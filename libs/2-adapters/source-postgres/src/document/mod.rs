@@ -97,6 +97,8 @@ const BUILD_CHUNK: usize = 512;
 #[derive(Debug, Clone)]
 struct ColumnMeta {
     sql_type: String,
+    /// A domain's type resolved through every domain; `None` for no domain.
+    base_type: Option<String>,
     nullable: bool,
 }
 
@@ -366,8 +368,18 @@ impl PgDocumentBuilder {
         // `format_type` yields a canonical, re-parseable type name, so it can be
         // dropped straight into a `$n::<type>` cast. `attnotnull` is the column's
         // NOT NULL constraint — the nullability mapping resolution needs, read
-        // from the same catalog row as the type.
-        let sql = "SELECT format_type(a.atttypid, a.atttypmod) AS sql_type, a.attnotnull AS not_null \
+        // from the same catalog row as the type. `base_type` follows a domain
+        // through `typbasetype` to the first type that is no domain.
+        let sql = "SELECT format_type(a.atttypid, a.atttypmod) AS sql_type, \
+                          (WITH RECURSIVE d(oid, typmod) AS ( \
+                               SELECT a.atttypid, a.atttypmod \
+                             UNION ALL \
+                               SELECT t.typbasetype, t.typtypmod \
+                               FROM pg_type t JOIN d ON t.oid = d.oid WHERE t.typtype = 'd' \
+                           ) SELECT format_type(d.oid, d.typmod) \
+                             FROM d JOIN pg_type t ON t.oid = d.oid WHERE t.typtype <> 'd') \
+                          AS base_type, \
+                          a.attnotnull AS not_null \
                    FROM pg_attribute a \
                    WHERE a.attrelid = to_regclass($1) AND a.attname = $2 \
                      AND a.attnum > 0 AND NOT a.attisdropped";
@@ -380,8 +392,10 @@ impl PgDocumentBuilder {
         let meta = match row {
             Some(row) => {
                 let sql_type: String = row.try_get("sql_type").map_err(query_err)?;
+                let base_type: Option<String> = row.try_get("base_type").map_err(query_err)?;
                 let not_null: bool = row.try_get("not_null").map_err(query_err)?;
                 ColumnMeta {
+                    base_type: base_type.filter(|base| *base != sql_type),
                     sql_type,
                     nullable: !not_null,
                 }
@@ -488,6 +502,7 @@ impl Catalog for PgDocumentBuilder {
         let meta = self.column_meta(schema, table, column).await?;
         Ok(ColumnInfo {
             sql_type: meta.sql_type,
+            base_type: meta.base_type,
             nullable: meta.nullable,
         })
     }
@@ -510,8 +525,14 @@ impl Catalog for PgDocumentBuilder {
         table: &TableName,
         column: &ColumnName,
         transforms: &[Transform],
+        element: bool,
     ) -> Result<bool> {
-        let sql_type = self.column_type(schema, table, column).await?;
+        let meta = self.column_meta(schema, table, column).await?;
+        let sql_type = if element {
+            element_type(meta.base_type.as_deref().unwrap_or(&meta.sql_type))
+        } else {
+            meta.sql_type
+        };
         let probe = query::transform_probe(&sql_type, transforms);
         match sqlx::query(probe).execute(&self.pool).await {
             Ok(_) => Ok(true),
@@ -670,9 +691,15 @@ impl DocumentBuilder for PgDocumentBuilder {
             None => Ok(Document::Delete { id: id.clone() }),
             Some(row) => {
                 let document: serde_json::Value = row.try_get("document").map_err(query_err)?;
-                Ok(Document::Upsert {
-                    id: id.clone(),
-                    body: value::coerce_document(document, &schema.fields),
+                Ok(match value::coerce_document(document, &schema.fields) {
+                    Ok(body) => Document::Upsert {
+                        id: id.clone(),
+                        body,
+                    },
+                    Err(failure) => Document::Failed {
+                        id: id.clone(),
+                        failure,
+                    },
                 })
             }
         }
@@ -732,8 +759,10 @@ impl DocumentBuilder for PgDocumentBuilder {
                 // Map each returned root key to its assembled body. `doc_key` is
                 // the first column, decoded through the same path live-change
                 // keys take, so it matches the ids' key values exactly.
-                let mut bodies: HashMap<kernel::GenericValue, kernel::GenericValue> =
-                    HashMap::with_capacity(rows.len());
+                let mut bodies: HashMap<
+                    kernel::GenericValue,
+                    std::result::Result<kernel::GenericValue, source::document::BuildFailure>,
+                > = HashMap::with_capacity(rows.len());
                 for row in &rows {
                     let key = value::first_column_to_generic(row);
                     let document: serde_json::Value = row.try_get("document").map_err(query_err)?;
@@ -745,9 +774,13 @@ impl DocumentBuilder for PgDocumentBuilder {
                 // soft-deleted (both fold into the query's WHERE) → a tombstone.
                 for (value, id) in chunk {
                     let document = match bodies.remove(*value) {
-                        Some(body) => Document::Upsert {
+                        Some(Ok(body)) => Document::Upsert {
                             id: (*id).clone(),
                             body,
+                        },
+                        Some(Err(failure)) => Document::Failed {
+                            id: (*id).clone(),
+                            failure,
                         },
                         None => Document::Delete { id: (*id).clone() },
                     };
@@ -808,6 +841,16 @@ pub(crate) async fn primary_key_column_names(
         names.push(row.try_get::<String, _>("name").map_err(query_err)?);
     }
     Ok(names)
+}
+
+/// The type of an array column's elements, as a transform probe casts to:
+/// the `[]` column's base type, or `text` for a `json`/`jsonb` column, whose
+/// string elements a document query transforms as text.
+fn element_type(column_type: &str) -> String {
+    match column_type.trim().strip_suffix("[]") {
+        Some(base) => base.trim().to_owned(),
+        None => "text".to_owned(),
+    }
 }
 
 #[cfg(test)]

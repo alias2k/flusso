@@ -47,6 +47,7 @@ fn builder_with(extra: Vec<Field>) -> PgDocumentBuilder {
                 enum_order: Vec::new(),
                 subfields: true,
                 indexed: true,
+                array: false,
             }),
         }],
     };

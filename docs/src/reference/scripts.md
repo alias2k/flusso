@@ -10,7 +10,7 @@ A `script:` turns a leaf field into a value computed from the built document by 
 | --- | --- | --- |
 | `script` | yes | The Rhai source. |
 | `required` | yes | `true` maps the field non-null; the script must then never return `()`. |
-| `array` | no | `true`: the script returns an array of the field's type, mapped like an `ids` aggregate. Only with `script`. |
+| `array` | no | `true`: the script returns an array of the field's type, mapped like an `ids` aggregate. On a column field it means the column holds one: see [array](field-types.md#array). |
 | `variants` | no | On `enum:`: the declared variants, in rank order. The script must return one of them. |
 | `subfields` | no | On `text`/`keyword`/`uuid`: as for a column field ([field types](field-types.md#subfields)). |
 | `options` | no | Extra mapping properties. |

@@ -1,0 +1,17 @@
+error[E0080]: evaluation panicked: `NestedCodes` is a newtype over `Vec<Codes>`, an array of arrays — `Codes` already reads an array; wrap its element type instead
+ --> tests/ui/array_newtype_element_not_a_leaf.rs:9:30
+  |
+9 | #[derive(serde::Deserialize, FlussoValue)]
+  |                              ^^^^^^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: `Bogi` is a FlussoValue newtype over `Vec<Bogus>`, but `Bogus` is a sub-document, not a value — for a `nested` array, write `Vec<Bogus>` or derive `FlussoFragment` on a `#[serde(transparent)]` newtype
+  --> tests/ui/array_newtype_element_not_a_leaf.rs:18:30
+   |
+18 | #[derive(serde::Deserialize, FlussoValue)]
+   |                              ^^^^^^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: `BogusLists` is a newtype over `Vec<BogusList>`, an array of arrays — `BogusList` already reads an array; wrap its element type instead
+  --> tests/ui/array_newtype_element_not_a_leaf.rs:25:30
+   |
+25 | #[derive(serde::Deserialize, FlussoValue)]
+   |                              ^^^^^^^^^^^ evaluation of `_` failed here

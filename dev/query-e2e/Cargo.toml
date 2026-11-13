@@ -16,7 +16,8 @@ workspace = true
 # integration test, so nothing here counts against `unused_crate_dependencies`.
 [dev-dependencies]
 chrono = { workspace = true, features = ["clock"] }
-flusso-query = { path = "../../sdk/query" }
+flusso-query = { path = "../../sdk/query", features = ["derive"] }
+config.workspace = true
 kernel.workspace = true
 sink.workspace = true
 sink-opensearch.workspace = true

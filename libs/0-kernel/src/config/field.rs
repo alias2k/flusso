@@ -129,6 +129,12 @@ pub struct Column {
     /// under it is searchable. Only a `json` column may turn it off.
     #[serde(default = "enabled", skip_serializing_if = "is_enabled")]
     pub indexed: bool,
+    /// Whether the column holds an array of [`ty`](Self::ty) (a `[]` column, or
+    /// a `json`/`jsonb` array). The mapping stays the element type; the
+    /// document carries the array with null elements dropped and a lone value
+    /// wrapped. `transforms` apply to each element and a `default` is a list.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub array: bool,
 }
 
 /// The serde default of an opt-out flag: on.
@@ -152,8 +158,9 @@ const MAP_KEY_MAPPING_REVISION: u8 = 2;
 
 /// Hashes the fields in declaration order (exactly what the derive did), plus
 /// `MAP_KEY_MAPPING_REVISION` for a `map` column only. `subfields` and `indexed`
-/// are hashed only when turned off, so a schema that never opts out keeps the
-/// content hash (and so the physical index) it had before they existed.
+/// are hashed only when turned off, and `array` only when on, so a schema that
+/// never uses them keeps the content hash (and so the physical index) it had
+/// before they existed.
 impl Hash for Column {
     fn hash<H: Hasher>(&self, state: &mut H) {
         let Self {
@@ -165,6 +172,7 @@ impl Hash for Column {
             enum_order,
             subfields,
             indexed,
+            array,
         } = self;
         column.hash(state);
         ty.hash(state);
@@ -180,6 +188,9 @@ impl Hash for Column {
         }
         if !indexed {
             "indexed".hash(state);
+        }
+        if *array {
+            "array".hash(state);
         }
     }
 }

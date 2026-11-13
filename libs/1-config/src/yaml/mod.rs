@@ -192,8 +192,43 @@ pub enum ConversionError {
     ScriptTypeNotAllowed { tag: String, field: String },
     #[error("field `{field}` has an empty `script`")]
     EmptyScript { field: String },
-    #[error("field `{field}` has `array` without a `script` — only a script can return an array")]
-    ArrayWithoutScript { field: String },
+    #[error(
+        "field `{field}` has `array: true` and a scalar `default` — an array field's `default` \
+         is a list (`default: [a, b]`), written when the column is null"
+    )]
+    ScalarArrayDefault { field: String },
+    #[error(
+        "field `{field}` has a `default` with {got} element — an array field's `default` \
+         lists non-null values, scalars (string, number, bool, or date) except on a `json` field"
+    )]
+    ArrayDefaultElement { field: String, got: DefaultElement },
+    #[error(
+        "`json` field `{field}` has `array: true` and `transforms` — a `json` field takes no \
+         `transforms`; remove them"
+    )]
+    TransformsOnJsonArray { field: String },
+}
+
+/// An element an array field's `default` may not list
+/// ([`ConversionError::ArrayDefaultElement`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefaultElement {
+    /// A `null`: an array never holds one.
+    Null,
+    /// A list, outside a `json` field.
+    Array,
+    /// An object, outside a `json` field.
+    Object,
+}
+
+impl std::fmt::Display for DefaultElement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Null => "a `null`",
+            Self::Array => "an array",
+            Self::Object => "an object",
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

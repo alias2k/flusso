@@ -706,6 +706,7 @@ fn col_full(
             enum_order: Vec::new(),
             subfields: true,
             indexed: true,
+            array: false,
         }),
     }
 }

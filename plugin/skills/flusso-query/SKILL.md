@@ -470,8 +470,16 @@ them can't silently disarm the guarantee.
 | `ids` aggregate | `Vec<i64>` / `Vec<String>` per `element_type` | `Number` / `Keyword` (term queries match arrays) |
 | `exists` aggregate | `bool` (never null) | `Bool` |
 | any join or `json` with `indexed: false` | as above (still deserialized and shape-checked) | **none** — not in the index, so no handle; querying it is a compile error |
-| a `script:` field | as for its type key (`array: true` → `Vec<…>`) | as for its type key |
+| any column or `script:` field with `array: true` | `Vec<T>` of its type key's type (`Option` unless `required`), or a `#[derive(FlussoValue)]` newtype over one (`struct Tags(Vec<Tag>)`, no kind tag) | as for its type key; operators take one element, a match on any element matches |
+| `json` with `array: true` | `serde_json::Value`, a `Vec` of any value (not of a struct), or a `FlussoValue` array newtype | `Json` |
 | any field with `emit: false` | **none**: not in the document; projecting it is an unknown-field compile error | **none** |
+
+**Two kinds of array newtype, never interchangeable.** A `#[derive(FlussoFragment)]`
+`#[serde(transparent)]` newtype over `Vec<Struct>` goes only at a `nested` field (`has_many` /
+`many_to_many`). A `#[derive(FlussoValue)]` untagged newtype over `Vec<E>`, `E` a leaf value, goes
+only at an `array: true` field of `E`'s kind or a `json` array. Its `E` can't be an array newtype or a
+fragment, and the newtype wraps the `Vec` directly (the `Option` goes on the field). A newtype over
+either is the same kind.
 
 Matching is by **leaf identifier and `Option` shape**: the macro compares the final type segment,
 not aliases. For exact money, declare a `custom` `scaled_float` in the schema and the derive accepts

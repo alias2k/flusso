@@ -1,0 +1,5 @@
+error: a FlussoValue newtype over an array wraps the `Vec<…>` directly — write `struct Codes(Vec<String>)`, and put the `Option<…>` on the field (`Option<Codes>`) when the schema field is nullable
+ --> tests/ui/array_newtype_over_an_option.rs:6:14
+  |
+6 | struct Codes(Option<Vec<String>>);
+  |              ^^^^^^

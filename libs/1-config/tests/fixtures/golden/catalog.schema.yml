@@ -49,6 +49,14 @@ fields:
     variants: [low, high]
     array: true
     script: '["low"]'
+  - keyword: tags
+    required: false
+    array: true
+    transforms: [lowercase]
+    default: [general]
+  - json: notes
+    required: false
+    array: true
   - uuid: externalId
     column: external_id
     required: false

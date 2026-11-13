@@ -168,10 +168,14 @@ definitions:
           (e.g. analyzer, format, scaling_factor).
       transforms:
         $ref: "#/definitions/transforms"
-      # Coalesce value for a null column. Must be a scalar (string/number/bool/
-      # date); an array/object/binary default is rejected at conversion.
+      # Coalesce value for a null column: a scalar (string/number/bool/date), or a
+      # list of them on an `array: true` field (any JSON values on a `json` one).
       default:
-        type: [string, number, boolean, "null"]
+        type: [string, number, boolean, "null", array]
+        description: >-
+          The value written when the column is null. A scalar on a plain field;
+          a list on an `array: true` field, with non-null scalar elements (any
+          non-null JSON for `json`). Makes the field non-null.
       # enum (optional declared variant order — drives order-correct sort):
       variants:
         type: array
@@ -209,12 +213,16 @@ definitions:
           a column. `this` is the object at the field's level (one element inside
           a `has_many`), `root` the whole document. Returns the field's type, or
           `()` for null. Editing it moves the index to a new physical index.
+      # scalar / enum / custom / json (a column holding an array, or a script returning one):
       array:
         type: boolean
         default: false
         description: >-
-          `true` makes the `script` return an array of the field's type. Only
-          with `script`.
+          `true` declares an array of the field's type: a column holding one
+          (`text[]`, a `json`/`jsonb` array) or a `script` returning one. The
+          mapping stays the element type; null elements are dropped, a lone
+          value is wrapped, `transforms` apply to each element and `default` is
+          a list. Changing it moves the index to a new physical index.
       # every field:
       emit:
         type: boolean

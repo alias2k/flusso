@@ -1,0 +1,33 @@
+version: 1
+table: orders
+primary_key: id
+
+# Array columns (issue #276).
+fields:
+  - keyword: id
+    required: true
+  - enum: tags
+    variants: [urgent, fragile]
+    required: false
+    array: true
+  - custom: labels
+    postgres: [jsonb]
+    opensearch: keyword
+    required: true
+    array: true
+  - integer: scores
+    required: false
+    array: true
+  - json: notes
+    required: false
+    array: true
+  - has_many: lines
+    table: lines
+    foreign_key: order_id
+    primary_key: id
+    fields:
+      - keyword: sku
+        required: true
+      - keyword: codes
+        required: true
+        array: true

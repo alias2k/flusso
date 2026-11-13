@@ -147,9 +147,9 @@ fn is_decimal(field: &Field) -> bool {
     }
 }
 
-/// Returns `(mapping_type, nullable, array)`. `array` is true only for an `ids`
-/// aggregate or an array-returning script, whose `mapping_type` is then the
-/// element type.
+/// Returns `(mapping_type, nullable, array)`. `array` is true for an array
+/// column, an `ids` aggregate or an array-returning script, whose
+/// `mapping_type` is then the element type.
 fn type_and_nullability(
     field: &Field,
     primary_key: Option<&ColumnName>,
@@ -160,10 +160,11 @@ fn type_and_nullability(
             ty,
             nullable,
             default,
+            array,
             ..
         }) => {
             let forced_non_null = primary_key == Some(column) || default.is_some();
-            (ty.opensearch(), *nullable && !forced_non_null, false)
+            (ty.opensearch(), *nullable && !forced_non_null, *array)
         }
         FieldSource::Group(_) => (MappingType::Object, false, false),
         FieldSource::Geo(geo) => (

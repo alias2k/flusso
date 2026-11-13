@@ -228,6 +228,7 @@ fn body_sibling_keys() -> BTreeSet<String> {
             required: _,
             options: _,
             default: _,
+            array: _,
         } = c;
         let config::yaml::GeoBody {
             field: _,
@@ -310,7 +311,7 @@ fn body_sibling_keys() -> BTreeSet<String> {
         "subfields",    // text / keyword / uuid
         "indexed",      // json / joins
         "script",       // scalar / enum (computed)
-        "array",        // scalar / enum (computed array)
+        "array",        // scalar / enum / custom (array column, computed array)
         "emit",         // every field (lifted onto `Field`, not a body)
     ])
 }

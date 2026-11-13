@@ -1,0 +1,28 @@
+error[E0080]: evaluation panicked: fragment `Note`: field `body` does not exist at the path this struct is embedded at
+  --> tests/ui/json_array_of_fragments.rs:15:12
+   |
+15 |     notes: Option<Vec<Note>>,
+   |            ^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Note::__flusso_check`
+  --> tests/ui/json_array_of_fragments.rs:8:11
+   |
+ 8 |     body: String,
+   |           ^^^^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: fragment `Note`: field `body` does not exist at the path this struct is embedded at
+  --> tests/ui/json_array_of_fragments.rs:28:11
+   |
+28 |     flat: Flat,
+   |           ^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Flat::__flusso_check`
+  --> tests/ui/json_array_of_fragments.rs:20:12
+   |
+20 |     notes: Option<Vec<Note>>,
+   |            ^^^^^^
+note: inside `Note::__flusso_check`
+  --> tests/ui/json_array_of_fragments.rs:8:11
+   |
+ 8 |     body: String,
+   |           ^^^^^^ the failure occurred here

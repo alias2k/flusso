@@ -375,6 +375,7 @@ fn schema() -> IndexSchema {
             enum_order: Vec::new(),
             subfields: true,
             indexed: true,
+            array: false,
         }),
     };
     IndexSchema {

@@ -1430,6 +1430,7 @@ fn column_field(name: &str, col: &str) -> Field {
             enum_order: Vec::new(),
             subfields: true,
             indexed: true,
+            array: false,
         }),
     }
 }

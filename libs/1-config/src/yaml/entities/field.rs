@@ -81,8 +81,8 @@ pub struct ScalarBody {
     /// conversion.
     #[serde(default)]
     pub script: Option<String>,
-    /// `true` makes a script return an array of the field's type. Only with
-    /// `script` — enforced at conversion.
+    /// `true` declares an array of the field's type: a column holding one
+    /// (`text[]`, a `jsonb` array), or a script returning one.
     #[serde(default)]
     pub array: Option<bool>,
 }
@@ -110,7 +110,8 @@ pub struct EnumBody {
     /// A script computing the variant, in place of a column.
     #[serde(default)]
     pub script: Option<String>,
-    /// `true` makes a script return an array of variants.
+    /// `true` declares an array of variants: a column holding one, or a
+    /// script returning one.
     #[serde(default)]
     pub array: Option<bool>,
 }
@@ -130,6 +131,9 @@ pub struct CustomBody {
     pub options: BTreeMap<String, serde_yaml::Value>,
     #[serde(default)]
     pub default: Option<serde_yaml::Value>,
+    /// `true` declares a column holding an array of the pair's type.
+    #[serde(default)]
+    pub array: Option<bool>,
 }
 
 /// A geo point: two coordinate columns (`lat`/`lon`), or a single `column`
@@ -433,7 +437,7 @@ impl<'de> Deserialize<'de> for Field {
                         subfields: None,
                         indexed: None,
                         script: None,
-                        array: None,
+                        array: c.array,
                     },
                 )
             }

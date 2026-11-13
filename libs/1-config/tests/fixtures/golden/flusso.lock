@@ -209,6 +209,28 @@ array = true
 enum_order = ["low", "high"]
 
 [[config.indexes.catalog.schema.fields]]
+field = "tags"
+
+[config.indexes.catalog.schema.fields.source.column]
+column = "tags"
+ty = "keyword"
+nullable = true
+transforms = ["lowercase"]
+array = true
+
+[config.indexes.catalog.schema.fields.source.column.default]
+Array = [{ String = "general" }]
+
+[[config.indexes.catalog.schema.fields]]
+field = "notes"
+
+[config.indexes.catalog.schema.fields.source.column]
+column = "notes"
+ty = "json"
+nullable = true
+array = true
+
+[[config.indexes.catalog.schema.fields]]
 field = "externalId"
 
 [config.indexes.catalog.schema.fields.source.column]

@@ -49,3 +49,8 @@ enabled = true
 name = "colliding"
 schema = "colliding.schema.yml"
 enabled = true
+
+[[index]]
+name = "lists"
+schema = "lists.schema.yml"
+enabled = true

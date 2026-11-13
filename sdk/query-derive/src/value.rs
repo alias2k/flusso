@@ -223,35 +223,86 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
                 )?;
             }
             let leaf_check = leaf_check(ident);
+            if let Some(element) = crate::doc::vec_inner(inner) {
+                return array_newtype(ident, element, explicit.is_some(), leaf_check);
+            }
+            if let Some(element) = crate::doc::option_inner(inner).and_then(crate::doc::vec_inner) {
+                return Err(syn::Error::new(
+                    inner.span(),
+                    format!(
+                        "a FlussoValue newtype over an array wraps the `Vec<…>` directly — write \
+                         `struct {ident}(Vec<{}>)`, and put the `Option<…>` on the field \
+                         (`Option<{ident}>`) when the schema field is nullable",
+                        crate::fragment::render(element),
+                    ),
+                ));
+            }
+            let rendered = crate::fragment::render(inner);
             match explicit {
                 // Restrict to one string kind (e.g. a keyword-only code wrapper).
                 Some(kind) => {
                     let marker = kind.marker();
                     let tag = kind.tag();
+                    let array_message = format!(
+                        "`{ident}` has a kind tag, so it stands for one value, but `{rendered}` \
+                         reads an array — drop the tag, and `{ident}` reads the array as \
+                         `{rendered}` does"
+                    );
                     Ok(quote! {
                         impl ::flusso_query::FlussoValue<#marker> for #ident {}
                         impl ::flusso_query::FlussoValueMeta for #ident {
                             const KINDS: &'static [::flusso_query::KindTag] = &[#tag];
                             const VARIANTS: &'static [&'static str] = &[];
                         }
+                        const _: () = {
+                            #[allow(unused_imports)]
+                            use ::flusso_query::OpaqueWithoutMeta as _;
+                            assert!(
+                                !::flusso_query::OpaqueProbe::<#inner>::READS_ARRAY,
+                                #array_message
+                            );
+                        };
                         #leaf_check
                     })
                 }
                 // Inherit every kind the inner type has — as a bound for the
-                // type-level check, and as data for the const-level one.
-                None => Ok(quote! {
-                    impl<__FlussoK> ::flusso_query::FlussoValue<__FlussoK> for #ident
-                    where #inner: ::flusso_query::FlussoValue<__FlussoK> {}
-                    impl ::flusso_query::FlussoValueMeta for #ident {
-                        const KINDS: &'static [::flusso_query::KindTag] =
-                            <#inner as ::flusso_query::FlussoValueMeta>::KINDS;
-                        const VARIANTS: &'static [&'static str] =
-                            <#inner as ::flusso_query::FlussoValueMeta>::VARIANTS;
-                        const EXHAUSTIVE: bool =
-                            <#inner as ::flusso_query::FlussoValueMeta>::EXHAUSTIVE;
-                    }
-                    #leaf_check
-                }),
+                // type-level check, and as data for the const-level one. An
+                // array newtype's `ARRAY` is forwarded with them, so the
+                // wrapper is placed where the array newtype is; a sub-document
+                // is refused, since a value's own check walks into nothing.
+                None => {
+                    let sub_document_message = format!(
+                        "`{ident}` derives `FlussoValue`, but `{rendered}` is a sub-document, \
+                         whose fields only a `FlussoFragment` checks — derive `FlussoFragment` \
+                         on `{ident}` instead"
+                    );
+                    Ok(quote! {
+                        impl<__FlussoK> ::flusso_query::FlussoValue<__FlussoK> for #ident
+                        where #inner: ::flusso_query::FlussoValue<__FlussoK> {}
+                        impl ::flusso_query::FlussoValueMeta for #ident {
+                            const KINDS: &'static [::flusso_query::KindTag] =
+                                <#inner as ::flusso_query::FlussoValueMeta>::KINDS;
+                            const VARIANTS: &'static [&'static str] =
+                                <#inner as ::flusso_query::FlussoValueMeta>::VARIANTS;
+                            const EXHAUSTIVE: bool =
+                                <#inner as ::flusso_query::FlussoValueMeta>::EXHAUSTIVE;
+                            const ARRAY: bool =
+                                <#inner as ::flusso_query::FlussoValueMeta>::ARRAY;
+                            const READS_ARRAY: bool =
+                                <#inner as ::flusso_query::FlussoValueMeta>::READS_ARRAY;
+                        }
+                        const _: () = {
+                            #[allow(unused_imports)]
+                            use ::flusso_query::OpaqueWithoutMeta as _;
+                            assert!(
+                                !::flusso_query::OpaqueProbe::<#inner>::HAS_META
+                                    || !::flusso_query::OpaqueProbe::<#inner>::AT_NESTED,
+                                #sub_document_message
+                            );
+                        };
+                        #leaf_check
+                    })
+                }
             }
         }
         Data::Union(_) => Err(syn::Error::new(
@@ -259,6 +310,74 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
             "FlussoValue cannot be derived for a union",
         )),
     }
+}
+
+/// A newtype over `Vec<E>`: it stands for a flat array whose elements are `E`
+/// values. It carries `E`'s kinds, variants and exhaustiveness as metadata
+/// with `ARRAY` set, which an array field reads to accept it, and no
+/// `FlussoValue<K>`, so query operators keep taking an element. A kind tag
+/// would restrict nothing the element does not already say, so it is refused.
+///
+/// `E` must be a leaf value that reads no array: a `Vec` of arrays fits no
+/// array leaf, and a sub-document's fields are checked only by a
+/// `FlussoFragment` newtype, which a value's no-op check never walks into.
+/// Both are const data, so they are asserted where the newtype is declared.
+fn array_newtype(
+    ident: &syn::Ident,
+    element: &syn::Type,
+    tagged: bool,
+    leaf_check: TokenStream,
+) -> syn::Result<TokenStream> {
+    if tagged {
+        return Err(syn::Error::new(
+            ident.span(),
+            "a FlussoValue newtype over a `Vec<…>` takes its kinds from the element — drop the \
+             kind tag, and put it on the element type",
+        ));
+    }
+    let rendered = crate::fragment::render(element);
+    let nested_array = format!(
+        "`{ident}` is a newtype over `Vec<{rendered}>`, an array of arrays — `{rendered}` already \
+         reads an array; wrap its element type instead"
+    );
+    let sub_document = format!(
+        "`{ident}` is a FlussoValue newtype over `Vec<{rendered}>`, but `{rendered}` is a \
+         sub-document, not a value — for a `nested` array, write `Vec<{rendered}>` or derive \
+         `FlussoFragment` on a `#[serde(transparent)]` newtype"
+    );
+    let object = format!(
+        "`{ident}` is a FlussoValue newtype over `Vec<{rendered}>`, but `{rendered}` stands for \
+         an `object`, not a leaf value — a `json` array takes `Vec<{rendered}>` as it is"
+    );
+    Ok(quote! {
+        // Read through `OpaqueProbe` behind `HAS_META`: an element without
+        // metadata already fails on `KINDS` below, with the trait's note.
+        const _: () = {
+            #[allow(unused_imports)]
+            use ::flusso_query::OpaqueWithoutMeta as _;
+            let meta = ::flusso_query::OpaqueProbe::<#element>::HAS_META;
+            assert!(
+                !meta || !::flusso_query::OpaqueProbe::<#element>::READS_ARRAY,
+                #nested_array
+            );
+            assert!(
+                !meta || !::flusso_query::OpaqueProbe::<#element>::AT_NESTED,
+                #sub_document
+            );
+            assert!(!meta || !::flusso_query::OpaqueProbe::<#element>::AT_OBJECT, #object);
+        };
+        impl ::flusso_query::FlussoValueMeta for #ident {
+            const KINDS: &'static [::flusso_query::KindTag] =
+                <#element as ::flusso_query::FlussoValueMeta>::KINDS;
+            const VARIANTS: &'static [&'static str] =
+                <#element as ::flusso_query::FlussoValueMeta>::VARIANTS;
+            const EXHAUSTIVE: bool =
+                <#element as ::flusso_query::FlussoValueMeta>::EXHAUSTIVE;
+            const ARRAY: bool = true;
+            const READS_ARRAY: bool = true;
+        }
+        #leaf_check
+    })
 }
 
 /// The no-op `__flusso_check` every value type carries.

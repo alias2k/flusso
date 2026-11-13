@@ -154,6 +154,9 @@ fn column_field(name: &str, column: &Column, body: &mut Mapping) -> Result<&'sta
     if !column.indexed {
         body.insert(Value::from("indexed"), Value::from(false));
     }
+    if column.array {
+        body.insert(Value::from("array"), Value::from(true));
+    }
     Ok(tag)
 }
 

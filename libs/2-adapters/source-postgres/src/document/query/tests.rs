@@ -36,6 +36,7 @@ fn col_field(name: &str, column: &str) -> Field {
             enum_order: Vec::new(),
             subfields: true,
             indexed: true,
+            array: false,
         }),
     }
 }
@@ -1041,5 +1042,81 @@ fn an_expression_reads_the_aggregated_table_through_via_and_through() {
         wrap(
             r#"(SELECT sum(("rel1"."weight" * 2)) FROM "public"."products" AS "rel1" JOIN "public"."order_items" AS "rel2" ON "rel2"."product_id" = "rel1"."id" WHERE "rel2"."order_id" = "root"."id")"#
         ),
+    );
+}
+
+fn array_field(
+    name: &str,
+    transforms: Vec<kernel::Transform>,
+    default: Option<GenericValue>,
+) -> Field {
+    let mut field = col_field(name, name);
+    if let FieldSource::Column(column) = &mut field.source {
+        column.array = true;
+        column.transforms = transforms;
+        column.default = default;
+    }
+    field
+}
+
+#[test]
+fn an_array_column_without_transforms_reads_the_column_and_leaves_its_default_to_the_decoder() {
+    let schema = index(
+        Some("id"),
+        None,
+        vec![
+            col_field("id", "id"),
+            array_field(
+                "tags",
+                Vec::new(),
+                Some(GenericValue::Array(vec![GenericValue::String(
+                    "general".into(),
+                )])),
+            ),
+        ],
+    );
+    let (sql, _) = document_query(
+        &schema,
+        &[(c("id"), GenericValue::Int(7))],
+        &HashMap::new(),
+        &id_types(),
+    )
+    .unwrap();
+    assert_eq!(
+        sql.as_str(),
+        r#"SELECT json_build_object('id', "root"."id", 'tags', "root"."tags") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::bigint"#
+    );
+}
+
+#[test]
+fn an_array_column_applies_its_transforms_to_each_string_element() {
+    let schema = index(
+        Some("id"),
+        None,
+        vec![array_field(
+            "tags",
+            vec![kernel::Transform::Trim, kernel::Transform::Lowercase],
+            None,
+        )],
+    );
+    let (sql, _) = document_query(
+        &schema,
+        &[(c("id"), GenericValue::Int(7))],
+        &HashMap::new(),
+        &id_types(),
+    )
+    .unwrap();
+    let column = r#""root"."tags""#;
+    let value = format!("to_jsonb({column})");
+    let expected = format!(
+        "CASE WHEN coalesce(jsonb_typeof({value}), 'null') = 'null' THEN NULL ELSE coalesce((SELECT jsonb_agg(CASE WHEN \
+         jsonb_typeof(e.v) = 'string' THEN to_jsonb(lower(trim(e.v #>> '{{}}'))) ELSE e.v END \
+         ORDER BY e.o) FROM jsonb_array_elements(CASE jsonb_typeof({value}) WHEN 'array' THEN \
+         {value} ELSE jsonb_build_array({value}) END) WITH ORDINALITY AS e(v, o)), '[]'::jsonb) END"
+    );
+    assert!(
+        sql.as_str().contains(&format!("'tags', {expected})")),
+        "{}",
+        sql.as_str()
     );
 }

@@ -2,6 +2,7 @@
 // action funnels through one of these; each returns a fresh `IndexSchema`.
 
 import type { Column, Field, FlussoType, IndexSchema } from "../api";
+import type { Generic } from "./generic";
 import { columnField, defaultField, retypeOptions, typeOptions } from "../fields";
 import { childFields, withChildFields } from "./containers";
 import { cloneJson } from "./exact";
@@ -16,10 +17,11 @@ export function toggleColumn(
   on: boolean,
   ty: FlussoType = "keyword",
   nullable = true,
+  sqlType?: string,
 ): IndexSchema {
   const fields = nodeFields(schema, path);
   if (on) {
-    return withNodeFields(schema, path, [...fields, columnField(column, { column, ty, nullable })]);
+    return withNodeFields(schema, path, [...fields, columnField(column, catalogColumn(column, ty, nullable, sqlType))]);
   }
   const next = fields.filter(
     (f) => !("column" in f.source && typeof f.source.column.ty === "string" && f.source.column.column === column),
@@ -36,7 +38,7 @@ export function addField(schema: IndexSchema, path: number[], field: Field): Ind
 export function includeColumns(
   schema: IndexSchema,
   path: number[],
-  columns: { name: string; ty?: FlussoType; nullable?: boolean }[],
+  columns: { name: string; ty?: FlussoType; nullable?: boolean; sqlType?: string }[],
 ): IndexSchema {
   const fields = nodeFields(schema, path);
   const present = new Set(
@@ -46,8 +48,36 @@ export function includeColumns(
   );
   const added = columns
     .filter((c) => !present.has(c.name))
-    .map((c) => columnField(c.name, { column: c.name, ty: c.ty ?? "keyword", nullable: c.nullable ?? true }));
+    .map((c) => columnField(c.name, catalogColumn(c.name, c.ty ?? "keyword", c.nullable ?? true, c.sqlType)));
   return withNodeFields(schema, path, [...fields, ...added]);
+}
+
+/// Whether a `default` (in its `GenericValue` form) is a list holding a list
+/// or an object, which only a `json` array's default may.
+export function listsStructured(def: Generic): boolean {
+  if (!isRecord(def) || !Array.isArray(def.Array)) return false;
+  return def.Array.some((e) => isRecord(e) && ("Array" in e || "Map" in e));
+}
+
+/// A `default` carried across the `array` switch: a value becomes a one-item
+/// list, a one-item list of a plain value becomes that value; anything else
+/// can't cross and is dropped.
+export function defaultAcrossArray(def: Generic, array: boolean): Generic {
+  if (def === undefined || def === "Null") return undefined;
+  if (array) return { Array: [def] };
+  if (!isRecord(def) || !Array.isArray(def.Array) || def.Array.length !== 1) return undefined;
+  const [only] = def.Array as Generic[];
+  return isRecord(only) && ("Array" in only || "Map" in only) ? undefined : only;
+}
+
+/// Whether a catalog type (as `format_type` spells it) is an array: `text[]`.
+export function holdsArray(sqlType?: string): boolean {
+  return sqlType?.trim().endsWith("[]") ?? false;
+}
+
+/// A column included from the catalog: an array type reads as `array: true`.
+function catalogColumn(column: string, ty: FlussoType, nullable: boolean, sqlType?: string): Column {
+  return holdsArray(sqlType) ? { column, ty, nullable, array: true } : { column, ty, nullable };
 }
 
 /// Remove the given rows from the node in one pass — matches a catalog-backed
@@ -168,6 +198,8 @@ export function retypeField(field: Field, column: Column, ty: FlussoType): Field
   const next: Column = { ...column, ty };
   if (!SUBFIELD_TYPES.includes(ty)) delete next.subfields;
   if (ty !== "json") delete next.indexed;
+  if (ty === "json" && next.array) delete next.transforms;
+  if (ty !== "json" && next.array && listsStructured(next.default)) delete next.default;
   const retyped: Field = { ...field, source: { column: next } };
   // An option `ty` would add that is already there was set by the user.
   const userSet = Object.keys(typeOptions(ty)).filter((k) => field.options && k in field.options);

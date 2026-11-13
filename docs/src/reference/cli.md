@@ -60,10 +60,11 @@ Once connected, and before any index is touched, `run` runs the same check as [`
   - a root `primary_key` that names no column, when the root table has a single-column primary key or the index has any relation (a relation keys on the root, or traces a change back to it, by that column);
   - a root `primary_key` that names a column other than the root table's single-column primary key: changes and the backfill carry the table's key, the build matches it on the declared column, so a document is built from another row or written as a tombstone, and a change on a related table fails;
   - a relation table without a single-column primary key (none, or a composite one): a join's, an aggregate's or a `via` hop's table, at any depth (a junction needs none);
-  - [`transforms`](field-types.md#transforms) the column's type doesn't take, such as `lowercase` over an `integer` or an enum column. When flusso can't ask (the role has no `USAGE` on the type's schema), it warns and skips this check.
+  - [`transforms`](field-types.md#transforms) the column's type doesn't take, such as `lowercase` over an `integer` or an enum column. When flusso can't ask (the role has no `USAGE` on the type's schema), it warns and skips this check;
+  - [`array: true`](field-types.md#array) over a column that holds no array (neither a `[]` type nor `json`/`jsonb`).
 
-  The last three fail document builds of the index, so 0.17 started and then wrote nothing, or failed on the first build. `run` exits non-zero with `the schemas cannot be built against this database (N problem(s) above)`. Under Kubernetes or compose that's a restart loop with the same message each time, until the config is fixed. Nothing is staged, no slot is created, no index is touched.
-- **Everything else is printed and the start goes on**, errors included: a declared type or aggregate `value_type` that doesn't accept the column's type (e.g. `keyword` over a Postgres enum or domain, which the database reports by its own type name), an expression or geo column that isn't numeric, `required` over a nullable column, a join `primary_key` that names no column, and a root table without a single-column primary key (none, or a composite one: the backfill skips it, its live changes are still indexed; see [Tables without a primary key](source-postgres.md#tables-without-a-primary-key)). On such a root, with no relation in the index, a `primary_key` that names no column is printed too: a root change built by its whole key never reads it (one whose key is a single column does, and fails, as do `flusso script run --id` and the designer's sample). The documents build as they did in 0.16; `check` still exits non-zero on the errors.
+  The three before the last fail document builds of the index, so 0.17 started and then wrote nothing, or failed on the first build. The last is a key new in 0.18, so no running deployment has it. `run` exits non-zero with `the schemas cannot be built against this database (N problem(s) above)`. Under Kubernetes or compose that's a restart loop with the same message each time, until the config is fixed. Nothing is staged, no slot is created, no index is touched.
+- **Everything else is printed and the start goes on**, errors included: a declared type or aggregate `value_type` that doesn't accept the column's type (e.g. `keyword` over a Postgres enum or domain, which the database reports by its own type name), an expression or geo column that isn't numeric, `required` over a nullable column, a join `primary_key` that names no column, a `[]` column without `array: true` (it indexes as before; the query side can't read it as an array), and a root table without a single-column primary key (none, or a composite one: the backfill skips it, its live changes are still indexed; see [Tables without a primary key](source-postgres.md#tables-without-a-primary-key)). On such a root, with no relation in the index, a `primary_key` that names no column is printed too: a root change built by its whole key never reads it (one whose key is a single column does, and fails, as do `flusso script run --id` and the designer's sample). The documents build as they did in 0.16; `check` still exits non-zero on the errors.
 - **An unreachable database** fails as it always has, as `connecting to Postgres`, before validation runs.
 
 There's no flag to skip it. Run `flusso check` before deploying a changed config to see the same list without stopping anything.
@@ -76,7 +77,7 @@ Loads and validates the config and every schema, validates every port table agai
 
 Every problem of one run is listed together, each naming the index, the field path (`users.orders.items`), and the missing table or column, with the schema key that names it (`` `foreign_key` references unknown column `public.orders.userid` ``).
 
-- **Fields.** Each column a field reads exists, and its database type is one the declared type accepts. Its [`transforms`](field-types.md#transforms) take that type: Postgres plans them over no rows, so a domain over `text` passes and an enum fails. A field declared `required` over a nullable column is a warning.
+- **Fields.** Each column a field reads exists, and its database type is one the declared type accepts. Its [`transforms`](field-types.md#transforms) take that type: Postgres plans them over no rows, so a domain over `text` passes and an enum fails. A field declared `required` over a nullable column is a warning. An [`array`](field-types.md#array) field's column holds an array (a `[]` type, or `json`/`jsonb`, whose elements aren't type-checked), and its transforms are checked against the element type; a `[]` column without `array: true` is a warning.
 - **Geo points.** Both coordinate columns exist and are numeric.
 - **Aggregate input.** A `sum`/`min`/`max` column's type is one `value_type` accepts; each column of an [expression](aggregates.md#arithmetic-input) exists and is numeric.
 - **Relations, at any depth.** For every join and aggregate:
@@ -92,7 +93,7 @@ Every problem of one run is listed together, each naming the index, the field pa
   A missing table is reported once, and nothing on it is looked up.
 - **Root keys, on the root table.** That the table has a single-column primary key, reported under `table`; that the declared `primary_key` column exists and is that key, reported under `primary_key`, whether or not a field reads it; the columns of the top-level value and null-check [`filters`](filters-and-soft-delete.md#root-filters), reported under `filters`, and the [`soft_delete`](filters-and-soft-delete.md#soft_delete) marker, reported under `soft_delete`: its `column`, its `when` columns, and its `field` (see [How the marker is verified](filters-and-soft-delete.md#how-the-marker-is-verified)).
 
-Everything above is an error except the two warnings, `required` over a nullable column and a join `primary_key` that names no column. Which errors also stop `run` is in [Validation at start](#validation-at-start). `--offline` still reports the one problem that needs no database: a `soft_delete` `field` that reads no column.
+Everything above is an error except the three warnings: `required` over a nullable column, a join `primary_key` that names no column, and a `[]` column without `array: true`. Which errors also stop `run` is in [Validation at start](#validation-at-start). `--offline` still reports the one problem that needs no database: a `soft_delete` `field` that reads no column.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -113,11 +114,13 @@ Exit status is non-zero when validation fails or any diagnostic is an error. `--
 | `relation_primary_key` | A relation table without a single-column primary key. | error | yes |
 | `transform_not_applicable` | `transforms` the column's type doesn't take. | error | yes |
 | `root_primary_key_mismatch` | A root `primary_key` other than the table's own single-column key. | error | yes |
+| `not_an_array_column` | `array: true` over a column that's neither a `[]` type nor `json`/`jsonb`, nor a domain over one. | error | yes |
 | `root_primary_key` | A root table with no primary key or a composite one (the message says which); on one, with no relation, a `primary_key` that names no column. | error | no |
 | `type_mismatch` | A declared type that doesn't accept the column's type. | error | no |
 | `not_numeric` | An expression or geo column that isn't numeric. | error | no |
 | `nullability` | `required` over a nullable column. | warning | no |
 | `ignored_primary_key` | A join `primary_key` that names no column. | warning | no |
+| `undeclared_array_column` | A `[]` column (or a domain over one) read by a field without `array: true`. | warning | no |
 
 ## design
 

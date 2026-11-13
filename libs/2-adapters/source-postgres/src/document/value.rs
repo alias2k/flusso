@@ -6,10 +6,13 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-use kernel::{Aggregate, AggregateOp, Field, FieldSource, FlussoType, GenericValue, Relation};
+use kernel::{
+    Aggregate, AggregateOp, Column, Field, FieldSource, FlussoType, GenericValue, Relation,
+};
 use rust_decimal::Decimal;
+use source::document::BuildFailure;
 use sqlx::postgres::{PgColumn, PgRow};
-use sqlx::{Column, Row, TypeInfo};
+use sqlx::{Column as _, Row, TypeInfo};
 use uuid::Uuid;
 
 /// Decode one named column of a row into a [`GenericValue`], or
@@ -149,28 +152,52 @@ pub(super) fn json_to_generic(value: serde_json::Value) -> GenericValue {
 /// types are erased on the wire); this is where we put them back, guided by the
 /// schema. Anything that fails to parse falls back to the untyped JSON value
 /// rather than failing the document.
-pub(crate) fn coerce_document(value: serde_json::Value, fields: &[Field]) -> GenericValue {
+///
+/// An array column is the exception ([`coerce_array`]): an element that is not
+/// a scalar fails the document, since its field cannot hold it.
+pub(crate) fn coerce_document(
+    value: serde_json::Value,
+    fields: &[Field],
+) -> Result<GenericValue, BuildFailure> {
+    coerce_object(value, fields, "")
+}
+
+fn coerce_object(
+    value: serde_json::Value,
+    fields: &[Field],
+    path: &str,
+) -> Result<GenericValue, BuildFailure> {
     let serde_json::Value::Object(mut object) = value else {
         // A document is always a JSON object; anything else can only be decoded
         // untyped.
-        return json_to_generic(value);
+        return Ok(json_to_generic(value));
     };
     let mut out = BTreeMap::new();
     for field in fields {
         let name = field.field.as_ref();
         if let Some(json) = object.remove(name) {
-            out.insert(name.to_owned(), coerce_field(json, &field.source));
+            let path = if path.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{path}.{name}")
+            };
+            out.insert(name.to_owned(), coerce_field(json, &field.source, &path)?);
         }
     }
-    GenericValue::Map(out)
+    Ok(GenericValue::Map(out))
 }
 
 /// Coerce one field's JSON value by where it comes from.
-fn coerce_field(json: serde_json::Value, source: &FieldSource) -> GenericValue {
-    match source {
+fn coerce_field(
+    json: serde_json::Value,
+    source: &FieldSource,
+    path: &str,
+) -> Result<GenericValue, BuildFailure> {
+    Ok(match source {
+        FieldSource::Column(column) if column.array => coerce_array(json, column, path)?,
         FieldSource::Column(column) => coerce_scalar(json, &column.ty),
-        FieldSource::Group(fields) => coerce_document(json, fields),
-        FieldSource::Relation(Relation::Join(join)) => coerce_relation(json, &join.fields),
+        FieldSource::Group(fields) => coerce_object(json, fields, path)?,
+        FieldSource::Relation(Relation::Join(join)) => coerce_relation(json, &join.fields, path)?,
         FieldSource::Relation(Relation::Aggregate(aggregate)) => coerce_aggregate(json, aggregate),
         // A geo point ({lat,lon} / [lon,lat] / "lat,lon") and a bare constant
         // carry no scalar type to coerce to; keep their natural JSON shape. A
@@ -178,22 +205,128 @@ fn coerce_field(json: serde_json::Value, source: &FieldSource) -> GenericValue {
         FieldSource::Geo(_) | FieldSource::Constant(_) | FieldSource::Script(_) => {
             json_to_generic(json)
         }
+    })
+}
+
+/// An array column's value: null becomes the column's `default` list (or stays
+/// null), a value that is not an array is wrapped, and null elements are
+/// dropped. Each remaining element is coerced to the declared type; for any
+/// type but `json`, an object or array element fails the document.
+fn coerce_array(
+    json: serde_json::Value,
+    column: &Column,
+    path: &str,
+) -> Result<GenericValue, BuildFailure> {
+    let (items, wrapped) = match json {
+        serde_json::Value::Null => {
+            return Ok(column
+                .default
+                .as_ref()
+                .map_or(GenericValue::Null, |default| {
+                    coerce_elements(default_to_json(default), &column.ty)
+                }));
+        }
+        serde_json::Value::Array(items) => (items, false),
+        other => (vec![other], true),
+    };
+    if column.ty != FlussoType::Json {
+        let structured = items.iter().enumerate().find_map(|(i, item)| match item {
+            serde_json::Value::Object(_) => Some((i, "an object")),
+            serde_json::Value::Array(_) => Some((i, "an array")),
+            _ => None,
+        });
+        if let Some((i, what)) = structured {
+            let at = if wrapped {
+                String::new()
+            } else {
+                format!(" at [{i}]")
+            };
+            return Err(BuildFailure {
+                field: path.to_owned(),
+                message: format!(
+                    "the column holds {what}{at}, but an `array: true` field of `{}` takes \
+                     scalar elements",
+                    type_name(&column.ty)
+                ),
+                position: None,
+            });
+        }
+    }
+    Ok(coerce_elements(items, &column.ty))
+}
+
+/// Coerce each non-null element to `ty`, dropping the nulls.
+fn coerce_elements(items: Vec<serde_json::Value>, ty: &FlussoType) -> GenericValue {
+    GenericValue::Array(
+        items
+            .into_iter()
+            .filter(|item| !item.is_null())
+            .map(|item| coerce_scalar(item, ty))
+            .collect(),
+    )
+}
+
+/// An array `default` (as the config parsed it) back as JSON elements, so it
+/// takes the same coercion as a value read from the column.
+fn default_to_json(default: &GenericValue) -> Vec<serde_json::Value> {
+    match default {
+        GenericValue::Array(items) => items.iter().map(generic_to_json).collect(),
+        other => vec![generic_to_json(other)],
+    }
+}
+
+fn generic_to_json(value: &GenericValue) -> serde_json::Value {
+    match value {
+        GenericValue::Null | GenericValue::Bytes(_) => serde_json::Value::Null,
+        GenericValue::Bool(b) => serde_json::Value::Bool(*b),
+        GenericValue::SmallInt(i) => (*i).into(),
+        GenericValue::Int(i) => (*i).into(),
+        GenericValue::BigInt(i) => (*i).into(),
+        GenericValue::Float(f) => serde_json::json!(f),
+        GenericValue::Double(f) => serde_json::json!(f),
+        GenericValue::Decimal(d) => serde_json::from_str(&d.to_string())
+            .unwrap_or_else(|_| serde_json::Value::String(d.to_string())),
+        GenericValue::String(s) => serde_json::Value::String(s.clone()),
+        GenericValue::Uuid(u) => serde_json::Value::String(u.to_string()),
+        GenericValue::Date(d) => serde_json::Value::String(d.to_string()),
+        GenericValue::Time(t) => serde_json::Value::String(t.to_string()),
+        GenericValue::Timestamp(ts) => serde_json::Value::String(ts.to_string()),
+        GenericValue::TimestampTz(ts) => serde_json::Value::String(ts.to_rfc3339()),
+        GenericValue::Array(items) => items.iter().map(generic_to_json).collect(),
+        GenericValue::Map(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(key, value)| (key.clone(), generic_to_json(value)))
+                .collect(),
+        ),
+    }
+}
+
+/// The type as a schema writes it, for a failure message.
+fn type_name(ty: &FlussoType) -> String {
+    match serde_json::to_value(ty) {
+        Ok(serde_json::Value::String(name)) => name,
+        _ => "custom".to_owned(),
     }
 }
 
 /// A joined relation: an array of sub-documents (`has_many` / `many_to_many`), a
 /// single sub-document (`belongs_to` / `has_one`), or null.
-fn coerce_relation(json: serde_json::Value, fields: &[Field]) -> GenericValue {
-    match json {
+fn coerce_relation(
+    json: serde_json::Value,
+    fields: &[Field],
+    path: &str,
+) -> Result<GenericValue, BuildFailure> {
+    Ok(match json {
         serde_json::Value::Array(items) => GenericValue::Array(
             items
                 .into_iter()
-                .map(|item| coerce_document(item, fields))
-                .collect(),
+                .enumerate()
+                .map(|(i, item)| coerce_object(item, fields, &format!("{path}[{i}]")))
+                .collect::<Result<_, _>>()?,
         ),
-        object @ serde_json::Value::Object(_) => coerce_document(object, fields),
+        object @ serde_json::Value::Object(_) => coerce_object(object, fields, path)?,
         other => json_to_generic(other),
-    }
+    })
 }
 
 /// An aggregate's result, typed by its op: a count is a [`BigInt`](GenericValue::BigInt),

@@ -1,0 +1,5 @@
+error: field `notes` is `json` in the schema — expected a `Vec<…>` (a `json` array)
+ --> tests/ui/json_array_not_a_vec.rs:9:12
+  |
+9 |     notes: Option<String>,
+  |            ^^^^^^

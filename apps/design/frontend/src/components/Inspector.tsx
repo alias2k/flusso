@@ -270,7 +270,12 @@ function ColumnsInspector({ path, names }: { path: number[]; names: string[] }) 
       edit.includeColumns(
         s,
         path,
-        toInclude.map((n) => ({ name: n, ty: shape.get(n)?.suggested_type, nullable: shape.get(n)?.nullable })),
+        toInclude.map((n) => ({
+          name: n,
+          ty: shape.get(n)?.suggested_type,
+          nullable: shape.get(n)?.nullable,
+          sqlType: shape.get(n)?.sql_type,
+        })),
       ),
     );
   const removeAll = () => {
@@ -807,10 +812,17 @@ function ScalarBody({
             <span>{t("inspector.typeMismatch", { col: sqlType ?? suggested, ty: column.ty as string })}</span>
           </p>
         )}
-        <div className="check-row my-1.5 flex flex-wrap gap-4">
-          <Check value={has("lowercase")} label={t("inspector.lowercase")} onChange={(on) => toggle("lowercase", on)} />
-          <Check value={has("trim")} label={t("inspector.trim")} onChange={(on) => toggle("trim", on)} />
-        </div>
+        <ArrayToggle column={column} setCol={setCol} />
+        {!(column.ty === "json" && column.array) && (
+          <div className="check-row my-1.5 flex flex-wrap gap-4">
+            <Check
+              value={has("lowercase")}
+              label={t("inspector.lowercase")}
+              onChange={(on) => toggle("lowercase", on)}
+            />
+            <Check value={has("trim")} label={t("inspector.trim")} onChange={(on) => toggle("trim", on)} />
+          </div>
+        )}
         {column.ty === "enum" && (
           <VariantsEditor
             variants={column.enum_order ?? []}
@@ -835,6 +847,32 @@ function ScalarBody({
         )}
         <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
       </Block>
+    </>
+  );
+}
+
+/// The `array` switch of a column field: the column holds an array of the
+/// field's type. Flipping it carries a `default` across when it can (a value
+/// becomes a one-item list and back) and drops it otherwise; turning it on for
+/// a `json` field drops `transforms`, which a `json` array refuses.
+function ArrayToggle({ column, setCol }: { column: Column; setCol: (c: Column) => void }) {
+  const { t } = useT();
+  const on = column.array ?? false;
+  return (
+    <>
+      <Check
+        value={on}
+        label={t("inspector.columnArray")}
+        onChange={(next) => {
+          const changed: Column = { ...column, array: next ? true : undefined };
+          const carried = edit.defaultAcrossArray(column.default, next);
+          if (carried === undefined) delete changed.default;
+          else changed.default = carried;
+          if (next && column.ty === "json") delete changed.transforms;
+          setCol(changed);
+        }}
+      />
+      <p className="hint">{on ? t("inspector.columnArrayOn") : t("inspector.columnArrayOff")}</p>
     </>
   );
 }
@@ -1048,7 +1086,7 @@ function RequiredDefault({
         <>
           <Row label={mustDefault ? t("inspector.defaultRequired") : t("inspector.defaultOptional")}>
             <GenericInput
-              slot="default"
+              slot={column.array ? (column.ty === "json" ? "json_array_default" : "array_default") : "default"}
               invalid={defaultMissing}
               value={column.default}
               onChange={(def) => setCol({ ...column, default: def === "Null" ? undefined : def })}
@@ -1294,6 +1332,7 @@ function CustomBody({
             onChange={(o) => setCol({ ...column, ty: { custom: { ...ty.custom, opensearch: o } } })}
           />
         </Row>
+        <ArrayToggle column={column} setCol={setCol} />
         <RequiredDefault column={column} srcNullable={srcNullable} setCol={setCol} />
       </Block>
     </>

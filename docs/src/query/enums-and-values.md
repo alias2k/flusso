@@ -31,6 +31,20 @@ Customer::tier().eq(Tier::Pro);   // term "pro"
 
 Keep enum keyword fields typed in the struct; never `#[flusso(skip)]` them.
 
+### Arrays
+
+**A newtype over a `Vec` stands for an [array field](document-structs.md#arrays).** It takes its element's kinds, variants and `exhaustive` flag. Where it fits, beside the `FlussoFragment` newtype over a `Vec` of sub-documents, is [one table](document-structs.md#two-kinds-of-array-newtype).
+
+```rust
+#[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
+#[serde(transparent)]
+struct Tags(Vec<Tag>);            // an array of `Tag`
+
+Order::tags().any_of([Tag::Urgent]);   // operators take the element, never `Tags`
+```
+
+It is no query value itself, so `eq(Tags(…))` doesn't compile. A kind tag on it is a compile error: tag the element type instead. An untagged newtype over it is an array newtype too.
+
 ### Hand-written values
 
 A type can implement `FlussoValue<K>` by hand instead. A root checks it by that bound alone. A `FlussoFragment` can't name a bound for a kind it only learns during const evaluation, so it reads the type's kind from `FlussoValueMeta` and walks into the type with a check function every flusso derive emits. Give a hand-written value both: implement `FlussoValueMeta` as the derive would (`KINDS` from the `FlussoValue<K>` impls, `VARIANTS` for an enum), then call `flusso_query::embeddable!` once, in the crate that defines the type:

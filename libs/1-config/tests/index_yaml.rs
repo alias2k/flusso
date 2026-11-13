@@ -7,10 +7,10 @@
 
 //! Parsing and conversion tests for the type-as-key field format.
 
-use config::yaml::{ConversionError, ParseError, SchemaYaml};
+use config::yaml::{ConversionError, DefaultElement, ParseError, SchemaYaml};
 use kernel::{
-    AggregateKey, AggregateOp, Column, Field, FieldSource, Filter, FilterValue, FlussoType, Geo,
-    IndexSchema, JoinKind, ParseFrom, Relation,
+    AggregateKey, AggregateOp, Column, Field, FieldSource, Filter, FilterValue, FlussoType,
+    GenericValue, Geo, IndexSchema, JoinKind, ParseFrom, Relation,
 };
 
 fn parse(yaml: &str) -> Result<SchemaYaml, ParseError> {
@@ -1317,7 +1317,7 @@ fn a_script_only_returns_a_plain_leaf() {
 }
 
 #[test]
-fn an_empty_script_or_an_array_without_one_is_rejected() {
+fn an_empty_script_is_rejected() {
     let err = convert(
         "version: 1\ntable: users\nfields:\n  - keyword: x\n    required: true\n    script: '  '",
     )
@@ -1326,15 +1326,110 @@ fn an_empty_script_or_an_array_without_one_is_rejected() {
         matches!(&err, ConversionError::EmptyScript { .. }),
         "got {err:?}"
     );
+}
+
+fn only_column(schema: &IndexSchema) -> &kernel::Column {
+    match &schema.fields[0].source {
+        FieldSource::Column(column) => column,
+        other => panic!("expected a column, got {other:?}"),
+    }
+}
+
+#[test]
+fn array_declares_a_column_holding_an_array() {
+    for field in [
+        "- keyword: tags\n    required: false\n    array: true",
+        "- enum: tags\n    variants: [urgent, fragile]\n    required: false\n    array: true",
+        "- custom: tags\n    postgres: [jsonb]\n    opensearch: keyword\n    required: false\n    array: true",
+        "- json: notes\n    required: false\n    array: true",
+        "- integer: scores\n    required: true\n    array: true\n    default: [1, 2]",
+        "- keyword: tags\n    required: false\n    array: true\n    transforms: [lowercase]",
+    ] {
+        let schema = convert(&format!("version: 1\ntable: orders\nfields:\n  {field}")).unwrap();
+        assert!(only_column(&schema).array, "{field}");
+    }
+    let plain =
+        convert("version: 1\ntable: orders\nfields:\n  - keyword: tags\n    required: false")
+            .unwrap();
+    assert!(!only_column(&plain).array);
+}
+
+#[test]
+fn an_array_default_is_a_list_of_scalars_or_of_json() {
+    let schema = convert(
+        "version: 1\ntable: orders\nfields:\n  - keyword: tags\n    required: false\n    array: true\n    default: [general]",
+    )
+    .unwrap();
+    assert_eq!(
+        only_column(&schema).default,
+        Some(GenericValue::Array(vec![GenericValue::String(
+            "general".into()
+        )]))
+    );
 
     let err = convert(
-        "version: 1\ntable: users\nfields:\n  - keyword: x\n    required: true\n    array: true",
+        "version: 1\ntable: orders\nfields:\n  - keyword: tags\n    required: false\n    array: true\n    default: general",
     )
     .unwrap_err();
     assert!(
-        matches!(&err, ConversionError::ArrayWithoutScript { .. }),
+        matches!(&err, ConversionError::ScalarArrayDefault { .. }),
         "got {err:?}"
     );
+
+    for (got, list, says) in [
+        (DefaultElement::Null, "[a, null]", "with a `null` element"),
+        (
+            DefaultElement::Object,
+            "[{ a: 1 }]",
+            "with an object element",
+        ),
+        (DefaultElement::Array, "[[a]]", "with an array element"),
+    ] {
+        let err = convert(&format!(
+            "version: 1\ntable: orders\nfields:\n  - keyword: tags\n    required: false\n    array: true\n    default: {list}"
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(&err, ConversionError::ArrayDefaultElement { got: g, .. } if *g == got),
+            "{list}: got {err:?}"
+        );
+        assert!(err.to_string().contains(says), "{list}: {err}");
+    }
+
+    let json = convert(
+        "version: 1\ntable: orders\nfields:\n  - json: notes\n    required: false\n    array: true\n    default: [{ a: 1 }, [b]]",
+    )
+    .unwrap();
+    assert!(
+        matches!(&only_column(&json).default, Some(GenericValue::Array(items)) if items.len() == 2)
+    );
+}
+
+#[test]
+fn a_json_array_takes_no_transforms() {
+    let err = convert(
+        "version: 1\ntable: orders\nfields:\n  - json: notes\n    required: false\n    array: true\n    transforms: [lowercase]",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, ConversionError::TransformsOnJsonArray { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn array_is_not_a_key_of_geo_map_object_or_constant() {
+    for field in [
+        "- geo: spot\n    column: spot\n    required: false\n    array: true",
+        "- map: labels\n    values: keyword\n    required: false\n    array: true",
+        "- object: info\n    array: true\n    fields:\n      - keyword: a\n        required: true",
+        "- constant: kind\n    value: a\n    array: true",
+    ] {
+        assert!(
+            parse(&format!("version: 1\ntable: orders\nfields:\n  {field}")).is_err(),
+            "{field}"
+        );
+    }
 }
 
 #[test]

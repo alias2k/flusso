@@ -9,7 +9,7 @@ help: the trait `FlussoValue<flusso_query::kind::Keyword>` is not implemented fo
    |
  7 | enum Tier {
    | ^^^^^^^^^
-   = note: use a built-in leaf type, or add `#[derive(FlussoValue)]` (with the matching kind) to `Tier`
+   = note: use a built-in leaf type, or a type with `#[derive(FlussoValue)]` of the matching kind
    = help: the following other types implement trait `FlussoValue<K>`:
              `&Uuid` implements `FlussoValue<flusso_query::kind::Keyword>`
              `&str` implements `FlussoValue<flusso_query::kind::Date>`

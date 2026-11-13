@@ -1,0 +1,33 @@
+error[E0277]: `Ids` is not a valid value for a `flusso_query::kind::Keyword` field
+  --> tests/ui/array_newtype_at_a_plain_field.rs:11:9
+   |
+11 |     id: Ids,
+   |         ^^^ unsupported field type
+   |
+help: the trait `FlussoValue<flusso_query::kind::Keyword>` is not implemented for `Ids`
+  --> tests/ui/array_newtype_at_a_plain_field.rs:6:1
+   |
+ 6 | struct Ids(Vec<String>);
+   | ^^^^^^^^^^
+   = note: use a built-in leaf type, or a type with `#[derive(FlussoValue)]` of the matching kind
+   = help: the following other types implement trait `FlussoValue<K>`:
+             `&Uuid` implements `FlussoValue<flusso_query::kind::Keyword>`
+             `&str` implements `FlussoValue<flusso_query::kind::Date>`
+             `&str` implements `FlussoValue<flusso_query::kind::Keyword>`
+             `&str` implements `FlussoValue<flusso_query::kind::Text>`
+             `Uuid` implements `FlussoValue<flusso_query::kind::Keyword>`
+             `bool` implements `FlussoValue<flusso_query::kind::Bool>`
+             `f32` implements `FlussoValue<flusso_query::kind::Double>`
+             `f32` implements `FlussoValue<flusso_query::kind::Float>`
+           and $N others
+note: required by a bound in `__assert_field_value`
+  --> tests/ui/array_newtype_at_a_plain_field.rs:11:9
+   |
+11 |     id: Ids,
+   |         ^^^ required by this bound in `__assert_field_value`
+
+error[E0080]: evaluation panicked: field `id` is a single `keyword` in the schema, not an array — `Ids` reads an array; use its element type, or declare the field `array: true`
+  --> tests/ui/array_newtype_at_a_plain_field.rs:11:9
+   |
+11 |     id: Ids,
+   |         ^^^ evaluation of `_` failed here
