@@ -325,8 +325,6 @@ export interface FileOp {
   path: string;
   /// Source path for a move, relative to flusso.toml.
   from?: string;
-  /// The index's name in flusso.toml on disk, when the save renames it.
-  was?: string;
   /// Content for upsert/move (raw wins over schema).
   schema?: IndexSchema;
   raw?: string;

@@ -64,11 +64,11 @@ Source, stream, and sinks are edited from each adapter's own declaration: a kind
 
 What an index row does to its schema file on **Save**. Names are compared the way flusso reads them, trimmed and lowercased, so `Orders` and `orders ` are both `orders`. Paths are compared the way the filesystem resolves them, symlinks included, so `./orders.schema.yml`, and `sub/orders.schema.yml` with `sub` a link to `.`, are both `orders.schema.yml`. A schema path is saved with `./`, doubled and trailing slashes dropped.
 
-- **Remove**: the file stays on disk. Save neither deletes nor rewrites it; delete it yourself if you no longer want it.
+- **Add**: **+ index** opens the **New index** wizard, as the sidebar's **New index** does: an index can't be saved until it has a schema.
+- **Remove**: the file stays on disk; Save doesn't delete it. Delete it yourself if you no longer want it. An index added later under the same path writes its own schema over it, in the designer's own form, and the review flags that the file is replaced.
 - **Rename**: the name applies when you leave the box (or press Enter). A file at the old name's default path, `<old name>.schema.yml`, then moves to `<new name>.schema.yml`, unless another row already uses that path. Any other path stays where it is.
 - **Name refused**: a name another index already has, or one flusso rejects (anything but lowercase `a`–`z`, digits and `_`, a leading digit, more than 63 characters), stays in the box, marked with the reason, and is never applied (the **New index** wizard refuses it too). **Save** is refused while it shows, naming the row; leaving the box puts the row's name back.
-- **Shared file**: two rows may point at one file while their schemas are the same. If they differ, Save refuses and names both rows. A row moved off a shared file leaves it in place for the other row.
-- **Config file**: a schema path that is the config file itself refuses the save.
+- **Shared file**: two rows may point at one file while their schemas are the same (see [what a save refuses](#what-a-save-refuses)). A row moved off a shared file leaves it in place for the other row.
 
 Each row keeps its own schema through any mix of these, undo and redo included: one index's schema is never written to another index's file. The server checks this again on every save, see [what a save refuses](#what-a-save-refuses).
 
@@ -116,27 +116,27 @@ A preview that fails anyway shows an error banner, cleared by the next preview t
 
 ## Save review
 
-Every changed file, in a folder tree: **New**, write, **Move** (rename or relocate, with "Moved from"). A warning marks any path resolving outside the config directory, a move that replaces a file already at its destination (such as one a removed index left behind), and any file whose layout a save can't keep (see below). Filter, toggle one or all, then **Write N files**. Below the list: **Validating…**, then **All checks passed**, **Database offline**, or the issue count. Unified, split, old, and new diff views.
+Every changed file, in a folder tree: **New**, write, **Move** (rename or relocate, with "Moved from"). A warning marks any path resolving outside the config directory, a file written over one that isn't that index's own (such as one a removed index left behind), and any file whose layout a save can't keep (see below). Filter, toggle one or all, then **Write N files**. Below the list: **Validating…**, then **All checks passed**, **Database offline**, or the issue count. Unified, split, old, and new diff views.
 
 Unchecked files are left as they are on disk. `flusso.toml` and the schema files that only fit the new one, those of a new, renamed or moved index, are marked with a link and go together: unchecking one unchecks all of them. Everything else can be left out on its own. So after any save, every index in `flusso.toml` on disk still has its file.
 
-Meaning is preserved: the written file parses back to the same schema and mapping, which the preview self-checks on every edit. Values (`constant`, `default`, `options`) are written as plain YAML: `1.5`, `true`, `null`, and a string quoted only where it would read as something else (`'123'`, `'null'`). Files from earlier designer releases carry tags such as `!String hi`; they load unchanged. One of those, `!Decimal '1.5'`, has always read as the string `"1.5"`, so a number saved that way is a string until you change it back. Moves are real: the old file is removed and emptied folders pruned, within the rules [above](#what-a-save-refuses).
+Meaning is preserved: the written file parses back to the same schema and mapping, which the preview self-checks on every edit. Values (`constant`, `default`, `options`) are written as plain YAML: `1.5`, `true`, `null`, and a string quoted only where it would read as something else (`'123'`, `'null'`). Files from earlier designer releases carry tags such as `!String hi`; they load unchanged. One of those, `!Decimal '1.5'`, has always read as the string `"1.5"`, so a number saved that way is a string until you change it back. Moves are real: the old file is removed and emptied folders pruned, within the rules [below](#what-a-save-refuses).
 
 ### What a save refuses
 
-The server checks every save against the `flusso.toml` that will be on disk after it: the new one, or the current one when it is left out. It refuses, and writes nothing, when:
+After any save, every index in the `flusso.toml` on disk has a file of its own, holding its own schema. The server checks every file the save writes against the `flusso.toml` that will be on disk after it: the new one, or the current one when it is left out. A file left out isn't written, so it isn't checked. Which index on disk each index is comes from the ids the designer sends, else from the names. The server refuses, and writes nothing, when:
 
 - two indexes have one name;
 - a schema path is the config file, a folder, or another index's path in other letter case (one file on macOS and Windows);
 - a file would be written for an index that config doesn't declare, or anywhere but that index's schema path;
 - a file another index uses would be written, unless that index writes it too with the same content;
-- a move would take the config file as its source;
-- a new, renamed or moved index's file is written without `flusso.toml`, or `flusso.toml` without it;
-- the new `flusso.toml` names a schema file that won't exist after the save.
+- a move's old file isn't the same index's file in the `flusso.toml` on disk;
+- a new, renamed or moved index's file is written without `flusso.toml`;
+- the new `flusso.toml` points an index at a file the save doesn't write, unless it is that index's own file on disk (two indexes keep sharing one only if they already did), or a file no index used, for a new index. An index added with no schema file is refused, by the designer before the review.
 
-A move removes its old file only when that is the same index's file in the `flusso.toml` on disk, no index uses it after the save, and it lies in the config directory; otherwise the old file stays and the move is a plain write. No other file is ever removed.
+A move removes its old file only when no index uses it after the save and it lies in the config directory; otherwise the old file stays. No other file is ever removed.
 
-Every check runs before anything is written. The files are then staged next to their targets and swapped in, `flusso.toml` last, and old files are removed after that. If a write still fails (permissions, a full disk), the files swapped before it keep their new content, the rest and `flusso.toml` keep the old, and no temporary file is left behind.
+Every check runs before anything is written. A save that fails anyway (permissions, a full disk) is undone: the project is left exactly as it was, with no temporary or backup file behind. Only if putting a file back fails too does the error name the backup files that still hold the previous content.
 
 ### What a save keeps
 
@@ -169,7 +169,7 @@ A field moved into another list (a different join or object, which only Code mod
 
 - **Comments that could not be kept.** A comment inside a value that had to be rewritten (a flow list `[…]` with a comment in it, an item the save can't follow line by line), on a field moved into another list, or on a field, entry or sink matched by name that may have been renamed, is dropped. Matched by name, a removed one and a renamed one look the same, so both count. The review marks the file and says above its diff how many comments it loses.
 - **A file written in the designer's own form.** A file whose layout the save can't follow (a top level written as a flow mapping `{…}`, for instance), or whose result wouldn't read back as exactly the schema being saved, is written in the designer's own form instead, without its comments. The review marks it and says so above its diff.
-- **Windows line endings.** A `flusso.toml` saved with CRLF line endings is written back with LF, comments kept. A CRLF `*.schema.yml` keeps its line endings through a value edit; renaming a field writes it in the designer's own form, and the review says so.
+- **Windows line endings.** A `flusso.toml` saved with CRLF line endings is written back with LF, comments kept. A CRLF `*.schema.yml` keeps its line endings and comments through a value edit and a field rename.
 
 Both show before anything is written. A file the designer creates is written in its own form.
 

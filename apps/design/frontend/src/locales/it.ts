@@ -44,6 +44,10 @@ export const it: Record<string, string> = {
   "toast.schemaIsConfig":
     'L\'indice "{name}" usa il file di configurazione {path} come file schema: assegnagli un file schema proprio.',
   "toast.duplicateIndexName": 'Due indici si chiamano "{name}": rinominane uno.',
+  "toast.indexNeedsSchema":
+    'L\'indice "{name}" non ha ancora uno schema, e {path} verrebbe salvato senza: progetta il suo schema con "Nuovo indice", o rimuovi la riga.',
+  "toast.unloadedSchemaMoved":
+    'Lo schema dell\'indice "{name}" non si è potuto caricare, quindi non può spostarsi da {from} a {path}: correggi prima il file, o ripristina il percorso.',
   "toast.nameRefusedSave": 'Indice "{row}": {reason}. Cambia il nome, o esci dalla casella per mantenere "{row}".',
   "toast.sharedSchemaClash":
     'Gli indici "{a}" e "{b}" condividono un file schema ma i loro schemi differiscono: assegna a uno dei due un file proprio.',

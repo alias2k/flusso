@@ -91,10 +91,13 @@ export function ConfigPanel({
   config,
   onChange,
   onDuplicate,
+  onAddIndex,
 }: {
   config: ConfigToml;
   onChange: (c: ConfigToml) => void;
   onDuplicate: (i: number) => void;
+  /// Open the New index wizard: an index is added with its schema.
+  onAddIndex: () => void;
 }) {
   const { t } = useT();
   const adapters = useAdapters() ?? [];
@@ -377,14 +380,7 @@ export function ConfigPanel({
             );
           })}
         </div>
-        <AddDashed
-          label={t("config.index")}
-          onClick={() => {
-            let name = "new_index";
-            for (let n = 2; index.some((e) => indexName(e.name) === name); n += 1) name = `new_index${n}`;
-            onChange({ ...config, index: [...index, { name, schema: defaultSchemaPath(name), enabled: true }] });
-          }}
-        />
+        <AddDashed label={t("config.index")} onClick={onAddIndex} />
       </Stage>
 
       <Stage step={3} tone="bg-primary" title={t("config.sinks")} hint={t("config.stageSinksHint")}>

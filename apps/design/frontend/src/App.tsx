@@ -209,7 +209,8 @@ const sinkIdentity = (saved: ConfigToml, config: ConfigToml): Record<string, str
 
 // What a preview of `schema` (the index `index`) writes it into, as a save
 // would: the Code-mode text when it is newer than the file, else the file the
-// index was last saved at (a pending path change has not moved it yet).
+// index was last saved at (a pending path change has not moved it yet). A new
+// index has no file of its own: a file at its path lends it no comments.
 const schemaFile = (
   index: string,
   schema: IndexSchema,
@@ -219,7 +220,7 @@ const schemaFile = (
   const savedDoc = saved ? (parseJson(saved) as Doc) : undefined;
   const was = entry?.id ? savedDoc?.config.index?.find((e) => e.id === entry.id) : undefined;
   const identity = identityFor(schema, texts[index], was && savedDoc?.schemas[was.name]);
-  return { path: was?.schema ?? entry?.schema, base: texts[index]?.text, identity };
+  return { path: was?.schema, base: texts[index]?.text, identity };
 };
 
 // Bumped to drop a Code-mode parse reply that a newer parse superseded.
@@ -749,7 +750,20 @@ export default function App() {
     const livePaths = new Set(pairs.map((p) => schemaPath(p.entry.schema)));
     const byFile = new Map<string, RowPair[]>();
     for (const pair of pairs) {
-      if (!of.schemas[pair.entry.name]) continue; // no model to write (failed load) — leave the file alone
+      if (!of.schemas[pair.entry.name]) {
+        // No model to write (a row added in the Deployment panel, or a schema
+        // that failed to load): its file is left alone, so it must be the
+        // row's own file on disk.
+        const { entry, old } = pair;
+        if (!old)
+          return { planned: [], refusal: t("toast.indexNeedsSchema", { name: entry.name, path: entry.schema }) };
+        if (schemaPath(old.schema) !== schemaPath(entry.schema))
+          return {
+            planned: [],
+            refusal: t("toast.unloadedSchemaMoved", { name: entry.name, from: old.schema, path: entry.schema }),
+          };
+        continue;
+      }
       const path = schemaPath(pair.entry.schema);
       byFile.set(path, [...(byFile.get(path) ?? []), pair]);
     }
@@ -775,11 +789,10 @@ export default function App() {
         const identity = old ? identityFor(schema, text, savedDoc?.schemas[old.name]) : undefined;
         const content = { schema, ...(base === undefined ? {} : { base }), ...(identity ? { identity } : {}) };
         const from = old && schemaPath(old.schema);
-        const was = old?.name;
         const op: FileOp =
           from && from !== path && !livePaths.has(from)
-            ? { kind: "move", index: entry.name, was, from, path, ...content }
-            : { kind: "upsert", index: entry.name, was, path, ...content };
+            ? { kind: "move", index: entry.name, from, path, ...content }
+            : { kind: "upsert", index: entry.name, path, ...content };
         planned.push({ op, name: entry.name, group: first.entry.name });
       }
     }
@@ -1421,14 +1434,12 @@ export default function App() {
                   {!e.enabled && <span className="text-muted-foreground"> {t("sidebar.off")}</span>}
                 </button>
               ))}
-              <NewIndex
-                tables={catalog?.catalog.tables.map((tbl) => tbl.name) ?? []}
-                junctions={catalog?.junctions.map((j) => j.table.table) ?? []}
-                taken={config?.index?.map((e) => e.name) ?? []}
-                onCreate={(...args) => void leaveBuffer(() => createIndex(...args))}
-                open={newIndexOpen}
-                onOpenChange={setNewIndexOpen}
-              />
+              <button
+                className={cn(NAV, "mt-1.5 border border-dashed border-border text-primary")}
+                onClick={() => setNewIndexOpen(true)}
+              >
+                + {t("sidebar.newIndex")}
+              </button>
             </div>
             {/* Colour key — open by default, but collapsible so a long index list
                 isn't crowded out. Pinned below the scrolling list. */}
@@ -1472,7 +1483,12 @@ export default function App() {
           </main>
         ) : active === "config" ? (
           <main className="col-start-2 row-start-2 min-h-0 overflow-y-auto p-4">
-            <ConfigPanel config={config} onChange={setConfig} onDuplicate={dupIndex} />
+            <ConfigPanel
+              config={config}
+              onChange={setConfig}
+              onDuplicate={dupIndex}
+              onAddIndex={() => setNewIndexOpen(true)}
+            />
           </main>
         ) : rawMode ? (
           <main className="raw-pane col-start-2 row-start-2 flex min-h-0 flex-col">
@@ -1589,6 +1605,14 @@ export default function App() {
         />
       )}
 
+      <NewIndex
+        tables={catalog?.catalog.tables.map((tbl) => tbl.name) ?? []}
+        junctions={catalog?.junctions.map((j) => j.table.table) ?? []}
+        taken={config?.index?.map((e) => e.name) ?? []}
+        onCreate={(...args) => void leaveBuffer(() => createIndex(...args))}
+        open={newIndexOpen}
+        onOpenChange={setNewIndexOpen}
+      />
       <CommandPalette
         open={paletteOpen}
         onOpenChange={setPaletteOpen}
@@ -2140,6 +2164,12 @@ function NewIndex({
   const effectivePath = cleanDir && effectiveFile ? `${cleanDir}/${effectiveFile}` : effectiveFile;
   const junctionSet = new Set(junctions);
 
+  // The initial `table` state captured the catalog before it loaded: default
+  // it on opening, from the tables that actually exist.
+  useEffect(() => {
+    if (open && !table && tables[0]) setTable(tables[0]);
+  }, [open, table, tables]);
+
   // Load the real subfolders under flusso.toml whenever the dialog opens.
   useEffect(() => {
     if (!open) return;
@@ -2182,17 +2212,6 @@ function NewIndex({
 
   return (
     <>
-      <button
-        className={cn(NAV, "mt-1.5 border border-dashed border-border text-primary")}
-        onClick={() => {
-          // The initial `table` state captured the catalog before it loaded —
-          // default it now, from the tables that actually exist.
-          if (!table && tables[0]) setTable(tables[0]);
-          onOpenChange(true);
-        }}
-      >
-        + {t("sidebar.newIndex")}
-      </button>
       <Dialog open={open} onOpenChange={(o) => (o ? onOpenChange(true) : reset())}>
         <DialogContent
           className="sm:max-w-md"

@@ -43,6 +43,10 @@ export const en: Record<string, string> = {
   "toast.schemaIsConfig":
     'Index "{name}" names the config file {path} as its schema file: give it a schema file of its own.',
   "toast.duplicateIndexName": 'Two indexes are named "{name}": rename one of them.',
+  "toast.indexNeedsSchema":
+    'Index "{name}" has no schema yet, and {path} would be saved without one: design its schema with "New index", or remove the row.',
+  "toast.unloadedSchemaMoved":
+    'The schema of index "{name}" could not be loaded, so it cannot move from {from} to {path}: fix the file first, or put the path back.',
   "toast.nameRefusedSave": 'Index "{row}": {reason}. Change the name, or leave the box to keep "{row}".',
   "toast.sharedSchemaClash":
     'Indexes "{a}" and "{b}" share one schema file but their schemas differ: give one of them its own file.',
