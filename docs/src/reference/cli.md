@@ -114,13 +114,13 @@ Exit status is non-zero when validation fails or any diagnostic is an error. `--
 | `relation_primary_key` | A relation table without a single-column primary key. | error | yes |
 | `transform_not_applicable` | `transforms` the column's type doesn't take. | error | yes |
 | `root_primary_key_mismatch` | A root `primary_key` other than the table's own single-column key. | error | yes |
-| `not_an_array_column` | `array: true` over a column that's neither a `[]` type nor `json`/`jsonb`. | error | yes |
+| `not_an_array_column` | `array: true` over a column that's neither a `[]` type nor `json`/`jsonb`, nor a domain over one. | error | yes |
 | `root_primary_key` | A root table with no primary key or a composite one (the message says which); on one, with no relation, a `primary_key` that names no column. | error | no |
 | `type_mismatch` | A declared type that doesn't accept the column's type. | error | no |
 | `not_numeric` | An expression or geo column that isn't numeric. | error | no |
 | `nullability` | `required` over a nullable column. | warning | no |
 | `ignored_primary_key` | A join `primary_key` that names no column. | warning | no |
-| `undeclared_array_column` | A `[]` column read by a field without `array: true`. | warning | no |
+| `undeclared_array_column` | A `[]` column (or a domain over one) read by a field without `array: true`. | warning | no |
 
 ## design
 

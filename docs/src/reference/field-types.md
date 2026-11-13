@@ -71,12 +71,13 @@ A leaf can also be computed from the built document instead of read from a colum
   | `["a", null, "b"]` | `["a", "b"]`: null elements are dropped |
   | `"a"` (a lone value in `jsonb`) | `["a"]` |
   | an object or array element | the document fails, and [`on_error`](index-and-on-error.md) decides |
+  | a multi-dimensional array (`'{{a,b},{c,d}}'`) | its elements are arrays, so the document fails. Postgres reports a 2-D column as a plain `text[]`, so `check` can't warn |
 
-  On a `json` field every element is kept, objects and nested arrays included; only top-level nulls are dropped.
+  Only a `json` field keeps structured elements: every element is kept, objects and nested arrays included, and only top-level nulls are dropped. A `custom` field fails on them like any other, whatever its `opensearch` type.
 - **[`transforms`](#transforms)** apply to each string element. They're checked against the element type: the `[]` column's base type, or `text` for `json`/`jsonb`. A `json` array takes none.
 - **`default`** is a list, written whole when the column is null: `default: [general]`. Its elements are non-null scalars (any non-null JSON on a `json` field). A scalar `default` with `array: true` is rejected at load.
 - **`required`** is about the array: `true` maps `Vec<T>`, `false` `Option<Vec<T>>`. See [Document structs](../query/document-structs.md#arrays).
-- **Checked against the database.** `array: true` over a column that's neither a `[]` type nor `json`/`jsonb` is an error that stops `run`; a `[]` column without it is a warning. See [check](cli.md#check).
+- **Checked against the database.** `array: true` over a column that's neither a `[]` type nor `json`/`jsonb` is an error that stops `run`; a `[]` column without it is a warning. A domain counts as the type it's declared over. See [check](cli.md#check).
 - **Not on** `geo`, `map`, `object`, `constant`, joins, or aggregates: the key is rejected at load.
 - **Changing it** moves the schema to a new content hash, so the index is rebuilt once. A schema without it keeps its hash.
 
@@ -147,7 +148,7 @@ A fixed value in every document. `value` absent or `null` renders as JSON null. 
 
 ## transforms
 
-Applied in order to a column value before it lands in the document. Each runs in Postgres (`lower`, `trim`), so the column's type must take it: a text type (`text`, `varchar`, `char`, `name`, `citext`) or a domain over one. Anything else, an `integer`, `jsonb` or an enum, fails every document build; `flusso check` reports it, and [Validation at start](cli.md#validation-at-start) says what `run` does. On an [`array`](#array) field they apply to each element instead, so a `text[]` or `jsonb` column takes them.
+Applied in order to a column value before it lands in the document. Each runs in Postgres (`lower`, `trim`), so the column's type must take it: a text type (`text`, `varchar`, `char`, `name`, `citext`) or a domain over one. Anything else, an `integer`, `jsonb` or an enum, fails every document build; `flusso check` reports it, and [Validation at start](cli.md#validation-at-start) says what `run` does. On an [`array`](#array) field they apply to each element instead, so a `text[]` or `jsonb` column takes them. A `[]` column read without `array: true` gets them on the whole array, which `lower` and `trim` don't take, so every build fails.
 
 | Transform | Effect |
 | --- | --- |
