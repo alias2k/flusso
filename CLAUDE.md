@@ -877,7 +877,11 @@ the field path): an array column's null takes the default, a lone value is wrapp
 dropped, and an object/array element of a non-`json` field is a `BuildFailure` that `build`/
 `build_many` return as `Document::Failed` (so `on_error` decides). `Catalog::accepts_transforms`
 takes `element: bool` (Postgres probes the `[]` base type, `text` for `json`/`jsonb`);
-`NotAnArrayColumn`/`UndeclaredArrayColumn` are the catalog checks. Query side: `check_type`'s
+`NotAnArrayColumn`/`UndeclaredArrayColumn` are the catalog checks; they read `ColumnInfo.base_type`
+(a domain resolved through `typbasetype`, which the element transform probe uses too), while the
+declared type is still checked against the domain's own name. The designer's `array_default` /
+`json_array_default` value slots refuse what the config conversion refuses, and `api::render_op`
+refuses a schema whose file would not load, so a save never writes one. Query side: `check_type`'s
 scalar arm also accepts a custom non-`Vec` type through const asserts (`OpaqueProbe::LEAF_ARRAY` +
 `accepts_kind`), and `#[derive(FlussoValue)]` on a newtype over `Vec<E>` emits only
 `FlussoValueMeta` (`E`'s kinds, `ARRAY`/`READS_ARRAY`), no `FlussoValue<K>`. So `ARRAY` has **two
