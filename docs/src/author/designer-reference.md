@@ -60,7 +60,17 @@ Two rules are steered, not forced. A `NOT NULL` column is required by default an
 
 ## Deployment panel
 
-Source, stream, and sinks are edited from each adapter's own declaration: a kind picker (one button per registered adapter of that port), the required options and secrets inline (a secret is a literal or an `env var` reference; a connection can also be a `parts` table), and every option with a default folded into an **options** drawer that counts what is set. The stream sits under the source as a drawer and is omitted from the file when left at its defaults. Indexes: name, schema file path (a subfolder creates directories on save), enabled, `on_error`, duplicate, remove (the schema file stays on disk), and a **per-sink options** drawer under each row with one form per sink that takes [per-index options](../reference/index-and-on-error.md#sinks) (an OpenSearch sink's `index_settings`). Renaming a sink carries its per-index options along; removing it, or switching it to a kind that takes none, drops them. Plus the index prefix and the server addresses. A config whose options its adapter rejects fails **Validate** and **Test connection** with the adapter's message before any connection is attempted.
+Source, stream, and sinks are edited from each adapter's own declaration: a kind picker (one button per registered adapter of that port), the required options and secrets inline (a secret is a literal or an `env var` reference; a connection can also be a `parts` table), and every option with a default folded into an **options** drawer that counts what is set. The stream sits under the source as a drawer and is omitted from the file when left at its defaults. Indexes: name, schema file path (a subfolder creates directories on save), enabled, `on_error`, duplicate, remove, and a **per-sink options** drawer under each row with one form per sink that takes [per-index options](../reference/index-and-on-error.md#sinks) (an OpenSearch sink's `index_settings`). Renaming a sink carries its per-index options along; removing it, or switching it to a kind that takes none, drops them. Plus the index prefix and the server addresses. A config whose options its adapter rejects fails **Validate** and **Test connection** with the adapter's message before any connection is attempted.
+
+What an index row does to its schema file on **Save**. Names are compared the way flusso reads them, trimmed and lowercased, so `Orders` and `orders ` are both `orders`. Paths are compared the way the filesystem resolves them, symlinks included, so `./orders.schema.yml`, and `sub/orders.schema.yml` with `sub` a link to `.`, are both `orders.schema.yml`. A schema path is saved with `./`, doubled and trailing slashes dropped.
+
+- **Remove**: the file stays on disk. Save neither deletes nor rewrites it; delete it yourself if you no longer want it.
+- **Rename**: the name applies when you leave the box (or press Enter). A file at the old name's default path, `<old name>.schema.yml`, then moves to `<new name>.schema.yml`, unless another row already uses that path. Any other path stays where it is.
+- **Name refused**: a name another index already has, or one flusso rejects (anything but lowercase `a`–`z`, digits and `_`, a leading digit, more than 63 characters), stays in the box, marked with the reason, and is never applied (the **New index** wizard refuses it too). **Save** is refused while it shows, naming the row; leaving the box puts the row's name back.
+- **Shared file**: two rows may point at one file while their schemas are the same. If they differ, Save refuses and names both rows. A row moved off a shared file leaves it in place for the other row.
+- **Config file**: a schema path that is the config file itself refuses the save.
+
+Each row keeps its own schema through any mix of these, undo and redo included: one index's schema is never written to another index's file. The server checks this again on every save, see [what a save refuses](#what-a-save-refuses).
 
 ## Code mode
 
@@ -106,9 +116,27 @@ A preview that fails anyway shows an error banner, cleared by the next preview t
 
 ## Save review
 
-Every changed file, in a folder tree: **New**, write, **Move** (rename or relocate, with "Moved from"), **Delete** (a removed index). A warning marks any path resolving outside the config directory, and any file whose layout a save can't keep (see below). Filter, toggle one or all, then **Write N files**. Below the list: **Validating…**, then **All checks passed**, **Database offline**, or the issue count. Unified, split, old, and new diff views.
+Every changed file, in a folder tree: **New**, write, **Move** (rename or relocate, with "Moved from"). A warning marks any path resolving outside the config directory, a move that replaces a file already at its destination (such as one a removed index left behind), and any file whose layout a save can't keep (see below). Filter, toggle one or all, then **Write N files**. Below the list: **Validating…**, then **All checks passed**, **Database offline**, or the issue count. Unified, split, old, and new diff views.
 
-Meaning is preserved: the written file parses back to the same schema and mapping, which the preview self-checks on every edit. Values (`constant`, `default`, `options`) are written as plain YAML: `1.5`, `true`, `null`, and a string quoted only where it would read as something else (`'123'`, `'null'`). Files from earlier designer releases carry tags such as `!String hi`; they load unchanged. One of those, `!Decimal '1.5'`, has always read as the string `"1.5"`, so a number saved that way is a string until you change it back. Moves are real: the old file is removed and emptied folders pruned. The save is atomic.
+Unchecked files are left as they are on disk. `flusso.toml` and the schema files that only fit the new one, those of a new, renamed or moved index, are marked with a link and go together: unchecking one unchecks all of them. Everything else can be left out on its own. So after any save, every index in `flusso.toml` on disk still has its file.
+
+Meaning is preserved: the written file parses back to the same schema and mapping, which the preview self-checks on every edit. Values (`constant`, `default`, `options`) are written as plain YAML: `1.5`, `true`, `null`, and a string quoted only where it would read as something else (`'123'`, `'null'`). Files from earlier designer releases carry tags such as `!String hi`; they load unchanged. One of those, `!Decimal '1.5'`, has always read as the string `"1.5"`, so a number saved that way is a string until you change it back. Moves are real: the old file is removed and emptied folders pruned, within the rules [above](#what-a-save-refuses).
+
+### What a save refuses
+
+The server checks every save against the `flusso.toml` that will be on disk after it: the new one, or the current one when it is left out. It refuses, and writes nothing, when:
+
+- two indexes have one name;
+- a schema path is the config file, a folder, or another index's path in other letter case (one file on macOS and Windows);
+- a file would be written for an index that config doesn't declare, or anywhere but that index's schema path;
+- a file another index uses would be written, unless that index writes it too with the same content;
+- a move would take the config file as its source;
+- a new, renamed or moved index's file is written without `flusso.toml`, or `flusso.toml` without it;
+- the new `flusso.toml` names a schema file that won't exist after the save.
+
+A move removes its old file only when that is the same index's file in the `flusso.toml` on disk, no index uses it after the save, and it lies in the config directory; otherwise the old file stays and the move is a plain write. No other file is ever removed.
+
+Every check runs before anything is written. The files are then staged next to their targets and swapped in, `flusso.toml` last, and old files are removed after that. If a write still fails (permissions, a full disk), the files swapped before it keep their new content, the rest and `flusso.toml` keep the old, and no temporary file is left behind.
 
 ### What a save keeps
 

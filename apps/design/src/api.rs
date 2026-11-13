@@ -9,15 +9,15 @@
 //! functions; the logic lives here so it stays testable without a server.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use config::Config;
 use config::toml::ConfigToml;
 use config::yaml::SchemaYaml;
 use kernel::AdapterConfig;
-use kernel::common::IndexName;
+use kernel::common::{IndexName, SchemaPath};
 use kernel::{IndexSchema, ParseFrom};
 use script::{Printer, ScriptContext, Scripts};
 use serde::{Deserialize, Serialize};
@@ -498,7 +498,8 @@ fn descend(ours: &serde_json::Value, theirs: &serde_json::Value, path: &mut Vec<
 
 /// What to do with one schema file. The client computes these from its saved
 /// snapshot → current document (correlated by a stable index id); the server
-/// holds no session state and just applies them.
+/// holds no session state, checks them against the config being saved, and
+/// applies them. There is no delete: a removed index's file stays on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OpKind {
@@ -506,23 +507,29 @@ pub enum OpKind {
     Upsert,
     /// Move `from` → `path` (its content may also change in the same step).
     Move,
-    /// Remove the file at `path`.
-    Delete,
 }
 
 /// One schema-file operation in a save/diff request. `schema`/`raw` supply the
-/// content for `Upsert`/`Move` (raw wins — the raw-edit escape hatch); `from` is
-/// the source path for `Move`.
+/// content (raw wins — the raw-edit escape hatch); `from` is the source path
+/// for `Move`.
 #[derive(Debug, Deserialize)]
 pub struct FileOp {
     /// What to do.
     pub kind: OpKind,
-    /// Destination (`Upsert`/`Move`) or target (`Delete`), relative to the config dir.
+    /// The index whose schema file this is. `path` must be that index's
+    /// schema path in the config being saved.
+    pub index: IndexName,
+    /// Destination, relative to the config dir.
     pub path: PathBuf,
     /// Source path for a `Move`, relative to the config dir.
     #[serde(default)]
     pub from: Option<PathBuf>,
-    /// The schema to render for `Upsert`/`Move`.
+    /// The index's name in the config on disk, when this save renames it.
+    /// Absent, it is `index`. A move removes its source only when that is
+    /// this index's schema file on disk.
+    #[serde(default)]
+    pub was: Option<IndexName>,
+    /// The schema to render.
     #[serde(default)]
     pub schema: Option<IndexSchema>,
     /// Raw YAML to write verbatim instead of rendering `schema`.
@@ -573,21 +580,18 @@ pub struct SaveResponse {
     pub written: Vec<String>,
     /// Files moved (rename/relocate).
     pub moved: Vec<MovedFile>,
-    /// Absolute paths deleted.
-    pub deleted: Vec<String>,
     /// Absolute paths of directories pruned because they became empty.
     pub pruned: Vec<String>,
 }
 
 /// The resolved effect of one op on disk, for the review. `Write` covers both
-/// create and modify; `Move`/`Delete` are lifecycle. A `changed: false` entry is
+/// create and modify; `Move` relocates a file. A `changed: false` entry is
 /// a no-op (e.g. an upsert whose rendered content already matches disk).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiffOp {
     Write,
     Move,
-    Delete,
 }
 
 /// One op resolved against the filesystem: what it would change, plus the before
@@ -596,21 +600,30 @@ pub enum DiffOp {
 pub struct OpDiff {
     /// The resolved lifecycle op.
     pub op: DiffOp,
-    /// Absolute destination / target path.
+    /// The index whose schema file this is; `None` for the config.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index: Option<IndexName>,
+    /// Absolute, normalized destination path.
     pub path: String,
     /// Absolute source path (`Move` only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
     /// On-disk text now (empty when the file doesn't exist yet).
     pub current: String,
-    /// Text after the op ("" for a delete).
+    /// Text after the op.
     pub next: String,
     /// Whether applying the op changes disk.
     pub changed: bool,
     /// A stable warning code when the path warrants one (`"outside_base"` when it
-    /// resolves outside the config directory); the client translates it.
+    /// resolves outside the config directory, `"overwrites"` when a move replaces
+    /// a file already at its destination); the client translates it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// The op only fits the new `flusso.toml`: its index is new, renamed, or
+    /// on another file than the config on disk says. It is saved together
+    /// with the config or not at all.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub needs_config: bool,
     /// Set when the write could not keep the file's comments and formatting.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notice: Option<Notice>,
@@ -643,122 +656,374 @@ fn render_op(op: &FileOp, on_disk: Option<&str>) -> Result<Saved> {
     }
 }
 
-/// Resolve every op against the filesystem into the review diffs — the config
-/// first, then each schema-file op. Shared by [`diff_project`] and [`save_project`]
-/// so the review and the apply see exactly the same plan.
-fn plan(config_path: &Path, request: &SaveRequest) -> Result<Vec<OpDiff>> {
-    let base = config_path.parent().unwrap_or(Path::new(".")).to_path_buf();
-    let mut plan = Vec::with_capacity(request.ops.len() + 1);
+/// One `[[index]]` entry with its schema file resolved on disk.
+struct Entry<'a> {
+    name: &'a IndexName,
+    path: PathBuf,
+}
 
-    let on_disk = std::fs::read_to_string(config_path).ok();
+/// The project's paths as the filesystem resolves them.
+struct Paths {
+    /// The config file, resolved.
+    config: PathBuf,
+    /// Its directory, resolved.
+    base: PathBuf,
+    /// Its directory as given, which schema paths are joined to: the OS
+    /// follows a `..` after a symlink from the link's target, and so does
+    /// [`on_disk`].
+    given_base: PathBuf,
+}
+
+impl Paths {
+    fn new(config_path: &Path) -> Result<Self> {
+        let given = std::path::absolute(config_path)?;
+        let given_base = given.parent().unwrap_or(Path::new("/")).to_path_buf();
+        let config = on_disk(&given)?;
+        let base = config.parent().unwrap_or(Path::new("/")).to_path_buf();
+        Ok(Self {
+            config,
+            base,
+            given_base,
+        })
+    }
+
+    /// A path relative to the config's directory, resolved.
+    fn at(&self, path: &Path) -> Result<PathBuf> {
+        on_disk(&resolve(&self.given_base, path))
+    }
+
+    /// Whether `path` is the config file, or would be on a case-insensitive
+    /// filesystem.
+    fn is_config(&self, path: &Path) -> bool {
+        path == self.config || folded(path) == folded(&self.config)
+    }
+
+    /// Every index of `config`, resolved. Two indexes with one name refuse.
+    fn entries<'a>(&self, config: &'a ConfigToml) -> Result<Vec<Entry<'a>>> {
+        let mut entries: Vec<Entry<'a>> = Vec::with_capacity(config.index.len());
+        for entry in &config.index {
+            if entries.iter().any(|e| *e.name == entry.name) {
+                bail!("two indexes are named `{}`", entry.name);
+            }
+            let path = self
+                .at(entry.schema.as_ref())
+                .with_context(|| format!("index `{}`", entry.name))?;
+            entries.push(Entry {
+                name: &entry.name,
+                path,
+            });
+        }
+        Ok(entries)
+    }
+
+    /// The indexes of the config on disk; one whose path doesn't resolve is
+    /// left out (nothing can be written for it).
+    fn disk_entries<'a>(&self, config: &'a ConfigToml) -> Vec<Entry<'a>> {
+        config
+            .index
+            .iter()
+            .filter_map(|entry| {
+                let path = self.at(entry.schema.as_ref()).ok()?;
+                Some(Entry {
+                    name: &entry.name,
+                    path,
+                })
+            })
+            .collect()
+    }
+}
+
+/// Refuse a config flusso couldn't load or that would let one file stand for
+/// another: a schema path that is the config file, a folder, or another
+/// index's path spelled with other letter case (one file on a
+/// case-insensitive filesystem, two elsewhere).
+fn check_entries(paths: &Paths, entries: &[Entry<'_>]) -> Result<()> {
+    for entry in entries {
+        if paths.is_config(&entry.path) {
+            bail!("index `{}` names the config file as its schema", entry.name);
+        }
+        if entry.path.is_dir() {
+            bail!(
+                "index `{}` names {}, which is a folder",
+                entry.name,
+                entry.path.display()
+            );
+        }
+        if let Some(other) = entries
+            .iter()
+            .find(|o| o.path != entry.path && folded(&o.path) == folded(&entry.path))
+        {
+            bail!(
+                "the schema paths of `{}` ({}) and `{}` ({}) differ only in letter case, \
+                 which some filesystems read as one file",
+                entry.name,
+                entry.path.display(),
+                other.name,
+                other.path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `config` with each schema path as flusso opens it: `.` segments, doubled
+/// and trailing slashes dropped (`./a//b.yml/` → `a/b.yml`).
+fn clean_schema_paths(config: &ConfigToml) -> Result<ConfigToml> {
+    let mut config = config.clone();
+    for entry in &mut config.index {
+        let clean: PathBuf = entry
+            .schema
+            .components()
+            .filter(|c| *c != Component::CurDir)
+            .collect();
+        if clean.as_os_str().is_empty() {
+            bail!("index `{}` has no schema path", entry.name);
+        }
+        entry.schema = SchemaPath::new(clean);
+    }
+    Ok(config)
+}
+
+/// Resolve every op against the filesystem into the review diffs — the config
+/// first, then each schema-file op. Shared by [`diff_project`] and
+/// [`save_project`], so the review and the apply see exactly the same plan.
+///
+/// Every path is resolved on disk first (symlinks and `..` followed, see
+/// [`on_disk`]), and every check below runs on the resolved paths. The ops are
+/// checked against the config on disk after the save: the request's when it
+/// is written, the current file when the review leaves it out (`skip`).
+///
+/// Refused, so nothing is written:
+/// - two indexes with one name (as [`IndexName`] normalizes it);
+/// - a schema path that is the config file, a folder, or another index's path
+///   in other letter case;
+/// - an op for an index that config doesn't declare, or writing anywhere but
+///   that index's schema path;
+/// - a write to a file another index also uses, unless that index writes it
+///   too, and two ops writing different content to one file;
+/// - a move out of the config file;
+/// - an op that needs the new config ([`OpDiff::needs_config`]) applied while
+///   the config is left out, or left out while the config is written;
+/// - a written config naming a schema file that won't exist after the save.
+///
+/// A move removes its source only when that is the same index's schema file
+/// in the config on disk now, no index uses it after the save, and it lies in
+/// the project directory; otherwise it is a plain write and the source stays.
+fn plan(config_path: &Path, request: &SaveRequest) -> Result<Vec<OpDiff>> {
+    let paths = Paths::new(config_path)?;
+    let config = clean_schema_paths(&request.config)?;
+    let entries = paths.entries(&config)?;
+    check_entries(&paths, &entries)?;
+
+    let on_disk_text = std::fs::read_to_string(&paths.config).ok();
+    let disk = on_disk_text
+        .as_deref()
+        .and_then(|text| ConfigToml::try_parse(text).ok());
+    let before = disk
+        .as_ref()
+        .map(|d| paths.disk_entries(d))
+        .unwrap_or_default();
+    let skipped = |path: &str| request.skip.iter().any(|s| s == path);
+
     let Saved {
         text: next,
         notice,
         dropped,
-    } = keep::config_toml(
-        on_disk.as_deref(),
-        &request.config,
-        request.identity.as_ref(),
-    )?;
-    let current = on_disk.unwrap_or_default();
+    } = keep::config_toml(on_disk_text.as_deref(), &config, request.identity.as_ref())?;
+    let current = on_disk_text.unwrap_or_default();
+    let config_shown = paths.config.display().to_string();
+    let config_changed = current != next;
+    let config_left_out = config_changed && skipped(&config_shown);
+    let after = if config_left_out { &before } else { &entries };
+
+    let mut plan = Vec::with_capacity(request.ops.len() + 1);
     plan.push(OpDiff {
         op: DiffOp::Write,
-        path: config_path.display().to_string(),
+        index: None,
+        path: config_shown,
         from: None,
-        changed: current != next,
+        changed: config_changed,
         warning: None,
         notice,
         dropped,
+        needs_config: false,
         current,
         next,
     });
 
+    let path_before = |name: &IndexName| {
+        before
+            .iter()
+            .find(|e| e.name == name)
+            .map(|e| e.path.as_path())
+    };
+    let mut written: Vec<(PathBuf, String, usize)> = Vec::new();
     for op in &request.ops {
-        match op.kind {
-            OpKind::Upsert => {
-                let dest = resolve(&base, &op.path);
-                let on_disk = std::fs::read_to_string(&dest).ok();
-                let Saved {
-                    text: next,
-                    notice,
-                    dropped,
-                } = render_op(op, on_disk.as_deref())?;
-                let current = on_disk.unwrap_or_default();
+        let dest = paths.at(&op.path)?;
+        if paths.is_config(&dest) {
+            bail!("an op for index `{}` writes the config file", op.index);
+        }
+        if dest.is_dir() {
+            bail!(
+                "an op for index `{}` writes {}, which is a folder",
+                op.index,
+                dest.display()
+            );
+        }
+        let own = after
+            .iter()
+            .find(|e| *e.name == op.index)
+            .map(|e| &e.path)
+            .with_context(|| {
+                if config_left_out {
+                    format!(
+                        "an op names `{}`, which flusso.toml on disk does not, and the save leaves flusso.toml out",
+                        op.index
+                    )
+                } else {
+                    format!("an op names `{}`, which the config does not", op.index)
+                }
+            })?;
+        if dest != *own {
+            bail!(
+                "an op writes {} for index `{}`, whose schema file is {}",
+                dest.display(),
+                op.index,
+                own.display()
+            );
+        }
+        if let Some(other) = after
+            .iter()
+            .find(|e| e.path == dest && !request.ops.iter().any(|o| o.index == *e.name))
+        {
+            bail!(
+                "an op for index `{}` writes {}, which index `{}` also uses",
+                op.index,
+                dest.display(),
+                other.name
+            );
+        }
+        let from = match op.kind {
+            OpKind::Move => {
+                Some(paths.at(op.from.as_deref().context("move op needs a `from` path")?)?)
+            }
+            OpKind::Upsert => None,
+        };
+        if from.as_deref().is_some_and(|f| paths.is_config(f)) {
+            bail!("a move takes the config file as its source");
+        }
+        let was = op.was.as_ref().unwrap_or(&op.index);
+        let needs_config = *was != op.index
+            || path_before(&op.index) != Some(dest.as_path())
+            || from.as_ref().is_some_and(|f| *f != dest);
+
+        let used = |path: &Path| {
+            after
+                .iter()
+                .any(|e| e.path == path || folded(&e.path) == folded(path))
+        };
+        let own_before = from
+            .as_ref()
+            .filter(|f| f.is_file() && path_before(was) == Some(f.as_path()));
+        let removed = own_before
+            .filter(|f| **f != dest && !used(f) && f.starts_with(&paths.base))
+            .cloned();
+        // The comments to keep are in the index's own file: the one it moves
+        // from, else the one at its path.
+        let base_text = std::fs::read_to_string(own_before.unwrap_or(&dest)).ok();
+        let Saved {
+            text: next,
+            notice,
+            dropped,
+        } = render_op(op, base_text.as_deref())?;
+        match written.iter().find(|(path, _, _)| *path == dest) {
+            Some((_, other, _)) if *other != next => bail!(
+                "two schema-file ops write {} with different content",
+                dest.display()
+            ),
+            Some((_, _, at)) => {
+                let at = *at;
+                if let Some(shared) = plan.get_mut(at) {
+                    shared.needs_config |= needs_config;
+                }
+                continue;
+            }
+            None => written.push((dest.clone(), next.clone(), plan.len())),
+        }
+
+        match removed {
+            Some(from) => {
+                let current = std::fs::read_to_string(&from).unwrap_or_default();
                 plan.push(OpDiff {
-                    op: DiffOp::Write,
-                    changed: current != next,
-                    warning: out_of_tree(&base, &dest),
+                    op: DiffOp::Move,
+                    index: Some(op.index.clone()),
+                    changed: true,
+                    warning: out_of_tree(&paths.base, &dest)
+                        .or_else(|| dest.exists().then(|| "overwrites".to_owned())),
                     notice,
                     dropped,
+                    needs_config,
+                    from: Some(from.display().to_string()),
                     path: dest.display().to_string(),
-                    from: None,
                     current,
                     next,
                 });
             }
-            OpKind::Move => {
-                let from = resolve(
-                    &base,
-                    op.from.as_deref().context("move op needs a `from` path")?,
-                );
-                let dest = resolve(&base, &op.path);
-                // Source already gone (a prior save, or an external move) — there's
-                // nothing to relocate, so degrade to a plain write at the destination.
-                if from.exists() {
-                    let on_disk = std::fs::read_to_string(&from).ok();
-                    let Saved {
-                        text: next,
-                        notice,
-                        dropped,
-                    } = render_op(op, on_disk.as_deref())?;
-                    plan.push(OpDiff {
-                        op: DiffOp::Move,
-                        from: Some(from.display().to_string()),
-                        changed: true,
-                        warning: out_of_tree(&base, &dest),
-                        notice,
-                        dropped,
-                        path: dest.display().to_string(),
-                        current: on_disk.unwrap_or_default(),
-                        next,
-                    });
-                } else {
-                    let on_disk = std::fs::read_to_string(&dest).ok();
-                    let Saved {
-                        text: next,
-                        notice,
-                        dropped,
-                    } = render_op(op, on_disk.as_deref())?;
-                    let current = on_disk.unwrap_or_default();
-                    plan.push(OpDiff {
-                        op: DiffOp::Write,
-                        from: None,
-                        changed: current != next,
-                        warning: out_of_tree(&base, &dest),
-                        notice,
-                        dropped,
-                        path: dest.display().to_string(),
-                        current,
-                        next,
-                    });
-                }
+            None => {
+                let current = std::fs::read_to_string(&dest).unwrap_or_default();
+                plan.push(OpDiff {
+                    op: DiffOp::Write,
+                    index: Some(op.index.clone()),
+                    from: None,
+                    changed: current != next,
+                    warning: out_of_tree(&paths.base, &dest),
+                    notice,
+                    dropped,
+                    needs_config,
+                    path: dest.display().to_string(),
+                    current,
+                    next,
+                });
             }
-            OpKind::Delete => {
-                let target = resolve(&base, &op.path);
-                if target.exists() {
-                    let current = std::fs::read_to_string(&target).unwrap_or_default();
-                    plan.push(OpDiff {
-                        op: DiffOp::Delete,
-                        path: target.display().to_string(),
-                        from: None,
-                        changed: true,
-                        warning: None,
-                        notice: None,
-                        dropped: 0,
-                        current,
-                        next: String::new(),
-                    });
-                }
+        }
+    }
+
+    let applied = |d: &OpDiff| d.changed && !skipped(&d.path);
+    for d in plan.iter().skip(1).filter(|d| d.needs_config && d.changed) {
+        if config_left_out && applied(d) {
+            bail!(
+                "{} only fits the new flusso.toml, which the save leaves out",
+                d.path
+            );
+        }
+        if !config_left_out && config_changed && !applied(d) {
+            bail!(
+                "the new flusso.toml needs {}, which the save leaves out",
+                d.path
+            );
+        }
+    }
+    if config_changed && !config_left_out {
+        let removed: Vec<&str> = plan
+            .iter()
+            .filter(|d| d.op == DiffOp::Move && applied(d))
+            .filter_map(|d| d.from.as_deref())
+            .collect();
+        for entry in &entries {
+            if before
+                .iter()
+                .any(|b| b.name == entry.name && b.path == entry.path)
+            {
+                continue;
+            }
+            let shown = entry.path.display().to_string();
+            let kept = entry.path.is_file() && !removed.contains(&shown.as_str());
+            if !kept && !plan.iter().skip(1).any(|d| d.path == shown && applied(d)) {
+                bail!(
+                    "flusso.toml would name {} for index `{}`, which the save does not write",
+                    shown,
+                    entry.name
+                );
             }
         }
     }
@@ -826,68 +1091,97 @@ fn collect_dirs(base: &Path, dir: &Path, depth: usize, out: &mut Vec<String>) {
     }
 }
 
-/// Apply the request's ops **atomically and in order**: render + stage every
-/// write to a sibling temp file first (so a codegen error changes nothing on
-/// disk), then commit the renames, then remove deletes and move-sources, then
-/// prune any directory left empty. Only files that actually change are touched,
-/// and the review's unchecked paths (`skip`) are left alone.
+/// Apply the request's ops. Every check [`diff_project`] makes runs before anything is
+/// written; then every file is staged to a sibling temp file, the temps are
+/// renamed into place (schema files first, `flusso.toml` last), and only then
+/// are move sources removed and emptied directories pruned. A staging failure
+/// changes nothing; a failed rename leaves the files renamed before it in
+/// place and the rest (and `flusso.toml`) as they were. Either way no temp
+/// file is left behind, nor a directory the save created and left empty.
+/// Only files that change
+/// are touched, and the review's unchecked paths (`skip`) are left alone.
 pub fn save_project(config_path: &Path, request: SaveRequest) -> Result<SaveResponse> {
-    let base = config_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let plan = plan(config_path, &request)?;
+    let base = Paths::new(config_path)?.base;
     let skip: HashSet<&str> = request.skip.iter().map(String::as_str).collect();
 
-    let mut resp = SaveResponse::default();
+    let mut applied: Vec<(usize, &OpDiff)> = plan
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.changed && !skip.contains(d.path.as_str()))
+        .collect();
+    applied.sort_by_key(|(i, _)| *i == 0);
+
+    let mut created: Vec<PathBuf> = Vec::new();
     let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
+    if let Err(e) = stage(&applied, &mut staged, &mut created) {
+        undo(&staged, &created);
+        return Err(e);
+    }
+    for (n, (tmp, dest)) in staged.iter().enumerate() {
+        if let Err(e) = std::fs::rename(tmp, dest) {
+            undo(staged.get(n..).unwrap_or_default(), &created);
+            return Err(e).with_context(|| format!("committing {}", dest.display()));
+        }
+    }
+
+    let mut resp = SaveResponse::default();
     let mut removals: Vec<PathBuf> = Vec::new();
-
-    // Stage: write every create/modify/move destination to a temp sibling. No
-    // final path is touched until every render + temp write has succeeded.
-    for (i, d) in plan.iter().enumerate() {
-        if !d.changed || skip.contains(d.path.as_str()) {
-            continue;
-        }
-        match d.op {
-            DiffOp::Write | DiffOp::Move => {
-                let dest = PathBuf::from(&d.path);
-                if let Some(parent) = dest.parent() {
-                    std::fs::create_dir_all(parent)
-                        .with_context(|| format!("creating {}", parent.display()))?;
-                }
-                let tmp = temp_sibling(&dest, i);
-                std::fs::write(&tmp, &d.next)
-                    .with_context(|| format!("staging {}", dest.display()))?;
-                staged.push((tmp, dest));
-                if d.op == DiffOp::Move {
-                    if let Some(from) = &d.from {
-                        removals.push(PathBuf::from(from));
-                        resp.moved.push(MovedFile {
-                            from: from.clone(),
-                            to: d.path.clone(),
-                        });
-                    }
-                } else {
-                    resp.written.push(d.path.clone());
-                }
+    for (_, d) in &applied {
+        match (d.op, &d.from) {
+            (DiffOp::Move, Some(from)) => {
+                removals.push(PathBuf::from(from));
+                resp.moved.push(MovedFile {
+                    from: from.clone(),
+                    to: d.path.clone(),
+                });
             }
-            DiffOp::Delete => {
-                removals.push(PathBuf::from(&d.path));
-                resp.deleted.push(d.path.clone());
-            }
+            _ => resp.written.push(d.path.clone()),
         }
     }
-
-    // Commit: flip each staged temp into place (a same-dir rename is atomic).
-    for (tmp, dest) in &staged {
-        std::fs::rename(tmp, dest).with_context(|| format!("committing {}", dest.display()))?;
-    }
-
-    // Remove deletes + move-sources, then prune any now-empty directory upward.
     for path in &removals {
         std::fs::remove_file(path).ok();
     }
     resp.pruned = prune_empty_dirs(&base, &removals);
 
     Ok(resp)
+}
+
+/// Write each applied file's text to a temp sibling of its destination,
+/// creating missing directories; `staged` and `created` record what to undo.
+fn stage(
+    applied: &[(usize, &OpDiff)],
+    staged: &mut Vec<(PathBuf, PathBuf)>,
+    created: &mut Vec<PathBuf>,
+) -> Result<()> {
+    for (i, d) in applied {
+        let dest = PathBuf::from(&d.path);
+        if let Some(parent) = dest.parent() {
+            let missing: Vec<&Path> = parent.ancestors().take_while(|a| !a.exists()).collect();
+            for dir in missing.into_iter().rev() {
+                std::fs::create_dir(dir).with_context(|| format!("creating {}", dir.display()))?;
+                created.push(dir.to_path_buf());
+            }
+        }
+        let tmp = temp_sibling(&dest, *i);
+        if let Err(e) = std::fs::write(&tmp, &d.next) {
+            std::fs::remove_file(&tmp).ok();
+            return Err(e).with_context(|| format!("staging {}", dest.display()));
+        }
+        staged.push((tmp, dest));
+    }
+    Ok(())
+}
+
+/// Remove the temp files not renamed into place and the directories the save
+/// created that are left empty.
+fn undo(staged: &[(PathBuf, PathBuf)], created: &[PathBuf]) {
+    for (tmp, _) in staged {
+        std::fs::remove_file(tmp).ok();
+    }
+    for dir in created.iter().rev() {
+        std::fs::remove_dir(dir).ok();
+    }
 }
 
 /// The introspected relational catalog plus detected junction tables.
@@ -1341,10 +1635,57 @@ fn temp_sibling(dest: &Path, i: usize) -> PathBuf {
     dir.join(format!(".{name}.flusso-save.{i}.tmp"))
 }
 
-/// Normalize `.`/`..` away lexically (no filesystem access — the destination may
-/// not exist yet), so containment can be checked on a would-be path.
+/// `path` (absolute) as the filesystem resolves it: its deepest existing
+/// ancestor canonicalized (symlinks and `..` followed), then the rest
+/// appended. A path that doesn't exist yet still resolves through the links
+/// above it, so `sub/x.yml` with `sub -> .` is `x.yml`. Refused: a broken
+/// link, a `..` in the part that doesn't exist (there is nothing to go up
+/// from), and a path through a file.
+fn on_disk(path: &Path) -> Result<PathBuf> {
+    let parts: Vec<Component<'_>> = path.components().collect();
+    for cut in (1..=parts.len()).rev() {
+        let Some((head, tail)) = parts.split_at_checked(cut) else {
+            continue;
+        };
+        let head: PathBuf = head.iter().collect();
+        match std::fs::canonicalize(&head) {
+            Ok(mut real) => {
+                if !tail.is_empty() && !real.is_dir() {
+                    bail!(
+                        "{} goes through {}, which is a file",
+                        path.display(),
+                        real.display()
+                    );
+                }
+                for part in tail {
+                    match part {
+                        Component::Normal(name) => real.push(name),
+                        Component::CurDir => {}
+                        _ => bail!(
+                            "{} goes up from a folder that does not exist",
+                            path.display()
+                        ),
+                    }
+                }
+                return Ok(real);
+            }
+            Err(e) if head.symlink_metadata().is_ok() => {
+                bail!("{} cannot be resolved: {e}", head.display())
+            }
+            Err(_) => {}
+        }
+    }
+    bail!("{} cannot be resolved", path.display())
+}
+
+/// `path` with every letter lowercased: two paths that fold alike are one file
+/// on a case-insensitive filesystem.
+fn folded(path: &Path) -> String {
+    path.to_string_lossy().to_lowercase()
+}
+
+/// Normalize `.`/`..` away lexically (no filesystem access).
 fn lexical_normalize(path: &Path) -> PathBuf {
-    use std::path::Component;
     let mut out = PathBuf::new();
     for comp in path.components() {
         match comp {
@@ -1358,12 +1699,11 @@ fn lexical_normalize(path: &Path) -> PathBuf {
     out
 }
 
-/// A warning code when `dest` resolves outside the config directory (a `../`
-/// escape or an absolute path elsewhere). The designer still allows it — this
-/// only flags it in the review; `None` when contained.
+/// A warning code when `dest` (resolved) lies outside the config directory
+/// (resolved). The designer still allows it — this only flags it in the
+/// review; `None` when contained.
 fn out_of_tree(base_dir: &Path, dest: &Path) -> Option<String> {
-    let base = lexical_normalize(base_dir);
-    (!lexical_normalize(dest).starts_with(&base)).then(|| "outside_base".to_owned())
+    (!dest.starts_with(base_dir)).then(|| "outside_base".to_owned())
 }
 
 /// Remove any directory left empty by the removed files, walking upward from each

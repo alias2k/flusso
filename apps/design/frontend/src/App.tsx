@@ -10,6 +10,7 @@ import {
   Eye,
   Folder,
   Languages,
+  Link2,
   Minus,
   Moon,
   Pencil,
@@ -82,6 +83,8 @@ import { LANGS, useT, type Translate } from "./i18n";
 import type { ParseErrorInfo } from "./model/anchors";
 import { removeAt, removeFields, removeNode } from "./model/edit";
 import { adoptIds, fieldIds, stripUids } from "./model/ids";
+import { cleanSchemaPath, indexName, isConfigFile, pairRows, type RowPair, schemaPath } from "./model/indexRows";
+import { useNameRefusal } from "./components/nameRefusal";
 import { formatRoute, parseRoute, type Route } from "./router";
 import { countTypeMismatches, fixAllTypes, requiredDefaultIssues } from "./model/issues";
 import { pruneIncomplete } from "./model/prune";
@@ -392,18 +395,24 @@ export default function App() {
   const bufferAhead = useUiStore((s) => s.rawMode && !!s.seed && s.rawText !== s.seed.text);
   // A value still being read may be the only change: Save waits for it.
   const valuesPending = useSyncExternalStore(subscribePendingValues, hasPendingValues);
+  const typingName = useUiStore((s) => s.nameDraft !== null);
   // Code-mode text not yet saved; may differ from the file in comments alone.
   const textsPending = useDesignStore((s) => Object.keys(s.texts).length > 0);
-  const canSave = dirty || bufferAhead || valuesPending || textsPending;
+  const canSave = dirty || bufferAhead || valuesPending || typingName || textsPending;
+  // An index is compared with its saved self, the same row: a renamed index
+  // whose schema didn't change is not dirty.
   const indexDirty = (name: string, of: Doc | null = doc): boolean => {
     if (!of || !savedDoc) return false;
+    const old = pairRows(savedDoc.config.index, of.config.index).find((p) => p.entry.name === name)?.old;
     const current = of.schemas[name];
-    return (current ? JSON.stringify(stripUids(current)) : undefined) !== savedSchemasBare.get(name);
+    const saved = old ? savedSchemasBare.get(old.name) : undefined;
+    return (current ? JSON.stringify(stripUids(current)) : undefined) !== saved;
   };
-  const configDirty = useMemo(
-    () => !!doc && (!savedDoc || JSON.stringify(doc.config) !== JSON.stringify(savedDoc.config)),
-    [doc, savedDoc],
+  const isConfigDirty = useCallback(
+    (of: Doc | null) => !!of && (!savedDoc || JSON.stringify(of.config) !== JSON.stringify(savedDoc.config)),
+    [savedDoc],
   );
+  const configDirty = useMemo(() => isConfigDirty(doc), [doc, isConfigDirty]);
 
   const config = doc?.config;
   const schema = doc && active !== "config" ? doc.schemas[active] : undefined;
@@ -706,55 +715,75 @@ export default function App() {
 
   // Warn before leaving with unsaved changes.
   useEffect(() => {
-    if (!dirty && !valuesPending && !textsPending) return;
+    if (!dirty && !valuesPending && !typingName && !textsPending) return;
     const warn = (e: BeforeUnloadEvent) => {
       e.preventDefault();
       e.returnValue = "";
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [dirty, valuesPending, textsPending]);
+  }, [dirty, valuesPending, typingName, textsPending]);
 
   useEffect(() => {
     loadCollapsed(active);
   }, [active, loadCollapsed]);
 
   // The schema-file ops a save applies, derived from the saved snapshot → the
-  // current doc, correlated by the stable per-index id (so a rename or a path
-  // change reads as a Move, not a delete + create). `name` is kept alongside so
-  // the snapshot can advance per index after the save.
-  const buildOps = (of: Doc | null = doc): { op: FileOp; name: string; removed: boolean }[] => {
-    if (!of) return [];
-    const prev = savedDoc?.config.index ?? [];
-    const prevById = new Map(prev.filter((e) => e.id).map((e) => [e.id, e]));
-    const cur = of.config.index ?? [];
+  // current doc, each row paired with its saved self (so a rename or a path
+  // change reads as a Move). `name` is kept alongside so the snapshot can
+  // advance per index after the save, and `group` names the row whose op the
+  // server reports for a file several rows share. A removed index plans
+  // nothing: its file stays on disk. A file a row still uses is never moved
+  // away. Rows on one file are all written once any of them is, and must agree
+  // on its content; a row on the config file refuses the save (`refusal`).
+  const buildOps = (of: Doc | null = doc): { planned: PlannedOp[]; refusal?: string } => {
+    if (!of) return { planned: [] };
+    const pairs = pairRows(savedDoc?.config.index, of.config.index);
     const texts = useDesignStore.getState().texts;
-    const seen = new Set<string>();
-    const planned: { op: FileOp; name: string; removed: boolean }[] = [];
-    for (const e of cur) {
-      if (e.id) seen.add(e.id);
-      const schema = of.schemas[e.name];
-      if (!schema) continue; // no model to write (failed load) — leave the file alone
-      const text = texts[e.name];
-      const base = text?.text;
-      const was = e.id ? prevById.get(e.id) : undefined;
-      const identity = was ? identityFor(schema, text, savedDoc?.schemas[was.name]) : undefined;
-      const content = { schema, ...(base === undefined ? {} : { base }), ...(identity ? { identity } : {}) };
-      if (!was) planned.push({ op: { kind: "upsert", path: e.schema, ...content }, name: e.name, removed: false });
-      else if (was.schema !== e.schema)
-        planned.push({
-          op: { kind: "move", from: was.schema, path: e.schema, ...content },
-          name: e.name,
-          removed: false,
-        });
-      else if (indexDirty(e.name, of) || base !== undefined)
-        planned.push({ op: { kind: "upsert", path: e.schema, ...content }, name: e.name, removed: false });
+    for (const { entry } of pairs) {
+      if (project && isConfigFile(entry.schema, project.config_path))
+        return { planned: [], refusal: t("toast.schemaIsConfig", { name: entry.name, path: entry.schema }) };
+      const twin = pairs.find((p) => p.entry !== entry && indexName(p.entry.name) === indexName(entry.name));
+      if (twin) return { planned: [], refusal: t("toast.duplicateIndexName", { name: indexName(entry.name) }) };
     }
-    // Indexes dropped from the config → delete their previous files.
-    for (const p of prev)
-      if (p.id && !seen.has(p.id))
-        planned.push({ op: { kind: "delete", path: p.schema }, name: p.name, removed: true });
-    return planned;
+    const livePaths = new Set(pairs.map((p) => schemaPath(p.entry.schema)));
+    const byFile = new Map<string, RowPair[]>();
+    for (const pair of pairs) {
+      if (!of.schemas[pair.entry.name]) continue; // no model to write (failed load) — leave the file alone
+      const path = schemaPath(pair.entry.schema);
+      byFile.set(path, [...(byFile.get(path) ?? []), pair]);
+    }
+    const planned: PlannedOp[] = [];
+    for (const [path, rows] of byFile) {
+      const [first] = rows;
+      const content = (p: RowPair) => JSON.stringify(stripUids(of.schemas[p.entry.name]));
+      const other = rows.find((p) => content(p) !== content(first));
+      if (other)
+        return {
+          planned: [],
+          refusal: t("toast.sharedSchemaClash", { a: first.entry.name, b: other.entry.name }),
+        };
+      const changed = rows.some(
+        ({ entry, old }) =>
+          !old || schemaPath(old.schema) !== path || indexDirty(entry.name, of) || texts[entry.name] !== undefined,
+      );
+      if (!changed) continue;
+      for (const { entry, old } of rows) {
+        const schema = of.schemas[entry.name];
+        const text = texts[entry.name];
+        const base = text?.text;
+        const identity = old ? identityFor(schema, text, savedDoc?.schemas[old.name]) : undefined;
+        const content = { schema, ...(base === undefined ? {} : { base }), ...(identity ? { identity } : {}) };
+        const from = old && schemaPath(old.schema);
+        const was = old?.name;
+        const op: FileOp =
+          from && from !== path && !livePaths.has(from)
+            ? { kind: "move", index: entry.name, was, from, path, ...content }
+            : { kind: "upsert", index: entry.name, was, path, ...content };
+        planned.push({ op, name: entry.name, group: first.entry.name });
+      }
+    }
+    return { planned };
   };
 
   // Which `[[index]]` entry of the file on disk (the saved snapshot) each
@@ -772,18 +801,10 @@ export default function App() {
     };
   };
 
-  // Match a planned op to its resolved diff entry: the server returns absolute
-  // paths, the op carries the config-relative one, so compare by suffix (a move
-  // may degrade to a plain write when its source is already gone).
-  const suffixOf = (abs: string, rel: string) => abs === rel || abs.endsWith(`/${rel}`);
-  const diffFor = (list: OpDiff[], p: { op: FileOp }): OpDiff | undefined =>
-    list.find((d) =>
-      p.op.kind === "delete"
-        ? d.op === "delete" && suffixOf(d.path, p.op.path)
-        : d.op === "delete"
-          ? false
-          : suffixOf(d.path, p.op.path),
-    );
+  // Match a planned op to its resolved diff entry by index name, as the server
+  // reads it.
+  const diffFor = (list: OpDiff[], p: PlannedOp): OpDiff | undefined =>
+    list.find((d) => d.index !== undefined && indexName(d.index) === indexName(p.group));
 
   // Save first shows a diff of what would change on disk; performSave applies it.
   // When the config model is unchanged we hide its diff (a formatting/comment-only
@@ -793,6 +814,13 @@ export default function App() {
   // a confirm writes; a buffer that doesn't parse refuses the save.
   const save = async () => {
     if (!doc || useUiStore.getState().saving) return;
+    const nameDraft = useUiStore.getState().nameDraft;
+    if (nameDraft?.refused) {
+      setToast({ kind: "error", text: t("toast.nameRefusedSave", { row: nameDraft.row, reason: nameDraft.refused }) });
+      return;
+    }
+    // Leaving the name box applies the name typed in it.
+    if (nameDraft && document.activeElement instanceof HTMLElement) document.activeElement.blur();
     setSaving(true);
     try {
       const unread = await flushPendingValues();
@@ -804,6 +832,10 @@ export default function App() {
         setToast({ kind: "error", text: t("code.unparsedSave") });
         return;
       }
+      const loaded = useDesignStore.getState().doc;
+      const entries = loaded?.config.index ?? [];
+      if (loaded && entries.some((e) => cleanSchemaPath(e.schema) !== e.schema))
+        setConfig({ ...loaded.config, index: entries.map((e) => ({ ...e, schema: cleanSchemaPath(e.schema) })) });
       const current = useDesignStore.getState().doc;
       if (!current) return;
       const rounded = [
@@ -814,12 +846,18 @@ export default function App() {
         setToast({ kind: "error", text: t("value.roundedSave", { fields: rounded.join(", ") }) });
         return;
       }
+      const { planned, refusal } = buildOps(current);
+      if (refusal) {
+        setToast({ kind: "error", text: refusal });
+        return;
+      }
       const result = await api.diff(
         current.config,
-        buildOps(current).map((p) => p.op),
+        planned.map((p) => p.op),
         configIdentity(current),
       );
-      const shown = configDirty || !result[0] ? result : [{ ...result[0], changed: false }, ...result.slice(1)];
+      const shown =
+        isConfigDirty(current) || !result[0] ? result : [{ ...result[0], changed: false }, ...result.slice(1)];
       if (shown.some((d) => d.changed)) setDiffs(shown);
       else setToast({ kind: "ok", text: t("toast.alreadyUpToDate") });
     } catch (e) {
@@ -835,7 +873,7 @@ export default function App() {
   // exactly the ops that were applied, so Reset targets the true on-disk state.
   const performSave = async (skipPaths: string[]) => {
     if (!doc || !diffs) return;
-    const planned = buildOps();
+    const { planned } = buildOps();
     const configPath = diffs[0]?.path;
     const skip = new Set(skipPaths);
     if (!configDirty && configPath) skip.add(configPath);
@@ -868,8 +906,7 @@ export default function App() {
         for (const p of planned) {
           const d = diffFor(diffs, p);
           if (!d || !d.changed || skip.has(d.path)) continue; // not applied
-          if (p.removed) delete nextSchemas[p.name];
-          else nextSchemas[p.name] = doc.schemas[p.name];
+          nextSchemas[p.name] = doc.schemas[p.name];
           clearTexts([p.name]);
         }
         const nextConfig = configSkipped ? prev.config : doc.config;
@@ -878,7 +915,7 @@ export default function App() {
         setSaved(JSON.stringify({ config: nextConfig, schemas: nextSchemas }));
       }
       setDiffs(null);
-      const n = res.written.length + res.moved.length + res.deleted.length;
+      const n = res.written.length + res.moved.length;
       setToast({ kind: "ok", text: t("toast.saved", { n }) });
     } catch (e) {
       setToast({ kind: "error", text: t("toast.saveFailed", { err: errText(e) }) });
@@ -1262,7 +1299,13 @@ export default function App() {
             </Button>
           </Hint>
           <Hint label={canSave ? t("topbar.unsaved") : t("topbar.upToDate")}>
-            <Button size="sm" onClick={() => void save()} disabled={saving || !canSave}>
+            <Button
+              size="sm"
+              // Keeps focus in an index name box, so Save sees a name still being typed.
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => void save()}
+              disabled={saving || !canSave}
+            >
               <span className={BTN_ICON}>
                 {saving ? <span className="spinner" /> : canSave ? <span className="dirty-dot" /> : <Save />}
               </span>
@@ -1381,6 +1424,7 @@ export default function App() {
               <NewIndex
                 tables={catalog?.catalog.tables.map((tbl) => tbl.name) ?? []}
                 junctions={catalog?.junctions.map((j) => j.table.table) ?? []}
+                taken={config?.index?.map((e) => e.name) ?? []}
                 onCreate={(...args) => void leaveBuffer(() => createIndex(...args))}
                 open={newIndexOpen}
                 onOpenChange={setNewIndexOpen}
@@ -1587,6 +1631,14 @@ function shortenPath(path: string, max = 30): string {
 }
 
 // The quick-validation state the save review runs while it's open.
+/// A schema-file op a save sends, with the row it writes for and the row whose
+/// op the server reports for that file (`group`, the first row on a shared file).
+interface PlannedOp {
+  op: FileOp;
+  name: string;
+  group: string;
+}
+
 type Check = { state: "loading" } | { state: "failed"; err: string } | { state: "done"; res: ValidateResponse };
 
 // A compact status chip for the review header: what the quick validation found.
@@ -1647,14 +1699,11 @@ function ValidationDetail({ check }: { check: Check }) {
   );
 }
 
-/// The op tag on a review row: move / delete / new (a plain modify has none, its
-/// +/- counts carry it). Tones match the canvas language (warn = move, destructive
-/// = delete, accent = new).
+/// The op tag on a review row: move / new (a plain modify has none, its +/-
+/// counts carry it). Tones match the canvas language (warn = move, accent = new).
 function OpBadge({ d }: { d: OpDiff }) {
   const { t } = useT();
   const pill = "rounded px-1 py-px text-3xs font-bold uppercase tracking-caps";
-  if (d.op === "delete")
-    return <span className={cn(pill, "bg-destructive/10 text-destructive")}>{t("diff.opDelete")}</span>;
   if (d.op === "move") return <span className={cn(pill, "bg-warn/10 text-warn")}>{t("diff.opMove")}</span>;
   if (d.current === "") return <span className={cn(pill, "bg-accent2/10 text-accent2")}>{t("diff.newFile")}</span>;
   return null;
@@ -1694,13 +1743,24 @@ function DiffModal({
   const [query, setQuery] = useState("");
   const needle = query.trim().toLowerCase();
   const shown = changed.filter((d) => !needle || d.path.toLowerCase().includes(needle));
-  const toggle = (path: string) =>
+  // flusso.toml and the files that only fit the new one (a new, renamed or
+  // moved index) are written together or not at all, as the server requires:
+  // checking or unchecking one does the same to the others.
+  const linked = useMemo(() => {
+    const needing = changed.filter((d) => d.needs_config).map((d) => d.path);
+    const config = changed.find((d) => d.index === undefined);
+    return new Set(needing.length && config ? [config.path, ...needing] : needing);
+  }, [changed]);
+  const setPaths = (paths: string[], on: boolean) =>
     setInclude((s) => {
       const next = new Set(s);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
+      const all = paths.some((p) => linked.has(p)) ? [...paths, ...linked] : paths;
+      for (const p of all)
+        if (on) next.add(p);
+        else next.delete(p);
       return next;
     });
+  const toggle = (path: string) => setPaths([path], !include.has(path));
   // The select-all box acts on the currently-shown (filtered) files.
   const shownIncluded = shown.filter((d) => include.has(d.path)).length;
   const allShown = shown.length > 0 && shownIncluded === shown.length;
@@ -1718,13 +1778,10 @@ function DiffModal({
     else groups.push({ dir, files: [d] });
   }
   const toggleFolder = (files: OpDiff[], clear: boolean) =>
-    setInclude((s) => {
-      const next = new Set(s);
-      for (const f of files)
-        if (clear) next.delete(f.path);
-        else next.add(f.path);
-      return next;
-    });
+    setPaths(
+      files.map((f) => f.path),
+      !clear,
+    );
 
   const ignoreList = () => changed.filter((d) => !include.has(d.path)).map((d) => d.path);
 
@@ -1759,14 +1816,10 @@ function DiffModal({
     }
   };
   const toggleAll = () =>
-    setInclude((s) => {
-      const next = new Set(s);
-      for (const d of shown) {
-        if (allShown) next.delete(d.path);
-        else next.add(d.path);
-      }
-      return next;
-    });
+    setPaths(
+      shown.map((d) => d.path),
+      !allShown,
+    );
 
   // Run a quick validation against the database when the review opens, so a save
   // surfaces schema/DB problems (or an all-clear) before writing anything.
@@ -1868,6 +1921,12 @@ function DiffModal({
               />
               {t("diff.selected", { n: include.size, m: changed.length })}
             </label>
+            {linked.size > 1 && (
+              <p className="flex shrink-0 gap-1.5 border-b border-border px-3 py-2 text-2xs text-muted-foreground">
+                <Link2 className="mt-0.5 size-3 shrink-0" />
+                {t("diff.linkedHint")}
+              </p>
+            )}
             <div className="min-h-0 flex-1 overflow-y-auto">
               {groups.map((g) => {
                 const folderOn = g.files.every((f) => include.has(f.path));
@@ -1926,6 +1985,18 @@ function DiffModal({
                                   aria-label={t("diff.warnOutside")}
                                 />
                               )}
+                              {linked.size > 1 && linked.has(d.path) && (
+                                <Link2
+                                  className="size-3 shrink-0 text-muted-foreground"
+                                  aria-label={t("diff.linked")}
+                                />
+                              )}
+                              {d.warning === "overwrites" && (
+                                <TriangleAlert
+                                  className="size-3 shrink-0 text-warn"
+                                  aria-label={t("diff.warnOverwrites")}
+                                />
+                              )}
                               {d.notice === "layout_reset" && (
                                 <TriangleAlert
                                   className="size-3 shrink-0 text-warn"
@@ -1941,7 +2012,7 @@ function DiffModal({
                             </span>
                             <span className="flex items-center gap-2 font-mono text-2xs tabular-nums">
                               <OpBadge d={d} />
-                              {d.op !== "delete" && <span className="text-diff-add-num">+{s.adds}</span>}
+                              <span className="text-diff-add-num">+{s.adds}</span>
                               {d.op !== "write" || d.current !== "" ? (
                                 <span className="text-diff-del-num">-{s.dels}</span>
                               ) : null}
@@ -2036,12 +2107,15 @@ function DiffModal({
 function NewIndex({
   tables,
   junctions,
+  taken,
   onCreate,
   open,
   onOpenChange,
 }: {
   tables: string[];
   junctions: string[];
+  /// The names other indexes already have.
+  taken: string[];
   onCreate: (name: string, table: string, schemaPath: string) => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -2060,7 +2134,7 @@ function NewIndex({
   const [overrideName, setOverrideName] = useState("");
   const [dirs, setDirs] = useState<string[]>([]);
   const SUFFIX = ".schema.yml";
-  const effectiveBase = (baseEdited ? base : name).trim();
+  const effectiveBase = baseEdited ? base.trim() : indexName(name);
   const effectiveFile = override ? overrideName.trim() : effectiveBase ? `${effectiveBase}${SUFFIX}` : "";
   const cleanDir = dir.replace(/^\/+|\/+$/g, "");
   const effectivePath = cleanDir && effectiveFile ? `${cleanDir}/${effectiveFile}` : effectiveFile;
@@ -2092,7 +2166,8 @@ function NewIndex({
     setOverride(false);
     setOverrideName("");
   };
-  const detailsOk = !!name && !!table;
+  const nameRefusal = useNameRefusal()(name, taken);
+  const detailsOk = !!indexName(name) && !nameRefusal && !!table;
   const create = () => {
     if (!detailsOk || !effectivePath) return;
     onCreate(name, table, effectivePath);
@@ -2144,7 +2219,8 @@ function NewIndex({
           {step === 0 ? (
             <div className="flex flex-col gap-3">
               <Field label={t("sidebar.indexName")}>
-                <Text value={name} onChange={setName} placeholder={t("sidebar.indexName")} />
+                <Text value={name} onChange={setName} invalid={!!nameRefusal} placeholder={t("sidebar.indexName")} />
+                {nameRefusal && <span className="text-2xs text-destructive">{nameRefusal}</span>}
               </Field>
               <Field label={t("sidebar.rootTable")}>
                 {tables.length ? (

@@ -41,6 +41,12 @@ export const it: Record<string, string> = {
   "toast.dbConnected": "Database connesso",
   "toast.alreadyUpToDate": "Già aggiornato",
   "toast.diffFailed": "Confronto non riuscito: {err}",
+  "toast.schemaIsConfig":
+    'L\'indice "{name}" usa il file di configurazione {path} come file schema: assegnagli un file schema proprio.',
+  "toast.duplicateIndexName": 'Due indici si chiamano "{name}": rinominane uno.',
+  "toast.nameRefusedSave": 'Indice "{row}": {reason}. Cambia il nome, o esci dalla casella per mantenere "{row}".',
+  "toast.sharedSchemaClash":
+    'Gli indici "{a}" e "{b}" condividono un file schema ma i loro schemi differiscono: assegna a uno dei due un file proprio.',
   "toast.dbNotReachableErr": "Database non raggiungibile: {err}",
   "toast.schemasMatch": "Gli schemi corrispondono al database",
 
@@ -115,9 +121,12 @@ export const it: Record<string, string> = {
   "diff.kbdClear": "Cancella filtro",
   "diff.newFile": "Nuovo",
   "diff.opMove": "Sposta",
-  "diff.opDelete": "Elimina",
   "diff.movedFrom": "Spostato da {path}",
   "diff.warnOutside": "Questo percorso è fuori dalla cartella di configurazione.",
+  "diff.warnOverwrites": "Sostituisce un file esistente in questo percorso.",
+  "diff.linked": "Salvato insieme a flusso.toml",
+  "diff.linkedHint":
+    "flusso.toml e i file segnati con un collegamento hanno senso solo insieme (un indice nuovo, rinominato o spostato): selezionarne o deselezionarne uno fa lo stesso con gli altri.",
   "diff.layoutReset":
     "Non è stato possibile mantenere l'impaginazione di questo file: viene scritto nella forma del designer, senza i suoi commenti.",
   "diff.commentsDropped":
@@ -444,7 +453,12 @@ export const it: Record<string, string> = {
   "config.duplicate": "duplica",
   "config.index": "indice",
   "config.removeIndexTitle": "Rimuovere l'indice?",
-  "config.removeIndex": 'Rimuovere l\'indice "{name}"? (il file schema resta su disco)',
+  "config.removeIndex":
+    'Rimuovere l\'indice "{name}"? Il file schema {path} resta su disco: il salvataggio non lo elimina.',
+  "config.nameTaken": 'Un altro indice si chiama già "{name}"',
+  "config.namePattern":
+    '"{name}" non è un nome di indice valido: usa lettere minuscole a–z, cifre e _, iniziando con una lettera o _',
+  "config.nameLength": "Un nome di indice ha al massimo 63 caratteri",
   "config.connection": "connessione",
   "config.stream": "Stream",
   "config.streamHint": "tra l'origine e le destinazioni",

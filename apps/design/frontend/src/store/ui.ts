@@ -62,6 +62,9 @@ interface UiState {
   autoFormat: boolean;
   diffs: OpDiff[] | null;
   browseCatalog: boolean;
+  /// An index name being typed in the Deployment panel, not applied until the
+  /// box is left: `row` is the row's name, `refused` says why it can't be applied.
+  nameDraft: NameDraft | null;
 
   toggleTheme: () => void;
   toggleLeft: () => void;
@@ -78,6 +81,14 @@ interface UiState {
   toggleAutoFormat: () => void;
   setDiffs: (diffs: OpDiff[] | null) => void;
   setBrowseCatalog: (open: boolean) => void;
+  setNameDraft: (nameDraft: NameDraft | null) => void;
+}
+
+export interface NameDraft {
+  row: string;
+  name: string;
+  /// Why the name can't be applied, in words; `null` when it can.
+  refused: string | null;
 }
 
 export const useUiStore = create<UiState>()((set) => ({
@@ -95,6 +106,7 @@ export const useUiStore = create<UiState>()((set) => ({
   autoFormat: initialAutoFormat(),
   diffs: null,
   browseCatalog: false,
+  nameDraft: null,
 
   toggleTheme: () => set((s) => ({ theme: s.theme === "dark" ? "light" : "dark" })),
   toggleLeft: () => set((s) => ({ leftOpen: !s.leftOpen })),
@@ -107,6 +119,7 @@ export const useUiStore = create<UiState>()((set) => ({
   setRawMode: (rawMode) => set({ rawMode }),
   setRawText: (rawText) => set({ rawText }),
   setSeed: (seed) => set({ seed }),
+  setNameDraft: (nameDraft) => set({ nameDraft }),
   toggleVim: () =>
     set((s) => {
       const vimMode = !s.vimMode;

@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode, useState } from "react";
+import { Fragment, type ReactNode, useEffect, useRef, useState } from "react";
 import { Copy, Plug, Plus, Search, Terminal } from "lucide-react";
 import type { AdapterDescription, ConfigToml, IndexEntry } from "../api";
 import { useT } from "../i18n";
@@ -6,6 +6,9 @@ import { LABEL } from "../styles";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useAdapters } from "../model/adapters";
+import { defaultSchemaPath, indexName } from "../model/indexRows";
+import { useUiStore } from "../store/ui";
+import { useNameRefusal } from "./nameRefusal";
 import { AdapterForm, KindBadge, KindToggle } from "./AdapterForm";
 import { Check, Drawer, Field, Num, PanelTitle, RemoveButton, Select, Text } from "./widgets";
 import {
@@ -37,6 +40,52 @@ function splitEntry(entry: Record<string, unknown> | undefined): { kind: string;
 // (no `auto`) so the leftover space — and thus the two `fr` columns — resolves
 // identically in the header grid and each row grid, keeping the labels aligned.
 const INDEX_COLS = "grid grid-cols-[minmax(6rem,1fr)_minmax(9rem,1.6fr)_8.5rem_6rem_2rem_2rem] items-center gap-x-2";
+
+/// An index name input that applies the name once the box is left (or on
+/// Enter), so a rename settles once. A name flusso would refuse (another row
+/// has it, compared as flusso reads names; or it isn't a valid index name) is
+/// marked with the reason and never applied: leaving the box keeps the row's
+/// name. Save is refused while it shows.
+function IndexNameField({ value, taken, onChange }: { value: string; taken: string[]; onChange: (v: string) => void }) {
+  const { t } = useT();
+  const refusal = useNameRefusal();
+  const [draft, setDraft] = useState<string | null>(null);
+  const setNameDraft = useUiStore((s) => s.setNameDraft);
+  const typing = useRef(false);
+  useEffect(
+    () => () => {
+      if (typing.current) setNameDraft(null);
+    },
+    [setNameDraft],
+  );
+  const reason = draft === null ? null : refusal(draft, taken);
+  const settle = () => {
+    const name = draft === null ? "" : indexName(draft);
+    if (name && !reason && name !== value) onChange(name);
+    typing.current = false;
+    setDraft(null);
+    setNameDraft(null);
+  };
+  return (
+    <span className="flex flex-col gap-0.5" title={reason ?? undefined}>
+      <Text
+        value={draft ?? value}
+        invalid={!!reason}
+        onChange={(v) => {
+          typing.current = true;
+          setDraft(v);
+          setNameDraft({ row: value, name: v, refused: refusal(v, taken) });
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
+        }}
+        onBlur={settle}
+        placeholder={t("config.name")}
+      />
+      {reason && <span className="text-2xs text-destructive">{reason}</span>}
+    </span>
+  );
+}
 
 export function ConfigPanel({
   config,
@@ -249,17 +298,17 @@ export function ConfigPanel({
             <span />
           </div>
           {index.map((e, i) => {
-            const suggestion = e.name ? `${e.name}.schema.yml` : "";
+            const suggestion = e.name ? defaultSchemaPath(e.name) : "";
             // Existing files + the name-derived suggestion, offered as datalist
             // autocomplete on an editable path field (not a fixed picker).
             const schemaList = Array.from(new Set([suggestion, ...index.map((x) => x.schema)].filter(Boolean)));
             return (
-              <Fragment key={i}>
+              <Fragment key={e.id ?? i}>
                 <div className={cn(INDEX_COLS, "px-3 py-1.5")}>
-                  <Text
+                  <IndexNameField
                     value={e.name}
+                    taken={index.filter((_, j) => j !== i).map((x) => indexName(x.name))}
                     onChange={(name) => setEntry(i, { ...e, name })}
-                    placeholder={t("config.name")}
                   />
                   <Text
                     value={e.schema}
@@ -330,12 +379,11 @@ export function ConfigPanel({
         </div>
         <AddDashed
           label={t("config.index")}
-          onClick={() =>
-            onChange({
-              ...config,
-              index: [...index, { name: "new_index", schema: "new_index.schema.yml", enabled: true }],
-            })
-          }
+          onClick={() => {
+            let name = "new_index";
+            for (let n = 2; index.some((e) => indexName(e.name) === name); n += 1) name = `new_index${n}`;
+            onChange({ ...config, index: [...index, { name, schema: defaultSchemaPath(name), enabled: true }] });
+          }}
         />
       </Stage>
 
@@ -366,7 +414,12 @@ export function ConfigPanel({
           <DialogHeader>
             <DialogTitle>{t("config.removeIndexTitle")}</DialogTitle>
             <DialogDescription>
-              {pendingRemove !== null ? t("config.removeIndex", { name: index[pendingRemove]?.name ?? "" }) : ""}
+              {pendingRemove !== null
+                ? t("config.removeIndex", {
+                    name: index[pendingRemove]?.name ?? "",
+                    path: index[pendingRemove]?.schema ?? "",
+                  })
+                : ""}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
