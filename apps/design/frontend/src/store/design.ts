@@ -8,6 +8,7 @@ import { dropPendingValues, flushPendingValues } from "../model/pending";
 import { adoptIds, stampIds, stripUids, uidSkeleton } from "../model/ids";
 import { loadOverrides, type Positions, saveOverrides } from "../model/layout";
 import { type Graph, pathId, projectGraph } from "../model/tree";
+import { anchorSelection, followSelection } from "../model/selection";
 import type { Selection } from "../state";
 
 export interface Doc {
@@ -167,7 +168,7 @@ export const useDesignStore = create<DesignState>()(
       setPreview: (preview) => set({ preview }),
       setDiagnostics: (diagnostics) => set({ diagnostics }),
       setActive: (active) => set({ active }),
-      setSelection: (selection) => set({ selection }),
+      setSelection: (selection) => set((s) => ({ selection: anchorSelection(selection, s.doc?.schemas[s.active]) })),
 
       loadProject: (project, resetActive) => {
         const schemas: Record<string, IndexSchema> = {};
@@ -348,6 +349,16 @@ export const useDesignStore = create<DesignState>()(
     },
   ),
 );
+
+// The selection follows its field through every change to the document: an
+// edit, Code mode, undo and redo all land here.
+useDesignStore.subscribe((s, prev) => {
+  if (s.doc === prev.doc && s.active === prev.active) return;
+  const schema = s.doc?.schemas[s.active];
+  if (!schema || !s.selection) return;
+  const selection = followSelection(s.selection, schema);
+  if (selection !== s.selection) useDesignStore.setState({ selection });
+});
 
 // A value still being read joins the history first, so undo takes it back.
 export const undo = () => void flushPendingValues().then(() => useDesignStore.temporal.getState().undo());
