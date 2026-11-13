@@ -21,6 +21,7 @@
 //! - an array column's `default` must be a list ([`ValueProblem::NotAList`])
 //!   with no null in it ([`ValueProblem::NullElement`]);
 //! - a `constant` and an option take any value.
+//!
 //! The result is the value after one real round trip in its slot
 //! (codegen, then the parser), so the preview and the content hash are computed
 //! from what the file reads. [`read`] also says how the file spells it, when
