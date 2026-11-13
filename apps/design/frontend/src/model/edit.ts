@@ -59,6 +59,17 @@ export function listsStructured(def: Generic): boolean {
   return def.Array.some((e) => isRecord(e) && ("Array" in e || "Map" in e));
 }
 
+/// A `default` carried across the `array` switch: a value becomes a one-item
+/// list, a one-item list of a plain value becomes that value; anything else
+/// can't cross and is dropped.
+export function defaultAcrossArray(def: Generic, array: boolean): Generic {
+  if (def === undefined || def === "Null") return undefined;
+  if (array) return { Array: [def] };
+  if (!isRecord(def) || !Array.isArray(def.Array) || def.Array.length !== 1) return undefined;
+  const [only] = def.Array as Generic[];
+  return isRecord(only) && ("Array" in only || "Map" in only) ? undefined : only;
+}
+
 /// Whether a catalog type (as `format_type` spells it) is an array: `text[]`.
 export function holdsArray(sqlType?: string): boolean {
   return sqlType?.trim().endsWith("[]") ?? false;

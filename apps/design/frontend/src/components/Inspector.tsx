@@ -852,9 +852,9 @@ function ScalarBody({
 }
 
 /// The `array` switch of a column field: the column holds an array of the
-/// field's type. Flipping it drops a `default`, which changes shape (a single
-/// value becomes a list); turning it on for a `json` field drops `transforms`,
-/// which a `json` array refuses.
+/// field's type. Flipping it carries a `default` across when it can (a value
+/// becomes a one-item list and back) and drops it otherwise; turning it on for
+/// a `json` field drops `transforms`, which a `json` array refuses.
 function ArrayToggle({ column, setCol }: { column: Column; setCol: (c: Column) => void }) {
   const { t } = useT();
   const on = column.array ?? false;
@@ -865,7 +865,9 @@ function ArrayToggle({ column, setCol }: { column: Column; setCol: (c: Column) =
         label={t("inspector.columnArray")}
         onChange={(next) => {
           const changed: Column = { ...column, array: next ? true : undefined };
-          delete changed.default;
+          const carried = edit.defaultAcrossArray(column.default, next);
+          if (carried === undefined) delete changed.default;
+          else changed.default = carried;
           if (next && column.ty === "json") delete changed.transforms;
           setCol(changed);
         }}

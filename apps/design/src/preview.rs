@@ -159,6 +159,28 @@ mod tests {
     }
 
     #[test]
+    fn a_json_field_reads_as_json_and_an_array_of_it_as_json_array() {
+        let schema = schema(
+            "version: 1\n\
+             table: t\n\
+             primary_key: id\n\
+             fields:\n\
+             \x20 - integer: id\n\
+             \x20   required: true\n\
+             \x20 - json: notes\n\
+             \x20   required: false\n\
+             \x20   array: true\n\
+             \x20 - json: meta\n\
+             \x20   required: false\n",
+        );
+        let index = IndexName::try_new("t").expect("index name");
+        let preview = preview(&schema, &index);
+        assert_eq!(preview.document[1].type_label, "json");
+        assert!(preview.document[1].array);
+        assert_eq!(preview.document[2].type_label, "json");
+    }
+
+    #[test]
     fn an_unindexed_field_previews_as_stored_with_its_shape() {
         let schema = schema(
             "version: 1\n\
@@ -216,7 +238,14 @@ fn is_indexed(indexed: &bool) -> bool {
 fn node(field: &ResolvedField) -> DocumentNode {
     DocumentNode {
         name: field.name.as_ref().to_owned(),
-        type_label: type_label(&field.mapping),
+        type_label: if field.children.is_empty()
+            && field.mapping.map_values.is_none()
+            && field.mapping.mapping_type == MappingType::Object
+        {
+            "json".to_owned()
+        } else {
+            type_label(&field.mapping)
+        },
         nullable: field.nullable,
         array: field.array,
         indexed: field.mapping.indexed,
