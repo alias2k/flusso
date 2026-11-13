@@ -1,8 +1,9 @@
 use flusso_query::{FlussoFragment, FlussoRoot, FlussoValue, Sortable};
 
 // Array columns (issue #276): a `Vec` of the element, an `Option` of one, and
-// a `FlussoValue` newtype over a `Vec`, on a root and in a fragment; a `json`
-// array as a `Vec` of anything. Filters take the element.
+// a `FlussoValue` newtype over a `Vec` (or over such a newtype), on a root and
+// in a fragment; a `json` array as a `Vec` of anything. Filters take the
+// element.
 
 #[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
 #[flusso(keyword)]
@@ -18,6 +19,9 @@ struct Tags(Vec<Tag>);
 
 #[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
 struct Codes(Vec<String>);
+
+#[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
+struct Forwarded(Codes);
 
 #[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "lists")]
@@ -69,6 +73,27 @@ struct OrderWithFragment {
     id: String,
     #[serde(flatten)]
     tagged: Tagged,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "lists")]
+struct OrderWithForwarded {
+    id: String,
+    labels: Forwarded,
+    notes: Option<Vec<Codes>>,
+    lines: Vec<LineWithForwarded>,
+}
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct LineWithForwarded {
+    codes: Forwarded,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "lists")]
+struct OrderWithForwardedNotes {
+    id: String,
+    notes: Option<Forwarded>,
 }
 
 fn main() {

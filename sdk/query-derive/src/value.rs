@@ -243,30 +243,66 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
                 Some(kind) => {
                     let marker = kind.marker();
                     let tag = kind.tag();
+                    let array_message = format!(
+                        "`{ident}` has a kind tag, so it stands for one value, but `{rendered}` \
+                         reads an array — drop the tag, and `{ident}` reads the array as \
+                         `{rendered}` does"
+                    );
                     Ok(quote! {
                         impl ::flusso_query::FlussoValue<#marker> for #ident {}
                         impl ::flusso_query::FlussoValueMeta for #ident {
                             const KINDS: &'static [::flusso_query::KindTag] = &[#tag];
                             const VARIANTS: &'static [&'static str] = &[];
                         }
+                        const _: () = {
+                            #[allow(unused_imports)]
+                            use ::flusso_query::OpaqueWithoutMeta as _;
+                            assert!(
+                                !::flusso_query::OpaqueProbe::<#inner>::READS_ARRAY,
+                                #array_message
+                            );
+                        };
                         #leaf_check
                     })
                 }
                 // Inherit every kind the inner type has — as a bound for the
-                // type-level check, and as data for the const-level one.
-                None => Ok(quote! {
-                    impl<__FlussoK> ::flusso_query::FlussoValue<__FlussoK> for #ident
-                    where #inner: ::flusso_query::FlussoValue<__FlussoK> {}
-                    impl ::flusso_query::FlussoValueMeta for #ident {
-                        const KINDS: &'static [::flusso_query::KindTag] =
-                            <#inner as ::flusso_query::FlussoValueMeta>::KINDS;
-                        const VARIANTS: &'static [&'static str] =
-                            <#inner as ::flusso_query::FlussoValueMeta>::VARIANTS;
-                        const EXHAUSTIVE: bool =
-                            <#inner as ::flusso_query::FlussoValueMeta>::EXHAUSTIVE;
-                    }
-                    #leaf_check
-                }),
+                // type-level check, and as data for the const-level one. An
+                // array newtype's `ARRAY` is forwarded with them, so the
+                // wrapper is placed where the array newtype is; a sub-document
+                // is refused, since a value's own check walks into nothing.
+                None => {
+                    let sub_document_message = format!(
+                        "`{ident}` derives `FlussoValue`, but `{rendered}` is a sub-document, \
+                         whose fields only a `FlussoFragment` checks — derive `FlussoFragment` \
+                         on `{ident}` instead"
+                    );
+                    Ok(quote! {
+                        impl<__FlussoK> ::flusso_query::FlussoValue<__FlussoK> for #ident
+                        where #inner: ::flusso_query::FlussoValue<__FlussoK> {}
+                        impl ::flusso_query::FlussoValueMeta for #ident {
+                            const KINDS: &'static [::flusso_query::KindTag] =
+                                <#inner as ::flusso_query::FlussoValueMeta>::KINDS;
+                            const VARIANTS: &'static [&'static str] =
+                                <#inner as ::flusso_query::FlussoValueMeta>::VARIANTS;
+                            const EXHAUSTIVE: bool =
+                                <#inner as ::flusso_query::FlussoValueMeta>::EXHAUSTIVE;
+                            const ARRAY: bool =
+                                <#inner as ::flusso_query::FlussoValueMeta>::ARRAY;
+                            const READS_ARRAY: bool =
+                                <#inner as ::flusso_query::FlussoValueMeta>::READS_ARRAY;
+                        }
+                        const _: () = {
+                            #[allow(unused_imports)]
+                            use ::flusso_query::OpaqueWithoutMeta as _;
+                            assert!(
+                                !::flusso_query::OpaqueProbe::<#inner>::HAS_META
+                                    || !::flusso_query::OpaqueProbe::<#inner>::AT_NESTED,
+                                #sub_document_message
+                            );
+                        };
+                        #leaf_check
+                    })
+                }
             }
         }
         Data::Union(_) => Err(syn::Error::new(

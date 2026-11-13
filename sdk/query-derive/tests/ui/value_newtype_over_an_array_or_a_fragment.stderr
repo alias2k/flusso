@@ -1,0 +1,11 @@
+error[E0080]: evaluation panicked: `Tagged` has a kind tag, so it stands for one value, but `Codes` reads an array — drop the tag, and `Tagged` reads the array as `Codes` does
+ --> tests/ui/value_newtype_over_an_array_or_a_fragment.rs:7:48
+  |
+7 | #[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
+  |                                                ^^^^^^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: `OverLine` derives `FlussoValue`, but `Line` is a sub-document, whose fields only a `FlussoFragment` checks — derive `FlussoFragment` on `OverLine` instead
+  --> tests/ui/value_newtype_over_an_array_or_a_fragment.rs:17:48
+   |
+17 | #[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
+   |                                                ^^^^^^^^^^^ evaluation of `_` failed here
