@@ -1,10 +1,13 @@
-import { useEffect, useId, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useContext, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { CheckIcon, ChevronDownIcon, ChevronRight, Link2, Plus, X } from "lucide-react";
-import type { ColumnShape } from "../api";
-import { useT } from "../i18n";
-import { type Generic, genericText, parseGeneric } from "../model/generic";
+import { api, type ColumnShape, type ValueCheck, type ValueSlot } from "../api";
+import { useT, type Translate } from "../i18n";
+import { exactIntegers, hasRoundedInteger } from "../model/exact";
+import { settlePendingValue, trackPendingValue } from "../model/pending";
+import { type Generic, genericText } from "../model/generic";
 import { LABEL, NO_PW_MANAGER } from "../styles";
 import { typeClass } from "../theme";
+import { ValueTargetContext } from "./valueTarget";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -201,50 +204,236 @@ export function Text({
 
 /// A JSON value box for a `GenericValue`-typed field (`options`, a column
 /// `default`, a `constant`). Shows the plain decoded value, posts the tagged
-/// form. Keeps a local text buffer so half-typed JSON isn't reverted by the
-/// controlled value — the model only updates on a parse, and empty maps to
-/// `undefined` (a cleared default) unless `emptyTo` overrides it.
+/// form. The typed text is read by the backend (`/api/value`) exactly as the
+/// saved file will read it in `slot`, and reaches the model only once it is
+/// accepted: a number the file can't hold exactly, or a list as a `default`, is
+/// refused with the reason, never rounded. It is read after a pause in typing,
+/// and at once when the box loses focus or leaves the screen (see
+/// `model/pending.ts`); only the newest text's reply is applied, through the
+/// `onChange` of the render it was typed in, so it lands on the field it was
+/// typed for (`ValueTargetContext`) even when the box shows another by then. A
+/// read that fails keeps the text, marked unchecked, for the next flush. Empty
+/// maps to `undefined` (a cleared default) unless `emptyTo` overrides it.
 export function GenericInput({
   value,
   onChange,
+  slot,
+  optionKey,
   placeholder,
   invalid,
   emptyTo,
 }: {
   // Generic is `unknown` (any JSON value, incl. undefined), so no `| undefined`.
   value: Generic;
+  /// Writes the value to its field as of now; must not depend on what the box shows.
   onChange: (v: Generic) => void;
+  slot: ValueSlot;
+  /// The option this box edits, for an `option` slot.
+  optionKey?: string;
   placeholder?: string;
   invalid?: boolean;
   emptyTo?: Generic;
 }) {
+  const { t } = useT();
+  const field = useContext(ValueTargetContext);
+  const where = slot === "constant" ? "" : slot === "default" ? ".default" : `.options.${optionKey ?? ""}`;
+  const target = { id: `${field.id}/${slot}/${optionKey ?? ""}`, label: `${field.label}${where}` };
   const external = value === undefined ? "" : genericText(value);
   const [text, setText] = useState(external);
-  // Resync from the model only when the model itself changes (undo, switching
-  // fields) — not on every keystroke, so partial JSON survives typing.
-  useEffect(() => setText(external), [external]);
-  const parseable =
-    text.trim() === "" ||
-    (() => {
-      try {
-        JSON.parse(text);
-        return true;
-      } catch {
-        return false;
+  const [problem, setProblem] = useState<ValueProblem | undefined>(undefined);
+  const [accepted, setAccepted] = useState<{ text: string; savedAs?: string } | null>(null);
+  // How a reply shows in this box; unset once the box left the screen.
+  const show = useRef<((shown: Shown) => void) | undefined>(undefined);
+  const [box] = useState(() => new ValueBox(slot, show));
+  // The text of the value this box last committed: the model coming back with
+  // it keeps what was typed (`1e3` stays, with a "saved as 1000.0" note).
+  const committed = useRef(external);
+  useEffect(() => {
+    show.current = (shown) => {
+      setProblem(shown.problem);
+      if (shown.accepted) {
+        committed.current = shown.accepted.committed;
+        setAccepted({ text: shown.accepted.text, savedAs: shown.accepted.savedAs });
       }
-    })();
+      if (shown.reset) {
+        setText(external);
+        setAccepted(null);
+      }
+    };
+  });
+  useEffect(() => {
+    if (external === committed.current) return;
+    committed.current = external;
+    box.drop(false);
+    setText(external);
+    setProblem(undefined);
+    setAccepted(null);
+  }, [external, box]);
+  useEffect(
+    () => () => {
+      show.current = undefined;
+      void box.flush();
+    },
+    [box],
+  );
   const handle = (s: string) => {
     setText(s);
-    if (s.trim() === "") return onChange(emptyTo);
-    try {
-      onChange(parseGeneric(s));
-    } catch {
-      /* keep typing until valid JSON */
+    box.drop(false);
+    if (s.trim() === "") {
+      setProblem(undefined);
+      committed.current = emptyTo === undefined ? "" : genericText(emptyTo);
+      return onChange(emptyTo);
     }
+    box.wait({ text: s, ...target, apply: onChange });
   };
-  return <Text value={text} onChange={handle} placeholder={placeholder} invalid={!!invalid || !parseable} />;
+  const savedAs = accepted?.text === text ? accepted.savedAs : undefined;
+  return (
+    <div className="min-w-0">
+      <Text
+        value={text}
+        onChange={handle}
+        onBlur={() => void box.flush()}
+        placeholder={placeholder}
+        invalid={!!invalid || !!problem}
+      />
+      {problem && (
+        <p className="mt-1 flex items-start gap-1 text-2xs text-warn" role="alert">
+          <span aria-hidden>⚠</span>
+          <span>{valueProblem(t, problem)}</span>
+        </p>
+      )}
+      {savedAs !== undefined && (
+        <p className="mt-1 text-2xs text-muted-foreground">{t("value.savedAs", { value: savedAs })}</p>
+      )}
+    </div>
+  );
 }
 
+/// What a `ValueBox` shows in its box while it is on the screen.
+interface Shown {
+  problem?: ValueProblem;
+  /// A reply that reached the model: the text it was read from, its saved
+  /// spelling when that differs, and the model value's text.
+  accepted?: { text: string; savedAs?: string; committed: string };
+  /// Show the model's value again (Reset).
+  reset?: boolean;
+}
+
+/// One text waiting to be read, with the target it was typed for.
+interface Waiting {
+  text: string;
+  id: string;
+  label: string;
+  /// The setter of the render the text was typed in.
+  apply: (v: Generic) => void;
+}
+
+/// The text one `GenericInput` is waiting to have read, outliving the box: a
+/// reply for a box that left the screen still reaches the field it was typed for.
+class ValueBox {
+  constructor(
+    private readonly slot: ValueSlot,
+    private readonly shown: { readonly current: ((shown: Shown) => void) | undefined },
+  ) {}
+
+  private show(shown: Shown) {
+    this.shown.current?.(shown);
+  }
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private waiting: Waiting | null = null;
+  private inFlight: Promise<void> | null = null;
+  private ticket = 0;
+
+  /// Read `waiting.text` after a pause in typing.
+  wait(waiting: Waiting) {
+    this.waiting = waiting;
+    this.timer = setTimeout(() => void this.flush(), VALUE_CHECK_DELAY_MS);
+    this.track(waiting);
+  }
+
+  private track({ id, label }: Waiting) {
+    trackPendingValue(this, { target: id, label, flush: () => this.flush(), drop: () => this.drop() });
+  }
+
+  /// Read the waiting text now; resolves once its reply was applied, refused,
+  /// or failed (then the text waits for the next flush).
+  flush(): Promise<void> {
+    clearTimeout(this.timer);
+    const waiting = this.waiting;
+    if (waiting === null) return this.inFlight ?? Promise.resolve();
+    this.waiting = null;
+    const mine = ++this.ticket;
+    const request = api
+      .value(waiting.text, this.slot)
+      .then(
+        (result) => {
+          if (mine !== this.ticket) return;
+          const problem: ValueProblem | undefined =
+            result.error ??
+            (!exactIntegers && hasRoundedInteger(result.value) ? { code: "browser_precision" } : undefined);
+          if (problem) return this.show({ problem });
+          const value: Generic = result.value;
+          this.show({ accepted: { text: waiting.text, savedAs: result.saved_as, committed: genericText(value) } });
+          waiting.apply(value);
+        },
+        () => {
+          if (mine !== this.ticket) return;
+          this.waiting ??= waiting;
+          this.show({ problem: { code: "unchecked" } });
+        },
+      )
+      .finally(() => {
+        if (this.inFlight !== request) return;
+        this.inFlight = null;
+        if (this.waiting === null) settlePendingValue(this);
+      });
+    this.inFlight = request;
+    return request;
+  }
+
+  /// Forget the waiting text and any reply still out; `reset` shows the
+  /// model's value again (Reset), typing over it doesn't.
+  drop(reset = true) {
+    clearTimeout(this.timer);
+    const had = this.waiting !== null || this.inFlight !== null;
+    this.waiting = null;
+    this.inFlight = null;
+    this.ticket += 1;
+    settlePendingValue(this);
+    if (had && reset) this.show({ reset: true });
+  }
+}
+
+/// How long typing pauses before a value is read.
+const VALUE_CHECK_DELAY_MS = 250;
+
+/// Why a typed value was refused: the backend's reasons, a browser that would
+/// round an integer the file holds exactly, or a read that got no answer.
+type ValueProblem = NonNullable<ValueCheck["error"]> | { code: "browser_precision" } | { code: "unchecked" };
+
+function valueProblem(t: Translate, problem: ValueProblem): string {
+  switch (problem.code) {
+    case "syntax":
+      return t("value.syntax", { position: problem.position });
+    case "inexact":
+      return t("value.inexact", { number: problem.number });
+    case "out_of_range":
+      return t("value.outOfRange", { number: problem.number });
+    case "too_deep":
+      return t("value.tooDeep", { limit: problem.limit });
+    case "not_scalar":
+      return t("value.notScalar");
+    case "reads_back_differently":
+      return t("value.readsBack");
+    case "unchecked":
+      return t("value.unchecked");
+    case "browser_precision":
+      return t("value.browserPrecision");
+  }
+}
+
+/// A number box. An integer a JS number can't hold exactly (past 2^53) is
+/// refused rather than rounded: the box turns red and the model keeps its value.
 export function Num({
   value,
   onChange,
@@ -254,12 +443,20 @@ export function Num({
   onChange: (v: number | undefined) => void;
   placeholder?: string;
 }) {
+  const [refused, setRefused] = useState<string | null>(null);
   return (
     <Input
       type="number"
-      value={value ?? ""}
+      value={refused ?? value ?? ""}
       placeholder={placeholder}
-      onChange={(e) => onChange(e.target.value === "" ? undefined : Number(e.target.value))}
+      className={cn(refused !== null && "invalid")}
+      aria-invalid={refused !== null ? true : undefined}
+      onChange={(e) => {
+        const n = e.target.value === "" ? undefined : Number(e.target.value);
+        const rounded = n !== undefined && Number.isInteger(n) && !Number.isSafeInteger(n);
+        setRefused(rounded ? e.target.value : null);
+        if (!rounded) onChange(n);
+      }}
     />
   );
 }

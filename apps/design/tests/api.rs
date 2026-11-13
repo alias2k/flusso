@@ -7,7 +7,9 @@
 
 use std::path::PathBuf;
 
+use config::ParseFrom;
 use design::api::{self, FileOp, OpKind, PreviewRequest, SaveRequest};
+use design::value::{MAX_DEPTH, ValueSlot};
 use kernel::IndexName;
 
 /// A unique scratch directory for this test process, seeded with the dev files.
@@ -312,4 +314,154 @@ fn preview_reports_script_compile_errors_and_drops_input_only_fields() {
         .map(|n| n.name.as_str())
         .collect();
     assert_eq!(names, ["id", "label"]);
+}
+
+/// A schema whose YAML parses back as another schema fails the self-check and
+/// names the field: a `Double` constant (what the inspector used to post for
+/// `1e21`) reads back as a `Decimal`.
+#[test]
+fn preview_fails_when_the_yaml_reads_back_as_another_schema() {
+    use config::yaml::SchemaYaml;
+    use kernel::{FieldSource, GenericValue, IndexSchema, ParseFrom};
+
+    let preview = |value: GenericValue| {
+        let mut schema = IndexSchema::try_from(
+            SchemaYaml::try_parse(
+                "version: 1\ntable: t\nprimary_key: id\nfields:\n- constant: big\n  value: 1\n",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        schema.fields[0].source = FieldSource::Constant(value);
+        api::build_preview(PreviewRequest {
+            index: IndexName::try_new("t").unwrap(),
+            schema,
+        })
+        .unwrap()
+    };
+    let response = preview(GenericValue::Double(1e21));
+    assert!(!response.parse_ok);
+    assert_eq!(response.differs_at.as_deref(), Some("big"));
+    assert!(response.parse_error.is_none());
+
+    let same = preview(GenericValue::Decimal(
+        "1000000000000000000000".parse().unwrap(),
+    ));
+    assert!(same.parse_ok, "{:?}", same.differs_at);
+}
+
+#[test]
+fn a_typed_value_is_read_as_its_saved_file_reads_it() {
+    let read_in = |text: &str, slot: ValueSlot| {
+        serde_json::to_value(api::read_value(&api::ValueRequest {
+            text: text.to_owned(),
+            slot,
+        }))
+        .unwrap()
+    };
+    let read = |text: &str| read_in(text, ValueSlot::Constant);
+    assert_eq!(
+        read("9007199254740993"),
+        serde_json::json!({ "value": { "BigInt": 9_007_199_254_740_993_i64 } })
+    );
+    assert_eq!(
+        read("1e-7"),
+        serde_json::json!({ "value": { "Decimal": "0.0000001" } })
+    );
+    assert_eq!(
+        read("1.5e300"),
+        serde_json::json!({ "error": { "code": "out_of_range", "number": "1.5e300" } })
+    );
+    assert_eq!(
+        read("[1,"),
+        serde_json::json!({ "error": { "code": "syntax", "position": 4 } })
+    );
+    assert_eq!(
+        read("1e3"),
+        serde_json::json!({ "value": { "Decimal": "1000.0" }, "saved_as": "1000.0" })
+    );
+    assert_eq!(
+        read(&"[".repeat(500)),
+        serde_json::json!({ "error": { "code": "too_deep", "limit": MAX_DEPTH } })
+    );
+    assert_eq!(
+        read_in("[1]", ValueSlot::Default),
+        serde_json::json!({ "error": { "code": "not_scalar" } })
+    );
+    assert_eq!(
+        read_in("[1]", ValueSlot::Option),
+        serde_json::json!({ "value": { "Array": [{ "BigInt": 1 }] } })
+    );
+    assert_eq!(
+        read_in(" 5 ", ValueSlot::Option),
+        serde_json::json!({ "value": { "BigInt": 5 }, "saved_as": "5" })
+    );
+}
+
+/// The deepest value `/api/value` accepts, in a field ten joins deep, passes
+/// through the same JSON bodies preview, diff and save read (serde_json's
+/// recursion limit) and is written to a file that reads back the same.
+#[test]
+fn the_deepest_accepted_value_previews_diffs_and_saves_ten_joins_deep() {
+    const JOINS: usize = 10;
+    let text = r#"[{"a": "#.repeat(MAX_DEPTH / 2) + "1" + "}]".repeat(MAX_DEPTH / 2).as_str();
+    let accepted = serde_json::to_value(api::read_value(&api::ValueRequest {
+        text,
+        slot: ValueSlot::Constant,
+    }))
+    .unwrap();
+    let value = accepted.get("value").cloned().unwrap();
+
+    let mut yaml = String::from("version: 1\ntable: t0\nprimary_key: id\nfields:\n");
+    for level in 1..=JOINS {
+        let pad = "  ".repeat(level - 1);
+        yaml.push_str(&format!(
+            "{pad}- has_many: l{level}\n{pad}  table: t{level}\n{pad}  foreign_key: parent_id\n{pad}  primary_key: id\n{pad}  fields:\n"
+        ));
+    }
+    let pad = "  ".repeat(JOINS);
+    yaml.push_str(&format!("{pad}- constant: deep\n{pad}  value: null\n"));
+    let mut schema = serde_json::to_value(
+        kernel::IndexSchema::try_from(config::yaml::SchemaYaml::try_parse(&yaml).unwrap()).unwrap(),
+    )
+    .unwrap();
+    let mut field = schema.pointer_mut("/fields/0").unwrap();
+    for _ in 1..JOINS {
+        field = field.pointer_mut("/source/relation/join/fields/0").unwrap();
+    }
+    *field
+        .pointer_mut("/source/relation/join/fields/0/source/constant")
+        .unwrap() = value.clone();
+
+    let preview: PreviewRequest =
+        serde_json::from_str(&serde_json::json!({ "index": "deep", "schema": schema }).to_string())
+            .unwrap();
+    let response = api::build_preview(preview).unwrap();
+    assert!(response.parse_ok, "{:?}", response.parse_error);
+
+    let dir = fixture();
+    let config_path = dir.join("flusso.toml");
+    let project = api::load_project(&config_path).unwrap();
+    let body = serde_json::json!({
+        "config": project.config,
+        "ops": [{ "kind": "upsert", "path": "deep.schema.yml", "schema": schema }],
+    })
+    .to_string();
+    let diff: SaveRequest = serde_json::from_str(&body).unwrap();
+    assert!(
+        api::diff_project(&config_path, diff)
+            .unwrap()
+            .iter()
+            .any(|d| d.changed)
+    );
+    let save: SaveRequest = serde_json::from_str(&body).unwrap();
+    api::save_project(&config_path, save).unwrap();
+    let written = std::fs::read_to_string(dir.join("deep.schema.yml")).unwrap();
+    let reread = serde_json::to_value(
+        kernel::IndexSchema::try_from(config::yaml::SchemaYaml::try_parse(&written).unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reread, schema);
+    std::fs::remove_dir_all(&dir).ok();
 }

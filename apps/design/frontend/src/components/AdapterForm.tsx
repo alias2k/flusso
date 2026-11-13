@@ -1,6 +1,7 @@
 import { type ReactNode, useState } from "react";
 import type { AdapterDescription } from "../api";
 import { useT } from "../i18n";
+import { hasRoundedInteger, parseJson } from "../model/exact";
 import { LABEL } from "../styles";
 import { cn } from "@/lib/utils";
 import { Check, Drawer, Field, Num, Select, Text } from "./widgets";
@@ -366,7 +367,10 @@ function JsonInput({ value, onChange }: { value: unknown; onChange: (v: unknown)
           return;
         }
         try {
-          onChange(JSON.parse(v));
+          // A browser without `JSON.rawJSON` rounds an integer past 2^53: refused.
+          const parsed = parseJson(v);
+          if (hasRoundedInteger(parsed)) throw new RangeError(v);
+          onChange(parsed);
           setInvalid(false);
         } catch {
           setInvalid(true);

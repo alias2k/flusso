@@ -36,6 +36,7 @@ import { drasticTypeChange, typeClass } from "../theme";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Hint } from "./Hint";
+import { ValueTargetContext } from "./valueTarget";
 import { Filters } from "./Filters";
 import {
   AddButton,
@@ -214,10 +215,18 @@ function nameSuggestions(field: Field): string[] {
 }
 
 export function Inspector() {
-  const { selection } = useDesign();
+  const { selection, schema, indexName } = useDesign();
   const { t } = useT();
   if (!selection) return <div className="inspector empty">{t("inspector.selectPrompt")}</div>;
   if (selection.kind === "columns") return <ColumnsInspector path={selection.path} names={selection.names} />;
+  // Keyed by the selected field, so selecting another one mounts a fresh panel
+  // instead of handing this one's boxes (and what they hold) to that field.
+  const key =
+    selection.kind === "root"
+      ? indexName
+      : selection.kind === "node"
+        ? `${indexName}/${fieldAtPath(schema, selection.path)?.uid ?? selection.path.join(".")}`
+        : `${indexName}/${nodeFields(schema, selection.path)[selection.index]?.uid ?? `${selection.path.join(".")}:${selection.index}`}`;
   return (
     <>
       <div className="mb-2.5 flex items-center justify-between gap-2">
@@ -225,11 +234,11 @@ export function Inspector() {
         <HeaderActions />
       </div>
       {selection.kind === "root" ? (
-        <RootInspector />
+        <RootInspector key={key} />
       ) : selection.kind === "node" ? (
-        <NodeInspector path={selection.path} />
+        <NodeInspector key={key} path={selection.path} />
       ) : (
-        <FieldInspector path={selection.path} index={selection.index} />
+        <FieldInspector key={key} path={selection.path} index={selection.index} />
       )}
     </>
   );
@@ -349,11 +358,14 @@ function RootInspector() {
 }
 
 function NodeInspector({ path }: { path: number[] }) {
-  const { schema, apply, catalog, columnsFor } = useDesign();
+  const { schema, catalog, columnsFor, indexName } = useDesign();
+  const applyTo = useDesignStore((s) => s.applyTo);
   const { t } = useT();
   const field = fieldAtPath(schema, path);
   if (!field) return null;
-  const setField = (f: Field) => apply((s) => edit.setNode(s, path, f));
+  const uid = field.uid;
+  const setField = (f: Field) =>
+    applyTo(indexName, (s) => (uid ? edit.updateField(s, uid, (now) => edit.rebase(field, f, now)) : s));
 
   if ("group" in field.source) {
     return (
@@ -507,7 +519,8 @@ function NodeInspector({ path }: { path: number[] }) {
 }
 
 function FieldInspector({ path, index }: { path: number[]; index: number }) {
-  const { schema, apply, catalog, columnsFor } = useDesign();
+  const { schema, catalog, columnsFor, indexName } = useDesign();
+  const applyTo = useDesignStore((s) => s.applyTo);
   const { t } = useT();
   const field = nodeFields(schema, path)[index];
   if (!field) return null;
@@ -515,7 +528,16 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
   const colShapes = columnsFor(table);
   const tables = catalog?.catalog.tables.map((tbl) => tbl.name) ?? [];
   const junctions = new Set(catalog?.junctions.map((j) => j.table.table) ?? []);
-  const set = (f: Field) => apply((s) => edit.setLeaf(s, path, index, f));
+  // Addressed by uid, not by position or name: an edit (a typed value read
+  // late) still lands on this field after it was renamed or moved, and on
+  // nothing once it was removed.
+  const uid = field.uid;
+  const set = (f: Field) =>
+    applyTo(indexName, (s) => (uid ? edit.updateField(s, uid, (now) => edit.rebase(field, f, now)) : s));
+  const target = {
+    id: `${indexName}/${uid ?? ""}`,
+    label: [indexName, ...pathLabels(schema, path), field.field].join("."),
+  };
   const s = field.source;
 
   // The bound source column, when known — drives the source-guided required/
@@ -527,46 +549,48 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
 
   const helpKind = fieldHelpKind(s);
   return (
-    <div className="inspector">
-      <SectionTitle className="mt-0">
-        {t("inspector.field")} · {field.field}
-      </SectionTitle>
-      {KIND_HELP[helpKind] && <p className="kind-help">{t(KIND_HELP[helpKind])}</p>}
-      {"column" in s && typeof s.column.ty === "string" && (
-        <ScalarBody
-          field={field}
-          column={s.column}
-          srcNullable={srcNullable}
-          suggested={srcCol?.suggested_type}
-          sqlType={srcCol?.sql_type}
-          set={set}
-        />
-      )}
-      {"column" in s && typeof s.column.ty !== "string" && "map" in s.column.ty && (
-        <MapBody field={field} column={s.column} columns={colShapes} srcNullable={srcNullable} set={set} />
-      )}
-      {"column" in s && typeof s.column.ty !== "string" && "custom" in s.column.ty && (
-        <CustomBody field={field} column={s.column} columns={colShapes} srcNullable={srcNullable} set={set} />
-      )}
-      {"geo" in s && <GeoBody field={field} set={set} columns={colShapes} />}
-      {"constant" in s && <ConstantBody field={field} set={set} value={s.constant} />}
-      {"script" in s && (
-        <ScriptBody field={field} script={s.script} errorPath={scriptPath(schema, path, index)} set={set} />
-      )}
-      {"relation" in s && "aggregate" in s.relation && (
-        <AggregateBody
-          field={field}
-          agg={s.relation.aggregate}
-          parentTable={table}
-          tables={tables}
-          junctions={junctions}
-          set={set}
-        />
-      )}
+    <ValueTargetContext.Provider value={target}>
+      <div className="inspector">
+        <SectionTitle className="mt-0">
+          {t("inspector.field")} · {field.field}
+        </SectionTitle>
+        {KIND_HELP[helpKind] && <p className="kind-help">{t(KIND_HELP[helpKind])}</p>}
+        {"column" in s && typeof s.column.ty === "string" && (
+          <ScalarBody
+            field={field}
+            column={s.column}
+            srcNullable={srcNullable}
+            suggested={srcCol?.suggested_type}
+            sqlType={srcCol?.sql_type}
+            set={set}
+          />
+        )}
+        {"column" in s && typeof s.column.ty !== "string" && "map" in s.column.ty && (
+          <MapBody field={field} column={s.column} columns={colShapes} srcNullable={srcNullable} set={set} />
+        )}
+        {"column" in s && typeof s.column.ty !== "string" && "custom" in s.column.ty && (
+          <CustomBody field={field} column={s.column} columns={colShapes} srcNullable={srcNullable} set={set} />
+        )}
+        {"geo" in s && <GeoBody field={field} set={set} columns={colShapes} />}
+        {"constant" in s && <ConstantBody field={field} set={set} value={s.constant} />}
+        {"script" in s && (
+          <ScriptBody field={field} script={s.script} errorPath={scriptPath(schema, path, index)} set={set} />
+        )}
+        {"relation" in s && "aggregate" in s.relation && (
+          <AggregateBody
+            field={field}
+            agg={s.relation.aggregate}
+            parentTable={table}
+            tables={tables}
+            junctions={junctions}
+            set={set}
+          />
+        )}
 
-      <EmitToggle field={field} set={set} />
-      <OptionsEditor field={field} set={set} />
-    </div>
+        <EmitToggle field={field} set={set} />
+        <OptionsEditor field={field} set={set} />
+      </div>
+    </ValueTargetContext.Provider>
   );
 }
 
@@ -1014,6 +1038,7 @@ function RequiredDefault({
         <>
           <Row label={mustDefault ? t("inspector.defaultRequired") : t("inspector.defaultOptional")}>
             <GenericInput
+              slot="default"
               invalid={defaultMissing}
               value={column.default}
               onChange={(def) => setCol({ ...column, default: def === "Null" ? undefined : def })}
@@ -1081,9 +1106,14 @@ function OptionsEditor({ field, set }: { field: Field; set: (f: Field) => void }
         </div>
       )}
       {entries.map(([k, v]) => (
-        <div className="opt-row mb-1.5 grid grid-cols-[1fr_1fr_auto] items-center gap-1.5" key={k}>
+        <div
+          className="opt-row mb-1.5 grid grid-cols-[1fr_1fr_auto] items-center gap-1.5"
+          key={`${field.uid ?? ""}:${k}`}
+        >
           <Text value={k} onChange={(nk) => renameOpt(k, nk)} placeholder={t("inspector.optKey")} />
           <GenericInput
+            slot="option"
+            optionKey={k}
             value={v}
             emptyTo={{ String: "" }}
             onChange={(nv) => setOpt(k, nv ?? { String: "" })}
@@ -1202,6 +1232,7 @@ function ConstantBody({ field, value, set }: { field: Field; value: unknown; set
         <NameField field={field} set={set} />
         <Row label={t("inspector.valueJson")}>
           <GenericInput
+            slot="constant"
             value={value}
             emptyTo="Null"
             onChange={(constant) => set({ ...field, source: { constant: constant ?? "Null" } })}

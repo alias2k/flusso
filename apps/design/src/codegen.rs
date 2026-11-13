@@ -428,6 +428,13 @@ fn options_value(options: &std::collections::BTreeMap<String, GenericValue>) -> 
     Ok(Value::Mapping(map))
 }
 
+/// A scalar value as its saved file spells it (`1000.0`, `'007'`, `null`).
+pub(crate) fn scalar_text(value: &GenericValue) -> Result<String> {
+    Ok(serde_yaml::to_string(&generic_value(value)?)?
+        .trim_end()
+        .to_owned())
+}
+
 /// A value as plain YAML — no `!Tag` — in the form the parser reads back as the
 /// same [`GenericValue`].
 ///

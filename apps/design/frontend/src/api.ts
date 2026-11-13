@@ -4,6 +4,7 @@
 // `{ variant: payload }`, unit variants become bare strings — so what the UI
 // builds round-trips through the Rust parser unchanged.
 
+import { parseJson } from "./model/exact";
 import { stripUids } from "./model/ids";
 
 export type FlussoType =
@@ -191,10 +192,15 @@ export interface Field {
   // `false` makes the field input-only: fetched for scripts, never emitted.
   emit?: boolean;
   source: FieldSource;
-  /// Client-only stable id of a container field (object group or join): the
-  /// canvas node id that collapse state and manual positions key on, so they
-  /// survive re-indexing. Stamped by `model/ids.ts`, stripped before any request.
+  /// Client-only stable id of the field, surviving re-indexing and renames: a
+  /// container's canvas node id (collapse state, manual positions), and what
+  /// the inspector and a typed value being read address the field by. Stamped
+  /// by `model/ids.ts`, stripped before any request.
   uid?: string;
+  /// Client-only: option keys the user set to the value a type adds (an
+  /// `identifier`'s analyzer), so retyping away keeps them (`retypeField`).
+  /// Stripped before any request.
+  keptOptions?: string[];
 }
 
 // Mirrors kernel's serde exactly: `Filter` is an externally-tagged enum
@@ -365,8 +371,11 @@ export interface DocumentNode {
 export interface PreviewResponse {
   yaml: string;
   preview: { mapping: unknown; document: DocumentNode[] };
+  /// Whether the generated YAML parses back to exactly this schema.
   parse_ok: boolean;
   parse_error?: string;
+  /// The first field that reads back differently, when the YAML parses.
+  differs_at?: string;
   // Every script field that does not compile.
   script_errors?: ScriptErrorDto[];
 }
@@ -414,6 +423,10 @@ export interface SampleResponse {
   printed?: string[];
 }
 
+/// A value read with no answer by then fails, so its box says so and Save can
+/// try it again instead of waiting on it for good. Below `PENDING_LIMIT_MS`.
+const VALUE_TIMEOUT_MS = 3000;
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const body = await res.text();
@@ -428,7 +441,7 @@ async function json<T>(res: Response): Promise<T> {
     }
     throw new Error(message);
   }
-  return res.json() as Promise<T>;
+  return parseJson(await res.text()) as T;
 }
 
 /// An aggregate input checked by the loader's own parser: the columns it
@@ -456,6 +469,26 @@ export interface ExpressionCheck {
   };
 }
 
+/// Where a typed value goes; each has the schema parser's own rules (a
+/// `default` takes only a scalar).
+export type ValueSlot = "constant" | "default" | "option";
+
+/// A value typed into the inspector, read the way its saved file reads it: the
+/// `GenericValue` to store, or why the text was refused.
+export interface ValueCheck {
+  value?: unknown;
+  /// How the saved file spells the value, when a number in it is written
+  /// other than typed (`1e3` → `1000.0`).
+  saved_as?: string;
+  error?:
+    | { code: "syntax"; position: number }
+    | { code: "inexact"; number: string }
+    | { code: "out_of_range"; number: string }
+    | { code: "too_deep"; limit: number }
+    | { code: "not_scalar" }
+    | { code: "reads_back_differently" };
+}
+
 export interface ParseResponse {
   schema?: IndexSchema;
   error?: string;
@@ -466,7 +499,7 @@ export interface ParseResponse {
   type_tag?: string;
 }
 
-/// Drop the client-only container uids (`model/ids.ts`) from a file op's schema.
+/// Drop the client-only field uids (`model/ids.ts`) from a file op's schema.
 const stripOpUids = (op: FileOp): FileOp => (op.schema ? { ...op, schema: stripUids(op.schema) } : op);
 
 /// Drop the session-local index ids before a config crosses to the backend —
@@ -509,6 +542,14 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ input }),
     }).then((r) => json<ExpressionCheck>(r)),
+  /// Read a typed JSON value (a constant, a default, an option) as its saved file will.
+  value: (text: string, slot: ValueSlot) =>
+    fetch("/api/value", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text, slot }),
+      signal: AbortSignal.timeout(VALUE_TIMEOUT_MS),
+    }).then((r) => json<ValueCheck>(r)),
   catalog: () => fetch("/api/catalog").then((r) => json<CatalogResponse>(r)),
   /// Relative subdirectories under the config dir, for the schema-folder picker.
   dirs: () => fetch("/api/dirs").then((r) => json<string[]>(r)),

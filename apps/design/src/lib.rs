@@ -9,5 +9,6 @@ pub mod api;
 pub mod codegen;
 pub mod preview;
 pub mod server;
+pub mod value;
 
 pub use server::{ConfigValidator, DesignOptions, serve};

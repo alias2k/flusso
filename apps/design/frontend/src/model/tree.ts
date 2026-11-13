@@ -119,10 +119,11 @@ export function fieldAtPath(schema: IndexSchema, path: number[]): Field | null {
   return parent[path[path.length - 1]] ?? null;
 }
 
-/// A container `next` keeps `prev`'s uid when it has none of its own, so
-/// replacing a field (a verb or kind change) keeps its node's view state.
+/// `next` keeps `prev`'s uid when it has none of its own, so replacing a field
+/// (a verb, kind or type change) keeps its identity: its node's view state, its
+/// open inspector, and a typed value still being read for it.
 export function carryUid(prev: Field | undefined, next: Field): Field {
-  return prev?.uid && !next.uid && childFields(next) !== null ? { ...next, uid: prev.uid } : next;
+  return prev?.uid && !next.uid ? { ...next, uid: prev.uid } : next;
 }
 
 /// Replace the container field that is the node at `path`.

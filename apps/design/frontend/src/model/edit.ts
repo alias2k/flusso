@@ -2,7 +2,9 @@
 // action funnels through one of these; each returns a fresh `IndexSchema`.
 
 import type { Column, Field, FlussoType, IndexSchema } from "../api";
-import { columnField, defaultField, retypeOptions } from "../fields";
+import { columnField, defaultField, retypeOptions, typeOptions } from "../fields";
+import { childFields, withChildFields } from "./containers";
+import { cloneJson } from "./exact";
 import { stripFieldUids } from "./ids";
 import { carryUid, nodeFields, setNodeField, withNodeFields } from "./tree";
 
@@ -81,7 +83,7 @@ export function duplicateAt(schema: IndexSchema, path: number[], index: number):
   const fields = nodeFields(schema, path);
   const orig = fields[index];
   if (!orig) return schema;
-  const [clone] = stripFieldUids([structuredClone(orig)]);
+  const [clone] = stripFieldUids([cloneJson(orig)]);
   const copy: Field = {
     ...clone,
     field: uniqueName(
@@ -167,8 +169,66 @@ export function retypeField(field: Field, column: Column, ty: FlussoType): Field
   if (!SUBFIELD_TYPES.includes(ty)) delete next.subfields;
   if (ty !== "json") delete next.indexed;
   const retyped: Field = { ...field, source: { column: next } };
-  const options = retypeOptions(field.options, column.ty, ty);
+  // An option `ty` would add that is already there was set by the user.
+  const userSet = Object.keys(typeOptions(ty)).filter((k) => field.options && k in field.options);
+  const kept = [...new Set([...(field.keptOptions ?? []), ...userSet])];
+  const options = retypeOptions(field.options, column.ty, ty, kept);
   if (options) retyped.options = options;
   else delete retyped.options;
+  const stillKept = kept.filter((k) => options && k in options);
+  if (stillKept.length) retyped.keptOptions = stillKept;
+  else delete retyped.keptOptions;
   return retyped;
 }
+
+/// `mine` (an edit of `base`) carried onto `theirs` (what `base` became since):
+/// a key `mine` left as it was in `base` takes `theirs`, one it changed takes
+/// `mine`, objects key by key; a key `theirs` removed stays removed (an option
+/// renamed or dropped since). So an edit made from an older render, such as a
+/// typed value read after its box lost focus, keeps newer edits to the rest.
+export function rebase<T>(base: T, mine: T, theirs: T): T {
+  if (sameJson(mine, base)) return theirs;
+  if (sameJson(theirs, base)) return mine;
+  if (!isRecord(base) || !isRecord(mine) || !isRecord(theirs)) return mine;
+  const out: Record<string, unknown> = {};
+  for (const key of new Set([...Object.keys(base), ...Object.keys(mine), ...Object.keys(theirs)])) {
+    if (base[key] !== undefined && theirs[key] === undefined) continue;
+    const value = rebase(base[key], mine[key], theirs[key]);
+    if (value !== undefined) out[key] = value;
+  }
+  return out as T;
+}
+
+/// Replace the field whose uid is `uid` — wherever it sits now, under whatever
+/// name — with `fn` of it. The schema is returned unchanged when no field has
+/// that uid any more (it was removed), so a late edit never lands elsewhere.
+export function updateField(schema: IndexSchema, uid: string, fn: (now: Field) => Field): IndexSchema {
+  const walk = (fields: Field[]): Field[] => {
+    const at = fields.findIndex((f) => f.uid === uid);
+    if (at >= 0) {
+      const replaced = carryUid(fields[at], fn(fields[at]));
+      if (sameJson(replaced, fields[at])) return fields;
+      const next = fields.slice();
+      next[at] = replaced;
+      return next;
+    }
+    for (const [i, f] of fields.entries()) {
+      const children = childFields(f);
+      if (children === null) continue;
+      const nextChildren = walk(children);
+      if (nextChildren === children) continue;
+      const next = fields.slice();
+      next[i] = withChildFields(f, nextChildren);
+      return next;
+    }
+    return fields;
+  };
+  const fields = walk(schema.fields);
+  return fields === schema.fields ? schema : { ...schema, fields };
+}
+
+const sameJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+/// A plain JSON object (not an array, and not an exact integer held as raw JSON).
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype;

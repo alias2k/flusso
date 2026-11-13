@@ -313,6 +313,24 @@ export const en: Record<string, string> = {
   "kindHelp.script": "A value computed by a script from the built document.",
   "preview.title": "Preview",
   "preview.empty": "Select or edit an index to preview it.",
+  "preview.differsAt":
+    "The generated YAML reads back differently at {field}, so the preview would not match the saved file.",
+  "value.syntax": 'Not valid JSON (character {position}). Text goes in double quotes: "like this".',
+  "value.inexact":
+    "{number} has more digits than the schema file keeps, so it would be saved rounded. Shorten it, or quote it to store it as text.",
+  "value.outOfRange":
+    "{number} is too large or too small to be a number in the schema file. Quote it to store it as text.",
+  "value.readsBack": "This value would read back differently from the saved file.",
+  "value.browserPrecision":
+    "This browser rounds integers past 9007199254740991, so this value would be saved as another number. Edit it in a current browser.",
+  "value.savedAs": "Saved as {value}",
+  "value.tooDeep": "Lists and objects nest deeper than {limit} levels here, more than the schema file reads back.",
+  "value.notScalar": "A default takes a single value: text, a number, true, false or null, not a list or an object.",
+  "value.unchecked": "Could not be checked, so it is not in the schema yet. Save tries again.",
+  "value.unreadSave":
+    "Not saved: the value typed in {fields} could not be checked. Check that the designer is still running, then save again.",
+  "value.roundedSave":
+    "Not saved: this browser rounded an integer past 9007199254740991 in {fields}, so the file would get another number. Open the designer in a current browser, or fix the value there.",
   "preview.parseError": "This schema does not parse:",
   "preview.leftOut": "Left out of this preview until complete: {list}",
   "preview.notIndexed": "not indexed",

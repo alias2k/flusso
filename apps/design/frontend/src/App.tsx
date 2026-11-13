@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useDesignStore, useCanUndo, useCanRedo, undo, redo, type Doc } from "./store/design";
 import { useUiStore } from "./store/ui";
 import {
@@ -30,6 +30,8 @@ import { Canvas } from "./components/Canvas";
 import { CatalogBrowser } from "./components/CatalogBrowser";
 import { DiffView } from "./components/DiffView";
 import { diffStats, type DiffMode } from "./model/diff";
+import { parseJson, roundedFields } from "./model/exact";
+import { flushPendingValues, hasPendingValues, subscribePendingValues } from "./model/pending";
 import { CommandPalette } from "./components/CommandPalette";
 import { ConfigPanel } from "./components/ConfigPanel";
 import { Icon } from "./components/Icon";
@@ -319,7 +321,7 @@ export default function App() {
   // it must not re-parse the whole saved doc each call.
   // Compared without the client-only node uids: a uid-only change (a container
   // removed and re-added as-is) writes nothing, so it must not read as unsaved.
-  const savedDoc = useMemo(() => (saved ? (JSON.parse(saved) as Doc) : null), [saved]);
+  const savedDoc = useMemo(() => (saved ? (parseJson(saved) as Doc) : null), [saved]);
   const savedBare = useMemo(() => (savedDoc ? bareDocJson(savedDoc) : null), [savedDoc]);
   const savedSchemasBare = useMemo(
     () => new Map(Object.entries(savedDoc?.schemas ?? {}).map(([name, s]) => [name, JSON.stringify(stripUids(s))])),
@@ -329,7 +331,9 @@ export default function App() {
   // Typed in Code mode but not applied yet (the sync's debounce): Save flushes
   // it first, so it must not wait for the document to move.
   const bufferAhead = useUiStore((s) => s.rawMode && !!s.seed && s.rawText !== s.seed.text);
-  const canSave = dirty || bufferAhead;
+  // A value still being read may be the only change: Save waits for it.
+  const valuesPending = useSyncExternalStore(subscribePendingValues, hasPendingValues);
+  const canSave = dirty || bufferAhead || valuesPending;
   const indexDirty = (name: string, of: Doc | null = doc): boolean => {
     if (!of || !savedDoc) return false;
     const current = of.schemas[name];
@@ -604,28 +608,32 @@ export default function App() {
       setLiveDiags([]);
       return;
     }
+    let current = true;
     const handle = setTimeout(() => {
       api
         .validate(doc.config, [{ name: active, schema }])
         .then((res) => {
-          if (!useUiStore.getState().rawMode) return;
+          if (!current || !useUiStore.getState().rawMode) return;
           setLiveDiags(res.db_reachable && !res.error ? res.diagnostics : []);
         })
-        .catch(() => setLiveDiags([]));
+        .catch(() => current && setLiveDiags([]));
     }, 800);
-    return () => clearTimeout(handle);
+    return () => {
+      current = false;
+      clearTimeout(handle);
+    };
   }, [rawMode, schema, doc, active, catalog]);
 
   // Warn before leaving with unsaved changes.
   useEffect(() => {
-    if (!dirty) return;
+    if (!dirty && !valuesPending) return;
     const warn = (e: BeforeUnloadEvent) => {
       e.preventDefault();
       e.returnValue = "";
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [dirty]);
+  }, [dirty, valuesPending]);
 
   useEffect(() => {
     loadCollapsed(active);
@@ -683,12 +691,25 @@ export default function App() {
     if (!doc || useUiStore.getState().saving) return;
     setSaving(true);
     try {
+      const unread = await flushPendingValues();
+      if (unread.length) {
+        setToast({ kind: "error", text: t("value.unreadSave", { fields: unread.join(", ") }) });
+        return;
+      }
       if (!(await flushBuffer())) {
         setToast({ kind: "error", text: t("code.unparsedSave") });
         return;
       }
       const current = useDesignStore.getState().doc;
       if (!current) return;
+      const rounded = [
+        ...roundedFields(current.config, "flusso.toml"),
+        ...Object.entries(current.schemas).flatMap(([name, s]) => roundedFields(s, name)),
+      ];
+      if (rounded.length) {
+        setToast({ kind: "error", text: t("value.roundedSave", { fields: rounded.join(", ") }) });
+        return;
+      }
       const result = await api.diff(
         current.config,
         buildOps(current).map((p) => p.op),
@@ -762,9 +783,11 @@ export default function App() {
   // buffer re-seeds from the reverted schema (the seed effect).
   const reset = revertChanges;
 
-  const openRaw = () => {
-    if (!codeBlocked(pruned?.left)) setRawMode(true);
-  };
+  const openRaw = () =>
+    void flushPendingValues().then(() => {
+      const current = useDesignStore.getState().doc?.schemas[active];
+      if (!codeBlocked(current ? pruneIncomplete(current).left : undefined)) setRawMode(true);
+    });
   const closeRaw = () => leaveBuffer(() => setRawMode(false));
 
   const validate = async () => {
@@ -1311,7 +1334,7 @@ export default function App() {
               {rawFor === active ? (
                 <CodeView
                   value={rawText}
-                  seedText={seed?.text}
+                  seed={seed ?? undefined}
                   onChange={setRawText}
                   fileName={config.index?.find((e) => e.name === active)?.schema ?? `${active}.schema.yml`}
                   dirty={indexDirty(active)}

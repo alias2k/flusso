@@ -97,17 +97,19 @@ export function typeOptions(ty: Column["ty"]): Record<string, unknown> {
 }
 
 /// `options` moved from type `from` to type `to`: the options the parser added
-/// for `from` (still at their added value) go, the ones it adds for `to` come in.
-/// An option the user set keeps its value either way.
+/// for `from` (still at their added value, and not in `kept`) go, the ones it
+/// adds for `to` come in. An option the user set keeps its value either way;
+/// `kept` names those the user set to exactly the added value.
 export function retypeOptions(
   options: Record<string, unknown> | undefined,
   from: Column["ty"] | undefined,
   to: Column["ty"],
+  kept: readonly string[] = [],
 ): Record<string, unknown> | undefined {
   const next: Record<string, unknown> = { ...options };
   if (from !== undefined) {
     for (const [k, v] of Object.entries(typeOptions(from))) {
-      if (JSON.stringify(next[k]) === JSON.stringify(v)) delete next[k];
+      if (!kept.includes(k) && JSON.stringify(next[k]) === JSON.stringify(v)) delete next[k];
     }
   }
   for (const [k, v] of Object.entries(typeOptions(to))) if (!(k in next)) next[k] = v;
