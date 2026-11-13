@@ -287,9 +287,16 @@ export default function App() {
   // An interrupted save the server settled (a notice) or could not (the
   // project is not shown).
   const [recovery, setRecovery] = useState<SaveRecovery | null>(null);
-  const notifyRecovered = (recovered: RecoveredSave[] | undefined) => {
+  // Adds to a notice still on screen: a save's response never hides one the
+  // user has not dismissed.
+  const notifyRecovered = (recovered: RecoveredSave[] | undefined, displaced: SaveRecovery["displaced"] = []) => {
     const fresh = unshownRecoveries(recovered);
-    if (fresh.length) setRecovery({ recovered: fresh, leftovers: [] });
+    if (!fresh.length && !displaced?.length) return;
+    setRecovery((shown) => ({
+      recovered: [...(shown?.recovered ?? []), ...fresh],
+      leftovers: shown?.leftovers ?? [],
+      displaced: [...(shown?.displaced ?? []), ...(displaced ?? [])],
+    }));
   };
   // The files the open review overwrites anyway, by path, with what changed
   // on disk; and a key that opens each review fresh.
@@ -1012,8 +1019,7 @@ export default function App() {
         setSaved(JSON.stringify({ config: nextConfig, schemas: nextSchemas }));
       }
       setDiffs(null);
-      notifyRecovered(res.recovered);
-      if (res.displaced?.length) setRecovery({ recovered: [], leftovers: [], displaced: res.displaced });
+      notifyRecovered(res.recovered, res.displaced);
       const n = res.written.length + res.moved.length;
       setToast({ kind: "ok", text: t("toast.saved", { n }) });
     } catch (e) {

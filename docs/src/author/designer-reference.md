@@ -188,7 +188,7 @@ The folder is private to you (mode 0700, each record 0600). One that others can 
 
 Deleting the state folder only means the saves cut short until then are reported instead of recovered. Where it can't be used (no home folder, a read-only one, wrong permissions or owner), saves still work and still undo themselves when they fail, but a save the designer is killed in the middle of is only reported. The designer logs this once. When it starts, the designer prunes records older than 180 days, and records whose project folder is missing once they are older than seven days (a folder moved away and back, or on a drive that is not mounted, keeps its record until then).
 
-Acting on your own save, recovery still checks every file against the text the journal records from before and after the save: it puts a file back, or removes one the save created, only when the file holds one of those texts, and it deletes a temporary file or backup only when it holds the text the save gave it. Before it finishes a committed save, it checks that every file holds the text the save wrote; when one doesn't, it deletes nothing and reports it.
+Acting on your own save, recovery still checks every file against the text the journal records from before and after the save: it puts a file back, or removes one the save created, only when the file holds one of those texts, and it deletes a temporary file or backup only when it holds the text the save gave it. A committed save is finished whatever its files hold by then: a file another program wrote since keeps its bytes and is named in the notice.
 
 #### When recovery stops
 
