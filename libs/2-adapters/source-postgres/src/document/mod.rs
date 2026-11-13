@@ -510,8 +510,14 @@ impl Catalog for PgDocumentBuilder {
         table: &TableName,
         column: &ColumnName,
         transforms: &[Transform],
+        element: bool,
     ) -> Result<bool> {
-        let sql_type = self.column_type(schema, table, column).await?;
+        let column_type = self.column_type(schema, table, column).await?;
+        let sql_type = if element {
+            element_type(&column_type)
+        } else {
+            column_type
+        };
         let probe = query::transform_probe(&sql_type, transforms);
         match sqlx::query(probe).execute(&self.pool).await {
             Ok(_) => Ok(true),
@@ -820,6 +826,16 @@ pub(crate) async fn primary_key_column_names(
         names.push(row.try_get::<String, _>("name").map_err(query_err)?);
     }
     Ok(names)
+}
+
+/// The type of an array column's elements, as a transform probe casts to:
+/// the `[]` column's base type, or `text` for a `json`/`jsonb` column, whose
+/// string elements a document query transforms as text.
+fn element_type(column_type: &str) -> String {
+    match column_type.trim().strip_suffix("[]") {
+        Some(base) => base.trim().to_owned(),
+        None => "text".to_owned(),
+    }
 }
 
 #[cfg(test)]

@@ -182,8 +182,10 @@ fn start_verdict(
 /// not exist, a `soft_delete` marker that reads no column (it would be dropped,
 /// and deleted rows stay indexed), a relation table without a single-column
 /// primary key, `transforms` the column's type does not take (every build of
-/// the index fails on either), or a root `primary_key` other than the table's
-/// own key (every document is written as a tombstone).
+/// the index fails on either), a root `primary_key` other than the table's
+/// own key (every document is written as a tombstone), or `array: true` over a
+/// column that holds no array (a key new in 0.18, so no running deployment has
+/// it).
 /// A type, numeric or nullability disagreement still builds, as it did before
 /// `run` validated, so it only prints. So does a root table without a
 /// single-column primary key: its live changes are still indexed, so refusing
@@ -195,12 +197,14 @@ fn stops_the_start(kind: DiagnosticKind) -> bool {
         | DiagnosticKind::UnreadSoftDeleteMarker
         | DiagnosticKind::RelationPrimaryKey
         | DiagnosticKind::TransformNotApplicable
-        | DiagnosticKind::RootPrimaryKeyMismatch => true,
+        | DiagnosticKind::RootPrimaryKeyMismatch
+        | DiagnosticKind::NotAnArrayColumn => true,
         DiagnosticKind::TypeMismatch
         | DiagnosticKind::NotNumeric
         | DiagnosticKind::Nullability
         | DiagnosticKind::IgnoredPrimaryKey
-        | DiagnosticKind::RootPrimaryKey => false,
+        | DiagnosticKind::RootPrimaryKey
+        | DiagnosticKind::UndeclaredArrayColumn => false,
     }
 }
 
@@ -390,6 +394,18 @@ mod tests {
     #[test]
     fn a_root_primary_key_other_than_the_tables_refuses_the_start() {
         refuses(DiagnosticKind::RootPrimaryKeyMismatch);
+    }
+
+    #[test]
+    fn an_array_flag_over_a_column_without_one_refuses_the_start() {
+        refuses(DiagnosticKind::NotAnArrayColumn);
+    }
+
+    #[test]
+    fn an_undeclared_array_column_warns_and_starts() {
+        let printed = starts(DiagnosticKind::UndeclaredArrayColumn);
+        assert!(printed.contains("[warning]"), "{printed}");
+        assert!(!printed.contains("starting anyway"), "{printed}");
     }
 
     #[test]

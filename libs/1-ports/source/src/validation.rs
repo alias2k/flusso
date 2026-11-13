@@ -142,7 +142,10 @@ pub trait Catalog: Send + Sync {
     }
 
     /// Whether `transforms`, applied in order, accept the type of `column` in
-    /// `table`. Only asked of a column that exists.
+    /// `table`. Only asked of a column that exists. With `element`, the column
+    /// holds an array and the transforms apply to each element, so the
+    /// element's type is the one asked about (`text` for a `json`/`jsonb`
+    /// column, whose elements are unknown).
     ///
     /// The default is `true`: the check is skipped.
     async fn accepts_transforms(
@@ -151,6 +154,7 @@ pub trait Catalog: Send + Sync {
         _table: &TableName,
         _column: &ColumnName,
         _transforms: &[Transform],
+        _element: bool,
     ) -> Result<bool> {
         Ok(true)
     }
@@ -205,6 +209,12 @@ pub enum DiagnosticKind {
     /// table's own key while the build matches on the declared column, so no
     /// document is ever written.
     RootPrimaryKeyMismatch,
+    /// A field declares `array: true` over a column that holds no array:
+    /// neither a `[]` type nor `json`/`jsonb`.
+    NotAnArrayColumn,
+    /// A field over a `[]` column does not declare `array: true`. It indexes
+    /// as before, but the query side cannot read it back as an array.
+    UndeclaredArrayColumn,
 }
 
 impl DiagnosticKind {
@@ -219,8 +229,11 @@ impl DiagnosticKind {
             | Self::RelationPrimaryKey
             | Self::TransformNotApplicable
             | Self::RootPrimaryKey
-            | Self::RootPrimaryKeyMismatch => Severity::Error,
-            Self::Nullability | Self::IgnoredPrimaryKey => Severity::Warning,
+            | Self::RootPrimaryKeyMismatch
+            | Self::NotAnArrayColumn => Severity::Error,
+            Self::Nullability | Self::IgnoredPrimaryKey | Self::UndeclaredArrayColumn => {
+                Severity::Warning
+            }
         }
     }
 
@@ -238,6 +251,8 @@ impl DiagnosticKind {
             Self::TransformNotApplicable => "transform_not_applicable",
             Self::RootPrimaryKey => "root_primary_key",
             Self::RootPrimaryKeyMismatch => "root_primary_key_mismatch",
+            Self::NotAnArrayColumn => "not_an_array_column",
+            Self::UndeclaredArrayColumn => "undeclared_array_column",
         }
     }
 }
@@ -945,7 +960,35 @@ impl Checker<'_> {
             return Ok(());
         };
 
-        if !column.ty.accepts_pg(&info.sql_type) {
+        let holds_array = is_array_type(&info.sql_type);
+        let holds_json = is_json_type(&info.sql_type);
+        if column.array && !holds_array && !holds_json {
+            self.report(
+                DiagnosticKind::NotAnArrayColumn,
+                format!(
+                    "declares `array: true`, but the column's database type `{}` holds no array \
+                     (a `[]` type or `json`/`jsonb` does)",
+                    info.sql_type
+                ),
+            );
+        }
+        if !column.array && holds_array {
+            self.report(
+                DiagnosticKind::UndeclaredArrayColumn,
+                format!(
+                    "the column's database type `{}` is an array; declare `array: true` so the \
+                     query side reads it back as one",
+                    info.sql_type
+                ),
+            );
+        }
+
+        // The elements of a `json`/`jsonb` array have no database type to
+        // check a scalar declaration against.
+        let unknown_elements = column.array
+            && holds_json
+            && !matches!(column.ty, FlussoType::Json | FlussoType::Custom { .. });
+        if !unknown_elements && !column.ty.accepts_pg(&info.sql_type) {
             self.report(
                 DiagnosticKind::TypeMismatch,
                 format!(
@@ -958,7 +1001,13 @@ impl Checker<'_> {
         if !column.transforms.is_empty()
             && !self
                 .catalog
-                .accepts_transforms(self.db_schema, table, &column.column, &column.transforms)
+                .accepts_transforms(
+                    self.db_schema,
+                    table,
+                    &column.column,
+                    &column.transforms,
+                    column.array,
+                )
                 .await?
         {
             let names = column
@@ -987,6 +1036,19 @@ impl Checker<'_> {
         }
         Ok(())
     }
+}
+
+/// Whether a `format_type` name is an array type (`text[]`, `integer[]`).
+fn is_array_type(sql_type: &str) -> bool {
+    sql_type.trim().ends_with("[]")
+}
+
+/// Whether a `format_type` name is `json` or `jsonb` (not an array of them).
+fn is_json_type(sql_type: &str) -> bool {
+    matches!(
+        sql_type.trim().to_ascii_lowercase().as_str(),
+        "json" | "jsonb"
+    )
 }
 
 /// Whether any field, at any depth, is a relation.
@@ -1220,6 +1282,127 @@ mod tests {
         }
     }
 
+    /// `lists(id integer, tags text[], codes integer[], doc jsonb, note text)`.
+    /// Transforms take a `text` element; the probe records whether each ask was
+    /// about the element.
+    struct Lists(std::sync::Mutex<Vec<(String, bool)>>);
+
+    #[async_trait]
+    impl Catalog for Lists {
+        async fn column(
+            &self,
+            schema: &DatabaseSchema,
+            table: &TableName,
+            column: &ColumnName,
+        ) -> Result<ColumnInfo> {
+            let sql_type = match column.as_ref() {
+                "id" => "integer",
+                "tags" => "text[]",
+                "codes" => "integer[]",
+                "doc" => "jsonb",
+                "note" => "text",
+                _ => {
+                    return Err(SourceError::UnknownColumn(format!(
+                        "{schema}.{table}.{column}"
+                    )));
+                }
+            };
+            Ok(ColumnInfo {
+                sql_type: sql_type.to_owned(),
+                nullable: column.as_ref() != "id",
+            })
+        }
+
+        async fn has_table(&self, _: &DatabaseSchema, _: &TableName) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn accepts_transforms(
+            &self,
+            _: &DatabaseSchema,
+            _: &TableName,
+            column: &ColumnName,
+            _: &[Transform],
+            element: bool,
+        ) -> Result<bool> {
+            self.0.lock().unwrap().push((column.to_string(), element));
+            Ok(matches!(column.as_ref(), "tags" | "doc" | "note"))
+        }
+    }
+
+    fn lists_findings(
+        fields: serde_json::Value,
+    ) -> (Vec<(String, DiagnosticKind)>, Vec<(String, bool)>) {
+        let schema: IndexSchema = serde_json::from_value(json!({
+            "version": 1, "table": "lists", "db_schema": "public", "primary_key": "id",
+            "fields": fields,
+        }))
+        .unwrap();
+        let spec = SourceSpec::new(BTreeMap::from([(
+            IndexName::try_new("lists").unwrap(),
+            schema,
+        )]));
+        let catalog = Lists(Default::default());
+        let findings = futures::executor::block_on(validate_indexes(&spec, &catalog))
+            .unwrap()
+            .into_iter()
+            .map(|d| (d.field.to_string(), d.kind))
+            .collect();
+        (findings, catalog.0.into_inner().unwrap())
+    }
+
+    fn list_column(column: &str, ty: &str, array: bool) -> serde_json::Value {
+        json!({ "field": column, "source": { "column": {
+            "column": column, "ty": ty, "nullable": true, "array": array,
+            "transforms": ["lowercase"],
+        } } })
+    }
+
+    #[test]
+    fn an_array_flag_must_match_a_column_that_holds_an_array() {
+        let (findings, _) = lists_findings(json!([
+            { "field": "id", "source": { "column": { "column": "id", "ty": "integer", "nullable": false } } },
+            list_column("tags", "keyword", true),
+            list_column("doc", "keyword", true),
+            list_column("note", "keyword", true),
+            { "field": "codes", "source": { "column": { "column": "codes", "ty": "integer", "nullable": true } } },
+        ]));
+        assert_eq!(
+            findings,
+            vec![
+                ("note".to_owned(), DiagnosticKind::NotAnArrayColumn),
+                ("codes".to_owned(), DiagnosticKind::UndeclaredArrayColumn),
+            ]
+        );
+        assert_eq!(DiagnosticKind::NotAnArrayColumn.severity(), Severity::Error);
+        assert_eq!(
+            DiagnosticKind::UndeclaredArrayColumn.severity(),
+            Severity::Warning
+        );
+    }
+
+    #[test]
+    fn an_array_column_asks_about_its_elements_transforms() {
+        let (findings, asked) = lists_findings(json!([
+            { "field": "id", "source": { "column": { "column": "id", "ty": "integer", "nullable": false } } },
+            list_column("tags", "keyword", true),
+            list_column("codes", "integer", true),
+            list_column("doc", "json", true),
+        ]));
+        assert_eq!(
+            findings,
+            vec![("codes".to_owned(), DiagnosticKind::TransformNotApplicable)]
+        );
+        assert_eq!(
+            asked,
+            vec![
+                ("tags".to_owned(), true),
+                ("codes".to_owned(), true),
+                ("doc".to_owned(), true),
+            ]
+        );
+    }
+
     /// The type, numeric and nullability checks each carry their own kind, so a
     /// caller can tell them from a name that does not exist.
     #[test]
@@ -1327,6 +1510,7 @@ mod tests {
             _: &TableName,
             column: &ColumnName,
             _: &[Transform],
+            _: bool,
         ) -> Result<bool> {
             Ok(column.as_ref() == "name")
         }
