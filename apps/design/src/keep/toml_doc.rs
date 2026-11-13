@@ -104,7 +104,10 @@ pub(super) fn patch(
 
     mark(doc.as_table_mut(), &mut stash)?;
     let after = order(&doc.to_string());
-    let root_values = doc.as_table().iter().any(|(_, item)| writes_body_line(item));
+    let root_values = doc
+        .as_table()
+        .iter()
+        .any(|(_, item)| writes_body_line(item));
     let prefixes = patcher.place(&stash, &before, &after, &trailing, root_values)?;
     for (id, prefix) in prefixes.headers {
         set_prefix(doc.as_table_mut(), id, &prefix);
@@ -409,6 +412,72 @@ enum Level {
     Other,
 }
 
+/// How an inline table spaces its entries: `{ a = 1, b = 2 }` or `{a=1,b=2}`.
+struct InlineSpacing {
+    /// Around the key: before it (after `{` or `,`) and before its `=`.
+    key: toml_edit::Decor,
+    /// Between `=` and the value.
+    value_prefix: String,
+    /// After a value that a `,` follows.
+    before_comma: String,
+    /// After the last value, before `}`.
+    before_close: String,
+}
+
+impl InlineSpacing {
+    /// The spacing of `table`, whose keys are `keys`, read off its last entry.
+    fn of(table: &dyn TableLike, keys: &[String]) -> Option<Self> {
+        let raw =
+            |r: Option<&toml_edit::RawString>| r.and_then(|r| r.as_str()).unwrap_or("").to_owned();
+        let value = |key: &String| table.get(key).and_then(Item::as_value).map(Value::decor);
+        let last = keys.last()?;
+        let before_comma = keys
+            .len()
+            .checked_sub(2)
+            .and_then(|i| keys.get(i))
+            .and_then(value)
+            .map_or_else(String::new, |d| raw(d.suffix()));
+        let decor = value(last)?;
+        let key = table.key(last)?.leaf_decor();
+        Some(Self {
+            key: toml_edit::Decor::new(raw(key.prefix()), raw(key.suffix())),
+            value_prefix: raw(decor.prefix()),
+            before_comma,
+            before_close: raw(decor.suffix()),
+        })
+    }
+
+    /// Space the entries the patch added (keys not in `was`) like the rest,
+    /// and keep the space before `}` after whichever entry is last now.
+    fn apply(self, table: &mut dyn TableLike, was: &[String]) {
+        let keys: Vec<String> = table.iter().map(|(k, _)| k.to_owned()).collect();
+        let (Some(last), Some(was_last)) = (keys.last(), was.last()) else {
+            return;
+        };
+        for key in &keys {
+            let added = !was.contains(key);
+            if added && let Some(mut handle) = table.key_mut(key) {
+                *handle.leaf_decor_mut() = self.key.clone();
+            }
+            let Some(decor) = table
+                .get_mut(key)
+                .and_then(Item::as_value_mut)
+                .map(Value::decor_mut)
+            else {
+                continue;
+            };
+            if added {
+                decor.set_prefix(self.value_prefix.as_str());
+            }
+            if key == last && (added || key != was_last) {
+                decor.set_suffix(self.before_close.as_str());
+            } else if key != last && (added || key == was_last) {
+                decor.set_suffix(self.before_comma.as_str());
+            }
+        }
+    }
+}
+
 struct Patcher<'a> {
     /// Free comments of removed keys with no key after them, per table (`None`
     /// is the root): they go after the table's last key.
@@ -444,6 +513,7 @@ impl Patcher<'_> {
             }
         };
         let names: Vec<String> = keys.iter().map(|k| named(k)).collect();
+        let spacing = inline.then(|| InlineSpacing::of(doc, &keys)).flatten();
         let mut pending = String::new();
         for (key, name) in keys.iter().zip(&names) {
             let before = old.get(name);
@@ -507,6 +577,9 @@ impl Patcher<'_> {
                 };
                 doc.insert(key, item);
             }
+        }
+        if let Some(spacing) = spacing {
+            spacing.apply(doc, &keys);
         }
         Some(())
     }

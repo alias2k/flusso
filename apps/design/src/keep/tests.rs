@@ -1521,3 +1521,30 @@ fn editing_a_top_level_dotted_key_keeps_the_blank_line_below_it() {
         )
     );
 }
+
+#[test]
+fn a_key_added_to_an_inline_table_follows_its_spacing() {
+    let base = format!(
+        "{BARE}\n[sinks]\na = {{ type = \"stdout\", note = \"q\" }}\nb = {{type=\"stdout\"}}\nc = {{ type = \"stdout\", note = \"q\" }} # c\n"
+    );
+    let text = save_config(&base, |c| {
+        set_option(c, "a", "pretty", "yes");
+        set_option(c, "b", "pretty", "yes");
+        c.sinks
+            .get_mut(&sink("c"))
+            .unwrap()
+            .port
+            .options
+            .0
+            .remove("note");
+    });
+    assert_eq!(
+        text,
+        base.replace("\"q\" }\nb", "\"q\", pretty = \"yes\" }\nb")
+            .replace("{type=\"stdout\"}", "{type=\"stdout\",pretty=\"yes\"}")
+            .replace(
+                "{ type = \"stdout\", note = \"q\" } # c",
+                "{ type = \"stdout\" } # c"
+            )
+    );
+}
