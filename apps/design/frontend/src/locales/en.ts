@@ -104,7 +104,7 @@ export const en: Record<string, string> = {
   "code.autoFormat": "Auto-format",
   "code.incomplete": "Finish or remove these first, Code mode would drop them: {list}",
   "code.renderFailed": "Code mode can't show this index yet: {err}",
-  "code.unparsed": "The YAML doesn't parse, so its last edits aren't in the document. Fix it, or discard them.",
+  "code.unparsed": "The schema doesn't load, so its last edits aren't in the document: {err}. Fix it, or discard them.",
   "code.unparsedSave": "The schema doesn't load, so nothing is saved: {err}",
   "code.discard": "Discard",
   "code.autoFormatHint": "Format the buffer on focus loss whenever the YAML is valid",

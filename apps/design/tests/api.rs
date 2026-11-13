@@ -1652,7 +1652,7 @@ fn which_index_an_op_is_comes_from_the_config_identity() {
         identity: users_is_orders.clone(),
         digests: seen(),
     });
-    // The request's own `was` is not read.
+    // The request can't name the index it was: an unknown field is refused.
     let forged = serde_json::json!({
         "digests": seen(),
         "config": config_without(&project.config, "products"),
@@ -1662,7 +1662,8 @@ fn which_index_an_op_is_comes_from_the_config_identity() {
             "schema": schema_of(&tagged("x: 1")), "base": tagged("x: 1"),
         }],
     });
-    refused(&dir, || serde_json::from_value(forged.clone()).unwrap());
+    let error = serde_json::from_value::<SaveRequest>(forged).unwrap_err();
+    assert!(error.to_string().contains("unknown field `was`"), "{error}");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -2164,8 +2165,8 @@ fn a_page_saves_a_file_another_page_did_not_touch() {
     b.save(b.request(b.project.config.clone(), vec![orders], Vec::new()))
         .unwrap();
     let files = files(&dir);
-    assert_eq!(files["users.schema.yml"], "users: a\n");
-    assert_eq!(files["orders.schema.yml"], "orders: b\n");
+    assert_eq!(files["users.schema.yml"], tagged("users: a"));
+    assert_eq!(files["orders.schema.yml"], tagged("orders: b"));
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -2214,7 +2215,7 @@ fn a_file_changed_on_disk_since_the_page_loaded_is_not_overwritten() {
         page.save(anyway).unwrap();
         assert_eq!(
             std::fs::read_to_string(&users).unwrap(),
-            "users: 1\n",
+            tagged("users: 1"),
             "{label}"
         );
     }
@@ -2335,7 +2336,6 @@ fn a_code_mode_base_older_than_the_file_is_refused() {
         page.project.config.clone(),
         vec![FileOp {
             schema: Some(edited),
-            raw: None,
             base: Some(format!("# mine\n{text}")),
             ..op(OpKind::Upsert, "users", "users.schema.yml", None, "")
         }],
@@ -2385,7 +2385,7 @@ fn a_page_saves_again_after_its_own_save_without_reloading() {
         .unwrap();
     assert_eq!(
         std::fs::read_to_string(dir.join("moved.schema.yml")).unwrap(),
-        "users: 5\n"
+        tagged("users: 5")
     );
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -2669,25 +2669,26 @@ fn a_schema_that_would_not_load_is_not_saved() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// A save op carries its content as a schema, which the save refuses unless its
-/// file loads. Text sent as `raw` is not read: the op has no schema, so the
-/// save is refused and writes nothing (issue #289).
+/// A save op carries its content only as a schema, which the save refuses
+/// unless its file loads. An op with `raw` text is refused before anything is
+/// read, as any unknown field is (issue #289).
 #[test]
-fn an_op_with_only_raw_text_writes_nothing() {
+fn an_op_with_raw_text_is_refused_as_an_unknown_field() {
     let dir = own_fixture("raw");
-    let config_path = dir.join("flusso.toml");
-    let project = api::load_project(&config_path).unwrap();
-    let before = files(&dir);
-    let request: SaveRequest = serde_json::from_value(serde_json::json!({
+    let project = api::load_project(&dir.join("flusso.toml")).unwrap();
+    let body = serde_json::json!({
         "config": project.config,
+        "digests": project.digests,
         "ops": [{
             "kind": "upsert", "index": "orders", "path": "orders.schema.yml",
             "raw": "this: [does not load\n",
         }],
-    }))
-    .unwrap();
-    let error = api::save_project(&config_path, request).unwrap_err();
-    assert!(format!("{error:#}").contains("needs a schema"), "{error:#}");
-    assert_eq!(files(&dir), before);
+    });
+    let refused = api::read_save_request(&serde_json::to_vec(&body).unwrap()).unwrap_err();
+    assert!(
+        refused.message.contains("unknown field `raw`"),
+        "{}",
+        refused.message
+    );
     std::fs::remove_dir_all(&dir).ok();
 }

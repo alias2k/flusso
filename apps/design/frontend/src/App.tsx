@@ -578,11 +578,12 @@ export default function App() {
   // holds the move; only the toast's Discard drops those edits, so no click
   // pattern can lose them by accident.
   const leaveBuffer = async (go: () => void, held?: () => void) => {
-    if ((await flushBuffer()) === null) return go();
+    const reason = await flushBuffer();
+    if (reason === null) return go();
     held?.();
     setToast({
       kind: "error",
-      text: t("code.unparsed"),
+      text: t("code.unparsed", { err: reason }),
       action: {
         label: t("code.discard"),
         run: () => {

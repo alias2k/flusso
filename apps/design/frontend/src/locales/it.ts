@@ -108,7 +108,7 @@ export const it: Record<string, string> = {
   "code.incomplete": "Completa o rimuovi prima questi elementi, la modalità Codice li perderebbe: {list}",
   "code.renderFailed": "La modalità Codice non può ancora mostrare questo indice: {err}",
   "code.unparsed":
-    "Lo YAML non è analizzabile, quindi le ultime modifiche non sono nel documento. Correggilo, oppure scartale.",
+    "Lo schema non si carica, quindi le ultime modifiche non sono nel documento: {err}. Correggilo, oppure scartale.",
   "code.unparsedSave": "Lo schema non si carica, quindi non si salva nulla: {err}",
   "code.discard": "Scarta",
   "code.autoFormatHint": "Formatta il buffer quando perde il focus, se lo YAML è valido",

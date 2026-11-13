@@ -555,8 +555,10 @@ pub enum OpKind {
 }
 
 /// One schema-file operation in a save/diff request. `schema` is the content,
-/// written into `base`; `from` is the source path for `Move`.
+/// written into `base`; `from` is the source path for `Move`. Unknown fields
+/// are refused, as on [`SaveRequest`].
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileOp {
     /// What to do.
     pub kind: OpKind,
@@ -3266,7 +3268,7 @@ mod tests {
                 "config": load_project(&fixture.config()).unwrap().config,
                 "digests": {},
                 "ops": [{ "kind": "upsert", "index": "orders", "path": "products.schema.yml",
-                          "raw": "orders: 2\n" }],
+                          "schema": schema("orders: 2"), "base": tagged("orders: 2") }],
             }))
             .unwrap();
             request.digests = page.clone();
@@ -3321,7 +3323,7 @@ mod tests {
             "config": load_project(&fixture.config()).unwrap().config,
             "digests": Fixture::loaded(),
             "ops": [{ "kind": "upsert", "index": "users", "path": "users.schema.yml",
-                      "raw": "users: 1\n" }],
+                      "schema": schema("users: 1"), "base": tagged("users: 1") }],
         }))
         .unwrap();
         stopped_by_an_editor(&fixture, &request, 1, "users.schema.yml");
@@ -3341,7 +3343,7 @@ mod tests {
             "config": config,
             "digests": Fixture::loaded(),
             "ops": [{ "kind": "move", "index": "users", "path": "moved.schema.yml",
-                      "from": "users.schema.yml", "raw": "users: 1\n" }],
+                      "from": "users.schema.yml", "schema": schema("users: 1"), "base": tagged("users: 1") }],
         }))
         .unwrap();
         // moved.schema.yml, flusso.toml, then the removal of users.schema.yml.
@@ -3368,7 +3370,7 @@ mod tests {
                 "config": load_project(&fixture.config()).unwrap().config,
                 "digests": digests,
                 "ops": [{ "kind": "upsert", "index": index, "path": format!("{index}.schema.yml"),
-                          "raw": format!("{index}: 1\n") }],
+                          "schema": schema(&format!("{index}: 1")), "base": tagged(&format!("{index}: 1")) }],
             }))
             .unwrap()
         };
@@ -3417,8 +3419,8 @@ mod tests {
                 "config": load_project(&fixture.config()).unwrap().config,
                 "digests": Fixture::loaded(),
                 "ops": [
-                    { "kind": "upsert", "index": "users", "path": "users.schema.yml", "raw": "users: 1\n" },
-                    { "kind": "upsert", "index": "products", "path": "products.schema.yml", "raw": "products: 1\n" },
+                    { "kind": "upsert", "index": "users", "path": "users.schema.yml", "schema": schema("users: 1"), "base": tagged("users: 1") },
+                    { "kind": "upsert", "index": "products", "path": "products.schema.yml", "schema": schema("products: 1"), "base": tagged("products: 1") },
                 ],
             }))
             .unwrap()
@@ -3452,7 +3454,7 @@ mod tests {
                         let want = if done {
                             "editor\n".to_owned()
                         } else {
-                            format!("{}: 1\n", &file[..file.find('.').unwrap()])
+                            tagged(&format!("{}: 1", &file[..file.find('.').unwrap()]))
                         };
                         assert_eq!(files[file], want, "after {n}");
                     }
@@ -3491,7 +3493,7 @@ mod tests {
             "config": load_project(&fixture.config()).unwrap().config,
             "digests": Fixture::loaded(),
             "ops": [{ "kind": "upsert", "index": "users", "path": "users.schema.yml",
-                      "raw": "users: 1\n" }],
+                      "schema": schema("users: 1"), "base": tagged("users: 1") }],
         }))
         .unwrap();
         let saved = save_with(
@@ -3501,7 +3503,7 @@ mod tests {
         )
         .unwrap();
         let files = fixture.files();
-        assert_eq!(files["users.schema.yml"], "users: 1\n");
+        assert_eq!(files["users.schema.yml"], tagged("users: 1"));
         assert_eq!(saved.displaced.len(), 1, "{saved:?}");
         assert_eq!(saved.displaced[0].path, "users.schema.yml");
         assert_eq!(files[&saved.displaced[0].copy], "editor\n");
@@ -3652,7 +3654,7 @@ mod tests {
             "config": request.config,
             "digests": {},
             "ops": [{ "kind": "upsert", "index": "orders", "path": "products.schema.yml",
-                      "raw": "orders: 2\n" }],
+                      "schema": schema("orders: 2"), "base": tagged("orders: 2") }],
         }))
         .unwrap();
         let again = SaveRequest {
