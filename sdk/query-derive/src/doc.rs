@@ -684,18 +684,40 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
             if let Some(kind) = kind_of(scalar, resolved.mapping.decimal)
                 && found.as_deref().is_some_and(|f| !is_primitive(Some(f)))
             {
-                return Ok(Some(value_assert(inner, kind.marker())));
+                let mut checks = value_assert(inner, kind.marker());
+                if !resolved.array {
+                    checks.extend(single_value_check(field, inner, os));
+                }
+                return Ok(Some(checks));
             }
             Err(scalar_error(field, os, &expected, found.as_deref()))
         }
     }
 }
 
+/// A custom type at a single-valued leaf must not read an array (an array
+/// newtype has no `FlussoValue<K>`, so its bound fails too; this says why).
+fn single_value_check(field: &DocField, inner: &Type, os: &str) -> TokenStream {
+    let key = &field.doc_key;
+    let rendered = crate::fragment::render(inner);
+    let message = format!(
+        "field `{key}` is a single `{os}` in the schema, not an array — `{rendered}` reads an \
+         array; use its element type, or declare the field `array: true`"
+    );
+    quote::quote_spanned! {inner.span()=>
+        const _: () = {
+            #[allow(unused_imports)]
+            use ::flusso_query::OpaqueWithoutMeta as _;
+            assert!(!::flusso_query::OpaqueProbe::<#inner>::READS_ARRAY, #message);
+        };
+    }
+}
+
 /// A type that is not a `Vec` at a flat array of a scalar kind. A custom type
-/// passes only as an array newtype (`FlussoValueMeta::ARRAY`, which
-/// `#[derive(FlussoValue)]` sets on a newtype over a `Vec`) whose elements are
-/// of the field's kind; both are const data, so they are asserted, each with its
-/// own message.
+/// passes only as an array newtype of leaf values (`OpaqueProbe::LEAF_ARRAY`,
+/// what `#[derive(FlussoValue)]` sets on a newtype over a `Vec`) whose
+/// elements are of the field's kind; all of it is const data, so it is
+/// asserted, each case with its own message.
 fn array_value_check(
     field: &DocField,
     inner: &Type,
@@ -1593,7 +1615,7 @@ fn leaf_ident(ty: &Type) -> Option<String> {
     }
 }
 
-fn option_inner(ty: &Type) -> Option<&Type> {
+pub(crate) fn option_inner(ty: &Type) -> Option<&Type> {
     single_generic(ty, "Option")
 }
 

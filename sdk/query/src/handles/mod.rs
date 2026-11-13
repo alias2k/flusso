@@ -231,7 +231,7 @@ pub mod kind {
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a valid value for a `{K}` field",
     label = "unsupported field type",
-    note = "use a built-in leaf type, or add `#[derive(FlussoValue)]` (with the matching kind) to `{Self}`"
+    note = "use a built-in leaf type, or a type with `#[derive(FlussoValue)]` of the matching kind"
 )]
 pub trait FlussoValue<K>: serde::Serialize {}
 

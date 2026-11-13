@@ -226,6 +226,18 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
             if let Some(element) = crate::doc::vec_inner(inner) {
                 return array_newtype(ident, element, explicit.is_some(), leaf_check);
             }
+            if let Some(element) = crate::doc::option_inner(inner).and_then(crate::doc::vec_inner) {
+                return Err(syn::Error::new(
+                    inner.span(),
+                    format!(
+                        "a FlussoValue newtype over an array wraps the `Vec<…>` directly — write \
+                         `struct {ident}(Vec<{}>)`, and put the `Option<…>` on the field \
+                         (`Option<{ident}>`) when the schema field is nullable",
+                        crate::fragment::render(element),
+                    ),
+                ));
+            }
+            let rendered = crate::fragment::render(inner);
             match explicit {
                 // Restrict to one string kind (e.g. a keyword-only code wrapper).
                 Some(kind) => {
