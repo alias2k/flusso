@@ -489,8 +489,9 @@ pub trait FlussoValueMeta {
     /// Whether the type reads a JSON array of sub-documents: a
     /// `#[serde(transparent)]` (or tuple) `FlussoFragment` newtype over a
     /// `Vec<…>` of a struct, or over another such newtype. A parent then places
-    /// it where it would place that `Vec`, at a `nested` array. Off by default;
-    /// only `#[derive(FlussoFragment)]` sets it.
+    /// it where it would place that `Vec`, at a `nested` array. Off by default.
+    /// `#[derive(FlussoFragment)]` sets it; leave it unset in a hand-written
+    /// impl, where nothing checks it against what the type reads.
     const ARRAY: bool = false;
 }
 
@@ -564,6 +565,8 @@ pub trait OpaqueWithoutMeta {
     const SKIPS_EXHAUSTIVE: bool = true;
     /// No metadata, so not an array newtype.
     const ARRAY: bool = false;
+    /// No metadata, so not known to be a sub-document.
+    const ARRAY_ELEMENT: bool = false;
 }
 
 impl<T: ?Sized> OpaqueWithoutMeta for OpaqueProbe<T> {}
@@ -579,6 +582,21 @@ impl<T: ?Sized + FlussoValueMeta> OpaqueProbe<T> {
     pub const SKIPS_EXHAUSTIVE: bool = T::EXHAUSTIVE;
     /// Whether the type reads a JSON array (see [`FlussoValueMeta::ARRAY`]).
     pub const ARRAY: bool = T::ARRAY;
+    /// Whether a `Vec` of the type reads one array of sub-documents: the type
+    /// is a sub-document and reads no array itself.
+    pub const ARRAY_ELEMENT: bool = !T::ARRAY && contains_nested(T::KINDS);
+}
+
+const fn contains_nested(kinds: &[KindTag]) -> bool {
+    let mut i = 0;
+    while i < kinds.len() {
+        #[allow(clippy::indexing_slicing)]
+        if matches!(kinds[i], KindTag::Nested) {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Mirrors the [`FlussoValue`](crate::FlussoValue) impls above, so a

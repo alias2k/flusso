@@ -163,26 +163,26 @@ pub(crate) fn embeddable(ident: &Ident, fields: &[DocField]) -> TokenStream {
 /// array's element level exactly as it would for `Vec<Element>`. Only a bare
 /// `Vec<…>` of a custom type, or a newtype that is itself one, is an array: an
 /// `Option<Vec<…>>` reads `null` too, and a `Vec` of a built-in leaf has no
-/// sub-document to walk.
+/// sub-document to walk. The element has to be a sub-document that reads no
+/// array itself (`OpaqueProbe::ARRAY_ELEMENT`): a `Vec` of an array newtype is
+/// an array of arrays, and a `Vec` of a value type reads no sub-document.
 fn newtype_array(field: &DocField) -> Option<TokenStream> {
     if field.ident.is_some() || field.skip || option_inner(field.ty).is_some() {
         return None;
     }
-    let value = match vec_inner(field.ty) {
-        Some(_) if checked_type(field, false).is_some() => quote! { true },
-        Some(_) => return None,
-        None => {
-            let ty = checked_type(field, false)?;
-            quote! {
-                {
-                    #[allow(unused_imports)]
-                    use ::flusso_query::OpaqueWithoutMeta as _;
-                    ::flusso_query::OpaqueProbe::<#ty>::ARRAY
-                }
-            }
-        }
+    let ty = checked_type(field, false)?;
+    let reads = if vec_inner(field.ty).is_some() {
+        quote! { ARRAY_ELEMENT }
+    } else {
+        quote! { ARRAY }
     };
-    Some(quote! { const ARRAY: bool = #value; })
+    Some(quote! {
+        const ARRAY: bool = {
+            #[allow(unused_imports)]
+            use ::flusso_query::OpaqueWithoutMeta as _;
+            ::flusso_query::OpaqueProbe::<#ty>::#reads
+        };
+    })
 }
 
 /// A fragment is location-free by definition — `index`/`path` here would make it
@@ -388,13 +388,13 @@ fn array_shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span
             assert!(::flusso_query::array_shape_ok(level, #key, false), #msg);
         };
     }
-    let msg = message(
+    let nested_msg = message(
         fragment,
         key,
         &format!(
-            "is `{rendered}`, but the schema field here is an array (a `nested` array or a \
-             flat array) — declare it `Vec<…>`, or make `{rendered}` a `#[serde(transparent)]` \
-             `FlussoFragment` newtype over one"
+            "is `{rendered}`, but the schema field here is a `nested` array — declare it \
+             `Vec<…>`, or make `{rendered}` a `#[serde(transparent)]` `FlussoFragment` newtype \
+             over one"
         ),
     );
     let array_msg = message(
@@ -410,7 +410,9 @@ fn array_shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span
             #[allow(unused_imports)]
             use ::flusso_query::OpaqueWithoutMeta as _;
             let array = ::flusso_query::OpaqueProbe::<#inner>::ARRAY;
-            assert!(array || ::flusso_query::array_shape_ok(level, #key, false), #msg);
+            let shaped = array || ::flusso_query::array_shape_ok(level, #key, false);
+            assert!(shaped || !::flusso_query::is_nested(level, #key), #nested_msg);
+            assert!(shaped, #msg);
             assert!(!array || ::flusso_query::array_shape_ok(level, #key, true), #array_msg);
         }
     }
@@ -452,7 +454,8 @@ fn opaque_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> 
             "is `#[flusso(opaque)]` on `{rendered}`, which has no flusso metadata, so a fragment \
              cannot check its kind at this leaf, as a root checks it — derive `FlussoValue` for \
              it, or for a hand-written `FlussoValue` implement `FlussoValueMeta` and call \
-             `flusso_query::embeddable!({rendered})`"
+             `flusso_query::embeddable!({rendered})`; wrap a type from another crate in a newtype \
+             that derives `FlussoValue`"
         ),
     );
     let leaf_msg = message(

@@ -621,7 +621,9 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
             }
             // A custom type may be a newtype over the `Vec`; whether it is
             // is const data, which `embed_checks` asserts.
-            let custom = leaf_ident(inner).is_some_and(|name| !is_primitive(Some(&name)));
+            let custom = leaf_ident(inner).is_some_and(|name| {
+                !is_primitive(Some(&name)) && !matches!(name.as_str(), "Box" | "Arc" | "Rc" | "Cow")
+            });
             if vec_inner(inner).is_none() && !custom {
                 return Err(shape_error(field, os, "a `Vec<…>` (a nested array)"));
             }

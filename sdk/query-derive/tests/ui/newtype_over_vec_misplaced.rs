@@ -95,4 +95,42 @@ struct FromArraysFragment {
     orders: ManyOrders,
 }
 
+/// One more newtype does not hide the array of arrays.
+#[derive(serde::Deserialize, FlussoFragment)]
+#[serde(transparent)]
+struct Batches(Vec<Orders>);
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+struct UserBatches {
+    id: i32,
+    orders: Batches,
+}
+
+/// A `Vec` of a value type reads no sub-documents.
+#[derive(serde::Serialize, serde::Deserialize, flusso_query::FlussoValue)]
+#[flusso(keyword)]
+enum Status {
+    Paid,
+}
+
+#[derive(serde::Deserialize, FlussoFragment)]
+#[serde(transparent)]
+struct Statuses(Vec<Status>);
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+struct UserStatuses {
+    id: i32,
+    orders: Statuses,
+}
+
+/// A wrapper around the `Vec` is not looked through.
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+struct UserBoxed {
+    id: i32,
+    orders: Box<Vec<Order>>,
+}
+
 fn main() {}
