@@ -1548,3 +1548,29 @@ fn a_key_added_to_an_inline_table_follows_its_spacing() {
             )
     );
 }
+
+#[test]
+fn an_untouched_dotted_key_keeps_its_spacing() {
+    let base = format!(
+        "{BARE}\n[sinks.p]\ntype = \"stdout\"\nx.y = 1\n  x . z = \"w\" # z\nx .\tv = 2\n\n[sinks.q]\ntype = \"stdout\"\n"
+    );
+    let text = save_config(&base, |c| set_option(c, "q", "pretty", "yes"));
+    assert_eq!(text, format!("{base}pretty = \"yes\"\n"));
+    let text = save_config(&base, |c| set_option(c, "p", "pretty", "yes"));
+    assert_eq!(text, base.replace("2\n\n", "2\npretty = \"yes\"\n\n"));
+    let text = save_config(&base, |c| {
+        let x = [
+            ("y".to_owned(), 1i64.into()),
+            ("z".to_owned(), "v".into()),
+            ("v".to_owned(), 2i64.into()),
+        ];
+        let x = kernel::OptionValue::Map(x.into_iter().collect());
+        c.sinks
+            .get_mut(&sink("p"))
+            .unwrap()
+            .port
+            .options
+            .insert("x", x);
+    });
+    assert_eq!(text, base.replace("z = \"w\"", "z = \"v\""));
+}

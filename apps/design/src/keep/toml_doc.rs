@@ -75,9 +75,14 @@ pub(super) fn patch(
     let source = mark_strings(text)?;
     let parsed = Document::parse(source.as_str()).ok()?;
     let ends = line_ends(parsed.as_table(), &source);
+    let keys = key_texts(parsed.as_table(), &source);
     let mut doc = parsed.into_mut();
     mark_decor(&mut doc);
     keep_line_ends(doc.as_table_mut(), &ends, eol)?;
+    let respelled = respelled_keys(&mut doc, keys)?;
+    if !respelled.is_empty() && text.contains([TAG_OPEN, TAG_CLOSE]) {
+        return None;
+    }
     if spells_a_sink_twice(doc.as_table()) {
         return None;
     }
@@ -113,7 +118,7 @@ pub(super) fn patch(
         set_prefix(doc.as_table_mut(), id, &prefix);
     }
     doc.set_trailing(prefixes.trailing);
-    let text = format!("{header}{doc}");
+    let text = restore_keys(format!("{header}{doc}"), &respelled)?;
     Some(Patched {
         text: if stands_in {
             text.replace(CR, "\r")
@@ -1042,6 +1047,123 @@ fn mark_decor(doc: &mut DocumentMut) {
     if let Some(trailing) = raw(Some(doc.trailing())) {
         doc.set_trailing(trailing);
     }
+}
+
+/// Open and close a tag ([`tag`]) in a value's decor. Private-use
+/// characters: a file holding either is not patched where a tag is needed.
+const TAG_OPEN: char = '\u{e00e}';
+const TAG_CLOSE: char = '\u{e00f}';
+
+/// The tag of the value [`Site`] `at`, written at the start of its decor.
+fn tag(at: usize) -> String {
+    format!("{TAG_OPEN}{at}{TAG_CLOSE}")
+}
+
+/// For every [`Site`] of the parsed `root`, in order, the text of its line
+/// in `source` before its value: indentation, key and `=` (`None` for a
+/// header).
+fn key_texts(root: &Table, source: &str) -> Vec<Option<String>> {
+    let mut found = Vec::new();
+    sites(root, false, &mut found);
+    found
+        .iter()
+        .map(|site| {
+            let Site::Value(value) = site else {
+                return None;
+            };
+            let end = value
+                .decor()
+                .prefix()
+                .and_then(|p| p.span())
+                .or_else(|| value.span())?
+                .start;
+            let before = source.get(..end)?;
+            let start = before.rfind('\n').map_or(0, |n| n + 1);
+            before.get(start..).map(str::to_owned)
+        })
+        .collect()
+}
+
+/// A value line `toml_edit` writes differently from the file: what the file
+/// says before the value, and what `toml_edit` writes there.
+struct Respelled {
+    at: usize,
+    written: String,
+    file: String,
+}
+
+/// The value lines of `doc` whose key `toml_edit` does not write back as the
+/// file spells it, each tagged in `doc` so [`restore_keys`] can find it.
+///
+/// A dotted key shares its leading parts with every other key under the same
+/// dotted table, so `toml_edit` keeps one spelling of them: `x . z = 1` after
+/// `x.y = 2` would be written `x. z = 1`.
+fn respelled_keys(doc: &mut DocumentMut, keys: Vec<Option<String>>) -> Option<Vec<Respelled>> {
+    let mut probe = doc.clone();
+    let mut at = 0;
+    sites_mut(probe.as_table_mut(), false, &mut |site| {
+        if let SiteMut::Value(value) = site {
+            prepend_tag(value, at);
+        }
+        at += 1;
+    });
+    let written = probe.to_string();
+    let mut respelled = Vec::new();
+    for (at, file) in keys.into_iter().enumerate() {
+        let Some(file) = file else { continue };
+        let written = written_key(&written, at)?;
+        if written != file {
+            respelled.push(Respelled {
+                at,
+                written: written.to_owned(),
+                file,
+            });
+        }
+    }
+    let mut at = 0;
+    sites_mut(doc.as_table_mut(), false, &mut |site| {
+        if let SiteMut::Value(value) = site
+            && respelled.iter().any(|r| r.at == at)
+        {
+            prepend_tag(value, at);
+        }
+        at += 1;
+    });
+    Some(respelled)
+}
+
+fn prepend_tag(value: &mut Value, at: usize) {
+    let decor = value.decor_mut();
+    let prefix = decor.prefix().and_then(|p| p.as_str()).unwrap_or("");
+    let prefix = format!("{}{prefix}", tag(at));
+    decor.set_prefix(prefix);
+}
+
+/// The text before the tag of site `at` on its line in `written`.
+fn written_key(written: &str, at: usize) -> Option<&str> {
+    let end = written.find(&tag(at))?;
+    let before = written.get(..end)?;
+    before.get(before.rfind('\n').map_or(0, |n| n + 1)..)
+}
+
+/// `text` with every tag [`respelled_keys`] set removed, and the key of each
+/// tagged line spelled as the file had it while the save still writes the
+/// key `toml_edit` read: a renamed key keeps its new spelling.
+fn restore_keys(mut text: String, respelled: &[Respelled]) -> Option<String> {
+    for r in respelled {
+        let tag = tag(r.at);
+        let Some(end) = text.find(&tag) else { continue };
+        if text.get(end + tag.len()..)?.contains(&tag) {
+            return None;
+        }
+        let start = text.get(..end)?.rfind('\n').map_or(0, |n| n + 1);
+        if text.get(start..end)? == r.written {
+            text.replace_range(start..end + tag.len(), &r.file);
+        } else {
+            text.replace_range(end..end + tag.len(), "");
+        }
+    }
+    Some(text)
 }
 
 /// One place `toml_edit` ends a line itself: a table's header or a key's
