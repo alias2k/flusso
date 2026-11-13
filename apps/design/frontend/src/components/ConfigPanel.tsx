@@ -457,7 +457,7 @@ export function ConfigPanel({
 
 /// The first of `sink1`, `sink2`, … no sink has, as flusso reads names.
 function freeSinkName(taken: string[]): string {
-  for (let n = taken.length + 1; ; n++) {
+  for (let n = 1; ; n++) {
     const name = `sink${n}`;
     if (!identifierProblem(name, taken)) return name;
   }
