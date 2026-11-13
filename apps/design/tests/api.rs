@@ -2003,6 +2003,7 @@ fn a_schema_that_would_not_load_is_not_saved() {
         }],
         skip: Vec::new(),
         identity: None,
+        loaded_at_ms: None,
     });
     std::fs::remove_dir_all(&dir).ok();
 }
