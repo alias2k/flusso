@@ -74,7 +74,7 @@ pub(super) fn patch(
         lines.pop();
     }
     let mixed = text.contains("\r\n") && text.replace("\r\n", "").contains('\n');
-    let tags = mixed.then(|| LineTags::tag(&mut lines, text));
+    let tags = (mixed && LineTags::fits(&lines)).then(|| LineTags::tag(&mut lines, text));
     let header_len = lines
         .iter()
         .take_while(|l| is_trivia(l) || l.trim_end() == "---" || l.starts_with('%'))
@@ -126,7 +126,22 @@ struct LineTags {
     width: usize,
 }
 
+/// The most padding the tags may add, in bytes. The runs grow with the line
+/// number, so their total grows with its square: past this a mixed file is
+/// written in its dominant ending instead.
+const MOST_TAG_PADDING: usize = 4 << 20;
+
 impl LineTags {
+    /// Whether tagging `lines` stays within [`MOST_TAG_PADDING`].
+    fn fits(lines: &[String]) -> bool {
+        let width = lines.iter().map(|l| trailing_spaces(l)).max().unwrap_or(0) + 1;
+        let n = lines.len();
+        width
+            .checked_mul(n)
+            .and_then(|w| w.checked_mul(n + 1))
+            .is_some_and(|twice| twice / 2 <= MOST_TAG_PADDING)
+    }
+
     /// Tag every line of `lines`, the lines of `text`.
     fn tag(lines: &mut [String], text: &str) -> Self {
         let width = lines.iter().map(|l| trailing_spaces(l)).max().unwrap_or(0) + 1;

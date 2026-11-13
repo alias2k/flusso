@@ -1623,6 +1623,27 @@ fn a_mixed_schema_keeps_each_untouched_line_and_writes_new_ones_in_the_dominant_
     assert!(text.starts_with(&base[..base.match_indices('\n').nth(3).unwrap().0]));
 }
 
+/// The tags' padding grows with the square of the line count: a file where
+/// it would pass a few megabytes is written in its dominant ending instead
+/// of taking the memory.
+#[test]
+fn a_large_mixed_schema_is_written_in_its_dominant_ending() {
+    let mut base = String::from("version: 1\ntable: t\nprimary_key: f0\r\nfields:\n");
+    base.push_str(&format!(
+        "  # a comment with trailing spaces{}\n",
+        " ".repeat(2000)
+    ));
+    for n in 0..400 {
+        base.push_str(&format!("  - keyword: f{n}\n    required: true\n"));
+    }
+    let text = save(&base, |s| rename(&mut s.fields[1], "renamed"));
+    assert!(text.contains("- keyword: renamed\n"), "the edit is written");
+    assert!(
+        !text.contains('\r'),
+        "every line ends in the dominant ending"
+    );
+}
+
 #[test]
 fn a_moved_field_keeps_the_endings_of_its_own_lines() {
     let base = "version: 1\r\ntable: t\r\nprimary_key: a\r\nfields:\r\n  - keyword: a\r\n    required: true\r\n  - keyword: b\n    required: true\n  - keyword: c\r\n    required: true\r\n";
