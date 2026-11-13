@@ -673,6 +673,145 @@ async fn transforms_and_defaults_apply() {
 }
 
 // ---------------------------------------------------------------------------
+// Array columns (issue #276).
+// ---------------------------------------------------------------------------
+
+fn array_col(
+    name: &str,
+    ty: FlussoType,
+    transforms: Vec<Transform>,
+    default: Option<GenericValue>,
+) -> Field {
+    Field {
+        source: FieldSource::Column(Column {
+            column: column(name),
+            ty,
+            nullable: true,
+            transforms,
+            default,
+            enum_order: Vec::new(),
+            subfields: true,
+            indexed: true,
+            array: true,
+        }),
+        ..base(name)
+    }
+}
+
+fn strings(items: &[&str]) -> GenericValue {
+    GenericValue::Array(
+        items
+            .iter()
+            .map(|item| GenericValue::String((*item).to_owned()))
+            .collect(),
+    )
+}
+
+/// A `text[]` and a `jsonb` array column: transforms per element, null
+/// elements dropped, a lone value wrapped, the default list on a null column,
+/// a structured element failing the document on both build paths; and the
+/// checks against the catalog: the element type takes the transforms, a flag
+/// over a plain column is an error, a `[]` column without one a warning.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn array_columns_clean_up_their_value_and_are_checked_against_the_catalog() {
+    let (_pg, url) = start_seeded().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "ALTER TABLE users ADD COLUMN labels text[], ADD COLUMN prefs jsonb, \
+         ADD COLUMN notes jsonb, ADD COLUMN codes int[]",
+        "UPDATE users SET labels = ARRAY[' Red ', NULL, 'Blue'], prefs = '[\"X\", null]', \
+         notes = '[{\"a\": 1}, null]', codes = '{1,2}' WHERE id = 1",
+        "UPDATE users SET prefs = '\"Solo\"' WHERE id = 2",
+        "UPDATE users SET labels = '{}', prefs = '[{\"bad\": 1}]' WHERE id = 3",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let integer = |name: &str| {
+        let mut field = col(name, name);
+        if let FieldSource::Column(column) = &mut field.source {
+            column.ty = FlussoType::Integer;
+        }
+        field
+    };
+    let schema = users_schema(
+        vec![
+            integer("id"),
+            array_col(
+                "labels",
+                FlussoType::Keyword,
+                vec![Transform::Trim, Transform::Lowercase],
+                Some(strings(&["none"])),
+            ),
+            array_col(
+                "prefs",
+                FlussoType::Keyword,
+                vec![Transform::Lowercase],
+                None,
+            ),
+            array_col("notes", FlussoType::Json, Vec::new(), None),
+            integer("codes"),
+            Field {
+                source: FieldSource::Column(Column {
+                    column: column("name"),
+                    array: true,
+                    ..match col("nick", "name").source {
+                        FieldSource::Column(column) => column,
+                        _ => unreachable!(),
+                    }
+                }),
+                ..base("nick")
+            },
+        ],
+        None,
+    );
+    let spec = spec(schema.clone());
+    let documents = builder(&url, schema).await;
+
+    let found: Vec<_> = validate_indexes(&spec, &documents)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|d| (d.dotted_path(), d.kind))
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            ("codes".to_owned(), DiagnosticKind::UndeclaredArrayColumn),
+            ("nick".to_owned(), DiagnosticKind::NotAnArrayColumn),
+        ]
+    );
+
+    let ada = upsert(&documents, 1).await;
+    assert_eq!(ada["labels"], strings(&["red", "blue"]));
+    assert_eq!(ada["prefs"], strings(&["x"]));
+    assert_eq!(
+        ada["notes"],
+        GenericValue::Array(vec![GenericValue::Map(BTreeMap::from([(
+            "a".to_owned(),
+            GenericValue::BigInt(1)
+        )]))])
+    );
+    assert_eq!(arr_of(&ada, "codes").len(), 2);
+    assert_eq!(ada["nick"], strings(&["Ada Lovelace"]));
+
+    let alan = upsert(&documents, 2).await;
+    assert_eq!(alan["labels"], strings(&["none"]));
+    assert_eq!(alan["prefs"], strings(&["solo"]));
+    assert_eq!(alan["notes"], GenericValue::Null);
+
+    let failed = |document: &Document| match document {
+        Document::Failed { failure, .. } => failure.field.clone(),
+        other => panic!("expected a failed document, got {other:?}"),
+    };
+    assert_eq!(failed(&documents.build(&doc(3)).await.unwrap()), "prefs");
+    let many = documents.build_many(&[doc(1), doc(3)]).await.unwrap();
+    let by_id = |id: i64| many.iter().find(|d| id_of(d.id()) == id).unwrap();
+    assert!(matches!(by_id(1), Document::Upsert { .. }));
+    assert_eq!(failed(by_id(3)), "prefs");
+}
+
+// ---------------------------------------------------------------------------
 // Soft delete: column form (boolean with a `when`, and a non-boolean marker)
 // and field form.
 // ---------------------------------------------------------------------------
