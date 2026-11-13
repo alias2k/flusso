@@ -1,0 +1,17 @@
+# Array columns (issue #276), read back through a derived root.
+version: 1
+table: orders
+primary_key: id
+fields:
+  - keyword: id
+    required: true
+  - enum: tags
+    variants: [urgent, fragile]
+    required: true
+    array: true
+  - integer: scores
+    required: false
+    array: true
+  - keyword: codes
+    required: false
+    array: true

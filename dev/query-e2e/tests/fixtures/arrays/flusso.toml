@@ -1,0 +1,11 @@
+# The `array_columns` e2e's derived root reads this at compile time; no
+# database or cluster is reached through it.
+
+[source]
+type = "postgres"
+connection_url = "postgres://app@localhost/test"
+
+[[index]]
+name = "listed"
+schema = "listed.schema.yml"
+enabled = true
