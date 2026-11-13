@@ -878,13 +878,21 @@ dropped, and an object/array element of a non-`json` field is a `BuildFailure` t
 `build_many` return as `Document::Failed` (so `on_error` decides). `Catalog::accepts_transforms`
 takes `element: bool` (Postgres probes the `[]` base type, `text` for `json`/`jsonb`);
 `NotAnArrayColumn`/`UndeclaredArrayColumn` are the catalog checks. Query side: `check_type`'s
-scalar arm also accepts a custom non-`Vec` type through const asserts (`OpaqueProbe::ARRAY` +
+scalar arm also accepts a custom non-`Vec` type through const asserts (`OpaqueProbe::LEAF_ARRAY` +
 `accepts_kind`), and `#[derive(FlussoValue)]` on a newtype over `Vec<E>` emits only
-`FlussoValueMeta` (`E`'s kinds, `ARRAY`/`READS_ARRAY`), no `FlussoValue<K>`. Guards:
+`FlussoValueMeta` (`E`'s kinds, `ARRAY`/`READS_ARRAY`), no `FlussoValue<K>`. So `ARRAY` has **two
+producers**, told apart by kinds (`OpaqueProbe::LEAF_ARRAY` = `ARRAY` with no `Nested`/`Object`
+kind): a value array newtype goes only at an array leaf or a `json` array, a fragment array newtype
+only at a `nested` field (root: `array_value_check`/`json_array_check`/`array_newtype_check`;
+fragment: `array_shape_check`). The value derive asserts where it is declared that `E` reads no array
+and is no sub-document/object, and its untagged forwarding path forwards `ARRAY`/`READS_ARRAY` and
+refuses a sub-document inner type (a value's `__flusso_check` walks into nothing). A fragment's
+shape check lets any element through at a `json` array, as a root does. Guards:
 `an_array_column_changes_the_content_hash_only_while_it_is_set`, the `value::tests`/`query::tests`
 array cases, `validation::tests`' `an_array_*`, `config_coverage`'s
 `array_columns_clean_up_their_value_and_are_checked_against_the_catalog`, the `array_columns` UI
-pass test + `array_*` compile-fail tests, and `dev/query-e2e`'s `array_columns`.
+pass test + `array_*`/`json_array_*`/`value_newtype_over_an_array_or_a_fragment` compile-fail tests,
+and `dev/query-e2e`'s `array_columns` (a derived root read back from real hits).
 
 ### Script fields (issue #198)
 

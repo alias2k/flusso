@@ -33,7 +33,7 @@ Keep enum keyword fields typed in the struct; never `#[flusso(skip)]` them.
 
 ### Arrays
 
-**A newtype over a `Vec` stands for an [array field](document-structs.md#arrays).** It takes its element's kinds, variants and `exhaustive` flag, so it fits a field declared `array: true` of that kind, and nothing else.
+**A newtype over a `Vec` stands for an [array field](document-structs.md#arrays).** It takes its element's kinds, variants and `exhaustive` flag. Where it fits, beside the `FlussoFragment` newtype over a `Vec` of sub-documents, is [one table](document-structs.md#two-kinds-of-array-newtype).
 
 ```rust
 #[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
@@ -43,7 +43,7 @@ struct Tags(Vec<Tag>);            // an array of `Tag`
 Order::tags().any_of([Tag::Urgent]);   // operators take the element, never `Tags`
 ```
 
-It is no query value itself, so `eq(Tags(…))` doesn't compile. A kind tag on it is a compile error: tag the element type instead.
+It is no query value itself, so `eq(Tags(…))` doesn't compile. A kind tag on it is a compile error: tag the element type instead. An untagged newtype over it is an array newtype too.
 
 ### Hand-written values
 

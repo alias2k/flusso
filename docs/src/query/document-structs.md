@@ -61,7 +61,7 @@ For each declared field, the derive finds the schema field by **document key**, 
 
 Type matching is by **leaf identifier plus `Option` shape**: the macro compares the final path segment (`String`, `i32`, `OffsetDateTime`) against the table below, since it can't resolve aliases. An `object` field expects a struct, a `nested` field a `Vec<_>`, and the inner check is handed to that fragment. A `HashMap`/`BTreeMap` is a `map`'s shape or a `json` field's, and a `Vec` of them a `json` field's alone; neither is ever an `object` or `nested` array with fields of their own: declare a struct for that (at a `nested` array, one per element, as `Vec<Struct>`), on a root and in a fragment. A `Vec<_>` goes exactly where the schema field is an array (a `nested` array or a flat one), on a root and in a fragment.
 
-A `#[serde(transparent)]` (or tuple) `FlussoFragment` newtype over a `Vec` of a struct reads the same JSON array, so it goes where that `Vec` would: `orders: Orders` with `struct Orders(Vec<Order>)` at a `nested` field, each element checked as `Order`. So does a newtype over such a newtype. One over `Option<Vec<_>>` reads `null` too, so it is no array. A newtype over a `Vec` is rejected at an `object`, and so is a `Vec` of one anywhere a level is checked: that is an array of arrays. The element has to be a fragment: a newtype over a `Vec` of a value type (an enum, a `FlussoValue` newtype) is no array of sub-documents. The fragment derive marks a newtype this way, and a hand-written `FlussoValueMeta` leaves `ARRAY` unset: a plain struct under `opaque` at a `nested` field still has to be a `Vec<_>`.
+A `#[serde(transparent)]` (or tuple) `FlussoFragment` newtype over a `Vec` of a struct reads the same JSON array, so it goes where that `Vec` would: `orders: Orders` with `struct Orders(Vec<Order>)` at a `nested` field, each element checked as `Order`. Where each [kind of array newtype](#two-kinds-of-array-newtype) fits is one table. A `Vec` of an array newtype is an array of arrays, rejected anywhere a level is checked. The fragment derive marks a newtype this way, and a hand-written `FlussoValueMeta` leaves `ARRAY` unset: a plain struct under `opaque` at a `nested` field still has to be a `Vec<_>`.
 
 ### Types named like a built-in
 
@@ -118,7 +118,7 @@ pub struct Product {
 | `date` | `time::Date` or chrono's | `Date` |
 | `timestamp` | `time::OffsetDateTime` or chrono's | `Date` |
 | `binary` | `String` (base64) | `Binary` |
-| `json` | `serde_json::Value`, any `HashMap`/`BTreeMap<String, _>`, or a `Vec` of them; a `Vec<_>` with `array: true` | `Json`; none with `indexed: false` |
+| `json` | `serde_json::Value`, any `HashMap`/`BTreeMap<String, _>`, or a `Vec` of them; with `array: true`, see [Arrays](#arrays) | `Json`; none with `indexed: false` |
 | `map` | `HashMap<String, V>`, `BTreeMap<String, V>`, or a `#[derive(FlussoMap)]` struct | `TextMap` / `KeywordMap` / `NumberMap` / `DateMap` |
 | `geo` | `GeoPoint { lat, lon }` | `Geo` |
 | `custom` | the matching scalar, else `serde_json::Value` | by OpenSearch type |
@@ -146,7 +146,20 @@ pub struct Order {
 Order::tags().any_of([Tag::Urgent]);
 ```
 
-A [`FlussoValue` newtype over a `Vec`](enums-and-values.md#arrays) goes where that `Vec` would: `tags: Option<Tags>` with `struct Tags(Vec<Tag>)`, the shape an ORM decoding a `jsonb` column usually wants. A plain type (`Tag`, `String`) at an array field is a compile error, and so is a `Vec` or an array newtype at a field that isn't one. A `json` array takes a `Vec` of anything, `serde_json::Value`, or an array newtype; no bare struct. Sorting an array uses OpenSearch's default: the smallest element ascending, the largest descending.
+A [`FlussoValue` newtype over a `Vec`](enums-and-values.md#arrays) goes where that `Vec` would: `tags: Option<Tags>` with `struct Tags(Vec<Tag>)`, the shape an ORM decoding a `jsonb` column usually wants. A plain type (`Tag`, `String`) at an array field is a compile error, and so is a `Vec` or an array newtype at a field that isn't one. Sorting an array uses OpenSearch's default: the smallest element ascending, the largest descending.
+
+A `json` array takes `serde_json::Value`, a `Vec` of any value (`String`, a number, an enum, `serde_json::Value`, a map, an array newtype), or an array newtype of values. A `Vec` of a fragment and a bare struct are compile errors: a `json` field declares no fields to check a struct against. A root and a fragment agree on all of it.
+
+### Two kinds of array newtype
+
+Both read a whole JSON array and go where that `Vec` would. What the array holds decides where each fits:
+
+| Newtype | Derive | Goes at | A compile error at |
+| --- | --- | --- | --- |
+| over `Vec<Struct>`, an array of sub-documents | `#[derive(FlussoFragment)]`, `#[serde(transparent)]` or a tuple struct | a `nested` field (`has_many`, `many_to_many`) | an array leaf, a `json` array, an `object` |
+| over `Vec<E>`, `E` a leaf value (`String`, a number, an enum, a `FlussoValue` newtype) | `#[derive(FlussoValue)]`, no kind tag | a field with `array: true` of `E`'s kind, or a `json` array | a `nested` field, a single-valued field |
+
+A newtype over either one, with the same derive, is the same kind. The element of a `FlussoValue` one must be a leaf: a `Vec` of an array newtype or of a fragment is a compile error where the newtype is declared. Wrap the `Vec` directly: over `Option<Vec<_>>` the newtype reads `null` too, so put the `Option` on the field instead.
 
 ## Nullability
 
