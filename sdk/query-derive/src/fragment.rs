@@ -165,7 +165,11 @@ fn newtype_kinds(field: &DocField) -> Option<TokenStream> {
     if field.ident.is_some() || field.skip {
         return None;
     }
-    let ty = checked_type(field, false)?;
+    let Some(ty) = checked_type(field, false) else {
+        let inner = strip_option(field.ty);
+        let tags = primitive_kinds(vec_inner(inner).unwrap_or(inner))?;
+        return Some(quote! { &[#(#tags),*] });
+    };
     Some(quote! {
         {
             #[allow(unused_imports)]
@@ -531,7 +535,8 @@ fn opaque_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> 
             #[allow(unused_imports)]
             use ::flusso_query::OpaqueWithoutMeta as _;
             assert!(
-                ::flusso_query::is_container(level, #key)
+                (::flusso_query::is_container(level, #key)
+                    && !::flusso_query::OpaqueProbe::<#element>::HAS_META)
                     || ::flusso_query::kind_is(
                         level, #key,
                         ::flusso_query::OpaqueProbe::<#element>::KINDS,

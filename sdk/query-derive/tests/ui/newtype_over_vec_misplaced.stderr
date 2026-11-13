@@ -135,3 +135,27 @@ note: inside `VecOfWrappedStatus::__flusso_check`
     |
 215 |     orders: Vec<WrappedStatus>,
     |             ^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: field `orders` in index `users` is a `nested` array with fields of its own — `Label` is not a sub-document; declare a struct for it with `#[derive(FlussoFragment)]`
+   --> tests/ui/newtype_over_vec_misplaced.rs:235:13
+    |
+235 |     orders: Vec<Label>,
+    |             ^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: field `orders` in index `users` is a `nested` array with fields of its own — `Labels` is not a sub-document; declare a struct for it with `#[derive(FlussoFragment)]`
+   --> tests/ui/newtype_over_vec_misplaced.rs:246:13
+    |
+246 |     orders: Labels,
+    |             ^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: fragment `OpaqueVecOfValues`: field `orders` is `Status`, whose flusso kind does not match the schema field's type at this path
+   --> tests/ui/newtype_over_vec_misplaced.rs:261:13
+    |
+261 |     orders: OpaqueVecOfValues,
+    |             ^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+    |
+note: inside `OpaqueVecOfValues::__flusso_check`
+   --> tests/ui/newtype_over_vec_misplaced.rs:253:13
+    |
+253 |     orders: Vec<Status>,
+    |             ^^^ the failure occurred here

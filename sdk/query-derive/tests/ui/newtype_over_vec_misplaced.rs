@@ -223,4 +223,42 @@ struct FromVecOfWrappedStatus {
     orders: VecOfWrappedStatus,
 }
 
+/// A newtype fragment over a primitive is a value too.
+#[derive(serde::Deserialize, FlussoFragment)]
+#[serde(transparent)]
+struct Label(String);
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+struct UserVecOfLabels {
+    id: i32,
+    orders: Vec<Label>,
+}
+
+#[derive(serde::Deserialize, FlussoFragment)]
+#[serde(transparent)]
+struct Labels(Vec<Label>);
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+struct UserLabels {
+    id: i32,
+    orders: Labels,
+}
+
+/// `opaque` in a fragment keeps the check a root keeps.
+#[derive(serde::Deserialize, FlussoFragment)]
+struct OpaqueVecOfValues {
+    #[flusso(opaque)]
+    orders: Vec<Status>,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+struct FromOpaqueVecOfValues {
+    id: i32,
+    #[serde(flatten)]
+    orders: OpaqueVecOfValues,
+}
+
 fn main() {}
