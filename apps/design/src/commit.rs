@@ -156,6 +156,10 @@ fn run(
         done.push(Done::Temp(temp.clone()));
         disk.write(&temp, &write.text)
             .map_err(|e| anyhow!("staging {}: {e}", write.dest.display()))?;
+        if let Ok(meta) = std::fs::metadata(&write.dest) {
+            std::fs::set_permissions(&temp, meta.permissions())
+                .map_err(|e| anyhow!("staging {}: {e}", write.dest.display()))?;
+        }
         temps.push(temp);
     }
 
@@ -341,6 +345,19 @@ mod tests {
 
     /// A failure at any step of the commit leaves the project byte for byte
     /// as it was: no temp file, no backup, no new folder.
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_file_keeps_its_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, writes, removals) = project("mode");
+        let config = dir.join("flusso.toml");
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        commit(&writes, &removals, &mut Disk::default()).unwrap();
+        let mode = std::fs::metadata(&config).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn a_failure_at_any_step_restores_the_project() {
         let (dir, writes, removals) = project("count");

@@ -118,7 +118,7 @@ A preview that fails anyway shows an error banner, cleared by the next preview t
 
 Every changed file, in a folder tree: **New**, write, **Move** (rename or relocate, with "Moved from"). A warning marks any path resolving outside the config directory, a file written over one that isn't that index's own (such as one a removed index left behind), and any file whose layout a save can't keep (see below). Filter, toggle one or all, then **Write N files**. Below the list: **Validating…**, then **All checks passed**, **Database offline**, or the issue count. Unified, split, old, and new diff views.
 
-Unchecked files are left as they are on disk. `flusso.toml` and the schema files that only fit the new one, those of a new, renamed or moved index, are marked with a link and go together: unchecking one unchecks all of them. Everything else can be left out on its own. So after any save, every index in `flusso.toml` on disk still has its file.
+Unchecked files are left as they are on disk. `flusso.toml` and the schema files that only fit the new one, those of a new, renamed or moved index, are marked with a link and go together: unchecking one unchecks all of them. Everything else can be left out on its own.
 
 Meaning is preserved: the written file parses back to the same schema and mapping, which the preview self-checks on every edit. Values (`constant`, `default`, `options`) are written as plain YAML: `1.5`, `true`, `null`, and a string quoted only where it would read as something else (`'123'`, `'null'`). Files from earlier designer releases carry tags such as `!String hi`; they load unchanged. One of those, `!Decimal '1.5'`, has always read as the string `"1.5"`, so a number saved that way is a string until you change it back. Moves are real: the old file is removed and emptied folders pruned, within the rules [below](#what-a-save-refuses).
 
@@ -132,11 +132,11 @@ After any save, every index in the `flusso.toml` on disk has a file of its own, 
 - a file another index uses would be written, unless that index writes it too with the same content;
 - a move's old file isn't the same index's file in the `flusso.toml` on disk;
 - a new, renamed or moved index's file is written without `flusso.toml`;
-- the new `flusso.toml` points an index at a file the save doesn't write, unless it is that index's own file on disk (two indexes keep sharing one only if they already did), or a file no index used, for a new index. An index added with no schema file is refused, by the designer before the review.
+- the new `flusso.toml` points an index at a file the save doesn't write, unless it is that index's own file on disk (two indexes keep sharing one only if they already did), or a file no index used that reads as a schema, for a new index. An index added with no schema file is refused, by the designer before the review.
 
 A move removes its old file only when no index uses it after the save and it lies in the config directory; otherwise the old file stays. No other file is ever removed.
 
-Every check runs before anything is written. A save that fails anyway (permissions, a full disk) is undone: the project is left exactly as it was, with no temporary or backup file behind. Only if putting a file back fails too does the error name the backup files that still hold the previous content.
+Every check runs before anything is written. A save that fails anyway (permissions, a full disk) is undone: the project is left exactly as it was, with no temporary or backup file behind. A file that is replaced keeps its permissions. A designer killed in the middle of a save is not undone: its `*.flusso-save.*.bak` files beside the schemas hold what was there. Only if putting a file back fails too does the error name the backup files that still hold the previous content.
 
 ### What a save keeps
 

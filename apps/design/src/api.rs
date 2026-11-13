@@ -1058,6 +1058,18 @@ fn plan(paths: &Paths, request: &SaveRequest) -> Result<Plan> {
                 (Some(_), None) => false,
             };
             if own {
+                if owners.is_empty() && paired.is_none() {
+                    let text = std::fs::read_to_string(&entry.path)
+                        .with_context(|| format!("reading {}", entry.path.display()))?;
+                    parse_schema_text(&text).with_context(|| {
+                        format!(
+                            "flusso.toml would point the new index `{}` at {}, which does not \
+                             read as a schema",
+                            entry.name,
+                            entry.path.display()
+                        )
+                    })?;
+                }
                 continue;
             }
             match owners.first().and_then(|&i| old.get(i)) {

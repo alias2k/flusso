@@ -1753,6 +1753,29 @@ fn an_added_index_needs_its_schema_file() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A new index may take a file no index used only when that file reads as a
+/// schema: anything else would leave a project that does not load.
+#[test]
+fn a_new_index_cannot_take_a_file_that_is_not_a_schema() {
+    let dir = own_fixture("not-a-schema");
+    let config_path = dir.join("flusso.toml");
+    std::fs::write(dir.join("notes.txt"), "not a schema\n").unwrap();
+    let project = api::load_project(&config_path).unwrap();
+    let request = || SaveRequest {
+        config: config_with(&project.config, &[("extra", "notes.txt")]),
+        ops: Vec::new(),
+        skip: Vec::new(),
+        identity: identity(&project.config, &[Some(0), Some(1), Some(2), None]),
+    };
+    refused(&dir, request);
+    let err = format!(
+        "{:#}",
+        api::diff_project(&config_path, request()).unwrap_err()
+    );
+    assert!(err.contains("does not read as a schema"), "{err}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Removing an index and adding one with its name writes the new schema over
 /// the old file in the designer's own form, and the review flags that it
 /// replaces an existing file.
