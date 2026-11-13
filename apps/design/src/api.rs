@@ -31,6 +31,7 @@ use source_postgres::{
     PgDocumentBuilder, PostgresConfig, WalChangeCapture, replication_config, sql_connection_url,
 };
 
+use crate::commit::journal::Digest;
 use crate::commit::{
     self, Direction, Disk, Fix, HandStep, Holds, LockError, Outcome, ProblemKind, ProjectLock,
     Report, State, Unusable, Write, commit, recover, strays,
@@ -52,10 +53,14 @@ pub struct Project {
     /// What the designer found of an earlier, interrupted save.
     #[serde(skip_serializing_if = "SaveRecovery::is_empty")]
     pub recovery: SaveRecovery,
-    /// When the project was read, in milliseconds since the Unix epoch: a
-    /// diff or save sends it back ([`SaveRequest::loaded_at_ms`]).
-    pub loaded_at_ms: u64,
+    /// The digest of each file the page's model came from, as it was read:
+    /// a diff or save sends them back ([`SaveRequest::digests`]).
+    pub digests: Digests,
 }
+
+/// Per file, by its path relative to the config's folder, the SHA-256 of
+/// its bytes in hex; `None` for a file that did not exist.
+pub type Digests = BTreeMap<String, Option<String>>;
 
 /// One index entry plus its loaded `*.schema.yml`.
 #[derive(Debug, Serialize)]
@@ -79,9 +84,20 @@ pub struct IndexFile {
 }
 
 /// Load the project rooted at `config_path`.
+///
+/// Each file is read once: its digest is of the bytes its part of the model
+/// was parsed from.
 pub fn load_project(config_path: &Path) -> Result<Project> {
-    let raw = std::fs::read_to_string(config_path)
-        .with_context(|| format!("reading {}", config_path.display()))?;
+    let bytes =
+        std::fs::read(config_path).with_context(|| format!("reading {}", config_path.display()))?;
+    let paths = Paths::new(config_path)?;
+    let mut digests = Digests::new();
+    digests.insert(
+        paths.relative_path(&paths.config),
+        Some(Digest::of(&bytes).hex().to_owned()),
+    );
+    let raw = String::from_utf8(bytes)
+        .with_context(|| format!("reading {}: not UTF-8", config_path.display()))?;
     let config = ConfigToml::try_parse(&raw)
         .with_context(|| format!("parsing {}", config_path.display()))?;
 
@@ -92,7 +108,22 @@ pub fn load_project(config_path: &Path) -> Result<Project> {
         .map(|entry| {
             let schema_path = entry.schema.as_ref();
             let resolved = resolve(base_dir, schema_path);
-            let raw = std::fs::read_to_string(&resolved).ok();
+            let bytes = std::fs::read(&resolved);
+            if let Ok(at) = paths.at(schema_path) {
+                match &bytes {
+                    Ok(bytes) => {
+                        digests.insert(
+                            paths.relative_path(&at),
+                            Some(Digest::of(bytes).hex().to_owned()),
+                        );
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        digests.insert(paths.relative_path(&at), None);
+                    }
+                    Err(_) => {}
+                }
+            }
+            let raw = bytes.ok().and_then(|b| String::from_utf8(b).ok());
             let (schema, error) = match raw.as_deref() {
                 Some(text) => match parse_schema_text(text) {
                     Ok(s) => (Some(s), None),
@@ -116,7 +147,7 @@ pub fn load_project(config_path: &Path) -> Result<Project> {
         config,
         indexes,
         recovery: SaveRecovery::default(),
-        loaded_at_ms: stamp(),
+        digests,
     })
 }
 
@@ -572,11 +603,14 @@ pub struct SaveRequest {
     /// Absent, or not matching the file, entries pair by name.
     #[serde(default)]
     pub identity: Option<ConfigIdentity>,
-    /// When the page read the project ([`Project::loaded_at_ms`]). A diff or
-    /// save from a page that read it before a save this process completed
-    /// while recovering is refused: that page shows files that changed since.
+    /// The digests of the files as the page read them ([`Project::digests`],
+    /// then what its own saves wrote). A save refuses to write, move or
+    /// remove a file that no longer has the digest given here (a file not
+    /// listed must not exist), and refuses anything while `flusso.toml` does
+    /// not have its digest: every check of a save reads it. Absent, nothing
+    /// is compared (the designer's page always sends them).
     #[serde(default)]
-    pub loaded_at_ms: Option<u64>,
+    pub digests: Option<Digests>,
 }
 
 /// What a diff found: the review, and the interrupted saves it rolled back
@@ -611,7 +645,69 @@ pub struct SaveResponse {
     /// Interrupted saves rolled back before this one.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recovered: Vec<RecoveredSave>,
+    /// The digest of every file the save wrote, and `None` for each it
+    /// removed: the page's digests from now on.
+    pub digests: Digests,
 }
+
+/// A file that is not as the page read it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StaleFile {
+    /// Its path, relative to the config's folder.
+    pub path: String,
+    /// What happened to it.
+    pub change: StaleChange,
+    /// The digest of the file on disk now; `None` when there is none. Sent
+    /// back as the file's digest, it lets a save overwrite the file anyway.
+    pub on_disk: Option<String>,
+}
+
+/// How a file differs from what the page read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StaleChange {
+    /// It holds other bytes.
+    Changed,
+    /// It was deleted.
+    Deleted,
+    /// It did not exist, and now does.
+    Created,
+    /// The page never read it, and it exists.
+    Unloaded,
+}
+
+/// A save refused because files it writes, moves or removes, or
+/// `flusso.toml`, changed on disk since the page read them: nothing was
+/// written.
+#[derive(Debug)]
+pub struct Stale(pub Vec<StaleFile>);
+
+impl std::fmt::Display for Stale {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let files = self
+            .0
+            .iter()
+            .map(|file| {
+                let path = &file.path;
+                match file.change {
+                    StaleChange::Changed => format!("{path} changed"),
+                    StaleChange::Deleted => format!("{path} was deleted"),
+                    StaleChange::Created => format!("{path} was created"),
+                    StaleChange::Unloaded => format!("{path} exists and was never loaded"),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(
+            f,
+            "nothing was saved: {files} on disk since this page loaded the project, and the save \
+             would overwrite that. Reload the page to load what is on disk (unsaved changes are \
+             lost), or copy your edits out first"
+        )
+    }
+}
+
+impl std::error::Error for Stale {}
 
 /// What the designer found of saves a process left half done (see the
 /// `commit` module): it settles them before it reads the project.
@@ -628,10 +724,6 @@ pub struct SaveRecovery {
     /// before journals, or found holding other text than the save's):
     /// reported, never touched.
     pub leftovers: Vec<String>,
-    /// The page read the project before an interrupted save was completed
-    /// on disk: what it shows is out of date, so it must reload to save.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub stale: bool,
 }
 
 impl SaveRecovery {
@@ -640,10 +732,9 @@ impl SaveRecovery {
         self.recovered.is_empty() && self.blocked.is_none() && self.leftovers.is_empty()
     }
 
-    /// Whether a diff or save must stop: a save could not be settled, or the
-    /// page is out of date.
+    /// Whether a diff or save must stop: a save could not be settled.
     fn stops(&self) -> bool {
-        self.blocked.is_some() || self.stale
+        self.blocked.is_some()
     }
 
     fn busy() -> Self {
@@ -896,53 +987,47 @@ pub enum BlockedProblem {
     Failed,
 }
 
-/// A load, diff or save refused because of an interrupted save: one was just
-/// settled (reload before editing on), one can't be, or another designer is
-/// saving.
+/// A load, diff or save refused because of an interrupted save: one can't
+/// be settled, or another designer is saving.
 #[derive(Debug)]
 pub struct Interrupted(pub SaveRecovery);
 
 impl std::fmt::Display for Interrupted {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let recovery = &self.0;
-        if let Some(blocked) = &recovery.blocked {
-            if blocked.busy {
-                return f
-                    .write_str("another designer is saving this project; try again in a moment");
-            }
-            write!(
-                f,
-                "an interrupted save could not be recovered. {}{}",
-                match blocked.direction {
-                    Some(RecoveryDirection::Back) =>
-                        "The save was cut short before every file was in place, so the designer \
-                         was rolling it back. ",
-                    Some(RecoveryDirection::Forward) =>
-                        "Every file of the save was in place, so the designer was finishing it. ",
-                    None => "",
-                },
-                blocked
-                    .problems
-                    .iter()
-                    .map(|p| problem_help(p, blocked.direction))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            )?;
-            if let Some(keep) = &blocked.keep {
-                write!(f, " {}", keep_help(blocked, keep))?;
-            }
-            if let Some(report) = &blocked.report {
-                write!(f, " {}", way_out(report))?;
-            }
-            if !blocked.leftovers.is_empty() {
-                write!(f, " Leftover files: {}.", blocked.leftovers.join(", "))?;
-            }
-            return Ok(());
+        let Some(blocked) = &self.0.blocked else {
+            return f.write_str("an interrupted save stops this request");
+        };
+        if blocked.busy {
+            return f.write_str("another designer is saving this project; try again in a moment");
         }
-        f.write_str(
-            "an interrupted save was completed on disk after this page read the project, so the \
-             page is out of date; reload the designer before saving (unsaved changes are lost)",
-        )
+        write!(
+            f,
+            "an interrupted save could not be recovered. {}{}",
+            match blocked.direction {
+                Some(RecoveryDirection::Back) =>
+                    "The save was cut short before every file was in place, so the designer \
+                     was rolling it back. ",
+                Some(RecoveryDirection::Forward) =>
+                    "Every file of the save was in place, so the designer was finishing it. ",
+                None => "",
+            },
+            blocked
+                .problems
+                .iter()
+                .map(|p| problem_help(p, blocked.direction))
+                .collect::<Vec<_>>()
+                .join(" ")
+        )?;
+        if let Some(keep) = &blocked.keep {
+            write!(f, " {}", keep_help(blocked, keep))?;
+        }
+        if let Some(report) = &blocked.report {
+            write!(f, " {}", way_out(report))?;
+        }
+        if !blocked.leftovers.is_empty() {
+            write!(f, " Leftover files: {}.", blocked.leftovers.join(", "))?;
+        }
+        Ok(())
     }
 }
 
@@ -1087,49 +1172,10 @@ fn way_out(report: &JournalReport) -> String {
     out.join(" ")
 }
 
-/// A moment on the server's clock: milliseconds since the Unix epoch, made
-/// strictly increasing within the process, so a page load and a recovery
-/// never share one.
-fn stamp() -> u64 {
-    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-    let previous = LAST
-        .fetch_update(
-            std::sync::atomic::Ordering::SeqCst,
-            std::sync::atomic::Ordering::SeqCst,
-            |last| Some(now.max(last.saturating_add(1))),
-        )
-        .unwrap_or(now);
-    now.max(previous.saturating_add(1))
-}
-
-/// Per project folder, when ([`stamp`]) this process last completed a save
-/// while recovering. A page that read the project before then shows files
-/// that changed under it.
-static COMPLETED: std::sync::Mutex<BTreeMap<PathBuf, u64>> = std::sync::Mutex::new(BTreeMap::new());
-
 /// The tokens of this process's own saves whose cleanup was left to the
 /// next recovery ([`commit::Committed::cleanup_left`]): finishing one is no
 /// news to the page that made it.
 static OWN_CLEANUP: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-
-fn note_completed(base: &Path) {
-    let now = stamp();
-    if let Ok(mut completed) = COMPLETED.lock() {
-        let at = completed.entry(base.to_path_buf()).or_default();
-        *at = (*at).max(now);
-    }
-}
-
-/// Whether a page that read the project at `loaded_at_ms` (unknown: `None`)
-/// is out of date: it read it before this process completed a save while
-/// recovering.
-fn is_stale(base: &Path, loaded_at_ms: Option<u64>) -> bool {
-    let completed = COMPLETED.lock().ok().and_then(|c| c.get(base).copied());
-    completed.is_some_and(|at| loaded_at_ms.is_none_or(|loaded| loaded < at))
-}
 
 /// Keep the designer's records of saves in flight in `dir` instead of the
 /// user's state folder, for this whole process (the first call wins): for
@@ -1234,15 +1280,7 @@ fn recover_locked(paths: &Paths, lock: &ProjectLock, disk: &mut Disk) -> SaveRec
             keep: b.keep.as_ref().map(|k| k.iter().map(step).collect()),
         }),
         leftovers: Vec::new(),
-        stale: false,
     };
-    if out
-        .recovered
-        .iter()
-        .any(|r| r.outcome == RecoveryOutcome::Completed)
-    {
-        note_completed(&paths.base);
-    }
     if out.blocked.is_none() {
         let mut folders = project_folders(paths);
         for folder in recovery.settled.iter().flat_map(|s| &s.folders) {
@@ -1428,6 +1466,13 @@ pub struct OpDiff {
     /// exists (see [`Saved::dropped`]).
     #[serde(skip_serializing_if = "is_zero")]
     pub dropped: usize,
+    /// The files this entry writes or removes that are not as the page read
+    /// them ([`SaveRequest::digests`]); for `flusso.toml`, set whether or not
+    /// it is written, since every save is checked against it. A save that
+    /// writes anything refuses while the config's is set, and refuses an
+    /// entry whose own is set.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stale: Vec<StaleFile>,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -1514,7 +1559,7 @@ impl Paths {
     /// `error` with every path in the project written relative to it, as
     /// the config names schema files.
     fn relative(&self, error: anyhow::Error) -> anyhow::Error {
-        if error.is::<Interrupted>() {
+        if error.is::<Interrupted>() || error.is::<Stale>() {
             return error;
         }
         anyhow::anyhow!(self.relative_text(&format!("{error:#}")))
@@ -1708,6 +1753,7 @@ fn plan(paths: &Paths, request: &SaveRequest) -> Result<Plan> {
         needs_config: false,
         current,
         next,
+        stale: Vec::new(),
     });
 
     // Each file written, with its text, its diff, and the saved indexes
@@ -1828,6 +1874,7 @@ fn plan(paths: &Paths, request: &SaveRequest) -> Result<Plan> {
             notice,
             dropped,
             needs_config,
+            stale: Vec::new(),
         });
     }
 
@@ -1931,10 +1978,41 @@ fn plan(paths: &Paths, request: &SaveRequest) -> Result<Plan> {
         }
     }
 
+    if let Some(digests) = &request.digests {
+        for diff in &mut diffs {
+            diff.stale = stale_files(paths, diff, digests)?;
+        }
+    }
     Ok(Plan {
         diffs,
         config_written,
     })
+}
+
+/// The files `diff` writes or removes that are not as `digests` says the
+/// page read them. A file `digests` doesn't list must not exist.
+fn stale_files(paths: &Paths, diff: &OpDiff, digests: &Digests) -> Result<Vec<StaleFile>> {
+    let mut stale = Vec::new();
+    for path in std::iter::once(&diff.path).chain(&diff.from) {
+        let key = paths.relative_path(Path::new(path));
+        let on_disk = Digest::at(Path::new(path))
+            .with_context(|| format!("reading {key}"))?
+            .map(|d| d.hex().to_owned());
+        let change = match (digests.get(&key), on_disk.is_some()) {
+            (Some(read), _) if *read == on_disk => continue,
+            (None, false) => continue,
+            (Some(Some(_)), true) => StaleChange::Changed,
+            (Some(Some(_)), false) => StaleChange::Deleted,
+            (Some(None), _) => StaleChange::Created,
+            (None, true) => StaleChange::Unloaded,
+        };
+        stale.push(StaleFile {
+            path: key,
+            change,
+            on_disk,
+        });
+    }
+    Ok(stale)
 }
 
 /// A checked save: the review's diffs, and whether `flusso.toml` is written.
@@ -1952,17 +2030,17 @@ pub fn diff_project(config_path: &Path, request: SaveRequest) -> Result<Vec<OpDi
 /// [`diff_project`], with the interrupted saves it rolled back first.
 ///
 /// An interrupted save found first is settled. Rolled back, the files are as
-/// the page read them, and the diff goes on. A page that read the project
-/// before a save was completed in recovery is refused with [`Interrupted`]
-/// (`stale`) every time, until it reloads; so is a save that can't be settled.
+/// they were, and the diff goes on; one that can't be settled is refused with
+/// [`Interrupted`]. Each entry is against the file on disk now, and lists the
+/// files that changed since the page read them ([`OpDiff::stale`]): the diff
+/// shows them, the save refuses them.
 pub fn review_project(config_path: &Path, request: SaveRequest) -> Result<Review> {
     let paths = Paths::new(config_path)?;
-    let mut recovery = if commit::pending(&paths.base) {
+    let recovery = if commit::pending(&paths.base) {
         recover_project(config_path)?
     } else {
         SaveRecovery::default()
     };
-    recovery.stale = is_stale(&paths.base, request.loaded_at_ms);
     if recovery.stops() {
         return Err(Interrupted(recovery).into());
     }
@@ -2042,14 +2120,34 @@ fn collect_dirs(base: &Path, dir: &Path, depth: usize, out: &mut Vec<String>) {
 /// The save holds the project's lock, waiting up to five seconds for another
 /// designer's save, and first settles a save a dead process left, as
 /// [`review_project`] does: rolled back, the save goes on and says so;
-/// refused with [`Interrupted`] when it can't be settled, or when the page
-/// read the project before a save was completed in recovery.
+/// refused with [`Interrupted`] when it can't be settled.
+///
+/// Under the lock, before anything is written, the files are compared with
+/// the request's [`SaveRequest::digests`]: when a file the save writes, moves
+/// or removes, or `flusso.toml` (which every check reads), is not as the page
+/// read it, the save is refused with [`Stale`] and nothing is written.
 pub fn save_project(config_path: &Path, request: SaveRequest) -> Result<SaveResponse> {
     save_with(config_path, &request, &mut Disk::default())
 }
 
 fn save_with(config_path: &Path, request: &SaveRequest, disk: &mut Disk) -> Result<SaveResponse> {
     let paths = Paths::new(config_path)?;
+    if let Some(digests) = &request.digests
+        && !paths.base.is_dir()
+    {
+        let gone: Vec<StaleFile> = digests
+            .iter()
+            .filter(|(_, digest)| digest.is_some())
+            .map(|(path, _)| StaleFile {
+                path: path.clone(),
+                change: StaleChange::Deleted,
+                on_disk: None,
+            })
+            .collect();
+        if !gone.is_empty() {
+            return Err(Stale(gone).into());
+        }
+    }
     std::fs::create_dir_all(&paths.base)
         .with_context(|| format!("creating {}", paths.base.display()))?;
     let lock = match ProjectLock::acquire(&paths.base, LOCK_WAIT) {
@@ -2057,8 +2155,7 @@ fn save_with(config_path: &Path, request: &SaveRequest, disk: &mut Disk) -> Resu
         Err(LockError::Busy) => return Err(Interrupted(SaveRecovery::busy()).into()),
         Err(e) => bail!(paths.relative_text(&e.to_string())),
     };
-    let mut recovery = recover_locked(&paths, &lock, disk);
-    recovery.stale = is_stale(&paths.base, request.loaded_at_ms);
+    let recovery = recover_locked(&paths, &lock, disk);
     if recovery.stops() {
         return Err(Interrupted(recovery).into());
     }
@@ -2072,6 +2169,17 @@ fn save_with(config_path: &Path, request: &SaveRequest, disk: &mut Disk) -> Resu
         .filter(|d| d.changed)
         .chain((plan.config_written).then_some(config))
         .collect();
+    if !applied.is_empty() {
+        let mut stale: Vec<StaleFile> = config.stale.clone();
+        for file in applied.iter().flat_map(|d| &d.stale) {
+            if !stale.iter().any(|s| s.path == file.path) {
+                stale.push(file.clone());
+            }
+        }
+        if !stale.is_empty() {
+            return Err(Stale(stale).into());
+        }
+    }
 
     let writes: Vec<Write> = applied
         .iter()
@@ -2096,6 +2204,15 @@ fn save_with(config_path: &Path, request: &SaveRequest, disk: &mut Disk) -> Resu
     }
 
     let mut resp = SaveResponse::default();
+    for write in &writes {
+        resp.digests.insert(
+            paths.relative_path(&write.dest),
+            Some(Digest::of(write.text.as_bytes()).hex().to_owned()),
+        );
+    }
+    for removed in &removals {
+        resp.digests.insert(paths.relative_path(removed), None);
+    }
     for d in &applied {
         match (d.op, &d.from) {
             (DiffOp::Move, Some(from)) => resp.moved.push(MovedFile {
@@ -2778,17 +2895,17 @@ mod tests {
     }
 
     /// A page that read the project before an interrupted save was completed
-    /// is refused every time, diff and save alike, until it reads it again.
+    /// is refused every time it saves a file that save changed, until it
+    /// reads the project again; its diff shows those files.
     #[test]
     fn a_page_older_than_a_completed_save_must_reload_to_save() {
         let fixture = Fixture::new("stale");
-        let page = load_project(&fixture.config()).unwrap().loaded_at_ms;
-        std::thread::sleep(Duration::from_millis(5));
+        let page = load_project(&fixture.config()).unwrap().digests;
         // Killed right after its commit point, before deleting a backup.
         let mut point = 1;
         loop {
             let mut request = fixture.swap();
-            request.loaded_at_ms = Some(page);
+            request.digests = Some(page.clone());
             save_with(
                 &fixture.config(),
                 &request,
@@ -2801,40 +2918,35 @@ mod tests {
             recover_project(&fixture.config()).unwrap();
             point += 1;
         }
-        let after = {
-            let mut files = fixture.files();
-            files.retain(|name, _| !name.starts_with('.'));
-            files
-        };
+        let recovery = recover_project(&fixture.config()).unwrap();
+        assert_eq!(recovery.recovered[0].outcome, RecoveryOutcome::Completed);
+        let after = fixture.files();
 
         let request = || {
-            let mut request = fixture.swap();
-            request.loaded_at_ms = Some(page);
+            let mut request: SaveRequest = serde_json::from_value(serde_json::json!({
+                "config": load_project(&fixture.config()).unwrap().config,
+                "ops": [{ "kind": "upsert", "index": "orders", "path": "products.schema.yml",
+                          "raw": "orders: 2\n" }],
+            }))
+            .unwrap();
+            request.digests = Some(page.clone());
             request
         };
         for _ in 0..2 {
-            let refused = interrupted(save_project(&fixture.config(), request()));
-            assert!(refused.stale && refused.blocked.is_none(), "{refused:?}");
-            let refused = interrupted(diff_project(&fixture.config(), request()));
-            assert!(refused.stale, "{refused:?}");
+            let err = save_project(&fixture.config(), request()).unwrap_err();
+            let refused = &err.downcast_ref::<Stale>().expect("stale").0;
+            let paths: Vec<&str> = refused.iter().map(|f| f.path.as_str()).collect();
+            assert_eq!(paths, ["flusso.toml", "products.schema.yml"]);
+            assert!(err.to_string().contains("Reload the page"), "{err}");
+            let review = review_project(&fixture.config(), request()).unwrap();
+            assert_eq!(review.diffs[0].stale[0].change, StaleChange::Changed);
+            assert_eq!(review.diffs[1].stale[0].path, "products.schema.yml");
         }
-        assert!(
-            Interrupted(SaveRecovery {
-                stale: true,
-                ..SaveRecovery::default()
-            })
-            .to_string()
-            .contains("reload")
-        );
         assert_eq!(fixture.files(), after, "a refused save wrote");
 
-        let reloaded = load_project(&fixture.config()).unwrap();
-        let request: SaveRequest = serde_json::from_value(serde_json::json!({
-            "config": reloaded.config,
-            "loaded_at_ms": reloaded.loaded_at_ms,
-        }))
-        .unwrap();
-        save_project(&fixture.config(), request).unwrap();
+        let mut reloaded = request();
+        reloaded.digests = Some(load_project(&fixture.config()).unwrap().digests);
+        save_project(&fixture.config(), reloaded).unwrap();
     }
 
     /// A journal naming a file outside the project blocks loading and saving
@@ -2954,75 +3066,39 @@ mod tests {
             .unwrap()
     }
 
-    /// A completed save's journal dated in the future (a clock set wrong)
-    /// does not hold every page stale: staleness reads the server's clock at
-    /// the moment recovery completed the save.
-    #[test]
-    fn a_completed_save_dated_in_the_future_does_not_hold_pages_stale() {
-        let point = commit_point("future-point");
-        let fixture = Fixture::new("future");
-        save_with(
-            &fixture.config(),
-            &fixture.swap(),
-            &mut Disk::stopping_after(point + 1),
-        )
-        .ok();
-        let done = fixture.0.join(".flusso-save.done");
-        let bytes = std::fs::read(&done).unwrap();
-        let mut journal: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        journal["started_at_ms"] = (stamp() + 10 * 365 * 24 * 3600 * 1000).into();
-        let dated = serde_json::to_vec_pretty(&journal).unwrap();
-        std::fs::write(&done, &dated).unwrap();
-        // The designer's own record follows the journal it now names.
-        let digest = |b: &[u8]| {
-            serde_json::to_value(commit::journal::Digest::of(b))
-                .unwrap()
-                .as_str()
-                .unwrap()
-                .to_owned()
-        };
-        for entry in std::fs::read_dir(fixture.state_dir()).unwrap().flatten() {
-            let text = std::fs::read_to_string(entry.path()).unwrap();
-            std::fs::write(entry.path(), text.replace(&digest(&bytes), &digest(&dated))).unwrap();
-        }
-
-        let recovery = recover_project(&fixture.config()).unwrap();
-        assert_eq!(recovery.recovered.len(), 1, "{recovery:?}");
-        assert_eq!(recovery.recovered[0].outcome, RecoveryOutcome::Completed);
-        let page = load_project(&fixture.config()).unwrap();
-        let request: SaveRequest = serde_json::from_value(serde_json::json!({
-            "config": page.config,
-            "loaded_at_ms": page.loaded_at_ms,
-        }))
-        .unwrap();
-        save_project(&fixture.config(), request).unwrap();
-    }
-
     /// A save whose commit mark could not be flushed returns, leaving its
     /// cleanup to the next recovery. Finishing it is no news to the page that
-    /// made the save: its next save goes on, and reports nothing recovered.
+    /// made the save: with the digests the save returned, its next save goes
+    /// on, and reports nothing recovered.
     #[test]
     fn a_save_left_for_cleanup_does_not_make_its_own_page_stale() {
         let point = commit_point("own-point");
         let fixture = Fixture::new("own");
-        let page = load_project(&fixture.config()).unwrap().loaded_at_ms;
-        let request = || {
-            let mut request = fixture.swap();
-            request.loaded_at_ms = Some(page);
-            request
-        };
-        save_with(
+        let mut page = load_project(&fixture.config()).unwrap().digests;
+        let mut request = fixture.swap();
+        request.digests = Some(page.clone());
+        let saved = save_with(
             &fixture.config(),
-            &request(),
+            &request,
             &mut Disk::failing_sync_from(point),
         )
         .unwrap();
         assert!(fixture.0.join(".flusso-save.journal").exists());
         assert!(fixture.committed());
+        page.extend(saved.digests);
 
-        let mut again = request();
-        again.ops.clear();
+        let again: SaveRequest = serde_json::from_value(serde_json::json!({
+            "config": request.config,
+            "ops": [{ "kind": "upsert", "index": "orders", "path": "products.schema.yml",
+                      "raw": "orders: 2\n" }],
+        }))
+        .unwrap();
+        let again = SaveRequest {
+            digests: Some(page),
+            ..again
+        };
         let saved = save_project(&fixture.config(), again).unwrap();
+        assert_eq!(saved.written.len(), 1, "{saved:?}");
         assert!(saved.recovered.is_empty(), "{saved:?}");
         assert!(fixture.files().keys().all(|name| !name.starts_with('.')));
     }

@@ -153,6 +153,11 @@ impl Digest {
         }
     }
 
+    /// The digest in hex.
+    pub(crate) fn hex(&self) -> &str {
+        &self.0
+    }
+
     /// Whether this is a digest a save writes: 64 lowercase hex digits.
     fn well_formed(&self) -> bool {
         self.0.len() == 64

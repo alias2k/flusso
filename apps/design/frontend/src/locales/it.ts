@@ -587,8 +587,25 @@ export const it: Record<string, string> = {
   "recovery.leftovers":
     "File lasciati da un salvataggio precedente, che il designer non tocca: {files}. Ognuno è stato lasciato da quel salvataggio e può contenere il testo di un file prima del salvataggio o quello che ha scritto; controllali ed eliminali.",
   "recovery.dismiss": "Chiudi",
-  "recovery.reloadToSave":
-    "Un salvataggio interrotto è stato completato sul disco dopo che questa pagina ha caricato il progetto, quindi ciò che mostra non è aggiornato. Ricarica il designer per salvare di nuovo (le modifiche non salvate vanno perse).",
+  // a file changed on disk since the page loaded it
+  "stale.changed": "{path} è cambiato sul disco da quando questa pagina lo ha caricato.",
+  "stale.deleted": "{path} è stato eliminato dal disco da quando questa pagina lo ha caricato.",
+  "stale.created": "{path} è stato creato sul disco da quando questa pagina ha caricato il progetto.",
+  "stale.unloaded": "{path} esiste sul disco e questa pagina non lo ha mai caricato.",
+  "stale.explain":
+    "Scriverlo cancellerebbe ciò che c'è ora sul disco, quindi non viene scritto. Ricarica la pagina per caricare ciò che c'è sul disco (le modifiche non salvate vanno perse), oppure copia prima la tua modifica: il lato destro del diff è ciò che scriveresti.",
+  "stale.configExplain":
+    "Ogni salvataggio viene verificato su flusso.toml, quindi non viene scritto nulla finché la pagina non viene ricaricata. Ricaricando perdi le modifiche non salvate: copiale prima (il lato destro di ogni diff è ciò che scriveresti).",
+  "stale.reload": "Ricarica la pagina",
+  "stale.overwrite": "Sovrascrivi comunque…",
+  "stale.overwriteConfirm":
+    "Sovrascrivere {path}? Il lato sinistro del diff è il file ora sul disco, con la modifica fatta da quando questa pagina lo ha caricato; scrivendo lo sostituisci con il lato destro, quindi ciò che di quella modifica il lato destro non mostra va perso.",
+  "stale.overwriteYes": "Sovrascrivi",
+  "stale.overwriting":
+    "{path} verrà sovrascritto con il lato destro del diff: ciò che della modifica sul disco non mostra viene scartato.",
+  "stale.badge": "Cambiato sul disco da quando questa pagina lo ha caricato",
+  "stale.refused":
+    "Non è stato salvato nulla: {files} sono cambiati sul disco da quando questa pagina ha caricato il progetto. Rivedi di nuovo le modifiche.",
   "recovery.blockedTitle": "Impossibile recuperare un salvataggio interrotto",
   "recovery.blockedIntro":
     "Un designer è stato fermato a metà di un salvataggio e il designer non riesce a sistemarlo da solo:",

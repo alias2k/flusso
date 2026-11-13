@@ -36,7 +36,7 @@ import type {
   SchemaIdentity,
   ValidateResponse,
 } from "./api";
-import { api, RecoveryError, type SaveRecovery } from "./api";
+import { api, type Digests, RecoveryError, type SaveRecovery, StaleError, type StaleFile } from "./api";
 import { RecoveryBlocked, RecoveryNotice } from "./components/Recovery";
 import { Canvas } from "./components/Canvas";
 import { CatalogBrowser } from "./components/CatalogBrowser";
@@ -832,19 +832,16 @@ export default function App() {
   // In Code mode the buffer is flushed first, so the review shows exactly what
   // a confirm writes; a buffer that doesn't parse refuses the save.
 
-  // A diff or save the server refused over an interrupted save: one completed
-  // on disk after this page loaded (its view is out of date: reload to save)
-  // or one it can't settle (show the files instead of the project).
+  // A diff or save the server refused over an interrupted save: another
+  // designer is saving, or one it can't settle (show the files instead of the
+  // project).
   const refusedOverRecovery = (e: unknown): boolean => {
     if (!(e instanceof RecoveryError)) return false;
     if (e.recovery.blocked?.busy) {
       setToast({ kind: "error", text: t("recovery.busy") });
-    } else if (e.recovery.blocked) {
+    } else {
       setDiffs(null);
       setBlocked(e.recovery);
-    } else {
-      if (e.recovery.recovered.length) setRecovery(e.recovery);
-      setToast({ kind: "error", text: t("recovery.reloadToSave") });
     }
     return true;
   };
@@ -914,12 +911,13 @@ export default function App() {
   // (plus the config whenever its model didn't change, so an untouched
   // flusso.toml keeps its comments). The saved snapshot advances per index for
   // exactly the ops that were applied, so Reset targets the true on-disk state.
-  const performSave = async (skipPaths: string[]) => {
+  const performSave = async (skipPaths: string[], overwrite: Digests) => {
     if (!doc || !diffs) return;
     const { planned } = buildOps();
     const configPath = diffs[0]?.path;
     const skip = new Set(skipPaths);
     if (!configDirty && configPath) skip.add(configPath);
+    let reviewAgain = false;
     setSaving(true);
     try {
       const res = await api.save(
@@ -927,6 +925,7 @@ export default function App() {
         planned.map((p) => p.op),
         [...skip],
         configIdentity(doc),
+        overwrite,
       );
       // Advance the saved snapshot to the new on-disk state. When everything was
       // applied (the common case) the doc *is* the disk, so snapshot it directly
@@ -963,9 +962,18 @@ export default function App() {
       setToast({ kind: "ok", text: t("toast.saved", { n }) });
     } catch (e) {
       if (refusedOverRecovery(e)) return;
+      if (e instanceof StaleError) {
+        // A file changed on disk between the review and the confirm: review
+        // again, which shows it.
+        setDiffs(null);
+        reviewAgain = true;
+        setToast({ kind: "error", text: t("stale.refused", { files: e.files.map((f) => f.path).join(", ") }) });
+        return;
+      }
       setToast({ kind: "error", text: t("toast.saveFailed", { err: errText(e) }) });
     } finally {
       setSaving(false);
+      if (reviewAgain) void save();
     }
   };
 
@@ -1634,7 +1642,7 @@ export default function App() {
           diffs={diffs}
           doc={doc}
           saving={saving}
-          onConfirm={(ignore) => void performSave(ignore)}
+          onConfirm={(ignore, overwrite) => void performSave(ignore, overwrite)}
           onCancel={() => setDiffs(null)}
         />
       )}
@@ -1767,6 +1775,92 @@ function OpBadge({ d }: { d: OpDiff }) {
   return null;
 }
 
+/// The files a review entry writes or removes that changed on disk since the
+/// page loaded them; `undefined` when none did.
+const staleOf = (d: OpDiff | undefined) => (d?.stale?.length ? d.stale : undefined);
+
+/// What happened on disk to one file since the page loaded it.
+function StaleLine({ file }: { file: StaleFile }) {
+  const { t } = useT();
+  const path = file.path;
+  switch (file.change) {
+    case "changed":
+      return <p>{t("stale.changed", { path })}</p>;
+    case "deleted":
+      return <p>{t("stale.deleted", { path })}</p>;
+    case "created":
+      return <p>{t("stale.created", { path })}</p>;
+    case "unloaded":
+      return <p>{t("stale.unloaded", { path })}</p>;
+  }
+}
+
+/// The review's notice on a file that changed on disk since the page loaded it:
+/// what happened, why it is not written, and the ways out (reload, copy the
+/// edit out, or overwrite anyway after a confirm).
+function StaleNotice({
+  files,
+  config,
+  overwritten,
+  onOverwrite,
+}: {
+  files: StaleFile[];
+  /// flusso.toml, which every save is checked against.
+  config: boolean;
+  overwritten: boolean;
+  onOverwrite?: () => void;
+}) {
+  const { t } = useT();
+  const [confirming, setConfirming] = useState(false);
+  const path = files.map((f) => f.path).join(", ");
+  return (
+    <div
+      role="alert"
+      className={cn(
+        "flex shrink-0 flex-col gap-1.5 border-b px-3 py-2 text-2xs",
+        overwritten
+          ? "border-warn/40 bg-warn/10 text-warn"
+          : "border-destructive/40 bg-destructive/10 text-destructive",
+      )}
+    >
+      <div className="flex items-start gap-1.5">
+        <TriangleAlert className="mt-0.5 size-3 shrink-0" />
+        <div className="flex flex-col gap-1">
+          {files.map((f) => (
+            <StaleLine key={f.path} file={f} />
+          ))}
+          <p>
+            {overwritten ? t("stale.overwriting", { path }) : config ? t("stale.configExplain") : t("stale.explain")}
+          </p>
+        </div>
+      </div>
+      {!overwritten && (
+        <div className="flex flex-wrap items-center gap-2 pl-4.5">
+          <Button variant="secondary" size="sm" onClick={() => window.location.reload()}>
+            {t("stale.reload")}
+          </Button>
+          {onOverwrite && !confirming && (
+            <Button variant="outline" size="sm" onClick={() => setConfirming(true)}>
+              {t("stale.overwrite")}
+            </Button>
+          )}
+        </div>
+      )}
+      {onOverwrite && confirming && !overwritten && (
+        <div className="flex flex-wrap items-center gap-2 pl-4.5">
+          <span>{t("stale.overwriteConfirm", { path })}</span>
+          <Button variant="destructive" size="sm" onClick={onOverwrite}>
+            {t("stale.overwriteYes")}
+          </Button>
+          <Button variant="secondary" size="sm" onClick={() => setConfirming(false)}>
+            {t("common.cancel")}
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DiffModal({
   diffs,
   doc,
@@ -1777,11 +1871,13 @@ function DiffModal({
   diffs: OpDiff[];
   doc: Doc;
   saving: boolean;
-  onConfirm: (paths: string[]) => void;
+  onConfirm: (paths: string[], overwrite: Digests) => void;
   onCancel: () => void;
 }) {
   const { t } = useT();
   const [mode, setMode] = useState<DiffMode>("split");
+  // The files the user chose to overwrite anyway although they changed on disk.
+  const [overwritten, setOverwritten] = useState<ReadonlySet<string>>(new Set());
   const [selected, setSelected] = useState(0);
   const [check, setCheck] = useState<Check>({ state: "loading" });
   const searchRef = useRef<HTMLInputElement>(null);
@@ -1795,12 +1891,6 @@ function DiffModal({
   }, [diffs]);
   const active = changed[selected] ?? changed[0];
 
-  // Which files to actually write (default all); the user can uncheck any to
-  // save a subset.
-  const [include, setInclude] = useState<ReadonlySet<string>>(() => new Set(changed.map((d) => d.path)));
-  const [query, setQuery] = useState("");
-  const needle = query.trim().toLowerCase();
-  const shown = changed.filter((d) => !needle || d.path.toLowerCase().includes(needle));
   // flusso.toml and the files that only fit the new one (a new, renamed or
   // moved index) are written together or not at all, as the server requires:
   // checking or unchecking one does the same to the others.
@@ -1809,15 +1899,49 @@ function DiffModal({
     const config = changed.find((d) => d.index === undefined);
     return new Set(needing.length && config ? [config.path, ...needing] : needing);
   }, [changed]);
-  const setPaths = (paths: string[], on: boolean) =>
+  // A file that changed on disk since the page loaded it is not written (nor
+  // the files linked to it) unless the user overwrites it anyway; while
+  // flusso.toml did, nothing is, since every save is checked against it.
+  const configDiff = diffs.find((d) => d.index === undefined);
+  const configBlocked = !!staleOf(configDiff) && !(configDiff && overwritten.has(configDiff.path));
+  const blocked = useMemo(() => {
+    const out = new Set(changed.filter((d) => staleOf(d) && !overwritten.has(d.path)).map((d) => d.path));
+    if ([...linked].some((p) => out.has(p))) for (const p of linked) out.add(p);
+    return out;
+  }, [changed, linked, overwritten]);
+
+  // Which files to actually write (default all that can be); the user can
+  // uncheck any to save a subset.
+  const [include, setInclude] = useState<ReadonlySet<string>>(
+    () => new Set(changed.filter((d) => !blocked.has(d.path)).map((d) => d.path)),
+  );
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  const shown = changed.filter((d) => !needle || d.path.toLowerCase().includes(needle));
+  const setPaths = (paths: string[], on: boolean, unblocked: ReadonlySet<string> = blocked) =>
     setInclude((s) => {
       const next = new Set(s);
       const all = paths.some((p) => linked.has(p)) ? [...paths, ...linked] : paths;
       for (const p of all)
-        if (on) next.add(p);
-        else next.delete(p);
+        if (!on) next.delete(p);
+        else if (!unblocked.has(p)) next.add(p);
       return next;
     });
+  const overwrite = (path: string) => {
+    const next = new Set(overwritten).add(path);
+    setOverwritten(next);
+    const still = new Set(changed.filter((d) => staleOf(d) && !next.has(d.path) && d.path !== path).map((d) => d.path));
+    if ([...linked].some((p) => still.has(p))) for (const p of linked) still.add(p);
+    setPaths([path], true, still);
+  };
+  const canWrite = !saving && include.size > 0 && !configBlocked;
+  // For each file overwritten anyway that is written, the digest it has on disk now.
+  const overwriteDigests = (): Digests =>
+    Object.fromEntries(
+      changed
+        .filter((d) => include.has(d.path) && overwritten.has(d.path))
+        .flatMap((d) => (d.stale ?? []).map((f) => [f.path, f.on_disk])),
+    );
   const toggle = (path: string) => setPaths([path], !include.has(path));
   // The select-all box acts on the currently-shown (filtered) files.
   const shownIncluded = shown.filter((d) => include.has(d.path)).length;
@@ -1851,7 +1975,7 @@ function DiffModal({
   const onDialogKey = (e: React.KeyboardEvent) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
       e.preventDefault();
-      if (include.size > 0 && !saving) onConfirm(ignoreList());
+      if (canWrite) onConfirm(ignoreList(), overwriteDigests());
       return;
     }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a") {
@@ -1946,6 +2070,11 @@ function DiffModal({
           </div>
         </DialogHeader>
         <ValidationDetail check={check} />
+        {configBlocked && configDiff && !changed.includes(configDiff) && (
+          <div className="overflow-hidden rounded-md border border-destructive/40">
+            <StaleNotice files={configDiff.stale ?? []} config overwritten={false} />
+          </div>
+        )}
         <div className="flex min-h-0 flex-1 overflow-hidden rounded-md border border-border">
           <div className="flex w-60 shrink-0 flex-col border-r border-border bg-secondary/40">
             {changed.length > 3 && (
@@ -2023,6 +2152,7 @@ function DiffModal({
                           <Checkbox
                             className="size-4 shrink-0"
                             checked={on}
+                            disabled={blocked.has(d.path)}
                             onCheckedChange={() => toggle(d.path)}
                             aria-label={d.path}
                           />
@@ -2037,6 +2167,15 @@ function DiffModal({
                           >
                             <span className="flex items-center gap-1 truncate font-mono text-xs">
                               <span className="truncate font-medium text-foreground">{base}</span>
+                              {staleOf(d) && (
+                                <TriangleAlert
+                                  className={cn(
+                                    "size-3 shrink-0",
+                                    overwritten.has(d.path) ? "text-warn" : "text-destructive",
+                                  )}
+                                  aria-label={t("stale.badge")}
+                                />
+                              )}
                               {d.warning === "outside_base" && (
                                 <TriangleAlert
                                   className="size-3 shrink-0 text-warn"
@@ -2088,6 +2227,15 @@ function DiffModal({
             </div>
           </div>
           <div className="flex min-h-0 flex-1 flex-col">
+            {active && staleOf(active) && (
+              <StaleNotice
+                key={active.path}
+                files={active.stale ?? []}
+                config={active === configDiff}
+                overwritten={overwritten.has(active.path)}
+                onOverwrite={() => overwrite(active.path)}
+              />
+            )}
             {active?.notice === "layout_reset" && (
               <p className="flex items-center gap-1.5 border-b border-border/60 px-3 py-1.5 text-2xs text-warn">
                 <TriangleAlert className="size-3 shrink-0" />
@@ -2149,7 +2297,7 @@ function DiffModal({
             <Button variant="secondary" size="sm" onClick={onCancel}>
               {t("common.cancel")}
             </Button>
-            <Button size="sm" onClick={() => onConfirm(ignoreList())} disabled={saving || include.size === 0}>
+            <Button size="sm" onClick={() => onConfirm(ignoreList(), overwriteDigests())} disabled={!canWrite}>
               {saving && <span className="spinner" />}
               {t("diff.write", { n: include.size })}
             </Button>

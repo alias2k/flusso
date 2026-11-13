@@ -571,8 +571,25 @@ export const en: Record<string, string> = {
   "recovery.leftovers":
     "Files an earlier save left behind, which the designer does not touch: {files}. Each was left by that save and may hold a file's text from before it or the text it wrote; check them and delete them.",
   "recovery.dismiss": "Dismiss",
-  "recovery.reloadToSave":
-    "An interrupted save was completed on disk after this page loaded the project, so what the page shows is out of date. Reload the designer to save again (unsaved changes are lost).",
+  // a file changed on disk since the page loaded it
+  "stale.changed": "{path} changed on disk since this page loaded it.",
+  "stale.deleted": "{path} was deleted on disk since this page loaded it.",
+  "stale.created": "{path} was created on disk since this page loaded the project.",
+  "stale.unloaded": "{path} exists on disk, and this page never loaded it.",
+  "stale.explain":
+    "Writing it would discard what is on disk now, so it is not written. Reload the page to load what is on disk (your unsaved edits are lost), or copy your edit out first: the right side of the diff is what you would write.",
+  "stale.configExplain":
+    "Every save is checked against flusso.toml, so nothing is written until the page is reloaded. Reloading loses your unsaved edits: copy them out first (the right side of each diff is what you would write).",
+  "stale.reload": "Reload page",
+  "stale.overwrite": "Overwrite anyway…",
+  "stale.overwriteConfirm":
+    "Overwrite {path}? The left side of the diff is the file on disk now, with the change made since this page loaded it; writing replaces it with the right side, so whatever of that change the right side does not show is lost.",
+  "stale.overwriteYes": "Overwrite",
+  "stale.overwriting":
+    "{path} will be overwritten with the right side of the diff: whatever of the change on disk it does not show is discarded.",
+  "stale.badge": "Changed on disk since this page loaded it",
+  "stale.refused":
+    "Nothing was saved: {files} changed on disk since this page loaded the project. Review the changes again.",
   "recovery.blockedTitle": "An interrupted save could not be recovered",
   "recovery.blockedIntro":
     "A designer was stopped in the middle of a save, and the designer can't settle it by itself:",

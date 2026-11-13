@@ -268,7 +268,9 @@ async fn save(
 /// body. Recoverable, surfaced conditions (DB unreachable, a schema that won't
 /// parse) are *not* errors: they ride back in the normal response body. An
 /// interrupted save ([`api::Interrupted`]) is a 409 whose body adds the
-/// `recovery`, so the editor can say what happened in the user's language.
+/// `recovery`, and a save over files changed on disk ([`api::Stale`]) one
+/// whose body adds the `stale` files, so the editor can say what happened in
+/// the user's language.
 struct ApiError(anyhow::Error);
 
 impl From<anyhow::Error> for ApiError {
@@ -283,6 +285,13 @@ impl IntoResponse for ApiError {
             return (
                 StatusCode::CONFLICT,
                 Json(serde_json::json!({ "error": self.0.to_string(), "recovery": recovery })),
+            )
+                .into_response();
+        }
+        if let Some(api::Stale(files)) = self.0.downcast_ref::<api::Stale>() {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": self.0.to_string(), "stale": files })),
             )
                 .into_response();
         }

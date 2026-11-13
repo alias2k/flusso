@@ -138,6 +138,20 @@ A move removes its old file only when no index uses it after the save and it lie
 
 Every check runs before anything is written. A save that fails anyway (permissions, a full disk) is undone: the project is left exactly as it was, with no temporary or backup file behind. A file that is replaced keeps its permissions. Only if putting a file back fails too does the error name the backup files that still hold the previous content.
 
+### When a file changed since the page loaded
+
+A page remembers each file it loaded (`flusso.toml` and every schema file) by a digest of its bytes, and after each of its own saves, the digest of what that save wrote. Another designer's save, another tab, a text editor, `git checkout`: anything that changes a file after the page loaded it changes its digest, including only its line endings or a byte-order mark. (`flusso run` writes only `flusso.lock`, which the designer doesn't read.)
+
+The review compares every file against the file on disk now. A file the save would write, move or remove that is not as the page loaded it is marked, with what happened to it: changed, deleted, created, or present though the page never loaded it. It is not written. Since every check of a save reads `flusso.toml`, nothing is written while `flusso.toml` is marked, even when the save leaves it out. The server makes the same comparison again under the project's lock, so a file changed between the review and Write refuses the save, names the files, and writes nothing; the page then opens the review again. A file the save doesn't touch may change freely.
+
+The ways out, each offered in the review:
+
+- **Reload the page**: it loads what is on disk. Unsaved edits are lost, so the browser asks first.
+- **Copy the edit out first**: the right side of each diff is what the page would write; copy it, reload, and apply it again.
+- **Overwrite anyway**, per file, after a confirm: the file is written with the right side of its diff, against the file on disk now (comments and formatting are kept as for any save). Whatever of the change on disk the right side doesn't show is lost. If the file changes again before Write, the save is refused.
+
+There is no merge.
+
 ### When a save is cut short
 
 A save lands whole or not at all, even when the designer is killed or the machine loses power in the middle of it. Before its first write, the save records every step in `.flusso-save.journal` beside `flusso.toml`, and it flushes each file to disk before putting it in place. The next time a designer opens the project, or diffs or saves it, it finds the journal and settles the save before reading anything:
@@ -145,7 +159,7 @@ A save lands whole or not at all, even when the designer is killed or the machin
 - **rolled back**, when not every file was in place: each file is as it was before the save;
 - **completed**, when every file was: each file is as the save wrote it, and only the backups are deleted.
 
-The designer says which, with the files involved, in a notice on the page and on its log. After a rollback a diff or save goes on, since the files are as the page loaded them. After a completion, a page that loaded the project before that save is out of date: its diffs and saves are refused until it reloads. Two designers open on one project never touch each other's save: a save holds a lock (`.flusso-save.lock`, removed afterwards except on Windows) for as long as it runs, and a designer waits up to five seconds for it.
+The designer says which, with the files involved, in a notice on the page and on its log. After a rollback a diff or save goes on, since the files are as the page loaded them. A completion changes the files the save wrote, so a page that loaded the project before it can't save over them ([above](#when-a-file-changed-since-the-page-loaded)). Two designers open on one project never touch each other's save: a save holds a lock (`.flusso-save.lock`, removed afterwards except on Windows) for as long as it runs, and a designer waits up to five seconds for it.
 
 #### Whose save is recovered
 
