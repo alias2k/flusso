@@ -200,7 +200,7 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   the build). Match these before assuming green. One scope note: on PRs confined to the query
   release train (`sdk/query`, `sdk/query-derive`, `dev/query-e2e`) the nextest step swaps in a
   filterset that skips the Postgres/OpenSearch container suites those paths can't break (the
-  query train's own `combined_search`, `cursor_paging`, `map_keys` + `tls` live e2e still run); pushes to main always run everything.
+  query train's own `combined_search`, `cursor_paging`, `map_keys`, `tls` + `array_columns` live e2e still run); pushes to main always run everything.
   A `docs` job builds the mdBook (`mdbook build docs`), link-checks it (`lychee --offline
   --include-fragments --root-dir docs/book 'docs/book/**/*.html'`), and runs
   `.github/scripts/check-manual-links.sh`. A separate `fuzz` job runs a 60-second
@@ -667,10 +667,10 @@ inside `Backends::source`, before anything is staged (`--locked` included; an un
 still fails as `connecting to Postgres`), prints every diagnostic to stderr with `check`'s printer,
 and refuses to start only on a kind that cannot work as written: `stops_the_start` matches
 `DiagnosticKind` exhaustively (`UnknownTable`/`UnknownColumn`/`UnreadSoftDeleteMarker`/
-`RelationPrimaryKey`/`TransformNotApplicable`/`RootPrimaryKeyMismatch` stop; type, numeric,
-nullability, ignored-primary-key and `RootPrimaryKey` findings print and start, as they built or ran
-in 0.17), so a new kind forces a decision there; stop only on a state no working 0.17 deployment can
-be in. `DiagnosticKind` stays exhaustive for that match; `Diagnostic` and `Anchor` are
+`RelationPrimaryKey`/`TransformNotApplicable`/`RootPrimaryKeyMismatch`/`NotAnArrayColumn` stop;
+type, numeric, nullability, ignored-primary-key, `UndeclaredArrayColumn` and `RootPrimaryKey`
+findings print and start, as they built or ran in 0.17), so a new kind forces a decision there; stop
+only on a state no working 0.17 deployment can be in (or on a key new since, like `array`). `DiagnosticKind` stays exhaustive for that match; `Diagnostic` and `Anchor` are
 `#[non_exhaustive]` (`Diagnostic::new` builds one). `check` still fails on every `Error`. No opt-out
 flag. Guards: `backends::tests` (one per kind) and `config_coverage`'s
 `an_enum_or_domain_column_is_a_type_mismatch_that_still_builds`. The daemon
@@ -867,6 +867,24 @@ order with no script; out-of-set values sort after. Parsing lives in
 `libs/1-config/src/yaml/entities/field.rs`; the core model is `kernel::FieldSource`
 (`Join.kind: JoinKind`, with reverse resolution per kind in
 `libs/2-adapters/source-postgres/src/document/resolve.rs`).
+
+**Array columns (issue #276).** `array: true` on a scalar/`enum`/`custom`/`json` column field is
+`Column.array` (hashed only when set), projected to `ResolvedField.array`; the mapping stays the
+element type. The Postgres builder renders `transforms` per string element over `to_jsonb(column)`
+(`sql::element_transformed`, one path for `[]` and `json`/`jsonb`) and leaves an array `default`
+(a list) to the decoder. `value::coerce_document` is **fallible** (`Result<_, BuildFailure>`, with
+the field path): an array column's null takes the default, a lone value is wrapped, null elements are
+dropped, and an object/array element of a non-`json` field is a `BuildFailure` that `build`/
+`build_many` return as `Document::Failed` (so `on_error` decides). `Catalog::accepts_transforms`
+takes `element: bool` (Postgres probes the `[]` base type, `text` for `json`/`jsonb`);
+`NotAnArrayColumn`/`UndeclaredArrayColumn` are the catalog checks. Query side: `check_type`'s
+scalar arm also accepts a custom non-`Vec` type through const asserts (`OpaqueProbe::ARRAY` +
+`accepts_kind`), and `#[derive(FlussoValue)]` on a newtype over `Vec<E>` emits only
+`FlussoValueMeta` (`E`'s kinds, `ARRAY`/`READS_ARRAY`), no `FlussoValue<K>`. Guards:
+`an_array_column_changes_the_content_hash_only_while_it_is_set`, the `value::tests`/`query::tests`
+array cases, `validation::tests`' `an_array_*`, `config_coverage`'s
+`array_columns_clean_up_their_value_and_are_checked_against_the_catalog`, the `array_columns` UI
+pass test + `array_*` compile-fail tests, and `dev/query-e2e`'s `array_columns`.
 
 ### Script fields (issue #198)
 
