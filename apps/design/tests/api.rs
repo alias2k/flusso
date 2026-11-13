@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use config::ParseFrom;
 use config::toml::ConfigToml;
 use design::api::{self, FileOp, OpKind, PreviewRequest, SaveRequest};
+use design::keep::ConfigIdentity;
 use design::value::{MAX_DEPTH, ValueSlot};
 use kernel::IndexName;
 
@@ -85,7 +86,6 @@ fn project_previews_saves_and_reopens() {
                 index: IndexName::try_new(&i.name).unwrap(),
                 path: PathBuf::from(&i.schema_path),
                 from: None,
-                was: None,
                 schema: i.schema.clone(),
                 raw: None,
                 base: None,
@@ -125,7 +125,6 @@ fn project_previews_saves_and_reopens() {
                 index: IndexName::try_new(&i.name).unwrap(),
                 path: PathBuf::from(&i.schema_path),
                 from: None,
-                was: None,
                 schema: i.schema.clone(),
                 raw: None,
                 base: None,
@@ -497,7 +496,6 @@ fn op(kind: OpKind, index: &str, path: &str, from: Option<&str>, raw: &str) -> F
         index: IndexName::try_new(index).unwrap(),
         path: PathBuf::from(path),
         from: from.map(PathBuf::from),
-        was: None,
         schema: None,
         raw: Some(raw.to_owned()),
         base: None,
@@ -723,8 +721,8 @@ fn a_save_refuses_a_schema_op_on_the_config_file() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// There is no delete op, and a move never removes a file outside the project
-/// directory: it degrades to a write and the source stays.
+/// There is no delete op, and a move never takes a file outside the project
+/// as its source: it is not the index's own file.
 #[test]
 fn a_save_removes_nothing_outside_the_project() {
     let dir = own_fixture("outside");
@@ -755,9 +753,7 @@ fn a_save_removes_nothing_outside_the_project() {
         skip: Vec::new(),
         identity: None,
     };
-    let diffs = api::diff_project(&config_path, moved()).unwrap();
-    assert!(diffs.iter().all(|d| d.op == api::DiffOp::Write));
-    api::save_project(&config_path, moved()).unwrap();
+    refused(&dir, moved);
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep\n");
 
     std::fs::remove_file(&victim).ok();
@@ -807,6 +803,7 @@ fn a_move_never_removes_a_file_an_index_uses() {
     assert_eq!(read("products.schema.yml"), "orders: 1\n");
     assert_eq!(read("orders.schema.yml"), "products: 1\n");
 
+    let project = api::load_project(&config_path).unwrap();
     let replaced = SaveRequest {
         config: config_with(
             &project.config,
@@ -838,22 +835,20 @@ fn a_move_never_removes_a_file_an_index_uses() {
     assert_eq!(read("archive/users.schema.yml"), "users: 1\n");
     assert_eq!(read("users.schema.yml"), "fresh: 1\n");
 
-    let products = read("products.schema.yml");
-    let untouched_source = SaveRequest {
+    // A move's source must be the index's own file on disk.
+    let project = api::load_project(&config_path).unwrap();
+    refused(&dir, || SaveRequest {
         config: config_with(&project.config, &[("orders", "sales.schema.yml")]),
         ops: vec![op(
             OpKind::Move,
             "orders",
             "sales.schema.yml",
-            Some("./products.schema.yml"),
+            Some("./orders.schema.yml"),
             "orders: 2\n",
         )],
         skip: Vec::new(),
         identity: None,
-    };
-    api::save_project(&config_path, untouched_source).unwrap();
-    assert_eq!(read("products.schema.yml"), products);
-    assert_eq!(read("sales.schema.yml"), "orders: 2\n");
+    });
 
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -906,12 +901,19 @@ fn a_move_onto_an_existing_file_is_flagged() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// A rename `op` carrying the index's name on disk.
+/// An `op` for a renamed index, `was` its name on disk.
 fn renamed(kind: OpKind, was: &str, index: &str, path: &str, from: Option<&str>) -> FileOp {
-    FileOp {
-        was: Some(IndexName::try_new(was).unwrap()),
-        ..op(kind, index, path, from, &format!("{was}: renamed\n"))
-    }
+    op(kind, index, path, from, &format!("{was}: renamed\n"))
+}
+
+/// The config identity the client sends: the names on disk, and for each
+/// saved index its position among them.
+fn identity(on_disk: &ConfigToml, after: &[Option<usize>]) -> Option<ConfigIdentity> {
+    Some(ConfigIdentity {
+        before: on_disk.index.iter().map(|e| e.name.to_string()).collect(),
+        after: after.to_vec(),
+        sinks: None,
+    })
 }
 
 /// `config` with the index `name` removed.
@@ -947,7 +949,6 @@ fn save_refused(dir: &Path, request: impl Fn() -> SaveRequest) {
     let before = files(dir);
     let review = SaveRequest {
         skip: Vec::new(),
-        identity: None,
         ..request()
     };
     api::diff_project(&config_path, review).unwrap();
@@ -985,7 +986,7 @@ fn a_rename_is_refused_when_the_config_is_left_out() {
                 Some("users.schema.yml"),
             )],
             skip: skip.clone(),
-            identity: None,
+            identity: identity(&project.config, &[Some(0), Some(1)]),
         });
     }
 
@@ -1004,7 +1005,7 @@ fn a_rename_is_refused_when_the_config_is_left_out() {
             Some("users.schema.yml"),
         )],
         skip: skip.clone(),
-        identity: None,
+        identity: identity(&project.config, &[Some(0), Some(1), Some(2)]),
     });
     assert!(dir.join("users.schema.yml").is_file());
     assert!(!dir.join("people.schema.yml").exists());
@@ -1033,7 +1034,7 @@ fn the_config_is_refused_when_a_file_it_needs_is_left_out() {
             Some("users.schema.yml"),
         )],
         skip,
-        identity: None,
+        identity: identity(&project.config, &[Some(0), Some(1), Some(2)]),
     };
     let diffs = api::diff_project(&dir.join("flusso.toml"), request(Vec::new())).unwrap();
     let moved = diffs.last().unwrap();
@@ -1149,9 +1150,7 @@ fn a_symlink_cannot_reach_another_index_s_file_or_the_config() {
         skip: Vec::new(),
         identity: None,
     };
-    let diffs = api::diff_project(&dir.join("flusso.toml"), from_orders()).unwrap();
-    assert_eq!(diffs.last().unwrap().op, api::DiffOp::Write);
-    api::save_project(&dir.join("flusso.toml"), from_orders()).unwrap();
+    refused(&dir, from_orders);
     assert_eq!(
         std::fs::read_to_string(dir.join("orders.schema.yml")).unwrap(),
         orders
@@ -1311,10 +1310,11 @@ fn a_failed_write_leaves_no_temp_file() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// A move removes its source only when that is the same index's file on disk:
-/// any other file in the project (`flusso.lock`, a removed index's file) stays.
+/// A move takes only the same index's file on disk as its source: one from
+/// any other file in the project (`flusso.lock`, a removed index's file, as a
+/// forged request could send) is refused, and the file stays.
 #[test]
-fn a_move_from_a_file_that_is_not_the_index_s_keeps_it() {
+fn a_move_from_a_file_that_is_not_the_index_s_is_refused() {
     let dir = own_fixture("not-own");
     let config_path = dir.join("flusso.toml");
     std::fs::write(dir.join("flusso.lock"), "lock\n").unwrap();
@@ -1333,9 +1333,7 @@ fn a_move_from_a_file_that_is_not_the_index_s_keeps_it() {
             skip: Vec::new(),
             identity: None,
         };
-        let diffs = api::diff_project(&config_path, request()).unwrap();
-        assert_eq!(diffs.last().unwrap().op, api::DiffOp::Write, "{from}");
-        api::save_project(&config_path, request()).unwrap();
+        refused(&dir, request);
         assert!(dir.join(from).is_file(), "{from}");
     }
     std::fs::remove_dir_all(&dir).ok();
@@ -1429,15 +1427,15 @@ fn a_diff_pairs_by_the_ids_it_is_sent_and_reports_dropped_comments() {
             "path": "users.schema.yml",
             "schema": after,
         });
-        let mut body = serde_json::json!({ "config": config, "ops": [] });
+        let mut body = serde_json::json!({
+            "config": config,
+            "ops": [],
+            "identity": { "before": ["users", "products", "orders"], "after": [0, 1] },
+        });
         if identity {
             op["identity"] = serde_json::json!({
                 "before": ids(&before.fields, "", &[]),
                 "after": ids(&after.fields, "", &[("ordersTotal", "orderCount")]),
-            });
-            body["identity"] = serde_json::json!({
-                "before": ["users", "products", "orders"],
-                "after": [0, 1],
             });
         }
         body["ops"] = serde_json::json!([op]);
@@ -1469,4 +1467,417 @@ fn a_diff_pairs_by_the_ids_it_is_sent_and_reports_dropped_comments() {
     let yaml = serde_json::to_value(&diffs[1]).unwrap();
     assert_eq!(yaml["dropped"], 5, "{yaml}");
     assert!(!yaml["next"].as_str().unwrap().contains("# Aggregates over"));
+}
+
+/// Leaving `flusso.toml` out, with the files linked to it (a renamed, moved
+/// or new index), still saves an unrelated schema edit: the ops left out are
+/// not written, so they are not checked against the config on disk (#270).
+#[test]
+fn the_config_and_its_linked_files_can_be_left_out_of_a_save() {
+    let dir = own_fixture("skip-linked");
+    let config_path = dir.join("flusso.toml");
+    let project = api::load_project(&config_path).unwrap();
+    let all = identity(&project.config, &[Some(0), Some(1), Some(2)]);
+    let edit = op(
+        OpKind::Upsert,
+        "orders",
+        "orders.schema.yml",
+        None,
+        "orders: edited\n",
+    );
+    let cases: Vec<(ConfigToml, FileOp, Option<ConfigIdentity>)> = vec![
+        (
+            config_renamed(
+                &config_with(&project.config, &[("users", "people.schema.yml")]),
+                "users",
+                "people",
+            ),
+            renamed(
+                OpKind::Move,
+                "users",
+                "people",
+                "people.schema.yml",
+                Some("users.schema.yml"),
+            ),
+            all.clone(),
+        ),
+        (
+            config_with(&project.config, &[("users", "sub/users.schema.yml")]),
+            op(
+                OpKind::Move,
+                "users",
+                "sub/users.schema.yml",
+                Some("users.schema.yml"),
+                "users: moved\n",
+            ),
+            all.clone(),
+        ),
+        (
+            config_with(&project.config, &[("fresh", "fresh.schema.yml")]),
+            op(
+                OpKind::Upsert,
+                "fresh",
+                "fresh.schema.yml",
+                None,
+                "fresh: 1\n",
+            ),
+            identity(&project.config, &[Some(0), Some(1), Some(2), None]),
+        ),
+    ];
+    let before = files(&dir);
+    for (config, linked, identity) in cases {
+        let request = |skip: Vec<String>| SaveRequest {
+            config: config.clone(),
+            ops: vec![linked.clone(), edit.clone()],
+            skip,
+            identity: identity.clone(),
+        };
+        let diffs = api::diff_project(&config_path, request(Vec::new())).unwrap();
+        let linked_path = diffs.get(1).unwrap();
+        assert!(linked_path.needs_config);
+        let skip = vec![config_shown(&dir), linked_path.path.clone()];
+        let saved = api::save_project(&config_path, request(skip)).unwrap();
+        assert_eq!(saved.written.len(), 1, "{:?}", saved.written);
+        let mut expected = before.clone();
+        expected.insert("orders.schema.yml".into(), "orders: edited\n".into());
+        assert_eq!(files(&dir), expected);
+        assert!(!dir.join("sub").exists());
+        std::fs::write(dir.join("orders.schema.yml"), &before["orders.schema.yml"]).unwrap();
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The server works out which index on disk each saved index is (from the
+/// config identity, else by name) and never takes the request's word for it:
+/// with `orders` removed and `users` renamed to `orders`, the new `orders`
+/// is `users`, so its schema can't go into `orders.schema.yml` while the
+/// config on disk still names the old `orders` there.
+#[test]
+fn which_index_an_op_is_comes_from_the_config_identity() {
+    let dir = own_fixture("derived");
+    let project = api::load_project(&dir.join("flusso.toml")).unwrap();
+    let taken_over = config_renamed(
+        &config_with(
+            &config_without(&project.config, "orders"),
+            &[("users", "orders.schema.yml")],
+        ),
+        "users",
+        "orders",
+    );
+    let users_is_orders = identity(&project.config, &[Some(0), Some(1)]);
+    let upsert = || {
+        op(
+            OpKind::Upsert,
+            "orders",
+            "orders.schema.yml",
+            None,
+            "users: schema\n",
+        )
+    };
+    // The config left out: the op only fits the new config.
+    save_refused(&dir, || SaveRequest {
+        config: taken_over.clone(),
+        ops: vec![upsert()],
+        skip: vec![config_shown(&dir)],
+        identity: users_is_orders.clone(),
+    });
+    // The config written without the op: `orders.schema.yml` holds the old
+    // `orders`, which is not the new `orders`.
+    refused(&dir, || SaveRequest {
+        config: taken_over.clone(),
+        ops: Vec::new(),
+        skip: Vec::new(),
+        identity: users_is_orders.clone(),
+    });
+    // A move must start at the index's own file on disk.
+    refused(&dir, || SaveRequest {
+        config: taken_over.clone(),
+        ops: vec![op(
+            OpKind::Move,
+            "orders",
+            "orders.schema.yml",
+            Some("products.schema.yml"),
+            "users: schema\n",
+        )],
+        skip: Vec::new(),
+        identity: users_is_orders.clone(),
+    });
+    // The request's own `was` is not read.
+    let forged = serde_json::json!({
+        "config": config_without(&project.config, "products"),
+        "ops": [{
+            "kind": "move", "index": "users", "was": "products",
+            "from": "products.schema.yml", "path": "users.schema.yml", "raw": "x: 1\n",
+        }],
+    });
+    refused(&dir, || serde_json::from_value(forged.clone()).unwrap());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A written config can't point an index at a file that holds another
+/// index's schema, unless the save writes it for both; two indexes may keep
+/// sharing a file only when they already did.
+#[test]
+fn a_config_cannot_repoint_an_index_at_another_index_s_file() {
+    let dir = own_fixture("repoint");
+    let config_path = dir.join("flusso.toml");
+    let project = api::load_project(&config_path).unwrap();
+    refused(&dir, || SaveRequest {
+        config: config_with(&project.config, &[("users", "orders.schema.yml")]),
+        ops: Vec::new(),
+        skip: Vec::new(),
+        identity: None,
+    });
+    refused(&dir, || SaveRequest {
+        config: config_with(&project.config, &[("users", "orders.schema.yml")]),
+        ops: vec![op(
+            OpKind::Upsert,
+            "users",
+            "orders.schema.yml",
+            None,
+            "users: 1\n",
+        )],
+        skip: Vec::new(),
+        identity: None,
+    });
+
+    // Two indexes already sharing a file keep it without writing it.
+    let shared = config_with(&project.config, &[("copy", "users.schema.yml")]);
+    api::save_project(
+        &config_path,
+        SaveRequest {
+            config: shared.clone(),
+            ops: vec![
+                op(OpKind::Upsert, "users", "users.schema.yml", None, "u: 1\n"),
+                op(OpKind::Upsert, "copy", "users.schema.yml", None, "u: 1\n"),
+            ],
+            skip: Vec::new(),
+            identity: None,
+        },
+    )
+    .unwrap();
+    let mut toggled = serde_json::to_value(&shared).unwrap();
+    toggled["index"][3]["enabled"] = false.into();
+    api::save_project(
+        &config_path,
+        SaveRequest {
+            config: serde_json::from_value(toggled).unwrap(),
+            ops: Vec::new(),
+            skip: Vec::new(),
+            identity: None,
+        },
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A `skip` path is resolved like every other path: the config left out
+/// through the symlinked project path is left out.
+#[cfg(unix)]
+#[test]
+fn a_skip_path_through_a_symlink_is_skipped() {
+    let dir = own_fixture("skip-link");
+    let link = dir.with_file_name(format!(
+        "{}-link",
+        dir.file_name().unwrap().to_string_lossy()
+    ));
+    std::fs::remove_file(&link).ok();
+    std::os::unix::fs::symlink(&dir, &link).unwrap();
+    let config_path = link.join("flusso.toml");
+    let project = api::load_project(&config_path).unwrap();
+    let config_text = std::fs::read_to_string(dir.join("flusso.toml")).unwrap();
+    let people = config_renamed(
+        &config_with(&project.config, &[("users", "people.schema.yml")]),
+        "users",
+        "people",
+    );
+    let skip = vec![link.join("flusso.toml").display().to_string()];
+    save_refused(&dir, || SaveRequest {
+        config: people.clone(),
+        ops: vec![renamed(
+            OpKind::Move,
+            "users",
+            "people",
+            "people.schema.yml",
+            Some("users.schema.yml"),
+        )],
+        skip: skip.clone(),
+        identity: identity(&project.config, &[Some(0), Some(1), Some(2)]),
+    });
+    api::save_project(
+        &config_path,
+        SaveRequest {
+            config: people.clone(),
+            ops: vec![op(
+                OpKind::Upsert,
+                "orders",
+                "orders.schema.yml",
+                None,
+                "orders: 1\n",
+            )],
+            skip,
+            identity: identity(&project.config, &[Some(0), Some(1), Some(2)]),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.join("flusso.toml")).unwrap(),
+        config_text
+    );
+    std::fs::remove_file(&link).ok();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// An index added with no schema file can't be saved, and the refusal names
+/// the file relative to the project.
+#[test]
+fn an_added_index_needs_its_schema_file() {
+    let dir = own_fixture("no-schema");
+    let config_path = dir.join("flusso.toml");
+    let project = api::load_project(&config_path).unwrap();
+    let request = || SaveRequest {
+        config: config_with(&project.config, &[("new_index", "new_index.schema.yml")]),
+        ops: Vec::new(),
+        skip: Vec::new(),
+        identity: identity(&project.config, &[Some(0), Some(1), Some(2), None]),
+    };
+    refused(&dir, request);
+    let err = api::diff_project(&config_path, request())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("`new_index` has no schema file: new_index.schema.yml does not exist"),
+        "{err}"
+    );
+    assert!(!err.contains(&*dir.to_string_lossy()), "{err}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Removing an index and adding one with its name writes the new schema over
+/// the old file in the designer's own form, and the review flags that it
+/// replaces an existing file.
+#[test]
+fn a_new_index_over_a_removed_one_s_file_is_flagged() {
+    let dir = own_fixture("readd");
+    let config_path = dir.join("flusso.toml");
+    let project = api::load_project(&config_path).unwrap();
+    let request = SaveRequest {
+        config: project.config.clone(),
+        ops: vec![op(
+            OpKind::Upsert,
+            "orders",
+            "orders.schema.yml",
+            None,
+            "orders: new\n",
+        )],
+        skip: Vec::new(),
+        identity: identity(&project.config, &[Some(0), Some(1), None]),
+    };
+    let diffs = api::diff_project(&config_path, request).unwrap();
+    let written = diffs.last().unwrap();
+    assert_eq!(written.warning.as_deref(), Some("overwrites"));
+    assert!(written.needs_config);
+
+    // The old file lends the new index none of its comments.
+    let orders = project
+        .indexes
+        .iter()
+        .find(|i| i.name == "orders")
+        .unwrap()
+        .schema
+        .clone();
+    let readd = SaveRequest {
+        config: project.config.clone(),
+        ops: vec![FileOp {
+            schema: orders,
+            raw: None,
+            ..op(OpKind::Upsert, "orders", "orders.schema.yml", None, "")
+        }],
+        skip: Vec::new(),
+        identity: identity(&project.config, &[Some(0), Some(1), None]),
+    };
+    let diffs = api::diff_project(&config_path, readd).unwrap();
+    let written = diffs.last().unwrap();
+    assert!(written.current.contains('#'));
+    assert!(!written.next.contains('#'), "{}", written.next);
+
+    let edit = SaveRequest {
+        config: project.config.clone(),
+        ops: vec![op(
+            OpKind::Upsert,
+            "orders",
+            "orders.schema.yml",
+            None,
+            "orders: edit\n",
+        )],
+        skip: Vec::new(),
+        identity: identity(&project.config, &[Some(0), Some(1), Some(2)]),
+    };
+    let diffs = api::diff_project(&config_path, edit).unwrap();
+    assert_eq!(diffs.last().unwrap().warning, None);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A `*.schema.yml` with CRLF line endings keeps them, and its comments,
+/// through a field rename and through a value edit, with no notice (the
+/// field ids the designer sends say which field was renamed).
+#[test]
+fn a_crlf_schema_keeps_its_line_endings_and_comments() {
+    let dir = own_fixture("crlf");
+    let config_path = dir.join("flusso.toml");
+    let lf = std::fs::read_to_string(dir.join("users.schema.yml")).unwrap();
+    std::fs::write(dir.join("users.schema.yml"), lf.replace('\n', "\r\n")).unwrap();
+    let project = api::load_project(&config_path).unwrap();
+    let schema = project
+        .indexes
+        .iter()
+        .find(|i| i.name == "users")
+        .unwrap()
+        .schema
+        .clone()
+        .unwrap();
+    let mut rename = schema.clone();
+    let field = rename
+        .fields
+        .iter_mut()
+        .find(|f| f.field.as_ref() == "fullName")
+        .unwrap();
+    field.field = kernel::FieldName::try_new("displayName").unwrap();
+    let mut value = schema.clone();
+    value.primary_key = None;
+    for (label, edited, renames) in [
+        ("rename", rename, &[("displayName", "fullName")][..]),
+        ("value", value, &[][..]),
+    ] {
+        let ids = serde_json::json!({
+            "before": ids(&schema.fields, "", &[]),
+            "after": ids(&edited.fields, "", renames),
+        });
+        let request = SaveRequest {
+            config: project.config.clone(),
+            ops: vec![FileOp {
+                schema: Some(edited),
+                identity: Some(serde_json::from_value(ids).unwrap()),
+                raw: None,
+                ..op(OpKind::Upsert, "users", "users.schema.yml", None, "")
+            }],
+            skip: Vec::new(),
+            identity: None,
+        };
+        let diffs = api::diff_project(&config_path, request).unwrap();
+        let written = diffs.last().unwrap();
+        assert!(written.changed, "{label}");
+        assert_eq!(written.notice, None, "{label}");
+        assert_eq!(written.dropped, 0, "{label}");
+        assert!(
+            !written.next.replace("\r\n", "").contains('\n'),
+            "{label}: a bare LF"
+        );
+        assert_eq!(
+            written.next.matches('#').count(),
+            lf.matches('#').count(),
+            "{label}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
 }

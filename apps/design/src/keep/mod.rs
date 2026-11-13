@@ -163,6 +163,22 @@ pub fn config_toml(
     })
 }
 
+/// For each `[[index]]` entry of `new`, the entry of `old` it is: from
+/// `identity` when it describes both configs, else the entry with its name.
+pub fn index_pairs(
+    identity: Option<&ConfigIdentity>,
+    old: &ConfigToml,
+    new: &ConfigToml,
+) -> Vec<Option<usize>> {
+    let names: Vec<String> = old.index.iter().map(|e| e.name.to_string()).collect();
+    match pairing::indexes(identity, &names, new.index.len()) {
+        Some(paired) => paired.pairs,
+        None => {
+            pairing::Pairing::matching(&old.index, &new.index, |was, is| was.name == is.name).pairs
+        }
+    }
+}
+
 fn parse_schema(text: &str) -> Option<IndexSchema> {
     IndexSchema::try_from(SchemaYaml::try_parse(text).ok()?).ok()
 }
