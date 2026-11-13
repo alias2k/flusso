@@ -105,6 +105,7 @@ impl Builder<'_> {
                 &column.column,
                 &column.transforms,
                 column.default.as_ref(),
+                column.array,
                 parent_alias,
             )),
             FieldSource::Group(nested) => self.object(nested, parent_alias, parent_pk),

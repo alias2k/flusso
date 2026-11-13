@@ -27,12 +27,20 @@ pub(super) fn json_agg_subquery(
 /// A column value expression: the qualified column, wrapped by transforms and a
 /// default. Defaults render as unknown-typed literals so Postgres adapts them
 /// to the column's type.
+///
+/// An array column applies its transforms to each element instead
+/// ([`element_transformed`]) and leaves its default to the decoder, which
+/// writes the list when the value is null.
 pub(super) fn column_value(
     column: &ColumnName,
     transforms: &[Transform],
     default: Option<&GenericValue>,
+    array: bool,
     alias: &str,
 ) -> String {
+    if array {
+        return element_transformed(qcol(alias, column), transforms);
+    }
     let mut expr = transformed(qcol(alias, column), transforms);
     if let Some(literal) = default.and_then(scalar_literal) {
         expr = format!("coalesce({expr}, {literal})");
@@ -48,6 +56,28 @@ pub(super) fn transformed(expr: String, transforms: &[Transform]) -> String {
             Transform::Lowercase => format!("lower({expr})"),
             Transform::Trim => format!("trim({expr})"),
         })
+}
+
+/// An array column's value with `transforms` applied to each string element,
+/// as `jsonb`, in order. Read through `to_jsonb`, so a `[]` column and a
+/// `json`/`jsonb` one take the same path; a value that is not an array is
+/// wrapped first (`jsonb_array_elements` fails on a scalar), and a non-string
+/// element passes through for the decoder to judge. SQL `NULL` and a JSON
+/// `null` stay null, and an empty array stays empty. With no transforms, the column as it is.
+pub(super) fn element_transformed(column: String, transforms: &[Transform]) -> String {
+    if transforms.is_empty() {
+        return column;
+    }
+    let value = format!("to_jsonb({column})");
+    let element = transformed("e.v #>> '{}'".to_owned(), transforms);
+    format!(
+        "CASE WHEN coalesce(jsonb_typeof({value}), 'null') = 'null' THEN NULL ELSE coalesce((\
+         SELECT jsonb_agg(CASE WHEN jsonb_typeof(e.v) = 'string' THEN to_jsonb({element}) \
+         ELSE e.v END ORDER BY e.o) \
+         FROM jsonb_array_elements(CASE jsonb_typeof({value}) WHEN 'array' THEN {value} \
+         ELSE jsonb_build_array({value}) END) WITH ORDINALITY AS e(v, o)\
+         ), '[]'::jsonb) END"
+    )
 }
 
 /// A `geo_point` value: `{ "lat": …, "lon": … }`, or SQL `NULL` when either
