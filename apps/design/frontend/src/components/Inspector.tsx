@@ -813,10 +813,16 @@ function ScalarBody({
           </p>
         )}
         <ArrayToggle column={column} setCol={setCol} />
-        <div className="check-row my-1.5 flex flex-wrap gap-4">
-          <Check value={has("lowercase")} label={t("inspector.lowercase")} onChange={(on) => toggle("lowercase", on)} />
-          <Check value={has("trim")} label={t("inspector.trim")} onChange={(on) => toggle("trim", on)} />
-        </div>
+        {!(column.ty === "json" && column.array) && (
+          <div className="check-row my-1.5 flex flex-wrap gap-4">
+            <Check
+              value={has("lowercase")}
+              label={t("inspector.lowercase")}
+              onChange={(on) => toggle("lowercase", on)}
+            />
+            <Check value={has("trim")} label={t("inspector.trim")} onChange={(on) => toggle("trim", on)} />
+          </div>
+        )}
         {column.ty === "enum" && (
           <VariantsEditor
             variants={column.enum_order ?? []}
@@ -847,7 +853,8 @@ function ScalarBody({
 
 /// The `array` switch of a column field: the column holds an array of the
 /// field's type. Flipping it drops a `default`, which changes shape (a single
-/// value becomes a list).
+/// value becomes a list); turning it on for a `json` field drops `transforms`,
+/// which a `json` array refuses.
 function ArrayToggle({ column, setCol }: { column: Column; setCol: (c: Column) => void }) {
   const { t } = useT();
   const on = column.array ?? false;
@@ -859,6 +866,7 @@ function ArrayToggle({ column, setCol }: { column: Column; setCol: (c: Column) =
         onChange={(next) => {
           const changed: Column = { ...column, array: next ? true : undefined };
           delete changed.default;
+          if (next && column.ty === "json") delete changed.transforms;
           setCol(changed);
         }}
       />

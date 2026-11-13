@@ -47,7 +47,7 @@ You're adding a location, a translations column, a status or severity with a mea
      transforms: [trim, lowercase]
    ```
 
-5. **A column holding an array.** Declare the element's type and `array: true`. Every element is indexed, nulls are dropped, and transforms apply to each element.
+5. **A column holding an array.** Declare the element's type and `array: true`.
 
    ```yaml
    - keyword: tags
@@ -56,7 +56,7 @@ You're adding a location, a translations column, a status or severity with a mea
      transforms: [lowercase]
    ```
 
-   Without the flag, `flusso check` warns on a `[]` column: it still indexes, but the query side can't read it back as an array. See [array](../reference/field-types.md#array).
+   What happens to nulls, lone values and transforms, and what `check` says about a `[]` column without the flag, is in [array](../reference/field-types.md#array).
 
 6. **Validate.** `flusso check --offline` shows the derived mapping: `geo_point` for the geo, `map<text>` for the map (`--format json` shows the mapping every key gets as its `values`), a `.sort` subfield under the enum.
 

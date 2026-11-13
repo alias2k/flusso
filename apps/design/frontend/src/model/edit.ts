@@ -179,6 +179,7 @@ export function retypeField(field: Field, column: Column, ty: FlussoType): Field
   const next: Column = { ...column, ty };
   if (!SUBFIELD_TYPES.includes(ty)) delete next.subfields;
   if (ty !== "json") delete next.indexed;
+  if (ty === "json" && next.array) delete next.transforms;
   const retyped: Field = { ...field, source: { column: next } };
   // An option `ty` would add that is already there was set by the user.
   const userSet = Object.keys(typeOptions(ty)).filter((k) => field.options && k in field.options);

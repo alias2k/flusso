@@ -59,11 +59,14 @@ pub(super) fn transformed(expr: String, transforms: &[Transform]) -> String {
 }
 
 /// An array column's value with `transforms` applied to each string element,
-/// as `jsonb`, in order. Read through `to_jsonb`, so a `[]` column and a
-/// `json`/`jsonb` one take the same path; a value that is not an array is
-/// wrapped first (`jsonb_array_elements` fails on a scalar), and a non-string
-/// element passes through for the decoder to judge. SQL `NULL` and a JSON
-/// `null` stay null, and an empty array stays empty. With no transforms, the column as it is.
+/// in order, as `jsonb`. With no transforms, the column as it is.
+///
+/// - Read through `to_jsonb`, so a `[]` column and a `json`/`jsonb` one share
+///   this path.
+/// - A value that is not an array is wrapped first: `jsonb_array_elements`
+///   fails on a scalar.
+/// - A non-string element passes through, for the decoder to judge.
+/// - SQL `NULL` and a JSON `null` stay null; an empty array stays empty.
 pub(super) fn element_transformed(column: String, transforms: &[Transform]) -> String {
     if transforms.is_empty() {
         return column;

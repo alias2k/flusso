@@ -1401,6 +1401,18 @@ fn an_array_default_is_a_list_of_scalars_or_of_json() {
 }
 
 #[test]
+fn a_json_array_takes_no_transforms() {
+    let err = convert(
+        "version: 1\ntable: orders\nfields:\n  - json: notes\n    required: false\n    array: true\n    transforms: [lowercase]",
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, ConversionError::TransformsOnJsonArray { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
 fn array_is_not_a_key_of_geo_map_object_or_constant() {
     for field in [
         "- geo: spot\n    column: spot\n    required: false\n    array: true",

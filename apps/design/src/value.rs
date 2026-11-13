@@ -15,10 +15,13 @@
 //! or too small to be a number in the file (`1.5e300`). Negative zero is zero.
 //! Nesting deeper than [`MAX_DEPTH`] is [`ValueProblem::TooDeep`].
 //!
-//! Each [`ValueSlot`] has the parser's own rules: a column `default` must be a
-//! scalar ([`ValueProblem::NotScalar`]); an array column's `default` a list
-//! ([`ValueProblem::NotAList`]) with no null in it
-//! ([`ValueProblem::NullElement`]); a `constant` and an option take any value. The result is the value after one real round trip in its slot
+//! Each [`ValueSlot`] has the parser's own rules:
+//!
+//! - a column `default` must be a scalar ([`ValueProblem::NotScalar`]);
+//! - an array column's `default` must be a list ([`ValueProblem::NotAList`])
+//!   with no null in it ([`ValueProblem::NullElement`]);
+//! - a `constant` and an option take any value.
+//! The result is the value after one real round trip in its slot
 //! (codegen, then the parser), so the preview and the content hash are computed
 //! from what the file reads. [`read`] also says how the file spells it, when
 //! that differs from what was typed (`1e3` is saved as `1000.0`, ` 5 ` as `5`).

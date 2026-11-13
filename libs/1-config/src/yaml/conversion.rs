@@ -79,6 +79,11 @@ fn convert_scalar(ty: FlussoType, body: entities::ScalarBody) -> Result<Field, C
         );
     }
     let array = body.array.unwrap_or(false);
+    if array && ty == FlussoType::Json && body.transforms.is_some() {
+        return Err(ConversionError::TransformsOnJsonArray {
+            field: body.field.to_string(),
+        });
+    }
     let default = convert_column_default(&body.field, body.default, array, &ty)?;
     let column = match body.column {
         Some(column) => column,

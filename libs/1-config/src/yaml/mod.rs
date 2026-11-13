@@ -199,9 +199,14 @@ pub enum ConversionError {
     ScalarArrayDefault { field: String },
     #[error(
         "field `{field}` has a `default` with a `{got}` element — an array field's `default` \
-         lists scalar values (string, number, bool, or date)"
+         lists non-null values, scalars (string, number, bool, or date) except on a `json` field"
     )]
     ArrayDefaultElement { field: String, got: &'static str },
+    #[error(
+        "`json` field `{field}` has `array: true` and `transforms` — a `json` field takes no \
+         `transforms`; remove them"
+    )]
+    TransformsOnJsonArray { field: String },
 }
 
 #[derive(Debug, Clone, Deserialize)]

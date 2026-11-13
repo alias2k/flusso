@@ -73,7 +73,7 @@ A leaf can also be computed from the built document instead of read from a colum
   | an object or array element | the document fails, and [`on_error`](index-and-on-error.md) decides |
 
   On a `json` field every element is kept, objects and nested arrays included; only top-level nulls are dropped.
-- **[`transforms`](#transforms)** apply to each string element. They're checked against the element type: the `[]` column's base type, or `text` for `json`/`jsonb`.
+- **[`transforms`](#transforms)** apply to each string element. They're checked against the element type: the `[]` column's base type, or `text` for `json`/`jsonb`. A `json` array takes none.
 - **`default`** is a list, written whole when the column is null: `default: [general]`. Its elements are non-null scalars (any non-null JSON on a `json` field). A scalar `default` with `array: true` is rejected at load.
 - **`required`** is about the array: `true` maps `Vec<T>`, `false` `Option<Vec<T>>`. See [Document structs](../query/document-structs.md#arrays).
 - **Checked against the database.** `array: true` over a column that's neither a `[]` type nor `json`/`jsonb` is an error that stops `run`; a `[]` column without it is a warning. See [check](cli.md#check).

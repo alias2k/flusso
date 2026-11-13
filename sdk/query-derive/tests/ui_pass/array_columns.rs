@@ -53,6 +53,14 @@ struct LineWithVec {
 #[derive(serde::Deserialize, FlussoFragment)]
 struct Tagged {
     tags: Option<Tags>,
+    notes: Option<serde_json::Value>,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "lists")]
+struct OrderWithRawNotes {
+    id: String,
+    notes: Option<serde_json::Value>,
 }
 
 #[derive(serde::Deserialize, FlussoRoot)]

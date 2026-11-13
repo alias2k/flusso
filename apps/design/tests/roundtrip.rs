@@ -19,7 +19,8 @@
 //!  - `distinct` only on an aggregate over `through`,
 //!  - `subfields: false` only on `text`/`keyword`/`uuid`, `indexed: false` only
 //!    on `json` and joins (none of which get generated `options`),
-//!  - an `array` column's `default` is a list of non-null scalars,
+//!  - an `array` column's `default` is a list of non-null scalars, and a `json`
+//!    array takes no `transforms`,
 //!  - values (`constant`, `default`, `options`) are ones the parser can produce:
 //!    `Null`, `Bool`, `BigInt`, a `Decimal` read from an `f64` or an integer past
 //!    `i64`, `String` (including ones that look like another kind), and, outside
@@ -456,6 +457,11 @@ fn scalar_source() -> BoxedStrategy<FieldSource> {
                     Vec::new()
                 };
                 let default = if array { array_default } else { default };
+                let transforms = if array && matches!(ty, FlussoType::Json) {
+                    Vec::new()
+                } else {
+                    transforms
+                };
                 FieldSource::Column(Column {
                     column,
                     nullable,

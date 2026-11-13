@@ -1387,7 +1387,7 @@ mod tests {
             { "field": "id", "source": { "column": { "column": "id", "ty": "integer", "nullable": false } } },
             list_column("tags", "keyword", true),
             list_column("codes", "integer", true),
-            list_column("doc", "json", true),
+            list_column("doc", "keyword", true),
         ]));
         assert_eq!(
             findings,
