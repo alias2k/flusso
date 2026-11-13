@@ -108,7 +108,9 @@ Saving is canonical regeneration: meaning is preserved (the written file parses 
 
 ### Typed values
 
-A `constant`, a `default` and each `options` value are typed as JSON: text in double quotes (`"like this"`), `true`, `null`, lists, objects, numbers. Numbers are a little looser than JSON: a leading `+`, leading zeros, and a bare point on either side (`5.`, `.5`) are accepted and read as the number they spell. The designer reads what you type the way the saved file will be read, so the preview and the content hash (the physical index name) match what flusso deploys from that file. A value is read once typing pauses, or at once when the box loses focus; Save, Code mode, undo and redo wait for it. It goes into the schema only once it is accepted; a refused one keeps the field red with the reason underneath and leaves the previous value in the schema. **Reset** discards a value still being read.
+A `constant`, a `default` and each `options` value are typed as JSON: text in double quotes (`"like this"`), `true`, `null`, lists, objects, numbers. Numbers are a little looser than JSON: a leading `+`, leading zeros, and a bare point on either side (`5.`, `.5`) are accepted and read as the number they spell. The designer reads what you type the way the saved file will be read, so the preview and the content hash (the physical index name) match what flusso deploys from that file. A value is read once typing pauses, or at once when the box loses focus; Save, Code mode, undo and redo wait for it, and **Save** is enabled while one is being read. It goes into the field it was typed for, even when you have selected, renamed or moved another field by the time it is read; a field deleted in the meantime gets nothing. It goes into the schema only once it is accepted; a refused one keeps the field red with the reason underneath and leaves the previous value in the schema. **Reset** discards a value still being read.
+
+When the designer cannot be reached to read a value, the box keeps what you typed, says it could not be checked, and the schema keeps the previous value. **Save** tries it again; if it still gets no answer within a few seconds, it writes nothing and names each field (`orders.items.quantity.default`) whose value could not be checked.
 
 | Typed | Stored as | A `constant` maps as |
 |---|---|---|
@@ -117,11 +119,12 @@ A `constant`, a `default` and each `options` value are typed as JSON: text in do
 | a fraction or an exponent (`1.5`, `5.`, `.5`, `1e3`, `1e-7`) | a decimal, as the file reads a float: `1e3` is `1000.0` | `double` |
 | `+5`, `007`, `-0`, spaces around the number | the same number: `5`, `7`, `0` | as above |
 
-When the saved file spells a number differently from what you typed, a *Saved as* note under the box shows the value as the file writes it (`1e3` → `1000.0`, `+5` → `5`, `[1, 1e3]` → `[1, 1000.0]`); when every number is written as typed (`1e-7`, `1.5`), there is no note. Refused, with a message, and never rounded:
+When the saved file spells the value differently from what you typed, a *Saved as* note under the box shows the value as the file writes it (`1e3` → `1000.0`, `+5` → `5`, `[1, 1e3]` → `[1, 1000.0]`, ` 5 ` → `5`); when it is written as typed (`1e-7`, `1.5`), there is no note. Refused, with a message, and never rounded:
 
 - a number with more digits than the file keeps, such as `0.1000000000000000000001`, or most integers past 2⁶⁴ (`18446744073709551616`);
 - a number too large or too small to be a number in the file, such as `1.5e300` or `1e-30`;
-- lists and objects nested more than 64 levels deep.
+- lists and objects nested more than 32 levels deep;
+- a list or an object as a column `default`, which takes a single value.
 
 To keep a number as written, quote it: `"1.5e300"` is stored as text.
 

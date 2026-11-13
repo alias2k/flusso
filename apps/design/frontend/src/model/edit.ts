@@ -3,6 +3,7 @@
 
 import type { Column, Field, FlussoType, IndexSchema } from "../api";
 import { columnField, defaultField, retypeOptions, typeOptions } from "../fields";
+import { childFields, withChildFields } from "./containers";
 import { cloneJson } from "./exact";
 import { stripFieldUids } from "./ids";
 import { carryUid, nodeFields, setNodeField, withNodeFields } from "./tree";
@@ -182,18 +183,46 @@ export function retypeField(field: Field, column: Column, ty: FlussoType): Field
 
 /// `mine` (an edit of `base`) carried onto `theirs` (what `base` became since):
 /// a key `mine` left as it was in `base` takes `theirs`, one it changed takes
-/// `mine`, objects key by key. So an edit made from an older render, such as
-/// a typed value read after its box lost focus, keeps newer edits to the rest.
+/// `mine`, objects key by key; a key `theirs` removed stays removed (an option
+/// renamed or dropped since). So an edit made from an older render, such as a
+/// typed value read after its box lost focus, keeps newer edits to the rest.
 export function rebase<T>(base: T, mine: T, theirs: T): T {
   if (sameJson(mine, base)) return theirs;
   if (sameJson(theirs, base)) return mine;
   if (!isRecord(base) || !isRecord(mine) || !isRecord(theirs)) return mine;
   const out: Record<string, unknown> = {};
   for (const key of new Set([...Object.keys(base), ...Object.keys(mine), ...Object.keys(theirs)])) {
+    if (key in base && !(key in theirs)) continue;
     const value = rebase(base[key], mine[key], theirs[key]);
     if (value !== undefined) out[key] = value;
   }
   return out as T;
+}
+
+/// Replace the field whose uid is `uid` — wherever it sits now, under whatever
+/// name — with `fn` of it. The schema is returned unchanged when no field has
+/// that uid any more (it was removed), so a late edit never lands elsewhere.
+export function updateField(schema: IndexSchema, uid: string, fn: (now: Field) => Field): IndexSchema {
+  const walk = (fields: Field[]): Field[] => {
+    const at = fields.findIndex((f) => f.uid === uid);
+    if (at >= 0) {
+      const next = fields.slice();
+      next[at] = carryUid(fields[at], fn(fields[at]));
+      return next;
+    }
+    for (const [i, f] of fields.entries()) {
+      const children = childFields(f);
+      if (children === null) continue;
+      const nextChildren = walk(children);
+      if (nextChildren === children) continue;
+      const next = fields.slice();
+      next[i] = withChildFields(f, nextChildren);
+      return next;
+    }
+    return fields;
+  };
+  const fields = walk(schema.fields);
+  return fields === schema.fields ? schema : { ...schema, fields };
 }
 
 const sameJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);

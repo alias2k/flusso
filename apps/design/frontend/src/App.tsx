@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useDesignStore, useCanUndo, useCanRedo, undo, redo, type Doc } from "./store/design";
 import { useUiStore } from "./store/ui";
 import {
@@ -31,7 +31,7 @@ import { CatalogBrowser } from "./components/CatalogBrowser";
 import { DiffView } from "./components/DiffView";
 import { diffStats, type DiffMode } from "./model/diff";
 import { parseJson, roundedFields } from "./model/exact";
-import { flushPendingValues } from "./model/pending";
+import { flushPendingValues, hasPendingValues, subscribePendingValues } from "./model/pending";
 import { CommandPalette } from "./components/CommandPalette";
 import { ConfigPanel } from "./components/ConfigPanel";
 import { Icon } from "./components/Icon";
@@ -331,7 +331,9 @@ export default function App() {
   // Typed in Code mode but not applied yet (the sync's debounce): Save flushes
   // it first, so it must not wait for the document to move.
   const bufferAhead = useUiStore((s) => s.rawMode && !!s.seed && s.rawText !== s.seed.text);
-  const canSave = dirty || bufferAhead;
+  // A value still being read may be the only change: Save waits for it.
+  const valuesPending = useSyncExternalStore(subscribePendingValues, hasPendingValues);
+  const canSave = dirty || bufferAhead || valuesPending;
   const indexDirty = (name: string, of: Doc | null = doc): boolean => {
     if (!of || !savedDoc) return false;
     const current = of.schemas[name];
@@ -606,16 +608,20 @@ export default function App() {
       setLiveDiags([]);
       return;
     }
+    let current = true;
     const handle = setTimeout(() => {
       api
         .validate(doc.config, [{ name: active, schema }])
         .then((res) => {
-          if (!useUiStore.getState().rawMode) return;
+          if (!current || !useUiStore.getState().rawMode) return;
           setLiveDiags(res.db_reachable && !res.error ? res.diagnostics : []);
         })
-        .catch(() => setLiveDiags([]));
+        .catch(() => current && setLiveDiags([]));
     }, 800);
-    return () => clearTimeout(handle);
+    return () => {
+      current = false;
+      clearTimeout(handle);
+    };
   }, [rawMode, schema, doc, active, catalog]);
 
   // Warn before leaving with unsaved changes.
@@ -685,7 +691,11 @@ export default function App() {
     if (!doc || useUiStore.getState().saving) return;
     setSaving(true);
     try {
-      await flushPendingValues();
+      const unread = await flushPendingValues();
+      if (unread.length) {
+        setToast({ kind: "error", text: t("value.unreadSave", { fields: unread.join(", ") }) });
+        return;
+      }
       if (!(await flushBuffer())) {
         setToast({ kind: "error", text: t("code.unparsedSave") });
         return;

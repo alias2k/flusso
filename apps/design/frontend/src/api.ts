@@ -192,9 +192,10 @@ export interface Field {
   // `false` makes the field input-only: fetched for scripts, never emitted.
   emit?: boolean;
   source: FieldSource;
-  /// Client-only stable id of a container field (object group or join): the
-  /// canvas node id that collapse state and manual positions key on, so they
-  /// survive re-indexing. Stamped by `model/ids.ts`, stripped before any request.
+  /// Client-only stable id of the field, surviving re-indexing and renames: a
+  /// container's canvas node id (collapse state, manual positions), and what
+  /// the inspector and a typed value being read address the field by. Stamped
+  /// by `model/ids.ts`, stripped before any request.
   uid?: string;
   /// Client-only: option keys the user set to the value a type adds (an
   /// `identifier`'s analyzer), so retyping away keeps them (`retypeField`).
@@ -464,6 +465,10 @@ export interface ExpressionCheck {
   };
 }
 
+/// Where a typed value goes; each has the schema parser's own rules (a
+/// `default` takes only a scalar).
+export type ValueSlot = "constant" | "default" | "option";
+
 /// A value typed into the inspector, read the way its saved file reads it: the
 /// `GenericValue` to store, or why the text was refused.
 export interface ValueCheck {
@@ -476,6 +481,7 @@ export interface ValueCheck {
     | { code: "inexact"; number: string }
     | { code: "out_of_range"; number: string }
     | { code: "too_deep"; limit: number }
+    | { code: "not_scalar" }
     | { code: "reads_back_differently" };
 }
 
@@ -489,7 +495,7 @@ export interface ParseResponse {
   type_tag?: string;
 }
 
-/// Drop the client-only container uids (`model/ids.ts`) from a file op's schema.
+/// Drop the client-only field uids (`model/ids.ts`) from a file op's schema.
 const stripOpUids = (op: FileOp): FileOp => (op.schema ? { ...op, schema: stripUids(op.schema) } : op);
 
 /// Drop the session-local index ids before a config crosses to the backend —
@@ -533,11 +539,11 @@ export const api = {
       body: JSON.stringify({ input }),
     }).then((r) => json<ExpressionCheck>(r)),
   /// Read a typed JSON value (a constant, a default, an option) as its saved file will.
-  value: (text: string) =>
+  value: (text: string, slot: ValueSlot) =>
     fetch("/api/value", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, slot }),
     }).then((r) => json<ValueCheck>(r)),
   catalog: () => fetch("/api/catalog").then((r) => json<CatalogResponse>(r)),
   /// Relative subdirectories under the config dir, for the schema-folder picker.

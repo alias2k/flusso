@@ -336,6 +336,11 @@ export const it: Record<string, string> = {
   "value.savedAs": "Salvato come {value}",
   "value.tooDeep":
     "Liste e oggetti sono annidati oltre {limit} livelli, più di quanti il file dello schema ne rilegga.",
+  "value.notScalar":
+    "Un default accetta un solo valore: testo, un numero, true, false o null, non una lista né un oggetto.",
+  "value.unchecked": "Non è stato possibile verificarlo, quindi non è ancora nello schema. Il salvataggio riprova.",
+  "value.unreadSave":
+    "Non salvato: non è stato possibile verificare il valore inserito in {fields}. Controlla che il designer sia ancora in esecuzione, poi salva di nuovo.",
   "value.roundedSave":
     "Non salvato: questo browser ha arrotondato un intero oltre 9007199254740991 in {fields}, quindi il file riceverebbe un altro numero. Apri il designer in un browser aggiornato, o correggi lì il valore.",
   "preview.parseError": "Questo schema non è analizzabile:",

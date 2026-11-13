@@ -195,16 +195,12 @@ export const useDesignStore = create<DesignState>()(
 
       applyTo: (index, fn) => {
         if (index === "config") return;
-        set((s) =>
-          s.doc && (index === s.active || index in s.doc.schemas)
-            ? {
-                doc: {
-                  ...s.doc,
-                  schemas: { ...s.doc.schemas, [index]: stampIds(fn(s.doc.schemas[index] ?? emptySchema(""))) },
-                },
-              }
-            : {},
-        );
+        set((s) => {
+          if (!s.doc || !(index === s.active || index in s.doc.schemas)) return {};
+          const current = s.doc.schemas[index];
+          const next = stampIds(fn(current ?? emptySchema("")));
+          return next === current ? {} : { doc: { ...s.doc, schemas: { ...s.doc.schemas, [index]: next } } };
+        });
       },
 
       setConfig: (next) => {

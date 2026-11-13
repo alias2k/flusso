@@ -205,7 +205,9 @@ fn typed_number() -> impl Strategy<Value = String> {
 
 /// A value the inspector accepts from a typed number (refused ones dropped).
 fn typed_value() -> impl Strategy<Value = GenericValue> {
-    typed_number().prop_filter_map("refused", |text| design::value::read_typed(&text).ok())
+    typed_number().prop_filter_map("refused", |text| {
+        design::value::read_typed(&text, design::value::ValueSlot::Constant).ok()
+    })
 }
 
 fn scalar_value() -> BoxedStrategy<GenericValue> {
@@ -826,7 +828,7 @@ proptest! {
             GenericValue::Decimal(d) => Some(*d),
             _ => None,
         };
-        match design::value::read_typed(&text) {
+        match design::value::read_typed(&text, design::value::ValueSlot::Constant) {
             Ok(value) => {
                 let read = decimal(&value);
                 prop_assert!(read.is_some(), "{text:?} became {value:?}");

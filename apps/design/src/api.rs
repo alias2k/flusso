@@ -190,6 +190,9 @@ pub fn check_expression(request: &ExpressionRequest) -> ExpressionResponse {
 pub struct ValueRequest {
     /// The text as typed.
     pub text: String,
+    /// Where the value goes; a `constant` when omitted.
+    #[serde(default)]
+    pub slot: crate::value::ValueSlot,
 }
 
 /// The value the saved file reads back as, or why the text can't be one.
@@ -209,7 +212,7 @@ pub struct ValueResponse {
 
 /// Read a typed value the way its saved file will (see [`crate::value`]).
 pub fn read_value(request: &ValueRequest) -> ValueResponse {
-    match crate::value::read(&request.text) {
+    match crate::value::read(&request.text, request.slot) {
         Ok(typed) => ValueResponse {
             value: Some(typed.value),
             saved_as: typed.saved_as,

@@ -15,18 +15,22 @@
 //! or too small to be a number in the file (`1.5e300`). Negative zero is zero.
 //! Nesting deeper than [`MAX_DEPTH`] is [`ValueProblem::TooDeep`].
 //!
-//! The result is the value after one real round trip (codegen, then the parser),
-//! so the preview and the content hash are computed from what the file reads.
-//! [`read`] also says how the file spells it, when a number is written other
-//! than typed (`1e3` is saved as `1000.0`).
+//! Each [`ValueSlot`] has the parser's own rules: a column `default` must be a
+//! scalar ([`ValueProblem::NotScalar`]); a `constant` and an option take any
+//! value. The result is the value after one real round trip in its slot
+//! (codegen, then the parser), so the preview and the content hash are computed
+//! from what the file reads. [`read`] also says how the file spells it, when
+//! that differs from what was typed (`1e3` is saved as `1000.0`, ` 5 ` as `5`).
 //!
 //! ```
-//! use design::value::{ValueProblem, read_typed};
+//! use design::value::{ValueProblem, ValueSlot, read_typed};
 //! use kernel::GenericValue;
 //!
-//! assert!(matches!(read_typed("9007199254740993"), Ok(GenericValue::BigInt(9_007_199_254_740_993))));
-//! assert!(matches!(read_typed("1e3"), Ok(GenericValue::Decimal(d)) if d == 1000.into()));
-//! assert!(matches!(read_typed("1.5e300"), Err(ValueProblem::OutOfRange { .. })));
+//! let constant = |text| read_typed(text, ValueSlot::Constant);
+//! assert!(matches!(constant("9007199254740993"), Ok(GenericValue::BigInt(9_007_199_254_740_993))));
+//! assert!(matches!(constant("1e3"), Ok(GenericValue::Decimal(d)) if d == 1000.into()));
+//! assert!(matches!(constant("1.5e300"), Err(ValueProblem::OutOfRange { .. })));
+//! assert_eq!(read_typed("[1]", ValueSlot::Default), Err(ValueProblem::NotScalar));
 //! ```
 
 use std::collections::BTreeMap;
@@ -35,13 +39,29 @@ use std::str::FromStr;
 use config::yaml::SchemaYaml;
 use kernel::{FieldSource, GenericValue, IndexSchema, ParseFrom};
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::codegen;
 
-/// How deep a typed value may nest: below what the schema file's own parser
-/// reads back (the value sits a few levels inside the file).
-pub const MAX_DEPTH: usize = 64;
+/// How deep a typed value may nest. The JSON the editor posts to preview, diff
+/// and save spells each list or object as two levels (`{"Array": [...]}`) and
+/// sits inside the schema's own nesting, all under serde_json's limit of 128:
+/// this cap leaves room for a value inside eleven nested joins (pinned at ten
+/// by `the_deepest_accepted_value_previews_diffs_and_saves_ten_joins_deep`).
+pub const MAX_DEPTH: usize = 32;
+
+/// Where a typed value goes in the schema file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValueSlot {
+    /// A `constant` field's value: any value.
+    #[default]
+    Constant,
+    /// A column's `default`: a scalar or `null`.
+    Default,
+    /// A field's `options` entry: any value.
+    Option,
+}
 
 /// A typed value as its saved file reads it.
 #[derive(Debug, Clone, PartialEq)]
@@ -66,18 +86,21 @@ pub enum ValueProblem {
     OutOfRange { number: String },
     /// Nested deeper than `limit` lists or objects.
     TooDeep { limit: usize },
+    /// A list or object where the file takes only a scalar (a `default`).
+    NotScalar,
     /// The value would read back as something else (a codegen defect).
     ReadsBackDifferently,
 }
 
-/// Typed JSON → the value its saved file reads back as, or why it can't be one.
-pub fn read_typed(text: &str) -> Result<GenericValue, ValueProblem> {
-    read(text).map(|typed| typed.value)
+/// Typed JSON → the value its saved file reads back as in `slot`, or why it
+/// can't be one.
+pub fn read_typed(text: &str, slot: ValueSlot) -> Result<GenericValue, ValueProblem> {
+    read(text, slot).map(|typed| typed.value)
 }
 
-/// Typed JSON → the value its saved file reads back as, and how the file
-/// spells it when that differs from what was typed.
-pub fn read(text: &str) -> Result<Typed, ValueProblem> {
+/// Typed JSON → the value its saved file reads back as in `slot`, and how the
+/// file spells it when that differs from what was typed.
+pub fn read(text: &str, slot: ValueSlot) -> Result<Typed, ValueProblem> {
     let mut reader = Reader {
         chars: text.chars().collect(),
         at: 0,
@@ -89,11 +112,11 @@ pub fn read(text: &str) -> Result<Typed, ValueProblem> {
     if reader.at < reader.chars.len() {
         return Err(reader.syntax());
     }
-    let value = read_back(&value)?;
-    let respelled = reader
-        .numbers
-        .iter()
-        .any(|(typed, number)| codegen::scalar_text(number).map_or(true, |saved| saved != *typed));
+    let value = read_back(&value, slot)?;
+    let respelled = text.trim() != text
+        || reader.numbers.iter().any(|(typed, number)| {
+            codegen::scalar_text(number).map_or(true, |saved| saved != *typed)
+        });
     let saved_as = if respelled {
         Some(spelled(&value).ok_or(ValueProblem::ReadsBackDifferently)?)
     } else {
@@ -127,30 +150,63 @@ fn spelled(value: &GenericValue) -> Option<String> {
     })
 }
 
-/// `value` written as a constant and parsed back; refused if it changes.
-fn read_back(value: &GenericValue) -> Result<GenericValue, ValueProblem> {
-    let mut schema = IndexSchema::try_from(
-        SchemaYaml::try_parse(
-            "version: 1\ntable: t\nprimary_key: id\nfields:\n- constant: c\n  value: null\n",
-        )
-        .map_err(|_| ValueProblem::ReadsBackDifferently)?,
-    )
-    .map_err(|_| ValueProblem::ReadsBackDifferently)?;
-    let Some(field) = schema.fields.first_mut() else {
-        return Err(ValueProblem::ReadsBackDifferently);
-    };
-    field.source = FieldSource::Constant(value.clone());
-    let yaml = codegen::schema_to_yaml(&schema).map_err(|_| ValueProblem::ReadsBackDifferently)?;
-    let reparsed = SchemaYaml::try_parse(&yaml)
-        .ok()
-        .and_then(|entity| IndexSchema::try_from(entity).ok());
-    match reparsed
-        .as_ref()
-        .and_then(|s| s.fields.first())
-        .map(|f| &f.source)
+/// `value` written in `slot` and parsed back; refused if the parser rejects it
+/// there or it changes.
+fn read_back(value: &GenericValue, slot: ValueSlot) -> Result<GenericValue, ValueProblem> {
+    if slot == ValueSlot::Default && matches!(value, GenericValue::Array(_) | GenericValue::Map(_))
     {
-        Some(FieldSource::Constant(back)) if same(back, value) => Ok(back.clone()),
+        return Err(ValueProblem::NotScalar);
+    }
+    let mut schema = carrier(slot).ok_or(ValueProblem::ReadsBackDifferently)?;
+    let field = schema
+        .fields
+        .first_mut()
+        .ok_or(ValueProblem::ReadsBackDifferently)?;
+    put(field, slot, value.clone());
+    let yaml = codegen::schema_to_yaml(&schema).map_err(|_| ValueProblem::ReadsBackDifferently)?;
+    let back = SchemaYaml::try_parse(&yaml)
+        .ok()
+        .and_then(|entity| IndexSchema::try_from(entity).ok())
+        .and_then(|reparsed| reparsed.fields.into_iter().next())
+        .and_then(|field| get(field, slot));
+    match back {
+        Some(back) if same(&back, value) => Ok(back),
         _ => Err(ValueProblem::ReadsBackDifferently),
+    }
+}
+
+/// The key a typed option is written under to read it back.
+const OPTION_KEY: &str = "option";
+
+/// A schema of one field that holds a value in `slot`.
+fn carrier(slot: ValueSlot) -> Option<IndexSchema> {
+    let field = match slot {
+        ValueSlot::Constant => "- constant: c\n  value: null\n",
+        ValueSlot::Default | ValueSlot::Option => "- boolean: c\n  required: false\n",
+    };
+    let yaml = format!("version: 1\ntable: t\nprimary_key: id\nfields:\n{field}");
+    IndexSchema::try_from(SchemaYaml::try_parse(&yaml).ok()?).ok()
+}
+
+fn put(field: &mut kernel::Field, slot: ValueSlot, value: GenericValue) {
+    match (slot, &mut field.source) {
+        (ValueSlot::Constant, source) => *source = FieldSource::Constant(value),
+        (ValueSlot::Default, FieldSource::Column(column)) => column.default = Some(value),
+        (ValueSlot::Default, _) => {}
+        (ValueSlot::Option, _) => {
+            field.options.insert(OPTION_KEY.to_owned(), value);
+        }
+    }
+}
+
+fn get(mut field: kernel::Field, slot: ValueSlot) -> Option<GenericValue> {
+    match (slot, field.source) {
+        (ValueSlot::Constant, FieldSource::Constant(value)) => Some(value),
+        (ValueSlot::Default, FieldSource::Column(column)) => {
+            Some(column.default.unwrap_or(GenericValue::Null))
+        }
+        (ValueSlot::Option, _) => field.options.remove(OPTION_KEY),
+        _ => None,
     }
 }
 
@@ -457,6 +513,14 @@ mod tests {
 
     use super::*;
 
+    fn read_typed(text: &str) -> Result<GenericValue, ValueProblem> {
+        super::read_typed(text, ValueSlot::Constant)
+    }
+
+    fn read_constant(text: &str) -> Result<Typed, ValueProblem> {
+        super::read(text, ValueSlot::Constant)
+    }
+
     fn decimal(text: &str) -> GenericValue {
         GenericValue::Decimal(text.parse().unwrap())
     }
@@ -590,14 +654,14 @@ mod tests {
         for _ in 0..MAX_DEPTH {
             expected = GenericValue::Array(vec![expected]);
         }
-        assert_eq!(super::read(&text).unwrap().value, expected);
+        assert_eq!(read_constant(&text).unwrap().value, expected);
         let text = r#"{"a":"#.repeat(MAX_DEPTH) + "1" + "}".repeat(MAX_DEPTH).as_str();
-        assert!(super::read(&text).is_ok());
+        assert!(read_constant(&text).is_ok());
     }
 
     #[test]
     fn saved_as_is_the_files_spelling_when_a_number_is_respelled() {
-        let saved = |text: &str| super::read(text).unwrap().saved_as;
+        let saved = |text: &str| read_constant(text).unwrap().saved_as;
         assert_eq!(saved("1e3").as_deref(), Some("1000.0"));
         assert_eq!(saved("+5").as_deref(), Some("5"));
         assert_eq!(saved("[1, 1e3]").as_deref(), Some("[1, 1000.0]"));
@@ -605,6 +669,8 @@ mod tests {
             saved(r#"{"b": 1E3, "a": "x"}"#).as_deref(),
             Some(r#"{"a": "x", "b": 1000.0}"#)
         );
+        assert_eq!(saved(" 5 ").as_deref(), Some("5"));
+        assert_eq!(saved(" [1,2] ").as_deref(), Some("[1, 2]"));
         for text in ["5", "1.5", "-12", r#""1e3""#, r#"{"a": [1, 2.5]}"#, "true"] {
             assert_eq!(saved(text), None, "{text}");
         }
@@ -613,7 +679,7 @@ mod tests {
     #[test]
     fn saved_as_matches_the_generated_file() {
         for text in ["1e-7", "1e21", "1e3", "5.0", "+.5", "007"] {
-            let typed = super::read(text).unwrap();
+            let typed = read_constant(text).unwrap();
             let schema = IndexSchema::try_from(
                 SchemaYaml::try_parse(
                     "version: 1\ntable: t\nprimary_key: id\nfields:\n- constant: c\n  value: null\n",
@@ -647,6 +713,26 @@ mod tests {
                 "{text:?}: {:?}",
                 read_typed(text)
             );
+        }
+    }
+
+    #[test]
+    fn a_default_takes_only_a_scalar() {
+        let default = |text: &str| super::read_typed(text, ValueSlot::Default);
+        assert_eq!(default("[1]"), Err(ValueProblem::NotScalar));
+        assert_eq!(default(r#"{"a": 1}"#), Err(ValueProblem::NotScalar));
+        assert_eq!(default("5"), Ok(GenericValue::BigInt(5)));
+        assert_eq!(default("1e3"), Ok(decimal("1000.0")));
+        assert_eq!(default(r#""x""#), Ok(GenericValue::String("x".into())));
+        assert_eq!(default("null"), Ok(GenericValue::Null));
+    }
+
+    #[test]
+    fn an_option_and_a_constant_take_any_value() {
+        for slot in [ValueSlot::Option, ValueSlot::Constant] {
+            for text in ["5", "1e3", r#"[1, "a"]"#, r#"{"a": {"b": [true]}}"#, "null"] {
+                assert!(super::read_typed(text, slot).is_ok(), "{slot:?} {text}");
+            }
         }
     }
 }
