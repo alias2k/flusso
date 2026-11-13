@@ -626,14 +626,14 @@ export default function App() {
 
   // Warn before leaving with unsaved changes.
   useEffect(() => {
-    if (!dirty) return;
+    if (!dirty && !valuesPending) return;
     const warn = (e: BeforeUnloadEvent) => {
       e.preventDefault();
       e.returnValue = "";
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [dirty]);
+  }, [dirty, valuesPending]);
 
   useEffect(() => {
     loadCollapsed(active);

@@ -192,7 +192,7 @@ export function rebase<T>(base: T, mine: T, theirs: T): T {
   if (!isRecord(base) || !isRecord(mine) || !isRecord(theirs)) return mine;
   const out: Record<string, unknown> = {};
   for (const key of new Set([...Object.keys(base), ...Object.keys(mine), ...Object.keys(theirs)])) {
-    if (key in base && !(key in theirs)) continue;
+    if (base[key] !== undefined && theirs[key] === undefined) continue;
     const value = rebase(base[key], mine[key], theirs[key]);
     if (value !== undefined) out[key] = value;
   }
@@ -206,8 +206,10 @@ export function updateField(schema: IndexSchema, uid: string, fn: (now: Field) =
   const walk = (fields: Field[]): Field[] => {
     const at = fields.findIndex((f) => f.uid === uid);
     if (at >= 0) {
+      const replaced = carryUid(fields[at], fn(fields[at]));
+      if (sameJson(replaced, fields[at])) return fields;
       const next = fields.slice();
-      next[at] = carryUid(fields[at], fn(fields[at]));
+      next[at] = replaced;
       return next;
     }
     for (const [i, f] of fields.entries()) {

@@ -423,6 +423,10 @@ export interface SampleResponse {
   printed?: string[];
 }
 
+/// A value read with no answer by then fails, so its box says so and Save can
+/// try it again instead of waiting on it for good. Below `PENDING_LIMIT_MS`.
+const VALUE_TIMEOUT_MS = 3000;
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const body = await res.text();
@@ -544,6 +548,7 @@ export const api = {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ text, slot }),
+      signal: AbortSignal.timeout(VALUE_TIMEOUT_MS),
     }).then((r) => json<ValueCheck>(r)),
   catalog: () => fetch("/api/catalog").then((r) => json<CatalogResponse>(r)),
   /// Relative subdirectories under the config dir, for the schema-folder picker.
