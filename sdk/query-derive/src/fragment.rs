@@ -131,12 +131,16 @@ pub(crate) fn embeddable(ident: &Ident, fields: &[DocField]) -> TokenStream {
         [field] => newtype_array(field),
         _ => None,
     };
+    let kinds = match fields {
+        [field] => newtype_kinds(field),
+        _ => None,
+    }
+    .unwrap_or_else(|| {
+        quote! { &[::flusso_query::KindTag::Object, ::flusso_query::KindTag::Nested] }
+    });
     quote! {
         impl ::flusso_query::FlussoValueMeta for #ident {
-            const KINDS: &'static [::flusso_query::KindTag] = &[
-                ::flusso_query::KindTag::Object,
-                ::flusso_query::KindTag::Nested,
-            ];
+            const KINDS: &'static [::flusso_query::KindTag] = #kinds;
             const VARIANTS: &'static [&'static str] = &[];
             #array
         }
@@ -153,6 +157,22 @@ pub(crate) fn embeddable(ident: &Ident, fields: &[DocField]) -> TokenStream {
             }
         }
     }
+}
+
+/// A newtype fragment stands where the type it wraps stands, so it reports
+/// that type's kinds: one over a value type is no sub-document.
+fn newtype_kinds(field: &DocField) -> Option<TokenStream> {
+    if field.ident.is_some() || field.skip {
+        return None;
+    }
+    let ty = checked_type(field, false)?;
+    Some(quote! {
+        {
+            #[allow(unused_imports)]
+            use ::flusso_query::OpaqueWithoutMeta as _;
+            ::flusso_query::OpaqueProbe::<#ty>::KINDS
+        }
+    })
 }
 
 /// `FlussoValueMeta::ARRAY` for a newtype fragment that reads a JSON array of

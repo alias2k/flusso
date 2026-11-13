@@ -627,6 +627,16 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
             if vec_inner(inner).is_none() && !custom {
                 return Err(shape_error(field, os, "a `Vec<…>` (a nested array)"));
             }
+            if let Some(element) = vec_inner(inner)
+                && !resolved.children.is_empty()
+                && leaf_ident(element).is_none_or(|name| is_primitive(Some(&name)))
+            {
+                return Err(shape_error(
+                    field,
+                    os,
+                    "a `Vec<…>` of a struct, since each element has fields of its own",
+                ));
+            }
             Ok(None)
         }
         MappingType::Object => {
@@ -1653,12 +1663,29 @@ fn array_newtype_check(
     let rendered = crate::fragment::render(ty);
     let nested = matches!(resolved.mapping.mapping_type, MappingType::Nested);
     let span = field.ty.span();
+    let (kind, stands) = if nested {
+        ("a `nested` array", quote::quote! { AT_NESTED })
+    } else {
+        ("an `object`", quote::quote! { AT_OBJECT })
+    };
+    let value_message = format!(
+        "field `{key}` in {scope} is {kind} with fields of its own — `{rendered}` is not a \
+         sub-document; declare a struct for it with `#[derive(FlussoFragment)]`"
+    );
+    let sub_document = quote::quote_spanned! {span=>
+        {
+            #[allow(unused_imports)]
+            use ::flusso_query::OpaqueWithoutMeta as _;
+            assert!(::flusso_query::OpaqueProbe::<#ty>::#stands, #value_message);
+        }
+    };
     if in_vec {
         let message = format!(
             "field `{key}` in {scope} is `Vec<{rendered}>`, an array of arrays — `{rendered}` is \
              a newtype over a `Vec<…>`, which already reads the array; drop the outer `Vec<…>`"
         );
         return Some(quote::quote_spanned! {span=>
+            #sub_document
             {
                 #[allow(unused_imports)]
                 use ::flusso_query::OpaqueWithoutMeta as _;
@@ -1679,6 +1706,7 @@ fn array_newtype_check(
         )
     };
     Some(quote::quote_spanned! {span=>
+        #sub_document
         {
             #[allow(unused_imports)]
             use ::flusso_query::OpaqueWithoutMeta as _;

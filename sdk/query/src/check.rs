@@ -575,6 +575,10 @@ pub trait OpaqueWithoutMeta {
     const ARRAY_ELEMENT: bool = false;
     /// No metadata, so not known to read an array.
     const READS_ARRAY: bool = false;
+    /// No metadata, so nothing says it cannot read a `nested` element.
+    const AT_NESTED: bool = true;
+    /// No metadata, so nothing says it cannot read an `object`.
+    const AT_OBJECT: bool = true;
 }
 
 impl<T: ?Sized> OpaqueWithoutMeta for OpaqueProbe<T> {}
@@ -592,17 +596,21 @@ impl<T: ?Sized + FlussoValueMeta> OpaqueProbe<T> {
     pub const ARRAY: bool = T::ARRAY;
     /// Whether a `Vec` of the type reads one array of sub-documents: the type
     /// is a sub-document and reads no array itself.
-    pub const ARRAY_ELEMENT: bool = !T::READS_ARRAY && contains_nested(T::KINDS);
+    pub const ARRAY_ELEMENT: bool = !T::READS_ARRAY && holds_kind(T::KINDS, KindTag::Nested);
+    /// Whether the type may stand at a `nested` field, as a sub-document.
+    pub const AT_NESTED: bool = holds_kind(T::KINDS, KindTag::Nested);
+    /// Whether the type may stand at an `object` field.
+    pub const AT_OBJECT: bool = holds_kind(T::KINDS, KindTag::Object);
     /// Whether the type reads a JSON array at all (see
     /// [`FlussoValueMeta::READS_ARRAY`]).
     pub const READS_ARRAY: bool = T::READS_ARRAY;
 }
 
-const fn contains_nested(kinds: &[KindTag]) -> bool {
+const fn holds_kind(kinds: &[KindTag], wanted: KindTag) -> bool {
     let mut i = 0;
     while i < kinds.len() {
         #[allow(clippy::indexing_slicing)]
-        if matches!(kinds[i], KindTag::Nested) {
+        if kinds[i] as u8 == wanted as u8 {
             return true;
         }
         i += 1;

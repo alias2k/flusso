@@ -173,6 +173,56 @@ struct UserVecOfStatuses {
     orders: Vec<WrappedStatuses>,
 }
 
+/// A value type is no sub-document, wrapped or not.
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+struct UserVecOfValues {
+    id: i32,
+    orders: Vec<Status>,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+struct UserVecOfStrings {
+    id: i32,
+    orders: Vec<String>,
+}
+
+#[derive(serde::Deserialize, FlussoFragment)]
+#[serde(transparent)]
+struct WrappedStatus(Status);
+
+#[derive(serde::Deserialize, FlussoFragment)]
+#[serde(transparent)]
+struct WrappedStatusList(Vec<WrappedStatus>);
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+struct UserWrappedStatusList {
+    id: i32,
+    orders: WrappedStatusList,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+struct UserVecOfWrappedStatus {
+    id: i32,
+    orders: Vec<WrappedStatus>,
+}
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct VecOfWrappedStatus {
+    orders: Vec<WrappedStatus>,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "users")]
+struct FromVecOfWrappedStatus {
+    id: i32,
+    #[serde(flatten)]
+    orders: VecOfWrappedStatus,
+}
+
 /// A wrapper around the `Vec` is not looked through.
 #[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "users")]
