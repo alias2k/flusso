@@ -67,7 +67,8 @@ pub(super) fn patch(
     indexes: Option<&Pairing>,
     sinks: &SinkNames,
 ) -> Option<Patched> {
-    if text.contains(MARK) || text.contains(CR) {
+    let stands_in = text.contains('\r');
+    if text.contains(MARK) || (stands_in && text.contains(CR)) {
         return None;
     }
     let eol = marked(super::dominant_ending(text));
@@ -109,8 +110,13 @@ pub(super) fn patch(
         set_prefix(doc.as_table_mut(), id, &prefix);
     }
     doc.set_trailing(prefixes.trailing);
+    let text = format!("{header}{doc}");
     Some(Patched {
-        text: format!("{header}{doc}").replace(CR, "\r"),
+        text: if stands_in {
+            text.replace(CR, "\r")
+        } else {
+            text
+        },
         dropped: patcher.dropped,
     })
 }

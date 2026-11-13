@@ -1206,6 +1206,13 @@ fn a_multi_line_string_keeps_its_own_line_breaks() {
 }
 
 #[test]
+fn an_lf_config_holding_the_stand_in_character_is_patched_in_place() {
+    let base = "[source]\ntype = \"postgres\"\nconnection_url = \"postgres://x\"\n\n# \u{e00d} kept\n[sinks.audit]\ntype = \"stdout\"\nnote = \"a\u{e00d}b\"\n";
+    let text = save_config(base, |c| set_option(c, "audit", "pretty", "yes"));
+    assert_eq!(text, format!("{base}pretty = \"yes\"\n"));
+}
+
+#[test]
 fn a_crlf_config_without_a_final_line_ending_keeps_it_that_way() {
     let base = to_crlf(CONFIG);
     let base = base.strip_suffix("\r\n").unwrap();
