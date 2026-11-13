@@ -581,20 +581,43 @@ export const it: Record<string, string> = {
 
   // salvataggi interrotti
   "recovery.rolledBack":
-    "Un salvataggio delle {time} è stato interrotto prima di finire. È stato annullato: {files} sono com'erano prima.",
+    "{n, plural, one {Un salvataggio delle {time} è stato interrotto prima di finire. È stato annullato: {files} è com'era prima.} other {Un salvataggio delle {time} è stato interrotto prima di finire. È stato annullato: {files} sono com'erano prima.}}",
   "recovery.completed":
-    "Un salvataggio delle {time} è stato interrotto durante la pulizia. È stato completato: {files} sono come li ha scritti.",
+    "{n, plural, one {Un salvataggio delle {time} è stato interrotto durante la pulizia. È stato completato: {files} è come l'ha scritto.} other {Un salvataggio delle {time} è stato interrotto durante la pulizia. È stato completato: {files} sono come li ha scritti.}}",
   "recovery.leftovers":
     "File lasciati da un salvataggio precedente, che il designer non tocca: {files}. Ognuno è stato lasciato da quel salvataggio e può contenere il testo di un file prima del salvataggio o quello che ha scritto; controllali ed eliminali.",
+  "recovery.kept": "{path} è stato scritto da un altro programma durante o dopo quel salvataggio, e resta com'è.",
+  "recovery.keptBackup":
+    "{path} è stato scritto da un altro programma durante o dopo quel salvataggio, e resta com'è. Il suo testo di prima del salvataggio è in {backup}: ricopialo, oppure eliminalo.",
+  "recovery.displaced":
+    "{path} è stato scritto da un altro programma nell'istante in cui il salvataggio lo sostituiva: contiene ciò che ha scritto il salvataggio, e i byte dell'altro programma sono in {copy}. Controllali, poi elimina quel file.",
   "recovery.dismiss": "Chiudi",
-  "recovery.reloadToSave":
-    "Un salvataggio interrotto è stato completato sul disco dopo che questa pagina ha caricato il progetto, quindi ciò che mostra non è aggiornato. Ricarica il designer per salvare di nuovo (le modifiche non salvate vanno perse).",
+  // a file changed on disk since the page loaded it
+  "stale.changed": "{path} è cambiato sul disco da quando questa pagina lo ha caricato.",
+  "stale.deleted": "{path} è stato eliminato dal disco da quando questa pagina lo ha caricato.",
+  "stale.created": "{path} è stato creato sul disco da quando questa pagina ha caricato il progetto.",
+  "stale.unloaded": "{path} esiste sul disco e questa pagina non lo ha mai caricato.",
+  "stale.explain":
+    "Scriverlo cancellerebbe ciò che c'è ora sul disco, quindi non viene scritto. Ricarica la pagina per caricare ciò che c'è sul disco (le modifiche non salvate vanno perse), oppure copia prima la tua modifica: il lato destro del diff è ciò che scriveresti.",
+  "stale.configExplain":
+    "Ogni salvataggio viene verificato su flusso.toml, quindi non viene scritto nulla finché differisce da ciò che questa pagina ha caricato. Il diff mostra cosa questa pagina scriverebbe in flusso.toml rispetto al file ora sul disco. Le tue modifiche agli schemi non sono elencate qui: per copiarle, apri ogni indice in modalità Codice. Ricarica la pagina per caricare ciò che c'è sul disco (le modifiche non salvate vanno perse), oppure sovrascrivi comunque flusso.toml per rivedere prima ogni file rispetto a esso.",
+  "stale.reload": "Ricarica la pagina",
+  "stale.overwrite": "Sovrascrivi comunque…",
+  "stale.overwriteConfirm":
+    "Sovrascrivere {path}? Il lato sinistro del diff è il file ora sul disco, con la modifica fatta da quando questa pagina lo ha caricato; scrivendo lo sostituisci con il lato destro, quindi ciò che di quella modifica il lato destro non mostra va perso.",
+  "stale.overwriteYes": "Sovrascrivi",
+  "stale.overwriting":
+    "{path} verrà sovrascritto con il lato destro del diff: ciò che della modifica sul disco non mostra viene scartato.",
+  "stale.badge": "Cambiato sul disco da quando questa pagina lo ha caricato",
+  "stale.refused":
+    "{n, plural, one {Non è stato salvato nulla: {files} è cambiato sul disco da quando questa pagina ha caricato il progetto. Rivedi di nuovo le modifiche.} other {Non è stato salvato nulla: {files} sono cambiati sul disco da quando questa pagina ha caricato il progetto. Rivedi di nuovo le modifiche.}}",
+  "stale.reloadPage":
+    "Questa pagina viene da un'altra versione del designer, quindi non può salvare. Ricarica la pagina; le modifiche non salvate vanno perse, quindi copiale prima.",
   "recovery.blockedTitle": "Impossibile recuperare un salvataggio interrotto",
   "recovery.blockedIntro":
     "Un designer è stato fermato a metà di un salvataggio e il designer non riesce a sistemarlo da solo:",
   "recovery.problemBackupMissing":
     "la copia con il suo testo di prima del salvataggio manca o non contiene più quel testo",
-  "recovery.problemEdited": "è cambiato dopo l'interruzione del salvataggio",
   "recovery.problemUnreadable": "non è stato possibile leggerlo",
   "recovery.problemJournalUnusable": "il designer non usa il journal di questo salvataggio",
   "recovery.problemFailed": "un passo del recupero non è riuscito",

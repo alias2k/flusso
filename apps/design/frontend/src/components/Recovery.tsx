@@ -6,8 +6,6 @@ const problemText = (t: Translate, problem: BlockedProblem): string => {
   switch (problem) {
     case "backup_missing":
       return t("recovery.problemBackupMissing");
-    case "edited":
-      return t("recovery.problemEdited");
     case "unreadable":
       return t("recovery.problemUnreadable");
     case "journal_unusable":
@@ -172,7 +170,6 @@ function JournalFiles({ report }: { report: JournalReport }) {
 const problemHelp = (t: Translate, p: BlockedFile, back: boolean): string[] => {
   const path = p.path;
   switch (p.problem) {
-    case "edited":
     case "backup_missing": {
       const fix = p.fix;
       if (back) {
@@ -213,18 +210,35 @@ function Keep({ steps, files, back }: { steps: HandStep[]; files: string; back: 
 /// names.
 export function RecoveryNotice({ recovery, onDismiss }: { recovery: SaveRecovery; onDismiss: () => void }) {
   const { t, lang } = useT();
-  if (recovery.recovered.length === 0 && recovery.leftovers.length === 0) return null;
+  const displaced = [...(recovery.displaced ?? []), ...recovery.recovered.flatMap((s) => s.displaced ?? [])];
+  if (recovery.recovered.length === 0 && recovery.leftovers.length === 0 && displaced.length === 0) return null;
   return (
     <div role="status" className="banner warn flex items-center gap-3 bg-warn/10 px-4 py-2 text-xs text-warn">
       <div className="flex-1 space-y-1">
         {recovery.recovered.map((save) => {
-          const vars = { time: new Date(save.started_at_ms).toLocaleString(lang), files: save.files.join(", ") };
+          const vars = {
+            time: new Date(save.started_at_ms).toLocaleString(lang),
+            files: save.files.join(", "),
+            n: save.files.length,
+          };
           return (
-            <p key={`${save.started_at_ms}-${save.outcome}`}>
-              {save.outcome === "rolled_back" ? t("recovery.rolledBack", vars) : t("recovery.completed", vars)}
-            </p>
+            <div key={save.id} className="space-y-0.5">
+              {save.files.length > 0 && (
+                <p>{save.outcome === "rolled_back" ? t("recovery.rolledBack", vars) : t("recovery.completed", vars)}</p>
+              )}
+              {save.kept?.map((k) => (
+                <p key={k.path}>
+                  {k.backup
+                    ? t("recovery.keptBackup", { path: k.path, backup: k.backup })
+                    : t("recovery.kept", { path: k.path })}
+                </p>
+              ))}
+            </div>
           );
         })}
+        {displaced.map((d) => (
+          <p key={d.copy}>{t("recovery.displaced", { path: d.path, copy: d.copy })}</p>
+        ))}
         {recovery.leftovers.length > 0 && <p>{t("recovery.leftovers", { files: recovery.leftovers.join(", ") })}</p>}
       </div>
       <Button variant="ghost" size="xs" onClick={onDismiss}>
@@ -276,9 +290,9 @@ export function RecoveryBlocked({ recovery }: { recovery: SaveRecovery }) {
               </li>
             ))}
           </ul>
-          {blocked.problems.some(
-            (p) => (p.problem === "edited" || p.problem === "backup_missing") && (back || p.fix),
-          ) && <p>{back ? t("recovery.directionBackEnd") : t("recovery.directionForwardEnd")}</p>}
+          {blocked.problems.some((p) => p.problem === "backup_missing" && (back || p.fix)) && (
+            <p>{back ? t("recovery.directionBackEnd") : t("recovery.directionForwardEnd")}</p>
+          )}
           {blocked.keep && (
             <Keep steps={blocked.keep} files={blocked.problems.map((p) => p.path).join(", ")} back={back} />
           )}

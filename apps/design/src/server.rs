@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -246,19 +247,15 @@ async fn sample(Json(request): Json<api::SampleRequest>) -> Response {
     Json(api::sample(request).await).into_response()
 }
 
-async fn diff(
-    State(state): State<AppState>,
-    Json(request): Json<api::SaveRequest>,
-) -> Result<Response, ApiError> {
+async fn diff(State(state): State<AppState>, body: Bytes) -> Result<Response, ApiError> {
+    let request = api::read_save_request(&body).map_err(anyhow::Error::new)?;
     let config_path = Arc::clone(&state.config_path);
     let review = blocking(move || api::review_project(&config_path, request)).await?;
     Ok(Json(review).into_response())
 }
 
-async fn save(
-    State(state): State<AppState>,
-    Json(request): Json<api::SaveRequest>,
-) -> Result<Response, ApiError> {
+async fn save(State(state): State<AppState>, body: Bytes) -> Result<Response, ApiError> {
+    let request = api::read_save_request(&body).map_err(anyhow::Error::new)?;
     let config_path = Arc::clone(&state.config_path);
     let response = blocking(move || api::save_project(&config_path, request)).await?;
     Ok(Json(response).into_response())
@@ -268,7 +265,9 @@ async fn save(
 /// body. Recoverable, surfaced conditions (DB unreachable, a schema that won't
 /// parse) are *not* errors: they ride back in the normal response body. An
 /// interrupted save ([`api::Interrupted`]) is a 409 whose body adds the
-/// `recovery`, so the editor can say what happened in the user's language.
+/// `recovery`, and a save over files changed on disk ([`api::Stale`]) one
+/// whose body adds the `stale` files, so the editor can say what happened in
+/// the user's language.
 struct ApiError(anyhow::Error);
 
 impl From<anyhow::Error> for ApiError {
@@ -283,6 +282,20 @@ impl IntoResponse for ApiError {
             return (
                 StatusCode::CONFLICT,
                 Json(serde_json::json!({ "error": self.0.to_string(), "recovery": recovery })),
+            )
+                .into_response();
+        }
+        if let Some(bad) = self.0.downcast_ref::<api::BadRequest>() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": bad.message, "reload": bad.reload })),
+            )
+                .into_response();
+        }
+        if let Some(api::Stale { files, .. }) = self.0.downcast_ref::<api::Stale>() {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": self.0.to_string(), "stale": files })),
             )
                 .into_response();
         }

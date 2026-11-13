@@ -11,6 +11,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::Path;
 
+use super::journal::Digest;
+
 /// `options` set to refuse a symbolic link at the path's last component,
 /// instead of opening (or creating) whatever it points at. It sets the
 /// custom flags, replacing any set before.
@@ -50,6 +52,32 @@ pub(crate) struct Disk {
     fail_sync_from: Option<usize>,
     /// Whether writing a private file fails once it is created.
     fail_private_write: bool,
+    /// Checks made so far ([`Disk::holds`]).
+    checks: usize,
+    /// The check (1-based) right before which the file it checks is given
+    /// these bytes (`None`: deleted), as another program would.
+    edit_at_check: Option<(usize, Option<Vec<u8>>)>,
+    /// Whether that edit lands right after the check looked, not before:
+    /// the instant between the last look and the rename.
+    #[cfg(test)]
+    edit_after_look: bool,
+    /// Writes another program makes right after a step (1-based).
+    #[cfg(test)]
+    edits_after: Vec<Edit>,
+}
+
+/// A write another program makes to a file, for a test.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct Edit {
+    pub(crate) after_step: usize,
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) bytes: Vec<u8>,
+    /// Write a temp file beside it and rename it over, as most editors do;
+    /// else truncate and write in place (`>`), which a hard link shares.
+    pub(crate) by_rename: bool,
+    /// Set once it is written (a write into a missing folder fails).
+    pub(crate) done: bool,
 }
 
 impl Default for Disk {
@@ -62,6 +90,12 @@ impl Default for Disk {
             sync: true,
             fail_sync_from: None,
             fail_private_write: false,
+            checks: 0,
+            edit_at_check: None,
+            #[cfg(test)]
+            edit_after_look: false,
+            #[cfg(test)]
+            edits_after: Vec::new(),
         }
     }
 }
@@ -114,6 +148,48 @@ impl Disk {
         }
     }
 
+    /// A disk on which another program writes `bytes` to (or, with `None`,
+    /// deletes) the file the `check`-th check ([`Disk::holds`]) looks at,
+    /// right before it looks.
+    #[cfg(test)]
+    pub(crate) fn editing_at_check(check: usize, bytes: Option<&str>) -> Self {
+        Self {
+            edit_at_check: Some((check, bytes.map(|b| b.as_bytes().to_vec()))),
+            ..Self::counting()
+        }
+    }
+
+    /// A disk on which another program writes `bytes` to the file the
+    /// `check`-th check looks at, in place (`>`), right after it looked: in
+    /// the instant before the rename that replaces it.
+    #[cfg(test)]
+    pub(crate) fn editing_after_look(check: usize, bytes: &str) -> Self {
+        Self {
+            edit_after_look: true,
+            ..Self::editing_at_check(check, Some(bytes))
+        }
+    }
+
+    /// This disk, on which another program also makes `edit`.
+    #[cfg(test)]
+    pub(crate) fn with_edit(mut self, edit: Edit) -> Self {
+        self.edits_after.push(edit);
+        self
+    }
+
+    /// This disk, stopping dead once `steps` steps ran as well.
+    #[cfg(test)]
+    pub(crate) fn and_stopping_after(mut self, steps: usize) -> Self {
+        self.stop_after = Some(steps);
+        self
+    }
+
+    /// The edits another program made, as they went.
+    #[cfg(test)]
+    pub(crate) fn edits(&self) -> &[Edit] {
+        &self.edits_after
+    }
+
     /// A disk that aborts the process right after step `step`.
     #[cfg(test)]
     pub(crate) fn aborting_after(step: usize) -> Self {
@@ -144,6 +220,19 @@ impl Disk {
             return Err(io::Error::other(format!("step {} failed", self.steps)));
         }
         let result = run();
+        #[cfg(test)]
+        for edit in &mut self.edits_after {
+            if edit.after_step == self.steps {
+                edit.done = if edit.by_rename {
+                    let temp = edit.path.with_extension("editor~");
+                    std::fs::write(&temp, &edit.bytes)
+                        .and_then(|()| std::fs::rename(&temp, &edit.path))
+                        .is_ok()
+                } else {
+                    std::fs::write(&edit.path, &edit.bytes).is_ok()
+                };
+            }
+        }
         if self.abort_after == Some(self.steps) {
             std::process::abort();
         }
@@ -228,6 +317,37 @@ impl Disk {
                 std::fs::remove_file(&temp).ok();
             })
         })
+    }
+
+    /// Whether `path` holds exactly `expected` (`None`: no file) now. Not a
+    /// step: it changes nothing. The last look before a rename replaces or
+    /// removes a file another program may have written meanwhile.
+    pub(crate) fn holds(&mut self, path: &Path, expected: Option<&Digest>) -> io::Result<bool> {
+        self.checks += 1;
+        let edit = match &self.edit_at_check {
+            Some((at, bytes)) if *at == self.checks => Some(bytes.clone()),
+            _ => None,
+        };
+        #[cfg(test)]
+        let after = self.edit_after_look;
+        #[cfg(not(test))]
+        let after = false;
+        let write = |bytes: &Option<Vec<u8>>| match bytes {
+            Some(bytes) => std::fs::write(path, bytes),
+            None => std::fs::remove_file(path),
+        };
+        if let Some(bytes) = &edit
+            && !after
+        {
+            write(bytes)?;
+        }
+        let holds = Digest::at(path)?.as_ref() == expected;
+        if let Some(bytes) = &edit
+            && after
+        {
+            write(bytes)?;
+        }
+        Ok(holds)
     }
 
     pub(crate) fn rename(&mut self, from: &Path, to: &Path) -> io::Result<()> {

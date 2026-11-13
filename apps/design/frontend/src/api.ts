@@ -383,6 +383,22 @@ export interface OpDiff {
   notice?: "layout_reset";
   /// How many comments the write drops although what they describe still exists.
   dropped?: number;
+  /// The files this entry writes or removes that changed on disk since the page
+  /// loaded them; for flusso.toml, set whether or not it is written (every save
+  /// is checked against it). A save refuses them.
+  stale?: StaleFile[];
+}
+
+/// Per file, relative to flusso.toml's folder, the SHA-256 of its bytes as the
+/// page loaded or last saved it; `null` for a file that did not exist.
+export type Digests = Record<string, string | null>;
+
+/// A file that is not as the page loaded it.
+export interface StaleFile {
+  path: string;
+  change: "changed" | "deleted" | "created" | "unloaded";
+  /// The digest of the file on disk now: sent as its digest, a save overwrites it anyway.
+  on_disk: string | null;
 }
 
 export interface MovedFile {
@@ -397,6 +413,17 @@ export interface SaveResult {
   pruned: string[];
   /// Interrupted saves rolled back before this one.
   recovered?: RecoveredSave[];
+  /// The digest of each file the save wrote (`null`: removed).
+  digests: Digests;
+  /// Files another program wrote in the instant the save replaced them.
+  displaced?: DisplacedFile[];
+}
+
+/// A file another program wrote in place in the instant a save replaced it:
+/// it holds the save's text, and the program's bytes are in `copy`.
+export interface DisplacedFile {
+  path: string;
+  copy: string;
 }
 
 /// What a diff found, and the interrupted saves it rolled back first.
@@ -411,20 +438,27 @@ export interface Project {
   indexes: IndexFile[];
   /// What the server found of an earlier, interrupted save; absent when nothing.
   recovery?: SaveRecovery;
-  /// When the server read the project; sent back with every diff and save.
-  loaded_at_ms: number;
+  /// The digest of each file the project was read from; sent back with every diff and save.
+  digests: Digests;
 }
 
 /// A save a killed designer left half done, settled before the project was read.
 export interface RecoveredSave {
+  /// Which save it was: the page shows each once.
+  id: string;
   outcome: "rolled_back" | "completed";
   /// When the save started, in milliseconds since the Unix epoch.
   started_at_ms: number;
   /// The files it changed, relative to flusso.toml.
   files: string[];
+  /// Files another program wrote during or after the save, kept as they are,
+  /// with the save's backup of the text before when it kept one.
+  kept?: { path: string; backup?: string }[];
+  /// Files whose backup holds what another program wrote as the save replaced them.
+  displaced?: DisplacedFile[];
 }
 
-export type BlockedProblem = "backup_missing" | "edited" | "unreadable" | "journal_unusable" | "failed";
+export type BlockedProblem = "backup_missing" | "unreadable" | "journal_unusable" | "failed";
 
 /// Why the server does not act on a save's journal.
 export type JournalCause =
@@ -498,9 +532,24 @@ export interface SaveRecovery {
   blocked?: BlockedSave;
   /// Temp files and backups no journal names: reported, left alone.
   leftovers: string[];
-  /// An interrupted save was completed after this page loaded: reload to save.
-  stale?: boolean;
+  /// Files a save of this page found written by another program as it replaced them.
+  displaced?: DisplacedFile[];
 }
+
+/// A save the server refused because files it writes changed on disk since the
+/// page loaded them (a 409): nothing was written.
+export class StaleError extends Error {
+  constructor(
+    message: string,
+    readonly files: StaleFile[],
+  ) {
+    super(message);
+  }
+}
+
+/// A diff or save the server does not read because this page comes from
+/// another version of the designer (a 400 asking for a reload).
+export class ReloadError extends Error {}
 
 /// A load, diff or save the server refused over an interrupted save (a 409).
 export class RecoveryError extends Error {
@@ -588,13 +637,24 @@ async function json<T>(res: Response): Promise<T> {
     // message rather than the raw JSON/HTTP status.
     let message = body || `${res.status} ${res.statusText}`;
     let recovery: SaveRecovery | undefined;
+    let stale: StaleFile[] | undefined;
+    let reload = false;
     try {
-      const parsed = JSON.parse(body) as { error?: string; recovery?: SaveRecovery };
+      const parsed = JSON.parse(body) as {
+        error?: string;
+        recovery?: SaveRecovery;
+        stale?: StaleFile[];
+        reload?: boolean;
+      };
       if (parsed.error) message = parsed.error;
       recovery = parsed.recovery;
+      stale = parsed.stale;
+      reload = parsed.reload === true;
     } catch {
       /* not JSON — use the text */
     }
+    if (reload) throw new ReloadError(message);
+    if (stale) throw new StaleError(message, stale);
     throw recovery ? new RecoveryError(message, recovery) : new Error(message);
   }
   return parseJson(await res.text()) as T;
@@ -687,16 +747,17 @@ export interface AdapterDescription {
   index_schema?: Record<string, unknown>;
 }
 
-/// When the server read the project this page shows: a diff or save from a
-/// page older than a save the server completed in recovery is refused.
-let loadedAt: number | undefined;
+/// The digest of each file as this page loaded it, then as its own saves wrote
+/// it: the server refuses a save over a file that no longer has it. A reload
+/// reads them afresh; Reset keeps them, since it goes back to that same state.
+let digests: Digests = {};
 
 export const api = {
   project: () =>
     fetch("/api/project")
       .then((r) => json<Project>(r))
       .then((p) => {
-        loadedAt = p.loaded_at_ms;
+        digests = p.digests;
         return p;
       }),
   /// The registered adapters and their option schemas.
@@ -759,13 +820,21 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ config: stripIds(config), name, schema: stripUids(schema), id }),
     }).then((r) => json<SampleResponse>(r)),
-  diff: (config: ConfigToml, ops: FileOp[], identity?: ConfigIdentity) =>
+  /// `overwrite` as for `save`: the review is computed with those files taken as they are on disk.
+  diff: (config: ConfigToml, ops: FileOp[], identity?: ConfigIdentity, overwrite: Digests = {}) =>
     fetch("/api/diff", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ config: stripIds(config), ops: ops.map(stripOpUids), identity, loaded_at_ms: loadedAt }),
+      body: JSON.stringify({
+        config: stripIds(config),
+        ops: ops.map(stripOpUids),
+        identity,
+        digests: { ...digests, ...overwrite },
+      }),
     }).then((r) => json<Review>(r)),
-  save: (config: ConfigToml, ops: FileOp[], skip: string[] = [], identity?: ConfigIdentity) =>
+  /// `overwrite` gives, for the files the user chose to overwrite anyway, the
+  /// digest they have on disk now (from the review), in place of the page's.
+  save: (config: ConfigToml, ops: FileOp[], skip: string[] = [], identity?: ConfigIdentity, overwrite: Digests = {}) =>
     fetch("/api/save", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -774,7 +843,12 @@ export const api = {
         ops: ops.map(stripOpUids),
         skip,
         identity,
-        loaded_at_ms: loadedAt,
+        digests: { ...digests, ...overwrite },
       }),
-    }).then((r) => json<SaveResult>(r)),
+    })
+      .then((r) => json<SaveResult>(r))
+      .then((res) => {
+        digests = { ...digests, ...res.digests };
+        return res;
+      }),
 };
