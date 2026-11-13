@@ -162,8 +162,9 @@ pub const fn array(level: &[FieldSpec], name: &str) -> bool {
 
 /// Whether a Rust type that is (`vec`) or is not a `Vec<…>` fits `name`'s
 /// array shape, as a root checks it: a `nested` array wants a `Vec`, an
-/// `object` with fields wants none, a leaf wants one exactly when it is a flat
-/// array. A `map`, an opaque `json` object and an unmodeled kind take either.
+/// `object` with fields wants none, a leaf or a `json` field wants one exactly
+/// when it is a flat array. A `map`, any other opaque `json` object and an
+/// unmodeled kind take either.
 /// Absent → `true`; the generated check reports the absence separately.
 #[must_use]
 pub const fn array_shape_ok(level: &[FieldSpec], name: &str, vec: bool) -> bool {
@@ -172,6 +173,7 @@ pub const fn array_shape_ok(level: &[FieldSpec], name: &str, vec: bool) -> bool 
     };
     match field.kind {
         KindTag::Nested => vec,
+        KindTag::Object if field.array => vec,
         KindTag::Object => field.map_values.is_some() || field.children.is_empty() || !vec,
         KindTag::Other => true,
         _ => field.array == vec,
@@ -606,6 +608,22 @@ impl<T: ?Sized + FlussoValueMeta> OpaqueProbe<T> {
     pub const READS_ARRAY: bool = T::READS_ARRAY;
 }
 
+/// Whether a type of `kinds` may stand in for a field of kind `field`. An empty
+/// `kinds` (a type without metadata) never does.
+#[doc(hidden)]
+#[must_use]
+pub const fn accepts_kind(kinds: &[KindTag], field: KindTag) -> bool {
+    let mut i = 0;
+    while i < kinds.len() {
+        #[allow(clippy::indexing_slicing)]
+        if kinds[i].accepts(field) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 const fn holds_kind(kinds: &[KindTag], wanted: KindTag) -> bool {
     let mut i = 0;
     while i < kinds.len() {
@@ -658,8 +676,9 @@ value_meta! {
 #[cfg(test)]
 mod tests {
     use super::{
-        FieldSpec, KindTag, array, children, exists, has_fields, has_variants, is_json, is_nested,
-        kind_is, map_kind_ok, map_value_is, nullable, variants_covered, variants_exhausted,
+        FieldSpec, KindTag, accepts_kind, array, array_shape_ok, children, exists, has_fields,
+        has_variants, is_json, is_nested, kind_is, map_kind_ok, map_value_is, nullable,
+        variants_covered, variants_exhausted,
     };
 
     const STATUS_VARIANTS: &[&str] = &["pending", "shipped", "delivered"];
@@ -737,6 +756,16 @@ mod tests {
             map_values: None,
             children: &[],
         },
+        // A `json` array column.
+        FieldSpec {
+            name: "notes",
+            kind: KindTag::Object,
+            nullable: true,
+            array: true,
+            variants: &[],
+            map_values: None,
+            children: &[],
+        },
         // A `custom { opensearch }` field this vocabulary does not model.
         FieldSpec {
             name: "custom",
@@ -761,6 +790,24 @@ mod tests {
         assert!(nullable(LEVEL, "zip"));
         assert!(array(LEVEL, "tags"));
         assert!(!array(LEVEL, "city"));
+    }
+
+    #[test]
+    fn a_json_array_wants_an_array_where_a_plain_json_takes_either() {
+        assert!(array_shape_ok(LEVEL, "notes", true));
+        assert!(!array_shape_ok(LEVEL, "notes", false));
+        assert!(array_shape_ok(LEVEL, "meta", true));
+        assert!(array_shape_ok(LEVEL, "meta", false));
+    }
+
+    #[test]
+    fn a_type_stands_for_a_kind_only_when_it_names_one() {
+        assert!(accepts_kind(
+            &[KindTag::Keyword, KindTag::Text],
+            KindTag::Keyword
+        ));
+        assert!(!accepts_kind(&[KindTag::Long], KindTag::Keyword));
+        assert!(!accepts_kind(&[], KindTag::Keyword));
     }
 
     #[test]

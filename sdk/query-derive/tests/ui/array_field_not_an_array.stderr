@@ -1,0 +1,11 @@
+error: field `scores` is `integer` in the schema — expected a `Vec<…>` (a flat array)
+  --> tests/ui/array_field_not_an_array.rs:23:13
+   |
+23 |     scores: Option<i32>,
+   |             ^^^^^^
+
+error[E0080]: evaluation panicked: field `tags` is a flat array of `keyword` in the schema — `Tag` does not read one; declare it `Vec<…>`, or derive `FlussoValue` on a newtype over a `Vec<…>`
+  --> tests/ui/array_field_not_an_array.rs:16:18
+   |
+16 |     tags: Option<Tag>,
+   |                  ^^^ evaluation of `_` failed here

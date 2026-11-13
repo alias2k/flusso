@@ -647,7 +647,7 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
                 return check_map_type(field, inner, values);
             }
             if resolved.children.is_empty() {
-                return Ok(None);
+                return json_array_check(field, inner, resolved);
             }
             if vec_inner(inner).is_some() || is_primitive(leaf_ident(inner).as_deref()) {
                 return Err(shape_error(field, os, "a struct (a sub-object)"));
@@ -667,7 +667,7 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
             let inner = if resolved.array {
                 match vec_inner(inner) {
                     Some(elem) => elem,
-                    None => return Err(shape_error(field, os, "a `Vec<…>` (a flat array)")),
+                    None => return array_value_check(field, inner, scalar, resolved),
                 }
             } else {
                 inner
@@ -689,6 +689,75 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
             Err(scalar_error(field, os, &expected, found.as_deref()))
         }
     }
+}
+
+/// A type that is not a `Vec` at a flat array of a scalar kind. A custom type
+/// passes only as an array newtype (`FlussoValueMeta::ARRAY`, which
+/// `#[derive(FlussoValue)]` sets on a newtype over a `Vec`) whose elements are
+/// of the field's kind; both are const data, so they are asserted, each with its
+/// own message.
+fn array_value_check(
+    field: &DocField,
+    inner: &Type,
+    scalar: &MappingType,
+    resolved: &ResolvedField,
+) -> syn::Result<Option<TokenStream>> {
+    let os = scalar.name();
+    let custom = leaf_ident(inner).filter(|name| !is_primitive(Some(name)));
+    let (Some(_), Some(kind)) = (custom, kind_of(scalar, resolved.mapping.decimal)) else {
+        return Err(shape_error(field, os, "a `Vec<…>` (a flat array)"));
+    };
+    let key = &field.doc_key;
+    let rendered = crate::fragment::render(inner);
+    let array_message = format!(
+        "field `{key}` is a flat array of `{os}` in the schema — `{rendered}` does not read one; \
+         declare it `Vec<…>`, or derive `FlussoValue` on a newtype over a `Vec<…>`"
+    );
+    let kind_message = format!(
+        "field `{key}` is a flat array of `{os}` in the schema — the elements of `{rendered}` \
+         are not a `{os}` value"
+    );
+    let tag = kind.tag();
+    Ok(Some(quote::quote_spanned! {inner.span()=>
+        const _: () = {
+            #[allow(unused_imports)]
+            use ::flusso_query::OpaqueWithoutMeta as _;
+            assert!(::flusso_query::OpaqueProbe::<#inner>::ARRAY, #array_message);
+            assert!(
+                ::flusso_query::accepts_kind(::flusso_query::OpaqueProbe::<#inner>::KINDS, #tag),
+                #kind_message
+            );
+        };
+    }))
+}
+
+/// An opaque `json` field takes any type, unless it is an array (`array:
+/// true`): then a `Vec<…>`, or a custom type that reads an array
+/// (`FlussoValueMeta::ARRAY`, asserted since it is const data).
+fn json_array_check(
+    field: &DocField,
+    inner: &Type,
+    resolved: &ResolvedField,
+) -> syn::Result<Option<TokenStream>> {
+    if !resolved.array || vec_inner(inner).is_some() {
+        return Ok(None);
+    }
+    let Some(_) = leaf_ident(inner).filter(|name| !is_primitive(Some(name))) else {
+        return Err(shape_error(field, "json", "a `Vec<…>` (a `json` array)"));
+    };
+    let message = format!(
+        "field `{}` is a `json` array in the schema — `{}` does not read one; declare it \
+         `Vec<…>`",
+        field.doc_key,
+        crate::fragment::render(inner),
+    );
+    Ok(Some(quote::quote_spanned! {inner.span()=>
+        const _: () = {
+            #[allow(unused_imports)]
+            use ::flusso_query::OpaqueWithoutMeta as _;
+            assert!(::flusso_query::OpaqueProbe::<#inner>::ARRAY, #message);
+        };
+    }))
 }
 
 /// A map type, or an array of maps, at a level with fields of its own.
@@ -1518,7 +1587,7 @@ fn option_inner(ty: &Type) -> Option<&Type> {
     single_generic(ty, "Option")
 }
 
-fn vec_inner(ty: &Type) -> Option<&Type> {
+pub(crate) fn vec_inner(ty: &Type) -> Option<&Type> {
     single_generic(ty, "Vec")
 }
 

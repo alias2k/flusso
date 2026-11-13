@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: field `labels` is a flat array of `keyword` in the schema — the elements of `Numbers` are not a `keyword` value
+  --> tests/ui/array_newtype_wrong_kind.rs:12:13
+   |
+12 |     labels: Numbers,
+   |             ^^^^^^^ evaluation of `_` failed here

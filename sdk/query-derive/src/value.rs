@@ -223,6 +223,9 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
                 )?;
             }
             let leaf_check = leaf_check(ident);
+            if let Some(element) = crate::doc::vec_inner(inner) {
+                return array_newtype(ident, element, explicit.is_some(), leaf_check);
+            }
             match explicit {
                 // Restrict to one string kind (e.g. a keyword-only code wrapper).
                 Some(kind) => {
@@ -259,6 +262,39 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
             "FlussoValue cannot be derived for a union",
         )),
     }
+}
+
+/// A newtype over `Vec<E>`: it stands for a flat array whose elements are `E`
+/// values. It carries `E`'s kinds, variants and exhaustiveness as metadata
+/// with `ARRAY` set, which an array field reads to accept it, and no
+/// `FlussoValue<K>`, so query operators keep taking an element. A kind tag
+/// would restrict nothing the element does not already say, so it is refused.
+fn array_newtype(
+    ident: &syn::Ident,
+    element: &syn::Type,
+    tagged: bool,
+    leaf_check: TokenStream,
+) -> syn::Result<TokenStream> {
+    if tagged {
+        return Err(syn::Error::new(
+            ident.span(),
+            "a FlussoValue newtype over a `Vec<…>` takes its kinds from the element — drop the \
+             kind tag, and put it on the element type",
+        ));
+    }
+    Ok(quote! {
+        impl ::flusso_query::FlussoValueMeta for #ident {
+            const KINDS: &'static [::flusso_query::KindTag] =
+                <#element as ::flusso_query::FlussoValueMeta>::KINDS;
+            const VARIANTS: &'static [&'static str] =
+                <#element as ::flusso_query::FlussoValueMeta>::VARIANTS;
+            const EXHAUSTIVE: bool =
+                <#element as ::flusso_query::FlussoValueMeta>::EXHAUSTIVE;
+            const ARRAY: bool = true;
+            const READS_ARRAY: bool = true;
+        }
+        #leaf_check
+    })
 }
 
 /// The no-op `__flusso_check` every value type carries.

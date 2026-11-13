@@ -1,0 +1,5 @@
+error: a FlussoValue newtype over a `Vec<…>` takes its kinds from the element — drop the kind tag, and put it on the element type
+ --> tests/ui/array_newtype_tagged.rs:7:8
+  |
+7 | struct Codes(Vec<String>);
+  |        ^^^^^
