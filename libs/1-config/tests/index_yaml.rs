@@ -7,7 +7,7 @@
 
 //! Parsing and conversion tests for the type-as-key field format.
 
-use config::yaml::{ConversionError, ParseError, SchemaYaml};
+use config::yaml::{ConversionError, DefaultElement, ParseError, SchemaYaml};
 use kernel::{
     AggregateKey, AggregateOp, Column, Field, FieldSource, Filter, FilterValue, FlussoType,
     GenericValue, Geo, IndexSchema, JoinKind, ParseFrom, Relation,
@@ -1376,10 +1376,14 @@ fn an_array_default_is_a_list_of_scalars_or_of_json() {
         "got {err:?}"
     );
 
-    for (got, list) in [
-        ("null", "[a, null]"),
-        ("object", "[{ a: 1 }]"),
-        ("array", "[[a]]"),
+    for (got, list, says) in [
+        (DefaultElement::Null, "[a, null]", "with a `null` element"),
+        (
+            DefaultElement::Object,
+            "[{ a: 1 }]",
+            "with an object element",
+        ),
+        (DefaultElement::Array, "[[a]]", "with an array element"),
     ] {
         let err = convert(&format!(
             "version: 1\ntable: orders\nfields:\n  - keyword: tags\n    required: false\n    array: true\n    default: {list}"
@@ -1389,6 +1393,7 @@ fn an_array_default_is_a_list_of_scalars_or_of_json() {
             matches!(&err, ConversionError::ArrayDefaultElement { got: g, .. } if *g == got),
             "{list}: got {err:?}"
         );
+        assert!(err.to_string().contains(says), "{list}: {err}");
     }
 
     let json = convert(

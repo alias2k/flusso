@@ -9,8 +9,8 @@ use kernel::{
 };
 use rust_decimal::Decimal;
 
-use super::ConversionError;
 use super::entities;
+use super::{ConversionError, DefaultElement};
 
 pub(crate) fn convert_field(f: entities::Field) -> Result<Field, ConversionError> {
     let mut field = convert_field_kind(f.kind)?;
@@ -254,11 +254,13 @@ fn convert_column_default(
     };
     for item in &items {
         match item {
-            GenericValue::Null => return Err(element_error("null")),
+            GenericValue::Null => return Err(element_error(DefaultElement::Null)),
             GenericValue::Array(_) if *ty != FlussoType::Json => {
-                return Err(element_error("array"));
+                return Err(element_error(DefaultElement::Array));
             }
-            GenericValue::Map(_) if *ty != FlussoType::Json => return Err(element_error("object")),
+            GenericValue::Map(_) if *ty != FlussoType::Json => {
+                return Err(element_error(DefaultElement::Object));
+            }
             _ => {}
         }
     }
