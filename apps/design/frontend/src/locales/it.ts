@@ -240,6 +240,8 @@ export const it: Record<string, string> = {
   "inspector.optionsHelp":
     "Proprietà di mappatura OpenSearch aggiuntive, unite accanto al tipo derivato. Scegline una comune o aggiungi la tua. Ogni valore è JSON.",
   "inspector.optKey": "chiave",
+  "inspector.optKeyEmpty": "Un'opzione ha bisogno di una chiave.",
+  "inspector.optKeyTaken": "Un'altra opzione si chiama già {key}.",
   "inspector.optValue": 'valore (JSON, es. "english" o 2)',
   "inspector.option": "opzione",
   "inspector.values": "valori",

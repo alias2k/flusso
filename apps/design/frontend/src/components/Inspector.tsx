@@ -27,6 +27,7 @@ import { AGGREGATE_OPS, KIND_HELP, LEAF_TYPES, withAggregateOp } from "../fields
 import { useT, type Translate } from "../i18n";
 import * as edit from "../model/edit";
 import { nameIncomplete } from "../model/complete";
+import { RowIds } from "../model/rowIds";
 import { errorsFor, retypeScript, scriptPath } from "../model/scripts";
 import { useDesignStore } from "../store/design";
 import { effectiveTable, fieldAtPath, joinOf, nodeFields, pathLabels } from "../model/tree";
@@ -1066,8 +1067,18 @@ function OptionsEditor({ field, set }: { field: Field; set: (f: Field) => void }
   const { t } = useT();
   const options = field.options ?? {};
   const entries = Object.entries(options);
+  // Rows are keyed by a row id, not by their key: renaming a key keeps the row
+  // (and the focus in its key box), and a value read after the rename still
+  // lands under the key the row has by then.
+  const [rows] = useState(() => new RowIds());
+  rows.keep(entries.map(([k]) => k));
   const setOpt = (key: string, value: unknown) => set({ ...field, options: { ...options, [key]: value } });
+  const setRow = (id: string, value: unknown) => {
+    const key = rows.key(id);
+    if (key !== undefined) setOpt(key, value);
+  };
   const renameOpt = (oldKey: string, newKey: string) => {
+    rows.rename(oldKey, newKey);
     const next: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(options)) next[k === oldKey ? newKey : k] = v;
     set({ ...field, options: next });
@@ -1088,6 +1099,8 @@ function OptionsEditor({ field, set }: { field: Field; set: (f: Field) => void }
     { key: "scaling_factor", seed: { BigInt: 100 } },
   ];
   const available = KNOBS.filter((k) => !(k.key in options));
+  let fresh = entries.length + 1;
+  while (`option${fresh}` in options) fresh += 1;
   return (
     <Drawer title={t("inspector.advanced")} count={entries.length}>
       <p className="mb-2.5 text-2xs leading-relaxed text-muted-foreground">{t("inspector.optionsHelp")}</p>
@@ -1105,25 +1118,76 @@ function OptionsEditor({ field, set }: { field: Field; set: (f: Field) => void }
           ))}
         </div>
       )}
-      {entries.map(([k, v]) => (
-        <div
-          className="opt-row mb-1.5 grid grid-cols-[1fr_1fr_auto] items-center gap-1.5"
-          key={`${field.uid ?? ""}:${k}`}
-        >
-          <Text value={k} onChange={(nk) => renameOpt(k, nk)} placeholder={t("inspector.optKey")} />
-          <GenericInput
-            slot="option"
+      {entries.map(([k, v]) => {
+        const id = rows.id(k);
+        return (
+          <OptionRow
+            key={id}
             optionKey={k}
             value={v}
-            emptyTo={{ String: "" }}
-            onChange={(nv) => setOpt(k, nv ?? { String: "" })}
-            placeholder={t("inspector.optValue")}
+            taken={(nk) => nk !== k && nk in options}
+            onRename={(nk) => renameOpt(k, nk)}
+            onValue={(nv) => setRow(id, nv ?? { String: "" })}
+            onRemove={() => removeOpt(k)}
           />
-          <RemoveButton label={t("common.remove")} onClick={() => removeOpt(k)} />
-        </div>
-      ))}
-      <AddButton label={t("inspector.option")} onClick={() => setOpt(`option${entries.length + 1}`, { String: "" })} />
+        );
+      })}
+      <AddButton label={t("inspector.option")} onClick={() => setOpt(`option${fresh}`, { String: "" })} />
     </Drawer>
+  );
+}
+
+/// One option: its key and its value. A key that is empty or another option's
+/// stays in the box, marked, and never reaches the model (it would merge two
+/// options); leaving the box shows the option's key again.
+function OptionRow({
+  optionKey,
+  value,
+  taken,
+  onRename,
+  onValue,
+  onRemove,
+}: {
+  optionKey: string;
+  value: unknown;
+  taken: (key: string) => boolean;
+  onRename: (key: string) => void;
+  onValue: (value: unknown) => void;
+  onRemove: () => void;
+}) {
+  const { t } = useT();
+  const [refused, setRefused] = useState<string | null>(null);
+  const rename = (nk: string) => {
+    if (nk === "" || taken(nk)) return setRefused(nk);
+    setRefused(null);
+    if (nk !== optionKey) onRename(nk);
+  };
+  return (
+    <div className="opt-row mb-1.5">
+      <div className="grid grid-cols-[1fr_1fr_auto] items-center gap-1.5">
+        <Text
+          value={refused ?? optionKey}
+          invalid={refused !== null}
+          onChange={rename}
+          onBlur={() => setRefused(null)}
+          placeholder={t("inspector.optKey")}
+        />
+        <GenericInput
+          slot="option"
+          optionKey={optionKey}
+          value={value}
+          emptyTo={{ String: "" }}
+          onChange={onValue}
+          placeholder={t("inspector.optValue")}
+        />
+        <RemoveButton label={t("common.remove")} onClick={onRemove} />
+      </div>
+      {refused !== null && (
+        <p className="error-hint mt-0.5 text-xs text-destructive" role="alert">
+          {refused === "" ? t("inspector.optKeyEmpty") : t("inspector.optKeyTaken", { key: refused })}
+        </p>
+      )}
+    </div>
   );
 }
 

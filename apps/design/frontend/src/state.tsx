@@ -4,13 +4,16 @@
 import { createContext, useContext } from "react";
 import type { CatalogResponse, ColumnShape, DiagnosticDto, IndexSchema } from "./api";
 
+/// What the inspector shows. `uid` is the selected field's (or container's)
+/// uid, set by the store: the path follows it through every edit
+/// (`model/selection.ts`), so a select call never passes one.
 export type Selection =
   | { kind: "root" }
-  | { kind: "node"; path: number[] }
-  | { kind: "field"; path: number[]; index: number }
+  | { kind: "node"; path: number[]; uid?: string }
+  | { kind: "field"; path: number[]; index: number; uid?: string }
   /// Multiple catalog columns of the node at `path`, selected by name — drives
   /// the Inspector's bulk include/exclude panel.
-  | { kind: "columns"; path: number[]; names: string[] }
+  | { kind: "columns"; path: number[]; names: string[]; uid?: string }
   | null;
 
 export interface DesignCtx {

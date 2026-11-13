@@ -232,6 +232,8 @@ export const en: Record<string, string> = {
   "inspector.optionsHelp":
     "Extra OpenSearch mapping properties merged beside the derived type. Pick a common one or add your own. Each value is JSON.",
   "inspector.optKey": "key",
+  "inspector.optKeyEmpty": "An option needs a key.",
+  "inspector.optKeyTaken": "Another option is already called {key}.",
   "inspector.optValue": 'value (JSON, e.g. "english" or 2)',
   "inspector.option": "option",
   "inspector.values": "values",
