@@ -29,6 +29,7 @@ With `auto_subfields` on (the default), `text`/`identifier`/`keyword`/`enum`/`uu
 | --- | --- | --- | --- | --- |
 | `subfields` | bool | `true` | `text`, `keyword`, `uuid` | `false` maps the field without the sink's automatic subfields. See [subfields](#subfields). |
 | `indexed` | bool | `true` | `json` (and every join) | `false` stores the value without indexing it. See [Joins: indexed](joins.md#indexed). |
+| `array` | bool | `false` | every scalar type, `enum`, `custom` | `true` reads a column holding an array of the field's type. See [array](#array). |
 
 A leaf can also be computed from the built document instead of read from a column: see [Script fields](scripts.md). Any field, leaf or not, can be made input-only with [`emit: false`](scripts.md#emit).
 
@@ -47,6 +48,39 @@ A leaf can also be computed from the built document instead of read from a colum
 - **Only `text`, `keyword`, and `uuid`.** Any other type rejects the key at load, `identifier` and `enum` included even though they get auto subfields too; give those a custom `options: { fields: {} }` to replace the subfields with none. Don't do that on an `enum` with `variants`: the override also drops its `.sort` subfield, so sorting by declared order stops working.
 - **Changing it** moves the schema to a new content hash, so the index is rebuilt once.
 - **Omitted or `true`** keeps the sink-wide behaviour.
+
+## array
+
+`array: true` declares a column that holds an array of the field's type: a Postgres array (`text[]`, `integer[]`) or a `json`/`jsonb` array.
+
+```yaml
+- enum: tags
+  variants: [urgent, fragile]
+  required: false
+  array: true
+  transforms: [lowercase]
+```
+
+- **Mapping.** Unchanged: OpenSearch has no array type, so the field maps as its element type and every element is indexed. A query matches the document when any element matches.
+- **Value.** flusso cleans it up as it builds the document, so a reader always gets an array or null:
+
+  | Column value | Document |
+  | --- | --- |
+  | `NULL` (or JSON `null`) | `null`, or the `default` |
+  | `[]` | `[]` |
+  | `["a", null, "b"]` | `["a", "b"]`: null elements are dropped |
+  | `"a"` (a lone value in `jsonb`) | `["a"]` |
+  | an object or array element | the document fails, and [`on_error`](index-and-on-error.md) decides |
+
+  On a `json` field every element is kept, objects and nested arrays included; only top-level nulls are dropped.
+- **[`transforms`](#transforms)** apply to each string element. They're checked against the element type: the `[]` column's base type, or `text` for `json`/`jsonb`.
+- **`default`** is a list, written whole when the column is null: `default: [general]`. Its elements are non-null scalars (any non-null JSON on a `json` field). A scalar `default` with `array: true` is rejected at load.
+- **`required`** is about the array: `true` maps `Vec<T>`, `false` `Option<Vec<T>>`. See [Document structs](../query/document-structs.md#arrays).
+- **Checked against the database.** `array: true` over a column that's neither a `[]` type nor `json`/`jsonb` is an error that stops `run`; a `[]` column without it is a warning. See [check](cli.md#check).
+- **Not on** `geo`, `map`, `object`, `constant`, joins, or aggregates: the key is rejected at load.
+- **Changing it** moves the schema to a new content hash, so the index is rebuilt once. A schema without it keeps its hash.
+
+A script field takes the same key, for a script that returns an array. See [Script fields](scripts.md).
 
 ## text vs identifier
 
@@ -113,7 +147,7 @@ A fixed value in every document. `value` absent or `null` renders as JSON null. 
 
 ## transforms
 
-Applied in order to a column value before it lands in the document. Each runs in Postgres (`lower`, `trim`), so the column's type must take it: a text type (`text`, `varchar`, `char`, `name`, `citext`) or a domain over one. Anything else, an `integer`, an array, `jsonb` or an enum, fails every document build; `flusso check` reports it, and [Validation at start](cli.md#validation-at-start) says what `run` does.
+Applied in order to a column value before it lands in the document. Each runs in Postgres (`lower`, `trim`), so the column's type must take it: a text type (`text`, `varchar`, `char`, `name`, `citext`) or a domain over one. Anything else, an `integer`, `jsonb` or an enum, fails every document build; `flusso check` reports it, and [Validation at start](cli.md#validation-at-start) says what `run` does. On an [`array`](#array) field they apply to each element instead, so a `text[]` or `jsonb` column takes them.
 
 | Transform | Effect |
 | --- | --- |

@@ -1,10 +1,10 @@
 # Geo, maps, enums and transforms
 
-The field kinds that need a little more than `- <type>: <name>`: a geographic point from two columns, a dynamic-key object over `jsonb`, an enum that sorts in a declared order, and value transforms.
+The field kinds that need a little more than `- <type>: <name>`: a geographic point from two columns, a dynamic-key object over `jsonb`, an enum that sorts in a declared order, a column holding an array, and value transforms.
 
 ## When to use this
 
-You're adding a location, a translations column, a status or severity with a meaningful order, or a value that needs normalizing before it's indexed.
+You're adding a location, a translations column, a status or severity with a meaningful order, a tags column (`text[]` or a `jsonb` array), or a value that needs normalizing before it's indexed.
 
 ## Steps
 
@@ -47,14 +47,25 @@ You're adding a location, a translations column, a status or severity with a mea
      transforms: [trim, lowercase]
    ```
 
-5. **Validate.** `flusso check --offline` shows the derived mapping: `geo_point` for the geo, `map<text>` for the map (`--format json` shows the mapping every key gets as its `values`), a `.sort` subfield under the enum.
+5. **A column holding an array.** Declare the element's type and `array: true`. Every element is indexed, nulls are dropped, and transforms apply to each element.
+
+   ```yaml
+   - keyword: tags
+     required: false
+     array: true
+     transforms: [lowercase]
+   ```
+
+   Without the flag, `flusso check` warns on a `[]` column: it still indexes, but the query side can't read it back as an array. See [array](../reference/field-types.md#array).
+
+6. **Validate.** `flusso check --offline` shows the derived mapping: `geo_point` for the geo, `map<text>` for the map (`--format json` shows the mapping every key gets as its `values`), a `.sort` subfield under the enum.
 
 ## Options and variations
 
 - **Changing an enum's order** rewrites the mapping, so it rotates the index generation and re-seeds, like any schema change.
 - **A map's `values`** must be a leaf kind: string, numeric, or date. `boolean`, `json`, `geo`, and `custom` are rejected.
 - **A `custom` scaled_float** is the exact-decimal answer when `decimal`'s lossy `double` won't do. See [custom](../reference/field-types.md#custom).
-- **Query-side counterparts.** Maps get `.key("it")` and the plain-field operators across every key ([Maps](../query/maps.md)); ordered enums get an `Enum` handle whose `.asc()` sorts by declared order ([Enums and custom values](../query/enums-and-values.md)).
+- **Query-side counterparts.** An array field is a `Vec` of its element, queried with the element's operators ([Arrays](../query/document-structs.md#arrays)). Maps get `.key("it")` and the plain-field operators across every key ([Maps](../query/maps.md)); ordered enums get an `Enum` handle whose `.asc()` sorts by declared order ([Enums and custom values](../query/enums-and-values.md)).
 
 ## Related
 

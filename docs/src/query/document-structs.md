@@ -118,7 +118,7 @@ pub struct Product {
 | `date` | `time::Date` or chrono's | `Date` |
 | `timestamp` | `time::OffsetDateTime` or chrono's | `Date` |
 | `binary` | `String` (base64) | `Binary` |
-| `json` | `serde_json::Value`, any `HashMap`/`BTreeMap<String, _>`, or a `Vec` of them | `Json`; none with `indexed: false` |
+| `json` | `serde_json::Value`, any `HashMap`/`BTreeMap<String, _>`, or a `Vec` of them; a `Vec<_>` with `array: true` | `Json`; none with `indexed: false` |
 | `map` | `HashMap<String, V>`, `BTreeMap<String, V>`, or a `#[derive(FlussoMap)]` struct | `TextMap` / `KeywordMap` / `NumberMap` / `DateMap` |
 | `geo` | `GeoPoint { lat, lon }` | `Geo` |
 | `custom` | the matching scalar, else `serde_json::Value` | by OpenSearch type |
@@ -126,10 +126,27 @@ pub struct Product {
 | `belongs_to`, `has_one` | `Option<Struct>` | object namespace |
 | `has_many`, `many_to_many` | `Vec<Struct>`, or a fragment newtype over one | `Nested<S, T>` |
 | any join or `json` with `indexed: false` | as above | none; see [Stored-only fields](#stored-only-fields) |
+| any scalar, `enum` or `custom` with `array: true` | `Vec<T>` of the type above, or a `FlussoValue` newtype over one; see [Arrays](#arrays) | the element's handle |
 | `ids` aggregate | `Vec<i64>` or `Vec<String>` | `Number` / `Keyword` |
 | `exists` aggregate | `bool` | `Bool` |
 
 Dates sit behind a feature so a caller picks `time` or `chrono` (or `String` for raw ISO-8601).
+
+## Arrays
+
+A field declared [`array: true`](../reference/field-types.md#array) is a `Vec` of the element type, in `Option` unless it's `required`. The handle is the element's, so operators take one element and match a document when any element matches.
+
+```rust
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "orders")]
+pub struct Order {
+    pub tags: Option<Vec<Tag>>,    // enum: tags, array: true
+}
+
+Order::tags().any_of([Tag::Urgent]);
+```
+
+A [`FlussoValue` newtype over a `Vec`](enums-and-values.md#arrays) goes where that `Vec` would: `tags: Option<Tags>` with `struct Tags(Vec<Tag>)`, the shape an ORM decoding a `jsonb` column usually wants. A plain type (`Tag`, `String`) at an array field is a compile error, and so is a `Vec` or an array newtype at a field that isn't one. A `json` array takes a `Vec` of anything, `serde_json::Value`, or an array newtype; no bare struct. Sorting an array uses OpenSearch's default: the smallest element ascending, the largest descending.
 
 ## Nullability
 
