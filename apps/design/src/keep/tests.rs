@@ -451,6 +451,27 @@ fn delete_one_and_rename_the_next_keeps_each_comment_with_its_field() {
 }
 
 #[test]
+fn a_field_identity_with_untrimmed_names_still_pairs() {
+    let mut schema = parse(ABC);
+    let before = ids(&schema.fields, "", &[]);
+    rename(field(&mut schema.fields, "c"), "FullName");
+    let mut after = ids(&schema.fields, "", &[("FullName", "c")]);
+    for id in &mut after {
+        id.name = format!(" {} ", id.name);
+    }
+    let identity = SchemaIdentity { before, after };
+    let saved = schema_yaml(Some(ABC), &schema, Some(&identity)).unwrap();
+    assert_eq!(
+        saved.text,
+        ABC.replace(
+            "  - keyword: c # c\n",
+            "  - keyword: FullName # c\n    column: c\n"
+        )
+    );
+    assert_eq!(saved.dropped, 0);
+}
+
+#[test]
 fn a_field_added_where_one_was_deleted_starts_without_comments() {
     let base = "version: 1\ntable: users\nprimary_key: id\nfields:\n  # the primary key\n  - integer: id\n    required: true\n  # SECRET: email is PII, never log it\n  - keyword: email\n    required: false\n";
     let saved = save_as(base, &[], |s| {
@@ -822,6 +843,59 @@ fn a_renamed_sink_keeps_its_place_keys_and_comments() {
         rename_sink(c, "audit", "trail");
     });
     assert_eq!(saved.text, base.replace("[sinks.audit]", "[sinks.trail]"));
+}
+
+#[test]
+fn a_sink_identity_in_another_spelling_still_renames_in_place() {
+    let identity = |sinks: &[(&str, Option<&str>)]| ConfigIdentity {
+        before: ConfigToml::try_parse(CONFIG)
+            .unwrap()
+            .index
+            .iter()
+            .map(|e| e.name.to_string())
+            .collect(),
+        after: (0..3).map(Some).collect(),
+        sinks: Some(
+            sinks
+                .iter()
+                .map(|(is, was)| ((*is).to_owned(), was.map(str::to_owned)))
+                .collect(),
+        ),
+    };
+    let saved = save_config_with(
+        CONFIG,
+        Some(identity(&[
+            ("primaryC", Some("primary")),
+            (" audit", Some("AUDIT")),
+        ])),
+        |c| rename_sink(c, "primary", "primaryc"),
+    );
+    assert_eq!(
+        saved.text,
+        CONFIG.replace("[sinks.primary]", "[sinks.primaryc]")
+    );
+    assert_eq!(saved.dropped, 0);
+
+    let not_a_name = save_config_with(
+        CONFIG,
+        Some(identity(&[
+            ("primary c", Some("primary")),
+            ("audit", Some("audit")),
+        ])),
+        |c| rename_sink(c, "primary", "primaryc"),
+    );
+    let twice = save_config_with(
+        CONFIG,
+        Some(identity(&[
+            ("primaryc", Some("primary")),
+            ("primaryC", Some("audit")),
+        ])),
+        |c| rename_sink(c, "primary", "primaryc"),
+    );
+    let by_name = save_config_with(CONFIG, None, |c| rename_sink(c, "primary", "primaryc"));
+    assert_eq!(not_a_name.text, by_name.text);
+    assert_eq!(twice.text, by_name.text);
+    assert_ne!(by_name.text, saved.text);
 }
 
 #[test]

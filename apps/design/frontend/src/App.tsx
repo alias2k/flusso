@@ -829,7 +829,11 @@ export default function App() {
     if (!doc || useUiStore.getState().saving) return;
     const nameDraft = useUiStore.getState().nameDraft;
     if (nameDraft?.refused) {
-      setToast({ kind: "error", text: t("toast.nameRefusedSave", { row: nameDraft.row, reason: nameDraft.refused }) });
+      const at = { row: nameDraft.row, reason: nameDraft.refused };
+      setToast({
+        kind: "error",
+        text: nameDraft.kind === "index" ? t("toast.nameRefusedSave", at) : t("toast.sinkNameRefusedSave", at),
+      });
       return;
     }
     // Leaving the name box applies the name typed in it.
