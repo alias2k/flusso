@@ -631,6 +631,7 @@ async fn transforms_and_defaults_apply() {
             enum_order: Vec::new(),
             subfields: true,
             indexed: true,
+            array: false,
         }),
         ..base("email")
     };
@@ -644,6 +645,7 @@ async fn transforms_and_defaults_apply() {
             enum_order: Vec::new(),
             subfields: true,
             indexed: true,
+            array: false,
         }),
         ..base("bio")
     };
@@ -1716,6 +1718,7 @@ async fn validation_reports_what_no_document_build_gets_past() {
             enum_order: Vec::new(),
             subfields: true,
             indexed: true,
+            array: false,
         }),
         ..base(name)
     };
@@ -1931,6 +1934,7 @@ fn col(name: &str, source_column: &str) -> Field {
             enum_order: Vec::new(),
             subfields: true,
             indexed: true,
+            array: false,
         }),
         ..base(name)
     }

@@ -755,6 +755,7 @@ fn a_type_change_writes_the_defaults_the_old_type_left_out() {
             enum_order: vec![],
             subfields: true,
             indexed: true,
+            array: false,
         });
     });
     assert_eq!(

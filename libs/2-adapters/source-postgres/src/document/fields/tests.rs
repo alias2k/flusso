@@ -24,6 +24,7 @@ fn id_field() -> Field {
             enum_order: Vec::new(),
             subfields: true,
             indexed: true,
+            array: false,
         }),
     }
 }

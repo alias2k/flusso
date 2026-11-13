@@ -32,6 +32,7 @@ fn field(name: &str) -> Field {
             enum_order: Vec::new(),
             subfields: true,
             indexed: true,
+            array: false,
         }),
     }
 }

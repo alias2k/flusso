@@ -99,6 +99,7 @@ fn column_schema(name: &str, ty: FlussoType) -> IndexSchema {
                 enum_order: Vec::new(),
                 subfields: true,
                 indexed: true,
+                array: false,
             }),
         }],
     }
@@ -142,6 +143,7 @@ fn enum_schema(name: &str, order: Vec<String>) -> IndexSchema {
                 enum_order: order,
                 subfields: true,
                 indexed: true,
+                array: false,
             }),
         }],
     }
@@ -403,6 +405,7 @@ fn column_field(name: &str, ty: FlussoType) -> Field {
             enum_order: vec![],
             subfields: true,
             indexed: true,
+            array: false,
         }),
     }
 }
@@ -840,4 +843,42 @@ fn two_spellings_of_one_expression_hash_the_same() {
         hash("quantity*unit_price"),
         hash(" (quantity) *  unit_price ")
     );
+}
+
+#[test]
+fn an_array_column_changes_the_content_hash_only_while_it_is_set() {
+    let products = IndexName::try_new("products").unwrap();
+    let base = mapless_schema().resolve(products.clone()).hash;
+
+    let mut array = mapless_schema();
+    set_column(&mut array, "name", |column| column.array = true);
+    let array = array.resolve(products.clone()).hash;
+
+    let mut unset = mapless_schema();
+    set_column(&mut unset, "name", |column| column.array = false);
+
+    assert_ne!(base, array);
+    assert_eq!(base, unset.resolve(products).hash);
+}
+
+#[test]
+fn an_array_column_projects_to_an_array_of_its_element() {
+    let mut schema = mapless_schema();
+    set_column(&mut schema, "name", |column| column.array = true);
+    set_column(&mut schema, "attrs", |column| column.array = true);
+    let mapping = schema.resolve(IndexName::try_new("products").unwrap());
+    let by_name = |name: &str| {
+        mapping
+            .fields
+            .iter()
+            .find(|field| field.name.as_ref() == name)
+            .unwrap()
+    };
+
+    let name = by_name("name");
+    assert!(name.array);
+    assert_eq!(name.mapping.mapping_type, MappingType::Text);
+    assert!(by_name("attrs").array);
+    assert_eq!(by_name("attrs").mapping.mapping_type, MappingType::Object);
+    assert!(!by_name("code").array);
 }

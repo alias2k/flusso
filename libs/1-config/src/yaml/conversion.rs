@@ -135,6 +135,7 @@ fn convert_scalar(ty: FlussoType, body: entities::ScalarBody) -> Result<Field, C
             enum_order: Vec::new(),
             subfields,
             indexed,
+            array: false,
         }),
     })
 }
@@ -274,6 +275,7 @@ fn convert_map(body: entities::MapBody) -> Result<Field, ConversionError> {
             enum_order: Vec::new(),
             subfields: true,
             indexed: true,
+            array: false,
         }),
     })
 }
@@ -329,6 +331,7 @@ fn convert_enum(body: entities::EnumBody) -> Result<Field, ConversionError> {
             enum_order: body.variants,
             subfields: true,
             indexed: true,
+            array: false,
         }),
     })
 }
@@ -406,6 +409,7 @@ fn convert_geo(body: entities::GeoBody) -> Result<Field, ConversionError> {
                 enum_order: Vec::new(),
                 subfields: true,
                 indexed: true,
+                array: false,
             })
         }
         _ => return Err(ConversionError::InvalidGeoSource),

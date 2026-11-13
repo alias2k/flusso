@@ -266,6 +266,7 @@ async fn typed_columns_coerce_to_canonical_variants_in_the_body() {
             enum_order: Vec::new(),
             subfields: true,
             indexed: true,
+            array: false,
         }),
     };
     let schema = IndexSchema {
@@ -668,6 +669,7 @@ fn column_field(name: &str, col: &str) -> Field {
             enum_order: Vec::new(),
             subfields: true,
             indexed: true,
+            array: false,
         }),
     }
 }

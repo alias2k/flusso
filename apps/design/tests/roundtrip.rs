@@ -441,6 +441,7 @@ fn scalar_source() -> BoxedStrategy<FieldSource> {
                         )),
                     indexed: !(stored && matches!(ty, FlussoType::Json)),
                     ty,
+                    array: false,
                 })
             },
         )
@@ -502,6 +503,7 @@ fn map_source() -> BoxedStrategy<FieldSource> {
                 enum_order: Vec::new(),
                 subfields: true,
                 indexed: true,
+                array: false,
             })
         })
         .boxed()
@@ -526,6 +528,7 @@ fn custom_source() -> BoxedStrategy<FieldSource> {
                 enum_order: Vec::new(),
                 subfields: true,
                 indexed: true,
+                array: false,
             })
         })
         .boxed()

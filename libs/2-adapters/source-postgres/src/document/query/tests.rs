@@ -36,6 +36,7 @@ fn col_field(name: &str, column: &str) -> Field {
             enum_order: Vec::new(),
             subfields: true,
             indexed: true,
+            array: false,
         }),
     }
 }

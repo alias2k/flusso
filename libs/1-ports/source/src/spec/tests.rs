@@ -25,6 +25,7 @@ fn column_field(name: &str) -> Field {
             enum_order: Vec::new(),
             subfields: true,
             indexed: true,
+            array: false,
         }),
     }
 }
@@ -52,6 +53,7 @@ fn schema(table: &str) -> IndexSchema {
                 enum_order: Vec::new(),
                 subfields: true,
                 indexed: true,
+                array: false,
             }),
         }],
     }

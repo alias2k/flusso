@@ -2209,6 +2209,7 @@ fn users_with_org_tasks_spec() -> SourceSpec {
                     enum_order: Vec::new(),
                     subfields: true,
                     indexed: true,
+                    array: false,
                 }),
             },
             aggregate_field(
