@@ -291,8 +291,17 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
                         };
                     };
                     Ok(quote! {
+                        // Both bounds are higher-ranked, which the compiler
+                        // checks only where the impl is used, not eagerly as a
+                        // bound naming no generic: over an array newtype, which
+                        // has no `FlussoValue<K>` (nor `Serialize`, the trait's
+                        // supertrait), the newtype then needs no `Serialize`,
+                        // as one over a `Vec` needs none.
                         impl<__FlussoK> ::flusso_query::FlussoValue<__FlussoK> for #ident
-                        where #inner: ::flusso_query::FlussoValue<__FlussoK> {}
+                        where
+                            for<'__flusso> #inner: ::flusso_query::FlussoValue<__FlussoK>,
+                            for<'__flusso> #ident: ::flusso_query::__serde::Serialize,
+                        {}
                         impl ::flusso_query::FlussoValueMeta for #ident {
                             const KINDS: &'static [::flusso_query::KindTag] =
                                 <#inner as ::flusso_query::FlussoValueMeta>::KINDS;

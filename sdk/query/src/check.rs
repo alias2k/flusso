@@ -504,10 +504,14 @@ pub trait FlussoValueMeta {
     /// Both derives forward it from a newtype over another array newtype of
     /// their own kind, and refuse, where the newtype is declared, any other
     /// newtype that would read an array: over `Option<Vec<…>>`, over a `Vec`
-    /// of arrays, or over an array of the other kind. So a derived type reads
-    /// a JSON array exactly when this is set. Off by default; leave it unset in
-    /// a hand-written impl, where nothing checks it against what the type
-    /// reads.
+    /// of arrays, or over an array of the other kind. So a `FlussoFragment` or
+    /// `FlussoValue` type reads a JSON array exactly when this is set. The
+    /// other two never set it: a `FlussoRoot` reads an object, and
+    /// `#[derive(FlussoMap)]` refuses every shape that certainly reads no
+    /// object (a newtype over a `Vec`, an `Option`, a single value or an array
+    /// newtype); a struct with named fields reads an object. Off by default;
+    /// leave it unset in a hand-written impl, where nothing checks it against
+    /// what the type reads.
     const ARRAY: bool = false;
 }
 

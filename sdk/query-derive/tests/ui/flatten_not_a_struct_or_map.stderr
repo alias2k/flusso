@@ -1,0 +1,65 @@
+error: `Vec<Order>` is `#[serde(flatten)]`, but it reads an array, and serde flattens only a struct or a map — every read would fail; drop `#[serde(flatten)]` and give the field its own key
+  --> tests/ui/flatten_not_a_struct_or_map.rs:42:13
+   |
+42 |     orders: Vec<Order>,
+   |             ^^^
+
+error: `Option<String>` is `#[serde(flatten)]`, but it reads a single value, and serde flattens only a struct or a map — every read would fail; drop `#[serde(flatten)]` and give the field its own key
+  --> tests/ui/flatten_not_a_struct_or_map.rs:50:12
+   |
+50 |     email: Option<String>,
+   |            ^^^^^^
+
+error[E0080]: evaluation panicked: `Codes` is `#[serde(flatten)]`, but it reads an array, and serde flattens only a struct or a map — every read would fail; drop `#[serde(flatten)]` and give the field its own key
+  --> tests/ui/flatten_not_a_struct_or_map.rs:26:12
+   |
+26 |     codes: Codes,
+   |            ^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: `Code` is `#[serde(flatten)]`, but it reads a single value, and serde flattens only a struct or a map — every read would fail; drop `#[serde(flatten)]` and give the field its own key
+  --> tests/ui/flatten_not_a_struct_or_map.rs:34:11
+   |
+34 |     code: Code,
+   |           ^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: `Orders` is `#[serde(flatten)]`, but it reads an array, and serde flattens only a struct or a map — every read would fail; drop `#[serde(flatten)]` and give the field its own key
+  --> tests/ui/flatten_not_a_struct_or_map.rs:64:13
+   |
+64 |     orders: Vec<Element>,
+   |             ^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Element::__flusso_check`
+  --> tests/ui/flatten_not_a_struct_or_map.rs:57:13
+   |
+57 |     orders: Orders,
+   |             ^^^^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: `Code` is `#[serde(flatten)]`, but it reads a single value, and serde flattens only a struct or a map — every read would fail; drop `#[serde(flatten)]` and give the field its own key
+  --> tests/ui/flatten_not_a_struct_or_map.rs:78:11
+   |
+78 |     flat: Flat,
+   |           ^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Flat::__flusso_check`
+  --> tests/ui/flatten_not_a_struct_or_map.rs:70:11
+   |
+70 |     code: Code,
+   |           ^^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: `Codes` is `#[serde(flatten)]`, but it reads an array, and serde flattens only a struct or a map — every read would fail; drop `#[serde(flatten)]` and give the field its own key
+  --> tests/ui/flatten_not_a_struct_or_map.rs:88:12
+   |
+88 |     codes: Codes,
+   |            ^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: `Orders` is `#[serde(flatten)]`, but it reads an array, and serde flattens only a struct or a map — every read would fail; drop `#[serde(flatten)]` and give the field its own key
+   --> tests/ui/flatten_not_a_struct_or_map.rs:103:11
+    |
+103 |     flat: OpaqueFlat,
+    |           ^^^^^^^^^^ evaluation of `_` failed inside this call
+    |
+note: inside `OpaqueFlat::__flusso_check`
+   --> tests/ui/flatten_not_a_struct_or_map.rs:95:13
+    |
+ 95 |     orders: Orders,
+    |             ^^^^^^ the failure occurred here

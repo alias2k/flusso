@@ -1,0 +1,35 @@
+error[E0277]: `Email` is not a valid value for a `flusso_query::kind::Keyword` field
+  --> tests/ui/value_newtype_without_serialize.rs:13:12
+   |
+13 |     email: Email,
+   |            ^^^^^ unsupported field type
+   |
+help: the trait `Serialize` is not implemented for `Email`
+  --> tests/ui/value_newtype_without_serialize.rs:7:1
+   |
+ 7 | struct Email(String);
+   | ^^^^^^^^^^^^
+   = note: use a built-in leaf type, or a type with `#[derive(FlussoValue)]` of the matching kind
+   = help: the following other types implement trait `Serialize`:
+             &'a T
+             &'a mut T
+             ()
+             (T,)
+             (T0, T1)
+             (T0, T1, T2)
+             (T0, T1, T2, T3)
+             (T0, T1, T2, T3, T4)
+           and $N others
+note: required for `Email` to implement `FlussoValue<flusso_query::kind::Keyword>`
+  --> tests/ui/value_newtype_without_serialize.rs:7:8
+   |
+ 6 | #[derive(serde::Deserialize, FlussoValue)]
+   |                              ----------- type parameter would need to implement `FlussoValue<flusso_query::kind::Keyword>`
+ 7 | struct Email(String);
+   |        ^^^^^
+   = help: consider manually implementing `FlussoValue<flusso_query::kind::Keyword>` to avoid undesired bounds
+note: required by a bound in `__assert_field_value`
+  --> tests/ui/value_newtype_without_serialize.rs:13:12
+   |
+13 |     email: Email,
+   |            ^^^^^ required by this bound in `__assert_field_value`

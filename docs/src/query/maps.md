@@ -83,7 +83,7 @@ Product::query().query(Product::name().contains("excav"))   // "Excavator", in a
 
 ## Document types
 
-A map field deserializes into `HashMap<String, V>` or `BTreeMap<String, V>`, with `V` checked against the declared value kind like a scalar. A type of your own stands in for the whole map with `#[derive(FlussoMap)]` and a **required** value-kind tag, `#[flusso(keyword)]` or `#[flusso(text)]`; untagged is a compile error. Any shape works: a newtype, or named fields whose on-disk form is a flat object of same-kind values. The tag goes on the type, once; the fields take no `#[flusso(…)]`, since they are never checked one by one.
+A map field deserializes into `HashMap<String, V>` or `BTreeMap<String, V>`, with `V` checked against the declared value kind like a scalar. A type of your own stands in for the whole map with `#[derive(FlussoMap)]` and a **required** value-kind tag, `#[flusso(keyword)]` or `#[flusso(text)]`; untagged is a compile error. Any shape that reads one JSON object works: a newtype over a `HashMap`/`BTreeMap` (or over another map type, or `serde_json::Value`), or named fields whose on-disk form is a flat object of same-kind values. A shape that certainly reads something else is a compile error where it is declared: a unit struct, a tuple of several fields, or a newtype over a `Vec`, an `Option`, a single value, an array newtype or a `FlussoFragment` struct (whose fields serde requires: declare the ones you need on the map type, beside a `#[serde(flatten)]` map). So is `#[serde(from)]`/`try_from` on it, since serde then reads another type. The tag goes on the type, once; the fields take no `#[flusso(…)]`, since they are never checked one by one.
 
 ```rust
 #[derive(serde::Deserialize, FlussoMap)]

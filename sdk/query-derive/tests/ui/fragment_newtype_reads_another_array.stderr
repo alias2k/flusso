@@ -22,7 +22,7 @@ error: a FlussoFragment newtype over a `Vec<…>` is an array of sub-documents, 
 62 | struct Values(Vec<serde_json::Value>);
    |                   ^^^^^^^^^^
 
-error: a FlussoFragment newtype over an array wraps the `Vec<…>` directly, since a `nested` array is never null — write `struct MaybeOrders(Vec<Order>)`, and put the `Option<…>` on the field (`Option<MaybeOrders>`) where it may be null
+error: a FlussoFragment newtype over an array of sub-documents reads a `nested` field, which is never null (no rows read as an empty array) — drop the `Option`: `struct MaybeOrders(Vec<Order>)`
   --> tests/ui/fragment_newtype_reads_another_array.rs:66:20
    |
 66 | struct MaybeOrders(Option<Vec<Order>>);
@@ -52,7 +52,7 @@ error[E0080]: evaluation panicked: `Maps` is a FlussoFragment newtype over `Vec<
 56 | struct Maps(Vec<Labels>);
    |                 ^^^^^^ evaluation of `_` failed here
 
-error[E0080]: evaluation panicked: `MaybeBatch` is a FlussoFragment newtype over `Option<Orders>`, and `Orders` reads an array, which a `nested` array never holds as null — wrap `Orders` directly, and put the `Option<…>` on the field (`Option<MaybeBatch>`)
+error[E0080]: evaluation panicked: `MaybeBatch` is a FlussoFragment newtype over `Option<Orders>`, and `Orders` reads an array, which a `nested` field holds and never as null (no rows read as an empty array) — drop the `Option`: `struct MaybeBatch(Orders)`
   --> tests/ui/fragment_newtype_reads_another_array.rs:69:26
    |
 69 | struct MaybeBatch(Option<Orders>);

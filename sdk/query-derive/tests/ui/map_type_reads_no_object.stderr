@@ -1,0 +1,65 @@
+error: a FlussoMap type reads one JSON object, but `OverAVec` reads an array — wrap a `HashMap<String, V>`/`BTreeMap<String, V>`, or declare named fields
+ --> tests/ui/map_type_reads_no_object.rs:9:17
+  |
+9 | struct OverAVec(Vec<String>);
+  |                 ^^^
+
+error: a FlussoMap type reads one JSON object, but `OverAnOption` reads `null` too, through its `Option` — wrap a `HashMap<String, V>`/`BTreeMap<String, V>`, or declare named fields
+  --> tests/ui/map_type_reads_no_object.rs:13:21
+   |
+13 | struct OverAnOption(Option<HashMap<String, String>>);
+   |                     ^^^^^^
+
+error: a FlussoMap type reads one JSON object, but `OverAString` reads a single value — wrap a `HashMap<String, V>`/`BTreeMap<String, V>`, or declare named fields
+  --> tests/ui/map_type_reads_no_object.rs:17:20
+   |
+17 | struct OverAString(String);
+   |                    ^^^^^^
+
+error: a FlussoMap type reads one JSON object, but `NamedOverMaps` reads an array — wrap a `HashMap<String, V>`/`BTreeMap<String, V>`, or declare named fields
+  --> tests/ui/map_type_reads_no_object.rs:23:11
+   |
+23 |     maps: Vec<HashMap<String, String>>,
+   |           ^^^
+
+error: a FlussoMap type reads one JSON object, but `Pair` reads an array — wrap a `HashMap<String, V>`/`BTreeMap<String, V>`, or declare named fields
+  --> tests/ui/map_type_reads_no_object.rs:28:12
+   |
+28 | struct Pair(HashMap<String, String>, HashMap<String, String>);
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: a FlussoMap type reads one JSON object, but `Unit` reads no value — wrap a `HashMap<String, V>`/`BTreeMap<String, V>`, or declare named fields
+  --> tests/ui/map_type_reads_no_object.rs:32:8
+   |
+32 | struct Unit;
+   |        ^^^^
+
+error: `#[serde(from)]`/`try_from` makes serde read another type and convert it, so this type's shape is never what serde reads; derive `FlussoMap` on the type serde reads, and convert after reading
+  --> tests/ui/map_type_reads_no_object.rs:61:1
+   |
+61 | #[serde(from = "Vec<String>")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: `#[serde(from)]`/`try_from` makes serde read another type and convert it, so this struct's fields are never what serde reads, and checking them proves nothing; derive `FlussoFragment` on the type serde reads, and convert after reading
+  --> tests/ui/map_type_reads_no_object.rs:71:1
+   |
+71 | #[serde(try_from = "String")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0080]: evaluation panicked: a FlussoMap type reads one JSON object, but `OverAnArrayNewtype` wraps `Codes`, which reads an array — wrap a `HashMap<String, V>`/`BTreeMap<String, V>`, or declare named fields
+  --> tests/ui/map_type_reads_no_object.rs:39:27
+   |
+39 | struct OverAnArrayNewtype(Codes);
+   |                           ^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: a FlussoMap type reads one JSON object, but `OverAValue` wraps `Code`, which reads a single value — wrap a `HashMap<String, V>`/`BTreeMap<String, V>`, or declare named fields
+  --> tests/ui/map_type_reads_no_object.rs:47:19
+   |
+47 | struct OverAValue(Code);
+   |                   ^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: a FlussoMap type reads one JSON object of dynamic keys, but `OverASubDocument` wraps `Contact`, a sub-document, whose fields serde requires — declare the fields you need on `OverASubDocument` itself, beside a `#[serde(flatten)]` map for the rest
+  --> tests/ui/map_type_reads_no_object.rs:56:25
+   |
+56 | struct OverASubDocument(Contact);
+   |                         ^^^^^^^ evaluation of `_` failed here

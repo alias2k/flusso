@@ -922,7 +922,7 @@ fn check_map_type(
 /// The value type `V` of a `HashMap<String, V>` / `BTreeMap<String, V>` (by the
 /// last path segment), else `None`. Peels a map field to its value type for
 /// checking.
-fn map_container_value(ty: &Type) -> Option<&Type> {
+pub(crate) fn map_container_value(ty: &Type) -> Option<&Type> {
     let Type::Path(path) = ty else {
         return None;
     };
@@ -1025,7 +1025,7 @@ fn expected_leaves(mapping_type: &MappingType) -> Vec<&'static str> {
     }
 }
 
-fn is_primitive(ident: Option<&str>) -> bool {
+pub(crate) fn is_primitive(ident: Option<&str>) -> bool {
     matches!(
         ident,
         Some(
@@ -1608,7 +1608,7 @@ fn to_pascal_case(name: &str) -> String {
 
 /// The last path segment ident of a type, e.g. `Option<String>` → `Option`,
 /// `rust_decimal::Decimal` → `Decimal`.
-fn leaf_ident(ty: &Type) -> Option<String> {
+pub(crate) fn leaf_ident(ty: &Type) -> Option<String> {
     match ty {
         Type::Path(path) => path.path.segments.last().map(|s| s.ident.to_string()),
         _ => None,
@@ -1835,13 +1835,10 @@ pub(crate) fn embed_checks(
     for field in fields {
         let span = field.ty.span();
         if field.flatten {
-            if let Some(element) = crate::fragment::embedded_type(field, false) {
-                calls.extend(crate::fragment::flattened_check(
-                    element,
-                    span,
-                    quote! { __FLUSSO_LEVEL },
-                ));
-            }
+            calls.extend(crate::fragment::flattened_field(
+                field,
+                quote! { __FLUSSO_LEVEL },
+            ));
             continue;
         }
         let key = &field.doc_key;
