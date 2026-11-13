@@ -882,3 +882,23 @@ fn an_array_column_projects_to_an_array_of_its_element() {
     assert_eq!(by_name("attrs").mapping.mapping_type, MappingType::Object);
     assert!(!by_name("code").array);
 }
+
+fn hash_of(schema: &IndexSchema) -> String {
+    schema
+        .resolve(IndexName::try_new("products").unwrap())
+        .hash
+        .to_string()
+}
+
+/// A schema with a `binary` column, or an `ids` of `binary`, moves off the
+/// hash it had while the column was indexed as Postgres hex text, so the index
+/// is rebuilt once with the bytes as base64. The pins are the hashes before.
+#[test]
+fn a_binary_schema_moves_off_its_hex_text_hash() {
+    let binary = columns_schema(vec![
+        column_field("name", FlussoType::Text),
+        column_field("thumbnail", FlussoType::Binary),
+    ]);
+    assert_ne!(hash_of(&binary), "28a742cb");
+    assert_ne!(hash_of(&ids_schema(FlussoType::Binary)), "7690cadc");
+}

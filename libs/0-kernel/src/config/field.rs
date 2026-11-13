@@ -156,8 +156,15 @@ pub(crate) fn is_enabled(flag: &bool) -> bool {
 /// built under `1`, which lacks the subfield.
 const MAP_KEY_MAPPING_REVISION: u8 = 2;
 
+/// Bumped when what a `binary` column indexes changes, so every schema with
+/// one gets a new content hash (a new physical index, rebuilt once) while no
+/// other schema moves. `1`: the bytes are indexed as base64; before, the
+/// column's Postgres hex text (`\x0102…`) was.
+pub(crate) const BINARY_ENCODING_REVISION: u8 = 1;
+
 /// Hashes the fields in declaration order (exactly what the derive did), plus
-/// `MAP_KEY_MAPPING_REVISION` for a `map` column only. `subfields` and `indexed`
+/// `MAP_KEY_MAPPING_REVISION` for a `map` column and `BINARY_ENCODING_REVISION`
+/// for a `binary` one only. `subfields` and `indexed`
 /// are hashed only when turned off, and `array` only when on, so a schema that
 /// never uses them keeps the content hash (and so the physical index) it had
 /// before they existed.
@@ -182,6 +189,9 @@ impl Hash for Column {
         enum_order.hash(state);
         if matches!(ty, FlussoType::Map { .. }) {
             MAP_KEY_MAPPING_REVISION.hash(state);
+        }
+        if matches!(ty, FlussoType::Binary) {
+            BINARY_ENCODING_REVISION.hash(state);
         }
         if !subfields {
             "subfields".hash(state);

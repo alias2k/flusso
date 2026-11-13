@@ -319,6 +319,94 @@ async fn typed_columns_coerce_to_canonical_variants_in_the_body() {
     );
 }
 
+/// A `binary` field, built by `build` and `build_many` against a real
+/// database: the bytes come back as [`GenericValue::Bytes`] (the sink
+/// base64-encodes them), not as the Postgres hex text the query's JSON holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn binary_columns_build_the_bytes_they_hold() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE blobs (id bigint PRIMARY KEY, blob bytea, blobs bytea[])",
+        "INSERT INTO blobs VALUES (1, '\\x00ff7f80', ARRAY['\\x01'::bytea, '\\x0203'::bytea]), \
+         (2, '\\x', NULL)",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let binary = |name: &str, array: bool| Field {
+        field: field(name),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Column(Column {
+            column: column(name),
+            ty: FlussoType::Binary,
+            nullable: true,
+            transforms: Vec::new(),
+            default: None,
+            enum_order: Vec::new(),
+            subfields: true,
+            indexed: true,
+            array,
+        }),
+    };
+    let fields = vec![
+        column_field("id", "id"),
+        binary("blob", false),
+        binary("blobs", true),
+    ];
+    let schema = IndexSchema {
+        version: 1,
+        table: table("blobs"),
+        db_schema: DatabaseSchema::try_new("public").unwrap(),
+        primary_key: Some(column("id")),
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields,
+    };
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("blobs"), schema)]));
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec))
+        .await
+        .unwrap();
+    let id = |n: i64| DocumentId {
+        index: index_name("blobs"),
+        key: row_key(n),
+    };
+
+    let one = builder.build(&id(1)).await.unwrap();
+    let many = builder.build_many(&[id(1), id(2)]).await.unwrap();
+    let bodies: Vec<(&str, &GenericValue)> = [("build", &one)]
+        .into_iter()
+        .chain(many.iter().map(|doc| ("build_many", doc)))
+        .map(|(how, doc)| match doc {
+            Document::Upsert { body, .. } => (how, body),
+            other => panic!("{how}: expected an upsert, got {other:?}"),
+        })
+        .collect();
+    for (how, body) in bodies {
+        let GenericValue::Map(map) = body else {
+            panic!("{how}: expected a document object");
+        };
+        let first = map.get("id") == Some(&GenericValue::BigInt(1));
+        let (blob, blobs) = if first {
+            (
+                GenericValue::Bytes(vec![0x00, 0xff, 0x7f, 0x80]),
+                GenericValue::Array(vec![
+                    GenericValue::Bytes(vec![0x01]),
+                    GenericValue::Bytes(vec![0x02, 0x03]),
+                ]),
+            )
+        } else {
+            (GenericValue::Bytes(Vec::new()), GenericValue::Null)
+        };
+        assert_eq!(map.get("blob"), Some(&blob), "{how}: {map:?}");
+        assert_eq!(map.get("blobs"), Some(&blobs), "{how}: {map:?}");
+    }
+}
+
 /// A row whose document fails to build (a scalar `array: true` field over a
 /// `jsonb` column holding an object) is reported as that failure, with its
 /// field path, by `document_by_id` and `sample_document`, not as a missing row.

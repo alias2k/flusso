@@ -18,7 +18,7 @@ Every scalar field's type key bridges a Postgres column type and an OpenSearch m
 | `decimal` | `numeric`, `money` | `double` | Lossy in storage. Use a `custom` `scaled_float` when exactness matters. |
 | `date` | `date` | `date` | |
 | `timestamp` | `timestamp`, `timestamptz`, `time` | `date` | |
-| `binary` | `bytea` | `binary` | Base64 on the wire. |
+| `binary` | `bytea` | `binary` | The column's bytes, as standard base64 with no line breaks: at the root, as [`array: true`](#array) over `bytea[]`, inside joins, and in an `ids` aggregate. Read in Postgres's default `bytea_output = hex`; a server or role set to `escape` leaves the value as that text. Before 0.18 the Postgres hex text (`\x0102…`) was indexed instead; see [Upgrade to 0.18](../operate/upgrade-to-0-18.md). |
 | `json` | `json`, `jsonb` | `object` | Opaque; no children declared. The strict root refuses any key inside it, so store it with [`indexed: false`](joins.md#indexed) or declare a [`map`](objects-and-maps.md). |
 | `custom` | as declared | as declared | See [custom](#custom). |
 | `geo` | see below | `geo_point` | Not a scalar; see [geo](#geo). |

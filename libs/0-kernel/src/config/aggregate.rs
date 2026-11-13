@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::common;
 
-use super::{AggregateKey, ColumnPair, Expression, Filter, FlussoType, join::hash_on};
+use super::{
+    AggregateKey, BINARY_ENCODING_REVISION, ColumnPair, Expression, Filter, FlussoType,
+    join::hash_on,
+};
 
 /// Reduces rows from a related `table` to a single value — a count, sum,
 /// extreme, or existence flag. The `key` connects the tables; `filters`
@@ -100,6 +103,12 @@ impl Hash for Aggregate {
             via.hash(state);
         }
         hash_on("on", on, state);
+        if let AggregateOp::Ids {
+            element_type: FlussoType::Binary,
+        } = op
+        {
+            BINARY_ENCODING_REVISION.hash(state);
+        }
     }
 }
 

@@ -131,7 +131,9 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   root-table change resolves to its own id *and* walks every path back at the root — issue #167),
   and `a_root_filtered_tree_indexes_only_top_level_rows` (the guide's tree with a `parent_id
   is_null` root filter: only top-level rows are documents across child/grandchild changes,
-  re-parenting, promotion, and demotion), and `an_update_of_an_unread_column_writes_nothing` (issue #169: an update changing
+  re-parenting, promotion, and demotion), and `a_binary_column_is_indexed_as_the_bytes_it_holds` (issue #291: a `bytea` at the root, as
+`bytea[]`, in every join kind and two levels deep reads back as base64 of its bytes on backfill and
+after a live update), and `an_update_of_an_unread_column_writes_nothing` (issue #169: an update changing
   only a column no document reads leaves the row's and its parent's `_version` alone; `wal`'s
   `an_update_of_unread_columns_rebuilds_nothing` covers root, child, aggregate, each read-column
   kind, and the no-pre-image fallback; `on_pairs_rebuild_the_parent_from_either_side` covers `on:`
@@ -855,7 +857,11 @@ so `path.*.keyword` names the exact values alone. `Column`'s
 hand-written `Hash` adds `MAP_KEY_MAPPING_REVISION` (`2`: typed keys, then the `.keyword`; both
 in 0.17.0) for a map column only, so map schemas
 moved to a new physical index when keys became typed and nothing else did
-(`a_schema_without_a_map_keeps_its_content_hash` / `a_map_schema_moves_off_its_dynamically_mapped_hash`).
+(`a_schema_without_a_map_keeps_its_content_hash` / `a_map_schema_moves_off_its_dynamically_mapped_hash`). The same
+pattern moves the `binary` schemas once (issue #291): `BINARY_ENCODING_REVISION` (a `binary` column or
+an `ids` of `binary`; the document query renders a `bytea` inside its JSON as `\x…` hex text, which
+`document/value.rs`'s `coerce_scalar` turns back into `GenericValue::Bytes` for `sink::to_json` to
+base64). Guard: `a_binary_schema_moves_off_its_hex_text_hash`.
 `values` must be a leaf kind (text/keyword/number/date); the conversion rejects others. An `enum:` field takes an optional `variants:` list (its own
 `EnumBody`/`Field::Enum` entity) — the variants in rank order; empty/omitted = a
 plain keyword. It lands on `Column.enum_order` (**not** on `FlussoType::Enum`,
