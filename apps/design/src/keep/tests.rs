@@ -1504,3 +1504,20 @@ fn a_byte_order_mark_stays() {
         )
     );
 }
+
+#[test]
+fn editing_a_top_level_dotted_key_keeps_the_blank_line_below_it() {
+    let base =
+        format!("# head\n\nsinks.primary.type = \"stdout\"\nsinks.primary.pretty = true\n\n{BARE}");
+    let text = save_config(&base, |c| set_option(c, "primary", "pretty", "no"));
+    assert_eq!(text, base.replace("pretty = true", "pretty = \"no\""));
+    let base = format!("sinks.primary.type = \"stdout\"\n\n{BARE}");
+    let text = save_config(&base, |c| set_option(c, "primary", "pretty", "no"));
+    assert_eq!(
+        text,
+        base.replace(
+            "\"stdout\"\n",
+            "\"stdout\"\nsinks.primary.pretty = \"no\"\n"
+        )
+    );
+}

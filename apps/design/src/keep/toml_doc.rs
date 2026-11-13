@@ -104,7 +104,7 @@ pub(super) fn patch(
 
     mark(doc.as_table_mut(), &mut stash)?;
     let after = order(&doc.to_string());
-    let root_values = doc.as_table().iter().any(|(_, item)| item.is_value());
+    let root_values = doc.as_table().iter().any(|(_, item)| writes_body_line(item));
     let prefixes = patcher.place(&stash, &before, &after, &trailing, root_values)?;
     for (id, prefix) in prefixes.headers {
         set_prefix(doc.as_table_mut(), id, &prefix);
@@ -124,17 +124,13 @@ pub(super) fn patch(
 /// Remove and return the file's header: everything before the first key or
 /// header. Without it a new top-level key would be written above it.
 fn take_header(doc: &mut DocumentMut) -> Option<String> {
-    let first_key = doc
-        .as_table()
-        .iter()
-        .find(|(_, item)| item.is_value())
-        .map(|(k, _)| k.to_owned());
-    if let Some(key) = first_key {
-        let mut key = doc.as_table_mut().key_mut(&key)?;
-        let decor = key.leaf_decor_mut();
+    let first_key = on_first_key_decor(doc.as_table_mut(), &mut |decor| {
         let header = decor.prefix().map_or(Some(""), |p| p.as_str())?.to_owned();
         decor.set_prefix("");
-        return Some(header);
+        Some(header)
+    });
+    if let Some(header) = first_key {
+        return header;
     }
     let mut first: Option<isize> = None;
     for_each_header(doc.as_table_mut(), &mut |table| {
@@ -156,6 +152,35 @@ fn take_header(doc: &mut DocumentMut) -> Option<String> {
         }
     });
     header.unwrap_or(Some(String::new()))
+}
+
+/// `f` on the decor that starts the first line of `table`'s body: its first key's,
+/// or, when that is a dotted key (`sinks.primary.url = …`), the leaf's.
+/// `None` when the body has no line.
+fn on_first_key_decor<R>(
+    table: &mut Table,
+    f: &mut dyn FnMut(&mut toml_edit::Decor) -> R,
+) -> Option<R> {
+    let key = table
+        .iter()
+        .find(|(_, item)| writes_body_line(item))
+        .map(|(k, _)| k.to_owned())?;
+    if table.get(&key).is_some_and(Item::is_value) {
+        return Some(f(table.key_mut(&key)?.leaf_decor_mut()));
+    }
+    on_first_key_decor(table.get_mut(&key)?.as_table_mut()?, f)
+}
+
+/// Whether `item` writes a line in its table's body: a value, or a dotted
+/// table holding one.
+fn writes_body_line(item: &Item) -> bool {
+    match item {
+        Item::Value(_) => true,
+        Item::Table(table) => {
+            table.is_dotted() && table.iter().any(|(_, item)| writes_body_line(item))
+        }
+        _ => false,
+    }
 }
 
 /// Tag every header without a marker with the next id, stashing its prefix.
