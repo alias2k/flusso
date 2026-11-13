@@ -319,12 +319,13 @@ async fn typed_columns_coerce_to_canonical_variants_in_the_body() {
     );
 }
 
-/// A `binary` field, built by `build` and `build_many` against a real
-/// database: the bytes come back as [`GenericValue::Bytes`] (the sink
-/// base64-encodes them), not as the Postgres hex text the query's JSON holds.
+/// A `binary` field and every kind of `constant`, built by `build` and
+/// `build_many` against a real database: the bytes come back as
+/// [`GenericValue::Bytes`] (the sink base64-encodes them), and a constant is
+/// exactly the value the schema holds, an object or a list included.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
-async fn binary_columns_build_the_bytes_they_hold() {
+async fn binary_columns_and_constants_build_the_values_they_hold() {
     let container = Postgres::default().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
@@ -352,11 +353,39 @@ async fn binary_columns_build_the_bytes_they_hold() {
             array,
         }),
     };
-    let fields = vec![
+    let object = GenericValue::Map(BTreeMap::from([
+        ("a".to_owned(), GenericValue::BigInt(1)),
+        (
+            "b".to_owned(),
+            GenericValue::Map(BTreeMap::from([(
+                "c".to_owned(),
+                GenericValue::String("x".to_owned()),
+            )])),
+        ),
+    ]));
+    let constants = [
+        ("text", GenericValue::String("crm".to_owned())),
+        ("number", GenericValue::BigInt(5)),
+        ("fraction", GenericValue::Decimal("1.5".parse().unwrap())),
+        ("flag", GenericValue::Bool(true)),
+        ("object", object),
+        (
+            "list",
+            GenericValue::Array(vec![GenericValue::BigInt(1), GenericValue::BigInt(2)]),
+        ),
+        ("nothing", GenericValue::Null),
+    ];
+    let mut fields = vec![
         column_field("id", "id"),
         binary("blob", false),
         binary("blobs", true),
     ];
+    fields.extend(constants.iter().map(|(name, value)| Field {
+        field: field(name),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Constant(value.clone()),
+    }));
     let schema = IndexSchema {
         version: 1,
         table: table("blobs"),
@@ -404,6 +433,9 @@ async fn binary_columns_build_the_bytes_they_hold() {
         };
         assert_eq!(map.get("blob"), Some(&blob), "{how}: {map:?}");
         assert_eq!(map.get("blobs"), Some(&blobs), "{how}: {map:?}");
+        for (name, value) in &constants {
+            assert_eq!(map.get(*name), Some(value), "{how}: `{name}` in {map:?}");
+        }
     }
 }
 

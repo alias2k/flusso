@@ -52,11 +52,11 @@
 //!   child/grandchild insert/update/delete, re-parenting, promotion to the top
 //!   level, and demotion under another row.
 //!
-//! - [`a_binary_column_is_indexed_as_the_bytes_it_holds`] — a `bytea` at the
+//! - [`binary_columns_and_constants_are_indexed_as_written`] — a `bytea` at the
 //!   root, as `bytea[]`, and inside `belongs_to` / `has_one` / `has_many` /
 //!   `many_to_many` and two levels deep reaches OpenSearch as base64 of its
 //!   bytes, on backfill and after a live update (issue #291: it was the column's
-//!   Postgres hex text).
+//!   Postgres hex text); a `constant` number, list, and object land as written.
 //!
 //! Each change is verified by polling a realtime `GET {index}/_doc/{id}` (reads
 //! the translog, so no refresh wait) until the index reflects the expectation or
@@ -77,8 +77,8 @@ use std::time::{Duration, Instant};
 use engine::{IngestEngine, SinkControl, SinkEngine};
 use kernel::{
     Column, ColumnName, DatabaseSchema, Field, FieldName, FieldSource, Filter, FlussoType,
-    IndexName, IndexSchema, Join, JoinKind, NullCheckFilter, NullOp, Relation, Secret, SinkName,
-    SoftDelete, SoftDeleteColumn, TableName,
+    GenericValue, IndexName, IndexSchema, Join, JoinKind, NullCheckFilter, NullOp, Relation,
+    Secret, SinkName, SoftDelete, SoftDeleteColumn, TableName,
 };
 use sink::Sink;
 use sink_opensearch::OpensearchSink;
@@ -883,7 +883,7 @@ fn assert_blobs(doc: &serde_json::Value, pointers: &[&str], want: &[u8], when: &
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
-async fn a_binary_column_is_indexed_as_the_bytes_it_holds() {
+async fn binary_columns_and_constants_are_indexed_as_written() {
     let pg = start_postgres().await;
     let os = start_opensearch().await;
 
@@ -915,8 +915,32 @@ async fn a_binary_column_is_indexed_as_the_bytes_it_holds() {
         exec(&pg.pool, &sql).await;
     }
 
+    let constant = |name: &str, value: GenericValue| Field {
+        field: field(name),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Constant(value),
+    };
     let mut things = simple_schema("things", None);
     things.fields.extend([
+        constant("weight", GenericValue::BigInt(5)),
+        constant(
+            "labels",
+            GenericValue::Array(vec![
+                GenericValue::String("a".to_owned()),
+                GenericValue::String("b".to_owned()),
+            ]),
+        ),
+        constant(
+            "meta",
+            GenericValue::Map(BTreeMap::from([
+                ("origin".to_owned(), GenericValue::String("crm".to_owned())),
+                (
+                    "rank".to_owned(),
+                    GenericValue::Array(vec![GenericValue::BigInt(1), GenericValue::BigInt(2)]),
+                ),
+            ])),
+        ),
         binary_field("blob", false),
         binary_field("blobs", true),
         join_field(
@@ -1015,6 +1039,17 @@ async fn a_binary_column_is_indexed_as_the_bytes_it_holds() {
         .await;
     let doc = live.fetch_source("things", "1").await.unwrap();
     assert_blobs(&doc, &pointers, &blob(25), "on backfill");
+    assert_eq!(doc.get("weight"), Some(&serde_json::json!(5)), "{doc}");
+    assert_eq!(
+        doc.get("labels"),
+        Some(&serde_json::json!(["a", "b"])),
+        "{doc}"
+    );
+    assert_eq!(
+        doc.get("meta"),
+        Some(&serde_json::json!({ "origin": "crm", "rank": [1, 2] })),
+        "{doc}"
+    );
 
     // Live (`build`): new bytes at every position, written through the WAL.
     for sql in [

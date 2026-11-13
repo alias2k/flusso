@@ -13,7 +13,7 @@ use crate::common::{ColumnName, GenericValue, IndexName};
 
 use super::{
     Aggregate, AggregateOp, Column, ContentHash, Field, FieldSource, FlussoType, IndexMapping,
-    IndexSchema, Mapping, MappingType, Relation, ResolvedField, Script,
+    IndexSchema, Mapping, MappingType, Relation, ResolvedField, Script, constant_holds_object,
 };
 
 impl IndexSchema {
@@ -96,12 +96,14 @@ fn has_subfields(field: &Field) -> bool {
     }
 }
 
-/// Whether a sink indexes this field: off only for a `json` column or a join
-/// that says `indexed: false`.
+/// Whether a sink indexes this field: off for a `json` column or a join that
+/// says `indexed: false`, and for a constant holding an object, whose keys the
+/// strict root would refuse.
 fn is_indexed(field: &Field) -> bool {
     match &field.source {
         FieldSource::Column(column) => column.indexed,
         FieldSource::Relation(Relation::Join(join)) => join.indexed,
+        FieldSource::Constant(value) => !constant_holds_object(value),
         _ => true,
     }
 }

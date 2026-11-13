@@ -315,3 +315,57 @@ fn a_binary_ids_aggregate_reads_back_as_bytes() {
         ])
     );
 }
+
+fn constant_field(name: &str, value: GenericValue) -> Field {
+    Field {
+        field: FieldName::try_new(name).unwrap(),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Constant(value),
+    }
+}
+
+#[test]
+fn a_constant_builds_the_value_the_schema_holds_whatever_the_query_read() {
+    let object = GenericValue::Map(BTreeMap::from([
+        ("a".to_owned(), GenericValue::BigInt(1)),
+        (
+            "b".to_owned(),
+            GenericValue::Array(vec![GenericValue::String("x".to_owned())]),
+        ),
+    ]));
+    let constants = [
+        ("text", GenericValue::String("crm".to_owned())),
+        ("number", GenericValue::BigInt(5)),
+        ("fraction", GenericValue::Decimal("1.5".parse().unwrap())),
+        ("flag", GenericValue::Bool(true)),
+        ("object", object),
+        (
+            "list",
+            GenericValue::Array(vec![
+                GenericValue::String("a".to_owned()),
+                GenericValue::String("b".to_owned()),
+            ]),
+        ),
+        ("nothing", GenericValue::Null),
+    ];
+    let fields: Vec<Field> = constants
+        .iter()
+        .map(|(name, value)| constant_field(name, value.clone()))
+        .collect();
+    let map = body(
+        json!({
+            "text": "crm",
+            "number": "5",
+            "fraction": "1.5",
+            "flag": "true",
+            "object": null,
+            "list": null,
+            "nothing": null,
+        }),
+        &fields,
+    );
+    for (name, value) in &constants {
+        assert_eq!(map.get(*name), Some(value), "{name}");
+    }
+}

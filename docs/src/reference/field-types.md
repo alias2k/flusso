@@ -139,12 +139,24 @@ PostGIS `geometry` and the native `point` type aren't accepted directly (WKB and
 
 ## constant
 
-A fixed value in every document. `value` absent or `null` renders as JSON null. It has no source column.
+A fixed value in every document, exactly as written. It has no source column.
 
 ```yaml
 - constant: source
   value: "crm"
 ```
+
+| `value` | Document | Mapping |
+| --- | --- | --- |
+| a string | the string | `keyword` |
+| a whole number | the number | `long` |
+| any other number | the number | `double` |
+| `true` / `false` | the boolean | `boolean` |
+| absent or `null` | `null` | `keyword`, nullable |
+| a list of scalars | the list | the first element's type; an empty list is `keyword` |
+| an object, or a list holding one | the value, every level included | `object`, stored but not indexed, like [`indexed: false`](joins.md#indexed): the strict root refuses keys in an `object` with no declared children |
+
+A list's elements share one mapping, so a list mixing types (`[1, "a"]`) is rejected by OpenSearch. Before 0.18 a number or boolean was indexed as its text (`"5"`) and an object or list as `null`; see [Upgrade to 0.18](../operate/upgrade-to-0-18.md).
 
 ## transforms
 

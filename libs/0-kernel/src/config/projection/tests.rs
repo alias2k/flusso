@@ -883,6 +883,15 @@ fn an_array_column_projects_to_an_array_of_its_element() {
     assert!(!by_name("code").array);
 }
 
+fn constant_field(name: &str, value: crate::common::GenericValue) -> Field {
+    Field {
+        field: FieldName::try_new(name).unwrap(),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Constant(value),
+    }
+}
+
 fn hash_of(schema: &IndexSchema) -> String {
     schema
         .resolve(IndexName::try_new("products").unwrap())
@@ -901,4 +910,44 @@ fn a_binary_schema_moves_off_its_hex_text_hash() {
     ]);
     assert_ne!(hash_of(&binary), "28a742cb");
     assert_ne!(hash_of(&ids_schema(FlussoType::Binary)), "7690cadc");
+}
+
+#[test]
+fn a_schema_without_binary_or_an_object_constant_keeps_its_content_hash() {
+    use crate::common::GenericValue;
+    let scalars = columns_schema(vec![
+        column_field("name", FlussoType::Text),
+        constant_field("source", GenericValue::String("crm".to_owned())),
+        constant_field("weight", GenericValue::BigInt(5)),
+        constant_field(
+            "tags",
+            GenericValue::Array(vec![GenericValue::String("a".to_owned())]),
+        ),
+        constant_field("nothing", GenericValue::Null),
+    ]);
+    assert_eq!(hash_of(&scalars), "894b0c70");
+    assert_eq!(hash_of(&ids_schema(FlussoType::Long)), "4d3e4e36");
+}
+
+/// A constant holding an object is built as written and stored unindexed: the
+/// strict root refuses keys in an `object` with no children. Its schema moves
+/// off the hash it had while it built `null`; a scalar constant stays indexed.
+#[test]
+fn a_constant_holding_an_object_is_stored_unindexed_and_moves_its_hash() {
+    use crate::common::GenericValue;
+    let object = GenericValue::Map(
+        [("a".to_owned(), GenericValue::BigInt(1))]
+            .into_iter()
+            .collect(),
+    );
+    let schema = columns_schema(vec![
+        constant_field("meta", object.clone()),
+        constant_field("rows", GenericValue::Array(vec![object])),
+        constant_field("source", GenericValue::String("crm".to_owned())),
+    ]);
+    let mapping = schema.resolve(IndexName::try_new("products").unwrap());
+    let indexed: Vec<bool> = mapping.fields.iter().map(|f| f.mapping.indexed).collect();
+    assert_eq!(indexed, [false, false, true]);
+    assert_eq!(mapping.fields[0].mapping.mapping_type, MappingType::Object);
+    assert_ne!(mapping.hash.to_string(), "56ebe48b");
 }

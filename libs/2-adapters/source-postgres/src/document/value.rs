@@ -199,12 +199,13 @@ fn coerce_field(
         FieldSource::Group(fields) => coerce_object(json, fields, path)?,
         FieldSource::Relation(Relation::Join(join)) => coerce_relation(json, &join.fields, path)?,
         FieldSource::Relation(Relation::Aggregate(aggregate)) => coerce_aggregate(json, aggregate),
-        // A geo point ({lat,lon} / [lon,lat] / "lat,lon") and a bare constant
-        // carry no scalar type to coerce to; keep their natural JSON shape. A
-        // script field is a placeholder null, computed after the build.
-        FieldSource::Geo(_) | FieldSource::Constant(_) | FieldSource::Script(_) => {
-            json_to_generic(json)
-        }
+        // The query reads a constant back as untyped text, or null for an object
+        // or a list; the schema holds it exactly.
+        FieldSource::Constant(value) => value.clone(),
+        // A geo point ({lat,lon} / [lon,lat] / "lat,lon") carries no scalar type
+        // to coerce to; keep its natural JSON shape. A script field is a
+        // placeholder null, computed after the build.
+        FieldSource::Geo(_) | FieldSource::Script(_) => json_to_generic(json),
     })
 }
 

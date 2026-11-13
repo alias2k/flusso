@@ -47,6 +47,27 @@ impl Hash for Field {
         if !emit {
             "emit".hash(state);
         }
+        if let FieldSource::Constant(value) = source
+            && constant_holds_object(value)
+        {
+            CONSTANT_OBJECT_REVISION.hash(state);
+        }
+    }
+}
+
+/// Bumped when what a `constant` holding an object builds changes, so only a
+/// schema with such a constant moves to a new physical index. `1`: the object
+/// is built as written (it was `null`) and mapped unindexed, since the strict
+/// root refuses keys in an `object` without children.
+const CONSTANT_OBJECT_REVISION: u8 = 1;
+
+/// Whether a constant's value is an object, or a list holding one at any depth.
+/// Such a constant is stored but not indexed.
+pub(crate) fn constant_holds_object(value: &common::GenericValue) -> bool {
+    match value {
+        common::GenericValue::Map(_) => true,
+        common::GenericValue::Array(items) => items.iter().any(constant_holds_object),
+        _ => false,
     }
 }
 
