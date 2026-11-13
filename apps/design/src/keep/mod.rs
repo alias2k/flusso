@@ -24,7 +24,8 @@
 //! - every line the save writes ends the way most of the file's lines do
 //!   (CRLF or LF); `flusso.toml` keeps each line it leaves alone as it was,
 //!   while a `*.schema.yml` is written in that one ending throughout. The
-//!   canonical form written over a CRLF file is CRLF too.
+//!   canonical form written over a CRLF file is CRLF too;
+//! - a byte order mark at the start of the file stays first.
 //!
 //! The result is re-parsed and must read back as exactly the model being saved.
 //! When it does not, or the base has a layout the patcher does not follow, the
@@ -110,6 +111,15 @@ pub fn schema_yaml(
     schema: &IndexSchema,
     identity: Option<&SchemaIdentity>,
 ) -> Result<Saved> {
+    let (bom, base) = split_bom(base);
+    Ok(with_bom(bom, schema_yaml_text(base, schema, identity)?))
+}
+
+fn schema_yaml_text(
+    base: Option<&str>,
+    schema: &IndexSchema,
+    identity: Option<&SchemaIdentity>,
+) -> Result<Saved> {
     let canonical = codegen::schema_to_yaml(schema)?;
     let Some(text) = base.filter(|b| !b.trim().is_empty()) else {
         return Ok(Saved::generated(canonical, base));
@@ -140,6 +150,15 @@ pub fn schema_yaml(
 /// `config` as a `flusso.toml`, written into `base` when there is one.
 /// `identity` says which `[[index]]` entry of `base` each entry is.
 pub fn config_toml(
+    base: Option<&str>,
+    config: &ConfigToml,
+    identity: Option<&ConfigIdentity>,
+) -> Result<Saved> {
+    let (bom, base) = split_bom(base);
+    Ok(with_bom(bom, config_toml_text(base, config, identity)?))
+}
+
+fn config_toml_text(
     base: Option<&str>,
     config: &ConfigToml,
     identity: Option<&ConfigIdentity>,
@@ -190,6 +209,25 @@ pub fn index_pairs(
             pairing::Pairing::matching(&old.index, &new.index, |was, is| was.name == is.name).pairs
         }
     }
+}
+
+/// A byte order mark both parsers skip and neither renders back: it is set
+/// aside before the save and written first again after it.
+const BOM: &str = "\u{feff}";
+
+/// `base` without its byte order mark, and the mark when it had one.
+fn split_bom(base: Option<&str>) -> (&'static str, Option<&str>) {
+    match base.and_then(|b| b.strip_prefix(BOM)) {
+        Some(rest) => (BOM, Some(rest)),
+        None => ("", base),
+    }
+}
+
+fn with_bom(bom: &str, mut saved: Saved) -> Saved {
+    if !bom.is_empty() {
+        saved.text.insert_str(0, bom);
+    }
+    saved
 }
 
 /// The line ending most of `text`'s lines end with: `"\r\n"` when CRLF lines

@@ -1475,3 +1475,32 @@ fn a_mixed_schema_is_written_in_its_dominant_ending() {
     let text = save(&base, |s| rename(&mut s.fields[0], "key"));
     assert!(!text.contains('\r'), "{text:?}");
 }
+
+// Layout a save keeps (issue #279).
+
+const BARE: &str = "[source]\ntype = \"postgres\"\nconnection_url = \"postgres://x\"\n";
+
+#[test]
+fn a_byte_order_mark_stays() {
+    let edit = |c: &mut ConfigToml| c.index[0].enabled = false;
+    let text = save_config(&format!("\u{feff}{CONFIG}"), edit);
+    assert_eq!(text, format!("\u{feff}{}", save_config(CONFIG, edit)));
+    let edit = |s: &mut IndexSchema| rename(&mut s.fields[0], "key");
+    let text = save(&format!("\u{feff}{ORDERS}"), edit);
+    assert_eq!(text, format!("\u{feff}{}", save(ORDERS, edit)));
+
+    let bare = format!("\u{feff}{BARE}");
+    assert_eq!(save_config(&bare, |_| {}), bare);
+
+    let base = "\u{feff}x = 1\r\n";
+    let config = ConfigToml::try_parse(CONFIG).unwrap();
+    let saved = config_toml(Some(base), &config, None).unwrap();
+    assert_eq!(saved.notice, Some(Notice::LayoutReset));
+    assert_eq!(
+        saved.text,
+        format!(
+            "\u{feff}{}",
+            to_crlf(&codegen::config_to_toml(&config).unwrap())
+        )
+    );
+}
