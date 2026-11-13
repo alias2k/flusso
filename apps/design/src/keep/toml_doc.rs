@@ -72,7 +72,7 @@ pub(super) fn patch(
         return None;
     }
     let eol = marked(super::dominant_ending(text));
-    let source = mark_strings(text)?;
+    let (source, swallowed) = mark_strings(text)?;
     let parsed = Document::parse(source.as_str()).ok()?;
     let ends = line_ends(parsed.as_table(), &source);
     let keys = key_texts(parsed.as_table(), &source);
@@ -121,7 +121,7 @@ pub(super) fn patch(
     let text = restore_keys(format!("{header}{doc}"), &respelled)?;
     Some(Patched {
         text: if stands_in {
-            text.replace(CR, "\r")
+            restore_swallowed(text.replace(CR, "\r"), &swallowed)?
         } else {
             text
         },
@@ -956,7 +956,12 @@ fn blank(line: &str) -> bool {
 /// `text` with the `\r` inside every string value as [`CR`], so it outlives
 /// the render: a multi-line string keeps the CRLF it holds on purpose, and a
 /// bare `\n` it holds stays bare. `None` when `text` does not parse.
-fn mark_strings(text: &str) -> Option<String> {
+///
+/// A `\r` in the whitespace a line-ending backslash swallows can't be a
+/// [`CR`]: `\` + [`CR`] is not an escape. That whitespace is replaced whole
+/// by a [`Swallowed`] stand-in instead, which [`restore_swallowed`] turns
+/// back into the file's bytes.
+fn mark_strings(text: &str) -> Option<(String, Vec<Swallowed>)> {
     fn walk(value: &Value, out: &mut Vec<std::ops::Range<usize>>) {
         match value {
             Value::String(_) => out.extend(value.span()),
@@ -976,21 +981,108 @@ fn mark_strings(text: &str) -> Option<String> {
         }
     }
     if !text.contains('\r') {
-        return Some(text.to_owned());
+        return Some((text.to_owned(), Vec::new()));
     }
     let parsed = Document::parse(text).ok()?;
     let mut spans = Vec::new();
     strings(parsed.as_table(), &mut spans);
     spans.sort_by_key(|s| s.start);
+    let longest_tabs = text.split(|c| c != '\t').map(str::len).max().unwrap_or(0);
+    let mut swallowed = Vec::new();
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
     for span in spans {
         out.push_str(text.get(at..span.start)?);
-        out.push_str(&text.get(span.clone())?.replace('\r', &CR.to_string()));
+        let mut raw = text.get(span.clone())?.to_owned();
+        if raw.starts_with("\"\"\"") {
+            for region in swallowed_regions(&raw).into_iter().rev() {
+                let tabs = longest_tabs + 1 + swallowed.len();
+                let code = format!("\n{}", "\t".repeat(tabs));
+                swallowed.push(Swallowed {
+                    text: raw.get(region.clone())?.to_owned(),
+                    code: code.clone(),
+                });
+                raw.replace_range(region, &code);
+            }
+        }
+        out.push_str(&raw.replace('\r', &CR.to_string()));
         at = span.end;
     }
     out.push_str(text.get(at..)?);
-    Some(out)
+    Some((out, swallowed))
+}
+
+/// The whitespace a line-ending backslash swallows, holding a `\r`, while
+/// it stands in the file as `code`: a line break, then a run of tabs longer
+/// than any in the file and than every other stand-in's.
+#[derive(Debug)]
+struct Swallowed {
+    code: String,
+    text: String,
+}
+
+/// In the raw multi-line basic string `raw`, the whitespace each
+/// line-ending backslash swallows (spaces and tabs after it, the line break,
+/// and the whitespace up to the next character), where it holds a `\r`.
+fn swallowed_regions(raw: &str) -> Vec<std::ops::Range<usize>> {
+    let ws = |b: &u8| matches!(b, b' ' | b'\t' | b'\n' | b'\r');
+    let bytes = raw.as_bytes();
+    let mut regions = Vec::new();
+    let mut i = 3;
+    while let Some(&b) = bytes.get(i) {
+        if b != b'\\' {
+            i += 1;
+            continue;
+        }
+        let start = i + 1;
+        let line = bytes
+            .get(start..)
+            .unwrap_or(&[])
+            .iter()
+            .take_while(|b| matches!(b, b' ' | b'\t'))
+            .count();
+        let after = bytes.get(start + line..).unwrap_or(&[]);
+        if after.starts_with(b"\n") || after.starts_with(b"\r\n") {
+            let end = start
+                + bytes
+                    .get(start..)
+                    .unwrap_or(&[])
+                    .iter()
+                    .take_while(|b| ws(b))
+                    .count();
+            if bytes.get(start..end).is_some_and(|r| r.contains(&b'\r')) {
+                regions.push(start..end);
+            }
+            i = end;
+        } else {
+            i += 2;
+        }
+    }
+    regions
+}
+
+/// `text` with each [`Swallowed`] stand-in back as the file's whitespace.
+/// A stand-in the save no longer writes (its string changed) is gone; one
+/// written twice is a guess, so the patch gives up.
+fn restore_swallowed(mut text: String, swallowed: &[Swallowed]) -> Option<String> {
+    for region in swallowed {
+        let found: Vec<usize> = text
+            .match_indices(&region.code)
+            .map(|(at, _)| at)
+            .filter(|&at| {
+                text.get(..at).is_some_and(|b| b.ends_with('\\'))
+                    && !text
+                        .get(at + region.code.len()..)
+                        .is_some_and(|rest| rest.starts_with([' ', '\t', '\n', '\r']))
+            })
+            .collect();
+        match found.as_slice() {
+            [] => {}
+            [at] => text.replace_range(*at..*at + region.code.len(), &region.text),
+            _ => return None,
+        }
+    }
+    Some(text)
 }
 
 /// Every `\r` in the document's whitespace and comments as [`CR`].

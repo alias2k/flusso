@@ -1574,3 +1574,18 @@ fn an_untouched_dotted_key_keeps_its_spacing() {
     });
     assert_eq!(text, base.replace("z = \"w\"", "z = \"v\""));
 }
+
+#[test]
+fn a_crlf_string_with_a_line_ending_backslash_is_patched_in_place() {
+    let base = "[source]\r\ntype = \"postgres\"\r\nconnection_url = \"postgres://x\"\r\n\r\n# p\r\n[sinks.p]\r\ntype = \"stdout\"\r\nnote = \"\"\"a \\  \t\r\n\r\n  b \\\r\n c\\\\\r\nd\"\"\"\r\nmixed = \"\"\"x\\\n\r\n \r\n y\\\r\n\n\t\"\"\"\r\nsame = [\"\"\"a \\\r\n  b\"\"\", \"\"\"a \\\r\n  b\"\"\"] # s\r\n";
+    let text = save_config(base, |c| set_option(c, "p", "pretty", "yes"));
+    assert_eq!(text, format!("{base}pretty = \"yes\"\r\n"));
+    let text = save_config(base, |c| set_option(c, "p", "mixed", "z"));
+    assert_eq!(
+        text,
+        base.replace(
+            "mixed = \"\"\"x\\\n\r\n \r\n y\\\r\n\n\t\"\"\"\r\n",
+            "mixed = \"z\"\r\n"
+        )
+    );
+}
