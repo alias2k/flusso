@@ -9,7 +9,7 @@ help: the trait `FlussoValueMeta` is not implemented for `Plain`
    |
  7 | struct Plain {
    | ^^^^^^^^^^^^
-   = note: add `#[derive(FlussoValue)]` for a value type, `#[derive(FlussoMap)]` for a type standing in for a dynamic-key `map`, `#[derive(FlussoFragment)]` for a sub-document, or `#[flusso(opaque)]` on the field to skip checking it
+   = note: add `#[derive(FlussoValue)]` for a value type, `#[derive(FlussoMap)]` for a type standing in for a dynamic-key `map`, `#[derive(FlussoFragment)]` for a sub-document, or `#[flusso(opaque)]` on the field to skip checking it; a hand-written `FlussoValue` implements `FlussoValueMeta` and calls `flusso_query::embeddable!`
    = help: the following other types implement trait `FlussoValueMeta`:
              User
              Uuid

@@ -59,7 +59,9 @@ For each declared field, the derive finds the schema field by **document key**, 
 | type matches | `` email is `keyword` → expected `String`, found `i32` `` |
 | nullability matches | `` email is required → expected `String`, found `Option<String>` `` |
 
-Type matching is by **leaf identifier plus `Option` shape**: the macro compares the final path segment (`String`, `i32`, `OffsetDateTime`) against the table below, since it can't resolve aliases. An `object` field expects a struct, a `nested` field a `Vec<_>`, and the inner check is handed to that fragment. A `HashMap`/`BTreeMap` is a `map`'s shape or a `json` field's, never an `object` with fields of its own: declare a struct for that, on a root and in a fragment. A `Vec<_>` goes exactly where the schema field is an array (a `nested` array or a flat one), on a root and in a fragment.
+Type matching is by **leaf identifier plus `Option` shape**: the macro compares the final path segment (`String`, `i32`, `OffsetDateTime`) against the table below, since it can't resolve aliases. An `object` field expects a struct, a `nested` field a `Vec<_>`, and the inner check is handed to that fragment. A `HashMap`/`BTreeMap` is a `map`'s shape or a `json` field's, and a `Vec` of them a `json` field's alone; neither is ever an `object` or `nested` array with fields of their own: declare a struct for that (at a `nested` array, one per element, as `Vec<Struct>`), on a root and in a fragment. A `Vec<_>` goes exactly where the schema field is an array (a `nested` array or a flat one), on a root and in a fragment.
+
+A `#[serde(transparent)]` (or tuple) `FlussoFragment` newtype over a `Vec` of a struct reads the same JSON array, so it goes where that `Vec` would: `orders: Orders` with `struct Orders(Vec<Order>)` at a `nested` field, each element checked as `Order`. So does a newtype over such a newtype. One over `Option<Vec<_>>` reads `null` too, so it is no array. A newtype over a `Vec` is rejected at an `object`, and so is a `Vec` of one anywhere a level is checked: that is an array of arrays. The element has to be a fragment: a newtype over a `Vec` of a value type (an enum, a `FlussoValue` newtype) is no array of sub-documents. The fragment derive marks a newtype this way, and a hand-written `FlussoValueMeta` leaves `ARRAY` unset: a plain struct under `opaque` at a `nested` field still has to be a `Vec<_>`.
 
 ### Types named like a built-in
 
@@ -90,13 +92,13 @@ pub struct Product {
 
 - `serde_json::Value` as a field type opts that field out of type checking.
 - `#[flusso(skip)]` drops a field from validation entirely, for a computed or app-only field (pair with `#[serde(skip)]` or `#[serde(default)]`).
-- `#[flusso(opaque)]` turns off the checks the derive hands to a field's custom type, for a plain un-derived struct. The field is still checked against the mapping: it exists, its nullability matches, and it is a `Vec<…>` exactly where the schema field is an array. It goes on a field whose type is a custom struct or enum, bare or in `Option<…>` or `Vec<…>`, at an `object`, `nested` or `json` field, where it turns off the walk into the type, or at a `keyword`/`text` field, where it turns off the variant check of a `FlussoValue` enum (or of a hand-written `FlussoValue` with no derive) and the type's kind is still checked. Anywhere it would turn off nothing it is a compile error:
+- `#[flusso(opaque)]` turns off the checks the derive hands to a field's custom type, for a plain un-derived struct. The field is still checked against the mapping: it exists, its nullability matches, and it is a `Vec<…>` exactly where the schema field is an array. It goes on a field whose type is a custom struct or enum, bare or in `Option<…>` or `Vec<…>`, at an `object`, `nested` or `json` field, where it turns off the walk into the type, or at a `keyword`/`text` field, where it turns off the variant check of a `FlussoValue` enum (or of a [hand-written `FlussoValue`](enums-and-values.md#hand-written-values)) and the type's kind is still checked. Anywhere it would turn off nothing it is a compile error:
   - a built-in leaf type (see [Types named like a built-in](#types-named-like-a-built-in)), `serde_json::Value` (or a `Vec` of it), a `HashMap`/`BTreeMap` (flattened or not), a `#[flusso(skip)]` field;
   - a `map` or a leaf other than `keyword`/`text` in the schema, where a custom type is checked by its kind alone;
   - at a `keyword`/`text` field, a type with no variants to check: a newtype over a `String`, or an enum that isn't `exhaustive` where the schema field declares no `variants:`;
   - the field of a `#[serde(transparent)]` newtype: put `opaque` on the field that embeds the newtype.
 
-  A fragment applies these rules where it is embedded, with one difference. It reads a type's kind from the metadata a flusso derive emits. A type without it (a hand-written `FlussoValue`, or a type with no flusso derive at all) cannot have its kind checked there, and `opaque` is what lets a fragment take such a type. In a fragment, `opaque` on such a type is accepted at any leaf but a `map`, and nothing about the type is checked; a root checks the type's `FlussoValue` bound instead, and rejects `opaque` outside `keyword`/`text`. Implementing `FlussoValueMeta` by hand does not change this: a fragment then reads the type's kind and rejects `opaque` at a leaf other than `keyword`/`text`, and without `opaque` it also needs the check function only a flusso derive emits.
+  A fragment applies these rules where it is embedded. It reads a type's kind from the metadata a flusso derive emits, where a root checks the type's `FlussoValue` bound, so at a leaf a fragment rejects a type without that metadata, `opaque` or not; at an `object`, `nested` or `json` field `opaque` still takes a plain struct. A hand-written `FlussoValue` [carries the metadata by hand](enums-and-values.md#hand-written-values).
 - `#[flusso(rename = "…")]` picks one of a field's `#[serde(alias)]`es as the document key the derive checks; serde reads either. That is its only use: the derive already reads the key serde reads, from `#[serde(rename = "…")]` (or the `deserialize` name of `rename(serialize = …, deserialize = …)`) and `rename_all`, so set the key there. A `#[flusso(rename)]` that names no `alias` is a compile error: naming the key serde reads repeats it, and naming any other key would check the schema under a key serde never reads, so every real document would fail to deserialize. A `#[serde(flatten)]` field has no key of its own, so `rename` on one is a compile error too.
 - `#[serde(flatten)]` on a fragment field checks its fields against the enclosing level. A flattened `HashMap<String, serde_json::Value>`, `BTreeMap<…>` or `serde_json::Value`, serde's catch-all for the keys no other field reads, is never checked, on a root or a fragment. `#[serde(transparent)]` newtypes are checked against the enclosing level too, as the one field serde reads: the field that is not `#[serde(skip)]`/`skip_deserializing`, `#[serde(default)]` or a `PhantomData`, in a tuple struct or a named one. No field of a transparent struct takes a `#[flusso(…)]` attribute, and one with more than one such field is a compile error, as it is in serde.
 - Each `#[flusso(…)]` key is given once per field or type: a repeat is a compile error, not "last one wins".
@@ -116,13 +118,13 @@ pub struct Product {
 | `date` | `time::Date` or chrono's | `Date` |
 | `timestamp` | `time::OffsetDateTime` or chrono's | `Date` |
 | `binary` | `String` (base64) | `Binary` |
-| `json` | `serde_json::Value`, or any `HashMap`/`BTreeMap<String, _>` | `Json`; none with `indexed: false` |
+| `json` | `serde_json::Value`, any `HashMap`/`BTreeMap<String, _>`, or a `Vec` of them | `Json`; none with `indexed: false` |
 | `map` | `HashMap<String, V>`, `BTreeMap<String, V>`, or a `#[derive(FlussoMap)]` struct | `TextMap` / `KeywordMap` / `NumberMap` / `DateMap` |
 | `geo` | `GeoPoint { lat, lon }` | `Geo` |
 | `custom` | the matching scalar, else `serde_json::Value` | by OpenSearch type |
 | `object` | a struct | object namespace |
 | `belongs_to`, `has_one` | `Option<Struct>` | object namespace |
-| `has_many`, `many_to_many` | `Vec<Struct>` | `Nested<S, T>` |
+| `has_many`, `many_to_many` | `Vec<Struct>`, or a fragment newtype over one | `Nested<S, T>` |
 | any join or `json` with `indexed: false` | as above | none; see [Stored-only fields](#stored-only-fields) |
 | `ids` aggregate | `Vec<i64>` or `Vec<String>` | `Number` / `Keyword` |
 | `exists` aggregate | `bool` | `Bool` |

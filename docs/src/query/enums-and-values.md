@@ -31,6 +31,26 @@ Customer::tier().eq(Tier::Pro);   // term "pro"
 
 Keep enum keyword fields typed in the struct; never `#[flusso(skip)]` them.
 
+### Hand-written values
+
+A type can implement `FlussoValue<K>` by hand instead. A root checks it by that bound alone. A `FlussoFragment` can't name a bound for a kind it only learns during const evaluation, so it reads the type's kind from `FlussoValueMeta` and walks into the type with a check function every flusso derive emits. Give a hand-written value both: implement `FlussoValueMeta` as the derive would (`KINDS` from the `FlussoValue<K>` impls, `VARIANTS` for an enum), then call `flusso_query::embeddable!` once, in the crate that defines the type:
+
+```rust
+use flusso_query::{FlussoValue, FlussoValueMeta, KindTag, kind};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Count(i64);
+
+impl FlussoValue<kind::Long> for Count {}
+impl FlussoValueMeta for Count {
+    const KINDS: &'static [KindTag] = &[KindTag::Long];
+    const VARIANTS: &'static [&'static str] = &[];
+}
+flusso_query::embeddable!(Count);
+```
+
+The fragment then checks it exactly as a derived value. Without the metadata, a fragment rejects the type at a leaf, `#[flusso(opaque)]` or not.
+
 ## Variant coverage
 
 When a `FlussoValue` enum sits in a struct field whose schema declares `variants:`, the derive checks them. A Rust variant the schema doesn't list is a compile error, since it could never match a document. Covering only some schema variants is fine: a partial projection.

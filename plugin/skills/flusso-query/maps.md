@@ -31,8 +31,9 @@ A whole-map wrapper opts in with `#[derive(FlussoMap)]` and a **required** kind 
 an untagged wrapper is a compile error. The wrapper takes any shape, newtype or named fields, so a
 translations type can carry a `fallback` field beside its language keys.
 
-A hand-written `impl FlussoMap<K>` works at a root but fails inside a `FlussoFragment`. Use the
-derive; the E0277 note points at it.
+A hand-written `impl FlussoMap<K>` works at a root but fails inside a `FlussoFragment` unless the
+type also implements `FlussoValueMeta` (`KINDS = [Object]`, `MAP_VALUES` = the value kind) and
+calls `flusso_query::embeddable!`. Use the derive; the E0277 note points at it.
 
 ## Query side
 

@@ -214,6 +214,15 @@ pub const fn has_fields(level: &[FieldSpec], name: &str) -> bool {
     }
 }
 
+/// Whether `name` is a `nested` array. Absent → `false`.
+#[must_use]
+pub const fn is_nested(level: &[FieldSpec], name: &str) -> bool {
+    match find(level, name) {
+        Some(field) => matches!(field.kind, KindTag::Nested),
+        None => false,
+    }
+}
+
 /// Whether `name` is an opaque `json` object (an `object` with no declared
 /// children that is not a `map`) or a kind this vocabulary does not model:
 /// a field that takes any JSON. Absent → `false`.
@@ -423,13 +432,35 @@ const fn str_eq(a: &str, b: &str) -> bool {
 /// what lets a fragment field typed `Decimal` (or a `#[derive(FlussoValue)]`
 /// enum) be checked as precisely as one typed `String`.
 ///
-/// Implemented by `#[derive(FlussoValue)]`. Reading
+/// Implemented by every flusso derive. Reading
 /// `<Money as FlussoValueMeta>::KINDS` in a const fn needs no bound, because the
 /// type is concrete — which is what keeps recursion into sub-fragments working.
+///
+/// # Implementing it by hand
+///
+/// A type with a hand-written [`FlussoValue`](crate::FlussoValue) implements
+/// this trait by hand too, then calls [`embeddable!`](crate::embeddable) so a
+/// `FlussoFragment` can embed it with its checks on. Set the constants as the
+/// derive would: `KINDS` from the `FlussoValue<K>` impls, `VARIANTS` for an
+/// enum.
+///
+/// ```
+/// use flusso_query::{FlussoValue, FlussoValueMeta, KindTag, kind};
+///
+/// #[derive(serde::Serialize, serde::Deserialize)]
+/// struct Count(i64);
+///
+/// impl FlussoValue<kind::Long> for Count {}
+/// impl FlussoValueMeta for Count {
+///     const KINDS: &'static [KindTag] = &[KindTag::Long];
+///     const VARIANTS: &'static [&'static str] = &[];
+/// }
+/// flusso_query::embeddable!(Count);
+/// ```
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be used as a document field type",
     label = "needs a flusso derive",
-    note = "add `#[derive(FlussoValue)]` for a value type, `#[derive(FlussoMap)]` for a type standing in for a dynamic-key `map`, `#[derive(FlussoFragment)]` for a sub-document, or `#[flusso(opaque)]` on the field to skip checking it"
+    note = "add `#[derive(FlussoValue)]` for a value type, `#[derive(FlussoMap)]` for a type standing in for a dynamic-key `map`, `#[derive(FlussoFragment)]` for a sub-document, or `#[flusso(opaque)]` on the field to skip checking it; a hand-written `FlussoValue` implements `FlussoValueMeta` and calls `flusso_query::embeddable!`"
 )]
 pub trait FlussoValueMeta {
     /// The mapping kinds this type may stand in for. Empty means "no opinion".
@@ -454,6 +485,53 @@ pub trait FlussoValueMeta {
     /// forwarded by an untagged newtype. Off by default: a Rust enum covering
     /// only some of the schema's variants is a legal partial projection.
     const EXHAUSTIVE: bool = false;
+
+    /// Whether the type reads a JSON array of sub-documents: a
+    /// `#[serde(transparent)]` (or tuple) `FlussoFragment` newtype over a
+    /// `Vec<…>` of a struct, or over another such newtype. A parent then places
+    /// it where it would place that `Vec`, at a `nested` array. Off by default.
+    /// `#[derive(FlussoFragment)]` sets it; leave it unset in a hand-written
+    /// impl, where nothing checks it against what the type reads.
+    const ARRAY: bool = false;
+
+    /// Whether the type reads a JSON array at all: a newtype over a `Vec<…>`,
+    /// or over a type that does, through any `Option`. A `Vec<…>` of such a
+    /// type is an array of arrays, which no schema field is. Off by default;
+    /// `#[derive(FlussoFragment)]` sets it.
+    const READS_ARRAY: bool = false;
+}
+
+/// Lets a type with a hand-written [`FlussoValueMeta`] sit in a
+/// `#[derive(FlussoFragment)]` struct with its checks on.
+///
+/// A fragment checks every custom field type the same way: it reads the type's
+/// [`FlussoValueMeta`], then walks into the type with a check function every
+/// flusso derive emits. A value type is a leaf, so its check does nothing; this
+/// macro emits that function for a type no derive covers. Call it once per
+/// type, in the crate that defines the type (it is an inherent impl). It also
+/// asserts the type implements [`FlussoValueMeta`].
+///
+/// See [`FlussoValueMeta`] for a full example.
+///
+/// ```
+/// # use flusso_query::{FlussoValueMeta, KindTag};
+/// # struct Code(String);
+/// # impl FlussoValueMeta for Code {
+/// #     const KINDS: &'static [KindTag] = &[KindTag::Keyword];
+/// #     const VARIANTS: &'static [&'static str] = &[];
+/// # }
+/// flusso_query::embeddable!(Code);
+/// ```
+#[macro_export]
+macro_rules! embeddable {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl $ty {
+            #[doc(hidden)]
+            pub const fn __flusso_check(_level: &[$crate::FieldSpec]) {
+                let _ = <$ty as $crate::FlussoValueMeta>::KINDS;
+            }
+        }
+    )+};
 }
 
 /// What `#[flusso(opaque)]` turns off for a type, as constants a generated
@@ -491,6 +569,16 @@ pub trait OpaqueWithoutMeta {
     const SKIPS_VARIANTS: bool = true;
     /// Whether `opaque` turns off a check at a field that declares none.
     const SKIPS_EXHAUSTIVE: bool = true;
+    /// No metadata, so not an array newtype.
+    const ARRAY: bool = false;
+    /// No metadata, so not known to be a sub-document.
+    const ARRAY_ELEMENT: bool = false;
+    /// No metadata, so not known to read an array.
+    const READS_ARRAY: bool = false;
+    /// No metadata, so nothing says it cannot read a `nested` element.
+    const AT_NESTED: bool = true;
+    /// No metadata, so nothing says it cannot read an `object`.
+    const AT_OBJECT: bool = true;
 }
 
 impl<T: ?Sized> OpaqueWithoutMeta for OpaqueProbe<T> {}
@@ -504,6 +592,30 @@ impl<T: ?Sized + FlussoValueMeta> OpaqueProbe<T> {
     pub const SKIPS_VARIANTS: bool = !T::VARIANTS.is_empty() || T::EXHAUSTIVE;
     /// At a field that declares none: only the `exhaustive` check runs.
     pub const SKIPS_EXHAUSTIVE: bool = T::EXHAUSTIVE;
+    /// Whether the type reads a JSON array (see [`FlussoValueMeta::ARRAY`]).
+    pub const ARRAY: bool = T::ARRAY;
+    /// Whether a `Vec` of the type reads one array of sub-documents: the type
+    /// is a sub-document and reads no array itself.
+    pub const ARRAY_ELEMENT: bool = !T::READS_ARRAY && holds_kind(T::KINDS, KindTag::Nested);
+    /// Whether the type may stand at a `nested` field, as a sub-document.
+    pub const AT_NESTED: bool = holds_kind(T::KINDS, KindTag::Nested);
+    /// Whether the type may stand at an `object` field.
+    pub const AT_OBJECT: bool = holds_kind(T::KINDS, KindTag::Object);
+    /// Whether the type reads a JSON array at all (see
+    /// [`FlussoValueMeta::READS_ARRAY`]).
+    pub const READS_ARRAY: bool = T::READS_ARRAY;
+}
+
+const fn holds_kind(kinds: &[KindTag], wanted: KindTag) -> bool {
+    let mut i = 0;
+    while i < kinds.len() {
+        #[allow(clippy::indexing_slicing)]
+        if kinds[i] as u8 == wanted as u8 {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Mirrors the [`FlussoValue`](crate::FlussoValue) impls above, so a
@@ -546,8 +658,8 @@ value_meta! {
 #[cfg(test)]
 mod tests {
     use super::{
-        FieldSpec, KindTag, array, children, exists, has_fields, has_variants, is_json, kind_is,
-        map_kind_ok, map_value_is, nullable, variants_covered, variants_exhausted,
+        FieldSpec, KindTag, array, children, exists, has_fields, has_variants, is_json, is_nested,
+        kind_is, map_kind_ok, map_value_is, nullable, variants_covered, variants_exhausted,
     };
 
     const STATUS_VARIANTS: &[&str] = &["pending", "shipped", "delivered"];
@@ -779,6 +891,23 @@ mod tests {
         assert!(!is_json(LEVEL, "labels"));
         assert!(!is_json(LEVEL, "city"));
         assert!(!is_json(LEVEL, "town"));
+    }
+
+    #[test]
+    fn only_a_nested_field_is_nested() {
+        const ORDERS: &[FieldSpec] = &[FieldSpec {
+            name: "orders",
+            kind: KindTag::Nested,
+            nullable: false,
+            array: false,
+            variants: &[],
+            map_values: None,
+            children: &[],
+        }];
+        assert!(is_nested(ORDERS, "orders"));
+        assert!(has_fields(ORDERS, "orders"));
+        assert!(!is_nested(LEVEL, "geo"));
+        assert!(!is_nested(LEVEL, "town"));
     }
 
     #[test]

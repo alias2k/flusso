@@ -1,0 +1,161 @@
+error: field `orders` is `nested` in the schema — expected a `Vec<…>` of a struct, since each element has fields of its own
+   --> tests/ui/newtype_over_vec_misplaced.rs:188:13
+    |
+188 |     orders: Vec<String>,
+    |             ^^^
+
+error[E0080]: evaluation panicked: field `billingAddress` in index `users` is an `object`, not an array — `Addresses` is a newtype over a `Vec<…>`; declare a struct for it
+  --> tests/ui/newtype_over_vec_misplaced.rs:29:22
+   |
+29 |     billing_address: Addresses,
+   |                      ^^^^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: field `orders` in index `users` is a `nested` array — `Order` does not read one; declare it `Vec<…>`, or make `Order` a `#[serde(transparent)]` `FlussoFragment` newtype over a `Vec<…>`
+  --> tests/ui/newtype_over_vec_misplaced.rs:36:13
+   |
+36 |     orders: Order,
+   |             ^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: field `orders` in index `users` is a `nested` array — `MaybeOrders` does not read one; declare it `Vec<…>`, or make `MaybeOrders` a `#[serde(transparent)]` `FlussoFragment` newtype over a `Vec<…>`
+  --> tests/ui/newtype_over_vec_misplaced.rs:43:13
+   |
+43 |     orders: MaybeOrders,
+   |             ^^^^^^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: fragment `Billing`: field `billingAddress` is `Addresses`, a newtype over a `Vec<…>`, but the schema field here is not an array — declare a struct for it
+  --> tests/ui/newtype_over_vec_misplaced.rs:57:14
+   |
+57 |     billing: Billing,
+   |              ^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Billing::__flusso_check`
+  --> tests/ui/newtype_over_vec_misplaced.rs:49:22
+   |
+49 |     billing_address: Addresses,
+   |                      ^^^^^^^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: fragment `OneOrder`: field `orders` is `Order`, but the schema field here is a `nested` array — declare it `Vec<…>`, or make `Order` a `#[serde(transparent)]` `FlussoFragment` newtype over one
+  --> tests/ui/newtype_over_vec_misplaced.rs:70:13
+   |
+70 |     orders: OneOrder,
+   |             ^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `OneOrder::__flusso_check`
+  --> tests/ui/newtype_over_vec_misplaced.rs:62:13
+   |
+62 |     orders: Order,
+   |             ^^^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: field `orders` in index `users` is `Vec<Orders>`, an array of arrays — `Orders` is a newtype over a `Vec<…>`, which already reads the array; drop the outer `Vec<…>`
+  --> tests/ui/newtype_over_vec_misplaced.rs:82:13
+   |
+82 |     orders: Vec<Orders>,
+   |             ^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: fragment `ManyOrders`: field `orders` is `Vec<Orders>`, an array of arrays — `Orders` is a newtype over a `Vec<…>`, which already reads the array; drop the outer `Vec<…>`
+  --> tests/ui/newtype_over_vec_misplaced.rs:95:13
+   |
+95 |     orders: ManyOrders,
+   |             ^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `ManyOrders::__flusso_check`
+  --> tests/ui/newtype_over_vec_misplaced.rs:87:13
+   |
+87 |     orders: Vec<Orders>,
+   |             ^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: field `orders` in index `users` is a `nested` array — `Batches` does not read one; declare it `Vec<…>`, or make `Batches` a `#[serde(transparent)]` `FlussoFragment` newtype over a `Vec<…>`
+   --> tests/ui/newtype_over_vec_misplaced.rs:107:13
+    |
+107 |     orders: Batches,
+    |             ^^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: field `orders` in index `users` is a `nested` array with fields of its own — `Statuses` is not a sub-document; declare a struct for it with `#[derive(FlussoFragment)]`
+   --> tests/ui/newtype_over_vec_misplaced.rs:125:13
+    |
+125 |     orders: Statuses,
+    |             ^^^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: field `orders` in index `users` is a `nested` array — `Triple` does not read one; declare it `Vec<…>`, or make `Triple` a `#[serde(transparent)]` `FlussoFragment` newtype over a `Vec<…>`
+   --> tests/ui/newtype_over_vec_misplaced.rs:137:13
+    |
+137 |     orders: Triple,
+    |             ^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: field `orders` in index `users` is `Vec<Wrapped>`, an array of arrays — `Wrapped` is a newtype over a `Vec<…>`, which already reads the array; drop the outer `Vec<…>`
+   --> tests/ui/newtype_over_vec_misplaced.rs:148:13
+    |
+148 |     orders: Vec<Wrapped>,
+    |             ^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: fragment `VecOfMaybe`: field `orders` is `Vec<MaybeOrders>`, an array of arrays — `MaybeOrders` is a newtype over a `Vec<…>`, which already reads the array; drop the outer `Vec<…>`
+   --> tests/ui/newtype_over_vec_misplaced.rs:161:13
+    |
+161 |     orders: VecOfMaybe,
+    |             ^^^^^^^^^^ evaluation of `_` failed inside this call
+    |
+note: inside `VecOfMaybe::__flusso_check`
+   --> tests/ui/newtype_over_vec_misplaced.rs:153:13
+    |
+153 |     orders: Vec<MaybeOrders>,
+    |             ^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: field `orders` in index `users` is a `nested` array with fields of its own — `WrappedStatuses` is not a sub-document; declare a struct for it with `#[derive(FlussoFragment)]`
+   --> tests/ui/newtype_over_vec_misplaced.rs:173:13
+    |
+173 |     orders: Vec<WrappedStatuses>,
+    |             ^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: field `orders` in index `users` is a `nested` array with fields of its own — `Status` is not a sub-document; declare a struct for it with `#[derive(FlussoFragment)]`
+   --> tests/ui/newtype_over_vec_misplaced.rs:181:13
+    |
+181 |     orders: Vec<Status>,
+    |             ^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: field `orders` in index `users` is a `nested` array with fields of its own — `WrappedStatusList` is not a sub-document; declare a struct for it with `#[derive(FlussoFragment)]`
+   --> tests/ui/newtype_over_vec_misplaced.rs:203:13
+    |
+203 |     orders: WrappedStatusList,
+    |             ^^^^^^^^^^^^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: field `orders` in index `users` is a `nested` array with fields of its own — `WrappedStatus` is not a sub-document; declare a struct for it with `#[derive(FlussoFragment)]`
+   --> tests/ui/newtype_over_vec_misplaced.rs:210:13
+    |
+210 |     orders: Vec<WrappedStatus>,
+    |             ^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: fragment `VecOfWrappedStatus`: field `orders` is `WrappedStatus`, which cannot hold the schema field at this path
+   --> tests/ui/newtype_over_vec_misplaced.rs:223:13
+    |
+223 |     orders: VecOfWrappedStatus,
+    |             ^^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+    |
+note: inside `VecOfWrappedStatus::__flusso_check`
+   --> tests/ui/newtype_over_vec_misplaced.rs:215:13
+    |
+215 |     orders: Vec<WrappedStatus>,
+    |             ^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: field `orders` in index `users` is a `nested` array with fields of its own — `Label` is not a sub-document; declare a struct for it with `#[derive(FlussoFragment)]`
+   --> tests/ui/newtype_over_vec_misplaced.rs:235:13
+    |
+235 |     orders: Vec<Label>,
+    |             ^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: field `orders` in index `users` is a `nested` array with fields of its own — `Labels` is not a sub-document; declare a struct for it with `#[derive(FlussoFragment)]`
+   --> tests/ui/newtype_over_vec_misplaced.rs:246:13
+    |
+246 |     orders: Labels,
+    |             ^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: fragment `OpaqueVecOfValues`: field `orders` is `Status`, whose flusso kind does not match the schema field's type at this path
+   --> tests/ui/newtype_over_vec_misplaced.rs:261:13
+    |
+261 |     orders: OpaqueVecOfValues,
+    |             ^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+    |
+note: inside `OpaqueVecOfValues::__flusso_check`
+   --> tests/ui/newtype_over_vec_misplaced.rs:253:13
+    |
+253 |     orders: Vec<Status>,
+    |             ^^^ the failure occurred here

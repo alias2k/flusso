@@ -109,12 +109,6 @@ struct NamedLikeALeaf {
     rest: Date,
 }
 
-/// A hand-written `FlussoValue` at a `long` field: a fragment reads a field
-/// type's metadata to check its kind, and `opaque` spares it that read.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct HandWrittenCount(i64);
-impl FlussoValue<kind::Long> for HandWrittenCount {}
-
 /// In a fragment, `opaque` turns off at each placement what it turns off on a
 /// root, so a root's placements work here too.
 #[derive(serde::Deserialize, FlussoFragment)]
@@ -122,15 +116,10 @@ struct UserParts {
     #[flusso(opaque)]
     tier: LooseTier,
     #[flusso(opaque)]
-    email: HandWritten,
-    #[flusso(opaque)]
     #[serde(rename = "billingAddress")]
     billing_address: Plain,
     #[flusso(opaque)]
     orders: Vec<Plain>,
-    #[flusso(opaque)]
-    #[serde(rename = "orderCount")]
-    order_count: HandWrittenCount,
 }
 
 #[derive(serde::Deserialize, FlussoRoot)]

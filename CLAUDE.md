@@ -932,12 +932,19 @@ is a hard error while a subset is silently fine. Embedding is checked by default
 `#[flusso(opaque)]` opts a plain struct out of the walk into its type only; the field still has to
 exist, with the schema's nullability and array shape, and a type with `FlussoValueMeta` keeps its
 kind check at a leaf (issue #256). A fragment does this as const assertions
-(`fragment::opaque_check`, `OpaqueProbe::{HAS_META, KINDS}`); its one difference from a root: a
-type without `FlussoValueMeta` (a hand-written `FlussoValue`, or no flusso impl at all) under
-`opaque` is accepted at any non-`map` leaf with its kind unchecked, where a root checks its bound
-(kept on purpose: it is the only way a fragment takes a hand-written numeric value; a hand
-`FlussoValueMeta` can't replace it, since a fragment also calls the derive-only `__flusso_check`, issue #262). `#[serde(flatten)]` and
-`#[serde(transparent)]` newtypes are supported (both checked against the enclosing level).
+(`fragment::opaque_check`, `OpaqueProbe::{HAS_META, KINDS}`): at a leaf a fragment rejects a type
+without `FlussoValueMeta`, `opaque` or not, since it can't check the bound a root checks (issue
+#265). A hand-written `FlussoValue` implements `FlussoValueMeta` by hand and calls
+`flusso_query::embeddable!(T)`, which emits the hidden `__flusso_check` the fragment calls
+(`check.rs`; `ui_pass/hand_written_value_in_fragment.rs`). `#[serde(flatten)]` and
+`#[serde(transparent)]` newtypes are supported (both checked against the enclosing level). A
+fragment newtype over a bare `Vec<Struct>` (or over another such newtype) sets
+`FlussoValueMeta::ARRAY` (`fragment::newtype_array`), so it is placed where the `Vec` would be: at
+a `nested` field, rejected at an `object`; the root asserts it in `doc::array_newtype_check`, a
+fragment in `array_shape_check`, both through `OpaqueProbe::ARRAY` so `opaque` keeps it
+(`ui_pass/newtype_over_vec_at_nested.rs`). A map type, or a `Vec` of maps, at an `object`/`nested`
+level with fields is a "declare a struct" error on both derives; a `Vec` of maps goes only at a
+`json` field (`ui/array_of_maps_at_a_level.rs`).
 
 Dynamic-key `map` fields (issue #28) get typed handles too: `handles/map.rs` emits one
 handle per value kind — `TextMap`/`KeywordMap`/`NumberMap`/`DateMap` — where
@@ -976,8 +983,9 @@ error); the
 derive's `check_type` map arm hard-checks a `HashMap`/`BTreeMap` value type and defers a
 `FlussoMap<kind>` bound otherwise. The `FlussoMap` derive also emits `FlussoValueMeta` (its
 `MAP_VALUES` carries the declared value kind) + a no-op `__flusso_check`, which is what lets
-the type sit inside a `FlussoFragment`; a hand-written `impl FlussoMap<K>` works only at a
-root — in a fragment it fails to compile, with the E0277 note pointing at the derive. Both
+the type sit inside a `FlussoFragment`; a hand-written `impl FlussoMap<K>` alone works only at a
+root — in a fragment it fails to compile, with the E0277 note pointing at the derive (or at a hand
+`FlussoValueMeta` + `embeddable!`). Both
 sides also enforce the value kind symmetrically (fragment `map_kind_ok` assert; the root's
 `embed_checks` mirrors it, so a map wrapper on a plain object/nested is rejected everywhere),
 and an opaque `json` field (object, no children) accepts any map-shaped type on both sides.
@@ -1065,7 +1073,7 @@ issue #262); every key is given once
 (`lib.rs`'s `once`; `keyword` beside `text` is a conflict); on a root `keyword`/`text` field
 `opaque` on a type with no variants to check is a const error through `flusso_query::OpaqueProbe`
 (inherent consts exist only with `FlussoValueMeta`; its `OpaqueWithoutMeta` fallback lets a
-hand-written `FlussoValue` keep `opaque`). Serde attributes are read in one place,
+hand-written `FlussoValue` keep `opaque` on a root). Serde attributes are read in one place,
 `serde_attr.rs`, which steps over every item it doesn't read (`bound = ""` before `rename_all`).
 Built-in leaf types are matched by **name** (a macro can't resolve paths, and path matching would
 reject re-exports like `sqlx::types::Uuid`), except where no built-in could sit: a flattened field

@@ -462,10 +462,10 @@ them can't silently disarm the guarantee.
 | `date` | `time::Date` / `chrono` (feature) | `Date` |
 | `timestamp` | `time::OffsetDateTime` / `chrono` | `Date` |
 | `binary` | `String` (base64) | `Binary` |
-| `json` | `serde_json::Value`, or any `HashMap`/`BTreeMap<String, _>` | `Json` |
+| `json` | `serde_json::Value`, any `HashMap`/`BTreeMap<String, _>`, or a `Vec` of them | `Json` |
 | `geo` | `GeoPoint { lat, lon }` | `Geo` |
 | `object` / `belongs_to` / `has_one` | struct / `Option<struct>` | object namespace |
-| `has_many` / `many_to_many` | `Vec<struct>` | `Nested<S,T>` |
+| `has_many` / `many_to_many` | `Vec<struct>`, or a `#[serde(transparent)]` fragment newtype over one | `Nested<S,T>` |
 | `map` | `HashMap<String, V>` or a `#[derive(FlussoMap)]` type | see [`maps.md`](maps.md) |
 | `ids` aggregate | `Vec<i64>` / `Vec<String>` per `element_type` | `Number` / `Keyword` (term queries match arrays) |
 | `exists` aggregate | `bool` (never null) | `Bool` |
