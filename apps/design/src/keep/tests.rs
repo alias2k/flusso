@@ -1466,16 +1466,6 @@ fn a_sink_spelled_twice_is_written_in_the_designers_form() {
     }
 }
 
-#[test]
-fn a_mixed_schema_is_written_in_its_dominant_ending() {
-    let base = to_crlf(ORDERS).replacen("\r\n", "\n", 3);
-    let text = save(&base, |s| rename(&mut s.fields[0], "key"));
-    assert!(all_crlf(&text), "{text:?}");
-    let base = ORDERS.replacen('\n', "\r\n", 3);
-    let text = save(&base, |s| rename(&mut s.fields[0], "key"));
-    assert!(!text.contains('\r'), "{text:?}");
-}
-
 // Layout a save keeps (issue #279).
 
 const BARE: &str = "[source]\ntype = \"postgres\"\nconnection_url = \"postgres://x\"\n";
@@ -1608,4 +1598,37 @@ fn a_value_with_characters_toml_forbids_raw_is_escaped() {
     let base = to_crlf(&format!("{BARE}\n[sinks.p]\ntype = \"stdout\"\n"));
     let text = save_config(&base, |c| set_option(c, "p", "note", "a\nb\u{7f}"));
     assert_eq!(text, format!("{base}note = \"a\\nb\\u007F\"\r\n"));
+}
+
+#[test]
+fn a_mixed_schema_keeps_each_untouched_line_and_writes_new_ones_in_the_dominant_ending() {
+    let base = to_crlf(ORDERS).replacen("\r\n", "\n", 3);
+    let text = save(&base, |s| rename(&mut s.fields[0], "key"));
+    assert_eq!(
+        changed_raw(&base, &text),
+        (
+            vec!["  - integer: id\r\n".into()],
+            vec!["  - integer: key\r\n".into(), "    column: id\r\n".into()]
+        )
+    );
+    let base = ORDERS.replacen('\n', "\r\n", 3);
+    let text = save(&base, |s| {
+        let mut extra = s.fields[1].clone();
+        rename(&mut extra, "otherId");
+        s.fields.insert(2, extra);
+    });
+    let (removed, added) = changed_raw(&base, &text);
+    assert!(removed.is_empty(), "{removed:?}");
+    assert!(added.iter().all(|l| !l.contains('\r')), "{added:?}");
+    assert!(text.starts_with(&base[..base.match_indices('\n').nth(3).unwrap().0]));
+}
+
+#[test]
+fn a_moved_field_keeps_the_endings_of_its_own_lines() {
+    let base = "version: 1\r\ntable: t\r\nprimary_key: a\r\nfields:\r\n  - keyword: a\r\n    required: true\r\n  - keyword: b\n    required: true\n  - keyword: c\r\n    required: true\r\n";
+    let text = save(base, |s| s.fields.swap(0, 1));
+    assert_eq!(
+        text,
+        "version: 1\r\ntable: t\r\nprimary_key: a\r\nfields:\r\n  - keyword: b\n    required: true\n  - keyword: a\r\n    required: true\r\n  - keyword: c\r\n    required: true\r\n"
+    );
 }

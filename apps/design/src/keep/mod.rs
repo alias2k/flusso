@@ -22,8 +22,7 @@
 //! - a value that changed is re-rendered in place in the canonical style, and a
 //!   key the edit adds is written after the key before it.
 //! - every line the save writes ends the way most of the file's lines do
-//!   (CRLF or LF); `flusso.toml` keeps each line it leaves alone as it was,
-//!   while a `*.schema.yml` is written in that one ending throughout. The
+//!   (CRLF or LF), and each line it leaves alone keeps its own. The
 //!   canonical form written over a CRLF file is CRLF too;
 //! - a byte order mark at the start of the file stays first.
 //!

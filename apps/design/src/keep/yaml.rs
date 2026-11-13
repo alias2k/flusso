@@ -33,6 +33,10 @@
 //! value, an item paired with nothing in a list that also gained one) is
 //! counted in [`Patched::dropped`].
 //!
+//! **Line endings.** The text is scanned without them. A line the patch keeps
+//! ends as it did; every line it writes ends the way most of the file's lines
+//! do.
+//!
 //! What the scanner does not understand (flow or quoted keys at a level it has
 //! to change, anchors, tabs) makes [`patch`] return `None`, and the caller
 //! falls back to the canonical form.
@@ -69,6 +73,8 @@ pub(super) fn patch(
     if ends_with_eol {
         lines.pop();
     }
+    let mixed = text.contains("\r\n") && text.replace("\r\n", "").contains('\n');
+    let tags = mixed.then(|| LineTags::tag(&mut lines, text));
     let header_len = lines
         .iter()
         .take_while(|l| is_trivia(l) || l.trim_end() == "---" || l.starts_with('%'))
@@ -86,14 +92,89 @@ pub(super) fn patch(
             fields,
         },
     )?);
-    let mut text = seal_kept_blocks(out).join(eol);
-    if ends_with_eol {
-        text.push_str(eol);
-    }
+    let out = seal_kept_blocks(out);
+    let text = match tags {
+        Some(tags) => tags.join(&out, eol, ends_with_eol),
+        None => {
+            let mut text = out.join(eol);
+            if ends_with_eol {
+                text.push_str(eol);
+            }
+            text
+        }
+    };
     Some(Patched {
         text,
         dropped: patcher.dropped,
     })
+}
+
+/// Which line of a file with mixed endings each patched line is, so a kept
+/// line keeps its own ending.
+///
+/// The scanner ignores trailing spaces, so while the file is patched every
+/// line carries a run of them that names it: line `k` gets `width * (k + 1)`
+/// more than it has, `width` being longer than any run the file holds. A
+/// kept line comes out with its run; a line the save writes from a kept one
+/// (a comment put back on a rewritten value) too, and loses it.
+struct LineTags {
+    /// The file's lines, without their tags.
+    lines: Vec<String>,
+    /// Each line's ending: `"\r\n"`, `"\n"`, or `""` for a last line with
+    /// none.
+    endings: Vec<&'static str>,
+    width: usize,
+}
+
+impl LineTags {
+    /// Tag every line of `lines`, the lines of `text`.
+    fn tag(lines: &mut [String], text: &str) -> Self {
+        let width = lines.iter().map(|l| trailing_spaces(l)).max().unwrap_or(0) + 1;
+        let endings = text
+            .split_inclusive('\n')
+            .map(|l| match l {
+                l if l.ends_with("\r\n") => "\r\n",
+                l if l.ends_with('\n') => "\n",
+                _ => "",
+            })
+            .collect();
+        let tags = Self {
+            lines: lines.to_vec(),
+            endings,
+            width,
+        };
+        for (k, line) in lines.iter_mut().enumerate() {
+            line.push_str(&" ".repeat(width * (k + 1)));
+        }
+        tags
+    }
+
+    /// `out`, the patched lines, untagged and joined: a line of the file
+    /// ends as it did there, any other in `eol`.
+    fn join(&self, out: &[String], eol: &str, ends_with_eol: bool) -> String {
+        let mut text = String::new();
+        for (i, line) in out.iter().enumerate() {
+            let run = trailing_spaces(line);
+            let (line, kept) = if run >= self.width {
+                let k = run / self.width - 1;
+                let content = line.get(..line.len() - run).unwrap_or_default();
+                let own = format!("{content}{}", " ".repeat(run % self.width));
+                let kept = self.lines.get(k) == Some(&own);
+                (own, kept.then(|| self.endings.get(k).copied()).flatten())
+            } else {
+                (line.clone(), None)
+            };
+            text.push_str(&line);
+            if i + 1 < out.len() || ends_with_eol {
+                text.push_str(kept.filter(|end| !end.is_empty()).unwrap_or(eol));
+            }
+        }
+        text
+    }
+}
+
+fn trailing_spaces(line: &str) -> usize {
+    line.len() - line.trim_end_matches(' ').len()
 }
 
 /// Stands, in the patched lines, right after a body that ends inside a
