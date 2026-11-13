@@ -28,7 +28,7 @@ You'd rather pick tables and columns than type the grammar, or you want a sample
 
 7. **Validate.** **Validate** checks every field's column, type, and nullability, and every table and column a relation names, against the database and highlights offending fields on the canvas with the message on hover.
 
-8. **Save.** **Save** (or `⌘/Ctrl+S`) opens a review of every file that would change, grouped by folder and tagged as a write, a move, a delete, or a new file. Uncheck anything to leave it alone. Saving is atomic: everything is staged first, so a failure leaves the files untouched.
+8. **Save.** **Save** (or `⌘/Ctrl+S`) opens a review of every file that would change, grouped by folder and tagged as a write, a move, or a new file. Uncheck a file to leave it alone; `flusso.toml` and the files of a new, renamed or moved index go together. Every check runs before anything is written ([what a save refuses](designer-reference.md#what-a-save-refuses)).
 
 ## Options and variations
 

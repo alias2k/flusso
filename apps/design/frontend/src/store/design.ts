@@ -18,6 +18,7 @@ import { adoptIds, stampIds, stripUids, uidSkeleton } from "../model/ids";
 import { loadOverrides, type Positions, saveOverrides } from "../model/layout";
 import { type Graph, pathId, projectGraph } from "../model/tree";
 import { anchorSelection, followSelection } from "../model/selection";
+import { defaultSchemaPath, indexName, pairRows, rekeyByRow, schemaPath } from "../model/indexRows";
 import type { Selection } from "../state";
 
 export interface Doc {
@@ -247,58 +248,38 @@ export const useDesignStore = create<DesignState>()(
       setConfig: (next) => {
         const { doc, active } = get();
         if (!doc) return;
-        const oldIdx = doc.config.index ?? [];
-        const newIdx = next.index ?? [];
-        const renames = new Map<string, string>();
-        for (let i = 0; i < Math.min(oldIdx.length, newIdx.length); i += 1) {
-          if (oldIdx[i].name !== newIdx[i].name) renames.set(oldIdx[i].name, newIdx[i].name);
-        }
-        const removed = oldIdx
-          .filter((o) => !newIdx.some((n) => n.name === o.name) && !renames.has(o.name))
-          .map((o) => o.name);
+        const newIdx = (next.index ?? []).map((entry) => (entry.id ? entry : { ...entry, id: newId() }));
+        const paired = pairRows(doc.config.index, newIdx);
 
-        // Re-key renamed schemas and drop removed ones, else a renamed index's schema is lost on save.
-        const schemas = { ...doc.schemas };
-        const texts = { ...get().texts };
-        for (const [oldName, newName] of renames) {
-          if (oldName in schemas) {
-            schemas[newName] = schemas[oldName];
-            delete schemas[oldName];
-          }
-          if (oldName in texts) {
-            texts[newName] = texts[oldName];
-            delete texts[oldName];
-          }
-        }
-        for (const name of removed) {
-          delete schemas[name];
-          delete texts[name];
-        }
-
-        // A renamed index whose file still tracks the default name follows the
-        // rename (Create/Duplicate both derive `<name>.schema.yml`); a custom
-        // schema path is left untouched.
-        const index = newIdx.map((entry, i) => {
-          const old = oldIdx[i];
-          // Backfill an id for a row added in the Config panel, so every entry
-          // carries one for op-set correlation.
-          const withId = entry.id ? entry : { ...entry, id: newId() };
-          return old && renames.get(old.name) === withId.name && withId.schema === `${old.name}.schema.yml`
-            ? { ...withId, schema: `${withId.name}.schema.yml` }
-            : withId;
+        // A renamed index whose file still has its old name's default path
+        // follows the rename, unless the new default path is another row's
+        // file. A custom schema path is left untouched.
+        const index = paired.map(({ entry, old }) => {
+          const target = defaultSchemaPath(entry.name);
+          const follows =
+            old &&
+            indexName(old.name) !== indexName(entry.name) &&
+            schemaPath(entry.schema) === defaultSchemaPath(old.name) &&
+            !newIdx.some((o) => o.id !== entry.id && schemaPath(o.schema) === target);
+          return follows ? { ...entry, schema: target } : entry;
         });
+        const schemas = rekeyByRow(doc.schemas, paired);
+        const texts = rekeyByRow(get().texts, paired);
 
-        const active2 = renames.has(active) ? renames.get(active)! : removed.includes(active) ? "config" : active;
+        const activeRow = paired.find(({ old }) => old?.name === active);
+        const active2 =
+          active === "config" ? active : activeRow ? activeRow.entry.name : active in schemas ? active : "config";
         set({ doc: { config: { ...next, index }, schemas }, texts, active: active2 });
       },
 
       openIndex: (name) => set({ active: name, selection: null, diagnostics: null }),
 
-      createIndex: (name, table, schemaPath) => {
+      createIndex: (typed, table, path) => {
         const { doc, catalog } = get();
-        if (!doc) return;
+        const name = indexName(typed);
+        if (!doc || !name || doc.config.index?.some((e) => indexName(e.name) === name)) return;
         const pk = catalog?.catalog.tables.find((t) => t.name === table)?.primary_key[0];
-        const schema = schemaPath.trim() || `${name}.schema.yml`;
+        const schema = path.trim() || defaultSchemaPath(name);
         set({
           doc: {
             config: {
@@ -319,16 +300,16 @@ export const useDesignStore = create<DesignState>()(
         const entries = doc.config.index ?? [];
         const src = entries[i];
         if (!src) return;
-        let name = `${src.name}_copy`;
+        let name = `${indexName(src.name)}_copy`;
         let n = 1;
-        while (entries.some((e) => e.name === name)) name = `${src.name}_copy${++n}`;
+        while (entries.some((e) => indexName(e.name) === name)) name = `${indexName(src.name)}_copy${++n}`;
         set({
           doc: {
             config: {
               ...doc.config,
               index: [
                 ...entries.slice(0, i + 1),
-                { name, schema: `${name}.schema.yml`, enabled: src.enabled, id: newId() },
+                { name, schema: defaultSchemaPath(name), enabled: src.enabled, id: newId() },
                 ...entries.slice(i + 1),
               ],
             },

@@ -315,11 +315,13 @@ export interface IndexFile {
 
 /// A schema-file operation the client computed from saved -> current, sent to
 /// diff/save. The backend just applies it (stateless).
-export type OpKind = "upsert" | "move" | "delete";
+export type OpKind = "upsert" | "move";
 
 export interface FileOp {
   kind: OpKind;
-  /// Destination (upsert/move) or target (delete), relative to flusso.toml.
+  /// The index whose schema file this is; `path` must be its schema path.
+  index: string;
+  /// Destination, relative to flusso.toml.
   path: string;
   /// Source path for a move, relative to flusso.toml.
   from?: string;
@@ -358,10 +360,12 @@ export interface ConfigIdentity {
 }
 
 /// One op resolved against disk, for the review. `write` covers create + modify.
-export type DiffOp = "write" | "move" | "delete";
+export type DiffOp = "write" | "move";
 
 export interface OpDiff {
   op: DiffOp;
+  /// The index whose schema file this is; absent for the config.
+  index?: string;
   path: string;
   from?: string;
   current: string;
@@ -369,6 +373,9 @@ export interface OpDiff {
   changed: boolean;
   /// A stable warning code (e.g. "outside_base"); the UI translates it.
   warning?: string;
+  /// The op only fits the new flusso.toml (a new, renamed or moved index): it
+  /// is saved together with the config or not at all.
+  needs_config?: boolean;
   /// Set when the write could not keep the file's comments and formatting.
   notice?: "layout_reset";
   /// How many comments the write drops although what they describe still exists.
@@ -384,7 +391,6 @@ export interface MovedFile {
 export interface SaveResult {
   written: string[];
   moved: MovedFile[];
-  deleted: string[];
   pruned: string[];
 }
 

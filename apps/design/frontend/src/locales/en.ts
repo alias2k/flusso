@@ -40,6 +40,16 @@ export const en: Record<string, string> = {
   "toast.dbConnected": "Database connected",
   "toast.alreadyUpToDate": "Already up to date",
   "toast.diffFailed": "Diff failed: {err}",
+  "toast.schemaIsConfig":
+    'Index "{name}" names the config file {path} as its schema file: give it a schema file of its own.',
+  "toast.duplicateIndexName": 'Two indexes are named "{name}": rename one of them.',
+  "toast.indexNeedsSchema":
+    'Index "{name}" has no schema yet, and {path} would be saved without one: design its schema with "New index", or remove the row.',
+  "toast.unloadedSchemaMoved":
+    'The schema of index "{name}" could not be loaded, so it cannot move from {from} to {path}: fix the file first, or put the path back.',
+  "toast.nameRefusedSave": 'Index "{row}": {reason}. Change the name, or leave the box to keep "{row}".',
+  "toast.sharedSchemaClash":
+    'Indexes "{a}" and "{b}" share one schema file but their schemas differ: give one of them its own file.',
   "toast.dbNotReachableErr": "Database not reachable: {err}",
   "toast.schemasMatch": "Schemas match the database",
 
@@ -111,9 +121,12 @@ export const en: Record<string, string> = {
   "diff.kbdClear": "Clear filter",
   "diff.newFile": "New",
   "diff.opMove": "Move",
-  "diff.opDelete": "Delete",
   "diff.movedFrom": "Moved from {path}",
   "diff.warnOutside": "This path resolves outside the config directory.",
+  "diff.warnOverwrites": "Replaces an existing file at this path.",
+  "diff.linked": "Saved together with flusso.toml",
+  "diff.linkedHint":
+    "flusso.toml and the files marked with a link only make sense together (a new, renamed or moved index): checking or unchecking one does the same to the others.",
   "diff.layoutReset":
     "This file's layout could not be kept: it is written in the designer's own form, without its comments.",
   "diff.commentsDropped":
@@ -429,7 +442,11 @@ export const en: Record<string, string> = {
   "config.duplicate": "duplicate",
   "config.index": "index",
   "config.removeIndexTitle": "Remove index?",
-  "config.removeIndex": 'Remove index "{name}"? (the schema file is left on disk)',
+  "config.removeIndex": 'Remove index "{name}"? Its schema file {path} stays on disk: Save does not delete it.',
+  "config.nameTaken": 'Another index is already named "{name}"',
+  "config.namePattern":
+    '"{name}" is not a valid index name: use lowercase letters a–z, digits and _, starting with a letter or _',
+  "config.nameLength": "An index name has at most 63 characters",
   "config.connection": "connection",
   "config.stream": "Stream",
   "config.streamHint": "between the source and the sinks",
