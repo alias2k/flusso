@@ -27,6 +27,7 @@ import {
 import type {
   ColumnShape,
   ConfigIdentity,
+  ConfigToml,
   DiagnosticDto,
   FileOp,
   IndexSchema,
@@ -175,11 +176,32 @@ const bareSchema = (schema: IndexSchema | undefined): string => (schema ? JSON.s
 // Without either (a new index) there is nothing to pair with.
 const identityFor = (
   schema: IndexSchema,
-  text: { ids: SchemaIdentity["before"] } | undefined,
+  text: { ids?: SchemaIdentity["before"] } | undefined,
   savedSchema: IndexSchema | undefined,
 ): SchemaIdentity | undefined => {
-  const before = text?.ids ?? (savedSchema ? fieldIds(savedSchema.fields) : undefined);
-  return before && { before, after: fieldIds(schema.fields) };
+  const before = text ? text.ids : savedSchema && fieldIds(savedSchema.fields);
+  const after = fieldIds(schema.fields);
+  return before && after && { before, after };
+};
+
+// For every sink of `config`, by name, its name in `saved` (the file on disk),
+// matched by the session's sink ids; `null` for a sink added since. Without
+// ids on either side the save pairs sinks by name.
+const sinkIdentity = (saved: ConfigToml, config: ConfigToml): Record<string, string | null> | undefined => {
+  const was = saved.sinkIds;
+  const is = config.sinkIds;
+  if (!was || !is) return undefined;
+  const byId = new Map(
+    Object.entries(was)
+      .filter(([name]) => name in (saved.sinks ?? {}))
+      .map(([name, id]) => [id, name]),
+  );
+  return Object.fromEntries(
+    Object.keys(config.sinks ?? {}).map((name) => {
+      const id = is[name];
+      return [name, (id && byId.get(id)) ?? null];
+    }),
+  );
 };
 
 // What a preview of `schema` (the index `index`) writes it into, as a save
@@ -746,6 +768,7 @@ export default function App() {
         const at = e.id ? prev.findIndex((p) => p.id === e.id) : -1;
         return at < 0 ? null : at;
       }),
+      sinks: sinkIdentity(savedDoc.config, of.config),
     };
   };
 

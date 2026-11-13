@@ -236,7 +236,12 @@ fn comments_follow_a_field_that_moves() {
             "      # Same lifecycle order as the standalone `orders` index, so sorting a\n"
         )
     );
+    // Only moved lines; moved first, the field leaves its blank line behind.
     let (removed, added) = changed(USERS, &text);
+    let (removed, added): (Vec<_>, Vec<_>) = (
+        removed.into_iter().filter(|l| !l.is_empty()).collect(),
+        added.into_iter().filter(|l| !l.is_empty()).collect(),
+    );
     assert_eq!(removed.len(), added.len(), "{text}");
     assert!(
         removed.iter().all(|l| added.contains(l)),
@@ -343,10 +348,28 @@ fn save_config_as(
     after: Option<Vec<Option<usize>>>,
     edit: impl FnOnce(&mut ConfigToml),
 ) -> Saved {
+    let before = ConfigToml::try_parse(base)
+        .unwrap()
+        .index
+        .iter()
+        .map(|e| e.name.to_string())
+        .collect();
+    let identity = after.map(|after| ConfigIdentity {
+        before,
+        after,
+        sinks: None,
+    });
+    save_config_with(base, identity, edit)
+}
+
+/// Save `edit` applied to the config in `base` with `identity`.
+fn save_config_with(
+    base: &str,
+    identity: Option<ConfigIdentity>,
+    edit: impl FnOnce(&mut ConfigToml),
+) -> Saved {
     let mut config = ConfigToml::try_parse(base).unwrap();
-    let before = config.index.iter().map(|e| e.name.to_string()).collect();
     edit(&mut config);
-    let identity = after.map(|after| ConfigIdentity { before, after });
     let saved = config_toml(Some(base), &config, identity.as_ref()).unwrap();
     assert_eq!(saved.notice, None, "fell back:\n{}", saved.text);
     assert!(reads_as(
@@ -716,5 +739,301 @@ fn a_type_change_writes_the_defaults_the_old_type_left_out() {
     assert_eq!(
         saved.text,
         "version: 1\ntable: t\nprimary_key: a\nfields:\n  - text: f0 # f\n    column: a\n    required: false\n    emit: false\n"
+    );
+}
+
+// A `|+` scalar owns the blank lines after it: moved last, it must not take
+// the blank line that followed its list as more content.
+
+#[test]
+fn an_item_ending_in_a_kept_block_scalar_moves_last_without_growing_it() {
+    let base = "version: 1\ntable: t\nprimary_key: a\nfields:\n  - object: o\n    fields:\n      # about a\n      - text: a\n        column: a\n        required: false\n        default: |+\n          x\n\n      # about b\n      - text: b\n        column: a\n        required: true\n\n  - text: c\n    column: a\n    required: true\n";
+    let saved = save_as(base, &[], |s| {
+        let o = children(&mut s.fields, "o");
+        let a = o.remove(0);
+        o.push(a);
+    });
+    assert_eq!(
+        saved.text,
+        "version: 1\ntable: t\nprimary_key: a\nfields:\n  - object: o\n    fields:\n      # about b\n      - text: b\n        column: a\n        required: true\n      # about a\n      - text: a\n        column: a\n        required: false\n        default: |+\n          x\n\n  - text: c\n    column: a\n    required: true\n"
+    );
+}
+
+// Sinks are keyed by name: a renamed one is renamed in place.
+
+fn sink(name: &str) -> kernel::common::SinkName {
+    kernel::common::SinkName::try_new(name).unwrap()
+}
+
+fn rename_sink(config: &mut ConfigToml, from: &str, to: &str) {
+    let entry = config.sinks.remove(&sink(from)).unwrap();
+    config.sinks.insert(sink(to), entry);
+    for index in &mut config.index {
+        if let Some(options) = index.sinks.remove(&sink(from)) {
+            index.sinks.insert(sink(to), options);
+        }
+    }
+}
+
+/// The identity of a save that renames the sinks `renamed` lists (new, old)
+/// and keeps every other `[[index]]` entry and sink where it is.
+fn sink_identity(base: &str, edited: &ConfigToml, renamed: &[(&str, &str)]) -> ConfigIdentity {
+    let was = ConfigToml::try_parse(base).unwrap();
+    let names: Vec<String> = was.index.iter().map(|e| e.name.to_string()).collect();
+    let sinks = edited
+        .sinks
+        .keys()
+        .map(|name| {
+            let name = name.to_string();
+            let old = renamed
+                .iter()
+                .find(|(new, _)| *new == name)
+                .map_or(name.clone(), |(_, old)| (*old).to_owned());
+            let kept = was.sinks.contains_key(&sink(&old));
+            (name, kept.then_some(old))
+        })
+        .collect();
+    ConfigIdentity {
+        after: (0..edited.index.len()).map(Some).collect(),
+        before: names,
+        sinks: Some(sinks),
+    }
+}
+
+fn save_sinks(base: &str, renamed: &[(&str, &str)], edit: impl Fn(&mut ConfigToml)) -> Saved {
+    let mut edited = ConfigToml::try_parse(base).unwrap();
+    edit(&mut edited);
+    let identity = sink_identity(base, &edited, renamed);
+    save_config_with(base, Some(identity), edit)
+}
+
+#[test]
+fn a_renamed_sink_keeps_its_place_keys_and_comments() {
+    let saved = save_sinks(CONFIG, &[("main", "primary")], |c| {
+        rename_sink(c, "primary", "main");
+    });
+    assert_eq!(
+        saved.text,
+        CONFIG.replace("[sinks.primary]", "[sinks.main]")
+    );
+    assert_eq!(saved.dropped, 0);
+    let base = CONFIG.replace("[sinks.audit]", "# the audit trail\n[sinks.audit]");
+    let saved = save_sinks(&base, &[("trail", "audit")], |c| {
+        rename_sink(c, "audit", "trail");
+    });
+    assert_eq!(saved.text, base.replace("[sinks.audit]", "[sinks.trail]"));
+}
+
+#[test]
+fn a_renamed_sink_renames_its_per_index_tables_in_place() {
+    let base = "[source]\ntype = \"postgres\"\nconnection_url = \"postgres://x\"\n\n# a\n[sinks.a]\ntype = \"stdout\"\n\n[sinks.b]\ntype = \"stdout\"\n\n[[index]]\nname = \"users\"\nschema = \"users.schema.yml\"\nenabled = true\n# users in a\n[index.sinks.a]\nshards = 2 # two\n\n[[index]]\nname = \"orders\"\nschema = \"orders.schema.yml\"\nenabled = true\nsinks.a.shards = 3 # three\nsinks.b = { shards = 4 }\n";
+    let saved = save_sinks(base, &[("z", "a")], |c| rename_sink(c, "a", "z"));
+    assert_eq!(saved.text, base.replace("sinks.a", "sinks.z"));
+    let saved = save_sinks(base, &[("a", "b"), ("b", "a")], |c| {
+        let a = c.sinks.remove(&sink("a")).unwrap();
+        let b = c.sinks.remove(&sink("b")).unwrap();
+        c.sinks.insert(sink("a"), b);
+        c.sinks.insert(sink("b"), a);
+        for index in &mut c.index {
+            let a = index.sinks.remove(&sink("a"));
+            let b = index.sinks.remove(&sink("b"));
+            if let Some(b) = b {
+                index.sinks.insert(sink("a"), b);
+            }
+            if let Some(a) = a {
+                index.sinks.insert(sink("b"), a);
+            }
+        }
+    });
+    assert_eq!(
+        saved.text,
+        "[source]\ntype = \"postgres\"\nconnection_url = \"postgres://x\"\n\n# a\n[sinks.b]\ntype = \"stdout\"\n\n[sinks.a]\ntype = \"stdout\"\n\n[[index]]\nname = \"users\"\nschema = \"users.schema.yml\"\nenabled = true\n# users in a\n[index.sinks.b]\nshards = 2 # two\n\n[[index]]\nname = \"orders\"\nschema = \"orders.schema.yml\"\nenabled = true\nsinks.b.shards = 3 # three\nsinks.a = { shards = 4 }\n"
+    );
+}
+
+#[test]
+fn a_sink_removed_where_another_takes_its_name_goes_with_its_comments() {
+    let saved = save_sinks(CONFIG, &[("audit", "primary")], |c| {
+        c.sinks.remove(&sink("audit"));
+        rename_sink(c, "primary", "audit");
+    });
+    assert!(
+        saved.text.contains("[sinks.audit]\ntype = \"opensearch\""),
+        "{}",
+        saved.text
+    );
+    assert!(
+        saved.text.contains("# auto_subfields = true\n"),
+        "{}",
+        saved.text
+    );
+    assert!(!saved.text.contains("type = \"stdout\""), "{}", saved.text);
+    assert!(!saved.text.contains("pretty"), "{}", saved.text);
+    assert_eq!(saved.dropped, 0);
+}
+
+#[test]
+fn without_identity_a_renamed_sinks_comments_are_reported() {
+    let mut config = ConfigToml::try_parse(CONFIG).unwrap();
+    rename_sink(&mut config, "primary", "main");
+    let saved = config_toml(Some(CONFIG), &config, None).unwrap();
+    assert!(!saved.text.contains("# number_of_shards"), "{}", saved.text);
+    assert_eq!(saved.dropped, 6, "{}", saved.text);
+    let mut config = ConfigToml::try_parse(CONFIG).unwrap();
+    config.sinks.remove(&sink("audit"));
+    let saved = config_toml(Some(CONFIG), &config, None).unwrap();
+    assert_eq!(saved.dropped, 0, "nothing was gained: audit was removed");
+}
+
+// The end of the file.
+
+#[test]
+fn a_comment_ending_the_file_below_the_last_table_is_that_tables() {
+    let base = format!("{CONFIG}# end of file comment\n");
+    let all = |n: usize| Some((0..n).map(Some).collect::<Vec<_>>());
+    let saved = save_config_as(&base, all(2), |c| {
+        c.index.pop();
+    });
+    assert!(!saved.text.contains("end of file"), "{}", saved.text);
+    let saved = save_config_as(&base, Some(vec![Some(2), Some(0), Some(1)]), |c| {
+        let orders = c.index.pop().unwrap();
+        c.index.insert(0, orders);
+    });
+    assert!(
+        saved.text.contains("name = \"orders\"\nschema = \"orders.schema.yml\"\nenabled = true\n# end of file comment\n"),
+        "{}",
+        saved.text
+    );
+    assert!(
+        saved
+            .text
+            .ends_with("name = \"products\"\nschema = \"products.schema.yml\"\nenabled = true\n"),
+        "{}",
+        saved.text
+    );
+    let base = format!("{CONFIG}\n# a blank line away: the file's\n");
+    let saved = save_config_as(&base, all(2), |c| {
+        c.index.pop();
+    });
+    assert!(
+        saved
+            .text
+            .ends_with("enabled = true\n\n# a blank line away: the file's\n"),
+        "{}",
+        saved.text
+    );
+}
+
+// A malformed identity is no identity: it pairs by name.
+
+#[test]
+fn a_malformed_config_identity_pairs_by_name() {
+    let edit = |c: &mut ConfigToml| {
+        c.index.remove(1);
+    };
+    let plain = save_config_with(CONFIG, None, edit).text;
+    let names: Vec<String> = ["users", "products", "orders"].map(String::from).into();
+    for after in [vec![Some(0), Some(0)], vec![Some(0), Some(7)]] {
+        let identity = ConfigIdentity {
+            before: names.clone(),
+            after,
+            sinks: None,
+        };
+        assert_eq!(save_config_with(CONFIG, Some(identity), edit).text, plain);
+    }
+    let rename = |c: &mut ConfigToml| rename_sink(c, "primary", "main");
+    let plain = save_config_with(CONFIG, None, rename);
+    let malformed = [
+        [("audit", Some("audit")), ("main", Some("audit"))],
+        [("audit", Some("audit")), ("main", Some("nope"))],
+        [("audit", Some("audit")), ("other", Some("primary"))],
+    ];
+    for map in malformed {
+        let identity = ConfigIdentity {
+            before: names.clone(),
+            after: vec![Some(0), Some(1), Some(2)],
+            sinks: Some(
+                map.iter()
+                    .map(|(k, v)| ((*k).to_owned(), v.map(str::to_owned)))
+                    .collect(),
+            ),
+        };
+        let saved = save_config_with(CONFIG, Some(identity), rename);
+        assert_eq!(
+            (saved.text, saved.dropped),
+            (plain.text.clone(), plain.dropped)
+        );
+    }
+}
+
+#[test]
+fn a_malformed_schema_identity_pairs_by_name() {
+    let edit = |s: &mut IndexSchema| {
+        remove(&mut s.fields, "b");
+        rename(field(&mut s.fields, "c"), "cc");
+    };
+    let mut schema = parse(ABC);
+    edit(&mut schema);
+    let plain = schema_yaml(Some(ABC), &schema, None).unwrap();
+    let blank = |ids: Vec<FieldId>| {
+        ids.into_iter()
+            .map(|id| FieldId {
+                uid: String::new(),
+                ..id
+            })
+            .collect()
+    };
+    let same = |ids: Vec<FieldId>| {
+        ids.into_iter()
+            .map(|id| FieldId {
+                uid: "x".into(),
+                ..id
+            })
+            .collect()
+    };
+    for spoil in [blank as fn(Vec<FieldId>) -> Vec<FieldId>, same] {
+        let identity = SchemaIdentity {
+            before: spoil(ids(&parse(ABC).fields, "", &[])),
+            after: spoil(ids(&schema.fields, "", &[("cc", "c")])),
+        };
+        let saved = schema_yaml(Some(ABC), &schema, Some(&identity)).unwrap();
+        assert_eq!(
+            (saved.text, saved.dropped),
+            (plain.text.clone(), plain.dropped)
+        );
+    }
+}
+
+#[test]
+fn a_kept_block_scalar_list_item_moved_up_keeps_its_value() {
+    let base = "version: 1\ntable: t\nprimary_key: a\nfields:\n\n# about a\n- geo: a\n  lat: a\n  lon: a\n  required: true\n\n# about b\n- text: b\n  column: a\n  required: true\n  options:\n    k:\n    - |+\n      x\n  \n";
+    let saved = save_as(base, &[], |s| s.fields.swap(0, 1));
+    assert_eq!(
+        saved.text,
+        "version: 1\ntable: t\nprimary_key: a\nfields:\n\n# about b\n- text: b\n  column: a\n  required: true\n  options:\n    k:\n    - |+\n      x\n  \n# about a\n- geo: a\n  lat: a\n  lon: a\n  required: true\n"
+    );
+}
+
+#[test]
+fn a_new_field_ending_in_a_kept_block_scalar_does_not_take_the_blank_line_after_it() {
+    let base = ABC.replace("  # about b", "\n  # about b");
+    let added = parse("version: 1\ntable: t\nprimary_key: a\nfields:\n  - constant: k\n    value:\n      'a b': \"\\n\"\n")
+        .fields
+        .remove(0);
+    let saved = save_as(&base, &[], |s| s.fields.insert(1, added));
+    assert!(saved.text.contains("# about b"), "{}", saved.text);
+}
+
+#[test]
+fn an_item_moved_to_the_top_of_its_list_leaves_its_blank_line_behind() {
+    let base = ABC.replace("  # about c", "\n  # about c");
+    let saved = save_as(&base, &[], |s| {
+        let c = s.fields.pop().unwrap();
+        s.fields.insert(0, c);
+    });
+    assert!(
+        saved.text.contains("fields:\n  # about c\n"),
+        "{}",
+        saved.text
     );
 }

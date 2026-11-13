@@ -121,7 +121,7 @@ export const it: Record<string, string> = {
   "diff.layoutReset":
     "Non è stato possibile mantenere l'impaginazione di questo file: viene scritto nella forma del designer, senza i suoi commenti.",
   "diff.commentsDropped":
-    "{n, plural, one {Non è stato possibile mantenere # commento di questo file: ciò che descrive esiste ancora, ma è stato riscritto nella forma del designer.} other {Non è stato possibile mantenere # commenti di questo file: ciò che descrivono esiste ancora, ma è stato riscritto nella forma del designer.}}",
+    "{n, plural, one {# commento di questo file non viene mantenuto: ciò che descrive è stato riscritto nella forma del designer, oppure è stato abbinato per nome e potrebbe essere stato rinominato anziché rimosso.} other {# commenti di questo file non vengono mantenuti: ciò che descrivono è stato riscritto nella forma del designer, oppure è stato abbinato per nome e potrebbe essere stato rinominato anziché rimosso.}}",
   "diff.write": "{n, plural, one {Scrivi # file} other {Scrivi # file}}",
   "diff.unchanged": "{n, plural, one {# riga invariata} other {# righe invariate}}",
   "diff.validating": "Convalida…",

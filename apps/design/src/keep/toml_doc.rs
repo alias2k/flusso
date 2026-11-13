@@ -8,6 +8,11 @@
 //! value is replaced keeping its trailing comment, and `[[index]]` entries pair
 //! by [`Pairing`].
 //!
+//! **Sinks** are keyed by name. A renamed sink ([`SinkNames`]) is renamed in
+//! place before the patch, in `[sinks]` and in every `[index.sinks]`, so it
+//! keeps its position, its key order and its comments; a removed one goes
+//! with its own comments.
+//!
 //! **Who owns a comment.** `toml_edit` keeps every comment before a header in
 //! that header's prefix, so the patcher splits it the way the YAML side splits
 //! its trivia:
@@ -17,7 +22,9 @@
 //! - the comment block directly above a header or a key, with no blank line
 //!   between, is that table's or key's;
 //! - the comment block directly below a table's last key, with no blank line
-//!   between, is that table's: it moves and goes with it;
+//!   between, is that table's: it moves and goes with it. At the end of the
+//!   file too: only what a blank line separates from the last table stays
+//!   last;
 //! - any other comment is nobody's: it stays where it is, before whatever
 //!   follows it.
 //!
@@ -28,25 +35,33 @@
 
 use std::collections::{HashMap, HashSet};
 
-use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, TableLike, Value};
+use toml_edit::{ArrayOfTables, DocumentMut, InlineTable, Item, Key, Table, TableLike, Value};
 
-use super::pairing::Pairing;
+use super::pairing::{Pairing, SinkNames};
 use super::yaml::Patched;
 
 const MARK: &str = "#<<flusso-keep ";
 
 /// `text` patched from `old` to `new`, or `None` when it does not parse.
 /// `indexes` pairs the `[[index]]` entries; without it they pair by name.
+/// `sinks` says which sink each sink of the file becomes.
 pub(super) fn patch(
     text: &str,
     old: &toml::Table,
     new: &toml::Table,
     indexes: Option<&Pairing>,
+    sinks: &SinkNames,
 ) -> Option<Patched> {
     if text.contains(MARK) {
         return None;
     }
     let mut doc: DocumentMut = text.parse().ok()?;
+    let mut old = old.clone();
+    if !sinks.renames.is_empty() {
+        rename_sinks(doc.as_table_mut(), &sinks.renames)?;
+        rename_sinks_in_model(&mut old, &sinks.renames);
+    }
+    let old = &old;
     let header = take_header(&mut doc)?;
     let mut stash = Vec::new();
     mark(doc.as_table_mut(), &mut stash)?;
@@ -56,9 +71,10 @@ pub(super) fn patch(
     let mut patcher = Patcher {
         tails: HashMap::new(),
         doubtful: HashMap::new(),
+        doubtful_sinks: &sinks.doubtful,
         dropped: 0,
     };
-    patcher.table(doc.as_table_mut(), None, old, new, false, indexes)?;
+    patcher.table(doc.as_table_mut(), None, old, new, Level::Root, indexes)?;
 
     mark(doc.as_table_mut(), &mut stash)?;
     let after = order(&doc.to_string());
@@ -198,6 +214,90 @@ fn split(prefix: &str) -> Split {
     }
 }
 
+/// The document's trailing text split by owner: the comment lines directly
+/// below the last table are its own, the rest stays at the end.
+fn split_end(trailing: &str) -> Split {
+    let lines: Vec<&str> = trailing.split_inclusive('\n').collect();
+    let below_len = lines.iter().take_while(|l| !l.trim().is_empty()).count();
+    let (below, free) = lines.split_at(below_len);
+    Split {
+        below: below.concat(),
+        free: free.concat(),
+        lead: String::new(),
+    }
+}
+
+/// Rename the sinks `renames` names, in `[sinks]` and in every entry's
+/// `[index.sinks]`, keeping each table's place, keys and comments.
+fn rename_sinks(root: &mut Table, renames: &HashMap<String, String>) -> Option<()> {
+    if let Some(sinks) = root.get_mut("sinks") {
+        rename_keys(sinks, renames)?;
+    }
+    if let Some(Item::ArrayOfTables(entries)) = root.get_mut("index") {
+        for entry in entries.iter_mut() {
+            if let Some(sinks) = entry.get_mut("sinks") {
+                rename_keys(sinks, renames)?;
+            }
+        }
+    }
+    Some(())
+}
+
+fn rename_keys(item: &mut Item, renames: &HashMap<String, String>) -> Option<()> {
+    let renamed = |key: Key| match renames.get(key.get()) {
+        Some(name) => Key::new(name.as_str())
+            .with_leaf_decor(key.leaf_decor().clone())
+            .with_dotted_decor(key.dotted_decor().clone()),
+        None => key,
+    };
+    match item {
+        Item::Table(table) => {
+            let keys: Vec<String> = table.iter().map(|(k, _)| k.to_owned()).collect();
+            let entries: Vec<(Key, Item)> = keys
+                .iter()
+                .map(|k| table.remove_entry(k))
+                .collect::<Option<_>>()?;
+            for (key, child) in entries {
+                table.insert_formatted(&renamed(key), child);
+            }
+        }
+        Item::Value(Value::InlineTable(table)) => rename_inline(table, &renamed)?,
+        _ => {}
+    }
+    Some(())
+}
+
+fn rename_inline(table: &mut InlineTable, renamed: &dyn Fn(Key) -> Key) -> Option<()> {
+    let keys: Vec<String> = table.iter().map(|(k, _)| k.to_owned()).collect();
+    let entries: Vec<(Key, Value)> = keys
+        .iter()
+        .map(|k| table.remove_entry(k))
+        .collect::<Option<_>>()?;
+    for (key, value) in entries {
+        table.insert_formatted(&renamed(key), value);
+    }
+    Some(())
+}
+
+/// The same renames in the model the file reads as.
+fn rename_sinks_in_model(config: &mut toml::Table, renames: &HashMap<String, String>) {
+    let rename = |table: &mut toml::Table| {
+        for (key, value) in std::mem::take(table) {
+            table.insert(renames.get(&key).cloned().unwrap_or(key), value);
+        }
+    };
+    if let Some(toml::Value::Table(sinks)) = config.get_mut("sinks") {
+        rename(sinks);
+    }
+    if let Some(toml::Value::Array(entries)) = config.get_mut("index") {
+        for entry in entries {
+            if let Some(toml::Value::Table(sinks)) = entry.get_mut("sinks") {
+                rename(sinks);
+            }
+        }
+    }
+}
+
 /// `free` appended to `pending` without doubling the blank line between them.
 fn join_free(pending: &mut String, free: &str) {
     let mut skipping = pending.ends_with("\n\n") || pending == "\n";
@@ -224,36 +324,60 @@ struct Prefixes {
     trailing: String,
 }
 
-struct Patcher {
+/// Where a table is in the config: what its keys name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Level {
+    Root,
+    /// An `[[index]]` entry.
+    Index,
+    /// `[sinks]` or an entry's `[index.sinks]`: keyed by sink name.
+    Sinks,
+    /// An inline table.
+    Inline,
+    Other,
+}
+
+struct Patcher<'a> {
     /// Free comments of removed keys with no key after them, per table (`None`
     /// is the root): they go after the table's last key.
     tails: HashMap<Option<usize>, String>,
-    /// Removed `[[index]]` entries that may still exist, with the comments
-    /// inside them.
+    /// Removed tables that may still exist (an `[[index]]` entry, a sink),
+    /// with the comments inside them.
     doubtful: HashMap<usize, usize>,
+    /// Removed sinks that may still exist under another name.
+    doubtful_sinks: &'a HashSet<String>,
     dropped: usize,
 }
 
-impl Patcher {
+impl Patcher<'_> {
     fn table(
         &mut self,
         doc: &mut dyn TableLike,
         id: Option<usize>,
         old: &toml::Table,
         new: &toml::Table,
-        inline: bool,
+        level: Level,
         indexes: Option<&Pairing>,
     ) -> Option<()> {
+        let inline = level == Level::Inline;
         let keys: Vec<String> = doc.iter().map(|(k, _)| k.to_owned()).collect();
         let mut pending = String::new();
         for key in &keys {
             let before = old.get(key);
             let removed = new.get(key).is_none() && before.is_some();
+            let doubtful = removed && level == Level::Sinks && self.doubtful_sinks.contains(key);
+            if doubtful {
+                let item = doc.get(key)?;
+                self.forget(item);
+            }
             if !inline && doc.get(key).is_some_and(Item::is_value) {
                 let mut handle = doc.key_mut(key)?;
                 let decor = handle.leaf_decor_mut();
                 let prefix = decor.prefix().map_or(Some(""), |p| p.as_str())?.to_owned();
                 let parts = split(&prefix);
+                if doubtful {
+                    self.dropped += count_comments(&parts.lead);
+                }
                 if removed {
                     if has_comment(&parts.free) || has_comment(&parts.below) {
                         pending.push_str(&parts.below);
@@ -267,7 +391,13 @@ impl Patcher {
                 Some(after) if before == Some(after) => {}
                 Some(after) => {
                     let sub = doc.get_mut(key)?;
-                    self.item(sub, key, before, after, indexes.filter(|_| key == "index"))?;
+                    let below = match (level, key.as_str()) {
+                        (Level::Root, "index") => Level::Index,
+                        (Level::Root | Level::Index, "sinks") => Level::Sinks,
+                        _ => Level::Other,
+                    };
+                    let indexes = indexes.filter(|_| level == Level::Root && key == "index");
+                    self.item(sub, key, before, after, below, indexes)?;
                 }
                 None if before.is_some() => {
                     doc.remove(key);
@@ -292,24 +422,60 @@ impl Patcher {
         Some(())
     }
 
+    /// A removed item that may still exist: its comments are reported.
+    fn forget(&mut self, item: &Item) {
+        match item {
+            Item::Table(table) => {
+                match mark_id(table) {
+                    Some(id) => {
+                        self.doubtful.insert(id, table_comments(table));
+                    }
+                    None => self.dropped += table_comments(table),
+                }
+                for (_, child) in table.iter() {
+                    if !child.is_value() {
+                        self.forget(child);
+                    }
+                }
+            }
+            Item::ArrayOfTables(array) => {
+                for table in array.iter() {
+                    if let Some(id) = mark_id(table) {
+                        self.doubtful.insert(id, table_comments(table));
+                    }
+                }
+            }
+            Item::Value(value) => {
+                let suffix = value
+                    .decor()
+                    .suffix()
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("");
+                self.dropped += count_comments(suffix) + inner_comments(value);
+            }
+            Item::None => {}
+        }
+    }
+
     fn item(
         &mut self,
         item: &mut Item,
         key: &str,
         before: Option<&toml::Value>,
         after: &toml::Value,
+        level: Level,
         indexes: Option<&Pairing>,
     ) -> Option<()> {
         match (item, before, after) {
             (Item::Table(table), Some(toml::Value::Table(was)), toml::Value::Table(is)) => {
                 let id = mark_id(table);
-                self.table(table, id, was, is, false, None)
+                self.table(table, id, was, is, level, None)
             }
             (
                 Item::Value(Value::InlineTable(table)),
                 Some(toml::Value::Table(was)),
                 toml::Value::Table(is),
-            ) => self.table(table, None, was, is, true, None),
+            ) => self.table(table, None, was, is, Level::Inline, None),
             (Item::ArrayOfTables(array), Some(toml::Value::Array(was)), toml::Value::Array(is)) => {
                 self.array(array, key, was, is, indexes)
             }
@@ -377,7 +543,12 @@ impl Patcher {
                     let was = old.get(*i)?;
                     if was != is {
                         let id = mark_id(&table);
-                        self.table(&mut table, id, was.as_table()?, is.as_table()?, false, None)?;
+                        let level = if key == "index" {
+                            Level::Index
+                        } else {
+                            Level::Other
+                        };
+                        self.table(&mut table, id, was.as_table()?, is.as_table()?, level, None)?;
                     }
                     table
                 }
@@ -415,8 +586,8 @@ impl Patcher {
         for &id in was {
             parts.insert(id, split(stash.get(id)?.as_deref().unwrap_or("")));
         }
-        let end = split(trailing);
-        let end_free = format!("{}{}", end.free, end.lead);
+        let end = split_end(trailing);
+        let end_free = end.free;
         // What follows a table's last key and is its own.
         let mut own_trailing: HashMap<Option<usize>, String> = HashMap::new();
         let mut prev: Option<usize> = None;

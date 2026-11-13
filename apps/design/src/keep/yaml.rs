@@ -86,7 +86,7 @@ pub(super) fn patch(
             fields,
         },
     )?);
-    let mut text = out.join(eol);
+    let mut text = seal_kept_blocks(out).join(eol);
     if ends_with_eol {
         text.push_str(eol);
     }
@@ -94,6 +94,52 @@ pub(super) fn patch(
         text,
         dropped: patcher.dropped,
     })
+}
+
+/// Stands, in the patched lines, right after a body that ends inside a
+/// keep-chomping block scalar (`|+`). Never a line of YAML.
+const KEPT_OPEN: &str = "\u{0}kept-open";
+
+/// `lines` without the [`KEPT_OPEN`] markers and the blank lines right after
+/// each: a body ending in a `|+` scalar owns the blank lines that follow it
+/// (they are its content), so a blank line the patch puts after it from
+/// elsewhere would change its value.
+fn seal_kept_blocks(lines: Vec<String>) -> Vec<String> {
+    let mut sealed = false;
+    lines
+        .into_iter()
+        .filter(|line| {
+            if line == KEPT_OPEN {
+                sealed = true;
+                return false;
+            }
+            sealed &= line.trim().is_empty();
+            !sealed
+        })
+        .collect()
+}
+
+/// `body`, then [`KEPT_OPEN`] when it ends inside a keep-chomping block scalar.
+fn sealed(body: &[String]) -> impl Iterator<Item = String> + '_ {
+    let open = ends_in_kept_block(body).then(|| KEPT_OPEN.to_owned());
+    body.iter().cloned().chain(open)
+}
+
+/// Whether the last lines of `body` are inside a keep-chomping block scalar.
+fn ends_in_kept_block(body: &[String]) -> bool {
+    let mut block: Option<(usize, bool)> = None;
+    for line in body {
+        if let Some((at, _)) = block {
+            if line.trim().is_empty() || indent(line) > at {
+                continue;
+            }
+            block = None;
+        }
+        if let Some(indicator) = block_indicator(split_comment(line).0) {
+            block = Some((block_parent_col(line), indicator.contains('+')));
+        }
+    }
+    block.is_some_and(|(_, keep)| keep)
 }
 
 /// A block node as written, with the lines it owns.
@@ -231,6 +277,21 @@ fn content_col(line: &str) -> usize {
     col
 }
 
+/// The indentation a block scalar opened on `line` is relative to: its
+/// content is indented deeper. The key's column (`key: |`), else the dash's
+/// (`- |`, the item is the scalar).
+fn block_parent_col(line: &str) -> usize {
+    let content = split_comment(line).0.trim_end();
+    let head = block_indicator(content)
+        .and_then(|ind| content.get(..content.len() - ind.len()))
+        .unwrap_or(content)
+        .trim_end();
+    match head.strip_suffix('-') {
+        Some(before) if before.ends_with(' ') || before.is_empty() => before.len(),
+        _ => content_col(line),
+    }
+}
+
 /// How many comments `lines` hold, skipping the content of block scalars.
 fn comments_in(lines: &[String]) -> usize {
     let mut count = 0;
@@ -247,7 +308,7 @@ fn comments_in(lines: &[String]) -> usize {
             count += 1;
         }
         if block_indicator(content).is_some() {
-            block = Some(content_col(line));
+            block = Some(block_parent_col(line));
         }
     }
     count
@@ -467,8 +528,11 @@ fn render_item(value: &Value, col: usize) -> Option<Vec<String>> {
 fn render(value: &Value, col: usize) -> Option<Vec<String>> {
     let text = serde_yaml::to_string(value).ok()?;
     let pad = " ".repeat(col);
-    let lines = quote_kept_blocks(text.lines().map(str::to_owned).collect())?;
-    Some(lines.into_iter().map(|l| format!("{pad}{l}")).collect())
+    let lines: Vec<String> = quote_kept_blocks(text.lines().map(str::to_owned).collect())?
+        .into_iter()
+        .map(|l| format!("{pad}{l}"))
+        .collect();
+    Some(sealed(&lines).collect())
 }
 
 /// `lines` with every keep-chomping block scalar (`|+`) written as a
@@ -652,7 +716,7 @@ impl Patcher {
                 Some(after) if before != Some(after) => {
                     lines.extend(self.entry(entry, before, after, ctx)?);
                 }
-                _ => lines.extend(entry.body.iter().cloned()),
+                _ => lines.extend(sealed(&entry.body)),
             }
             chunks.push((key.to_owned(), lines));
         }
@@ -781,7 +845,8 @@ impl Patcher {
             let item = node.items.get(i)?;
             match fate.get(i)? {
                 Some(true) => out.extend(carry.before.get(i)?.iter().cloned()),
-                _ if !item.above.free.iter().any(|l| is_comment(l)) => {
+                // Blank lines move with the item, except to the top of the list.
+                _ if j > 0 && !item.above.free.iter().any(|l| is_comment(l)) => {
                     out.extend(item.above.free.iter().cloned());
                 }
                 _ => {}
@@ -789,7 +854,7 @@ impl Patcher {
             out.extend(item.above.lead.iter().cloned());
             let before = old.get(i)?;
             if before == after {
-                out.extend(item.body.iter().cloned());
+                out.extend(sealed(&item.body));
                 continue;
             }
             let ctx = Ctx {

@@ -117,7 +117,7 @@ export const en: Record<string, string> = {
   "diff.layoutReset":
     "This file's layout could not be kept: it is written in the designer's own form, without its comments.",
   "diff.commentsDropped":
-    "{n, plural, one {# comment in this file could not be kept: what it describes still exists, but was rewritten in the designer's own form.} other {# comments in this file could not be kept: what they describe still exists, but was rewritten in the designer's own form.}}",
+    "{n, plural, one {# comment in this file is not kept: what it describes was rewritten in the designer's own form, or was matched by name and may have been renamed rather than removed.} other {# comments in this file are not kept: what they describe was rewritten in the designer's own form, or was matched by name and may have been renamed rather than removed.}}",
   "diff.write": "{n, plural, one {Write # file} other {Write # files}}",
   "diff.unchanged": "{n, plural, one {# unchanged line} other {# unchanged lines}}",
   "diff.validating": "Validating…",

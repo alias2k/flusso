@@ -89,7 +89,9 @@ export function ConfigPanel({
   const removeSink = (name: string) => {
     const next = { ...sinks };
     delete next[name];
-    onChange({ ...config, sinks: next, index: reKeyIndexSinks(name, undefined) });
+    const sinkIds = { ...config.sinkIds };
+    delete sinkIds[name];
+    onChange({ ...config, sinks: next, sinkIds, index: reKeyIndexSinks(name, undefined) });
   };
   const sinksWithIndexOptions = Object.entries(sinks).flatMap(([name, sink]) => {
     const description = sinkAdapters.find((a) => a.kind === splitEntry(sink).kind);
@@ -111,7 +113,9 @@ export function ConfigPanel({
     if (!name || name === from || name in sinks) return;
     const next: Record<string, Sink> = {};
     for (const [k, v] of Object.entries(sinks)) next[k === from ? name : k] = v;
-    onChange({ ...config, sinks: next, index: reKeyIndexSinks(from, name) });
+    const sinkIds: Record<string, string> = {};
+    for (const [k, v] of Object.entries(config.sinkIds ?? {})) sinkIds[k === from ? name : k] = v;
+    onChange({ ...config, sinks: next, sinkIds, index: reKeyIndexSinks(from, name) });
   };
 
   return (

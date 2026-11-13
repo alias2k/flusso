@@ -129,15 +129,17 @@ A comment stays with what it describes, through a rename, a type change and a mo
 | at the end of a line | that line |
 | after a list's last item, at the item's dash column or further left | the list |
 | after a field's last line, indented deeper than its dash | the field |
-| in `flusso.toml`, directly below a table's last key, with no blank line between | that table |
+| in `flusso.toml`, directly below a table's last key, with no blank line between (at the end of the file too) | that table |
 
-So deleting a join deletes its own comments and everything inside it, while the heading a blank line above it stays, before the next field. Deleting a sink keeps the commented-out options the sink above ends with.
+So deleting a join deletes its own comments and everything inside it, while the heading a blank line above it stays, before the next field. Deleting a sink keeps the commented-out options the sink above ends with, and deleting the last `[[index]]` entry deletes the comment directly below it at the end of the file.
 
-The designer tells the save which field each field was (and which `[[index]]` entry each entry was) by an id it keeps for the session, so renaming one field and deleting its neighbour in one save can't hand the neighbour's comments to it. When the file changed on disk since the designer read it, fields and entries are matched by name instead: a renamed one then counts as removed and added.
+The designer tells the save which field each field was, which `[[index]]` entry each entry was and which sink each sink was, by an id it keeps for the session, so renaming one field and deleting its neighbour in one save can't hand the neighbour's comments to it. A renamed sink is renamed where it stands, in `[sinks]` and in every `[index.sinks.<name>]`: its place, key order and comments stay. When the file changed on disk since the designer read it, fields, entries and sinks are matched by name instead: a renamed one then counts as removed and added, and its comments as lost.
+
+A field moved into another list (a different join or object, which only Code mode can do) is written there without its comments; the review counts them.
 
 #### What the review reports
 
-- **Comments that could not be kept.** A comment inside a value that had to be rewritten (a flow list `[…]` with a comment in it, an item the save can't follow line by line), or on a field matched by name that may have been renamed, is dropped. The review marks the file and says above its diff how many comments it loses.
+- **Comments that could not be kept.** A comment inside a value that had to be rewritten (a flow list `[…]` with a comment in it, an item the save can't follow line by line), on a field moved into another list, or on a field, entry or sink matched by name that may have been renamed, is dropped. Matched by name, a removed one and a renamed one look the same, so both count. The review marks the file and says above its diff how many comments it loses.
 - **A file written in the designer's own form.** A file whose layout the save can't follow (a top level written as a flow mapping `{…}`, for instance), or whose result wouldn't read back as exactly the schema being saved, is written in the designer's own form instead, without its comments. The review marks it and says so above its diff.
 
 Both show before anything is written. A file the designer creates is written in its own form.

@@ -118,11 +118,14 @@ export function stripUids(schema: IndexSchema): IndexSchema {
 }
 
 /// Every field's name and uid, with its children: the identity a save sends
-/// next to the schema (never inside it).
-export function fieldIds(fields: Field[]): FieldId[] {
-  return fields.map((field) => ({
-    name: field.field,
-    uid: field.uid ?? "",
-    fields: fieldIds(childFields(field) ?? []),
-  }));
+/// next to the schema (never inside it). `undefined` when a field has no uid:
+/// the save then pairs fields by name.
+export function fieldIds(fields: Field[]): FieldId[] | undefined {
+  const ids: FieldId[] = [];
+  for (const field of fields) {
+    const children = fieldIds(childFields(field) ?? []);
+    if (!field.uid || !children) return undefined;
+    ids.push({ name: field.field, uid: field.uid, fields: children });
+  }
+  return ids;
 }

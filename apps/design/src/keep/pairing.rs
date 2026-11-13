@@ -7,12 +7,16 @@
 //! **before**) next to the ids of the model being saved (the **after**). Ids
 //! never reach the schema; they only say which is which.
 //!
+//! Sinks are keyed by name, so their identity is a map: every sink being
+//! saved, by its new name, to its name in the file.
+//!
 //! Without them, or when the file no longer reads as the before (it changed on
-//! disk), items pair by name only. An item matching nothing is written fresh,
-//! and an old item matching nothing is deleted with its comments. Nothing is
-//! paired by its slot.
+//! disk), or when they are malformed (an empty or repeated id, a position or a
+//! name the file does not have), items pair by name only. An item matching
+//! nothing is written fresh, and an old item matching nothing is deleted with
+//! its comments. Nothing is paired by its slot.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use kernel::{Field, FieldSource, Relation};
 use serde::Deserialize;
@@ -38,7 +42,7 @@ pub struct FieldId {
     pub fields: Vec<FieldId>,
 }
 
-/// The `[[index]]` entries before and after an edit.
+/// The `[[index]]` entries and the sinks before and after an edit.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ConfigIdentity {
     /// The index names of the config the file reads as, in file order.
@@ -46,6 +50,76 @@ pub struct ConfigIdentity {
     /// For every index entry being saved, its position in `before`, or `None`
     /// for a new entry.
     pub after: Vec<Option<usize>>,
+    /// For every sink being saved, by its name, its name in the file, or
+    /// `None` for a new sink. Absent, sinks pair by name.
+    #[serde(default)]
+    pub sinks: Option<BTreeMap<String, Option<String>>>,
+}
+
+/// What the sinks' names do in a save.
+#[derive(Debug, Clone, Default)]
+pub(super) struct SinkNames {
+    /// A sink's name in the file to the name it is saved under. A sink the
+    /// identity says was removed, whose name a saved sink takes, is renamed
+    /// out of the way, so it goes with its comments instead of lending them.
+    pub(super) renames: HashMap<String, String>,
+    /// The names of removed sinks that may still exist under another name
+    /// (no identity): their comments are reported as lost.
+    pub(super) doubtful: HashSet<String>,
+}
+
+/// How the sinks named `old` in the file become the sinks named `new`.
+pub(super) fn sinks(
+    identity: Option<&ConfigIdentity>,
+    old: &[String],
+    new: &[String],
+) -> SinkNames {
+    match identity.and_then(|i| i.sinks.as_ref()) {
+        Some(map) if describes_sinks(map, old, new) => {
+            let mut renames: HashMap<String, String> = map
+                .iter()
+                .filter_map(|(is, was)| Some((was.clone()?, is.clone())))
+                .collect();
+            let mut spare = 0;
+            for was in old {
+                if !renames.contains_key(was) && new.contains(was) {
+                    let placeholder = loop {
+                        spare += 1;
+                        let name = format!("flusso-removed-sink-{spare}");
+                        if !old.contains(&name) && !new.contains(&name) {
+                            break name;
+                        }
+                    };
+                    renames.insert(was.clone(), placeholder);
+                }
+            }
+            SinkNames {
+                renames,
+                doubtful: HashSet::new(),
+            }
+        }
+        _ => {
+            let gained = new.iter().any(|is| !old.contains(is));
+            SinkNames {
+                renames: HashMap::new(),
+                doubtful: old
+                    .iter()
+                    .filter(|was| gained && !new.contains(was))
+                    .cloned()
+                    .collect(),
+            }
+        }
+    }
+}
+
+/// Whether `map` names every new sink once and only old sinks, each once.
+fn describes_sinks(map: &BTreeMap<String, Option<String>>, old: &[String], new: &[String]) -> bool {
+    let olds: Vec<&String> = map.values().flatten().collect();
+    let distinct: HashSet<&String> = olds.iter().copied().collect();
+    map.len() == new.len()
+        && new.iter().all(|is| map.contains_key(is))
+        && distinct.len() == olds.len()
+        && olds.iter().all(|was| old.contains(was))
 }
 
 /// How the items of one list pair up, and how their own child lists do.
@@ -97,7 +171,11 @@ pub(super) fn fields(
     new: &[Field],
 ) -> Option<Pairing> {
     let identity = identity?;
-    if !describes(&identity.before, old) || !describes(&identity.after, new) {
+    if !describes(&identity.before, old)
+        || !describes(&identity.after, new)
+        || !distinct_ids(&identity.before)
+        || !distinct_ids(&identity.after)
+    {
         return None;
     }
     let mut everywhere = HashSet::new();
@@ -112,9 +190,12 @@ pub(super) fn indexes(
     new: usize,
 ) -> Option<Pairing> {
     let identity = identity?;
+    let paired: Vec<usize> = identity.after.iter().flatten().copied().collect();
+    let distinct: HashSet<usize> = paired.iter().copied().collect();
     if identity.before != old
         || identity.after.len() != new
-        || identity.after.iter().flatten().any(|&i| i >= old.len())
+        || paired.iter().any(|&i| i >= old.len())
+        || distinct.len() != paired.len()
     {
         return None;
     }
@@ -138,6 +219,15 @@ fn describes(ids: &[FieldId], fields: &[Field]) -> bool {
         && ids.iter().zip(fields).all(|(id, field)| {
             id.name == field.field.as_ref() && describes(&id.fields, children(field))
         })
+}
+
+/// Whether every id in the tree is non-empty and used once.
+fn distinct_ids(ids: &[FieldId]) -> bool {
+    fn walk<'a>(ids: &'a [FieldId], seen: &mut HashSet<&'a str>) -> bool {
+        ids.iter()
+            .all(|id| !id.uid.is_empty() && seen.insert(&id.uid) && walk(&id.fields, seen))
+    }
+    walk(ids, &mut HashSet::new())
 }
 
 fn collect<'a>(ids: &'a [FieldId], into: &mut HashSet<&'a str>) {

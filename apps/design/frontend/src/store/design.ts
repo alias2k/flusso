@@ -29,7 +29,7 @@ export interface Doc {
 /// it reads as (so the save can tell which field each one is).
 export interface CodeText {
   text: string;
-  ids: FieldId[];
+  ids?: FieldId[];
 }
 
 export const emptySchema = (table: string, pk?: string): IndexSchema => ({
@@ -216,6 +216,7 @@ export const useDesignStore = create<DesignState>()(
         const config = {
           ...project.config,
           index: (project.config.index ?? []).map((e) => ({ ...e, id: newId() })),
+          sinkIds: Object.fromEntries(Object.keys(project.config.sinks ?? {}).map((name) => [name, newId()])),
         };
         const doc: Doc = { config, schemas: stampAll(schemas) };
         const saved = JSON.stringify(doc);

@@ -294,6 +294,9 @@ export interface ConfigToml {
   source: Record<string, unknown>;
   stream?: Record<string, unknown>;
   sinks?: Record<string, unknown>;
+  /// A session-local, stable id per sink, keyed by the sink's name: a save
+  /// tells a renamed sink from a removed one by it. Never written to disk.
+  sinkIds?: Record<string, string>;
   index?: IndexEntry[];
   prefix?: string;
   on_error?: unknown;
@@ -346,10 +349,12 @@ export interface SchemaIdentity {
 }
 
 /// The `[[index]]` names of the file on disk, and for each entry being saved
-/// its position there (`null`: a new entry).
+/// its position there (`null`: a new entry); for each sink being saved, by
+/// name, its name on disk (`null`: a new sink).
 export interface ConfigIdentity {
   before: string[];
   after: (number | null)[];
+  sinks?: Record<string, string | null>;
 }
 
 /// One op resolved against disk, for the review. `write` covers create + modify.
@@ -536,8 +541,11 @@ const stripOpUids = (op: FileOp): FileOp => (op.schema ? { ...op, schema: stripU
 /// Drop the session-local index ids before a config crosses to the backend —
 /// they're a client-only correlation handle and the strict parser rejects
 /// unknown fields. (`undefined` values are omitted by JSON.stringify.)
-const stripIds = (config: ConfigToml): ConfigToml =>
-  config.index ? { ...config, index: config.index.map((e) => ({ ...e, id: undefined })) } : config;
+const stripIds = (config: ConfigToml): ConfigToml => ({
+  ...config,
+  sinkIds: undefined,
+  ...(config.index ? { index: config.index.map((e) => ({ ...e, id: undefined })) } : {}),
+});
 
 /// What one registered adapter declares about its options (mirrors
 /// `kernel::AdapterDescription`): the designer renders its forms from these.

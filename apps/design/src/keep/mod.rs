@@ -69,8 +69,11 @@ pub struct Saved {
     /// Set when the existing file's comments and formatting were not kept.
     pub notice: Option<Notice>,
     /// How many of the file's comments the save could not keep although what
-    /// they describe still exists (a value re-rendered in the canonical form,
-    /// an item that may have been renamed). Zero with a notice.
+    /// they describe may still exist: a value re-rendered in the canonical
+    /// form, or an item matched by name that may have been renamed (without
+    /// identity a removed item and a renamed one look alike, so both count).
+    /// Never a comment of an item the identity says was removed. Zero with a
+    /// notice.
     pub dropped: usize,
 }
 
@@ -139,9 +142,12 @@ pub fn config_toml(
     let patched = ConfigToml::try_parse(text).ok().and_then(|old| {
         let names: Vec<String> = old.index.iter().map(|e| e.name.to_string()).collect();
         let indexes = pairing::indexes(identity, &names, config.index.len());
+        let sink_names =
+            |c: &ConfigToml| c.sinks.keys().map(ToString::to_string).collect::<Vec<_>>();
+        let sinks = pairing::sinks(identity, &sink_names(&old), &sink_names(config));
         let old = toml::Table::try_from(&old).ok()?;
         let new = toml::Table::try_from(config).ok()?;
-        toml_doc::patch(text, &old, &new, indexes.as_ref())
+        toml_doc::patch(text, &old, &new, indexes.as_ref(), &sinks)
     });
     Ok(match patched {
         Some(yaml::Patched { text, dropped })
