@@ -605,7 +605,9 @@ export const it: Record<string, string> = {
     "{path} verrà sovrascritto con il lato destro del diff: ciò che della modifica sul disco non mostra viene scartato.",
   "stale.badge": "Cambiato sul disco da quando questa pagina lo ha caricato",
   "stale.refused":
-    "Non è stato salvato nulla: {files} sono cambiati sul disco da quando questa pagina ha caricato il progetto. Rivedi di nuovo le modifiche.",
+    "{n, plural, one {Non è stato salvato nulla: {files} è cambiato sul disco da quando questa pagina ha caricato il progetto. Rivedi di nuovo le modifiche.} other {Non è stato salvato nulla: {files} sono cambiati sul disco da quando questa pagina ha caricato il progetto. Rivedi di nuovo le modifiche.}}",
+  "stale.reloadPage":
+    "Questa pagina viene da un'altra versione del designer, quindi non può salvare. Ricarica la pagina; le modifiche non salvate vanno perse, quindi copiale prima.",
   "recovery.blockedTitle": "Impossibile recuperare un salvataggio interrotto",
   "recovery.blockedIntro":
     "Un designer è stato fermato a metà di un salvataggio e il designer non riesce a sistemarlo da solo:",

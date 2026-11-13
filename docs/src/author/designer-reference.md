@@ -142,7 +142,13 @@ Every check runs before anything is written. A save that fails anyway (permissio
 
 A page remembers each file it loaded (`flusso.toml` and every schema file) by a digest of its bytes, and after each of its own saves, the digest of what that save wrote. Another designer's save, another tab, a text editor, `git checkout`: anything that changes a file after the page loaded it changes its digest, including only its line endings or a byte-order mark. (`flusso run` writes only `flusso.lock`, which the designer doesn't read.)
 
-The review compares every file against the file on disk now. A file the save would write, move or remove that is not as the page loaded it is marked, with what happened to it: changed, deleted, created, or present though the page never loaded it. It is not written. Since every check of a save reads `flusso.toml`, nothing is written while `flusso.toml` is marked, even when the save leaves it out. The server makes the same comparison again under the project's lock, so a file changed between the review and Write refuses the save, names the files, and writes nothing; the page then opens the review again. A file the save doesn't touch may change freely.
+`flusso.toml` is compared first. Every check of a save reads it, so while it is not as the page loaded it (another page renamed an index, say), the review shows it alone, marked, and nothing is written, even when the save leaves it out.
+
+Then the review compares every other file against the file on disk now. A file the save would write, move or remove that is not as the page loaded it is marked, with what happened to it: changed, deleted, created, or present though the page never loaded it. It is not written. A file the save doesn't touch may change freely.
+
+The save compares again under the project's lock, so a file changed between the review and Write refuses the save, names the files, and writes nothing; the page then opens the review again. It looks once more right before it replaces or removes each file, after everything else is ready: a file changed by then stops the save the same way, and whatever the save already put in place is undone. A program that writes a file without the designer's lock (an editor, `git checkout`) in the instant between that last look and the replacement can still be overwritten; nothing short of that program taking the lock closes that.
+
+A page served by another version of the designer (one left open across an upgrade) can't save at all: the server asks it to reload.
 
 The ways out, each offered in the review:
 
@@ -159,7 +165,7 @@ A save lands whole or not at all, even when the designer is killed or the machin
 - **rolled back**, when not every file was in place: each file is as it was before the save;
 - **completed**, when every file was: each file is as the save wrote it, and only the backups are deleted.
 
-The designer says which, with the files involved, in a notice on the page and on its log. After a rollback a diff or save goes on, since the files are as the page loaded them. A completion changes the files the save wrote, so a page that loaded the project before it can't save over them ([above](#when-a-file-changed-since-the-page-loaded)). Two designers open on one project never touch each other's save: a save holds a lock (`.flusso-save.lock`, removed afterwards except on Windows) for as long as it runs, and a designer waits up to five seconds for it.
+The designer says which, with the files involved, in a notice on the page and on its log. After a rollback a diff or save goes on, since the files are as the page loaded them. A completion changes the files the save wrote, so a page that loaded the project before it can't save over them ([above](#when-a-file-changed-since-the-page-loaded)); its next diff or save in that designer also says the save was completed, whichever file it writes. Two designers open on one project never touch each other's save: a save holds a lock (`.flusso-save.lock`, removed afterwards except on Windows) for as long as it runs, and a designer waits up to five seconds for it.
 
 #### Whose save is recovered
 

@@ -589,7 +589,9 @@ export const en: Record<string, string> = {
     "{path} will be overwritten with the right side of the diff: whatever of the change on disk it does not show is discarded.",
   "stale.badge": "Changed on disk since this page loaded it",
   "stale.refused":
-    "Nothing was saved: {files} changed on disk since this page loaded the project. Review the changes again.",
+    "{n, plural, one {Nothing was saved: {files} changed on disk since this page loaded the project. Review the changes again.} other {Nothing was saved: {files} changed on disk since this page loaded the project. Review the changes again.}}",
+  "stale.reloadPage":
+    "This page comes from another version of the designer, so it can't save. Reload the page; unsaved edits are lost, so copy them out first.",
   "recovery.blockedTitle": "An interrupted save could not be recovered",
   "recovery.blockedIntro":
     "A designer was stopped in the middle of a save, and the designer can't settle it by itself:",

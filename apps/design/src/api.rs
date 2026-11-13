@@ -33,8 +33,8 @@ use source_postgres::{
 
 use crate::commit::journal::Digest;
 use crate::commit::{
-    self, Direction, Disk, Fix, HandStep, Holds, LockError, Outcome, ProblemKind, ProjectLock,
-    Report, State, Unusable, Write, commit, recover, strays,
+    self, Changed, Direction, Disk, Expect, Fix, HandStep, Holds, LockError, Outcome, ProblemKind,
+    ProjectLock, Remove, Report, State, Unusable, Write, commit, recover, strays,
 };
 use crate::fspath::{MAX_PATH, on_disk};
 use crate::keep::{self, ConfigIdentity, Notice, Saved, SchemaIdentity};
@@ -588,7 +588,10 @@ pub struct FileOp {
 }
 
 /// A full save/diff request: the deployment config plus the schema-file ops.
+/// Unknown fields are refused, so a page from an older designer is told to
+/// reload instead of being served differently.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SaveRequest {
     /// The deployment config to write to `flusso.toml`.
     pub config: ConfigToml,
@@ -607,10 +610,62 @@ pub struct SaveRequest {
     /// then what its own saves wrote). A save refuses to write, move or
     /// remove a file that no longer has the digest given here (a file not
     /// listed must not exist), and refuses anything while `flusso.toml` does
-    /// not have its digest: every check of a save reads it. Absent, nothing
-    /// is compared (the designer's page always sends them).
-    #[serde(default)]
-    pub digests: Option<Digests>,
+    /// not have its digest: every check of a save reads it. Required.
+    pub digests: Digests,
+}
+
+/// A diff or save request the server does not read: answered with a 400.
+#[derive(Debug)]
+pub struct BadRequest {
+    /// What is wrong, naming the field.
+    pub message: String,
+    /// The page is from another version of the designer: reloading it fixes
+    /// this.
+    pub reload: bool,
+}
+
+impl std::fmt::Display for BadRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for BadRequest {}
+
+/// Read a diff or save request. One without `digests` (or with `null`), or
+/// with a field this designer does not know, comes from a page served by
+/// another version of the designer: refused, telling it to reload, so it
+/// never saves without the check against files changed on disk.
+pub fn read_save_request(body: &[u8]) -> std::result::Result<SaveRequest, BadRequest> {
+    let value: serde_json::Value = serde_json::from_slice(body).map_err(|e| BadRequest {
+        message: format!("the request is not JSON: {e}"),
+        reload: false,
+    })?;
+    if value.get("digests").is_none_or(serde_json::Value::is_null) {
+        return Err(BadRequest {
+            message: "the request has no `digests`: this page is from another version of the \
+                      designer; reload this page (unsaved changes are lost, so copy them out first)"
+                .to_owned(),
+            reload: true,
+        });
+    }
+    serde_json::from_value(value).map_err(|e| {
+        let message = e.to_string();
+        if message.starts_with("unknown field") {
+            BadRequest {
+                message: format!(
+                    "{message}: this page is from another version of the designer; reload this \
+                     page (unsaved changes are lost, so copy them out first)"
+                ),
+                reload: true,
+            }
+        } else {
+            BadRequest {
+                message,
+                reload: false,
+            }
+        }
+    })
 }
 
 /// What a diff found: the review, and the interrupted saves it rolled back
@@ -680,29 +735,53 @@ pub enum StaleChange {
 /// `flusso.toml`, changed on disk since the page read them: nothing was
 /// written.
 #[derive(Debug)]
-pub struct Stale(pub Vec<StaleFile>);
+pub struct Stale {
+    /// The files, the config first when it is one of them.
+    pub files: Vec<StaleFile>,
+    /// The config's path, as `files` names it.
+    pub config: String,
+}
 
 impl std::fmt::Display for Stale {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let files = self
-            .0
+        let what = self
+            .files
             .iter()
             .map(|file| {
                 let path = &file.path;
                 match file.change {
-                    StaleChange::Changed => format!("{path} changed"),
-                    StaleChange::Deleted => format!("{path} was deleted"),
-                    StaleChange::Created => format!("{path} was created"),
-                    StaleChange::Unloaded => format!("{path} exists and was never loaded"),
+                    StaleChange::Changed => {
+                        format!("{path} changed on disk since this page loaded it")
+                    }
+                    StaleChange::Deleted => format!("{path} was deleted since this page loaded it"),
+                    StaleChange::Created => {
+                        format!("{path} was created since this page loaded the project")
+                    }
+                    StaleChange::Unloaded => {
+                        format!("{path} exists on disk, and this page never loaded it")
+                    }
                 }
             })
             .collect::<Vec<_>>()
-            .join(", ");
+            .join("; ");
+        let config = self.files.iter().any(|file| file.path == self.config);
+        let others = self.files.iter().any(|file| file.path != self.config);
+        let why = match (config, others) {
+            (true, false) => format!(
+                "Every save is checked against {}, so none goes through while it differs from \
+                 what the page shows.",
+                self.config
+            ),
+            (true, true) => format!(
+                "Saving would overwrite what is on disk now, and every save is checked against {}.",
+                self.config
+            ),
+            _ => "Saving would overwrite what is on disk now.".to_owned(),
+        };
         write!(
             f,
-            "nothing was saved: {files} on disk since this page loaded the project, and the save \
-             would overwrite that. Reload the page to load what is on disk (unsaved changes are \
-             lost), or copy your edits out first"
+            "Nothing was saved: {what}. {why} Reload the page to load what is on disk (unsaved \
+             changes are lost), or copy your edits out first."
         )
     }
 }
@@ -1172,6 +1251,53 @@ fn way_out(report: &JournalReport) -> String {
     out.join(" ")
 }
 
+/// Per project folder, the latest saves this process's recovery completed
+/// ([`COMPLETED_KEPT`] at most). A page whose digests show it has not seen
+/// what one wrote is told on its next diff or save ([`unseen_recoveries`]).
+static COMPLETED: std::sync::Mutex<BTreeMap<PathBuf, Vec<RecoveredSave>>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+/// How many completed saves [`COMPLETED`] keeps per project.
+const COMPLETED_KEPT: usize = 16;
+
+/// `recovered`, plus each save this process completed earlier that the page
+/// has not seen: a file it wrote that the page read (`digests`) differs from
+/// the file now.
+fn unseen_recoveries(
+    paths: &Paths,
+    digests: &Digests,
+    mut recovered: Vec<RecoveredSave>,
+) -> Vec<RecoveredSave> {
+    let remembered = COMPLETED
+        .lock()
+        .ok()
+        .and_then(|c| c.get(&paths.base).cloned())
+        .unwrap_or_default();
+    for save in remembered {
+        if recovered
+            .iter()
+            .any(|r| r.started_at_ms == save.started_at_ms && r.files == save.files)
+        {
+            continue;
+        }
+        let unseen = save.files.iter().any(|file| {
+            let Some(read) = digests.get(file) else {
+                return false;
+            };
+            let now = paths
+                .at(Path::new(file))
+                .ok()
+                .and_then(|path| Digest::at(&path).ok())
+                .map(|d| d.map(|d| d.hex().to_owned()));
+            now.is_some_and(|now| now != *read)
+        });
+        if unseen {
+            recovered.push(save);
+        }
+    }
+    recovered
+}
+
 /// The tokens of this process's own saves whose cleanup was left to the
 /// next recovery ([`commit::Committed::cleanup_left`]): finishing one is no
 /// news to the page that made it.
@@ -1281,6 +1407,20 @@ fn recover_locked(paths: &Paths, lock: &ProjectLock, disk: &mut Disk) -> SaveRec
         }),
         leftovers: Vec::new(),
     };
+    let completed: Vec<RecoveredSave> = out
+        .recovered
+        .iter()
+        .filter(|r| r.outcome == RecoveryOutcome::Completed)
+        .cloned()
+        .collect();
+    if !completed.is_empty()
+        && let Ok(mut remembered) = COMPLETED.lock()
+    {
+        let saves = remembered.entry(paths.base.clone()).or_default();
+        saves.extend(completed);
+        let excess = saves.len().saturating_sub(COMPLETED_KEPT);
+        saves.drain(..excess);
+    }
     if out.blocked.is_none() {
         let mut folders = project_folders(paths);
         for folder in recovery.settled.iter().flat_map(|s| &s.folders) {
@@ -1574,14 +1714,35 @@ impl Paths {
         text
     }
 
-    /// `path` relative to the config's folder when it lies in it.
+    /// `path` relative to the config's folder: `../shared/x.schema.yml`
+    /// for one beside it, as the config names it. Absolute only when the two
+    /// share nothing but the root.
     fn relative_path(&self, path: &Path) -> String {
-        [&self.base, &self.given_base]
+        if let Some(inside) = [&self.base, &self.given_base]
             .iter()
             .find_map(|dir| path.strip_prefix(dir).ok())
-            .unwrap_or(path)
-            .display()
-            .to_string()
+        {
+            return inside.display().to_string();
+        }
+        let shared = self
+            .base
+            .components()
+            .zip(path.components())
+            .take_while(|(a, b)| a == b)
+            .count();
+        if shared > 1 {
+            commit::journal::relative(&self.base, path)
+        } else {
+            path.display().to_string()
+        }
+    }
+
+    /// A [`Stale`] refusal of `files` in this project.
+    fn stale(&self, files: Vec<StaleFile>) -> Stale {
+        Stale {
+            files,
+            config: self.relative_path(&self.config),
+        }
     }
 
     /// Whether `path` is the config file, or would be on a case-insensitive
@@ -1978,10 +2139,8 @@ fn plan(paths: &Paths, request: &SaveRequest) -> Result<Plan> {
         }
     }
 
-    if let Some(digests) = &request.digests {
-        for diff in &mut diffs {
-            diff.stale = stale_files(paths, diff, digests)?;
-        }
+    for diff in &mut diffs {
+        diff.stale = stale_files(paths, diff, &request.digests)?;
     }
     Ok(Plan {
         diffs,
@@ -1994,25 +2153,30 @@ fn plan(paths: &Paths, request: &SaveRequest) -> Result<Plan> {
 fn stale_files(paths: &Paths, diff: &OpDiff, digests: &Digests) -> Result<Vec<StaleFile>> {
     let mut stale = Vec::new();
     for path in std::iter::once(&diff.path).chain(&diff.from) {
-        let key = paths.relative_path(Path::new(path));
-        let on_disk = Digest::at(Path::new(path))
-            .with_context(|| format!("reading {key}"))?
-            .map(|d| d.hex().to_owned());
-        let change = match (digests.get(&key), on_disk.is_some()) {
-            (Some(read), _) if *read == on_disk => continue,
-            (None, false) => continue,
-            (Some(Some(_)), true) => StaleChange::Changed,
-            (Some(Some(_)), false) => StaleChange::Deleted,
-            (Some(None), _) => StaleChange::Created,
-            (None, true) => StaleChange::Unloaded,
-        };
-        stale.push(StaleFile {
-            path: key,
-            change,
-            on_disk,
-        });
+        stale.extend(stale_file(paths, Path::new(path), digests)?);
     }
     Ok(stale)
+}
+
+/// `path` when it is not as `digests` says the page read it.
+fn stale_file(paths: &Paths, path: &Path, digests: &Digests) -> Result<Option<StaleFile>> {
+    let key = paths.relative_path(path);
+    let on_disk = Digest::at(path)
+        .with_context(|| format!("reading {key}"))?
+        .map(|d| d.hex().to_owned());
+    let change = match (digests.get(&key), on_disk.is_some()) {
+        (Some(read), _) if *read == on_disk => return Ok(None),
+        (None, false) => return Ok(None),
+        (Some(Some(_)), true) => StaleChange::Changed,
+        (Some(Some(_)), false) => StaleChange::Deleted,
+        (Some(None), _) => StaleChange::Created,
+        (None, true) => StaleChange::Unloaded,
+    };
+    Ok(Some(StaleFile {
+        path: key,
+        change,
+        on_disk,
+    }))
 }
 
 /// A checked save: the review's diffs, and whether `flusso.toml` is written.
@@ -2044,13 +2208,44 @@ pub fn review_project(config_path: &Path, request: SaveRequest) -> Result<Review
     if recovery.stops() {
         return Err(Interrupted(recovery).into());
     }
+    let recovered = unseen_recoveries(&paths, &request.digests, recovery.recovered);
+    if let Some(stale) = stale_file(&paths, &paths.config, &request.digests)? {
+        return Ok(Review {
+            diffs: vec![stale_config(&paths, &request, stale)],
+            recovered,
+        });
+    }
     let diffs = plan(&paths, &request)
         .map(|plan| plan.diffs)
         .map_err(|e| paths.relative(e))?;
-    Ok(Review {
-        diffs,
-        recovered: recovery.recovered,
-    })
+    Ok(Review { diffs, recovered })
+}
+
+/// The review of a request whose `flusso.toml` changed since the page read
+/// it: that file alone, marked, against the file on disk. Nothing else is
+/// planned, since every check would read a config the page never saw.
+fn stale_config(paths: &Paths, request: &SaveRequest, stale: StaleFile) -> OpDiff {
+    let current = std::fs::read_to_string(&paths.config).unwrap_or_default();
+    let next = keep::config_toml(
+        Some(current.as_str()).filter(|_| paths.config.is_file()),
+        &request.config,
+        request.identity.as_ref(),
+    )
+    .map_or_else(|_| current.clone(), |saved| saved.text);
+    OpDiff {
+        op: DiffOp::Write,
+        index: None,
+        path: paths.config.display().to_string(),
+        from: None,
+        changed: current != next,
+        warning: None,
+        notice: None,
+        dropped: 0,
+        needs_config: false,
+        current,
+        next,
+        stale: vec![stale],
+    }
 }
 
 /// Every subdirectory under the config directory (relative, forward-slash
@@ -2132,22 +2327,14 @@ pub fn save_project(config_path: &Path, request: SaveRequest) -> Result<SaveResp
 
 fn save_with(config_path: &Path, request: &SaveRequest, disk: &mut Disk) -> Result<SaveResponse> {
     let paths = Paths::new(config_path)?;
-    if let Some(digests) = &request.digests
-        && !paths.base.is_dir()
-    {
-        let gone: Vec<StaleFile> = digests
-            .iter()
-            .filter(|(_, digest)| digest.is_some())
-            .map(|(path, _)| StaleFile {
-                path: path.clone(),
-                change: StaleChange::Deleted,
-                on_disk: None,
-            })
-            .collect();
-        if !gone.is_empty() {
-            return Err(Stale(gone).into());
+    let config_stale = || -> Result<()> {
+        match stale_file(&paths, &paths.config, &request.digests)? {
+            Some(stale) => Err(paths.stale(vec![stale]).into()),
+            None => Ok(()),
         }
-    }
+    };
+    // Before the folder is made again for the lock, when it is gone.
+    config_stale()?;
     std::fs::create_dir_all(&paths.base)
         .with_context(|| format!("creating {}", paths.base.display()))?;
     let lock = match ProjectLock::acquire(&paths.base, LOCK_WAIT) {
@@ -2159,6 +2346,7 @@ fn save_with(config_path: &Path, request: &SaveRequest, disk: &mut Disk) -> Resu
     if recovery.stops() {
         return Err(Interrupted(recovery).into());
     }
+    config_stale()?;
     let plan = plan(&paths, request).map_err(|e| paths.relative(e))?;
     let (config, schemas) = plan
         .diffs
@@ -2177,25 +2365,58 @@ fn save_with(config_path: &Path, request: &SaveRequest, disk: &mut Disk) -> Resu
             }
         }
         if !stale.is_empty() {
-            return Err(Stale(stale).into());
+            return Err(paths.stale(stale).into());
         }
     }
 
+    let expect = |path: &Path| {
+        Expect::Holds(
+            request
+                .digests
+                .get(&paths.relative_path(path))
+                .cloned()
+                .flatten()
+                .map(Digest::from_hex),
+        )
+    };
     let writes: Vec<Write> = applied
         .iter()
-        .map(|d| Write {
-            dest: PathBuf::from(&d.path),
-            text: d.next.clone(),
+        .map(|d| {
+            let dest = PathBuf::from(&d.path);
+            Write {
+                expect: expect(&dest),
+                dest,
+                text: d.next.clone(),
+            }
         })
         .collect();
-    let removals: Vec<PathBuf> = applied
+    let removals: Vec<Remove> = applied
         .iter()
         .filter(|d| d.op == DiffOp::Move)
         .filter_map(|d| d.from.as_ref().map(PathBuf::from))
+        .map(|path| Remove {
+            expect: expect(&path),
+            path,
+        })
         .collect();
     let state = State::for_saving();
-    let committed =
-        commit(&lock, &writes, &removals, state.as_ref(), disk).map_err(|e| paths.relative(e))?;
+    let committed = commit(&lock, &writes, &removals, state.as_ref(), disk).map_err(|e| {
+        match e.downcast_ref::<Changed>() {
+            Some(Changed(path)) => paths
+                .stale(vec![
+                    stale_file(&paths, path, &request.digests)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| StaleFile {
+                            path: paths.relative_path(path),
+                            change: StaleChange::Changed,
+                            on_disk: None,
+                        }),
+                ])
+                .into(),
+            None => paths.relative(e),
+        }
+    })?;
     // A stopped disk stands for a killed process, which remembers nothing.
     if let (Some(token), false, Ok(mut own)) =
         (committed.cleanup_left, disk.stopped(), OWN_CLEANUP.lock())
@@ -2211,7 +2432,8 @@ fn save_with(config_path: &Path, request: &SaveRequest, disk: &mut Disk) -> Resu
         );
     }
     for removed in &removals {
-        resp.digests.insert(paths.relative_path(removed), None);
+        resp.digests
+            .insert(paths.relative_path(&removed.path), None);
     }
     for d in &applied {
         match (d.op, &d.from) {
@@ -2222,8 +2444,9 @@ fn save_with(config_path: &Path, request: &SaveRequest, disk: &mut Disk) -> Resu
             _ => resp.written.push(d.path.clone()),
         }
     }
-    resp.pruned = prune_empty_dirs(&paths.base, &removals);
-    resp.recovered = recovery.recovered;
+    let removed: Vec<PathBuf> = removals.into_iter().map(|r| r.path).collect();
+    resp.pruned = prune_empty_dirs(&paths.base, &removed);
+    resp.recovered = unseen_recoveries(&paths, &request.digests, recovery.recovered);
     Ok(resp)
 }
 
@@ -2750,27 +2973,42 @@ mod tests {
             ));
             std::fs::remove_dir_all(&dir).ok();
             std::fs::create_dir_all(&dir).unwrap();
-            for (name, text) in [
-                ("flusso.toml", include_str!("../../../dev/flusso.toml")),
-                (
-                    "users.schema.yml",
-                    include_str!("../../../dev/users.schema.yml"),
-                ),
-                (
-                    "orders.schema.yml",
-                    include_str!("../../../dev/orders.schema.yml"),
-                ),
-                (
-                    "products.schema.yml",
-                    include_str!("../../../dev/products.schema.yml"),
-                ),
-            ] {
+            for (name, text) in Self::FILES {
                 std::fs::write(dir.join(name), text).unwrap();
             }
             let fixture = Self(dir);
             std::fs::remove_dir_all(fixture.state_dir()).ok();
             commit::state::use_test_dir(Some(fixture.state_dir()));
             fixture
+        }
+
+        const FILES: [(&str, &str); 4] = [
+            ("flusso.toml", include_str!("../../../dev/flusso.toml")),
+            (
+                "users.schema.yml",
+                include_str!("../../../dev/users.schema.yml"),
+            ),
+            (
+                "orders.schema.yml",
+                include_str!("../../../dev/orders.schema.yml"),
+            ),
+            (
+                "products.schema.yml",
+                include_str!("../../../dev/products.schema.yml"),
+            ),
+        ];
+
+        /// The digests of a page that read the fresh project.
+        fn loaded() -> Digests {
+            Self::FILES
+                .iter()
+                .map(|(name, text)| {
+                    (
+                        (*name).to_owned(),
+                        Some(Digest::of(text.as_bytes()).hex().to_owned()),
+                    )
+                })
+                .collect()
         }
 
         fn state_dir(&self) -> PathBuf {
@@ -2815,6 +3053,7 @@ mod tests {
             }
             serde_json::from_value(serde_json::json!({
                 "config": config,
+                "digests": Self::loaded(),
                 "ops": [
                     { "kind": "move", "index": "orders", "path": "products.schema.yml",
                       "from": "orders.schema.yml", "raw": "orders: 1\n" },
@@ -2905,7 +3144,7 @@ mod tests {
         let mut point = 1;
         loop {
             let mut request = fixture.swap();
-            request.digests = Some(page.clone());
+            request.digests = page.clone();
             save_with(
                 &fixture.config(),
                 &request,
@@ -2925,28 +3164,138 @@ mod tests {
         let request = || {
             let mut request: SaveRequest = serde_json::from_value(serde_json::json!({
                 "config": load_project(&fixture.config()).unwrap().config,
+                "digests": {},
                 "ops": [{ "kind": "upsert", "index": "orders", "path": "products.schema.yml",
                           "raw": "orders: 2\n" }],
             }))
             .unwrap();
-            request.digests = Some(page.clone());
+            request.digests = page.clone();
             request
         };
         for _ in 0..2 {
             let err = save_project(&fixture.config(), request()).unwrap_err();
-            let refused = &err.downcast_ref::<Stale>().expect("stale").0;
+            let refused = &err.downcast_ref::<Stale>().expect("stale").files;
             let paths: Vec<&str> = refused.iter().map(|f| f.path.as_str()).collect();
-            assert_eq!(paths, ["flusso.toml", "products.schema.yml"]);
+            assert_eq!(paths, ["flusso.toml"], "the config is compared first");
             assert!(err.to_string().contains("Reload the page"), "{err}");
             let review = review_project(&fixture.config(), request()).unwrap();
+            assert_eq!(review.diffs.len(), 1, "nothing planned on an unseen config");
             assert_eq!(review.diffs[0].stale[0].change, StaleChange::Changed);
-            assert_eq!(review.diffs[1].stale[0].path, "products.schema.yml");
         }
         assert_eq!(fixture.files(), after, "a refused save wrote");
 
         let mut reloaded = request();
-        reloaded.digests = Some(load_project(&fixture.config()).unwrap().digests);
+        reloaded.digests = load_project(&fixture.config()).unwrap().digests;
         save_project(&fixture.config(), reloaded).unwrap();
+    }
+
+    /// A save stopped because a program that takes no lock wrote a file
+    /// between the save's checks and its rename: the refusal names that
+    /// file, which keeps the program's bytes, and nothing of the save is
+    /// left, files, temp files, backups, journal or record.
+    fn stopped_by_an_editor(fixture: &Fixture, request: &SaveRequest, check: usize, edited: &str) {
+        let before = fixture.files();
+        let err = save_with(
+            &fixture.config(),
+            request,
+            &mut Disk::editing_at_check(check, Some("editor\n")),
+        )
+        .unwrap_err();
+        let stale = &err.downcast_ref::<Stale>().expect("stale").files;
+        assert_eq!(stale.len(), 1, "{stale:?}");
+        assert_eq!(stale[0].path, edited);
+        assert_eq!(stale[0].change, StaleChange::Changed);
+        let mut expected = before;
+        expected.insert(edited.to_owned(), "editor\n".to_owned());
+        assert_eq!(fixture.files(), expected);
+        assert!(
+            State::at(fixture.state_dir()).is_ok_and(|s| s.records().is_empty()),
+            "a record is left"
+        );
+    }
+
+    #[test]
+    fn a_file_written_between_the_check_and_its_rename_stops_the_save() {
+        let fixture = Fixture::new("race-write");
+        let request: SaveRequest = serde_json::from_value(serde_json::json!({
+            "config": load_project(&fixture.config()).unwrap().config,
+            "digests": Fixture::loaded(),
+            "ops": [{ "kind": "upsert", "index": "users", "path": "users.schema.yml",
+                      "raw": "users: 1\n" }],
+        }))
+        .unwrap();
+        stopped_by_an_editor(&fixture, &request, 1, "users.schema.yml");
+    }
+
+    #[test]
+    fn a_file_written_before_its_removal_stops_the_save() {
+        let fixture = Fixture::new("race-remove");
+        let mut config =
+            serde_json::to_value(load_project(&fixture.config()).unwrap().config).unwrap();
+        for entry in config["index"].as_array_mut().unwrap() {
+            if entry["name"] == "users" {
+                entry["schema"] = "moved.schema.yml".into();
+            }
+        }
+        let request: SaveRequest = serde_json::from_value(serde_json::json!({
+            "config": config,
+            "digests": Fixture::loaded(),
+            "ops": [{ "kind": "move", "index": "users", "path": "moved.schema.yml",
+                      "from": "users.schema.yml", "raw": "users: 1\n" }],
+        }))
+        .unwrap();
+        // moved.schema.yml, flusso.toml, then the removal of users.schema.yml.
+        stopped_by_an_editor(&fixture, &request, 3, "users.schema.yml");
+    }
+
+    /// The change lands on the second of three files, after the first was
+    /// renamed into place: that rename is undone.
+    #[test]
+    fn a_file_written_mid_swap_undoes_the_renames_already_done() {
+        let fixture = Fixture::new("race-second");
+        // products.schema.yml, orders.schema.yml, then flusso.toml.
+        stopped_by_an_editor(&fixture, &fixture.swap(), 2, "orders.schema.yml");
+    }
+
+    /// A page that read the project before a recovery completed a save is
+    /// told so by its next save, even of a file that save did not write; a
+    /// page that read it afterwards is not.
+    #[test]
+    fn a_save_from_a_page_older_than_a_completed_save_reports_it() {
+        let fixture = Fixture::new("told");
+        let upsert = |index: &str, digests: Digests| -> SaveRequest {
+            serde_json::from_value(serde_json::json!({
+                "config": load_project(&fixture.config()).unwrap().config,
+                "digests": digests,
+                "ops": [{ "kind": "upsert", "index": index, "path": format!("{index}.schema.yml"),
+                          "raw": format!("{index}: 1\n") }],
+            }))
+            .unwrap()
+        };
+        let mut point = 1;
+        loop {
+            save_with(
+                &fixture.config(),
+                &upsert("users", Fixture::loaded()),
+                &mut Disk::stopping_after(point),
+            )
+            .ok();
+            if fixture.committed() {
+                break;
+            }
+            recover_project(&fixture.config()).unwrap();
+            point += 1;
+        }
+        let recovery = recover_project(&fixture.config()).unwrap();
+        assert_eq!(recovery.recovered[0].outcome, RecoveryOutcome::Completed);
+
+        let saved = save_project(&fixture.config(), upsert("orders", Fixture::loaded())).unwrap();
+        assert_eq!(saved.recovered.len(), 1, "{saved:?}");
+        assert_eq!(saved.recovered[0].files, ["users.schema.yml"]);
+
+        let fresh = load_project(&fixture.config()).unwrap().digests;
+        let saved = save_project(&fixture.config(), upsert("products", fresh)).unwrap();
+        assert!(saved.recovered.is_empty(), "{saved:?}");
     }
 
     /// A journal naming a file outside the project blocks loading and saving
@@ -3029,6 +3378,7 @@ mod tests {
             vec![Write {
                 dest: fixture.0.join("users.schema.yml"),
                 text: "users: 1\n".into(),
+                expect: Expect::AsFound,
             }],
             Vec::new(),
         );
@@ -3076,7 +3426,7 @@ mod tests {
         let fixture = Fixture::new("own");
         let mut page = load_project(&fixture.config()).unwrap().digests;
         let mut request = fixture.swap();
-        request.digests = Some(page.clone());
+        request.digests = page.clone();
         let saved = save_with(
             &fixture.config(),
             &request,
@@ -3089,12 +3439,13 @@ mod tests {
 
         let again: SaveRequest = serde_json::from_value(serde_json::json!({
             "config": request.config,
+            "digests": {},
             "ops": [{ "kind": "upsert", "index": "orders", "path": "products.schema.yml",
                       "raw": "orders: 2\n" }],
         }))
         .unwrap();
         let again = SaveRequest {
-            digests: Some(page),
+            digests: page,
             ..again
         };
         let saved = save_project(&fixture.config(), again).unwrap();

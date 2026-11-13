@@ -23,7 +23,12 @@
 //! 4. **keep**: hard-link every file that will be replaced to a backup beside
 //!    it (a flushed copy where links don't work);
 //! 5. **swap**: rename each temp file over its destination, then rename each
-//!    removed file to its backup; flush the folders;
+//!    removed file to its backup; flush the folders. Right before each of
+//!    these renames the file is checked to still hold the journal's `before`
+//!    digest, which is the one the caller expects ([`Expect`]): a program
+//!    that wrote it without the project's lock stops the commit with
+//!    [`Changed`], and everything already done is undone. Only a write
+//!    landing between that check and the rename is still replaced;
 //! 6. **commit point**: mark the record committed (one rename in the state
 //!    folder), and flush the state folder;
 //! 7. rename the journal to `.flusso-save.done` (for the reader: recovery
@@ -61,8 +66,9 @@
 //! let lock = ProjectLock::acquire(&dir, Duration::from_secs(5))?;
 //! let state = State::open();
 //! recover(&lock, &dir.join("flusso.toml"), state.as_ref().map_err(|e| e.to_string().as_str()), &mut Disk::default());
-//! let writes = vec![Write { dest: dir.join("users.schema.yml"), text: "…".into() }];
-//! commit(&lock, &writes, &[dir.join("old.schema.yml")], state.as_ref().ok(), &mut Disk::default())?;
+//! let writes = vec![Write { dest: dir.join("users.schema.yml"), text: "…".into(), expect: Expect::AsFound }];
+//! let removals = vec![Remove { path: dir.join("old.schema.yml"), expect: Expect::AsFound }];
+//! commit(&lock, &writes, &removals, state.as_ref().ok(), &mut Disk::default())?;
 //! ```
 
 mod disk;
@@ -94,6 +100,64 @@ pub(crate) struct Write {
     pub(crate) dest: PathBuf,
     /// Its new text.
     pub(crate) text: String,
+    /// What it must hold for the commit to replace it.
+    pub(crate) expect: Expect,
+}
+
+/// One file a commit removes.
+#[derive(Debug)]
+pub(crate) struct Remove {
+    /// The file's resolved path.
+    pub(crate) path: PathBuf,
+    /// What it must hold for the commit to remove it.
+    pub(crate) expect: Expect,
+}
+
+/// What a file must hold for a commit to replace or remove it: checked when
+/// the commit plans (it becomes the journal's `before`), and again right
+/// before the rename that replaces or removes the file.
+#[derive(Debug, Clone)]
+pub(crate) enum Expect {
+    /// Whatever it holds when the commit plans: for tests of the commit alone.
+    #[cfg(test)]
+    AsFound,
+    /// Exactly this: `None` for no file.
+    Holds(Option<journal::Digest>),
+}
+
+impl Expect {
+    /// The digest `path` must hold, refusing with [`Changed`] when it holds
+    /// another.
+    fn check(&self, path: &std::path::Path) -> Result<Option<journal::Digest>> {
+        let now = journal::Digest::at(path)?;
+        match self {
+            Self::Holds(expected) if *expected != now => Err(Changed(path.to_path_buf()).into()),
+            #[cfg(test)]
+            Self::AsFound => Ok(now),
+            Self::Holds(_) => Ok(now),
+        }
+    }
+}
+
+/// A commit refused because a file it replaces or removes no longer holds
+/// what it expects: written by someone who doesn't take the project's lock.
+/// Nothing the commit did is left.
+#[derive(Debug)]
+pub(crate) struct Changed(pub(crate) PathBuf);
+
+impl std::fmt::Display for Changed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} changed during the save", self.0.display())
+    }
+}
+
+impl std::error::Error for Changed {}
+
+/// How far [`run`] got: the writes renamed into place and the files removed.
+#[derive(Debug, Default)]
+struct Progress {
+    renamed: usize,
+    removed: usize,
 }
 
 /// A save that stands.
@@ -111,7 +175,7 @@ pub(crate) struct Committed {
 pub(crate) fn commit(
     lock: &ProjectLock,
     writes: &[Write],
-    removals: &[PathBuf],
+    removals: &[Remove],
     state: Option<&State>,
     disk: &mut Disk,
 ) -> Result<Committed> {
@@ -136,7 +200,8 @@ pub(crate) fn commit(
         None => None,
     };
 
-    let ran = run(&steps, &text, writes, lock, disk).and_then(|()| match state {
+    let mut progress = Progress::default();
+    let ran = run(&steps, &text, writes, lock, disk, &mut progress).and_then(|()| match state {
         Some(state) => state
             .commit(&record, disk)
             .map_err(|e| anyhow!("completing the save: {e}")),
@@ -149,7 +214,12 @@ pub(crate) fn commit(
             return Err(failed);
         }
         let staging = base.join(STAGING);
-        let undone = recover::roll_back(&steps, &journal_path, disk).and_then(|()| {
+        let undone = if failed.is::<Changed>() {
+            undo_reached(&steps, &progress, &journal_path, disk)
+        } else {
+            recover::roll_back(&steps, &journal_path, disk)
+        };
+        let undone = undone.and_then(|()| {
             disk.remove_file(&staging).map_err(|e| {
                 Blocked::new(Vec::new(), vec![staging.clone()]).with_error(&staging, e)
             })
@@ -218,13 +288,57 @@ pub(crate) fn commit(
     Ok(Committed { cleanup_left: None })
 }
 
-/// Steps 2–5: everything up to the commit point.
+/// Undo a commit stopped by [`Changed`] at `progress`. The files it had not
+/// reached were never replaced, and one of them holds another program's text,
+/// which [`recover::roll_back`] would refuse to touch: their temp files and
+/// backups (a backup is a second name, never the file itself) are deleted,
+/// and the rest is rolled back as any failed commit.
+fn undo_reached(
+    steps: &Steps,
+    progress: &Progress,
+    journal: &std::path::Path,
+    disk: &mut Disk,
+) -> Result<(), Blocked> {
+    let failed = |path: &std::path::Path, e| {
+        Blocked::new(Vec::new(), vec![path.to_path_buf()]).with_error(path, e)
+    };
+    for write in steps.writes.iter().skip(progress.renamed) {
+        disk.remove_file(&write.temp)
+            .map_err(|e| failed(&write.temp, e))?;
+        if let Some(backup) = &write.backup {
+            disk.remove_file(backup).map_err(|e| failed(backup, e))?;
+        }
+    }
+    let reached = Steps {
+        started_at_ms: steps.started_at_ms,
+        token: steps.token.clone(),
+        dirs: steps.dirs.clone(),
+        writes: steps
+            .writes
+            .iter()
+            .take(progress.renamed)
+            .cloned()
+            .collect(),
+        removals: steps
+            .removals
+            .iter()
+            .take(progress.removed)
+            .cloned()
+            .collect(),
+    };
+    recover::roll_back(&reached, journal, disk)
+}
+
+/// Steps 2–5: everything up to the commit point. Right before each rename
+/// that replaces or removes a file, the file is checked to still hold what
+/// the journal says it held ([`Changed`] otherwise).
 fn run(
     steps: &Steps,
     text: &[u8],
     writes: &[Write],
     lock: &ProjectLock,
     disk: &mut Disk,
+    progress: &mut Progress,
 ) -> Result<()> {
     let base = lock.base();
     let staging = base.join(STAGING);
@@ -256,12 +370,26 @@ fn run(
     }
 
     for planned in &steps.writes {
+        let unchanged = disk
+            .holds(&planned.dest, planned.before.as_ref())
+            .map_err(|e| anyhow!("reading {}: {e}", planned.dest.display()))?;
+        if !unchanged {
+            return Err(Changed(planned.dest.clone()).into());
+        }
         disk.rename(&planned.temp, &planned.dest)
             .map_err(|e| anyhow!("writing {}: {e}", planned.dest.display()))?;
+        progress.renamed += 1;
     }
     for removal in &steps.removals {
+        let unchanged = disk
+            .holds(&removal.path, Some(&removal.before))
+            .map_err(|e| anyhow!("reading {}: {e}", removal.path.display()))?;
+        if !unchanged {
+            return Err(Changed(removal.path.clone()).into());
+        }
         disk.rename(&removal.path, &removal.backup)
             .map_err(|e| anyhow!("removing {}: {e}", removal.path.display()))?;
+        progress.removed += 1;
     }
     for folder in &folders {
         disk.sync_dir(folder)

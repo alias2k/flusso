@@ -529,6 +529,10 @@ export class StaleError extends Error {
   }
 }
 
+/// A diff or save the server does not read because this page comes from
+/// another version of the designer (a 400 asking for a reload).
+export class ReloadError extends Error {}
+
 /// A load, diff or save the server refused over an interrupted save (a 409).
 export class RecoveryError extends Error {
   constructor(
@@ -616,14 +620,22 @@ async function json<T>(res: Response): Promise<T> {
     let message = body || `${res.status} ${res.statusText}`;
     let recovery: SaveRecovery | undefined;
     let stale: StaleFile[] | undefined;
+    let reload = false;
     try {
-      const parsed = JSON.parse(body) as { error?: string; recovery?: SaveRecovery; stale?: StaleFile[] };
+      const parsed = JSON.parse(body) as {
+        error?: string;
+        recovery?: SaveRecovery;
+        stale?: StaleFile[];
+        reload?: boolean;
+      };
       if (parsed.error) message = parsed.error;
       recovery = parsed.recovery;
       stale = parsed.stale;
+      reload = parsed.reload === true;
     } catch {
       /* not JSON — use the text */
     }
+    if (reload) throw new ReloadError(message);
     if (stale) throw new StaleError(message, stale);
     throw recovery ? new RecoveryError(message, recovery) : new Error(message);
   }

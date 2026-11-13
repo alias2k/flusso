@@ -115,7 +115,7 @@ pub(crate) struct Steps {
 
 /// One file written: its text goes to `temp`, the file is kept at `backup`,
 /// then `temp` is renamed over it.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct FileWrite {
     pub(crate) dest: PathBuf,
     pub(crate) temp: PathBuf,
@@ -127,7 +127,7 @@ pub(crate) struct FileWrite {
 }
 
 /// One file removed, by renaming it to `backup`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Removal {
     pub(crate) path: PathBuf,
     pub(crate) backup: PathBuf,
@@ -151,6 +151,11 @@ impl Digest {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// A digest given in hex, as a page sends it back.
+    pub(crate) fn from_hex(hex: String) -> Self {
+        Self(hex)
     }
 
     /// The digest in hex.
@@ -279,7 +284,7 @@ impl Journal {
     pub(crate) fn plan(
         base: &Path,
         writes: &[super::Write],
-        removals: &[PathBuf],
+        removals: &[super::Remove],
     ) -> Result<(Self, Steps)> {
         let started = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -298,7 +303,7 @@ impl Journal {
                     }
                 }
             }
-            let before = Digest::at(&write.dest)?;
+            let before = write.expect.check(&write.dest)?;
             planned.push(FileWrite {
                 temp: temp(&write.dest, &token, i),
                 backup: before.is_some().then(|| backup(&write.dest, &token, i)),
@@ -308,11 +313,14 @@ impl Journal {
             });
         }
         let mut planned_removals = Vec::with_capacity(removals.len());
-        for (i, path) in removals.iter().enumerate() {
+        for (i, removal) in removals.iter().enumerate() {
+            let path = &removal.path;
             planned_removals.push(Removal {
                 backup: removal_backup(path, &token, i),
                 path: path.clone(),
-                before: Digest::at(path)?
+                before: removal
+                    .expect
+                    .check(path)?
                     .ok_or_else(|| anyhow::anyhow!("{} does not exist", path.display()))?,
             });
         }
@@ -706,7 +714,7 @@ impl Steps {
 
 /// `path` relative to `base`, `/`-separated: with `..` when it lies outside,
 /// as given when the two share no root.
-fn relative(base: &Path, path: &Path) -> String {
+pub(crate) fn relative(base: &Path, path: &Path) -> String {
     let base_parts: Vec<Component<'_>> = base.components().collect();
     let parts: Vec<Component<'_>> = path.components().collect();
     let common = base_parts

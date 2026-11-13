@@ -96,9 +96,9 @@ fn project_previews_saves_and_reopens() {
             .collect(),
         skip: Vec::new(),
         identity: None,
-        digests: None,
+        digests: seen(),
     };
-    let written = api::save_project(&config_path, save).unwrap();
+    let written = save_project(&config_path, save).unwrap();
     assert!(written.written.is_empty(), "{:?}", written.written);
     assert!(written.moved.is_empty());
 
@@ -136,9 +136,9 @@ fn project_previews_saves_and_reopens() {
             .collect(),
         skip: Vec::new(),
         identity: None,
-        digests: None,
+        digests: seen(),
     };
-    let again = api::save_project(&config_path, resave).unwrap();
+    let again = save_project(&config_path, resave).unwrap();
     assert!(
         again.written.is_empty(),
         "re-saving unchanged files writes nothing: {:?}",
@@ -168,9 +168,9 @@ fn save_moves_and_prunes() {
         )],
         skip: Vec::new(),
         identity: None,
-        digests: None,
+        digests: seen(),
     };
-    let resp = api::save_project(&config_path, moved).unwrap();
+    let resp = save_project(&config_path, moved).unwrap();
     assert!(
         dir.join("nested/moved.schema.yml").exists(),
         "moved file at new path"
@@ -189,9 +189,9 @@ fn save_moves_and_prunes() {
         )],
         skip: Vec::new(),
         identity: None,
-        digests: None,
+        digests: seen(),
     };
-    let resp = api::save_project(&config_path, back).unwrap();
+    let resp = save_project(&config_path, back).unwrap();
     assert!(!dir.join("nested").exists(), "emptied folder pruned");
     assert!(resp.pruned.iter().any(|p| p.ends_with("nested")));
 
@@ -455,19 +455,20 @@ fn the_deepest_accepted_value_previews_diffs_and_saves_ten_joins_deep() {
     let config_path = dir.join("flusso.toml");
     let project = api::load_project(&config_path).unwrap();
     let body = serde_json::json!({
+        "digests": seen(),
         "config": config_with(&project.config, &[("deep", "deep.schema.yml")]),
         "ops": [{ "kind": "upsert", "index": "deep", "path": "deep.schema.yml", "schema": schema }],
     })
     .to_string();
     let diff: SaveRequest = serde_json::from_str(&body).unwrap();
     assert!(
-        api::diff_project(&config_path, diff)
+        diff_project(&config_path, diff)
             .unwrap()
             .iter()
             .any(|d| d.changed)
     );
     let save: SaveRequest = serde_json::from_str(&body).unwrap();
-    api::save_project(&config_path, save).unwrap();
+    save_project(&config_path, save).unwrap();
     let written = std::fs::read_to_string(dir.join("deep.schema.yml")).unwrap();
     let reread = serde_json::to_value(
         kernel::IndexSchema::try_from(config::yaml::SchemaYaml::try_parse(&written).unwrap())
@@ -546,8 +547,8 @@ fn files(dir: &Path) -> BTreeMap<String, String> {
 fn refused(dir: &Path, request: impl Fn() -> SaveRequest) {
     let config_path = dir.join("flusso.toml");
     let before = files(dir);
-    assert!(api::diff_project(&config_path, request()).is_err());
-    assert!(api::save_project(&config_path, request()).is_err());
+    assert!(diff_project(&config_path, request()).is_err());
+    assert!(save_project(&config_path, request()).is_err());
     assert_eq!(files(dir), before);
 }
 
@@ -578,7 +579,7 @@ fn a_save_refuses_two_different_writes_to_one_file() {
         ],
         skip: Vec::new(),
         identity: None,
-        digests: None,
+        digests: seen(),
     });
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -604,7 +605,7 @@ fn a_save_refuses_two_indexes_with_one_normalized_name() {
             )],
             skip: Vec::new(),
             identity: None,
-            digests: None,
+            digests: seen(),
         });
     }
     std::fs::remove_dir_all(&dir).ok();
@@ -633,7 +634,7 @@ fn a_save_refuses_to_write_another_index_s_file() {
                 )],
                 skip: Vec::new(),
                 identity: None,
-                digests: None,
+                digests: seen(),
             });
         }
         refused(&dir, || SaveRequest {
@@ -641,7 +642,7 @@ fn a_save_refuses_to_write_another_index_s_file() {
             ops: vec![op(OpKind::Upsert, "users", path, None, "users: 1\n")],
             skip: Vec::new(),
             identity: None,
-            digests: None,
+            digests: seen(),
         });
     }
     refused(&dir, || SaveRequest {
@@ -655,7 +656,7 @@ fn a_save_refuses_to_write_another_index_s_file() {
         )],
         skip: Vec::new(),
         identity: None,
-        digests: None,
+        digests: seen(),
     });
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -679,7 +680,7 @@ fn a_shared_file_is_written_only_by_every_index_that_uses_it() {
         )],
         skip: Vec::new(),
         identity: None,
-        digests: None,
+        digests: seen(),
     });
     let both = SaveRequest {
         config,
@@ -689,9 +690,9 @@ fn a_shared_file_is_written_only_by_every_index_that_uses_it() {
         ],
         skip: Vec::new(),
         identity: None,
-        digests: None,
+        digests: seen(),
     };
-    api::save_project(&config_path, both).unwrap();
+    save_project(&config_path, both).unwrap();
     assert_eq!(
         std::fs::read_to_string(dir.join("users.schema.yml")).unwrap(),
         "x: 1\n"
@@ -717,7 +718,7 @@ fn a_save_refuses_a_schema_op_on_the_config_file() {
                 )],
                 skip: Vec::new(),
                 identity: None,
-                digests: None,
+                digests: seen(),
             });
         }
         refused(&dir, || SaveRequest {
@@ -731,7 +732,7 @@ fn a_save_refuses_a_schema_op_on_the_config_file() {
             )],
             skip: Vec::new(),
             identity: None,
-            digests: None,
+            digests: seen(),
         });
     }
     std::fs::remove_dir_all(&dir).ok();
@@ -752,6 +753,7 @@ fn a_save_removes_nothing_outside_the_project() {
     let victim_rel = format!("../{}", victim.file_name().unwrap().to_string_lossy());
 
     let delete = serde_json::json!({
+        "digests": seen(),
         "config": project.config,
         "ops": [{ "kind": "delete", "index": "users", "path": victim_rel }],
     });
@@ -768,7 +770,7 @@ fn a_save_removes_nothing_outside_the_project() {
         )],
         skip: Vec::new(),
         identity: None,
-        digests: None,
+        digests: seen(),
     };
     refused(&dir, moved);
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep\n");
@@ -813,11 +815,11 @@ fn a_move_never_removes_a_file_an_index_uses() {
         ],
         skip: Vec::new(),
         identity: None,
-        digests: None,
+        digests: seen(),
     };
-    let diffs = api::diff_project(&config_path, swap()).unwrap();
+    let diffs = diff_project(&config_path, swap()).unwrap();
     assert!(diffs.iter().all(|d| d.op == api::DiffOp::Write));
-    api::save_project(&config_path, swap()).unwrap();
+    save_project(&config_path, swap()).unwrap();
     assert_eq!(read("products.schema.yml"), "orders: 1\n");
     assert_eq!(read("orders.schema.yml"), "products: 1\n");
 
@@ -848,9 +850,9 @@ fn a_move_never_removes_a_file_an_index_uses() {
         ],
         skip: Vec::new(),
         identity: None,
-        digests: None,
+        digests: seen(),
     };
-    api::save_project(&config_path, replaced).unwrap();
+    save_project(&config_path, replaced).unwrap();
     assert_eq!(read("archive/users.schema.yml"), "users: 1\n");
     assert_eq!(read("users.schema.yml"), "fresh: 1\n");
 
@@ -867,7 +869,7 @@ fn a_move_never_removes_a_file_an_index_uses() {
         )],
         skip: Vec::new(),
         identity: None,
-        digests: None,
+        digests: seen(),
     });
 
     std::fs::remove_dir_all(&dir).ok();
@@ -894,9 +896,9 @@ fn a_move_onto_an_existing_file_is_flagged() {
             )],
             skip: Vec::new(),
             identity: None,
-            digests: None,
+            digests: seen(),
         };
-        let diffs = api::diff_project(&config_path, request).unwrap();
+        let diffs = diff_project(&config_path, request).unwrap();
         let moved = diffs.last().unwrap();
         assert_eq!(moved.op, api::DiffOp::Move);
         assert_eq!(moved.warning.as_deref(), Some("overwrites"), "{path}");
@@ -915,9 +917,9 @@ fn a_move_onto_an_existing_file_is_flagged() {
         )],
         skip: Vec::new(),
         identity: None,
-        digests: None,
+        digests: seen(),
     };
-    let diffs = api::diff_project(&config_path, request).unwrap();
+    let diffs = diff_project(&config_path, request).unwrap();
     assert_eq!(diffs.last().unwrap().current, orders);
 
     std::fs::remove_dir_all(&dir).ok();
@@ -973,8 +975,8 @@ fn save_refused(dir: &Path, request: impl Fn() -> SaveRequest) {
         skip: Vec::new(),
         ..request()
     };
-    api::diff_project(&config_path, review).unwrap();
-    assert!(api::save_project(&config_path, request()).is_err());
+    diff_project(&config_path, review).unwrap();
+    assert!(save_project(&config_path, request()).is_err());
     assert_eq!(files(dir), before);
 }
 
@@ -1009,7 +1011,7 @@ fn a_rename_is_refused_when_the_config_is_left_out() {
             )],
             skip: skip.clone(),
             identity: identity(&project.config, &[Some(0), Some(1)]),
-            digests: None,
+            digests: seen(),
         });
     }
 
@@ -1029,7 +1031,7 @@ fn a_rename_is_refused_when_the_config_is_left_out() {
         )],
         skip: skip.clone(),
         identity: identity(&project.config, &[Some(0), Some(1), Some(2)]),
-        digests: None,
+        digests: seen(),
     });
     assert!(dir.join("users.schema.yml").is_file());
     assert!(!dir.join("people.schema.yml").exists());
@@ -1059,9 +1061,9 @@ fn the_config_is_refused_when_a_file_it_needs_is_left_out() {
         )],
         skip,
         identity: identity(&project.config, &[Some(0), Some(1), Some(2)]),
-        digests: None,
+        digests: seen(),
     };
-    let diffs = api::diff_project(&dir.join("flusso.toml"), request(Vec::new())).unwrap();
+    let diffs = diff_project(&dir.join("flusso.toml"), request(Vec::new())).unwrap();
     let moved = diffs.last().unwrap();
     assert!(moved.needs_config);
     let moved = moved.path.clone();
@@ -1073,7 +1075,7 @@ fn the_config_is_refused_when_a_file_it_needs_is_left_out() {
         ops: Vec::new(),
         skip: Vec::new(),
         identity: None,
-        digests: None,
+        digests: seen(),
     });
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -1098,9 +1100,9 @@ fn an_edit_is_saved_with_the_config_left_out() {
         )],
         skip: vec![config_shown(&dir)],
         identity: None,
-        digests: None,
+        digests: seen(),
     };
-    let diffs = api::diff_project(&config_path, request).unwrap();
+    let diffs = diff_project(&config_path, request).unwrap();
     assert!(!diffs.last().unwrap().needs_config);
     let request = SaveRequest {
         config: config_renamed(&project.config, "users", "people"),
@@ -1113,9 +1115,9 @@ fn an_edit_is_saved_with_the_config_left_out() {
         )],
         skip: vec![config_shown(&dir)],
         identity: None,
-        digests: None,
+        digests: seen(),
     };
-    api::save_project(&config_path, request).unwrap();
+    save_project(&config_path, request).unwrap();
     assert_eq!(std::fs::read_to_string(&config_path).unwrap(), config_text);
     assert_eq!(
         std::fs::read_to_string(dir.join("orders.schema.yml")).unwrap(),
@@ -1149,7 +1151,7 @@ fn a_symlink_cannot_reach_another_index_s_file_or_the_config() {
                 )],
                 skip: Vec::new(),
                 identity: None,
-                digests: None,
+                digests: seen(),
             });
         }
     }
@@ -1164,7 +1166,7 @@ fn a_symlink_cannot_reach_another_index_s_file_or_the_config() {
         )],
         skip: Vec::new(),
         identity: None,
-        digests: None,
+        digests: seen(),
     });
 
     let orders = std::fs::read_to_string(dir.join("orders.schema.yml")).unwrap();
@@ -1179,7 +1181,7 @@ fn a_symlink_cannot_reach_another_index_s_file_or_the_config() {
         )],
         skip: Vec::new(),
         identity: None,
-        digests: None,
+        digests: seen(),
     };
     refused(&dir, from_orders);
     assert_eq!(
@@ -1217,16 +1219,10 @@ fn a_project_opened_through_a_symlink_resolves_its_paths() {
             ops: vec![op(OpKind::Upsert, "users", path, None, "users: 1\n")],
             skip: Vec::new(),
             identity: None,
-            digests: None,
+            digests: seen(),
         };
-        assert!(
-            api::diff_project(&config_path, request()).is_err(),
-            "{path}"
-        );
-        assert!(
-            api::save_project(&config_path, request()).is_err(),
-            "{path}"
-        );
+        assert!(diff_project(&config_path, request()).is_err(), "{path}");
+        assert!(save_project(&config_path, request()).is_err(), "{path}");
         assert_eq!(files(&dir), before);
     }
     std::fs::remove_file(&link).ok();
@@ -1253,7 +1249,7 @@ fn a_path_differing_only_in_case_is_refused() {
                 )],
                 skip: Vec::new(),
                 identity: None,
-                digests: None,
+                digests: seen(),
             });
         }
     }
@@ -1279,7 +1275,7 @@ fn a_folder_as_a_schema_path_changes_nothing() {
             )],
             skip: Vec::new(),
             identity: None,
-            digests: None,
+            digests: seen(),
         });
     }
     assert_eq!(
@@ -1335,9 +1331,9 @@ fn a_failed_write_leaves_no_temp_file() {
         ],
         skip: Vec::new(),
         identity: None,
-        digests: None,
+        digests: seen(),
     };
-    assert!(api::save_project(&dir.join("flusso.toml"), request).is_err());
+    assert!(save_project(&dir.join("flusso.toml"), request).is_err());
     assert_eq!(files(&dir), before);
     assert!(!dir.join("fresh").exists());
     assert_eq!(std::fs::read_dir(&locked).unwrap().count(), 0);
@@ -1367,7 +1363,7 @@ fn a_move_from_a_file_that_is_not_the_index_s_is_refused() {
             )],
             skip: Vec::new(),
             identity: None,
-            digests: None,
+            digests: seen(),
         };
         refused(&dir, request);
         assert!(dir.join(from).is_file(), "{from}");
@@ -1403,9 +1399,9 @@ fn a_schema_path_is_saved_normalized() {
         }],
         skip: Vec::new(),
         identity: None,
-        digests: None,
+        digests: seen(),
     };
-    api::save_project(&config_path, request).unwrap();
+    save_project(&config_path, request).unwrap();
     let text = std::fs::read_to_string(&config_path).unwrap();
     assert!(text.contains("schema = \"people.schema.yml\""), "{text}");
     let reopened = api::load_project(&config_path).unwrap();
@@ -1465,6 +1461,7 @@ fn a_diff_pairs_by_the_ids_it_is_sent_and_reports_dropped_comments() {
             "schema": after,
         });
         let mut body = serde_json::json!({
+            "digests": seen(),
             "config": config,
             "ops": [],
             "identity": { "before": ["users", "products", "orders"], "after": [0, 1] },
@@ -1479,7 +1476,7 @@ fn a_diff_pairs_by_the_ids_it_is_sent_and_reports_dropped_comments() {
         serde_json::from_value(body).unwrap()
     };
 
-    let diffs = api::diff_project(&config_path, request(true)).unwrap();
+    let diffs = diff_project(&config_path, request(true)).unwrap();
     let toml = serde_json::to_value(&diffs[0]).unwrap();
     assert!(toml.get("dropped").is_none(), "{toml}");
     let next = toml["next"].as_str().unwrap();
@@ -1500,7 +1497,7 @@ fn a_diff_pairs_by_the_ids_it_is_sent_and_reports_dropped_comments() {
     // Without ids the renamed count is a new field, and either removed field
     // may be the one it was: their comments (4 on `orders`, 1 on the count)
     // are dropped, and the review says so.
-    let diffs = api::diff_project(&config_path, request(false)).unwrap();
+    let diffs = diff_project(&config_path, request(false)).unwrap();
     let yaml = serde_json::to_value(&diffs[1]).unwrap();
     assert_eq!(yaml["dropped"], 5, "{yaml}");
     assert!(!yaml["next"].as_str().unwrap().contains("# Aggregates over"));
@@ -1568,13 +1565,13 @@ fn the_config_and_its_linked_files_can_be_left_out_of_a_save() {
             ops: vec![linked.clone(), edit.clone()],
             skip,
             identity: identity.clone(),
-            digests: None,
+            digests: seen(),
         };
-        let diffs = api::diff_project(&config_path, request(Vec::new())).unwrap();
+        let diffs = diff_project(&config_path, request(Vec::new())).unwrap();
         let linked_path = diffs.get(1).unwrap();
         assert!(linked_path.needs_config);
         let skip = vec![config_shown(&dir), linked_path.path.clone()];
-        let saved = api::save_project(&config_path, request(skip)).unwrap();
+        let saved = save_project(&config_path, request(skip)).unwrap();
         assert_eq!(saved.written.len(), 1, "{:?}", saved.written);
         let mut expected = before.clone();
         expected.insert("orders.schema.yml".into(), "orders: edited\n".into());
@@ -1618,7 +1615,7 @@ fn which_index_an_op_is_comes_from_the_config_identity() {
         ops: vec![upsert()],
         skip: vec![config_shown(&dir)],
         identity: users_is_orders.clone(),
-        digests: None,
+        digests: seen(),
     });
     // The config written without the op: `orders.schema.yml` holds the old
     // `orders`, which is not the new `orders`.
@@ -1627,7 +1624,7 @@ fn which_index_an_op_is_comes_from_the_config_identity() {
         ops: Vec::new(),
         skip: Vec::new(),
         identity: users_is_orders.clone(),
-        digests: None,
+        digests: seen(),
     });
     // A move must start at the index's own file on disk.
     refused(&dir, || SaveRequest {
@@ -1641,10 +1638,11 @@ fn which_index_an_op_is_comes_from_the_config_identity() {
         )],
         skip: Vec::new(),
         identity: users_is_orders.clone(),
-        digests: None,
+        digests: seen(),
     });
     // The request's own `was` is not read.
     let forged = serde_json::json!({
+        "digests": seen(),
         "config": config_without(&project.config, "products"),
         "ops": [{
             "kind": "move", "index": "users", "was": "products",
@@ -1668,7 +1666,7 @@ fn a_config_cannot_repoint_an_index_at_another_index_s_file() {
         ops: Vec::new(),
         skip: Vec::new(),
         identity: None,
-        digests: None,
+        digests: seen(),
     });
     refused(&dir, || SaveRequest {
         config: config_with(&project.config, &[("users", "orders.schema.yml")]),
@@ -1681,12 +1679,12 @@ fn a_config_cannot_repoint_an_index_at_another_index_s_file() {
         )],
         skip: Vec::new(),
         identity: None,
-        digests: None,
+        digests: seen(),
     });
 
     // Two indexes already sharing a file keep it without writing it.
     let shared = config_with(&project.config, &[("copy", "users.schema.yml")]);
-    api::save_project(
+    save_project(
         &config_path,
         SaveRequest {
             config: shared.clone(),
@@ -1696,20 +1694,20 @@ fn a_config_cannot_repoint_an_index_at_another_index_s_file() {
             ],
             skip: Vec::new(),
             identity: None,
-            digests: None,
+            digests: seen(),
         },
     )
     .unwrap();
     let mut toggled = serde_json::to_value(&shared).unwrap();
     toggled["index"][3]["enabled"] = false.into();
-    api::save_project(
+    save_project(
         &config_path,
         SaveRequest {
             config: serde_json::from_value(toggled).unwrap(),
             ops: Vec::new(),
             skip: Vec::new(),
             identity: None,
-            digests: None,
+            digests: seen(),
         },
     )
     .unwrap();
@@ -1748,9 +1746,9 @@ fn a_skip_path_through_a_symlink_is_skipped() {
         )],
         skip: skip.clone(),
         identity: identity(&project.config, &[Some(0), Some(1), Some(2)]),
-        digests: None,
+        digests: seen(),
     });
-    api::save_project(
+    save_project(
         &config_path,
         SaveRequest {
             config: people.clone(),
@@ -1763,7 +1761,7 @@ fn a_skip_path_through_a_symlink_is_skipped() {
             )],
             skip,
             identity: identity(&project.config, &[Some(0), Some(1), Some(2)]),
-            digests: None,
+            digests: seen(),
         },
     )
     .unwrap();
@@ -1787,10 +1785,10 @@ fn an_added_index_needs_its_schema_file() {
         ops: Vec::new(),
         skip: Vec::new(),
         identity: identity(&project.config, &[Some(0), Some(1), Some(2), None]),
-        digests: None,
+        digests: seen(),
     };
     refused(&dir, request);
-    let err = api::diff_project(&config_path, request())
+    let err = diff_project(&config_path, request())
         .unwrap_err()
         .to_string();
     assert!(
@@ -1814,13 +1812,10 @@ fn a_new_index_cannot_take_a_file_that_is_not_a_schema() {
         ops: Vec::new(),
         skip: Vec::new(),
         identity: identity(&project.config, &[Some(0), Some(1), Some(2), None]),
-        digests: None,
+        digests: seen(),
     };
     refused(&dir, request);
-    let err = format!(
-        "{:#}",
-        api::diff_project(&config_path, request()).unwrap_err()
-    );
+    let err = format!("{:#}", diff_project(&config_path, request()).unwrap_err());
     assert!(err.contains("does not read as a schema"), "{err}");
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -1844,9 +1839,9 @@ fn a_new_index_over_a_removed_one_s_file_is_flagged() {
         )],
         skip: Vec::new(),
         identity: identity(&project.config, &[Some(0), Some(1), None]),
-        digests: None,
+        digests: seen(),
     };
-    let diffs = api::diff_project(&config_path, request).unwrap();
+    let diffs = diff_project(&config_path, request).unwrap();
     let written = diffs.last().unwrap();
     assert_eq!(written.warning.as_deref(), Some("overwrites"));
     assert!(written.needs_config);
@@ -1868,9 +1863,9 @@ fn a_new_index_over_a_removed_one_s_file_is_flagged() {
         }],
         skip: Vec::new(),
         identity: identity(&project.config, &[Some(0), Some(1), None]),
-        digests: None,
+        digests: seen(),
     };
-    let diffs = api::diff_project(&config_path, readd).unwrap();
+    let diffs = diff_project(&config_path, readd).unwrap();
     let written = diffs.last().unwrap();
     assert!(written.current.contains('#'));
     assert!(!written.next.contains('#'), "{}", written.next);
@@ -1886,9 +1881,9 @@ fn a_new_index_over_a_removed_one_s_file_is_flagged() {
         )],
         skip: Vec::new(),
         identity: identity(&project.config, &[Some(0), Some(1), Some(2)]),
-        digests: None,
+        digests: seen(),
     };
-    let diffs = api::diff_project(&config_path, edit).unwrap();
+    let diffs = diff_project(&config_path, edit).unwrap();
     assert_eq!(diffs.last().unwrap().warning, None);
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -1938,9 +1933,9 @@ fn a_crlf_schema_keeps_its_line_endings_and_comments() {
             }],
             skip: Vec::new(),
             identity: None,
-            digests: None,
+            digests: seen(),
         };
-        let diffs = api::diff_project(&config_path, request).unwrap();
+        let diffs = diff_project(&config_path, request).unwrap();
         let written = diffs.last().unwrap();
         assert!(written.changed, "{label}");
         assert_eq!(written.notice, None, "{label}");
@@ -1956,6 +1951,69 @@ fn a_crlf_schema_keeps_its_line_endings_and_comments() {
         );
     }
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A request's digests standing for a page that has seen the project as it
+/// is when the request is sent: filled in by [`save_project`],
+/// [`diff_project`] and [`review_project`].
+fn seen() -> api::Digests {
+    BTreeMap::from([(SEEN.to_owned(), None)])
+}
+
+const SEEN: &str = "\0seen";
+
+/// Every file under `dir` (and the files the project names), by its path
+/// relative to `dir`, with its digest; a schema file the config names that
+/// is missing as `None`.
+fn on_disk(config_path: &Path) -> api::Digests {
+    fn walk(root: &Path, dir: &Path, out: &mut api::Digests) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(root, &path, out);
+            } else if let Ok(bytes) = std::fs::read(&path) {
+                let key = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.insert(key, Some(sha256(&bytes)));
+            }
+        }
+    }
+    let dir = config_path.parent().unwrap();
+    let mut out = api::load_project(config_path)
+        .map(|p| p.digests)
+        .unwrap_or_default();
+    walk(dir, dir, &mut out);
+    out
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn filled(config_path: &Path, mut request: SaveRequest) -> SaveRequest {
+    if request.digests.contains_key(SEEN) {
+        request.digests = on_disk(config_path);
+    }
+    request
+}
+
+fn save_project(config_path: &Path, request: SaveRequest) -> anyhow::Result<api::SaveResponse> {
+    api::save_project(config_path, filled(config_path, request))
+}
+
+fn diff_project(config_path: &Path, request: SaveRequest) -> anyhow::Result<Vec<api::OpDiff>> {
+    api::diff_project(config_path, filled(config_path, request))
+}
+
+fn review_project(config_path: &Path, request: SaveRequest) -> anyhow::Result<api::Review> {
+    api::review_project(config_path, filled(config_path, request))
 }
 
 /// A page: what it loaded of the project, and the digests it holds.
@@ -1983,7 +2041,7 @@ impl Page {
             ops,
             skip,
             identity: None,
-            digests: Some(self.digests.clone()),
+            digests: self.digests.clone(),
         }
     }
 
@@ -1996,7 +2054,7 @@ impl Page {
 
     /// Save, and hold the digests the save returned, as the page does.
     fn save(&mut self, request: SaveRequest) -> anyhow::Result<api::SaveResponse> {
-        let saved = api::save_project(&self.config_path, request)?;
+        let saved = save_project(&self.config_path, request)?;
         self.digests.extend(saved.digests.clone());
         Ok(saved)
     }
@@ -2012,7 +2070,11 @@ impl Page {
             .unwrap_or_else(|| panic!("not refused as stale: {err:#}"));
         assert!(err.to_string().contains("Reload the page"), "{err}");
         assert_eq!(files(&dir), before, "a refused save wrote");
-        stale.0.iter().map(|f| (f.path.clone(), f.change)).collect()
+        stale
+            .files
+            .iter()
+            .map(|f| (f.path.clone(), f.change))
+            .collect()
     }
 }
 
@@ -2040,7 +2102,7 @@ fn a_page_cannot_save_over_a_file_another_page_saved() {
         b.refused(b.request(edit.clone(), Vec::new(), Vec::new())),
         changed("flusso.toml")
     );
-    let review = api::review_project(&b.config_path, b.request(edit, Vec::new(), Vec::new()))
+    let review = review_project(&b.config_path, b.request(edit, Vec::new(), Vec::new()))
         .unwrap()
         .diffs;
     assert_eq!(review[0].current, after_a, "the review is against the disk");
@@ -2128,15 +2190,13 @@ fn a_file_changed_on_disk_since_the_page_loaded_is_not_overwritten() {
             "{label}"
         );
 
-        let review = api::review_project(&page.config_path, request(&page))
+        let review = review_project(&page.config_path, request(&page))
             .unwrap()
             .diffs;
         let mut anyway = request(&page);
         let stale = &review[1].stale[0];
         anyway
             .digests
-            .as_mut()
-            .unwrap()
             .insert(stale.path.clone(), stale.on_disk.clone());
         page.save(anyway).unwrap();
         assert_eq!(
@@ -2226,27 +2286,18 @@ fn a_schema_save_is_refused_while_the_config_changed_under_it() {
         page.refused(page.request(page.project.config.clone(), vec![users()], skip.clone())),
         changed("flusso.toml")
     );
-    let review = api::review_project(
+    let review = review_project(
         &page.config_path,
         page.request(page.project.config.clone(), vec![users()], skip),
     )
     .unwrap()
     .diffs;
-    assert_eq!(review[0].stale[0].change, api::StaleChange::Changed);
-    assert!(review[1].stale.is_empty());
-
-    // A save that writes nothing is not refused: there is nothing to lose.
-    let unchanged = op(
-        OpKind::Upsert,
-        "users",
-        "users.schema.yml",
-        None,
-        &std::fs::read_to_string(dir.join("users.schema.yml")).unwrap(),
+    assert_eq!(
+        review.len(),
+        1,
+        "nothing planned on a config the page never saw"
     );
-    let saved = page
-        .save(page.request(page.project.config.clone(), vec![unchanged], Vec::new()))
-        .unwrap();
-    assert!(saved.written.is_empty());
+    assert_eq!(review[0].stale[0].change, api::StaleChange::Changed);
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -2362,13 +2413,197 @@ fn a_project_folder_replaced_or_deleted_refuses_the_save() {
     let stale = err.downcast_ref::<api::Stale>().expect("stale");
     assert!(
         stale
-            .0
+            .files
             .iter()
             .all(|f| f.change == api::StaleChange::Deleted)
     );
-    assert!(stale.0.iter().any(|f| f.path == "flusso.toml"));
+    assert!(stale.files.iter().any(|f| f.path == "flusso.toml"));
     assert!(!dir.exists(), "a refused save made the folder");
     std::fs::remove_dir_all(&aside).ok();
+}
+
+/// Another page renamed an index (moving its file) or swapped two indexes'
+/// files and saved: this page's diff shows flusso.toml as changed with
+/// nothing planned against it, and its save is refused naming flusso.toml,
+/// never a check failing against a config the page never saw.
+#[test]
+fn a_config_another_page_restructured_is_the_refusal_not_a_failed_check() {
+    for case in ["rename", "swap"] {
+        let dir = own_fixture(&format!("restructured-{case}"));
+        let mut a = Page::open(&dir);
+        let mut b = Page::open(&dir);
+        let request = match case {
+            "rename" => {
+                let config = config_renamed(&a.project.config, "users", "people");
+                let config = config_with(&config, &[("people", "people.schema.yml")]);
+                let mut request = a.request(
+                    config,
+                    vec![op(
+                        OpKind::Move,
+                        "people",
+                        "people.schema.yml",
+                        Some("users.schema.yml"),
+                        "people: 1\n",
+                    )],
+                    Vec::new(),
+                );
+                request.identity = identity(&a.project.config, &[Some(0), Some(1), Some(2)]);
+                request
+            }
+            _ => {
+                let config = config_with(
+                    &a.project.config,
+                    &[
+                        ("orders", "products.schema.yml"),
+                        ("products", "orders.schema.yml"),
+                    ],
+                );
+                a.request(
+                    config,
+                    vec![
+                        op(
+                            OpKind::Move,
+                            "orders",
+                            "products.schema.yml",
+                            Some("orders.schema.yml"),
+                            "orders: 1\n",
+                        ),
+                        op(
+                            OpKind::Move,
+                            "products",
+                            "orders.schema.yml",
+                            Some("products.schema.yml"),
+                            "products: 1\n",
+                        ),
+                    ],
+                    Vec::new(),
+                )
+            }
+        };
+        a.save(request).unwrap();
+
+        let edit = || {
+            b.request(
+                b.project.config.clone(),
+                vec![op(
+                    OpKind::Upsert,
+                    "products",
+                    "products.schema.yml",
+                    None,
+                    "products: b\n",
+                )],
+                Vec::new(),
+            )
+        };
+        let review = review_project(&b.config_path, edit()).unwrap().diffs;
+        assert_eq!(review.len(), 1, "{case}: {review:?}");
+        assert_eq!(review[0].stale[0].path, "flusso.toml", "{case}");
+        assert_eq!(b.refused(edit()), changed("flusso.toml"), "{case}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+/// A request without `digests`, with `null`, or with a field this designer
+/// does not know comes from a page of another version: refused with a 400
+/// that names the field and says to reload. An empty map is a request.
+#[test]
+fn a_request_from_another_designer_version_is_told_to_reload() {
+    let config = serde_json::to_value(
+        api::load_project(&fixture().join("flusso.toml"))
+            .unwrap()
+            .config,
+    )
+    .unwrap();
+    for (label, body) in [
+        ("missing", serde_json::json!({ "config": config })),
+        (
+            "null",
+            serde_json::json!({ "config": config, "digests": null }),
+        ),
+        (
+            "unknown",
+            serde_json::json!({ "config": config, "digests": {}, "loaded_at_ms": 1 }),
+        ),
+    ] {
+        let bad = api::read_save_request(body.to_string().as_bytes()).unwrap_err();
+        assert!(bad.reload, "{label}");
+        assert!(
+            bad.message.contains("reload this page"),
+            "{label}: {}",
+            bad.message
+        );
+        let field = if label == "unknown" {
+            "loaded_at_ms"
+        } else {
+            "digests"
+        };
+        assert!(bad.message.contains(field), "{label}: {}", bad.message);
+    }
+    let empty = serde_json::json!({ "config": config, "digests": {} });
+    assert!(
+        api::read_save_request(empty.to_string().as_bytes())
+            .unwrap()
+            .digests
+            .is_empty()
+    );
+}
+
+/// The refusal says why flusso.toml matters when the save leaves it out,
+/// and names a file beside the project as the config does.
+#[test]
+fn a_refusal_names_files_as_the_config_does_and_says_why() {
+    let dir = own_fixture("wording");
+    let shared = dir.with_extension("shared");
+    std::fs::create_dir_all(&shared).unwrap();
+    let outside = format!(
+        "../{}/x.schema.yml",
+        shared.file_name().unwrap().to_string_lossy()
+    );
+    std::fs::write(shared.join("x.schema.yml"), "users: 0\n").unwrap();
+    let config_path = dir.join("flusso.toml");
+    let text = std::fs::read_to_string(&config_path).unwrap();
+    std::fs::write(
+        &config_path,
+        text.replace(
+            "schema = \"users.schema.yml\"",
+            &format!("schema = \"{outside}\""),
+        ),
+    )
+    .unwrap();
+
+    let mut page = Page::open(&dir);
+    assert!(
+        page.digests.contains_key(&outside),
+        "{:?}",
+        page.digests.keys()
+    );
+    std::fs::write(shared.join("x.schema.yml"), "users: theirs\n").unwrap();
+    let users = op(OpKind::Upsert, "users", &outside, None, "users: 1\n");
+    let request = page.request(page.project.config.clone(), vec![users], Vec::new());
+    assert_eq!(page.refused(request), changed(&outside));
+
+    std::fs::write(
+        &config_path,
+        format!(
+            "{}\n# theirs\n",
+            std::fs::read_to_string(&config_path).unwrap()
+        ),
+    )
+    .unwrap();
+    let request = page.request(
+        page.project.config.clone(),
+        Vec::new(),
+        vec!["flusso.toml".to_owned()],
+    );
+    let err = page.save(request).unwrap_err();
+    let text = err.to_string();
+    assert!(
+        text.contains("Every save is checked against flusso.toml"),
+        "{text}"
+    );
+    assert!(!text.contains("overwrite"), "{text}");
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&shared).ok();
 }
 
 /// Keep the designer's save records in the build's temp folder, never in the

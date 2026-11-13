@@ -36,7 +36,7 @@ import type {
   SchemaIdentity,
   ValidateResponse,
 } from "./api";
-import { api, type Digests, RecoveryError, type SaveRecovery, StaleError, type StaleFile } from "./api";
+import { api, type Digests, RecoveryError, ReloadError, type SaveRecovery, StaleError, type StaleFile } from "./api";
 import { RecoveryBlocked, RecoveryNotice } from "./components/Recovery";
 import { Canvas } from "./components/Canvas";
 import { CatalogBrowser } from "./components/CatalogBrowser";
@@ -836,6 +836,10 @@ export default function App() {
   // designer is saving, or one it can't settle (show the files instead of the
   // project).
   const refusedOverRecovery = (e: unknown): boolean => {
+    if (e instanceof ReloadError) {
+      setToast({ kind: "error", text: t("stale.reloadPage") });
+      return true;
+    }
     if (!(e instanceof RecoveryError)) return false;
     if (e.recovery.blocked?.busy) {
       setToast({ kind: "error", text: t("recovery.busy") });
@@ -897,7 +901,9 @@ export default function App() {
       const result = review.diffs;
       const shown =
         isConfigDirty(current) || !result[0] ? result : [{ ...result[0], changed: false }, ...result.slice(1)];
-      if (shown.some((d) => d.changed)) setDiffs(shown);
+      // A stale flusso.toml is shown even when nothing else changed: no save
+      // goes through until the page reloads.
+      if (shown.some((d) => d.changed) || staleOf(result[0])) setDiffs(shown);
       else setToast({ kind: "ok", text: t("toast.alreadyUpToDate") });
     } catch (e) {
       if (refusedOverRecovery(e)) return;
@@ -967,7 +973,10 @@ export default function App() {
         // again, which shows it.
         setDiffs(null);
         reviewAgain = true;
-        setToast({ kind: "error", text: t("stale.refused", { files: e.files.map((f) => f.path).join(", ") }) });
+        setToast({
+          kind: "error",
+          text: t("stale.refused", { n: e.files.length, files: e.files.map((f) => f.path).join(", ") }),
+        });
         return;
       }
       setToast({ kind: "error", text: t("toast.saveFailed", { err: errText(e) }) });
@@ -1904,11 +1913,15 @@ function DiffModal({
   // flusso.toml did, nothing is, since every save is checked against it.
   const configDiff = diffs.find((d) => d.index === undefined);
   const configBlocked = !!staleOf(configDiff) && !(configDiff && overwritten.has(configDiff.path));
-  const blocked = useMemo(() => {
-    const out = new Set(changed.filter((d) => staleOf(d) && !overwritten.has(d.path)).map((d) => d.path));
+  // The files that can't be written with `over` overwritten anyway: every one
+  // while flusso.toml is stale.
+  const blockedBy = (over: ReadonlySet<string>) => {
+    if (staleOf(configDiff) && !(configDiff && over.has(configDiff.path))) return new Set(changed.map((d) => d.path));
+    const out = new Set(changed.filter((d) => staleOf(d) && !over.has(d.path)).map((d) => d.path));
     if ([...linked].some((p) => out.has(p))) for (const p of linked) out.add(p);
     return out;
-  }, [changed, linked, overwritten]);
+  };
+  const blocked = blockedBy(overwritten);
 
   // Which files to actually write (default all that can be); the user can
   // uncheck any to save a subset.
@@ -1930,9 +1943,10 @@ function DiffModal({
   const overwrite = (path: string) => {
     const next = new Set(overwritten).add(path);
     setOverwritten(next);
-    const still = new Set(changed.filter((d) => staleOf(d) && !next.has(d.path) && d.path !== path).map((d) => d.path));
-    if ([...linked].some((p) => still.has(p))) for (const p of linked) still.add(p);
-    setPaths([path], true, still);
+    const still = blockedBy(next);
+    // Overwriting flusso.toml lets every other unchanged-on-disk file be written again.
+    const freed = changed.map((d) => d.path).filter((p) => blocked.has(p) && !still.has(p));
+    setPaths([path, ...freed], true, still);
   };
   const canWrite = !saving && include.size > 0 && !configBlocked;
   // For each file overwritten anyway that is written, the digest it has on disk now.

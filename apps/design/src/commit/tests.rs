@@ -93,10 +93,11 @@ impl Project {
         }
     }
 
-    fn save(&self, shape: Shape) -> (Vec<Write>, Vec<PathBuf>) {
+    fn save(&self, shape: Shape) -> (Vec<Write>, Vec<Remove>) {
         let w = |name: &str, text: &str| Write {
             dest: self.dir.join(name),
             text: text.into(),
+            expect: Expect::AsFound,
         };
         match shape {
             Shape::Edits => (
@@ -120,7 +121,10 @@ impl Project {
                     w("new/deep/orders.schema.yml", "orders moved\n"),
                     w("flusso.toml", "config 2\n"),
                 ],
-                vec![self.dir.join("orders.schema.yml")],
+                vec![Remove {
+                    path: self.dir.join("orders.schema.yml"),
+                    expect: Expect::AsFound,
+                }],
             ),
         }
     }
@@ -1023,10 +1027,12 @@ fn a_captured_journal_replayed_in_a_sibling_or_its_own_project_changes_nothing()
             Write {
                 dest: shared.clone(),
                 text: "shared\n".into(),
+                expect: Expect::AsFound,
             },
             Write {
                 dest: a.dir.join("flusso.toml"),
                 text: "config 2\n".into(),
+                expect: Expect::AsFound,
             },
         ]
     };
@@ -1630,6 +1636,7 @@ impl Beside {
         let w = |dest: PathBuf, text: &str| Write {
             dest,
             text: text.into(),
+            expect: Expect::AsFound,
         };
         let writes = [
             w(self.0.join("shared/existing.schema.yml"), "shared 2\n"),

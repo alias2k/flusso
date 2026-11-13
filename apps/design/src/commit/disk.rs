@@ -11,6 +11,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::Path;
 
+use super::journal::Digest;
+
 /// `options` set to refuse a symbolic link at the path's last component,
 /// instead of opening (or creating) whatever it points at. It sets the
 /// custom flags, replacing any set before.
@@ -50,6 +52,11 @@ pub(crate) struct Disk {
     fail_sync_from: Option<usize>,
     /// Whether writing a private file fails once it is created.
     fail_private_write: bool,
+    /// Checks made so far ([`Disk::holds`]).
+    checks: usize,
+    /// The check (1-based) right before which the file it checks is given
+    /// these bytes (`None`: deleted), as another program would.
+    edit_at_check: Option<(usize, Option<Vec<u8>>)>,
 }
 
 impl Default for Disk {
@@ -62,6 +69,8 @@ impl Default for Disk {
             sync: true,
             fail_sync_from: None,
             fail_private_write: false,
+            checks: 0,
+            edit_at_check: None,
         }
     }
 }
@@ -110,6 +119,17 @@ impl Disk {
     pub(crate) fn failing_private_writes() -> Self {
         Self {
             fail_private_write: true,
+            ..Self::counting()
+        }
+    }
+
+    /// A disk on which another program writes `bytes` to (or, with `None`,
+    /// deletes) the file the `check`-th check ([`Disk::holds`]) looks at,
+    /// right before it looks.
+    #[cfg(test)]
+    pub(crate) fn editing_at_check(check: usize, bytes: Option<&str>) -> Self {
+        Self {
+            edit_at_check: Some((check, bytes.map(|b| b.as_bytes().to_vec()))),
             ..Self::counting()
         }
     }
@@ -228,6 +248,22 @@ impl Disk {
                 std::fs::remove_file(&temp).ok();
             })
         })
+    }
+
+    /// Whether `path` holds exactly `expected` (`None`: no file) now. Not a
+    /// step: it changes nothing. The last look before a rename replaces or
+    /// removes a file another program may have written meanwhile.
+    pub(crate) fn holds(&mut self, path: &Path, expected: Option<&Digest>) -> io::Result<bool> {
+        self.checks += 1;
+        if let Some((at, bytes)) = &self.edit_at_check
+            && *at == self.checks
+        {
+            match bytes {
+                Some(bytes) => std::fs::write(path, bytes)?,
+                None => std::fs::remove_file(path)?,
+            }
+        }
+        Ok(Digest::at(path)?.as_ref() == expected)
     }
 
     pub(crate) fn rename(&mut self, from: &Path, to: &Path) -> io::Result<()> {
