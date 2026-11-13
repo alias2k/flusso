@@ -219,6 +219,7 @@ export function GenericInput({
   onChange,
   slot,
   optionKey,
+  row,
   placeholder,
   invalid,
   emptyTo,
@@ -230,6 +231,8 @@ export function GenericInput({
   slot: ValueSlot;
   /// The option this box edits, for an `option` slot.
   optionKey?: string;
+  /// The option's row id: what a waiting value is filed under, since the key can be renamed meanwhile.
+  row?: string;
   placeholder?: string;
   invalid?: boolean;
   emptyTo?: Generic;
@@ -237,7 +240,7 @@ export function GenericInput({
   const { t } = useT();
   const field = useContext(ValueTargetContext);
   const where = slot === "constant" ? "" : slot === "default" ? ".default" : `.options.${optionKey ?? ""}`;
-  const target = { id: `${field.id}/${slot}/${optionKey ?? ""}`, label: `${field.label}${where}` };
+  const target = { id: `${field.id}/${slot}/${row ?? optionKey ?? ""}`, label: `${field.label}${where}` };
   const external = value === undefined ? "" : genericText(value);
   const [text, setText] = useState(external);
   const [problem, setProblem] = useState<ValueProblem | undefined>(undefined);

@@ -52,9 +52,9 @@ Column badges: muted `*` = required and `NOT NULL`; accent `*` = required over a
 | script | type (the leaf types a script may return), required, **Returns an array**, **Variants** on `enum`, **Auto subfields** on `text`/`keyword`/`uuid`, the **Script** editor (compile errors from the live preview listed under it and underlined in it); no source block. See [Script fields](../reference/scripts.md) |
 | every field | **Emitted** (off makes it input-only: fetched for scripts, never in the document or the mapping; see [emit](../reference/scripts.md#emit)). The canvas marks an input-only row with ⊘ and a broken script in red |
 
-The inspector follows the selected field, not its position: adding, removing or moving another field, on the canvas or in Code mode, and undo or redo leave it on the same field. When the selected field itself is removed, the selection clears.
+The inspector follows the selected field, not its position: adding, removing or moving another field, on the canvas or in Code mode, and undo or redo leave it on the same field. When the selected field itself is removed, the selection clears. Code mode tells fields apart by name: one edit there that both renames the selected field and adds or removes a field above it can clear the selection or move it to the field that took its place.
 
-An option's key is renamed while it is typed. A key that is empty or already used by another option of the field stays in the box, marked with the reason; the field keeps the option's previous key until a free one is typed, and leaving the box shows that key again.
+An option's key is renamed while it is typed. A key that is empty or already used by another option of the field stays in the box, marked with the reason; the field keeps the last free key typed, and leaving the box shows that key again. Typing `boost` while another option is called `boost` therefore leaves the option named `boos`.
 
 Two rules are steered, not forced. A `NOT NULL` column is required by default and may be relaxed. A nullable column marked required demands a default and is flagged (red default field, highlighted column) until one is set; you can still save. A type that's a sharp change from the source column (a `text` over an `integer`) raises a banner with **Fix all** / **Ignore**.
 

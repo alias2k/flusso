@@ -1123,6 +1123,7 @@ function OptionsEditor({ field, set }: { field: Field; set: (f: Field) => void }
         return (
           <OptionRow
             key={id}
+            rowId={id}
             optionKey={k}
             value={v}
             taken={(nk) => nk !== k && nk in options}
@@ -1141,6 +1142,7 @@ function OptionsEditor({ field, set }: { field: Field; set: (f: Field) => void }
 /// stays in the box, marked, and never reaches the model (it would merge two
 /// options); leaving the box shows the option's key again.
 function OptionRow({
+  rowId,
   optionKey,
   value,
   taken,
@@ -1148,6 +1150,7 @@ function OptionRow({
   onValue,
   onRemove,
 }: {
+  rowId: string;
   optionKey: string;
   value: unknown;
   taken: (key: string) => boolean;
@@ -1175,6 +1178,7 @@ function OptionRow({
         <GenericInput
           slot="option"
           optionKey={optionKey}
+          row={rowId}
           value={value}
           emptyTo={{ String: "" }}
           onChange={onValue}
