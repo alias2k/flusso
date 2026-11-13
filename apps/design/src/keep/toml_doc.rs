@@ -11,7 +11,20 @@
 //! **Sinks** are keyed by name. A renamed sink ([`SinkNames`]) is renamed in
 //! place before the patch, in `[sinks]` and in every `[index.sinks]`, so it
 //! keeps its position, its key order and its comments; a removed one goes
-//! with its own comments.
+//! with its own comments. A sink key is matched by the name the loader reads
+//! it as ([`SinkName`](kernel::common::SinkName) trims and lowercases), so
+//! `[sinks.Primary]` is patched, renamed or removed where it stands and keeps
+//! its spelling while its name does not change. A table naming one sink in
+//! two spellings is the loader's last-wins guess, so the patch gives up.
+//!
+//! **Line endings.** `toml_edit` writes every line with `\n` and drops every
+//! `\r` it holds, so while the file is patched each `\r` stands as the
+//! private-use [`CR`] character, which a file the patcher takes never holds:
+//! in comments and blank lines, at the end of each key and header line whose
+//! line ended in CRLF, and inside string values (a multi-line string keeps
+//! the CRLFs it holds and the bare `\n`s too). Every line the save writes
+//! ends the way most of the file's lines do. After the render each [`CR`]
+//! becomes `\r` again, so a line the save left alone keeps its bytes.
 //!
 //! **Who owns a comment.** `toml_edit` keeps every comment before a header in
 //! that header's prefix, so the patcher splits it the way the YAML side splits
@@ -35,7 +48,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use toml_edit::{ArrayOfTables, DocumentMut, InlineTable, Item, Key, Table, TableLike, Value};
+use toml_edit::{
+    ArrayOfTables, Document, DocumentMut, InlineTable, Item, Key, Table, TableLike, Value,
+};
 
 use super::pairing::{Pairing, SinkNames};
 use super::yaml::Patched;
@@ -52,10 +67,19 @@ pub(super) fn patch(
     indexes: Option<&Pairing>,
     sinks: &SinkNames,
 ) -> Option<Patched> {
-    if text.contains(MARK) {
+    if text.contains(MARK) || text.contains(CR) {
         return None;
     }
-    let mut doc: DocumentMut = text.parse().ok()?;
+    let eol = marked(super::dominant_ending(text));
+    let source = mark_strings(text)?;
+    let parsed = Document::parse(source.as_str()).ok()?;
+    let ends = line_ends(parsed.as_table(), &source);
+    let mut doc = parsed.into_mut();
+    mark_decor(&mut doc);
+    keep_line_ends(doc.as_table_mut(), &ends, eol)?;
+    if spells_a_sink_twice(doc.as_table()) {
+        return None;
+    }
     let mut old = old.clone();
     if !sinks.renames.is_empty() {
         rename_sinks(doc.as_table_mut(), &sinks.renames)?;
@@ -73,6 +97,7 @@ pub(super) fn patch(
         doubtful: HashMap::new(),
         doubtful_sinks: &sinks.doubtful,
         dropped: 0,
+        eol,
     };
     patcher.table(doc.as_table_mut(), None, old, new, Level::Root, indexes)?;
 
@@ -85,7 +110,7 @@ pub(super) fn patch(
     }
     doc.set_trailing(prefixes.trailing);
     Some(Patched {
-        text: format!("{header}{doc}"),
+        text: format!("{header}{doc}").replace(CR, "\r"),
         dropped: patcher.dropped,
     })
 }
@@ -202,7 +227,7 @@ struct Split {
 
 fn split(prefix: &str) -> Split {
     let lines: Vec<&str> = prefix.split_inclusive('\n').collect();
-    let blank = |l: &&str| l.trim().is_empty();
+    let blank = |l: &&str| blank(l);
     let lead_len = lines.iter().rev().take_while(|l| !blank(l)).count();
     let (rest, lead) = lines.split_at(lines.len() - lead_len);
     let below_len = rest.iter().take_while(|l| !blank(l)).count();
@@ -216,15 +241,15 @@ fn split(prefix: &str) -> Split {
 
 /// The document's trailing text split by owner: the comment lines directly
 /// below the last table are its own, the rest stays at the end.
-fn split_end(trailing: &str) -> Split {
+fn split_end(trailing: &str, eol: &str) -> Split {
     let lines: Vec<&str> = trailing.split_inclusive('\n').collect();
-    let below_len = lines.iter().take_while(|l| !l.trim().is_empty()).count();
+    let below_len = lines.iter().take_while(|l| !blank(l)).count();
     let (below, free) = lines.split_at(below_len);
     let mut below = below.concat();
     // A file with no final newline: the comment still ends its line, so the
     // table that comes after it starts on its own.
     if !below.is_empty() && !below.ends_with('\n') {
-        below.push('\n');
+        below.push_str(eol);
     }
     Split {
         below,
@@ -250,11 +275,11 @@ fn rename_sinks(root: &mut Table, renames: &HashMap<String, String>) -> Option<(
 }
 
 fn rename_keys(item: &mut Item, renames: &HashMap<String, String>) -> Option<()> {
-    let renamed = |key: Key| match renames.get(key.get()) {
-        Some(name) => Key::new(name.as_str())
+    let renamed = |key: Key| match renames.get(&sink_name(key.get())) {
+        Some(name) if *name != sink_name(key.get()) => Key::new(name.as_str())
             .with_leaf_decor(key.leaf_decor().clone())
             .with_dotted_decor(key.dotted_decor().clone()),
-        None => key,
+        _ => key,
     };
     match item {
         Item::Table(table) => {
@@ -306,13 +331,21 @@ fn rename_sinks_in_model(config: &mut toml::Table, renames: &HashMap<String, Str
 
 /// `free` appended to `pending` without doubling the blank line between them.
 fn join_free(pending: &mut String, free: &str) {
-    let mut skipping = pending.ends_with("\n\n") || pending == "\n";
+    let mut skipping = ends_blank(pending);
     for line in free.split_inclusive('\n') {
-        skipping &= line.trim().is_empty();
+        skipping &= blank(line);
         if !skipping {
             pending.push_str(line);
         }
     }
+}
+
+/// Whether `text` ends with a blank line, in either line ending.
+fn ends_blank(text: &str) -> bool {
+    ["\n", "\u{e00d}\n"].contains(&text)
+        || ["\n\n", "\n\u{e00d}\n"]
+            .iter()
+            .any(|end| text.ends_with(end))
 }
 
 fn has_comment(text: &str) -> bool {
@@ -340,6 +373,8 @@ enum Level {
     Sinks,
     /// An inline table.
     Inline,
+    /// An inline table keyed by sink name: `sinks = { primary = { … } }`.
+    InlineSinks,
     Other,
 }
 
@@ -353,6 +388,8 @@ struct Patcher<'a> {
     /// Removed sinks that may still exist under another name.
     doubtful_sinks: &'a HashSet<String>,
     dropped: usize,
+    /// The file's line ending, for every line the save writes.
+    eol: &'static str,
 }
 
 impl Patcher<'_> {
@@ -365,13 +402,22 @@ impl Patcher<'_> {
         level: Level,
         indexes: Option<&Pairing>,
     ) -> Option<()> {
-        let inline = level == Level::Inline;
+        let inline = matches!(level, Level::Inline | Level::InlineSinks);
+        let by_sink = matches!(level, Level::Sinks | Level::InlineSinks);
         let keys: Vec<String> = doc.iter().map(|(k, _)| k.to_owned()).collect();
+        let named = |key: &str| {
+            if by_sink {
+                sink_name(key)
+            } else {
+                key.to_owned()
+            }
+        };
+        let names: Vec<String> = keys.iter().map(|k| named(k)).collect();
         let mut pending = String::new();
-        for key in &keys {
-            let before = old.get(key);
-            let removed = new.get(key).is_none() && before.is_some();
-            let doubtful = removed && level == Level::Sinks && self.doubtful_sinks.contains(key);
+        for (key, name) in keys.iter().zip(&names) {
+            let before = old.get(name);
+            let removed = new.get(name).is_none() && before.is_some();
+            let doubtful = removed && by_sink && self.doubtful_sinks.contains(name);
             if doubtful {
                 let item = doc.get(key)?;
                 self.forget(item);
@@ -393,11 +439,11 @@ impl Patcher<'_> {
                     decor.set_prefix(format!("{}{prefix}", std::mem::take(&mut pending)));
                 }
             }
-            match new.get(key) {
+            match new.get(name) {
                 Some(after) if before == Some(after) => {}
                 Some(after) => {
                     let sub = doc.get_mut(key)?;
-                    let below = match (level, key.as_str()) {
+                    let below = match (level, name.as_str()) {
                         (Level::Root, "index") => Level::Index,
                         (Level::Root | Level::Index, "sinks") => Level::Sinks,
                         _ => Level::Other,
@@ -415,11 +461,17 @@ impl Patcher<'_> {
             self.tails.entry(id).or_default().push_str(&pending);
         }
         for (key, after) in new {
-            if !keys.contains(key) && old.get(key) != Some(after) {
+            if !names.contains(key) && old.get(key) != Some(after) {
                 let item = to_item(key, after)?;
                 let item = if inline {
-                    Item::Value(item.into_value().ok()?)
+                    let mut value = item.into_value().ok()?;
+                    if self.eol != "\n" {
+                        single_line(&mut value)?;
+                    }
+                    Item::Value(value)
                 } else {
+                    let mut item = item;
+                    use_ending(&mut item, self.eol)?;
                     item
                 };
                 doc.insert(key, item);
@@ -481,12 +533,20 @@ impl Patcher<'_> {
                 Item::Value(Value::InlineTable(table)),
                 Some(toml::Value::Table(was)),
                 toml::Value::Table(is),
-            ) => self.table(table, None, was, is, Level::Inline, None),
+            ) => {
+                let level = if level == Level::Sinks {
+                    Level::InlineSinks
+                } else {
+                    Level::Inline
+                };
+                self.table(table, None, was, is, level, None)
+            }
             (Item::ArrayOfTables(array), Some(toml::Value::Array(was)), toml::Value::Array(is)) => {
                 self.array(array, key, was, is, indexes)
             }
             (item, _, after) => {
                 let mut next = to_item(key, after)?;
+                use_ending(&mut next, self.eol)?;
                 match (&*item, &mut next) {
                     (Item::Value(was), _) => {
                         self.dropped += inner_comments(was);
@@ -558,10 +618,14 @@ impl Patcher<'_> {
                     }
                     table
                 }
-                None => match to_item(key, &toml::Value::Array(vec![is.clone()]))? {
-                    Item::ArrayOfTables(fresh) => fresh.get(0)?.clone(),
-                    _ => return None,
-                },
+                None => {
+                    let mut fresh = to_item(key, &toml::Value::Array(vec![is.clone()]))?;
+                    use_ending(&mut fresh, self.eol)?;
+                    match fresh {
+                        Item::ArrayOfTables(fresh) => fresh.get(0)?.clone(),
+                        _ => return None,
+                    }
+                }
             };
             tables.push(table);
         }
@@ -593,7 +657,7 @@ impl Patcher<'_> {
             parts.insert(id, split(stash.get(id)?.as_deref().unwrap_or("")));
         }
         let end_trailing = trailing;
-        let end = split_end(trailing);
+        let end = split_end(trailing, self.eol);
         let end_free = end.free;
         // What follows a table's last key and is its own.
         let mut own_trailing: HashMap<Option<usize>, String> = HashMap::new();
@@ -654,14 +718,14 @@ impl Patcher<'_> {
                 }
                 None => {
                     let leading = prev.is_some() || !prefix.is_empty();
-                    if leading && !prefix.ends_with("\n\n") {
-                        prefix.push('\n');
+                    if leading && !ends_blank(&prefix) {
+                        prefix.push_str(self.eol);
                     }
                 }
             }
             // Keys above the first table, with nothing between: a blank line.
             if prev.is_none() && root_values && prefix.is_empty() {
-                prefix.push('\n');
+                prefix.push_str(self.eol);
             }
             headers.push((id, prefix));
             prev = Some(id);
@@ -670,8 +734,9 @@ impl Patcher<'_> {
         trailing.push_str(&pending);
         trailing.push_str(&end_free);
         let unterminated = !end_trailing.is_empty() && !end_trailing.ends_with('\n');
-        if unterminated && trailing.ends_with('\n') {
-            trailing.pop();
+        if unterminated && let Some(cut) = trailing.strip_suffix('\n') {
+            let cut = cut.strip_suffix(CR).unwrap_or(cut).len();
+            trailing.truncate(cut);
         }
         Some(Prefixes { headers, trailing })
     }
@@ -760,4 +825,364 @@ fn unplace(table: &mut Table) {
             _ => {}
         }
     }
+}
+/// Stands for a `\r` while the file is in `toml_edit`'s hands: its encoder
+/// writes every raw string without its `\r`s, a CRLF line ending, a CRLF in
+/// a comment block and one inside a multi-line string alike. A private-use
+/// character no file is allowed to hold (see [`patch`]), so turning each one
+/// back into `\r` after the render restores exactly the `\r`s the file had
+/// and the ones the save chose.
+const CR: char = '\u{e00d}';
+
+/// The end of a line in `eol`, with its `\r` as [`CR`].
+fn marked(eol: &str) -> &'static str {
+    if eol == "\r\n" { "\u{e00d}\n" } else { "\n" }
+}
+
+/// Whether `line` holds nothing but whitespace.
+fn blank(line: &str) -> bool {
+    line.chars().all(|c| c.is_whitespace() || c == CR)
+}
+
+/// `text` with the `\r` inside every string value as [`CR`], so it outlives
+/// the render: a multi-line string keeps the CRLF it holds on purpose, and a
+/// bare `\n` it holds stays bare. `None` when `text` does not parse.
+fn mark_strings(text: &str) -> Option<String> {
+    fn walk(value: &Value, out: &mut Vec<std::ops::Range<usize>>) {
+        match value {
+            Value::String(_) => out.extend(value.span()),
+            Value::Array(array) => array.iter().for_each(|v| walk(v, out)),
+            Value::InlineTable(table) => table.iter().for_each(|(_, v)| walk(v, out)),
+            _ => {}
+        }
+    }
+    fn strings(table: &Table, out: &mut Vec<std::ops::Range<usize>>) {
+        for (_, item) in table.iter() {
+            match item {
+                Item::Value(value) => walk(value, out),
+                Item::Table(table) => strings(table, out),
+                Item::ArrayOfTables(array) => array.iter().for_each(|t| strings(t, out)),
+                Item::None => {}
+            }
+        }
+    }
+    if !text.contains('\r') {
+        return Some(text.to_owned());
+    }
+    let parsed = Document::parse(text).ok()?;
+    let mut spans = Vec::new();
+    strings(parsed.as_table(), &mut spans);
+    spans.sort_by_key(|s| s.start);
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for span in spans {
+        out.push_str(text.get(at..span.start)?);
+        out.push_str(&text.get(span.clone())?.replace('\r', &CR.to_string()));
+        at = span.end;
+    }
+    out.push_str(text.get(at..)?);
+    Some(out)
+}
+
+/// Every `\r` in the document's whitespace and comments as [`CR`].
+fn mark_decor(doc: &mut DocumentMut) {
+    fn raw(raw: Option<&toml_edit::RawString>) -> Option<String> {
+        raw.and_then(|r| r.as_str())
+            .filter(|s| s.contains('\r'))
+            .map(|s| s.replace('\r', &CR.to_string()))
+    }
+    fn decor(decor: &mut toml_edit::Decor) {
+        if let Some(prefix) = raw(decor.prefix()) {
+            decor.set_prefix(prefix);
+        }
+        if let Some(suffix) = raw(decor.suffix()) {
+            decor.set_suffix(suffix);
+        }
+    }
+    fn in_value(value: &mut Value) {
+        decor(value.decor_mut());
+        match value {
+            Value::Array(array) => {
+                array.iter_mut().for_each(in_value);
+                if let Some(trailing) = raw(Some(array.trailing())) {
+                    array.set_trailing(trailing);
+                }
+            }
+            Value::InlineTable(table) => {
+                for (mut key, item) in table.iter_mut() {
+                    decor(key.leaf_decor_mut());
+                    decor(key.dotted_decor_mut());
+                    in_value(item);
+                }
+                if let Some(trailing) = raw(Some(table.trailing())) {
+                    table.set_trailing(trailing);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn in_table(table: &mut Table) {
+        decor(table.decor_mut());
+        for (mut key, item) in table.iter_mut() {
+            decor(key.leaf_decor_mut());
+            decor(key.dotted_decor_mut());
+            match item {
+                Item::Value(value) => in_value(value),
+                Item::Table(table) => in_table(table),
+                Item::ArrayOfTables(array) => array.iter_mut().for_each(in_table),
+                Item::None => {}
+            }
+        }
+    }
+    in_table(doc.as_table_mut());
+    if let Some(trailing) = raw(Some(doc.trailing())) {
+        doc.set_trailing(trailing);
+    }
+}
+
+/// One place `toml_edit` ends a line itself: a table's header or a key's
+/// value. It drops the line ending the source had there and renders `\n`.
+enum Site<'a> {
+    Header(&'a Table),
+    Value(&'a Value),
+}
+
+enum SiteMut<'a> {
+    Header(&'a mut Table),
+    Value(&'a mut Value),
+}
+
+/// Whether `table` has a header line of its own (the test `for_each_header`
+/// makes, minus dotted keys, which have none).
+fn has_header(table: &Table) -> bool {
+    !table.is_implicit() && !table.is_dotted()
+}
+
+fn sites<'a>(table: &'a Table, header: bool, out: &mut Vec<Site<'a>>) {
+    if header {
+        out.push(Site::Header(table));
+    }
+    for (_, item) in table.iter() {
+        match item {
+            Item::Value(value) => out.push(Site::Value(value)),
+            Item::Table(table) => sites(table, has_header(table), out),
+            Item::ArrayOfTables(array) => array.iter().for_each(|t| sites(t, true, out)),
+            Item::None => {}
+        }
+    }
+}
+
+fn sites_mut(table: &mut Table, header: bool, f: &mut dyn FnMut(SiteMut<'_>)) {
+    if header {
+        f(SiteMut::Header(table));
+    }
+    for (_, item) in table.iter_mut() {
+        match item {
+            Item::Value(value) => f(SiteMut::Value(value)),
+            Item::Table(table) => {
+                let header = has_header(table);
+                sites_mut(table, header, f);
+            }
+            Item::ArrayOfTables(array) => array.iter_mut().for_each(|t| sites_mut(t, true, f)),
+            Item::None => {}
+        }
+    }
+}
+
+/// For every [`Site`] of the parsed `root`, in order, whether its line ends
+/// with CRLF in `source` (`None`: the file ends there, or no span says).
+fn line_ends(root: &Table, source: &str) -> Vec<Option<bool>> {
+    let mut found = Vec::new();
+    sites(root, false, &mut found);
+    found
+        .iter()
+        .map(|site| {
+            let (decor, span) = match site {
+                Site::Header(table) => (table.decor(), table.span()),
+                Site::Value(value) => (value.decor(), value.span()),
+            };
+            let end = decor
+                .suffix()
+                .and_then(|s| s.span())
+                .filter(|s| !s.is_empty())
+                .or(span)?
+                .end;
+            let rest = source.get(end..)?;
+            if rest.starts_with("\r\n") {
+                Some(true)
+            } else if rest.starts_with('\n') {
+                Some(false)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Put back the line endings `ends` recorded: a CRLF line gets its `\r` (as
+/// [`CR`]) at the end of its suffix, so `toml_edit`'s own `\n` completes it.
+/// A line with no ending in the source (the last one) takes `eol`.
+fn keep_line_ends(root: &mut Table, ends: &[Option<bool>], eol: &str) -> Option<()> {
+    let mut at = 0;
+    sites_mut(root, false, &mut |site| {
+        let crlf = ends.get(at).copied().flatten().unwrap_or(eol != "\n");
+        at += 1;
+        if crlf {
+            end_with_cr(site);
+        }
+    });
+    (at == ends.len()).then_some(())
+}
+
+fn end_with_cr(site: SiteMut<'_>) {
+    let decor = match site {
+        SiteMut::Header(table) => table.decor_mut(),
+        SiteMut::Value(value) => value.decor_mut(),
+    };
+    let suffix = decor.suffix().and_then(|s| s.as_str()).unwrap_or("");
+    let suffix = format!("{suffix}{CR}");
+    decor.set_suffix(suffix);
+}
+
+/// `item`, freshly rendered, with every line it writes ending in `eol` (a
+/// [`marked`] ending): its lines' own endings, the blank lines in its decor,
+/// and no line break left inside a value (a multi-line string is written as
+/// one escaped line).
+fn use_ending(item: &mut Item, eol: &str) -> Option<()> {
+    if eol == "\n" {
+        return Some(());
+    }
+    match item {
+        Item::Value(value) => {
+            single_line(value)?;
+            end_with_cr(SiteMut::Value(value));
+        }
+        Item::Table(table) => table_ending(table, has_header(table), eol)?,
+        Item::ArrayOfTables(array) => {
+            for table in array.iter_mut() {
+                table_ending(table, true, eol)?;
+            }
+        }
+        Item::None => {}
+    }
+    Some(())
+}
+
+fn table_ending(table: &mut Table, header: bool, eol: &str) -> Option<()> {
+    let decor = table.decor_mut();
+    if let Some(prefix) = decor.prefix().and_then(|p| p.as_str()) {
+        let prefix = prefix.replace('\n', eol);
+        decor.set_prefix(prefix);
+    }
+    if header {
+        end_with_cr(SiteMut::Header(table));
+    }
+    let keys: Vec<String> = table.iter().map(|(k, _)| k.to_owned()).collect();
+    for key in keys {
+        if let Some(mut key) = table.key_mut(&key) {
+            let decor = key.leaf_decor_mut();
+            if let Some(prefix) = decor.prefix().and_then(|p| p.as_str()) {
+                let prefix = prefix.replace('\n', eol);
+                decor.set_prefix(prefix);
+            }
+        }
+        use_ending(table.get_mut(&key)?, eol)?;
+    }
+    Some(())
+}
+
+/// `value` written on one line: a string holding a line break becomes an
+/// escaped basic string, an array or inline table loses the breaks between
+/// its items.
+fn single_line(value: &mut Value) -> Option<()> {
+    match value {
+        Value::String(text) if text.display_repr().contains('\n') => {
+            let decor = text.decor().clone();
+            let escaped = serde_json::to_string(text.value()).ok()?;
+            let mut line: Value = escaped.parse().ok()?;
+            *line.decor_mut() = decor;
+            *value = line;
+        }
+        Value::Array(array) => {
+            for item in array.iter_mut() {
+                flatten_decor(item.decor_mut());
+                single_line(item)?;
+            }
+            array.set_trailing("");
+        }
+        Value::InlineTable(table) => {
+            for (_, item) in table.iter_mut() {
+                flatten_decor(item.decor_mut());
+                single_line(item)?;
+            }
+        }
+        _ => {}
+    }
+    Some(())
+}
+
+/// A fresh value's decor holds only whitespace: a line break in it becomes a
+/// space.
+fn flatten_decor(decor: &mut toml_edit::Decor) {
+    let flat = |raw: Option<&toml_edit::RawString>| {
+        raw.and_then(|r| r.as_str())
+            .filter(|s| s.contains('\n'))
+            .map(|s| s.replace('\n', " "))
+    };
+    if let Some(prefix) = flat(decor.prefix()) {
+        decor.set_prefix(prefix);
+    }
+    if let Some(suffix) = flat(decor.suffix()) {
+        decor.set_suffix(suffix);
+    }
+}
+
+/// `canonical`, the designer's own form of a config, with every line ending
+/// in `eol`; `None` when it cannot be (it then stays LF).
+pub(super) fn with_ending(canonical: &str, eol: &str) -> Option<String> {
+    if eol == "\n" || canonical.contains(CR) {
+        return None;
+    }
+    let eol = marked(eol);
+    let mut doc: DocumentMut = canonical.parse().ok()?;
+    let root = doc.as_table_mut();
+    let keys: Vec<String> = root.iter().map(|(k, _)| k.to_owned()).collect();
+    for key in keys {
+        if let Some(mut key) = root.key_mut(&key) {
+            let decor = key.leaf_decor_mut();
+            if let Some(prefix) = decor.prefix().and_then(|p| p.as_str()) {
+                let prefix = prefix.replace('\n', eol);
+                decor.set_prefix(prefix);
+            }
+        }
+        use_ending(root.get_mut(&key)?, eol)?;
+    }
+    let trailing = doc.trailing().as_str()?.replace('\n', eol);
+    doc.set_trailing(trailing);
+    Some(doc.to_string().replace(CR, "\r"))
+}
+
+/// Whether a `[sinks]` or `[index.sinks]` table names one sink twice, in two
+/// spellings the loader reads as the same name (`Primary` and `primary`).
+/// Which one the file means is the loader's guess, not the save's.
+fn spells_a_sink_twice(root: &Table) -> bool {
+    let twice = |item: Option<&Item>| {
+        let Some(table) = item.and_then(Item::as_table_like) else {
+            return false;
+        };
+        let mut seen = HashSet::new();
+        table.iter().any(|(key, _)| !seen.insert(sink_name(key)))
+    };
+    let entries = root
+        .get("index")
+        .and_then(Item::as_array_of_tables)
+        .into_iter()
+        .flat_map(ArrayOfTables::iter);
+    twice(root.get("sinks")) || entries.into_iter().any(|entry| twice(entry.get("sinks")))
+}
+
+/// The name the loader reads a sink key as: trimmed and lowercased by
+/// [`SinkName`](kernel::common::SinkName). A key it refuses stays as written.
+fn sink_name(key: &str) -> String {
+    kernel::common::SinkName::try_new(key).map_or_else(|_| key.to_owned(), |name| name.to_string())
 }

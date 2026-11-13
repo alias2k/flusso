@@ -144,6 +144,8 @@ A save writes the edit into the file as it stands (in Code mode, into the YAML y
 
 - **Untouched parts stay byte for byte**: comments, blank lines, key order, quoting, flow lists (`[lowercase, trim]`), and settings written out at their default (`required: false`). A setting the file leaves out stays out, unless the field's type changes.
 - **What changed is written the way a new file is.** A changed value is rewritten on its own lines, keeping the comment at the end of its first line and the comments after it. An added field or setting is written after the one before it, without comments.
+- **Line endings stay.** A file with CRLF (Windows) line endings stays CRLF on every line, including the lines a save adds or rewrites, and so does a file the designer has to write in its own form. In a file with mixed endings, every line a save writes ends the way most of the file's lines do; a `flusso.toml` keeps each line it leaves alone as it was, while a `*.schema.yml` is written in that one ending throughout. A multi-line string in `flusso.toml` keeps the line breaks it holds.
+- **Names are matched the way flusso reads them.** `[sinks.Primary]` is the sink `primary`: editing, renaming or removing it changes that table where it stands, and it keeps its spelling while it keeps its name. The same goes for its `[index.sinks.<name>]` tables and an `[[index]]` entry's `name`. A file that spells one sink twice (`[sinks.Primary]` and `[sinks.primary]`) means whichever comes last, so the save writes it in the designer's own form, with the notice below.
 
 #### Which comment belongs to what
 
@@ -169,7 +171,6 @@ A field moved into another list (a different join or object, which only Code mod
 
 - **Comments that could not be kept.** A comment inside a value that had to be rewritten (a flow list `[…]` with a comment in it, an item the save can't follow line by line), on a field moved into another list, or on a field, entry or sink matched by name that may have been renamed, is dropped. Matched by name, a removed one and a renamed one look the same, so both count. The review marks the file and says above its diff how many comments it loses.
 - **A file written in the designer's own form.** A file whose layout the save can't follow (a top level written as a flow mapping `{…}`, for instance), or whose result wouldn't read back as exactly the schema being saved, is written in the designer's own form instead, without its comments. The review marks it and says so above its diff.
-- **Windows line endings.** A `flusso.toml` saved with CRLF line endings is written back with LF, comments kept. A CRLF `*.schema.yml` keeps its line endings and comments through a value edit and a field rename.
 
 Both show before anything is written. A file the designer creates is written in its own form.
 

@@ -60,7 +60,7 @@ pub(super) fn patch(
     let (Value::Mapping(old), Value::Mapping(new)) = (old, new) else {
         return None;
     };
-    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let eol = super::dominant_ending(text);
     let mut lines: Vec<String> = text
         .split('\n')
         .map(|l| l.strip_suffix('\r').unwrap_or(l).to_owned())
