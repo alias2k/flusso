@@ -412,6 +412,7 @@ fn array_shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span
                     // crate (`clippy::assertions_on_constants`).
                     assert!(
                         !(::flusso_query::exists(level, #key)
+                            && !::flusso_query::is_json(level, #key)
                             && ::flusso_query::OpaqueProbe::<#element>::READS_ARRAY),
                         #nested_msg
                     );
@@ -722,10 +723,17 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
             render(element)
         ),
     );
+    // A `json` array holds any element, as on a root.
+    let json_array = quote! {
+        (::flusso_query::is_json(level, #key) && ::flusso_query::array(level, #key))
+    };
     match primitive_kinds(element) {
         // A known leaf type — its acceptable kinds are baked right here.
         Some(tags) => checks.extend(quote_spanned! {span=>
-            assert!(::flusso_query::kind_is(level, #key, &[#(#tags),*]), #kind_msg);
+            assert!(
+                ::flusso_query::kind_is(level, #key, &[#(#tags),*]) || #json_array,
+                #kind_msg
+            );
         }),
         // Any other type is treated uniformly: kinds + variants from its
         // metadata, then recurse. A value type's check is a no-op.
@@ -804,7 +812,7 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
                     ::flusso_query::kind_is(
                         level, #key,
                         <#element as ::flusso_query::FlussoValueMeta>::KINDS,
-                    ),
+                    ) || #json_array,
                     #kind_msg
                 );
                 // A map wrapper carries its value kind, so check that too —

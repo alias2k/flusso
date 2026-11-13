@@ -1,9 +1,9 @@
 use flusso_query::{FlussoFragment, FlussoRoot, FlussoValue, Sortable};
 
 // Array columns (issue #276): a `Vec` of the element, an `Option` of one, and
-// a `FlussoValue` newtype over a `Vec` (or over such a newtype), on a root and
-// in a fragment; a `json` array as a `Vec` of anything. Filters take the
-// element.
+// a `FlussoValue` newtype over a `Vec` (or over such a newtype), on a root, in
+// a fragment and flattened; a `json` array as a `Vec` of any value, an array
+// newtype, or a `Vec` of them, the same on both sides. Filters take the element.
 
 #[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
 #[flusso(keyword)]
@@ -94,6 +94,72 @@ struct LineWithForwarded {
 struct OrderWithForwardedNotes {
     id: String,
     notes: Option<Forwarded>,
+}
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct JsonStrings {
+    labels: Forwarded,
+    notes: Option<Vec<String>>,
+}
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct JsonNumbers {
+    notes: Option<Vec<i32>>,
+}
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct JsonEnums {
+    notes: Option<Vec<Tag>>,
+}
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct JsonNewtype {
+    notes: Option<Codes>,
+}
+
+#[derive(serde::Deserialize, FlussoFragment)]
+struct JsonArrays {
+    notes: Option<Vec<Codes>>,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "lists")]
+struct FlatStrings {
+    id: String,
+    #[serde(flatten)]
+    flat: JsonStrings,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "lists")]
+struct FlatNumbers {
+    id: String,
+    #[serde(flatten)]
+    flat: JsonNumbers,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "lists")]
+struct FlatEnums {
+    id: String,
+    #[serde(flatten)]
+    flat: JsonEnums,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "lists")]
+struct FlatNewtype {
+    id: String,
+    #[serde(flatten)]
+    flat: JsonNewtype,
+}
+
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "lists")]
+struct FlatArrays {
+    id: String,
+    #[serde(flatten)]
+    flat: JsonArrays,
 }
 
 fn main() {
