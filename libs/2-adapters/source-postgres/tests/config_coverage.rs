@@ -718,10 +718,14 @@ async fn array_columns_clean_up_their_value_and_are_checked_against_the_catalog(
     let (_pg, url) = start_seeded().await;
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
     for statement in [
+        "CREATE DOMAIN tag_list AS text[]",
+        "CREATE DOMAIN tag_doc AS jsonb",
         "ALTER TABLE users ADD COLUMN labels text[], ADD COLUMN prefs jsonb, \
-         ADD COLUMN notes jsonb, ADD COLUMN codes int[]",
+         ADD COLUMN notes jsonb, ADD COLUMN codes int[], ADD COLUMN dom_tags tag_list, \
+         ADD COLUMN dom_prefs tag_doc, ADD COLUMN dom_plain tag_list",
         "UPDATE users SET labels = ARRAY[' Red ', NULL, 'Blue'], prefs = '[\"X\", null]', \
-         notes = '[{\"a\": 1}, null]', codes = '{1,2}' WHERE id = 1",
+         notes = '[{\"a\": 1}, null]', codes = '{1,2}', dom_tags = ARRAY[' Up ', NULL], \
+         dom_prefs = '[\"Q\"]', dom_plain = ARRAY['p'] WHERE id = 1",
         "UPDATE users SET prefs = '\"Solo\"' WHERE id = 2",
         "UPDATE users SET labels = '{}', prefs = '[{\"bad\": 1}]' WHERE id = 3",
     ] {
@@ -762,6 +766,19 @@ async fn array_columns_clean_up_their_value_and_are_checked_against_the_catalog(
                 }),
                 ..base("nick")
             },
+            array_col(
+                "dom_tags",
+                FlussoType::Keyword,
+                vec![Transform::Trim, Transform::Lowercase],
+                None,
+            ),
+            array_col(
+                "dom_prefs",
+                FlussoType::Keyword,
+                vec![Transform::Lowercase],
+                None,
+            ),
+            col("dom_plain", "dom_plain"),
         ],
         None,
     );
@@ -779,6 +796,15 @@ async fn array_columns_clean_up_their_value_and_are_checked_against_the_catalog(
         vec![
             ("codes".to_owned(), DiagnosticKind::UndeclaredArrayColumn),
             ("nick".to_owned(), DiagnosticKind::NotAnArrayColumn),
+            // A domain is named by its own name, which no declared type
+            // accepts; its base type decides that it holds an array, and its
+            // element type (`text`) takes the transforms.
+            ("dom_tags".to_owned(), DiagnosticKind::TypeMismatch),
+            (
+                "dom_plain".to_owned(),
+                DiagnosticKind::UndeclaredArrayColumn
+            ),
+            ("dom_plain".to_owned(), DiagnosticKind::TypeMismatch),
         ]
     );
 
@@ -794,6 +820,8 @@ async fn array_columns_clean_up_their_value_and_are_checked_against_the_catalog(
     );
     assert_eq!(arr_of(&ada, "codes").len(), 2);
     assert_eq!(ada["nick"], strings(&["Ada Lovelace"]));
+    assert_eq!(ada["dom_tags"], strings(&["up"]));
+    assert_eq!(ada["dom_prefs"], strings(&["q"]));
 
     let alan = upsert(&documents, 2).await;
     assert_eq!(alan["labels"], strings(&["none"]));

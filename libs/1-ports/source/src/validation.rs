@@ -61,7 +61,11 @@
 //!         column: &ColumnName,
 //!     ) -> source::Result<ColumnInfo> {
 //!         match (table.as_ref(), column.as_ref()) {
-//!             ("users", "id") => Ok(ColumnInfo { sql_type: "integer".into(), nullable: false }),
+//!             ("users", "id") => Ok(ColumnInfo {
+//!                 sql_type: "integer".into(),
+//!                 base_type: None,
+//!                 nullable: false,
+//!             }),
 //!             ("users", _) => Err(SourceError::UnknownColumn(format!("{schema}.{table}.{column}"))),
 //!             _ => Err(SourceError::UnknownTable(format!("{schema}.{table}"))),
 //!         }
@@ -106,7 +110,13 @@ use crate::{Result, SourceError, SourceSpec};
 /// admits null.
 #[derive(Debug, Clone)]
 pub struct ColumnInfo {
+    /// The column's type as the store names it: a domain by its own name.
     pub sql_type: String,
+    /// What a domain column's type resolves to through every domain (`text[]`
+    /// for a domain over `text[]`), which decides whether it holds an array or
+    /// JSON; `None` when the type is no domain.
+    pub base_type: Option<String>,
+    /// Whether the column admits null.
     pub nullable: bool,
 }
 
@@ -960,26 +970,41 @@ impl Checker<'_> {
             return Ok(());
         };
 
-        let holds_array = is_array_type(&info.sql_type);
-        let holds_json = is_json_type(&info.sql_type);
+        let structure = info.base_type.as_deref().unwrap_or(&info.sql_type);
+        let holds_array = is_array_type(structure);
+        let holds_json = is_json_type(structure);
+        let database_type = match &info.base_type {
+            Some(base) => format!("`{}` (a domain over `{base}`)", info.sql_type),
+            None => format!("`{}`", info.sql_type),
+        };
         if column.array && !holds_array && !holds_json {
             self.report(
                 DiagnosticKind::NotAnArrayColumn,
                 format!(
-                    "declares `array: true`, but the column's database type `{}` holds no array \
-                     (a `[]` type or `json`/`jsonb` does)",
-                    info.sql_type
+                    "declares `array: true`, but the column's database type {database_type} holds \
+                     no array (a `[]` type or `json`/`jsonb` does)"
                 ),
             );
         }
         if !column.array && holds_array {
+            let advice = match &column.ty {
+                FlussoType::Map { .. } | FlussoType::GeoPoint => format!(
+                    "a `{}` field takes no `array: true`; read the column with a field type that \
+                     does (a `json` field, say)",
+                    if matches!(column.ty, FlussoType::GeoPoint) {
+                        "geo"
+                    } else {
+                        "map"
+                    }
+                ),
+                _ => "declare `array: true` so the query side reads it back as one: that changes \
+                      the index's content hash, so the index is rebuilt, and turns on the array \
+                      clean-up (null elements dropped, a lone value wrapped)"
+                    .to_owned(),
+            };
             self.report(
                 DiagnosticKind::UndeclaredArrayColumn,
-                format!(
-                    "the column's database type `{}` is an array; declare `array: true` so the \
-                     query side reads it back as one",
-                    info.sql_type
-                ),
+                format!("the column's database type {database_type} is an array; {advice}"),
             );
         }
 
@@ -1170,6 +1195,7 @@ mod tests {
             };
             Ok(ColumnInfo {
                 sql_type: sql_type.to_owned(),
+                base_type: None,
                 nullable: true,
             })
         }
@@ -1273,6 +1299,7 @@ mod tests {
             };
             Ok(ColumnInfo {
                 sql_type: sql_type.to_owned(),
+                base_type: None,
                 nullable: column.as_ref() != "id",
             })
         }
@@ -1282,9 +1309,11 @@ mod tests {
         }
     }
 
-    /// `lists(id integer, tags text[], codes integer[], doc jsonb, note text)`.
-    /// Transforms take a `text` element; the probe records whether each ask was
-    /// about the element.
+    /// `lists(id integer, tags text[], codes integer[], doc jsonb, note text,
+    /// tagged tags_domain, attrs json_domain)`, where `tags_domain` is a domain
+    /// over `text[]` and `json_domain` one over `jsonb`. Transforms take a
+    /// `text` element; the probe records whether each ask was about the
+    /// element.
     struct Lists(std::sync::Mutex<Vec<(String, bool)>>);
 
     #[async_trait]
@@ -1295,12 +1324,14 @@ mod tests {
             table: &TableName,
             column: &ColumnName,
         ) -> Result<ColumnInfo> {
-            let sql_type = match column.as_ref() {
-                "id" => "integer",
-                "tags" => "text[]",
-                "codes" => "integer[]",
-                "doc" => "jsonb",
-                "note" => "text",
+            let (sql_type, base_type) = match column.as_ref() {
+                "id" => ("integer", None),
+                "tags" => ("text[]", None),
+                "codes" => ("integer[]", None),
+                "doc" => ("jsonb", None),
+                "note" => ("text", None),
+                "tagged" => ("tags_domain", Some("text[]")),
+                "attrs" => ("json_domain", Some("jsonb")),
                 _ => {
                     return Err(SourceError::UnknownColumn(format!(
                         "{schema}.{table}.{column}"
@@ -1309,6 +1340,7 @@ mod tests {
             };
             Ok(ColumnInfo {
                 sql_type: sql_type.to_owned(),
+                base_type: base_type.map(str::to_owned),
                 nullable: column.as_ref() != "id",
             })
         }
@@ -1326,7 +1358,10 @@ mod tests {
             element: bool,
         ) -> Result<bool> {
             self.0.lock().unwrap().push((column.to_string(), element));
-            Ok(matches!(column.as_ref(), "tags" | "doc" | "note"))
+            Ok(matches!(
+                column.as_ref(),
+                "tags" | "doc" | "note" | "tagged" | "attrs"
+            ))
         }
     }
 
@@ -1378,6 +1413,61 @@ mod tests {
         assert_eq!(
             DiagnosticKind::UndeclaredArrayColumn.severity(),
             Severity::Warning
+        );
+    }
+
+    /// A domain is judged by the type it resolves to: one over `text[]` or
+    /// `jsonb` holds an array, and one over `text[]` without the flag is
+    /// reported by its name and its base. The declared type is still checked
+    /// against the domain's own name, as for any domain: a `TypeMismatch`,
+    /// which does not stop a start, where the `json` domain's unknown
+    /// elements skip that check.
+    #[test]
+    fn a_domain_over_an_array_or_jsonb_holds_an_array() {
+        let (findings, _) = lists_findings(json!([
+            { "field": "id", "source": { "column": { "column": "id", "ty": "integer", "nullable": false } } },
+            list_column("tagged", "keyword", true),
+            list_column("attrs", "keyword", true),
+        ]));
+        assert_eq!(
+            findings,
+            vec![("tagged".to_owned(), DiagnosticKind::TypeMismatch)]
+        );
+
+        let schema: IndexSchema = serde_json::from_value(json!({
+            "version": 1, "table": "lists", "db_schema": "public", "primary_key": "id",
+            "fields": [
+                { "field": "id", "source": { "column": { "column": "id", "ty": "integer", "nullable": false } } },
+                { "field": "tagged", "source": { "column": { "column": "tagged", "ty": "keyword", "nullable": true } } },
+            ],
+        }))
+        .unwrap();
+        let spec = SourceSpec::new(BTreeMap::from([(
+            IndexName::try_new("lists").unwrap(),
+            schema,
+        )]));
+        let found =
+            futures::executor::block_on(validate_indexes(&spec, &Lists(Default::default())))
+                .unwrap();
+        let undeclared: Vec<_> = found
+            .iter()
+            .filter(|d| d.kind == DiagnosticKind::UndeclaredArrayColumn)
+            .collect();
+        let [finding] = undeclared.as_slice() else {
+            panic!("one undeclared array: {found:?}");
+        };
+
+        assert!(
+            finding.message.contains(
+                "`tags_domain` (a domain over `text[]`) is an array; declare `array: true`"
+            ),
+            "{}",
+            finding.message
+        );
+        assert!(
+            finding.message.contains("content hash"),
+            "{}",
+            finding.message
         );
     }
 
@@ -1479,6 +1569,7 @@ mod tests {
             }
             Ok(ColumnInfo {
                 sql_type: "integer".to_owned(),
+                base_type: None,
                 nullable: true,
             })
         }

@@ -475,6 +475,7 @@ mod tests {
             };
             Ok(source::ColumnInfo {
                 sql_type: sql_type.to_owned(),
+                base_type: None,
                 nullable: true,
             })
         }
