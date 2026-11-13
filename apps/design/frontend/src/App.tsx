@@ -341,10 +341,11 @@ export default function App() {
     }
   }, [theme]);
 
-  // Auto-dismiss toasts; one that asks for a choice stays longer.
+  // Auto-dismiss toasts; one that asks for a choice, or says why something
+  // failed, stays longer.
   useEffect(() => {
     if (!toast) return;
-    const t = setTimeout(() => setToast(null), toast.action ? 10000 : 3500);
+    const t = setTimeout(() => setToast(null), toast.action || toast.kind === "error" ? 10000 : 3500);
     return () => clearTimeout(t);
   }, [toast, setToast]);
   // A choice about the buffer goes stale once the buffer changes.
@@ -557,18 +558,19 @@ export default function App() {
   }, [rawMode, rawText, active, rawFor]);
 
   // Apply the buffer now, if it moved since it last agreed with the document.
-  // `false` means it doesn't parse, so its edits since then would be lost.
-  const flushBuffer = async (): Promise<boolean> => {
+  // A string is why it doesn't load, so its edits since then would be lost;
+  // `null` means it is applied.
+  const flushBuffer = async (): Promise<string | null> => {
     const index = useDesignStore.getState().active;
     const text = useUiStore.getState().rawText;
-    if (!useUiStore.getState().rawMode || !bufferLive(index) || text === useUiStore.getState().seed?.text) return true;
+    if (!useUiStore.getState().rawMode || !bufferLive(index) || text === useUiStore.getState().seed?.text) return null;
     parseSeq++;
-    const res = await api.parse(text).catch(() => null);
-    if (!res?.schema) return !bufferLive(index);
+    const res = await api.parse(text).catch((e: unknown) => ({ error: errText(e), schema: undefined }));
+    if (!res.schema) return bufferLive(index) ? (res.error ?? "") : null;
     applyBuffer(index, text, res.schema);
     // Typed while the parse was out: apply that too, or the move would leave it.
     if (useUiStore.getState().rawText !== text) return flushBuffer();
-    return true;
+    return null;
   };
 
   // Every way out of the buffer (the toggle, another index, Deployment, back/
@@ -576,7 +578,7 @@ export default function App() {
   // holds the move; only the toast's Discard drops those edits, so no click
   // pattern can lose them by accident.
   const leaveBuffer = async (go: () => void, held?: () => void) => {
-    if (await flushBuffer()) return go();
+    if ((await flushBuffer()) === null) return go();
     held?.();
     setToast({
       kind: "error",
@@ -941,8 +943,9 @@ export default function App() {
         setToast({ kind: "error", text: t("value.unreadSave", { fields: unread.join(", ") }) });
         return;
       }
-      if (!(await flushBuffer())) {
-        setToast({ kind: "error", text: t("code.unparsedSave") });
+      const held = await flushBuffer();
+      if (held !== null) {
+        setToast({ kind: "error", text: t("code.unparsedSave", { err: held }) });
         return;
       }
       const loaded = useDesignStore.getState().doc;
