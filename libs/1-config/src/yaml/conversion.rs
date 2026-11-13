@@ -78,11 +78,8 @@ fn convert_scalar(ty: FlussoType, body: entities::ScalarBody) -> Result<Field, C
             ],
         );
     }
-    if body.array.is_some() {
-        return Err(ConversionError::ArrayWithoutScript {
-            field: body.field.to_string(),
-        });
-    }
+    let array = body.array.unwrap_or(false);
+    let default = convert_column_default(&body.field, body.default, array, &ty)?;
     let column = match body.column {
         Some(column) => column,
         None => default_column(&body.field)?,
@@ -131,11 +128,11 @@ fn convert_scalar(ty: FlussoType, body: entities::ScalarBody) -> Result<Field, C
             ty,
             nullable: !body.required,
             transforms,
-            default: convert_default(body.default)?,
+            default,
             enum_order: Vec::new(),
             subfields,
             indexed,
-            array: false,
+            array,
         }),
     })
 }
@@ -225,6 +222,44 @@ fn scalar_tag(ty: &FlussoType) -> String {
     }
 }
 
+/// Convert a column field's `default`. An array field takes a list, written
+/// whole when the column is null: its elements are non-null scalars, or any
+/// non-null JSON for a `json` field. Any other field takes a scalar
+/// ([`convert_default`]).
+fn convert_column_default(
+    field: &kernel::FieldName,
+    value: Option<serde_yaml::Value>,
+    array: bool,
+    ty: &FlussoType,
+) -> Result<Option<GenericValue>, ConversionError> {
+    if !array {
+        return convert_default(value);
+    }
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let GenericValue::Array(items) = yaml_to_generic(value) else {
+        return Err(ConversionError::ScalarArrayDefault {
+            field: field.to_string(),
+        });
+    };
+    let element_error = |got| ConversionError::ArrayDefaultElement {
+        field: field.to_string(),
+        got,
+    };
+    for item in &items {
+        match item {
+            GenericValue::Null => return Err(element_error("null")),
+            GenericValue::Array(_) if *ty != FlussoType::Json => {
+                return Err(element_error("array"));
+            }
+            GenericValue::Map(_) if *ty != FlussoType::Json => return Err(element_error("object")),
+            _ => {}
+        }
+    }
+    Ok(Some(GenericValue::Array(items)))
+}
+
 /// Convert a scalar field's `default`, rejecting non-scalar values. A `default`
 /// is coalesced into a single column value at read time, so only a scalar (or
 /// null) is meaningful; an array/object/binary default would be silently dropped
@@ -304,11 +339,8 @@ fn convert_enum(body: entities::EnumBody) -> Result<Field, ConversionError> {
             ],
         );
     }
-    if body.array.is_some() {
-        return Err(ConversionError::ArrayWithoutScript {
-            field: body.field.to_string(),
-        });
-    }
+    let array = body.array.unwrap_or(false);
+    let default = convert_column_default(&body.field, body.default, array, &FlussoType::Enum)?;
     let column = match body.column {
         Some(column) => column,
         None => default_column(&body.field)?,
@@ -327,11 +359,11 @@ fn convert_enum(body: entities::EnumBody) -> Result<Field, ConversionError> {
             ty,
             nullable: !body.required,
             transforms,
-            default: convert_default(body.default)?,
+            default,
             enum_order: body.variants,
             subfields: true,
             indexed: true,
-            array: false,
+            array,
         }),
     })
 }

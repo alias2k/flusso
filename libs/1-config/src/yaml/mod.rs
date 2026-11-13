@@ -192,8 +192,16 @@ pub enum ConversionError {
     ScriptTypeNotAllowed { tag: String, field: String },
     #[error("field `{field}` has an empty `script`")]
     EmptyScript { field: String },
-    #[error("field `{field}` has `array` without a `script` — only a script can return an array")]
-    ArrayWithoutScript { field: String },
+    #[error(
+        "field `{field}` has `array: true` and a scalar `default` — an array field's `default` \
+         is a list (`default: [a, b]`), written when the column is null"
+    )]
+    ScalarArrayDefault { field: String },
+    #[error(
+        "field `{field}` has a `default` with a `{got}` element — an array field's `default` \
+         lists scalar values (string, number, bool, or date)"
+    )]
+    ArrayDefaultElement { field: String, got: &'static str },
 }
 
 #[derive(Debug, Clone, Deserialize)]
