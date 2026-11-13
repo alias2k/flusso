@@ -7,6 +7,7 @@ mod assets;
 
 pub mod api;
 pub mod codegen;
+pub mod keep;
 pub mod preview;
 pub mod server;
 pub mod value;

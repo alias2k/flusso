@@ -4,7 +4,7 @@ Open the designer on a live database, build an index from its tables on a node-g
 
 ## When to use this
 
-You'd rather pick tables and columns than type the grammar, or you want a sample document from real data before committing to a shape. The designer is a view over the canonical files, not a separate model: what it saves is what `flusso check` and `flusso run` read. Hand-written comments in a schema don't survive a save, so keep comment-heavy schemas out of it.
+You'd rather pick tables and columns than type the grammar, or you want a sample document from real data before committing to a shape. The designer is a view over the files, not a separate model: what it saves is what `flusso check` and `flusso run` read. A save writes your edit into the existing file, so hand-written comments and layout stay; see [what a save keeps](designer-reference.md#what-a-save-keeps).
 
 ## Steps
 

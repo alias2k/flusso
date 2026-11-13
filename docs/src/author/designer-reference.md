@@ -64,13 +64,13 @@ Source, stream, and sinks are edited from each adapter's own declaration: a kind
 
 ## Code mode
 
-A YAML editor over the selected index. Problems panel with a count, valid-YAML indicator, search, block folding, cursor position, **Format**, **Auto-format** on focus loss when valid, VIM keybindings. Edits sync into the project as you type; Save reviews and writes as usual.
+A YAML editor over the selected index, opened on the file as a save would write it: its comments included. Problems panel with a count, valid-YAML indicator, search, block folding, cursor position, **Format**, **Auto-format** on focus loss when valid, VIM keybindings. Edits sync into the project as you type; Save reviews and writes as usual, and comments typed here are saved too, even after later edits on the canvas.
 
 Code mode shows the whole schema, so it opens only when no field is [incomplete](#incomplete-fields): otherwise the canvas stays and a message names each piece to finish or remove (a field with a blank name by its position, `#3`). A schema the server refuses for another reason, such as a malformed column name, keeps the canvas too, with the server's message. A Code URL reached with Back or Forward is refused the same way, and the history entry is replaced, so Back still moves past it.
 
 Opening Code mode and leaving it again changes nothing: the YAML it opens with is never applied back, only what you type.
 
-- **Undo, Redo, Reset** change the project, and the YAML is rewritten from the result. Undo and redo stay one step each, whichever mode made the edit. If the result has an incomplete field, the canvas comes back with the message above; nothing is dropped.
+- **Undo, Redo, Reset** change the project, and the YAML is rewritten from the result. Undo and redo stay one step each, whichever mode made the edit. A comment typed here is a step too: undoing it takes it out of what Save writes, so with every step undone there is nothing to save. If the result has an incomplete field, the canvas comes back with the message above; nothing is dropped.
 - **`⌘/Ctrl+Z` inside the editor** is the editor's own undo. It changes the YAML, and the project follows like any other edit. It starts afresh when Undo, Redo or Reset rewrites the YAML, so it can't bring back what they took out.
 - **Leaving** (the toggle, another index, Deployment, the command palette, Back or Forward) applies YAML you typed that isn't in the project yet. **Tables** is not leaving: the index stays in Code mode behind it, and picking that index in the sidebar comes back to its YAML as you left it, even YAML that doesn't parse.
 - **Save** applies it first too, so the review shows exactly what gets written. It is enabled as soon as you type.
@@ -80,7 +80,7 @@ Opening Code mode and leaving it again changes nothing: the YAML it opens with i
 
 | Tab | Shows |
 | --- | --- |
-| YAML | the canonical file that would be written, minus anything [left out](#incomplete-fields) |
+| YAML | the file a save would write, minus anything [left out](#incomplete-fields) |
 | Mapping | the derived OpenSearch mapping, database-free; an opted-out field shows `subfields: false` or `indexed: false` |
 | Sample | a document built from one live row via the same path the sink uses, scripts run and input-only fields stripped; **Row id** picks the row (blank: the first); a failing script shows its field, message and line with a caret over the row as built; what the scripts printed; synthesized example data (marked *example*) when the table is empty; **Build sample** / **refresh** |
 
@@ -106,9 +106,44 @@ A preview that fails anyway shows an error banner, cleared by the next preview t
 
 ## Save review
 
-Every changed file, in a folder tree: **New**, write, **Move** (rename or relocate, with "Moved from"), **Delete** (a removed index). A warning marks any path resolving outside the config directory. Filter, toggle one or all, then **Write N files**. Below the list: **Validating…**, then **All checks passed**, **Database offline**, or the issue count. Unified, split, old, and new diff views.
+Every changed file, in a folder tree: **New**, write, **Move** (rename or relocate, with "Moved from"), **Delete** (a removed index). A warning marks any path resolving outside the config directory, and any file whose layout a save can't keep (see below). Filter, toggle one or all, then **Write N files**. Below the list: **Validating…**, then **All checks passed**, **Database offline**, or the issue count. Unified, split, old, and new diff views.
 
-Saving is canonical regeneration: meaning is preserved (the written file parses back to the same schema and mapping, which the preview self-checks on every edit), comments and incidental formatting are not. Values (`constant`, `default`, `options`) are written as plain YAML: `1.5`, `true`, `null`, and a string quoted only where it would read as something else (`'123'`, `'null'`). Files from earlier designer releases carry tags such as `!String hi`; they load unchanged. One of those, `!Decimal '1.5'`, has always read as the string `"1.5"`, so a number saved that way is a string until you change it back. Moves are real: the old file is removed and emptied folders pruned. The save is atomic.
+Meaning is preserved: the written file parses back to the same schema and mapping, which the preview self-checks on every edit. Values (`constant`, `default`, `options`) are written as plain YAML: `1.5`, `true`, `null`, and a string quoted only where it would read as something else (`'123'`, `'null'`). Files from earlier designer releases carry tags such as `!String hi`; they load unchanged. One of those, `!Decimal '1.5'`, has always read as the string `"1.5"`, so a number saved that way is a string until you change it back. Moves are real: the old file is removed and emptied folders pruned. The save is atomic.
+
+### What a save keeps
+
+A save writes the edit into the file as it stands (in Code mode, into the YAML you typed), for `*.schema.yml` and `flusso.toml` alike. Saving after a one-field edit changes only that field's lines.
+
+- **Untouched parts stay byte for byte**: comments, blank lines, key order, quoting, flow lists (`[lowercase, trim]`), and settings written out at their default (`required: false`). A setting the file leaves out stays out, unless the field's type changes.
+- **What changed is written the way a new file is.** A changed value is rewritten on its own lines, keeping the comment at the end of its first line and the comments after it. An added field or setting is written after the one before it, without comments.
+
+#### Which comment belongs to what
+
+A comment stays with what it describes, through a rename, a type change and a move, and is deleted with it. It never moves to something else.
+
+| Where the comment is | It belongs to |
+|---|---|
+| before the first key or table | the file: it stays first |
+| directly above a field, a key, a list item or a table, with no blank line between | that field, key, item or table |
+| a blank line away from what follows (a section heading, a commented-out block) | nothing: it stays where it is, before whatever follows it |
+| at the end of a line | that line |
+| after a list's last item, at the item's dash column or further left | the list |
+| after a field's last line, indented deeper than its dash | the field |
+| in `flusso.toml`, directly below a table's last key, with no blank line between (at the end of the file too) | that table |
+
+So deleting a join deletes its own comments and everything inside it, while the heading a blank line above it stays, before the next field. Deleting a sink keeps the commented-out options the sink above ends with, and deleting the last `[[index]]` entry deletes the comment directly below it at the end of the file.
+
+The designer tells the save which field each field was, which `[[index]]` entry each entry was and which sink each sink was, by an id it keeps for the session, so renaming one field and deleting its neighbour in one save can't hand the neighbour's comments to it. A renamed sink is renamed where it stands, in `[sinks]` and in every `[index.sinks.<name>]`: its place, key order and comments stay. When the file changed on disk since the designer read it, fields, entries and sinks are matched by name instead: a renamed one then counts as removed and added, and its comments as lost.
+
+A field moved into another list (a different join or object, which only Code mode can do) is written there without its comments; the review counts them.
+
+#### What the review reports
+
+- **Comments that could not be kept.** A comment inside a value that had to be rewritten (a flow list `[…]` with a comment in it, an item the save can't follow line by line), on a field moved into another list, or on a field, entry or sink matched by name that may have been renamed, is dropped. Matched by name, a removed one and a renamed one look the same, so both count. The review marks the file and says above its diff how many comments it loses.
+- **A file written in the designer's own form.** A file whose layout the save can't follow (a top level written as a flow mapping `{…}`, for instance), or whose result wouldn't read back as exactly the schema being saved, is written in the designer's own form instead, without its comments. The review marks it and says so above its diff.
+- **Windows line endings.** A `flusso.toml` saved with CRLF line endings is written back with LF, comments kept. A CRLF `*.schema.yml` keeps its line endings through a value edit; renaming a field writes it in the designer's own form, and the review says so.
+
+Both show before anything is written. A file the designer creates is written in its own form.
 
 ### Typed values
 

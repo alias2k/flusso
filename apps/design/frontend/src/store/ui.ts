@@ -12,11 +12,13 @@ export interface Toast {
 }
 
 /// What the Code buffer last agreed with the document on: the text it was
-/// seeded with or last applied, and that schema as bare JSON.
+/// seeded with or last applied, that schema as bare JSON, and the Code-mode
+/// text the store held for the index then (`texts`, undone with the document).
 export interface Seed {
   index: string;
   text: string;
   schema: string;
+  base?: string;
 }
 
 const initialTheme = (): "dark" | "light" => {

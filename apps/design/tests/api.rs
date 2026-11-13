@@ -5,7 +5,7 @@
 
 #![allow(clippy::unwrap_used, unused_crate_dependencies)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use config::ParseFrom;
 use design::api::{self, FileOp, OpKind, PreviewRequest, SaveRequest};
@@ -52,10 +52,16 @@ fn project_previews_saves_and_reopens() {
     let schema = orders.schema.clone().unwrap();
 
     // Preview: derives a mapping + document and self-checks the generated YAML.
-    let response = api::build_preview(PreviewRequest {
-        index: IndexName::try_new("orders").unwrap(),
-        schema: schema.clone(),
-    })
+    let response = api::build_preview(
+        Path::new("flusso.toml"),
+        PreviewRequest {
+            index: IndexName::try_new("orders").unwrap(),
+            schema: schema.clone(),
+            path: None,
+            base: None,
+            identity: None,
+        },
+    )
     .unwrap();
     assert!(
         response.parse_ok,
@@ -65,7 +71,8 @@ fn project_previews_saves_and_reopens() {
     assert!(response.preview.document.iter().any(|n| n.name == "items"));
     assert!(response.yaml.contains("- has_many: items"));
 
-    // Save every index back through codegen (an Upsert per file).
+    // Save every index back (an Upsert per file): the model is unchanged, so
+    // every file keeps its text and nothing is written.
     let save = SaveRequest {
         config: project.config.clone(),
         ops: project
@@ -77,15 +84,18 @@ fn project_previews_saves_and_reopens() {
                 from: None,
                 schema: i.schema.clone(),
                 raw: None,
+                base: None,
+                identity: None,
             })
             .collect(),
         skip: Vec::new(),
+        identity: None,
     };
     let written = api::save_project(&config_path, save).unwrap();
-    assert_eq!(written.written.len(), 4, "config + three schemas");
+    assert!(written.written.is_empty(), "{:?}", written.written);
     assert!(written.moved.is_empty() && written.deleted.is_empty());
 
-    // Reopen: the regenerated files load and resolve to the same mapping.
+    // Reopen: the files load and resolve to the same mapping.
     let reopened = api::load_project(&config_path).unwrap();
     let reorders = reopened
         .indexes
@@ -100,8 +110,7 @@ fn project_previews_saves_and_reopens() {
         serde_json::to_value(&reorders).unwrap(),
     );
 
-    // Saving the reopened (already-canonical) project again writes nothing —
-    // only changed files are touched.
+    // Saving the reopened project again writes nothing either.
     let resave = SaveRequest {
         config: reopened.config.clone(),
         ops: reopened
@@ -113,9 +122,12 @@ fn project_previews_saves_and_reopens() {
                 from: None,
                 schema: i.schema.clone(),
                 raw: None,
+                base: None,
+                identity: None,
             })
             .collect(),
         skip: Vec::new(),
+        identity: None,
     };
     let again = api::save_project(&config_path, resave).unwrap();
     assert!(
@@ -155,6 +167,8 @@ fn save_moves_deletes_and_prunes() {
                     from: Some(PathBuf::from(&moved.schema_path)),
                     schema: moved.schema.clone(),
                     raw: moved.raw.clone(),
+                    base: None,
+                    identity: None,
                 },
                 FileOp {
                     kind: OpKind::Delete,
@@ -162,9 +176,12 @@ fn save_moves_deletes_and_prunes() {
                     from: None,
                     schema: None,
                     raw: None,
+                    base: None,
+                    identity: None,
                 },
             ],
             skip: Vec::new(),
+            identity: None,
         },
     )
     .unwrap();
@@ -186,8 +203,11 @@ fn save_moves_deletes_and_prunes() {
                 from: Some(moved_rel),
                 schema: moved.schema.clone(),
                 raw: moved.raw.clone(),
+                base: None,
+                identity: None,
             }],
             skip: Vec::new(),
+            identity: None,
         },
     )
     .unwrap();
@@ -298,10 +318,16 @@ fn preview_reports_script_compile_errors_and_drops_input_only_fields() {
     })
     .schema
     .unwrap();
-    let response = api::build_preview(PreviewRequest {
-        index: IndexName::try_new("products").unwrap(),
-        schema,
-    })
+    let response = api::build_preview(
+        Path::new("flusso.toml"),
+        PreviewRequest {
+            index: IndexName::try_new("products").unwrap(),
+            schema,
+            path: None,
+            base: None,
+            identity: None,
+        },
+    )
     .unwrap();
     assert_eq!(response.script_errors.len(), 1);
     let error = &response.script_errors[0];
@@ -333,10 +359,16 @@ fn preview_fails_when_the_yaml_reads_back_as_another_schema() {
         )
         .unwrap();
         schema.fields[0].source = FieldSource::Constant(value);
-        api::build_preview(PreviewRequest {
-            index: IndexName::try_new("t").unwrap(),
-            schema,
-        })
+        api::build_preview(
+            Path::new("flusso.toml"),
+            PreviewRequest {
+                index: IndexName::try_new("t").unwrap(),
+                schema,
+                path: None,
+                base: None,
+                identity: None,
+            },
+        )
         .unwrap()
     };
     let response = preview(GenericValue::Double(1e21));
@@ -436,7 +468,7 @@ fn the_deepest_accepted_value_previews_diffs_and_saves_ten_joins_deep() {
     let preview: PreviewRequest =
         serde_json::from_str(&serde_json::json!({ "index": "deep", "schema": schema }).to_string())
             .unwrap();
-    let response = api::build_preview(preview).unwrap();
+    let response = api::build_preview(Path::new("flusso.toml"), preview).unwrap();
     assert!(response.parse_ok, "{:?}", response.parse_error);
 
     let dir = fixture();
@@ -464,4 +496,94 @@ fn the_deepest_accepted_value_previews_diffs_and_saves_ten_joins_deep() {
     .unwrap();
     assert_eq!(reread, schema);
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The ids the client sends for `fields`: the uid of each field is its path
+/// of old names, so `renamed` (new, old) keeps a renamed field's id.
+fn ids(fields: &[kernel::Field], parent: &str, renamed: &[(&str, &str)]) -> serde_json::Value {
+    fields
+        .iter()
+        .map(|field| {
+            let name = field.field.as_ref();
+            let was = renamed
+                .iter()
+                .find(|(new, _)| *new == name)
+                .map_or(name, |(_, old)| *old);
+            let uid = format!("{parent}/{was}");
+            let children: &[kernel::Field] = match &field.source {
+                kernel::FieldSource::Group(fields) => fields,
+                kernel::FieldSource::Relation(kernel::Relation::Join(join)) => &join.fields,
+                _ => &[],
+            };
+            serde_json::json!({ "name": name, "uid": uid, "fields": ids(children, &uid, renamed) })
+        })
+        .collect()
+}
+
+#[test]
+fn a_diff_pairs_by_the_ids_it_is_sent_and_reports_dropped_comments() {
+    let dir = fixture();
+    let config_path = dir.join("flusso.toml");
+    let project = api::load_project(&config_path).unwrap();
+    let users = project.indexes.iter().find(|i| i.name == "users").unwrap();
+    let before = users.schema.clone().unwrap();
+    let mut after = before.clone();
+    after.fields.retain(|f| f.field.as_ref() != "orders");
+    let count = after
+        .fields
+        .iter_mut()
+        .find(|f| f.field.as_ref() == "orderCount")
+        .unwrap();
+    count.field = kernel::FieldName::try_new("ordersTotal").unwrap();
+    let mut config = serde_json::to_value(&project.config).unwrap();
+    let index = config["index"].as_array_mut().unwrap();
+    index.remove(0);
+    index[0]["name"] = "goods".into();
+
+    let request = |identity: bool| -> SaveRequest {
+        let mut op = serde_json::json!({
+            "kind": "upsert",
+            "path": "users.schema.yml",
+            "schema": after,
+        });
+        let mut body = serde_json::json!({ "config": config, "ops": [] });
+        if identity {
+            op["identity"] = serde_json::json!({
+                "before": ids(&before.fields, "", &[]),
+                "after": ids(&after.fields, "", &[("ordersTotal", "orderCount")]),
+            });
+            body["identity"] = serde_json::json!({
+                "before": ["users", "products", "orders"],
+                "after": [1, 2],
+            });
+        }
+        body["ops"] = serde_json::json!([op]);
+        serde_json::from_value(body).unwrap()
+    };
+
+    let diffs = api::diff_project(&config_path, request(true)).unwrap();
+    let toml = serde_json::to_value(&diffs[0]).unwrap();
+    assert!(toml.get("dropped").is_none(), "{toml}");
+    let next = toml["next"].as_str().unwrap();
+    assert!(
+        next.contains("name = \"goods\"\nschema = \"products.schema.yml\""),
+        "{next}"
+    );
+    assert!(!next.contains("name = \"users\""));
+    let yaml = serde_json::to_value(&diffs[1]).unwrap();
+    assert!(yaml.get("dropped").is_none(), "{yaml}");
+    let next = yaml["next"].as_str().unwrap();
+    assert!(
+        next.contains("  # Aggregates over the user's orders.\n  - count: ordersTotal\n"),
+        "{next}"
+    );
+    assert!(!next.contains("One-to-many: orders"), "{next}");
+
+    // Without ids the renamed count is a new field, and either removed field
+    // may be the one it was: their comments (4 on `orders`, 1 on the count)
+    // are dropped, and the review says so.
+    let diffs = api::diff_project(&config_path, request(false)).unwrap();
+    let yaml = serde_json::to_value(&diffs[1]).unwrap();
+    assert_eq!(yaml["dropped"], 5, "{yaml}");
+    assert!(!yaml["next"].as_str().unwrap().contains("# Aggregates over"));
 }

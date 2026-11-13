@@ -24,7 +24,17 @@ import {
   Waypoints,
   X,
 } from "lucide-react";
-import type { ColumnShape, DiagnosticDto, FileOp, IndexSchema, OpDiff, ValidateResponse } from "./api";
+import type {
+  ColumnShape,
+  ConfigIdentity,
+  ConfigToml,
+  DiagnosticDto,
+  FileOp,
+  IndexSchema,
+  OpDiff,
+  SchemaIdentity,
+  ValidateResponse,
+} from "./api";
 import { api } from "./api";
 import { Canvas } from "./components/Canvas";
 import { CatalogBrowser } from "./components/CatalogBrowser";
@@ -71,7 +81,7 @@ import { LANGS, useT, type Translate } from "./i18n";
 // the main chunk (the runtime anchor code stays in the lazy CodeView chunk).
 import type { ParseErrorInfo } from "./model/anchors";
 import { removeAt, removeFields, removeNode } from "./model/edit";
-import { adoptIds, stripUids } from "./model/ids";
+import { adoptIds, fieldIds, stripUids } from "./model/ids";
 import { formatRoute, parseRoute, type Route } from "./router";
 import { countTypeMismatches, fixAllTypes, requiredDefaultIssues } from "./model/issues";
 import { pruneIncomplete } from "./model/prune";
@@ -161,6 +171,54 @@ const bareDocJson = (doc: Doc): string =>
 /// A schema as JSON without the client-only node uids ("" for none).
 const bareSchema = (schema: IndexSchema | undefined): string => (schema ? JSON.stringify(stripUids(schema)) : "");
 
+// Which field of a save's base each field of `schema` is: the base is the
+// Code-mode text when there is one, else the file as last loaded or saved.
+// Without either (a new index) there is nothing to pair with.
+const identityFor = (
+  schema: IndexSchema,
+  text: { ids?: SchemaIdentity["before"] } | undefined,
+  savedSchema: IndexSchema | undefined,
+): SchemaIdentity | undefined => {
+  const before = text ? text.ids : savedSchema && fieldIds(savedSchema.fields);
+  const after = fieldIds(schema.fields);
+  return before && after && { before, after };
+};
+
+// For every sink of `config`, by name, its name in `saved` (the file on disk),
+// matched by the session's sink ids; `null` for a sink added since. Without
+// ids on either side the save pairs sinks by name.
+const sinkIdentity = (saved: ConfigToml, config: ConfigToml): Record<string, string | null> | undefined => {
+  const was = saved.sinkIds;
+  const is = config.sinkIds;
+  if (!was || !is) return undefined;
+  const byId = new Map(
+    Object.entries(was)
+      .filter(([name]) => name in (saved.sinks ?? {}))
+      .map(([name, id]) => [id, name]),
+  );
+  return Object.fromEntries(
+    Object.keys(config.sinks ?? {}).map((name) => {
+      const id = is[name];
+      return [name, (id && byId.get(id)) ?? null];
+    }),
+  );
+};
+
+// What a preview of `schema` (the index `index`) writes it into, as a save
+// would: the Code-mode text when it is newer than the file, else the file the
+// index was last saved at (a pending path change has not moved it yet).
+const schemaFile = (
+  index: string,
+  schema: IndexSchema,
+): { path?: string; base?: string; identity?: SchemaIdentity } => {
+  const { doc, saved, texts } = useDesignStore.getState();
+  const entry = doc?.config.index?.find((e) => e.name === index);
+  const savedDoc = saved ? (parseJson(saved) as Doc) : undefined;
+  const was = entry?.id ? savedDoc?.config.index?.find((e) => e.id === entry.id) : undefined;
+  const identity = identityFor(schema, texts[index], was && savedDoc?.schemas[was.name]);
+  return { path: was?.schema ?? entry?.schema, base: texts[index]?.text, identity };
+};
+
 // Bumped to drop a Code-mode parse reply that a newer parse superseded.
 let parseSeq = 0;
 // Set when Code mode was refused: the route effect then replaces the URL
@@ -194,6 +252,7 @@ export default function App() {
   const diagnostics = useDesignStore((s) => s.diagnostics);
   const setCatalog = useDesignStore((s) => s.setCatalog);
   const setSaved = useDesignStore((s) => s.setSaved);
+  const clearTexts = useDesignStore((s) => s.clearTexts);
   const setActive = useDesignStore((s) => s.setActive);
   const setSelection = useDesignStore((s) => s.setSelection);
   const setPreview = useDesignStore((s) => s.setPreview);
@@ -333,7 +392,9 @@ export default function App() {
   const bufferAhead = useUiStore((s) => s.rawMode && !!s.seed && s.rawText !== s.seed.text);
   // A value still being read may be the only change: Save waits for it.
   const valuesPending = useSyncExternalStore(subscribePendingValues, hasPendingValues);
-  const canSave = dirty || bufferAhead || valuesPending;
+  // Code-mode text not yet saved; may differ from the file in comments alone.
+  const textsPending = useDesignStore((s) => Object.keys(s.texts).length > 0);
+  const canSave = dirty || bufferAhead || valuesPending || textsPending;
   const indexDirty = (name: string, of: Doc | null = doc): boolean => {
     if (!of || !savedDoc) return false;
     const current = of.schemas[name];
@@ -381,7 +442,7 @@ export default function App() {
     let current = true;
     const handle = setTimeout(() => {
       api
-        .preview(active, pruned.schema)
+        .preview(active, pruned.schema, schemaFile(active, pruned.schema))
         .then((p) => {
           if (!current) return;
           setPreview(p);
@@ -419,7 +480,9 @@ export default function App() {
     if (useDesignStore.getState().active !== index || !bufferLive(index)) return;
     const current = useDesignStore.getState().doc?.schemas[index];
     if (!current || JSON.stringify(parsed) !== bareSchema(current)) apply((prev) => adoptIds(prev, parsed));
-    setSeed({ index, text, schema: bareSchema(useDesignStore.getState().doc?.schemas[index]) });
+    const now = useDesignStore.getState().doc?.schemas[index];
+    useDesignStore.getState().setText(index, { text, ids: fieldIds(now?.fields ?? []) });
+    setSeed({ index, text, schema: bareSchema(now), base: text });
   };
 
   const [codeProblem, setCodeProblem] = useState<ParseErrorInfo | null>(null);
@@ -509,14 +572,17 @@ export default function App() {
   useEffect(() => {
     if (!rawMode) setSeed(null);
   }, [rawMode, setSeed]);
+  const activeText = useDesignStore((s) => s.texts[s.active]?.text);
   useEffect(() => {
     if (!rawMode || !doc || active === "config") return;
     const at = bareSchema(schema);
     const s = useUiStore.getState().seed;
-    if (s?.index === active && s.schema === at) return;
+    // A Code-mode text undone (or redone) moves `activeText` with no change to
+    // the schema: the buffer follows it too.
+    if (s?.index === active && s.schema === at && s.base === activeText) return;
     if (!schema) {
       const text = project?.indexes.find((i) => i.name === active)?.raw ?? "";
-      useUiStore.setState({ rawText: text, seed: { index: active, text, schema: at } });
+      useUiStore.setState({ rawText: text, seed: { index: active, text, schema: at, base: activeText } });
       return;
     }
     if (codeBlocked(pruneIncomplete(schema).left)) {
@@ -525,11 +591,11 @@ export default function App() {
     }
     let alive = true;
     api
-      .preview(active, schema)
+      .preview(active, schema, schemaFile(active, schema))
       .then((p) => {
         if (!alive || !useUiStore.getState().rawMode) return;
         // One update, so the editor sees the new text and its seed together.
-        useUiStore.setState({ rawText: p.yaml, seed: { index: active, text: p.yaml, schema: at } });
+        useUiStore.setState({ rawText: p.yaml, seed: { index: active, text: p.yaml, schema: at, base: activeText } });
       })
       .catch((e) => {
         if (!alive) return;
@@ -539,7 +605,21 @@ export default function App() {
     return () => {
       alive = false;
     };
-  }, [rawMode, doc, active, seed, schema, project, setRawText, setSeed, refuseCode, setToast, t, codeBlocked]);
+  }, [
+    rawMode,
+    doc,
+    active,
+    seed,
+    schema,
+    project,
+    activeText,
+    setRawText,
+    setSeed,
+    refuseCode,
+    setToast,
+    t,
+    codeBlocked,
+  ]);
 
   // ── routing: the hash mirrors what the main area shows (see router.ts) ────
 
@@ -626,14 +706,14 @@ export default function App() {
 
   // Warn before leaving with unsaved changes.
   useEffect(() => {
-    if (!dirty && !valuesPending) return;
+    if (!dirty && !valuesPending && !textsPending) return;
     const warn = (e: BeforeUnloadEvent) => {
       e.preventDefault();
       e.returnValue = "";
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [dirty, valuesPending]);
+  }, [dirty, valuesPending, textsPending]);
 
   useEffect(() => {
     loadCollapsed(active);
@@ -648,24 +728,48 @@ export default function App() {
     const prev = savedDoc?.config.index ?? [];
     const prevById = new Map(prev.filter((e) => e.id).map((e) => [e.id, e]));
     const cur = of.config.index ?? [];
+    const texts = useDesignStore.getState().texts;
     const seen = new Set<string>();
     const planned: { op: FileOp; name: string; removed: boolean }[] = [];
     for (const e of cur) {
       if (e.id) seen.add(e.id);
       const schema = of.schemas[e.name];
       if (!schema) continue; // no model to write (failed load) — leave the file alone
+      const text = texts[e.name];
+      const base = text?.text;
       const was = e.id ? prevById.get(e.id) : undefined;
-      if (!was) planned.push({ op: { kind: "upsert", path: e.schema, schema }, name: e.name, removed: false });
+      const identity = was ? identityFor(schema, text, savedDoc?.schemas[was.name]) : undefined;
+      const content = { schema, ...(base === undefined ? {} : { base }), ...(identity ? { identity } : {}) };
+      if (!was) planned.push({ op: { kind: "upsert", path: e.schema, ...content }, name: e.name, removed: false });
       else if (was.schema !== e.schema)
-        planned.push({ op: { kind: "move", from: was.schema, path: e.schema, schema }, name: e.name, removed: false });
-      else if (indexDirty(e.name, of))
-        planned.push({ op: { kind: "upsert", path: e.schema, schema }, name: e.name, removed: false });
+        planned.push({
+          op: { kind: "move", from: was.schema, path: e.schema, ...content },
+          name: e.name,
+          removed: false,
+        });
+      else if (indexDirty(e.name, of) || base !== undefined)
+        planned.push({ op: { kind: "upsert", path: e.schema, ...content }, name: e.name, removed: false });
     }
     // Indexes dropped from the config → delete their previous files.
     for (const p of prev)
       if (p.id && !seen.has(p.id))
         planned.push({ op: { kind: "delete", path: p.schema }, name: p.name, removed: true });
     return planned;
+  };
+
+  // Which `[[index]]` entry of the file on disk (the saved snapshot) each
+  // entry of `of` is, by its session id.
+  const configIdentity = (of: Doc): ConfigIdentity | undefined => {
+    const prev = savedDoc?.config.index;
+    if (!prev) return undefined;
+    return {
+      before: prev.map((e) => e.name),
+      after: (of.config.index ?? []).map((e) => {
+        const at = e.id ? prev.findIndex((p) => p.id === e.id) : -1;
+        return at < 0 ? null : at;
+      }),
+      sinks: sinkIdentity(savedDoc.config, of.config),
+    };
   };
 
   // Match a planned op to its resolved diff entry: the server returns absolute
@@ -713,6 +817,7 @@ export default function App() {
       const result = await api.diff(
         current.config,
         buildOps(current).map((p) => p.op),
+        configIdentity(current),
       );
       const shown = configDirty || !result[0] ? result : [{ ...result[0], changed: false }, ...result.slice(1)];
       if (shown.some((d) => d.changed)) setDiffs(shown);
@@ -740,6 +845,7 @@ export default function App() {
         doc.config,
         planned.map((p) => p.op),
         [...skip],
+        configIdentity(doc),
       );
       // Advance the saved snapshot to the new on-disk state. When everything was
       // applied (the common case) the doc *is* the disk, so snapshot it directly
@@ -755,6 +861,7 @@ export default function App() {
         });
       if (!anySkipped) {
         setSaved(JSON.stringify(doc));
+        clearTexts();
       } else {
         const prev = savedDoc ?? doc;
         const nextSchemas = { ...prev.schemas };
@@ -763,6 +870,7 @@ export default function App() {
           if (!d || !d.changed || skip.has(d.path)) continue; // not applied
           if (p.removed) delete nextSchemas[p.name];
           else nextSchemas[p.name] = doc.schemas[p.name];
+          clearTexts([p.name]);
         }
         const nextConfig = configSkipped ? prev.config : doc.config;
         const live = new Set((nextConfig.index ?? []).map((e) => e.name));
@@ -1146,7 +1254,7 @@ export default function App() {
             </Button>
           </Hint>
           <Hint label={t("topbar.resetHint")}>
-            <Button variant="secondary" size="sm" onClick={reset} disabled={!dirty || saving}>
+            <Button variant="secondary" size="sm" onClick={reset} disabled={!(dirty || textsPending) || saving}>
               <span className={BTN_ICON}>
                 <RotateCcw />
               </span>
@@ -1818,6 +1926,18 @@ function DiffModal({
                                   aria-label={t("diff.warnOutside")}
                                 />
                               )}
+                              {d.notice === "layout_reset" && (
+                                <TriangleAlert
+                                  className="size-3 shrink-0 text-warn"
+                                  aria-label={t("diff.layoutReset")}
+                                />
+                              )}
+                              {!!d.dropped && (
+                                <TriangleAlert
+                                  className="size-3 shrink-0 text-warn"
+                                  aria-label={t("diff.commentsDropped", { n: d.dropped })}
+                                />
+                              )}
                             </span>
                             <span className="flex items-center gap-2 font-mono text-2xs tabular-nums">
                               <OpBadge d={d} />
@@ -1838,9 +1958,29 @@ function DiffModal({
               )}
             </div>
           </div>
-          <div className="min-h-0 flex-1">
+          <div className="flex min-h-0 flex-1 flex-col">
+            {active?.notice === "layout_reset" && (
+              <p className="flex items-center gap-1.5 border-b border-border/60 px-3 py-1.5 text-2xs text-warn">
+                <TriangleAlert className="size-3 shrink-0" />
+                {t("diff.layoutReset")}
+              </p>
+            )}
+            {!!active?.dropped && (
+              <p className="flex items-center gap-1.5 border-b border-border/60 px-3 py-1.5 text-2xs text-warn">
+                <TriangleAlert className="size-3 shrink-0" />
+                {t("diff.commentsDropped", { n: active.dropped })}
+              </p>
+            )}
             {active && (
-              <DiffView key={active.path} path={active.path} current={active.current} next={active.next} mode={mode} />
+              <div className="min-h-0 flex-1">
+                <DiffView
+                  key={active.path}
+                  path={active.path}
+                  current={active.current}
+                  next={active.next}
+                  mode={mode}
+                />
+              </div>
             )}
           </div>
         </div>

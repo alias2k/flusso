@@ -13,8 +13,10 @@
 // - `uidSkeleton` reduces a schema to names + uids, so the store can persist
 //   the saved doc's uids and `adoptIds` them onto the file on the next load.
 // - `stripUids` removes them before a schema crosses the wire.
+// - `fieldIds` lists them beside the names, for a save to tell which field of
+//   the file each field is (a rename or a move keeps the field's comments).
 
-import type { Field, IndexSchema } from "../api";
+import type { Field, FieldId, IndexSchema } from "../api";
 import { childFields, withChildFields } from "./containers";
 
 const newUid = () => crypto.randomUUID();
@@ -113,4 +115,17 @@ export function stripFieldUids(fields: Field[]): Field[] {
 /// The schema without any uid — what the backend and the YAML see.
 export function stripUids(schema: IndexSchema): IndexSchema {
   return { ...schema, fields: stripFieldUids(schema.fields) };
+}
+
+/// Every field's name and uid, with its children: the identity a save sends
+/// next to the schema (never inside it). `undefined` when a field has no uid:
+/// the save then pairs fields by name.
+export function fieldIds(fields: Field[]): FieldId[] | undefined {
+  const ids: FieldId[] = [];
+  for (const field of fields) {
+    const children = fieldIds(childFields(field) ?? []);
+    if (!field.uid || !children) return undefined;
+    ids.push({ name: field.field, uid: field.uid, fields: children });
+  }
+  return ids;
 }

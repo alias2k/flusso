@@ -5,10 +5,10 @@
 //! of parsing: it emits the type-first YAML grammar (`- keyword: email`, join
 //! verbs, aggregate ops) and the TOML wiring.
 //!
-//! Output is **canonical**, not format-preserving: a deterministic, tidy layout
-//! derived from the model. Hand-written comments and incidental formatting are
-//! not retained (that was the design choice for this surface). What *is*
-//! guaranteed is a clean round-trip of meaning — [`schema_to_yaml`]'s output
+//! Output is **canonical**: a deterministic, tidy layout derived from the model,
+//! used for a file the designer creates. Saving over an existing file goes
+//! through [`crate::keep`] instead, which patches the file's own text so its
+//! comments and formatting survive. What *is* guaranteed here is a clean round-trip of meaning — [`schema_to_yaml`]'s output
 //! parses back to a schema that resolves to the same mapping, which the
 //! `roundtrips_*` tests assert against the real parser.
 //!
@@ -34,6 +34,12 @@ use serde_yaml::{Mapping, Value};
 
 /// Render an [`IndexSchema`] as a type-first `*.schema.yml` document.
 pub fn schema_to_yaml(schema: &IndexSchema) -> Result<String> {
+    Ok(serde_yaml::to_string(&schema_value(schema)?)?)
+}
+
+/// The YAML tree [`schema_to_yaml`] prints: one key per setting the canonical
+/// form writes, in its order.
+pub fn schema_value(schema: &IndexSchema) -> Result<Value> {
     let mut root = Mapping::new();
     insert(&mut root, "version", Value::from(schema.version));
     insert(&mut root, "table", Value::from(schema.table.as_ref()));
@@ -50,8 +56,7 @@ pub fn schema_to_yaml(schema: &IndexSchema) -> Result<String> {
         insert(&mut root, "filters", filters_value(filters)?);
     }
     insert(&mut root, "fields", fields_value(&schema.fields)?);
-
-    Ok(serde_yaml::to_string(&Value::Mapping(root))?)
+    Ok(Value::Mapping(root))
 }
 
 /// Render a [`ConfigToml`] as a `flusso.toml` document.

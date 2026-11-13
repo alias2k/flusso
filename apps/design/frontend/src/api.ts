@@ -294,6 +294,9 @@ export interface ConfigToml {
   source: Record<string, unknown>;
   stream?: Record<string, unknown>;
   sinks?: Record<string, unknown>;
+  /// A session-local, stable id per sink, keyed by the sink's name: a save
+  /// tells a renamed sink from a removed one by it. Never written to disk.
+  sinkIds?: Record<string, string>;
   index?: IndexEntry[];
   prefix?: string;
   on_error?: unknown;
@@ -323,6 +326,35 @@ export interface FileOp {
   /// Content for upsert/move (raw wins over schema).
   schema?: IndexSchema;
   raw?: string;
+  /// The text to write `schema` into, keeping its comments (the Code-mode
+  /// buffer); absent, the file on disk is used.
+  base?: string;
+  /// Which field of the base each field of `schema` is, so a comment follows
+  /// its field through a rename or a move.
+  identity?: SchemaIdentity;
+}
+
+/// One field's name and client-only uid, with its child fields: what the save
+/// pairs a field with its old self by (`model/ids.ts`).
+export interface FieldId {
+  name: string;
+  uid: string;
+  fields: FieldId[];
+}
+
+/// The fields of the model a base text reads as, and of the model being saved.
+export interface SchemaIdentity {
+  before: FieldId[];
+  after: FieldId[];
+}
+
+/// The `[[index]]` names of the file on disk, and for each entry being saved
+/// its position there (`null`: a new entry); for each sink being saved, by
+/// name, its name on disk (`null`: a new sink).
+export interface ConfigIdentity {
+  before: string[];
+  after: (number | null)[];
+  sinks?: Record<string, string | null>;
 }
 
 /// One op resolved against disk, for the review. `write` covers create + modify.
@@ -337,6 +369,10 @@ export interface OpDiff {
   changed: boolean;
   /// A stable warning code (e.g. "outside_base"); the UI translates it.
   warning?: string;
+  /// Set when the write could not keep the file's comments and formatting.
+  notice?: "layout_reset";
+  /// How many comments the write drops although what they describe still exists.
+  dropped?: number;
 }
 
 export interface MovedFile {
@@ -505,8 +541,11 @@ const stripOpUids = (op: FileOp): FileOp => (op.schema ? { ...op, schema: stripU
 /// Drop the session-local index ids before a config crosses to the backend —
 /// they're a client-only correlation handle and the strict parser rejects
 /// unknown fields. (`undefined` values are omitted by JSON.stringify.)
-const stripIds = (config: ConfigToml): ConfigToml =>
-  config.index ? { ...config, index: config.index.map((e) => ({ ...e, id: undefined })) } : config;
+const stripIds = (config: ConfigToml): ConfigToml => ({
+  ...config,
+  sinkIds: undefined,
+  ...(config.index ? { index: config.index.map((e) => ({ ...e, id: undefined })) } : {}),
+});
 
 /// What one registered adapter declares about its options (mirrors
 /// `kernel::AdapterDescription`): the designer renders its forms from these.
@@ -559,11 +598,17 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(stripIds(config)),
     }).then((r) => json<CatalogResponse>(r)),
-  preview: (index: string, schema: IndexSchema) =>
+  /// `file` names the schema file (config-relative) or the Code-mode text the
+  /// returned `yaml` is written into, so it shows what a save would write.
+  preview: (
+    index: string,
+    schema: IndexSchema,
+    file: { path?: string; base?: string; identity?: SchemaIdentity } = {},
+  ) =>
     fetch("/api/preview", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ index, schema: stripUids(schema) }),
+      body: JSON.stringify({ index, schema: stripUids(schema), ...file }),
     }).then((r) => json<PreviewResponse>(r)),
   validate: (config: ConfigToml, indexes: { name: string; schema: IndexSchema }[]) =>
     fetch("/api/validate", {
@@ -580,16 +625,16 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ config: stripIds(config), name, schema: stripUids(schema), id }),
     }).then((r) => json<SampleResponse>(r)),
-  diff: (config: ConfigToml, ops: FileOp[]) =>
+  diff: (config: ConfigToml, ops: FileOp[], identity?: ConfigIdentity) =>
     fetch("/api/diff", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ config: stripIds(config), ops: ops.map(stripOpUids) }),
+      body: JSON.stringify({ config: stripIds(config), ops: ops.map(stripOpUids), identity }),
     }).then((r) => json<OpDiff[]>(r)),
-  save: (config: ConfigToml, ops: FileOp[], skip: string[] = []) =>
+  save: (config: ConfigToml, ops: FileOp[], skip: string[] = [], identity?: ConfigIdentity) =>
     fetch("/api/save", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ config: stripIds(config), ops: ops.map(stripOpUids), skip }),
+      body: JSON.stringify({ config: stripIds(config), ops: ops.map(stripOpUids), skip, identity }),
     }).then((r) => json<SaveResult>(r)),
 };

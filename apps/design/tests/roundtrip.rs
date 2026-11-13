@@ -5,6 +5,11 @@
 //! (and so resolves to the same mapping). This is the deep correctness net the
 //! dev-schema fixtures can't give: it explores shapes nobody wrote by hand.
 //!
+//! A second property writes the schema as a hand-written, commented file,
+//! saves random edits into it (`design::keep`), and asserts every comment
+//! stays with the field it names, goes with a deleted one, and that nothing
+//! else is lost or moved.
+//!
 //! The generator mirrors the parser's invariants so a failure means *codegen*
 //! is wrong, not the fixture:
 //!  - `identifier` is excluded (conversion injects an `analyzer` option),
@@ -23,7 +28,9 @@
 
 use std::collections::BTreeMap;
 
+use config::toml::ConfigToml;
 use config::yaml::SchemaYaml;
+use design::keep::{ConfigIdentity, FieldId, SchemaIdentity};
 use kernel::common::ColumnName;
 use kernel::{
     Aggregate, AggregateKey, AggregateOp, BinaryOp, Column, ColumnPair, DatabaseSchema, Expression,
@@ -867,5 +874,716 @@ proptest! {
             "round-trip changed the schema; emitted:\n{}",
             yaml
         );
+    }
+}
+
+/// One edit the designer can make to a fields list somewhere in the tree.
+#[derive(Debug, Clone)]
+enum Edit {
+    Remove(usize),
+    Move(usize, usize),
+    Rename(usize),
+    Replace(usize, FieldSource),
+    Insert(usize, FieldSource),
+    Required(usize),
+}
+
+fn edit() -> impl Strategy<Value = (usize, Edit)> {
+    let at = 0..8usize;
+    let kind = prop_oneof![
+        2 => at.clone().prop_map(Edit::Remove),
+        2 => (at.clone(), at.clone()).prop_map(|(a, b)| Edit::Move(a, b)),
+        2 => at.clone().prop_map(Edit::Rename),
+        1 => (at.clone(), source(1)).prop_map(|(i, s)| Edit::Replace(i, s)),
+        1 => (at.clone(), source(1)).prop_map(|(i, s)| Edit::Insert(i, s)),
+        1 => at.prop_map(Edit::Required),
+    ];
+    (0..16usize, kind)
+}
+
+fn children(field: &Field) -> &[Field] {
+    match &field.source {
+        FieldSource::Group(children) => children,
+        FieldSource::Relation(Relation::Join(join)) => &join.fields,
+        _ => &[],
+    }
+}
+
+fn is_container(field: &Field) -> bool {
+    matches!(
+        field.source,
+        FieldSource::Group(_) | FieldSource::Relation(Relation::Join(_))
+    )
+}
+
+/// A schema and the designer's id of every field, kept in step through edits.
+#[derive(Debug, Clone)]
+struct Tracked {
+    schema: IndexSchema,
+    ids: Vec<FieldId>,
+    next: usize,
+}
+
+impl Tracked {
+    fn new(schema: IndexSchema) -> Self {
+        let mut tracked = Self {
+            ids: Vec::new(),
+            schema,
+            next: 0,
+        };
+        tracked.ids = tracked.fresh(&tracked.schema.fields.clone());
+        tracked
+    }
+
+    fn fresh(&mut self, fields: &[Field]) -> Vec<FieldId> {
+        fields
+            .iter()
+            .map(|field| {
+                self.next += 1;
+                let uid = format!("u{}", self.next);
+                FieldId {
+                    name: field.field.as_ref().to_owned(),
+                    fields: self.fresh(children(field)),
+                    uid,
+                }
+            })
+            .collect()
+    }
+
+    fn apply(&mut self, (list, edit): &(usize, Edit)) {
+        let lists = count_lists(&self.schema.fields);
+        let mut pick = list % lists;
+        let path = nth_path(&self.schema.fields, &mut pick, &mut Vec::new()).unwrap();
+        self.next += 1;
+        let serial = self.next;
+        let fresh_ids = match edit {
+            Edit::Replace(_, source) | Edit::Insert(_, source) => {
+                let probe = Field {
+                    field: FieldName::try_new("probe").unwrap(),
+                    options: BTreeMap::new(),
+                    emit: true,
+                    source: source.clone(),
+                };
+                self.fresh(children(&probe))
+            }
+            _ => Vec::new(),
+        };
+        let (fields, ids) = lists_at(&mut self.schema.fields, &mut self.ids, &path);
+        let n = fields.len();
+        match edit {
+            Edit::Remove(i) if n > 1 => {
+                fields.remove(i % n);
+                ids.remove(i % n);
+            }
+            Edit::Remove(_) => {}
+            Edit::Move(a, b) => {
+                let field = fields.remove(a % n);
+                let id = ids.remove(a % n);
+                fields.insert(b % n, field);
+                ids.insert(b % n, id);
+            }
+            Edit::Rename(i) => {
+                let name = format!("rn{serial}");
+                fields[i % n].field = FieldName::try_new(&name).unwrap();
+                ids[i % n].name = name;
+            }
+            Edit::Replace(i, source) => {
+                fields[i % n].options = options_for(source, BTreeMap::new());
+                fields[i % n].source = source.clone();
+                ids[i % n].fields = fresh_ids;
+            }
+            Edit::Insert(i, source) => {
+                let name = format!("add{serial}");
+                fields.insert(
+                    i % (n + 1),
+                    Field {
+                        field: FieldName::try_new(&name).unwrap(),
+                        options: options_for(source, BTreeMap::new()),
+                        emit: true,
+                        source: source.clone(),
+                    },
+                );
+                ids.insert(
+                    i % (n + 1),
+                    FieldId {
+                        name,
+                        uid: format!("u{serial}"),
+                        fields: fresh_ids,
+                    },
+                );
+            }
+            Edit::Required(i) => match &mut fields[i % n].source {
+                FieldSource::Column(column) => column.nullable = !column.nullable,
+                FieldSource::Script(script) => script.nullable = !script.nullable,
+                _ => {}
+            },
+        }
+    }
+}
+
+/// How many fields lists the tree has.
+fn count_lists(fields: &[Field]) -> usize {
+    1 + fields
+        .iter()
+        .filter(|f| is_container(f))
+        .map(|f| count_lists(children(f)))
+        .sum::<usize>()
+}
+
+/// The positions leading to the `n`th fields list, depth first.
+fn nth_path(fields: &[Field], n: &mut usize, path: &mut Vec<usize>) -> Option<Vec<usize>> {
+    if *n == 0 {
+        return Some(path.clone());
+    }
+    *n -= 1;
+    for (i, field) in fields.iter().enumerate() {
+        if !is_container(field) {
+            continue;
+        }
+        path.push(i);
+        if let Some(found) = nth_path(children(field), n, path) {
+            return Some(found);
+        }
+        path.pop();
+    }
+    None
+}
+
+fn lists_at<'a>(
+    fields: &'a mut Vec<Field>,
+    ids: &'a mut Vec<FieldId>,
+    path: &[usize],
+) -> (&'a mut Vec<Field>, &'a mut Vec<FieldId>) {
+    let Some((&i, rest)) = path.split_first() else {
+        return (fields, ids);
+    };
+    let children = match &mut fields[i].source {
+        FieldSource::Group(children) => children,
+        FieldSource::Relation(Relation::Join(join)) => &mut join.fields,
+        _ => unreachable!("a path leads through containers"),
+    };
+    lists_at(children, &mut ids[i].fields, rest)
+}
+
+/// How a generated file is laid out: what a hand-written one varies.
+#[derive(Debug, Clone)]
+struct Layout {
+    /// Spaces per level.
+    width: usize,
+    /// A pseudo-random stream for the per-list and per-item choices.
+    seed: u64,
+}
+
+impl Layout {
+    fn roll(&mut self, one_in: u64) -> bool {
+        self.seed ^= self.seed << 13;
+        self.seed ^= self.seed >> 7;
+        self.seed ^= self.seed << 17;
+        self.seed % one_in == 0
+    }
+}
+
+fn layout() -> impl Strategy<Value = Layout> {
+    (2usize..=4, any::<u64>()).prop_map(|(width, seed)| Layout {
+        width,
+        seed: seed | 1,
+    })
+}
+
+/// What a generated file wrote, to check a save against.
+#[derive(Debug, Default)]
+struct Written {
+    /// Every `# heading N` and `# end of list` comment, with the list it is in
+    /// (`""` for the root list).
+    list_comments: Vec<(String, String)>,
+    /// Fields whose `# inner` comment was written.
+    inner: Vec<String>,
+}
+
+/// `key: value` as serde_yaml prints it, indented to `col`.
+fn entry_lines(key: &serde_yaml::Value, value: &serde_yaml::Value, col: usize) -> Vec<String> {
+    let mut map = serde_yaml::Mapping::new();
+    map.insert(key.clone(), value.clone());
+    let text = serde_yaml::to_string(&map).unwrap();
+    text.lines()
+        .map(|l| format!("{}{l}", " ".repeat(col)))
+        .collect()
+}
+
+/// The schema as a hand-written file: the layout's indent width, each list
+/// indented under its key or not, blank-line groups and section headings,
+/// every field with a comment above it, one at the end of its first line and
+/// sometimes one inside it, and some lists with a comment after their last
+/// item. Keys in `omit` (field uid, key) are left out.
+fn write(
+    schema: &IndexSchema,
+    ids: &[FieldId],
+    layout: &mut Layout,
+    omit: &[(String, String)],
+) -> (String, Written) {
+    let tree = design::codegen::schema_value(schema).unwrap();
+    let serde_yaml::Value::Mapping(root) = tree else {
+        unreachable!()
+    };
+    let mut out = vec!["# A header.".to_owned(), String::new()];
+    let mut written = Written::default();
+    let mut headings = 0;
+    for (key, value) in &root {
+        if key.as_str() == Some("fields") {
+            out.push("fields:".to_owned());
+            let last = true;
+            write_fields(
+                value,
+                ids,
+                0,
+                "",
+                last,
+                layout,
+                omit,
+                &mut out,
+                &mut written,
+                &mut headings,
+            );
+        } else {
+            out.extend(entry_lines(key, value, 0));
+        }
+    }
+    (out.join("\n") + "\n", written)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_fields(
+    items: &serde_yaml::Value,
+    ids: &[FieldId],
+    key_col: usize,
+    owner: &str,
+    last_key: bool,
+    layout: &mut Layout,
+    omit: &[(String, String)],
+    out: &mut Vec<String>,
+    written: &mut Written,
+    headings: &mut usize,
+) -> bool {
+    let items = items.as_sequence().unwrap();
+    if items.is_empty() {
+        let last = out.last_mut().unwrap();
+        last.push_str(" []");
+        return false;
+    }
+    let dash = if layout.roll(3) {
+        key_col
+    } else {
+        key_col + layout.width
+    };
+    let pad = " ".repeat(dash);
+    let keeps_blanks = |line: &String| {
+        line.trim_end()
+            .rsplit([' ', '-'])
+            .next()
+            .is_some_and(|last| last.starts_with(['|', '>']) && last.contains('+'))
+    };
+    for (item, id) in items.iter().zip(ids) {
+        // A blank line after a keep-chomping block scalar would be its content.
+        let after_kept = out
+            .iter()
+            .rev()
+            .take_while(|l| !l.trim_start().starts_with("# about"))
+            .any(keeps_blanks);
+        if after_kept {
+        } else if layout.roll(4) {
+            *headings += 1;
+            out.push(String::new());
+            out.push(format!("{pad}# heading {headings}"));
+            out.push(String::new());
+            written
+                .list_comments
+                .push((owner.to_owned(), format!("# heading {headings}")));
+        } else if layout.roll(4) {
+            out.push(String::new());
+        }
+        out.push(format!("{pad}# about {}", id.uid));
+        let map = item.as_mapping().unwrap();
+        let col = dash + 2;
+        // A comment at the item's column after a list written at that column
+        // is the list's, not the item's.
+        let mut ends_in_compact_list = false;
+        for (k, (key, value)) in map.iter().enumerate() {
+            if k > 0 && omit.contains(&(id.uid.clone(), key.as_str().unwrap().to_owned())) {
+                continue;
+            }
+            if key.as_str() == Some("fields") {
+                out.push(format!("{}fields:", " ".repeat(col)));
+                let last = k + 1 == map.len();
+                ends_in_compact_list = write_fields(
+                    value, &id.fields, col, &id.uid, last, layout, omit, out, written, headings,
+                );
+                continue;
+            }
+            ends_in_compact_list = value.as_sequence().is_some_and(|items| !items.is_empty());
+            let mut lines = entry_lines(key, value, col);
+            if k == 0 {
+                lines[0].replace_range(dash..col, "- ");
+                lines[0].push_str(&format!(" # tail {}", id.uid));
+            }
+            out.extend(lines);
+        }
+        if !ends_in_compact_list && layout.roll(3) {
+            out.push(format!("{}# inner {}", " ".repeat(col), id.uid));
+            written.inner.push(id.uid.clone());
+        }
+    }
+    // At the key's own column, a comment above the next key is that key's.
+    if (dash > key_col || last_key) && layout.roll(3) {
+        out.push(format!("{pad}# end of list {owner}"));
+        written
+            .list_comments
+            .push((owner.to_owned(), format!("# end of list {owner}")));
+    }
+    dash == key_col
+}
+
+fn all_ids<'a>(ids: &'a [FieldId], into: &mut BTreeMap<&'a str, &'a FieldId>) {
+    for id in ids {
+        into.insert(&id.uid, id);
+        all_ids(&id.fields, into);
+    }
+}
+
+/// The lists (by owner, `""` for the root) that exist both before and after.
+fn living_lists(
+    before: &[FieldId],
+    after: &[FieldId],
+    schema_before: &IndexSchema,
+    schema_after: &IndexSchema,
+) -> Vec<String> {
+    fn containers(fields: &[Field], ids: &[FieldId], into: &mut Vec<String>) {
+        for (field, id) in fields.iter().zip(ids) {
+            if is_container(field) {
+                into.push(id.uid.clone());
+                containers(children(field), &id.fields, into);
+            }
+        }
+    }
+    let (mut was, mut is) = (Vec::new(), Vec::new());
+    containers(&schema_before.fields, before, &mut was);
+    containers(&schema_after.fields, after, &mut is);
+    let mut living: Vec<String> = was.into_iter().filter(|uid| is.contains(uid)).collect();
+    living.push(String::new());
+    living
+}
+
+fn read(text: &str) -> Result<serde_json::Value, String> {
+    let entity = SchemaYaml::try_parse(text).map_err(|e| e.to_string())?;
+    IndexSchema::try_from(entity)
+        .map(|s| serde_json::to_value(&s).unwrap())
+        .map_err(|e| e.to_string())
+}
+
+/// A hand-written-looking file for `tracked`, with up to three keys a field
+/// item may leave out (ones whose absence reads back the same) left out.
+fn hand_written(tracked: &Tracked, layout: &Layout) -> (String, Written) {
+    let expected = Ok(serde_json::to_value(&tracked.schema).unwrap());
+    let mut omit: Vec<(String, String)> = Vec::new();
+    let tree = design::codegen::schema_value(&tracked.schema).unwrap();
+    let mut candidates = Vec::new();
+    fn keys(value: &serde_yaml::Value, ids: &[FieldId], into: &mut Vec<(String, String)>) {
+        let Some(items) = value.get("fields").and_then(|v| v.as_sequence()) else {
+            return;
+        };
+        for (item, id) in items.iter().zip(ids) {
+            for key in item.as_mapping().unwrap().keys().skip(1) {
+                if key.as_str() != Some("fields") {
+                    into.push((id.uid.clone(), key.as_str().unwrap().to_owned()));
+                }
+            }
+            keys(item, &id.fields, into);
+        }
+    }
+    keys(&tree, &tracked.ids, &mut candidates);
+    let mut picker = layout.clone();
+    for candidate in candidates {
+        if omit.len() == 3 || !picker.roll(4) {
+            continue;
+        }
+        omit.push(candidate);
+        let (text, _) = write(&tracked.schema, &tracked.ids, &mut layout.clone(), &omit);
+        if read(&text) != expected {
+            omit.pop();
+        }
+    }
+    write(&tracked.schema, &tracked.ids, &mut layout.clone(), &omit)
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// Edits saved into a hand-written, commented file: every field that
+    /// survives keeps exactly its own comments, a deleted field's comments
+    /// are gone, and no other comment is lost or duplicated.
+    #[test]
+    fn each_comment_stays_with_its_field_through_a_save(
+        schema in schema(),
+        layout in layout(),
+        edits in prop::collection::vec(edit(), 1..=5),
+    ) {
+        let tracked = Tracked::new(schema);
+        let (base, written) = hand_written(&tracked, &layout);
+        prop_assert_eq!(read(&base), Ok(serde_json::to_value(&tracked.schema).unwrap()), "{}", base);
+
+        let untouched = design::keep::schema_yaml(Some(&base), &tracked.schema, None).unwrap();
+        prop_assert_eq!(&untouched.text, &base);
+
+        let mut edited = tracked.clone();
+        for edit in &edits {
+            edited.apply(edit);
+        }
+        let identity = SchemaIdentity { before: tracked.ids.clone(), after: edited.ids.clone() };
+        let saved = design::keep::schema_yaml(Some(&base), &edited.schema, Some(&identity)).unwrap();
+        prop_assert!(saved.notice.is_none(), "fell back:\n{}\n--- base ---\n{}", saved.text, base);
+        prop_assert_eq!(saved.dropped, 0, "{}\n--- base ---\n{}", saved.text, base);
+        prop_assert_eq!(read(&saved.text), Ok(serde_json::to_value(&edited.schema).unwrap()), "{}", saved.text);
+
+        let text = &saved.text;
+        let lines: Vec<&str> = text.lines().collect();
+        let count = |needle: &str| lines.iter().filter(|l| l.trim_start() == needle || l.ends_with(&format!(" {needle}"))).count();
+        let ctx = format!("\n--- saved ---\n{text}\n--- base ---\n{base}\n--- edits ---\n{edits:?}");
+        let (mut was, mut is) = (BTreeMap::new(), BTreeMap::new());
+        all_ids(&tracked.ids, &mut was);
+        all_ids(&edited.ids, &mut is);
+        prop_assert_eq!(count("# A header."), 1, "{}", ctx);
+        for uid in was.keys() {
+            let about = format!("# about {uid}");
+            let tail = format!("# tail {uid}");
+            let inner = format!("# inner {uid}");
+            let wrote_inner = written.inner.iter().any(|u| u == uid);
+            match is.get(uid) {
+                None => {
+                    prop_assert_eq!(count(&about) + count(&tail) + count(&inner), 0, "deleted {}{}", uid, ctx);
+                }
+                Some(id) => {
+                    prop_assert_eq!(count(&about), 1, "{}{}", about, ctx);
+                    prop_assert_eq!(count(&tail), 1, "{}{}", tail, ctx);
+                    prop_assert_eq!(count(&inner), usize::from(wrote_inner), "{}{}", inner, ctx);
+                    let at = lines.iter().position(|l| l.trim_start() == about).unwrap();
+                    let dash = lines[at + 1];
+                    prop_assert!(dash.ends_with(&format!(" {tail}")), "{} not above its field{}", about, ctx);
+                    let col = dash.len() - dash.trim_start().len();
+                    prop_assert!(dash[col..].starts_with("- "), "{}", ctx);
+                    let first: serde_yaml::Mapping = serde_yaml::from_str(&dash[col + 2..]).unwrap();
+                    prop_assert_eq!(first.values().next().and_then(|v| v.as_str()), Some(id.name.as_str()), "{}{}", about, ctx);
+                    if wrote_inner {
+                        let end = lines.iter().position(|l| l.trim_start() == inner).unwrap();
+                        prop_assert!(end > at + 1, "{}{}", inner, ctx);
+                        for line in &lines[at + 2..end] {
+                            let d = line.len() - line.trim_start().len();
+                            let content = !line.trim().is_empty() && !line.trim_start().starts_with('#');
+                            prop_assert!(!(content && d <= col), "{} left its field at {:?}{}", inner, line, ctx);
+                        }
+                    }
+                }
+            }
+        }
+        for uid in is.keys().filter(|uid| !was.contains_key(*uid)) {
+            prop_assert_eq!(count(&format!("# about {uid}")), 0, "{}", ctx);
+        }
+        let living = living_lists(&tracked.ids, &edited.ids, &tracked.schema, &edited.schema);
+        for (owner, comment) in &written.list_comments {
+            let expected = usize::from(living.contains(owner));
+            prop_assert_eq!(count(comment), expected, "{} of list {:?}{}", comment, owner, ctx);
+        }
+    }
+}
+
+/// A `flusso.toml` reduced to what the TOML save pairs: sinks and `[[index]]`
+/// entries, each with an id, and the per-index sink tables.
+#[derive(Debug, Clone)]
+struct Deployment {
+    sinks: Vec<(String, String)>,
+    indexes: Vec<(String, String, Vec<String>)>,
+    next: usize,
+}
+
+#[derive(Debug, Clone)]
+enum TomlEdit {
+    RenameSink(usize),
+    RemoveSink(usize),
+    RenameIndex(usize),
+    RemoveIndex(usize),
+    MoveIndex(usize, usize),
+}
+
+fn toml_edit() -> impl Strategy<Value = TomlEdit> {
+    prop_oneof![
+        (0..8usize).prop_map(TomlEdit::RenameSink),
+        (0..8usize).prop_map(TomlEdit::RemoveSink),
+        (0..8usize).prop_map(TomlEdit::RenameIndex),
+        (0..8usize).prop_map(TomlEdit::RemoveIndex),
+        (0..8usize, 0..8usize).prop_map(|(a, b)| TomlEdit::MoveIndex(a, b)),
+    ]
+}
+
+fn deployment() -> impl Strategy<Value = Deployment> {
+    (
+        1..4usize,
+        prop::collection::vec(prop::collection::vec(any::<bool>(), 3), 1..4),
+    )
+        .prop_map(|(sinks, indexes)| Deployment {
+            sinks: (0..sinks)
+                .map(|k| (format!("s{k}"), format!("s{k}")))
+                .collect(),
+            indexes: indexes
+                .iter()
+                .enumerate()
+                .map(|(k, uses)| {
+                    let used = (0..sinks)
+                        .filter(|s| uses.get(*s).copied().unwrap_or(false))
+                        .map(|s| format!("s{s}"))
+                        .collect();
+                    (format!("i{k}"), format!("i{k}"), used)
+                })
+                .collect(),
+            next: 0,
+        })
+}
+
+impl Deployment {
+    fn sink_name(&self, uid: &str) -> &str {
+        &self.sinks.iter().find(|(u, _)| u == uid).unwrap().1
+    }
+
+    fn apply(&mut self, edit: &TomlEdit) {
+        self.next += 1;
+        let (s, i) = (self.sinks.len(), self.indexes.len());
+        match *edit {
+            TomlEdit::RenameSink(k) => self.sinks[k % s].1 = format!("r{}", self.next),
+            TomlEdit::RemoveSink(k) if s > 1 => {
+                let (uid, _) = self.sinks.remove(k % s);
+                for index in &mut self.indexes {
+                    index.2.retain(|u| *u != uid);
+                }
+            }
+            TomlEdit::RenameIndex(k) => self.indexes[k % i].1 = format!("n{}", self.next),
+            TomlEdit::RemoveIndex(k) if i > 1 => {
+                self.indexes.remove(k % i);
+            }
+            TomlEdit::MoveIndex(a, b) => {
+                let index = self.indexes.remove(a % i);
+                self.indexes.insert(b % i, index);
+            }
+            _ => {}
+        }
+    }
+
+    /// The file, commented (every sink, entry and per-index table has a
+    /// comment naming its id above it; sinks one below too) or bare.
+    fn text(&self, comments: bool) -> String {
+        let mut out = String::from(
+            "# A header.\n\n[source]\ntype = \"postgres\"\nconnection_url = \"postgres://x\"\n",
+        );
+        for (uid, name) in &self.sinks {
+            out.push('\n');
+            if comments {
+                out.push_str(&format!("# about sink {uid}\n"));
+            }
+            out.push_str(&format!("[sinks.{name}]\ntype = \"stdout\"\n"));
+            if comments {
+                out.push_str(&format!("# below sink {uid}\n"));
+            }
+        }
+        for (uid, name, used) in &self.indexes {
+            out.push('\n');
+            if comments {
+                out.push_str(&format!("# about index {uid}\n"));
+            }
+            out.push_str(&format!(
+                "[[index]]\nname = \"{name}\"\nschema = \"{uid}.schema.yml\"\nenabled = true\n"
+            ));
+            for sink in used {
+                if comments {
+                    out.push_str(&format!("# about {uid} in {sink}\n"));
+                }
+                out.push_str(&format!(
+                    "[index.sinks.{}]\nshards = 1\n",
+                    self.sink_name(sink)
+                ));
+            }
+        }
+        out
+    }
+}
+
+proptest! {
+    #![proptest_config(config())]
+
+    /// Sink and `[[index]]` renames, removals and reorders saved with
+    /// identity: every surviving table keeps exactly its own comments, a
+    /// removed one's are gone, and nothing else is lost.
+    #[test]
+    fn each_toml_comment_stays_with_its_table_through_a_save(
+        base in deployment(),
+        edits in prop::collection::vec(toml_edit(), 1..=5),
+    ) {
+        let text = base.text(true);
+        let mut edited = base.clone();
+        for edit in &edits {
+            edited.apply(edit);
+        }
+        let config = ConfigToml::try_parse(&edited.text(false)).unwrap();
+        let identity = ConfigIdentity {
+            before: base.indexes.iter().map(|i| i.1.clone()).collect(),
+            after: edited
+                .indexes
+                .iter()
+                .map(|(uid, _, _)| base.indexes.iter().position(|i| i.0 == *uid))
+                .collect(),
+            sinks: Some(
+                edited
+                    .sinks
+                    .iter()
+                    .map(|(uid, name)| (name.clone(), Some(base.sink_name(uid).to_owned())))
+                    .collect(),
+            ),
+        };
+        let saved = design::keep::config_toml(Some(&text), &config, Some(&identity)).unwrap();
+        let ctx = format!("\n--- saved ---\n{}\n--- base ---\n{text}\n--- edits ---\n{edits:?}", saved.text);
+        prop_assert!(saved.notice.is_none(), "fell back{}", ctx);
+        prop_assert_eq!(saved.dropped, 0, "{}", ctx);
+        let lines: Vec<&str> = saved.text.lines().collect();
+        let at = |needle: &str| -> Vec<usize> { lines.iter().enumerate().filter(|(_, l)| **l == needle).map(|(i, _)| i).collect() };
+        prop_assert_eq!(at("# A header.").len(), 1, "{}", ctx);
+        for (uid, _) in &base.sinks {
+            let about = at(&format!("# about sink {uid}"));
+            let below = at(&format!("# below sink {uid}"));
+            match edited.sinks.iter().find(|(u, _)| u == uid) {
+                None => prop_assert!(about.is_empty() && below.is_empty(), "removed {}{}", uid, ctx),
+                Some((_, name)) => {
+                    prop_assert_eq!(about.len(), 1, "{}{}", uid, ctx);
+                    prop_assert_eq!(lines.get(about[0] + 1).map(|l| l.to_string()), Some(format!("[sinks.{name}]")), "{}", ctx);
+                    prop_assert_eq!(below, vec![about[0] + 3], "{}{}", uid, ctx);
+                }
+            }
+        }
+        for (uid, _, used) in &base.indexes {
+            let about = at(&format!("# about index {uid}"));
+            let now = edited.indexes.iter().find(|i| i.0 == *uid);
+            match now {
+                None => prop_assert!(about.is_empty(), "removed {}{}", uid, ctx),
+                Some((_, name, _)) => {
+                    prop_assert_eq!(about.len(), 1, "{}{}", uid, ctx);
+                    prop_assert_eq!(lines.get(about[0] + 2).map(|l| l.to_string()), Some(format!("name = \"{name}\"")), "{}", ctx);
+                }
+            }
+            for sink in used {
+                let own = at(&format!("# about {uid} in {sink}"));
+                match now.filter(|i| i.2.contains(sink)) {
+                    None => prop_assert!(own.is_empty(), "{} in {}{}", uid, sink, ctx),
+                    Some(_) => {
+                        prop_assert_eq!(own.len(), 1, "{} in {}{}", uid, sink, ctx);
+                        let header = format!("[index.sinks.{}]", edited.sink_name(sink));
+                        prop_assert_eq!(lines.get(own[0] + 1).copied(), Some(header.as_str()), "{}", ctx);
+                    }
+                }
+            }
+        }
     }
 }

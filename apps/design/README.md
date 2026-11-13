@@ -15,7 +15,7 @@ flusso design --config flusso.toml
 - **Edit** the full grammar on a node-graph canvas with an inspector: scalars, `map`/`custom`/`geo`/`object`, the four join verbs, the six aggregate ops, filters, `order_by`, soft-delete, plus the `flusso.toml` source/sink/index wiring.
 - **Preview** the derived mapping and document tree on every edit, and build a **sample document** from one live row.
 - **Validate** the schemas against the database and flag disagreements on the canvas.
-- **Save** by canonical regeneration, reviewed as a diff first, atomically.
+- **Save** the edit into the existing files, keeping their comments and untouched formatting (a new file is generated), reviewed as a diff first, atomically.
 
 ## Layout
 
