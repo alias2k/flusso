@@ -316,6 +316,61 @@ async fn a_column_changing_type_mid_run_recovers_after_one_restart() {
     engine.abort();
 }
 
+/// With the capture told about the builder's column types, the `Relation`
+/// message Postgres sends after a table changes drops them before the change
+/// is built: no restart, and a column that became `bytea` is rendered as hex
+/// text behind a pooler on a database set to `escape`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_column_changing_type_mid_run_is_read_by_its_new_type_without_a_restart() {
+    let (postgres, port, url) = start_postgres().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "ALTER DATABASE postgres SET bytea_output = 'escape'",
+        "CREATE TABLE kws (id int PRIMARY KEY, b_kw bytea, t_kw text)",
+        "CREATE PUBLICATION flusso FOR TABLE kws",
+        r"INSERT INTO kws VALUES (1, '\x0102', 'hello')",
+    ] {
+        alter(&pool, statement).await;
+    }
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (bounced, _bouncer) = connect_over(Route::Pooler, &postgres, &url).await;
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("kws"), kws_schema())]));
+    let documents = PgDocumentBuilder::connect(&bounced, Arc::new(spec))
+        .await
+        .unwrap();
+    let capture = WalChangeCapture::new(replication(port), bounced.clone())
+        .with_column_types(documents.column_types());
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let restarts = Arc::new(AtomicUsize::new(0));
+    let mut engine = tokio::spawn(supervise(
+        Arc::new(capture),
+        Arc::new(documents),
+        Arc::new(DocumentSink(Arc::clone(&recorded))),
+        Arc::clone(&restarts),
+    ));
+    let expect = |b_kw: &str, t_kw: &str| json!({ "bKw": b_kw, "tKw": t_kw });
+
+    document_reaches(&mut engine, &recorded, "1", &expect(r"\x0102", "hello")).await;
+    alter(
+        &pool,
+        "ALTER TABLE kws ALTER COLUMN b_kw TYPE text USING encode(b_kw, 'hex'); UPDATE kws SET b_kw = 'now-text' WHERE id = 1",
+    )
+    .await;
+    document_reaches(&mut engine, &recorded, "1", &expect("now-text", "hello")).await;
+    alter(
+        &pool,
+        r"ALTER TABLE kws ALTER COLUMN t_kw TYPE bytea USING convert_to(t_kw, 'UTF8'); UPDATE kws SET t_kw = '\x0a0b' WHERE id = 1",
+    )
+    .await;
+    document_reaches(&mut engine, &recorded, "1", &expect("now-text", r"\x0a0b")).await;
+    assert_eq!(restarts.load(Ordering::SeqCst), 0);
+    engine.abort();
+}
+
 /// `kws` indexed as `{ bKw, tKw }`, both `keyword`.
 fn kws_schema() -> IndexSchema {
     IndexSchema {
