@@ -15,7 +15,9 @@
 //! stops the engine on its first change instead of resolving to nothing. A
 //! root `primary_key` other than the table's own key writes no document.
 //! Each key type the document builder reads works in every relation position
-//! and the backfill, with the same document ids from both.
+//! and the backfill, with the same document ids from both. A link of another
+//! type than its key, holding a value no key can equal, matches no parent and
+//! never stops the engine.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -3133,6 +3135,179 @@ linked_by_another_spelling! {
         "text COLLATE folded",
         &["CREATE COLLATION folded (provider = icu, locale = 'und-u-ks-level2', deterministic = false)"],
         ["'Ab'", "'AB'"], "Ab";
+}
+
+/// A link of another type than its key, holding a value no key can equal
+/// (issues #312, #313): `int8` past the `int4` range, a numeric `NaN` or
+/// fraction, a float past every integer, an infinite timestamp, text longer
+/// than a `char(n)` key. In the backfill and in every live change (insert,
+/// update, re-parent both ways, delete), in every relation position, the
+/// link matches no parent: the change rebuilds only what it names and the
+/// engine keeps running.
+async fn a_link_no_key_can_equal_matches_no_parent(
+    [sql_type, link_type]: [&str; 2],
+    [root, link, bad]: [&str; 3],
+    id: &str,
+) {
+    let (_container, port, url) = start_logical_postgres().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        format!("CREATE TABLE parents (id {sql_type} PRIMARY KEY, name text)"),
+        format!("CREATE TABLE kids (id int PRIMARY KEY, parent {link_type}, name text)"),
+        "CREATE TABLE grandkids (id int PRIMARY KEY, kid_id int, name text)".to_owned(),
+        format!("CREATE TABLE fars (id {sql_type} PRIMARY KEY, name text)"),
+        format!(
+            "CREATE TABLE links (parent {link_type}, far {link_type}, PRIMARY KEY (parent, far))"
+        ),
+        "ALTER TABLE kids REPLICA IDENTITY FULL".to_owned(),
+        "ALTER TABLE grandkids REPLICA IDENTITY FULL".to_owned(),
+        "ALTER TABLE links REPLICA IDENTITY FULL".to_owned(),
+        "CREATE PUBLICATION flusso FOR TABLE parents, kids, grandkids, fars, links".to_owned(),
+        format!("INSERT INTO parents VALUES ({root}, 'pa')"),
+        format!("INSERT INTO fars VALUES ({root}, 'fa')"),
+        format!("INSERT INTO kids VALUES (1, {link}, 'k1'), (2, {bad}, 'k2')"),
+        "INSERT INTO grandkids VALUES (100, 2, NULL)".to_owned(),
+        format!("INSERT INTO links VALUES ({link}, {link}), ({bad}, {bad})"),
+    ] {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let documents = Arc::new(
+        PgDocumentBuilder::connect(&url, Arc::new(keyed_parents_spec()))
+            .await
+            .unwrap(),
+    );
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = tokio::spawn(run_deployment(
+        Arc::new(WalChangeCapture::new(replication(port), url.clone())),
+        Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
+        Arc::new(RecordingSink::new(&recorded)),
+    ));
+    let parent = format!("upsert parents {id}");
+    for op in [
+        parent.as_str(),
+        "upsert kids 1",
+        "upsert kids 2",
+        "upsert grandkids 100",
+    ] {
+        expect_op(&mut engine, &recorded, op).await;
+    }
+
+    let marker_sql = "INSERT INTO grandkids (id) VALUES ($1)";
+    let mut marker = 900;
+    let mut rebuilt = async |sql: String| {
+        marker += 1;
+        rebuilt_by(
+            &mut engine,
+            &recorded,
+            &pool,
+            &sql,
+            marker_sql,
+            marker,
+            &format!("upsert grandkids {marker}"),
+        )
+        .await
+    };
+    let ops = |ops: &[&str]| sorted(ops);
+
+    for (sql, expected, what) in [
+        (
+            format!("INSERT INTO kids VALUES (3, {bad}, 'k3')"),
+            ops(&["upsert kids 3"]),
+            "a new kid whose link equals no key",
+        ),
+        (
+            "UPDATE kids SET name = 'k3b' WHERE id = 3".to_owned(),
+            ops(&["upsert kids 3"]),
+            "an updated kid whose link equals no key",
+        ),
+        (
+            format!("UPDATE kids SET parent = {bad} WHERE id = 1"),
+            ops(&[&parent, "upsert kids 1"]),
+            "a kid re-parented away to a link that equals no key",
+        ),
+        (
+            format!("UPDATE kids SET parent = {link} WHERE id = 1"),
+            ops(&[&parent, "upsert kids 1"]),
+            "a kid re-parented back",
+        ),
+        (
+            "INSERT INTO grandkids VALUES (101, 3, NULL)".to_owned(),
+            ops(&["upsert grandkids 101"]),
+            "a row a `via` hop reaches through such a kid",
+        ),
+        (
+            format!("INSERT INTO links VALUES ({bad}, {link})"),
+            ops(&[]),
+            "a junction row whose left key equals no key",
+        ),
+        (
+            format!("INSERT INTO links VALUES ({link}, {bad})"),
+            ops(&[&parent]),
+            "a junction row whose right key equals no far key",
+        ),
+        (
+            format!("UPDATE fars SET name = 'fa2' WHERE id = {root}"),
+            ops(&[&parent]),
+            "a far row",
+        ),
+        (
+            format!("UPDATE parents SET name = 'pa2' WHERE id = {root}"),
+            ops(&[&parent, "upsert kids 1"]),
+            "the root, and only the kid that `belongs_to` it",
+        ),
+        (
+            "DELETE FROM kids WHERE id = 3".to_owned(),
+            ops(&["delete kids 3"]),
+            "a deleted kid whose link equals no key",
+        ),
+        (
+            format!("DELETE FROM links WHERE parent = {bad} OR far = {bad}"),
+            ops(&[&parent]),
+            "deleted junction rows",
+        ),
+    ] {
+        assert_eq!(rebuilt(sql).await, expected, "{what}");
+    }
+
+    engine.abort();
+}
+
+macro_rules! linked_by_a_value_no_key_equals {
+    ($($test:ident: [$sql_type:literal, $link_type:literal], [$root:literal, $link:literal, $bad:literal], $id:literal;)*) => {$(
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires docker"]
+        async fn $test() {
+            a_link_no_key_can_equal_matches_no_parent(
+                [$sql_type, $link_type], [$root, $link, $bad], $id,
+            )
+            .await;
+        }
+    )*};
+}
+
+linked_by_a_value_no_key_equals! {
+    a_bigint_link_past_the_int_range_matches_no_parent:
+        ["int", "bigint"], ["1", "1", "3000000000"], "1";
+    an_int_link_past_the_smallint_range_matches_no_parent:
+        ["smallint", "int"], ["1", "1", "70000"], "1";
+    a_numeric_nan_link_matches_no_int_parent:
+        ["int", "numeric"], ["1", "1", "'NaN'"], "1";
+    a_numeric_fraction_link_matches_no_bigint_parent:
+        ["bigint", "numeric"], ["1", "1", "1e30"], "1";
+    an_infinite_float_link_matches_no_int_parent:
+        ["int", "float8"], ["1", "1", "'Infinity'"], "1";
+    an_infinite_timestamp_link_matches_no_date_parent:
+        ["date", "timestamp"], ["'2024-01-01'", "'2024-01-01'", "'infinity'"], "2024-01-01";
+    an_overlong_text_link_matches_no_char_parent:
+        ["char(3)", "text"], ["'abc'", "'abc'", "'abcdef'"], "abc";
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

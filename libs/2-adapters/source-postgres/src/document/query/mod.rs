@@ -112,6 +112,15 @@ pub(super) fn transform_probe(sql_type: &str, transforms: &[Transform]) -> SqlSt
     ))
 }
 
+/// A query that compares a `NULL` of `link_type` with a `NULL` of
+/// `key_type` (each a column's `format_type`) exactly as a document query
+/// joins a link column to its key. Postgres resolves the `=` the same way, so
+/// it fails where the two types don't compare. It reads no table, so it takes
+/// no lock.
+pub(super) fn comparison_probe(link_type: &str, key_type: &str) -> SqlString {
+    SqlString::new(format!("SELECT NULL::{link_type} = NULL::{key_type}"))
+}
+
 /// Build the single query that assembles one document, given its key. Returns
 /// the SQL (selecting one `json` column named `document`) and its bound params.
 pub(super) fn document_query(

@@ -1816,6 +1816,367 @@ async fn a_root_key_the_builder_cannot_read_back_is_refused() {
     }
 }
 
+/// A link Postgres can't compare with the key it names (issues #313, #299's
+/// facts): every relation position, each against the key it is joined to.
+/// The document query joins the two columns with `=`, so a pair with no `=`
+/// operator fails to plan and every build of the index fails, whatever the
+/// rows hold. Pairs Postgres compares across types (`int` with `bigint`,
+/// `varchar` with `text`) are not reported.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn validation_reports_a_link_postgres_cannot_compare_with_its_key() {
+    let (_pg, url) = start_seeded().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE owners (id uuid PRIMARY KEY, code text, name text)",
+        "CREATE TABLE codes (id uuid PRIMARY KEY, name text)",
+        "CREATE TABLE pets (id int PRIMARY KEY, owner text, code uuid, name text)",
+        "CREATE TABLE cards (id int PRIMARY KEY, owner_ref varchar(36), name text)",
+        "CREATE TABLE toys (id bigint PRIMARY KEY, name text)",
+        "CREATE TABLE owner_toys (owner text, toy int, PRIMARY KEY (owner, toy))",
+        "CREATE TABLE visits (id int PRIMARY KEY, pet_id bytea)",
+        "CREATE TABLE kept (id int PRIMARY KEY, owner_id uuid, name text)",
+        "INSERT INTO owners VALUES ('00000000-0000-0000-0000-00000000000a', 'x', 'o')",
+    ] {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let pair = |local: &str, related: &str| ColumnPair {
+        local: column(local),
+        related: column(related),
+    };
+    let join = |table_name: &str, kind: JoinKind| Join {
+        table: table(table_name),
+        primary_key: column("id"),
+        nullable: true,
+        kind,
+        filters: None,
+        order_by: None,
+        limit: None,
+        fields: vec![col("name", "name")],
+        indexed: true,
+        on: vec![],
+    };
+    let aggregate = |table_name: &str, key: AggregateKey, via: Vec<ViaHop>| Aggregate {
+        table: table(table_name),
+        op: AggregateOp::Count,
+        key,
+        value_type: None,
+        filters: None,
+        distinct: false,
+        via,
+        on: vec![],
+    };
+    let owner_toys = || Through {
+        table: table("owner_toys"),
+        left_key: column("owner"),
+        right_key: column("toy"),
+        filters: None,
+    };
+    let fields = vec![
+        join_field(
+            "pets",
+            Join {
+                on: vec![pair("code", "code")],
+                ..join(
+                    "pets",
+                    JoinKind::HasMany {
+                        foreign_key: column("owner"),
+                    },
+                )
+            },
+        ),
+        join_field(
+            "card",
+            join(
+                "cards",
+                JoinKind::HasOne {
+                    foreign_key: column("owner_ref"),
+                },
+            ),
+        ),
+        join_field(
+            "code",
+            join(
+                "codes",
+                JoinKind::BelongsTo {
+                    column: column("code"),
+                },
+            ),
+        ),
+        join_field(
+            "toys",
+            join(
+                "toys",
+                JoinKind::ManyToMany {
+                    through: owner_toys(),
+                },
+            ),
+        ),
+        agg_field(
+            "petCount",
+            aggregate("pets", AggregateKey::Direct(column("owner")), vec![]),
+        ),
+        agg_field(
+            "toyCount",
+            aggregate("toys", AggregateKey::Through(owner_toys()), vec![]),
+        ),
+        agg_field(
+            "visitCount",
+            aggregate(
+                "visits",
+                AggregateKey::Direct(column("pet_id")),
+                vec![ViaHop {
+                    table: table("pets"),
+                    foreign_key: column("owner"),
+                    filters: None,
+                    on: vec![],
+                }],
+            ),
+        ),
+        join_field(
+            "kept",
+            join(
+                "kept",
+                JoinKind::HasMany {
+                    foreign_key: column("owner_id"),
+                },
+            ),
+        ),
+    ];
+    let mut schema = users_schema(fields, None);
+    schema.table = table("owners");
+    let documents = builder(&url, schema.clone()).await;
+    let found: Vec<_> = validate_indexes(&spec(schema), &documents)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|d| (d.dotted_path(), d.kind.as_str(), d.message))
+        .collect();
+    let cannot = |role: &str, link: &str, link_type: &str, key: &str, key_type: &str| {
+        format!(
+            "`{role}` `{link}` (`{link_type}`) can't be compared with `{key}` (`{key_type}`): \
+             every document build fails"
+        )
+    };
+    let expected = [
+        (
+            "pets",
+            cannot("foreign_key", "pets.owner", "text", "owners.id", "uuid"),
+        ),
+        (
+            "pets",
+            cannot("on.related", "pets.code", "uuid", "owners.code", "text"),
+        ),
+        (
+            "card",
+            cannot(
+                "foreign_key",
+                "cards.owner_ref",
+                "character varying(36)",
+                "owners.id",
+                "uuid",
+            ),
+        ),
+        (
+            "code",
+            cannot("column", "owners.code", "text", "codes.id", "uuid"),
+        ),
+        (
+            "toys",
+            cannot(
+                "through.left_key",
+                "owner_toys.owner",
+                "text",
+                "owners.id",
+                "uuid",
+            ),
+        ),
+        (
+            "petCount",
+            cannot("foreign_key", "pets.owner", "text", "owners.id", "uuid"),
+        ),
+        (
+            "toyCount",
+            cannot(
+                "through.left_key",
+                "owner_toys.owner",
+                "text",
+                "owners.id",
+                "uuid",
+            ),
+        ),
+        (
+            "visitCount",
+            cannot("via.foreign_key", "pets.owner", "text", "owners.id", "uuid"),
+        ),
+        (
+            "visitCount",
+            cannot(
+                "foreign_key",
+                "visits.pet_id",
+                "bytea",
+                "pets.id",
+                "integer",
+            ),
+        ),
+    ];
+    assert_eq!(
+        found,
+        expected
+            .into_iter()
+            .map(|(path, message)| (path.to_owned(), "link_type_mismatch", message))
+            .collect::<Vec<_>>()
+    );
+
+    let build = documents
+        .build_many(&[DocumentId {
+            index: index_name("users"),
+            key: RowKey(vec![(
+                column("id"),
+                GenericValue::Uuid("00000000-0000-0000-0000-00000000000a".parse().unwrap()),
+            )]),
+        }])
+        .await;
+    assert!(
+        build
+            .as_ref()
+            .is_err_and(|e| e.to_string().contains("operator does not exist")),
+        "every build fails, whatever the rows hold: {build:?}"
+    );
+}
+
+/// An `ids` aggregate's `element_type` against the related table's key type
+/// (issue #299). OpenSearch maps the array as the element type: one that can
+/// hold no value of the key's type rejects every document collecting a key,
+/// so it is an error; one that holds only some, or changes them, is a
+/// warning; one that holds them all is not reported.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn validation_checks_an_ids_element_type_against_the_related_key() {
+    let (_pg, url) = start_seeded().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for key in ["bigint", "int", "uuid", "numeric", "text", "bytea"] {
+        let name = key.replace(' ', "_");
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "CREATE TABLE keyed_{name} (id {key} PRIMARY KEY, user_id int)"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let ids = |name: &str, element: &str, key: &str| {
+        agg_field(
+            name,
+            Aggregate {
+                table: table(&format!("keyed_{key}")),
+                op: AggregateOp::Ids {
+                    element_type: serde_json::from_value(serde_json::json!(element)).unwrap(),
+                },
+                key: AggregateKey::Direct(column("user_id")),
+                value_type: None,
+                filters: None,
+                distinct: false,
+                via: Vec::new(),
+                on: vec![],
+            },
+        )
+    };
+    let schema = users_schema(
+        vec![
+            ids("binaryOverBigint", "binary", "bigint"),
+            ids("jsonOverInt", "json", "int"),
+            ids("longOverUuid", "long", "uuid"),
+            ids("booleanOverInt", "boolean", "int"),
+            ids("integerOverBigint", "integer", "bigint"),
+            ids("dateOverText", "date", "text"),
+            ids("dateOverBigint", "date", "bigint"),
+            ids("longOverInt", "long", "int"),
+            ids("longOverBigint", "long", "bigint"),
+            ids("keywordOverUuid", "keyword", "uuid"),
+            ids("decimalOverNumeric", "decimal", "numeric"),
+            ids("binaryOverBytea", "binary", "bytea"),
+            ids("textOverBigint", "text", "bigint"),
+        ],
+        None,
+    );
+    let documents = builder(&url, schema.clone()).await;
+    let found: Vec<_> = validate_indexes(&spec(schema), &documents)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|d| (d.dotted_path(), d.kind.as_str(), d.message))
+        .collect();
+    let rejects = |element: &str, key: &str, table: &str| {
+        format!(
+            "`element_type` `{element}` can't hold the `{key}` keys of `{table}`: OpenSearch \
+             rejects every document that collects one"
+        )
+    };
+    let some = |element: &str, key: &str, table: &str| {
+        format!(
+            "`element_type` `{element}` holds only some `{key}` keys of `{table}`: OpenSearch \
+             rejects a document that collects another, or stores the key altered (a fraction \
+             truncated), so two keys can become equal"
+        )
+    };
+    let changes = |element: &str, key: &str, table: &str, how: &str| {
+        format!("`element_type` `{element}` changes the `{key}` keys of `{table}`: {how}")
+    };
+    assert_eq!(
+        found,
+        vec![
+            (
+                "binaryOverBigint".to_owned(),
+                "ids_element_lossy",
+                changes(
+                    "binary",
+                    "bigint",
+                    "keyed_bigint",
+                    "they are indexed as written, not as bytes"
+                ),
+            ),
+            (
+                "jsonOverInt".to_owned(),
+                "ids_element_mismatch",
+                rejects("json", "integer", "keyed_int"),
+            ),
+            (
+                "longOverUuid".to_owned(),
+                "ids_element_mismatch",
+                rejects("long", "uuid", "keyed_uuid"),
+            ),
+            (
+                "booleanOverInt".to_owned(),
+                "ids_element_mismatch",
+                rejects("boolean", "integer", "keyed_int"),
+            ),
+            (
+                "integerOverBigint".to_owned(),
+                "ids_element_lossy",
+                some("integer", "bigint", "keyed_bigint"),
+            ),
+            (
+                "dateOverText".to_owned(),
+                "ids_element_lossy",
+                some("date", "text", "keyed_text"),
+            ),
+            (
+                "dateOverBigint".to_owned(),
+                "ids_element_lossy",
+                changes(
+                    "date",
+                    "bigint",
+                    "keyed_bigint",
+                    "they are read as milliseconds since 1970"
+                ),
+            ),
+        ]
+    );
+}
+
 /// A document keyed as a live change carries a value of a type the WAL
 /// decoder leaves as text.
 fn doc_keyed(key: &str) -> DocumentId {

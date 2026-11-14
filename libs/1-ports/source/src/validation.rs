@@ -25,6 +25,13 @@
 //! own primary key, which every relation table must have, on one column
 //! ([`DiagnosticKind::RelationPrimaryKey`]). A column field's `transforms` must
 //! apply to its column's type ([`DiagnosticKind::TransformNotApplicable`]).
+//! Every link column must compare with the key it names
+//! ([`DiagnosticKind::LinkTypeMismatch`]): a foreign key with its parent's key,
+//! a `belongs_to` `column` with the target's, a junction's keys with both
+//! sides', a `via` hop's foreign key with the level before, and both sides of
+//! each `on:` pair. An `ids` aggregate's `element_type` is checked against the
+//! related table's key type ([`DiagnosticKind::IdsElementMismatch`],
+//! [`DiagnosticKind::IdsElementLossy`]).
 //!
 //! The root's own keys are checked on the root table: that it has a
 //! single-column primary key ([`DiagnosticKind::RootPrimaryKey`]), that the
@@ -43,8 +50,9 @@
 //! check --offline`) and [`validate_indexes`] reports them with the rest.
 //!
 //! The one store-specific piece is the [`Catalog`] trait: how a store reports a
-//! table and a column, and, when it can, a table's primary key and whether a
-//! column's type takes its `transforms`. Everything else — the field walk, which table each name
+//! table and a column, and, when it can, a table's primary key, whether a
+//! column's type takes its `transforms`, and whether two columns compare.
+//! Everything else — the field walk, which table each name
 //! lives on — is shared here.
 //!
 //! ```
@@ -108,6 +116,10 @@ use kernel::{
 
 use crate::spec::first_named;
 use crate::{Result, SourceError, SourceSpec};
+
+mod element;
+
+use element::Fit;
 
 /// How a store reports one base-table column: its native type name (as the
 /// store spells it, e.g. Postgres `character varying(255)`) and whether it
@@ -186,6 +198,20 @@ pub trait Catalog: Send + Sync {
     ) -> Result<bool> {
         Ok(true)
     }
+
+    /// Whether a value of `link` and a value of `key` (each a table and a
+    /// column) compare for equality, as the document query joins a link
+    /// column to the key it names. Only asked of two columns that exist.
+    ///
+    /// The default is `true`: the check is skipped.
+    async fn compares(
+        &self,
+        _schema: &DatabaseSchema,
+        _link: (&TableName, &ColumnName),
+        _key: (&TableName, &ColumnName),
+    ) -> Result<bool> {
+        Ok(true)
+    }
 }
 
 /// How serious a [`Diagnostic`] is.
@@ -247,6 +273,20 @@ pub enum DiagnosticKind {
     /// A field over a `[]` column does not declare `array: true`. It indexes
     /// as before, but the query side cannot read it back as an array.
     UndeclaredArrayColumn,
+    /// A link column and the key it names are of types the store can't
+    /// compare (e.g. a `text` foreign key against a `uuid` key): the document
+    /// query can't join them, so every document build fails.
+    LinkTypeMismatch,
+    /// An `ids` aggregate's `element_type` can hold no value of the related
+    /// table's key type (e.g. `long` over a `uuid` key, or `json`): the sink
+    /// rejects every document that collects a key.
+    IdsElementMismatch,
+    /// An `ids` aggregate's `element_type` holds only some values of the
+    /// related table's key type (e.g. `integer` over a `bigint` key: another
+    /// is rejected, or stored altered), or changes them (e.g. `date` over an
+    /// integer key, read as epoch milliseconds). Values that fit index as
+    /// before.
+    IdsElementLossy,
     /// Two fields at one level of the document share a name (as
     /// [`FieldName`] reads it: trimmed, case kept). The index maps the last
     /// one; a document holds the last one's value, read as the first one
@@ -278,10 +318,13 @@ impl DiagnosticKind {
             | Self::RootPrimaryKey
             | Self::RootPrimaryKeyMismatch
             | Self::UnsupportedKeyType
-            | Self::NotAnArrayColumn => Severity::Error,
+            | Self::NotAnArrayColumn
+            | Self::LinkTypeMismatch
+            | Self::IdsElementMismatch => Severity::Error,
             Self::Nullability
             | Self::IgnoredPrimaryKey
             | Self::UndeclaredArrayColumn
+            | Self::IdsElementLossy
             | Self::DuplicateFieldName
             | Self::TimestampFormat => Severity::Warning,
         }
@@ -304,6 +347,9 @@ impl DiagnosticKind {
             Self::UnsupportedKeyType => "unsupported_key_type",
             Self::NotAnArrayColumn => "not_an_array_column",
             Self::UndeclaredArrayColumn => "undeclared_array_column",
+            Self::LinkTypeMismatch => "link_type_mismatch",
+            Self::IdsElementMismatch => "ids_element_mismatch",
+            Self::IdsElementLossy => "ids_element_lossy",
             Self::DuplicateFieldName => "duplicate_field_name",
             Self::TimestampFormat => "timestamp_format",
         }
@@ -977,7 +1023,8 @@ impl Checker<'_> {
     }
 
     /// Both sides of each `on:` pair: `local` on `before` (skipped when that
-    /// table is missing), `related` on `related` (likewise).
+    /// table is missing), `related` on `related` (likewise), and that the two
+    /// compare.
     async fn on_pairs(
         &mut self,
         on: &[ColumnPair],
@@ -994,6 +1041,121 @@ impl Checker<'_> {
                 self.exists(related, &pair.related, &format!("{role}.related"))
                     .await?;
             }
+            if let (Some(before), Some(related)) = (before, related) {
+                self.link(
+                    &format!("{role}.related"),
+                    (related, &pair.related),
+                    (before, &pair.local),
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The single-column primary key of an existing `table`, when it has one
+    /// and the catalog can say.
+    async fn single_key(&mut self, table: &TableName) -> Result<Option<ColumnName>> {
+        Ok(match self.primary_key(table).await?.as_deref() {
+            Some([single]) => Some(single.clone()),
+            _ => None,
+        })
+    }
+
+    /// A link column, named by `role`, against the key column it names on
+    /// `table`'s single-column primary key: reported when the two don't
+    /// compare. Skipped when the table has no such key, or either column is
+    /// missing (reported where it is named).
+    async fn link_to_key(
+        &mut self,
+        role: &str,
+        link: (&TableName, &ColumnName),
+        table: &TableName,
+    ) -> Result<()> {
+        match self.single_key(table).await? {
+            Some(key) => self.link(role, link, (table, &key)).await,
+            None => Ok(()),
+        }
+    }
+
+    /// A link column, named by `role`, against the column it is joined to:
+    /// reported when the catalog says the two don't compare. Skipped when
+    /// either column is missing.
+    async fn link(
+        &mut self,
+        role: &str,
+        link: (&TableName, &ColumnName),
+        key: (&TableName, &ColumnName),
+    ) -> Result<()> {
+        let (Some(link_info), Some(key_info)) = (
+            self.quiet_column(link).await?,
+            self.quiet_column(key).await?,
+        ) else {
+            return Ok(());
+        };
+        if self.catalog.compares(self.db_schema, link, key).await? {
+            return Ok(());
+        }
+        self.report(
+            DiagnosticKind::LinkTypeMismatch,
+            format!(
+                "`{role}` `{}.{}` (`{}`) can't be compared with `{}.{}` (`{}`): every document \
+                 build fails",
+                link.0, link.1, link_info.sql_type, key.0, key.1, key_info.sql_type,
+            ),
+        );
+        Ok(())
+    }
+
+    /// A column's info, or `None` when it or its table is missing, without
+    /// reporting it: the check that names the column reports that.
+    async fn quiet_column(
+        &mut self,
+        (table, column): (&TableName, &ColumnName),
+    ) -> Result<Option<ColumnInfo>> {
+        match self.catalog.column(self.db_schema, table, column).await {
+            Ok(info) => Ok(Some(info)),
+            Err(SourceError::UnknownColumn(_) | SourceError::UnknownTable(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// An `ids` aggregate's `element_type` against the type of the key it
+    /// collects: the primary key of `table`.
+    async fn ids_element(&mut self, table: &TableName, element: &FlussoType) -> Result<()> {
+        let Some(key) = self.single_key(table).await? else {
+            return Ok(());
+        };
+        let Some(info) = self.quiet_column((table, &key)).await? else {
+            return Ok(());
+        };
+        let key_type = info.base_type.as_deref().unwrap_or(&info.sql_type);
+        let element_name = element::name(element);
+        let sql_type = &info.sql_type;
+        match element::fit(element, key_type) {
+            Fit::Holds => {}
+            Fit::Rejects => self.report(
+                DiagnosticKind::IdsElementMismatch,
+                format!(
+                    "`element_type` `{element_name}` can't hold the `{sql_type}` keys of \
+                     `{table}`: OpenSearch rejects every document that collects one"
+                ),
+            ),
+            Fit::Some => self.report(
+                DiagnosticKind::IdsElementLossy,
+                format!(
+                    "`element_type` `{element_name}` holds only some `{sql_type}` keys of \
+                     `{table}`: OpenSearch rejects a document that collects another, or stores \
+                     the key altered (a fraction truncated), so two keys can become equal"
+                ),
+            ),
+            Fit::Changes(how) => self.report(
+                DiagnosticKind::IdsElementLossy,
+                format!(
+                    "`element_type` `{element_name}` changes the `{sql_type}` keys of \
+                     `{table}`: {how}"
+                ),
+            ),
         }
         Ok(())
     }
@@ -1023,18 +1185,55 @@ impl Checker<'_> {
         .await
     }
 
+    /// A junction's keys against the keys they name: `left_key` against
+    /// `parent`'s, `right_key` against the far table's (when it exists).
+    async fn through_links(
+        &mut self,
+        through: &Through,
+        parent: &TableName,
+        far: Option<&TableName>,
+    ) -> Result<()> {
+        self.link_to_key(
+            "through.left_key",
+            (&through.table, &through.left_key),
+            parent,
+        )
+        .await?;
+        if let Some(far) = far {
+            self.link_to_key(
+                "through.right_key",
+                (&through.table, &through.right_key),
+                far,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     /// A join under `parent`: its table, key, `on:` pairs, primary key,
     /// filters and `order_by`, then its fields.
     async fn join(&mut self, parent: &TableName, join: &Join) -> Result<()> {
         let related = self.table(&join.table, "table").await?;
         match &join.kind {
-            JoinKind::BelongsTo { column } => self.exists(parent, column, "column").await?,
+            JoinKind::BelongsTo { column } => {
+                self.exists(parent, column, "column").await?;
+                if related {
+                    self.link_to_key("column", (parent, column), &join.table)
+                        .await?;
+                }
+            }
             JoinKind::HasOne { foreign_key } | JoinKind::HasMany { foreign_key } => {
                 if related {
                     self.exists(&join.table, foreign_key, "foreign_key").await?;
+                    self.link_to_key("foreign_key", (&join.table, foreign_key), parent)
+                        .await?;
                 }
             }
-            JoinKind::ManyToMany { through } => self.through(through, "through").await?,
+            JoinKind::ManyToMany { through } => {
+                self.through(through, "through").await?;
+                self.through_links(through, parent, related.then_some(&join.table))
+                    .await?;
+            }
         }
         self.on_pairs(&join.on, Some(parent), related.then_some(&join.table), "on")
             .await?;
@@ -1064,6 +1263,10 @@ impl Checker<'_> {
                 self.relation_key(table, "via.table").await?;
                 self.exists(table, &hop.foreign_key, "via.foreign_key")
                     .await?;
+                if let Some(before) = before {
+                    self.link_to_key("via.foreign_key", (table, &hop.foreign_key), before)
+                        .await?;
+                }
             }
             self.on_pairs(&hop.on, before, here, "via.on").await?;
             if let Some(table) = here {
@@ -1081,9 +1284,19 @@ impl Checker<'_> {
                 if related {
                     self.exists(&aggregate.table, foreign_key, "foreign_key")
                         .await?;
+                    if let Some(before) = before {
+                        self.link_to_key("foreign_key", (&aggregate.table, foreign_key), before)
+                            .await?;
+                    }
                 }
             }
-            AggregateKey::Through(through) => self.through(through, "through").await?,
+            AggregateKey::Through(through) => {
+                self.through(through, "through").await?;
+                if let Some(before) = before {
+                    self.through_links(through, before, related.then_some(&aggregate.table))
+                        .await?;
+                }
+            }
         }
         self.on_pairs(
             &aggregate.on,
@@ -1097,6 +1310,9 @@ impl Checker<'_> {
         }
         self.filters(&aggregate.table, aggregate.filters.as_deref(), "filters")
             .await?;
+        if let AggregateOp::Ids { element_type } = &aggregate.op {
+            self.ids_element(&aggregate.table, element_type).await?;
+        }
         self.aggregate_input(aggregate).await
     }
 
@@ -1747,7 +1963,7 @@ mod tests {
     const SHOP: &[(&str, &[&str])] = &[
         ("users", &["id", "name", "team_id"]),
         ("teams", &["id", "name"]),
-        ("orders", &["id", "user_id", "status", "region"]),
+        ("orders", &["id", "user_id", "status", "region", "user_ref"]),
         ("items", &["id", "order_id", "qty", "region"]),
         ("tags", &["id", "label"]),
         ("user_tags", &["user_id", "tag_id", "kind"]),
@@ -1808,6 +2024,15 @@ mod tests {
             _: bool,
         ) -> Result<bool> {
             Ok(column.as_ref() == "name")
+        }
+
+        async fn compares(
+            &self,
+            _: &DatabaseSchema,
+            (_, link): (&TableName, &ColumnName),
+            _: (&TableName, &ColumnName),
+        ) -> Result<bool> {
+            Ok(link.as_ref() != "user_ref")
         }
     }
 
@@ -3241,6 +3466,39 @@ mod tests {
                     DiagnosticKind::RelationPrimaryKey,
                     "`table` `public.notes` has no primary key; a relation table needs a \
                      single-column one"
+                ),
+            ]),
+        );
+    }
+
+    /// A link that doesn't compare with its key is reported once, on the
+    /// relation; a link column that doesn't exist only as unknown.
+    #[test]
+    fn a_link_that_does_not_compare_with_its_key_is_reported_on_the_relation() {
+        let has_many = |name: &str, foreign_key: &str| {
+            json!({ "field": name, "source": { "relation": { "join": {
+                "table": "orders", "kind": { "has_many": { "foreign_key": foreign_key } },
+                "primary_key": "id", "fields": [],
+            } } } })
+        };
+        let found = shop_problems(json!([
+            has_many("orders", "user_id"),
+            has_many("byRef", "user_ref"),
+            has_many("byTypo", "user_rf"),
+        ]));
+        assert_eq!(
+            found,
+            problems(&[
+                (
+                    "byRef",
+                    DiagnosticKind::LinkTypeMismatch,
+                    "`foreign_key` `orders.user_ref` (`integer`) can't be compared with \
+                     `users.id` (`integer`): every document build fails"
+                ),
+                (
+                    "byTypo",
+                    DiagnosticKind::UnknownColumn,
+                    "`foreign_key` references unknown column `public.orders.user_rf`"
                 ),
             ]),
         );

@@ -183,11 +183,14 @@ fn start_verdict(
 /// and deleted rows stay indexed), a relation table without a single-column
 /// primary key, `transforms` the column's type does not take (every build of
 /// the index fails on either), a root `primary_key` other than the table's
-/// own key (every document is written as a tombstone), or `array: true` over a
+/// own key (every document is written as a tombstone), `array: true` over a
 /// column that holds no array (a key new in 0.18, so no running deployment has
-/// it).
+/// it), or a link column Postgres can't compare with its key (every build of
+/// the index fails to plan).
 /// A type, numeric or nullability disagreement still builds, as it did before
-/// `run` validated, so it only prints. So does a root table without a
+/// `run` validated, so it only prints. So does an `ids` `element_type` that
+/// holds no key, or only some: a document whose `ids` array is empty, or
+/// holds only keys that fit, indexes as before. So does a root table without a
 /// single-column primary key: its live changes are still indexed, so refusing
 /// would stop a deployment that runs.
 fn stops_the_start(kind: DiagnosticKind) -> bool {
@@ -199,13 +202,16 @@ fn stops_the_start(kind: DiagnosticKind) -> bool {
         | DiagnosticKind::TransformNotApplicable
         | DiagnosticKind::RootPrimaryKeyMismatch
         | DiagnosticKind::UnsupportedKeyType
-        | DiagnosticKind::NotAnArrayColumn => true,
+        | DiagnosticKind::NotAnArrayColumn
+        | DiagnosticKind::LinkTypeMismatch => true,
         DiagnosticKind::TypeMismatch
         | DiagnosticKind::NotNumeric
         | DiagnosticKind::Nullability
         | DiagnosticKind::IgnoredPrimaryKey
         | DiagnosticKind::RootPrimaryKey
         | DiagnosticKind::UndeclaredArrayColumn
+        | DiagnosticKind::IdsElementMismatch
+        | DiagnosticKind::IdsElementLossy
         | DiagnosticKind::DuplicateFieldName
         | DiagnosticKind::TimestampFormat => false,
     }
@@ -407,6 +413,25 @@ mod tests {
     #[test]
     fn an_array_flag_over_a_column_without_one_refuses_the_start() {
         refuses(DiagnosticKind::NotAnArrayColumn);
+    }
+
+    #[test]
+    fn a_link_its_key_cannot_be_compared_with_refuses_the_start() {
+        refuses(DiagnosticKind::LinkTypeMismatch);
+    }
+
+    #[test]
+    fn an_ids_element_type_that_holds_no_key_prints_and_starts() {
+        let printed = starts(DiagnosticKind::IdsElementMismatch);
+        assert!(printed.contains("[error]"), "{printed}");
+        assert!(printed.contains("starting anyway"), "{printed}");
+    }
+
+    #[test]
+    fn an_ids_element_type_that_holds_only_some_keys_warns_and_starts() {
+        let printed = starts(DiagnosticKind::IdsElementLossy);
+        assert!(printed.contains("[warning]"), "{printed}");
+        assert!(!printed.contains("starting anyway"), "{printed}");
     }
 
     #[test]
