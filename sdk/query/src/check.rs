@@ -474,7 +474,9 @@ pub trait FlussoValueMeta {
 
     /// For a type standing in for a dynamic-key `map`, the value kinds it can
     /// hold. Empty for anything that is not a map — which is why it defaults:
-    /// only `#[derive(FlussoMap)]` sets it.
+    /// `#[derive(FlussoMap)]` sets it, and a `FlussoFragment` or untagged
+    /// `FlussoValue` newtype over a map type (a `HashMap`/`BTreeMap` included)
+    /// carries the value kinds of what it wraps.
     ///
     /// Without this a map wrapper embedded in a fragment could only be checked
     /// as "the schema field here is object-ish", since a fragment can't see the
@@ -591,6 +593,8 @@ pub trait OpaqueWithoutMeta {
     const AT_NESTED: bool = true;
     /// No metadata, so nothing says it cannot read an `object`.
     const AT_OBJECT: bool = true;
+    /// No metadata, so no map value kind the derive can see.
+    const MAP_VALUES: &'static [KindTag] = &[];
 }
 
 impl<T: ?Sized> OpaqueWithoutMeta for OpaqueProbe<T> {}
@@ -616,6 +620,8 @@ impl<T: ?Sized + FlussoValueMeta> OpaqueProbe<T> {
     pub const AT_NESTED: bool = holds_kind(T::KINDS, KindTag::Nested);
     /// Whether the type may stand at an `object` field.
     pub const AT_OBJECT: bool = holds_kind(T::KINDS, KindTag::Object);
+    /// The value kinds of a map type (see [`FlussoValueMeta::MAP_VALUES`]).
+    pub const MAP_VALUES: &'static [KindTag] = T::MAP_VALUES;
 }
 
 /// Whether a type of `kinds` may stand in for a field of kind `field`. An empty

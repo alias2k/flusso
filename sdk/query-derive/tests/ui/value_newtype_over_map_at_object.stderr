@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: field `billingAddress` in index `users` has fields of its own, and `Wrapped` is a map type — declare a struct for it (a `#[derive(FlussoFragment)]`, or a plain struct marked `#[flusso(opaque)]`); a map type goes on a `map` or `json` field
+  --> tests/ui/value_newtype_over_map_at_object.rs:20:22
+   |
+20 |     billing_address: Wrapped,
+   |                      ^^^^^^^ evaluation of `_` failed here

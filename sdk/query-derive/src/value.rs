@@ -88,7 +88,7 @@ impl Kind {
     }
 
     /// The tag as written in `#[flusso(…)]`, for the string kinds.
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Kind::Keyword => "keyword",
             Kind::Text => "text",
@@ -248,6 +248,11 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
                          reads an array — drop the tag, and `{ident}` reads the array as \
                          `{rendered}` does"
                     );
+                    let object_message = format!(
+                        "`{ident}` has a kind tag, so it stands for one value, but `{rendered}` \
+                         reads an object — derive `FlussoMap` on `{ident}` for a map, or \
+                         `FlussoFragment` for a sub-document"
+                    );
                     let array_check = quote_spanned! {inner.span()=>
                         const _: () = {
                             #[allow(unused_imports)]
@@ -255,6 +260,11 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
                             assert!(
                                 !::flusso_query::OpaqueProbe::<#inner>::ARRAY,
                                 #array_message
+                            );
+                            assert!(
+                                !::flusso_query::OpaqueProbe::<#inner>::HAS_META
+                                    || !::flusso_query::OpaqueProbe::<#inner>::AT_OBJECT,
+                                #object_message
                             );
                         };
                     };
@@ -311,7 +321,14 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
                                 <#inner as ::flusso_query::FlussoValueMeta>::EXHAUSTIVE;
                             const ARRAY: bool =
                                 <#inner as ::flusso_query::FlussoValueMeta>::ARRAY;
+                            const MAP_VALUES: &'static [::flusso_query::KindTag] =
+                                <#inner as ::flusso_query::FlussoValueMeta>::MAP_VALUES;
                         }
+                        // A newtype over a map type stands where the map does.
+                        impl<__FlussoK> ::flusso_query::FlussoMap<__FlussoK> for #ident
+                        where
+                            for<'__flusso> #inner: ::flusso_query::FlussoMap<__FlussoK>,
+                        {}
                         #sub_document_check
                         #leaf_check
                     })

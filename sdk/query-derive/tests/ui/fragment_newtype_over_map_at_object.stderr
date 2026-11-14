@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: field `billingAddress` in index `users` has fields of its own, and `Address` is a map type — declare a struct for it (a `#[derive(FlussoFragment)]`, or a plain struct marked `#[flusso(opaque)]`); a map type goes on a `map` or `json` field
+  --> tests/ui/fragment_newtype_over_map_at_object.rs:17:22
+   |
+17 |     billing_address: Address,
+   |                      ^^^^^^^ evaluation of `_` failed here

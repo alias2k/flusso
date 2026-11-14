@@ -1133,7 +1133,13 @@ named fields (e.g. a translations type with a `fallback` beside the language key
 **required** `#[flusso(keyword|text)]` value-kind tag (no default — untagged is a compile
 error); the
 derive's `check_type` map arm hard-checks a `HashMap`/`BTreeMap` value type and defers a
-`FlussoMap<kind>` bound otherwise. The `FlussoMap` derive also emits `FlussoValueMeta` (its
+`FlussoMap<kind>` bound otherwise. What a `FlussoMap` type holds is checked against its tag where it
+is declared (issue #294, `map.rs`): a newtype's `HashMap<String, V>` gets a `FlussoValue<tag>` bound
+on `V`, any other wrapped type (and a named struct's flattened field) must carry the tag in
+`OpaqueProbe::MAP_VALUES` (so `Box<…>`/a plain struct is refused), a named field must be `Option<V>`
+with the same bound, `deny_unknown_fields` is refused. A `FlussoFragment` newtype over a map, and an
+untagged `FlussoValue` newtype over a map type, carry `MAP_VALUES` (the map's value kinds) and a
+forwarding `FlussoMap<K>` impl, so they go exactly where the map goes. The `FlussoMap` derive also emits `FlussoValueMeta` (its
 `MAP_VALUES` carries the declared value kind) + a no-op `__flusso_check`, which is what lets
 the type sit inside a `FlussoFragment`; a hand-written `impl FlussoMap<K>` alone works only at a
 root — in a fragment it fails to compile, with the E0277 note pointing at the derive (or at a hand
@@ -1144,6 +1150,16 @@ and an opaque `json` field (object, no children) accepts any map-shaped type on 
 `handle_fn` dispatches on `Mapping.map_values` (`Text`→`TextMap`, `Keyword`→`KeywordMap`,
 `Date`→`DateMap`, the numerics→`NumberMap`). Phase 2 (per-key analyzers for per-language
 stemming) is deferred.
+
+**The boundary is pinned (issue #294).** What the derive trusts (any type at a `json` field, a
+flattened map, an enum where no `variants:` are declared, `opaque`, serde attributes that change what
+is read, a `String` at `geo`) is one list in `docs/src/query/document-structs.md` ("What the derive
+trusts"). `sdk/query-derive/tests/boundary.rs` generates ~420 cases (shape × field kind of the
+`boundary` fixture × root/fragment/flattened), compiles them in ≤50-module files through cargo in
+trybuild's target dir (`target/tests/trybuild`, same manifest, so it reuses the `ui` harness's
+artifacts), reads sample documents into what builds, and fails on a compile-then-fail case no
+`TRUSTED` rule covers; outcomes are recorded in `tests/boundary.outcomes` (re-record with
+`FLUSSO_BLESS=1`), and each rule's phrase must appear in the manual. A new shape or kind goes there.
 
 **Ordered enums (issue #87).** A keyword mapping with `Mapping.enum_order` set gets the
 `Enum<S, Sub>` handle (`handles/string.rs`) instead of `Keyword`: same value ops (delegated;

@@ -1,0 +1,5 @@
+error: field `it` of the FlussoMap type `Title` holds one key of a map, and a map may lack any key — declare it `Option<String>`
+ --> tests/ui/map_named_field_required.rs:8:9
+  |
+8 |     it: String,
+  |         ^^^^^^

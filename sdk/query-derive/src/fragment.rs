@@ -155,12 +155,19 @@ pub(crate) fn embeddable(ident: &Ident, fields: &[DocField]) -> TokenStream {
     .unwrap_or_else(|| {
         quote! { &[::flusso_query::KindTag::Object, ::flusso_query::KindTag::Nested] }
     });
+    let NewtypeMap { values, map_impl } = match fields {
+        [field] => newtype_map(ident, field),
+        _ => NewtypeMap::default(),
+    };
     quote! {
         impl ::flusso_query::FlussoValueMeta for #ident {
             const KINDS: &'static [::flusso_query::KindTag] = #kinds;
             const VARIANTS: &'static [&'static str] = &[];
             #array
+            #values
         }
+
+        #map_impl
 
         #declared
 
@@ -179,10 +186,14 @@ pub(crate) fn embeddable(ident: &Ident, fields: &[DocField]) -> TokenStream {
 }
 
 /// A newtype fragment stands where the type it wraps stands, so it reports
-/// that type's kinds: one over a value type is no sub-document.
+/// that type's kinds: one over a value type is no sub-document, and one over a
+/// `HashMap`/`BTreeMap` is an `object` (see [`newtype_map`]).
 fn newtype_kinds(field: &DocField) -> Option<TokenStream> {
     if field.ident.is_some() || field.skip {
         return None;
+    }
+    if map_container_value(field.ty).is_some() {
+        return Some(quote! { &[::flusso_query::KindTag::Object] });
     }
     let Some(ty) = checked_type(field, false) else {
         let inner = strip_option(field.ty);
@@ -358,6 +369,58 @@ fn newtype_array(ident: &Ident, field: &DocField) -> syn::Result<NewtypeArray> {
         },
         array: quote! { const ARRAY: bool = true; },
     })
+}
+
+/// What a newtype fragment carries of the map it wraps, so a parent places it
+/// as it places that map, and checks its values.
+///
+/// - Over a `HashMap<String, V>`/`BTreeMap<String, V>`: `MAP_VALUES` holds
+///   `V`'s kinds (any kind for `serde_json::Value`), and the newtype is a
+///   `FlussoMap<K>` exactly where the map is, which is what a root asks of a
+///   type at a `map` field.
+/// - Over any other type that is no `Vec`: both are forwarded from it, so a
+///   newtype over a `FlussoMap` type is one too.
+fn newtype_map(ident: &Ident, field: &DocField) -> NewtypeMap {
+    if field.ident.is_some() || field.skip || vec_inner(field.ty).is_some() {
+        return NewtypeMap::default();
+    }
+    let ty = field.ty;
+    let values = match map_container_value(ty) {
+        Some(value) if leaf_ident(value).as_deref() == Some("Value") => {
+            quote! { &[::flusso_query::KindTag::Other] }
+        }
+        Some(value) => match primitive_kinds(value) {
+            Some(tags) => quote! { &[#(#tags),*] },
+            None => quote! { <#value as ::flusso_query::FlussoValueMeta>::KINDS },
+        },
+        None if option_inner(ty).is_some() || checked_type(field, false).is_none() => {
+            return NewtypeMap::default();
+        }
+        None => quote! {
+            {
+                #[allow(unused_imports)]
+                use ::flusso_query::OpaqueWithoutMeta as _;
+                ::flusso_query::OpaqueProbe::<#ty>::MAP_VALUES
+            }
+        },
+    };
+    NewtypeMap {
+        values: quote! { const MAP_VALUES: &'static [::flusso_query::KindTag] = #values; },
+        map_impl: quote! {
+            impl<__FlussoK> ::flusso_query::FlussoMap<__FlussoK> for #ident
+            where
+                for<'__flusso> #ty: ::flusso_query::FlussoMap<__FlussoK>,
+            {}
+        },
+    }
+}
+
+/// What [`newtype_map`] emits: `MAP_VALUES` inside the newtype's
+/// `FlussoValueMeta` impl, and its `FlussoMap` impl.
+#[derive(Default)]
+struct NewtypeMap {
+    values: TokenStream,
+    map_impl: TokenStream,
 }
 
 /// What [`newtype_array`] emits: the checks beside the newtype, and its
@@ -967,19 +1030,19 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
                     render(element)
                 ),
             );
-            // `map_kind_ok` only fails for a map wrapper (a type with declared
-            // `MAP_VALUES` — always `keyword` or `text`, the derive allows no
-            // other tag), so when the schema's `values:` kind is readable the
-            // message can name the exact tag to put on it. A const panic takes
+            // `map_kind_ok` only fails for a map type (a type with declared
+            // `MAP_VALUES`: a `FlussoMap` type, tagged `keyword` or `text`, or
+            // a newtype over a map), so when the schema's `values:` kind is
+            // readable the message can name the fix. A const panic takes
             // a literal, so this is one assert per possible `values:` kind,
             // each guarded to fire only for its own case.
             let map_text_msg = message(
                 fragment,
                 key,
                 &format!(
-                    "is `{}`, a map wrapper whose kind tag does not match — the schema \
-                     field here is a `map` of `text` values, so the type needs \
-                     `#[flusso(text)]`",
+                    "is `{}`, a map type whose values are not `text` values, which the \
+                     schema field here holds — tag a FlussoMap type `#[flusso(text)]`, or \
+                     give a map `String` values",
                     render(element)
                 ),
             );
@@ -987,9 +1050,9 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
                 fragment,
                 key,
                 &format!(
-                    "is `{}`, a map wrapper whose kind tag does not match — the schema \
-                     field here is a `map` of `keyword` values, so the type needs \
-                     `#[flusso(keyword)]`",
+                    "is `{}`, a map type whose values are not `keyword` values, which the \
+                     schema field here holds — tag a FlussoMap type `#[flusso(keyword)]`, or \
+                     give a map `String` values",
                     render(element)
                 ),
             );
@@ -997,8 +1060,8 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
                 fragment,
                 key,
                 &format!(
-                    "is `{}`, a map wrapper — but the schema field here is a `map` of \
-                     number/date values, which a kind tag cannot name; use a \
+                    "is `{}`, a map type whose values are not the number/date values the \
+                     schema field here holds, which a kind tag cannot name; use a \
                      `HashMap`/`BTreeMap` of the matching value type instead",
                     render(element)
                 ),

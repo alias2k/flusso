@@ -1,0 +1,28 @@
+error[E0277]: `i64` is not a valid value for a `flusso_query::kind::Text` field
+ --> tests/ui/map_named_field_wrong_kind.rs:9:16
+  |
+9 |     it: Option<i64>,
+  |                ^^^ unsupported field type
+  |
+  = help: the trait `FlussoValue<flusso_query::kind::Text>` is not implemented for `i64`
+  = note: use a built-in leaf type, or a type with `#[derive(FlussoValue)]` of the matching kind
+help: the following other types implement trait `FlussoValue<K>`
+ --> $WORKSPACE/sdk/query/src/handles/mod.rs
+  |
+  |     ($kind:path: $($ty:ty),+ $(,)?) => { $(impl FlussoValue<$kind> for $ty {})+ };
+  |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |                                            |
+  |                                            `i64` implements `FlussoValue<flusso_query::kind::Decimal>`
+  |                                            `i64` implements `FlussoValue<flusso_query::kind::Long>`
+...
+  | number_values!(kind::Long: i8, i16, i32, i64);
+  | --------------------------------------------- in this macro invocation
+...
+  | number_values!(kind::Decimal: i8, i16, i32, i64);
+  | ------------------------------------------------ in this macro invocation
+note: required by a bound in `__flusso_map_value`
+ --> tests/ui/map_named_field_wrong_kind.rs:9:16
+  |
+9 |     it: Option<i64>,
+  |                ^^^ required by this bound in `__flusso_map_value`
+  = note: this error originates in the macro `number_values` (in Nightly builds, run with -Z macro-backtrace for more info)

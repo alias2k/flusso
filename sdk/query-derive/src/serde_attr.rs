@@ -127,6 +127,23 @@ pub(crate) fn skips_deserializing(attrs: &[Attribute]) -> bool {
         .any(|meta| matches!(meta.name.as_str(), "skip" | "skip_deserializing"))
 }
 
+/// Whether a field reads through its own function: `with` or
+/// `deserialize_with`, so its declared type says nothing about what is read.
+pub(crate) fn reads_with(attrs: &[Attribute]) -> bool {
+    serde_metas(attrs)
+        .iter()
+        .any(|meta| matches!(meta.name.as_str(), "with" | "deserialize_with"))
+}
+
+/// The `#[serde(…)]` attribute that sets `deny_unknown_fields`, if any.
+pub(crate) fn denies_unknown_fields(attrs: &[Attribute]) -> Option<&Attribute> {
+    attrs.iter().find(|attr| {
+        serde_metas(std::slice::from_ref(attr))
+            .iter()
+            .any(|meta| meta.name == "deny_unknown_fields")
+    })
+}
+
 /// The `#[serde(…)]` attribute that sets `from` or `try_from`, if any: serde
 /// then reads another type and converts it, so the derive's check of this one
 /// describes nothing serde reads.

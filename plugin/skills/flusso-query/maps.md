@@ -30,7 +30,11 @@ A whole-map wrapper opts in with `#[derive(FlussoMap)]` and a **required** kind 
 (`#[flusso(text)]` or `#[flusso(keyword)]`, matching the schema's `values:`). There is no default;
 an untagged wrapper is a compile error. The wrapper takes any shape that reads one JSON object, newtype
 over a map or named fields, so a translations type can carry a `fallback` field beside its language
-keys; a newtype over a `Vec`, an `Option` or a single value is a compile error.
+keys; a newtype over a `Vec`, an `Option` or a single value is a compile error. What it holds is
+checked against the tag: a newtype's `HashMap<String, V>` needs `V` of that kind, and a named field
+is `Option<V>` (a map may lack any key). What the derive checks and what it trusts (a flattened map,
+a `json` field, …) is one list in the manual:
+<https://alias2k.github.io/flusso/main/query/document-structs.html#what-the-derive-trusts>.
 
 A hand-written `impl FlussoMap<K>` works at a root but fails inside a `FlussoFragment` unless the
 type also implements `FlussoValueMeta` (`KINDS = [Object]`, `MAP_VALUES` = the value kind) and

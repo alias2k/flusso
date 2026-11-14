@@ -1,0 +1,441 @@
+# What the derive does with each generated case (tests/boundary.rs).
+# Re-record: FLUSSO_BLESS=1 cargo nextest run -p flusso-query-derive --test boundary
+root/string/kw reads
+root/string/n refused
+root/string/kwa refused
+root/string/ob refused
+root/string/ne refused
+root/string/mp refused
+root/string/mpn refused
+root/string/js trusted json
+root/string/jsa refused
+root/long/kw refused
+root/long/n reads
+root/long/kwa refused
+root/long/ob refused
+root/long/ne refused
+root/long/mp refused
+root/long/mpn refused
+root/long/js trusted json
+root/long/jsa refused
+root/vec_string/kw refused
+root/vec_string/n refused
+root/vec_string/kwa reads
+root/vec_string/ob refused
+root/vec_string/ne refused
+root/vec_string/mp refused
+root/vec_string/mpn refused
+root/vec_string/js trusted json
+root/vec_string/jsa trusted json
+root/code/kw reads
+root/code/n refused
+root/code/kwa refused
+root/code/ob refused
+root/code/ne refused
+root/code/mp refused
+root/code/mpn refused
+root/code/js trusted json
+root/code/jsa refused
+root/tags/kw refused
+root/tags/n refused
+root/tags/kwa reads
+root/tags/ob refused
+root/tags/ne refused
+root/tags/mp refused
+root/tags/mpn refused
+root/tags/js trusted json
+root/tags/jsa trusted json
+root/enum/kw trusted variants
+root/enum/n refused
+root/enum/kwa refused
+root/enum/ob refused
+root/enum/ne refused
+root/enum/mp refused
+root/enum/mpn refused
+root/enum/js trusted json
+root/enum/jsa refused
+root/value/kw reads
+root/value/n reads
+root/value/kwa reads
+root/value/ob reads
+root/value/ne reads
+root/value/mp reads
+root/value/mpn reads
+root/value/js reads
+root/value/jsa reads
+root/sub/kw refused
+root/sub/n refused
+root/sub/kwa refused
+root/sub/ob reads
+root/sub/ne refused
+root/sub/mp refused
+root/sub/mpn refused
+root/sub/js refused
+root/sub/jsa refused
+root/vec_sub/kw refused
+root/vec_sub/n refused
+root/vec_sub/kwa refused
+root/vec_sub/ob refused
+root/vec_sub/ne reads
+root/vec_sub/mp refused
+root/vec_sub/mpn refused
+root/vec_sub/js refused
+root/vec_sub/jsa refused
+root/subs/kw refused
+root/subs/n refused
+root/subs/kwa refused
+root/subs/ob refused
+root/subs/ne reads
+root/subs/mp refused
+root/subs/mpn refused
+root/subs/js refused
+root/subs/jsa refused
+root/hash_map/kw refused
+root/hash_map/n refused
+root/hash_map/kwa refused
+root/hash_map/ob refused
+root/hash_map/ne refused
+root/hash_map/mp reads
+root/hash_map/mpn refused
+root/hash_map/js trusted json
+root/hash_map/jsa refused
+root/btree_map_long/kw refused
+root/btree_map_long/n refused
+root/btree_map_long/kwa refused
+root/btree_map_long/ob refused
+root/btree_map_long/ne refused
+root/btree_map_long/mp refused
+root/btree_map_long/mpn reads
+root/btree_map_long/js trusted json
+root/btree_map_long/jsa refused
+root/hash_map_enum/kw refused
+root/hash_map_enum/n refused
+root/hash_map_enum/kwa refused
+root/hash_map_enum/ob refused
+root/hash_map_enum/ne refused
+root/hash_map_enum/mp trusted variants
+root/hash_map_enum/mpn refused
+root/hash_map_enum/js trusted json
+root/hash_map_enum/jsa refused
+root/fragment_over_map/kw refused
+root/fragment_over_map/n refused
+root/fragment_over_map/kwa refused
+root/fragment_over_map/ob refused
+root/fragment_over_map/ne refused
+root/fragment_over_map/mp reads
+root/fragment_over_map/mpn refused
+root/fragment_over_map/js trusted json
+root/fragment_over_map/jsa refused
+root/vec_fragment_over_map/kw refused
+root/vec_fragment_over_map/n refused
+root/vec_fragment_over_map/kwa refused
+root/vec_fragment_over_map/ob refused
+root/vec_fragment_over_map/ne refused
+root/vec_fragment_over_map/mp refused
+root/vec_fragment_over_map/mpn refused
+root/vec_fragment_over_map/js trusted json
+root/vec_fragment_over_map/jsa trusted json
+root/map_keyword/kw refused
+root/map_keyword/n refused
+root/map_keyword/kwa refused
+root/map_keyword/ob refused
+root/map_keyword/ne refused
+root/map_keyword/mp reads
+root/map_keyword/mpn refused
+root/map_keyword/js trusted json
+root/map_keyword/jsa refused
+root/map_text/kw refused
+root/map_text/n refused
+root/map_text/kwa refused
+root/map_text/ob refused
+root/map_text/ne refused
+root/map_text/mp refused
+root/map_text/mpn refused
+root/map_text/js trusted json
+root/map_text/jsa refused
+root/map_keyword_of_long/kw refused
+root/map_keyword_of_long/n refused
+root/map_keyword_of_long/kwa refused
+root/map_keyword_of_long/ob refused
+root/map_keyword_of_long/ne refused
+root/map_keyword_of_long/mp refused
+root/map_keyword_of_long/mpn refused
+root/map_keyword_of_long/js refused
+root/map_keyword_of_long/jsa refused
+root/map_named/kw refused
+root/map_named/n refused
+root/map_named/kwa refused
+root/map_named/ob refused
+root/map_named/ne refused
+root/map_named/mp reads
+root/map_named/mpn refused
+root/map_named/js trusted json
+root/map_named/jsa refused
+root/map_named_required/kw refused
+root/map_named_required/n refused
+root/map_named_required/kwa refused
+root/map_named_required/ob refused
+root/map_named_required/ne refused
+root/map_named_required/mp refused
+root/map_named_required/mpn refused
+root/map_named_required/js refused
+root/map_named_required/jsa refused
+root/map_over_box/kw refused
+root/map_over_box/n refused
+root/map_over_box/kwa refused
+root/map_over_box/ob refused
+root/map_over_box/ne refused
+root/map_over_box/mp refused
+root/map_over_box/mpn refused
+root/map_over_box/js refused
+root/map_over_box/jsa refused
+root/map_over_map_type/kw refused
+root/map_over_map_type/n refused
+root/map_over_map_type/kwa refused
+root/map_over_map_type/ob refused
+root/map_over_map_type/ne refused
+root/map_over_map_type/mp reads
+root/map_over_map_type/mpn refused
+root/map_over_map_type/js trusted json
+root/map_over_map_type/jsa refused
+root/value_over_map/kw refused
+root/value_over_map/n refused
+root/value_over_map/kwa refused
+root/value_over_map/ob refused
+root/value_over_map/ne refused
+root/value_over_map/mp reads
+root/value_over_map/mpn refused
+root/value_over_map/js trusted json
+root/value_over_map/jsa refused
+root/fragment_over_map_type/kw refused
+root/fragment_over_map_type/n refused
+root/fragment_over_map_type/kwa refused
+root/fragment_over_map_type/ob refused
+root/fragment_over_map_type/ne refused
+root/fragment_over_map_type/mp reads
+root/fragment_over_map_type/mpn refused
+root/fragment_over_map_type/js trusted json
+root/fragment_over_map_type/jsa refused
+fragment/string/kw reads
+fragment/string/n refused
+fragment/string/kwa refused
+fragment/string/ob refused
+fragment/string/ne refused
+fragment/string/mp refused
+fragment/string/mpn refused
+fragment/string/js refused
+fragment/string/jsa refused
+fragment/long/kw refused
+fragment/long/n reads
+fragment/long/kwa refused
+fragment/long/ob refused
+fragment/long/ne refused
+fragment/long/mp refused
+fragment/long/mpn refused
+fragment/long/js refused
+fragment/long/jsa refused
+fragment/vec_string/kw refused
+fragment/vec_string/n refused
+fragment/vec_string/kwa reads
+fragment/vec_string/ob refused
+fragment/vec_string/ne refused
+fragment/vec_string/mp refused
+fragment/vec_string/mpn refused
+fragment/vec_string/js refused
+fragment/vec_string/jsa trusted json
+fragment/code/kw reads
+fragment/code/n refused
+fragment/code/kwa refused
+fragment/code/ob refused
+fragment/code/ne refused
+fragment/code/mp refused
+fragment/code/mpn refused
+fragment/code/js refused
+fragment/code/jsa refused
+fragment/tags/kw refused
+fragment/tags/n refused
+fragment/tags/kwa reads
+fragment/tags/ob refused
+fragment/tags/ne refused
+fragment/tags/mp refused
+fragment/tags/mpn refused
+fragment/tags/js refused
+fragment/tags/jsa trusted json
+fragment/enum/kw trusted variants
+fragment/enum/n refused
+fragment/enum/kwa refused
+fragment/enum/ob refused
+fragment/enum/ne refused
+fragment/enum/mp refused
+fragment/enum/mpn refused
+fragment/enum/js refused
+fragment/enum/jsa refused
+fragment/value/kw reads
+fragment/value/n reads
+fragment/value/kwa reads
+fragment/value/ob reads
+fragment/value/ne reads
+fragment/value/mp reads
+fragment/value/mpn reads
+fragment/value/js reads
+fragment/value/jsa reads
+fragment/sub/kw refused
+fragment/sub/n refused
+fragment/sub/kwa refused
+fragment/sub/ob reads
+fragment/sub/ne refused
+fragment/sub/mp refused
+fragment/sub/mpn refused
+fragment/sub/js refused
+fragment/sub/jsa refused
+fragment/vec_sub/kw refused
+fragment/vec_sub/n refused
+fragment/vec_sub/kwa refused
+fragment/vec_sub/ob refused
+fragment/vec_sub/ne reads
+fragment/vec_sub/mp refused
+fragment/vec_sub/mpn refused
+fragment/vec_sub/js refused
+fragment/vec_sub/jsa refused
+fragment/subs/kw refused
+fragment/subs/n refused
+fragment/subs/kwa refused
+fragment/subs/ob refused
+fragment/subs/ne reads
+fragment/subs/mp refused
+fragment/subs/mpn refused
+fragment/subs/js refused
+fragment/subs/jsa refused
+fragment/hash_map/kw refused
+fragment/hash_map/n refused
+fragment/hash_map/kwa refused
+fragment/hash_map/ob refused
+fragment/hash_map/ne refused
+fragment/hash_map/mp reads
+fragment/hash_map/mpn refused
+fragment/hash_map/js trusted json
+fragment/hash_map/jsa trusted json
+fragment/btree_map_long/kw refused
+fragment/btree_map_long/n refused
+fragment/btree_map_long/kwa refused
+fragment/btree_map_long/ob refused
+fragment/btree_map_long/ne refused
+fragment/btree_map_long/mp refused
+fragment/btree_map_long/mpn reads
+fragment/btree_map_long/js trusted json
+fragment/btree_map_long/jsa trusted json
+fragment/hash_map_enum/kw refused
+fragment/hash_map_enum/n refused
+fragment/hash_map_enum/kwa refused
+fragment/hash_map_enum/ob refused
+fragment/hash_map_enum/ne refused
+fragment/hash_map_enum/mp trusted variants
+fragment/hash_map_enum/mpn refused
+fragment/hash_map_enum/js trusted json
+fragment/hash_map_enum/jsa trusted json
+fragment/fragment_over_map/kw refused
+fragment/fragment_over_map/n refused
+fragment/fragment_over_map/kwa refused
+fragment/fragment_over_map/ob refused
+fragment/fragment_over_map/ne refused
+fragment/fragment_over_map/mp reads
+fragment/fragment_over_map/mpn refused
+fragment/fragment_over_map/js trusted json
+fragment/fragment_over_map/jsa refused
+fragment/vec_fragment_over_map/kw refused
+fragment/vec_fragment_over_map/n refused
+fragment/vec_fragment_over_map/kwa refused
+fragment/vec_fragment_over_map/ob refused
+fragment/vec_fragment_over_map/ne refused
+fragment/vec_fragment_over_map/mp refused
+fragment/vec_fragment_over_map/mpn refused
+fragment/vec_fragment_over_map/js trusted json
+fragment/vec_fragment_over_map/jsa trusted json
+fragment/map_keyword/kw refused
+fragment/map_keyword/n refused
+fragment/map_keyword/kwa refused
+fragment/map_keyword/ob refused
+fragment/map_keyword/ne refused
+fragment/map_keyword/mp reads
+fragment/map_keyword/mpn refused
+fragment/map_keyword/js trusted json
+fragment/map_keyword/jsa refused
+fragment/map_text/kw refused
+fragment/map_text/n refused
+fragment/map_text/kwa refused
+fragment/map_text/ob refused
+fragment/map_text/ne refused
+fragment/map_text/mp refused
+fragment/map_text/mpn refused
+fragment/map_text/js trusted json
+fragment/map_text/jsa refused
+fragment/map_keyword_of_long/kw refused
+fragment/map_keyword_of_long/n refused
+fragment/map_keyword_of_long/kwa refused
+fragment/map_keyword_of_long/ob refused
+fragment/map_keyword_of_long/ne refused
+fragment/map_keyword_of_long/mp refused
+fragment/map_keyword_of_long/mpn refused
+fragment/map_keyword_of_long/js refused
+fragment/map_keyword_of_long/jsa refused
+fragment/map_named/kw refused
+fragment/map_named/n refused
+fragment/map_named/kwa refused
+fragment/map_named/ob refused
+fragment/map_named/ne refused
+fragment/map_named/mp reads
+fragment/map_named/mpn refused
+fragment/map_named/js trusted json
+fragment/map_named/jsa refused
+fragment/map_named_required/kw refused
+fragment/map_named_required/n refused
+fragment/map_named_required/kwa refused
+fragment/map_named_required/ob refused
+fragment/map_named_required/ne refused
+fragment/map_named_required/mp refused
+fragment/map_named_required/mpn refused
+fragment/map_named_required/js refused
+fragment/map_named_required/jsa refused
+fragment/map_over_box/kw refused
+fragment/map_over_box/n refused
+fragment/map_over_box/kwa refused
+fragment/map_over_box/ob refused
+fragment/map_over_box/ne refused
+fragment/map_over_box/mp refused
+fragment/map_over_box/mpn refused
+fragment/map_over_box/js refused
+fragment/map_over_box/jsa refused
+fragment/map_over_map_type/kw refused
+fragment/map_over_map_type/n refused
+fragment/map_over_map_type/kwa refused
+fragment/map_over_map_type/ob refused
+fragment/map_over_map_type/ne refused
+fragment/map_over_map_type/mp reads
+fragment/map_over_map_type/mpn refused
+fragment/map_over_map_type/js trusted json
+fragment/map_over_map_type/jsa refused
+fragment/value_over_map/kw refused
+fragment/value_over_map/n refused
+fragment/value_over_map/kwa refused
+fragment/value_over_map/ob refused
+fragment/value_over_map/ne refused
+fragment/value_over_map/mp reads
+fragment/value_over_map/mpn refused
+fragment/value_over_map/js trusted json
+fragment/value_over_map/jsa refused
+fragment/fragment_over_map_type/kw refused
+fragment/fragment_over_map_type/n refused
+fragment/fragment_over_map_type/kwa refused
+fragment/fragment_over_map_type/ob refused
+fragment/fragment_over_map_type/ne refused
+fragment/fragment_over_map_type/mp reads
+fragment/fragment_over_map_type/mpn refused
+fragment/fragment_over_map_type/js trusted json
+fragment/fragment_over_map_type/jsa refused
+flattened/hash_map trusted flattened
+flattened/btree_map_long trusted flattened
+flattened/value reads
+flattened/sub refused
+flattened/map_keyword trusted flattened
+flattened/map_named trusted flattened
+flattened/fragment_over_map trusted flattened

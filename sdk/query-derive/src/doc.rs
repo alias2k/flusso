@@ -1883,9 +1883,9 @@ pub(crate) fn embed_checks(
             // note ("add a derive, or mark the field opaque") rather than
             // only a bare "no `__flusso_check`".
             let map_message = format!(
-                "field `{key}` in {scope} is not a `map` — `{}` is a map type, so it can \
-                 only hold a `map` field with a matching value kind",
+                "field `{key}` in {scope} has fields of its own, and `{}` is a map type — {}",
                 crate::fragment::render(element),
+                crate::fragment::DECLARE_A_STRUCT,
             );
             calls.extend(quote::quote_spanned! {span=>
                 assert!(

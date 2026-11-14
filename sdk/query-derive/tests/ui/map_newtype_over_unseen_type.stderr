@@ -1,0 +1,11 @@
+error[E0080]: evaluation panicked: a `#[flusso(keyword)]` FlussoMap type holds `keyword` values, but `Boxed` wraps `Box<String>`, which is not a map of `keyword` values the derive can see into — use a `HashMap<String, String>`, or a type that derives `FlussoMap` with `#[flusso(keyword)]`
+ --> tests/ui/map_newtype_over_unseen_type.rs:7:14
+  |
+7 | struct Boxed(Box<String>);
+  |              ^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: a `#[flusso(keyword)]` FlussoMap type holds `keyword` values, but `Wrapped` wraps `Plain`, which is not a map of `keyword` values the derive can see into — use a `HashMap<String, String>`, or a type that derives `FlussoMap` with `#[flusso(keyword)]`
+  --> tests/ui/map_newtype_over_unseen_type.rs:16:16
+   |
+16 | struct Wrapped(Plain);
+   |                ^^^^^ evaluation of `_` failed here

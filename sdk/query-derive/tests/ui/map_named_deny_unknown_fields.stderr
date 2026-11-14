@@ -1,0 +1,5 @@
+error: a map holds any key, and `deny_unknown_fields` makes `Title` fail on every key it does not name — remove it; a `#[serde(flatten)]` `HashMap<String, String>` field keeps the other keys
+ --> tests/ui/map_named_deny_unknown_fields.rs:7:1
+  |
+7 | #[serde(deny_unknown_fields)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: `Code` has a kind tag, so it stands for one value, but `Codes` reads an object — derive `FlussoMap` on `Code` for a map, or `FlussoFragment` for a sub-document
+  --> tests/ui/value_tagged_newtype_over_map.rs:13:13
+   |
+13 | struct Code(Codes);
+   |             ^^^^^ evaluation of `_` failed here

@@ -1,4 +1,4 @@
-error[E0080]: evaluation panicked: field `billingAddress` in index `users` is not a `map` — `Translations` is a map type, so it can only hold a `map` field with a matching value kind
+error[E0080]: evaluation panicked: field `billingAddress` in index `users` has fields of its own, and `Translations` is a map type — declare a struct for it (a `#[derive(FlussoFragment)]`, or a plain struct marked `#[flusso(opaque)]`); a map type goes on a `map` or `json` field
   --> tests/ui/map_wrapper_on_plain_object.rs:17:22
    |
 17 |     billing_address: Translations,
