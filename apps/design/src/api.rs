@@ -3681,7 +3681,11 @@ mod tests {
         /// Kill `request` at the last step before its commit point: every
         /// file in place, the record not committed.
         fn kill_before_commit(&self, request: &SaveRequest) {
-            let point = {
+            static POINTS: std::sync::Mutex<BTreeMap<String, usize>> =
+                std::sync::Mutex::new(BTreeMap::new());
+            let key = format!("{request:?}");
+            let known = POINTS.lock().unwrap().get(&key).copied();
+            let point = known.unwrap_or_else(|| {
                 let probe = Fixture::new("probe-commit-point");
                 let point = (1..)
                     .find(|&point| {
@@ -3693,8 +3697,9 @@ mod tests {
                         committed
                     })
                     .unwrap();
+                POINTS.lock().unwrap().insert(key, point);
                 point
-            };
+            });
             commit::state::use_test_dir(Some(self.state_dir()));
             save_with(
                 &self.config(),
