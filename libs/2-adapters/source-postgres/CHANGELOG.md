@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-source-postgres-v0.17.0...flusso-source-postgres-v0.18.0) - 2026-11-14
+
+### Added
+
+- *(source)* warn on a timestamp format that refuses the ISO form
+- *(design)* author array columns ([#276](https://github.com/alias2k/flusso/pull/276))
+- *(source)* [**breaking**] validate array columns against the catalog ([#276](https://github.com/alias2k/flusso/pull/276))
+- *(source-postgres)* clean up an array column's value as the document is decoded ([#276](https://github.com/alias2k/flusso/pull/276))
+- *(source-postgres)* per-element transforms on an array column ([#276](https://github.com/alias2k/flusso/pull/276))
+- *(kernel)* a column may hold an array of its type ([#276](https://github.com/alias2k/flusso/pull/276))
+
+### Fixed
+
+- *(source-postgres)* a refused link probe is cached like a verdict ([#324](https://github.com/alias2k/flusso/pull/324))
+- *(source)* a check the database would not let run is reported, not dropped ([#324](https://github.com/alias2k/flusso/pull/324))
+- *(source)* [**breaking**] a schema that can never index a document stops the start (#316, #309)
+- *(source-postgres)* a Relation that omits a column is no evidence its type changed ([#298](https://github.com/alias2k/flusso/pull/298))
+- *(source-postgres)* a table's Relation message drops its cached column types ([#298](https://github.com/alias2k/flusso/pull/298))
+- *(source-postgres)* a failed document query forgets its tables' column types ([#298](https://github.com/alias2k/flusso/pull/298))
+- *(source-postgres)* wrap an array of a bytea domain; keep the session SET as a backstop ([#298](https://github.com/alias2k/flusso/pull/298))
+- *(source-postgres)* a binary field holds the column's bytes whatever bytea_output is ([#298](https://github.com/alias2k/flusso/pull/298))
+- *(source-postgres)* say a lossy ids key may be stored altered; check prints a skipped probe (#299, #313)
+- *(source-postgres)* probe a type pair once, in one round trip; pin exact ids pairs (#299, #313)
+- *(source-postgres)* check reports a link or ids element the key can't take (#299, #312, #313)
+- *(query-derive)* refuse by name only what can't be a string type of your own
+- *(query-derive)* say only what the derive promises; make the boundary test cheap
+- *(source-postgres)* resolve each change as it is buffered again ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* compare a resolved value as the join compares its column ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* parse years past 9999, so their ids keep main's form ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* read a batch's root keys back in one query per index ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* set no startup options, so PgBouncer passes ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* a link names the root's own document, however it spells the key ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* read a key back as the text the WAL sends ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* refuse a jsonb or json root key ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* read every key type the same way in backfill, WAL and build
+- *(source-postgres)* read bytea as hex whatever the database's bytea_output
+- *(source-postgres)* a constant builds the value the schema holds
+- *(source-postgres)* index a binary column as its bytes, not Postgres hex text
+- *(cli)* script run reports a document that fails to build as the failure
+- *(source)* a domain over an array or jsonb holds an array
+- review findings on array columns ([#276](https://github.com/alias2k/flusso/pull/276))
+- *(source-postgres)* a transform probe the role cannot run is not a verdict
+- *(source)* [**breaking**] settle the root-key kinds; probe transforms without a table
+- *(source)* report four schemas check accepted that cannot work
+
+### Other
+
+- *(source-postgres)* a refused link probe is asked once per type pair ([#324](https://github.com/alias2k/flusso/pull/324))
+- *(source)* a check the database would not let run is reported ([#324](https://github.com/alias2k/flusso/pull/324))
+- *(source-postgres)* a Relation that omits a cached column keeps the cached types ([#298](https://github.com/alias2k/flusso/pull/298))
+- *(source-postgres)* a link or ids element of a type the key can't take (#299, #312, #313)
+- warn on a timestamp format that refuses the ISO form; pin tuned mappings
+- *(query-derive)* typed-map shapes the review found still compile and fail ([#294](https://github.com/alias2k/flusso/pull/294))
+- *(source-postgres)* restore the recorded pgoutput fixture ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* a jsonb or "char" root key is refused ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* every key type in every relation position ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* array columns against a live Postgres ([#276](https://github.com/alias2k/flusso/pull/276))
+
 ## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-source-postgres-v0.16.0...flusso-source-postgres-v0.17.0) - 2026-11-12
 
 ### Added
