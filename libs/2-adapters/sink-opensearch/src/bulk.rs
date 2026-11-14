@@ -22,8 +22,9 @@
 //! Some ids OpenSearch refuses before it runs the request at all, and one of
 //! them fails the **whole** request with HTTP 400: an index action whose `_id`
 //! is empty or longer than [`MAX_ID_BYTES`] UTF-8 bytes, and a delete whose
-//! `_id` is empty. [`refused_id`] finds those, so `flush` rejects each one
-//! alone, never sends it, and sends the rest. A delete with an over-long id is
+//! `_id` is empty. [`refused_id`] finds those, so `flush` never sends them and
+//! sends the rest: an index action is rejected alone, a delete is dropped,
+//! since no document can have an empty id. A delete with an over-long id is
 //! sent: OpenSearch accepts it and answers `not_found`.
 //!
 //! ```text

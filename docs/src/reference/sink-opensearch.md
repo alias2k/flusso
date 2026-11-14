@@ -66,13 +66,14 @@ OpenSearch checks ids before it runs a bulk request, and one bad id refuses the 
 | --- | --- | --- |
 | upsert | 1 to 512 bytes | Sent. |
 | upsert | over 512 bytes | Rejected: `document id is 600 bytes; OpenSearch accepts at most 512 bytes in an _id`. |
-| upsert or delete | empty | Rejected: `document id is empty; OpenSearch needs a non-empty _id`. |
+| upsert | empty | Rejected: `document id is empty; OpenSearch needs a non-empty _id`. |
+| delete | empty | Not sent, and not a rejection: no document has an empty id. |
 | delete | over 512 bytes | Sent. OpenSearch answers `not_found`: no document can carry that id. |
 
 A rejected id is an item-level rejection like any other, so the index's [`on_error`](index-and-on-error.md#on_error) decides it and nothing retries it:
 
-- **`skip`**: the document is quarantined and the batch is acked. The log carries `document rejected by sink; quarantining and continuing` with the `index`, `id`, and `reason`; [`/status`](http.md#get-status) counts it in `documents_quarantined`, and the [`flusso.documents.quarantined`](metrics.md) counter goes up. The row stays out of the index until its key changes.
-- **`stop`**: the rest of the batch is written, then the sink engine stops with the batch unconfirmed: `sink rejected 1 document(s) (e.g. users/kkkk…: document id is 600 bytes; …); stopping`. [`/status`](http.md#get-status) shows it in `last_error`, counts it in `errors`, and puts the sink in phase `failed`. It restarts with backoff and stops again on the same row until the key is shortened or the policy is `skip`.
+- **`skip`**: the document is quarantined and the batch is acked. The log carries `document rejected by sink; quarantining and continuing` with the `index`, `id`, and `reason` (a log line and `last_error` show the first 64 characters of a longer id, then its length); [`/status`](http.md#get-status) counts it in `documents_quarantined`, and the [`flusso.documents.quarantined`](metrics.md) counter goes up. The row stays out of the index until its key changes.
+- **`stop`**: the rest of the batch is written, then the sink engine stops with the batch unconfirmed: `sink rejected 1 document(s) (e.g. users/kkkk… (600 bytes): document id is 600 bytes; …); stopping`. [`/status`](http.md#get-status) shows it in `last_error`, counts it in `errors`, and puts the sink in phase `failed`. It restarts with backoff and stops again on the same row until the key is shortened or the policy is `skip`.
 
 ## Index settings
 

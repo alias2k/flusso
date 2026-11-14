@@ -188,6 +188,8 @@ impl Sink for OpensearchSink {
         let mut rejected: Vec<RejectedDocument> = Vec::new();
         actions.retain(|action| match refused_id(action) {
             None => true,
+            // No document can have the id, so the delete has nothing to remove.
+            Some(_) if matches!(action, BulkAction::Delete { .. }) => false,
             Some(reason) => {
                 rejected.push(RejectedDocument {
                     index: action.index().to_owned(),

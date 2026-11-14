@@ -268,7 +268,7 @@ async fn an_empty_id_is_rejected_alone_and_the_rest_lands() {
             .await
             .expect("an empty id must not fail the whole flush");
 
-        assert_eq!(report.rejected.len(), 2, "{:?}", report.rejected);
+        assert_eq!(report.rejected.len(), 1, "{:?}", report.rejected);
         for doc in &report.rejected {
             assert_eq!(doc.id, "");
             assert_eq!(doc.index, logical);
