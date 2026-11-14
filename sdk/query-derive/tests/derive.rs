@@ -917,6 +917,7 @@ struct Listing {
     title: String,
     blurb: Option<String>,
     snapshot: Option<serde_json::Value>,
+    codes: serde_json::Value,
     variants: Vec<Variant>,
 }
 
@@ -942,11 +943,13 @@ fn opted_out_fields_deserialize_and_lose_only_what_the_index_lacks() -> Result {
         "title": "Flat",
         "blurb": null,
         "snapshot": { "rooms": 3, "tags": ["a", 1] },
+        "codes": [1, "n/a"],
         "variants": [{ "color": "red", "price": 9.5 }, { "color": "blue", "price": null }],
     }))?;
     assert_eq!(listing.variants.len(), 2);
     assert_eq!(listing.variants[0].color, "red");
     assert_eq!(listing.snapshot.unwrap()["rooms"], 3);
+    assert_eq!(listing.codes, serde_json::json!([1, "n/a"]));
     Ok(())
 }
 

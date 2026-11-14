@@ -13,7 +13,8 @@ use crate::common::{ColumnName, GenericValue, IndexName};
 
 use super::{
     Aggregate, AggregateOp, Column, ContentHash, Field, FieldSource, FlussoType, IndexMapping,
-    IndexSchema, Mapping, MappingType, Relation, ResolvedField, Script, constant_holds_object,
+    IndexSchema, Mapping, MappingType, Relation, ResolvedField, Script,
+    constant_is_stored_unindexed,
 };
 
 impl IndexSchema {
@@ -97,13 +98,13 @@ fn has_subfields(field: &Field) -> bool {
 }
 
 /// Whether a sink indexes this field: off for a `json` column or a join that
-/// says `indexed: false`, and for a constant holding an object, whose keys the
-/// strict root would refuse.
+/// says `indexed: false`, and for a constant
+/// [stored unindexed](constant_is_stored_unindexed).
 fn is_indexed(field: &Field) -> bool {
     match &field.source {
         FieldSource::Column(column) => column.indexed,
         FieldSource::Relation(Relation::Join(join)) => join.indexed,
-        FieldSource::Constant(value) => !constant_holds_object(value),
+        FieldSource::Constant(value) => !constant_is_stored_unindexed(value),
         _ => true,
     }
 }
@@ -174,6 +175,9 @@ fn type_and_nullability(
             geo.nullable,
             false,
         ),
+        FieldSource::Constant(value) if constant_is_stored_unindexed(value) => {
+            (MappingType::Object, false, false)
+        }
         FieldSource::Constant(value) => (
             constant_mapping_type(value),
             matches!(value, GenericValue::Null),

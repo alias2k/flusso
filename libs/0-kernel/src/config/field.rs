@@ -48,27 +48,60 @@ impl Hash for Field {
             "emit".hash(state);
         }
         if let FieldSource::Constant(value) = source
-            && constant_holds_object(value)
+            && constant_is_stored_unindexed(value)
         {
             CONSTANT_OBJECT_REVISION.hash(state);
         }
     }
 }
 
-/// Bumped when what a `constant` holding an object builds changes, so only a
-/// schema with such a constant moves to a new physical index. `1`: the object
-/// is built as written (it was `null`) and mapped unindexed, since the strict
-/// root refuses keys in an `object` without children.
+/// Bumped when what a `constant` stored unindexed builds changes, so only a
+/// schema with such a constant moves to a new physical index. `1`: the value
+/// is built as written (an object or list was `null`) and mapped unindexed,
+/// since the strict root refuses keys in an `object` without children and a
+/// mapped field refuses an element of another kind.
 const CONSTANT_OBJECT_REVISION: u8 = 1;
 
-/// Whether a constant's value is an object, or a list holding one at any depth.
-/// Such a constant is stored but not indexed.
-pub(crate) fn constant_holds_object(value: &common::GenericValue) -> bool {
-    match value {
-        common::GenericValue::Map(_) => true,
-        common::GenericValue::Array(items) => items.iter().any(constant_holds_object),
-        _ => false,
+/// Whether a constant is stored but not indexed: an object, or a list holding
+/// one or mixing scalar kinds (string, number, boolean) at any depth, nulls
+/// aside. One OpenSearch field takes one kind, and a nested list is flattened
+/// into it, so such a value can't be indexed. The mapping projection, the
+/// content hash and so the designer and the query derive all ask this.
+pub(crate) fn constant_is_stored_unindexed(value: &common::GenericValue) -> bool {
+    let mut kinds = Vec::new();
+    !collect_constant_kinds(value, &mut kinds) || kinds.len() > 1
+}
+
+#[derive(PartialEq)]
+enum ScalarKind {
+    String,
+    Number,
+    Boolean,
+}
+
+/// Adds each scalar kind `value` holds to `kinds`; `false` on an object.
+fn collect_constant_kinds(value: &common::GenericValue, kinds: &mut Vec<ScalarKind>) -> bool {
+    use common::GenericValue as V;
+    let kind = match value {
+        V::Map(_) => return false,
+        V::Array(items) => return items.iter().all(|item| collect_constant_kinds(item, kinds)),
+        V::Null => return true,
+        V::Bool(_) => ScalarKind::Boolean,
+        V::SmallInt(_) | V::Int(_) | V::BigInt(_) | V::Float(_) | V::Double(_) | V::Decimal(_) => {
+            ScalarKind::Number
+        }
+        V::String(_)
+        | V::Uuid(_)
+        | V::Date(_)
+        | V::Time(_)
+        | V::Timestamp(_)
+        | V::TimestampTz(_)
+        | V::Bytes(_) => ScalarKind::String,
+    };
+    if !kinds.contains(&kind) {
+        kinds.push(kind);
     }
+    true
 }
 
 /// Where a field's value comes from. The shapes are mutually exclusive — a field

@@ -951,3 +951,79 @@ fn a_constant_holding_an_object_is_stored_unindexed_and_moves_its_hash() {
     assert_eq!(mapping.fields[0].mapping.mapping_type, MappingType::Object);
     assert_ne!(mapping.hash.to_string(), "56ebe48b");
 }
+
+fn list_constant_schema(items: Vec<crate::common::GenericValue>) -> IndexSchema {
+    columns_schema(vec![constant_field(
+        "codes",
+        crate::common::GenericValue::Array(items),
+    )])
+}
+
+/// A list whose scalars are one kind (integers and floats are both numbers,
+/// nulls aside, nested lists flattened) stays indexed and keeps the hash it
+/// had before constants were built as written. The pins are those hashes.
+#[test]
+fn a_constant_list_of_one_kind_stays_indexed_and_keeps_its_hash() {
+    use crate::common::GenericValue as V;
+    for (items, pin) in [
+        (
+            vec![
+                V::BigInt(1),
+                V::Double(2.5),
+                V::Null,
+                V::Array(vec![V::BigInt(3)]),
+            ],
+            "39e3f15a",
+        ),
+        (
+            vec![
+                V::Null,
+                V::String("a".into()),
+                V::Array(vec![V::String("b".into())]),
+            ],
+            "61fc25ce",
+        ),
+    ] {
+        let schema = list_constant_schema(items);
+        assert_eq!(hash_of(&schema), pin);
+        let mapping = schema.resolve(IndexName::try_new("products").unwrap());
+        assert!(mapping.fields[0].mapping.indexed);
+    }
+}
+
+fn mixed_constant_lists() -> Vec<(Vec<crate::common::GenericValue>, &'static str)> {
+    use crate::common::GenericValue as V;
+    vec![
+        (vec![V::BigInt(1), V::String("n/a".into())], "bc077fc0"),
+        (vec![V::Bool(true), V::BigInt(1)], "aa845af3"),
+        (
+            vec![
+                V::Array(vec![V::BigInt(1)]),
+                V::Array(vec![V::String("a".into())]),
+            ],
+            "2b4a291f",
+        ),
+    ]
+}
+
+/// A list mixing scalar kinds moves off the hash it had while it built
+/// `null`, so it lands in a new physical index. The pins are those hashes.
+#[test]
+fn a_constant_list_mixing_kinds_moves_its_hash() {
+    for (items, pin) in mixed_constant_lists() {
+        assert_ne!(hash_of(&list_constant_schema(items)), pin);
+    }
+}
+
+/// One OpenSearch field takes one kind, so a list mixing kinds is stored
+/// unindexed as an opaque object, like an object constant.
+#[test]
+fn a_constant_list_mixing_kinds_is_stored_unindexed() {
+    for (items, _) in mixed_constant_lists() {
+        let mapping = list_constant_schema(items).resolve(IndexName::try_new("products").unwrap());
+        let field = &mapping.fields[0];
+        assert!(!field.mapping.indexed);
+        assert_eq!(field.mapping.mapping_type, MappingType::Object);
+        assert!(!field.array);
+    }
+}

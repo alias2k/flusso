@@ -861,11 +861,18 @@ moved to a new physical index when keys became typed and nothing else did
 pattern moves two more sets once (issue #291): `BINARY_ENCODING_REVISION` (a `binary` column or an
 `ids` of `binary`; the document query renders a `bytea` inside its JSON as `\x…` hex text, which
 `document/value.rs`'s `coerce_scalar` turns back into `GenericValue::Bytes` for `sink::to_json` to
-base64) and `CONSTANT_OBJECT_REVISION` in `Field`'s `Hash` (a `constant` holding an object, built as
-written by `coerce_field` from the schema, never from the query's untyped literal, and projected
-`indexed: false`, since the strict root refuses keys in a childless `object`). Guards:
+base64; `PgDocumentBuilder::connect` sets `bytea_output = 'hex'` on every pooled connection, since a
+database set to `escape` would render escape text) and `CONSTANT_OBJECT_REVISION` in `Field`'s `Hash`
+(a `constant` that `constant_is_stored_unindexed`: an object, or a list holding one or mixing scalar
+kinds — string/number/boolean, nulls aside, nested lists flattened — since one OpenSearch field takes
+one kind and the strict root refuses keys in a childless `object`; built as written by `coerce_field`
+from the schema, never from the query's untyped literal, and projected as an `indexed: false`
+`object`, so the designer and the derive (no handle) follow). Guards:
 `a_binary_schema_moves_off_its_hex_text_hash`,
-`a_schema_without_binary_or_an_object_constant_keeps_its_content_hash`.
+`a_schema_without_binary_or_an_object_constant_keeps_its_content_hash`,
+`a_constant_list_mixing_kinds_moves_its_hash` / `_is_stored_unindexed`,
+`a_constant_list_of_one_kind_stays_indexed_and_keeps_its_hash`, `integration`'s
+`a_database_set_to_escape_bytea_output_still_builds_the_bytes`.
 `values` must be a leaf kind (text/keyword/number/date); the conversion rejects others. An `enum:` field takes an optional `variants:` list (its own
 `EnumBody`/`Field::Enum` entity) — the variants in rank order; empty/omitted = a
 plain keyword. It lands on `Column.enum_order` (**not** on `FlussoType::Enum`,

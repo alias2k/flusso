@@ -18,7 +18,7 @@ Every scalar field's type key bridges a Postgres column type and an OpenSearch m
 | `decimal` | `numeric`, `money` | `double` | Lossy in storage. Use a `custom` `scaled_float` when exactness matters. |
 | `date` | `date` | `date` | |
 | `timestamp` | `timestamp`, `timestamptz`, `time` | `date` | |
-| `binary` | `bytea` | `binary` | The column's bytes, as standard base64 with no line breaks: at the root, as [`array: true`](#array) over `bytea[]`, inside joins, and in an `ids` aggregate. Read in Postgres's default `bytea_output = hex`; a server or role set to `escape` leaves the value as that text. Before 0.18 the Postgres hex text (`\x0102…`) was indexed instead; see [Upgrade to 0.18](../operate/upgrade-to-0-18.md). |
+| `binary` | `bytea` | `binary` | The column's bytes, as standard base64 with no line breaks: at the root, as [`array: true`](#array) over `bytea[]`, inside joins, and in an `ids` aggregate, whatever the server's `bytea_output`. A `bytea` primary key still gives the document `_id` as Postgres hex text (`\x0102`), not base64. Before 0.18 the Postgres hex text (`\x0102…`) was indexed instead; see [Upgrade to 0.18](../operate/upgrade-to-0-18.md). |
 | `json` | `json`, `jsonb` | `object` | Opaque; no children declared. The strict root refuses any key inside it, so store it with [`indexed: false`](joins.md#indexed) or declare a [`map`](objects-and-maps.md). |
 | `custom` | as declared | as declared | See [custom](#custom). |
 | `geo` | see below | `geo_point` | Not a scalar; see [geo](#geo). |
@@ -114,6 +114,8 @@ For a type the named set doesn't cover, name the OpenSearch type and the Postgre
   options: { scaling_factor: 100 }
 ```
 
+A `custom` field indexes the value as Postgres renders it into JSON, unconverted: `opensearch: binary` over a `bytea` column indexes its hex text (`\x0102…`), which isn't base64. Declare a `bytea` column [`binary`](#field-types) to index its bytes.
+
 ## geo
 
 A `geo` field is an OpenSearch `geo_point`, in one of two shapes.
@@ -153,10 +155,11 @@ A fixed value in every document, exactly as written. It has no source column.
 | any other number | the number | `double` |
 | `true` / `false` | the boolean | `boolean` |
 | absent or `null` | `null` | `keyword`, nullable |
-| a list of scalars | the list | the first element's type; an empty list is `keyword` |
-| an object, or a list holding one | the value, every level included | `object`, stored but not indexed, like [`indexed: false`](joins.md#indexed): the strict root refuses keys in an `object` with no declared children |
+| a list of one kind of scalar | the list | the first element's type; an empty list is `keyword` |
+| a list mixing kinds of scalar | the list | `object`, stored but not indexed, like [`indexed: false`](joins.md#indexed): one field takes one kind |
+| an object, or a list holding one | the value, every level included | `object`, stored but not indexed: the strict root refuses keys in an `object` with no declared children |
 
-A list's elements share one mapping, so a list mixing types (`[1, "a"]`) is rejected by OpenSearch. Before 0.18 a number or boolean was indexed as its text (`"5"`) and an object or list as `null`; see [Upgrade to 0.18](../operate/upgrade-to-0-18.md).
+The kinds are string, number (whole or not) and boolean; a `null` element counts as none, and a list inside a list counts with its elements, as OpenSearch flattens it. So `[1, 2.5, null]` and `[["a"], "b"]` are one kind, `[1, "n/a"]` and `[true, 1]` mix kinds. Before 0.18 a number or boolean was indexed as its text (`"5"`) and an object or list as `null`; see [Upgrade to 0.18](../operate/upgrade-to-0-18.md).
 
 ## transforms
 

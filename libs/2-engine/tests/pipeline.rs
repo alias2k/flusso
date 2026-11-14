@@ -56,7 +56,8 @@
 //!   root, as `bytea[]`, and inside `belongs_to` / `has_one` / `has_many` /
 //!   `many_to_many` and two levels deep reaches OpenSearch as base64 of its
 //!   bytes, on backfill and after a live update (issue #291: it was the column's
-//!   Postgres hex text); a `constant` number, list, and object land as written.
+//!   Postgres hex text); a `constant` number, list, list mixing kinds, and
+//!   object land as written.
 //!
 //! Each change is verified by polling a realtime `GET {index}/_doc/{id}` (reads
 //! the translog, so no refresh wait) until the index reflects the expectation or
@@ -932,6 +933,13 @@ async fn binary_columns_and_constants_are_indexed_as_written() {
             ]),
         ),
         constant(
+            "codes",
+            GenericValue::Array(vec![
+                GenericValue::BigInt(1),
+                GenericValue::String("n/a".to_owned()),
+            ]),
+        ),
+        constant(
             "meta",
             GenericValue::Map(BTreeMap::from([
                 ("origin".to_owned(), GenericValue::String("crm".to_owned())),
@@ -1043,6 +1051,11 @@ async fn binary_columns_and_constants_are_indexed_as_written() {
     assert_eq!(
         doc.get("labels"),
         Some(&serde_json::json!(["a", "b"])),
+        "{doc}"
+    );
+    assert_eq!(
+        doc.get("codes"),
+        Some(&serde_json::json!([1, "n/a"])),
         "{doc}"
     );
     assert_eq!(
