@@ -66,7 +66,7 @@ flusso connects through PgBouncer in session and in transaction mode alike, the 
 - **`ignore_startup_parameters = extra_float_digits`.** flusso's SQL connections send that startup parameter and stock PgBouncer refuses it: `unsupported startup parameter: extra_float_digits`. Many PgBouncer images already set it.
 - **`max_prepared_statements` above `0` in transaction mode.** flusso uses prepared statements. With `0` the start fails with `prepared statement "sqlx_s_1" already exists`.
 
-No key flusso reads depends on a setting a pooled connection could drop. One thing does: a [`binary`](field-types.md) field's bytes. flusso sets `bytea_output = hex` on each connection it opens, which a transaction-mode pool may not keep, so set it on the database or role there too: `ALTER ROLE flusso SET bytea_output = 'hex'`.
+Nothing flusso indexes depends on a setting a pooled connection could drop. Its queries render every key and every `bytea` value in a form no session setting changes, so a database or role set to `bytea_output = escape` changes nothing either. No `ALTER ROLE` or `ALTER DATABASE` is needed.
 
 ## Capture
 

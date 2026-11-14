@@ -228,16 +228,7 @@ impl PgDocumentBuilder {
 
     #[tracing::instrument(name = "pg.connect", skip_all, err)]
     pub async fn connect(connection_url: &str, spec: Arc<SourceSpec>) -> Result<Self> {
-        // The document query renders a `bytea` as text inside its JSON, which
-        // `value::postgres_hex` decodes. A database or role set to
-        // `bytea_output = 'escape'` would render the escape text instead.
         let pool = sqlx::postgres::PgPoolOptions::new()
-            .after_connect(|connection, _| {
-                Box::pin(async move {
-                    sqlx::Executor::execute(&mut *connection, "SET bytea_output = 'hex'").await?;
-                    Ok(())
-                })
-            })
             .connect(connection_url)
             .await
             .map_err(|e| SourceError::Connection(e.to_string()))?;
@@ -524,6 +515,32 @@ impl PgDocumentBuilder {
             types.insert(key, sql_type);
         }
         Ok(types)
+    }
+
+    /// The columns `schema`'s documents read as values whose base type is
+    /// `bytea` or `bytea[]`, which the document query renders itself. Each
+    /// type comes from the cached catalog lookup validation already made.
+    async fn byte_columns(
+        &self,
+        schema: &IndexSchema,
+        pks: &HashMap<String, ColumnName>,
+    ) -> Result<query::ByteColumns> {
+        let mut columns = Vec::new();
+        fields::collect_value_columns(&schema.fields, &schema.table, pks, &mut columns);
+        let mut bytes = query::ByteColumns::new();
+        for (table, column) in columns {
+            let kind = match self
+                .base_name(&schema.db_schema, &table, &column)
+                .await?
+                .as_str()
+            {
+                "bytea" => query::Bytes::Scalar,
+                "_bytea" => query::Bytes::Array,
+                _ => continue,
+            };
+            bytes.insert((table.to_string(), column.to_string()), kind);
+        }
+        Ok(bytes)
     }
 
     /// Ensure `types` carries the catalog SQL type of each root-table key column,
@@ -844,7 +861,8 @@ impl DocumentBuilder for PgDocumentBuilder {
         let key_columns: Vec<&ColumnName> = id.key.0.iter().map(|(column, _)| column).collect();
         self.add_key_column_types(schema, &key_columns, &mut col_types)
             .await?;
-        let (sql, params) = query::document_query(schema, &id.key.0, &pks, &col_types)?;
+        let bytes = self.byte_columns(schema, &pks).await?;
+        let (sql, params) = query::document_query(schema, &id.key.0, &pks, &col_types, &bytes)?;
 
         let mut statement = sqlx::query(sql);
         for param in &params {
@@ -916,12 +934,14 @@ impl DocumentBuilder for PgDocumentBuilder {
             let pk_base = self
                 .base_name(&schema.db_schema, &schema.table, &pk_column)
                 .await?;
+            let bytes = self.byte_columns(schema, &pks).await?;
 
             for chunk in keyed.chunks(BUILD_CHUNK) {
                 let keys: Vec<kernel::GenericValue> =
                     chunk.iter().map(|(value, _)| (*value).clone()).collect();
-                let (sql, params) =
-                    query::documents_query(schema, &pk_column, &pk_base, &keys, &pks, &col_types)?;
+                let (sql, params) = query::documents_query(
+                    schema, &pk_column, &pk_base, &keys, &pks, &col_types, &bytes,
+                )?;
 
                 let mut statement = sqlx::query(sql);
                 for param in &params {

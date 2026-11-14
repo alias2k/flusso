@@ -44,6 +44,18 @@ const ROOT: &str = "root";
 /// The alias the batched build selects each row's root key under.
 pub(super) const DOC_KEY: &str = "doc_key";
 
+/// The columns a document reads whose base type is `bytea` or `bytea[]`, by
+/// `(table, column)`. The document query renders them as hex text itself, so
+/// what a document holds never depends on the session's `bytea_output`.
+pub(super) type ByteColumns = HashMap<(String, String), Bytes>;
+
+/// Which `bytea` a [`ByteColumns`] column holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Bytes {
+    Scalar,
+    Array,
+}
+
 /// SQL assembled by this module's query builder, ready to hand to
 /// [`sqlx::query`](fn@sqlx::query).
 ///
@@ -128,16 +140,23 @@ pub(super) fn document_query(
     key: &[(ColumnName, GenericValue)],
     pks: &HashMap<String, ColumnName>,
     col_types: &HashMap<(String, String), String>,
+    bytes: &ByteColumns,
 ) -> Result<(SqlString, Vec<GenericValue>)> {
     let mut builder = Builder {
         db: &schema.db_schema,
         pks,
         col_types,
+        bytes,
         params: Vec::new(),
         seq: 0,
     };
 
-    let object = builder.object(&schema.fields, ROOT, schema.primary_key.as_ref())?;
+    let object = builder.object(
+        &schema.fields,
+        &schema.table,
+        ROOT,
+        schema.primary_key.as_ref(),
+    )?;
 
     let mut conditions = Vec::new();
     for (column, value) in key {
@@ -182,18 +201,25 @@ pub(super) fn documents_query(
     keys: &[GenericValue],
     pks: &HashMap<String, ColumnName>,
     col_types: &HashMap<(String, String), String>,
+    bytes: &ByteColumns,
 ) -> Result<(SqlString, Vec<GenericValue>)> {
     let mut builder = Builder {
         db: &schema.db_schema,
         pks,
         col_types,
+        bytes,
         params: Vec::new(),
         seq: 0,
     };
 
     // Build the object first: its filters push the leading `$n` params, exactly
     // as `document_query` does, so the key placeholders that follow come after.
-    let object = builder.object(&schema.fields, ROOT, schema.primary_key.as_ref())?;
+    let object = builder.object(
+        &schema.fields,
+        &schema.table,
+        ROOT,
+        schema.primary_key.as_ref(),
+    )?;
 
     let mut placeholders = Vec::with_capacity(keys.len());
     for key in keys {

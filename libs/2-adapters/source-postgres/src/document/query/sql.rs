@@ -249,9 +249,27 @@ pub(super) fn arithmetic(expression: &Expression, alias: &str) -> String {
     }
 }
 
-/// `coalesce(json_agg(<alias>.<column>), '[]'::json)` — the flat array of a
-/// related table's keys an `ids` aggregate collects, never null for an empty
-/// relation.
-pub(super) fn ids_agg(alias: &str, column: &ColumnName) -> String {
-    format!("coalesce(json_agg({}), '[]'::json)", qcol(alias, column))
+/// `coalesce(json_agg(<key>), '[]'::json)` — the flat array of a related
+/// table's keys an `ids` aggregate collects, never null for an empty relation.
+pub(super) fn ids_agg(key: &str) -> String {
+    format!("coalesce(json_agg({key}), '[]'::json)")
+}
+
+/// A `bytea` expression as the text `bytea_output = hex` renders it (`\x0aff`),
+/// whatever the session's `bytea_output`; null stays null. The prefix is an
+/// escape string, so `standard_conforming_strings` can't change it either.
+pub(super) fn hex_text(bytes: &str) -> String {
+    format!("(E'\\\\x' || encode({bytes}, 'hex'))")
+}
+
+/// A `bytea[]` expression as JSON, each element as [`hex_text`] renders it, in
+/// order, a null element kept. Anything but a one-dimensional array (null,
+/// empty, nested) reads as it did, through `to_json`: an empty one is `[]`, and
+/// a nested one fails the document either way.
+pub(super) fn hex_array(bytes: &str) -> String {
+    format!(
+        "CASE WHEN array_ndims({bytes}) = 1 THEN (SELECT json_agg({} ORDER BY flusso_bytes.n) \
+         FROM unnest({bytes}) WITH ORDINALITY AS flusso_bytes(b, n)) ELSE to_json({bytes}) END",
+        hex_text("flusso_bytes.b"),
+    )
 }

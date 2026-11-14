@@ -1,8 +1,14 @@
 //! Pure traversal of an index's field tree: finding relation paths (for reverse
-//! resolution) and collecting relation tables (to pre-resolve their primary keys).
+//! resolution), collecting relation tables (to pre-resolve their primary keys)
+//! and the columns a document renders as values (to find its `bytea` ones).
 //! No I/O.
 
-use kernel::{ColumnName, ColumnPair, Field, Filter, Relation, RelationKey, TableName, ViaHop};
+use std::collections::HashMap;
+
+use kernel::{
+    AggregateOp, ColumnName, ColumnPair, Expression, Field, FieldSource, Filter, Relation,
+    RelationKey, TableName, ViaHop,
+};
 
 /// One hop of a path from the root down to a changed table: a relation's own
 /// hop, or one table of an aggregate's `via` on the way to it.
@@ -41,6 +47,40 @@ impl<'a> Step<'a> {
         match self {
             Step::Relation(relation) => source::row_link(relation),
             Step::Via { hop, .. } => Some((&hop.table, &hop.foreign_key)),
+        }
+    }
+}
+
+/// Collect every `(table, column)` whose value a document renders, at any
+/// depth, `table` being the table `fields` read: each column field, a
+/// `min`/`max` over a plain column, and the key an `ids` aggregate collects
+/// (from `pks`, by table name).
+pub(super) fn collect_value_columns(
+    fields: &[Field],
+    table: &TableName,
+    pks: &HashMap<String, ColumnName>,
+    out: &mut Vec<(TableName, ColumnName)>,
+) {
+    for field in fields {
+        match &field.source {
+            FieldSource::Column(column) => out.push((table.clone(), column.column.clone())),
+            FieldSource::Group(nested) => collect_value_columns(nested, table, pks, out),
+            FieldSource::Relation(Relation::Join(join)) => {
+                collect_value_columns(&join.fields, &join.table, pks, out);
+            }
+            FieldSource::Relation(Relation::Aggregate(aggregate)) => match &aggregate.op {
+                AggregateOp::Min(Expression::Column(column))
+                | AggregateOp::Max(Expression::Column(column)) => {
+                    out.push((aggregate.table.clone(), column.clone()));
+                }
+                AggregateOp::Ids { .. } => {
+                    if let Some(pk) = pks.get(&aggregate.table.to_string()) {
+                        out.push((aggregate.table.clone(), pk.clone()));
+                    }
+                }
+                _ => {}
+            },
+            FieldSource::Geo(_) | FieldSource::Constant(_) | FieldSource::Script(_) => {}
         }
     }
 }
