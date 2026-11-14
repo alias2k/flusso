@@ -1317,6 +1317,9 @@ export default function App() {
       return;
     }
     if (e.key === "Escape") {
+      // An Escape that closes the palette closes only the palette: the
+      // selection, and the name box it returns to, stay.
+      if (paletteOpen || e.defaultPrevented) return;
       setSelection(null);
       return;
     }

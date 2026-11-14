@@ -50,7 +50,8 @@ const INDEX_COLS = "grid grid-cols-[minmax(6rem,1fr)_minmax(9rem,1.6fr)_8.5rem_6
 /// would refuse (another index or sink has it, compared as flusso reads names;
 /// or it isn't a valid name) is marked with the reason and never applied:
 /// leaving the box keeps the old name. Save is refused while it shows. The
-/// reason floats under the box, so showing or hiding it moves nothing.
+/// reason floats under the box and lets the pointer through, so showing or
+/// hiding it moves nothing and a press on what it covers lands.
 function NameField({
   kind,
   id,
@@ -90,7 +91,7 @@ function NameField({
         placeholder={t("config.name")}
       />
       {reason && (
-        <span className="absolute top-full left-0 z-20 mt-0.5 w-64 rounded border border-destructive/40 bg-background px-1.5 py-0.5 text-2xs text-destructive shadow">
+        <span className="pointer-events-none absolute top-full left-0 z-20 mt-0.5 w-64 rounded border border-destructive/40 bg-background px-1.5 py-0.5 text-2xs text-destructive shadow">
           {reason}
         </span>
       )}

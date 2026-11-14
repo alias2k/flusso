@@ -123,6 +123,9 @@ const KINDS: &[(&str, &str)] = &[
     ),
     ("exists", "- exists: v\n  table: r\n  foreign_key: t_id"),
     ("constant", "- constant: v\n  value: 5"),
+    ("constant string", "- constant: v\n  value: hello"),
+    ("constant list", "- constant: v\n  value: [1, 2]"),
+    ("constant mixed list", "- constant: v\n  value: [1, a]"),
     ("constant object", "- constant: v\n  value: { a: 1 }"),
     (
         "script",
@@ -176,6 +179,11 @@ enum Seen {
     FailsToBuild,
     Rejected,
     Nothing,
+    /// Every document holds `null` under the name.
+    Null,
+    /// A text rendering of the last one's value (in a one-element array or
+    /// not), which neither builds on its own.
+    AsText,
     /// The value the namesake at this position builds on its own, with the
     /// same verdict from the sink.
     Holds(usize),
@@ -243,7 +251,15 @@ async fn the_duplicate_warning_says_what_a_live_pipeline_does() {
             DuplicateOutcome::Unknown => true,
             DuplicateOutcome::FailsToBuild { .. } => seen == Seen::FailsToBuild,
             DuplicateOutcome::Nothing => seen == Seen::Nothing,
-            DuplicateOutcome::Holds(at) => seen == Seen::Holds(*at),
+            DuplicateOutcome::Null => seen == Seen::Null,
+            DuplicateOutcome::AsText => seen == Seen::AsText,
+            // Namesakes that build the same on their own can't be told apart.
+            DuplicateOutcome::Holds(at) => {
+                seen == Seen::Holds(*at)
+                    || (matches!(seen, Seen::Holds(_))
+                        && alone[a].rows == alone[b].rows
+                        && alone[a].rejected == alone[b].rejected)
+            }
             DuplicateOutcome::Wrapped => seen == Seen::Wrapped,
             DuplicateOutcome::FirstsChildren { .. } => seen == Seen::FirstsChildren,
             DuplicateOutcome::Rejected {
@@ -297,6 +313,9 @@ fn classify(run: &Run, alone: &[&Run; 2], firsts_children: &[String]) -> Seen {
     if values.iter().all(Option::is_none) {
         return Seen::Nothing;
     }
+    if values.iter().all(|v| v == &Some(&Value::Null)) && run.rejected.iter().all(Option::is_none) {
+        return Seen::Null;
+    }
     let refused = |r: &Run| r.rejected.iter().map(Option::is_some).collect::<Vec<_>>();
     let same_as = |other: &Run, change: &dyn Fn(&Value) -> Value| {
         values.iter().zip(&other.rows).all(|(value, theirs)| {
@@ -323,6 +342,14 @@ fn classify(run: &Run, alone: &[&Run; 2], firsts_children: &[String]) -> Seen {
     }
     if !accepted {
         return Seen::Rejected;
+    }
+    let text = |v: &Option<&Value>| match v {
+        Some(Value::String(_)) => true,
+        Some(Value::Array(items)) => matches!(items.as_slice(), [Value::String(_)]),
+        _ => false,
+    };
+    if values.iter().all(text) {
+        return Seen::AsText;
     }
     Seen::Other
 }
@@ -369,6 +396,8 @@ fn describe(seen: &Seen, run: &Run) -> String {
         })
         .join("; "),
         Seen::Nothing => "no value".to_owned(),
+        Seen::Null => "`null`".to_owned(),
+        Seen::AsText => "the last one's value as text".to_owned(),
         Seen::Holds(0) => "the first one's value".to_owned(),
         Seen::Holds(_) => "the last one's value".to_owned(),
         Seen::FirstsChildren => "the last one's value cut to the first one's children".to_owned(),
@@ -392,6 +421,8 @@ fn short(outcome: &DuplicateOutcome) -> String {
         DuplicateOutcome::FirstsChildren { .. } => "first's children".to_owned(),
         DuplicateOutcome::Wrapped => "wrapped".to_owned(),
         DuplicateOutcome::Nothing => "nothing".to_owned(),
+        DuplicateOutcome::Null => "null".to_owned(),
+        DuplicateOutcome::AsText => "as text".to_owned(),
         DuplicateOutcome::FailsToBuild { .. } => "fails to build".to_owned(),
         DuplicateOutcome::Rejected { .. } => "rejected".to_owned(),
         _ => "general wording".to_owned(),

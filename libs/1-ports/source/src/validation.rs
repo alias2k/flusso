@@ -2495,6 +2495,78 @@ mod tests {
         );
     }
 
+    /// A constant builds what it holds when it comes first; last, a list or
+    /// an object reaches the first one as `null` and a number or boolean as
+    /// text. Positions are each field's place at the level.
+    #[test]
+    fn a_constant_namesake_says_what_a_document_holds() {
+        let message = |fields: serde_json::Value| {
+            let found = duplicates(fields);
+            assert_eq!(found.len(), 1, "{found:?}");
+            let (_, clause) = found[0].2.split_once("; ").unwrap();
+            clause.trim_end_matches(". Rename all but one").to_owned()
+        };
+        let constant =
+            |value: serde_json::Value| json!({ "field": "v", "source": { "constant": value } });
+        let tags = json!({ "field": "v", "source": { "column": {
+            "column": "tags", "ty": "keyword", "nullable": true, "array": true,
+        } } });
+        let point = json!({ "field": "v", "source": {
+            "geo": { "lat": "lat", "lon": "lon", "nullable": true },
+        } });
+        assert_eq!(
+            message(json!([
+                int_field("id"),
+                tags.clone(),
+                constant(json!({ "Array": [{ "BigInt": 1 }, { "BigInt": 2 }] }))
+            ])),
+            "the index maps the last one, but every document holds `null`: #3 is a constant \
+             holding a list or an object, which the document query reads as `null`, and #2 \
+             reads that"
+        );
+        assert_eq!(
+            message(json!([
+                int_field("id"),
+                tags,
+                constant(json!({ "BigInt": 5 }))
+            ])),
+            "the index maps the last one, and a document holds the last one's value as the \
+             document query renders it, as text #2 does not convert back (a number or boolean \
+             constant as a string, a `binary` column as Postgres hex, `\\x0102`), in a \
+             one-element array when #2 is an `array: true` column"
+        );
+        assert_eq!(
+            message(json!([
+                int_field("id"),
+                constant(json!({ "Array": [{ "BigInt": 1 }, { "BigInt": 2 }] })),
+                point.clone()
+            ])),
+            "the index maps the last one, and a document holds the first one's constant (#2), \
+             which a constant builds whatever the last one reads"
+        );
+        assert_eq!(
+            message(json!([
+                int_field("id"),
+                constant(json!({ "BigInt": 5 })),
+                point
+            ])),
+            "the index maps the last one, geo point, but a document holds the first one's \
+             constant (#2), which a constant builds whatever the last one reads: OpenSearch \
+             rejects every document. With `on_error = stop` (the default) the sink stops and \
+             restarts on it, which halts every index it writes and pins the replication slot; \
+             with `skip` such a document is quarantined"
+        );
+        assert_eq!(
+            message(json!([
+                int_field("id"),
+                constant(json!({ "String": "hello" })),
+                column_field("v", "k")
+            ])),
+            "the index maps the last one, and a document holds the first one's constant (#2), \
+             which a constant builds whatever the last one reads"
+        );
+    }
+
     /// A finding on one of two namesakes says which one, by position.
     #[test]
     fn a_finding_under_a_duplicated_name_carries_its_position() {

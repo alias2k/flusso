@@ -727,9 +727,10 @@ function NameField({ field }: { field: Field; set: (f: Field) => void }) {
   const reason = draft.refused ?? refusal(field.field, siblings);
   const chips = renameChips(nameSuggestions(field), field.field, (n) => !!fieldNameProblem(n, siblings));
   const offered = chips.some((chip) => !chip.current);
-  // The reason floats over the chips and the chips' row has one height, and
-  // `renameChips` keeps each chip in its place: applying or refusing a name
-  // moves no control below it, nor a chip along the row.
+  // The reason floats over the label above the box and lets the pointer
+  // through, the chips' row has one height, and `renameChips` keeps each chip
+  // in its place: applying or refusing a name moves no control, and a press
+  // that leaves the box reaches what it was aimed at.
   return (
     <div className="field mb-2 flex flex-col gap-1">
       <span className={cn("field-label", LABEL)}>{t("inspector.fieldName")}</span>
@@ -742,7 +743,7 @@ function NameField({ field }: { field: Field; set: (f: Field) => void }) {
           onBlur={draft.blur}
         />
         {reason && (
-          <p className="error-hint absolute top-full right-0 left-0 z-20 mt-0.5 rounded border border-destructive/40 bg-background px-1.5 py-0.5 text-xs text-destructive shadow">
+          <p className="error-hint pointer-events-none absolute right-0 bottom-full left-0 z-20 mb-0.5 rounded border border-destructive/40 bg-background px-1.5 py-0.5 text-xs text-destructive shadow">
             {reason}
           </p>
         )}

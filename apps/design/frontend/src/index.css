@@ -429,16 +429,32 @@
     cursor: pointer;
     position: relative;
   }
-  /* The title box lies over the title, out of the flow, so the header is the
-     same size editing or not. The slot's minimum width is the box's. */
-  .flow-node .node-title-slot {
-    position: relative;
-    display: inline-block;
-    min-width: 6rem;
-    margin-left: 0.375rem;
+  /* The header's first line never wraps: badges and controls keep their size,
+     the title shrinks to an ellipsis, and the title box covers the title's
+     slot, out of the flow. So the header is one height for any title, badge
+     or edit, and nothing below it moves. The right padding clears the
+     absolutely placed remove button. */
+  .flow-node .node-head {
+    display: flex;
+    align-items: center;
+    height: 1.25rem;
+    min-width: 0;
+    padding-right: 1.25rem;
     white-space: nowrap;
   }
+  .flow-node .node-head > * {
+    flex-shrink: 0;
+  }
+  .flow-node .node-head > .node-title-slot {
+    position: relative;
+    flex: 1 1 auto;
+    min-width: 2rem;
+    margin-left: 0.375rem;
+  }
   .flow-node .node-title {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
     font-weight: 700;
   }
   .flow-node .node-title-edit {
@@ -457,12 +473,15 @@
     outline: none;
   }
   .flow-node .node-title-edit.invalid {
-    border-color: var(--danger, #ef4444);
+    border-color: var(--error);
   }
   .flow-node .node-sub {
     color: var(--muted);
     font-size: 0.6875rem;
     margin-top: 0.125rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .badge {
     font-size: 0.625rem;

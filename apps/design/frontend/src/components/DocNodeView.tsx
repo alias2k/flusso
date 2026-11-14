@@ -178,102 +178,109 @@ export function DocNodeView({ data, selected }: NodeProps) {
         className="relative"
         onClick={() => select(node.path.length ? { kind: "node", path: node.path } : { kind: "root" })}
       >
-        <button
-          className={`chevron${isCollapsed ? " collapsed" : ""}`}
-          title={isCollapsed ? t("node.expand") : t("node.collapse")}
-          onClick={(e) => {
-            e.stopPropagation();
-            toggleCollapsed(node.id);
-          }}
-        >
-          <Icon name="chevron" size={12} />
-        </button>
-        <span className={`badge ${node.kind}`}>{node.kind}</span>
-        {/* The box lies over the title, which keeps its place: editing never
+        {/* One line whatever the title or badge: the title shrinks to an
+            ellipsis and the box covers its slot, so neither a long name nor
+            editing one moves a row. */}
+        <div className="node-head">
+          <button
+            className={`chevron${isCollapsed ? " collapsed" : ""}`}
+            title={isCollapsed ? t("node.expand") : t("node.collapse")}
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleCollapsed(node.id);
+            }}
+          >
+            <Icon name="chevron" size={12} />
+          </button>
+          <span className={`badge ${node.kind}`}>{node.kind}</span>
+          {/* The box lies over the title, which keeps its place: editing never
             reflows the header, so a press that leaves the box lands where it
             was aimed. */}
-        <span className="node-title-slot">
-          <span
-            className={cn("node-title", renaming && "invisible")}
-            title={canRename ? t("node.renameHint") : undefined}
-            onDoubleClick={
-              canRename
-                ? (e) => {
-                    e.stopPropagation();
-                    startRename();
-                  }
-                : undefined
-            }
-          >
-            {node.name ?? node.table}
-          </span>
-          {renaming && (
-            <input
-              className={cn("node-title-edit", renameRefused && "invalid")}
-              ref={focusOnMount}
-              value={rename.text ?? node.name ?? ""}
-              aria-label={t("node.renameField")}
-              aria-invalid={renameRefused ? true : undefined}
-              title={renameRefused ?? undefined}
-              onChange={(e) => rename.change(e.target.value)}
-              onClick={(e) => e.stopPropagation()}
-              onBlur={(e) => {
-                rename.blur(e);
-                if (!keepsNameDraft(e.relatedTarget)) setRenaming(false);
-              }}
-              onKeyDown={(e) => {
-                // The page's shortcuts (the palette, Save) reach it, as from
-                // any other box; plain keys stay with the box, not the canvas.
-                if (!e.ctrlKey && !e.metaKey) e.stopPropagation();
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  // A refused name stays in the box with its reason; leaving
-                  // the box drops it.
-                  if (!renameRefused) {
-                    rename.settle();
+          <span className="node-title-slot">
+            <span
+              className={cn("node-title", renaming && "invisible")}
+              title={canRename ? `${node.name ?? ""}\n${t("node.renameHint")}` : (node.name ?? node.table)}
+              onDoubleClick={
+                canRename
+                  ? (e) => {
+                      e.stopPropagation();
+                      startRename();
+                    }
+                  : undefined
+              }
+            >
+              {node.name ?? node.table}
+            </span>
+            {renaming && (
+              <input
+                className={cn("node-title-edit", renameRefused && "invalid")}
+                ref={focusOnMount}
+                value={rename.text ?? node.name ?? ""}
+                aria-label={t("node.renameField")}
+                aria-invalid={renameRefused ? true : undefined}
+                title={renameRefused ?? undefined}
+                onChange={(e) => rename.change(e.target.value)}
+                onClick={(e) => e.stopPropagation()}
+                onBlur={(e) => {
+                  rename.blur(e);
+                  if (!keepsNameDraft(e.relatedTarget)) setRenaming(false);
+                }}
+                onKeyDown={(e) => {
+                  // The page's shortcuts (the palette, Save) reach it, as from
+                  // any other box; plain keys stay with the box, not the canvas.
+                  if (!e.ctrlKey && !e.metaKey) e.stopPropagation();
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    // A refused name stays in the box with its reason; leaving
+                    // the box drops it.
+                    if (!renameRefused) {
+                      rename.settle();
+                      setRenaming(false);
+                    }
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    rename.drop();
                     setRenaming(false);
-                  }
-                } else if (e.key === "Escape") {
-                  e.preventDefault();
-                  rename.drop();
-                  setRenaming(false);
-                } else rename.keyDown(e);
-              }}
-            />
+                  } else rename.keyDown(e);
+                }}
+              />
+            )}
+          </span>
+          {nodeIssues > 0 && (
+            <span className="issue-badge" title={t("node.diagCount", { n: nodeIssues })}>
+              {nodeIssues}
+            </span>
           )}
-        </span>
-        {nodeIssues > 0 && (
-          <span className="issue-badge" title={t("node.diagCount", { n: nodeIssues })}>
-            {nodeIssues}
-          </span>
-        )}
-        {selfIssues.length > 0 && (
-          <span
-            className={cn("issue-badge", selfIssues.every((d) => d.severity === "warning") && "warn")}
-            title={[t("node.selfDiagCount", { n: selfIssues.length }), ...selfIssues.map((d) => d.message)].join("\n")}
-          >
-            {selfIssues.length}
-          </span>
-        )}
-        {keyIssues.length > 0 && (
-          <span
-            className={cn("issue-badge", keyIssues.every((d) => d.severity === "warning") && "warn")}
-            title={[
-              t("node.keyDiagCount", { n: keyIssues.length }),
-              ...keyIssues.map((d) => `${d.field}: ${d.message}`),
-            ].join("\n")}
-          >
-            {keyIssues.length}
-          </span>
-        )}
-        {selfIncomplete && (
-          <span
-            className="issue-badge warn"
-            title={nameIncomplete(self ?? undefined) ? t("node.nameIncomplete") : t("node.joinIncomplete")}
-          >
-            !
-          </span>
-        )}
+          {selfIssues.length > 0 && (
+            <span
+              className={cn("issue-badge", selfIssues.every((d) => d.severity === "warning") && "warn")}
+              title={[t("node.selfDiagCount", { n: selfIssues.length }), ...selfIssues.map((d) => d.message)].join(
+                "\n",
+              )}
+            >
+              {selfIssues.length}
+            </span>
+          )}
+          {keyIssues.length > 0 && (
+            <span
+              className={cn("issue-badge", keyIssues.every((d) => d.severity === "warning") && "warn")}
+              title={[
+                t("node.keyDiagCount", { n: keyIssues.length }),
+                ...keyIssues.map((d) => `${d.field}: ${d.message}`),
+              ].join("\n")}
+            >
+              {keyIssues.length}
+            </span>
+          )}
+          {selfIncomplete && (
+            <span
+              className="issue-badge warn"
+              title={nameIncomplete(self ?? undefined) ? t("node.nameIncomplete") : t("node.joinIncomplete")}
+            >
+              !
+            </span>
+          )}
+        </div>
         {node.path.length > 0 && (
           <button
             className="x"
@@ -293,7 +300,7 @@ export function DocNodeView({ data, selected }: NodeProps) {
           {node.leaves.length > 0 ? ` · ${t("node.fields", { n: node.leaves.length })}` : ""}
         </div>
         {renameRefused && (
-          <div className="rename-refused absolute top-full right-0 left-0 z-20 rounded-b border border-destructive/40 bg-background px-2 py-1 text-2xs text-destructive shadow">
+          <div className="rename-refused pointer-events-none absolute top-full right-0 left-0 z-20 rounded-b border border-destructive/40 bg-background px-2 py-1 text-2xs text-destructive shadow">
             {renameRefused}
           </div>
         )}

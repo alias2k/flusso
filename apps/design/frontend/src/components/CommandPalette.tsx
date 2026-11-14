@@ -325,6 +325,11 @@ export function CommandPalette({
       <DialogContent
         data-keeps-name-draft
         showCloseButton={false}
+        // A name typed in a box before the palette opened is still pending:
+        // the focus goes back to that box, so leaving it applies the name.
+        onCloseAutoFocus={(e) => {
+          if (useUiStore.getState().nameDraft?.refocus()) e.preventDefault();
+        }}
         aria-describedby={undefined}
         className="top-[11%] translate-y-0 gap-0 overflow-hidden p-0 sm:max-w-3xl"
       >

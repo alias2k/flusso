@@ -10,6 +10,11 @@
 //!    emits both keys; decoding keeps the last) and converts it through the
 //!    **first** one's declaration (`coerce_document`). An `array: true` column
 //!    of scalars refuses an object element there, which fails the document.
+//!    A constant is the exception both ways: the query emits a scalar
+//!    constant as text and a list or an object as `null`, and a first
+//!    constant builds the value it holds, whatever the query read. A `binary`
+//!    column's bytes are Postgres hex text until a `binary` declaration
+//!    decodes them.
 //! 2. Script fields write their output over it.
 //! 3. An input-only (`emit: false`) namesake strips the name.
 //! 4. The sink indexes what is left under the last emitted one's mapping, and
@@ -36,7 +41,7 @@
 
 use kernel::{
     AggregateOp, Field, FieldName, FieldSource, FlussoType, GenericValue, MappingType, Relation,
-    constant_mapping_type,
+    constant_is_stored_unindexed, constant_mapping_type,
 };
 
 /// What every document holds under a name its namesakes share.
@@ -60,6 +65,14 @@ pub enum DuplicateOutcome {
     },
     /// No document holds the name: an input-only namesake strips it.
     Nothing,
+    /// Every document holds `null` under the name: the last one is a constant
+    /// holding a list or an object, which the document query reads as `null`.
+    Null,
+    /// The last one's value as the document query renders it, as text, which
+    /// the first one's declaration does not convert back: a number or boolean
+    /// constant (`"5"`), a `binary` column (Postgres hex, `\x0102`). In a
+    /// one-element array when the first one is an `array: true` column.
+    AsText,
     /// Some documents fail to build; `documents` says which.
     FailsToBuild {
         /// Which documents, in a few words.
@@ -98,6 +111,9 @@ pub enum Rejection {
     /// A geo point cut to the first namesake's child fields, which name no
     /// `lat` and `lon`.
     PointWithoutLatLon,
+    /// The first namesake's constant, which the last one's mapping does not
+    /// take.
+    FirstConstant,
 }
 
 /// What a deployment does with the namesakes `same`, in declaration order.
@@ -117,11 +133,33 @@ pub fn duplicate_outcome(same: &[&Field]) -> DuplicateOutcome {
     if let Some(at) = script {
         return script_outcome(at, same, last);
     }
-    // A constant holding an object builds as `null`, whatever it holds, and a
-    // `custom` column may hold anything: neither is pinned beside a namesake.
-    if same.iter().any(|field| holds_constant_object(field))
-        || (scalar_array(first) && is_custom(last))
+    if let FieldSource::Constant(value) = &first.source {
+        return match constant_fits(value, last) {
+            Some(true) => DuplicateOutcome::Holds(0),
+            Some(false) => DuplicateOutcome::Rejected {
+                reason: Rejection::FirstConstant,
+                unless_it_fits: None,
+            },
+            None => DuplicateOutcome::Unknown,
+        };
+    }
+    if let FieldSource::Constant(value) = &last.source
+        && read_as_null(value)
     {
+        // An `array: true` column turns a null into its `default`.
+        let defaulted =
+            matches!(&first.source, FieldSource::Column(c) if c.array && c.default.is_some());
+        return if defaulted {
+            DuplicateOutcome::Unknown
+        } else {
+            DuplicateOutcome::Null
+        };
+    }
+    if read_as_text(first, last) {
+        return DuplicateOutcome::AsText;
+    }
+    // A `custom` column may hold anything: not pinned beside a namesake.
+    if scalar_array(first) && is_custom(last) {
         return DuplicateOutcome::Unknown;
     }
     document_outcome(same.len() - 1, first, last)
@@ -167,6 +205,13 @@ pub(crate) fn duplicate_message(name: &FieldName, same: &[(usize, &Field)]) -> S
         DuplicateOutcome::Nothing if fields.iter().all(|field| !field.emit) => {
             "none reaches the document".to_owned()
         }
+        DuplicateOutcome::Null => format!(
+            "the index maps the last one, but every document holds `null`: #{} is a constant \
+             holding a list or an object, which the document query reads as `null`, and #{} \
+             reads that",
+            position(fields.len() - 1),
+            position(0)
+        ),
         DuplicateOutcome::Nothing => "the index maps the last emitted one, but the input-only \
                                       (`emit: false`) one strips the name from every document, \
                                       so no document holds it"
@@ -177,6 +222,14 @@ pub(crate) fn duplicate_message(name: &FieldName, same: &[(usize, &Field)]) -> S
              objects. With `on_error = stop` (the default) the ingest engine stops and \
              restarts on it, which halts every index of the deployment; with `skip` such a \
              document keeps its previous indexed version (none on a first backfill)",
+            position(0)
+        ),
+        DuplicateOutcome::AsText => format!(
+            "the index maps the last one, and a document holds the last one's value as the \
+             document query renders it, as text #{} does not convert back (a number or \
+             boolean constant as a string, a `binary` column as Postgres hex, `\\x0102`), in \
+             a one-element array when #{} is an `array: true` column",
+            position(0),
             position(0)
         ),
         DuplicateOutcome::Wrapped => "the index maps the last one, and a document holds the last \
@@ -225,6 +278,11 @@ fn rejection_message(reason: &Rejection, position: impl Fn(usize) -> usize) -> S
             typed(produced, false),
             typed(wanted, false)
         ),
+        Rejection::FirstConstant => format!(
+            "a document holds the first one's constant (#{}), which a constant builds \
+             whatever the last one reads: OpenSearch rejects every document",
+            position(0)
+        ),
         Rejection::PointWithoutLatLon => format!(
             "a document holds its point cut to the child fields #{} declares, with no `lat` \
              and `lon`: OpenSearch rejects every document with a point",
@@ -258,6 +316,14 @@ fn holds_message(i: usize, fields: &[&Field], position: usize) -> String {
             typed(&script.ty.opensearch(), script.array)
         );
     }
+    if i == 0
+        && let FieldSource::Constant(_) = &first.source
+    {
+        return format!(
+            "the index maps the last one, and a document holds the first one's constant \
+             (#{position}), which a constant builds whatever the last one reads"
+        );
+    }
     let raw = "as raw JSON, not converted to the declared types";
     let how = if array_column(first) {
         ", its elements read as the first one's type"
@@ -275,17 +341,130 @@ fn holds_message(i: usize, fields: &[&Field], position: usize) -> String {
     format!("the index maps the last one, and a document holds the last one's value{space}{how}")
 }
 
-/// A constant holding an object builds as `null` today, whatever it says, so
-/// what it does beside a namesake is not pinned.
-fn holds_constant_object(field: &Field) -> bool {
-    matches!(&field.source, FieldSource::Constant(value) if holds_object(value))
+/// Whether the document query reads a constant as `null`: it emits only a
+/// scalar as its literal.
+fn read_as_null(value: &GenericValue) -> bool {
+    matches!(value, GenericValue::Array(_) | GenericValue::Map(_))
 }
 
-fn holds_object(value: &GenericValue) -> bool {
+/// Whether `last`'s value reaches the build as text `first` keeps: a number
+/// or boolean constant (the query emits every scalar constant as text), or a
+/// `binary` column, which only a `binary` declaration decodes.
+fn read_as_text(first: &Field, last: &Field) -> bool {
+    let binary = |field: &Field| matches!(&field.source, FieldSource::Column(c) if c.ty == FlussoType::Binary);
+    match &last.source {
+        FieldSource::Constant(value) => matches!(
+            value,
+            GenericValue::Bool(_)
+                | GenericValue::SmallInt(_)
+                | GenericValue::Int(_)
+                | GenericValue::BigInt(_)
+                | GenericValue::Float(_)
+                | GenericValue::Double(_)
+                | GenericValue::Decimal(_)
+        ),
+        _ => binary(last) && !binary(first),
+    }
+}
+
+/// Whether the last namesake's mapping takes the first one's constant
+/// `value`; `None` where that is not pinned.
+fn constant_fits(value: &GenericValue, last: &Field) -> Option<bool> {
+    let mut leaves = Vec::new();
+    let object = scalar_leaves(value, &mut leaves);
+    match mapped_as(last) {
+        Mapped::Unindexed | Mapped::Itself => Some(true),
+        Mapped::Structured if object => None,
+        Mapped::Structured => Some(leaves.is_empty()),
+        _ if object => Some(false),
+        Mapped::Anything => Some(true),
+        Mapped::Scalar(MappingType::Other(name)) if name == "geo_point" => geo_fits(value),
+        Mapped::Scalar(ty) => leaves
+            .iter()
+            .try_fold(true, |all, leaf| Some(all && scalar_fits(leaf, &ty)?)),
+    }
+}
+
+/// Whether a `geo_point` takes the constant `value`: a `[lon, lat]` pair
+/// does, a lone number or boolean doesn't; a string may be `"lat,lon"`.
+fn geo_fits(value: &GenericValue) -> Option<bool> {
+    let number = |v: &GenericValue| {
+        matches!(
+            v,
+            GenericValue::SmallInt(_)
+                | GenericValue::Int(_)
+                | GenericValue::BigInt(_)
+                | GenericValue::Float(_)
+                | GenericValue::Double(_)
+                | GenericValue::Decimal(_)
+        )
+    };
+    match value {
+        GenericValue::Array(items) if items.len() == 2 && items.iter().all(number) => Some(true),
+        GenericValue::Bool(_) => Some(false),
+        v if number(v) => Some(false),
+        _ => None,
+    }
+}
+
+/// Collects `value`'s scalars, lists flattened; `true` when it holds an object
+/// (the scalars are then partial, and unused).
+fn scalar_leaves<'a>(value: &'a GenericValue, leaves: &mut Vec<&'a GenericValue>) -> bool {
     match value {
         GenericValue::Map(_) => true,
-        GenericValue::Array(items) => items.iter().any(holds_object),
-        _ => false,
+        GenericValue::Array(items) => items.iter().any(|item| scalar_leaves(item, leaves)),
+        GenericValue::Null => false,
+        scalar => {
+            leaves.push(scalar);
+            false
+        }
+    }
+}
+
+/// Whether a field mapped as `ty` takes the scalar `value`; `None` where that
+/// is not pinned.
+fn scalar_fits(value: &GenericValue, ty: &MappingType) -> Option<bool> {
+    use GenericValue as V;
+    use MappingType as M;
+    let numeric = matches!(
+        ty,
+        M::Byte
+            | M::Short
+            | M::Integer
+            | M::Long
+            | M::Float
+            | M::Double
+            | M::HalfFloat
+            | M::ScaledFloat
+    );
+    match value {
+        V::SmallInt(_) | V::Int(_) | V::BigInt(_) | V::Float(_) | V::Double(_) | V::Decimal(_) => {
+            match ty {
+                _ if numeric => Some(true),
+                M::Date => Some(true),
+                M::Boolean => Some(false),
+                M::Other(name) if name == "geo_point" => Some(false),
+                _ => None,
+            }
+        }
+        V::Bool(_) => match ty {
+            M::Boolean => Some(true),
+            M::Date => Some(false),
+            _ if numeric => Some(false),
+            M::Other(name) if name == "geo_point" => Some(false),
+            _ => None,
+        },
+        V::String(text) => match ty {
+            _ if numeric => Some(text.trim().parse::<f64>().is_ok()),
+            M::Boolean => Some(text == "true" || text == "false"),
+            _ => None,
+        },
+        V::Date(_) | V::Timestamp(_) | V::TimestampTz(_) => match ty {
+            M::Date => Some(true),
+            M::Boolean => Some(false),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -349,7 +528,7 @@ fn script_outcome(at: usize, same: &[&Field], last: &Field) -> DuplicateOutcome 
     };
     let produced = script.ty.opensearch();
     match mapped_as(last) {
-        Mapped::Itself | Mapped::Anything => DuplicateOutcome::Holds(at),
+        Mapped::Itself | Mapped::Anything | Mapped::Unindexed => DuplicateOutcome::Holds(at),
         Mapped::Structured => DuplicateOutcome::Rejected {
             reason: Rejection::ScriptOutput {
                 at,
@@ -374,8 +553,10 @@ fn script_outcome(at: usize, same: &[&Field], last: &Field) -> DuplicateOutcome 
 enum Mapped {
     /// The script whose output it is.
     Itself,
-    /// Any scalar: a text-family field, or one that is not indexed.
+    /// Any scalar: a text-family field.
     Anything,
+    /// Any value: a field that is not indexed.
+    Unindexed,
     /// An object or nested array: a join, an object, a `json` or `map` column.
     Structured,
     /// A scalar of this type.
@@ -390,14 +571,15 @@ fn mapped_as(field: &Field) -> Mapped {
     };
     match &field.source {
         FieldSource::Script(_) => Mapped::Itself,
+        FieldSource::Constant(value) if constant_is_stored_unindexed(value) => Mapped::Unindexed,
         FieldSource::Constant(value) => match constant_mapping_type(value) {
             MappingType::Keyword | MappingType::Text => Mapped::Anything,
             MappingType::Object | MappingType::Nested => Mapped::Structured,
             other => Mapped::Scalar(other),
         },
-        FieldSource::Column(column) if !column.indexed => Mapped::Anything,
+        FieldSource::Column(column) if !column.indexed => Mapped::Unindexed,
         FieldSource::Column(column) => of(&column.ty),
-        FieldSource::Relation(Relation::Join(join)) if !join.indexed => Mapped::Anything,
+        FieldSource::Relation(Relation::Join(join)) if !join.indexed => Mapped::Unindexed,
         FieldSource::Relation(Relation::Join(_)) | FieldSource::Group(_) => Mapped::Structured,
         FieldSource::Relation(Relation::Aggregate(aggregate)) => match &aggregate.op {
             AggregateOp::Count => Mapped::Scalar(MappingType::Long),

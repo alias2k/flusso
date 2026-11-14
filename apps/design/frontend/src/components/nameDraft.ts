@@ -11,8 +11,11 @@
 //   Save settles it; Undo, Redo and Reset drop it. Their buttons keep focus
 //   (`keepFocus`), so the draft is still there when they act.
 // - Focus moving into the command palette (`data-keeps-name-draft`) leaves the
-//   draft pending, for the palette's own actions to settle or drop.
-// - Escape and Ctrl+Z (⌘Z) in the box drop it.
+//   draft pending, for the palette's own actions to settle or drop. Closing
+//   the palette puts the focus back in the box (`refocus`), so leaving the box
+//   applies the name as usual.
+// - Escape and Ctrl+Z (⌘Z) in the box drop it; Ctrl+Shift+Z is the input's own
+//   redo.
 //
 // Applying a name must move nothing on the page: a press that left the box
 // would otherwise end on another control, and its click would be lost. So the
@@ -70,6 +73,13 @@ export function useNameDraft({
     callbacks.current = { refusal, apply };
   });
   const typed = useRef<string | null>(null);
+  const box = useRef<HTMLInputElement | null>(null);
+  const refocus = useCallback(() => {
+    const input = box.current;
+    if (!input?.isConnected) return false;
+    input.focus();
+    return true;
+  }, []);
   const end = useCallback(() => {
     typed.current = null;
     setText(null);
@@ -105,10 +115,11 @@ export function useNameDraft({
     text,
     refused: late ?? (text === null ? null : refusal(text)),
     change: (value: string) => {
+      box.current = document.activeElement instanceof HTMLInputElement ? document.activeElement : box.current;
       typed.current = value;
       setText(value);
       setLate(null);
-      setNameDraft({ kind, row, name: value, refused: refusal(value), settle, drop });
+      setNameDraft({ kind, row, name: value, refused: refusal(value), settle, drop, refocus });
     },
     blur: (e: FocusEvent) => {
       if (!keepsNameDraft(e.relatedTarget)) settle();
@@ -116,7 +127,7 @@ export function useNameDraft({
     keyDown: (e: KeyboardEvent<HTMLInputElement>) => {
       if (e.key === "Enter") e.currentTarget.blur();
       else if (e.key === "Escape") drop();
-      else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && typed.current !== null) {
+      else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "z" && typed.current !== null) {
         e.preventDefault();
         drop();
       }

@@ -95,6 +95,9 @@ export interface NameDraft {
   settle: () => void;
   /// End the draft without applying the name.
   drop: () => void;
+  /// Put the focus back in the box holding the name, when it is still on the
+  /// page; `false` when it is not.
+  refocus: () => boolean;
 }
 
 export const useUiStore = create<UiState>()((set) => ({

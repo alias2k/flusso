@@ -19,23 +19,26 @@ Two fields at one level of the document (the root, or one join's or object's fie
 
 What happens is decided in this order:
 
-1. The Postgres build reads the **last** one's value and converts it through the **first** one's declaration. A conversion that can't be done fails the document.
+1. The Postgres build reads the **last** one's value and converts it through the **first** one's declaration. A conversion that can't be done fails the document. Constants are the exception both ways: a constant that comes first builds the value it holds, whatever the last one reads, and one that comes last reaches the first one as text (a scalar) or as `null` (a list or an object). A `binary` column reaches it as Postgres hex text, which only a `binary` declaration decodes.
 2. Script fields write their output over it.
 3. An `emit: false` namesake strips the name.
 4. OpenSearch indexes what is left under the last emitted one's mapping, and may refuse it.
 
-The outcomes below come from a live test (`apps/cli/tests/duplicate_names.rs`). It builds every ordered pair of 31 field kinds through the real builder and OpenSearch sink: each leaf type, `array: true`, `json` with and without `indexed`, `map`, `geo`, `custom`, each join kind with and without related rows, `object`, the aggregates, constants, scripts and `emit: false`. Each outcome is checked against the classification the warning's wording is built from; the table below is written from that test's results.
+The outcomes below come from a live test (`apps/cli/tests/duplicate_names.rs`). It builds every ordered pair of 34 field kinds through the real builder and OpenSearch sink: each leaf type, `array: true`, `json` with and without `indexed`, `map`, `geo`, `custom`, each join kind with and without related rows, `object`, the aggregates, constants (a number, a string, a list, a mixed list, an object), scripts and `emit: false`. Each outcome is checked against the classification the warning's wording is built from; the table below is written from that test's results.
 
 | First | Last | A document holds |
 | --- | --- | --- |
 | any | any, when one of them is `emit: false` | nothing under the name (the mapping still lists the last emitted one) |
-| a value (column, aggregate, geo, constant) | anything | the last one's value: read as the first one's type when both are values, as raw JSON otherwise |
+| a constant | anything | the first one's constant, under the last one's mapping: **OpenSearch rejects** every document when that mapping can't take it (a number or boolean under a `geo` point or a join, a string that isn't a number under a numeric field, an object under a scalar field) |
+| anything but a constant | a constant holding a list or an object | `null` |
+| anything but a constant or a `binary` column | a number or boolean constant, a `binary` column | the last one's value as text: `"5"`, `"true"`, or Postgres hex (`"\x0102"`) instead of base64; in a one-element array when the first one is an `array: true` column |
+| a value (column, aggregate, geo) | anything else | the last one's value: read as the first one's type when both are values, as raw JSON otherwise |
 | a join or object | a join or object whose child fields it declares too | the last one's value, its child fields read as the first one declares them |
 | a join or object | a join or object with child fields it doesn't declare | only the child fields both declare; with none, every element (or the object) is empty: `has_many: orders` twice, first with `status`, then with `total` and `note`, gives `"orders": [{}, {}]` |
 | an object | a to-many join | the last one's rows, as raw JSON |
 | a join or object | a `map`, or a `json` with `indexed: false` | the last one's object cut to the keys named like the first one's child fields |
 | a join or object | a scalar column or aggregate | the last one's value, as raw JSON |
-| an `array: true` column | a scalar column, an aggregate other than `ids`, a scalar constant | the last one's value in a one-element array |
+| an `array: true` column | a scalar column, an aggregate other than `ids`, a string constant | the last one's value in a one-element array |
 | an `array: true` `json` column | an object, a to-one join, a `geo` point, a `map` column | the last one's value in a one-element array |
 | an `array: true` column | an array, a to-many join, `ids` | the last one's value, its elements read as the first one's type |
 | an `array: true` column of scalars | a join with a related row, an object, a set `geo` point, a `json` or `map` column holding an object | nothing: **the document fails to build** (`the column holds an object at [0], but an array: true field of keyword takes scalar elements`) |
@@ -45,7 +48,8 @@ The outcomes below come from a live test (`apps/cli/tests/duplicate_names.rs`). 
 
 The warning names each field by its position (`#3`) and says which row applies. Where the outcome depends on the data or on a declaration it can't see, it says so instead of guessing: "the index maps the last one; what a document holds depends on both declarations: it may hold either value, be empty, fail to build or be refused by the sink (run `flusso script run` on a row to see)". That covers:
 
-- a constant holding an object (it builds as `null` today);
+- a constant first whose value the last one's mapping may or may not take: an object under a join, an object, a `json` or `map` column; a string under a date, `binary` or `geo` field;
+- an `array: true` column with a `default` before a constant holding a list or an object (the column's `default` replaces the `null`);
 - a `custom` column after an `array: true` one or after a join or object;
 - an indexed `json` column (or `json` array) after a join, an object, or another array (a `json` field holding keys is refused by the strict mapping on its own).
 

@@ -218,7 +218,6 @@ fn aggregate_type(aggregate: &Aggregate) -> (MappingType, bool, bool) {
 #[cfg(test)]
 mod tests;
 
-/// The mapping type a constant value's shape implies.
 /// The OpenSearch type a `constant` field holding `value` is mapped as.
 pub fn constant_mapping_type(value: &GenericValue) -> MappingType {
     match value {

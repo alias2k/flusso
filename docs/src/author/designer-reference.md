@@ -58,12 +58,12 @@ A field's name, in the inspector's name box, is applied when you leave the box (
 
 The same holds for every name box (an index, a sink, a field, a node title):
 
-- **Leaving the box** (a click or tap elsewhere, Tab) applies the name at once, then the click does what it does: typing a name, then ticking **Array**, saves both; renaming an index row, then pressing its **duplicate**, duplicates the renamed row. A refused name is dropped instead. Applying a name moves nothing on the page: the reason shows over the page, the rename chips keep their row's height and their places (the chip for the name the field has now is left out as a gap), and a node's title box covers the title without changing the header's height. Only the control you press can move things, and only after it acts: **remove** and **duplicate** do what they say with the renamed field, row or sink.
+- **Leaving the box** (a click or tap elsewhere, Tab) applies the name at once, then the click does what it does: typing a name, then ticking **Array**, saves both; renaming an index row, then pressing its **duplicate**, duplicates the renamed row. A refused name is dropped instead. Applying a name moves nothing on the page: the reason shows over the page and lets a press through to what it covers, the rename chips keep their row's height and their places (the chip for the name the field has now is left out as a gap), and a node's header is one line whatever its title: a long title ends in an ellipsis (hover it for the whole name), and the title box covers the title. Only the control you press can move things, and only after it acts: **remove** and **duplicate** do what they say with the renamed field, row or sink.
 - **Enter** applies the name.
 - **Escape** drops it.
-- **Ctrl+Z** (⌘Z) in the box puts the name back as it was before you typed.
+- **Ctrl+Z** (⌘Z) in the box puts the name back as it was before you typed. **Ctrl+Shift+Z** is the box's own redo of what you typed.
 - **Undo**, **Redo** and **Reset** with a name still in its box discard that name; Undo and Redo do nothing else, and Reset then resets.
-- The command palette leaves the name in its box, so its Undo does the same, and its **Save** applies the name.
+- The command palette (**Ctrl+K**, from any box) leaves the name in its box, so its Undo does the same, and its **Save** applies the name. Closing the palette puts you back in the box.
 - **The box going away** while it holds a name (another field selected, the index switched) applies it, like leaving the box.
 
 A name is always applied to the thing it was typed for, as that thing and its siblings are at that moment: the index row, the sink, the field (wherever it now sits, in its own index). If it is gone, nothing happens. If another field took the name meanwhile, the box keeps it, marked.

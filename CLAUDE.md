@@ -257,8 +257,11 @@ after a live update; constants land as written), and `an_update_of_an_unread_col
   through the store's `renameField`/`renameIndex`/`renameSink`, which take an identity (uid, row id,
   sink id) and read the current state (`model/renames.ts`), never a closure's snapshot. Applying a
   name must move no layout (a press that blurred the box would end elsewhere and lose its click:
-  reasons float, the rename-chip row has a fixed height and a fixed order, `model/renameChips.ts`,
-  and the canvas title box lies over the title, out of the flow; no test runs a browser, so a
+  reasons float and take no pointer events, the rename-chip row has a fixed height and a fixed
+  order, `model/renameChips.ts`, and a canvas node header is one non-wrapping line, the title
+  ending in an ellipsis and the title box covering its slot; closing the command palette hands the
+  focus back through the draft's `refocus`, and an Escape that closes it doesn't also clear the
+  selection; no test runs a browser, so a
   change here needs a by-hand check that each control near a pending name still takes its
   click), and the canvas keeps React Flow's
   `measured`/`selected` across a re-projection, or every node is hidden until re-measured (issue #284).
@@ -674,10 +677,12 @@ which the document query silently skips — is an error that `validate_spec` rep
 database, so `check --offline` shows it; so is `DuplicateFieldName` (issue #284), a warning: two
 fields sharing a `FieldName` at one level still load (format freeze), but the OpenSearch mapping
 keeps the last, the Postgres document holds the last one's value coerced through the first one's
-declaration (`coerce_document`), and an `emit: false` namesake strips the name from every
+declaration (`coerce_document`; a first constant builds its own value, a last one reaches the
+first as text, or as `null` for a list or object, and a `binary` column as hex text), and an
+`emit: false` namesake strips the name from every
 document (the designer refuses to make one: `model/names.ts`'s `fieldNameProblem`); the message
 is built from `source::duplicate_outcome` (`libs/1-ports/source/src/duplicates.rs`), which the live
-`apps/cli/tests/duplicate_names.rs` matrix (every ordered pair of 31 field kinds through the real
+`apps/cli/tests/duplicate_names.rs` matrix (every ordered pair of 34 field kinds through the real
 builder and OpenSearch sink; `opensearch` nextest group) pins pair by pair, a pair it can't place
 getting `Unknown` and a wording that claims nothing; a finding
 under a duplicated name carries its position (`Diagnostic.positions`, rendered by `dotted_path` as
