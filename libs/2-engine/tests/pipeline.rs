@@ -59,6 +59,12 @@
 //!   Postgres hex text); a `constant` number, list, list mixing kinds, and
 //!   object land as written.
 //!
+//! - [`an_id_past_512_bytes_is_decided_by_on_error`] — a text key OpenSearch
+//!   refuses as an `_id` (over 512 bytes) is one rejected document, decided by
+//!   `on_error`: `skip` quarantines it and acks the batch, `stop` stops the sink
+//!   engine with the batch unacked; the rest of its batch lands either way
+//!   (issue #301: it failed the whole bulk request).
+//!
 //! Each change is verified by polling a realtime `GET {index}/_doc/{id}` (reads
 //! the translog, so no refresh wait) until the index reflects the expectation or
 //! a deadline trips — so the assertions are deterministic despite async flush.
@@ -75,7 +81,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use engine::{IngestEngine, SinkControl, SinkEngine};
+use engine::{EngineError, FailurePolicies, FailurePolicy, IngestEngine, SinkControl, SinkEngine};
 use kernel::{
     Column, ColumnName, DatabaseSchema, Field, FieldName, FieldSource, Filter, FlussoType,
     GenericValue, IndexName, IndexSchema, Join, JoinKind, NullCheckFilter, NullOp, Relation,
@@ -1224,6 +1230,118 @@ async fn restart_rebuilds_when_the_replication_slot_was_dropped() {
     second.shutdown();
 }
 
+// ───────────────────── an id OpenSearch refuses (issue #301) ─────────────────────
+
+/// The slot's `confirmed_flush_lsn` has reached `lsn`.
+async fn slot_confirmed_past(pool: &PgPool, lsn: &str) -> bool {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT confirmed_flush_lsn >= $1::pg_lsn FROM pg_replication_slots \
+         WHERE slot_name = 'flusso'",
+    )
+    .bind(lsn)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn current_lsn(pool: &PgPool) -> String {
+    sqlx::query_scalar("SELECT pg_current_wal_lsn()::text")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// A text key past OpenSearch's 512-byte `_id` limit is one rejected document,
+/// decided by `on_error`: under `skip` it is quarantined, the rest of its
+/// transaction lands, the batch is acked (the slot confirms past it) and the
+/// engine keeps going; under `stop` the rest still lands, then the sink engine
+/// stops with the batch unacked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn an_id_past_512_bytes_is_decided_by_on_error() {
+    let pg = start_postgres().await;
+    let os = start_opensearch().await;
+    for name in ["long_skip", "long_stop"] {
+        create_table(
+            &pg.pool,
+            &format!("CREATE TABLE {name} (id text PRIMARY KEY, name text)"),
+        )
+        .await;
+    }
+    exec(
+        &pg.pool,
+        "CREATE PUBLICATION flusso FOR TABLE long_skip, long_stop",
+    )
+    .await;
+    exec(
+        &pg.pool,
+        "SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')",
+    )
+    .await;
+    let spec = SourceSpec::new(BTreeMap::from([
+        (index_name("long_skip"), simple_schema("long_skip", None)),
+        (index_name("long_stop"), simple_schema("long_stop", None)),
+    ]));
+    let policies =
+        FailurePolicies::new(FailurePolicy::Skip).with_override("long_stop", FailurePolicy::Stop);
+    let live = spawn_pipeline_with(&pg, &os, spec, policies).await;
+    live.await_seeded(2).await;
+    let long = "k".repeat(600);
+
+    exec(
+        &pg.pool,
+        &format!("INSERT INTO long_skip (id, name) VALUES ('{long}', 'long'), ('normal', 'kept')"),
+    )
+    .await;
+    let skipped_at = current_lsn(&pg.pool).await;
+    live.assert_eventually("long_skip", "normal", Some("kept"))
+        .await
+        .unwrap_or_else(|got| panic!("skip: the rest of the batch did not land, saw {got}"));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !slot_confirmed_past(&pg.pool, &skipped_at).await {
+        live.fail_if_stopped();
+        assert!(Instant::now() < deadline, "skip: the batch was never acked");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    exec(
+        &pg.pool,
+        "INSERT INTO long_skip (id, name) VALUES ('after', 'next')",
+    )
+    .await;
+    live.assert_eventually("long_skip", "after", Some("next"))
+        .await
+        .unwrap_or_else(|got| panic!("skip: the engine did not keep going, saw {got}"));
+
+    exec(
+        &pg.pool,
+        &format!("INSERT INTO long_stop (id, name) VALUES ('{long}', 'long'), ('normal', 'kept')"),
+    )
+    .await;
+    let stopped_at = current_lsn(&pg.pool).await;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let outcome = loop {
+        if let Some(outcome) = live.outcome.lock().unwrap().take() {
+            break outcome;
+        }
+        assert!(Instant::now() < deadline, "stop: the engine never stopped");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    };
+    assert!(
+        matches!(&outcome, Err(EngineError::DocumentsRejected(1, reason)) if reason.contains("512")),
+        "stop: the sink engine stops on the one rejection, got {outcome:?}"
+    );
+    assert_eq!(
+        live.fetch_name("long_stop", "normal").await.as_deref(),
+        Some("kept"),
+        "stop: the rest of the batch still landed",
+    );
+    assert!(
+        !slot_confirmed_past(&pg.pool, &stopped_at).await,
+        "stop: the batch stays unacked",
+    );
+    live.shutdown();
+}
+
 // ───────────────────────────────── harness ───────────────────────────────────
 
 /// A running Postgres with logical replication and a connection pool.
@@ -1527,6 +1645,16 @@ async fn start_pipeline(pg: &Pg, os: &Os, spec: SourceSpec, tables: &[&str]) -> 
 /// document builder, and sink — as a new `flusso run` does — and runs both
 /// engines. The publication and slot are whatever the database has.
 async fn spawn_pipeline(pg: &Pg, os: &Os, spec: SourceSpec) -> Pipeline {
+    spawn_pipeline_with(pg, os, spec, FailurePolicies::default()).await
+}
+
+/// [`spawn_pipeline`] with the sink engine's `on_error` policies set.
+async fn spawn_pipeline_with(
+    pg: &Pg,
+    os: &Os,
+    spec: SourceSpec,
+    policies: FailurePolicies,
+) -> Pipeline {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_test_writer()
@@ -1555,7 +1683,7 @@ async fn spawn_pipeline(pg: &Pg, os: &Os, spec: SourceSpec) -> Pipeline {
     let record = Arc::clone(&outcome);
     Pipeline {
         engine: tokio::spawn(async move {
-            let result = run_deployment(capture, documents, sink).await;
+            let result = run_deployment(capture, documents, sink, policies).await;
             *record.lock().unwrap() = Some(result);
         }),
         outcome,
@@ -1571,12 +1699,14 @@ async fn run_deployment(
     capture: Arc<dyn ChangeCapture>,
     documents: Arc<dyn DocumentBuilder>,
     sink: Arc<dyn Sink>,
+    policies: FailurePolicies,
 ) -> engine::Result<()> {
     let name = SinkName::try_new("e2e").unwrap();
     let stream: Arc<dyn Stream> = Arc::new(ChannelStream::new(1024, [name.clone()]));
     let continuity = capture.continuity().await?;
     let mappings = documents.index_mappings().await?;
-    let sink_engine = SinkEngine::new(name.clone(), sink, Arc::clone(&stream), mappings);
+    let sink_engine = SinkEngine::new(name.clone(), sink, Arc::clone(&stream), mappings)
+        .with_failure_policies(policies);
     sink_engine.stage(continuity).await?;
     let ingest = IngestEngine::new(capture, documents, stream, vec![name]);
     let (_control, mut control_rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
