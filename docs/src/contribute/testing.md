@@ -28,7 +28,7 @@ Match this before assuming green:
 6. `cargo test --workspace --doc`
 7. `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items`
 
-On a PR confined to the query train (`sdk/query`, `sdk/query-derive`, `dev/query-e2e`), step 5 skips the `source-postgres`, `engine` and `sink-opensearch` integration tests, which those paths can't break; the query train's own e2e still run. Pushes to `main` run everything.
+On a PR confined to the query train (`sdk/query`, `sdk/query-derive`, `dev/query-e2e`), step 5 skips every integration-test binary of `source-postgres`, `engine` and `sink-opensearch`, which those paths can't break; everything else, the query train's own e2e included, still runs. Pushes to `main` run everything.
 
 A separate job runs a 60-second `pgoutput_decode` fuzz on a pinned nightly; another builds and lints the designer SPA; a `docs` job builds the book and link-checks it. A `bench` workflow gates PRs on the in-process benches and records scenario history on `main`; see [Benchmarks](benchmarks.md). An `audit` workflow checks RustSec advisories weekly and on manifest or lock changes; see [Dependency updates](dependencies.md).
 
@@ -38,27 +38,36 @@ The workspace lints deny `unwrap_used` and `expect_used`, and test targets use `
 
 ## The e2e suites
 
-The `#[ignore]`d suites spin up containers with `testcontainers`. They're legitimately slow and occasionally flaky, so `.config/nextest.toml` caps their concurrency (`docker` group: eight Postgres at once; `opensearch` group: one at a time) and retries them. A new e2e binary must be added to the filtersets in both profiles.
+The `#[ignore]`d suites spin up containers with `testcontainers`. They're legitimately slow and occasionally flaky, so `.config/nextest.toml` puts each binary in a test group by what it needs and retries it twice: the `docker` group (no OpenSearch, eight at a time) and the `opensearch` group (anything with OpenSearch, one at a time). Both groups get a longer slow-timeout than ordinary tests, a little longer still under the `ci` profile; `.config/nextest.toml` holds the numbers. A new e2e binary must be added to the filtersets in both profiles.
 
-| Crate | Binary | Proves |
-| --- | --- | --- |
-| `source-postgres` | `integration`, `config_coverage`, `publication`, `introspection` | capture, coverage reports, publication management, catalog enumeration |
-| `source-postgres` | `tls` | a hostssl-only PG 16 honors `sslmode` on both the stream and the SQL pool |
-| `source-postgres` | `wal_idle` | the slot advances from keepalives while watched tables are idle |
-| `source-postgres` | `partitions` | a partitioned root and child: leaf changes arrive under the parent's name and resolve, a deleted child's pre-image reaches its old parent, backfill reads the partitions |
-| `source-postgres` | `continuity` | `continuity()` is read-only and `Fresh` exactly while the slot is missing; `prepare()` creates it |
-| `source-postgres` | `record_pgoutput` | not a test: re-records the decode bench's fixture from a real Postgres (see [Benchmarks](benchmarks.md#re-recording-the-pgoutput-fixture)) |
-| `engine` | `wal` | which op the engine emits per change, against a recording sink, including none for an update of columns no document reads |
-| `engine` | `wal_release` | the slot releases WAL that produces no document (unread tables and columns, filtered, soft-deleted and orphaned rows, large and split transactions, idle WAL) and the sinks get exactly the expected ops; it confirms within 5 s of the commit, or of the sink flush for a change that produces a document; a stalled sink pins the slot at the last position it flushed until it catches up, a `backfill = false` sink does not |
-| `engine` | `pipeline` | the full source to OpenSearch path, reading the index back over HTTP: live insert/update/delete across key types, soft-delete tombstoning, backfill, the two seed-marker contradictions, and an unread-column update leaving `_version` alone |
-| `sink-opensearch` | `reindex` | generations, alias swap, retracted markers, index-prefix isolation, per-index `index_settings`, and the visibility a flush reports |
-| `sink-opensearch` | `map_keys` | map keys take their `values` type under the strict root and inside a `nested` array; an `indexed: false` subtree is stored but matches no query |
-| `sink-opensearch` | `tls` | over `https://` with an untrusted CA: `tls_verify = true` refuses promptly and without retrying, `ca_file` makes it trusted, `false` writes anyway; under either rustls crypto provider, and the refusal comes from the pinned roots, not the OS store |
-| `daemon` | `fence` | the real daemon over Postgres and OpenSearch: one unpolled read after a fence sees the commit (applied by get, searchable by search), including a position behind unwatched WAL, a transaction split across batches and concurrent writers; a stalled sibling sink blocks an all-sinks fence but not one on the healthy sink |
-| `flusso-query-e2e` | `combined_search` | generation-suffix normalization against a real cluster |
-| `flusso-query-e2e` | `cursor_paging` | page cursors: a live walk follows a reindex (a prefixed union too), a pinned walk reads one view until its generation drops, a streamed walk closes its point-in-time |
-| `flusso-query-e2e` | `map_keys` | every cross-key map query matches the per-key `or`, adversarial values included; sorting a map by key |
-| `flusso-query-e2e` | `tls` | `flusso-query` refuses an untrusted certificate and reads once given the CA |
+| Crate | Binary | Needs | Proves |
+| --- | --- | --- | --- |
+| `source-postgres` | `integration` | Postgres | capture end to end: slot, stream, decode, backfill |
+| `source-postgres` | `config_coverage` | Postgres | every schema key builds against a real catalog; validation reports a typo in every relation and root position |
+| `source-postgres` | `publication` | Postgres | publication create/extend and `REPLICA IDENTITY FULL` management, incl. kept identity indexes, unowned tables and lock timeouts |
+| `source-postgres` | `introspection` | Postgres | catalog enumeration for the designer |
+| `source-postgres` | `tls` | Postgres | a hostssl-only PG 16 honors `sslmode` on both the stream and the SQL pool |
+| `source-postgres` | `wal_idle` | Postgres | the slot advances from keepalives while watched tables are idle |
+| `source-postgres` | `partitions` | Postgres | a partitioned root and child: leaf changes arrive under the parent's name and resolve, a deleted child's pre-image reaches its old parent, backfill reads the partitions |
+| `source-postgres` | `continuity` | Postgres | `continuity()` is read-only and `Fresh` exactly while the slot is missing; `prepare()` creates it |
+| `source-postgres` | `record_pgoutput` | Postgres | not a test: re-records the decode bench's fixture (see [Benchmarks](benchmarks.md#re-recording-the-pgoutput-fixture)) |
+| `engine` | `wal` | Postgres | which op the engine emits per change, against a recording sink, including none for an update of columns no document reads |
+| `engine` | `wal_release` | Postgres | the slot releases WAL that produces no document, confirms within 5 s of the last flush, and a stalled sink pins it while a `backfill = false` sink does not |
+| `engine` | `bytea_output` | Postgres + PgBouncer | a `bytea` reads as the same text in backfill and live changes whatever the server's `bytea_output`, through a transaction-mode pooler |
+| `engine` | `pipeline` | both | the full source-to-OpenSearch path, read back over HTTP: live ops across key types, soft-delete, backfill, the seed-marker contradictions, reverse resolution of deleted and re-parented children |
+| `sink-opensearch` | `reindex` | OpenSearch | generations, alias swap, retracted markers, index-prefix isolation, per-index `index_settings`, and the visibility a flush reports |
+| `sink-opensearch` | `map_keys` | OpenSearch | map keys take their `values` type under the strict root and inside a `nested` array; an `indexed: false` subtree is stored but matches no query |
+| `sink-opensearch` | `tls` | OpenSearch | over `https://` with an untrusted CA: `tls_verify = true` refuses promptly without retrying, `ca_file` makes it trusted, `false` writes anyway |
+| `sink-opensearch` | `document_ids` | OpenSearch | ids OpenSearch refuses before running `_bulk` (over 512 bytes and the like) don't take the rest of the request down |
+| `daemon` | `fence` | both | the real daemon: one unpolled read after a fence sees the commit (applied and searchable), across unwatched WAL, split transactions, concurrent writers and a stalled sibling sink |
+| `flusso-cli` | `duplicate_names` | both | the live matrix behind the `duplicate_field_name` warning: every pair of field kinds sharing a name, built and written for real |
+| `flusso-cli` | `time_columns` | both | a `time`/`timetz` column under a `timestamp` or `date` field: which cases index and which `validate_indexes` reports |
+| `flusso-query-e2e` | `combined_search` | OpenSearch | generation-suffix normalization against a real cluster |
+| `flusso-query-e2e` | `cursor_paging` | OpenSearch | page cursors: a live walk follows a reindex, a pinned walk reads one view, a streamed walk closes its point-in-time |
+| `flusso-query-e2e` | `map_keys` | OpenSearch | every cross-key map query matches the per-key `or`, adversarial values included; sorting a map by key |
+| `flusso-query-e2e` | `tls` | OpenSearch | `flusso-query` refuses an untrusted certificate and reads once given the CA |
+| `flusso-query-e2e` | `array_columns` | OpenSearch | an `array: true` field is queried like a plain field of its element type |
+| `flusso-query-e2e` | `geo_points` | OpenSearch | `GeoPoint` reads every point form a `text` or `jsonb` column can hold with the coordinates OpenSearch indexed |
 
 The full source-to-sink e2e lives in `engine`, not in a source crate: a leaf source must not dev-depend on the engine or it can't be published first.
 
