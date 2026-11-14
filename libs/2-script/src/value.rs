@@ -10,15 +10,16 @@
 //! | `SmallInt` / `Int` / `BigInt` | `i64` |
 //! | `Float` / `Double` | `f64` |
 //! | `Decimal` | `Decimal` |
-//! | `BigDecimal` (past `Decimal`'s range) | string, its exact digits |
+//! | `BigDecimal` (a declared `decimal`) | `Decimal` (rounded past 28 fractional digits); a string of its digits past `Decimal`'s range |
 //! | `String`, `Uuid` | string |
 //! | `Date` / `Time` / `Timestamp` / `TimestampTz` | RFC 3339 string |
 //! | `Bytes` | blob |
 //! | `Array` / `Map` | array / object map |
 //!
 //! **Out** ([`from_dynamic`]): a script's result is checked against the field's declared type,
-//! strictly. The only widening allowed: an integer is accepted for a `float`/`double`/`decimal`
-//! field.
+//! strictly. The only widenings allowed: an integer is accepted for a `float`/`double`/`decimal`
+//! field, and a string holding a decimal number for a `decimal` field (a value past `Decimal`'s
+//! range passed through), written as that number.
 //!
 //! ```
 //! use kernel::{FlussoType, GenericValue};
@@ -31,9 +32,12 @@
 //! assert_eq!(from_dynamic(rhai, &out), Ok(GenericValue::BigInt(5)));
 //! ```
 
+use std::str::FromStr;
+
 use chrono::{DateTime, NaiveDate, NaiveDateTime, SecondsFormat};
 use kernel::{FlussoType, GenericValue};
 use rhai::{Array, Dynamic, Map};
+use rust_decimal::Decimal;
 
 /// Convert a document value into a Rhai value.
 pub fn to_dynamic(value: &GenericValue) -> Dynamic {
@@ -46,7 +50,12 @@ pub fn to_dynamic(value: &GenericValue) -> Dynamic {
         GenericValue::Float(f) => Dynamic::from_float(f64::from(*f)),
         GenericValue::Double(f) => Dynamic::from_float(*f),
         GenericValue::Decimal(d) => Dynamic::from_decimal(*d),
-        GenericValue::BigDecimal(d) => Dynamic::from(d.as_str().to_owned()),
+        GenericValue::BigDecimal(d) => Decimal::from_str(d.as_str())
+            .or_else(|_| Decimal::from_scientific(d.as_str()))
+            .map_or_else(
+                |_| Dynamic::from(d.as_str().to_owned()),
+                Dynamic::from_decimal,
+            ),
         GenericValue::String(s) => Dynamic::from(s.clone()),
         GenericValue::Uuid(u) => Dynamic::from(u.to_string()),
         GenericValue::Date(d) => Dynamic::from(d.format("%Y-%m-%d").to_string()),
@@ -151,6 +160,11 @@ fn leaf(value: Dynamic, out: &Output<'_>) -> Result<GenericValue, String> {
         FlussoType::Decimal => {
             if let Ok(d) = value.as_decimal() {
                 Ok(GenericValue::Decimal(d))
+            } else if value.is_string() {
+                let text = value.into_string().map_err(|_| mismatch())?;
+                kernel::BigDecimal::parse(&text)
+                    .map(GenericValue::BigDecimal)
+                    .ok_or_else(|| format!("returned `{text}`, which is not a decimal number"))
             } else {
                 integer(&value, mismatch).map(|i| GenericValue::Decimal(i.into()))
             }

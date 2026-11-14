@@ -1,6 +1,8 @@
 use super::*;
 use std::collections::BTreeMap;
 
+use rust_decimal::Decimal;
+
 #[test]
 fn maps_to_plain_json() {
     let value = GenericValue::Map(BTreeMap::from([
@@ -173,7 +175,7 @@ fn a_decimal_is_written_as_the_nearest_double_as_before() {
         (Decimal::new(1000, 1), "100.0"),
         (Decimal::new(5, 0), "5.0"),
         (Decimal::new(1250, 2), "12.5"),
-        (Decimal::MAX, "7.922816251426434e28"),
+        (Decimal::MAX, "7.922816251426434e+28"),
     ] {
         let value = GenericValue::Decimal(decimal);
         assert_eq!(written(&value), json, "{decimal}");

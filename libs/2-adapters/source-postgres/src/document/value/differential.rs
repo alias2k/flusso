@@ -20,11 +20,12 @@ use kernel::{
     FlussoType, GenericValue, Geo, Join, JoinKind, Relation, Script, TableName,
 };
 
-use super::{DocumentError, coerce_document};
+use super::{DocumentError, DocumentPlan, coerce_document};
 
 /// What the sink receives for `case`, as one line.
 fn render(case: &Case) -> String {
-    match coerce_document(case.doc.as_bytes(), &case.fields) {
+    let plan = DocumentPlan::new(&case.fields);
+    match coerce_document(case.doc.as_bytes(), &case.fields, &plan) {
         Ok(body) => format!("OK {}", serde_json::to_string(&sink::Json(&body)).unwrap()),
         Err(DocumentError::Failed(failure)) => {
             format!("ERR {}: {}", failure.field, failure.message)

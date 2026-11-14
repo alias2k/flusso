@@ -439,7 +439,7 @@ fn body_text(doc: &str, fields: &[Field]) -> BTreeMap<String, GenericValue> {
 
 /// Build the document `doc` (JSON text) for `fields`.
 fn build(doc: &str, fields: &[Field]) -> Result<GenericValue, BuildFailure> {
-    match coerce_document(doc.as_bytes(), fields) {
+    match coerce_document(doc.as_bytes(), fields, &DocumentPlan::new(fields)) {
         Ok(body) => Ok(body),
         Err(DocumentError::Failed(failure)) => Err(failure),
         Err(DocumentError::Malformed(error)) => panic!("malformed {doc}: {error}"),
@@ -450,7 +450,6 @@ fn build(doc: &str, fields: &[Field]) -> Result<GenericValue, BuildFailure> {
 /// decimal number.
 fn exact_decimal(value: Option<&GenericValue>) -> Option<String> {
     match value? {
-        GenericValue::Decimal(d) => Some(d.to_string()),
         GenericValue::BigDecimal(d) => Some(d.as_str().to_owned()),
         _ => None,
     }
@@ -670,7 +669,8 @@ fn a_decimal_map_keeps_every_digit_of_each_value() {
 
 /// A value nested past `serde_json`'s 128 levels under a declared `decimal`
 /// (a scalar, an array element, an `ids` key) fails the read as the rest of the
-/// document does, never reads as `null`; one level less still reads.
+/// document does, never reads as `null`; one level less still reads (an array
+/// element then fails the document as any structured element does).
 #[test]
 fn a_decimal_nested_past_the_depth_limit_fails_the_read() {
     let fields = vec![
@@ -684,6 +684,7 @@ fn a_decimal_nested_past_the_depth_limit_fails_the_read() {
             None,
         ),
     ];
+    let plan = DocumentPlan::new(&fields);
     // The root object is one level and an array of decimals another, so a
     // value at `d` may open 126 more, one inside `ds` or `keys` 125.
     let nested = |levels: usize| format!("{}1{}", "[".repeat(levels), "]".repeat(levels));
@@ -698,12 +699,15 @@ fn a_decimal_nested_past_the_depth_limit_fails_the_read() {
         };
         let fits = 126 - inside;
         assert!(
-            matches!(coerce_document(wrap(fits).as_bytes(), &fields), Ok(_)),
+            !matches!(
+                coerce_document(wrap(fits).as_bytes(), &fields, &plan),
+                Err(DocumentError::Malformed(_))
+            ),
             "{key} at {fits} levels reads"
         );
         assert!(
             matches!(
-                coerce_document(wrap(fits + 1).as_bytes(), &fields),
+                coerce_document(wrap(fits + 1).as_bytes(), &fields, &plan),
                 Err(DocumentError::Malformed(_))
             ),
             "{key} at {} levels fails the read",
