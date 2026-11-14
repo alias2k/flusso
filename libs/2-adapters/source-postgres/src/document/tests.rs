@@ -585,6 +585,23 @@ async fn a_changed_column_type_reaches_the_kept_root_link_answer() {
     assert_eq!(ask().await, None, "back to integer after a failed query");
 }
 
+/// A reverse lookup that fails drops the cached types of every table its
+/// index reads, as a failed document query does: one written from a type
+/// that changed would fail the same way on every retry otherwise.
+#[tokio::test]
+async fn a_failed_resolve_forgets_the_column_types_of_its_index() {
+    let builder = builder_with(vec![event_count()]);
+    let events = TableName::try_new("events").unwrap();
+    let change = RowKey(vec![(column("id"), GenericValue::Int(1))]);
+    assert!(builder.col_type_cache.caches("public", "events"));
+
+    let resolved = builder.resolve(&events, &change, None, None).await;
+
+    assert!(resolved.is_err(), "the pool reaches no database");
+    assert!(!builder.col_type_cache.caches("public", "events"));
+    assert!(!builder.col_type_cache.caches("public", "users"));
+}
+
 /// Counts the `WARN` events logged on this thread while it is the default.
 #[derive(Default)]
 struct Warnings(std::sync::atomic::AtomicUsize);

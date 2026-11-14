@@ -94,7 +94,7 @@ fn columns_only() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::bigint"#
+        r#"SELECT json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::int4::bigint"#
     );
     assert_eq!(params, vec![GenericValue::Int(7)]);
 }
@@ -115,7 +115,9 @@ fn keyed_predicate_casts_a_uuid_primary_key() {
     )
     .unwrap();
     assert!(
-        single.as_str().ends_with(r#"WHERE "root"."id" = $1::uuid"#),
+        single
+            .as_str()
+            .ends_with(r#"WHERE "root"."id" = $1::uuid::uuid"#),
         "{}",
         single.as_str()
     );
@@ -133,7 +135,7 @@ fn keyed_predicate_casts_a_uuid_primary_key() {
     assert!(
         batched
             .as_str()
-            .ends_with(r#"WHERE "root"."id" IN ($1::uuid)"#),
+            .ends_with(r#"WHERE "root"."id" IN ($1::uuid::uuid)"#),
         "{}",
         batched.as_str()
     );
@@ -159,7 +161,7 @@ fn root_filters_fold_into_both_query_forms() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT json_build_object('id', "root"."id") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::bigint AND ("root"."status" = $2::text)"#
+        r#"SELECT json_build_object('id', "root"."id") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::int4::bigint AND ("root"."status" = $2::text)"#
     );
     assert_eq!(
         params,
@@ -180,8 +182,9 @@ fn root_filters_fold_into_both_query_forms() {
     )
     .unwrap();
     assert!(
-        sql.as_str()
-            .ends_with(r#"WHERE "root"."id" IN ($1::bigint) AND ("root"."status" = $2::text)"#),
+        sql.as_str().ends_with(
+            r#"WHERE "root"."id" IN ($1::int4::bigint) AND ("root"."status" = $2::text)"#
+        ),
         "{}",
         sql.as_str()
     );
@@ -224,7 +227,7 @@ fn has_many_with_order_and_limit() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT json_build_object('orders', (SELECT coalesce(json_agg(json_build_object('id', "rel1"."id", 'total', "rel1"."total") ORDER BY "rel1"."created_at" DESC), '[]'::json) FROM (SELECT "rel2".* FROM "public"."orders" AS "rel2" WHERE "rel2"."user_id" = "root"."id" ORDER BY "rel2"."created_at" DESC LIMIT 5) AS "rel1")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::bigint"#
+        r#"SELECT json_build_object('orders', (SELECT coalesce(json_agg(json_build_object('id', "rel1"."id", 'total', "rel1"."total") ORDER BY "rel1"."created_at" DESC), '[]'::json) FROM (SELECT "rel2".* FROM "public"."orders" AS "rel2" WHERE "rel2"."user_id" = "root"."id" ORDER BY "rel2"."created_at" DESC LIMIT 5) AS "rel1")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::int4::bigint"#
     );
 }
 
@@ -264,7 +267,7 @@ fn belongs_to_correlates_on_the_parent_column() {
     // column — the reverse of a has_one — and needs no parent primary key.
     assert_eq!(
         sql.as_str(),
-        r#"SELECT json_build_object('org', (SELECT json_build_object('name', "rel1"."name") FROM "public"."orgs" AS "rel1" WHERE "rel1"."id" = "root"."org_id" LIMIT 1)) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::bigint"#
+        r#"SELECT json_build_object('org', (SELECT json_build_object('name', "rel1"."name") FROM "public"."orgs" AS "rel1" WHERE "rel1"."id" = "root"."org_id" LIMIT 1)) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::int4::bigint"#
     );
 }
 
@@ -296,7 +299,7 @@ fn aggregate_count() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT json_build_object('order_count', (SELECT count(*) FROM "public"."orders" AS "rel1" WHERE "rel1"."user_id" = "root"."id")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::bigint"#
+        r#"SELECT json_build_object('order_count', (SELECT count(*) FROM "public"."orders" AS "rel1" WHERE "rel1"."user_id" = "root"."id")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::int4::bigint"#
     );
 }
 
@@ -332,7 +335,7 @@ fn aggregate_ids_direct_collects_the_related_pk() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT json_build_object('order_ids', (SELECT coalesce(json_agg("rel1"."id"), '[]'::json) FROM "public"."orders" AS "rel1" WHERE "rel1"."user_id" = "root"."id")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::bigint"#
+        r#"SELECT json_build_object('order_ids', (SELECT coalesce(json_agg("rel1"."id"), '[]'::json) FROM "public"."orders" AS "rel1" WHERE "rel1"."user_id" = "root"."id")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::int4::bigint"#
     );
 }
 
@@ -386,7 +389,7 @@ fn through_aggregate_sql(
 
 fn wrap(aggregate: &str) -> String {
     format!(
-        r#"SELECT json_build_object('agg', {aggregate}) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::bigint"#
+        r#"SELECT json_build_object('agg', {aggregate}) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::int4::bigint"#
     )
 }
 
@@ -519,8 +522,50 @@ fn soft_delete_folds_into_where() {
     )
     .unwrap();
     assert!(sql.as_str().contains(
-        r#"WHERE "root"."id" = $1::bigint AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END))"#
+        r#"WHERE "root"."id" = $1::int4::bigint AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END))"#
     ));
+}
+
+/// A key decoded before its column changed type (`int4`) and one decoded
+/// after (`int8`) are two statements (issue #335): sqlx prepares a text once
+/// per connection with the parameter types of its first use.
+#[test]
+fn keys_bound_as_different_types_are_different_statements() {
+    let schema = index(Some("id"), None, vec![col_field("id", "id")]);
+    let text = |key: GenericValue| {
+        let (single, _) = document_query(
+            &schema,
+            &[(c("id"), key.clone())],
+            &HashMap::new(),
+            &id_types(),
+            &ByteColumns::new(),
+        )
+        .unwrap();
+        let (batched, _) = documents_query(
+            &schema,
+            &c("id"),
+            "int8",
+            &[key.clone()],
+            &HashMap::new(),
+            &id_types(),
+            &ByteColumns::new(),
+        )
+        .unwrap();
+        let (reverse, _) = reverse_query(
+            &db(),
+            &t("orders"),
+            (&c("user_id"), "bigint", "int8"),
+            &[(c("id"), key)],
+            &types(&[("orders", "id", "bigint")]),
+        )
+        .unwrap();
+        [single, batched, reverse].map(|sql| sql.as_str().to_owned())
+    };
+    let int = text(GenericValue::Int(7));
+    let bigint = text(GenericValue::BigInt(7));
+    for (int, bigint) in int.iter().zip(&bigint) {
+        assert_ne!(int, bigint);
+    }
 }
 
 #[test]
@@ -542,7 +587,7 @@ fn documents_query_keys_with_in_and_selects_the_key() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT format('%s', "root"."id") AS "doc_key", "root"."id" AS "doc_key:typed", json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" IN ($1::bigint, $2::bigint)"#
+        r#"SELECT format('%s', "root"."id") AS "doc_key", "root"."id"::bigint AS "doc_key:typed", json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" IN ($1::int4::bigint, $2::int4::bigint)"#
     );
     assert_eq!(params, vec![GenericValue::Int(7), GenericValue::Int(9)]);
 }
@@ -568,7 +613,7 @@ fn documents_query_folds_soft_delete_into_where() {
     )
     .unwrap();
     assert!(sql.as_str().contains(
-        r#"WHERE "root"."id" IN ($1::bigint) AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END))"#
+        r#"WHERE "root"."id" IN ($1::int4::bigint) AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END))"#
     ));
 }
 
@@ -617,7 +662,7 @@ fn soft_delete_field_inside_a_relation_reads_the_root_column() {
     .unwrap();
     assert!(
         sql.as_str().ends_with(
-            r#"WHERE "root"."id" IN ($1::bigint) AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END))"#
+            r#"WHERE "root"."id" IN ($1::int4::bigint) AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END))"#
         ),
         "{}",
         sql.as_str()
@@ -717,8 +762,7 @@ fn a_key_carried_as_text_is_cast_from_text() {
     let (reverse, _) = reverse_query(
         &db(),
         &t("users"),
-        &c("id"),
-        "date",
+        (&c("id"), "date", "date"),
         &[(c("id"), key)],
         &col_types,
     )
@@ -735,15 +779,14 @@ fn reverse_query_selects_foreign_key() {
     let (sql, params) = reverse_query(
         &db(),
         &t("orders"),
-        &c("user_id"),
-        "int8",
+        (&c("user_id"), "bigint", "int8"),
         &[(c("id"), GenericValue::Int(9))],
         &types(&[("orders", "id", "bigint")]),
     )
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT format('%s', "user_id") AS "user_id", "user_id" AS "user_id:typed" FROM "public"."orders" WHERE "id" = $1::bigint"#
+        r#"SELECT format('%s', "user_id") AS "user_id", "user_id"::bigint AS "user_id:typed" FROM "public"."orders" WHERE "id" = $1::int4::bigint"#
     );
     assert_eq!(params, vec![GenericValue::Int(9)]);
 }
@@ -829,7 +872,7 @@ fn an_aggregate_via_one_hop_matches_the_hop_s_rows_of_the_parent() {
         wrap(
             r#"(EXISTS (SELECT 1 FROM "public"."tasks" AS "rel2" WHERE "rel2"."project_id" IN (SELECT "rel1"."id" FROM "public"."projects" AS "rel1" WHERE "rel1"."user_id" = "root"."id" AND ("rel1"."archived" = $1::boolean)) AND ("rel2"."status" = $2::text)))"#
         )
-        .replace("\"root\".\"id\" = $1::bigint", "\"root\".\"id\" = $3::bigint"),
+        .replace("\"root\".\"id\" = $1::int4::bigint", "\"root\".\"id\" = $3::int4::bigint"),
     );
 }
 
@@ -993,7 +1036,7 @@ fn on_pairs_join_every_join_kind_to_its_parent_row_at_any_depth() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT json_build_object('orders', (SELECT coalesce(json_agg(json_build_object('shop', (SELECT json_build_object('name', "rel2"."name") FROM "public"."shops" AS "rel2" WHERE "rel2"."id" = "rel1"."shop_id" AND "rel2"."region_code" = "rel1"."region" LIMIT 1), 'invoice', (SELECT json_build_object('number', "rel3"."number") FROM "public"."invoices" AS "rel3" WHERE "rel3"."order_id" = "rel1"."id" AND "rel3"."tenant_id" = "rel1"."tenant_id" LIMIT 1))), '[]'::json) FROM (SELECT "rel4".* FROM "public"."orders" AS "rel4" WHERE "rel4"."user_id" = "root"."id" AND "rel4"."tenant_id" = "root"."tenant_id" AND "rel4"."region" = "root"."region") AS "rel1")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::bigint"#
+        r#"SELECT json_build_object('orders', (SELECT coalesce(json_agg(json_build_object('shop', (SELECT json_build_object('name', "rel2"."name") FROM "public"."shops" AS "rel2" WHERE "rel2"."id" = "rel1"."shop_id" AND "rel2"."region_code" = "rel1"."region" LIMIT 1), 'invoice', (SELECT json_build_object('number', "rel3"."number") FROM "public"."invoices" AS "rel3" WHERE "rel3"."order_id" = "rel1"."id" AND "rel3"."tenant_id" = "rel1"."tenant_id" LIMIT 1))), '[]'::json) FROM (SELECT "rel4".* FROM "public"."orders" AS "rel4" WHERE "rel4"."user_id" = "root"."id" AND "rel4"."tenant_id" = "root"."tenant_id" AND "rel4"."region" = "root"."region") AS "rel1")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::int4::bigint"#
     );
 }
 
@@ -1171,7 +1214,7 @@ fn an_array_column_without_transforms_reads_the_column_and_leaves_its_default_to
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT json_build_object('id', "root"."id", 'tags', "root"."tags") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::bigint"#
+        r#"SELECT json_build_object('id', "root"."id", 'tags', "root"."tags") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::int4::bigint"#
     );
 }
 
@@ -1216,8 +1259,7 @@ fn root_keys_query_casts_each_link_from_its_bound_type() {
     let (sql, params) = root_keys_query(
         &db(),
         &t("users"),
-        &c("id"),
-        "numeric",
+        (&c("id"), "numeric", "numeric"),
         &[
             GenericValue::Decimal("1.500".parse().unwrap()),
             GenericValue::String("NaN".to_owned()),
@@ -1227,7 +1269,7 @@ fn root_keys_query_casts_each_link_from_its_bound_type() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT format('%s', "id") AS "id", "id" AS "id:typed" FROM "public"."users" WHERE "id" IN ($1::numeric::numeric, $2::text::numeric)"#
+        r#"SELECT format('%s', "id") AS "id", "id"::numeric AS "id:typed" FROM "public"."users" WHERE "id" IN ($1::numeric::numeric, $2::text::numeric)"#
     );
     assert_eq!(params.len(), 2);
 }

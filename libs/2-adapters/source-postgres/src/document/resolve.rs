@@ -219,8 +219,7 @@ impl PgDocumentBuilder {
         let (sql, params) = query::reverse_query(
             schema,
             parent_table,
-            parent_pk,
-            &base.base_name,
+            (parent_pk, &base.sql_type, &base.base_name),
             &key,
             &col_types,
         )?;
@@ -249,8 +248,7 @@ impl PgDocumentBuilder {
         let (sql, params) = query::reverse_query(
             schema,
             child,
-            foreign_key,
-            &base.base_name,
+            (foreign_key, &base.sql_type, &base.base_name),
             &child_key.0,
             &col_types,
         )?;
@@ -281,8 +279,7 @@ impl PgDocumentBuilder {
         let (sql, params) = query::reverse_query(
             schema,
             junction,
-            left_key,
-            &base.base_name,
+            (left_key, &base.sql_type, &base.base_name),
             &key,
             &col_types,
         )?;
@@ -311,8 +308,7 @@ impl PgDocumentBuilder {
         let (sql, params) = query::reverse_query(
             schema,
             junction,
-            left_key,
-            &base.base_name,
+            (left_key, &base.sql_type, &base.base_name),
             &junction_key.0,
             &col_types,
         )?;
@@ -479,8 +475,7 @@ impl PgDocumentBuilder {
         let (sql, params) = query::root_keys_query(
             &schema.db_schema,
             &schema.table,
-            pk,
-            &base.base_name,
+            (pk, &base.sql_type, &base.base_name),
             links,
             &sql_type,
         )?;

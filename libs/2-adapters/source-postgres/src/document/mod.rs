@@ -440,7 +440,12 @@ impl PgDocumentBuilder {
             .await?;
         let sql = format!(
             "SELECT {key} FROM \"{db_schema}\".\"{table}\" WHERE \"{pk}\" IS NOT NULL LIMIT 1",
-            key = value::key_select(&format!("\"{pk_column}\""), "key", &pk_meta.base_name),
+            key = value::key_select(
+                &format!("\"{pk_column}\""),
+                "key",
+                &pk_meta.sql_type,
+                &pk_meta.base_name,
+            ),
             pk = pk_column,
             db_schema = schema.db_schema,
             table = schema.table,
@@ -700,17 +705,56 @@ impl PgDocumentBuilder {
         self.col_type_cache.clone()
     }
 
-    /// A document query of `schema` failed: forget the column types of every
+    /// A document query of `index` failed: forget the column types of every
     /// table it reads, since a type that changed under the cache fails it the
-    /// same way on every retry otherwise, then report the error.
-    fn failed_query(&self, schema: &IndexSchema, error: sqlx::Error) -> SourceError {
+    /// same way on every retry otherwise, then report the error. One Postgres
+    /// raises when the database no longer has what the schema reads (a
+    /// column, a table, an `=` between a link and its key) names the index
+    /// and points at `flusso check`: no retry fixes it, a schema or database
+    /// change does.
+    fn failed_query(
+        &self,
+        index: &IndexName,
+        schema: &IndexSchema,
+        error: sqlx::Error,
+    ) -> SourceError {
+        self.forget_tables_of(schema);
+        let mismatch = error.as_database_error().is_some_and(|error| {
+            matches!(
+                error.code().as_deref(),
+                Some(UNDEFINED_FUNCTION | DATATYPE_MISMATCH | UNDEFINED_COLUMN | UNDEFINED_TABLE)
+            )
+        });
+        if mismatch {
+            return SourceError::Query(format!(
+                "{error}: the database no longer matches index `{index}`; `flusso check` names \
+                 the field"
+            ));
+        }
+        query_err(error)
+    }
+
+    /// Resolving a change on `table` failed: forget the column types of every
+    /// table an index reading `table` reads, as [`failed_query`](Self::failed_query)
+    /// does, since its reverse lookups are written from them too.
+    #[cold]
+    #[inline(never)]
+    fn failed_resolve(&self, table: &TableName, error: SourceError) -> SourceError {
+        for (name, schema) in self.spec.indexes() {
+            if schema.table == *table || !self.reads.paths(name, table).is_empty() {
+                self.forget_tables_of(schema);
+            }
+        }
+        error
+    }
+
+    fn forget_tables_of(&self, schema: &IndexSchema) {
         let mut tables = vec![schema.table.clone()];
         fields::collect_tables(&schema.fields, &mut tables);
         for table in tables {
             self.col_type_cache
                 .forget_table(schema.db_schema.as_ref(), table.as_ref());
         }
-        query_err(error)
     }
 
     /// The columns `schema`'s documents read as values whose base type is
@@ -1017,6 +1061,12 @@ impl PgDocumentBuilder {
 const UNDEFINED_FUNCTION: &str = "42883";
 /// SQLSTATE `42725`: several functions could take it.
 const AMBIGUOUS_FUNCTION: &str = "42725";
+/// SQLSTATE `42804`: an expression is of another type than its place takes.
+const DATATYPE_MISMATCH: &str = "42804";
+/// SQLSTATE `42703`: no such column.
+const UNDEFINED_COLUMN: &str = "42703";
+/// SQLSTATE `42P01`: no such table.
+const UNDEFINED_TABLE: &str = "42P01";
 
 #[async_trait]
 impl DocumentBuilder for PgDocumentBuilder {
@@ -1028,13 +1078,20 @@ impl DocumentBuilder for PgDocumentBuilder {
         after: Option<&RowImage>,
     ) -> Result<Vec<DocumentId>> {
         let mut links = RootLinks::default();
-        let ids = self
+        let ids = match self
             .resolve_change(table, key, before, after, &mut links)
-            .await?;
+            .await
+        {
+            Ok(ids) => ids,
+            Err(error) => return Err(self.failed_resolve(table, error)),
+        };
         if links.is_empty() {
             return Ok(ids);
         }
-        self.with_root_keys(ids, links).await
+        match self.with_root_keys(ids, links).await {
+            Ok(ids) => Ok(ids),
+            Err(error) => Err(self.failed_resolve(table, error)),
+        }
     }
 
     #[tracing::instrument(
@@ -1065,7 +1122,7 @@ impl DocumentBuilder for PgDocumentBuilder {
         let row = statement
             .fetch_optional(&self.pool)
             .await
-            .map_err(|error| self.failed_query(schema, error))?;
+            .map_err(|error| self.failed_query(&id.index, schema, error))?;
 
         // No row means the root is absent or soft-deleted (both folded into the
         // query's WHERE) → the document should not exist.
@@ -1144,19 +1201,24 @@ impl DocumentBuilder for PgDocumentBuilder {
                 let rows = statement
                     .fetch_all(&self.pool)
                     .await
-                    .map_err(|error| self.failed_query(schema, error))?;
+                    .map_err(|error| self.failed_query(index_name, schema, error))?;
 
-                // Map each returned root key to its assembled body. `doc_key` is
-                // parsed as live-change keys are, so it matches the ids' key
-                // values exactly.
+                // Map each returned root key to its assembled body, by the
+                // key as the sink's `_id` renders it: a row is matched to every
+                // requested id that names the same document, also one whose
+                // key was decoded as another type before its column changed
+                // (an `int4` and an `int8` of one row in one batch).
                 let mut bodies: HashMap<
-                    kernel::GenericValue,
+                    String,
                     std::result::Result<kernel::GenericValue, source::document::BuildFailure>,
                 > = HashMap::with_capacity(rows.len());
                 for row in &rows {
                     let key = value::decode_key(row, query::DOC_KEY);
+                    if matches!(key, kernel::GenericValue::Null) {
+                        continue;
+                    }
                     bodies.insert(
-                        key,
+                        source::document::key_part(&key),
                         value::read_document(row, &schema.fields, self.plan(index_name)?)?,
                     );
                 }
@@ -1164,17 +1226,29 @@ impl DocumentBuilder for PgDocumentBuilder {
                 // Every requested id yields an outcome: a body present in the
                 // result is an upsert; an absent key means the root is gone or
                 // soft-deleted (both fold into the query's WHERE) → a tombstone.
+                let mut built: HashMap<String, usize> = HashMap::with_capacity(chunk.len());
                 for (value, id) in chunk {
-                    let document = match bodies.remove(*value) {
-                        Some(Ok(body)) => Document::Upsert {
-                            id: (*id).clone(),
-                            body,
+                    let id = (*id).clone();
+                    let key = source::document::key_part(value);
+                    let document = match bodies.remove_entry(&key) {
+                        Some((key, outcome)) => {
+                            built.insert(key, out.len());
+                            match outcome {
+                                Ok(body) => Document::Upsert { id, body },
+                                Err(failure) => Document::Failed { id, failure },
+                            }
+                        }
+                        None => match built.get(&key).and_then(|&at| out.get(at)) {
+                            Some(Document::Upsert { body, .. }) => Document::Upsert {
+                                id,
+                                body: body.clone(),
+                            },
+                            Some(Document::Failed { failure, .. }) => Document::Failed {
+                                id,
+                                failure: failure.clone(),
+                            },
+                            Some(Document::Delete { .. }) | None => Document::Delete { id },
                         },
-                        Some(Err(failure)) => Document::Failed {
-                            id: (*id).clone(),
-                            failure,
-                        },
-                        None => Document::Delete { id: (*id).clone() },
                     };
                     out.push(document);
                 }

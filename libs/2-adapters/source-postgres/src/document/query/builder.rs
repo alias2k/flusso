@@ -509,7 +509,9 @@ impl Builder<'_> {
                 SourceError::Query(format!("internal: missing type for `{table}.{column}`"))
             })?
             .clone();
-        let cast = super::sql::key_cast(&value, &sql_type);
+        let cast = super::sql::key_cast(&value, &sql_type).ok_or_else(|| {
+            SourceError::Query("cannot bind null, array, or map as a parameter".into())
+        })?;
         let placeholder = self.placeholder(value)?;
         Ok(format!("{placeholder}{cast}"))
     }

@@ -235,11 +235,19 @@ pub(super) fn documents_query(
     let root_filters = builder.filters(schema.filters.as_deref(), ROOT, &schema.table)?;
     predicate.push_str(&root_filters);
 
+    let pk_type = col_types
+        .get(&(schema.table.to_string(), pk_column.to_string()))
+        .ok_or_else(|| {
+            SourceError::Query(format!(
+                "internal: missing type for `{}.{pk_column}`",
+                schema.table
+            ))
+        })?;
     let sql = format!(
         "SELECT {key}, {object} AS \"document\" \
          FROM {} AS \"{ROOT}\" WHERE {predicate}",
         qtable(&schema.db_schema, &schema.table),
-        key = super::value::key_select(&qcol(ROOT, pk_column), DOC_KEY, pk_base),
+        key = super::value::key_select(&qcol(ROOT, pk_column), DOC_KEY, pk_type, pk_base),
     );
     Ok((SqlString::new(sql), builder.params))
 }
@@ -255,8 +263,7 @@ pub(super) fn documents_query(
 pub(super) fn root_keys_query(
     db: &DatabaseSchema,
     table: &TableName,
-    pk: &ColumnName,
-    pk_base: &str,
+    (pk, pk_type, pk_base): (&ColumnName, &str, &str),
     links: &[GenericValue],
     sql_type: &str,
 ) -> Result<(SqlString, Vec<GenericValue>)> {
@@ -269,7 +276,7 @@ pub(super) fn root_keys_query(
     let column = qident(pk.as_ref());
     let sql = format!(
         "SELECT {} FROM {} WHERE {column} IN ({})",
-        super::value::key_select(&column, pk.as_ref(), pk_base),
+        super::value::key_select(&column, pk.as_ref(), pk_type, pk_base),
         qtable(db, table),
         placeholders.join(", "),
     );
@@ -284,18 +291,16 @@ pub(super) fn root_keys_query(
 pub(super) fn reverse_query(
     db: &DatabaseSchema,
     table: &TableName,
-    select_column: &ColumnName,
-    select_base: &str,
+    (select_column, select_type, select_base): (&ColumnName, &str, &str),
     key: &[(ColumnName, GenericValue)],
     col_types: &HashMap<(String, String), String>,
 ) -> Result<(SqlString, Vec<GenericValue>)> {
     let mut params = Vec::new();
     let mut conditions = Vec::new();
     for (column, value) in key {
+        let unbindable = || SourceError::Query("cannot bind null, array, or map as a key".into());
         if !value.is_bindable_scalar() {
-            return Err(SourceError::Query(
-                "cannot bind null, array, or map as a key".into(),
-            ));
+            return Err(unbindable());
         }
         let sql_type = col_types
             .get(&(table.to_string(), column.to_string()))
@@ -307,7 +312,7 @@ pub(super) fn reverse_query(
             "{} = ${}{}",
             qident(column.as_ref()),
             params.len(),
-            sql::key_cast(value, sql_type),
+            sql::key_cast(value, sql_type).ok_or_else(unbindable)?,
         ));
     }
     if conditions.is_empty() {
@@ -318,6 +323,7 @@ pub(super) fn reverse_query(
         super::value::key_select(
             &qident(select_column.as_ref()),
             select_column.as_ref(),
+            select_type,
             select_base,
         ),
         qtable(db, table),

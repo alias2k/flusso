@@ -1070,8 +1070,19 @@ column-type cache follows the table** (`document/mod.rs`'s `ColumnTypes`, `PgDoc
 the CLI hands it to `WalChangeCapture::with_column_types`, and the stream drops a table's entries on a
 `Relation` message (Postgres sends one after a definition change) naming another type OID than a cached
 column's (`ColumnTypes::forget_changed`; unchanged types keep them, so a stream start costs no lookup), and a failed document query
-(`failed_query`) drops those of every table its index reads, so a type change never loops the ingest
-engine on a stale cast or `encode`. No query per build. The cache is nested by schema, table and
+(`failed_query`) or reverse lookup (`failed_resolve`) drops those of every table its index reads, so a
+type change never loops the ingest engine on a stale cast or `encode`. **Statement texts carry every
+type a prepared statement depends on** (issue #335): sqlx caches one statement per text on each pooled
+connection, with the parameter types of its first use, and Postgres refuses one whose result type
+changed. So a bound key is spelled `$n::<bound>::<column type>` (`sql::key_cast`, as `root_keys_query`
+does), and a selected key's typed column is cast to its cached `format_type` (`value::key_select`); no
+statement cache is cleared and nothing is retried. A key decoded before and after its column changed
+type (`Int(1)`, `BigInt(1)`) is one document: `build_many` matches rows to ids by the rendered `_id`
+(`source::document::key_part`), never by variant. A query Postgres refuses as a schema mismatch
+(`42883`/`42804`/`42703`/`42P01`) names the index and `flusso check`; it is a real mismatch, which
+validation reports, not a stale cache. Guard: the `engine` `type_change` e2e (root key, links, junction
+and `via` keys, `numeric` precision, a recreated table, a migration in one transaction, a concurrent
+reader on several pooled connections; no restart, no tombstone). No query per build. The cache is nested by schema, table and
 column, looked up by borrowed names, and hands out `Arc<ColumnMeta>`, so a hit allocates nothing; each
 `forget_table` bumps its generation, which answers derived from it (the per-path root-link decision)
 check. Guards: `stream::tests`'

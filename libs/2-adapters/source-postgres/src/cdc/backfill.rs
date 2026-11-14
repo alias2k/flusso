@@ -100,10 +100,10 @@ async fn resolve_tables(pool: &PgPool, tables: &[SnapshotTable]) -> Result<Vec<B
             continue; // reason already logged
         };
         let qualified = format!("{}.{}", quote_ident(schema), quote_ident(name));
-        let pk_base = base_name(pool, &qualified, pk.as_ref()).await?;
+        let (pk_type, pk_base) = key_type(pool, &qualified, pk.as_ref()).await?;
         out.push(BackfillTable {
             qualified,
-            key_select: value::key_select(&quote_ident(pk.as_ref()), KEY, &pk_base),
+            key_select: value::key_select(&quote_ident(pk.as_ref()), KEY, &pk_type, &pk_base),
             table: table.table.clone(),
             pk,
             cursor: format!("flusso_backfill_{n}"),
@@ -112,16 +112,18 @@ async fn resolve_tables(pool: &PgPool, tables: &[SnapshotTable]) -> Result<Vec<B
     Ok(out)
 }
 
-/// The `pg_type.typname` of `column`'s type on `qualified`, through every
-/// domain.
-async fn base_name(pool: &PgPool, qualified: &str, column: &str) -> Result<String> {
-    sqlx::query_scalar(
+/// `column`'s type on `qualified`: its `format_type`, and the
+/// `pg_type.typname` of its type through every domain.
+async fn key_type(pool: &PgPool, qualified: &str, column: &str) -> Result<(String, String)> {
+    sqlx::query_as(
         "WITH RECURSIVE d(oid) AS ( \
            SELECT a.atttypid FROM pg_attribute a \
            WHERE a.attrelid = $1::regclass AND a.attname = $2 \
          UNION ALL \
            SELECT t.typbasetype FROM pg_type t JOIN d ON t.oid = d.oid WHERE t.typtype = 'd' \
-         ) SELECT t.typname::text FROM d JOIN pg_type t ON t.oid = d.oid WHERE t.typtype <> 'd'",
+         ) SELECT format_type(a.atttypid, a.atttypmod), t.typname::text \
+           FROM d JOIN pg_type t ON t.oid = d.oid, pg_attribute a \
+           WHERE t.typtype <> 'd' AND a.attrelid = $1::regclass AND a.attname = $2",
     )
     .bind(qualified)
     .bind(column)

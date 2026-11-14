@@ -132,18 +132,19 @@ fn sql_string(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
 }
 
-/// The cast a bound key takes: `::<sql_type>`, or `::text::<sql_type>` for a
-/// key carried as text (a value its type's parser can't represent, like
-/// `infinity`), so the database parses it as it rendered it.
+/// The cast a bound key takes: `::<bound>::<sql_type>`, where `bound` is the
+/// type the value is sent as ([`bound_type`]), `text` for a key carried as
+/// text (a value its type's parser can't represent, like `infinity`), so the
+/// database parses it as it rendered it.
 ///
-/// The two spellings are two statements: sqlx caches a prepared statement by
-/// its text with the parameter types of its first use, so a text value bound
-/// where a typed one was prepared would be sent in the wrong binary format.
-pub(super) fn key_cast(value: &GenericValue, sql_type: &str) -> String {
-    match value {
-        GenericValue::String(_) | GenericValue::BigDecimal(_) => format!("::text::{sql_type}"),
-        _ => format!("::{sql_type}"),
-    }
+/// The bound type is spelled out because sqlx caches a prepared statement by
+/// its text with the parameter types of its first use, on each pooled
+/// connection: an `int4` bound where an `int8` was prepared (a key decoded
+/// before and after its column changed type) would be sent in the wrong
+/// binary format. Postgres casts from the bound type either way, so the
+/// spelling changes nothing else. `None` for a value that can't be bound.
+pub(super) fn key_cast(value: &GenericValue, sql_type: &str) -> Option<String> {
+    bound_type(value).map(|bound| format!("::{bound}::{sql_type}"))
 }
 
 /// The SQL type a value is bound as; `None` for one that can't be bound.

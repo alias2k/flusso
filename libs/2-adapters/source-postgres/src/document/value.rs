@@ -24,14 +24,21 @@ use sqlx::postgres::{PgRow, PgValueFormat};
 use sqlx::{Column as _, Row, TypeInfo, ValueRef as _};
 use uuid::Uuid;
 
-/// The SQL that selects `expr`, a key of base type `base_name`
-/// (`pg_type.typname`), as [`decode_key`] reads it under `alias`: its
-/// [`key_text`](crate::text_value::key_text), beside the value itself, which
-/// is never decoded (a query's row description names its type, a domain by
-/// its base type).
-pub(crate) fn key_select(expr: &str, alias: &str, base_name: &str) -> String {
+/// The SQL that selects `expr`, a key of type `sql_type` (`format_type`) and
+/// base type `base_name` (`pg_type.typname`), as [`decode_key`] reads it under
+/// `alias`: its [`key_text`](crate::text_value::key_text), beside the value
+/// itself, which is never decoded (a query's row description names its type,
+/// a domain by its base type).
+///
+/// The value is cast to `sql_type`, so the statement's result types follow
+/// from its text alone. Postgres refuses to run a prepared statement whose
+/// result type changed under it ("cached plan must not change result type"),
+/// and sqlx keeps one per text on each pooled connection: without the cast, a
+/// key column that changed type (`int` → `bigint`) would fail every lookup
+/// on every connection that ran it before, with the same text after.
+pub(crate) fn key_select(expr: &str, alias: &str, sql_type: &str, base_name: &str) -> String {
     format!(
-        "{} AS \"{alias}\", {expr} AS \"{alias}{TYPED}\"",
+        "{} AS \"{alias}\", {expr}::{sql_type} AS \"{alias}{TYPED}\"",
         crate::text_value::key_text(expr, base_name)
     )
 }
