@@ -2,7 +2,8 @@
 //! kinds of one fixture × position, each compiled and read. It covers the kinds
 //! the fixture holds: every leaf kind, a `custom` field the derive does not
 //! model, the aggregates, an `enum` with `variants:`, maps, `json`, every join
-//! verb, an unindexed join and `subfields: false`.
+//! verb, an unindexed join and `subfields: false` (four of these share a
+//! mapping with another field and are not placed: see [`NAMED_ONLY`]).
 //!
 //! Two shape lists are placed at the fields of the `boundary` fixture index
 //! ([`KINDS`]: one of each kind it holds, required ones bare, nullable ones in
@@ -63,8 +64,8 @@
 //! ([`Project::inputs`]), and its results are cached under that name, so a
 //! rerun on an unchanged derive compiles nothing.
 //!
-//! `Arc<…>` is in no list: serde reads it only with its `rc` feature, which
-//! the workspace does not enable, so it never compiles.
+//! `Arc<str>` and `Rc<str>` compile because this crate's `flusso-query`
+//! dev-dependency turns on its `rc` feature (serde's `rc`).
 #![allow(
     unused_crate_dependencies,
     clippy::unwrap_used,
@@ -560,6 +561,22 @@ fn named_shapes() -> Vec<Shape> {
         )
         .namesake()
         .string(),
+        shape("arc_str", "std::sync::Arc<str>", &[]).string(),
+        shape("rc_str", "std::rc::Rc<str>", &[]).string(),
+        shape("vec_rc_str", "Vec<std::rc::Rc<str>>", &[]),
+        shape(
+            "hash_map_arc_str",
+            "HashMap<String, Option<std::sync::Arc<str>>>",
+            &[],
+        )
+        .map(),
+        shape("ip_addr", "std::net::IpAddr", &[]),
+        shape(
+            "foreign",
+            "Foreign",
+            &["#[derive(Debug, Deserialize)] pub struct Foreign(pub String);"],
+        )
+        .string(),
         shape("vec_own_date", "Vec<Date>", &[OWN_DATE]).namesake(),
         shape("hash_map_own_date", "HashMap<String, Option<Date>>", &[OWN_DATE])
             .map()
@@ -709,7 +726,6 @@ const KINDS: &[(&str, bool)] = &[
     ("cu", false),
     ("ids", false),
     ("ex", false),
-    ("ct", false),
     ("av", true),
     ("bo", true),
     ("sh", false),
@@ -719,10 +735,7 @@ const KINDS: &[(&str, bool)] = &[
     ("dc", false),
     ("bi", true),
     ("uu", false),
-    ("kns", false),
     ("hu", false),
-    ("bt", true),
-    ("mm", false),
 ];
 
 /// The fields only [`named_shapes`] are placed at, to keep the test within its
@@ -731,9 +744,13 @@ const KINDS: &[(&str, bool)] = &[
 /// shape does (`n`, `kw`, `ho`, `ne`), and the named shapes hold the types that
 /// matter at each (integers, floats, `bool`, `Decimal`, `uuid::Uuid`, integer
 /// newtypes).
+///
+/// Four fixture fields are placed at no shape: their mapping is one another
+/// field already has, which is all the derive reads (`count` `ct` is `n`'s
+/// required `long`, `subfields: false` `kns` is `kw`'s `keyword`, `belongs_to`
+/// `bt` is `ho`'s nullable object, `many_to_many` `mm` is `ne`'s `nested`).
 const NAMED_ONLY: &[&str] = &[
-    "ids", "ex", "ct", "av", "bo", "sh", "it", "fl", "db", "dc", "bi", "uu", "kns", "hu", "bt",
-    "mm",
+    "ids", "ex", "av", "bo", "sh", "it", "fl", "db", "dc", "bi", "uu", "hu",
 ];
 
 /// The `custom` field of an OpenSearch type the derive does not model.
@@ -941,6 +958,20 @@ const DISAGREE: &[(&str, &str, &str)] = &[
         "field_vec_alias",
         "cu",
         "a root sees through a type alias, a fragment cannot",
+    ),
+    // At a `custom` field a root takes any type. A fragment can take a type
+    // only if it can skip the walk into it, which needs the type's name (a
+    // std wrapper over generic arguments, a primitive) or flusso metadata:
+    // stable Rust has no const fn a fragment could call for any type.
+    (
+        "ip_addr",
+        "cu",
+        "a fragment cannot take a type it can't name or read metadata of",
+    ),
+    (
+        "foreign",
+        "cu",
+        "a fragment cannot take a type it can't name or read metadata of",
     ),
 ];
 

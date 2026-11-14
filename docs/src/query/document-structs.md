@@ -70,7 +70,7 @@ Because a macro can't resolve paths, a built-in leaf type is recognized by that 
 - on a root, at an `object` or `nested` field (a level with fields of its own), it is checked as your own type;
 - on a `#[serde(flatten)]` field, root or fragment, it is checked as your own type too, except `GeoPoint`: flattened, it is taken for flusso's own, which serde can flatten and which is not checked.
 
-Anywhere else it is taken for the built-in, and a `FlussoValue` type of your own also goes where its own kinds fit, on a root by its bound and in a fragment by its metadata: a `#[derive(FlussoValue)] struct Date(String)` goes at a `keyword` field as well as a `date` one. A sub-document of your own named like one, in a fragment, fails to match the schema, and the error says to rename it. A type named `Value` is always taken for `serde_json::Value`, which is never checked. Rename it to have it checked. What a namesake compiles at and fails to read is [trusted](#what-the-derive-trusts).
+Anywhere else it is taken for the built-in, except `Decimal`: a type named `Decimal` with flusso metadata (`rust_decimal::Decimal`'s, or your own derive's) is judged by its own kinds alone. A `FlussoValue` type of your own also goes where its own kinds fit, on a root by its bound and in a fragment by its metadata: a `#[derive(FlussoValue)] struct Date(String)` goes at a `keyword` field as well as a `date` one. A sub-document of your own named like one, in a fragment, fails to match the schema, and the error says to rename it. A type named `Value` is always taken for `serde_json::Value`, which is never checked. Rename it to have it checked. What a namesake compiles at and fails to read is [trusted](#what-the-derive-trusts).
 
 Fragments are checked **where embedded**. The root bakes the resolved level into const data and drives one assertion per fragment field; the error's primary span is the embedding, with a note chain down to the offending field. Two limits follow from const evaluation: messages can't interpolate the schema's type name, and there are no warnings, only pass or fail.
 
@@ -139,9 +139,9 @@ The derive checks a struct against the mapping at compile time, but a struct tha
 - **What [`#[flusso(opaque)]`](#escape-hatches) turns off**, and a type the derive can't see into under it (`Box<…>`, a tuple, a plain struct).
 - **serde attributes that change what is read**: `with`/`deserialize_with` on a field, `from`/`try_from` on a `FlussoValue` type (validation in `try_from` is a common use), and `deny_unknown_fields` on a fragment, which then fails on every key it leaves out.
 - **A `String` at a `geo` field.** It reads the string forms a one-column `geo` over a `text` column holds (see [geo](../reference/field-types.md#geo)), but not the `{lat, lon}` object a two-column `geo` is written as, nor the object and array forms a `json`/`jsonb` column can hold. `GeoPoint` reads every form.
-- **Any type at a `custom` field whose OpenSearch type the derive does not model.** `opensearch: ip`, for one: the derive has no kind to check it against, and flusso writes the column as Postgres renders it into JSON. A type that reads that value (a `String` for an `ip`) reads every document. In a fragment, a type from another crate goes there only through a flusso derive (see [Root and fragment](#root-and-fragment)).
+- **Any type at a `custom` field whose OpenSearch type the derive does not model.** `opensearch: ip`, for one: the derive has no kind to check it against, and flusso writes the column as Postgres renders it into JSON. A type that reads that value (a `String` for an `ip`) reads every document. In a fragment, a type the derive can neither name nor read flusso metadata of is a compile error there (see [Root and fragment](#root-and-fragment)).
 - **An untagged `FlussoValue` newtype over an integer, at a wider numeric field.** `struct Qty(i32)` takes `i32`'s query kinds, which widen: it compiles at a `long`, `count`, `ids`, `double`, `decimal` or `avg` field, and fails on a value past `i32` or with a fraction. A bare `i32` there is a compile error. Wrap the field's own type (`i64` at a `long`, `f64` at a `double`).
-- **A type of your own named like a built-in leaf.** It is taken for the built-in by its name ([Types named like a built-in](#types-named-like-a-built-in)), so `struct Decimal(String)` compiles at a `double` and fails on every number. Rename it to have it checked as your own.
+- **A type of your own named like a built-in leaf.** It is taken for the built-in by its name ([Types named like a built-in](#types-named-like-a-built-in)), so a struct of your own named `Value` compiles at any field, and a `#[derive(FlussoValue)] struct GeoPoint(String)` at a two-column `geo`, where it fails on the `{lat, lon}` object. Rename it to have it checked as your own.
 - **`uuid::Uuid` at a `keyword` field.** A `uuid` field maps to `keyword`, so the derive can't tell the two apart: `Uuid` reads every `uuid` field and fails on a plain `keyword` value that isn't a UUID. Use `String` at a `keyword`.
 - **`Decimal` at a `double` or `decimal` field.** It reads every value inside its range (±7.9 × 10^28), and fails past it: a large `double`, and a `decimal` column's largest values, which flusso writes through an `f64` that rounds them up past it. Use `f64` when the column can hold them.
 - **A `map` or array over a `jsonb` column holding values of another type.** flusso writes such a column as it is: `{"x": 1}` under a `keyword` map, or `["a", 1]` in a `keyword` array, is indexed (OpenSearch coerces the number), and `_source` keeps the number, which `HashMap<String, String>` or `Vec<String>` fails on. Use `serde_json::Value` values when the column isn't uniform.
@@ -151,7 +151,7 @@ The derive checks a struct against the mapping at compile time, but a struct tha
 A root and a fragment accept the same types at the same fields, with two exceptions, both because a fragment only has the type's name and the const data a flusso derive emits, where a root checks a trait bound:
 
 - a `type` alias of a type without a flusso derive (a map, `String`) reads on a root, which sees through it, and is a compile error in a fragment;
-- at a `custom` field the derive does not model, a root takes any type; a fragment takes a std type and a type with a flusso derive, and a type from another crate only wrapped in a `FlussoValue` newtype.
+- at a `custom` field the derive does not model, a root takes any type. A fragment takes a type with flusso metadata (a flusso derive, a built-in leaf, `Box<str>`, …), a Rust primitive, and a std wrapper or collection written with its generic arguments (`Box<…>`, `Option<…>`, `Vec<…>`, …). Any other type is a compile error there, `std::net::IpAddr` and a plain struct of your own or another crate's included: a fragment walks into a field's type through a check function the type must have, and only a name it knows tells it there is none. Wrap such a type in a tagged newtype, `#[derive(FlussoValue)] #[flusso(keyword)] struct Ip(IpAddr)`.
 
 `sdk/query-derive/tests/boundary.rs` pins all of it: it places a list of type shapes at one field of each kind in its fixture, on a root and in a fragment, and fails on one that compiles and fails to read a sample document under no rule above, or that a root and a fragment treat differently outside the two exceptions. It covers the kinds its fixture holds: every leaf kind, `custom`, the aggregates, an `enum` with `variants:`, maps, `json`, every join verb, an unindexed join and `subfields: false`.
 
@@ -159,13 +159,13 @@ A root and a fragment accept the same types at the same fields, with two excepti
 
 | flusso type | Rust type | Handle |
 | --- | --- | --- |
-| `text`, `identifier` | `String` | `Text` |
-| `keyword` | `String`, or a `FlussoValue` newtype/enum | `Keyword` |
+| `text`, `identifier` | `String` (or a [string alternative](#string-alternatives)) | `Text` |
+| `keyword` | `String` (or a [string alternative](#string-alternatives)), or a `FlussoValue` newtype/enum | `Keyword` |
 | `enum` | `String`, or a `#[derive(FlussoValue)]` enum | `Enum` with declared `variants`, else `Keyword` |
 | `uuid` | `String`, or `uuid::Uuid` (`uuid` feature) | `Keyword` |
 | `boolean` | `bool` | `Bool` |
 | `short` / `integer` / `long` | `i16` / `i32` / `i64` | `Number<kind::Short \| Integer \| Long>` |
-| `float` / `double` | `f32` / `f64` | `Number<kind::Float \| Double>` |
+| `float` / `double` | `f32` / `f64`, or `Decimal` at a `double` | `Number<kind::Float \| Double>` |
 | `decimal` | `Decimal` (`decimal` feature) or `f64` | `Number<kind::Decimal>` |
 | `date` | `time::Date` or chrono's | `Date` |
 | `timestamp` | `time::OffsetDateTime` or chrono's | `Date` |
@@ -183,6 +183,10 @@ A root and a fragment accept the same types at the same fields, with two excepti
 | `exists` aggregate | `bool` | `Bool` |
 
 Dates sit behind a feature so a caller picks `time` or `chrono` (or `String` for raw ISO-8601).
+
+### String alternatives
+
+Wherever `String` is a value (`text`, `keyword`, `uuid`, an `enum`, `date`/`timestamp`, a map's values, an array's elements), `Box<str>` and `Cow<'_, str>` go too, and `Arc<str>` and `Rc<str>` with the `rc` feature (serde reads and writes those two only with its own `rc` feature, which it turns on). They are field types on a root and in a fragment, and query values: `User::email().eq(Box::<str>::from("a@b.c"))`. A `binary` or `geo` field, which takes `String` by its name, doesn't take them.
 
 ## Arrays
 

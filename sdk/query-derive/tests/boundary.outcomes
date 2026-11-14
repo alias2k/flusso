@@ -57,21 +57,17 @@ gen/fragment_box_l refused
 gen/map_box_l refused
 gen/value_of_value_box_l refused
 gen/fragment_of_fragment_box_l refused
-gen/value_cow refused
 gen/fragment_cow refused
 gen/map_cow refused
-gen/value_of_value_cow refused
 gen/fragment_of_fragment_cow refused
 gen/value_opt_cow refused
 gen/fragment_opt_cow refused
 gen/map_opt_cow refused
 gen/value_of_value_opt_cow refused
 gen/fragment_of_fragment_opt_cow refused
-gen/value_vec_cow refused
 gen/keyword_value_vec_cow refused
 gen/fragment_vec_cow refused
 gen/map_vec_cow refused
-gen/value_of_value_vec_cow refused
 gen/fragment_of_fragment_vec_cow refused
 gen/value_box_cow refused
 gen/fragment_box_cow refused
@@ -274,21 +270,17 @@ gen/fragment_box_f refused
 gen/map_box_f refused
 gen/value_of_value_box_f refused
 gen/fragment_of_fragment_box_f refused
-gen/value_bs refused
 gen/fragment_bs refused
 gen/map_bs refused
-gen/value_of_value_bs refused
 gen/fragment_of_fragment_bs refused
 gen/value_opt_bs refused
 gen/fragment_opt_bs refused
 gen/map_opt_bs refused
 gen/value_of_value_opt_bs refused
 gen/fragment_of_fragment_opt_bs refused
-gen/value_vec_bs refused
 gen/keyword_value_vec_bs refused
 gen/fragment_vec_bs refused
 gen/map_vec_bs refused
-gen/value_of_value_vec_bs refused
 gen/fragment_of_fragment_vec_bs refused
 gen/value_box_bs refused
 gen/fragment_box_bs refused
@@ -381,6 +373,7 @@ flattened/fragment_over_option_map reads
 flattened/fragment_over_option_value_map trusted flattened
 flattened/fragment_over_value_map reads
 flattened/hash_map trusted flattened
+flattened/hash_map_arc_str trusted flattened
 flattened/hash_map_box_str trusted flattened
 flattened/hash_map_char trusted flattened
 flattened/hash_map_code trusted flattened
@@ -404,13 +397,45 @@ flattened/map_text trusted flattened
 flattened/sub refused
 flattened/value reads
 flattened/value_over_map trusted flattened
+fragment/arc_str/av refused
+fragment/arc_str/bi refused
+fragment/arc_str/bo refused
+fragment/arc_str/cm trusted json
+fragment/arc_str/co trusted json
+fragment/arc_str/cu reads
+fragment/arc_str/db refused
+fragment/arc_str/dc refused
+fragment/arc_str/dt reads
+fragment/arc_str/ev reads
+fragment/arc_str/ex refused
+fragment/arc_str/fl refused
+fragment/arc_str/gp refused
+fragment/arc_str/ho refused
+fragment/arc_str/hu refused
+fragment/arc_str/ids refused
+fragment/arc_str/it refused
+fragment/arc_str/js trusted json
+fragment/arc_str/jsa refused
+fragment/arc_str/jso trusted json
+fragment/arc_str/kw reads
+fragment/arc_str/kwa refused
+fragment/arc_str/kwao refused
+fragment/arc_str/kwo reads
+fragment/arc_str/mp refused
+fragment/arc_str/mpn refused
+fragment/arc_str/mpo refused
+fragment/arc_str/n refused
+fragment/arc_str/ne refused
+fragment/arc_str/nn refused
+fragment/arc_str/ob refused
+fragment/arc_str/sh refused
+fragment/arc_str/ts reads
+fragment/arc_str/uu reads
 fragment/bool/av refused
 fragment/bool/bi refused
 fragment/bool/bo reads
-fragment/bool/bt refused
 fragment/bool/cm trusted json
 fragment/bool/co trusted json
-fragment/bool/ct refused
 fragment/bool/cu trusted custom
 fragment/bool/db refused
 fragment/bool/dc refused
@@ -426,12 +451,10 @@ fragment/bool/it refused
 fragment/bool/js trusted json
 fragment/bool/jsa refused
 fragment/bool/jso trusted json
-fragment/bool/kns refused
 fragment/bool/kw refused
 fragment/bool/kwa refused
 fragment/bool/kwao refused
 fragment/bool/kwo refused
-fragment/bool/mm refused
 fragment/bool/mp refused
 fragment/bool/mpn refused
 fragment/bool/mpo refused
@@ -442,14 +465,45 @@ fragment/bool/ob refused
 fragment/bool/sh refused
 fragment/bool/ts refused
 fragment/bool/uu refused
+fragment/box_str/av refused
+fragment/box_str/bi refused
+fragment/box_str/bo refused
+fragment/box_str/cm trusted json
+fragment/box_str/co trusted json
 fragment/box_str/cu reads
+fragment/box_str/db refused
+fragment/box_str/dc refused
+fragment/box_str/dt reads
+fragment/box_str/ev reads
+fragment/box_str/ex refused
+fragment/box_str/fl refused
+fragment/box_str/gp refused
+fragment/box_str/ho refused
+fragment/box_str/hu refused
+fragment/box_str/ids refused
+fragment/box_str/it refused
+fragment/box_str/js trusted json
+fragment/box_str/jsa refused
+fragment/box_str/jso trusted json
+fragment/box_str/kw reads
+fragment/box_str/kwa refused
+fragment/box_str/kwao refused
+fragment/box_str/kwo reads
+fragment/box_str/mp refused
+fragment/box_str/mpn refused
+fragment/box_str/mpo refused
+fragment/box_str/n refused
+fragment/box_str/ne refused
+fragment/box_str/nn refused
+fragment/box_str/ob refused
+fragment/box_str/sh refused
+fragment/box_str/ts reads
+fragment/box_str/uu reads
 fragment/btree_map_long/av refused
 fragment/btree_map_long/bi refused
 fragment/btree_map_long/bo refused
-fragment/btree_map_long/bt refused
 fragment/btree_map_long/cm trusted json
 fragment/btree_map_long/co reads
-fragment/btree_map_long/ct refused
 fragment/btree_map_long/cu trusted custom
 fragment/btree_map_long/db refused
 fragment/btree_map_long/dc refused
@@ -465,12 +519,10 @@ fragment/btree_map_long/it refused
 fragment/btree_map_long/js trusted json
 fragment/btree_map_long/jsa refused
 fragment/btree_map_long/jso trusted json
-fragment/btree_map_long/kns refused
 fragment/btree_map_long/kw refused
 fragment/btree_map_long/kwa refused
 fragment/btree_map_long/kwao refused
 fragment/btree_map_long/kwo refused
-fragment/btree_map_long/mm refused
 fragment/btree_map_long/mp refused
 fragment/btree_map_long/mpn trusted null
 fragment/btree_map_long/mpo refused
@@ -484,10 +536,8 @@ fragment/btree_map_long/uu refused
 fragment/btree_map_option_long/av refused
 fragment/btree_map_option_long/bi refused
 fragment/btree_map_option_long/bo refused
-fragment/btree_map_option_long/bt refused
 fragment/btree_map_option_long/cm trusted json
 fragment/btree_map_option_long/co reads
-fragment/btree_map_option_long/ct refused
 fragment/btree_map_option_long/cu trusted custom
 fragment/btree_map_option_long/db refused
 fragment/btree_map_option_long/dc refused
@@ -503,12 +553,10 @@ fragment/btree_map_option_long/it refused
 fragment/btree_map_option_long/js trusted json
 fragment/btree_map_option_long/jsa refused
 fragment/btree_map_option_long/jso trusted json
-fragment/btree_map_option_long/kns refused
 fragment/btree_map_option_long/kw refused
 fragment/btree_map_option_long/kwa refused
 fragment/btree_map_option_long/kwao refused
 fragment/btree_map_option_long/kwo refused
-fragment/btree_map_option_long/mm refused
 fragment/btree_map_option_long/mp refused
 fragment/btree_map_option_long/mpn reads
 fragment/btree_map_option_long/mpo refused
@@ -523,10 +571,8 @@ fragment/char/cu trusted custom
 fragment/code/av refused
 fragment/code/bi refused
 fragment/code/bo refused
-fragment/code/bt refused
 fragment/code/cm trusted json
 fragment/code/co trusted json
-fragment/code/ct refused
 fragment/code/cu reads
 fragment/code/db refused
 fragment/code/dc refused
@@ -542,12 +588,10 @@ fragment/code/it refused
 fragment/code/js trusted json
 fragment/code/jsa refused
 fragment/code/jso trusted json
-fragment/code/kns reads
 fragment/code/kw reads
 fragment/code/kwa refused
 fragment/code/kwao refused
 fragment/code/kwo reads
-fragment/code/mm refused
 fragment/code/mp refused
 fragment/code/mpn refused
 fragment/code/mpo refused
@@ -561,10 +605,8 @@ fragment/code/uu reads
 fragment/date_time_utc/av refused
 fragment/date_time_utc/bi refused
 fragment/date_time_utc/bo refused
-fragment/date_time_utc/bt refused
 fragment/date_time_utc/cm trusted json
 fragment/date_time_utc/co trusted json
-fragment/date_time_utc/ct refused
 fragment/date_time_utc/cu trusted custom
 fragment/date_time_utc/db refused
 fragment/date_time_utc/dc refused
@@ -580,12 +622,10 @@ fragment/date_time_utc/it refused
 fragment/date_time_utc/js trusted json
 fragment/date_time_utc/jsa refused
 fragment/date_time_utc/jso trusted json
-fragment/date_time_utc/kns refused
 fragment/date_time_utc/kw refused
 fragment/date_time_utc/kwa refused
 fragment/date_time_utc/kwao refused
 fragment/date_time_utc/kwo refused
-fragment/date_time_utc/mm refused
 fragment/date_time_utc/mp refused
 fragment/date_time_utc/mpn refused
 fragment/date_time_utc/mpo refused
@@ -599,10 +639,8 @@ fragment/date_time_utc/uu refused
 fragment/decimal/av trusted decimal
 fragment/decimal/bi refused
 fragment/decimal/bo refused
-fragment/decimal/bt refused
 fragment/decimal/cm trusted json
 fragment/decimal/co trusted json
-fragment/decimal/ct refused
 fragment/decimal/cu trusted custom
 fragment/decimal/db trusted decimal
 fragment/decimal/dc trusted decimal
@@ -618,12 +656,10 @@ fragment/decimal/it refused
 fragment/decimal/js trusted json
 fragment/decimal/jsa refused
 fragment/decimal/jso trusted json
-fragment/decimal/kns refused
 fragment/decimal/kw refused
 fragment/decimal/kwa refused
 fragment/decimal/kwao refused
 fragment/decimal/kwo refused
-fragment/decimal/mm refused
 fragment/decimal/mp refused
 fragment/decimal/mpn refused
 fragment/decimal/mpo refused
@@ -637,10 +673,8 @@ fragment/decimal/uu refused
 fragment/deny_unknown_fields/av refused
 fragment/deny_unknown_fields/bi refused
 fragment/deny_unknown_fields/bo refused
-fragment/deny_unknown_fields/bt reads
 fragment/deny_unknown_fields/cm refused
 fragment/deny_unknown_fields/co refused
-fragment/deny_unknown_fields/ct refused
 fragment/deny_unknown_fields/cu trusted serde
 fragment/deny_unknown_fields/db refused
 fragment/deny_unknown_fields/dc refused
@@ -656,12 +690,10 @@ fragment/deny_unknown_fields/it refused
 fragment/deny_unknown_fields/js refused
 fragment/deny_unknown_fields/jsa refused
 fragment/deny_unknown_fields/jso refused
-fragment/deny_unknown_fields/kns refused
 fragment/deny_unknown_fields/kw refused
 fragment/deny_unknown_fields/kwa refused
 fragment/deny_unknown_fields/kwao refused
 fragment/deny_unknown_fields/kwo refused
-fragment/deny_unknown_fields/mm refused
 fragment/deny_unknown_fields/mp refused
 fragment/deny_unknown_fields/mpn refused
 fragment/deny_unknown_fields/mpo refused
@@ -675,10 +707,8 @@ fragment/deny_unknown_fields/uu refused
 fragment/deserialize_with/av refused
 fragment/deserialize_with/bi refused
 fragment/deserialize_with/bo refused
-fragment/deserialize_with/bt refused
 fragment/deserialize_with/cm trusted json
 fragment/deserialize_with/co trusted json
-fragment/deserialize_with/ct refused
 fragment/deserialize_with/cu trusted serde
 fragment/deserialize_with/db refused
 fragment/deserialize_with/dc refused
@@ -694,12 +724,10 @@ fragment/deserialize_with/it refused
 fragment/deserialize_with/js trusted json
 fragment/deserialize_with/jsa refused
 fragment/deserialize_with/jso refused
-fragment/deserialize_with/kns trusted serde
 fragment/deserialize_with/kw trusted serde
 fragment/deserialize_with/kwa refused
 fragment/deserialize_with/kwao refused
 fragment/deserialize_with/kwo refused
-fragment/deserialize_with/mm refused
 fragment/deserialize_with/mp refused
 fragment/deserialize_with/mpn refused
 fragment/deserialize_with/mpo refused
@@ -713,10 +741,8 @@ fragment/deserialize_with/uu trusted serde
 fragment/enum/av refused
 fragment/enum/bi refused
 fragment/enum/bo refused
-fragment/enum/bt refused
 fragment/enum/cm trusted json
 fragment/enum/co trusted json
-fragment/enum/ct refused
 fragment/enum/cu trusted variants
 fragment/enum/db refused
 fragment/enum/dc refused
@@ -732,12 +758,10 @@ fragment/enum/it refused
 fragment/enum/js trusted json
 fragment/enum/jsa refused
 fragment/enum/jso trusted json
-fragment/enum/kns trusted variants
 fragment/enum/kw trusted variants
 fragment/enum/kwa refused
 fragment/enum/kwao refused
 fragment/enum/kwo reads
-fragment/enum/mm refused
 fragment/enum/mp refused
 fragment/enum/mpn refused
 fragment/enum/mpo refused
@@ -751,10 +775,8 @@ fragment/enum/uu trusted variants
 fragment/enum_partial/av refused
 fragment/enum_partial/bi refused
 fragment/enum_partial/bo refused
-fragment/enum_partial/bt refused
 fragment/enum_partial/cm trusted json
 fragment/enum_partial/co trusted json
-fragment/enum_partial/ct refused
 fragment/enum_partial/cu trusted partial
 fragment/enum_partial/db refused
 fragment/enum_partial/dc refused
@@ -770,12 +792,10 @@ fragment/enum_partial/it refused
 fragment/enum_partial/js trusted json
 fragment/enum_partial/jsa refused
 fragment/enum_partial/jso trusted json
-fragment/enum_partial/kns trusted partial
 fragment/enum_partial/kw trusted partial
 fragment/enum_partial/kwa refused
 fragment/enum_partial/kwao refused
 fragment/enum_partial/kwo trusted partial
-fragment/enum_partial/mm refused
 fragment/enum_partial/mp refused
 fragment/enum_partial/mpn refused
 fragment/enum_partial/mpo refused
@@ -789,10 +809,8 @@ fragment/enum_partial/uu trusted partial
 fragment/exhaustive/av refused
 fragment/exhaustive/bi refused
 fragment/exhaustive/bo refused
-fragment/exhaustive/bt refused
 fragment/exhaustive/cm refused
 fragment/exhaustive/co refused
-fragment/exhaustive/ct refused
 fragment/exhaustive/cu trusted custom
 fragment/exhaustive/db refused
 fragment/exhaustive/dc refused
@@ -808,12 +826,10 @@ fragment/exhaustive/it refused
 fragment/exhaustive/js refused
 fragment/exhaustive/jsa refused
 fragment/exhaustive/jso refused
-fragment/exhaustive/kns refused
 fragment/exhaustive/kw refused
 fragment/exhaustive/kwa refused
 fragment/exhaustive/kwao refused
 fragment/exhaustive/kwo refused
-fragment/exhaustive/mm refused
 fragment/exhaustive/mp refused
 fragment/exhaustive/mpn refused
 fragment/exhaustive/mpo refused
@@ -827,10 +843,8 @@ fragment/exhaustive/uu refused
 fragment/f32/av refused
 fragment/f32/bi refused
 fragment/f32/bo refused
-fragment/f32/bt refused
 fragment/f32/cm trusted json
 fragment/f32/co trusted json
-fragment/f32/ct refused
 fragment/f32/cu trusted custom
 fragment/f32/db refused
 fragment/f32/dc refused
@@ -846,12 +860,10 @@ fragment/f32/it refused
 fragment/f32/js trusted json
 fragment/f32/jsa refused
 fragment/f32/jso trusted json
-fragment/f32/kns refused
 fragment/f32/kw refused
 fragment/f32/kwa refused
 fragment/f32/kwao refused
 fragment/f32/kwo refused
-fragment/f32/mm refused
 fragment/f32/mp refused
 fragment/f32/mpn refused
 fragment/f32/mpo refused
@@ -865,10 +877,8 @@ fragment/f32/uu refused
 fragment/f64/av reads
 fragment/f64/bi refused
 fragment/f64/bo refused
-fragment/f64/bt refused
 fragment/f64/cm trusted json
 fragment/f64/co trusted json
-fragment/f64/ct refused
 fragment/f64/cu trusted custom
 fragment/f64/db reads
 fragment/f64/dc reads
@@ -884,12 +894,10 @@ fragment/f64/it refused
 fragment/f64/js trusted json
 fragment/f64/jsa refused
 fragment/f64/jso trusted json
-fragment/f64/kns refused
 fragment/f64/kw refused
 fragment/f64/kwa refused
 fragment/f64/kwao refused
 fragment/f64/kwo refused
-fragment/f64/mm refused
 fragment/f64/mp refused
 fragment/f64/mpn refused
 fragment/f64/mpo refused
@@ -900,13 +908,12 @@ fragment/f64/ob refused
 fragment/f64/sh refused
 fragment/f64/ts refused
 fragment/f64/uu refused
+fragment/foreign/cu refused
 fragment/fragment_over_map/av refused
 fragment/fragment_over_map/bi refused
 fragment/fragment_over_map/bo refused
-fragment/fragment_over_map/bt refused
 fragment/fragment_over_map/cm trusted json
 fragment/fragment_over_map/co trusted json
-fragment/fragment_over_map/ct refused
 fragment/fragment_over_map/cu trusted custom
 fragment/fragment_over_map/db refused
 fragment/fragment_over_map/dc refused
@@ -922,12 +929,10 @@ fragment/fragment_over_map/it refused
 fragment/fragment_over_map/js trusted json
 fragment/fragment_over_map/jsa refused
 fragment/fragment_over_map/jso trusted json
-fragment/fragment_over_map/kns refused
 fragment/fragment_over_map/kw refused
 fragment/fragment_over_map/kwa refused
 fragment/fragment_over_map/kwao refused
 fragment/fragment_over_map/kwo refused
-fragment/fragment_over_map/mm refused
 fragment/fragment_over_map/mp trusted jsonb+null
 fragment/fragment_over_map/mpn refused
 fragment/fragment_over_map/mpo trusted null
@@ -941,10 +946,8 @@ fragment/fragment_over_map/uu refused
 fragment/fragment_over_map_type/av refused
 fragment/fragment_over_map_type/bi refused
 fragment/fragment_over_map_type/bo refused
-fragment/fragment_over_map_type/bt refused
 fragment/fragment_over_map_type/cm trusted json
 fragment/fragment_over_map_type/co trusted json
-fragment/fragment_over_map_type/ct refused
 fragment/fragment_over_map_type/cu trusted custom
 fragment/fragment_over_map_type/db refused
 fragment/fragment_over_map_type/dc refused
@@ -960,12 +963,10 @@ fragment/fragment_over_map_type/it refused
 fragment/fragment_over_map_type/js trusted json
 fragment/fragment_over_map_type/jsa refused
 fragment/fragment_over_map_type/jso trusted json
-fragment/fragment_over_map_type/kns refused
 fragment/fragment_over_map_type/kw refused
 fragment/fragment_over_map_type/kwa refused
 fragment/fragment_over_map_type/kwao refused
 fragment/fragment_over_map_type/kwo refused
-fragment/fragment_over_map_type/mm refused
 fragment/fragment_over_map_type/mp trusted jsonb+null
 fragment/fragment_over_map_type/mpn refused
 fragment/fragment_over_map_type/mpo trusted null
@@ -979,10 +980,8 @@ fragment/fragment_over_map_type/uu refused
 fragment/fragment_over_option_map/av refused
 fragment/fragment_over_option_map/bi refused
 fragment/fragment_over_option_map/bo refused
-fragment/fragment_over_option_map/bt refused
 fragment/fragment_over_option_map/cm trusted json
 fragment/fragment_over_option_map/co trusted json
-fragment/fragment_over_option_map/ct refused
 fragment/fragment_over_option_map/cu trusted custom
 fragment/fragment_over_option_map/db refused
 fragment/fragment_over_option_map/dc refused
@@ -998,12 +997,10 @@ fragment/fragment_over_option_map/it refused
 fragment/fragment_over_option_map/js trusted json
 fragment/fragment_over_option_map/jsa refused
 fragment/fragment_over_option_map/jso trusted json
-fragment/fragment_over_option_map/kns refused
 fragment/fragment_over_option_map/kw refused
 fragment/fragment_over_option_map/kwa refused
 fragment/fragment_over_option_map/kwao refused
 fragment/fragment_over_option_map/kwo refused
-fragment/fragment_over_option_map/mm refused
 fragment/fragment_over_option_map/mp trusted jsonb+null
 fragment/fragment_over_option_map/mpn refused
 fragment/fragment_over_option_map/mpo trusted null
@@ -1017,10 +1014,8 @@ fragment/fragment_over_option_map/uu refused
 fragment/fragment_over_option_value_map/av refused
 fragment/fragment_over_option_value_map/bi refused
 fragment/fragment_over_option_value_map/bo refused
-fragment/fragment_over_option_value_map/bt refused
 fragment/fragment_over_option_value_map/cm trusted json
 fragment/fragment_over_option_value_map/co trusted json
-fragment/fragment_over_option_value_map/ct refused
 fragment/fragment_over_option_value_map/cu trusted custom
 fragment/fragment_over_option_value_map/db refused
 fragment/fragment_over_option_value_map/dc refused
@@ -1036,12 +1031,10 @@ fragment/fragment_over_option_value_map/it refused
 fragment/fragment_over_option_value_map/js trusted json
 fragment/fragment_over_option_value_map/jsa refused
 fragment/fragment_over_option_value_map/jso trusted json
-fragment/fragment_over_option_value_map/kns refused
 fragment/fragment_over_option_value_map/kw refused
 fragment/fragment_over_option_value_map/kwa refused
 fragment/fragment_over_option_value_map/kwao refused
 fragment/fragment_over_option_value_map/kwo refused
-fragment/fragment_over_option_value_map/mm refused
 fragment/fragment_over_option_value_map/mp trusted jsonb
 fragment/fragment_over_option_value_map/mpn refused
 fragment/fragment_over_option_value_map/mpo reads
@@ -1055,10 +1048,8 @@ fragment/fragment_over_option_value_map/uu refused
 fragment/fragment_over_value_map/av refused
 fragment/fragment_over_value_map/bi refused
 fragment/fragment_over_value_map/bo refused
-fragment/fragment_over_value_map/bt refused
 fragment/fragment_over_value_map/cm trusted json
 fragment/fragment_over_value_map/co reads
-fragment/fragment_over_value_map/ct refused
 fragment/fragment_over_value_map/cu trusted custom
 fragment/fragment_over_value_map/db refused
 fragment/fragment_over_value_map/dc refused
@@ -1074,12 +1065,10 @@ fragment/fragment_over_value_map/it refused
 fragment/fragment_over_value_map/js trusted json
 fragment/fragment_over_value_map/jsa refused
 fragment/fragment_over_value_map/jso trusted json
-fragment/fragment_over_value_map/kns refused
 fragment/fragment_over_value_map/kw refused
 fragment/fragment_over_value_map/kwa refused
 fragment/fragment_over_value_map/kwao refused
 fragment/fragment_over_value_map/kwo refused
-fragment/fragment_over_value_map/mm refused
 fragment/fragment_over_value_map/mp refused
 fragment/fragment_over_value_map/mpn refused
 fragment/fragment_over_value_map/mpo refused
@@ -1093,10 +1082,8 @@ fragment/fragment_over_value_map/uu refused
 fragment/geo_point/av refused
 fragment/geo_point/bi refused
 fragment/geo_point/bo refused
-fragment/geo_point/bt refused
 fragment/geo_point/cm trusted json
 fragment/geo_point/co trusted json
-fragment/geo_point/ct refused
 fragment/geo_point/cu trusted custom
 fragment/geo_point/db refused
 fragment/geo_point/dc refused
@@ -1112,12 +1099,10 @@ fragment/geo_point/it refused
 fragment/geo_point/js trusted json
 fragment/geo_point/jsa refused
 fragment/geo_point/jso trusted json
-fragment/geo_point/kns refused
 fragment/geo_point/kw refused
 fragment/geo_point/kwa refused
 fragment/geo_point/kwao refused
 fragment/geo_point/kwo refused
-fragment/geo_point/mm refused
 fragment/geo_point/mp refused
 fragment/geo_point/mpn refused
 fragment/geo_point/mpo refused
@@ -1131,10 +1116,8 @@ fragment/geo_point/uu refused
 fragment/hash_map/av refused
 fragment/hash_map/bi refused
 fragment/hash_map/bo refused
-fragment/hash_map/bt refused
 fragment/hash_map/cm trusted json
 fragment/hash_map/co trusted json
-fragment/hash_map/ct refused
 fragment/hash_map/cu trusted custom
 fragment/hash_map/db refused
 fragment/hash_map/dc refused
@@ -1150,12 +1133,10 @@ fragment/hash_map/it refused
 fragment/hash_map/js trusted json
 fragment/hash_map/jsa refused
 fragment/hash_map/jso trusted json
-fragment/hash_map/kns refused
 fragment/hash_map/kw refused
 fragment/hash_map/kwa refused
 fragment/hash_map/kwao refused
 fragment/hash_map/kwo refused
-fragment/hash_map/mm refused
 fragment/hash_map/mp trusted jsonb+null
 fragment/hash_map/mpn refused
 fragment/hash_map/mpo trusted null
@@ -1166,13 +1147,45 @@ fragment/hash_map/ob refused
 fragment/hash_map/sh refused
 fragment/hash_map/ts refused
 fragment/hash_map/uu refused
+fragment/hash_map_arc_str/av refused
+fragment/hash_map_arc_str/bi refused
+fragment/hash_map_arc_str/bo refused
+fragment/hash_map_arc_str/cm trusted json
+fragment/hash_map_arc_str/co trusted json
+fragment/hash_map_arc_str/cu trusted custom
+fragment/hash_map_arc_str/db refused
+fragment/hash_map_arc_str/dc refused
+fragment/hash_map_arc_str/dt refused
+fragment/hash_map_arc_str/ev refused
+fragment/hash_map_arc_str/ex refused
+fragment/hash_map_arc_str/fl refused
+fragment/hash_map_arc_str/gp refused
+fragment/hash_map_arc_str/ho refused
+fragment/hash_map_arc_str/hu refused
+fragment/hash_map_arc_str/ids refused
+fragment/hash_map_arc_str/it refused
+fragment/hash_map_arc_str/js trusted json
+fragment/hash_map_arc_str/jsa refused
+fragment/hash_map_arc_str/jso trusted json
+fragment/hash_map_arc_str/kw refused
+fragment/hash_map_arc_str/kwa refused
+fragment/hash_map_arc_str/kwao refused
+fragment/hash_map_arc_str/kwo refused
+fragment/hash_map_arc_str/mp trusted jsonb
+fragment/hash_map_arc_str/mpn refused
+fragment/hash_map_arc_str/mpo reads
+fragment/hash_map_arc_str/n refused
+fragment/hash_map_arc_str/ne refused
+fragment/hash_map_arc_str/nn refused
+fragment/hash_map_arc_str/ob refused
+fragment/hash_map_arc_str/sh refused
+fragment/hash_map_arc_str/ts refused
+fragment/hash_map_arc_str/uu refused
 fragment/hash_map_box_str/av refused
 fragment/hash_map_box_str/bi refused
 fragment/hash_map_box_str/bo refused
-fragment/hash_map_box_str/bt refused
 fragment/hash_map_box_str/cm trusted json
 fragment/hash_map_box_str/co trusted json
-fragment/hash_map_box_str/ct refused
 fragment/hash_map_box_str/cu trusted custom
 fragment/hash_map_box_str/db refused
 fragment/hash_map_box_str/dc refused
@@ -1188,15 +1201,13 @@ fragment/hash_map_box_str/it refused
 fragment/hash_map_box_str/js trusted json
 fragment/hash_map_box_str/jsa refused
 fragment/hash_map_box_str/jso trusted json
-fragment/hash_map_box_str/kns refused
 fragment/hash_map_box_str/kw refused
 fragment/hash_map_box_str/kwa refused
 fragment/hash_map_box_str/kwao refused
 fragment/hash_map_box_str/kwo refused
-fragment/hash_map_box_str/mm refused
-fragment/hash_map_box_str/mp refused
+fragment/hash_map_box_str/mp trusted jsonb+null
 fragment/hash_map_box_str/mpn refused
-fragment/hash_map_box_str/mpo refused
+fragment/hash_map_box_str/mpo trusted null
 fragment/hash_map_box_str/n refused
 fragment/hash_map_box_str/ne refused
 fragment/hash_map_box_str/nn refused
@@ -1207,10 +1218,8 @@ fragment/hash_map_box_str/uu refused
 fragment/hash_map_char/av refused
 fragment/hash_map_char/bi refused
 fragment/hash_map_char/bo refused
-fragment/hash_map_char/bt refused
 fragment/hash_map_char/cm trusted json
 fragment/hash_map_char/co trusted json
-fragment/hash_map_char/ct refused
 fragment/hash_map_char/cu trusted custom
 fragment/hash_map_char/db refused
 fragment/hash_map_char/dc refused
@@ -1226,12 +1235,10 @@ fragment/hash_map_char/it refused
 fragment/hash_map_char/js trusted json
 fragment/hash_map_char/jsa refused
 fragment/hash_map_char/jso trusted json
-fragment/hash_map_char/kns refused
 fragment/hash_map_char/kw refused
 fragment/hash_map_char/kwa refused
 fragment/hash_map_char/kwao refused
 fragment/hash_map_char/kwo refused
-fragment/hash_map_char/mm refused
 fragment/hash_map_char/mp refused
 fragment/hash_map_char/mpn refused
 fragment/hash_map_char/mpo refused
@@ -1245,10 +1252,8 @@ fragment/hash_map_char/uu refused
 fragment/hash_map_code/av refused
 fragment/hash_map_code/bi refused
 fragment/hash_map_code/bo refused
-fragment/hash_map_code/bt refused
 fragment/hash_map_code/cm trusted json
 fragment/hash_map_code/co trusted json
-fragment/hash_map_code/ct refused
 fragment/hash_map_code/cu trusted custom
 fragment/hash_map_code/db refused
 fragment/hash_map_code/dc refused
@@ -1264,12 +1269,10 @@ fragment/hash_map_code/it refused
 fragment/hash_map_code/js trusted json
 fragment/hash_map_code/jsa refused
 fragment/hash_map_code/jso trusted json
-fragment/hash_map_code/kns refused
 fragment/hash_map_code/kw refused
 fragment/hash_map_code/kwa refused
 fragment/hash_map_code/kwao refused
 fragment/hash_map_code/kwo refused
-fragment/hash_map_code/mm refused
 fragment/hash_map_code/mp trusted jsonb+null
 fragment/hash_map_code/mpn refused
 fragment/hash_map_code/mpo trusted null
@@ -1283,10 +1286,8 @@ fragment/hash_map_code/uu refused
 fragment/hash_map_custom_hasher/av refused
 fragment/hash_map_custom_hasher/bi refused
 fragment/hash_map_custom_hasher/bo refused
-fragment/hash_map_custom_hasher/bt refused
 fragment/hash_map_custom_hasher/cm trusted json
 fragment/hash_map_custom_hasher/co trusted json
-fragment/hash_map_custom_hasher/ct refused
 fragment/hash_map_custom_hasher/cu trusted custom
 fragment/hash_map_custom_hasher/db refused
 fragment/hash_map_custom_hasher/dc refused
@@ -1302,12 +1303,10 @@ fragment/hash_map_custom_hasher/it refused
 fragment/hash_map_custom_hasher/js trusted json
 fragment/hash_map_custom_hasher/jsa refused
 fragment/hash_map_custom_hasher/jso trusted json
-fragment/hash_map_custom_hasher/kns refused
 fragment/hash_map_custom_hasher/kw refused
 fragment/hash_map_custom_hasher/kwa refused
 fragment/hash_map_custom_hasher/kwao refused
 fragment/hash_map_custom_hasher/kwo refused
-fragment/hash_map_custom_hasher/mm refused
 fragment/hash_map_custom_hasher/mp trusted jsonb+null
 fragment/hash_map_custom_hasher/mpn refused
 fragment/hash_map_custom_hasher/mpo trusted null
@@ -1321,10 +1320,8 @@ fragment/hash_map_custom_hasher/uu refused
 fragment/hash_map_enum/av refused
 fragment/hash_map_enum/bi refused
 fragment/hash_map_enum/bo refused
-fragment/hash_map_enum/bt refused
 fragment/hash_map_enum/cm trusted json
 fragment/hash_map_enum/co trusted json
-fragment/hash_map_enum/ct refused
 fragment/hash_map_enum/cu trusted custom
 fragment/hash_map_enum/db refused
 fragment/hash_map_enum/dc refused
@@ -1340,12 +1337,10 @@ fragment/hash_map_enum/it refused
 fragment/hash_map_enum/js trusted json
 fragment/hash_map_enum/jsa refused
 fragment/hash_map_enum/jso trusted json
-fragment/hash_map_enum/kns refused
 fragment/hash_map_enum/kw refused
 fragment/hash_map_enum/kwa refused
 fragment/hash_map_enum/kwao refused
 fragment/hash_map_enum/kwo refused
-fragment/hash_map_enum/mm refused
 fragment/hash_map_enum/mp trusted jsonb+null+variants
 fragment/hash_map_enum/mpn refused
 fragment/hash_map_enum/mpo trusted null
@@ -1359,10 +1354,8 @@ fragment/hash_map_enum/uu refused
 fragment/hash_map_map/av refused
 fragment/hash_map_map/bi refused
 fragment/hash_map_map/bo refused
-fragment/hash_map_map/bt refused
 fragment/hash_map_map/cm trusted json
 fragment/hash_map_map/co trusted json
-fragment/hash_map_map/ct refused
 fragment/hash_map_map/cu trusted custom
 fragment/hash_map_map/db refused
 fragment/hash_map_map/dc refused
@@ -1378,12 +1371,10 @@ fragment/hash_map_map/it refused
 fragment/hash_map_map/js trusted json
 fragment/hash_map_map/jsa refused
 fragment/hash_map_map/jso trusted json
-fragment/hash_map_map/kns refused
 fragment/hash_map_map/kw refused
 fragment/hash_map_map/kwa refused
 fragment/hash_map_map/kwao refused
 fragment/hash_map_map/kwo refused
-fragment/hash_map_map/mm refused
 fragment/hash_map_map/mp refused
 fragment/hash_map_map/mpn refused
 fragment/hash_map_map/mpo refused
@@ -1397,10 +1388,8 @@ fragment/hash_map_map/uu refused
 fragment/hash_map_option/av refused
 fragment/hash_map_option/bi refused
 fragment/hash_map_option/bo refused
-fragment/hash_map_option/bt refused
 fragment/hash_map_option/cm trusted json
 fragment/hash_map_option/co trusted json
-fragment/hash_map_option/ct refused
 fragment/hash_map_option/cu trusted custom
 fragment/hash_map_option/db refused
 fragment/hash_map_option/dc refused
@@ -1416,12 +1405,10 @@ fragment/hash_map_option/it refused
 fragment/hash_map_option/js trusted json
 fragment/hash_map_option/jsa refused
 fragment/hash_map_option/jso trusted json
-fragment/hash_map_option/kns refused
 fragment/hash_map_option/kw refused
 fragment/hash_map_option/kwa refused
 fragment/hash_map_option/kwao refused
 fragment/hash_map_option/kwo refused
-fragment/hash_map_option/mm refused
 fragment/hash_map_option/mp trusted jsonb
 fragment/hash_map_option/mpn refused
 fragment/hash_map_option/mpo reads
@@ -1435,10 +1422,8 @@ fragment/hash_map_option/uu refused
 fragment/hash_map_option_option/av refused
 fragment/hash_map_option_option/bi refused
 fragment/hash_map_option_option/bo refused
-fragment/hash_map_option_option/bt refused
 fragment/hash_map_option_option/cm trusted json
 fragment/hash_map_option_option/co trusted json
-fragment/hash_map_option_option/ct refused
 fragment/hash_map_option_option/cu trusted custom
 fragment/hash_map_option_option/db refused
 fragment/hash_map_option_option/dc refused
@@ -1454,12 +1439,10 @@ fragment/hash_map_option_option/it refused
 fragment/hash_map_option_option/js trusted json
 fragment/hash_map_option_option/jsa refused
 fragment/hash_map_option_option/jso trusted json
-fragment/hash_map_option_option/kns refused
 fragment/hash_map_option_option/kw refused
 fragment/hash_map_option_option/kwa refused
 fragment/hash_map_option_option/kwao refused
 fragment/hash_map_option_option/kwo refused
-fragment/hash_map_option_option/mm refused
 fragment/hash_map_option_option/mp refused
 fragment/hash_map_option_option/mpn refused
 fragment/hash_map_option_option/mpo refused
@@ -1473,10 +1456,8 @@ fragment/hash_map_option_option/uu refused
 fragment/hash_map_own_date/av refused
 fragment/hash_map_own_date/bi refused
 fragment/hash_map_own_date/bo refused
-fragment/hash_map_own_date/bt refused
 fragment/hash_map_own_date/cm trusted json
 fragment/hash_map_own_date/co trusted json
-fragment/hash_map_own_date/ct refused
 fragment/hash_map_own_date/cu trusted custom
 fragment/hash_map_own_date/db refused
 fragment/hash_map_own_date/dc refused
@@ -1492,12 +1473,10 @@ fragment/hash_map_own_date/it refused
 fragment/hash_map_own_date/js trusted json
 fragment/hash_map_own_date/jsa refused
 fragment/hash_map_own_date/jso trusted json
-fragment/hash_map_own_date/kns refused
 fragment/hash_map_own_date/kw refused
 fragment/hash_map_own_date/kwa refused
 fragment/hash_map_own_date/kwao refused
 fragment/hash_map_own_date/kwo refused
-fragment/hash_map_own_date/mm refused
 fragment/hash_map_own_date/mp trusted namesake
 fragment/hash_map_own_date/mpn refused
 fragment/hash_map_own_date/mpo reads
@@ -1511,10 +1490,8 @@ fragment/hash_map_own_date/uu refused
 fragment/hash_map_sub/av refused
 fragment/hash_map_sub/bi refused
 fragment/hash_map_sub/bo refused
-fragment/hash_map_sub/bt refused
 fragment/hash_map_sub/cm trusted json
 fragment/hash_map_sub/co trusted json
-fragment/hash_map_sub/ct refused
 fragment/hash_map_sub/cu trusted custom
 fragment/hash_map_sub/db refused
 fragment/hash_map_sub/dc refused
@@ -1530,12 +1507,10 @@ fragment/hash_map_sub/it refused
 fragment/hash_map_sub/js trusted json
 fragment/hash_map_sub/jsa refused
 fragment/hash_map_sub/jso trusted json
-fragment/hash_map_sub/kns refused
 fragment/hash_map_sub/kw refused
 fragment/hash_map_sub/kwa refused
 fragment/hash_map_sub/kwao refused
 fragment/hash_map_sub/kwo refused
-fragment/hash_map_sub/mm refused
 fragment/hash_map_sub/mp refused
 fragment/hash_map_sub/mpn refused
 fragment/hash_map_sub/mpo refused
@@ -1549,10 +1524,8 @@ fragment/hash_map_sub/uu refused
 fragment/hash_map_uuid/av refused
 fragment/hash_map_uuid/bi refused
 fragment/hash_map_uuid/bo refused
-fragment/hash_map_uuid/bt refused
 fragment/hash_map_uuid/cm trusted json
 fragment/hash_map_uuid/co trusted json
-fragment/hash_map_uuid/ct refused
 fragment/hash_map_uuid/cu trusted custom
 fragment/hash_map_uuid/db refused
 fragment/hash_map_uuid/dc refused
@@ -1568,12 +1541,10 @@ fragment/hash_map_uuid/it refused
 fragment/hash_map_uuid/js trusted json
 fragment/hash_map_uuid/jsa refused
 fragment/hash_map_uuid/jso trusted json
-fragment/hash_map_uuid/kns refused
 fragment/hash_map_uuid/kw refused
 fragment/hash_map_uuid/kwa refused
 fragment/hash_map_uuid/kwao refused
 fragment/hash_map_uuid/kwo refused
-fragment/hash_map_uuid/mm refused
 fragment/hash_map_uuid/mp trusted null+uuid
 fragment/hash_map_uuid/mpn refused
 fragment/hash_map_uuid/mpo trusted null+uuid
@@ -1587,10 +1558,8 @@ fragment/hash_map_uuid/uu refused
 fragment/hash_map_vec/av refused
 fragment/hash_map_vec/bi refused
 fragment/hash_map_vec/bo refused
-fragment/hash_map_vec/bt refused
 fragment/hash_map_vec/cm trusted json
 fragment/hash_map_vec/co trusted json
-fragment/hash_map_vec/ct refused
 fragment/hash_map_vec/cu trusted custom
 fragment/hash_map_vec/db refused
 fragment/hash_map_vec/dc refused
@@ -1606,12 +1575,10 @@ fragment/hash_map_vec/it refused
 fragment/hash_map_vec/js trusted json
 fragment/hash_map_vec/jsa refused
 fragment/hash_map_vec/jso trusted json
-fragment/hash_map_vec/kns refused
 fragment/hash_map_vec/kw refused
 fragment/hash_map_vec/kwa refused
 fragment/hash_map_vec/kwao refused
 fragment/hash_map_vec/kwo refused
-fragment/hash_map_vec/mm refused
 fragment/hash_map_vec/mp refused
 fragment/hash_map_vec/mpn refused
 fragment/hash_map_vec/mpo refused
@@ -1625,10 +1592,8 @@ fragment/hash_map_vec/uu refused
 fragment/i16/av refused
 fragment/i16/bi refused
 fragment/i16/bo refused
-fragment/i16/bt refused
 fragment/i16/cm trusted json
 fragment/i16/co trusted json
-fragment/i16/ct refused
 fragment/i16/cu trusted custom
 fragment/i16/db refused
 fragment/i16/dc refused
@@ -1644,12 +1609,10 @@ fragment/i16/it refused
 fragment/i16/js trusted json
 fragment/i16/jsa refused
 fragment/i16/jso trusted json
-fragment/i16/kns refused
 fragment/i16/kw refused
 fragment/i16/kwa refused
 fragment/i16/kwao refused
 fragment/i16/kwo refused
-fragment/i16/mm refused
 fragment/i16/mp refused
 fragment/i16/mpn refused
 fragment/i16/mpo refused
@@ -1663,10 +1626,8 @@ fragment/i16/uu refused
 fragment/i32/av refused
 fragment/i32/bi refused
 fragment/i32/bo refused
-fragment/i32/bt refused
 fragment/i32/cm trusted json
 fragment/i32/co trusted json
-fragment/i32/ct refused
 fragment/i32/cu trusted custom
 fragment/i32/db refused
 fragment/i32/dc refused
@@ -1682,12 +1643,10 @@ fragment/i32/it reads
 fragment/i32/js trusted json
 fragment/i32/jsa refused
 fragment/i32/jso trusted json
-fragment/i32/kns refused
 fragment/i32/kw refused
 fragment/i32/kwa refused
 fragment/i32/kwao refused
 fragment/i32/kwo refused
-fragment/i32/mm refused
 fragment/i32/mp refused
 fragment/i32/mpn refused
 fragment/i32/mpo refused
@@ -1701,10 +1660,8 @@ fragment/i32/uu refused
 fragment/integer_newtype/av trusted integer
 fragment/integer_newtype/bi refused
 fragment/integer_newtype/bo refused
-fragment/integer_newtype/bt refused
 fragment/integer_newtype/cm trusted json
 fragment/integer_newtype/co trusted json
-fragment/integer_newtype/ct trusted integer
 fragment/integer_newtype/cu trusted custom
 fragment/integer_newtype/db trusted integer
 fragment/integer_newtype/dc trusted integer
@@ -1720,12 +1677,10 @@ fragment/integer_newtype/it reads
 fragment/integer_newtype/js trusted json
 fragment/integer_newtype/jsa refused
 fragment/integer_newtype/jso trusted json
-fragment/integer_newtype/kns refused
 fragment/integer_newtype/kw refused
 fragment/integer_newtype/kwa refused
 fragment/integer_newtype/kwao refused
 fragment/integer_newtype/kwo refused
-fragment/integer_newtype/mm refused
 fragment/integer_newtype/mp refused
 fragment/integer_newtype/mpn refused
 fragment/integer_newtype/mpo refused
@@ -1736,13 +1691,12 @@ fragment/integer_newtype/ob refused
 fragment/integer_newtype/sh refused
 fragment/integer_newtype/ts refused
 fragment/integer_newtype/uu refused
+fragment/ip_addr/cu refused
 fragment/long/av refused
 fragment/long/bi refused
 fragment/long/bo refused
-fragment/long/bt refused
 fragment/long/cm trusted json
 fragment/long/co trusted json
-fragment/long/ct reads
 fragment/long/cu trusted custom
 fragment/long/db refused
 fragment/long/dc refused
@@ -1758,12 +1712,10 @@ fragment/long/it refused
 fragment/long/js trusted json
 fragment/long/jsa refused
 fragment/long/jso trusted json
-fragment/long/kns refused
 fragment/long/kw refused
 fragment/long/kwa refused
 fragment/long/kwao refused
 fragment/long/kwo refused
-fragment/long/mm refused
 fragment/long/mp refused
 fragment/long/mpn refused
 fragment/long/mpo refused
@@ -1777,10 +1729,8 @@ fragment/long/uu refused
 fragment/long_newtype/av refused
 fragment/long_newtype/bi refused
 fragment/long_newtype/bo refused
-fragment/long_newtype/bt refused
 fragment/long_newtype/cm trusted json
 fragment/long_newtype/co trusted json
-fragment/long_newtype/ct reads
 fragment/long_newtype/cu trusted custom
 fragment/long_newtype/db refused
 fragment/long_newtype/dc trusted integer
@@ -1796,12 +1746,10 @@ fragment/long_newtype/it refused
 fragment/long_newtype/js trusted json
 fragment/long_newtype/jsa refused
 fragment/long_newtype/jso trusted json
-fragment/long_newtype/kns refused
 fragment/long_newtype/kw refused
 fragment/long_newtype/kwa refused
 fragment/long_newtype/kwao refused
 fragment/long_newtype/kwo refused
-fragment/long_newtype/mm refused
 fragment/long_newtype/mp refused
 fragment/long_newtype/mpn refused
 fragment/long_newtype/mpo refused
@@ -1815,10 +1763,8 @@ fragment/long_newtype/uu refused
 fragment/map_keyword/av refused
 fragment/map_keyword/bi refused
 fragment/map_keyword/bo refused
-fragment/map_keyword/bt refused
 fragment/map_keyword/cm trusted json
 fragment/map_keyword/co trusted json
-fragment/map_keyword/ct refused
 fragment/map_keyword/cu trusted custom
 fragment/map_keyword/db refused
 fragment/map_keyword/dc refused
@@ -1834,12 +1780,10 @@ fragment/map_keyword/it refused
 fragment/map_keyword/js trusted json
 fragment/map_keyword/jsa refused
 fragment/map_keyword/jso trusted json
-fragment/map_keyword/kns refused
 fragment/map_keyword/kw refused
 fragment/map_keyword/kwa refused
 fragment/map_keyword/kwao refused
 fragment/map_keyword/kwo refused
-fragment/map_keyword/mm refused
 fragment/map_keyword/mp trusted jsonb+null
 fragment/map_keyword/mpn refused
 fragment/map_keyword/mpo trusted null
@@ -1853,10 +1797,8 @@ fragment/map_keyword/uu refused
 fragment/map_keyword_option/av refused
 fragment/map_keyword_option/bi refused
 fragment/map_keyword_option/bo refused
-fragment/map_keyword_option/bt refused
 fragment/map_keyword_option/cm trusted json
 fragment/map_keyword_option/co trusted json
-fragment/map_keyword_option/ct refused
 fragment/map_keyword_option/cu trusted custom
 fragment/map_keyword_option/db refused
 fragment/map_keyword_option/dc refused
@@ -1872,12 +1814,10 @@ fragment/map_keyword_option/it refused
 fragment/map_keyword_option/js trusted json
 fragment/map_keyword_option/jsa refused
 fragment/map_keyword_option/jso trusted json
-fragment/map_keyword_option/kns refused
 fragment/map_keyword_option/kw refused
 fragment/map_keyword_option/kwa refused
 fragment/map_keyword_option/kwao refused
 fragment/map_keyword_option/kwo refused
-fragment/map_keyword_option/mm refused
 fragment/map_keyword_option/mp trusted jsonb
 fragment/map_keyword_option/mpn refused
 fragment/map_keyword_option/mpo reads
@@ -1891,10 +1831,8 @@ fragment/map_keyword_option/uu refused
 fragment/map_named/av refused
 fragment/map_named/bi refused
 fragment/map_named/bo refused
-fragment/map_named/bt refused
 fragment/map_named/cm trusted json
 fragment/map_named/co trusted json
-fragment/map_named/ct refused
 fragment/map_named/cu trusted custom
 fragment/map_named/db refused
 fragment/map_named/dc refused
@@ -1910,12 +1848,10 @@ fragment/map_named/it refused
 fragment/map_named/js trusted json
 fragment/map_named/jsa refused
 fragment/map_named/jso trusted json
-fragment/map_named/kns refused
 fragment/map_named/kw refused
 fragment/map_named/kwa refused
 fragment/map_named/kwao refused
 fragment/map_named/kwo refused
-fragment/map_named/mm refused
 fragment/map_named/mp trusted jsonb
 fragment/map_named/mpn refused
 fragment/map_named/mpo reads
@@ -1929,10 +1865,8 @@ fragment/map_named/uu refused
 fragment/map_named_option_rest/av refused
 fragment/map_named_option_rest/bi refused
 fragment/map_named_option_rest/bo refused
-fragment/map_named_option_rest/bt refused
 fragment/map_named_option_rest/cm trusted json
 fragment/map_named_option_rest/co trusted json
-fragment/map_named_option_rest/ct refused
 fragment/map_named_option_rest/cu trusted custom
 fragment/map_named_option_rest/db refused
 fragment/map_named_option_rest/dc refused
@@ -1948,12 +1882,10 @@ fragment/map_named_option_rest/it refused
 fragment/map_named_option_rest/js trusted json
 fragment/map_named_option_rest/jsa refused
 fragment/map_named_option_rest/jso trusted json
-fragment/map_named_option_rest/kns refused
 fragment/map_named_option_rest/kw refused
 fragment/map_named_option_rest/kwa refused
 fragment/map_named_option_rest/kwao refused
 fragment/map_named_option_rest/kwo refused
-fragment/map_named_option_rest/mm refused
 fragment/map_named_option_rest/mp trusted jsonb
 fragment/map_named_option_rest/mpn refused
 fragment/map_named_option_rest/mpo reads
@@ -1967,10 +1899,8 @@ fragment/map_named_option_rest/uu refused
 fragment/map_over_map_type/av refused
 fragment/map_over_map_type/bi refused
 fragment/map_over_map_type/bo refused
-fragment/map_over_map_type/bt refused
 fragment/map_over_map_type/cm trusted json
 fragment/map_over_map_type/co trusted json
-fragment/map_over_map_type/ct refused
 fragment/map_over_map_type/cu trusted custom
 fragment/map_over_map_type/db refused
 fragment/map_over_map_type/dc refused
@@ -1986,12 +1916,10 @@ fragment/map_over_map_type/it refused
 fragment/map_over_map_type/js trusted json
 fragment/map_over_map_type/jsa refused
 fragment/map_over_map_type/jso trusted json
-fragment/map_over_map_type/kns refused
 fragment/map_over_map_type/kw refused
 fragment/map_over_map_type/kwa refused
 fragment/map_over_map_type/kwao refused
 fragment/map_over_map_type/kwo refused
-fragment/map_over_map_type/mm refused
 fragment/map_over_map_type/mp trusted jsonb+null
 fragment/map_over_map_type/mpn refused
 fragment/map_over_map_type/mpo trusted null
@@ -2005,10 +1933,8 @@ fragment/map_over_map_type/uu refused
 fragment/map_text/av refused
 fragment/map_text/bi refused
 fragment/map_text/bo refused
-fragment/map_text/bt refused
 fragment/map_text/cm trusted json
 fragment/map_text/co trusted json
-fragment/map_text/ct refused
 fragment/map_text/cu trusted custom
 fragment/map_text/db refused
 fragment/map_text/dc refused
@@ -2024,12 +1950,10 @@ fragment/map_text/it refused
 fragment/map_text/js trusted json
 fragment/map_text/jsa refused
 fragment/map_text/jso trusted json
-fragment/map_text/kns refused
 fragment/map_text/kw refused
 fragment/map_text/kwa refused
 fragment/map_text/kwao refused
 fragment/map_text/kwo refused
-fragment/map_text/mm refused
 fragment/map_text/mp refused
 fragment/map_text/mpn refused
 fragment/map_text/mpo refused
@@ -2043,10 +1967,8 @@ fragment/map_text/uu refused
 fragment/naive_date/av refused
 fragment/naive_date/bi refused
 fragment/naive_date/bo refused
-fragment/naive_date/bt refused
 fragment/naive_date/cm trusted json
 fragment/naive_date/co trusted json
-fragment/naive_date/ct refused
 fragment/naive_date/cu trusted custom
 fragment/naive_date/db refused
 fragment/naive_date/dc refused
@@ -2062,12 +1984,10 @@ fragment/naive_date/it refused
 fragment/naive_date/js trusted json
 fragment/naive_date/jsa refused
 fragment/naive_date/jso trusted json
-fragment/naive_date/kns refused
 fragment/naive_date/kw refused
 fragment/naive_date/kwa refused
 fragment/naive_date/kwao refused
 fragment/naive_date/kwo refused
-fragment/naive_date/mm refused
 fragment/naive_date/mp refused
 fragment/naive_date/mpn refused
 fragment/naive_date/mpo refused
@@ -2081,10 +2001,8 @@ fragment/naive_date/uu refused
 fragment/naive_date_time/av refused
 fragment/naive_date_time/bi refused
 fragment/naive_date_time/bo refused
-fragment/naive_date_time/bt refused
 fragment/naive_date_time/cm trusted json
 fragment/naive_date_time/co trusted json
-fragment/naive_date_time/ct refused
 fragment/naive_date_time/cu trusted custom
 fragment/naive_date_time/db refused
 fragment/naive_date_time/dc refused
@@ -2100,12 +2018,10 @@ fragment/naive_date_time/it refused
 fragment/naive_date_time/js trusted json
 fragment/naive_date_time/jsa refused
 fragment/naive_date_time/jso trusted json
-fragment/naive_date_time/kns refused
 fragment/naive_date_time/kw refused
 fragment/naive_date_time/kwa refused
 fragment/naive_date_time/kwao refused
 fragment/naive_date_time/kwo refused
-fragment/naive_date_time/mm refused
 fragment/naive_date_time/mp refused
 fragment/naive_date_time/mpn refused
 fragment/naive_date_time/mpo refused
@@ -2119,10 +2035,8 @@ fragment/naive_date_time/uu refused
 fragment/naive_time/av refused
 fragment/naive_time/bi refused
 fragment/naive_time/bo refused
-fragment/naive_time/bt refused
 fragment/naive_time/cm trusted json
 fragment/naive_time/co trusted json
-fragment/naive_time/ct refused
 fragment/naive_time/cu trusted custom
 fragment/naive_time/db refused
 fragment/naive_time/dc refused
@@ -2138,12 +2052,10 @@ fragment/naive_time/it refused
 fragment/naive_time/js trusted json
 fragment/naive_time/jsa refused
 fragment/naive_time/jso trusted json
-fragment/naive_time/kns refused
 fragment/naive_time/kw refused
 fragment/naive_time/kwa refused
 fragment/naive_time/kwao refused
 fragment/naive_time/kwo refused
-fragment/naive_time/mm refused
 fragment/naive_time/mp refused
 fragment/naive_time/mpn refused
 fragment/naive_time/mpo refused
@@ -2157,10 +2069,8 @@ fragment/naive_time/uu refused
 fragment/opaque_plain/av refused
 fragment/opaque_plain/bi refused
 fragment/opaque_plain/bo refused
-fragment/opaque_plain/bt trusted opaque
 fragment/opaque_plain/cm trusted json
 fragment/opaque_plain/co trusted json
-fragment/opaque_plain/ct refused
 fragment/opaque_plain/cu refused
 fragment/opaque_plain/db refused
 fragment/opaque_plain/dc refused
@@ -2176,12 +2086,10 @@ fragment/opaque_plain/it refused
 fragment/opaque_plain/js trusted json
 fragment/opaque_plain/jsa refused
 fragment/opaque_plain/jso trusted json
-fragment/opaque_plain/kns refused
 fragment/opaque_plain/kw refused
 fragment/opaque_plain/kwa refused
 fragment/opaque_plain/kwao refused
 fragment/opaque_plain/kwo refused
-fragment/opaque_plain/mm refused
 fragment/opaque_plain/mp refused
 fragment/opaque_plain/mpn refused
 fragment/opaque_plain/mpo refused
@@ -2195,10 +2103,8 @@ fragment/opaque_plain/uu refused
 fragment/own_date/av refused
 fragment/own_date/bi refused
 fragment/own_date/bo refused
-fragment/own_date/bt refused
 fragment/own_date/cm trusted json
 fragment/own_date/co trusted json
-fragment/own_date/ct refused
 fragment/own_date/cu reads
 fragment/own_date/db refused
 fragment/own_date/dc refused
@@ -2214,12 +2120,10 @@ fragment/own_date/it refused
 fragment/own_date/js trusted json
 fragment/own_date/jsa refused
 fragment/own_date/jso trusted json
-fragment/own_date/kns reads
 fragment/own_date/kw reads
 fragment/own_date/kwa refused
 fragment/own_date/kwao refused
 fragment/own_date/kwo reads
-fragment/own_date/mm refused
 fragment/own_date/mp refused
 fragment/own_date/mpn refused
 fragment/own_date/mpo refused
@@ -2230,16 +2134,14 @@ fragment/own_date/ob refused
 fragment/own_date/sh refused
 fragment/own_date/ts reads
 fragment/own_date/uu reads
-fragment/own_decimal/av trusted namesake
+fragment/own_decimal/av refused
 fragment/own_decimal/bi refused
 fragment/own_decimal/bo refused
-fragment/own_decimal/bt refused
 fragment/own_decimal/cm trusted json
 fragment/own_decimal/co trusted json
-fragment/own_decimal/ct refused
 fragment/own_decimal/cu reads
-fragment/own_decimal/db trusted namesake
-fragment/own_decimal/dc trusted namesake
+fragment/own_decimal/db refused
+fragment/own_decimal/dc refused
 fragment/own_decimal/dt reads
 fragment/own_decimal/ev reads
 fragment/own_decimal/ex refused
@@ -2252,12 +2154,10 @@ fragment/own_decimal/it refused
 fragment/own_decimal/js trusted json
 fragment/own_decimal/jsa refused
 fragment/own_decimal/jso trusted json
-fragment/own_decimal/kns reads
 fragment/own_decimal/kw reads
 fragment/own_decimal/kwa refused
 fragment/own_decimal/kwao refused
 fragment/own_decimal/kwo reads
-fragment/own_decimal/mm refused
 fragment/own_decimal/mp refused
 fragment/own_decimal/mpn refused
 fragment/own_decimal/mpo refused
@@ -2271,10 +2171,8 @@ fragment/own_decimal/uu reads
 fragment/own_geo_point/av refused
 fragment/own_geo_point/bi refused
 fragment/own_geo_point/bo refused
-fragment/own_geo_point/bt refused
 fragment/own_geo_point/cm trusted json
 fragment/own_geo_point/co trusted json
-fragment/own_geo_point/ct refused
 fragment/own_geo_point/cu reads
 fragment/own_geo_point/db refused
 fragment/own_geo_point/dc refused
@@ -2290,12 +2188,10 @@ fragment/own_geo_point/it refused
 fragment/own_geo_point/js trusted json
 fragment/own_geo_point/jsa refused
 fragment/own_geo_point/jso trusted json
-fragment/own_geo_point/kns reads
 fragment/own_geo_point/kw reads
 fragment/own_geo_point/kwa refused
 fragment/own_geo_point/kwao refused
 fragment/own_geo_point/kwo reads
-fragment/own_geo_point/mm refused
 fragment/own_geo_point/mp refused
 fragment/own_geo_point/mpn refused
 fragment/own_geo_point/mpo refused
@@ -2309,10 +2205,8 @@ fragment/own_geo_point/uu reads
 fragment/own_uuid/av refused
 fragment/own_uuid/bi refused
 fragment/own_uuid/bo refused
-fragment/own_uuid/bt refused
 fragment/own_uuid/cm trusted json
 fragment/own_uuid/co trusted json
-fragment/own_uuid/ct refused
 fragment/own_uuid/cu reads
 fragment/own_uuid/db refused
 fragment/own_uuid/dc refused
@@ -2328,12 +2222,10 @@ fragment/own_uuid/it refused
 fragment/own_uuid/js trusted json
 fragment/own_uuid/jsa refused
 fragment/own_uuid/jso trusted json
-fragment/own_uuid/kns reads
 fragment/own_uuid/kw reads
 fragment/own_uuid/kwa refused
 fragment/own_uuid/kwao refused
 fragment/own_uuid/kwo reads
-fragment/own_uuid/mm refused
 fragment/own_uuid/mp refused
 fragment/own_uuid/mpn refused
 fragment/own_uuid/mpo refused
@@ -2347,10 +2239,8 @@ fragment/own_uuid/uu reads
 fragment/own_value/av trusted namesake
 fragment/own_value/bi trusted namesake
 fragment/own_value/bo trusted namesake
-fragment/own_value/bt trusted namesake
 fragment/own_value/cm trusted json
 fragment/own_value/co trusted json
-fragment/own_value/ct trusted namesake
 fragment/own_value/cu trusted custom
 fragment/own_value/db trusted namesake
 fragment/own_value/dc trusted namesake
@@ -2366,12 +2256,10 @@ fragment/own_value/it trusted namesake
 fragment/own_value/js trusted json
 fragment/own_value/jsa trusted json
 fragment/own_value/jso trusted json
-fragment/own_value/kns trusted namesake
 fragment/own_value/kw trusted namesake
 fragment/own_value/kwa trusted namesake
 fragment/own_value/kwao trusted namesake
 fragment/own_value/kwo trusted namesake
-fragment/own_value/mm trusted namesake
 fragment/own_value/mp trusted namesake
 fragment/own_value/mpn trusted namesake
 fragment/own_value/mpo trusted namesake
@@ -2382,13 +2270,45 @@ fragment/own_value/ob trusted namesake
 fragment/own_value/sh trusted namesake
 fragment/own_value/ts trusted namesake
 fragment/own_value/uu trusted namesake
+fragment/rc_str/av refused
+fragment/rc_str/bi refused
+fragment/rc_str/bo refused
+fragment/rc_str/cm trusted json
+fragment/rc_str/co trusted json
+fragment/rc_str/cu reads
+fragment/rc_str/db refused
+fragment/rc_str/dc refused
+fragment/rc_str/dt reads
+fragment/rc_str/ev reads
+fragment/rc_str/ex refused
+fragment/rc_str/fl refused
+fragment/rc_str/gp refused
+fragment/rc_str/ho refused
+fragment/rc_str/hu refused
+fragment/rc_str/ids refused
+fragment/rc_str/it refused
+fragment/rc_str/js trusted json
+fragment/rc_str/jsa refused
+fragment/rc_str/jso trusted json
+fragment/rc_str/kw reads
+fragment/rc_str/kwa refused
+fragment/rc_str/kwao refused
+fragment/rc_str/kwo reads
+fragment/rc_str/mp refused
+fragment/rc_str/mpn refused
+fragment/rc_str/mpo refused
+fragment/rc_str/n refused
+fragment/rc_str/ne refused
+fragment/rc_str/nn refused
+fragment/rc_str/ob refused
+fragment/rc_str/sh refused
+fragment/rc_str/ts reads
+fragment/rc_str/uu reads
 fragment/short_newtype/av trusted integer
 fragment/short_newtype/bi refused
 fragment/short_newtype/bo refused
-fragment/short_newtype/bt refused
 fragment/short_newtype/cm trusted json
 fragment/short_newtype/co trusted json
-fragment/short_newtype/ct trusted integer
 fragment/short_newtype/cu trusted custom
 fragment/short_newtype/db trusted integer
 fragment/short_newtype/dc trusted integer
@@ -2404,12 +2324,10 @@ fragment/short_newtype/it trusted integer
 fragment/short_newtype/js trusted json
 fragment/short_newtype/jsa refused
 fragment/short_newtype/jso trusted json
-fragment/short_newtype/kns refused
 fragment/short_newtype/kw refused
 fragment/short_newtype/kwa refused
 fragment/short_newtype/kwao refused
 fragment/short_newtype/kwo refused
-fragment/short_newtype/mm refused
 fragment/short_newtype/mp refused
 fragment/short_newtype/mpn refused
 fragment/short_newtype/mpo refused
@@ -2423,10 +2341,8 @@ fragment/short_newtype/uu refused
 fragment/string/av refused
 fragment/string/bi reads
 fragment/string/bo refused
-fragment/string/bt refused
 fragment/string/cm trusted json
 fragment/string/co trusted json
-fragment/string/ct refused
 fragment/string/cu reads
 fragment/string/db refused
 fragment/string/dc refused
@@ -2442,12 +2358,10 @@ fragment/string/it refused
 fragment/string/js trusted json
 fragment/string/jsa refused
 fragment/string/jso trusted json
-fragment/string/kns reads
 fragment/string/kw reads
 fragment/string/kwa refused
 fragment/string/kwao refused
 fragment/string/kwo reads
-fragment/string/mm refused
 fragment/string/mp refused
 fragment/string/mpn refused
 fragment/string/mpo refused
@@ -2461,10 +2375,8 @@ fragment/string/uu reads
 fragment/string_alias/av refused
 fragment/string_alias/bi refused
 fragment/string_alias/bo refused
-fragment/string_alias/bt refused
 fragment/string_alias/cm refused
 fragment/string_alias/co refused
-fragment/string_alias/ct refused
 fragment/string_alias/cu refused
 fragment/string_alias/db refused
 fragment/string_alias/dc refused
@@ -2480,12 +2392,10 @@ fragment/string_alias/it refused
 fragment/string_alias/js refused
 fragment/string_alias/jsa refused
 fragment/string_alias/jso refused
-fragment/string_alias/kns refused
 fragment/string_alias/kw refused
 fragment/string_alias/kwa refused
 fragment/string_alias/kwao refused
 fragment/string_alias/kwo refused
-fragment/string_alias/mm refused
 fragment/string_alias/mp refused
 fragment/string_alias/mpn refused
 fragment/string_alias/mpo refused
@@ -2499,10 +2409,8 @@ fragment/string_alias/uu refused
 fragment/sub/av refused
 fragment/sub/bi refused
 fragment/sub/bo refused
-fragment/sub/bt reads
 fragment/sub/cm refused
 fragment/sub/co refused
-fragment/sub/ct refused
 fragment/sub/cu trusted custom
 fragment/sub/db refused
 fragment/sub/dc refused
@@ -2518,12 +2426,10 @@ fragment/sub/it refused
 fragment/sub/js refused
 fragment/sub/jsa refused
 fragment/sub/jso refused
-fragment/sub/kns refused
 fragment/sub/kw refused
 fragment/sub/kwa refused
 fragment/sub/kwao refused
 fragment/sub/kwo refused
-fragment/sub/mm refused
 fragment/sub/mp refused
 fragment/sub/mpn refused
 fragment/sub/mpo refused
@@ -2537,10 +2443,8 @@ fragment/sub/uu refused
 fragment/subs/av refused
 fragment/subs/bi refused
 fragment/subs/bo refused
-fragment/subs/bt refused
 fragment/subs/cm refused
 fragment/subs/co refused
-fragment/subs/ct refused
 fragment/subs/cu trusted custom
 fragment/subs/db refused
 fragment/subs/dc refused
@@ -2556,12 +2460,10 @@ fragment/subs/it refused
 fragment/subs/js refused
 fragment/subs/jsa refused
 fragment/subs/jso refused
-fragment/subs/kns refused
 fragment/subs/kw refused
 fragment/subs/kwa refused
 fragment/subs/kwao refused
 fragment/subs/kwo refused
-fragment/subs/mm reads
 fragment/subs/mp refused
 fragment/subs/mpn refused
 fragment/subs/mpo refused
@@ -2575,10 +2477,8 @@ fragment/subs/uu refused
 fragment/tagged_over_alias/av refused
 fragment/tagged_over_alias/bi refused
 fragment/tagged_over_alias/bo refused
-fragment/tagged_over_alias/bt refused
 fragment/tagged_over_alias/cm trusted json
 fragment/tagged_over_alias/co trusted json
-fragment/tagged_over_alias/ct refused
 fragment/tagged_over_alias/cu trusted unseen
 fragment/tagged_over_alias/db refused
 fragment/tagged_over_alias/dc refused
@@ -2594,12 +2494,10 @@ fragment/tagged_over_alias/it refused
 fragment/tagged_over_alias/js trusted json
 fragment/tagged_over_alias/jsa refused
 fragment/tagged_over_alias/jso trusted json
-fragment/tagged_over_alias/kns trusted unseen
 fragment/tagged_over_alias/kw trusted unseen
 fragment/tagged_over_alias/kwa refused
 fragment/tagged_over_alias/kwao refused
 fragment/tagged_over_alias/kwo trusted unseen
-fragment/tagged_over_alias/mm refused
 fragment/tagged_over_alias/mp refused
 fragment/tagged_over_alias/mpn refused
 fragment/tagged_over_alias/mpo refused
@@ -2613,10 +2511,8 @@ fragment/tagged_over_alias/uu trusted unseen
 fragment/tagged_over_char/av refused
 fragment/tagged_over_char/bi refused
 fragment/tagged_over_char/bo refused
-fragment/tagged_over_char/bt refused
 fragment/tagged_over_char/cm trusted json
 fragment/tagged_over_char/co trusted json
-fragment/tagged_over_char/ct refused
 fragment/tagged_over_char/cu trusted unseen
 fragment/tagged_over_char/db refused
 fragment/tagged_over_char/dc refused
@@ -2632,12 +2528,10 @@ fragment/tagged_over_char/it refused
 fragment/tagged_over_char/js trusted json
 fragment/tagged_over_char/jsa refused
 fragment/tagged_over_char/jso trusted json
-fragment/tagged_over_char/kns trusted unseen
 fragment/tagged_over_char/kw trusted unseen
 fragment/tagged_over_char/kwa refused
 fragment/tagged_over_char/kwao refused
 fragment/tagged_over_char/kwo reads
-fragment/tagged_over_char/mm refused
 fragment/tagged_over_char/mp refused
 fragment/tagged_over_char/mpn refused
 fragment/tagged_over_char/mpo refused
@@ -2651,10 +2545,8 @@ fragment/tagged_over_char/uu trusted unseen
 fragment/tagged_over_cow_str/av refused
 fragment/tagged_over_cow_str/bi refused
 fragment/tagged_over_cow_str/bo refused
-fragment/tagged_over_cow_str/bt refused
 fragment/tagged_over_cow_str/cm trusted json
 fragment/tagged_over_cow_str/co trusted json
-fragment/tagged_over_cow_str/ct refused
 fragment/tagged_over_cow_str/cu reads
 fragment/tagged_over_cow_str/db refused
 fragment/tagged_over_cow_str/dc refused
@@ -2670,12 +2562,10 @@ fragment/tagged_over_cow_str/it refused
 fragment/tagged_over_cow_str/js trusted json
 fragment/tagged_over_cow_str/jsa refused
 fragment/tagged_over_cow_str/jso trusted json
-fragment/tagged_over_cow_str/kns reads
 fragment/tagged_over_cow_str/kw reads
 fragment/tagged_over_cow_str/kwa refused
 fragment/tagged_over_cow_str/kwao refused
 fragment/tagged_over_cow_str/kwo reads
-fragment/tagged_over_cow_str/mm refused
 fragment/tagged_over_cow_str/mp refused
 fragment/tagged_over_cow_str/mpn refused
 fragment/tagged_over_cow_str/mpo refused
@@ -2689,10 +2579,8 @@ fragment/tagged_over_cow_str/uu reads
 fragment/tagged_over_decimal/av refused
 fragment/tagged_over_decimal/bi refused
 fragment/tagged_over_decimal/bo refused
-fragment/tagged_over_decimal/bt refused
 fragment/tagged_over_decimal/cm trusted json
 fragment/tagged_over_decimal/co trusted json
-fragment/tagged_over_decimal/ct refused
 fragment/tagged_over_decimal/cu trusted unseen
 fragment/tagged_over_decimal/db refused
 fragment/tagged_over_decimal/dc refused
@@ -2708,12 +2596,10 @@ fragment/tagged_over_decimal/it refused
 fragment/tagged_over_decimal/js trusted json
 fragment/tagged_over_decimal/jsa refused
 fragment/tagged_over_decimal/jso trusted json
-fragment/tagged_over_decimal/kns trusted unseen
 fragment/tagged_over_decimal/kw trusted unseen
 fragment/tagged_over_decimal/kwa refused
 fragment/tagged_over_decimal/kwao refused
 fragment/tagged_over_decimal/kwo trusted unseen
-fragment/tagged_over_decimal/mm refused
 fragment/tagged_over_decimal/mp refused
 fragment/tagged_over_decimal/mpn refused
 fragment/tagged_over_decimal/mpo refused
@@ -2727,10 +2613,8 @@ fragment/tagged_over_decimal/uu trusted unseen
 fragment/tagged_over_duration/av refused
 fragment/tagged_over_duration/bi refused
 fragment/tagged_over_duration/bo refused
-fragment/tagged_over_duration/bt refused
 fragment/tagged_over_duration/cm trusted json
 fragment/tagged_over_duration/co trusted json
-fragment/tagged_over_duration/ct refused
 fragment/tagged_over_duration/cu trusted unseen
 fragment/tagged_over_duration/db refused
 fragment/tagged_over_duration/dc refused
@@ -2746,12 +2630,10 @@ fragment/tagged_over_duration/it refused
 fragment/tagged_over_duration/js trusted json
 fragment/tagged_over_duration/jsa refused
 fragment/tagged_over_duration/jso trusted json
-fragment/tagged_over_duration/kns trusted unseen
 fragment/tagged_over_duration/kw trusted unseen
 fragment/tagged_over_duration/kwa refused
 fragment/tagged_over_duration/kwao refused
 fragment/tagged_over_duration/kwo trusted unseen
-fragment/tagged_over_duration/mm refused
 fragment/tagged_over_duration/mp refused
 fragment/tagged_over_duration/mpn refused
 fragment/tagged_over_duration/mpo refused
@@ -2765,10 +2647,8 @@ fragment/tagged_over_duration/uu trusted unseen
 fragment/tagged_over_geo_point/av refused
 fragment/tagged_over_geo_point/bi refused
 fragment/tagged_over_geo_point/bo refused
-fragment/tagged_over_geo_point/bt refused
 fragment/tagged_over_geo_point/cm trusted json
 fragment/tagged_over_geo_point/co trusted json
-fragment/tagged_over_geo_point/ct refused
 fragment/tagged_over_geo_point/cu trusted unseen
 fragment/tagged_over_geo_point/db refused
 fragment/tagged_over_geo_point/dc refused
@@ -2784,12 +2664,10 @@ fragment/tagged_over_geo_point/it refused
 fragment/tagged_over_geo_point/js trusted json
 fragment/tagged_over_geo_point/jsa refused
 fragment/tagged_over_geo_point/jso trusted json
-fragment/tagged_over_geo_point/kns trusted unseen
 fragment/tagged_over_geo_point/kw trusted unseen
 fragment/tagged_over_geo_point/kwa refused
 fragment/tagged_over_geo_point/kwao refused
 fragment/tagged_over_geo_point/kwo trusted unseen
-fragment/tagged_over_geo_point/mm refused
 fragment/tagged_over_geo_point/mp refused
 fragment/tagged_over_geo_point/mpn refused
 fragment/tagged_over_geo_point/mpo refused
@@ -2803,10 +2681,8 @@ fragment/tagged_over_geo_point/uu trusted unseen
 fragment/tagged_over_naive_date/av refused
 fragment/tagged_over_naive_date/bi refused
 fragment/tagged_over_naive_date/bo refused
-fragment/tagged_over_naive_date/bt refused
 fragment/tagged_over_naive_date/cm trusted json
 fragment/tagged_over_naive_date/co trusted json
-fragment/tagged_over_naive_date/ct refused
 fragment/tagged_over_naive_date/cu trusted unseen
 fragment/tagged_over_naive_date/db refused
 fragment/tagged_over_naive_date/dc refused
@@ -2822,12 +2698,10 @@ fragment/tagged_over_naive_date/it refused
 fragment/tagged_over_naive_date/js trusted json
 fragment/tagged_over_naive_date/jsa refused
 fragment/tagged_over_naive_date/jso trusted json
-fragment/tagged_over_naive_date/kns trusted unseen
 fragment/tagged_over_naive_date/kw trusted unseen
 fragment/tagged_over_naive_date/kwa refused
 fragment/tagged_over_naive_date/kwao refused
 fragment/tagged_over_naive_date/kwo trusted unseen
-fragment/tagged_over_naive_date/mm refused
 fragment/tagged_over_naive_date/mp refused
 fragment/tagged_over_naive_date/mpn refused
 fragment/tagged_over_naive_date/mpo refused
@@ -2841,10 +2715,8 @@ fragment/tagged_over_naive_date/uu trusted unseen
 fragment/tagged_over_plain_map_newtype/av refused
 fragment/tagged_over_plain_map_newtype/bi refused
 fragment/tagged_over_plain_map_newtype/bo refused
-fragment/tagged_over_plain_map_newtype/bt refused
 fragment/tagged_over_plain_map_newtype/cm trusted json
 fragment/tagged_over_plain_map_newtype/co trusted json
-fragment/tagged_over_plain_map_newtype/ct refused
 fragment/tagged_over_plain_map_newtype/cu trusted unseen
 fragment/tagged_over_plain_map_newtype/db refused
 fragment/tagged_over_plain_map_newtype/dc refused
@@ -2860,12 +2732,10 @@ fragment/tagged_over_plain_map_newtype/it refused
 fragment/tagged_over_plain_map_newtype/js trusted json
 fragment/tagged_over_plain_map_newtype/jsa refused
 fragment/tagged_over_plain_map_newtype/jso trusted json
-fragment/tagged_over_plain_map_newtype/kns trusted unseen
 fragment/tagged_over_plain_map_newtype/kw trusted unseen
 fragment/tagged_over_plain_map_newtype/kwa refused
 fragment/tagged_over_plain_map_newtype/kwao refused
 fragment/tagged_over_plain_map_newtype/kwo trusted unseen
-fragment/tagged_over_plain_map_newtype/mm refused
 fragment/tagged_over_plain_map_newtype/mp refused
 fragment/tagged_over_plain_map_newtype/mpn refused
 fragment/tagged_over_plain_map_newtype/mpo refused
@@ -2879,10 +2749,8 @@ fragment/tagged_over_plain_map_newtype/uu trusted unseen
 fragment/tags/av refused
 fragment/tags/bi refused
 fragment/tags/bo refused
-fragment/tags/bt refused
 fragment/tags/cm trusted json
 fragment/tags/co trusted json
-fragment/tags/ct refused
 fragment/tags/cu trusted custom
 fragment/tags/db refused
 fragment/tags/dc refused
@@ -2898,12 +2766,10 @@ fragment/tags/it refused
 fragment/tags/js trusted json
 fragment/tags/jsa trusted json
 fragment/tags/jso trusted json
-fragment/tags/kns refused
 fragment/tags/kw refused
 fragment/tags/kwa trusted jsonb
 fragment/tags/kwao reads
 fragment/tags/kwo refused
-fragment/tags/mm refused
 fragment/tags/mp refused
 fragment/tags/mpn refused
 fragment/tags/mpo refused
@@ -2917,10 +2783,8 @@ fragment/tags/uu refused
 fragment/try_from/av refused
 fragment/try_from/bi refused
 fragment/try_from/bo refused
-fragment/try_from/bt refused
 fragment/try_from/cm trusted json
 fragment/try_from/co trusted json
-fragment/try_from/ct refused
 fragment/try_from/cu reads
 fragment/try_from/db refused
 fragment/try_from/dc refused
@@ -2936,12 +2800,10 @@ fragment/try_from/it refused
 fragment/try_from/js trusted json
 fragment/try_from/jsa refused
 fragment/try_from/jso trusted json
-fragment/try_from/kns trusted serde
 fragment/try_from/kw trusted serde
 fragment/try_from/kwa refused
 fragment/try_from/kwao refused
 fragment/try_from/kwo trusted serde
-fragment/try_from/mm refused
 fragment/try_from/mp refused
 fragment/try_from/mpn refused
 fragment/try_from/mpo refused
@@ -2956,10 +2818,8 @@ fragment/u128/cu trusted custom
 fragment/uuid/av refused
 fragment/uuid/bi refused
 fragment/uuid/bo refused
-fragment/uuid/bt refused
 fragment/uuid/cm trusted json
 fragment/uuid/co trusted json
-fragment/uuid/ct refused
 fragment/uuid/cu trusted custom
 fragment/uuid/db refused
 fragment/uuid/dc refused
@@ -2975,12 +2835,10 @@ fragment/uuid/it refused
 fragment/uuid/js trusted json
 fragment/uuid/jsa refused
 fragment/uuid/jso trusted json
-fragment/uuid/kns trusted uuid
 fragment/uuid/kw trusted uuid
 fragment/uuid/kwa refused
 fragment/uuid/kwao refused
 fragment/uuid/kwo trusted uuid
-fragment/uuid/mm refused
 fragment/uuid/mp refused
 fragment/uuid/mpn refused
 fragment/uuid/mpo refused
@@ -2994,10 +2852,8 @@ fragment/uuid/uu reads
 fragment/value/av reads
 fragment/value/bi reads
 fragment/value/bo reads
-fragment/value/bt reads
 fragment/value/cm reads
 fragment/value/co reads
-fragment/value/ct reads
 fragment/value/cu reads
 fragment/value/db reads
 fragment/value/dc reads
@@ -3013,12 +2869,10 @@ fragment/value/it reads
 fragment/value/js reads
 fragment/value/jsa reads
 fragment/value/jso reads
-fragment/value/kns reads
 fragment/value/kw reads
 fragment/value/kwa reads
 fragment/value/kwao reads
 fragment/value/kwo reads
-fragment/value/mm reads
 fragment/value/mp reads
 fragment/value/mpn reads
 fragment/value/mpo reads
@@ -3032,10 +2886,8 @@ fragment/value/uu reads
 fragment/value_over_map/av refused
 fragment/value_over_map/bi refused
 fragment/value_over_map/bo refused
-fragment/value_over_map/bt refused
 fragment/value_over_map/cm trusted json
 fragment/value_over_map/co trusted json
-fragment/value_over_map/ct refused
 fragment/value_over_map/cu trusted custom
 fragment/value_over_map/db refused
 fragment/value_over_map/dc refused
@@ -3051,12 +2903,10 @@ fragment/value_over_map/it refused
 fragment/value_over_map/js trusted json
 fragment/value_over_map/jsa refused
 fragment/value_over_map/jso trusted json
-fragment/value_over_map/kns refused
 fragment/value_over_map/kw refused
 fragment/value_over_map/kwa refused
 fragment/value_over_map/kwao refused
 fragment/value_over_map/kwo refused
-fragment/value_over_map/mm refused
 fragment/value_over_map/mp trusted jsonb+null
 fragment/value_over_map/mpn refused
 fragment/value_over_map/mpo trusted null
@@ -3070,10 +2920,8 @@ fragment/value_over_map/uu refused
 fragment/vec_decimal/av refused
 fragment/vec_decimal/bi refused
 fragment/vec_decimal/bo refused
-fragment/vec_decimal/bt refused
 fragment/vec_decimal/cm trusted json
 fragment/vec_decimal/co trusted json
-fragment/vec_decimal/ct refused
 fragment/vec_decimal/cu trusted custom
 fragment/vec_decimal/db refused
 fragment/vec_decimal/dc refused
@@ -3089,12 +2937,10 @@ fragment/vec_decimal/it refused
 fragment/vec_decimal/js trusted json
 fragment/vec_decimal/jsa trusted json
 fragment/vec_decimal/jso trusted json
-fragment/vec_decimal/kns refused
 fragment/vec_decimal/kw refused
 fragment/vec_decimal/kwa refused
 fragment/vec_decimal/kwao refused
 fragment/vec_decimal/kwo refused
-fragment/vec_decimal/mm refused
 fragment/vec_decimal/mp refused
 fragment/vec_decimal/mpn refused
 fragment/vec_decimal/mpo refused
@@ -3108,10 +2954,8 @@ fragment/vec_decimal/uu refused
 fragment/vec_enum_partial/av refused
 fragment/vec_enum_partial/bi refused
 fragment/vec_enum_partial/bo refused
-fragment/vec_enum_partial/bt refused
 fragment/vec_enum_partial/cm trusted json
 fragment/vec_enum_partial/co trusted json
-fragment/vec_enum_partial/ct refused
 fragment/vec_enum_partial/cu trusted custom
 fragment/vec_enum_partial/db refused
 fragment/vec_enum_partial/dc refused
@@ -3127,12 +2971,10 @@ fragment/vec_enum_partial/it refused
 fragment/vec_enum_partial/js trusted json
 fragment/vec_enum_partial/jsa trusted json
 fragment/vec_enum_partial/jso trusted json
-fragment/vec_enum_partial/kns refused
 fragment/vec_enum_partial/kw refused
 fragment/vec_enum_partial/kwa trusted jsonb+partial
 fragment/vec_enum_partial/kwao trusted partial
 fragment/vec_enum_partial/kwo refused
-fragment/vec_enum_partial/mm refused
 fragment/vec_enum_partial/mp refused
 fragment/vec_enum_partial/mpn refused
 fragment/vec_enum_partial/mpo refused
@@ -3146,10 +2988,8 @@ fragment/vec_enum_partial/uu refused
 fragment/vec_fragment_over_map/av refused
 fragment/vec_fragment_over_map/bi refused
 fragment/vec_fragment_over_map/bo refused
-fragment/vec_fragment_over_map/bt refused
 fragment/vec_fragment_over_map/cm trusted json
 fragment/vec_fragment_over_map/co trusted json
-fragment/vec_fragment_over_map/ct refused
 fragment/vec_fragment_over_map/cu trusted custom
 fragment/vec_fragment_over_map/db refused
 fragment/vec_fragment_over_map/dc refused
@@ -3165,12 +3005,10 @@ fragment/vec_fragment_over_map/it refused
 fragment/vec_fragment_over_map/js trusted json
 fragment/vec_fragment_over_map/jsa trusted json
 fragment/vec_fragment_over_map/jso trusted json
-fragment/vec_fragment_over_map/kns refused
 fragment/vec_fragment_over_map/kw refused
 fragment/vec_fragment_over_map/kwa refused
 fragment/vec_fragment_over_map/kwao refused
 fragment/vec_fragment_over_map/kwo refused
-fragment/vec_fragment_over_map/mm refused
 fragment/vec_fragment_over_map/mp refused
 fragment/vec_fragment_over_map/mpn refused
 fragment/vec_fragment_over_map/mpo refused
@@ -3184,10 +3022,8 @@ fragment/vec_fragment_over_map/uu refused
 fragment/vec_long/av refused
 fragment/vec_long/bi refused
 fragment/vec_long/bo refused
-fragment/vec_long/bt refused
 fragment/vec_long/cm trusted json
 fragment/vec_long/co trusted json
-fragment/vec_long/ct refused
 fragment/vec_long/cu trusted custom
 fragment/vec_long/db refused
 fragment/vec_long/dc refused
@@ -3203,12 +3039,10 @@ fragment/vec_long/it refused
 fragment/vec_long/js trusted json
 fragment/vec_long/jsa trusted json
 fragment/vec_long/jso trusted json
-fragment/vec_long/kns refused
 fragment/vec_long/kw refused
 fragment/vec_long/kwa refused
 fragment/vec_long/kwao refused
 fragment/vec_long/kwo refused
-fragment/vec_long/mm refused
 fragment/vec_long/mp refused
 fragment/vec_long/mpn refused
 fragment/vec_long/mpo refused
@@ -3223,10 +3057,8 @@ fragment/vec_option/cu trusted custom
 fragment/vec_own_date/av refused
 fragment/vec_own_date/bi refused
 fragment/vec_own_date/bo refused
-fragment/vec_own_date/bt refused
 fragment/vec_own_date/cm trusted json
 fragment/vec_own_date/co trusted json
-fragment/vec_own_date/ct refused
 fragment/vec_own_date/cu trusted custom
 fragment/vec_own_date/db refused
 fragment/vec_own_date/dc refused
@@ -3242,12 +3074,10 @@ fragment/vec_own_date/it refused
 fragment/vec_own_date/js trusted json
 fragment/vec_own_date/jsa trusted json
 fragment/vec_own_date/jso trusted json
-fragment/vec_own_date/kns refused
 fragment/vec_own_date/kw refused
 fragment/vec_own_date/kwa trusted namesake
 fragment/vec_own_date/kwao reads
 fragment/vec_own_date/kwo refused
-fragment/vec_own_date/mm refused
 fragment/vec_own_date/mp refused
 fragment/vec_own_date/mpn refused
 fragment/vec_own_date/mpo refused
@@ -3258,13 +3088,45 @@ fragment/vec_own_date/ob refused
 fragment/vec_own_date/sh refused
 fragment/vec_own_date/ts refused
 fragment/vec_own_date/uu refused
+fragment/vec_rc_str/av refused
+fragment/vec_rc_str/bi refused
+fragment/vec_rc_str/bo refused
+fragment/vec_rc_str/cm trusted json
+fragment/vec_rc_str/co trusted json
+fragment/vec_rc_str/cu trusted custom
+fragment/vec_rc_str/db refused
+fragment/vec_rc_str/dc refused
+fragment/vec_rc_str/dt refused
+fragment/vec_rc_str/ev refused
+fragment/vec_rc_str/ex refused
+fragment/vec_rc_str/fl refused
+fragment/vec_rc_str/gp refused
+fragment/vec_rc_str/ho refused
+fragment/vec_rc_str/hu refused
+fragment/vec_rc_str/ids refused
+fragment/vec_rc_str/it refused
+fragment/vec_rc_str/js trusted json
+fragment/vec_rc_str/jsa trusted json
+fragment/vec_rc_str/jso trusted json
+fragment/vec_rc_str/kw refused
+fragment/vec_rc_str/kwa trusted jsonb
+fragment/vec_rc_str/kwao reads
+fragment/vec_rc_str/kwo refused
+fragment/vec_rc_str/mp refused
+fragment/vec_rc_str/mpn refused
+fragment/vec_rc_str/mpo refused
+fragment/vec_rc_str/n refused
+fragment/vec_rc_str/ne refused
+fragment/vec_rc_str/nn refused
+fragment/vec_rc_str/ob refused
+fragment/vec_rc_str/sh refused
+fragment/vec_rc_str/ts refused
+fragment/vec_rc_str/uu refused
 fragment/vec_string/av refused
 fragment/vec_string/bi refused
 fragment/vec_string/bo refused
-fragment/vec_string/bt refused
 fragment/vec_string/cm trusted json
 fragment/vec_string/co trusted json
-fragment/vec_string/ct refused
 fragment/vec_string/cu trusted custom
 fragment/vec_string/db refused
 fragment/vec_string/dc refused
@@ -3280,12 +3142,10 @@ fragment/vec_string/it refused
 fragment/vec_string/js trusted json
 fragment/vec_string/jsa trusted json
 fragment/vec_string/jso trusted json
-fragment/vec_string/kns refused
 fragment/vec_string/kw refused
 fragment/vec_string/kwa trusted jsonb
 fragment/vec_string/kwao reads
 fragment/vec_string/kwo refused
-fragment/vec_string/mm refused
 fragment/vec_string/mp refused
 fragment/vec_string/mpn refused
 fragment/vec_string/mpo refused
@@ -3299,10 +3159,8 @@ fragment/vec_string/uu refused
 fragment/vec_sub/av refused
 fragment/vec_sub/bi refused
 fragment/vec_sub/bo refused
-fragment/vec_sub/bt refused
 fragment/vec_sub/cm refused
 fragment/vec_sub/co refused
-fragment/vec_sub/ct refused
 fragment/vec_sub/cu trusted custom
 fragment/vec_sub/db refused
 fragment/vec_sub/dc refused
@@ -3318,12 +3176,10 @@ fragment/vec_sub/it refused
 fragment/vec_sub/js refused
 fragment/vec_sub/jsa refused
 fragment/vec_sub/jso refused
-fragment/vec_sub/kns refused
 fragment/vec_sub/kw refused
 fragment/vec_sub/kwa refused
 fragment/vec_sub/kwao refused
 fragment/vec_sub/kwo refused
-fragment/vec_sub/mm reads
 fragment/vec_sub/mp refused
 fragment/vec_sub/mpn refused
 fragment/vec_sub/mpo refused
@@ -3337,10 +3193,8 @@ fragment/vec_sub/uu refused
 fragment/vec_uuid/av refused
 fragment/vec_uuid/bi refused
 fragment/vec_uuid/bo refused
-fragment/vec_uuid/bt refused
 fragment/vec_uuid/cm trusted json
 fragment/vec_uuid/co trusted json
-fragment/vec_uuid/ct refused
 fragment/vec_uuid/cu trusted custom
 fragment/vec_uuid/db refused
 fragment/vec_uuid/dc refused
@@ -3356,12 +3210,10 @@ fragment/vec_uuid/it refused
 fragment/vec_uuid/js trusted json
 fragment/vec_uuid/jsa trusted json
 fragment/vec_uuid/jso trusted json
-fragment/vec_uuid/kns refused
 fragment/vec_uuid/kw refused
 fragment/vec_uuid/kwa trusted uuid
 fragment/vec_uuid/kwao trusted uuid
 fragment/vec_uuid/kwo refused
-fragment/vec_uuid/mm refused
 fragment/vec_uuid/mp refused
 fragment/vec_uuid/mpn refused
 fragment/vec_uuid/mpo refused
@@ -3411,7 +3263,28 @@ gen/fragment/field_box_l/cu trusted custom
 gen/fragment/field_box_mk/cu trusted custom
 gen/fragment/field_box_s/cu reads
 gen/fragment/field_box_sub/cu trusted custom
+gen/fragment/field_bs/cm trusted json
+gen/fragment/field_bs/co trusted json
 gen/fragment/field_bs/cu reads
+gen/fragment/field_bs/dt reads
+gen/fragment/field_bs/ev reads
+gen/fragment/field_bs/gp refused
+gen/fragment/field_bs/ho refused
+gen/fragment/field_bs/js trusted json
+gen/fragment/field_bs/jsa refused
+gen/fragment/field_bs/jso trusted json
+gen/fragment/field_bs/kw reads
+gen/fragment/field_bs/kwa refused
+gen/fragment/field_bs/kwao refused
+gen/fragment/field_bs/kwo reads
+gen/fragment/field_bs/mp refused
+gen/fragment/field_bs/mpn refused
+gen/fragment/field_bs/mpo refused
+gen/fragment/field_bs/n refused
+gen/fragment/field_bs/ne refused
+gen/fragment/field_bs/nn refused
+gen/fragment/field_bs/ob refused
+gen/fragment/field_bs/ts reads
 gen/fragment/field_btv/cm trusted json
 gen/fragment/field_btv/co reads
 gen/fragment/field_btv/cu trusted custom
@@ -3457,7 +3330,28 @@ gen/fragment/field_code/ne refused
 gen/fragment/field_code/nn refused
 gen/fragment/field_code/ob refused
 gen/fragment/field_code/ts reads
+gen/fragment/field_cow/cm trusted json
+gen/fragment/field_cow/co trusted json
 gen/fragment/field_cow/cu reads
+gen/fragment/field_cow/dt reads
+gen/fragment/field_cow/ev reads
+gen/fragment/field_cow/gp refused
+gen/fragment/field_cow/ho refused
+gen/fragment/field_cow/js trusted json
+gen/fragment/field_cow/jsa refused
+gen/fragment/field_cow/jso trusted json
+gen/fragment/field_cow/kw reads
+gen/fragment/field_cow/kwa refused
+gen/fragment/field_cow/kwao refused
+gen/fragment/field_cow/kwo reads
+gen/fragment/field_cow/mp refused
+gen/fragment/field_cow/mpn refused
+gen/fragment/field_cow/mpo refused
+gen/fragment/field_cow/n refused
+gen/fragment/field_cow/ne refused
+gen/fragment/field_cow/nn refused
+gen/fragment/field_cow/ob refused
+gen/fragment/field_cow/ts reads
 gen/fragment/field_f/cm trusted json
 gen/fragment/field_f/co trusted json
 gen/fragment/field_f/cu trusted custom
@@ -3701,7 +3595,28 @@ gen/fragment/field_sub/nn refused
 gen/fragment/field_sub/ob reads
 gen/fragment/field_sub/ts refused
 gen/fragment/field_vec_alias/cu refused
+gen/fragment/field_vec_bs/cm trusted json
+gen/fragment/field_vec_bs/co trusted json
 gen/fragment/field_vec_bs/cu trusted custom
+gen/fragment/field_vec_bs/dt refused
+gen/fragment/field_vec_bs/ev refused
+gen/fragment/field_vec_bs/gp refused
+gen/fragment/field_vec_bs/ho refused
+gen/fragment/field_vec_bs/js trusted json
+gen/fragment/field_vec_bs/jsa trusted json
+gen/fragment/field_vec_bs/jso trusted json
+gen/fragment/field_vec_bs/kw refused
+gen/fragment/field_vec_bs/kwa trusted jsonb
+gen/fragment/field_vec_bs/kwao reads
+gen/fragment/field_vec_bs/kwo refused
+gen/fragment/field_vec_bs/mp refused
+gen/fragment/field_vec_bs/mpn refused
+gen/fragment/field_vec_bs/mpo refused
+gen/fragment/field_vec_bs/n refused
+gen/fragment/field_vec_bs/ne refused
+gen/fragment/field_vec_bs/nn refused
+gen/fragment/field_vec_bs/ob refused
+gen/fragment/field_vec_bs/ts refused
 gen/fragment/field_vec_btv/cm trusted json
 gen/fragment/field_vec_btv/co trusted json
 gen/fragment/field_vec_btv/cu trusted custom
@@ -3747,7 +3662,28 @@ gen/fragment/field_vec_code/ne refused
 gen/fragment/field_vec_code/nn refused
 gen/fragment/field_vec_code/ob refused
 gen/fragment/field_vec_code/ts refused
+gen/fragment/field_vec_cow/cm trusted json
+gen/fragment/field_vec_cow/co trusted json
 gen/fragment/field_vec_cow/cu trusted custom
+gen/fragment/field_vec_cow/dt refused
+gen/fragment/field_vec_cow/ev refused
+gen/fragment/field_vec_cow/gp refused
+gen/fragment/field_vec_cow/ho refused
+gen/fragment/field_vec_cow/js trusted json
+gen/fragment/field_vec_cow/jsa trusted json
+gen/fragment/field_vec_cow/jso trusted json
+gen/fragment/field_vec_cow/kw refused
+gen/fragment/field_vec_cow/kwa trusted jsonb
+gen/fragment/field_vec_cow/kwao reads
+gen/fragment/field_vec_cow/kwo refused
+gen/fragment/field_vec_cow/mp refused
+gen/fragment/field_vec_cow/mpn refused
+gen/fragment/field_vec_cow/mpo refused
+gen/fragment/field_vec_cow/n refused
+gen/fragment/field_vec_cow/ne refused
+gen/fragment/field_vec_cow/nn refused
+gen/fragment/field_vec_cow/ob refused
+gen/fragment/field_vec_cow/ts refused
 gen/fragment/field_vec_f/cm trusted json
 gen/fragment/field_vec_f/co trusted json
 gen/fragment/field_vec_f/cu trusted custom
@@ -5332,6 +5268,28 @@ gen/fragment/map_mk/ne refused
 gen/fragment/map_mk/nn refused
 gen/fragment/map_mk/ob refused
 gen/fragment/map_mk/ts refused
+gen/fragment/value_bs/cm trusted json
+gen/fragment/value_bs/co trusted json
+gen/fragment/value_bs/cu reads
+gen/fragment/value_bs/dt reads
+gen/fragment/value_bs/ev reads
+gen/fragment/value_bs/gp refused
+gen/fragment/value_bs/ho refused
+gen/fragment/value_bs/js trusted json
+gen/fragment/value_bs/jsa refused
+gen/fragment/value_bs/jso trusted json
+gen/fragment/value_bs/kw reads
+gen/fragment/value_bs/kwa refused
+gen/fragment/value_bs/kwao refused
+gen/fragment/value_bs/kwo reads
+gen/fragment/value_bs/mp refused
+gen/fragment/value_bs/mpn refused
+gen/fragment/value_bs/mpo refused
+gen/fragment/value_bs/n refused
+gen/fragment/value_bs/ne refused
+gen/fragment/value_bs/nn refused
+gen/fragment/value_bs/ob refused
+gen/fragment/value_bs/ts reads
 gen/fragment/value_code/cm trusted json
 gen/fragment/value_code/co trusted json
 gen/fragment/value_code/cu reads
@@ -5354,6 +5312,28 @@ gen/fragment/value_code/ne refused
 gen/fragment/value_code/nn refused
 gen/fragment/value_code/ob refused
 gen/fragment/value_code/ts reads
+gen/fragment/value_cow/cm trusted json
+gen/fragment/value_cow/co trusted json
+gen/fragment/value_cow/cu reads
+gen/fragment/value_cow/dt reads
+gen/fragment/value_cow/ev reads
+gen/fragment/value_cow/gp refused
+gen/fragment/value_cow/ho refused
+gen/fragment/value_cow/js trusted json
+gen/fragment/value_cow/jsa refused
+gen/fragment/value_cow/jso trusted json
+gen/fragment/value_cow/kw reads
+gen/fragment/value_cow/kwa refused
+gen/fragment/value_cow/kwao refused
+gen/fragment/value_cow/kwo reads
+gen/fragment/value_cow/mp refused
+gen/fragment/value_cow/mpn refused
+gen/fragment/value_cow/mpo refused
+gen/fragment/value_cow/n refused
+gen/fragment/value_cow/ne refused
+gen/fragment/value_cow/nn refused
+gen/fragment/value_cow/ob refused
+gen/fragment/value_cow/ts reads
 gen/fragment/value_f/cm trusted json
 gen/fragment/value_f/co trusted json
 gen/fragment/value_f/cu trusted custom
@@ -5420,6 +5400,28 @@ gen/fragment/value_mk/ne refused
 gen/fragment/value_mk/nn refused
 gen/fragment/value_mk/ob refused
 gen/fragment/value_mk/ts refused
+gen/fragment/value_of_value_bs/cm trusted json
+gen/fragment/value_of_value_bs/co trusted json
+gen/fragment/value_of_value_bs/cu reads
+gen/fragment/value_of_value_bs/dt reads
+gen/fragment/value_of_value_bs/ev reads
+gen/fragment/value_of_value_bs/gp refused
+gen/fragment/value_of_value_bs/ho refused
+gen/fragment/value_of_value_bs/js trusted json
+gen/fragment/value_of_value_bs/jsa refused
+gen/fragment/value_of_value_bs/jso trusted json
+gen/fragment/value_of_value_bs/kw reads
+gen/fragment/value_of_value_bs/kwa refused
+gen/fragment/value_of_value_bs/kwao refused
+gen/fragment/value_of_value_bs/kwo reads
+gen/fragment/value_of_value_bs/mp refused
+gen/fragment/value_of_value_bs/mpn refused
+gen/fragment/value_of_value_bs/mpo refused
+gen/fragment/value_of_value_bs/n refused
+gen/fragment/value_of_value_bs/ne refused
+gen/fragment/value_of_value_bs/nn refused
+gen/fragment/value_of_value_bs/ob refused
+gen/fragment/value_of_value_bs/ts reads
 gen/fragment/value_of_value_code/cm trusted json
 gen/fragment/value_of_value_code/co trusted json
 gen/fragment/value_of_value_code/cu reads
@@ -5442,6 +5444,28 @@ gen/fragment/value_of_value_code/ne refused
 gen/fragment/value_of_value_code/nn refused
 gen/fragment/value_of_value_code/ob refused
 gen/fragment/value_of_value_code/ts reads
+gen/fragment/value_of_value_cow/cm trusted json
+gen/fragment/value_of_value_cow/co trusted json
+gen/fragment/value_of_value_cow/cu reads
+gen/fragment/value_of_value_cow/dt reads
+gen/fragment/value_of_value_cow/ev reads
+gen/fragment/value_of_value_cow/gp refused
+gen/fragment/value_of_value_cow/ho refused
+gen/fragment/value_of_value_cow/js trusted json
+gen/fragment/value_of_value_cow/jsa refused
+gen/fragment/value_of_value_cow/jso trusted json
+gen/fragment/value_of_value_cow/kw reads
+gen/fragment/value_of_value_cow/kwa refused
+gen/fragment/value_of_value_cow/kwao refused
+gen/fragment/value_of_value_cow/kwo reads
+gen/fragment/value_of_value_cow/mp refused
+gen/fragment/value_of_value_cow/mpn refused
+gen/fragment/value_of_value_cow/mpo refused
+gen/fragment/value_of_value_cow/n refused
+gen/fragment/value_of_value_cow/ne refused
+gen/fragment/value_of_value_cow/nn refused
+gen/fragment/value_of_value_cow/ob refused
+gen/fragment/value_of_value_cow/ts reads
 gen/fragment/value_of_value_f/cm trusted json
 gen/fragment/value_of_value_f/co trusted json
 gen/fragment/value_of_value_f/cu trusted custom
@@ -5530,6 +5554,28 @@ gen/fragment/value_of_value_s/ne refused
 gen/fragment/value_of_value_s/nn refused
 gen/fragment/value_of_value_s/ob refused
 gen/fragment/value_of_value_s/ts reads
+gen/fragment/value_of_value_vec_bs/cm trusted json
+gen/fragment/value_of_value_vec_bs/co trusted json
+gen/fragment/value_of_value_vec_bs/cu trusted custom
+gen/fragment/value_of_value_vec_bs/dt refused
+gen/fragment/value_of_value_vec_bs/ev refused
+gen/fragment/value_of_value_vec_bs/gp refused
+gen/fragment/value_of_value_vec_bs/ho refused
+gen/fragment/value_of_value_vec_bs/js trusted json
+gen/fragment/value_of_value_vec_bs/jsa trusted json
+gen/fragment/value_of_value_vec_bs/jso trusted json
+gen/fragment/value_of_value_vec_bs/kw refused
+gen/fragment/value_of_value_vec_bs/kwa trusted jsonb
+gen/fragment/value_of_value_vec_bs/kwao reads
+gen/fragment/value_of_value_vec_bs/kwo refused
+gen/fragment/value_of_value_vec_bs/mp refused
+gen/fragment/value_of_value_vec_bs/mpn refused
+gen/fragment/value_of_value_vec_bs/mpo refused
+gen/fragment/value_of_value_vec_bs/n refused
+gen/fragment/value_of_value_vec_bs/ne refused
+gen/fragment/value_of_value_vec_bs/nn refused
+gen/fragment/value_of_value_vec_bs/ob refused
+gen/fragment/value_of_value_vec_bs/ts refused
 gen/fragment/value_of_value_vec_code/cm trusted json
 gen/fragment/value_of_value_vec_code/co trusted json
 gen/fragment/value_of_value_vec_code/cu trusted custom
@@ -5552,6 +5598,28 @@ gen/fragment/value_of_value_vec_code/ne refused
 gen/fragment/value_of_value_vec_code/nn refused
 gen/fragment/value_of_value_vec_code/ob refused
 gen/fragment/value_of_value_vec_code/ts refused
+gen/fragment/value_of_value_vec_cow/cm trusted json
+gen/fragment/value_of_value_vec_cow/co trusted json
+gen/fragment/value_of_value_vec_cow/cu trusted custom
+gen/fragment/value_of_value_vec_cow/dt refused
+gen/fragment/value_of_value_vec_cow/ev refused
+gen/fragment/value_of_value_vec_cow/gp refused
+gen/fragment/value_of_value_vec_cow/ho refused
+gen/fragment/value_of_value_vec_cow/js trusted json
+gen/fragment/value_of_value_vec_cow/jsa trusted json
+gen/fragment/value_of_value_vec_cow/jso trusted json
+gen/fragment/value_of_value_vec_cow/kw refused
+gen/fragment/value_of_value_vec_cow/kwa trusted jsonb
+gen/fragment/value_of_value_vec_cow/kwao reads
+gen/fragment/value_of_value_vec_cow/kwo refused
+gen/fragment/value_of_value_vec_cow/mp refused
+gen/fragment/value_of_value_vec_cow/mpn refused
+gen/fragment/value_of_value_vec_cow/mpo refused
+gen/fragment/value_of_value_vec_cow/n refused
+gen/fragment/value_of_value_vec_cow/ne refused
+gen/fragment/value_of_value_vec_cow/nn refused
+gen/fragment/value_of_value_vec_cow/ob refused
+gen/fragment/value_of_value_vec_cow/ts refused
 gen/fragment/value_of_value_vec_f/cm trusted json
 gen/fragment/value_of_value_vec_f/co trusted json
 gen/fragment/value_of_value_vec_f/cu trusted custom
@@ -5640,6 +5708,28 @@ gen/fragment/value_s/ne refused
 gen/fragment/value_s/nn refused
 gen/fragment/value_s/ob refused
 gen/fragment/value_s/ts reads
+gen/fragment/value_vec_bs/cm trusted json
+gen/fragment/value_vec_bs/co trusted json
+gen/fragment/value_vec_bs/cu trusted custom
+gen/fragment/value_vec_bs/dt refused
+gen/fragment/value_vec_bs/ev refused
+gen/fragment/value_vec_bs/gp refused
+gen/fragment/value_vec_bs/ho refused
+gen/fragment/value_vec_bs/js trusted json
+gen/fragment/value_vec_bs/jsa trusted json
+gen/fragment/value_vec_bs/jso trusted json
+gen/fragment/value_vec_bs/kw refused
+gen/fragment/value_vec_bs/kwa trusted jsonb
+gen/fragment/value_vec_bs/kwao reads
+gen/fragment/value_vec_bs/kwo refused
+gen/fragment/value_vec_bs/mp refused
+gen/fragment/value_vec_bs/mpn refused
+gen/fragment/value_vec_bs/mpo refused
+gen/fragment/value_vec_bs/n refused
+gen/fragment/value_vec_bs/ne refused
+gen/fragment/value_vec_bs/nn refused
+gen/fragment/value_vec_bs/ob refused
+gen/fragment/value_vec_bs/ts refused
 gen/fragment/value_vec_code/cm trusted json
 gen/fragment/value_vec_code/co trusted json
 gen/fragment/value_vec_code/cu trusted custom
@@ -5662,6 +5752,28 @@ gen/fragment/value_vec_code/ne refused
 gen/fragment/value_vec_code/nn refused
 gen/fragment/value_vec_code/ob refused
 gen/fragment/value_vec_code/ts refused
+gen/fragment/value_vec_cow/cm trusted json
+gen/fragment/value_vec_cow/co trusted json
+gen/fragment/value_vec_cow/cu trusted custom
+gen/fragment/value_vec_cow/dt refused
+gen/fragment/value_vec_cow/ev refused
+gen/fragment/value_vec_cow/gp refused
+gen/fragment/value_vec_cow/ho refused
+gen/fragment/value_vec_cow/js trusted json
+gen/fragment/value_vec_cow/jsa trusted json
+gen/fragment/value_vec_cow/jso trusted json
+gen/fragment/value_vec_cow/kw refused
+gen/fragment/value_vec_cow/kwa trusted jsonb
+gen/fragment/value_vec_cow/kwao reads
+gen/fragment/value_vec_cow/kwo refused
+gen/fragment/value_vec_cow/mp refused
+gen/fragment/value_vec_cow/mpn refused
+gen/fragment/value_vec_cow/mpo refused
+gen/fragment/value_vec_cow/n refused
+gen/fragment/value_vec_cow/ne refused
+gen/fragment/value_vec_cow/nn refused
+gen/fragment/value_vec_cow/ob refused
+gen/fragment/value_vec_cow/ts refused
 gen/fragment/value_vec_f/cm trusted json
 gen/fragment/value_vec_f/co trusted json
 gen/fragment/value_vec_f/cu trusted custom
@@ -6146,20 +6258,20 @@ gen/root/field_box_sub/ne refused
 gen/root/field_box_sub/nn refused
 gen/root/field_box_sub/ob refused
 gen/root/field_box_sub/ts refused
-gen/root/field_bs/cm refused
-gen/root/field_bs/co refused
+gen/root/field_bs/cm trusted json
+gen/root/field_bs/co trusted json
 gen/root/field_bs/cu reads
-gen/root/field_bs/dt refused
-gen/root/field_bs/ev refused
+gen/root/field_bs/dt reads
+gen/root/field_bs/ev reads
 gen/root/field_bs/gp refused
 gen/root/field_bs/ho refused
-gen/root/field_bs/js refused
+gen/root/field_bs/js trusted json
 gen/root/field_bs/jsa refused
-gen/root/field_bs/jso refused
-gen/root/field_bs/kw refused
+gen/root/field_bs/jso trusted json
+gen/root/field_bs/kw reads
 gen/root/field_bs/kwa refused
 gen/root/field_bs/kwao refused
-gen/root/field_bs/kwo refused
+gen/root/field_bs/kwo reads
 gen/root/field_bs/mp refused
 gen/root/field_bs/mpn refused
 gen/root/field_bs/mpo refused
@@ -6167,7 +6279,7 @@ gen/root/field_bs/n refused
 gen/root/field_bs/ne refused
 gen/root/field_bs/nn refused
 gen/root/field_bs/ob refused
-gen/root/field_bs/ts refused
+gen/root/field_bs/ts reads
 gen/root/field_btv/cm trusted json
 gen/root/field_btv/co reads
 gen/root/field_btv/cu trusted custom
@@ -6234,20 +6346,20 @@ gen/root/field_code/ne refused
 gen/root/field_code/nn refused
 gen/root/field_code/ob refused
 gen/root/field_code/ts reads
-gen/root/field_cow/cm refused
-gen/root/field_cow/co refused
+gen/root/field_cow/cm trusted json
+gen/root/field_cow/co trusted json
 gen/root/field_cow/cu reads
-gen/root/field_cow/dt refused
-gen/root/field_cow/ev refused
+gen/root/field_cow/dt reads
+gen/root/field_cow/ev reads
 gen/root/field_cow/gp refused
 gen/root/field_cow/ho refused
-gen/root/field_cow/js refused
+gen/root/field_cow/js trusted json
 gen/root/field_cow/jsa refused
-gen/root/field_cow/jso refused
-gen/root/field_cow/kw refused
+gen/root/field_cow/jso trusted json
+gen/root/field_cow/kw reads
 gen/root/field_cow/kwa refused
 gen/root/field_cow/kwao refused
-gen/root/field_cow/kwo refused
+gen/root/field_cow/kwo reads
 gen/root/field_cow/mp refused
 gen/root/field_cow/mpn refused
 gen/root/field_cow/mpo refused
@@ -6255,7 +6367,7 @@ gen/root/field_cow/n refused
 gen/root/field_cow/ne refused
 gen/root/field_cow/nn refused
 gen/root/field_cow/ob refused
-gen/root/field_cow/ts refused
+gen/root/field_cow/ts reads
 gen/root/field_f/cm trusted json
 gen/root/field_f/co trusted json
 gen/root/field_f/cu trusted custom
@@ -6938,19 +7050,19 @@ gen/root/field_vec_alias/ne refused
 gen/root/field_vec_alias/nn refused
 gen/root/field_vec_alias/ob refused
 gen/root/field_vec_alias/ts refused
-gen/root/field_vec_bs/cm refused
-gen/root/field_vec_bs/co refused
+gen/root/field_vec_bs/cm trusted json
+gen/root/field_vec_bs/co trusted json
 gen/root/field_vec_bs/cu trusted custom
 gen/root/field_vec_bs/dt refused
 gen/root/field_vec_bs/ev refused
 gen/root/field_vec_bs/gp refused
 gen/root/field_vec_bs/ho refused
-gen/root/field_vec_bs/js refused
-gen/root/field_vec_bs/jsa refused
-gen/root/field_vec_bs/jso refused
+gen/root/field_vec_bs/js trusted json
+gen/root/field_vec_bs/jsa trusted json
+gen/root/field_vec_bs/jso trusted json
 gen/root/field_vec_bs/kw refused
-gen/root/field_vec_bs/kwa refused
-gen/root/field_vec_bs/kwao refused
+gen/root/field_vec_bs/kwa trusted jsonb
+gen/root/field_vec_bs/kwao reads
 gen/root/field_vec_bs/kwo refused
 gen/root/field_vec_bs/mp refused
 gen/root/field_vec_bs/mpn refused
@@ -7026,19 +7138,19 @@ gen/root/field_vec_code/ne refused
 gen/root/field_vec_code/nn refused
 gen/root/field_vec_code/ob refused
 gen/root/field_vec_code/ts refused
-gen/root/field_vec_cow/cm refused
-gen/root/field_vec_cow/co refused
+gen/root/field_vec_cow/cm trusted json
+gen/root/field_vec_cow/co trusted json
 gen/root/field_vec_cow/cu trusted custom
 gen/root/field_vec_cow/dt refused
 gen/root/field_vec_cow/ev refused
 gen/root/field_vec_cow/gp refused
 gen/root/field_vec_cow/ho refused
-gen/root/field_vec_cow/js refused
-gen/root/field_vec_cow/jsa refused
-gen/root/field_vec_cow/jso refused
+gen/root/field_vec_cow/js trusted json
+gen/root/field_vec_cow/jsa trusted json
+gen/root/field_vec_cow/jso trusted json
 gen/root/field_vec_cow/kw refused
-gen/root/field_vec_cow/kwa refused
-gen/root/field_vec_cow/kwao refused
+gen/root/field_vec_cow/kwa trusted jsonb
+gen/root/field_vec_cow/kwao reads
 gen/root/field_vec_cow/kwo refused
 gen/root/field_vec_cow/mp refused
 gen/root/field_vec_cow/mpn refused
@@ -8654,6 +8766,28 @@ gen/root/map_mk/ne refused
 gen/root/map_mk/nn refused
 gen/root/map_mk/ob refused
 gen/root/map_mk/ts refused
+gen/root/value_bs/cm trusted json
+gen/root/value_bs/co trusted json
+gen/root/value_bs/cu reads
+gen/root/value_bs/dt reads
+gen/root/value_bs/ev reads
+gen/root/value_bs/gp refused
+gen/root/value_bs/ho refused
+gen/root/value_bs/js trusted json
+gen/root/value_bs/jsa refused
+gen/root/value_bs/jso trusted json
+gen/root/value_bs/kw reads
+gen/root/value_bs/kwa refused
+gen/root/value_bs/kwao refused
+gen/root/value_bs/kwo reads
+gen/root/value_bs/mp refused
+gen/root/value_bs/mpn refused
+gen/root/value_bs/mpo refused
+gen/root/value_bs/n refused
+gen/root/value_bs/ne refused
+gen/root/value_bs/nn refused
+gen/root/value_bs/ob refused
+gen/root/value_bs/ts reads
 gen/root/value_code/cm trusted json
 gen/root/value_code/co trusted json
 gen/root/value_code/cu reads
@@ -8676,6 +8810,28 @@ gen/root/value_code/ne refused
 gen/root/value_code/nn refused
 gen/root/value_code/ob refused
 gen/root/value_code/ts reads
+gen/root/value_cow/cm trusted json
+gen/root/value_cow/co trusted json
+gen/root/value_cow/cu reads
+gen/root/value_cow/dt reads
+gen/root/value_cow/ev reads
+gen/root/value_cow/gp refused
+gen/root/value_cow/ho refused
+gen/root/value_cow/js trusted json
+gen/root/value_cow/jsa refused
+gen/root/value_cow/jso trusted json
+gen/root/value_cow/kw reads
+gen/root/value_cow/kwa refused
+gen/root/value_cow/kwao refused
+gen/root/value_cow/kwo reads
+gen/root/value_cow/mp refused
+gen/root/value_cow/mpn refused
+gen/root/value_cow/mpo refused
+gen/root/value_cow/n refused
+gen/root/value_cow/ne refused
+gen/root/value_cow/nn refused
+gen/root/value_cow/ob refused
+gen/root/value_cow/ts reads
 gen/root/value_f/cm trusted json
 gen/root/value_f/co trusted json
 gen/root/value_f/cu trusted custom
@@ -8742,6 +8898,28 @@ gen/root/value_mk/ne refused
 gen/root/value_mk/nn refused
 gen/root/value_mk/ob refused
 gen/root/value_mk/ts refused
+gen/root/value_of_value_bs/cm trusted json
+gen/root/value_of_value_bs/co trusted json
+gen/root/value_of_value_bs/cu reads
+gen/root/value_of_value_bs/dt reads
+gen/root/value_of_value_bs/ev reads
+gen/root/value_of_value_bs/gp refused
+gen/root/value_of_value_bs/ho refused
+gen/root/value_of_value_bs/js trusted json
+gen/root/value_of_value_bs/jsa refused
+gen/root/value_of_value_bs/jso trusted json
+gen/root/value_of_value_bs/kw reads
+gen/root/value_of_value_bs/kwa refused
+gen/root/value_of_value_bs/kwao refused
+gen/root/value_of_value_bs/kwo reads
+gen/root/value_of_value_bs/mp refused
+gen/root/value_of_value_bs/mpn refused
+gen/root/value_of_value_bs/mpo refused
+gen/root/value_of_value_bs/n refused
+gen/root/value_of_value_bs/ne refused
+gen/root/value_of_value_bs/nn refused
+gen/root/value_of_value_bs/ob refused
+gen/root/value_of_value_bs/ts reads
 gen/root/value_of_value_code/cm trusted json
 gen/root/value_of_value_code/co trusted json
 gen/root/value_of_value_code/cu reads
@@ -8764,6 +8942,28 @@ gen/root/value_of_value_code/ne refused
 gen/root/value_of_value_code/nn refused
 gen/root/value_of_value_code/ob refused
 gen/root/value_of_value_code/ts reads
+gen/root/value_of_value_cow/cm trusted json
+gen/root/value_of_value_cow/co trusted json
+gen/root/value_of_value_cow/cu reads
+gen/root/value_of_value_cow/dt reads
+gen/root/value_of_value_cow/ev reads
+gen/root/value_of_value_cow/gp refused
+gen/root/value_of_value_cow/ho refused
+gen/root/value_of_value_cow/js trusted json
+gen/root/value_of_value_cow/jsa refused
+gen/root/value_of_value_cow/jso trusted json
+gen/root/value_of_value_cow/kw reads
+gen/root/value_of_value_cow/kwa refused
+gen/root/value_of_value_cow/kwao refused
+gen/root/value_of_value_cow/kwo reads
+gen/root/value_of_value_cow/mp refused
+gen/root/value_of_value_cow/mpn refused
+gen/root/value_of_value_cow/mpo refused
+gen/root/value_of_value_cow/n refused
+gen/root/value_of_value_cow/ne refused
+gen/root/value_of_value_cow/nn refused
+gen/root/value_of_value_cow/ob refused
+gen/root/value_of_value_cow/ts reads
 gen/root/value_of_value_f/cm trusted json
 gen/root/value_of_value_f/co trusted json
 gen/root/value_of_value_f/cu trusted custom
@@ -8852,6 +9052,28 @@ gen/root/value_of_value_s/ne refused
 gen/root/value_of_value_s/nn refused
 gen/root/value_of_value_s/ob refused
 gen/root/value_of_value_s/ts reads
+gen/root/value_of_value_vec_bs/cm trusted json
+gen/root/value_of_value_vec_bs/co trusted json
+gen/root/value_of_value_vec_bs/cu trusted custom
+gen/root/value_of_value_vec_bs/dt refused
+gen/root/value_of_value_vec_bs/ev refused
+gen/root/value_of_value_vec_bs/gp refused
+gen/root/value_of_value_vec_bs/ho refused
+gen/root/value_of_value_vec_bs/js trusted json
+gen/root/value_of_value_vec_bs/jsa trusted json
+gen/root/value_of_value_vec_bs/jso trusted json
+gen/root/value_of_value_vec_bs/kw refused
+gen/root/value_of_value_vec_bs/kwa trusted jsonb
+gen/root/value_of_value_vec_bs/kwao reads
+gen/root/value_of_value_vec_bs/kwo refused
+gen/root/value_of_value_vec_bs/mp refused
+gen/root/value_of_value_vec_bs/mpn refused
+gen/root/value_of_value_vec_bs/mpo refused
+gen/root/value_of_value_vec_bs/n refused
+gen/root/value_of_value_vec_bs/ne refused
+gen/root/value_of_value_vec_bs/nn refused
+gen/root/value_of_value_vec_bs/ob refused
+gen/root/value_of_value_vec_bs/ts refused
 gen/root/value_of_value_vec_code/cm trusted json
 gen/root/value_of_value_vec_code/co trusted json
 gen/root/value_of_value_vec_code/cu trusted custom
@@ -8874,6 +9096,28 @@ gen/root/value_of_value_vec_code/ne refused
 gen/root/value_of_value_vec_code/nn refused
 gen/root/value_of_value_vec_code/ob refused
 gen/root/value_of_value_vec_code/ts refused
+gen/root/value_of_value_vec_cow/cm trusted json
+gen/root/value_of_value_vec_cow/co trusted json
+gen/root/value_of_value_vec_cow/cu trusted custom
+gen/root/value_of_value_vec_cow/dt refused
+gen/root/value_of_value_vec_cow/ev refused
+gen/root/value_of_value_vec_cow/gp refused
+gen/root/value_of_value_vec_cow/ho refused
+gen/root/value_of_value_vec_cow/js trusted json
+gen/root/value_of_value_vec_cow/jsa trusted json
+gen/root/value_of_value_vec_cow/jso trusted json
+gen/root/value_of_value_vec_cow/kw refused
+gen/root/value_of_value_vec_cow/kwa trusted jsonb
+gen/root/value_of_value_vec_cow/kwao reads
+gen/root/value_of_value_vec_cow/kwo refused
+gen/root/value_of_value_vec_cow/mp refused
+gen/root/value_of_value_vec_cow/mpn refused
+gen/root/value_of_value_vec_cow/mpo refused
+gen/root/value_of_value_vec_cow/n refused
+gen/root/value_of_value_vec_cow/ne refused
+gen/root/value_of_value_vec_cow/nn refused
+gen/root/value_of_value_vec_cow/ob refused
+gen/root/value_of_value_vec_cow/ts refused
 gen/root/value_of_value_vec_f/cm trusted json
 gen/root/value_of_value_vec_f/co trusted json
 gen/root/value_of_value_vec_f/cu trusted custom
@@ -8962,6 +9206,28 @@ gen/root/value_s/ne refused
 gen/root/value_s/nn refused
 gen/root/value_s/ob refused
 gen/root/value_s/ts reads
+gen/root/value_vec_bs/cm trusted json
+gen/root/value_vec_bs/co trusted json
+gen/root/value_vec_bs/cu trusted custom
+gen/root/value_vec_bs/dt refused
+gen/root/value_vec_bs/ev refused
+gen/root/value_vec_bs/gp refused
+gen/root/value_vec_bs/ho refused
+gen/root/value_vec_bs/js trusted json
+gen/root/value_vec_bs/jsa trusted json
+gen/root/value_vec_bs/jso trusted json
+gen/root/value_vec_bs/kw refused
+gen/root/value_vec_bs/kwa trusted jsonb
+gen/root/value_vec_bs/kwao reads
+gen/root/value_vec_bs/kwo refused
+gen/root/value_vec_bs/mp refused
+gen/root/value_vec_bs/mpn refused
+gen/root/value_vec_bs/mpo refused
+gen/root/value_vec_bs/n refused
+gen/root/value_vec_bs/ne refused
+gen/root/value_vec_bs/nn refused
+gen/root/value_vec_bs/ob refused
+gen/root/value_vec_bs/ts refused
 gen/root/value_vec_code/cm trusted json
 gen/root/value_vec_code/co trusted json
 gen/root/value_vec_code/cu trusted custom
@@ -8984,6 +9250,28 @@ gen/root/value_vec_code/ne refused
 gen/root/value_vec_code/nn refused
 gen/root/value_vec_code/ob refused
 gen/root/value_vec_code/ts refused
+gen/root/value_vec_cow/cm trusted json
+gen/root/value_vec_cow/co trusted json
+gen/root/value_vec_cow/cu trusted custom
+gen/root/value_vec_cow/dt refused
+gen/root/value_vec_cow/ev refused
+gen/root/value_vec_cow/gp refused
+gen/root/value_vec_cow/ho refused
+gen/root/value_vec_cow/js trusted json
+gen/root/value_vec_cow/jsa trusted json
+gen/root/value_vec_cow/jso trusted json
+gen/root/value_vec_cow/kw refused
+gen/root/value_vec_cow/kwa trusted jsonb
+gen/root/value_vec_cow/kwao reads
+gen/root/value_vec_cow/kwo refused
+gen/root/value_vec_cow/mp refused
+gen/root/value_vec_cow/mpn refused
+gen/root/value_vec_cow/mpo refused
+gen/root/value_vec_cow/n refused
+gen/root/value_vec_cow/ne refused
+gen/root/value_vec_cow/nn refused
+gen/root/value_vec_cow/ob refused
+gen/root/value_vec_cow/ts refused
 gen/root/value_vec_f/cm trusted json
 gen/root/value_vec_f/co trusted json
 gen/root/value_vec_f/cu trusted custom
@@ -9050,13 +9338,45 @@ gen/root/value_vec_s/ne refused
 gen/root/value_vec_s/nn refused
 gen/root/value_vec_s/ob refused
 gen/root/value_vec_s/ts refused
+root/arc_str/av refused
+root/arc_str/bi refused
+root/arc_str/bo refused
+root/arc_str/cm trusted json
+root/arc_str/co trusted json
+root/arc_str/cu reads
+root/arc_str/db refused
+root/arc_str/dc refused
+root/arc_str/dt reads
+root/arc_str/ev reads
+root/arc_str/ex refused
+root/arc_str/fl refused
+root/arc_str/gp refused
+root/arc_str/ho refused
+root/arc_str/hu refused
+root/arc_str/ids refused
+root/arc_str/it refused
+root/arc_str/js trusted json
+root/arc_str/jsa refused
+root/arc_str/jso trusted json
+root/arc_str/kw reads
+root/arc_str/kwa refused
+root/arc_str/kwao refused
+root/arc_str/kwo reads
+root/arc_str/mp refused
+root/arc_str/mpn refused
+root/arc_str/mpo refused
+root/arc_str/n refused
+root/arc_str/ne refused
+root/arc_str/nn refused
+root/arc_str/ob refused
+root/arc_str/sh refused
+root/arc_str/ts reads
+root/arc_str/uu reads
 root/bool/av refused
 root/bool/bi refused
 root/bool/bo reads
-root/bool/bt refused
 root/bool/cm trusted json
 root/bool/co trusted json
-root/bool/ct refused
 root/bool/cu trusted custom
 root/bool/db refused
 root/bool/dc refused
@@ -9072,12 +9392,10 @@ root/bool/it refused
 root/bool/js trusted json
 root/bool/jsa refused
 root/bool/jso trusted json
-root/bool/kns refused
 root/bool/kw refused
 root/bool/kwa refused
 root/bool/kwao refused
 root/bool/kwo refused
-root/bool/mm refused
 root/bool/mp refused
 root/bool/mpn refused
 root/bool/mpo refused
@@ -9091,15 +9409,13 @@ root/bool/uu refused
 root/box_str/av refused
 root/box_str/bi refused
 root/box_str/bo refused
-root/box_str/bt refused
-root/box_str/cm refused
-root/box_str/co refused
-root/box_str/ct refused
+root/box_str/cm trusted json
+root/box_str/co trusted json
 root/box_str/cu reads
 root/box_str/db refused
 root/box_str/dc refused
-root/box_str/dt refused
-root/box_str/ev refused
+root/box_str/dt reads
+root/box_str/ev reads
 root/box_str/ex refused
 root/box_str/fl refused
 root/box_str/gp refused
@@ -9107,15 +9423,13 @@ root/box_str/ho refused
 root/box_str/hu refused
 root/box_str/ids refused
 root/box_str/it refused
-root/box_str/js refused
+root/box_str/js trusted json
 root/box_str/jsa refused
-root/box_str/jso refused
-root/box_str/kns refused
-root/box_str/kw refused
+root/box_str/jso trusted json
+root/box_str/kw reads
 root/box_str/kwa refused
 root/box_str/kwao refused
-root/box_str/kwo refused
-root/box_str/mm refused
+root/box_str/kwo reads
 root/box_str/mp refused
 root/box_str/mpn refused
 root/box_str/mpo refused
@@ -9124,15 +9438,13 @@ root/box_str/ne refused
 root/box_str/nn refused
 root/box_str/ob refused
 root/box_str/sh refused
-root/box_str/ts refused
-root/box_str/uu refused
+root/box_str/ts reads
+root/box_str/uu reads
 root/btree_map_long/av refused
 root/btree_map_long/bi refused
 root/btree_map_long/bo refused
-root/btree_map_long/bt refused
 root/btree_map_long/cm trusted json
 root/btree_map_long/co reads
-root/btree_map_long/ct refused
 root/btree_map_long/cu trusted custom
 root/btree_map_long/db refused
 root/btree_map_long/dc refused
@@ -9148,12 +9460,10 @@ root/btree_map_long/it refused
 root/btree_map_long/js trusted json
 root/btree_map_long/jsa refused
 root/btree_map_long/jso trusted json
-root/btree_map_long/kns refused
 root/btree_map_long/kw refused
 root/btree_map_long/kwa refused
 root/btree_map_long/kwao refused
 root/btree_map_long/kwo refused
-root/btree_map_long/mm refused
 root/btree_map_long/mp refused
 root/btree_map_long/mpn trusted null
 root/btree_map_long/mpo refused
@@ -9167,10 +9477,8 @@ root/btree_map_long/uu refused
 root/btree_map_option_long/av refused
 root/btree_map_option_long/bi refused
 root/btree_map_option_long/bo refused
-root/btree_map_option_long/bt refused
 root/btree_map_option_long/cm trusted json
 root/btree_map_option_long/co reads
-root/btree_map_option_long/ct refused
 root/btree_map_option_long/cu trusted custom
 root/btree_map_option_long/db refused
 root/btree_map_option_long/dc refused
@@ -9186,12 +9494,10 @@ root/btree_map_option_long/it refused
 root/btree_map_option_long/js trusted json
 root/btree_map_option_long/jsa refused
 root/btree_map_option_long/jso trusted json
-root/btree_map_option_long/kns refused
 root/btree_map_option_long/kw refused
 root/btree_map_option_long/kwa refused
 root/btree_map_option_long/kwao refused
 root/btree_map_option_long/kwo refused
-root/btree_map_option_long/mm refused
 root/btree_map_option_long/mp refused
 root/btree_map_option_long/mpn reads
 root/btree_map_option_long/mpo refused
@@ -9205,10 +9511,8 @@ root/btree_map_option_long/uu refused
 root/char/av refused
 root/char/bi refused
 root/char/bo refused
-root/char/bt refused
 root/char/cm refused
 root/char/co refused
-root/char/ct refused
 root/char/cu trusted custom
 root/char/db refused
 root/char/dc refused
@@ -9224,12 +9528,10 @@ root/char/it refused
 root/char/js refused
 root/char/jsa refused
 root/char/jso refused
-root/char/kns refused
 root/char/kw refused
 root/char/kwa refused
 root/char/kwao refused
 root/char/kwo refused
-root/char/mm refused
 root/char/mp refused
 root/char/mpn refused
 root/char/mpo refused
@@ -9243,10 +9545,8 @@ root/char/uu refused
 root/code/av refused
 root/code/bi refused
 root/code/bo refused
-root/code/bt refused
 root/code/cm trusted json
 root/code/co trusted json
-root/code/ct refused
 root/code/cu reads
 root/code/db refused
 root/code/dc refused
@@ -9262,12 +9562,10 @@ root/code/it refused
 root/code/js trusted json
 root/code/jsa refused
 root/code/jso trusted json
-root/code/kns reads
 root/code/kw reads
 root/code/kwa refused
 root/code/kwao refused
 root/code/kwo reads
-root/code/mm refused
 root/code/mp refused
 root/code/mpn refused
 root/code/mpo refused
@@ -9281,10 +9579,8 @@ root/code/uu reads
 root/date_time_utc/av refused
 root/date_time_utc/bi refused
 root/date_time_utc/bo refused
-root/date_time_utc/bt refused
 root/date_time_utc/cm trusted json
 root/date_time_utc/co trusted json
-root/date_time_utc/ct refused
 root/date_time_utc/cu trusted custom
 root/date_time_utc/db refused
 root/date_time_utc/dc refused
@@ -9300,12 +9596,10 @@ root/date_time_utc/it refused
 root/date_time_utc/js trusted json
 root/date_time_utc/jsa refused
 root/date_time_utc/jso trusted json
-root/date_time_utc/kns refused
 root/date_time_utc/kw refused
 root/date_time_utc/kwa refused
 root/date_time_utc/kwao refused
 root/date_time_utc/kwo refused
-root/date_time_utc/mm refused
 root/date_time_utc/mp refused
 root/date_time_utc/mpn refused
 root/date_time_utc/mpo refused
@@ -9319,10 +9613,8 @@ root/date_time_utc/uu refused
 root/decimal/av trusted decimal
 root/decimal/bi refused
 root/decimal/bo refused
-root/decimal/bt refused
 root/decimal/cm trusted json
 root/decimal/co trusted json
-root/decimal/ct refused
 root/decimal/cu trusted custom
 root/decimal/db trusted decimal
 root/decimal/dc trusted decimal
@@ -9338,12 +9630,10 @@ root/decimal/it refused
 root/decimal/js trusted json
 root/decimal/jsa refused
 root/decimal/jso trusted json
-root/decimal/kns refused
 root/decimal/kw refused
 root/decimal/kwa refused
 root/decimal/kwao refused
 root/decimal/kwo refused
-root/decimal/mm refused
 root/decimal/mp refused
 root/decimal/mpn refused
 root/decimal/mpo refused
@@ -9357,10 +9647,8 @@ root/decimal/uu refused
 root/deny_unknown_fields/av refused
 root/deny_unknown_fields/bi refused
 root/deny_unknown_fields/bo refused
-root/deny_unknown_fields/bt reads
 root/deny_unknown_fields/cm refused
 root/deny_unknown_fields/co refused
-root/deny_unknown_fields/ct refused
 root/deny_unknown_fields/cu trusted serde
 root/deny_unknown_fields/db refused
 root/deny_unknown_fields/dc refused
@@ -9376,12 +9664,10 @@ root/deny_unknown_fields/it refused
 root/deny_unknown_fields/js refused
 root/deny_unknown_fields/jsa refused
 root/deny_unknown_fields/jso refused
-root/deny_unknown_fields/kns refused
 root/deny_unknown_fields/kw refused
 root/deny_unknown_fields/kwa refused
 root/deny_unknown_fields/kwao refused
 root/deny_unknown_fields/kwo refused
-root/deny_unknown_fields/mm refused
 root/deny_unknown_fields/mp refused
 root/deny_unknown_fields/mpn refused
 root/deny_unknown_fields/mpo refused
@@ -9395,10 +9681,8 @@ root/deny_unknown_fields/uu refused
 root/deserialize_with/av refused
 root/deserialize_with/bi refused
 root/deserialize_with/bo refused
-root/deserialize_with/bt refused
 root/deserialize_with/cm trusted json
 root/deserialize_with/co trusted json
-root/deserialize_with/ct refused
 root/deserialize_with/cu trusted serde
 root/deserialize_with/db refused
 root/deserialize_with/dc refused
@@ -9414,12 +9698,10 @@ root/deserialize_with/it refused
 root/deserialize_with/js trusted json
 root/deserialize_with/jsa refused
 root/deserialize_with/jso refused
-root/deserialize_with/kns trusted serde
 root/deserialize_with/kw trusted serde
 root/deserialize_with/kwa refused
 root/deserialize_with/kwao refused
 root/deserialize_with/kwo refused
-root/deserialize_with/mm refused
 root/deserialize_with/mp refused
 root/deserialize_with/mpn refused
 root/deserialize_with/mpo refused
@@ -9433,10 +9715,8 @@ root/deserialize_with/uu trusted serde
 root/enum/av refused
 root/enum/bi refused
 root/enum/bo refused
-root/enum/bt refused
 root/enum/cm trusted json
 root/enum/co trusted json
-root/enum/ct refused
 root/enum/cu trusted variants
 root/enum/db refused
 root/enum/dc refused
@@ -9452,12 +9732,10 @@ root/enum/it refused
 root/enum/js trusted json
 root/enum/jsa refused
 root/enum/jso trusted json
-root/enum/kns trusted variants
 root/enum/kw trusted variants
 root/enum/kwa refused
 root/enum/kwao refused
 root/enum/kwo reads
-root/enum/mm refused
 root/enum/mp refused
 root/enum/mpn refused
 root/enum/mpo refused
@@ -9471,10 +9749,8 @@ root/enum/uu trusted variants
 root/enum_partial/av refused
 root/enum_partial/bi refused
 root/enum_partial/bo refused
-root/enum_partial/bt refused
 root/enum_partial/cm trusted json
 root/enum_partial/co trusted json
-root/enum_partial/ct refused
 root/enum_partial/cu trusted partial
 root/enum_partial/db refused
 root/enum_partial/dc refused
@@ -9490,12 +9766,10 @@ root/enum_partial/it refused
 root/enum_partial/js trusted json
 root/enum_partial/jsa refused
 root/enum_partial/jso trusted json
-root/enum_partial/kns trusted partial
 root/enum_partial/kw trusted partial
 root/enum_partial/kwa refused
 root/enum_partial/kwao refused
 root/enum_partial/kwo trusted partial
-root/enum_partial/mm refused
 root/enum_partial/mp refused
 root/enum_partial/mpn refused
 root/enum_partial/mpo refused
@@ -9509,10 +9783,8 @@ root/enum_partial/uu trusted partial
 root/exhaustive/av refused
 root/exhaustive/bi refused
 root/exhaustive/bo refused
-root/exhaustive/bt refused
 root/exhaustive/cm refused
 root/exhaustive/co refused
-root/exhaustive/ct refused
 root/exhaustive/cu trusted custom
 root/exhaustive/db refused
 root/exhaustive/dc refused
@@ -9528,12 +9800,10 @@ root/exhaustive/it refused
 root/exhaustive/js refused
 root/exhaustive/jsa refused
 root/exhaustive/jso refused
-root/exhaustive/kns refused
 root/exhaustive/kw refused
 root/exhaustive/kwa refused
 root/exhaustive/kwao refused
 root/exhaustive/kwo refused
-root/exhaustive/mm refused
 root/exhaustive/mp refused
 root/exhaustive/mpn refused
 root/exhaustive/mpo refused
@@ -9547,10 +9817,8 @@ root/exhaustive/uu refused
 root/f32/av refused
 root/f32/bi refused
 root/f32/bo refused
-root/f32/bt refused
 root/f32/cm trusted json
 root/f32/co trusted json
-root/f32/ct refused
 root/f32/cu trusted custom
 root/f32/db refused
 root/f32/dc refused
@@ -9566,12 +9834,10 @@ root/f32/it refused
 root/f32/js trusted json
 root/f32/jsa refused
 root/f32/jso trusted json
-root/f32/kns refused
 root/f32/kw refused
 root/f32/kwa refused
 root/f32/kwao refused
 root/f32/kwo refused
-root/f32/mm refused
 root/f32/mp refused
 root/f32/mpn refused
 root/f32/mpo refused
@@ -9585,10 +9851,8 @@ root/f32/uu refused
 root/f64/av reads
 root/f64/bi refused
 root/f64/bo refused
-root/f64/bt refused
 root/f64/cm trusted json
 root/f64/co trusted json
-root/f64/ct refused
 root/f64/cu trusted custom
 root/f64/db reads
 root/f64/dc reads
@@ -9604,12 +9868,10 @@ root/f64/it refused
 root/f64/js trusted json
 root/f64/jsa refused
 root/f64/jso trusted json
-root/f64/kns refused
 root/f64/kw refused
 root/f64/kwa refused
 root/f64/kwao refused
 root/f64/kwo refused
-root/f64/mm refused
 root/f64/mp refused
 root/f64/mpn refused
 root/f64/mpo refused
@@ -9620,13 +9882,45 @@ root/f64/ob refused
 root/f64/sh refused
 root/f64/ts refused
 root/f64/uu refused
+root/foreign/av refused
+root/foreign/bi refused
+root/foreign/bo refused
+root/foreign/cm refused
+root/foreign/co refused
+root/foreign/cu reads
+root/foreign/db refused
+root/foreign/dc refused
+root/foreign/dt refused
+root/foreign/ev refused
+root/foreign/ex refused
+root/foreign/fl refused
+root/foreign/gp refused
+root/foreign/ho refused
+root/foreign/hu refused
+root/foreign/ids refused
+root/foreign/it refused
+root/foreign/js refused
+root/foreign/jsa refused
+root/foreign/jso refused
+root/foreign/kw refused
+root/foreign/kwa refused
+root/foreign/kwao refused
+root/foreign/kwo refused
+root/foreign/mp refused
+root/foreign/mpn refused
+root/foreign/mpo refused
+root/foreign/n refused
+root/foreign/ne refused
+root/foreign/nn refused
+root/foreign/ob refused
+root/foreign/sh refused
+root/foreign/ts refused
+root/foreign/uu refused
 root/fragment_over_map/av refused
 root/fragment_over_map/bi refused
 root/fragment_over_map/bo refused
-root/fragment_over_map/bt refused
 root/fragment_over_map/cm trusted json
 root/fragment_over_map/co trusted json
-root/fragment_over_map/ct refused
 root/fragment_over_map/cu trusted custom
 root/fragment_over_map/db refused
 root/fragment_over_map/dc refused
@@ -9642,12 +9936,10 @@ root/fragment_over_map/it refused
 root/fragment_over_map/js trusted json
 root/fragment_over_map/jsa refused
 root/fragment_over_map/jso trusted json
-root/fragment_over_map/kns refused
 root/fragment_over_map/kw refused
 root/fragment_over_map/kwa refused
 root/fragment_over_map/kwao refused
 root/fragment_over_map/kwo refused
-root/fragment_over_map/mm refused
 root/fragment_over_map/mp trusted jsonb+null
 root/fragment_over_map/mpn refused
 root/fragment_over_map/mpo trusted null
@@ -9661,10 +9953,8 @@ root/fragment_over_map/uu refused
 root/fragment_over_map_type/av refused
 root/fragment_over_map_type/bi refused
 root/fragment_over_map_type/bo refused
-root/fragment_over_map_type/bt refused
 root/fragment_over_map_type/cm trusted json
 root/fragment_over_map_type/co trusted json
-root/fragment_over_map_type/ct refused
 root/fragment_over_map_type/cu trusted custom
 root/fragment_over_map_type/db refused
 root/fragment_over_map_type/dc refused
@@ -9680,12 +9970,10 @@ root/fragment_over_map_type/it refused
 root/fragment_over_map_type/js trusted json
 root/fragment_over_map_type/jsa refused
 root/fragment_over_map_type/jso trusted json
-root/fragment_over_map_type/kns refused
 root/fragment_over_map_type/kw refused
 root/fragment_over_map_type/kwa refused
 root/fragment_over_map_type/kwao refused
 root/fragment_over_map_type/kwo refused
-root/fragment_over_map_type/mm refused
 root/fragment_over_map_type/mp trusted jsonb+null
 root/fragment_over_map_type/mpn refused
 root/fragment_over_map_type/mpo trusted null
@@ -9699,10 +9987,8 @@ root/fragment_over_map_type/uu refused
 root/fragment_over_option_map/av refused
 root/fragment_over_option_map/bi refused
 root/fragment_over_option_map/bo refused
-root/fragment_over_option_map/bt refused
 root/fragment_over_option_map/cm trusted json
 root/fragment_over_option_map/co trusted json
-root/fragment_over_option_map/ct refused
 root/fragment_over_option_map/cu trusted custom
 root/fragment_over_option_map/db refused
 root/fragment_over_option_map/dc refused
@@ -9718,12 +10004,10 @@ root/fragment_over_option_map/it refused
 root/fragment_over_option_map/js trusted json
 root/fragment_over_option_map/jsa refused
 root/fragment_over_option_map/jso trusted json
-root/fragment_over_option_map/kns refused
 root/fragment_over_option_map/kw refused
 root/fragment_over_option_map/kwa refused
 root/fragment_over_option_map/kwao refused
 root/fragment_over_option_map/kwo refused
-root/fragment_over_option_map/mm refused
 root/fragment_over_option_map/mp trusted jsonb+null
 root/fragment_over_option_map/mpn refused
 root/fragment_over_option_map/mpo trusted null
@@ -9737,10 +10021,8 @@ root/fragment_over_option_map/uu refused
 root/fragment_over_option_value_map/av refused
 root/fragment_over_option_value_map/bi refused
 root/fragment_over_option_value_map/bo refused
-root/fragment_over_option_value_map/bt refused
 root/fragment_over_option_value_map/cm trusted json
 root/fragment_over_option_value_map/co trusted json
-root/fragment_over_option_value_map/ct refused
 root/fragment_over_option_value_map/cu trusted custom
 root/fragment_over_option_value_map/db refused
 root/fragment_over_option_value_map/dc refused
@@ -9756,12 +10038,10 @@ root/fragment_over_option_value_map/it refused
 root/fragment_over_option_value_map/js trusted json
 root/fragment_over_option_value_map/jsa refused
 root/fragment_over_option_value_map/jso trusted json
-root/fragment_over_option_value_map/kns refused
 root/fragment_over_option_value_map/kw refused
 root/fragment_over_option_value_map/kwa refused
 root/fragment_over_option_value_map/kwao refused
 root/fragment_over_option_value_map/kwo refused
-root/fragment_over_option_value_map/mm refused
 root/fragment_over_option_value_map/mp trusted jsonb
 root/fragment_over_option_value_map/mpn refused
 root/fragment_over_option_value_map/mpo reads
@@ -9775,10 +10055,8 @@ root/fragment_over_option_value_map/uu refused
 root/fragment_over_value_map/av refused
 root/fragment_over_value_map/bi refused
 root/fragment_over_value_map/bo refused
-root/fragment_over_value_map/bt refused
 root/fragment_over_value_map/cm trusted json
 root/fragment_over_value_map/co reads
-root/fragment_over_value_map/ct refused
 root/fragment_over_value_map/cu trusted custom
 root/fragment_over_value_map/db refused
 root/fragment_over_value_map/dc refused
@@ -9794,12 +10072,10 @@ root/fragment_over_value_map/it refused
 root/fragment_over_value_map/js trusted json
 root/fragment_over_value_map/jsa refused
 root/fragment_over_value_map/jso trusted json
-root/fragment_over_value_map/kns refused
 root/fragment_over_value_map/kw refused
 root/fragment_over_value_map/kwa refused
 root/fragment_over_value_map/kwao refused
 root/fragment_over_value_map/kwo refused
-root/fragment_over_value_map/mm refused
 root/fragment_over_value_map/mp refused
 root/fragment_over_value_map/mpn refused
 root/fragment_over_value_map/mpo refused
@@ -9813,10 +10089,8 @@ root/fragment_over_value_map/uu refused
 root/geo_point/av refused
 root/geo_point/bi refused
 root/geo_point/bo refused
-root/geo_point/bt refused
 root/geo_point/cm trusted json
 root/geo_point/co trusted json
-root/geo_point/ct refused
 root/geo_point/cu trusted custom
 root/geo_point/db refused
 root/geo_point/dc refused
@@ -9832,12 +10106,10 @@ root/geo_point/it refused
 root/geo_point/js trusted json
 root/geo_point/jsa refused
 root/geo_point/jso trusted json
-root/geo_point/kns refused
 root/geo_point/kw refused
 root/geo_point/kwa refused
 root/geo_point/kwao refused
 root/geo_point/kwo refused
-root/geo_point/mm refused
 root/geo_point/mp refused
 root/geo_point/mpn refused
 root/geo_point/mpo refused
@@ -9851,10 +10123,8 @@ root/geo_point/uu refused
 root/hash_map/av refused
 root/hash_map/bi refused
 root/hash_map/bo refused
-root/hash_map/bt refused
 root/hash_map/cm trusted json
 root/hash_map/co trusted json
-root/hash_map/ct refused
 root/hash_map/cu trusted custom
 root/hash_map/db refused
 root/hash_map/dc refused
@@ -9870,12 +10140,10 @@ root/hash_map/it refused
 root/hash_map/js trusted json
 root/hash_map/jsa refused
 root/hash_map/jso trusted json
-root/hash_map/kns refused
 root/hash_map/kw refused
 root/hash_map/kwa refused
 root/hash_map/kwao refused
 root/hash_map/kwo refused
-root/hash_map/mm refused
 root/hash_map/mp trusted jsonb+null
 root/hash_map/mpn refused
 root/hash_map/mpo trusted null
@@ -9886,13 +10154,45 @@ root/hash_map/ob refused
 root/hash_map/sh refused
 root/hash_map/ts refused
 root/hash_map/uu refused
+root/hash_map_arc_str/av refused
+root/hash_map_arc_str/bi refused
+root/hash_map_arc_str/bo refused
+root/hash_map_arc_str/cm trusted json
+root/hash_map_arc_str/co trusted json
+root/hash_map_arc_str/cu trusted custom
+root/hash_map_arc_str/db refused
+root/hash_map_arc_str/dc refused
+root/hash_map_arc_str/dt refused
+root/hash_map_arc_str/ev refused
+root/hash_map_arc_str/ex refused
+root/hash_map_arc_str/fl refused
+root/hash_map_arc_str/gp refused
+root/hash_map_arc_str/ho refused
+root/hash_map_arc_str/hu refused
+root/hash_map_arc_str/ids refused
+root/hash_map_arc_str/it refused
+root/hash_map_arc_str/js trusted json
+root/hash_map_arc_str/jsa refused
+root/hash_map_arc_str/jso trusted json
+root/hash_map_arc_str/kw refused
+root/hash_map_arc_str/kwa refused
+root/hash_map_arc_str/kwao refused
+root/hash_map_arc_str/kwo refused
+root/hash_map_arc_str/mp trusted jsonb
+root/hash_map_arc_str/mpn refused
+root/hash_map_arc_str/mpo reads
+root/hash_map_arc_str/n refused
+root/hash_map_arc_str/ne refused
+root/hash_map_arc_str/nn refused
+root/hash_map_arc_str/ob refused
+root/hash_map_arc_str/sh refused
+root/hash_map_arc_str/ts refused
+root/hash_map_arc_str/uu refused
 root/hash_map_box_str/av refused
 root/hash_map_box_str/bi refused
 root/hash_map_box_str/bo refused
-root/hash_map_box_str/bt refused
 root/hash_map_box_str/cm trusted json
 root/hash_map_box_str/co trusted json
-root/hash_map_box_str/ct refused
 root/hash_map_box_str/cu trusted custom
 root/hash_map_box_str/db refused
 root/hash_map_box_str/dc refused
@@ -9908,15 +10208,13 @@ root/hash_map_box_str/it refused
 root/hash_map_box_str/js trusted json
 root/hash_map_box_str/jsa refused
 root/hash_map_box_str/jso trusted json
-root/hash_map_box_str/kns refused
 root/hash_map_box_str/kw refused
 root/hash_map_box_str/kwa refused
 root/hash_map_box_str/kwao refused
 root/hash_map_box_str/kwo refused
-root/hash_map_box_str/mm refused
-root/hash_map_box_str/mp refused
+root/hash_map_box_str/mp trusted jsonb+null
 root/hash_map_box_str/mpn refused
-root/hash_map_box_str/mpo refused
+root/hash_map_box_str/mpo trusted null
 root/hash_map_box_str/n refused
 root/hash_map_box_str/ne refused
 root/hash_map_box_str/nn refused
@@ -9927,10 +10225,8 @@ root/hash_map_box_str/uu refused
 root/hash_map_char/av refused
 root/hash_map_char/bi refused
 root/hash_map_char/bo refused
-root/hash_map_char/bt refused
 root/hash_map_char/cm trusted json
 root/hash_map_char/co trusted json
-root/hash_map_char/ct refused
 root/hash_map_char/cu trusted custom
 root/hash_map_char/db refused
 root/hash_map_char/dc refused
@@ -9946,12 +10242,10 @@ root/hash_map_char/it refused
 root/hash_map_char/js trusted json
 root/hash_map_char/jsa refused
 root/hash_map_char/jso trusted json
-root/hash_map_char/kns refused
 root/hash_map_char/kw refused
 root/hash_map_char/kwa refused
 root/hash_map_char/kwao refused
 root/hash_map_char/kwo refused
-root/hash_map_char/mm refused
 root/hash_map_char/mp refused
 root/hash_map_char/mpn refused
 root/hash_map_char/mpo refused
@@ -9965,10 +10259,8 @@ root/hash_map_char/uu refused
 root/hash_map_code/av refused
 root/hash_map_code/bi refused
 root/hash_map_code/bo refused
-root/hash_map_code/bt refused
 root/hash_map_code/cm trusted json
 root/hash_map_code/co trusted json
-root/hash_map_code/ct refused
 root/hash_map_code/cu trusted custom
 root/hash_map_code/db refused
 root/hash_map_code/dc refused
@@ -9984,12 +10276,10 @@ root/hash_map_code/it refused
 root/hash_map_code/js trusted json
 root/hash_map_code/jsa refused
 root/hash_map_code/jso trusted json
-root/hash_map_code/kns refused
 root/hash_map_code/kw refused
 root/hash_map_code/kwa refused
 root/hash_map_code/kwao refused
 root/hash_map_code/kwo refused
-root/hash_map_code/mm refused
 root/hash_map_code/mp trusted jsonb+null
 root/hash_map_code/mpn refused
 root/hash_map_code/mpo trusted null
@@ -10003,10 +10293,8 @@ root/hash_map_code/uu refused
 root/hash_map_custom_hasher/av refused
 root/hash_map_custom_hasher/bi refused
 root/hash_map_custom_hasher/bo refused
-root/hash_map_custom_hasher/bt refused
 root/hash_map_custom_hasher/cm trusted json
 root/hash_map_custom_hasher/co trusted json
-root/hash_map_custom_hasher/ct refused
 root/hash_map_custom_hasher/cu trusted custom
 root/hash_map_custom_hasher/db refused
 root/hash_map_custom_hasher/dc refused
@@ -10022,12 +10310,10 @@ root/hash_map_custom_hasher/it refused
 root/hash_map_custom_hasher/js trusted json
 root/hash_map_custom_hasher/jsa refused
 root/hash_map_custom_hasher/jso trusted json
-root/hash_map_custom_hasher/kns refused
 root/hash_map_custom_hasher/kw refused
 root/hash_map_custom_hasher/kwa refused
 root/hash_map_custom_hasher/kwao refused
 root/hash_map_custom_hasher/kwo refused
-root/hash_map_custom_hasher/mm refused
 root/hash_map_custom_hasher/mp trusted jsonb+null
 root/hash_map_custom_hasher/mpn refused
 root/hash_map_custom_hasher/mpo trusted null
@@ -10041,10 +10327,8 @@ root/hash_map_custom_hasher/uu refused
 root/hash_map_enum/av refused
 root/hash_map_enum/bi refused
 root/hash_map_enum/bo refused
-root/hash_map_enum/bt refused
 root/hash_map_enum/cm trusted json
 root/hash_map_enum/co trusted json
-root/hash_map_enum/ct refused
 root/hash_map_enum/cu trusted custom
 root/hash_map_enum/db refused
 root/hash_map_enum/dc refused
@@ -10060,12 +10344,10 @@ root/hash_map_enum/it refused
 root/hash_map_enum/js trusted json
 root/hash_map_enum/jsa refused
 root/hash_map_enum/jso trusted json
-root/hash_map_enum/kns refused
 root/hash_map_enum/kw refused
 root/hash_map_enum/kwa refused
 root/hash_map_enum/kwao refused
 root/hash_map_enum/kwo refused
-root/hash_map_enum/mm refused
 root/hash_map_enum/mp trusted jsonb+null+variants
 root/hash_map_enum/mpn refused
 root/hash_map_enum/mpo trusted null
@@ -10079,10 +10361,8 @@ root/hash_map_enum/uu refused
 root/hash_map_exhaustive/av refused
 root/hash_map_exhaustive/bi refused
 root/hash_map_exhaustive/bo refused
-root/hash_map_exhaustive/bt refused
 root/hash_map_exhaustive/cm refused
 root/hash_map_exhaustive/co refused
-root/hash_map_exhaustive/ct refused
 root/hash_map_exhaustive/cu refused
 root/hash_map_exhaustive/db refused
 root/hash_map_exhaustive/dc refused
@@ -10098,12 +10378,10 @@ root/hash_map_exhaustive/it refused
 root/hash_map_exhaustive/js refused
 root/hash_map_exhaustive/jsa refused
 root/hash_map_exhaustive/jso refused
-root/hash_map_exhaustive/kns refused
 root/hash_map_exhaustive/kw refused
 root/hash_map_exhaustive/kwa refused
 root/hash_map_exhaustive/kwao refused
 root/hash_map_exhaustive/kwo refused
-root/hash_map_exhaustive/mm refused
 root/hash_map_exhaustive/mp refused
 root/hash_map_exhaustive/mpn refused
 root/hash_map_exhaustive/mpo refused
@@ -10117,10 +10395,8 @@ root/hash_map_exhaustive/uu refused
 root/hash_map_long_key/av refused
 root/hash_map_long_key/bi refused
 root/hash_map_long_key/bo refused
-root/hash_map_long_key/bt refused
 root/hash_map_long_key/cm refused
 root/hash_map_long_key/co refused
-root/hash_map_long_key/ct refused
 root/hash_map_long_key/cu refused
 root/hash_map_long_key/db refused
 root/hash_map_long_key/dc refused
@@ -10136,12 +10412,10 @@ root/hash_map_long_key/it refused
 root/hash_map_long_key/js refused
 root/hash_map_long_key/jsa refused
 root/hash_map_long_key/jso refused
-root/hash_map_long_key/kns refused
 root/hash_map_long_key/kw refused
 root/hash_map_long_key/kwa refused
 root/hash_map_long_key/kwao refused
 root/hash_map_long_key/kwo refused
-root/hash_map_long_key/mm refused
 root/hash_map_long_key/mp refused
 root/hash_map_long_key/mpn refused
 root/hash_map_long_key/mpo refused
@@ -10155,10 +10429,8 @@ root/hash_map_long_key/uu refused
 root/hash_map_map/av refused
 root/hash_map_map/bi refused
 root/hash_map_map/bo refused
-root/hash_map_map/bt refused
 root/hash_map_map/cm trusted json
 root/hash_map_map/co trusted json
-root/hash_map_map/ct refused
 root/hash_map_map/cu trusted custom
 root/hash_map_map/db refused
 root/hash_map_map/dc refused
@@ -10174,12 +10446,10 @@ root/hash_map_map/it refused
 root/hash_map_map/js trusted json
 root/hash_map_map/jsa refused
 root/hash_map_map/jso trusted json
-root/hash_map_map/kns refused
 root/hash_map_map/kw refused
 root/hash_map_map/kwa refused
 root/hash_map_map/kwao refused
 root/hash_map_map/kwo refused
-root/hash_map_map/mm refused
 root/hash_map_map/mp refused
 root/hash_map_map/mpn refused
 root/hash_map_map/mpo refused
@@ -10193,10 +10463,8 @@ root/hash_map_map/uu refused
 root/hash_map_option/av refused
 root/hash_map_option/bi refused
 root/hash_map_option/bo refused
-root/hash_map_option/bt refused
 root/hash_map_option/cm trusted json
 root/hash_map_option/co trusted json
-root/hash_map_option/ct refused
 root/hash_map_option/cu trusted custom
 root/hash_map_option/db refused
 root/hash_map_option/dc refused
@@ -10212,12 +10480,10 @@ root/hash_map_option/it refused
 root/hash_map_option/js trusted json
 root/hash_map_option/jsa refused
 root/hash_map_option/jso trusted json
-root/hash_map_option/kns refused
 root/hash_map_option/kw refused
 root/hash_map_option/kwa refused
 root/hash_map_option/kwao refused
 root/hash_map_option/kwo refused
-root/hash_map_option/mm refused
 root/hash_map_option/mp trusted jsonb
 root/hash_map_option/mpn refused
 root/hash_map_option/mpo reads
@@ -10231,10 +10497,8 @@ root/hash_map_option/uu refused
 root/hash_map_option_option/av refused
 root/hash_map_option_option/bi refused
 root/hash_map_option_option/bo refused
-root/hash_map_option_option/bt refused
 root/hash_map_option_option/cm trusted json
 root/hash_map_option_option/co trusted json
-root/hash_map_option_option/ct refused
 root/hash_map_option_option/cu trusted custom
 root/hash_map_option_option/db refused
 root/hash_map_option_option/dc refused
@@ -10250,12 +10514,10 @@ root/hash_map_option_option/it refused
 root/hash_map_option_option/js trusted json
 root/hash_map_option_option/jsa refused
 root/hash_map_option_option/jso trusted json
-root/hash_map_option_option/kns refused
 root/hash_map_option_option/kw refused
 root/hash_map_option_option/kwa refused
 root/hash_map_option_option/kwao refused
 root/hash_map_option_option/kwo refused
-root/hash_map_option_option/mm refused
 root/hash_map_option_option/mp refused
 root/hash_map_option_option/mpn refused
 root/hash_map_option_option/mpo refused
@@ -10269,10 +10531,8 @@ root/hash_map_option_option/uu refused
 root/hash_map_own_date/av refused
 root/hash_map_own_date/bi refused
 root/hash_map_own_date/bo refused
-root/hash_map_own_date/bt refused
 root/hash_map_own_date/cm trusted json
 root/hash_map_own_date/co trusted json
-root/hash_map_own_date/ct refused
 root/hash_map_own_date/cu trusted custom
 root/hash_map_own_date/db refused
 root/hash_map_own_date/dc refused
@@ -10288,12 +10548,10 @@ root/hash_map_own_date/it refused
 root/hash_map_own_date/js trusted json
 root/hash_map_own_date/jsa refused
 root/hash_map_own_date/jso trusted json
-root/hash_map_own_date/kns refused
 root/hash_map_own_date/kw refused
 root/hash_map_own_date/kwa refused
 root/hash_map_own_date/kwao refused
 root/hash_map_own_date/kwo refused
-root/hash_map_own_date/mm refused
 root/hash_map_own_date/mp trusted namesake
 root/hash_map_own_date/mpn refused
 root/hash_map_own_date/mpo reads
@@ -10307,10 +10565,8 @@ root/hash_map_own_date/uu refused
 root/hash_map_sub/av refused
 root/hash_map_sub/bi refused
 root/hash_map_sub/bo refused
-root/hash_map_sub/bt refused
 root/hash_map_sub/cm trusted json
 root/hash_map_sub/co trusted json
-root/hash_map_sub/ct refused
 root/hash_map_sub/cu trusted custom
 root/hash_map_sub/db refused
 root/hash_map_sub/dc refused
@@ -10326,12 +10582,10 @@ root/hash_map_sub/it refused
 root/hash_map_sub/js trusted json
 root/hash_map_sub/jsa refused
 root/hash_map_sub/jso trusted json
-root/hash_map_sub/kns refused
 root/hash_map_sub/kw refused
 root/hash_map_sub/kwa refused
 root/hash_map_sub/kwao refused
 root/hash_map_sub/kwo refused
-root/hash_map_sub/mm refused
 root/hash_map_sub/mp refused
 root/hash_map_sub/mpn refused
 root/hash_map_sub/mpo refused
@@ -10345,10 +10599,8 @@ root/hash_map_sub/uu refused
 root/hash_map_uuid/av refused
 root/hash_map_uuid/bi refused
 root/hash_map_uuid/bo refused
-root/hash_map_uuid/bt refused
 root/hash_map_uuid/cm trusted json
 root/hash_map_uuid/co trusted json
-root/hash_map_uuid/ct refused
 root/hash_map_uuid/cu trusted custom
 root/hash_map_uuid/db refused
 root/hash_map_uuid/dc refused
@@ -10364,12 +10616,10 @@ root/hash_map_uuid/it refused
 root/hash_map_uuid/js trusted json
 root/hash_map_uuid/jsa refused
 root/hash_map_uuid/jso trusted json
-root/hash_map_uuid/kns refused
 root/hash_map_uuid/kw refused
 root/hash_map_uuid/kwa refused
 root/hash_map_uuid/kwao refused
 root/hash_map_uuid/kwo refused
-root/hash_map_uuid/mm refused
 root/hash_map_uuid/mp trusted null+uuid
 root/hash_map_uuid/mpn refused
 root/hash_map_uuid/mpo trusted null+uuid
@@ -10383,10 +10633,8 @@ root/hash_map_uuid/uu refused
 root/hash_map_vec/av refused
 root/hash_map_vec/bi refused
 root/hash_map_vec/bo refused
-root/hash_map_vec/bt refused
 root/hash_map_vec/cm trusted json
 root/hash_map_vec/co trusted json
-root/hash_map_vec/ct refused
 root/hash_map_vec/cu trusted custom
 root/hash_map_vec/db refused
 root/hash_map_vec/dc refused
@@ -10402,12 +10650,10 @@ root/hash_map_vec/it refused
 root/hash_map_vec/js trusted json
 root/hash_map_vec/jsa refused
 root/hash_map_vec/jso trusted json
-root/hash_map_vec/kns refused
 root/hash_map_vec/kw refused
 root/hash_map_vec/kwa refused
 root/hash_map_vec/kwao refused
 root/hash_map_vec/kwo refused
-root/hash_map_vec/mm refused
 root/hash_map_vec/mp refused
 root/hash_map_vec/mpn refused
 root/hash_map_vec/mpo refused
@@ -10421,10 +10667,8 @@ root/hash_map_vec/uu refused
 root/i16/av refused
 root/i16/bi refused
 root/i16/bo refused
-root/i16/bt refused
 root/i16/cm trusted json
 root/i16/co trusted json
-root/i16/ct refused
 root/i16/cu trusted custom
 root/i16/db refused
 root/i16/dc refused
@@ -10440,12 +10684,10 @@ root/i16/it refused
 root/i16/js trusted json
 root/i16/jsa refused
 root/i16/jso trusted json
-root/i16/kns refused
 root/i16/kw refused
 root/i16/kwa refused
 root/i16/kwao refused
 root/i16/kwo refused
-root/i16/mm refused
 root/i16/mp refused
 root/i16/mpn refused
 root/i16/mpo refused
@@ -10459,10 +10701,8 @@ root/i16/uu refused
 root/i32/av refused
 root/i32/bi refused
 root/i32/bo refused
-root/i32/bt refused
 root/i32/cm trusted json
 root/i32/co trusted json
-root/i32/ct refused
 root/i32/cu trusted custom
 root/i32/db refused
 root/i32/dc refused
@@ -10478,12 +10718,10 @@ root/i32/it reads
 root/i32/js trusted json
 root/i32/jsa refused
 root/i32/jso trusted json
-root/i32/kns refused
 root/i32/kw refused
 root/i32/kwa refused
 root/i32/kwao refused
 root/i32/kwo refused
-root/i32/mm refused
 root/i32/mp refused
 root/i32/mpn refused
 root/i32/mpo refused
@@ -10497,10 +10735,8 @@ root/i32/uu refused
 root/integer_newtype/av trusted integer
 root/integer_newtype/bi refused
 root/integer_newtype/bo refused
-root/integer_newtype/bt refused
 root/integer_newtype/cm trusted json
 root/integer_newtype/co trusted json
-root/integer_newtype/ct trusted integer
 root/integer_newtype/cu trusted custom
 root/integer_newtype/db trusted integer
 root/integer_newtype/dc trusted integer
@@ -10516,12 +10752,10 @@ root/integer_newtype/it reads
 root/integer_newtype/js trusted json
 root/integer_newtype/jsa refused
 root/integer_newtype/jso trusted json
-root/integer_newtype/kns refused
 root/integer_newtype/kw refused
 root/integer_newtype/kwa refused
 root/integer_newtype/kwao refused
 root/integer_newtype/kwo refused
-root/integer_newtype/mm refused
 root/integer_newtype/mp refused
 root/integer_newtype/mpn refused
 root/integer_newtype/mpo refused
@@ -10532,13 +10766,45 @@ root/integer_newtype/ob refused
 root/integer_newtype/sh refused
 root/integer_newtype/ts refused
 root/integer_newtype/uu refused
+root/ip_addr/av refused
+root/ip_addr/bi refused
+root/ip_addr/bo refused
+root/ip_addr/cm refused
+root/ip_addr/co refused
+root/ip_addr/cu reads
+root/ip_addr/db refused
+root/ip_addr/dc refused
+root/ip_addr/dt refused
+root/ip_addr/ev refused
+root/ip_addr/ex refused
+root/ip_addr/fl refused
+root/ip_addr/gp refused
+root/ip_addr/ho refused
+root/ip_addr/hu refused
+root/ip_addr/ids refused
+root/ip_addr/it refused
+root/ip_addr/js refused
+root/ip_addr/jsa refused
+root/ip_addr/jso refused
+root/ip_addr/kw refused
+root/ip_addr/kwa refused
+root/ip_addr/kwao refused
+root/ip_addr/kwo refused
+root/ip_addr/mp refused
+root/ip_addr/mpn refused
+root/ip_addr/mpo refused
+root/ip_addr/n refused
+root/ip_addr/ne refused
+root/ip_addr/nn refused
+root/ip_addr/ob refused
+root/ip_addr/sh refused
+root/ip_addr/ts refused
+root/ip_addr/uu refused
 root/long/av refused
 root/long/bi refused
 root/long/bo refused
-root/long/bt refused
 root/long/cm trusted json
 root/long/co trusted json
-root/long/ct reads
 root/long/cu trusted custom
 root/long/db refused
 root/long/dc refused
@@ -10554,12 +10820,10 @@ root/long/it refused
 root/long/js trusted json
 root/long/jsa refused
 root/long/jso trusted json
-root/long/kns refused
 root/long/kw refused
 root/long/kwa refused
 root/long/kwao refused
 root/long/kwo refused
-root/long/mm refused
 root/long/mp refused
 root/long/mpn refused
 root/long/mpo refused
@@ -10573,10 +10837,8 @@ root/long/uu refused
 root/long_newtype/av refused
 root/long_newtype/bi refused
 root/long_newtype/bo refused
-root/long_newtype/bt refused
 root/long_newtype/cm trusted json
 root/long_newtype/co trusted json
-root/long_newtype/ct reads
 root/long_newtype/cu trusted custom
 root/long_newtype/db refused
 root/long_newtype/dc trusted integer
@@ -10592,12 +10854,10 @@ root/long_newtype/it refused
 root/long_newtype/js trusted json
 root/long_newtype/jsa refused
 root/long_newtype/jso trusted json
-root/long_newtype/kns refused
 root/long_newtype/kw refused
 root/long_newtype/kwa refused
 root/long_newtype/kwao refused
 root/long_newtype/kwo refused
-root/long_newtype/mm refused
 root/long_newtype/mp refused
 root/long_newtype/mpn refused
 root/long_newtype/mpo refused
@@ -10611,10 +10871,8 @@ root/long_newtype/uu refused
 root/map_keyword/av refused
 root/map_keyword/bi refused
 root/map_keyword/bo refused
-root/map_keyword/bt refused
 root/map_keyword/cm trusted json
 root/map_keyword/co trusted json
-root/map_keyword/ct refused
 root/map_keyword/cu trusted custom
 root/map_keyword/db refused
 root/map_keyword/dc refused
@@ -10630,12 +10888,10 @@ root/map_keyword/it refused
 root/map_keyword/js trusted json
 root/map_keyword/jsa refused
 root/map_keyword/jso trusted json
-root/map_keyword/kns refused
 root/map_keyword/kw refused
 root/map_keyword/kwa refused
 root/map_keyword/kwao refused
 root/map_keyword/kwo refused
-root/map_keyword/mm refused
 root/map_keyword/mp trusted jsonb+null
 root/map_keyword/mpn refused
 root/map_keyword/mpo trusted null
@@ -10649,10 +10905,8 @@ root/map_keyword/uu refused
 root/map_keyword_option/av refused
 root/map_keyword_option/bi refused
 root/map_keyword_option/bo refused
-root/map_keyword_option/bt refused
 root/map_keyword_option/cm trusted json
 root/map_keyword_option/co trusted json
-root/map_keyword_option/ct refused
 root/map_keyword_option/cu trusted custom
 root/map_keyword_option/db refused
 root/map_keyword_option/dc refused
@@ -10668,12 +10922,10 @@ root/map_keyword_option/it refused
 root/map_keyword_option/js trusted json
 root/map_keyword_option/jsa refused
 root/map_keyword_option/jso trusted json
-root/map_keyword_option/kns refused
 root/map_keyword_option/kw refused
 root/map_keyword_option/kwa refused
 root/map_keyword_option/kwao refused
 root/map_keyword_option/kwo refused
-root/map_keyword_option/mm refused
 root/map_keyword_option/mp trusted jsonb
 root/map_keyword_option/mpn refused
 root/map_keyword_option/mpo reads
@@ -10687,10 +10939,8 @@ root/map_keyword_option/uu refused
 root/map_named/av refused
 root/map_named/bi refused
 root/map_named/bo refused
-root/map_named/bt refused
 root/map_named/cm trusted json
 root/map_named/co trusted json
-root/map_named/ct refused
 root/map_named/cu trusted custom
 root/map_named/db refused
 root/map_named/dc refused
@@ -10706,12 +10956,10 @@ root/map_named/it refused
 root/map_named/js trusted json
 root/map_named/jsa refused
 root/map_named/jso trusted json
-root/map_named/kns refused
 root/map_named/kw refused
 root/map_named/kwa refused
 root/map_named/kwao refused
 root/map_named/kwo refused
-root/map_named/mm refused
 root/map_named/mp trusted jsonb
 root/map_named/mpn refused
 root/map_named/mpo reads
@@ -10725,10 +10973,8 @@ root/map_named/uu refused
 root/map_named_option_rest/av refused
 root/map_named_option_rest/bi refused
 root/map_named_option_rest/bo refused
-root/map_named_option_rest/bt refused
 root/map_named_option_rest/cm trusted json
 root/map_named_option_rest/co trusted json
-root/map_named_option_rest/ct refused
 root/map_named_option_rest/cu trusted custom
 root/map_named_option_rest/db refused
 root/map_named_option_rest/dc refused
@@ -10744,12 +10990,10 @@ root/map_named_option_rest/it refused
 root/map_named_option_rest/js trusted json
 root/map_named_option_rest/jsa refused
 root/map_named_option_rest/jso trusted json
-root/map_named_option_rest/kns refused
 root/map_named_option_rest/kw refused
 root/map_named_option_rest/kwa refused
 root/map_named_option_rest/kwao refused
 root/map_named_option_rest/kwo refused
-root/map_named_option_rest/mm refused
 root/map_named_option_rest/mp trusted jsonb
 root/map_named_option_rest/mpn refused
 root/map_named_option_rest/mpo reads
@@ -10763,10 +11007,8 @@ root/map_named_option_rest/uu refused
 root/map_over_map_type/av refused
 root/map_over_map_type/bi refused
 root/map_over_map_type/bo refused
-root/map_over_map_type/bt refused
 root/map_over_map_type/cm trusted json
 root/map_over_map_type/co trusted json
-root/map_over_map_type/ct refused
 root/map_over_map_type/cu trusted custom
 root/map_over_map_type/db refused
 root/map_over_map_type/dc refused
@@ -10782,12 +11024,10 @@ root/map_over_map_type/it refused
 root/map_over_map_type/js trusted json
 root/map_over_map_type/jsa refused
 root/map_over_map_type/jso trusted json
-root/map_over_map_type/kns refused
 root/map_over_map_type/kw refused
 root/map_over_map_type/kwa refused
 root/map_over_map_type/kwao refused
 root/map_over_map_type/kwo refused
-root/map_over_map_type/mm refused
 root/map_over_map_type/mp trusted jsonb+null
 root/map_over_map_type/mpn refused
 root/map_over_map_type/mpo trusted null
@@ -10801,10 +11041,8 @@ root/map_over_map_type/uu refused
 root/map_text/av refused
 root/map_text/bi refused
 root/map_text/bo refused
-root/map_text/bt refused
 root/map_text/cm trusted json
 root/map_text/co trusted json
-root/map_text/ct refused
 root/map_text/cu trusted custom
 root/map_text/db refused
 root/map_text/dc refused
@@ -10820,12 +11058,10 @@ root/map_text/it refused
 root/map_text/js trusted json
 root/map_text/jsa refused
 root/map_text/jso trusted json
-root/map_text/kns refused
 root/map_text/kw refused
 root/map_text/kwa refused
 root/map_text/kwao refused
 root/map_text/kwo refused
-root/map_text/mm refused
 root/map_text/mp refused
 root/map_text/mpn refused
 root/map_text/mpo refused
@@ -10839,10 +11075,8 @@ root/map_text/uu refused
 root/naive_date/av refused
 root/naive_date/bi refused
 root/naive_date/bo refused
-root/naive_date/bt refused
 root/naive_date/cm trusted json
 root/naive_date/co trusted json
-root/naive_date/ct refused
 root/naive_date/cu trusted custom
 root/naive_date/db refused
 root/naive_date/dc refused
@@ -10858,12 +11092,10 @@ root/naive_date/it refused
 root/naive_date/js trusted json
 root/naive_date/jsa refused
 root/naive_date/jso trusted json
-root/naive_date/kns refused
 root/naive_date/kw refused
 root/naive_date/kwa refused
 root/naive_date/kwao refused
 root/naive_date/kwo refused
-root/naive_date/mm refused
 root/naive_date/mp refused
 root/naive_date/mpn refused
 root/naive_date/mpo refused
@@ -10877,10 +11109,8 @@ root/naive_date/uu refused
 root/naive_date_time/av refused
 root/naive_date_time/bi refused
 root/naive_date_time/bo refused
-root/naive_date_time/bt refused
 root/naive_date_time/cm trusted json
 root/naive_date_time/co trusted json
-root/naive_date_time/ct refused
 root/naive_date_time/cu trusted custom
 root/naive_date_time/db refused
 root/naive_date_time/dc refused
@@ -10896,12 +11126,10 @@ root/naive_date_time/it refused
 root/naive_date_time/js trusted json
 root/naive_date_time/jsa refused
 root/naive_date_time/jso trusted json
-root/naive_date_time/kns refused
 root/naive_date_time/kw refused
 root/naive_date_time/kwa refused
 root/naive_date_time/kwao refused
 root/naive_date_time/kwo refused
-root/naive_date_time/mm refused
 root/naive_date_time/mp refused
 root/naive_date_time/mpn refused
 root/naive_date_time/mpo refused
@@ -10915,10 +11143,8 @@ root/naive_date_time/uu refused
 root/naive_time/av refused
 root/naive_time/bi refused
 root/naive_time/bo refused
-root/naive_time/bt refused
 root/naive_time/cm trusted json
 root/naive_time/co trusted json
-root/naive_time/ct refused
 root/naive_time/cu trusted custom
 root/naive_time/db refused
 root/naive_time/dc refused
@@ -10934,12 +11160,10 @@ root/naive_time/it refused
 root/naive_time/js trusted json
 root/naive_time/jsa refused
 root/naive_time/jso trusted json
-root/naive_time/kns refused
 root/naive_time/kw refused
 root/naive_time/kwa refused
 root/naive_time/kwao refused
 root/naive_time/kwo refused
-root/naive_time/mm refused
 root/naive_time/mp refused
 root/naive_time/mpn refused
 root/naive_time/mpo refused
@@ -10953,10 +11177,8 @@ root/naive_time/uu refused
 root/opaque_plain/av refused
 root/opaque_plain/bi refused
 root/opaque_plain/bo refused
-root/opaque_plain/bt trusted opaque
 root/opaque_plain/cm trusted json
 root/opaque_plain/co trusted json
-root/opaque_plain/ct refused
 root/opaque_plain/cu refused
 root/opaque_plain/db refused
 root/opaque_plain/dc refused
@@ -10972,12 +11194,10 @@ root/opaque_plain/it refused
 root/opaque_plain/js trusted json
 root/opaque_plain/jsa refused
 root/opaque_plain/jso trusted json
-root/opaque_plain/kns refused
 root/opaque_plain/kw refused
 root/opaque_plain/kwa refused
 root/opaque_plain/kwao refused
 root/opaque_plain/kwo refused
-root/opaque_plain/mm refused
 root/opaque_plain/mp refused
 root/opaque_plain/mpn refused
 root/opaque_plain/mpo refused
@@ -10991,10 +11211,8 @@ root/opaque_plain/uu refused
 root/option_box_vec/av refused
 root/option_box_vec/bi refused
 root/option_box_vec/bo refused
-root/option_box_vec/bt refused
 root/option_box_vec/cm refused
 root/option_box_vec/co refused
-root/option_box_vec/ct refused
 root/option_box_vec/cu refused
 root/option_box_vec/db refused
 root/option_box_vec/dc refused
@@ -11010,12 +11228,10 @@ root/option_box_vec/it refused
 root/option_box_vec/js refused
 root/option_box_vec/jsa refused
 root/option_box_vec/jso refused
-root/option_box_vec/kns refused
 root/option_box_vec/kw refused
 root/option_box_vec/kwa refused
 root/option_box_vec/kwao refused
 root/option_box_vec/kwo refused
-root/option_box_vec/mm refused
 root/option_box_vec/mp refused
 root/option_box_vec/mpn refused
 root/option_box_vec/mpo refused
@@ -11029,10 +11245,8 @@ root/option_box_vec/uu refused
 root/own_date/av refused
 root/own_date/bi refused
 root/own_date/bo refused
-root/own_date/bt refused
 root/own_date/cm trusted json
 root/own_date/co trusted json
-root/own_date/ct refused
 root/own_date/cu reads
 root/own_date/db refused
 root/own_date/dc refused
@@ -11048,12 +11262,10 @@ root/own_date/it refused
 root/own_date/js trusted json
 root/own_date/jsa refused
 root/own_date/jso trusted json
-root/own_date/kns reads
 root/own_date/kw reads
 root/own_date/kwa refused
 root/own_date/kwao refused
 root/own_date/kwo reads
-root/own_date/mm refused
 root/own_date/mp refused
 root/own_date/mpn refused
 root/own_date/mpo refused
@@ -11064,16 +11276,14 @@ root/own_date/ob refused
 root/own_date/sh refused
 root/own_date/ts reads
 root/own_date/uu reads
-root/own_decimal/av trusted namesake
+root/own_decimal/av refused
 root/own_decimal/bi refused
 root/own_decimal/bo refused
-root/own_decimal/bt refused
 root/own_decimal/cm trusted json
 root/own_decimal/co trusted json
-root/own_decimal/ct refused
 root/own_decimal/cu reads
-root/own_decimal/db trusted namesake
-root/own_decimal/dc trusted namesake
+root/own_decimal/db refused
+root/own_decimal/dc refused
 root/own_decimal/dt reads
 root/own_decimal/ev reads
 root/own_decimal/ex refused
@@ -11086,12 +11296,10 @@ root/own_decimal/it refused
 root/own_decimal/js trusted json
 root/own_decimal/jsa refused
 root/own_decimal/jso trusted json
-root/own_decimal/kns reads
 root/own_decimal/kw reads
 root/own_decimal/kwa refused
 root/own_decimal/kwao refused
 root/own_decimal/kwo reads
-root/own_decimal/mm refused
 root/own_decimal/mp refused
 root/own_decimal/mpn refused
 root/own_decimal/mpo refused
@@ -11105,10 +11313,8 @@ root/own_decimal/uu reads
 root/own_geo_point/av refused
 root/own_geo_point/bi refused
 root/own_geo_point/bo refused
-root/own_geo_point/bt refused
 root/own_geo_point/cm trusted json
 root/own_geo_point/co trusted json
-root/own_geo_point/ct refused
 root/own_geo_point/cu reads
 root/own_geo_point/db refused
 root/own_geo_point/dc refused
@@ -11124,12 +11330,10 @@ root/own_geo_point/it refused
 root/own_geo_point/js trusted json
 root/own_geo_point/jsa refused
 root/own_geo_point/jso trusted json
-root/own_geo_point/kns reads
 root/own_geo_point/kw reads
 root/own_geo_point/kwa refused
 root/own_geo_point/kwao refused
 root/own_geo_point/kwo reads
-root/own_geo_point/mm refused
 root/own_geo_point/mp refused
 root/own_geo_point/mpn refused
 root/own_geo_point/mpo refused
@@ -11143,10 +11347,8 @@ root/own_geo_point/uu reads
 root/own_uuid/av refused
 root/own_uuid/bi refused
 root/own_uuid/bo refused
-root/own_uuid/bt refused
 root/own_uuid/cm trusted json
 root/own_uuid/co trusted json
-root/own_uuid/ct refused
 root/own_uuid/cu reads
 root/own_uuid/db refused
 root/own_uuid/dc refused
@@ -11162,12 +11364,10 @@ root/own_uuid/it refused
 root/own_uuid/js trusted json
 root/own_uuid/jsa refused
 root/own_uuid/jso trusted json
-root/own_uuid/kns reads
 root/own_uuid/kw reads
 root/own_uuid/kwa refused
 root/own_uuid/kwao refused
 root/own_uuid/kwo reads
-root/own_uuid/mm refused
 root/own_uuid/mp refused
 root/own_uuid/mpn refused
 root/own_uuid/mpo refused
@@ -11181,10 +11381,8 @@ root/own_uuid/uu reads
 root/own_value/av trusted namesake
 root/own_value/bi trusted namesake
 root/own_value/bo trusted namesake
-root/own_value/bt trusted namesake
 root/own_value/cm trusted json
 root/own_value/co trusted json
-root/own_value/ct trusted namesake
 root/own_value/cu trusted custom
 root/own_value/db trusted namesake
 root/own_value/dc trusted namesake
@@ -11200,12 +11398,10 @@ root/own_value/it trusted namesake
 root/own_value/js trusted json
 root/own_value/jsa trusted json
 root/own_value/jso trusted json
-root/own_value/kns trusted namesake
 root/own_value/kw trusted namesake
 root/own_value/kwa trusted namesake
 root/own_value/kwao trusted namesake
 root/own_value/kwo trusted namesake
-root/own_value/mm trusted namesake
 root/own_value/mp trusted namesake
 root/own_value/mpn trusted namesake
 root/own_value/mpo trusted namesake
@@ -11216,13 +11412,45 @@ root/own_value/ob trusted namesake
 root/own_value/sh trusted namesake
 root/own_value/ts trusted namesake
 root/own_value/uu trusted namesake
+root/rc_str/av refused
+root/rc_str/bi refused
+root/rc_str/bo refused
+root/rc_str/cm trusted json
+root/rc_str/co trusted json
+root/rc_str/cu reads
+root/rc_str/db refused
+root/rc_str/dc refused
+root/rc_str/dt reads
+root/rc_str/ev reads
+root/rc_str/ex refused
+root/rc_str/fl refused
+root/rc_str/gp refused
+root/rc_str/ho refused
+root/rc_str/hu refused
+root/rc_str/ids refused
+root/rc_str/it refused
+root/rc_str/js trusted json
+root/rc_str/jsa refused
+root/rc_str/jso trusted json
+root/rc_str/kw reads
+root/rc_str/kwa refused
+root/rc_str/kwao refused
+root/rc_str/kwo reads
+root/rc_str/mp refused
+root/rc_str/mpn refused
+root/rc_str/mpo refused
+root/rc_str/n refused
+root/rc_str/ne refused
+root/rc_str/nn refused
+root/rc_str/ob refused
+root/rc_str/sh refused
+root/rc_str/ts reads
+root/rc_str/uu reads
 root/short_newtype/av trusted integer
 root/short_newtype/bi refused
 root/short_newtype/bo refused
-root/short_newtype/bt refused
 root/short_newtype/cm trusted json
 root/short_newtype/co trusted json
-root/short_newtype/ct trusted integer
 root/short_newtype/cu trusted custom
 root/short_newtype/db trusted integer
 root/short_newtype/dc trusted integer
@@ -11238,12 +11466,10 @@ root/short_newtype/it trusted integer
 root/short_newtype/js trusted json
 root/short_newtype/jsa refused
 root/short_newtype/jso trusted json
-root/short_newtype/kns refused
 root/short_newtype/kw refused
 root/short_newtype/kwa refused
 root/short_newtype/kwao refused
 root/short_newtype/kwo refused
-root/short_newtype/mm refused
 root/short_newtype/mp refused
 root/short_newtype/mpn refused
 root/short_newtype/mpo refused
@@ -11257,10 +11483,8 @@ root/short_newtype/uu refused
 root/string/av refused
 root/string/bi reads
 root/string/bo refused
-root/string/bt refused
 root/string/cm trusted json
 root/string/co trusted json
-root/string/ct refused
 root/string/cu reads
 root/string/db refused
 root/string/dc refused
@@ -11276,12 +11500,10 @@ root/string/it refused
 root/string/js trusted json
 root/string/jsa refused
 root/string/jso trusted json
-root/string/kns reads
 root/string/kw reads
 root/string/kwa refused
 root/string/kwao refused
 root/string/kwo reads
-root/string/mm refused
 root/string/mp refused
 root/string/mpn refused
 root/string/mpo refused
@@ -11295,10 +11517,8 @@ root/string/uu reads
 root/string_alias/av refused
 root/string_alias/bi refused
 root/string_alias/bo refused
-root/string_alias/bt refused
 root/string_alias/cm refused
 root/string_alias/co refused
-root/string_alias/ct refused
 root/string_alias/cu reads
 root/string_alias/db refused
 root/string_alias/dc refused
@@ -11314,12 +11534,10 @@ root/string_alias/it refused
 root/string_alias/js refused
 root/string_alias/jsa refused
 root/string_alias/jso refused
-root/string_alias/kns reads
 root/string_alias/kw reads
 root/string_alias/kwa refused
 root/string_alias/kwao refused
 root/string_alias/kwo reads
-root/string_alias/mm refused
 root/string_alias/mp refused
 root/string_alias/mpn refused
 root/string_alias/mpo refused
@@ -11333,10 +11551,8 @@ root/string_alias/uu reads
 root/sub/av refused
 root/sub/bi refused
 root/sub/bo refused
-root/sub/bt reads
 root/sub/cm refused
 root/sub/co refused
-root/sub/ct refused
 root/sub/cu trusted custom
 root/sub/db refused
 root/sub/dc refused
@@ -11352,12 +11568,10 @@ root/sub/it refused
 root/sub/js refused
 root/sub/jsa refused
 root/sub/jso refused
-root/sub/kns refused
 root/sub/kw refused
 root/sub/kwa refused
 root/sub/kwao refused
 root/sub/kwo refused
-root/sub/mm refused
 root/sub/mp refused
 root/sub/mpn refused
 root/sub/mpo refused
@@ -11371,10 +11585,8 @@ root/sub/uu refused
 root/subs/av refused
 root/subs/bi refused
 root/subs/bo refused
-root/subs/bt refused
 root/subs/cm refused
 root/subs/co refused
-root/subs/ct refused
 root/subs/cu trusted custom
 root/subs/db refused
 root/subs/dc refused
@@ -11390,12 +11602,10 @@ root/subs/it refused
 root/subs/js refused
 root/subs/jsa refused
 root/subs/jso refused
-root/subs/kns refused
 root/subs/kw refused
 root/subs/kwa refused
 root/subs/kwao refused
 root/subs/kwo refused
-root/subs/mm reads
 root/subs/mp refused
 root/subs/mpn refused
 root/subs/mpo refused
@@ -11409,10 +11619,8 @@ root/subs/uu refused
 root/tagged_over_alias/av refused
 root/tagged_over_alias/bi refused
 root/tagged_over_alias/bo refused
-root/tagged_over_alias/bt refused
 root/tagged_over_alias/cm trusted json
 root/tagged_over_alias/co trusted json
-root/tagged_over_alias/ct refused
 root/tagged_over_alias/cu trusted unseen
 root/tagged_over_alias/db refused
 root/tagged_over_alias/dc refused
@@ -11428,12 +11636,10 @@ root/tagged_over_alias/it refused
 root/tagged_over_alias/js trusted json
 root/tagged_over_alias/jsa refused
 root/tagged_over_alias/jso trusted json
-root/tagged_over_alias/kns trusted unseen
 root/tagged_over_alias/kw trusted unseen
 root/tagged_over_alias/kwa refused
 root/tagged_over_alias/kwao refused
 root/tagged_over_alias/kwo trusted unseen
-root/tagged_over_alias/mm refused
 root/tagged_over_alias/mp refused
 root/tagged_over_alias/mpn refused
 root/tagged_over_alias/mpo refused
@@ -11447,10 +11653,8 @@ root/tagged_over_alias/uu trusted unseen
 root/tagged_over_char/av refused
 root/tagged_over_char/bi refused
 root/tagged_over_char/bo refused
-root/tagged_over_char/bt refused
 root/tagged_over_char/cm trusted json
 root/tagged_over_char/co trusted json
-root/tagged_over_char/ct refused
 root/tagged_over_char/cu trusted unseen
 root/tagged_over_char/db refused
 root/tagged_over_char/dc refused
@@ -11466,12 +11670,10 @@ root/tagged_over_char/it refused
 root/tagged_over_char/js trusted json
 root/tagged_over_char/jsa refused
 root/tagged_over_char/jso trusted json
-root/tagged_over_char/kns trusted unseen
 root/tagged_over_char/kw trusted unseen
 root/tagged_over_char/kwa refused
 root/tagged_over_char/kwao refused
 root/tagged_over_char/kwo reads
-root/tagged_over_char/mm refused
 root/tagged_over_char/mp refused
 root/tagged_over_char/mpn refused
 root/tagged_over_char/mpo refused
@@ -11485,10 +11687,8 @@ root/tagged_over_char/uu trusted unseen
 root/tagged_over_cow_str/av refused
 root/tagged_over_cow_str/bi refused
 root/tagged_over_cow_str/bo refused
-root/tagged_over_cow_str/bt refused
 root/tagged_over_cow_str/cm trusted json
 root/tagged_over_cow_str/co trusted json
-root/tagged_over_cow_str/ct refused
 root/tagged_over_cow_str/cu reads
 root/tagged_over_cow_str/db refused
 root/tagged_over_cow_str/dc refused
@@ -11504,12 +11704,10 @@ root/tagged_over_cow_str/it refused
 root/tagged_over_cow_str/js trusted json
 root/tagged_over_cow_str/jsa refused
 root/tagged_over_cow_str/jso trusted json
-root/tagged_over_cow_str/kns reads
 root/tagged_over_cow_str/kw reads
 root/tagged_over_cow_str/kwa refused
 root/tagged_over_cow_str/kwao refused
 root/tagged_over_cow_str/kwo reads
-root/tagged_over_cow_str/mm refused
 root/tagged_over_cow_str/mp refused
 root/tagged_over_cow_str/mpn refused
 root/tagged_over_cow_str/mpo refused
@@ -11523,10 +11721,8 @@ root/tagged_over_cow_str/uu reads
 root/tagged_over_decimal/av refused
 root/tagged_over_decimal/bi refused
 root/tagged_over_decimal/bo refused
-root/tagged_over_decimal/bt refused
 root/tagged_over_decimal/cm trusted json
 root/tagged_over_decimal/co trusted json
-root/tagged_over_decimal/ct refused
 root/tagged_over_decimal/cu trusted unseen
 root/tagged_over_decimal/db refused
 root/tagged_over_decimal/dc refused
@@ -11542,12 +11738,10 @@ root/tagged_over_decimal/it refused
 root/tagged_over_decimal/js trusted json
 root/tagged_over_decimal/jsa refused
 root/tagged_over_decimal/jso trusted json
-root/tagged_over_decimal/kns trusted unseen
 root/tagged_over_decimal/kw trusted unseen
 root/tagged_over_decimal/kwa refused
 root/tagged_over_decimal/kwao refused
 root/tagged_over_decimal/kwo trusted unseen
-root/tagged_over_decimal/mm refused
 root/tagged_over_decimal/mp refused
 root/tagged_over_decimal/mpn refused
 root/tagged_over_decimal/mpo refused
@@ -11561,10 +11755,8 @@ root/tagged_over_decimal/uu trusted unseen
 root/tagged_over_duration/av refused
 root/tagged_over_duration/bi refused
 root/tagged_over_duration/bo refused
-root/tagged_over_duration/bt refused
 root/tagged_over_duration/cm trusted json
 root/tagged_over_duration/co trusted json
-root/tagged_over_duration/ct refused
 root/tagged_over_duration/cu trusted unseen
 root/tagged_over_duration/db refused
 root/tagged_over_duration/dc refused
@@ -11580,12 +11772,10 @@ root/tagged_over_duration/it refused
 root/tagged_over_duration/js trusted json
 root/tagged_over_duration/jsa refused
 root/tagged_over_duration/jso trusted json
-root/tagged_over_duration/kns trusted unseen
 root/tagged_over_duration/kw trusted unseen
 root/tagged_over_duration/kwa refused
 root/tagged_over_duration/kwao refused
 root/tagged_over_duration/kwo trusted unseen
-root/tagged_over_duration/mm refused
 root/tagged_over_duration/mp refused
 root/tagged_over_duration/mpn refused
 root/tagged_over_duration/mpo refused
@@ -11599,10 +11789,8 @@ root/tagged_over_duration/uu trusted unseen
 root/tagged_over_geo_point/av refused
 root/tagged_over_geo_point/bi refused
 root/tagged_over_geo_point/bo refused
-root/tagged_over_geo_point/bt refused
 root/tagged_over_geo_point/cm trusted json
 root/tagged_over_geo_point/co trusted json
-root/tagged_over_geo_point/ct refused
 root/tagged_over_geo_point/cu trusted unseen
 root/tagged_over_geo_point/db refused
 root/tagged_over_geo_point/dc refused
@@ -11618,12 +11806,10 @@ root/tagged_over_geo_point/it refused
 root/tagged_over_geo_point/js trusted json
 root/tagged_over_geo_point/jsa refused
 root/tagged_over_geo_point/jso trusted json
-root/tagged_over_geo_point/kns trusted unseen
 root/tagged_over_geo_point/kw trusted unseen
 root/tagged_over_geo_point/kwa refused
 root/tagged_over_geo_point/kwao refused
 root/tagged_over_geo_point/kwo trusted unseen
-root/tagged_over_geo_point/mm refused
 root/tagged_over_geo_point/mp refused
 root/tagged_over_geo_point/mpn refused
 root/tagged_over_geo_point/mpo refused
@@ -11637,10 +11823,8 @@ root/tagged_over_geo_point/uu trusted unseen
 root/tagged_over_naive_date/av refused
 root/tagged_over_naive_date/bi refused
 root/tagged_over_naive_date/bo refused
-root/tagged_over_naive_date/bt refused
 root/tagged_over_naive_date/cm trusted json
 root/tagged_over_naive_date/co trusted json
-root/tagged_over_naive_date/ct refused
 root/tagged_over_naive_date/cu trusted unseen
 root/tagged_over_naive_date/db refused
 root/tagged_over_naive_date/dc refused
@@ -11656,12 +11840,10 @@ root/tagged_over_naive_date/it refused
 root/tagged_over_naive_date/js trusted json
 root/tagged_over_naive_date/jsa refused
 root/tagged_over_naive_date/jso trusted json
-root/tagged_over_naive_date/kns trusted unseen
 root/tagged_over_naive_date/kw trusted unseen
 root/tagged_over_naive_date/kwa refused
 root/tagged_over_naive_date/kwao refused
 root/tagged_over_naive_date/kwo trusted unseen
-root/tagged_over_naive_date/mm refused
 root/tagged_over_naive_date/mp refused
 root/tagged_over_naive_date/mpn refused
 root/tagged_over_naive_date/mpo refused
@@ -11675,10 +11857,8 @@ root/tagged_over_naive_date/uu trusted unseen
 root/tagged_over_plain_map_newtype/av refused
 root/tagged_over_plain_map_newtype/bi refused
 root/tagged_over_plain_map_newtype/bo refused
-root/tagged_over_plain_map_newtype/bt refused
 root/tagged_over_plain_map_newtype/cm trusted json
 root/tagged_over_plain_map_newtype/co trusted json
-root/tagged_over_plain_map_newtype/ct refused
 root/tagged_over_plain_map_newtype/cu trusted unseen
 root/tagged_over_plain_map_newtype/db refused
 root/tagged_over_plain_map_newtype/dc refused
@@ -11694,12 +11874,10 @@ root/tagged_over_plain_map_newtype/it refused
 root/tagged_over_plain_map_newtype/js trusted json
 root/tagged_over_plain_map_newtype/jsa refused
 root/tagged_over_plain_map_newtype/jso trusted json
-root/tagged_over_plain_map_newtype/kns trusted unseen
 root/tagged_over_plain_map_newtype/kw trusted unseen
 root/tagged_over_plain_map_newtype/kwa refused
 root/tagged_over_plain_map_newtype/kwao refused
 root/tagged_over_plain_map_newtype/kwo trusted unseen
-root/tagged_over_plain_map_newtype/mm refused
 root/tagged_over_plain_map_newtype/mp refused
 root/tagged_over_plain_map_newtype/mpn refused
 root/tagged_over_plain_map_newtype/mpo refused
@@ -11713,10 +11891,8 @@ root/tagged_over_plain_map_newtype/uu trusted unseen
 root/tags/av refused
 root/tags/bi refused
 root/tags/bo refused
-root/tags/bt refused
 root/tags/cm trusted json
 root/tags/co trusted json
-root/tags/ct refused
 root/tags/cu trusted custom
 root/tags/db refused
 root/tags/dc refused
@@ -11732,12 +11908,10 @@ root/tags/it refused
 root/tags/js trusted json
 root/tags/jsa trusted json
 root/tags/jso trusted json
-root/tags/kns refused
 root/tags/kw refused
 root/tags/kwa trusted jsonb
 root/tags/kwao reads
 root/tags/kwo refused
-root/tags/mm refused
 root/tags/mp refused
 root/tags/mpn refused
 root/tags/mpo refused
@@ -11751,10 +11925,8 @@ root/tags/uu refused
 root/try_from/av refused
 root/try_from/bi refused
 root/try_from/bo refused
-root/try_from/bt refused
 root/try_from/cm trusted json
 root/try_from/co trusted json
-root/try_from/ct refused
 root/try_from/cu reads
 root/try_from/db refused
 root/try_from/dc refused
@@ -11770,12 +11942,10 @@ root/try_from/it refused
 root/try_from/js trusted json
 root/try_from/jsa refused
 root/try_from/jso trusted json
-root/try_from/kns trusted serde
 root/try_from/kw trusted serde
 root/try_from/kwa refused
 root/try_from/kwao refused
 root/try_from/kwo trusted serde
-root/try_from/mm refused
 root/try_from/mp refused
 root/try_from/mpn refused
 root/try_from/mpo refused
@@ -11789,10 +11959,8 @@ root/try_from/uu reads
 root/u128/av refused
 root/u128/bi refused
 root/u128/bo refused
-root/u128/bt refused
 root/u128/cm refused
 root/u128/co refused
-root/u128/ct refused
 root/u128/cu trusted custom
 root/u128/db refused
 root/u128/dc refused
@@ -11808,12 +11976,10 @@ root/u128/it refused
 root/u128/js refused
 root/u128/jsa refused
 root/u128/jso refused
-root/u128/kns refused
 root/u128/kw refused
 root/u128/kwa refused
 root/u128/kwao refused
 root/u128/kwo refused
-root/u128/mm refused
 root/u128/mp refused
 root/u128/mpn refused
 root/u128/mpo refused
@@ -11827,10 +11993,8 @@ root/u128/uu refused
 root/uuid/av refused
 root/uuid/bi refused
 root/uuid/bo refused
-root/uuid/bt refused
 root/uuid/cm trusted json
 root/uuid/co trusted json
-root/uuid/ct refused
 root/uuid/cu trusted custom
 root/uuid/db refused
 root/uuid/dc refused
@@ -11846,12 +12010,10 @@ root/uuid/it refused
 root/uuid/js trusted json
 root/uuid/jsa refused
 root/uuid/jso trusted json
-root/uuid/kns trusted uuid
 root/uuid/kw trusted uuid
 root/uuid/kwa refused
 root/uuid/kwao refused
 root/uuid/kwo trusted uuid
-root/uuid/mm refused
 root/uuid/mp refused
 root/uuid/mpn refused
 root/uuid/mpo refused
@@ -11865,10 +12027,8 @@ root/uuid/uu reads
 root/value/av reads
 root/value/bi reads
 root/value/bo reads
-root/value/bt reads
 root/value/cm reads
 root/value/co reads
-root/value/ct reads
 root/value/cu reads
 root/value/db reads
 root/value/dc reads
@@ -11884,12 +12044,10 @@ root/value/it reads
 root/value/js reads
 root/value/jsa reads
 root/value/jso reads
-root/value/kns reads
 root/value/kw reads
 root/value/kwa reads
 root/value/kwao reads
 root/value/kwo reads
-root/value/mm reads
 root/value/mp reads
 root/value/mpn reads
 root/value/mpo reads
@@ -11903,10 +12061,8 @@ root/value/uu reads
 root/value_over_map/av refused
 root/value_over_map/bi refused
 root/value_over_map/bo refused
-root/value_over_map/bt refused
 root/value_over_map/cm trusted json
 root/value_over_map/co trusted json
-root/value_over_map/ct refused
 root/value_over_map/cu trusted custom
 root/value_over_map/db refused
 root/value_over_map/dc refused
@@ -11922,12 +12078,10 @@ root/value_over_map/it refused
 root/value_over_map/js trusted json
 root/value_over_map/jsa refused
 root/value_over_map/jso trusted json
-root/value_over_map/kns refused
 root/value_over_map/kw refused
 root/value_over_map/kwa refused
 root/value_over_map/kwao refused
 root/value_over_map/kwo refused
-root/value_over_map/mm refused
 root/value_over_map/mp trusted jsonb+null
 root/value_over_map/mpn refused
 root/value_over_map/mpo trusted null
@@ -11941,10 +12095,8 @@ root/value_over_map/uu refused
 root/vec_decimal/av refused
 root/vec_decimal/bi refused
 root/vec_decimal/bo refused
-root/vec_decimal/bt refused
 root/vec_decimal/cm trusted json
 root/vec_decimal/co trusted json
-root/vec_decimal/ct refused
 root/vec_decimal/cu trusted custom
 root/vec_decimal/db refused
 root/vec_decimal/dc refused
@@ -11960,12 +12112,10 @@ root/vec_decimal/it refused
 root/vec_decimal/js trusted json
 root/vec_decimal/jsa trusted json
 root/vec_decimal/jso trusted json
-root/vec_decimal/kns refused
 root/vec_decimal/kw refused
 root/vec_decimal/kwa refused
 root/vec_decimal/kwao refused
 root/vec_decimal/kwo refused
-root/vec_decimal/mm refused
 root/vec_decimal/mp refused
 root/vec_decimal/mpn refused
 root/vec_decimal/mpo refused
@@ -11979,10 +12129,8 @@ root/vec_decimal/uu refused
 root/vec_enum_partial/av refused
 root/vec_enum_partial/bi refused
 root/vec_enum_partial/bo refused
-root/vec_enum_partial/bt refused
 root/vec_enum_partial/cm trusted json
 root/vec_enum_partial/co trusted json
-root/vec_enum_partial/ct refused
 root/vec_enum_partial/cu trusted custom
 root/vec_enum_partial/db refused
 root/vec_enum_partial/dc refused
@@ -11998,12 +12146,10 @@ root/vec_enum_partial/it refused
 root/vec_enum_partial/js trusted json
 root/vec_enum_partial/jsa trusted json
 root/vec_enum_partial/jso trusted json
-root/vec_enum_partial/kns refused
 root/vec_enum_partial/kw refused
 root/vec_enum_partial/kwa trusted jsonb+partial
 root/vec_enum_partial/kwao trusted partial
 root/vec_enum_partial/kwo refused
-root/vec_enum_partial/mm refused
 root/vec_enum_partial/mp refused
 root/vec_enum_partial/mpn refused
 root/vec_enum_partial/mpo refused
@@ -12017,10 +12163,8 @@ root/vec_enum_partial/uu refused
 root/vec_fragment_over_map/av refused
 root/vec_fragment_over_map/bi refused
 root/vec_fragment_over_map/bo refused
-root/vec_fragment_over_map/bt refused
 root/vec_fragment_over_map/cm trusted json
 root/vec_fragment_over_map/co trusted json
-root/vec_fragment_over_map/ct refused
 root/vec_fragment_over_map/cu trusted custom
 root/vec_fragment_over_map/db refused
 root/vec_fragment_over_map/dc refused
@@ -12036,12 +12180,10 @@ root/vec_fragment_over_map/it refused
 root/vec_fragment_over_map/js trusted json
 root/vec_fragment_over_map/jsa trusted json
 root/vec_fragment_over_map/jso trusted json
-root/vec_fragment_over_map/kns refused
 root/vec_fragment_over_map/kw refused
 root/vec_fragment_over_map/kwa refused
 root/vec_fragment_over_map/kwao refused
 root/vec_fragment_over_map/kwo refused
-root/vec_fragment_over_map/mm refused
 root/vec_fragment_over_map/mp refused
 root/vec_fragment_over_map/mpn refused
 root/vec_fragment_over_map/mpo refused
@@ -12055,10 +12197,8 @@ root/vec_fragment_over_map/uu refused
 root/vec_long/av refused
 root/vec_long/bi refused
 root/vec_long/bo refused
-root/vec_long/bt refused
 root/vec_long/cm trusted json
 root/vec_long/co trusted json
-root/vec_long/ct refused
 root/vec_long/cu trusted custom
 root/vec_long/db refused
 root/vec_long/dc refused
@@ -12074,12 +12214,10 @@ root/vec_long/it refused
 root/vec_long/js trusted json
 root/vec_long/jsa trusted json
 root/vec_long/jso trusted json
-root/vec_long/kns refused
 root/vec_long/kw refused
 root/vec_long/kwa refused
 root/vec_long/kwao refused
 root/vec_long/kwo refused
-root/vec_long/mm refused
 root/vec_long/mp refused
 root/vec_long/mpn refused
 root/vec_long/mpo refused
@@ -12093,10 +12231,8 @@ root/vec_long/uu refused
 root/vec_option/av refused
 root/vec_option/bi refused
 root/vec_option/bo refused
-root/vec_option/bt refused
 root/vec_option/cm refused
 root/vec_option/co refused
-root/vec_option/ct refused
 root/vec_option/cu trusted custom
 root/vec_option/db refused
 root/vec_option/dc refused
@@ -12112,12 +12248,10 @@ root/vec_option/it refused
 root/vec_option/js refused
 root/vec_option/jsa refused
 root/vec_option/jso refused
-root/vec_option/kns refused
 root/vec_option/kw refused
 root/vec_option/kwa refused
 root/vec_option/kwao refused
 root/vec_option/kwo refused
-root/vec_option/mm refused
 root/vec_option/mp refused
 root/vec_option/mpn refused
 root/vec_option/mpo refused
@@ -12131,10 +12265,8 @@ root/vec_option/uu refused
 root/vec_own_date/av refused
 root/vec_own_date/bi refused
 root/vec_own_date/bo refused
-root/vec_own_date/bt refused
 root/vec_own_date/cm trusted json
 root/vec_own_date/co trusted json
-root/vec_own_date/ct refused
 root/vec_own_date/cu trusted custom
 root/vec_own_date/db refused
 root/vec_own_date/dc refused
@@ -12150,12 +12282,10 @@ root/vec_own_date/it refused
 root/vec_own_date/js trusted json
 root/vec_own_date/jsa trusted json
 root/vec_own_date/jso trusted json
-root/vec_own_date/kns refused
 root/vec_own_date/kw refused
 root/vec_own_date/kwa trusted namesake
 root/vec_own_date/kwao reads
 root/vec_own_date/kwo refused
-root/vec_own_date/mm refused
 root/vec_own_date/mp refused
 root/vec_own_date/mpn refused
 root/vec_own_date/mpo refused
@@ -12166,13 +12296,45 @@ root/vec_own_date/ob refused
 root/vec_own_date/sh refused
 root/vec_own_date/ts refused
 root/vec_own_date/uu refused
+root/vec_rc_str/av refused
+root/vec_rc_str/bi refused
+root/vec_rc_str/bo refused
+root/vec_rc_str/cm trusted json
+root/vec_rc_str/co trusted json
+root/vec_rc_str/cu trusted custom
+root/vec_rc_str/db refused
+root/vec_rc_str/dc refused
+root/vec_rc_str/dt refused
+root/vec_rc_str/ev refused
+root/vec_rc_str/ex refused
+root/vec_rc_str/fl refused
+root/vec_rc_str/gp refused
+root/vec_rc_str/ho refused
+root/vec_rc_str/hu refused
+root/vec_rc_str/ids refused
+root/vec_rc_str/it refused
+root/vec_rc_str/js trusted json
+root/vec_rc_str/jsa trusted json
+root/vec_rc_str/jso trusted json
+root/vec_rc_str/kw refused
+root/vec_rc_str/kwa trusted jsonb
+root/vec_rc_str/kwao reads
+root/vec_rc_str/kwo refused
+root/vec_rc_str/mp refused
+root/vec_rc_str/mpn refused
+root/vec_rc_str/mpo refused
+root/vec_rc_str/n refused
+root/vec_rc_str/ne refused
+root/vec_rc_str/nn refused
+root/vec_rc_str/ob refused
+root/vec_rc_str/sh refused
+root/vec_rc_str/ts refused
+root/vec_rc_str/uu refused
 root/vec_string/av refused
 root/vec_string/bi refused
 root/vec_string/bo refused
-root/vec_string/bt refused
 root/vec_string/cm trusted json
 root/vec_string/co trusted json
-root/vec_string/ct refused
 root/vec_string/cu trusted custom
 root/vec_string/db refused
 root/vec_string/dc refused
@@ -12188,12 +12350,10 @@ root/vec_string/it refused
 root/vec_string/js trusted json
 root/vec_string/jsa trusted json
 root/vec_string/jso trusted json
-root/vec_string/kns refused
 root/vec_string/kw refused
 root/vec_string/kwa trusted jsonb
 root/vec_string/kwao reads
 root/vec_string/kwo refused
-root/vec_string/mm refused
 root/vec_string/mp refused
 root/vec_string/mpn refused
 root/vec_string/mpo refused
@@ -12207,10 +12367,8 @@ root/vec_string/uu refused
 root/vec_sub/av refused
 root/vec_sub/bi refused
 root/vec_sub/bo refused
-root/vec_sub/bt refused
 root/vec_sub/cm refused
 root/vec_sub/co refused
-root/vec_sub/ct refused
 root/vec_sub/cu trusted custom
 root/vec_sub/db refused
 root/vec_sub/dc refused
@@ -12226,12 +12384,10 @@ root/vec_sub/it refused
 root/vec_sub/js refused
 root/vec_sub/jsa refused
 root/vec_sub/jso refused
-root/vec_sub/kns refused
 root/vec_sub/kw refused
 root/vec_sub/kwa refused
 root/vec_sub/kwao refused
 root/vec_sub/kwo refused
-root/vec_sub/mm reads
 root/vec_sub/mp refused
 root/vec_sub/mpn refused
 root/vec_sub/mpo refused
@@ -12245,10 +12401,8 @@ root/vec_sub/uu refused
 root/vec_uuid/av refused
 root/vec_uuid/bi refused
 root/vec_uuid/bo refused
-root/vec_uuid/bt refused
 root/vec_uuid/cm trusted json
 root/vec_uuid/co trusted json
-root/vec_uuid/ct refused
 root/vec_uuid/cu trusted custom
 root/vec_uuid/db refused
 root/vec_uuid/dc refused
@@ -12264,12 +12418,10 @@ root/vec_uuid/it refused
 root/vec_uuid/js trusted json
 root/vec_uuid/jsa trusted json
 root/vec_uuid/jso trusted json
-root/vec_uuid/kns refused
 root/vec_uuid/kw refused
 root/vec_uuid/kwa trusted uuid
 root/vec_uuid/kwao trusted uuid
 root/vec_uuid/kwo refused
-root/vec_uuid/mm refused
 root/vec_uuid/mp refused
 root/vec_uuid/mpn refused
 root/vec_uuid/mpo refused

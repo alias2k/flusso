@@ -1258,8 +1258,10 @@ derive; a shape whose declarations alone are refused is not placed) at the field
 fixture (every leaf kind, `custom` `ip`, the aggregates, an `enum` with variants, maps, `json`, every
 join verb, an unindexed join, `subfields: false`; required kinds bare, nullable ones in `Option`;
 generated shapes skip the `NAMED_ONLY` kinds, a time-budget cut) on a root, then in a fragment for
-shapes that compile at some root field other than `custom` (at `custom` alone otherwise), ~11,900
-cases; cold ~245 s, which is near the nextest slow-timeout, so widen it with care. It compiles them in ≤60-module files
+shapes that compile at some root field other than `custom` (at `custom` alone otherwise), ~12,100
+cases (`ct`/`kns`/`bt`/`mm` share another field's mapping and are not placed). Cold it takes ~232 s
+here and ~550 s on CI; nextest marks it SLOW at 300 s and kills it at 900 s
+(`slow-timeout = { period = "300s", terminate-after = 3 }`), so keep CI under ~600 s when widening. It compiles them in ≤60-module files
 in its own crate and target dir (`target/tests/flusso-boundary/`, so the `ui` harness never waits on
 its lock; nextest group `boundary`, one at a time): the first round runs `cargo check`, later rounds
 `cargo build`; each file is named after a hash of its text and of every input (derive, `flusso-query`,
@@ -1313,7 +1315,12 @@ shorthand when no option is set; `and`/`or`/`not`/`to_value` are **provided meth
 ones in `handles/extra.rs` (`ids`/`query_string`/`simple_query_string`/`combined_fields`/
 `script`/`script_score`/`distance_feature`/`rank_feature`/`more_like_this`); `Sort` is a
 builder (`sort.rs`); search-level controls + the `Highlight` builder live on `Search`
-(`search.rs`). The `uuid` feature makes `uuid::Uuid` a `keyword` value (no `#[flusso(skip)]`).
+(`search.rs`). The `uuid` feature makes `uuid::Uuid` a `keyword` value (no `#[flusso(skip)]`). `Box<str>` and `Cow<'_, str>` are
+values wherever `String` is (`FlussoValue`/`FlussoValueMeta` impls beside `String`'s), `Arc<str>`/`Rc<str>`
+behind the `rc` feature (serde's `rc`). A fragment checks a std type it knows by name (a primitive, a
+generic std wrapper) through `OpaqueProbe`, with no walk into it; any other type without flusso metadata
+needs the walk, so it can't stand even at a `custom` field (stable Rust has no const fn pointer or const
+trait call to skip it).
 Every scalar handle is typed by **kind**, not by one fixed Rust type: value ops take `impl
 FlussoValue<kind::…>`. Numerics are **split per type** — `Number<kind::Byte|Short|Integer|Long|
 Float|Double|Decimal, S>` — and `FlussoValue` is impl'd by **lossless widening**, so `eq(5)` works
