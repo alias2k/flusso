@@ -1,0 +1,21 @@
+# Geo points in every shape a `geo` field is written in (issue #307), read
+# back through a derived root.
+version: 1
+table: places
+primary_key: id
+fields:
+  - keyword: id
+    required: true
+  # Two columns: the document query writes `{lat, lon}`.
+  - geo: pinned
+    lat: latitude
+    lon: longitude
+    required: false
+  # One column over `text`: the point as the column holds it.
+  - geo: from_text
+    column: point_text
+    required: false
+  # One column over `jsonb`: the point as the column holds it.
+  - geo: from_jsonb
+    column: point_jsonb
+    required: false
