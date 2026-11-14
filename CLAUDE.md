@@ -90,16 +90,17 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   a breach is confirmed when the re-run or the mean of both passes is past 10%, cleared only when both
   are within it; on a `main` push, `scenarios` runs everything and stores the
   points via `github-action-benchmark` on the `benchmarks` data branch (folded into Pages at
-  `/bench/`), then `bench-regression.py` compares each point to the same series on earlier
-  *matching runs* (the same kind of runner, told only by evidence flusso can't move: CPU model,
-  stamped by `bench-runner-facts.py`, and the floors `select_1`/`pg_select_1`/`runner/sha256_64mib`
-  within 5%; last 40 runs), calls a regression when two judged points in a row are each past three
-  swings and on average past 25% (20% RSS), then **holds** the series at its pre-step level until two
-  judged points are back within half the threshold (or an image change, or the 200-run history ends);
-  an image change costs one judged run; it prints the newest run's judged count and the too-noisy
-  series; one self-maintained issue (issues #317, #331; tests: `python3 -m unittest discover -s
-  .github/scripts -p 'test_*.py'` over the real history in `.github/scripts/fixtures/`, CI's `scripts`
-  job). `just load` is the soak script — not a benchmark.
+  `/bench/`), then `bench-regression.py` judges every run: against the same series on earlier
+  *matching runs* (runner facts stamped by `bench-runner-facts.py`, CPU model + cores + no-flusso
+  calibrations within 5%; for older points, the other suites' series within 5%; last 40 runs), or,
+  with no match, across all runners (real only past every earlier point). A regression is the two
+  newest judged points each real and each past 25% (20% RSS); one with a same-runner point **holds**
+  the series at its pre-step level until three same-runner runs are back within half the threshold
+  (or an image change, the 200-run history ends, or the series is gone 3 runs). An image change
+  restarts a series. It prints each finding's basis, the newest run's judging, the too-noisy series;
+  an unreadable file exits 1 before `gh`; one self-maintained issue (issues #317, #331; tests: `python3
+  -m unittest discover -s .github/scripts -p 'test_*.py'` over the real 79-run history in
+  `.github/scripts/fixtures/`, CI's `scripts` job). `just load` is the soak script — not a benchmark.
 - The `#[ignore]`d e2e tests live in `source-postgres`'s `integration`,
   `config_coverage`, `publication`, `introspection`, `tls`, `wal_idle`, `continuity`, and `partitions` binaries
   (`tls` boots a hostssl-only PG 16 with a committed throwaway self-signed cert and

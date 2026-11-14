@@ -69,40 +69,39 @@ To compare a branch by hand: run `just bench main` on `main`, `just bench pr` on
 
 ## What counts as a regression
 
-The storage action's own alerting is off. `.github/scripts/bench-regression.py` reads the history after every `main` run and decides. The hard part is the runners: GitHub runs `main` on a few kinds of machine, and each kind moves the numbers its own way. On one kind nearly every series is 40% faster; on another the Postgres benches are 20% faster while the OpenSearch ones are 20% slower. Compared to its own recent median, a series swings by 10–30% from run to run with no code change behind it. Compared to earlier runs on the same kind of machine, most series swing by 1–6%.
+The storage action's own alerting is off. `.github/scripts/bench-regression.py` reads the history after every `main` run and decides. The hard part is the runners: GitHub runs `main` on a few kinds of machine, and each kind moves the numbers its own way. On one kind nearly every series is 40% faster; on another the Postgres benches are 20% faster while the OpenSearch ones are 20% slower. Compared to its own recent median, a series swings by 10–30% from run to run with no code change behind it. Compared to earlier runs on the same kind of machine, most series swing by under 6%.
 
 ### Matching runs
 
-Two runs *match* when they ran on the same kind of machine. That is told from evidence no flusso change can move, so a regression can't hide by changing which runs match:
+Two runs *match*, for a series, when they ran on the same kind of machine:
 
-- the CPU model, where both runs recorded one (`bench-runner-facts.py` stamps it into every data point's `extra`);
-- the **floors**: `components/baseline/select_1` and `components/baseline/pg_select_1` (a bare `sqlx` `SELECT 1`) and `runner/sha256_64mib` (a SHA-256 pass over 64 MiB, recorded since #317). Two runs match when these differ by less than 5% on average, over the ones both have.
-
-The floors are the runner's evidence, so they are never judged themselves.
+- **With runner facts** (every point stored since #317): the same CPU model and core count, and calibrations within 5% (median over them). `bench-runner-facts.py` records these in each point's `extra`. The calibrations are fixed work that runs no flusso code and loads no flusso dependency: a SHA-256 pass over 64 MiB, a 256 MiB memory copy, and a synced 64 MiB disk write.
+- **Without them** (the points stored before): the series of the *other* suites within 5%, as the median over them. The suites are `inprocess`, `components` and the scenarios. A step confined to one suite can't move the match its own series are judged by. A step that moves most series of every suite at once can, and only runner facts tell it apart from a slower machine.
 
 ### The rule
 
-1. **Comparison.** A point is compared to the median of its series over its matching runs among the last 40. With fewer than three, it isn't judged.
-2. **Swing.** A series' noise: the median change of that comparison from one judged point to the next, over the last 20, divided by √2. For steady noise that's the median absolute deviation; a step doesn't inflate it. It takes five judged points.
-3. **Regression.** Two judged points in a row are each worse than their matches by more than three swings (*real*), and on average by more than 25%, or 20% for peak RSS (*large*).
-4. **Hold.** From then on the series is held at the level before the step, which starts at the first of those points, or earlier if the points before them were already past three swings:
-   - every later point is compared to its matching runs from *before* the step, however old;
-   - a point with fewer than three of those is skipped. It doesn't end the hold or move it;
-   - the swing stops taking in points.
+1. **Same-runner comparison.** A point is compared to the median of its series over its matching runs among the last 40. This needs at least three matching runs and five earlier same-runner comparisons. It is *real* past three swings. The swing is the median change of that comparison from one point to the next, over √2: the median absolute deviation for steady noise, which a step doesn't inflate.
+2. **All-runners comparison.** Every other point is compared to the median of its series over the last 40 points on any runner, and is *real* when it is past every one of them, a move larger than anything the runners did. This needs two earlier points, so a new series is judged from its third run. Points already past everything (the run of them the point belongs to) are left out.
+3. **Regression.** The two newest judged points are each real, and each worse than its comparison by more than 25% (20% for peak RSS).
+4. **Hold.** When at least one of those two points is a same-runner comparison, the series is held from the start of its run of real points:
+   - later points are compared to points from before the step, matching runs of any age or the last 40 on any runner;
+   - the swing stops taking in points;
+   - the hold ends when three judged points in a row are same-runner comparisons each within half the threshold (12.5%, or 10% for RSS). It also ends on an image-tag change, when the stored history (200 runs) no longer reaches back before the step, or when the series is missing from the newest three runs.
 
-   The hold ends when two judged points in a row are each back within half the threshold (12.5%, or 10% for RSS). It also ends on an image-tag change, or once the stored history (200 runs) no longer reaches back before the step.
-5. **Image-tag changes.** The first judged point on a new image measures the image's own step against the old image's matches and isn't judged. From the next judged point on, the series is judged with that step taken out.
+   A regression seen only across all runners isn't held: across all runners there's no level to hold to, since a new kind of machine also moves past everything before. It's reported while it lasts.
+5. **Image-tag change.** A series restarts on a new image, and only points on the new image count. With no same-runner history on it yet, it's judged across all runners from its third run on the new image.
 
-So a lasting regression stays in the issue until it goes away; nothing is absorbed quietly. There's no switch to accept one: a slowdown kept on purpose stays listed until an image change, or until the stored history no longer reaches back before it.
+A finding names the basis it was judged against. For a hold, it also names the last same-runner run before the step that wasn't past the swing, and the first run of the step ("after X, by Y"), or "at or before Y" when no earlier run was judged.
 
 ### What it can't see
 
-- **The floors and the calibration.** A change that moves them (a `sqlx` or Postgres upgrade, a new GitHub fleet) reads as a new kind of machine. No run matches until three runs of the new kind are stored.
-- **Runs on a kind of machine seen fewer than three times in the last 40.** They're skipped. The output says how many series the newest run was judged on, and a finding names the last run it was judged at.
-- **The first judged run on a new image.** A regression landing in the same run as an image change is taken for the image's own step. The earliest call is on the image's third judged run, as before the change.
-- **Series too noisy for the threshold.** When three swings are more than the threshold, a step just past the threshold can't count as real. Every run prints these series with the smallest step each can still catch. As of November 2026, in the `ci` scale history, they are the two visible p99 latencies (about +180% and +200%), `bulk_index/1` (+57%), `bulk_index/100` (+39%), the two `flush_p99_ms` (+30–38%), `change_burst/1` (+31%) and `reference/ci/peak_rss_mib` (+24% against its 20%). Their headline stages are covered by the p50 and the component benches.
+- **A step on every suite at once, before runner facts.** It moves each run away from its matches, so those runs are judged only across all runners: a doubling is caught, a 30% step isn't, and nothing is held. With runner facts it's caught and held like any other.
+- **The first runs of a new image.** A step landing on the new image's first run becomes its baseline. A step on its second run is caught only if it's large (about ×2), because the comparison has one run before it. From the third run on, a doubling is reported within three runs. A lasting step there is held only once three same-runner runs exist on the new image.
+- **Series too noisy for the threshold.** When three swings are more than the threshold, a step just past the threshold can't count as real. Every run prints these series with the smallest step each can still catch. On the `ci` scale history as of November 2026 they are the two visible p99 latencies (about +190% and +210%), `bulk_index/1` (+59%), `bulk_index/100` (+39%), `complex/ci/flush_p50_ms` (+30%) and the two `flush_p99_ms` (+28%).
 
 > **Note:** "too noisy" is a fact about the `ci` scale, not about flusso. A longer confirmation (more runs in a row) would make these series slower to call and pass more of their spikes; more samples per run is the real fix.
+
+There's no switch to accept a slowdown on purpose: a held series stays listed until it recovers, its image changes, or the stored history no longer reaches back before it.
 
 The script's tests replay it over a snapshot of the real history (`.github/scripts/fixtures/bench-history.json`), and CI's `scripts` job runs them:
 
@@ -110,7 +109,7 @@ The script's tests replay it over a snapshot of the real history (`.github/scrip
 python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 ```
 
-When a series is held, the script opens one issue, "Performance regression on main". It keeps the issue current on later runs, with the last run each finding was judged at and the run its step started. It closes the issue when no series is held. The verdict also goes to the `scenarios` job's summary.
+When a series is flagged, the script opens one issue, "Performance regression on main", and keeps it current on later runs. The issue says which basis each finding used, whether it's held, the last run it was judged at, where its step started, and how the newest run was judged. The script closes the issue when nothing is flagged. An unreadable data file fails the step and leaves the issue alone. The verdict also goes to the `scenarios` job's summary.
 
 ## Re-recording the pgoutput fixture
 

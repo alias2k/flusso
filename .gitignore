@@ -28,3 +28,4 @@ node_modules/
 /libs/2-adapters/source-postgres/fuzz/Cargo.lock
 !/apps/design/src/commit/fixtures/**/.flusso-save.*
 !/apps/design/src/commit/fixtures/**/.*.flusso-save.*
+__pycache__/

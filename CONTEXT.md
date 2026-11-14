@@ -242,19 +242,19 @@ The stored headline metrics and component bench results for the main branch, the
 _Avoid_: reference (taken by the scenario name), golden, snapshot
 
 **Matching run**:
-An earlier run of main on the same kind of machine as this one, told by evidence no flusso change can move: the same CPU model where both recorded one, and the floors (two `SELECT 1` round-trips and a SHA-256 calibration) within 5% of each other on average. A point is only ever compared to its matching runs.
+An earlier run of main on the same kind of machine as this one. With runner facts recorded: the same CPU model and core count, and calibrations within 5% of each other (median over them). Without: the series of the other suites within 5% (median over them). A point is compared to its matching runs when it has enough of them, otherwise across all runners.
 _Avoid_: runner type (the machine is inferred, not named), similar run
 
-**Floor**:
-A benchmark series that measures the machine, not flusso: no change to flusso can move it, so it decides which runs match and is never judged itself.
-_Avoid_: baseline (taken), control
+**Runner facts**:
+What `bench-runner-facts.py` records about the machine in every data point: CPU model, core count, and calibrations of fixed work that runs no flusso code.
+_Avoid_: floors, environment
 
 **Hold**:
-The state of a series after a regression: later points are compared to the level before the step, for as long as the history reaches, until two runs in a row are back within half the threshold.
+The state of a series after a regression confirmed against matching runs: later points are compared to the level before the step until three runs in a row are back within half the threshold.
 _Avoid_: latch, pin
 
 **Regression**:
-A headline metric crossing its threshold against the baseline on two consecutive judged runs of main. One bad run is noise until the next confirms it. The baseline is the same metric on matching runs; after a regression it is held at the level before the step.
+A headline metric crossing its threshold against the baseline on each of the two newest judged runs of main. One bad run is noise until the next confirms it. The baseline is the same metric on matching runs (or on all runners when there are none); after a regression confirmed against matching runs it is held at the level before the step.
 _Avoid_: slowdown, degradation, alert (that is the notification, not the fact)
 
 **Soak**:
