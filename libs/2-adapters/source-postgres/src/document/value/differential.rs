@@ -447,7 +447,8 @@ fn cases() -> Vec<Case> {
     }
 
     namesakes(&mut push);
-    wide(&mut push);
+    wide(&mut push, false);
+    wide(&mut push, true);
     depth(&mut push);
     out
 }
@@ -513,8 +514,10 @@ fn namesakes(push: &mut impl FnMut(String, (Vec<Field>, String))) {
 }
 
 /// More than 50 fields: the query joins chunks with `||`, so `jsonb` sorts the
-/// keys by length, then bytes, and keeps the last of a repeated key.
-fn wide(push: &mut impl FnMut(String, (Vec<Field>, String))) {
+/// keys by length, then bytes, and keeps the last of a repeated key. With
+/// `arrays`, every seventh field is an array column, and some fail.
+fn wide(push: &mut impl FnMut(String, (Vec<Field>, String)), arrays: bool) {
+    let shape = if arrays { "wide/arrays" } else { "wide" };
     let types = scalar_types();
     let readable: Vec<&str> = VALUES.iter().copied().filter(|v| *v != "1e400").collect();
     let mut fields = Vec::new();
@@ -522,7 +525,7 @@ fn wide(push: &mut impl FnMut(String, (Vec<Field>, String))) {
     for i in 0..120 {
         let (_, ty) = &types[i % types.len()];
         let field_name = format!("f{}", 119 - i);
-        fields.push(column(&field_name, ty.clone(), false));
+        fields.push(column(&field_name, ty.clone(), arrays && i % 7 == 3));
         values.push((field_name, readable[i % readable.len()]));
     }
     fields.push(column("f3", FlussoType::Binary, false));
@@ -536,7 +539,7 @@ fn wide(push: &mut impl FnMut(String, (Vec<Field>, String))) {
         write!(in_order, r#""{key}":{value}"#).unwrap();
     }
     in_order.push_str(r#","f3":"\\x0102","f30":5.0}"#);
-    push("wide/field_order".to_owned(), (fields.clone(), in_order));
+    push(format!("{shape}/field_order"), (fields.clone(), in_order));
 
     let mut sorted: BTreeMap<(usize, String), &str> = BTreeMap::new();
     for (key, value) in &values {
@@ -552,7 +555,7 @@ fn wide(push: &mut impl FnMut(String, (Vec<Field>, String))) {
         write!(jsonb, r#""{key}":{value}"#).unwrap();
     }
     jsonb.push('}');
-    push("wide/jsonb_order".to_owned(), (fields, jsonb));
+    push(format!("{shape}/jsonb_order"), (fields, jsonb));
 }
 
 /// Values nested near and past `serde_json`'s 128 levels, under each reader.
