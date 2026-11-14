@@ -7,6 +7,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-design-v0.17.0...flusso-design-v0.18.0) - 2026-11-14
+
+### Added
+
+- *(design)* author array columns ([#276](https://github.com/alias2k/flusso/pull/276))
+- *(kernel)* a column may hold an array of its type ([#276](https://github.com/alias2k/flusso/pull/276))
+- *(design)* a save keeps the file's comments and untouched layout
+
+### Fixed
+
+- *(cli)* a refusal stops the start only when every sink refuses ([#316](https://github.com/alias2k/flusso/pull/316))
+- *(source)* [**breaking**] a schema that can never index a document stops the start (#316, #309)
+- *(design)* a step whose file is at its destination ran, whatever is at its source
+- *(design)* flush every rename before the record marks it
+- *(design)* a rollback records each step's completion, never infers it
+- *(design)* a rollback settles each file once, even across kills
+- *(design)* Validate, a row's remove and the palette's New index apply a pending name first
+- *(design,source)* a name applies when the press that left its box ends; key lists by identity
+- *(source,design)* duplicate-name outcomes for constants and binary; one-line node header; palette returns focus
+- *(design)* refuse a field name its level already has; warn about duplicates; read typed table and column names as flusso does
+- *(design)* the Italian unsaved-notice line says "once the designer stops"
+- *(design)* never keep a settled save's journal; a broken config names nothing outside
+- *(design)* name files outside the folder, tell before the journal only when stored
+- *(design)* tell a recovery before its journal goes; check notices on each load
+- *(design)* a dismissed rollback's backup line holds for a deleted file too
+- *(design)* keep the recovery notice until it is dismissed, and say what happened to each file
+- *(cli)* script run reports a document that fails to build as the failure
+- *(query-derive)* two refusals suggest a fix that works
+- *(design)* name why leaving Code mode is held; refuse an op's unknown fields
+- *(design)* drop the raw save op, say why a Code-mode save is refused
+- *(design)* a save's response adds to a recovery notice on screen; the manual states how a committed save finishes
+- *(design)* keep what another program writes during or after a save
+- *(design)* check each file again right before the save replaces it
+- *(design)* refuse a save over a file changed since the page loaded it
+- *(design)* bound the padding a mixed-ending schema's line tags may add
+- *(design)* keep each line's own ending in a mixed-ending schema
+- *(design)* escape DEL in a value written on one line of a CRLF file
+- *(design)* patch a CRLF flusso.toml whose string ends a line with a backslash
+- *(design)* keep the spelling of a dotted key toml_edit respells
+- *(design)* space a key added to an inline table like the rest
+- *(design)* keep the blank line below a top-level dotted key
+- *(design)* keep a byte order mark through a save
+- *(design)* a json field reads `json` in the document tree; the array switch carries the default
+- *(design)* an array default follows the field's element rule, and a save that would not load writes nothing
+- *(design)* a blank line after the value slot list ([#276](https://github.com/alias2k/flusso/pull/276))
+- review findings on array columns ([#276](https://github.com/alias2k/flusso/pull/276))
+- *(design)* recover a save the designer was killed in the middle of
+- *(design)* a new sink takes the first free sinkN; state the name rules once
+- *(design)* a sink name is applied as flusso reads it
+- *(design)* an LF flusso.toml holding U+E00D is patched in place
+- *(design)* keep a flusso.toml's line endings and match sink keys as read
+- *(design)* a new index takes an unused file only if it reads as a schema; a save keeps file permissions
+- *(design)* add an index only with its schema, and say what a failed save keeps
+- *(design)* check a save on the server's own pairing, and undo a failed one
+- *(design)* keep each index's schema in its own file, and refuse a save that doesn't
+- *(design)* a comment ending a file with no final newline stays its table's
+- *(design)* keep a renamed sink's comments and a file's last comment
+- *(design)* file a waiting option value under its row, not its key
+- *(design)* keep focus in an option's key box; select a field by its uid
+- *(design)* a removed option stays removed; a value read that never answers fails
+- *(design)* apply a typed value to the field it was typed for
+- *(design)* keep typed values exact through reset, blur, format and old browsers
+- *(design)* a number typed in the inspector is saved as the value it previews
+- *(design)* a Code-mode visit never applies the seeded YAML
+- *(design)* canvas values and fields equal what their YAML reads back as
+- *(design)* write values as plain YAML the parser reads back unchanged
+- *(design)* one flush path keeps the Code buffer and the document in step
+- *(design)* write a null value as YAML null, not the string 'Null'
+- *(design)* Code mode never seeds from the pruned preview YAML
+- *(design)* leave a field with a blank or invalid name out of the live preview
+- *(design)* badge a finding on a join on the join's own header
+- *(design)* match validation findings by path and anchor
+
+### Other
+
+- *(design)* rebuild the SPA on main
+- *(design)* probe a request's commit point once per run
+- *(design)* a file the user remade after its step ran is kept and named
+- *(design)* every change is flushed before the record says it happened
+- *(design)* a save file gone after the rollback's plan is never a step done
+- *(design)* a kill during recovery, then a user edit, never re-settles a settled file
+- *(design)* rebuild the SPA
+- *(design)* rebuild the SPA
+- *(design)* the press tracker and the rename chips under npm test
+- *(design)* a settled save is never settled again; a broken config names nothing outside
+- *(design)* a schema outside the folder, an unwritable notices folder, links, wording
+- *(design)* a kill during recovery, hand-edited and stale notices, unknown dismiss fields
+- *(design)* what the recovery notice says, and what outlives a restart
+- *(design)* widen the save property tests to every layout of #279
+- *(design)* rebuild the embedded SPA on main; the new save test names when its page loaded
+- Merge remote-tracking branch 'origin/main' into fix/check-validation-gaps
+- *(design)* move to zustand 5
+- *(design)* bump the npm-compatible group (34 updates)
+
 ## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-design-v0.16.0...flusso-design-v0.17.0) - 2026-11-12
 
 ### Added

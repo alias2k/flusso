@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.17.0...flusso-query-derive-v0.18.0) - 2026-11-14
+
+### Added
+
+- *(query-derive)* read an array column as a Vec or an array newtype ([#276](https://github.com/alias2k/flusso/pull/276))
+
+### Fixed
+
+- *(query-derive)* an Arc<str>/Rc<str> field without `rc` names the feature ([#306](https://github.com/alias2k/flusso/pull/306))
+- *(query-derive)* string alternatives, Decimal by its kinds, a true message ([#306](https://github.com/alias2k/flusso/pull/306))
+- *(query-derive)* a fragment accepts what a root accepts ([#306](https://github.com/alias2k/flusso/pull/306))
+- *(source)* a camelCase format name reads the ISO form; the date table follows the T form ([#304](https://github.com/alias2k/flusso/pull/304))
+- *(query-derive)* refuse by name only what can't be a string type of your own
+- *(query-derive)* say only what the derive promises; make the boundary test cheap
+- *(query-derive)* read null map values, refuse exhaustive enums without variants, name the tagged-newtype refusals
+- *(query-derive)* close the typed-map holes the review found; pin root/fragment agreement
+- *(query-derive)* check typed maps against what they read; pin the boundary
+- *(kernel)* store a constant list mixing kinds unindexed, on a new index
+- *(query-derive)* two refusals suggest a fix that works
+- *(query-derive)* [**breaking**] refuse a flattened non-object and a map type that reads no object
+- *(query-derive)* [**breaking**] a newtype reads an array only as one of the two array kinds
+- *(query-derive)* a fragment takes what a root takes at a json array
+- *(query-derive)* a newtype over an array newtype reads the array too
+- *(query-derive)* say why an array newtype does not fit a single value
+- *(query-derive)* an array newtype of values holds leaf values only
+- review findings on array columns ([#276](https://github.com/alias2k/flusso/pull/276))
+- *(query-derive)* a newtype over a primitive is a value; opaque in a fragment keeps the kind check at a level
+- *(query-derive)* a value type is no sub-document at a nested or object field
+- *(query-derive)* refuse an array of arrays at any depth of newtypes
+- *(query-derive)* an array newtype needs a sub-document element
+- *(query-derive)* [**breaking**] arrays of maps, newtypes over a Vec, hand-written values in fragments
+- *(query-derive)* a field serde skips may still name its level with flusso(rename)
+- *(query-derive)* [**breaking**] root and fragment agree on maps; reject a rename serde does not see
+- *(query-derive)* a transparent named-field struct is a value newtype too
+- *(query-derive)* match a fragment's opaque to a root's, and close the review gaps
+- *(query-derive)* [**breaking**] reject the remaining unread attributes
+- *(query-derive)* leave a flattened catch-all unchecked in a fragment; reject a rename serde contradicts
+- *(query-derive)* [**breaking**] reject opaque, rename and scope_mod where they do nothing
+- *(query-derive)* reject a second scope for one level; the flatten error names the way out
+- *(query-derive)* [**breaking**] a scope attribute that renames nothing is a compile error
+
+### Other
+
+- *(query-derive)* no assert on a field type named Arc<str> or Rc<str> ([#306](https://github.com/alias2k/flusso/pull/306))
+- *(query)* a decimal past Decimal's range is written as a string (#306, #327)
+- *(query-derive)* pin string alternatives and foreign types at custom ([#306](https://github.com/alias2k/flusso/pull/306))
+- *(query-derive)* review round of #306
+- *(query-derive)* state and pin every trusted rule of the derive ([#306](https://github.com/alias2k/flusso/pull/306))
+- *(query-derive)* a fragment accepts what a root accepts ([#306](https://github.com/alias2k/flusso/pull/306))
+- *(query-derive)* string-reading map keys and tagged newtypes the derive refuses by name ([#294](https://github.com/alias2k/flusso/pull/294))
+- *(query-derive)* null map values, date and constant kinds, named non-string types ([#294](https://github.com/alias2k/flusso/pull/294))
+- *(query-derive)* typed-map shapes the review found still compile and fail ([#294](https://github.com/alias2k/flusso/pull/294))
+- *(query-derive)* typed maps the derive does not check yet ([#294](https://github.com/alias2k/flusso/pull/294))
+- *(query-derive)* drop the Box case, whose rustc notes differ between hosts
+
 ## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-query-derive-v0.16.0...flusso-query-derive-v0.17.0) - 2026-11-12
 
 ### Added

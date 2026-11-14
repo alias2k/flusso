@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-sink-v0.17.0...flusso-sink-v0.18.0) - 2026-11-14
+
+### Fixed
+
+- *(source)* a camelCase format name reads the ISO form; the date table follows the T form ([#304](https://github.com/alias2k/flusso/pull/304))
+- *(sink)* [**breaking**] write a naive timestamp as ISO 8601 with a T
+
+### Other
+
+- *(query)* a decimal past Decimal's range is written as a string (#306, #327)
+- a naive timestamp must reach OpenSearch as ISO 8601
+- *(query-derive)* null map values, date and constant kinds, named non-string types ([#294](https://github.com/alias2k/flusso/pull/294))
+- *(query-derive)* typed-map shapes the review found still compile and fail ([#294](https://github.com/alias2k/flusso/pull/294))
+
 ## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-sink-v0.16.0...flusso-sink-v0.17.0) - 2026-11-12
 
 ### Added
