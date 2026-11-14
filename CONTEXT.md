@@ -241,8 +241,12 @@ _Avoid_: KPI, stat, measurement
 The stored headline metrics and component bench results for the main branch, the thing a new run is compared to.
 _Avoid_: reference (taken by the scenario name), golden, snapshot
 
+**Matching run**:
+An earlier run of main on the same kind of machine as this one, told apart by its numbers: across every series they differ by less than 5%. A point is only ever compared to its matching runs.
+_Avoid_: runner type (the machine is never named, only inferred), similar run
+
 **Regression**:
-A headline metric crossing its threshold against the baseline on two consecutive runs of main. One bad run is noise until the next confirms it.
+A headline metric crossing its threshold against the baseline on two consecutive runs of main. One bad run is noise until the next confirms it. The baseline is the same metric on matching runs.
 _Avoid_: slowdown, degradation, alert (that is the notification, not the fact)
 
 **Soak**:

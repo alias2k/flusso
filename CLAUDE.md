@@ -90,10 +90,13 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   a breach is confirmed when the re-run or the mean of both passes is past 10%, cleared only when both
   are within it; on a `main` push, `scenarios` runs everything and stores the
   points via `github-action-benchmark` on the `benchmarks` data branch (folded into Pages at
-  `/bench/`), then `bench-regression.py` compares each point to the median of the previous five and
-  calls a regression only on two consecutive points past 25% (20% RSS) and past three times the
-  window's median absolute deviation (a noisy series needs a larger move, issue #317), image-tag change restarts
-  the window, one self-maintained issue. `just load` is the soak script — not a benchmark.
+  `/bench/`), then `bench-regression.py` compares each point to the same series on earlier
+  *matching runs* (the same kind of runner: every series within 5%, median over series, last 40 runs),
+  holds the pre-step baseline while a series stays past three swings, and calls a regression when the
+  two newest judged points are each past three swings and on average past 25% (20% RSS); image-tag
+  change restarts it, one self-maintained issue (issue #317; tests: `python3 -m unittest discover -s
+  .github/scripts -p 'test_*.py'` over the real history in `.github/scripts/fixtures/`, CI's `scripts`
+  job). `just load` is the soak script — not a benchmark.
 - The `#[ignore]`d e2e tests live in `source-postgres`'s `integration`,
   `config_coverage`, `publication`, `introspection`, `tls`, `wal_idle`, `continuity`, and `partitions` binaries
   (`tls` boots a hostssl-only PG 16 with a committed throwaway self-signed cert and
@@ -254,7 +257,9 @@ mapping takes, on backfill and live, under a non-UTC `TimeZone`, with a `range` 
   --include-fragments --root-dir docs/book 'docs/book/**/*.html'`), and runs
   `.github/scripts/check-manual-links.sh`. A separate `fuzz` job runs a 60-second
   `pgoutput_decode` smoke fuzz on nightly (see below); the `query.rs` proptests need no special
-  handling — they're ordinary tests caught by the nextest step. Outside `ci.yml`, `audit.yml`'s
+  handling — they're ordinary tests caught by the nextest step. A `scripts` job runs the stdlib
+  unit tests under `.github/scripts` (`python3 -m unittest discover -s .github/scripts -p
+  'test_*.py'`; today `bench-regression.py` over the real history). Outside `ci.yml`, `audit.yml`'s
   `advisories (cargo deny)` job runs `cargo deny check advisories --all-features` weekly and on
   changes to a `Cargo.toml`/`Cargo.lock` — advisory only, never a required check — and
   `.github/dependabot.yml` opens grouped weekly `chore(deps)` PRs (cargo, npm, actions; skips

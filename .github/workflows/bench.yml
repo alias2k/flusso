@@ -15,7 +15,7 @@ name: bench
 #                a data point on the `benchmarks` branch (rendered under
 #                /bench/ on the Pages site), and the regression script calls a
 #                regression only when two consecutive points cross the
-#                threshold against the rolling median.
+#                threshold against earlier runs on the same kind of runner.
 
 on:
   pull_request:

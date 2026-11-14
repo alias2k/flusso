@@ -69,9 +69,30 @@ To compare a branch by hand: run `just bench main` on `main`, `just bench pr` on
 
 ## What counts as a regression
 
-The storage action's own alerting is off. `.github/scripts/bench-regression.py` reads the history and compares each new point to the **median of the previous five** points of the same series. A point is over when it is worse than that median by more than 25% (20% for peak RSS) and by more than three times the window's own median absolute deviation, so a series that swings from run to run needs a move larger than its swings. A regression is the newest point being over **and** the one before it being over against its own window, two consecutive runs of `main`. One bad run is noise until the next confirms it. A change in the container image tags restarts the window.
+The storage action's own alerting is off. `.github/scripts/bench-regression.py` reads the history after every `main` run and decides. The hard part is the runners: GitHub runs `main` on a few kinds of machine, and each kind moves the numbers its own way. On one kind nearly every series is 40% faster; on another the Postgres benches are 20% faster while the OpenSearch ones are 20% slower. Compared to its own recent median, a series swings by 10–30% from run to run with no code change behind it. Compared to earlier runs on the same kind of machine, most series swing by 1–6%.
 
-When a regression is found the script opens one issue, "Performance regression on main", keeps it current on later runs, and closes it when every series is back within its threshold.
+So the rule compares like with like:
+
+1. **Matching runs.** An earlier run *matches* the current one when their values, across every series both have, differ by less than 5% (the median of the absolute differences, so a few regressed series don't change the match). Only the last 40 runs are searched.
+2. **Against its matches.** Each point is compared to the median of its series over the matching runs. A point with fewer than three matching runs isn't judged: nothing comparable ran before it.
+3. **Held baseline.** While a series stays worse than its matches by more than three of its swings (below), the runs since it first did are left out of its matches. A lasting step stays measured against the level before it instead of being absorbed. The new level becomes the baseline only once fewer than three matching runs from before the step remain in the 40-run lookback.
+4. **Regression.** The series' two newest judged points, against the 20 judged points before them, must be both:
+   - **real**: each is worse than its matches by more than three times the series' *swing*, the median change of that comparison from one judged point to the next (divided by √2, which makes it the median absolute deviation for steady noise; unlike that deviation, a step inside the window doesn't inflate it);
+   - **large**: on average, worse than their matches by more than 25% (20% for peak RSS).
+
+One bad run is noise until the next confirms it. A series is judged once it has five judged points before the newest two, and a change in the container image tags restarts its comparisons.
+
+Replayed over the first 78 runs of history, a lasting step of 30% injected at a random run is caught within four runs about 85% of the time (by the second run, two times in three). The misses are mostly the noisiest series: the two p99 visible latencies swing by about 40% even on matching runs, so they need a move of more than three times that before it counts as real.
+
+> **Note:** a change that slows most series at once also moves its run away from every earlier run, so it has no matches and goes unjudged until it does. Catching that is the PR gate's job: its A/B runs base and PR on one runner.
+
+The script's tests replay it over a snapshot of that history (`.github/scripts/fixtures/bench-history.json`):
+
+```sh
+python3 -m unittest discover -s .github/scripts -p 'test_*.py'
+```
+
+When a regression is found the script opens one issue, "Performance regression on main", keeps it current on later runs, and closes it when no series is flagged: each is back within its threshold, or its step has outlived the lookback.
 
 ## Re-recording the pgoutput fixture
 
