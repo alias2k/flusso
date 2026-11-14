@@ -526,8 +526,13 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   (`Observer::on_document_quarantined`, with the sink) and acks so the poison isn't redelivered.
   A single `Stop` halts the whole batch before any quarantine event is emitted. The OpenSearch
   sink does *not* retry item-level rejections, and reports a missing target
-  (`index_not_found_exception`) as flush-wide, not as a rejection. Guarded by `skip_policy_*`/`stop_policy_*`/
-  `per_index_stop_*`.
+  (`index_not_found_exception`) as flush-wide, not as a rejection. An id OpenSearch validates before
+  running `_bulk` (an upsert's past 512 UTF-8 bytes, or an empty one) would 400 the *whole* request,
+  so `flush` rejects it item-level without sending it (`bulk::refused_id`; issue #301; never truncate
+  or hash it); a delete's over-long id is sent (OpenSearch answers `not_found`). Guarded by
+  `skip_policy_*`/`stop_policy_*`/`per_index_stop_*`, `bulk::tests`' `refused_id` cases, the sink's
+  `document_ids` e2e (seeded alias and unseeded generation, multi-byte ids at the limit), and
+  `pipeline`'s `an_id_past_512_bytes_is_decided_by_on_error` (`skip` acks, `stop` leaves it unacked).
 - **A document a script fails on is decided on the ingest side (issue #198).** A
   `DocumentBuilder` may return `Document::Failed { id, failure: BuildFailure }`; the ingest engine
   resolves the index's `FailurePolicies` (the same `on_error` the sink engines use, handed to it by

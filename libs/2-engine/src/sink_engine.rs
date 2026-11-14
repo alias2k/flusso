@@ -404,7 +404,8 @@ impl SinkEngine {
             for doc in &report.rejected {
                 if self.failure_policies.resolve(&doc.index) == FailurePolicy::Stop {
                     if stop_count == 0 {
-                        stop_example = format!("{}/{}: {}", doc.index, doc.id, doc.reason);
+                        stop_example =
+                            format!("{}/{}: {}", doc.index, shown_id(&doc.id), doc.reason);
                     }
                     stop_count += 1;
                 }
@@ -415,7 +416,7 @@ impl SinkEngine {
             for doc in &report.rejected {
                 tracing::warn!(
                     index = %doc.index,
-                    id = %doc.id,
+                    id = %shown_id(&doc.id),
                     reason = %doc.reason,
                     "document rejected by sink; quarantining and continuing",
                 );
@@ -473,5 +474,45 @@ async fn until(at: Option<Instant>) {
     match at {
         Some(at) => sleep_until(at).await,
         None => std::future::pending().await,
+    }
+}
+
+/// The longest id a log line or an error message carries whole, in characters.
+const SHOWN_ID_CHARS: usize = 64;
+
+/// A document id as a log line or an error message shows it: whole when
+/// short, else its first [`SHOWN_ID_CHARS`] characters and its length. An id
+/// has no upper bound (a `bytea` key renders two characters per byte), and a
+/// `stop` rejection is logged again on every restart.
+fn shown_id(id: &str) -> std::borrow::Cow<'_, str> {
+    match id.char_indices().nth(SHOWN_ID_CHARS) {
+        None => id.into(),
+        Some((cut, _)) => {
+            let head = id.get(..cut).unwrap_or(id);
+            format!("{head}… ({} bytes)", id.len()).into()
+        }
+    }
+}
+
+#[cfg(test)]
+mod shown_id_tests {
+    use super::shown_id;
+
+    #[test]
+    fn a_short_id_is_shown_whole() {
+        assert_eq!(shown_id("42"), "42");
+        assert_eq!(shown_id(&"é".repeat(64)), "é".repeat(64));
+    }
+
+    #[test]
+    fn a_long_id_is_cut_at_a_character_and_says_its_length() {
+        assert_eq!(
+            shown_id(&"k".repeat(600)),
+            format!("{}… (600 bytes)", "k".repeat(64))
+        );
+        assert_eq!(
+            shown_id(&"é".repeat(65)),
+            format!("{}… (130 bytes)", "é".repeat(64))
+        );
     }
 }

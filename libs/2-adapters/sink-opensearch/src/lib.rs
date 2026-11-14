@@ -41,6 +41,9 @@ pub fn bench_render_bulk(envelopes: &[kernel::Envelope]) -> Result<String> {
                 id: envelope.id.clone(),
             },
         };
+        if bulk::refused_id(&action).is_some() {
+            continue;
+        }
         body.push_str(&bulk::bulk_action_fragment(&action)?);
     }
     Ok(body)

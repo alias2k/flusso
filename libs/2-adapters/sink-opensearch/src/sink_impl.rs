@@ -11,7 +11,7 @@ use kernel::{Envelope, IndexMapping, IndexName, Op};
 use sink::{FlushReport, RejectedDocument, Result, Sink, SinkError, Visibility, to_json};
 use tracing::{debug, info, warn};
 
-use crate::bulk::{BulkAction, bulk_action_fragment, plan_chunks};
+use crate::bulk::{BulkAction, bulk_action_fragment, plan_chunks, refused_id};
 use crate::generations::{generation_name, next_generation, parse_generation};
 use crate::{IndexTarget, OpensearchSink};
 
@@ -175,15 +175,32 @@ impl Sink for OpensearchSink {
     /// caught-up flush refreshes them.
     ///
     /// A missing target fails the whole flush, not one document (see the
-    /// `bulk` module docs).
+    /// `bulk` module docs). An id OpenSearch would refuse before running the
+    /// request (empty, or an upsert's past 512 bytes) is one rejected
+    /// document: it is never sent, so the rest of the flush still lands.
     #[tracing::instrument(name = "os.flush", skip_all, fields(caught_up), err)]
     async fn flush(&self, caught_up: bool) -> Result<FlushReport> {
-        let actions = {
+        let mut actions = {
             let mut buf = self.buffer.lock().await;
             std::mem::take(&mut *buf)
         };
 
-        if actions.is_empty() {
+        let mut rejected: Vec<RejectedDocument> = Vec::new();
+        actions.retain(|action| match refused_id(action) {
+            None => true,
+            // No document can have the id, so the delete has nothing to remove.
+            Some(_) if matches!(action, BulkAction::Delete { .. }) => false,
+            Some(reason) => {
+                rejected.push(RejectedDocument {
+                    index: action.index().to_owned(),
+                    id: action.id().to_owned(),
+                    reason,
+                });
+                false
+            }
+        });
+
+        if actions.is_empty() && rejected.is_empty() {
             let visibility = self.settle_visibility(caught_up, &actions).await;
             return Ok(FlushReport::clean().visible(visibility));
         }
@@ -211,7 +228,6 @@ impl Sink for OpensearchSink {
             "flushing buffered operations",
         );
 
-        let mut rejected: Vec<RejectedDocument> = Vec::new();
         let mut start = 0usize;
         for &count in &plan {
             let end = start + count;
