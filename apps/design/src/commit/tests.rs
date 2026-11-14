@@ -2992,3 +2992,103 @@ fn every_change_is_flushed_before_the_record_says_it_happened() {
         broken.join("\n")
     );
 }
+
+/// A `shape` save killed right before its commit point, then its recovery
+/// killed right after the rename of the step `caught` names and before that
+/// step's mark: `caught` sees the project and the record's plan.
+fn caught_between_rename_and_mark(
+    shape: Shape,
+    tag: &str,
+    caught: impl Fn(&Project, &journal::Steps, &state::Undo) -> bool,
+) -> Project {
+    let point = commit_point(shape);
+    let cut = |m: usize| {
+        let project = Project::new(&format!("caught-{tag}-{m}"));
+        project
+            .commit(shape, &mut Disk::stopping_after(point - 1))
+            .ok();
+        project.recover(&mut Disk::stopping_after(m));
+        project
+    };
+    let m = (1..40)
+        .find(|&m| {
+            let probe = cut(m);
+            let (Some(steps), Some(undo)) = (
+                in_flight_steps(&probe),
+                probe.records().first().and_then(|r| r.undo.clone()),
+            ) else {
+                return false;
+            };
+            caught(&probe, &steps, &undo)
+        })
+        .expect("no recovery stop between that rename and its mark");
+    cut(m)
+}
+
+/// Review of #305: recovery killed after it renamed a file the save created
+/// (`new/deep/orders.schema.yml`) to its temp name, before the mark; the user
+/// then makes that file again, with the text the save gave it. The next
+/// recovery keeps it, and says so.
+#[test]
+fn a_file_made_again_after_its_removal_ran_is_kept_and_named() {
+    let project = caught_between_rename_and_mark(Shape::MoveAndRemove, "remake", |p, s, u| {
+        let created = s.writes.iter().position(|w| w.before.is_none()).unwrap();
+        let write = &s.writes[created];
+        u.writes[created] == state::Act::Remove
+            && !u.write_done(created)
+            && write.temp.exists()
+            && !write.dest.exists()
+            && p.dir.join("new/deep").is_dir()
+    });
+    let file = project.dir.join("new/deep/orders.schema.yml");
+    std::fs::write(&file, "orders moved\n").unwrap();
+    for load in 1..=3 {
+        let recovery = project.recover(&mut Disk::counting());
+        assert!(recovery.blocked.is_none(), "load {load}: {recovery:?}");
+        assert_eq!(
+            std::fs::read_to_string(&file).ok().as_deref(),
+            Some("orders moved\n"),
+            "load {load}"
+        );
+        if load == 1 {
+            let settled = &recovery.settled[0];
+            assert_eq!(settled.outcome, Outcome::RolledBack);
+            let kept: Vec<_> = settled.kept.iter().map(|k| k.path.clone()).collect();
+            let base = std::fs::canonicalize(&project.dir).unwrap();
+            assert_eq!(kept, vec![base.join("new/deep/orders.schema.yml")]);
+        }
+    }
+    assert!(project.records().is_empty());
+}
+
+/// The mirror for a restore: recovery killed after it renamed the backup of
+/// `flusso.toml` back over it, before the mark; the user then writes the
+/// save's text into it, in place. The next recovery keeps it, and says so.
+#[test]
+fn a_file_given_the_saves_text_after_its_restore_ran_is_kept_and_named() {
+    let project = caught_between_rename_and_mark(Shape::Edits, "restore", |p, s, u| {
+        let config = s.writes.len() - 1;
+        u.writes[config] == state::Act::Restore
+            && !u.write_done(config)
+            && std::fs::read_to_string(p.dir.join("flusso.toml")).unwrap() == "config\n"
+    });
+    let config = project.dir.join("flusso.toml");
+    std::fs::write(&config, "config 2\n").unwrap();
+    for load in 1..=3 {
+        let recovery = project.recover(&mut Disk::counting());
+        assert!(recovery.blocked.is_none(), "load {load}: {recovery:?}");
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "config 2\n",
+            "load {load}"
+        );
+        if load == 1 {
+            let settled = &recovery.settled[0];
+            assert_eq!(settled.outcome, Outcome::RolledBack);
+            let kept: Vec<_> = settled.kept.iter().map(|k| k.path.clone()).collect();
+            let base = std::fs::canonicalize(&project.dir).unwrap();
+            assert_eq!(kept, vec![base.join("flusso.toml")]);
+        }
+    }
+    assert!(project.records().is_empty());
+}
