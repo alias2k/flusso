@@ -89,6 +89,7 @@ fn seed_integer_columns(builder: &PgDocumentBuilder, columns: &[(&str, &str)]) {
                 sql_type: "integer".to_owned(),
                 base_type: None,
                 base_name: "int4".to_owned(),
+                element_name: None,
                 deterministic: true,
                 nullable: true,
             },
@@ -437,6 +438,7 @@ fn equal_keys_render_alike_except_for_numbers_and_loose_text() {
         sql_type: base_name.to_owned(),
         base_type: None,
         base_name: base_name.to_owned(),
+        element_name: None,
         deterministic,
         nullable: false,
     };

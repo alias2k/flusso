@@ -102,6 +102,9 @@ struct ColumnMeta {
     base_type: Option<String>,
     /// The `pg_type.typname` of the type, through every domain.
     base_name: String,
+    /// For an array, the `pg_type.typname` of its element type, through every
+    /// domain; `None` for any other type.
+    element_name: Option<String>,
     /// Whether the column's collation compares by identity (always, for a
     /// type without one).
     deterministic: bool,
@@ -228,7 +231,18 @@ impl PgDocumentBuilder {
 
     #[tracing::instrument(name = "pg.connect", skip_all, err)]
     pub async fn connect(connection_url: &str, spec: Arc<SourceSpec>) -> Result<Self> {
+        // The document query renders the `bytea` it can reach itself (see
+        // `byte_columns`). One nested in a composite, a range or a `json` it
+        // builds is rendered by the session's `bytea_output`, which this sets
+        // on every connection a direct link keeps. A transaction-mode pooler
+        // may not.
         let pool = sqlx::postgres::PgPoolOptions::new()
+            .after_connect(|connection, _| {
+                Box::pin(async move {
+                    sqlx::Executor::execute(&mut *connection, "SET bytea_output = 'hex'").await?;
+                    Ok(())
+                })
+            })
             .connect(connection_url)
             .await
             .map_err(|e| SourceError::Connection(e.to_string()))?;
@@ -415,11 +429,14 @@ impl PgDocumentBuilder {
         // NOT NULL constraint — the nullability mapping resolution needs, read
         // from the same catalog row as the type. `base_type` follows a domain
         // through `typbasetype` to the first type that is no domain, and
-        // `base_name` names that type. `collisdeterministic` is read through
+        // `base_name` names that type. For an array, `element_name` names its
+        // element type the same way (`typelem`, then every domain), so an
+        // array of a domain over `bytea` reads as one of `bytea`.
+        // `collisdeterministic` is read through
         // `to_jsonb` because Postgres before 12 has no such column (and only
         // deterministic collations).
         let sql = "SELECT format_type(a.atttypid, a.atttypmod) AS sql_type, \
-                          b.base_type, b.base_name, \
+                          b.base_type, b.base_name, el.element_name, \
                           coalesce((SELECT (to_jsonb(c) ->> 'collisdeterministic')::boolean \
                                     FROM pg_collation c WHERE c.oid = a.attcollation), \
                                    true) AS deterministic, \
@@ -431,9 +448,19 @@ impl PgDocumentBuilder {
                                SELECT t.typbasetype, t.typtypmod \
                                FROM pg_type t JOIN d ON t.oid = d.oid WHERE t.typtype = 'd' \
                           ) SELECT format_type(d.oid, d.typmod) AS base_type, \
-                                   t.typname::text AS base_name \
+                                   t.typname::text AS base_name, t.oid AS base_oid \
                             FROM d JOIN pg_type t ON t.oid = d.oid WHERE t.typtype <> 'd' \
                         ) b \
+                   LEFT JOIN LATERAL ( \
+                          WITH RECURSIVE e(oid) AS ( \
+                               SELECT a.typelem FROM pg_type a \
+                               WHERE a.oid = b.base_oid AND a.typelem <> 0 AND a.typlen = -1 \
+                             UNION ALL \
+                               SELECT t.typbasetype FROM pg_type t JOIN e ON t.oid = e.oid \
+                               WHERE t.typtype = 'd' \
+                          ) SELECT t.typname::text AS element_name \
+                            FROM e JOIN pg_type t ON t.oid = e.oid WHERE t.typtype <> 'd' \
+                        ) el ON true \
                    WHERE a.attrelid = to_regclass($1) AND a.attname = $2 \
                      AND a.attnum > 0 AND NOT a.attisdropped";
         let row = sqlx::query(sql)
@@ -450,6 +477,7 @@ impl PgDocumentBuilder {
                 ColumnMeta {
                     base_type: base_type.filter(|base| *base != sql_type),
                     base_name: row.try_get("base_name").map_err(query_err)?,
+                    element_name: row.try_get("element_name").map_err(query_err)?,
                     deterministic: row.try_get("deterministic").map_err(query_err)?,
                     sql_type,
                     nullable: !not_null,
@@ -529,14 +557,13 @@ impl PgDocumentBuilder {
         fields::collect_value_columns(&schema.fields, &schema.table, pks, &mut columns);
         let mut bytes = query::ByteColumns::new();
         for (table, column) in columns {
-            let kind = match self
-                .base_name(&schema.db_schema, &table, &column)
-                .await?
-                .as_str()
-            {
-                "bytea" => query::Bytes::Scalar,
-                "_bytea" => query::Bytes::Array,
-                _ => continue,
+            let meta = self.column_meta(&schema.db_schema, &table, &column).await?;
+            let kind = if meta.base_name == "bytea" {
+                query::Bytes::Scalar
+            } else if meta.element_name.as_deref() == Some("bytea") {
+                query::Bytes::Array
+            } else {
+                continue;
             };
             bytes.insert((table.to_string(), column.to_string()), kind);
         }

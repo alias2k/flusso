@@ -180,8 +180,8 @@ mapping takes, on backfill and live, under a non-UTC `TimeZone`, with a `range` 
   null (refused at start). **No startup `options`** anywhere (PgBouncer refuses them; issue #295's
   second review): the replication session runs `text_value::REPLICATION_SETTINGS` (`DateStyle`,
   `TimeZone`, `bytea_output`, `extra_float_digits`) as `SET`s on a gated `pgwire-replication` session
-  before `START_REPLICATION` (`capture.rs`'s `live`), a refusal stopping the start. No SQL pool sets
-  anything after connecting: a document body's `bytea` is rendered by the query too (below). The temporal parser reads any year
+  before `START_REPLICATION` (`capture.rs`'s `live`), a refusal stopping the start. The builder's pool keeps an
+  after-connect `SET bytea_output = 'hex'` only as a backstop for a `bytea` the query can't reach (below). The temporal parser reads any year
   width by hand (chrono's `%Y` stops at four digits), so a year past 9999 is typed and keeps its
   `+10000-01-01` id. A domain column is retyped to its base OID when the
   stream keys its `Relation` (`stream.rs`'s `retype_domains`). A value the parser can't hold
@@ -991,11 +991,15 @@ pattern moves two more sets once (issue #291): `BINARY_ENCODING_REVISION` (a `bi
 `document/value.rs`'s `coerce_scalar` turns back into `GenericValue::Bytes` for `sink::to_json` to
 base64). That text is rendered **in the query, not by the session's `bytea_output`** (issue #298: a
 transaction-mode pooler drops a session `SET`): `PgDocumentBuilder::byte_columns` finds every value
-column whose base type is `bytea`/`bytea[]` (`fields::collect_value_columns`: column fields at any
-depth, `min`/`max` over a plain column, an `ids` key) from the cached catalog lookup validation already
-made, and the `Builder` wraps it in `sql::hex_text` (`E'\\x' || encode(…, 'hex')`) or `sql::hex_array`,
-whatever the declared type (a `keyword` over `bytea` keeps its `\x…` text), so the bytes under
-`hex` are unchanged and `escape` stores the same and `CONSTANT_OBJECT_REVISION` in `Field`'s `Hash`
+column whose base type is `bytea`, or an array whose element is (`ColumnMeta.element_name`: `typelem`
+then every domain, so `blob[]` of a domain `blob` counts) (`fields::collect_value_columns`: column
+fields at any depth, `min`/`max` over a plain column, an `ids` key) from the cached catalog lookup, and
+the `Builder` wraps it in `sql::hex_text` (`E'\\x' || encode(…, 'hex')`) or `sql::hex_array`, whatever
+the declared type (a `keyword` over `bytea` keeps its `\x…` text), so the bytes under `hex` are
+unchanged and `escape` stores the same. A `bytea` nested in a composite, a range or an array of
+composites is out of reach: the pool's after-connect `SET bytea_output = 'hex'` stays as the backstop
+(a direct connection reads it as before; behind a transaction-mode pooler it follows the server, which
+the manual's "Behind PgBouncer" states), and `CONSTANT_OBJECT_REVISION` in `Field`'s `Hash`
 (a `constant` that `constant_is_stored_unindexed`: an object, or a list holding one or mixing scalar
 kinds — string/number/boolean, nulls aside, nested lists flattened, and a fractional or out-of-range
 number after a whole one, which the first element's `long` would refuse or cut — since one OpenSearch field takes
