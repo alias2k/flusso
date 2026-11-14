@@ -36,7 +36,7 @@ These hold for every brief, every review and every fix you make yourself.
 ## Git rules
 
 `main` takes **merge commits only** (ruleset): `gh pr merge N --merge --match-head-commit <sha>`. Never squash-merge or rebase-merge.
-**Rebase, never merge, to update a PR branch**: `git rebase origin/main`, then `git push --force-with-lease`. Never merge `main` into a branch, also not as a way out of a hard rebase. When a rebase conflicts across many commits, first squash the branch into its test commit and its fix commit, then rebase those two, so the test-first order survives. Rebase only on conflict or when the branch needs something from `main`.
+**Rebase, never merge, to update a PR branch**: `git rebase origin/main`, then `git push --force-with-lease`. A branch stacked on another branch rebases onto that base the same way. Never merge `main` or any other base into a branch, also not as a way out of a hard rebase. When a rebase conflicts across many commits, first squash the branch into its test commit and its fix commit, then rebase those two, so the test-first order survives. Rebase only on conflict or when the branch needs something from `main`.
 Conventional Commits matching the history (`fix(query): …`, `feat(engine)!: …`). No `Co-Authored-By` or AI-attribution trailer on commits. Branches are `fix/<desc>-<issue>`, `feat/<desc>-<issue>`, `chore/<desc>`.
 
 ## Running agents

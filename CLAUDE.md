@@ -814,8 +814,8 @@ by name, so a new option must be decided) — any state it doesn't model means n
 type, numeric, nullability, ignored-primary-key, `UndeclaredArrayColumn`, `IdsElementMismatch` (an empty
 `ids` array still indexes), `IdsElementLossy`, `DuplicateFieldName`, `RootPrimaryKey`
 and `TimestampFormat` (issue #304: a timestamp `options.format` no pattern of which reads the ISO
-form, `source::reads_iso_timestamps`, checked offline in `validate_spec`) and `CheckSkipped` findings print and start, as they built or ran in 0.17), so a new kind forces a decision there; stop
-only on a state no working 0.17 deployment can be in (or on a key new since, like `array`). `DiagnosticKind` stays exhaustive for that match; `Diagnostic` and `Anchor` are
+form, `source::reads_iso_timestamps`, checked offline in `validate_spec`) and `CheckSkipped` findings print and start, as they built or ran in 0.17), so a new kind forces a decision there. A kind
+that stops a deployment the previous release started is a breaking change: allowed in a minor or major release when it is the correct behaviour, marked breaking, with an entry on that release's upgrade page (`docs/src/operate/upgrade-to-*.md`) saying what stops and how to fix it. `DiagnosticKind` stays exhaustive for that match; `Diagnostic` and `Anchor` are
 `#[non_exhaustive]` (`Diagnostic::new` builds one). `check` still fails on every `Error`. No opt-out
 flag. The stopping kinds apply only where every document carries the value, mapped as declared:
 the root and plain objects (`validation.rs`'s `carries`: a `Group`, emitted, no `options`); a pair
