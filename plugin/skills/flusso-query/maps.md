@@ -28,8 +28,9 @@ struct Product {
 
 A whole-map wrapper opts in with `#[derive(FlussoMap)]` and a **required** kind tag
 (`#[flusso(text)]` or `#[flusso(keyword)]`, matching the schema's `values:`). There is no default;
-an untagged wrapper is a compile error. The wrapper takes any shape, newtype or named fields, so a
-translations type can carry a `fallback` field beside its language keys.
+an untagged wrapper is a compile error. The wrapper takes any shape that reads one JSON object, newtype
+over a map or named fields, so a translations type can carry a `fallback` field beside its language
+keys; a newtype over a `Vec`, an `Option` or a single value is a compile error.
 
 A hand-written `impl FlussoMap<K>` works at a root but fails inside a `FlussoFragment` unless the
 type also implements `FlussoValueMeta` (`KINDS = [Object]`, `MAP_VALUES` = the value kind) and

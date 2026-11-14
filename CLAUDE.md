@@ -881,21 +881,40 @@ takes `element: bool` (Postgres probes the `[]` base type, `text` for `json`/`js
 (a domain resolved through `typbasetype`, which the element transform probe uses too), while the
 declared type is still checked against the domain's own name. The designer's `array_default` /
 `json_array_default` value slots refuse what the config conversion refuses, and `api::render_op`
-refuses a schema whose file would not load, so a save never writes one. Query side: `check_type`'s
+refuses a schema whose file would not load, so a save never writes one (a `FileOp` carries its
+content only as `schema`, written into `base`; there is no raw-text op). Query side: `check_type`'s
 scalar arm also accepts a custom non-`Vec` type through const asserts (`OpaqueProbe::LEAF_ARRAY` +
 `accepts_kind`), and `#[derive(FlussoValue)]` on a newtype over `Vec<E>` emits only
-`FlussoValueMeta` (`E`'s kinds, `ARRAY`/`READS_ARRAY`), no `FlussoValue<K>`. So `ARRAY` has **two
+`FlussoValueMeta` (`E`'s kinds, `ARRAY`), no `FlussoValue<K>`. So `ARRAY` has **two
 producers**, told apart by kinds (`OpaqueProbe::LEAF_ARRAY` = `ARRAY` with no `Nested`/`Object`
 kind): a value array newtype goes only at an array leaf or a `json` array, a fragment array newtype
 only at a `nested` field (root: `array_value_check`/`json_array_check`/`array_newtype_check`;
-fragment: `array_shape_check`). The value derive asserts where it is declared that `E` reads no array
-and is no sub-document/object, and its untagged forwarding path forwards `ARRAY`/`READS_ARRAY` and
-refuses a sub-document inner type (a value's `__flusso_check` walks into nothing). A fragment's
-shape check lets any element through at a `json` array, as a root does. Guards:
+fragment: `array_shape_check`). **A `FlussoFragment`/`FlussoValue` type reads a JSON array exactly
+when `ARRAY` is set** (issue #289; there is no separate "reads an array" fact): each derive refuses,
+where the newtype is declared, every other newtype that would read one. A `FlussoRoot` reads an
+object; `#[derive(FlussoMap)]` (`map.rs`'s `reads_an_object`) refuses every shape that certainly reads
+no object (unit, a tuple of several, a newtype over a `Vec`/`Option`/primitive at macro time, over a
+value, array newtype or derived sub-document through `OpaqueProbe`), and `from`/`try_from` on it, as on a fragment
+(`serde_attr::converts_from`; trusted on a `FlussoValue`, like a field's `with`). A
+`#[serde(flatten)]` field must read an object, on both derives, `opaque` or not
+(`fragment::flattened_field`: macro error on a `Vec`/primitive, `!ARRAY && AT_OBJECT` asserts). The
+forwarding `FlussoValue<K>` impl of an untagged value newtype carries both its bounds higher-ranked
+(`for<'__flusso>`), so a newtype over an array newtype needs no `Serialize`. The value derive asserts `E` reads no array and is
+no sub-document/object, refuses `Option<Vec<_>>`, and its untagged forwarding path forwards `ARRAY`
+and refuses a sub-document inner type (a value's `__flusso_check` walks into nothing); the fragment
+derive (`fragment.rs`'s `newtype_array`) refuses `Option<…>` of an array, a `Vec` of values, maps,
+`Value` or arrays, and a value array newtype inside. Those asserts are spanned on the element type.
+A `map` takes no `Vec` (`check::array_shape_ok`), as on a root. A fragment's shape check, and its
+`opaque` check, let any element through at a `json` array, as a root does; a root does not walk a
+non-`Vec` type at a `json` array, which `json_array_check` already placed. Guards:
 `an_array_column_changes_the_content_hash_only_while_it_is_set`, the `value::tests`/`query::tests`
 array cases, `validation::tests`' `an_array_*`, `config_coverage`'s
 `array_columns_clean_up_their_value_and_are_checked_against_the_catalog`, the `array_columns` UI
-pass test + `array_*`/`json_array_*`/`value_newtype_over_an_array_or_a_fragment` compile-fail tests,
+pass test + `array_*`/`json_array_*`/`value_newtype_over_an_array_or_a_fragment`/
+`fragment_newtype_reads_another_array`/`flatten_not_a_struct_or_map`/`map_type_reads_no_object`/
+`value_newtype_without_serialize` compile-fail tests, `ui_pass/{opaque_at_a_json_array,
+flatten_struct_or_map,map_type_shapes,refused_newtypes_fixed}.rs` (the last follows every refusal's
+suggested fix and reads),
 and `dev/query-e2e`'s `array_columns` (a derived root read back from real hits).
 
 ### Script fields (issue #198)
@@ -1006,7 +1025,7 @@ pass tests (both type-states: `tests/ui_pass/`, `tests/ui_no_subfields/`), and `
 `map_cross_key_adversarial_values_match_the_per_key_or` (operator words, backslashes, quotes,
 empty values; with and without subfields) in the `map_keys` live e2e. The
 doc-side type is `HashMap<String, V>` or `BTreeMap<String, V>` (blanket `FlussoMap<K>` impls
-for any `V: FlussoValue<K>`), or a `#[derive(FlussoMap)]` struct of **any shape** — newtype or
+for any `V: FlussoValue<K>`), or a `#[derive(FlussoMap)]` struct of **any shape that reads an object** — newtype or
 named fields (e.g. a translations type with a `fallback` beside the language keys) with a
 **required** `#[flusso(keyword|text)]` value-kind tag (no default — untagged is a compile
 error); the

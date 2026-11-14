@@ -554,10 +554,11 @@ pub enum OpKind {
     Move,
 }
 
-/// One schema-file operation in a save/diff request. `schema`/`raw` supply the
-/// content (raw wins — the raw-edit escape hatch); `from` is the source path
-/// for `Move`.
+/// One schema-file operation in a save/diff request. `schema` is the content,
+/// written into `base`; `from` is the source path for `Move`. Unknown fields
+/// are refused, as on [`SaveRequest`].
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileOp {
     /// What to do.
     pub kind: OpKind,
@@ -573,9 +574,6 @@ pub struct FileOp {
     /// The schema to render.
     #[serde(default)]
     pub schema: Option<IndexSchema>,
-    /// Raw YAML to write verbatim instead of rendering `schema`.
-    #[serde(default)]
-    pub raw: Option<String>,
     /// The text to write `schema` into, keeping its comments: the Code-mode
     /// buffer the schema was last read from. Absent, the file on disk is used.
     #[serde(default)]
@@ -1685,35 +1683,25 @@ fn is_zero(n: &usize) -> bool {
     *n == 0
 }
 
-/// Render one op's file content: the raw escape hatch wins, else the schema
-/// written into its base (the op's own, else `on_disk`). A schema whose file
-/// would not load as that schema is refused, so a diff shows nothing and a
-/// save writes nothing: `keep` falls back to the canonical form when the
-/// patched file does not read back, and that form fails the same way.
+/// Render one op's file content: its schema written into its base (the op's
+/// own, else `on_disk`). A schema whose file would not load as that schema is
+/// refused, so a diff shows nothing and a save writes nothing: `keep` falls
+/// back to the canonical form when the patched file does not read back, and
+/// that form fails the same way.
 fn render_op(op: &FileOp, on_disk: Option<&str>) -> Result<Saved> {
-    match &op.raw {
-        Some(raw) => Ok(Saved {
-            text: raw.clone(),
-            notice: None,
-            dropped: 0,
-        }),
-        None => {
-            let schema = op
-                .schema
-                .as_ref()
-                .context("upsert/move op needs a schema or raw content")?;
-            let saved =
-                keep::schema_yaml(op.base.as_deref().or(on_disk), schema, op.identity.as_ref())?;
-            let read = SchemaYaml::try_parse(&saved.text)
-                .map_err(anyhow::Error::from)
-                .and_then(|entity| IndexSchema::try_from(entity).map_err(anyhow::Error::from))
-                .context("the schema does not load, so it is not saved")?;
-            if let Some(at) = first_difference(schema, &read) {
-                bail!("the schema reads back differently at `{at}`, so it is not saved");
-            }
-            Ok(saved)
-        }
+    let schema = op
+        .schema
+        .as_ref()
+        .context("upsert/move op needs a schema")?;
+    let saved = keep::schema_yaml(op.base.as_deref().or(on_disk), schema, op.identity.as_ref())?;
+    let read = SchemaYaml::try_parse(&saved.text)
+        .map_err(anyhow::Error::from)
+        .and_then(|entity| IndexSchema::try_from(entity).map_err(anyhow::Error::from))
+        .context("the schema does not load, so it is not saved")?;
+    if let Some(at) = first_difference(schema, &read) {
+        bail!("the schema reads back differently at `{at}`, so it is not saved");
     }
+    Ok(saved)
 }
 
 /// One `[[index]]` entry with its schema file resolved on disk.
@@ -3155,9 +3143,11 @@ mod tests {
                 "digests": Self::loaded(),
                 "ops": [
                     { "kind": "move", "index": "orders", "path": "products.schema.yml",
-                      "from": "orders.schema.yml", "raw": "orders: 1\n" },
+                      "from": "orders.schema.yml", "schema": schema("orders: 1"),
+                      "base": tagged("orders: 1") },
                     { "kind": "move", "index": "products", "path": "orders.schema.yml",
-                      "from": "products.schema.yml", "raw": "products: 1\n" },
+                      "from": "products.schema.yml", "schema": schema("products: 1"),
+                      "base": tagged("products: 1") },
                 ],
             }))
             .unwrap()
@@ -3169,9 +3159,22 @@ mod tests {
             save_with(&self.config(), &self.swap(), &mut Disk::stopping_after(10)).unwrap_err();
             assert_eq!(
                 std::fs::read_to_string(self.0.join("products.schema.yml")).unwrap(),
-                "orders: 1\n"
+                tagged("orders: 1")
             );
         }
+    }
+
+    /// A schema file that loads, told apart from others by its `tag` comment.
+    fn tagged(tag: &str) -> String {
+        format!(
+            "# {tag}\nversion: 1\ntable: t\nprimary_key: id\nfields:\n  - keyword: id\n    required: true\n"
+        )
+    }
+
+    /// The schema [`tagged`] holds, as the page sends it.
+    fn schema(tag: &str) -> serde_json::Value {
+        let entity = SchemaYaml::try_parse(&tagged(tag)).unwrap();
+        serde_json::to_value(IndexSchema::try_from(entity).unwrap()).unwrap()
     }
 
     fn interrupted(result: Result<impl std::fmt::Debug>) -> SaveRecovery {
@@ -3202,7 +3205,7 @@ mod tests {
         save_project(&fixture.config(), fixture.swap()).unwrap();
         assert_eq!(
             std::fs::read_to_string(fixture.0.join("products.schema.yml")).unwrap(),
-            "orders: 1\n"
+            tagged("orders: 1")
         );
         assert!(fixture.files().keys().all(|name| !name.starts_with('.')));
     }
@@ -3227,7 +3230,7 @@ mod tests {
         assert_eq!(saved.recovered[0].outcome, RecoveryOutcome::RolledBack);
         assert_eq!(
             std::fs::read_to_string(fixture.0.join("products.schema.yml")).unwrap(),
-            "orders: 1\n"
+            tagged("orders: 1")
         );
         assert!(fixture.files().keys().all(|name| !name.starts_with('.')));
     }
@@ -3265,7 +3268,7 @@ mod tests {
                 "config": load_project(&fixture.config()).unwrap().config,
                 "digests": {},
                 "ops": [{ "kind": "upsert", "index": "orders", "path": "products.schema.yml",
-                          "raw": "orders: 2\n" }],
+                          "schema": schema("orders: 2"), "base": tagged("orders: 2") }],
             }))
             .unwrap();
             request.digests = page.clone();
@@ -3320,7 +3323,7 @@ mod tests {
             "config": load_project(&fixture.config()).unwrap().config,
             "digests": Fixture::loaded(),
             "ops": [{ "kind": "upsert", "index": "users", "path": "users.schema.yml",
-                      "raw": "users: 1\n" }],
+                      "schema": schema("users: 1"), "base": tagged("users: 1") }],
         }))
         .unwrap();
         stopped_by_an_editor(&fixture, &request, 1, "users.schema.yml");
@@ -3340,7 +3343,7 @@ mod tests {
             "config": config,
             "digests": Fixture::loaded(),
             "ops": [{ "kind": "move", "index": "users", "path": "moved.schema.yml",
-                      "from": "users.schema.yml", "raw": "users: 1\n" }],
+                      "from": "users.schema.yml", "schema": schema("users: 1"), "base": tagged("users: 1") }],
         }))
         .unwrap();
         // moved.schema.yml, flusso.toml, then the removal of users.schema.yml.
@@ -3367,7 +3370,7 @@ mod tests {
                 "config": load_project(&fixture.config()).unwrap().config,
                 "digests": digests,
                 "ops": [{ "kind": "upsert", "index": index, "path": format!("{index}.schema.yml"),
-                          "raw": format!("{index}: 1\n") }],
+                          "schema": schema(&format!("{index}: 1")), "base": tagged(&format!("{index}: 1")) }],
             }))
             .unwrap()
         };
@@ -3416,8 +3419,8 @@ mod tests {
                 "config": load_project(&fixture.config()).unwrap().config,
                 "digests": Fixture::loaded(),
                 "ops": [
-                    { "kind": "upsert", "index": "users", "path": "users.schema.yml", "raw": "users: 1\n" },
-                    { "kind": "upsert", "index": "products", "path": "products.schema.yml", "raw": "products: 1\n" },
+                    { "kind": "upsert", "index": "users", "path": "users.schema.yml", "schema": schema("users: 1"), "base": tagged("users: 1") },
+                    { "kind": "upsert", "index": "products", "path": "products.schema.yml", "schema": schema("products: 1"), "base": tagged("products: 1") },
                 ],
             }))
             .unwrap()
@@ -3451,7 +3454,7 @@ mod tests {
                         let want = if done {
                             "editor\n".to_owned()
                         } else {
-                            format!("{}: 1\n", &file[..file.find('.').unwrap()])
+                            tagged(&format!("{}: 1", &file[..file.find('.').unwrap()]))
                         };
                         assert_eq!(files[file], want, "after {n}");
                     }
@@ -3490,7 +3493,7 @@ mod tests {
             "config": load_project(&fixture.config()).unwrap().config,
             "digests": Fixture::loaded(),
             "ops": [{ "kind": "upsert", "index": "users", "path": "users.schema.yml",
-                      "raw": "users: 1\n" }],
+                      "schema": schema("users: 1"), "base": tagged("users: 1") }],
         }))
         .unwrap();
         let saved = save_with(
@@ -3500,7 +3503,7 @@ mod tests {
         )
         .unwrap();
         let files = fixture.files();
-        assert_eq!(files["users.schema.yml"], "users: 1\n");
+        assert_eq!(files["users.schema.yml"], tagged("users: 1"));
         assert_eq!(saved.displaced.len(), 1, "{saved:?}");
         assert_eq!(saved.displaced[0].path, "users.schema.yml");
         assert_eq!(files[&saved.displaced[0].copy], "editor\n");
@@ -3651,7 +3654,7 @@ mod tests {
             "config": request.config,
             "digests": {},
             "ops": [{ "kind": "upsert", "index": "orders", "path": "products.schema.yml",
-                      "raw": "orders: 2\n" }],
+                      "schema": schema("orders: 2"), "base": tagged("orders: 2") }],
         }))
         .unwrap();
         let again = SaveRequest {

@@ -853,11 +853,17 @@ function ScalarBody({
 
 /// The `array` switch of a column field: the column holds an array of the
 /// field's type. Flipping it carries a `default` across when it can (a value
-/// becomes a one-item list and back) and drops it otherwise; turning it on for
-/// a `json` field drops `transforms`, which a `json` array refuses.
+/// becomes a one-item list and back) and drops it otherwise, which the hint
+/// says before the switch is turned off; turning it on for a `json` field drops
+/// `transforms`, which a `json` array refuses.
 function ArrayToggle({ column, setCol }: { column: Column; setCol: (c: Column) => void }) {
   const { t } = useT();
   const on = column.array ?? false;
+  const dropsDefault =
+    on &&
+    column.default !== undefined &&
+    column.default !== "Null" &&
+    edit.defaultAcrossArray(column.default, false) === undefined;
   return (
     <>
       <Check
@@ -873,6 +879,7 @@ function ArrayToggle({ column, setCol }: { column: Column; setCol: (c: Column) =
         }}
       />
       <p className="hint">{on ? t("inspector.columnArrayOn") : t("inspector.columnArrayOff")}</p>
+      {dropsDefault && <p className="hint">{t("inspector.columnArrayDropsDefault")}</p>}
     </>
   );
 }

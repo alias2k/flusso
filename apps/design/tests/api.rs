@@ -10,10 +10,11 @@ use std::path::{Path, PathBuf};
 
 use config::ParseFrom;
 use config::toml::ConfigToml;
+use config::yaml::SchemaYaml;
 use design::api::{self, FileOp, OpKind, PreviewRequest, SaveRequest};
 use design::keep::ConfigIdentity;
 use design::value::{MAX_DEPTH, ValueSlot};
-use kernel::IndexName;
+use kernel::{IndexName, IndexSchema};
 
 /// A unique scratch directory for this test process, seeded with the dev files.
 fn fixture() -> PathBuf {
@@ -89,7 +90,6 @@ fn project_previews_saves_and_reopens() {
                 path: PathBuf::from(&i.schema_path),
                 from: None,
                 schema: i.schema.clone(),
-                raw: None,
                 base: None,
                 identity: None,
             })
@@ -129,7 +129,6 @@ fn project_previews_saves_and_reopens() {
                 path: PathBuf::from(&i.schema_path),
                 from: None,
                 schema: i.schema.clone(),
-                raw: None,
                 base: None,
                 identity: None,
             })
@@ -498,17 +497,30 @@ fn own_fixture(tag: &str) -> PathBuf {
     dir
 }
 
-fn op(kind: OpKind, index: &str, path: &str, from: Option<&str>, raw: &str) -> FileOp {
+/// An op writing [`tagged`]`(tag)`.
+fn op(kind: OpKind, index: &str, path: &str, from: Option<&str>, tag: &str) -> FileOp {
+    let text = tagged(tag);
     FileOp {
         kind,
         index: IndexName::try_new(index).unwrap(),
         path: PathBuf::from(path),
         from: from.map(PathBuf::from),
-        schema: None,
-        raw: Some(raw.to_owned()),
-        base: None,
+        schema: Some(schema_of(&text)),
+        base: Some(text),
         identity: None,
     }
+}
+
+/// A schema file that loads, told apart from others by its `tag` comment.
+fn tagged(tag: &str) -> String {
+    format!(
+        "# {}\nversion: 1\ntable: t\nprimary_key: id\nfields:\n  - keyword: id\n    required: true\n",
+        tag.trim_end()
+    )
+}
+
+fn schema_of(text: &str) -> IndexSchema {
+    IndexSchema::try_from(SchemaYaml::try_parse(text).unwrap()).unwrap()
 }
 
 /// `config` with each `(name, schema path)` set: an existing index's path
@@ -695,7 +707,7 @@ fn a_shared_file_is_written_only_by_every_index_that_uses_it() {
     save_project(&config_path, both).unwrap();
     assert_eq!(
         std::fs::read_to_string(dir.join("users.schema.yml")).unwrap(),
-        "x: 1\n"
+        tagged("x: 1")
     );
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -820,8 +832,8 @@ fn a_move_never_removes_a_file_an_index_uses() {
     let diffs = diff_project(&config_path, swap()).unwrap();
     assert!(diffs.iter().all(|d| d.op == api::DiffOp::Write));
     save_project(&config_path, swap()).unwrap();
-    assert_eq!(read("products.schema.yml"), "orders: 1\n");
-    assert_eq!(read("orders.schema.yml"), "products: 1\n");
+    assert_eq!(read("products.schema.yml"), tagged("orders: 1"));
+    assert_eq!(read("orders.schema.yml"), tagged("products: 1"));
 
     let project = api::load_project(&config_path).unwrap();
     let replaced = SaveRequest {
@@ -853,8 +865,8 @@ fn a_move_never_removes_a_file_an_index_uses() {
         digests: seen(),
     };
     save_project(&config_path, replaced).unwrap();
-    assert_eq!(read("archive/users.schema.yml"), "users: 1\n");
-    assert_eq!(read("users.schema.yml"), "fresh: 1\n");
+    assert_eq!(read("archive/users.schema.yml"), tagged("users: 1"));
+    assert_eq!(read("users.schema.yml"), tagged("fresh: 1"));
 
     // A move's source must be the index's own file on disk.
     let project = api::load_project(&config_path).unwrap();
@@ -1121,7 +1133,7 @@ fn an_edit_is_saved_with_the_config_left_out() {
     assert_eq!(std::fs::read_to_string(&config_path).unwrap(), config_text);
     assert_eq!(
         std::fs::read_to_string(dir.join("orders.schema.yml")).unwrap(),
-        "orders: 1\n"
+        tagged("orders: 1")
     );
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -1388,7 +1400,7 @@ fn a_schema_path_is_saved_normalized() {
         config: config_with(&project.config, &[("users", "./people.schema.yml/")]),
         ops: vec![FileOp {
             schema,
-            raw: None,
+            base: None,
             ..op(
                 OpKind::Move,
                 "users",
@@ -1574,7 +1586,7 @@ fn the_config_and_its_linked_files_can_be_left_out_of_a_save() {
         let saved = save_project(&config_path, request(skip)).unwrap();
         assert_eq!(saved.written.len(), 1, "{:?}", saved.written);
         let mut expected = before.clone();
-        expected.insert("orders.schema.yml".into(), "orders: edited\n".into());
+        expected.insert("orders.schema.yml".into(), tagged("orders: edited"));
         assert_eq!(files(&dir), expected);
         assert!(!dir.join("sub").exists());
         std::fs::write(dir.join("orders.schema.yml"), &before["orders.schema.yml"]).unwrap();
@@ -1640,16 +1652,18 @@ fn which_index_an_op_is_comes_from_the_config_identity() {
         identity: users_is_orders.clone(),
         digests: seen(),
     });
-    // The request's own `was` is not read.
+    // The request can't name the index it was: an unknown field is refused.
     let forged = serde_json::json!({
         "digests": seen(),
         "config": config_without(&project.config, "products"),
         "ops": [{
             "kind": "move", "index": "users", "was": "products",
-            "from": "products.schema.yml", "path": "users.schema.yml", "raw": "x: 1\n",
+            "from": "products.schema.yml", "path": "users.schema.yml",
+            "schema": schema_of(&tagged("x: 1")), "base": tagged("x: 1"),
         }],
     });
-    refused(&dir, || serde_json::from_value(forged.clone()).unwrap());
+    let error = serde_json::from_value::<SaveRequest>(forged).unwrap_err();
+    assert!(error.to_string().contains("unknown field `was`"), "{error}");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -1858,7 +1872,7 @@ fn a_new_index_over_a_removed_one_s_file_is_flagged() {
         config: project.config.clone(),
         ops: vec![FileOp {
             schema: orders,
-            raw: None,
+            base: None,
             ..op(OpKind::Upsert, "orders", "orders.schema.yml", None, "")
         }],
         skip: Vec::new(),
@@ -1928,7 +1942,7 @@ fn a_crlf_schema_keeps_its_line_endings_and_comments() {
             ops: vec![FileOp {
                 schema: Some(edited),
                 identity: Some(serde_json::from_value(ids).unwrap()),
-                raw: None,
+                base: None,
                 ..op(OpKind::Upsert, "users", "users.schema.yml", None, "")
             }],
             skip: Vec::new(),
@@ -2151,8 +2165,8 @@ fn a_page_saves_a_file_another_page_did_not_touch() {
     b.save(b.request(b.project.config.clone(), vec![orders], Vec::new()))
         .unwrap();
     let files = files(&dir);
-    assert_eq!(files["users.schema.yml"], "users: a\n");
-    assert_eq!(files["orders.schema.yml"], "orders: b\n");
+    assert_eq!(files["users.schema.yml"], tagged("users: a"));
+    assert_eq!(files["orders.schema.yml"], tagged("orders: b"));
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -2201,7 +2215,7 @@ fn a_file_changed_on_disk_since_the_page_loaded_is_not_overwritten() {
         page.save(anyway).unwrap();
         assert_eq!(
             std::fs::read_to_string(&users).unwrap(),
-            "users: 1\n",
+            tagged("users: 1"),
             "{label}"
         );
     }
@@ -2322,7 +2336,6 @@ fn a_code_mode_base_older_than_the_file_is_refused() {
         page.project.config.clone(),
         vec![FileOp {
             schema: Some(edited),
-            raw: None,
             base: Some(format!("# mine\n{text}")),
             ..op(OpKind::Upsert, "users", "users.schema.yml", None, "")
         }],
@@ -2372,7 +2385,7 @@ fn a_page_saves_again_after_its_own_save_without_reloading() {
         .unwrap();
     assert_eq!(
         std::fs::read_to_string(dir.join("moved.schema.yml")).unwrap(),
-        "users: 5\n"
+        tagged("users: 5")
     );
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -2646,12 +2659,36 @@ fn a_schema_that_would_not_load_is_not_saved() {
         config: project.config.clone(),
         ops: vec![FileOp {
             schema: Some(schema.clone()),
-            raw: None,
+            base: None,
             ..op(OpKind::Upsert, "orders", "orders.schema.yml", None, "")
         }],
         skip: Vec::new(),
         identity: None,
         digests: seen(),
     });
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A save op carries its content only as a schema, which the save refuses
+/// unless its file loads. An op with `raw` text is refused before anything is
+/// read, as any unknown field is (issue #289).
+#[test]
+fn an_op_with_raw_text_is_refused_as_an_unknown_field() {
+    let dir = own_fixture("raw");
+    let project = api::load_project(&dir.join("flusso.toml")).unwrap();
+    let body = serde_json::json!({
+        "config": project.config,
+        "digests": project.digests,
+        "ops": [{
+            "kind": "upsert", "index": "orders", "path": "orders.schema.yml",
+            "raw": "this: [does not load\n",
+        }],
+    });
+    let refused = api::read_save_request(&serde_json::to_vec(&body).unwrap()).unwrap_err();
+    assert!(
+        refused.message.contains("unknown field `raw`"),
+        "{}",
+        refused.message
+    );
     std::fs::remove_dir_all(&dir).ok();
 }

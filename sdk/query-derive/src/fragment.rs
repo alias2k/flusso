@@ -58,6 +58,10 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
         }
     }
 
+    if let Some(attr) = crate::serde_attr::converts_from(&input.attrs) {
+        return syn::Error::new_spanned(attr, CONVERTS_FROM_FRAGMENT).to_compile_error();
+    }
+
     let struct_fields = match &input.data {
         Data::Struct(data) => &data.fields,
         _ => {
@@ -99,6 +103,11 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
     out
 }
 
+/// The error for `#[serde(from)]`/`try_from` on a fragment.
+const CONVERTS_FROM_FRAGMENT: &str = "`#[serde(from)]`/`try_from` makes serde read another type \
+     and convert it, so this struct's fields are never what serde reads, and checking them proves \
+     nothing; derive `FlussoFragment` on the type serde reads, and convert after reading";
+
 /// Make a **schema-bound** struct embeddable — a root, or a legacy `path =` child.
 ///
 /// Its check is a no-op on purpose: it resolved the schema itself and its own
@@ -127,9 +136,17 @@ pub(crate) fn embeddable_leaf(ident: &Ident) -> TokenStream {
 /// and the check it runs against the level it is placed at.
 pub(crate) fn embeddable(ident: &Ident, fields: &[DocField]) -> TokenStream {
     let checks = fields.iter().map(|field| field_check(ident, field));
-    let array = match fields {
-        [field] => newtype_array(field),
-        _ => None,
+    let NewtypeArray {
+        checks: declared,
+        array,
+    } = match fields {
+        // Refused at macro time, the newtype meant an array: placed as one,
+        // it adds no second error where it is used.
+        [field] => newtype_array(ident, field).unwrap_or_else(|error| NewtypeArray {
+            checks: error.to_compile_error(),
+            array: quote! { const ARRAY: bool = true; },
+        }),
+        _ => NewtypeArray::default(),
     };
     let kinds = match fields {
         [field] => newtype_kinds(field),
@@ -144,6 +161,8 @@ pub(crate) fn embeddable(ident: &Ident, fields: &[DocField]) -> TokenStream {
             const VARIANTS: &'static [&'static str] = &[];
             #array
         }
+
+        #declared
 
         impl #ident {
             /// Check this shape against one mapping level. Called by the root
@@ -179,55 +198,174 @@ fn newtype_kinds(field: &DocField) -> Option<TokenStream> {
     })
 }
 
-/// `FlussoValueMeta::ARRAY` for a newtype fragment that reads a JSON array of
-/// sub-documents, so a parent places it where it would place the `Vec`.
+/// `FlussoValueMeta::ARRAY` for a newtype fragment, and the checks that keep
+/// it honest, where the newtype is declared.
 ///
-/// The newtype's own check walks the element against the level it is handed
-/// (its field is checked like a flattened one), so a parent hands it a `nested`
-/// array's element level exactly as it would for `Vec<Element>`. Only a bare
-/// `Vec<…>` of a custom type, or a newtype that is itself one, is an array: an
-/// `Option<Vec<…>>` reads `null` too, and a `Vec` of a built-in leaf has no
-/// sub-document to walk. The element has to be a sub-document that reads no
-/// array itself (`OpaqueProbe::ARRAY_ELEMENT`): a `Vec` of an array newtype is
-/// an array of arrays, and a `Vec` of a value type reads no sub-document.
+/// A fragment newtype that reads a JSON array is an array of sub-documents and
+/// nothing else: over `Vec<Struct>`, or over another such newtype. A parent
+/// places it where it would place the `Vec` (a `nested` field), and its own
+/// check walks the element against the level it is handed. Every other way a
+/// fragment newtype could read an array is refused here, so a derived type
+/// reads an array exactly when `ARRAY` is set and a parent needs no other fact:
 ///
-/// `READS_ARRAY` is the wider fact a `Vec<…>` of the newtype is refused on:
-/// an array anywhere down the chain of newtypes, `Option` or not.
-fn newtype_array(field: &DocField) -> Option<TokenStream> {
+/// - over `Vec<E>`, `E` a leaf value (an array of values is a `FlussoValue`
+///   newtype's), a map or `serde_json::Value` (opaque JSON, written at a `json`
+///   field as it is), or an array itself (an array of arrays);
+/// - over `Option<…>` of an array: it reads `null` too, which a `nested` field
+///   never holds — put the `Option` on the field;
+/// - over a `FlussoValue` array newtype, an array of the other kind.
+///
+/// Built-in leaves, maps and `Value` are refused at macro time; a custom
+/// element is known only at const evaluation, so it gets one assert per case,
+/// each spanned on the type it names.
+fn newtype_array(ident: &Ident, field: &DocField) -> syn::Result<NewtypeArray> {
     if field.ident.is_some() || field.skip {
-        return None;
+        return Ok(NewtypeArray::default());
     }
-    let nullable = option_inner(field.ty).is_some();
-    let inner = strip_option(field.ty);
-    let in_vec = vec_inner(inner).is_some();
+    if let Some(optional) = option_inner(field.ty) {
+        if let Some(element) = vec_inner(optional) {
+            return Err(syn::Error::new(
+                field.ty.span(),
+                format!(
+                    "a FlussoFragment newtype over an array of sub-documents reads a `nested` \
+                     field, which is never null (no rows read as an empty array) — drop the \
+                     `Option`: `struct {ident}(Vec<{}>)`",
+                    render(element),
+                ),
+            ));
+        }
+        let Some(ty) = checked_type(field, false) else {
+            return Ok(NewtypeArray::default());
+        };
+        let rendered = render(ty);
+        let message = format!(
+            "`{ident}` is a FlussoFragment newtype over `Option<{rendered}>`, and `{rendered}` \
+             reads an array, which a `nested` field holds and never as null (no rows read as an \
+             empty array) — drop the `Option`: `struct {ident}({rendered})`"
+        );
+        let values = format!(
+            "`{ident}` is a FlussoFragment newtype over `Option<{rendered}>`, and `{rendered}` \
+             is an array of values — derive `FlussoValue` on a newtype over `{rendered}`, and put \
+             the `Option<…>` on the field (`Option<{ident}>`) where it may be null"
+        );
+        return Ok(NewtypeArray {
+            checks: quote_spanned! {ty.span()=>
+                const _: () = {
+                    #[allow(unused_imports)]
+                    use ::flusso_query::OpaqueWithoutMeta as _;
+                    assert!(
+                        !::flusso_query::OpaqueProbe::<#ty>::ARRAY
+                            || !::flusso_query::OpaqueProbe::<#ty>::AT_NESTED,
+                        #message
+                    );
+                    assert!(
+                        !::flusso_query::OpaqueProbe::<#ty>::ARRAY
+                            || ::flusso_query::OpaqueProbe::<#ty>::AT_NESTED,
+                        #values
+                    );
+                };
+            },
+            array: TokenStream::new(),
+        });
+    }
+    let Some(element) = vec_inner(field.ty) else {
+        let Some(ty) = checked_type(field, false) else {
+            return Ok(NewtypeArray::default());
+        };
+        let rendered = render(ty);
+        let message = format!(
+            "`{ident}` is a FlussoFragment newtype over `{rendered}`, a `FlussoValue` newtype \
+             over an array of values — derive `FlussoValue` on `{ident}` instead, so it goes \
+             where `{rendered}` does"
+        );
+        return Ok(NewtypeArray {
+            checks: quote_spanned! {ty.span()=>
+                const _: () = {
+                    #[allow(unused_imports)]
+                    use ::flusso_query::OpaqueWithoutMeta as _;
+                    assert!(
+                        !::flusso_query::OpaqueProbe::<#ty>::ARRAY
+                            || ::flusso_query::OpaqueProbe::<#ty>::AT_NESTED,
+                        #message
+                    );
+                };
+            },
+            array: quote! {
+                const ARRAY: bool = {
+                    #[allow(unused_imports)]
+                    use ::flusso_query::OpaqueWithoutMeta as _;
+                    ::flusso_query::OpaqueProbe::<#ty>::ARRAY
+                };
+            },
+        });
+    };
+    let rendered = render(element);
     let Some(ty) = checked_type(field, false) else {
-        return in_vec.then(|| quote! { const READS_ARRAY: bool = true; });
-    };
-    let (array, reads) = if in_vec {
-        (quote! { ARRAY_ELEMENT }, quote! { true })
-    } else {
-        (
-            quote! { ARRAY },
-            quote! { ::flusso_query::OpaqueProbe::<#ty>::READS_ARRAY },
-        )
-    };
-    let array = if nullable {
-        quote! { false }
-    } else {
-        quote! { ::flusso_query::OpaqueProbe::<#ty>::#array }
-    };
-    Some(quote! {
-        const ARRAY: bool = {
-            #[allow(unused_imports)]
-            use ::flusso_query::OpaqueWithoutMeta as _;
-            #array
+        let (what, fix) = if leaf_ident(element).as_deref() == Some("Value")
+            || map_container_value(element).is_some()
+        {
+            (
+                "opaque JSON",
+                format!(
+                    "only a `json` field holds it, and takes `Vec<{rendered}>` as it is: declare \
+                     the field `Vec<{rendered}>` and drop `{ident}`"
+                ),
+            )
+        } else {
+            (
+                "an array of values",
+                format!(
+                    "derive `FlussoValue` on `{ident}` instead, which reads an array of values \
+                     and goes at an array leaf or a `json` array"
+                ),
+            )
         };
-        const READS_ARRAY: bool = {
-            #[allow(unused_imports)]
-            use ::flusso_query::OpaqueWithoutMeta as _;
-            #reads
-        };
+        return Err(syn::Error::new(
+            element.span(),
+            format!(
+                "a FlussoFragment newtype over a `Vec<…>` is an array of sub-documents, for a \
+                 `nested` field, but `Vec<{rendered}>` is {what} — {fix}"
+            ),
+        ));
+    };
+    let nested_array = format!(
+        "`{ident}` is a FlussoFragment newtype over `Vec<{rendered}>`, an array of arrays — \
+         `{rendered}` already reads an array; wrap its element type instead"
+    );
+    let map = format!(
+        "`{ident}` is a FlussoFragment newtype over `Vec<{rendered}>`, an array of maps, which is \
+         opaque JSON — only a `json` field holds it, and takes `Vec<{rendered}>` as it is: declare \
+         the field `Vec<{rendered}>` and drop `{ident}`"
+    );
+    let value = format!(
+        "`{ident}` is a FlussoFragment newtype over `Vec<{rendered}>`, but `{rendered}` is a \
+         value, not a sub-document — for an array of values, derive `FlussoValue` on `{ident}` \
+         instead"
+    );
+    Ok(NewtypeArray {
+        checks: quote_spanned! {ty.span()=>
+            const _: () = {
+                #[allow(unused_imports)]
+                use ::flusso_query::OpaqueWithoutMeta as _;
+                assert!(!::flusso_query::OpaqueProbe::<#ty>::ARRAY, #nested_array);
+                assert!(
+                    ::flusso_query::OpaqueProbe::<#ty>::AT_NESTED
+                        || !::flusso_query::OpaqueProbe::<#ty>::AT_OBJECT,
+                    #map
+                );
+                assert!(::flusso_query::OpaqueProbe::<#ty>::AT_NESTED, #value);
+            };
+        },
+        array: quote! { const ARRAY: bool = true; },
     })
+}
+
+/// What [`newtype_array`] emits: the checks beside the newtype, and its
+/// `ARRAY` inside its `FlussoValueMeta` impl.
+#[derive(Default)]
+struct NewtypeArray {
+    checks: TokenStream,
+    array: TokenStream,
 }
 
 /// A fragment is location-free by definition — `index`/`path` here would make it
@@ -324,6 +462,74 @@ pub(crate) fn flattened_check(
     }
 }
 
+/// The check of a `#[serde(flatten)]` field (not a newtype's own field, which
+/// serde reads as the newtype), on a root and in a fragment.
+///
+/// serde flattens only a struct or a map: anything else compiles and fails on
+/// every read. A `Vec` or a built-in leaf is refused at macro time; a custom
+/// type through const data, spanned on it: it must stand for an object
+/// (`OpaqueProbe::AT_OBJECT`: a sub-document or a map type) and read no array.
+/// `serde_json::Value`, a `HashMap`/`BTreeMap` (serde's catch-all) and flusso's
+/// `GeoPoint` (a struct) are not checked; `opaque` keeps this check.
+pub(crate) fn flattened_field(field: &DocField, level: TokenStream) -> TokenStream {
+    if field.ident.is_none() || field.skip {
+        return embedded_type(field, false).map_or_else(TokenStream::new, |ty| {
+            flattened_check(ty, field.ty.span(), level)
+        });
+    }
+    let inner = strip_option(field.ty);
+    let rendered = render(field.ty);
+    let refuse = |reads: &str| {
+        syn::Error::new(
+            field.ty.span(),
+            format!(
+                "`{rendered}` is `#[serde(flatten)]`, but it reads {reads}, and serde flattens \
+                 only a struct or a map — every read would fail; drop `#[serde(flatten)]` and \
+                 give the field its own key"
+            ),
+        )
+        .to_compile_error()
+    };
+    if vec_inner(inner).is_some() {
+        return refuse("an array");
+    }
+    if leaf_ident(inner).as_deref() == Some("Value") || map_container_value(inner).is_some() {
+        return TokenStream::new();
+    }
+    if primitive_kinds(inner).is_some() && !is_foreign_leaf(inner) {
+        return refuse("a single value");
+    }
+    // `opaque` turns off the walk into the type, never this: what serde can
+    // flatten is no check of the type's own.
+    let Some(ty) = checked_type(field, false) else {
+        return TokenStream::new();
+    };
+    let shown = render(ty);
+    let array = format!(
+        "`{shown}` is `#[serde(flatten)]`, but it reads an array, and serde flattens only a \
+         struct or a map — every read would fail; drop `#[serde(flatten)]` and give the field \
+         its own key"
+    );
+    let value = format!(
+        "`{shown}` is `#[serde(flatten)]`, but it reads a single value, and serde flattens only \
+         a struct or a map — every read would fail; drop `#[serde(flatten)]` and give the field \
+         its own key"
+    );
+    let span = ty.span();
+    let mut checks = quote_spanned! {span=>
+        {
+            #[allow(unused_imports)]
+            use ::flusso_query::OpaqueWithoutMeta as _;
+            assert!(!::flusso_query::OpaqueProbe::<#ty>::ARRAY, #array);
+            assert!(::flusso_query::OpaqueProbe::<#ty>::AT_OBJECT, #value);
+        }
+    };
+    if embedded_type(field, false).is_some() {
+        checks.extend(flattened_check(ty, span, level));
+    }
+    checks
+}
+
 /// The assertions for one field, with every message baked in at macro time.
 ///
 /// `opaque` keeps what it keeps on a root: the field-exists, nullability and
@@ -342,9 +548,7 @@ fn field_check(fragment: &Ident, field: &DocField) -> TokenStream {
     // A flattened `serde_json::Value` or map is serde's catch-all for the
     // leftover keys, so there is nothing to check — the same rule a root follows.
     if field.flatten {
-        return embedded_type(field, false).map_or_else(TokenStream::new, |ty| {
-            flattened_check(ty, span, quote! { level })
-        });
+        return flattened_field(field, quote! { level });
     }
 
     let exists = message(
@@ -413,7 +617,7 @@ fn array_shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span
                     assert!(
                         !(::flusso_query::exists(level, #key)
                             && !::flusso_query::is_json(level, #key)
-                            && ::flusso_query::OpaqueProbe::<#element>::READS_ARRAY),
+                            && ::flusso_query::OpaqueProbe::<#element>::ARRAY),
                         #nested_msg
                     );
                 }
@@ -448,7 +652,7 @@ fn array_shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span
         key,
         &format!(
             "is `{rendered}`, a newtype over a `Vec<…>`, which reads an array, but the schema \
-             field here is not an array — declare its element type here"
+             field here is not an array — it takes one value, so declare a type that reads one"
         ),
     );
     let values_at_nested_msg = message(
@@ -568,7 +772,8 @@ fn opaque_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> 
                     || ::flusso_query::kind_is(
                         level, #key,
                         ::flusso_query::OpaqueProbe::<#element>::KINDS,
-                    ),
+                    )
+                    || (::flusso_query::is_json(level, #key) && ::flusso_query::array(level, #key)),
                 #kind_msg
             );
             assert!(::flusso_query::map_values_of(level, #key).is_none(), #map_msg);

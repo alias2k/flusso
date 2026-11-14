@@ -100,8 +100,9 @@ pub struct Product {
 
   A fragment applies these rules where it is embedded. It reads a type's kind from the metadata a flusso derive emits, where a root checks the type's `FlussoValue` bound, so at a leaf a fragment rejects a type without that metadata, `opaque` or not; at an `object`, `nested` or `json` field `opaque` still takes a plain struct. A hand-written `FlussoValue` [carries the metadata by hand](enums-and-values.md#hand-written-values).
 - `#[flusso(rename = "…")]` picks one of a field's `#[serde(alias)]`es as the document key the derive checks; serde reads either. That is its only use: the derive already reads the key serde reads, from `#[serde(rename = "…")]` (or the `deserialize` name of `rename(serialize = …, deserialize = …)`) and `rename_all`, so set the key there. A `#[flusso(rename)]` that names no `alias` is a compile error: naming the key serde reads repeats it, and naming any other key would check the schema under a key serde never reads, so every real document would fail to deserialize. A `#[serde(flatten)]` field has no key of its own, so `rename` on one is a compile error too.
-- `#[serde(flatten)]` on a fragment field checks its fields against the enclosing level. A flattened `HashMap<String, serde_json::Value>`, `BTreeMap<…>` or `serde_json::Value`, serde's catch-all for the keys no other field reads, is never checked, on a root or a fragment. `#[serde(transparent)]` newtypes are checked against the enclosing level too, as the one field serde reads: the field that is not `#[serde(skip)]`/`skip_deserializing`, `#[serde(default)]` or a `PhantomData`, in a tuple struct or a named one. No field of a transparent struct takes a `#[flusso(…)]` attribute, and one with more than one such field is a compile error, as it is in serde.
+- `#[serde(flatten)]` on a fragment field checks its fields against the enclosing level. serde flattens only a struct or a map, so a flattened `Vec`, array newtype or single value (a `String`, a `FlussoValue` newtype) is a compile error, on a root and in a fragment, `opaque` or not; an `Option` of a struct is fine. A flattened `HashMap<String, serde_json::Value>`, `BTreeMap<…>` or `serde_json::Value`, serde's catch-all for the keys no other field reads, is never checked, on a root or a fragment. `#[serde(transparent)]` newtypes are checked against the enclosing level too, as the one field serde reads: the field that is not `#[serde(skip)]`/`skip_deserializing`, `#[serde(default)]` or a `PhantomData`, in a tuple struct or a named one. No field of a transparent struct takes a `#[flusso(…)]` attribute, and one with more than one such field is a compile error, as it is in serde.
 - Each `#[flusso(…)]` key is given once per field or type: a repeat is a compile error, not "last one wins".
+- serde attributes that change what serde reads are trusted: `#[serde(with)]`/`deserialize_with` on a field, `#[serde(try_from)]`/`from` on a `FlussoValue` type (validation in `try_from` is a common use). The derive checks the declared type; keeping a custom deserializer in step with it is yours. On a `FlussoFragment` or `FlussoMap` type `from`/`try_from` is a compile error: derive on the type serde reads, and convert after reading.
 
 ## flusso types to Rust types
 
@@ -148,7 +149,7 @@ Order::tags().any_of([Tag::Urgent]);
 
 A [`FlussoValue` newtype over a `Vec`](enums-and-values.md#arrays) goes where that `Vec` would: `tags: Option<Tags>` with `struct Tags(Vec<Tag>)`, the shape an ORM decoding a `jsonb` column usually wants. A plain type (`Tag`, `String`) at an array field is a compile error, and so is a `Vec` or an array newtype at a field that isn't one. Sorting an array uses OpenSearch's default: the smallest element ascending, the largest descending.
 
-A `json` array takes `serde_json::Value`, a `Vec` of any value (`String`, a number, an enum, `serde_json::Value`, a map, an array newtype), or an array newtype of values. A `Vec` of a fragment and a bare struct are compile errors: a `json` field declares no fields to check a struct against. A root and a fragment agree on all of it.
+A `json` array takes `serde_json::Value`, a `Vec` of any value (`String`, a number, an enum, `serde_json::Value`, a map, an array newtype), or an array newtype of values. A `Vec` of a fragment and a bare struct are compile errors: a `json` field declares no fields to check a struct against. A root and a fragment agree on all of it, with `#[flusso(opaque)]` too, which there turns off the walk into a struct element.
 
 ### Two kinds of array newtype
 
@@ -156,10 +157,21 @@ Both read a whole JSON array and go where that `Vec` would. What the array holds
 
 | Newtype | Derive | Goes at | A compile error at |
 | --- | --- | --- | --- |
-| over `Vec<Struct>`, an array of sub-documents | `#[derive(FlussoFragment)]`, `#[serde(transparent)]` or a tuple struct | a `nested` field (`has_many`, `many_to_many`) | an array leaf, a `json` array, an `object` |
-| over `Vec<E>`, `E` a leaf value (`String`, a number, an enum, a `FlussoValue` newtype) | `#[derive(FlussoValue)]`, no kind tag | a field with `array: true` of `E`'s kind, or a `json` array | a `nested` field, a single-valued field |
+| over `Vec<Struct>`, an array of sub-documents | `#[derive(FlussoFragment)]`, `#[serde(transparent)]` or a tuple struct | a `nested` field (`has_many`, `many_to_many`) | an array leaf, a `json` array, an `object`, a `map`, a single-valued leaf |
+| over `Vec<E>`, `E` a leaf value (`String`, a number, an enum, a `FlussoValue` newtype) | `#[derive(FlussoValue)]`, no kind tag | a field with `array: true` of `E`'s kind, or a `json` array | a `nested` field, an `object`, a `map`, a single-valued leaf |
 
-A newtype over either one, with the same derive, is the same kind. The element of a `FlussoValue` one must be a leaf: a `Vec` of an array newtype or of a fragment is a compile error where the newtype is declared. Wrap the `Vec` directly: over `Option<Vec<_>>` the newtype reads `null` too, so put the `Option` on the field instead.
+A newtype over either one, with the same derive, is the same kind. A plain `json` field takes either, as it takes any JSON.
+
+These two are the only types that read an array in place of a `Vec`. Each derive refuses, where the newtype is declared, any other newtype that would:
+
+| Declared | Why | Instead |
+| --- | --- | --- |
+| `FlussoFragment` over `Option<Vec<Struct>>`, or `Option<…>` of a fragment array newtype | it reads `null` too, and a `nested` field is never null: no rows read as an empty array | drop the `Option`: `struct Orders(Vec<Order>)`, field `orders: Orders` |
+| `FlussoValue` over `Option<Vec<_>>` | it reads `null` too, which no array field holds | wrap the `Vec`, and put the `Option` on the field: `Option<Tags>` |
+| over a `Vec` of an array newtype | an array of arrays | wrap the element type |
+| `FlussoFragment` over a `Vec` of values (`Vec<String>`, `Vec<i64>`, a `Vec` of a `FlussoValue` type), or over a `FlussoValue` array newtype | an array of values, the other kind | `#[derive(FlussoValue)]` on the newtype |
+| `FlussoFragment` over a `Vec` of maps or of `serde_json::Value` | opaque JSON | the `Vec` itself, at a `json` field |
+| `FlussoValue` over a `Vec` of a fragment or of a map type | not a leaf value | `Vec<Struct>` or a `FlussoFragment` newtype; a `Vec` of maps at a `json` field |
 
 ## Nullability
 

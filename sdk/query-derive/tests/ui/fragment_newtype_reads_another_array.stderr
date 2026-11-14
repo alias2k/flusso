@@ -1,0 +1,65 @@
+error: a FlussoFragment newtype over a `Vec<…>` is an array of sub-documents, for a `nested` field, but `Vec<String>` is an array of values — derive `FlussoValue` on `Codes` instead, which reads an array of values and goes at an array leaf or a `json` array
+  --> tests/ui/fragment_newtype_reads_another_array.rs:37:18
+   |
+37 | struct Codes(Vec<String>);
+   |                  ^^^^^^
+
+error: a FlussoFragment newtype over a `Vec<…>` is an array of sub-documents, for a `nested` field, but `Vec<i64>` is an array of values — derive `FlussoValue` on `NamedCodes` instead, which reads an array of values and goes at an array leaf or a `json` array
+  --> tests/ui/fragment_newtype_reads_another_array.rs:42:16
+   |
+42 |     codes: Vec<i64>,
+   |                ^^^
+
+error: a FlussoFragment newtype over a `Vec<…>` is an array of sub-documents, for a `nested` field, but `Vec<HashMap<String, String>>` is opaque JSON — only a `json` field holds it, and takes `Vec<HashMap<String, String>>` as it is: declare the field `Vec<HashMap<String, String>>` and drop `HashMaps`
+  --> tests/ui/fragment_newtype_reads_another_array.rs:59:21
+   |
+59 | struct HashMaps(Vec<HashMap<String, String>>);
+   |                     ^^^^^^^
+
+error: a FlussoFragment newtype over a `Vec<…>` is an array of sub-documents, for a `nested` field, but `Vec<serde_json::Value>` is opaque JSON — only a `json` field holds it, and takes `Vec<serde_json::Value>` as it is: declare the field `Vec<serde_json::Value>` and drop `Values`
+  --> tests/ui/fragment_newtype_reads_another_array.rs:62:19
+   |
+62 | struct Values(Vec<serde_json::Value>);
+   |                   ^^^^^^^^^^
+
+error: a FlussoFragment newtype over an array of sub-documents reads a `nested` field, which is never null (no rows read as an empty array) — drop the `Option`: `struct MaybeOrders(Vec<Order>)`
+  --> tests/ui/fragment_newtype_reads_another_array.rs:66:20
+   |
+66 | struct MaybeOrders(Option<Vec<Order>>);
+   |                    ^^^^^^
+
+error[E0080]: evaluation panicked: `Statuses` is a FlussoFragment newtype over `Vec<Status>`, but `Status` is a value, not a sub-document — for an array of values, derive `FlussoValue` on `Statuses` instead
+  --> tests/ui/fragment_newtype_reads_another_array.rs:46:21
+   |
+46 | struct Statuses(Vec<Status>);
+   |                     ^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: `LabelList` is a FlussoFragment newtype over `Vec<Label>`, but `Label` is a value, not a sub-document — for an array of values, derive `FlussoValue` on `LabelList` instead
+  --> tests/ui/fragment_newtype_reads_another_array.rs:49:22
+   |
+49 | struct LabelList(Vec<Label>);
+   |                      ^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: `OverTags` is a FlussoFragment newtype over `Tags`, a `FlussoValue` newtype over an array of values — derive `FlussoValue` on `OverTags` instead, so it goes where `Tags` does
+  --> tests/ui/fragment_newtype_reads_another_array.rs:52:17
+   |
+52 | struct OverTags(Tags);
+   |                 ^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: `Maps` is a FlussoFragment newtype over `Vec<Labels>`, an array of maps, which is opaque JSON — only a `json` field holds it, and takes `Vec<Labels>` as it is: declare the field `Vec<Labels>` and drop `Maps`
+  --> tests/ui/fragment_newtype_reads_another_array.rs:56:17
+   |
+56 | struct Maps(Vec<Labels>);
+   |                 ^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: `MaybeBatch` is a FlussoFragment newtype over `Option<Orders>`, and `Orders` reads an array, which a `nested` field holds and never as null (no rows read as an empty array) — drop the `Option`: `struct MaybeBatch(Orders)`
+  --> tests/ui/fragment_newtype_reads_another_array.rs:69:26
+   |
+69 | struct MaybeBatch(Option<Orders>);
+   |                          ^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: `Batches` is a FlussoFragment newtype over `Vec<Orders>`, an array of arrays — `Orders` already reads an array; wrap its element type instead
+  --> tests/ui/fragment_newtype_reads_another_array.rs:73:20
+   |
+73 | struct Batches(Vec<Orders>);
+   |                    ^^^^^^ evaluation of `_` failed here

@@ -205,6 +205,11 @@ pub use flusso_query_derive::FlussoMultiDocument;
 #[doc(hidden)]
 pub use serde_json as __serde_json;
 
+// `#[derive(FlussoValue)]` names `Serialize` through this path, so a crate
+// using it needs no `serde` of its own in scope. Hidden: not API.
+#[doc(hidden)]
+pub use serde as __serde;
+
 /// `rust_decimal::Decimal`, re-exported for `decimal` fields. Enabled by the
 /// `decimal` feature.
 #[cfg(feature = "decimal")]

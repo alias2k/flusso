@@ -16,23 +16,6 @@ error[E0080]: evaluation panicked: field `notes` is a `json` array in the schema
 37 |     notes: Option<Lines>,
    |                   ^^^^^ evaluation of `_` failed here
 
-error[E0080]: evaluation panicked: fragment `Line`: field `sku` does not exist at the path this struct is embedded at
-  --> tests/ui/array_newtype_kinds_misplaced.rs:37:12
-   |
-37 |     notes: Option<Lines>,
-   |            ^^^^^^ evaluation of `_` failed inside this call
-   |
-note: inside `Lines::__flusso_check`
-  --> tests/ui/array_newtype_kinds_misplaced.rs:17:14
-   |
-17 | struct Lines(Vec<Line>);
-   |              ^^^
-note: inside `Line::__flusso_check`
-  --> tests/ui/array_newtype_kinds_misplaced.rs:11:10
-   |
-11 |     sku: String,
-   |          ^^^^^^ the failure occurred here
-
 error[E0080]: evaluation panicked: fragment `FlatValuesAtNested`: field `lines` is `Codes`, a `FlussoValue` newtype over a `Vec<…>` of values, but the schema field here is a `nested` array, whose elements have fields of their own — declare `Vec<Struct>`, or a `#[serde(transparent)]` `FlussoFragment` newtype over one
   --> tests/ui/array_newtype_kinds_misplaced.rs:50:11
    |

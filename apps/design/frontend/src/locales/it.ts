@@ -108,8 +108,8 @@ export const it: Record<string, string> = {
   "code.incomplete": "Completa o rimuovi prima questi elementi, la modalità Codice li perderebbe: {list}",
   "code.renderFailed": "La modalità Codice non può ancora mostrare questo indice: {err}",
   "code.unparsed":
-    "Lo YAML non è analizzabile, quindi le ultime modifiche non sono nel documento. Correggilo, oppure scartale.",
-  "code.unparsedSave": "Lo YAML non è analizzabile, quindi non si può salvare. Correggilo prima.",
+    "Lo schema non si carica, quindi le ultime modifiche non sono nel documento: {err}. Correggilo, oppure scartale.",
+  "code.unparsedSave": "Lo schema non si carica, quindi non si salva nulla: {err}",
   "code.discard": "Scarta",
   "code.autoFormatHint": "Formatta il buffer quando perde il focus, se lo YAML è valido",
 
@@ -320,6 +320,8 @@ export const it: Record<string, string> = {
   "inspector.columnArray": "Array",
   "inspector.columnArrayOn":
     "La colonna contiene un array (text[], un array json): ogni elemento viene indicizzato, i null vengono scartati, un valore singolo viene racchiuso in un array. Le trasformazioni si applicano a ogni elemento; il default è una lista.",
+  "inspector.columnArrayDropsDefault":
+    "Disattivando Array questo default si perde: solo una lista di un elemento diventa un valore singolo.",
   "inspector.columnArrayOff": "La colonna contiene un solo valore.",
   "inspector.scriptEmpty": "Scrivi lo script che calcola questo campo.",
   "inspector.softDelete": "eliminazione logica",

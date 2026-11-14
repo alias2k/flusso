@@ -65,6 +65,8 @@ flusso_query::embeddable!(Count);
 
 The fragment then checks it exactly as a derived value. Without the metadata, a fragment rejects the type at a leaf, `#[flusso(opaque)]` or not.
 
+The metadata is trusted, not checked against what the type reads. A hand-written value must read a single value of its `KINDS` and leave `ARRAY` unset: an array of values is a `#[derive(FlussoValue)]` newtype over a `Vec` (see [Arrays](#arrays)).
+
 ## Variant coverage
 
 When a `FlussoValue` enum sits in a struct field whose schema declares `variants:`, the derive checks them. A Rust variant the schema doesn't list is a compile error, since it could never match a document. Covering only some schema variants is fine: a partial projection.

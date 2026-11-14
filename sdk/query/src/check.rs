@@ -162,8 +162,8 @@ pub const fn array(level: &[FieldSpec], name: &str) -> bool {
 
 /// Whether a Rust type that is (`vec`) or is not a `Vec<…>` fits `name`'s
 /// array shape, as a root checks it: a `nested` array wants a `Vec`, an
-/// `object` with fields wants none, a leaf or a `json` field wants one exactly
-/// when it is a flat array. A `map`, any other opaque `json` object and an
+/// `object` with fields and a `map` want none, a leaf or a `json` field wants
+/// one exactly when it is a flat array. Any other opaque `json` object and an
 /// unmodeled kind take either.
 /// Absent → `true`; the generated check reports the absence separately.
 #[must_use]
@@ -174,7 +174,7 @@ pub const fn array_shape_ok(level: &[FieldSpec], name: &str, vec: bool) -> bool 
     match field.kind {
         KindTag::Nested => vec,
         KindTag::Object if field.array => vec,
-        KindTag::Object => field.map_values.is_some() || field.children.is_empty() || !vec,
+        KindTag::Object => (field.map_values.is_none() && field.children.is_empty()) || !vec,
         KindTag::Other => true,
         _ => field.array == vec,
     }
@@ -501,17 +501,18 @@ pub trait FlussoValueMeta {
     ///   `Nested` or `Object`, and it goes at an array leaf (`array: true`) or
     ///   a `json` array only ([`OpaqueProbe`]'s `LEAF_ARRAY`).
     ///
-    /// Both derives forward it from a newtype over another array newtype. Off
-    /// by default; leave it unset in a hand-written impl, where nothing checks
-    /// it against what the type reads.
+    /// Both derives forward it from a newtype over another array newtype of
+    /// their own kind, and refuse, where the newtype is declared, any other
+    /// newtype that would read an array: over `Option<Vec<…>>`, over a `Vec`
+    /// of arrays, or over an array of the other kind. So a `FlussoFragment` or
+    /// `FlussoValue` type reads a JSON array exactly when this is set. The
+    /// other two never set it: a `FlussoRoot` reads an object, and
+    /// `#[derive(FlussoMap)]` refuses every shape that certainly reads no
+    /// object (a newtype over a `Vec`, an `Option`, a single value or an array
+    /// newtype); a struct with named fields reads an object. Off by default;
+    /// leave it unset in a hand-written impl, where nothing checks it against
+    /// what the type reads.
     const ARRAY: bool = false;
-
-    /// Whether the type reads a JSON array at all: an array newtype (see
-    /// [`ARRAY`](Self::ARRAY)), or a newtype over a `Vec<…>` or over a type
-    /// that reads one, through any `Option`. A `Vec<…>` of such a type is an
-    /// array of arrays, which no field but a `json` array holds. Off by
-    /// default; both derives set it beside `ARRAY`.
-    const READS_ARRAY: bool = false;
 }
 
 /// Lets a type with a hand-written [`FlussoValueMeta`] sit in a
@@ -586,10 +587,6 @@ pub trait OpaqueWithoutMeta {
     const ARRAY: bool = false;
     /// No metadata, so not an array newtype of values.
     const LEAF_ARRAY: bool = false;
-    /// No metadata, so not known to be a sub-document.
-    const ARRAY_ELEMENT: bool = false;
-    /// No metadata, so not known to read an array.
-    const READS_ARRAY: bool = false;
     /// No metadata, so nothing says it cannot read a `nested` element.
     const AT_NESTED: bool = true;
     /// No metadata, so nothing says it cannot read an `object`.
@@ -615,16 +612,10 @@ impl<T: ?Sized + FlussoValueMeta> OpaqueProbe<T> {
     pub const LEAF_ARRAY: bool = T::ARRAY
         && !holds_kind(T::KINDS, KindTag::Nested)
         && !holds_kind(T::KINDS, KindTag::Object);
-    /// Whether a `Vec` of the type reads one array of sub-documents: the type
-    /// is a sub-document and reads no array itself.
-    pub const ARRAY_ELEMENT: bool = !T::READS_ARRAY && holds_kind(T::KINDS, KindTag::Nested);
     /// Whether the type may stand at a `nested` field, as a sub-document.
     pub const AT_NESTED: bool = holds_kind(T::KINDS, KindTag::Nested);
     /// Whether the type may stand at an `object` field.
     pub const AT_OBJECT: bool = holds_kind(T::KINDS, KindTag::Object);
-    /// Whether the type reads a JSON array at all (see
-    /// [`FlussoValueMeta::READS_ARRAY`]).
-    pub const READS_ARRAY: bool = T::READS_ARRAY;
 }
 
 /// Whether a type of `kinds` may stand in for a field of kind `field`. An empty
@@ -817,6 +808,12 @@ mod tests {
         assert!(!array_shape_ok(LEVEL, "notes", false));
         assert!(array_shape_ok(LEVEL, "meta", true));
         assert!(array_shape_ok(LEVEL, "meta", false));
+    }
+
+    #[test]
+    fn a_map_holds_one_object_never_an_array() {
+        assert!(array_shape_ok(LEVEL, "labels", false));
+        assert!(!array_shape_ok(LEVEL, "labels", true));
     }
 
     #[test]

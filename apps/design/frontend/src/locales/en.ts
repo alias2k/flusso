@@ -104,8 +104,8 @@ export const en: Record<string, string> = {
   "code.autoFormat": "Auto-format",
   "code.incomplete": "Finish or remove these first, Code mode would drop them: {list}",
   "code.renderFailed": "Code mode can't show this index yet: {err}",
-  "code.unparsed": "The YAML doesn't parse, so its last edits aren't in the document. Fix it, or discard them.",
-  "code.unparsedSave": "The YAML doesn't parse, so it can't be saved. Fix it first.",
+  "code.unparsed": "The schema doesn't load, so its last edits aren't in the document: {err}. Fix it, or discard them.",
+  "code.unparsedSave": "The schema doesn't load, so nothing is saved: {err}",
   "code.discard": "Discard",
   "code.autoFormatHint": "Format the buffer on focus loss whenever the YAML is valid",
 
@@ -310,6 +310,8 @@ export const en: Record<string, string> = {
   "inspector.columnArray": "Array",
   "inspector.columnArrayOn":
     "The column holds an array (text[], a json array): every element is indexed, nulls are dropped, a lone value is wrapped. Transforms apply to each element; a default is a list.",
+  "inspector.columnArrayDropsDefault":
+    "Turning Array off drops this default: only a one-item list becomes a single value.",
   "inspector.columnArrayOff": "The column holds a single value.",
   "inspector.scriptEmpty": "Write the script that computes this field.",
   "inspector.softDelete": "soft delete",

@@ -477,9 +477,11 @@ them can't silently disarm the guarantee.
 **Two kinds of array newtype, never interchangeable.** A `#[derive(FlussoFragment)]`
 `#[serde(transparent)]` newtype over `Vec<Struct>` goes only at a `nested` field (`has_many` /
 `many_to_many`). A `#[derive(FlussoValue)]` untagged newtype over `Vec<E>`, `E` a leaf value, goes
-only at an `array: true` field of `E`'s kind or a `json` array. Its `E` can't be an array newtype or a
-fragment, and the newtype wraps the `Vec` directly (the `Option` goes on the field). A newtype over
-either is the same kind.
+only at an `array: true` field of `E`'s kind or a `json` array. Each derive refuses, where the
+newtype is declared, every other newtype that would read an array: over `Option<Vec<_>>` (the
+`Option` goes on the field for a `FlussoValue` array, and is dropped for a `FlussoFragment` one, since a `nested` field is never null), over a `Vec` of an array newtype, or over the other kind. So a fragment
+newtype over `Vec<String>` (or any `Vec` of values) is a compile error: derive `FlussoValue` on it.
+A newtype over either, with the same derive, is the same kind.
 
 Matching is by **leaf identifier and `Option` shape**: the macro compares the final type segment,
 not aliases. For exact money, declare a `custom` `scaled_float` in the schema and the derive accepts

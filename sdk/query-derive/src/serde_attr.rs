@@ -127,6 +127,17 @@ pub(crate) fn skips_deserializing(attrs: &[Attribute]) -> bool {
         .any(|meta| matches!(meta.name.as_str(), "skip" | "skip_deserializing"))
 }
 
+/// The `#[serde(…)]` attribute that sets `from` or `try_from`, if any: serde
+/// then reads another type and converts it, so the derive's check of this one
+/// describes nothing serde reads.
+pub(crate) fn converts_from(attrs: &[Attribute]) -> Option<&Attribute> {
+    attrs.iter().find(|attr| {
+        serde_metas(std::slice::from_ref(attr))
+            .iter()
+            .any(|meta| matches!(meta.name.as_str(), "from" | "try_from"))
+    })
+}
+
 /// Whether `#[serde(transparent)]` is set.
 pub(crate) fn transparent(attrs: &[Attribute]) -> bool {
     serde_metas(attrs)
