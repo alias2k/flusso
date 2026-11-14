@@ -581,7 +581,7 @@ export const en: Record<string, string> = {
   "recovery.copyDisplaced":
     "{copy} holds what another program wrote to {path} in the instant a save from {time} replaced it: check it, then delete it.",
   "recovery.copyBefore":
-    "{copy} holds {path}'s text from before a save from {time}, which was rolled back while {path} kept what another program wrote: to go back to that text, copy {copy} over {path}; otherwise delete {copy}.",
+    "{copy} holds {path}'s text from before a save from {time}. That save was rolled back, but {path} had been changed or deleted meanwhile, so it was left as it was: to go back to that text, copy {copy} to {path}; otherwise delete {copy}.",
   "recovery.interrupted":
     "{outcome, select, rolled_back {A save from {time} was interrupted before it finished. The designer undoes such a save, but every file it wrote was changed or deleted meanwhile:} other {A save from {time} was interrupted while it cleaned up. The designer finished it, but every file it wrote was changed or deleted afterwards:}}",
   "recovery.keptDeletedAfter":

@@ -597,7 +597,7 @@ export const it: Record<string, string> = {
   "recovery.copyDisplaced":
     "{copy} contiene ciò che un altro programma ha scritto in {path} nell'istante in cui un salvataggio delle {time} lo sostituiva: controllalo, poi eliminalo.",
   "recovery.copyBefore":
-    "{copy} contiene il testo di {path} di prima di un salvataggio delle {time}, annullato mentre {path} teneva ciò che un altro programma aveva scritto: per tornare a quel testo, copia {copy} su {path}; altrimenti elimina {copy}.",
+    "{copy} contiene il testo di {path} di prima di un salvataggio delle {time}. Quel salvataggio è stato annullato, ma {path} era stato modificato o eliminato nel frattempo, quindi è rimasto com'era: per tornare a quel testo, copia {copy} in {path}; altrimenti elimina {copy}.",
   "recovery.interrupted":
     "{outcome, select, rolled_back {Un salvataggio delle {time} è stato interrotto prima di finire. Il designer annulla un salvataggio così, ma ogni file che aveva scritto è stato modificato o eliminato nel frattempo:} other {Un salvataggio delle {time} è stato interrotto durante la pulizia. Il designer l'ha completato, ma ogni file che aveva scritto è stato modificato o eliminato in seguito:}}",
   "recovery.keptDeletedAfter":
