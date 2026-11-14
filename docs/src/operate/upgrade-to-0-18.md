@@ -25,6 +25,7 @@ Without either, no index is rebuilt. A `constant` holding a number, a boolean, o
 ## Options and variations
 
 - **Rolling back to 0.17** returns to the old index, which missed every change made since. Run `flusso reindex <index>` for each affected index after the rollback.
+- **A `timestamp` column (without time zone)** needs no rebuild and moves no hash. Before 0.18 it was written with a space (`2024-01-02 03:04:05`), which OpenSearch's `date` refuses, so every document holding one was rejected: under `on_error = "stop"` the sink engine stopped on the first, under `"skip"` each was quarantined. 0.18 writes ISO 8601 (`2024-01-02T03:04:05`; see [Field types](../reference/field-types.md#dates-and-times)). A stopped sink engine resumes from the batch it held. Quarantined documents land at their row's next write; to fill them in now, run [`flusso reindex <index>`](../reference/cli.md#reindex). A `stdout` sink writes the `T` form from the first run.
 - **Several OpenSearch sinks** each rebuild their own copy. A `stdout` sink has no index; its output carries the corrected values from the first run.
 
 ## Related

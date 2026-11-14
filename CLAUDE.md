@@ -134,7 +134,10 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   is_null` root filter: only top-level rows are documents across child/grandchild changes,
   re-parenting, promotion, and demotion), and `binary_columns_and_constants_are_indexed_as_written` (issue #291: a `bytea` at the root, as
 `bytea[]`, in every join kind and two levels deep reads back as base64 of its bytes on backfill and
-after a live update; constants land as written), and `an_update_of_an_unread_column_writes_nothing` (issue #169: an update changing
+after a live update; constants land as written), and `date_and_time_columns_are_indexed_and_queryable`
+(issue #304: `date`/`timestamp`/`timestamptz` and their arrays land as ISO 8601 a default `date`
+mapping takes, on backfill and live, under a non-UTC `TimeZone`, with a `range` and a sort over each;
+`sink::to_json` writes a naive timestamp with a `T`), and `an_update_of_an_unread_column_writes_nothing` (issue #169: an update changing
   only a column no document reads leaves the row's and its parent's `_version` alone; `wal`'s
   `an_update_of_unread_columns_rebuilds_nothing` covers root, child, aggregate, each read-column
   kind, and the no-pre-image fallback; `on_pairs_rebuild_the_parent_from_either_side` covers `on:`

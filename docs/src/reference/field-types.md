@@ -16,8 +16,8 @@ Every scalar field's type key bridges a Postgres column type and an OpenSearch m
 | `float` | `real` | `float` | |
 | `double` | `double precision` | `double` | |
 | `decimal` | `numeric`, `money` | `double` | Lossy in storage. Use a `custom` `scaled_float` when exactness matters. |
-| `date` | `date` | `date` | |
-| `timestamp` | `timestamp`, `timestamptz`, `time` | `date` | |
+| `date` | `date` | `date` | Written as `2024-01-02`. See [dates and times](#dates-and-times). |
+| `timestamp` | `timestamp`, `timestamptz`, `time` | `date` | Written as ISO 8601, stored to the millisecond. A `time` column's values are refused by OpenSearch. See [dates and times](#dates-and-times). |
 | `binary` | `bytea` | `binary` | The column's bytes, as standard base64 with no line breaks: at the root, as [`array: true`](#array) over `bytea[]`, inside joins, and in an `ids` aggregate, whatever the server's `bytea_output`. Under a name another field at the same level shares, a `binary` field declared last is read as Postgres hex text instead: see [One name per level](identifiers.md#one-name-per-level). A `bytea` primary key still gives the document `_id` as Postgres hex text (`\x0102`), not base64. Before 0.18 the Postgres hex text (`\x0102…`) was indexed instead; see [Upgrade to 0.18](../operate/upgrade-to-0-18.md). |
 | `json` | `json`, `jsonb` | `object` | Opaque; no children declared. The strict root refuses any key inside it, so store it with [`indexed: false`](joins.md#indexed) or declare a [`map`](objects-and-maps.md). |
 | `custom` | as declared | as declared | See [custom](#custom). |
@@ -101,6 +101,30 @@ An `enum` is a keyword for a closed set. Without `variants` it is a plain keywor
 - **Values outside the list** sort after every declared variant.
 - **Changing the order** rewrites the mapping, so like any schema change it rotates the index generation and re-seeds.
 - **The query side** sorts an `Enum` handle by declared order automatically. See [Enums and custom values](../query/enums-and-values.md).
+
+## dates and times
+
+A `date` or `timestamp` field is mapped as an OpenSearch `date` with its default format, `strict_date_optional_time||epoch_millis`. Each Postgres type is written in a form that format takes, on backfill and on a live change alike, whatever the database's `TimeZone`:
+
+| Postgres | Written as | Notes |
+| --- | --- | --- |
+| `date` | `2024-01-02` | |
+| `timestamp` (without time zone) | `2024-01-02T03:04:05.123456` | No offset, so OpenSearch reads it as UTC. Fractional seconds as Postgres holds them: none, 3, or 6 digits. Before 0.18 it was written with a space (`2024-01-02 03:04:05`) and every document holding one was rejected; see [Upgrade to 0.18](../operate/upgrade-to-0-18.md). |
+| `timestamptz` | `2024-01-02T03:04:05.123456+00:00` | The UTC instant. |
+| an array of any of these | each element as above | With [`array: true`](#array). |
+
+- **Precision.** A `date` field stores milliseconds, so `range` and sort see `.123456` as `.123`. `_source` keeps every digit.
+- **A time of day has no date.** A `time` or `timetz` column is accepted under `timestamp`, but the `date` mapping refuses `03:04:05`, so every document with a non-null value is an [item-level rejection](index-and-on-error.md#on_error). Declare it as a `custom` keyword instead; `HH:MM:SS` sorts correctly as text:
+
+  ```yaml
+  - custom: opensAt
+    column: opens_at
+    postgres: [time without time zone]
+    opensearch: keyword
+    required: false
+  ```
+
+- **Values outside the format.** A BC date, `infinity` and `-infinity`, and a year past 9999 reach the document as Postgres renders them (`0044-03-15 BC`, `infinity`), which the `date` mapping refuses, so that one document is rejected and `on_error` decides.
 
 ## custom
 
