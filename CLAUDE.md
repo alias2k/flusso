@@ -1095,8 +1095,9 @@ through `f64`; every other value, untyped numbers included, reads as `main` did 
 `float`), `NaN`/`Infinity` stay strings, and reading goes on past a failure so a malformed document
 is `Malformed` wherever it is and the failure reported is the first in declaration order; a raw value
 read again may open no more levels than the document had left (`Untyped.remaining`), and skipped
-values are checked (`Skip`). Guard: `value/differential.rs`, 6171 cases (every field kind but
-`decimal`, aggregates, joins, namesakes, wide documents, depths) whose sink bytes were recorded from
+values are checked (`Skip`). Guard: `value/differential.rs`, 7605 cases (every field kind but
+`decimal`, aggregates, joins nested in joins, groups, namesakes, wide documents, depths at every level,
+the spaced layout `jsonb` writes, fields built from schema YAML) whose sink bytes were recorded from
 `main`'s reader and render into `differential.expected` (re-bless with `FLUSSO_BLESS=1` only for a
 deliberate change). An array column's null
 takes the default, a lone value is wrapped, null elements are dropped, and an object/array element of a non-`json` field is a `BuildFailure` that `build`/

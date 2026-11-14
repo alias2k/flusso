@@ -1479,6 +1479,7 @@ dependencies = [
  "bon",
  "chrono",
  "criterion",
+ "flusso-config",
  "flusso-kernel",
  "flusso-sink",
  "flusso-source",

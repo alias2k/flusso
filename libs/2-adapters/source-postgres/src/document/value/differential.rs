@@ -3,8 +3,11 @@
 //! byte for byte as it did before the reader learned to keep a decimal's digits.
 //!
 //! `differential.expected` was recorded from `main`'s reader and sink render
-//! (`coerce_document` over a `serde_json::Value`, then `sink::to_json`) at
-//! 26a81616, by running this module there with `FLUSSO_BLESS=1`. Re-bless only
+//! (`coerce_document` over a `serde_json::Value`, then `sink::to_json`) by
+//! running this module there, with only `render` swapped for those calls, under
+//! `FLUSSO_BLESS=1`: at 26a81616, then again at 987ce77e when the `jsonb`
+//! layout, nested levels and schema-YAML cases were added (the earlier lines
+//! came out byte-identical). Re-bless only
 //! after a deliberate change to what the sink receives, and say so in the PR.
 //!
 //! A case is one schema level and one document text; its line is `name`, a tab,
@@ -450,6 +453,9 @@ fn cases() -> Vec<Case> {
     wide(&mut push, false);
     wide(&mut push, true);
     depth(&mut push);
+    spaced(&mut push);
+    nested_levels(&mut push);
+    from_schema_yaml(&mut push);
     out
 }
 
@@ -556,6 +562,162 @@ fn wide(push: &mut impl FnMut(String, (Vec<Field>, String)), arrays: bool) {
     }
     jsonb.push('}');
     push(format!("{shape}/jsonb_order"), (fields, jsonb));
+}
+
+/// `text`, valid JSON, laid out as `jsonb` writes it: a space after each `:`
+/// and `,` outside strings.
+fn jsonb_spaced(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() * 2);
+    let (mut in_string, mut escaped) = (false, false);
+    for c in text.chars() {
+        out.push(c);
+        if in_string {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => in_string = false,
+                _ => {}
+            }
+        } else if c == '"' {
+            in_string = true;
+        } else if c == ':' || c == ',' {
+            out.push(' ');
+        }
+    }
+    out
+}
+
+/// Every value in the layout `jsonb` writes, at the root and inside a join.
+fn spaced(push: &mut impl FnMut(String, (Vec<Field>, String))) {
+    for (i, value) in VALUES.iter().enumerate() {
+        let value = jsonb_spaced(value);
+        for (ty_name, ty) in scalar_types() {
+            let fields = vec![
+                column("f", ty.clone(), false),
+                column("g", FlussoType::Keyword, false),
+            ];
+            push(
+                format!("spaced/{ty_name}/{i}"),
+                (fields, format!(r#"{{"f": {value}, "g": "x"}}"#)),
+            );
+        }
+        let fields = vec![join(
+            "f",
+            has_many(),
+            vec![
+                column("k", FlussoType::Keyword, false),
+                column("n", FlussoType::Double, false),
+                column("j", FlussoType::Json, false),
+            ],
+            true,
+        )];
+        push(
+            format!("spaced/join/{i}"),
+            (
+                fields,
+                format!(r#"{{"f": [{{"k": {value}, "n": {value}, "j": {value}}}]}}"#),
+            ),
+        );
+    }
+}
+
+/// Joins inside joins, a group inside a join, and values nested deep inside
+/// those levels.
+fn nested_levels(push: &mut impl FnMut(String, (Vec<Field>, String))) {
+    let leaves = || {
+        vec![
+            column("n", FlussoType::Double, false),
+            column("k", FlussoType::Keyword, false),
+            column("j", FlussoType::Json, false),
+            column("a", FlussoType::Long, true),
+        ]
+    };
+    let mut group = column("g", FlussoType::Json, false);
+    group.source = FieldSource::Group(leaves());
+    let mut inner_fields = leaves();
+    inner_fields.push(group.clone());
+    let inner = join("inner", has_many(), inner_fields, true);
+    let owner = join("owner", belongs_to(), leaves(), false);
+    let mut outer_fields = leaves();
+    outer_fields.extend([inner, owner, group]);
+    let fields = vec![join("f", has_many(), outer_fields, true)];
+
+    for (i, value) in VALUES.iter().enumerate() {
+        let leaf = format!(r#""n":{value},"k":{value},"j":{value},"a":[{value}]"#);
+        let doc = format!(
+            r#"{{"f":[{{{leaf},"inner":[{{{leaf},"g":{{{leaf}}}}},{{{leaf}}}],"owner":{{{leaf}}},"g":{{{leaf}}}}}]}}"#
+        );
+        push(format!("nested/{i}"), (fields.clone(), doc));
+    }
+    for levels in [118, 121, 122, 123, 124, 126] {
+        let deep = format!("{}1{}", "[".repeat(levels), "]".repeat(levels));
+        for (at, doc) in [
+            ("join", format!(r#"{{"f":[{{"j":{deep}}}]}}"#)),
+            (
+                "inner",
+                format!(r#"{{"f":[{{"inner":[{{"j":{deep}}}]}}]}}"#),
+            ),
+            ("group", format!(r#"{{"f":[{{"g":{{"j":{deep}}}}}]}}"#)),
+            ("owner", format!(r#"{{"f":[{{"owner":{{"n":{deep}}}}}]}}"#)),
+            (
+                "array",
+                format!(r#"{{"f":[{{"inner":[{{"a":{deep}}}]}}]}}"#),
+            ),
+        ] {
+            push(format!("nested/depth/{at}/{levels}"), (fields.clone(), doc));
+        }
+    }
+}
+
+/// Fields built from schema YAML by the config crate, as a deployment builds
+/// them: `options` (`ignore_malformed`), a namesake whose second declaration
+/// is a `decimal`, a `map`, a nested join.
+fn from_schema_yaml(push: &mut impl FnMut(String, (Vec<Field>, String))) {
+    use config::yaml::SchemaYaml;
+    use kernel::{IndexSchema, ParseFrom};
+    let yaml = "version: 1
+table: products
+fields:
+  - keyword: id
+    required: true
+  - double: lax
+    required: false
+    options:
+      ignore_malformed: true
+  - keyword: twin
+    required: false
+    column: twin_a
+  - long: count
+    required: false
+  - decimal: twin
+    required: false
+    column: twin_b
+  - map: labels
+    required: false
+    values: double
+  - has_many: items
+    table: items
+    foreign_key: product_id
+    primary_key: id
+    fields:
+      - double: weight
+        required: false
+        options:
+          ignore_malformed: true
+      - json: extra
+        required: false
+";
+    let schema = IndexSchema::try_from(SchemaYaml::try_parse(yaml).unwrap()).unwrap();
+    for (i, value) in VALUES.iter().enumerate() {
+        let doc = format!(
+            r#"{{"id":"1","lax":{value},"twin":{value},"count":{value},"twin":{value},"labels":{{"x":{value}}},"items":[{{"weight":{value},"extra":{value}}}]}}"#
+        );
+        push(format!("yaml/{i}"), (schema.fields.clone(), doc.clone()));
+        push(
+            format!("yaml/spaced/{i}"),
+            (schema.fields.clone(), jsonb_spaced(&doc)),
+        );
+    }
 }
 
 /// Values nested near and past `serde_json`'s 128 levels, under each reader.
