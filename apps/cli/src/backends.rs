@@ -709,7 +709,19 @@ mod tests {
             ),
             "",
         );
-        assert!(refuses(&one_strict, true));
+        assert!(!refuses(&one_strict, true));
+
+        let both_plain = deployment(
+            &format!(
+                "{opensearch}[sinks.audit]\ntype = \"opensearch\"\nurl = \"http://audit:9200\"\n"
+            ),
+            "",
+        );
+        assert!(refuses(&both_plain, false) && refuses(&both_plain, true));
+
+        let beside_stdout =
+            deployment(&format!("{opensearch}[sinks.out]\ntype = \"stdout\"\n"), "");
+        assert!(!refuses(&beside_stdout, false) && !refuses(&beside_stdout, true));
     }
 
     /// A refusal stops the start only on a sink flusso can prove plain: any
