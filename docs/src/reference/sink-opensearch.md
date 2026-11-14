@@ -56,6 +56,24 @@ Writes to a **seeded** index go through the hash alias, each bulk item flagged `
 
 Each index is created up front from the resolved schema mapping with `dynamic: strict`: types come from the schema, and a document with an unmapped key is rejected. The one open spot is a [`map`](objects-and-maps.md#map): its object takes runtime keys, and a `dynamic_templates` entry per map (named `flusso_map:<path>`, matching `<path>.*`) maps each key like a plain field of the map's `values`. An index that already exists is left as is. The `on_error` policy decides what an item-level rejection does; see [Index entries and on_error](index-and-on-error.md#on_error).
 
+## Document ids
+
+A document's `_id` is its root key as a string. OpenSearch caps an `_id` at **512 bytes** of UTF-8, not characters: 512 ASCII characters fit, 257 two-byte characters (`é`) don't. A long `text` key can go over, and so can a `bytea` key past 255 bytes, since its id is the `\x…` hex text.
+
+OpenSearch checks ids before it runs a bulk request, and one bad id refuses the whole request. So the sink checks first: a document it would refuse is **rejected on its own**, never sent, and the rest of the flush lands. The id is never truncated or hashed, since that would point the row at a different document.
+
+| Operation | Id | Outcome |
+| --- | --- | --- |
+| upsert | 1 to 512 bytes | Sent. |
+| upsert | over 512 bytes | Rejected: `document id is 600 bytes; OpenSearch accepts at most 512 bytes in an _id`. |
+| upsert or delete | empty | Rejected: `document id is empty; OpenSearch needs a non-empty _id`. |
+| delete | over 512 bytes | Sent. OpenSearch answers `not_found`: no document can carry that id. |
+
+A rejected id is an item-level rejection like any other, so the index's [`on_error`](index-and-on-error.md#on_error) decides it and nothing retries it:
+
+- **`skip`**: the document is quarantined and the batch is acked. The log carries `document rejected by sink; quarantining and continuing` with the `index`, `id`, and `reason`; [`/status`](http.md#get-status) counts it in `documents_quarantined`, and the [`flusso.documents.quarantined`](metrics.md) counter goes up. The row stays out of the index until its key changes.
+- **`stop`**: the rest of the batch is written, then the sink engine stops with the batch unconfirmed: `sink rejected 1 document(s) (e.g. users/kkkk…: document id is 600 bytes; …); stopping`. [`/status`](http.md#get-status) shows it in `last_error`, counts it in `errors`, and puts the sink in phase `failed`. It restarts with backoff and stops again on the same row until the key is shortened or the policy is `skip`.
+
 ## Index settings
 
 `index_settings` adds OpenSearch index settings to the indexes the sink creates, in two places:

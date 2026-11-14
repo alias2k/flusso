@@ -249,3 +249,49 @@ fn a_delete_against_a_missing_index_fails_the_whole_flush() {
     });
     assert!(bulk_rejected(&resp, &actions).is_err());
 }
+
+fn index_action(id: &str) -> BulkAction {
+    BulkAction::Index {
+        index: "users_1".to_owned(),
+        id: id.to_owned(),
+        doc: json!({}),
+        require_alias: false,
+    }
+}
+
+fn delete_action(id: &str) -> BulkAction {
+    BulkAction::Delete {
+        index: "users_1".to_owned(),
+        id: id.to_owned(),
+    }
+}
+
+#[test]
+fn an_upsert_id_is_refused_past_512_bytes_counted_in_utf8_bytes() {
+    for accepted in [
+        "a".repeat(512),
+        "é".repeat(256),
+        format!("{}aa", "é".repeat(255)),
+    ] {
+        assert_eq!(refused_id(&index_action(&accepted)), None, "{accepted}");
+    }
+    for refused in [
+        "a".repeat(513),
+        format!("{}a", "é".repeat(256)),
+        "€".repeat(171),
+    ] {
+        let reason = refused_id(&index_action(&refused)).unwrap();
+        assert!(
+            reason.contains("513 bytes") && reason.contains("512"),
+            "{reason}"
+        );
+    }
+}
+
+#[test]
+fn an_empty_id_is_refused_on_both_ops_and_a_long_delete_id_is_not() {
+    assert!(refused_id(&index_action("")).unwrap().contains("empty"));
+    assert!(refused_id(&delete_action("")).unwrap().contains("empty"));
+    assert_eq!(refused_id(&delete_action(&"a".repeat(513))), None);
+    assert_eq!(refused_id(&index_action("42")), None);
+}

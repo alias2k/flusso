@@ -14,7 +14,7 @@ All three of `name`, `schema`, and `enabled` are required.
 
 ## on_error
 
-`on_error` governs **per-document failures** only: an **item-level rejection** (the sink applied a bulk request, but the destination refused one document: a mapping conflict, a value it can't index), and a document a [script failed on](scripts.md#failures). A flush-wide failure (destination unreachable, whole request refused, or the OpenSearch sink's [target index deleted while running](sink-opensearch.md#seeding)) always stops the run and the batch is redelivered on restart.
+`on_error` governs **per-document failures** only: an **item-level rejection** (the sink applied a bulk request, but the destination refused one document: a mapping conflict, a value it can't index, an [id OpenSearch refuses](sink-opensearch.md#document-ids)), and a document a [script failed on](scripts.md#failures). A flush-wide failure (destination unreachable, whole request refused, or the OpenSearch sink's [target index deleted while running](sink-opensearch.md#seeding)) always stops the run and the batch is redelivered on restart.
 
 | Value | Behavior |
 | --- | --- |

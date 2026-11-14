@@ -18,6 +18,17 @@
 //! A response item reporting `index_not_found_exception` means the target is
 //! gone, which is the sink's problem rather than the document's: it fails the
 //! whole flush (see [`bulk_rejected`]).
+//!
+//! Some ids OpenSearch refuses before it runs the request at all, and one of
+//! them fails the **whole** request with HTTP 400: an index action whose `_id`
+//! is empty or longer than [`MAX_ID_BYTES`] UTF-8 bytes, and a delete whose
+//! `_id` is empty. [`refused_id`] finds those, so `flush` rejects each one
+//! alone, never sends it, and sends the rest. A delete with an over-long id is
+//! sent: OpenSearch accepts it and answers `not_found`.
+//!
+//! ```text
+//! Validation Failed: 1: id [aaa…] is too long, must be no longer than 512 bytes but was: 513;
+//! ```
 
 use serde_json::{Value, json};
 use sink::{RejectedDocument, Result, SinkError};
@@ -49,6 +60,25 @@ impl BulkAction {
         match self {
             BulkAction::Index { id, .. } | BulkAction::Delete { id, .. } => id,
         }
+    }
+}
+
+/// The longest `_id` OpenSearch accepts, in UTF-8 bytes.
+pub(crate) const MAX_ID_BYTES: usize = 512;
+
+/// Why OpenSearch would refuse `action`'s id before running the bulk request,
+/// failing every other action in it too; `None` when it would accept it.
+pub(crate) fn refused_id(action: &BulkAction) -> Option<String> {
+    let id = action.id();
+    if id.is_empty() {
+        return Some("document id is empty; OpenSearch needs a non-empty _id".to_owned());
+    }
+    match action {
+        BulkAction::Index { .. } if id.len() > MAX_ID_BYTES => Some(format!(
+            "document id is {} bytes; OpenSearch accepts at most {MAX_ID_BYTES} bytes in an _id",
+            id.len()
+        )),
+        _ => None,
     }
 }
 
