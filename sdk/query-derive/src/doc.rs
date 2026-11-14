@@ -357,6 +357,9 @@ pub(crate) fn validate(
             errors.push(error);
             continue;
         }
+        if !field.skip {
+            asserts.push(exhaustive_map_values(field.ty));
+        }
         // A flattened group has no container field in the mapping — its keys
         // live at *this* level, so its type is checked against this level
         // instead (see `embed_checks`).
@@ -906,6 +909,9 @@ fn check_map_type(
     let kind = kind_of(&values.mapping_type, values.decimal);
     match map_container_value(inner) {
         Some(value_ty) => {
+            // A map value can be `null` (a `jsonb` column's `{"x": null}` is
+            // indexed as it is), so one `Option` level is the value's own.
+            let value_ty = option_inner(value_ty).unwrap_or(value_ty);
             let expected = expected_leaves(&values.mapping_type);
             let found = leaf_ident(value_ty);
             if found.as_deref().is_some_and(|f| expected.contains(&f)) {
@@ -976,6 +982,38 @@ pub(crate) fn non_string_key(ty: &Type) -> Option<syn::Error> {
         ));
     }
     non_string_key(value)
+}
+
+/// That no map in `ty` (through `Option`, `Vec`, `Box`) holds an
+/// `exhaustive` enum: a map's values declare no `variants:`, so the enum's
+/// promise to cover them has nothing to cover. A const assert, since only the
+/// enum's metadata says it is `exhaustive`.
+pub(crate) fn exhaustive_map_values(ty: &Type) -> TokenStream {
+    let inner = option_inner(ty)
+        .or_else(|| vec_inner(ty))
+        .or_else(|| single_generic(ty, "Box"));
+    if let Some(inner) = inner {
+        return exhaustive_map_values(inner);
+    }
+    let Some(value) = map_container_value(ty) else {
+        return TokenStream::new();
+    };
+    let value = option_inner(value).unwrap_or(value);
+    if map_container_value(value).is_some() {
+        return exhaustive_map_values(value);
+    }
+    let rendered = crate::fragment::render(value);
+    let message = format!(
+        "`{rendered}` is marked `exhaustive`, but a map's values declare no `variants:`, so \
+         there is nothing to cover; drop the marker, or use a map of an enum without it"
+    );
+    quote::quote_spanned! {value.span()=>
+        const _: () = {
+            #[allow(unused_imports)]
+            use ::flusso_query::OpaqueWithoutMeta as _;
+            assert!(!::flusso_query::OpaqueProbe::<#value>::EXHAUSTIVE, #message);
+        };
+    }
 }
 
 /// The key type `K` of a `HashMap<K, V>` / `BTreeMap<K, V>`.
@@ -1989,10 +2027,12 @@ pub(crate) fn embed_checks(
             // the meta on any other field would pile a second error onto a
             // missing derive, which `check_type`'s deferred bound already
             // reports better.
-            None if matches!(
-                resolved.mapping.mapping_type,
-                MappingType::Keyword | MappingType::Text
-            ) && resolved.mapping.map_values.is_none() =>
+            None if resolved.mapping.map_values.is_none()
+                && (matches!(
+                    resolved.mapping.mapping_type,
+                    MappingType::Keyword | MappingType::Text
+                ) || (matches!(resolved.mapping.mapping_type, MappingType::Object)
+                    && resolved.children.is_empty())) =>
             {
                 let message = format!(
                     "field `{key}` in {scope} declares no variants — the Rust type is marked \
@@ -2000,10 +2040,11 @@ pub(crate) fn embed_checks(
                      schema field or drop the marker",
                 );
                 calls.extend(quote::quote_spanned! {span=>
-                    assert!(
-                        !<#element as ::flusso_query::FlussoValueMeta>::EXHAUSTIVE,
-                        #message
-                    );
+                    {
+                        #[allow(unused_imports)]
+                        use ::flusso_query::OpaqueWithoutMeta as _;
+                        assert!(!::flusso_query::OpaqueProbe::<#element>::EXHAUSTIVE, #message);
+                    }
                 });
             }
             None => {}

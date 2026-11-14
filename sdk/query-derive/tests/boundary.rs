@@ -615,7 +615,11 @@ const TRUSTED: &[Trust] = &[
     Trust {
         rule: "null",
         manual: "**A map value that is not an `Option`.**",
-        applies: |_, doc, error| doc == NULL_DOC && error.contains("null"),
+        // serde says `null` for most types, and "expected value" for an
+        // enum, which reads `null` as no variant at all.
+        applies: |_, doc, error| {
+            doc == NULL_DOC && (error.contains("null") || error.starts_with("expected value"))
+        },
     },
     Trust {
         rule: "dates",

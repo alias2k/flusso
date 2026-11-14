@@ -353,21 +353,23 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
     }
 }
 
-/// The type a tagged newtype reads its one string through: `inner` with
-/// `Option`, `Box` and `Rc` peeled off. What it certainly can't read as one
-/// string is refused here: a map, a collection, a tuple or array, a Rust
-/// primitive other than `String`. A custom type is checked through its flusso
-/// metadata by the caller; one without metadata (a `type` alias, a plain
-/// struct, a type from another crate) the derive can't see into, and trusts.
+/// The type a tagged newtype reads its one string through: `inner` with the
+/// wrappers serde reads as what they hold peeled off ([`TRANSPARENT`]). What
+/// the derive recognises by name as reading no single string is refused here:
+/// a map, a collection, a slice/tuple/array (a `Cow<[T]>` too), a Rust
+/// primitive other than `String`, and the std and flusso types of
+/// [`NOT_A_STRING`]. A custom type is checked through its flusso metadata by
+/// the caller; any other type (one without metadata: another crate's, a plain
+/// struct, a `type` alias) is trusted to read one string.
 fn tagged_inner<'a>(
     ident: &syn::Ident,
     inner: &'a syn::Type,
     kind: Kind,
 ) -> syn::Result<&'a syn::Type> {
     let mut read = inner;
-    while let Some(peeled) = crate::doc::option_inner(read)
-        .or_else(|| single_generic(read, "Box"))
-        .or_else(|| single_generic(read, "Rc"))
+    while let Some(peeled) = TRANSPARENT
+        .iter()
+        .find_map(|wrapper| single_generic(read, wrapper))
     {
         read = peeled;
     }
@@ -407,19 +409,70 @@ fn tagged_inner<'a>(
             "drop the tag: an untagged newtype over a `Vec` reads an array of values",
         );
     }
+    if let Some((_, reads)) = NOT_A_STRING
+        .iter()
+        .find(|(names, _)| leaf.as_deref().is_some_and(|leaf| names.contains(&leaf)))
+    {
+        return refuse(reads, "wrap a `String`, or a type that reads one");
+    }
     if crate::doc::is_primitive(leaf.as_deref()) && leaf.as_deref() != Some("String") {
+        // Behind a wrapper, an untagged newtype has no kind to carry over.
+        let fix = if std::ptr::eq(read, inner) && leaf.as_deref() != Some("char") {
+            "drop the tag: an untagged newtype carries the kind of what it wraps"
+        } else {
+            "wrap a `String`"
+        };
         let reads = match leaf.as_deref() {
-            Some("bool") => "a boolean",
             Some("char") => "a character",
+            Some("bool") => "a boolean",
             _ => "a number",
         };
-        return refuse(
-            reads,
-            "drop the tag: an untagged newtype carries the kind of what it wraps",
-        );
+        return refuse(reads, fix);
     }
     Ok(read)
 }
+
+/// Wrappers serde reads as the one value they hold, by name: a tagged
+/// newtype over one is checked as what it holds. `Cow<'_, str>` peels to
+/// `str`, which reads a string; `Cow<'_, [T]>` to a slice, which doesn't.
+const TRANSPARENT: &[&str] = &[
+    "Option",
+    "Box",
+    "Rc",
+    "Arc",
+    "Cell",
+    "RefCell",
+    "Mutex",
+    "RwLock",
+    "Cow",
+    "Wrapping",
+    "Saturating",
+    "Reverse",
+];
+
+/// Types the derive recognises by name as reading no single string, with what
+/// they read instead.
+const NOT_A_STRING: &[(&[&str], &str)] = &[
+    (
+        &[
+            "NonZero",
+            "NonZeroU8",
+            "NonZeroU16",
+            "NonZeroU32",
+            "NonZeroU64",
+            "NonZeroU128",
+            "NonZeroUsize",
+            "NonZeroI8",
+            "NonZeroI16",
+            "NonZeroI32",
+            "NonZeroI64",
+            "NonZeroI128",
+            "NonZeroIsize",
+        ],
+        "a number",
+    ),
+    (&["Duration", "SystemTime", "GeoPoint"], "an object"),
+];
 
 fn single_generic<'a>(ty: &'a syn::Type, wrapper: &str) -> Option<&'a syn::Type> {
     let syn::Type::Path(path) = ty else {

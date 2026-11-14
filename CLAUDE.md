@@ -1134,7 +1134,7 @@ named fields (e.g. a translations type with a `fallback` beside the language key
 error); the
 derive's `check_type` map arm hard-checks a `HashMap`/`BTreeMap` value type and defers a
 `FlussoMap<kind>` bound otherwise. What a `FlussoMap` type holds is checked against its tag where it
-is declared (issue #294, `map.rs`): a newtype's `HashMap<String, V>` gets a `FlussoValue<tag>` bound
+is declared (issue #294, `map.rs`): a newtype's `HashMap<String, V>` (`V` may be one `Option` level: a map value can be `null`) gets a `FlussoValue<tag>` bound
 on `V`, any other wrapped type (and a named struct's flattened field) must carry the tag in
 `OpaqueProbe::MAP_VALUES` (so `Box<…>`/a plain struct is refused), a named field must be `Option<V>`
 with the same bound, `deny_unknown_fields` and a field's `alias` are refused. A `FlussoFragment`
@@ -1158,17 +1158,18 @@ and an opaque `json` field (object, no children) accepts any map-shaped type on 
 `Date`→`DateMap`, the numerics→`NumberMap`). Phase 2 (per-key analyzers for per-language
 stemming) is deferred.
 
-**The boundary is pinned (issue #294).** What the derive trusts (any type at a `json` field, a
-flattened map, an enum where no `variants:` are declared, `opaque`, serde attributes that change what
-is read, a `String` at `geo`) is one list in `docs/src/query/document-structs.md` ("What the derive
-trusts"). `sdk/query-derive/tests/boundary.rs` places two shape lists (hand-written `named_shapes`, and
+**The boundary is pinned (issue #294).** What the derive trusts is one list, owned by
+`docs/src/query/document-structs.md` ("What the derive trusts"); don't restate it here.
+`sdk/query-derive/tests/boundary.rs` places two shape lists (hand-written `named_shapes`, and
 `generated_shapes`: inner type × wrapper × newtype derive, whose declarations are compiled alone
 first so a refused one isn't placed) at every field of the `boundary` fixture (required kinds bare,
-nullable ones in `Option`, plus `geo`) on a root and in a fragment, ~4400 cases. It compiles them in
-≤50-module files through cargo in trybuild's target dir (`target/tests/trybuild`, same manifest, so it
-reuses the `ui` harness's artifacts; a file is rewritten only when it changes), reads sample documents
-(null, missing keys, empty and many elements) into what builds, and fails on a compile-then-fail case
-no `TRUSTED` rule covers, or a (shape, field) whose root and fragment outcomes differ unless
+nullable ones in `Option`, `geo`, `date`/`timestamp`, two unindexed constants) on a root and in a
+fragment, ~9100 cases, ~3 min. It compiles them in ≤50-module files through cargo in trybuild's
+target dir (`target/tests/trybuild`, same manifest plus `chrono`, so it reuses the `ui` harness's
+artifacts; a file is rewritten only when it changes), reads sample documents (null, missing keys,
+empty and many elements, a `null` map value, each date form) into what builds, and fails on a
+compile-then-fail case unless, for every document it fails on, a `TRUSTED` rule matches that
+document and its error; or on a (shape, field) whose root and fragment outcomes differ unless
 `DISAGREE` lists it; outcomes are recorded in `tests/boundary.outcomes` (re-record with
 `FLUSSO_BLESS=1`), and each rule's phrase must appear in the manual. A new shape or kind goes there.
 

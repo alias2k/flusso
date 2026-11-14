@@ -1,0 +1,41 @@
+error: `A` is `#[flusso(keyword)]`, so it reads one string, but `NonZeroU32` reads a number — wrap a `String`, or a type that reads one
+  --> tests/ui/value_tagged_newtype_over_a_named_non_string.rs:15:10
+   |
+15 | struct A(NonZeroU32);
+   |          ^^^^^^^^^^
+
+error: `B` is `#[flusso(keyword)]`, so it reads one string, but `i64` reads a number — wrap a `String`
+  --> tests/ui/value_tagged_newtype_over_a_named_non_string.rs:19:19
+   |
+19 | struct B(Wrapping<i64>);
+   |                   ^^^
+
+error: `C` is `#[flusso(keyword)]`, so it reads one string, but `Duration` reads an object — wrap a `String`, or a type that reads one
+  --> tests/ui/value_tagged_newtype_over_a_named_non_string.rs:23:10
+   |
+23 | struct C(Duration);
+   |          ^^^^^^^^
+
+error: `D` is `#[flusso(keyword)]`, so it reads one string, but `GeoPoint` reads an object — wrap a `String`, or a type that reads one
+  --> tests/ui/value_tagged_newtype_over_a_named_non_string.rs:27:10
+   |
+27 | struct D(GeoPoint);
+   |          ^^^^^^^^
+
+error: `E` is `#[flusso(keyword)]`, so it reads one string, but `[String]` reads an array — drop the tag: an untagged newtype over a `Vec` reads an array of values
+  --> tests/ui/value_tagged_newtype_over_a_named_non_string.rs:31:23
+   |
+31 | struct E(Cow<'static, [String]>);
+   |                       ^^^^^^^^
+
+error: `F` is `#[flusso(keyword)]`, so it reads one string, but `HashMap<String, String>` reads an object — for a map, declare `#[derive(FlussoMap)] #[flusso(keyword)] struct F(HashMap<String, String>)` instead
+  --> tests/ui/value_tagged_newtype_over_a_named_non_string.rs:35:18
+   |
+35 | struct F(RefCell<HashMap<String, String>>);
+   |                  ^^^^^^^
+
+error: `G` is `#[flusso(keyword)]`, so it reads one string, but `HashMap<String, String>` reads an object — for a map, declare `#[derive(FlussoMap)] #[flusso(keyword)] struct G(HashMap<String, String>)` instead
+  --> tests/ui/value_tagged_newtype_over_a_named_non_string.rs:39:16
+   |
+39 | struct G(Mutex<HashMap<String, String>>);
+   |                ^^^^^^^

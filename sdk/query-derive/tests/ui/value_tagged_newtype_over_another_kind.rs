@@ -6,4 +6,9 @@ use flusso_query::FlussoValue;
 #[flusso(keyword)]
 struct Count(i64);
 
+// A `char` reads one character, and an untagged newtype over it has no kind.
+#[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
+#[flusso(keyword)]
+struct Letter(char);
+
 fn main() {}

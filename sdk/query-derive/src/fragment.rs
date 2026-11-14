@@ -88,6 +88,9 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
     {
         out.extend(error.to_compile_error());
     }
+    for field in fields.iter().filter(|field| !field.skip) {
+        out.extend(doc::exhaustive_map_values(field.ty));
+    }
     for error in fields
         .iter()
         .flat_map(|field| doc::misplaced_attrs(field, false))
@@ -444,15 +447,28 @@ fn newtype_map(ident: &Ident, field: &DocField) -> NewtypeMap {
     if vec_inner(ty).is_some() {
         return NewtypeMap::default();
     }
-    let values = match map_container_value(ty) {
+    let value = map_container_value(ty).map(strip_option);
+    let values = match value {
         // Any value reads `serde_json::Value`, but no `map` field's values are
         // `object`s: the newtype goes at a `json` field only, as the map does.
         Some(value) if leaf_ident(value).as_deref() == Some("Value") => {
             quote! { &[::flusso_query::KindTag::Object] }
         }
+        // A value with no flusso metadata (a `Vec`, a map) has no kind any
+        // `map` field holds: `object`, so the newtype goes at `json` only.
         Some(value) => match primitive_kinds(value) {
             Some(tags) => quote! { &[#(#tags),*] },
-            None => quote! { <#value as ::flusso_query::FlussoValueMeta>::KINDS },
+            None => quote! {
+                {
+                    #[allow(unused_imports)]
+                    use ::flusso_query::OpaqueWithoutMeta as _;
+                    if ::flusso_query::OpaqueProbe::<#value>::HAS_META {
+                        ::flusso_query::OpaqueProbe::<#value>::KINDS
+                    } else {
+                        &[::flusso_query::KindTag::Object]
+                    }
+                }
+            },
         },
         None if checked_type(field, false).is_none() => return NewtypeMap::default(),
         None => quote! {
@@ -463,13 +479,16 @@ fn newtype_map(ident: &Ident, field: &DocField) -> NewtypeMap {
             }
         },
     };
+    // Over a map, the newtype is a `FlussoMap<K>` where a value is a `K`
+    // value, as for the map written at the field; over a map type, where it is.
+    let bound = match value {
+        Some(value) => quote! { for<'__flusso> #value: ::flusso_query::FlussoValue<__FlussoK> },
+        None => quote! { for<'__flusso> #ty: ::flusso_query::FlussoMap<__FlussoK> },
+    };
     NewtypeMap {
         values: quote! { const MAP_VALUES: &'static [::flusso_query::KindTag] = #values; },
         map_impl: quote! {
-            impl<__FlussoK> ::flusso_query::FlussoMap<__FlussoK> for #ident
-            where
-                for<'__flusso> #ty: ::flusso_query::FlussoMap<__FlussoK>,
-            {}
+            impl<__FlussoK> ::flusso_query::FlussoMap<__FlussoK> for #ident where #bound {}
         },
     }
 }
@@ -956,6 +975,8 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
 
     // A dynamic-key map: check the declared value kind, not the container.
     if let Some(value_ty) = map_container_value(inner) {
+        // One `Option` level is the value's own: a map value can be `null`.
+        let value_ty = strip_option(value_ty);
         let container = leaf_ident(inner).unwrap_or_else(|| "HashMap".to_string());
         let mut checks = not_at_a_level(fragment, key, &format!("a `{container}`"), span);
         // `serde_json::Value` has no kind: it holds an opaque `json` field's
@@ -991,14 +1012,23 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
             Some(tags) => quote_spanned! {span=>
                 assert!(::flusso_query::map_value_is(level, #key, &[#(#tags),*]), #msg);
             },
+            // Read through the probe: a value type with no flusso metadata
+            // (`char`, a `Vec`, a map) fits a `json` field, as on a root, and
+            // no `map`.
             None => quote_spanned! {span=>
-                assert!(
-                    ::flusso_query::map_value_is(
-                        level, #key,
-                        <#value_ty as ::flusso_query::FlussoValueMeta>::KINDS,
-                    ),
-                    #msg
-                );
+                {
+                    #[allow(unused_imports)]
+                    use ::flusso_query::OpaqueWithoutMeta as _;
+                    assert!(
+                        ::flusso_query::is_json(level, #key)
+                            || (::flusso_query::OpaqueProbe::<#value_ty>::HAS_META
+                                && ::flusso_query::map_value_is(
+                                    level, #key,
+                                    ::flusso_query::OpaqueProbe::<#value_ty>::KINDS,
+                                )),
+                        #msg
+                    );
+                }
             },
         });
         return checks;

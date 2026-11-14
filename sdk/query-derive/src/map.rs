@@ -169,7 +169,9 @@ fn reads_an_object(input: &DeriveInput, kind: Kind) -> syn::Result<TokenStream> 
         return Err(error);
     }
     if let Some(value) = crate::doc::map_container_value(inner) {
-        return Ok(value_check(value, kind));
+        let mut checks = value_check(value, kind);
+        checks.extend(crate::doc::exhaustive_map_values(inner));
+        return Ok(checks);
     }
     let name = crate::doc::leaf_ident(inner);
     if name.as_deref() == Some("Value") {
@@ -296,6 +298,7 @@ fn named_fields(
             continue;
         };
         checks.extend(value_check(value, kind));
+        checks.extend(exhaustive_value(value));
     }
     match errors {
         Some(errors) => Err(errors),
@@ -308,7 +311,9 @@ fn named_fields(
 fn flattened_map(ident: &syn::Ident, ty: &Type, kind: Kind) -> syn::Result<TokenStream> {
     let inner = crate::doc::option_inner(ty).unwrap_or(ty);
     if let Some(value) = crate::doc::map_container_value(inner) {
-        return Ok(value_check(value, kind));
+        let mut checks = value_check(value, kind);
+        checks.extend(crate::doc::exhaustive_map_values(inner));
+        return Ok(checks);
     }
     let name = crate::doc::leaf_ident(inner);
     if name.as_deref() == Some("Value") {
@@ -342,6 +347,24 @@ fn flattened_map(ident: &syn::Ident, ty: &Type, kind: Kind) -> syn::Result<Token
     })
 }
 
+/// That a named field's value, one of the map's values, is no `exhaustive`
+/// enum: a map's values declare no `variants:` to cover.
+fn exhaustive_value(value: &Type) -> TokenStream {
+    let value = crate::doc::option_inner(value).unwrap_or(value);
+    let rendered = crate::fragment::render(value);
+    let message = format!(
+        "`{rendered}` is marked `exhaustive`, but a map's values declare no `variants:`, so \
+         there is nothing to cover; drop the marker, or use an enum without it"
+    );
+    quote::quote_spanned! {value.span()=>
+        const _: () = {
+            #[allow(unused_imports)]
+            use ::flusso_query::OpaqueWithoutMeta as _;
+            assert!(!::flusso_query::OpaqueProbe::<#value>::EXHAUSTIVE, #message);
+        };
+    }
+}
+
 /// The message for a type in a map that is no map of the tag's values.
 fn not_a_map_of(what: &str, kind: Kind) -> String {
     let tag = kind.name();
@@ -355,6 +378,8 @@ fn not_a_map_of(what: &str, kind: Kind) -> String {
 /// That `value`, one value of the map, is a value of the tag: a
 /// `FlussoValue` bound, spanned on it. `serde_json::Value` takes anything.
 fn value_check(value: &Type, kind: Kind) -> TokenStream {
+    // One `Option` level is the value's own: a map value can be `null`.
+    let value = crate::doc::option_inner(value).unwrap_or(value);
     if crate::doc::leaf_ident(value).as_deref() == Some("Value") {
         return TokenStream::new();
     }

@@ -106,17 +106,25 @@ pub struct Product {
 
 ## What the derive trusts
 
-The derive checks a type wherever it can see it: a built-in leaf, a type with a flusso derive, the two [array newtypes](#two-kinds-of-array-newtype), and a `HashMap`/`BTreeMap<String, V>` at a field. A map's keys are `String`, the document's keys: any other key type is a compile error. A map type is checked as the map it reads: a [`FlussoMap` type](maps.md#document-types)'s values against its tag, and a `FlussoFragment` or `FlussoValue` newtype over a map (or over an `Option` of one) only goes where that map goes, its values checked against the field's. A `FlussoFragment` newtype over a leaf value is a compile error: it is a value, so derive `FlussoValue`. A struct that compiles reads every document the schema allows, except where the derive trusts it:
+The derive checks a type wherever it can see it: a built-in leaf, a type with a flusso derive, the two [array newtypes](#two-kinds-of-array-newtype), and a `HashMap`/`BTreeMap<String, V>` at a field, where `V` may be `Option<V>` (one level). A map's keys are `String`, the document's keys: any other key type is a compile error. A map type is checked as the map it reads: a [`FlussoMap` type](maps.md#document-types)'s values against its tag, and a `FlussoFragment` or `FlussoValue` newtype over a map (or over an `Option` of one) only goes where that map goes, its values checked against the field's. A `FlussoFragment` newtype over a leaf value is a compile error: it is a value, so derive `FlussoValue`. An `exhaustive` enum where the schema declares no `variants:` is a compile error everywhere, a `json` field and a map's values included. A struct that compiles reads every document the schema allows, except where the derive trusts it:
 
-- **Any type at a `json` field.** A `json` field declares nothing to check against.
+- **Any type at a `json` field, or at a `constant` stored unindexed.** Neither declares anything to check against: a [`constant`](../reference/field-types.md#constant) holding an object or a list that mixes kinds is mapped like `json`.
 - **A `#[serde(flatten)]` map.** A flattened `HashMap`, `BTreeMap`, `FlussoMap` type or newtype over a map reads every key no other field reads, whatever its kind, and its value type isn't checked against them. Only `serde_json::Value` values read them all.
+- **A map value that is not an `Option`.** It is trusted never to be `null`, but a `map` over a `jsonb` column holding `{"x": null}` indexes that `null` under its key. Use `Option<V>` (`HashMap<String, Option<String>>`, or `Option` values in a `FlussoMap` type) when the column can hold one.
 - **An enum where the schema declares no `variants:`.** At a plain `keyword`, or as a map's values, every value must be one of the enum's.
-- **A tagged `FlussoValue` newtype over a type the derive can't see into.** `#[flusso(keyword)] struct Sku(SmolStr)` is how a string type from another crate goes at a `keyword` field, so a type without flusso metadata (another crate's, a plain struct, a `type` alias) is taken to read one string. Over a map, a collection, a number or a flusso type that reads no string, a tagged newtype is a compile error, through `Option`, `Box` and `Rc` too.
+- **A date type at a `date` or `timestamp` field.** Both map to OpenSearch `date`, so the derive can't tell them apart, and a `timestamp` field holds whatever its column is. What flusso writes, and what reads it:
+
+  | Column | Written as | Reads into |
+  | --- | --- | --- |
+  | `date` | `2024-01-02` | `chrono::NaiveDate`, `String` |
+  | `time` | `03:04:05.123456` | `chrono::NaiveTime`, `String` |
+  | `timestamp` (no zone) | `2024-01-02 03:04:05.123456` | `String` only ([#304](https://github.com/alias2k/flusso/issues/304)) |
+  | `timestamptz` | `2024-01-02T03:04:05.123456+00:00` | `chrono::DateTime<Utc>`, `String` |
+
+- **Any other type behind a tagged `FlussoValue` newtype.** `#[flusso(keyword)] struct Sku(SmolStr)` is how a string type from another crate goes at a `keyword` field, so it is trusted to read one string. The derive refuses what it recognises by name as reading something else, looking through `Option`, `Box`, `Rc`, `Arc`, `Cell`, `RefCell`, `Mutex`, `RwLock`, `Cow`, `Wrapping`, `Saturating` and `Reverse`: a map, a collection, a slice, tuple or array, a Rust primitive other than `String`, `NonZero*`, `Duration`, `SystemTime`, flusso's `GeoPoint`, and a flusso type that reads no string. Everything else, a plain struct or a `type` alias included, is taken on trust.
 - **What [`#[flusso(opaque)]`](#escape-hatches) turns off**, and a type the derive can't see into under it (`Box<…>`, a tuple, a plain struct).
 - **serde attributes that change what is read**: `with`/`deserialize_with` on a field, `from`/`try_from` on a `FlussoValue` type (validation in `try_from` is a common use), and `deny_unknown_fields` on a fragment, which then fails on every key it leaves out.
 - **A `String` at a `geo` field.** flusso writes a point as `{lat, lon}`, which a `String` doesn't read; a `custom` field mapped to `geo_point` can hold `"lat,lon"` strings.
-
-A map's values can be `null`: a `map` over a `jsonb` column holding `{"x": null}` is indexed as it is, so a map that must read every such document takes `Option` values (`HashMap<String, Option<String>>`).
 
 A test pins this list: `sdk/query-derive/tests/boundary.rs` places every type shape at every field kind, on a root and in a fragment, and fails on one that compiles, fails to read a sample document, and isn't covered here, or that a root and a fragment treat differently. One pair differs on purpose: a `type` alias of a map at a `map` field reads on a root, which sees through the alias, and is a compile error in a fragment, which can't.
 

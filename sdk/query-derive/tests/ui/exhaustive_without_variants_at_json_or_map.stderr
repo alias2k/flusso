@@ -1,0 +1,11 @@
+error[E0080]: evaluation panicked: field `settings` in index `shapes` declares no variants — the Rust type is marked `exhaustive`, but there is nothing to cover; declare `variants:` on the schema field or drop the marker
+  --> tests/ui/exhaustive_without_variants_at_json_or_map.rs:18:15
+   |
+18 |     settings: Code,
+   |               ^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: `Code` is marked `exhaustive`, but a map's values declare no `variants:`, so there is nothing to cover; drop the marker, or use a map of an enum without it
+  --> tests/ui/exhaustive_without_variants_at_json_or_map.rs:25:35
+   |
+25 |     codes: Option<HashMap<String, Code>>,
+   |                                   ^^^^ evaluation of `_` failed here

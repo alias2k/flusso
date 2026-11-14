@@ -595,6 +595,8 @@ pub trait OpaqueWithoutMeta {
     const AT_OBJECT: bool = true;
     /// No metadata, so no map value kind the derive can see.
     const MAP_VALUES: &'static [KindTag] = &[];
+    /// No metadata, so not an `exhaustive` enum.
+    const EXHAUSTIVE: bool = false;
 }
 
 impl<T: ?Sized> OpaqueWithoutMeta for OpaqueProbe<T> {}
@@ -622,6 +624,9 @@ impl<T: ?Sized + FlussoValueMeta> OpaqueProbe<T> {
     pub const AT_OBJECT: bool = holds_kind(T::KINDS, KindTag::Object);
     /// The value kinds of a map type (see [`FlussoValueMeta::MAP_VALUES`]).
     pub const MAP_VALUES: &'static [KindTag] = T::MAP_VALUES;
+    /// Whether the type is an `exhaustive` enum (see
+    /// [`FlussoValueMeta::EXHAUSTIVE`]).
+    pub const EXHAUSTIVE: bool = T::EXHAUSTIVE;
 }
 
 /// Whether a type of `kinds` may stand in for a field of kind `field`. An empty

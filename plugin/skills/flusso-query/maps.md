@@ -11,18 +11,19 @@ subfields). The derive gives it one handle per value kind: `TextMap`, `KeywordMa
 
 ## Doc side
 
-The field type is `HashMap<String, V>` (or `BTreeMap`) where `V` is a value of the declared kind, by
-blanket impl and no derive: `HashMap<String, String>` for a text or keyword map,
-`HashMap<String, f64>` for a `double` map. A nullable map is `Option<HashMap<…>>`.
+The field type is `HashMap<String, V>` (or `BTreeMap`) where `V` is a value of the declared kind, or
+`Option<V>`: `HashMap<String, Option<String>>` for a text or keyword map, `HashMap<String,
+Option<f64>>` for a `double` map. A map over a `jsonb` column is indexed as it is, `{"x": null}`
+included, and only `Option` values read that null. A nullable map is `Option<HashMap<…>>`.
 
 ```rust
 #[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "products")]
 struct Product {
     sku: String,
-    title: HashMap<String, String>,          // map<text>    → TextMap
-    codes: Option<HashMap<String, String>>,  // map<keyword> → KeywordMap (nullable)
-    prices: Option<HashMap<String, f64>>,    // map<double>  → NumberMap
+    title: HashMap<String, Option<String>>,          // map<text>    → TextMap
+    codes: Option<HashMap<String, Option<String>>>,  // map<keyword> → KeywordMap (nullable)
+    prices: Option<HashMap<String, Option<f64>>>,    // map<double>  → NumberMap
 }
 ```
 
