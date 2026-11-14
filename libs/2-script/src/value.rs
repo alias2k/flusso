@@ -10,17 +10,16 @@
 //! | `SmallInt` / `Int` / `BigInt` | `i64` |
 //! | `Float` / `Double` | `f64` |
 //! | `Decimal` | `Decimal` |
-//! | `BigDecimal` (a declared `decimal`) | `Decimal` (rounded past 28 fractional digits, however small); a string of its digits past `Decimal`'s magnitude |
+//! | `BigDecimal` (a declared `decimal`) | `Decimal`: exact when it holds the text, else as read through `f64`; a string of its digits past `Decimal`'s range |
 //! | `String`, `Uuid` | string |
 //! | `Date` / `Time` / `Timestamp` / `TimestampTz` | RFC 3339 string |
 //! | `Bytes` | blob |
 //! | `Array` / `Map` | array / object map |
 //!
 //! **Out** ([`from_dynamic`]): a script's result is checked against the field's declared type,
-//! strictly. The only widenings allowed: an integer is accepted for a `float`/`double`/`decimal`
-//! field, and a string holding a decimal number for a `decimal` field (a value past `Decimal`'s
-//! range passed through), written as that number. A `decimal` result is a
-//! [`BigDecimal`](GenericValue::BigDecimal) of its exact text, written with every digit.
+//! strictly. The only widening allowed: an integer is accepted for a `float`/`double`/`decimal`
+//! field. A `decimal` result is a [`BigDecimal`](GenericValue::BigDecimal) of its exact text,
+//! written with every digit.
 //!
 //! ```
 //! use kernel::{FlussoType, GenericValue};
@@ -156,11 +155,6 @@ fn leaf(value: Dynamic, out: &Output<'_>) -> Result<GenericValue, String> {
         FlussoType::Decimal => {
             if let Ok(d) = value.as_decimal() {
                 Ok(exact(&d))
-            } else if value.is_string() {
-                let text = value.into_string().map_err(|_| mismatch())?;
-                kernel::BigDecimal::parse(&text)
-                    .map(GenericValue::BigDecimal)
-                    .ok_or_else(|| format!("returned `{text}`, which is not a decimal number"))
             } else {
                 integer(&value, mismatch).map(|i| exact(&Decimal::from(i)))
             }
@@ -191,65 +185,88 @@ fn leaf(value: Dynamic, out: &Output<'_>) -> Result<GenericValue, String> {
     }
 }
 
-/// A declared decimal in Rhai: the `Decimal` nearest its text (rounded past 28
-/// fractional digits, however small), or a string of its digits past
-/// `Decimal`'s magnitude.
+/// A declared decimal in Rhai. A value `Decimal` holds exactly is that
+/// decimal, every digit kept. Any other (written with an exponent, more than
+/// 28 fractional digits, zero, past the range) reads as `main` read it before
+/// issue #327, through `f64`, so a tiny value is the same zero and a value past
+/// ±7.9e28 is a string, here of its exact digits.
+// Out of line: the common arms of `to_dynamic` stay small and fast.
 #[inline(never)]
 fn declared_decimal(value: &kernel::BigDecimal) -> Dynamic {
-    nearest_decimal(value.as_str()).map_or_else(
-        || Dynamic::from(value.as_str().to_owned()),
-        Dynamic::from_decimal,
-    )
+    let text = value.as_str();
+    match Decimal::from_str_exact(text) {
+        Ok(d) if !d.is_zero() => Dynamic::from_decimal(d),
+        _ => as_read_through_f64(text)
+            .map_or_else(|| Dynamic::from(text.to_owned()), Dynamic::from_decimal),
+    }
 }
 
-/// `text`, a JSON number, as the nearest `Decimal`; `None` past its magnitude.
-/// `Decimal::from_str` rounds extra fractional digits but refuses an exponent,
-/// and `from_scientific` refuses one below its scale, so the number is first
-/// written out without one. Below 10^-29 it rounds to zero.
-fn nearest_decimal(text: &str) -> Option<Decimal> {
-    if let Ok(d) = Decimal::from_str(text) {
-        return Some(d);
-    }
-    let (mantissa, exponent) = text.split_once(['e', 'E'])?;
-    let exponent: i64 = exponent.parse().ok()?;
-    let (negative, mantissa) = match mantissa.strip_prefix('-') {
-        Some(rest) => (true, rest),
-        None => (false, mantissa),
-    };
-    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    let digits: String = whole.chars().chain(fraction.chars()).collect();
-    let significant = digits.trim_start_matches('0');
-    if significant.is_empty() {
-        return Some(Decimal::ZERO);
-    }
-    let leading_zeros = (digits.len() - significant.len()) as i64;
-    let point = (whole.len() as i64).checked_add(exponent)? - leading_zeros;
-    let plain = if point <= -29 {
-        return Some(Decimal::ZERO);
-    } else if point > 29 {
-        return None;
-    } else if point <= 0 {
-        format!(
-            "0.{}{significant}",
-            "0".repeat(point.unsigned_abs() as usize)
-        )
-    } else {
-        let point = point as usize;
-        if point >= significant.len() {
-            format!("{significant}{}", "0".repeat(point - significant.len()))
-        } else {
-            let (whole, fraction) = significant.split_at(point);
-            format!("{whole}.{fraction}")
-        }
-    };
-    let rounded = Decimal::from_str(&plain).ok()?;
-    Some(if negative { -rounded } else { rounded })
+/// `text`, a JSON number, as the `Decimal` a `serde_json` number read gave:
+/// its text when `Decimal` takes it, else its `f64`; `None` past either.
+fn as_read_through_f64(text: &str) -> Option<Decimal> {
+    let number: serde_json::Number = serde_json::from_str(text).ok()?;
+    Decimal::from_str(&number.to_string())
+        .ok()
+        .or_else(|| number.as_f64().and_then(|f| Decimal::try_from(f).ok()))
 }
 
 /// A `decimal` script field's result, written with every digit it holds.
 fn exact(value: &Decimal) -> GenericValue {
-    kernel::BigDecimal::parse(&value.to_string())
+    let mut text = DecimalText::default();
+    let written = std::fmt::Write::write_fmt(&mut text, format_args!("{value}")).is_ok();
+    written
+        .then(|| kernel::BigDecimal::parse(text.as_str()))
+        .flatten()
         .map_or(GenericValue::Decimal(*value), GenericValue::BigDecimal)
+}
+
+/// A decimal's `to_float()` in a script: the `f64` nearest its exact value,
+/// parsed from its text (`Decimal::to_f64` can land one unit in the last place
+/// off for a long value); `0.0` for a zero of either sign.
+pub(crate) fn decimal_to_float(value: Decimal) -> f64 {
+    if value.is_zero() {
+        return 0.0;
+    }
+    let mut text = DecimalText::default();
+    match std::fmt::Write::write_fmt(&mut text, format_args!("{value}")) {
+        Ok(()) => text.as_str().parse().unwrap_or(f64::NAN),
+        Err(_) => value.to_string().parse().unwrap_or(f64::NAN),
+    }
+}
+
+/// A `Decimal`'s text on the stack: a sign, 29 digits, a point and up to 28
+/// leading fractional zeros fit.
+struct DecimalText {
+    bytes: [u8; 64],
+    len: usize,
+}
+
+impl Default for DecimalText {
+    fn default() -> Self {
+        Self {
+            bytes: [0; 64],
+            len: 0,
+        }
+    }
+}
+
+impl DecimalText {
+    fn as_str(&self) -> &str {
+        self.bytes
+            .get(..self.len)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .unwrap_or_default()
+    }
+}
+
+impl std::fmt::Write for DecimalText {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        let end = self.len + s.len();
+        let slot = self.bytes.get_mut(self.len..end).ok_or(std::fmt::Error)?;
+        slot.copy_from_slice(s.as_bytes());
+        self.len = end;
+        Ok(())
+    }
 }
 
 fn integer(value: &Dynamic, mismatch: impl Fn() -> String) -> Result<i64, String> {

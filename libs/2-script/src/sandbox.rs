@@ -10,6 +10,8 @@
 //! - **Bounded:** fixed caps on operations, call depth, expression depth and the
 //!   size of strings, arrays and maps, so a runaway script fails one document
 //!   instead of stalling the pipeline.
+//! - **Correctly rounded:** a decimal's `to_float()` is the `f64` nearest its
+//!   exact value, parsed from its text.
 //!
 //! ```
 //! let engine = script::sandbox::engine();
@@ -42,6 +44,7 @@ pub fn engine() -> Engine {
         .set_max_string_size(MAX_STRING_SIZE)
         .set_max_array_size(MAX_COLLECTION_SIZE)
         .set_max_map_size(MAX_COLLECTION_SIZE);
+    engine.register_fn("to_float", crate::value::decimal_to_float);
     engine.on_print(|_| {});
     engine.on_debug(|_, _, _| {});
     engine

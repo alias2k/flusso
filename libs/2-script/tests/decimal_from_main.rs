@@ -7,11 +7,16 @@
 //! number's text, else through `f64`), under `FLUSSO_BLESS=1`. Each line is the
 //! input's label and JSON text, then `type_of(x)`, `${x}` and `x.to_float()`.
 //!
-//! What must match `main`, by label:
-//! - `zero`, `exponent`: all three. A value that rounds to zero, or is written
-//!   with an exponent, reads as `main` read it.
-//! - `long`, `exact`: the kind and `to_float()`, the correctly rounded double.
-//!   `${x}` keeps every digit the text has, where `main` kept about 17.
+//! What must hold, by label:
+//! - every decimal: `to_float()` is the `f64` nearest the decimal the script
+//!   holds, its `${x}` parsed (`0.0` for a zero). `main`'s was `Decimal::to_f64`
+//!   of a value serde_json's default float parser read, so a long value could
+//!   land one unit in the last place off; the test counts those rows.
+//! - `zero`, `exponent`: the kind and `${x}` as on `main`. A value that rounds
+//!   to zero, or is written with an exponent, reads as `main` read it.
+//! - `long`, `exact`: the kind as on `main`, and `${x}` is the input, every
+//!   digit, where `main` kept about 17; an input with more digits than
+//!   `Decimal` holds reads as `main` read it.
 //! - `past`: the kind (a string). Its text is the exact digits, where `main`'s
 //!   went through `f64`.
 //! - `max`: nothing. A value `Decimal` holds exactly but `f64` rounds past its
@@ -157,29 +162,48 @@ fn a_declared_decimal_reaches_a_script_as_main_gave_it() {
         return;
     }
     let mut wrong = Vec::new();
+    let mut main_off = 0;
     for (main, branch) in FIXTURE.lines().zip(actual.lines()) {
         let main: Vec<&str> = main.split('\t').collect();
         let branch: Vec<&str> = branch.split('\t').collect();
         assert_eq!(main[..2], branch[..2], "the inputs differ");
-        let must_match: &[usize] = match main[0] {
-            "zero" | "exponent" => &[2, 3, 4],
-            "long" | "exact" => &[2, 4],
-            "max" => &[],
-            _ => &[2],
-        };
-        if must_match
-            .iter()
-            .any(|&column| main[column] != branch[column])
-        {
+        let (label, input) = (main[0], main[1]);
+        let mut problems = Vec::new();
+        if label != "max" && main[2] != branch[2] {
+            problems.push("kind");
+        }
+        if matches!(label, "zero" | "exponent") && main[3] != branch[3] {
+            problems.push("text");
+        }
+        if matches!(label, "long" | "exact") {
+            let held_exactly = rust_decimal::Decimal::from_str_exact(input).is_ok();
+            if held_exactly && branch[3] != input {
+                problems.push("every digit");
+            }
+            if !held_exactly && branch[3] != main[3] {
+                problems.push("text");
+            }
+        }
+        if branch[2] == "decimal" {
+            let held: f64 = branch[3].parse().unwrap();
+            let nearest = if held == 0.0 { 0.0 } else { held };
+            if branch[4] != serde_json::to_string(&nearest).unwrap() {
+                problems.push("correctly rounded");
+            }
+            if main[2] == "decimal" && main[4] != branch[4] {
+                main_off += 1;
+            }
+        }
+        if !problems.is_empty() {
             wrong.push(format!(
-                "{} {}\n  main:   {}\n  branch: {}",
-                main[0],
-                main[1],
+                "{label} {input} ({})\n  main:   {}\n  branch: {}",
+                problems.join(", "),
                 main[2..].join(" | "),
                 branch[2..].join(" | ")
             ));
         }
     }
+    println!("rows where main's to_float() was not the nearest f64: {main_off}");
     assert_eq!(FIXTURE.lines().count(), actual.lines().count());
     assert!(
         wrong.is_empty(),

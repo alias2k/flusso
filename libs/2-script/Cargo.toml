@@ -26,9 +26,9 @@ rhai.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 rust_decimal.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 config.workspace = true
 tokio = { workspace = true, features = ["rt", "macros"] }
 criterion.workspace = true
