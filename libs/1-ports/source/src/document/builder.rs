@@ -58,7 +58,8 @@ fn key_part(value: &GenericValue) -> String {
 
 /// The result of assembling a document: a body to upsert into the index, a
 /// tombstone when the root row is gone (or soft-deleted), or a document that
-/// could not be finished (a script failed on it).
+/// could not be finished (a script failed on it, or an `array: true` column
+/// held an object).
 #[derive(Debug, Clone)]
 pub enum Document {
     /// Upsert the assembled body under [`id`](Self::Upsert::id).

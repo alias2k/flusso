@@ -26,7 +26,9 @@ import {
 import { AGGREGATE_OPS, KIND_HELP, LEAF_TYPES, withAggregateOp } from "../fields";
 import { useT, type Translate } from "../i18n";
 import * as edit from "../model/edit";
-import { nameIncomplete } from "../model/complete";
+import { fieldNameProblem } from "../model/names";
+import { renameChips } from "../model/renameChips";
+import { siblingNames } from "../model/selection";
 import { RowIds } from "../model/rowIds";
 import { errorsFor, retypeScript, scriptPath } from "../model/scripts";
 import { useDesignStore } from "../store/design";
@@ -37,9 +39,10 @@ import { drasticTypeChange, typeClass } from "../theme";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Hint } from "./Hint";
+import { settleNameDraft, useNameDraft } from "./nameDraft";
+import { useFieldNameRefusal, useRenameProblemText } from "./nameRefusal";
 import { ValueTargetContext } from "./valueTarget";
 import { Filters } from "./Filters";
-import { trimmed } from "../model/names";
 import {
   AddButton,
   Block,
@@ -117,7 +120,7 @@ function Breadcrumb() {
     crumbs = [root, ...pathLabels(schema, selection.path), field?.field ?? "?"];
   } else if (selection.kind === "node") crumbs = [root, ...pathLabels(schema, selection.path)];
   else crumbs = [root];
-  return <div className="crumbs min-w-0 break-words text-2xs text-muted-foreground">{crumbs.join(" › ")}</div>;
+  return <div className="crumbs min-w-0 truncate text-2xs text-muted-foreground">{crumbs.join(" › ")}</div>;
 }
 
 // Delete/duplicate act on a node or field; the index root has neither, so only
@@ -128,6 +131,7 @@ function HeaderActions() {
   if (!selection) return null;
   const canModify = (selection.kind === "node" && selection.path.length > 0) || selection.kind === "field";
   const duplicate = () => {
+    settleNameDraft();
     if (selection.kind === "node") {
       apply((s) => edit.duplicateNode(s, selection.path));
       select({ kind: "node", path: [...selection.path.slice(0, -1), selection.path[selection.path.length - 1] + 1] });
@@ -137,6 +141,7 @@ function HeaderActions() {
     }
   };
   const remove = () => {
+    settleNameDraft();
     if (selection.kind === "node") apply((s) => edit.removeNode(s, selection.path));
     else if (selection.kind === "field") apply((s) => edit.removeAt(s, selection.path, selection.index));
     select(null);
@@ -186,7 +191,7 @@ const plural = (s: string) => pluralize.plural(s);
 
 /// One-click name suggestions for the document field, by what the field draws
 /// from: a column offers itself + its camelCase; a join its table singular; an
-/// aggregate an op-flavoured name. The current name is filtered out by the row.
+/// aggregate an op-flavoured name. The row hides the current name in place.
 function nameSuggestions(field: Field): string[] {
   const s = field.source;
   if ("column" in s) {
@@ -218,6 +223,8 @@ function nameSuggestions(field: Field): string[] {
 
 export function Inspector() {
   const { selection, schema, indexName } = useDesign();
+  // The index row's id, not its name: renaming the index must not re-mount the panel.
+  const indexId = useDesignStore((s) => s.doc?.config.index?.find((e) => e.name === indexName)?.id) ?? indexName;
   const { t } = useT();
   if (!selection) return <div className="inspector empty">{t("inspector.selectPrompt")}</div>;
   if (selection.kind === "columns") return <ColumnsInspector path={selection.path} names={selection.names} />;
@@ -225,10 +232,10 @@ export function Inspector() {
   // instead of handing this one's boxes (and what they hold) to that field.
   const key =
     selection.kind === "root"
-      ? indexName
+      ? indexId
       : selection.kind === "node"
-        ? `${indexName}/${fieldAtPath(schema, selection.path)?.uid ?? selection.path.join(".")}`
-        : `${indexName}/${nodeFields(schema, selection.path)[selection.index]?.uid ?? `${selection.path.join(".")}:${selection.index}`}`;
+        ? `${indexId}/${fieldAtPath(schema, selection.path)?.uid ?? selection.path.join(".")}`
+        : `${indexId}/${nodeFields(schema, selection.path)[selection.index]?.uid ?? `${selection.path.join(".")}:${selection.index}`}`;
   return (
     <>
       <div className="mb-2.5 flex items-center justify-between gap-2">
@@ -558,7 +565,7 @@ function FieldInspector({ path, index }: { path: number[]; index: number }) {
   return (
     <ValueTargetContext.Provider value={target}>
       <div className="inspector">
-        <SectionTitle className="mt-0">
+        <SectionTitle className="mt-0 truncate">
           {t("inspector.field")} · {field.field}
         </SectionTitle>
         {KIND_HELP[helpKind] && <p className="kind-help">{t(KIND_HELP[helpKind])}</p>}
@@ -700,41 +707,79 @@ function ScriptBody({
 // --- leaf bodies ---
 
 /// The document-field name plus one-click rename chips derived from the source
-/// (see [`nameSuggestions`]). Goes first in every Document block.
-function NameField({ field, set }: { field: Field; set: (f: Field) => void }) {
+/// (see [`nameSuggestions`]). Goes first in every Document block. Like an
+/// index or sink name box, the typed name is applied, trimmed as flusso reads a
+/// field name, once the box is left (or on Enter), so a rename settles once. A
+/// name another field at this level already reads as, or one flusso refuses,
+/// is marked with the reason and never applied: leaving the box keeps the old
+/// name, and Save is refused while it shows. A field that already shares its
+/// name (a file written by hand) is marked too.
+function NameField({ field }: { field: Field; set: (f: Field) => void }) {
   const { t } = useT();
-  const chips = nameSuggestions(field)
-    .filter((n, i, a) => n && n !== field.field && a.indexOf(n) === i)
-    .slice(0, 3);
-  const badName = nameIncomplete(field);
+  const { schema, indexName } = useDesign();
+  const refusal = useFieldNameRefusal();
+  const problemText = useRenameProblemText("field");
+  const siblings = siblingNames(schema, field.uid);
+  const rename = (text: string) =>
+    field.uid ? problemText(useDesignStore.getState().renameField(indexName, field.uid, text), text) : null;
+  const draft = useNameDraft({
+    kind: "field",
+    row: field.field,
+    refusal: (text) => refusal(text, siblings),
+    apply: rename,
+  });
+  const reason = draft.refused ?? refusal(field.field, siblings);
+  const chips = renameChips(nameSuggestions(field), field.field, (n) => !!fieldNameProblem(n, siblings));
+  const offered = chips.some((chip) => !chip.current);
+  // The reason floats over the label above the box and lets the pointer
+  // through, the chips' row has one height, and `renameChips` keeps each chip
+  // in its place: applying or refusing a name moves no control, and a press
+  // that leaves the box reaches what it was aimed at.
   return (
     <div className="field mb-2 flex flex-col gap-1">
       <span className={cn("field-label", LABEL)}>{t("inspector.fieldName")}</span>
-      <Text
-        value={field.field}
-        invalid={badName}
-        onChange={(name) => set({ ...field, field: name })}
-        onBlur={() => {
-          const name = trimmed(field.field);
-          if (name !== field.field) set({ ...field, field: name });
-        }}
-      />
-      {badName && <p className="error-hint mt-0.5 text-xs text-destructive">{t("inspector.fieldNameInvalid")}</p>}
-      {chips.length > 0 && (
-        <div className="rename-chips mt-1.5 flex flex-wrap items-center gap-1.5">
-          <span className="text-3xs uppercase tracking-caps text-muted-foreground">{t("inspector.renameTo")}</span>
-          {chips.map((n) => (
-            <button
-              type="button"
-              key={n}
-              className="rchip cursor-pointer rounded-full border border-primary/30 bg-primary/15 px-2 py-px font-mono text-2xs text-primary hover:bg-primary/20"
-              onClick={() => set({ ...field, field: n })}
-            >
-              {n}
-            </button>
-          ))}
-        </div>
-      )}
+      <div className="relative">
+        <Text
+          value={draft.text ?? field.field}
+          invalid={reason !== null}
+          onChange={draft.change}
+          onKeyDown={draft.keyDown}
+          onBlur={draft.blur}
+        />
+        {reason && (
+          <p className="error-hint pointer-events-none absolute right-0 bottom-full left-0 z-20 mb-0.5 rounded border border-destructive/40 bg-background px-1.5 py-0.5 text-xs text-destructive shadow">
+            {reason}
+          </p>
+        )}
+      </div>
+      <div className="rename-chips mt-1.5 flex h-5 flex-nowrap items-center gap-1.5 overflow-hidden">
+        {chips.length > 0 && (
+          <span
+            className={cn("shrink-0 text-3xs uppercase tracking-caps text-muted-foreground", !offered && "invisible")}
+          >
+            {t("inspector.renameTo")}
+          </span>
+        )}
+        {chips.map(({ name: n, current }) => (
+          <button
+            type="button"
+            key={n}
+            className={cn(
+              "rchip shrink-0 cursor-pointer rounded-full border border-primary/30 bg-primary/15 px-2 py-px font-mono text-2xs text-primary hover:bg-primary/20",
+              current && "invisible",
+            )}
+            aria-hidden={current ? true : undefined}
+            tabIndex={current ? -1 : undefined}
+            onClick={() => {
+              // The chip is what was pressed: it wins over the typed name.
+              draft.drop();
+              rename(n);
+            }}
+          >
+            {n}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

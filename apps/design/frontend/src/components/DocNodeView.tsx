@@ -1,5 +1,5 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
-import { useRef, useState, type ReactNode } from "react";
+import { useCallback, useRef, useState, type ReactNode } from "react";
 import { ChevronDownIcon } from "lucide-react";
 import { SCALAR_TYPES, type ColumnShape, type DiagnosticDto, type FlussoType } from "../api";
 import { KIND_HELP } from "../fields";
@@ -19,7 +19,10 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
-import { trimmed } from "../model/names";
+import { sqlName, trimmed } from "../model/names";
+import { siblingNames } from "../model/selection";
+import { keepsNameDraft, settleNameDraft, useNameDraft } from "./nameDraft";
+import { useFieldNameRefusal, useRenameProblemText, useSqlNameRefusal } from "./nameRefusal";
 
 const FIELD_KINDS = ["object", "geo", "map", "custom", "constant", "script"] as const;
 const AGG_KINDS = ["count", "exists", "sum", "avg", "min", "max", "ids"] as const;
@@ -30,7 +33,7 @@ const REL_VERB_ORDER = ["belongs_to", "has_many", "many_to_many"] as const;
 
 export function DocNodeView({ data, selected }: NodeProps) {
   const node = (data as { node: DocNode }).node;
-  const { catalog, schema, apply, select, selection, columnsFor, diagnostics, collapsed, toggleCollapsed } =
+  const { catalog, schema, indexName, apply, select, selection, columnsFor, diagnostics, collapsed, toggleCollapsed } =
     useDesign();
   const { t } = useT();
   const cols = columnsFor(node.table);
@@ -40,24 +43,29 @@ export function DocNodeView({ data, selected }: NodeProps) {
   const matches = (name: string) => name.toLowerCase().includes(filter.toLowerCase());
 
   // Inline rename of a nested node's field name (the root has no field, so it's
-  // not renamable here). Commits through the same path-addressed edit the
-  // Inspector uses; Escape cancels, empty/unchanged is a no-op.
+  // not renamable here). Renames the node's field by its uid (the node id),
+  // like the Inspector's box; Escape cancels, empty/unchanged is a no-op, and a
+  // name the Inspector would refuse (another field here has it, or flusso
+  // can't read it) is marked with its reason floating under the header, kept
+  // on Enter, and dropped when the box is left.
   const [renaming, setRenaming] = useState(false);
-  const [draft, setDraft] = useState("");
   const canRename = node.path.length > 0;
-  const startRename = () => {
-    setDraft(node.name ?? "");
-    setRenaming(true);
-  };
-  const commitRename = () => {
-    setRenaming(false);
-    const name = trimmed(draft);
-    if (!name || name === node.name) return;
-    apply((s) => {
-      const f = fieldAtPath(s, node.path);
-      return f ? edit.setNode(s, node.path, { ...f, field: name }) : s;
-    });
-  };
+  const fieldRefusal = useFieldNameRefusal();
+  const problemText = useRenameProblemText("field");
+  const siblings = canRename ? siblingNames(schema, fieldAtPath(schema, node.path)?.uid) : [];
+  const refuse = (text: string) => (trimmed(text) ? fieldRefusal(text, siblings) : null);
+  const rename = useNameDraft({
+    kind: "field",
+    row: node.name ?? "",
+    refusal: refuse,
+    apply: (text) =>
+      trimmed(text) ? problemText(useDesignStore.getState().renameField(indexName, node.id, text), text) : null,
+  });
+  const renameRefused = renaming && rename.text !== null ? rename.refused : null;
+  const startRename = () => setRenaming(true);
+  // Stable, so a re-render (the palette open over a pending name) doesn't take
+  // the focus back.
+  const focusOnMount = useCallback((el: HTMLInputElement | null) => el?.focus(), []);
   const pickRootTable = (t: string) => {
     if (!t) return;
     const pk = catalog?.catalog.tables.find((x) => x.name === t)?.primary_key[0];
@@ -70,13 +78,27 @@ export function DocNodeView({ data, selected }: NodeProps) {
   // node, not a row, so a finding on the join itself goes on its header. A node
   // shows a count badge, a row shows its message on hover.
   const here = namePath(schema, node.path);
+  // A segment another field at its level shares carries the field's position
+  // (`name#3`), so a finding on one of two namesakes badges only that one.
+  const atIndex = (d: DiagnosticDto, depth: number, index: number | undefined) => {
+    const position = d.positions?.[depth] ?? null;
+    return position === null || position === (index ?? -1) + 1;
+  };
   const fieldUnder = (d: DiagnosticDto, depth: number) =>
-    d.anchor === "field" && d.path.length === depth && here.every((n, i) => d.path[i] === n);
-  const diagByField = new Map(diagnostics.filter((d) => fieldUnder(d, here.length + 1)).map((d) => [d.field, d]));
+    d.anchor === "field" &&
+    d.path.length === depth &&
+    here.every((n, i) => d.path[i] === n && atIndex(d, i, node.path[i]));
+  const rowDiagnostics = diagnostics.filter((d) => fieldUnder(d, here.length + 1));
+  // A row's most severe finding colours it; its title lists every finding.
+  const diagOf = (name: string, index: number): DiagnosticDto | undefined => {
+    const mine = rowDiagnostics.filter((d) => d.field === name && atIndex(d, here.length, index));
+    const first = mine.find((d) => d.severity === "error") ?? mine[0];
+    return first && { ...first, message: mine.map((d) => d.message).join("\n") };
+  };
   const keyIssues = node.path.length === 0 ? diagnostics.filter((d) => d.anchor === "index_key") : [];
   const selfIssues = node.path.length > 0 ? diagnostics.filter((d) => fieldUnder(d, here.length)) : [];
   const preview = useDesignStore((st) => st.preview);
-  const nodeIssues = node.leaves.filter((l) => diagByField.has(l.name)).length;
+  const nodeIssues = node.leaves.filter((l) => diagOf(l.name, l.index)).length;
   const self = fieldAtPath(schema, node.path);
   const selfIncomplete = node.path.length > 0 && fieldIncomplete(self ?? undefined);
 
@@ -152,92 +174,120 @@ export function DocNodeView({ data, selected }: NodeProps) {
   return (
     <div className={`flow-node kind-${node.kind}${selected ? " selected" : ""}`}>
       <Handle type="target" position={Position.Left} />
-      <header onClick={() => select(node.path.length ? { kind: "node", path: node.path } : { kind: "root" })}>
-        <button
-          className={`chevron${isCollapsed ? " collapsed" : ""}`}
-          title={isCollapsed ? t("node.expand") : t("node.collapse")}
-          onClick={(e) => {
-            e.stopPropagation();
-            toggleCollapsed(node.id);
-          }}
-        >
-          <Icon name="chevron" size={12} />
-        </button>
-        <span className={`badge ${node.kind}`}>{node.kind}</span>
-        {renaming ? (
-          <input
-            className="node-title-edit"
-            ref={(el) => el?.focus()}
-            value={draft}
-            aria-label={t("node.renameField")}
-            onChange={(e) => setDraft(e.target.value)}
-            onClick={(e) => e.stopPropagation()}
-            onBlur={commitRename}
-            onKeyDown={(e) => {
+      <header
+        className="relative"
+        onClick={() => select(node.path.length ? { kind: "node", path: node.path } : { kind: "root" })}
+      >
+        {/* One line whatever the title or badge: the title shrinks to an
+            ellipsis and the box covers its slot, so neither a long name nor
+            editing one moves a row. */}
+        <div className="node-head">
+          <button
+            className={`chevron${isCollapsed ? " collapsed" : ""}`}
+            title={isCollapsed ? t("node.expand") : t("node.collapse")}
+            onClick={(e) => {
               e.stopPropagation();
-              if (e.key === "Enter") {
-                e.preventDefault();
-                commitRename();
-              } else if (e.key === "Escape") {
-                e.preventDefault();
-                setRenaming(false);
-              }
+              toggleCollapsed(node.id);
             }}
-          />
-        ) : (
-          <span
-            className="node-title"
-            title={canRename ? t("node.renameHint") : undefined}
-            onDoubleClick={
-              canRename
-                ? (e) => {
-                    e.stopPropagation();
-                    startRename();
-                  }
-                : undefined
-            }
           >
-            {node.name ?? node.table}
+            <Icon name="chevron" size={12} />
+          </button>
+          <span className={`badge ${node.kind}`}>{node.kind}</span>
+          {/* The box lies over the title, which keeps its place: editing never
+            reflows the header, so a press that leaves the box lands where it
+            was aimed. */}
+          <span className="node-title-slot">
+            <span
+              className={cn("node-title", renaming && "invisible")}
+              title={canRename ? `${node.name ?? ""}\n${t("node.renameHint")}` : (node.name ?? node.table)}
+              onDoubleClick={
+                canRename
+                  ? (e) => {
+                      e.stopPropagation();
+                      startRename();
+                    }
+                  : undefined
+              }
+            >
+              {node.name ?? node.table}
+            </span>
+            {renaming && (
+              <input
+                className={cn("node-title-edit", renameRefused && "invalid")}
+                ref={focusOnMount}
+                value={rename.text ?? node.name ?? ""}
+                aria-label={t("node.renameField")}
+                aria-invalid={renameRefused ? true : undefined}
+                title={renameRefused ?? undefined}
+                onChange={(e) => rename.change(e.target.value)}
+                onClick={(e) => e.stopPropagation()}
+                onBlur={(e) => {
+                  rename.blur(e);
+                  if (!keepsNameDraft(e.relatedTarget)) setRenaming(false);
+                }}
+                onKeyDown={(e) => {
+                  // The page's shortcuts (the palette, Save) reach it, as from
+                  // any other box; plain keys stay with the box, not the canvas.
+                  if (!e.ctrlKey && !e.metaKey) e.stopPropagation();
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    // A refused name stays in the box with its reason; leaving
+                    // the box drops it.
+                    if (!renameRefused) {
+                      rename.settle();
+                      setRenaming(false);
+                    }
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    rename.drop();
+                    setRenaming(false);
+                  } else rename.keyDown(e);
+                }}
+              />
+            )}
           </span>
-        )}
-        {nodeIssues > 0 && (
-          <span className="issue-badge" title={t("node.diagCount", { n: nodeIssues })}>
-            {nodeIssues}
-          </span>
-        )}
-        {selfIssues.length > 0 && (
-          <span
-            className={cn("issue-badge", selfIssues.every((d) => d.severity === "warning") && "warn")}
-            title={[t("node.selfDiagCount", { n: selfIssues.length }), ...selfIssues.map((d) => d.message)].join("\n")}
-          >
-            {selfIssues.length}
-          </span>
-        )}
-        {keyIssues.length > 0 && (
-          <span
-            className={cn("issue-badge", keyIssues.every((d) => d.severity === "warning") && "warn")}
-            title={[
-              t("node.keyDiagCount", { n: keyIssues.length }),
-              ...keyIssues.map((d) => `${d.field}: ${d.message}`),
-            ].join("\n")}
-          >
-            {keyIssues.length}
-          </span>
-        )}
-        {selfIncomplete && (
-          <span
-            className="issue-badge warn"
-            title={nameIncomplete(self ?? undefined) ? t("node.nameIncomplete") : t("node.joinIncomplete")}
-          >
-            !
-          </span>
-        )}
+          {nodeIssues > 0 && (
+            <span className="issue-badge" title={t("node.diagCount", { n: nodeIssues })}>
+              {nodeIssues}
+            </span>
+          )}
+          {selfIssues.length > 0 && (
+            <span
+              className={cn("issue-badge", selfIssues.every((d) => d.severity === "warning") && "warn")}
+              title={[t("node.selfDiagCount", { n: selfIssues.length }), ...selfIssues.map((d) => d.message)].join(
+                "\n",
+              )}
+            >
+              {selfIssues.length}
+            </span>
+          )}
+          {keyIssues.length > 0 && (
+            <span
+              className={cn("issue-badge", keyIssues.every((d) => d.severity === "warning") && "warn")}
+              title={[
+                t("node.keyDiagCount", { n: keyIssues.length }),
+                ...keyIssues.map((d) => `${d.field}: ${d.message}`),
+              ].join("\n")}
+            >
+              {keyIssues.length}
+            </span>
+          )}
+          {selfIncomplete && (
+            <span
+              className="issue-badge warn"
+              title={nameIncomplete(self ?? undefined) ? t("node.nameIncomplete") : t("node.joinIncomplete")}
+            >
+              !
+            </span>
+          )}
+        </div>
         {node.path.length > 0 && (
           <button
             className="x"
             title={t("common.remove")}
             onClick={(e) => {
               e.stopPropagation();
+              settleNameDraft();
               apply((s) => edit.removeNode(s, node.path));
               select(null);
             }}
@@ -250,6 +300,11 @@ export function DocNodeView({ data, selected }: NodeProps) {
           {node.primaryKey ? ` · ${t("node.pk")}: ${node.primaryKey}` : ""}
           {node.leaves.length > 0 ? ` · ${t("node.fields", { n: node.leaves.length })}` : ""}
         </div>
+        {renameRefused && (
+          <div className="rename-refused pointer-events-none absolute top-full right-0 left-0 z-20 rounded-b border border-destructive/40 bg-background px-2 py-1 text-2xs text-destructive shadow">
+            {renameRefused}
+          </div>
+        )}
       </header>
 
       {node.kind === "root" && !node.table ? (
@@ -316,7 +371,7 @@ export function DocNodeView({ data, selected }: NodeProps) {
                 {visibleCols.map((c) => {
                   const inc = includedByCol.get(c.name);
                   const renamed = inc && inc.name !== c.name;
-                  const diag = inc ? diagByField.get(inc.name) : undefined;
+                  const diag = inc ? diagOf(inc.name, inc.index) : undefined;
                   // Required/default state, relative to the source column, so it
                   // reads at a glance: a dot = required (muted when it just mirrors a
                   // NOT NULL column, accent when it overrides a nullable one), and an
@@ -374,7 +429,7 @@ export function DocNodeView({ data, selected }: NodeProps) {
                 })}
 
                 {visibleLeaves.map((l) => {
-                  const diag = diagByField.get(l.name);
+                  const diag = diagOf(l.name, l.index);
                   const leaf = fields[l.index];
                   const incomplete = fieldIncomplete(leaf);
                   const scriptErrors = errorsFor(preview?.script_errors, scriptPath(schema, node.path, l.index));
@@ -400,6 +455,7 @@ export function DocNodeView({ data, selected }: NodeProps) {
                         aria-label={t("common.remove")}
                         onClick={(e) => {
                           e.stopPropagation();
+                          settleNameDraft();
                           apply((s) => edit.removeAt(s, node.path, l.index));
                         }}
                       >
@@ -608,38 +664,74 @@ function FieldMenu({ onPick }: { onPick: (k: string) => void }) {
 }
 
 /// Type a column name the catalog doesn't list (offline, or a view) and Enter to
-/// add it.
+/// add it, as flusso reads it (lowercased). A name flusso can't read is marked
+/// and not added.
 function ManualColumn({ onAdd }: { onAdd: (name: string) => void }) {
   const { t } = useT();
   const [name, setName] = useState("");
+  const refusal = useSqlNameRefusal()(name);
   return (
-    <Text
+    <SqlNameInput
       className="manual-col w-full text-xs"
       value={name}
+      refusal={refusal}
       onChange={setName}
       placeholder={t("node.addColumn")}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" && name.trim()) {
-          onAdd(name.trim());
-          setName("");
-        }
+      onEnter={() => {
+        onAdd(sqlName(name));
+        setName("");
       }}
     />
   );
 }
 
-/// The empty-state root-table entry (when the catalog has no tables to pick).
+/// The empty-state root-table entry (when the catalog has no tables to pick),
+/// read as flusso reads a table name.
 function RootTableInput({ onPick }: { onPick: (table: string) => void }) {
   const { t } = useT();
   const [name, setName] = useState("");
+  const refusal = useSqlNameRefusal()(name);
   return (
-    <Text
+    <SqlNameInput
       value={name}
+      refusal={refusal}
       onChange={setName}
       placeholder={t("node.rootTableEnter")}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" && name.trim()) onPick(name.trim());
-      }}
+      onEnter={() => onPick(sqlName(name))}
     />
+  );
+}
+
+/// A table or column name box committed with Enter, only when it holds a name
+/// flusso reads; otherwise the reason shows under it.
+function SqlNameInput({
+  value,
+  refusal,
+  onChange,
+  onEnter,
+  placeholder,
+  className,
+}: {
+  value: string;
+  refusal: string | null;
+  onChange: (v: string) => void;
+  onEnter: () => void;
+  placeholder: string;
+  className?: string;
+}) {
+  return (
+    <span className="flex flex-col gap-0.5">
+      <Text
+        className={className}
+        value={value}
+        invalid={!!refusal}
+        onChange={onChange}
+        placeholder={placeholder}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && sqlName(value) && !refusal) onEnter();
+        }}
+      />
+      {refusal && <span className="text-2xs text-destructive">{refusal}</span>}
+    </span>
   );
 }

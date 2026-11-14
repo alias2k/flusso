@@ -30,7 +30,8 @@ pub enum EngineError {
     )]
     DocumentsRejected(usize, String),
 
-    /// A document could not be built (a script failed on it) and the failure
+    /// A document could not be built (a script failed on it, or an `array:
+    /// true` column held an object) and the failure
     /// policy for its index is [`Stop`](crate::FailurePolicy::Stop).
     #[error(
         "document `{id}` in index `{index}` could not be built: {failure}\n\

@@ -224,8 +224,9 @@ jobs:
         working-directory: apps/design/frontend
         run: npm run check:i18n
 
-      # Pure frontend logic (src/model/recovery.ts: the recovery notice's
-      # wording) under Node's own test runner, which strips the types.
+      # Pure frontend logic (src/model/: the recovery notice's wording, when a
+      # name box applies its name, the rename chips) under Node's own test
+      # runner, which strips the types.
       - name: Test the frontend model
         working-directory: apps/design/frontend
         run: npm test

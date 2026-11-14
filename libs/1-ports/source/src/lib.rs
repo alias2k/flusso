@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 
+mod duplicates;
 mod error;
 mod introspection;
 mod provisioning;
@@ -11,6 +12,7 @@ mod validation;
 pub mod cdc;
 pub mod document;
 
+pub use duplicates::{DuplicateOutcome, Rejection, Text, duplicate_outcome};
 pub use error::*;
 pub use introspection::*;
 pub use provisioning::*;

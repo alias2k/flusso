@@ -32,6 +32,16 @@ export function locateField(schema: IndexSchema, uid: string): { path: number[];
   return walk(schema.fields, []);
 }
 
+/// The names of the other fields at the level of the field `uid`: the names a
+/// rename of it must not take.
+export function siblingNames(schema: IndexSchema, uid: string | undefined): string[] {
+  const at = uid ? locateField(schema, uid) : null;
+  if (!at) return [];
+  return nodeFields(schema, at.path)
+    .filter((_, i) => i !== at.index)
+    .map((f) => f.field);
+}
+
 /// The uid of the field a selection points at, read at its path now.
 function uidAt(selection: NonNullable<Selection>, schema: IndexSchema): string | undefined {
   switch (selection.kind) {

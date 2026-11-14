@@ -66,6 +66,10 @@ reqwest = { workspace = true, features = ["json", "rustls", "query"] }
 webpki-root-certs.workspace = true
 
 [dev-dependencies]
+# The live matrix behind the duplicate-name warning (`tests/duplicate_names.rs`):
+# the real builder and sink against Postgres and OpenSearch containers.
+testcontainers-modules = { workspace = true, features = ["postgres", "http_wait"] }
+sqlx.workspace = true
 # The `/wait` router tests implement a tiny `ChangeCapture`, whose stream type
 # is a `futures` one.
 futures.workspace = true

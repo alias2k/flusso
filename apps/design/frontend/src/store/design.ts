@@ -18,6 +18,7 @@ import { adoptIds, stampIds, stripUids, uidSkeleton } from "../model/ids";
 import { loadOverrides, type Positions, saveOverrides } from "../model/layout";
 import { type Graph, pathId, projectGraph } from "../model/tree";
 import { anchorSelection, followSelection } from "../model/selection";
+import { type RenameProblem, renameField, renameIndexIn, renameSinkIn } from "../model/renames";
 import { defaultSchemaPath, indexName, pairRows, rekeyByRow, schemaPath } from "../model/indexRows";
 import type { Selection } from "../state";
 
@@ -156,6 +157,12 @@ interface DesignState {
   /// `apply` on the index `index`, whichever is active now (an edit that lands
   /// after its index was left).
   applyTo: (index: string, fn: (s: IndexSchema) => IndexSchema) => void;
+  /// Rename the field `uid` of index `index`, the index row `id`, or the sink
+  /// `id`, as it and its siblings are now (`model/renames.ts`); what refused
+  /// it, else `null`.
+  renameField: (index: string, uid: string, text: string) => RenameProblem | null;
+  renameIndex: (id: string, text: string) => RenameProblem | null;
+  renameSink: (id: string, text: string) => RenameProblem | null;
   setConfig: (next: ConfigToml) => void;
   openIndex: (name: string) => void;
   createIndex: (name: string, table: string, schemaPath: string) => void;
@@ -243,6 +250,28 @@ export const useDesignStore = create<DesignState>()(
           const next = stampIds(fn(current ?? emptySchema("")));
           return next === current ? {} : { doc: { ...s.doc, schemas: { ...s.doc.schemas, [index]: next } } };
         });
+      },
+
+      renameField: (index, uid, text) => {
+        const schema = get().doc?.schemas[index];
+        if (!schema) return "gone";
+        const { problem } = renameField(schema, uid, text);
+        if (!problem) get().applyTo(index, (now) => renameField(now, uid, text).schema);
+        return problem;
+      },
+      renameIndex: (id, text) => {
+        const config = get().doc?.config;
+        if (!config) return "gone";
+        const renamed = renameIndexIn(config, id, text);
+        if (!renamed.problem && renamed.config !== config) get().setConfig(renamed.config);
+        return renamed.problem;
+      },
+      renameSink: (id, text) => {
+        const config = get().doc?.config;
+        if (!config) return "gone";
+        const renamed = renameSinkIn(config, id, text);
+        if (!renamed.problem && renamed.config !== config) get().setConfig(renamed.config);
+        return renamed.problem;
       },
 
       setConfig: (next) => {

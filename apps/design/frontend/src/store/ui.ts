@@ -62,9 +62,9 @@ interface UiState {
   autoFormat: boolean;
   diffs: OpDiff[] | null;
   browseCatalog: boolean;
-  /// An index or sink name being typed in the Deployment panel, not applied
-  /// until the box is left: `row` is its current name, `refused` says why the
-  /// typed one can't be applied.
+  /// An index or sink name being typed in the Deployment panel, or a field
+  /// name in the Inspector, not applied until the box is left: `row` is its
+  /// current name, `refused` says why the typed one can't be applied.
   nameDraft: NameDraft | null;
 
   toggleTheme: () => void;
@@ -86,11 +86,18 @@ interface UiState {
 }
 
 export interface NameDraft {
-  kind: "index" | "sink";
+  kind: "index" | "sink" | "field";
   row: string;
   name: string;
   /// Why the name can't be applied, in words; `null` when it can.
   refused: string | null;
+  /// Apply the name (or drop it when refused) and end the draft, now.
+  settle: () => void;
+  /// End the draft without applying the name.
+  drop: () => void;
+  /// Put the focus back in the box holding the name, when it is still on the
+  /// page; `false` when it is not.
+  refocus: () => boolean;
 }
 
 export const useUiStore = create<UiState>()((set) => ({

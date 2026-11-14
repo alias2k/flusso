@@ -34,9 +34,11 @@
 //! diagnostic on one of these is anchored at the key's name (`table`,
 //! `primary_key`, `filters`, `soft_delete`) instead of a field, and its
 //! [`Anchor`] says so: a field may carry the same name.
-//! One check needs no database at all: a `soft_delete` `field` that names no
-//! column field, which [`validate_spec`] reports on its own (`flusso check
-//! --offline`) and [`validate_indexes`] reports with the rest.
+//! Two checks need no database at all: a `soft_delete` `field` that names no
+//! column field, and two fields sharing a name at one level
+//! ([`DiagnosticKind::DuplicateFieldName`], a warning, since such a schema
+//! has always loaded). [`validate_spec`] reports them on their own (`flusso
+//! check --offline`) and [`validate_indexes`] reports them with the rest.
 //!
 //! The one store-specific piece is the [`Catalog`] trait: how a store reports a
 //! table and a column, and, when it can, a table's primary key and whether a
@@ -225,6 +227,15 @@ pub enum DiagnosticKind {
     /// A field over a `[]` column does not declare `array: true`. It indexes
     /// as before, but the query side cannot read it back as an array.
     UndeclaredArrayColumn,
+    /// Two fields at one level of the document share a name (as
+    /// [`FieldName`] reads it: trimmed, case kept). The index maps the last
+    /// one; a document holds the last one's value, read as the first one
+    /// declares it, and an input-only (`emit: false`) one strips the name from
+    /// every document. Some pairs fail every document: an `array: true` column
+    /// before a field holding objects fails the build, a script before a field
+    /// its output does not fit is rejected by OpenSearch; the message says
+    /// which. A schema with one still loads, as earlier releases did.
+    DuplicateFieldName,
 }
 
 impl DiagnosticKind {
@@ -241,9 +252,10 @@ impl DiagnosticKind {
             | Self::RootPrimaryKey
             | Self::RootPrimaryKeyMismatch
             | Self::NotAnArrayColumn => Severity::Error,
-            Self::Nullability | Self::IgnoredPrimaryKey | Self::UndeclaredArrayColumn => {
-                Severity::Warning
-            }
+            Self::Nullability
+            | Self::IgnoredPrimaryKey
+            | Self::UndeclaredArrayColumn
+            | Self::DuplicateFieldName => Severity::Warning,
         }
     }
 
@@ -263,6 +275,7 @@ impl DiagnosticKind {
             Self::RootPrimaryKeyMismatch => "root_primary_key_mismatch",
             Self::NotAnArrayColumn => "not_an_array_column",
             Self::UndeclaredArrayColumn => "undeclared_array_column",
+            Self::DuplicateFieldName => "duplicate_field_name",
         }
     }
 }
@@ -301,6 +314,11 @@ pub struct Diagnostic {
     /// (`table`, `primary_key`, `filters` or `soft_delete`), and
     /// [`anchor`](Self::anchor) is [`Anchor::IndexKey`].
     pub path: Vec<FieldName>,
+    /// For each segment of [`path`](Self::path), its 1-based position among
+    /// the fields of its level when another field there has the same name
+    /// (see [`DiagnosticKind::DuplicateFieldName`]), else `None`: which of
+    /// the namesakes the finding is on.
+    pub positions: Vec<Option<usize>>,
     /// Whether [`path`](Self::path) names a field or an index-level key.
     pub anchor: Anchor,
     /// What was found.
@@ -323,6 +341,7 @@ impl Diagnostic {
         Self {
             index,
             path: vec![field.clone()],
+            positions: vec![None],
             field,
             anchor,
             kind,
@@ -331,12 +350,18 @@ impl Diagnostic {
         }
     }
 
-    /// The field path joined with `.`, e.g. `orders.items.sku`.
+    /// The field path joined with `.`, e.g. `orders.items.sku`. A segment
+    /// another field at its level shares carries its position, as the
+    /// duplicate warning names it: `orders#2.items.sku`.
     pub fn dotted_path(&self) -> String {
         self.path
             .iter()
-            .map(AsRef::as_ref)
-            .collect::<Vec<&str>>()
+            .enumerate()
+            .map(|(i, name)| match self.positions.get(i).copied().flatten() {
+                Some(at) => format!("{name}#{at}"),
+                None => name.to_string(),
+            })
+            .collect::<Vec<String>>()
             .join(".")
     }
 }
@@ -354,6 +379,7 @@ pub async fn validate_indexes(spec: &SourceSpec, catalog: &dyn Catalog) -> Resul
             tables: HashMap::new(),
             primary_keys: HashMap::new(),
             path: Vec::new(),
+            positions: Vec::new(),
             anchor: Anchor::Field,
             out: &mut diagnostics,
         };
@@ -361,32 +387,84 @@ pub async fn validate_indexes(spec: &SourceSpec, catalog: &dyn Catalog) -> Resul
             .fields(&schema.table, &schema.fields, schema.primary_key.as_ref())
             .await?;
         checker.root(schema).await?;
+        duplicate_names(name, &schema.fields, &mut Vec::new(), &mut diagnostics);
     }
     Ok(diagnostics)
 }
 
 /// The checks that need no database: a `soft_delete` `field` that names no
-/// field, or whose first field of that name is not a column. Such a marker
-/// reads nothing, so soft-deleted rows would stay indexed. [`validate_indexes`]
-/// reports these too.
+/// field, or whose first field of that name is not a column (such a marker
+/// reads nothing, so soft-deleted rows would stay indexed), and two fields of
+/// one name at one level ([`DiagnosticKind::DuplicateFieldName`]).
+/// [`validate_indexes`] reports these too.
 pub fn validate_spec(spec: &SourceSpec) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     for (name, schema) in spec.indexes() {
-        let Some(message) = marker_field_problem(schema) else {
-            continue;
-        };
-        let Some(key) = schema_key(SOFT_DELETE) else {
-            continue;
-        };
-        diagnostics.push(Diagnostic::new(
-            name.clone(),
-            key,
-            Anchor::IndexKey,
-            DiagnosticKind::UnreadSoftDeleteMarker,
-            message,
-        ));
+        if let Some(message) = marker_field_problem(schema)
+            && let Some(key) = schema_key(SOFT_DELETE)
+        {
+            diagnostics.push(Diagnostic::new(
+                name.clone(),
+                key,
+                Anchor::IndexKey,
+                DiagnosticKind::UnreadSoftDeleteMarker,
+                message,
+            ));
+        }
+        duplicate_names(name, &schema.fields, &mut Vec::new(), &mut diagnostics);
     }
     diagnostics
+}
+
+/// One [`DiagnosticKind::DuplicateFieldName`] per name declared more than
+/// once at a level of `fields`, at any depth, anchored at that name.
+fn duplicate_names(
+    index: &IndexName,
+    fields: &[Field],
+    path: &mut Vec<(FieldName, Option<usize>)>,
+    out: &mut Vec<Diagnostic>,
+) {
+    let mut reported: Vec<&FieldName> = Vec::new();
+    for field in fields {
+        let name = &field.field;
+        if reported.contains(&name) {
+            continue;
+        }
+        let same: Vec<(usize, &Field)> = fields
+            .iter()
+            .enumerate()
+            .filter(|(_, other)| other.field == *name)
+            .collect();
+        if same.len() < 2 {
+            continue;
+        }
+        reported.push(name);
+        path.push((name.clone(), None));
+        out.push(Diagnostic {
+            index: index.clone(),
+            field: name.clone(),
+            path: path.iter().map(|(name, _)| name.clone()).collect(),
+            positions: path.iter().map(|(_, at)| *at).collect(),
+            anchor: Anchor::Field,
+            kind: DiagnosticKind::DuplicateFieldName,
+            severity: DiagnosticKind::DuplicateFieldName.severity(),
+            message: crate::duplicates::duplicate_message(name, &same),
+        });
+        path.pop();
+    }
+    for (at, field) in fields.iter().enumerate() {
+        path.push((field.field.clone(), position(fields, at)));
+        duplicate_names(index, field.children(), path, out);
+        path.pop();
+    }
+}
+
+/// The 1-based position of `fields[at]` when another field of `fields` has
+/// its name.
+fn position(fields: &[Field], at: usize) -> Option<usize> {
+    let name = &fields.get(at)?.field;
+    let shared = fields.iter().filter(|other| other.field == *name).count() > 1;
+    shared.then_some(at + 1)
 }
 
 const TABLE: &str = "table";
@@ -426,6 +504,9 @@ struct Checker<'a> {
     tables: HashMap<TableName, bool>,
     primary_keys: HashMap<TableName, Option<Vec<ColumnName>>>,
     path: Vec<FieldName>,
+    /// The [`position`] of each field segment of `path` (index-level keys,
+    /// pushed after the fields, have none).
+    positions: Vec<Option<usize>>,
     anchor: Anchor,
     out: &'a mut Vec<Diagnostic>,
 }
@@ -453,6 +534,9 @@ impl Checker<'_> {
             index: self.index.clone(),
             field: field.clone(),
             path: self.path.clone(),
+            positions: (0..self.path.len())
+                .map(|i| self.positions.get(i).copied().flatten())
+                .collect(),
             anchor: self.anchor,
             kind,
             severity: kind.severity(),
@@ -608,9 +692,11 @@ impl Checker<'_> {
         primary_key: Option<&'s ColumnName>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 's>> {
         Box::pin(async move {
-            for field in fields {
+            for (at, field) in fields.iter().enumerate() {
                 self.path.push(field.field.clone());
+                self.positions.push(position(fields, at));
                 self.field(table, field, primary_key).await?;
+                self.positions.pop();
                 self.path.pop();
             }
             Ok(())
@@ -2013,7 +2099,7 @@ mod tests {
             })),
             problems(&[
                 (
-                    "team",
+                    "team#2",
                     DiagnosticKind::UnknownColumn,
                     "references unknown column `public.users.team`"
                 ),
@@ -2021,6 +2107,13 @@ mod tests {
                     "@soft_delete",
                     DiagnosticKind::UnreadSoftDeleteMarker,
                     "`field` names `team`, but the first field of that name is not a column"
+                ),
+                (
+                    "team",
+                    DiagnosticKind::DuplicateFieldName,
+                    "`team` is declared 2 times at this level: #1 (join on `teams`), #2 (column \
+                     `team`); the index maps the last one, and a document holds the last one's \
+                     value as raw JSON, not converted to the declared types. Rename all but one"
                 ),
             ]),
         );
@@ -2078,6 +2171,522 @@ mod tests {
                 "soft_delete": { "column": { "column": "deleted_at" } },
             })))
             .is_empty()
+        );
+    }
+
+    fn column_field(name: &str, column: &str) -> serde_json::Value {
+        json!({
+            "field": name,
+            "source": { "column": { "column": column, "ty": "keyword", "nullable": true } },
+        })
+    }
+
+    fn orders_join(name: &str, fields: serde_json::Value) -> serde_json::Value {
+        json!({ "field": name, "source": { "relation": { "join": {
+            "table": "orders", "kind": { "has_many": { "foreign_key": "user_id" } },
+            "primary_key": "id", "fields": fields,
+        } } } })
+    }
+
+    fn duplicates(fields: serde_json::Value) -> Vec<Found> {
+        located(validate_spec(&users_spec(json!({ "fields": fields }))))
+    }
+
+    #[test]
+    fn two_fields_of_one_name_at_the_root_are_a_warning_with_no_database() {
+        assert_eq!(
+            duplicates(json!([
+                int_field("id"),
+                column_field("email", "email"),
+                column_field("email", "full_name"),
+            ])),
+            problems(&[(
+                "email",
+                DiagnosticKind::DuplicateFieldName,
+                "`email` is declared 2 times at this level: #2 (column `email`), #3 (column \
+                 `full_name`); the index maps the last one, and a document holds the last one's \
+                 value, read as the first one declares it. Rename all but one"
+            )]),
+        );
+        assert_eq!(
+            DiagnosticKind::DuplicateFieldName.severity(),
+            Severity::Warning
+        );
+    }
+
+    /// `FieldName` trims, so surrounding spaces name the same field; case is
+    /// kept, so `Email` is another field.
+    #[test]
+    fn names_are_compared_as_field_name_reads_them() {
+        let found = duplicates(json!([
+            column_field("email", "email"),
+            column_field(" email ", "full_name"),
+            column_field("Email", "email"),
+        ]));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].0, "email");
+    }
+
+    #[test]
+    fn a_duplicate_inside_a_join_and_two_joins_of_one_name_are_each_reported() {
+        assert_eq!(
+            duplicates(json!([
+                orders_join("orders", json!([int_field("id"), int_field("id")])),
+                orders_join("orders", json!([int_field("total")])),
+            ])),
+            problems(&[
+                (
+                    "orders",
+                    DiagnosticKind::DuplicateFieldName,
+                    "`orders` is declared 2 times at this level: #1 (join on `orders`), #2 \
+                     (join on `orders`); the index maps the last one, but a document keeps none \
+                     of its child fields: #1 and #2 declare none in common, so every element is \
+                     empty. Rename all but one"
+                ),
+                (
+                    "orders#1.id",
+                    DiagnosticKind::DuplicateFieldName,
+                    "`id` is declared 2 times at this level: #1 (column `id`), #2 (column `id`); \
+                     the index maps the last one, and a document holds the last one's value, \
+                     read as the first one declares it. Rename all but one"
+                ),
+            ]),
+        );
+    }
+
+    fn group(name: &str, fields: serde_json::Value) -> serde_json::Value {
+        json!({ "field": name, "source": { "group": fields } })
+    }
+
+    fn to_one(name: &str, fields: serde_json::Value) -> serde_json::Value {
+        json!({ "field": name, "source": { "relation": { "join": {
+            "table": "orders", "kind": { "belongs_to": { "column": "order_id" } },
+            "primary_key": "id", "nullable": true, "fields": fields,
+        } } } })
+    }
+
+    /// What the last clause says for each pair of shapes; the Postgres build
+    /// reads the last one's value through the first one's declaration.
+    #[test]
+    fn a_join_or_object_namesake_says_which_child_fields_survive() {
+        let kept = |fields: serde_json::Value| {
+            let found = duplicates(fields);
+            assert_eq!(found.len(), 1, "{found:?}");
+            let message = &found[0].2;
+            let (_, clause) = message.split_once("; ").unwrap();
+            clause.trim_end_matches(". Rename all but one").to_owned()
+        };
+        let a = || int_field("a");
+        let b = || int_field("b");
+        let c = || int_field("c");
+        assert_eq!(
+            kept(json!([
+                orders_join("o", json!([a(), b()])),
+                orders_join("o", json!([b(), c(), a()]))
+            ])),
+            "the index maps the last one, but a document holds its value cut to the child \
+             fields #1 declares that #2 has too (`a`, `b`), read as #1 declares them"
+        );
+        assert_eq!(
+            kept(json!([group("o", json!([a()])), to_one("o", json!([b()]))])),
+            "the index maps the last one, but a document keeps none of its child fields: #1 \
+             and #2 declare none in common, so the object is empty"
+        );
+        assert_eq!(
+            kept(json!([
+                orders_join("o", json!([a()])),
+                group("o", json!([a(), b()]))
+            ])),
+            "the index maps the last one, but a document holds its value cut to the child \
+             fields #1 declares that #2 has too (`a`), read as #1 declares them"
+        );
+        assert_eq!(
+            kept(json!([
+                group("o", json!([a()])),
+                orders_join("o", json!([a(), b()]))
+            ])),
+            "the index maps the last one, and a document holds the last one's value as raw JSON, \
+             not converted to the declared types"
+        );
+        assert_eq!(
+            kept(json!([int_field("o"), orders_join("o", json!([a()]))])),
+            "the index maps the last one, and a document holds the last one's value as raw JSON, \
+             not converted to the declared types"
+        );
+        assert_eq!(
+            kept(json!([group("o", json!([a()])), int_field("o")])),
+            "the index maps the last one, and a document holds the last one's value as raw \
+             JSON, not converted to the declared types"
+        );
+    }
+
+    /// A namesake pair whose documents fail to build, or that OpenSearch
+    /// rejects, says so and what `on_error` then does.
+    #[test]
+    fn a_namesake_that_fails_to_build_or_to_index_says_so() {
+        let clause = |fields: serde_json::Value| {
+            let found = duplicates(fields);
+            assert_eq!(found.len(), 1, "{found:?}");
+            let (_, clause) = found[0].2.split_once("; ").unwrap();
+            clause.trim_end_matches(". Rename all but one").to_owned()
+        };
+        let tags = |ty: &str| {
+            json!({ "field": "tags", "source": { "column": {
+                "column": "tags", "ty": ty, "nullable": true, "array": true,
+            } } })
+        };
+        let script = |ty: &str| {
+            json!({ "field": "tags", "source": { "script": {
+                "source": "\"x\"", "ty": ty, "nullable": true,
+            } } })
+        };
+        let column = |ty: &str| {
+            json!({ "field": "tags", "source": { "column": {
+                "column": "tags", "ty": ty, "nullable": true,
+            } } })
+        };
+        let build = |documents: &str| {
+            format!(
+                "the index maps the last one, but {documents} fails to build: #1 is an `array: \
+                 true` column, which takes scalar elements, and the last one's value holds \
+                 objects. With `on_error = stop` (the default) the ingest engine stops and \
+                 restarts on it, which halts every index of the deployment; with `skip` such a \
+                 document keeps its previous indexed version (none on a first backfill)"
+            )
+        };
+        assert_eq!(
+            clause(json!([
+                tags("keyword"),
+                orders_join("tags", json!([int_field("id")]))
+            ])),
+            build("every document with a related row")
+        );
+        assert_eq!(
+            clause(json!([
+                tags("keyword"),
+                group("tags", json!([int_field("id")]))
+            ])),
+            build("every document")
+        );
+        assert_eq!(
+            clause(json!([tags("integer"), column("json")])),
+            build("every document whose value holds an object")
+        );
+        let mut hidden = tags("keyword");
+        hidden["emit"] = json!(false);
+        assert_eq!(
+            clause(json!([
+                hidden,
+                orders_join("tags", json!([int_field("id")]))
+            ])),
+            build("every document with a related row"),
+            "the build fails before the input-only one strips the name"
+        );
+        assert!(
+            clause(json!([
+                tags("json"),
+                orders_join("tags", json!([int_field("id")]))
+            ]))
+            .ends_with("the last one's value, its elements read as the first one's type"),
+            "a `json` array takes objects"
+        );
+        let rejects = |last: &str, which: &str| {
+            format!(
+                "the index maps the last one, {last}, but a document holds the last script's \
+                 output (#1, a `keyword`): OpenSearch rejects {which}. With `on_error = stop` \
+                 (the default) the sink stops and restarts on it, which halts every index it \
+                 writes and pins the replication slot; with `skip` such a document is \
+                 quarantined"
+            )
+        };
+        assert_eq!(
+            clause(json!([
+                script("keyword"),
+                orders_join("tags", json!([int_field("id")]))
+            ])),
+            rejects(
+                "join on `orders`",
+                "every document where the script returns a value"
+            )
+        );
+        assert_eq!(
+            clause(json!([script("keyword"), column("integer")])),
+            rejects(
+                "column `tags`",
+                "every document whose output does not read as an `integer`"
+            )
+        );
+        assert_eq!(
+            clause(json!([script("keyword"), column("text")])),
+            "the index maps the last one, and a document holds the last script's output (#1, \
+             a `keyword`)"
+        );
+        assert_eq!(
+            clause(json!([column("date"), script("timestamp")])),
+            "the index maps the last one, and a document holds the last script's output (#2, \
+             a `date`)"
+        );
+    }
+
+    /// Every `#n` in a warning is the field's place at its level, never its
+    /// place among the namesakes.
+    #[test]
+    fn a_warning_numbers_every_field_by_its_place_at_the_level() {
+        let message = |fields: serde_json::Value| {
+            let found = duplicates(fields);
+            assert_eq!(found.len(), 1, "{found:?}");
+            found[0].2.clone()
+        };
+        let script = |name: &str, ty: &str| {
+            json!({ "field": name, "source": { "script": {
+                "source": "\"s\"", "ty": ty, "nullable": true,
+            } } })
+        };
+        let age = json!({ "field": "v", "source": { "column": {
+            "column": "age", "ty": "integer", "nullable": true,
+        } } });
+        assert_eq!(
+            message(json!([int_field("id"), script("v", "keyword"), age])),
+            "`v` is declared 2 times at this level: #2 (script), #3 (column `age`); the index \
+             maps the last one, column `age`, but a document holds the last script's output \
+             (#2, a `keyword`): OpenSearch rejects every document whose output does not read \
+             as an `integer`. With `on_error = stop` (the default) the sink stops and restarts \
+             on it, which halts every index it writes and pins the replication slot; with \
+             `skip` such a document is quarantined. Rename all but one"
+        );
+        assert_eq!(
+            message(json!([
+                int_field("id"),
+                script("v", "keyword"),
+                orders_join("v", json!([int_field("id")]))
+            ])),
+            "`v` is declared 2 times at this level: #2 (script), #3 (join on `orders`); the \
+             index maps the last one, join on `orders`, but a document holds the last \
+             script's output (#2, a `keyword`): OpenSearch rejects every document where the \
+             script returns a value. With `on_error = stop` (the default) the sink stops and \
+             restarts on it, which halts every index it writes and pins the replication slot; \
+             with `skip` such a document is quarantined. Rename all but one"
+        );
+        assert_eq!(
+            message(json!([
+                int_field("id"),
+                script("v", "integer"),
+                column_field("v", "name")
+            ])),
+            "`v` is declared 2 times at this level: #2 (script), #3 (column `name`); the index \
+             maps the last one, and a document holds the last script's output (#2, an \
+             `integer`). Rename all but one"
+        );
+        let point = json!({ "field": "v", "source": {
+            "geo": { "lat": "lat", "lon": "lon", "nullable": true },
+        } });
+        assert_eq!(
+            message(json!([
+                int_field("id"),
+                orders_join("v", json!([int_field("a")])),
+                point
+            ])),
+            "`v` is declared 2 times at this level: #2 (join on `orders`), #3 (geo point); the \
+             index maps the last one, geo point, but a document holds its point cut to the \
+             child fields #2 declares, with no `lat` and `lon`: OpenSearch rejects every \
+             document with a point. With `on_error = stop` (the default) the sink stops and \
+             restarts on it, which halts every index it writes and pins the replication slot; \
+             with `skip` such a document is quarantined. Rename all but one"
+        );
+    }
+
+    /// A constant builds what it holds when it comes first; last, a list or
+    /// an object reaches the first one as `null` and a number or boolean as
+    /// text. Positions are each field's place at the level.
+    #[test]
+    fn a_constant_namesake_says_what_a_document_holds() {
+        let message = |fields: serde_json::Value| {
+            let found = duplicates(fields);
+            assert_eq!(found.len(), 1, "{found:?}");
+            let (_, clause) = found[0].2.split_once("; ").unwrap();
+            clause.trim_end_matches(". Rename all but one").to_owned()
+        };
+        let constant =
+            |value: serde_json::Value| json!({ "field": "v", "source": { "constant": value } });
+        let tags = json!({ "field": "v", "source": { "column": {
+            "column": "tags", "ty": "keyword", "nullable": true, "array": true,
+        } } });
+        let point = json!({ "field": "v", "source": {
+            "geo": { "lat": "lat", "lon": "lon", "nullable": true },
+        } });
+        assert_eq!(
+            message(json!([
+                int_field("id"),
+                tags.clone(),
+                constant(json!({ "Array": [{ "BigInt": 1 }, { "BigInt": 2 }] }))
+            ])),
+            "the index maps the last one, but every document holds `null`: #3 is a constant \
+             holding a list or an object, which the document query reads as `null`, and #2 \
+             reads that"
+        );
+        assert_eq!(
+            message(json!([
+                int_field("id"),
+                tags,
+                constant(json!({ "BigInt": 5 }))
+            ])),
+            "the index maps the last one, and a document holds the last one's value as text, \
+             in a one-element array since #2 is an `array: true` column: #3 is a number \
+             constant, which reaches #2 as a string (`\"5\"`), and only a `decimal` field \
+             reads a string as a number"
+        );
+        let column = |name: &str, ty: &str| {
+            json!({ "field": "v", "source": { "column": {
+                "column": name, "ty": ty, "nullable": true,
+            } } })
+        };
+        assert_eq!(
+            message(json!([
+                int_field("id"),
+                column("k", "keyword"),
+                column("bin", "binary")
+            ])),
+            "the index maps the last one, and a document holds the last one's value as text: \
+             #3 is a `binary` column, whose bytes reach #2 as Postgres hex text \
+             (`\"\\x0102\"`), not base64: only a `binary` field decodes them"
+        );
+        assert_eq!(
+            message(json!([
+                int_field("id"),
+                column("bin", "binary"),
+                column("bin", "binary")
+            ])),
+            "the index maps the last one, and a document holds the last one's value, read as \
+             the first one declares it"
+        );
+        assert_eq!(
+            message(json!([
+                int_field("id"),
+                column("n", "integer"),
+                constant(json!({ "Bool": true }))
+            ])),
+            "the index maps the last one, and a document holds the last one's value as text: \
+             #3 is a boolean constant, which reaches #2 as the string `\"true\"` or \
+             `\"false\"`"
+        );
+        assert_eq!(
+            message(json!([
+                int_field("id"),
+                column("dec", "decimal"),
+                constant(json!({ "Double": 2.5 }))
+            ])),
+            "the index maps the last one, and a document holds the last one's value, read as \
+             the first one declares it"
+        );
+        assert_eq!(
+            message(json!([
+                int_field("id"),
+                constant(json!({ "Array": [{ "BigInt": 1 }, { "BigInt": 2 }] })),
+                point.clone()
+            ])),
+            "the index maps the last one, and a document holds the first one's constant (#2), \
+             which a constant builds whatever the last one reads"
+        );
+        assert_eq!(
+            message(json!([
+                int_field("id"),
+                constant(json!({ "BigInt": 5 })),
+                point
+            ])),
+            "the index maps the last one, geo point, but a document holds the first one's \
+             constant (#2), which a constant builds whatever the last one reads: OpenSearch \
+             rejects every document. With `on_error = stop` (the default) the sink stops and \
+             restarts on it, which halts every index it writes and pins the replication slot; \
+             with `skip` such a document is quarantined"
+        );
+        assert_eq!(
+            message(json!([
+                int_field("id"),
+                constant(json!({ "String": "hello" })),
+                column_field("v", "k")
+            ])),
+            "the index maps the last one, and a document holds the first one's constant (#2), \
+             which a constant builds whatever the last one reads"
+        );
+    }
+
+    /// A finding on one of two namesakes says which one, by position.
+    #[test]
+    fn a_finding_under_a_duplicated_name_carries_its_position() {
+        let found = shop_problems(json!([
+            int_field("id"),
+            int_field("name"),
+            json!({ "field": "name", "source": { "column": {
+                "column": "nme", "ty": "integer", "nullable": true,
+            } } }),
+        ]));
+        assert_eq!(
+            found
+                .iter()
+                .map(|(at, kind, _)| (at.as_str(), *kind))
+                .collect::<Vec<_>>(),
+            [
+                ("name#3", DiagnosticKind::UnknownColumn),
+                ("name", DiagnosticKind::DuplicateFieldName),
+            ],
+        );
+    }
+
+    #[test]
+    fn an_input_only_or_script_namesake_says_what_the_document_holds() {
+        let mut hidden = column_field("name", "full_name");
+        hidden["emit"] = json!(false);
+        let script = json!({ "field": "name", "source": { "script": {
+            "source": "this.name", "ty": "keyword", "nullable": true,
+        } } });
+        let messages = |fields| {
+            duplicates(fields)
+                .into_iter()
+                .map(|(_, _, message)| message)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            messages(json!([column_field("name", "name"), hidden.clone()])),
+            [
+                "`name` is declared 2 times at this level: #1 (column `name`), #2 (column \
+              `full_name`, `emit: false`); the index maps the last emitted one, but the \
+              input-only (`emit: false`) one strips the name from every document, so no \
+              document holds it. Rename all but one"
+            ],
+        );
+        assert_eq!(
+            messages(json!([script, column_field("name", "name")])),
+            [
+                "`name` is declared 2 times at this level: #1 (script), #2 (column `name`); the \
+              index maps the last one, and a document holds the last script's output (#1, a \
+              `keyword`). Rename all but one"
+            ],
+        );
+        assert_eq!(
+            messages(json!([hidden.clone(), hidden])),
+            [
+                "`name` is declared 2 times at this level: #1 (column `full_name`, `emit: false`), \
+              #2 (column `full_name`, `emit: false`); none reaches the document. Rename all \
+              but one"
+            ],
+        );
+    }
+
+    #[test]
+    fn validate_indexes_reports_duplicates_too() {
+        assert_eq!(
+            shop_problems(json!([
+                int_field("id"),
+                int_field("name"),
+                int_field("name")
+            ])),
+            problems(&[(
+                "name",
+                DiagnosticKind::DuplicateFieldName,
+                "`name` is declared 2 times at this level: #2 (column `name`), #3 (column \
+                 `name`); the index maps the last one, and a document holds the last one's \
+                 value, read as the first one declares it. Rename all but one"
+            )]),
         );
     }
 

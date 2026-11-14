@@ -251,6 +251,25 @@ after a live update; constants land as written), and `an_update_of_an_unread_col
   border-centred defaults). Keep new UI on shadcn atoms + Tailwind utilities, in
   **rem not px**, and **custom values — especially colours — as `@theme` tokens, never arbitrary
   `[var(--x)]`/`[0.6875rem]`** (`text-string`, not `text-[var(--string)]`).
+  Every name box (index, sink, field, canvas title) goes through `components/nameDraft.ts`'s
+  `useNameDraft`: the typed name is a draft in the UI store with its own `settle`/`drop` (Save
+  settles, Undo/Redo/Reset drop; their buttons `keepFocus`), applied through the store's
+  `renameField`/`renameIndex`/`renameSink`, which take an identity (uid, row id, sink id) and read
+  the current state (`model/renames.ts`), never a closure's snapshot. **A blur inside a pointer
+  press applies the name when the press ends**, after the click's handlers ran (`model/press.ts`:
+  the pure reducer and `createPressTracker` on injectable timers, both under `npm test` in
+  `scripts/press.test.mjs`, as `model/renameChips.ts` is in `scripts/renameChips.test.mjs`; the
+  document-level capture listeners that feed it live in `nameDraft.ts`), so
+  nothing re-renders mid-press and no click is lost to a moved or re-created control; Tab, Enter,
+  unmount and Save apply at once, and a control acting on the renamed thing calls
+  `settleNameDraft()` first (Save, duplicate, remove, Code mode). Lists are keyed by identity,
+  never by a name a box can change (sidebar `e.id`, sink cards and per-sink sections
+  `sinkIds[name]`, the Inspector by index row id + uid). Layout still never moves when a name
+  applies (reasons float and take no pointer events, `model/renameChips.ts` keeps chips in place,
+  a node header is one non-wrapping line); closing the palette hands the focus back through the
+  draft's `refocus`. No test runs a browser, so a change here needs a by-hand check that each
+  control near a pending name still takes its click; the canvas keeps React Flow's
+  `measured`/`selected` across a re-projection, or every node is hidden until re-measured (issue #284).
 - **The toolchain is pinned in `rust-toolchain.toml`** (CI's `dtolnay/rust-toolchain@stable`
   installs stable, but rustup honors the pin and switches to it). This exists because
   `flusso-query-derive`'s trybuild UI tests (`sdk/query-derive/tests/ui/*.stderr`) compare
@@ -660,7 +679,21 @@ key a missing declared column is `UnknownColumn` only when a relation reads it, 
 designer tells a key from a same-named field; every relation table also needs a single-column
 primary key; a `field` that reads no column — `source::soft_delete_column` is `None`,
 which the document query silently skips — is an error that `validate_spec` reports with no
-database, so `check --offline` shows it; guards: the `validation::tests` mock-catalog
+database, so `check --offline` shows it; so is `DuplicateFieldName` (issue #284), a warning: two
+fields sharing a `FieldName` at one level still load (format freeze), but the OpenSearch mapping
+keeps the last, the Postgres document holds the last one's value coerced through the first one's
+declaration (`coerce_document`; a first constant builds its own value, a last one reaches the
+first as text, or as `null` for a list or object, and a `binary` column as hex text), and an
+`emit: false` namesake strips the name from every
+document (the designer refuses to make one: `model/names.ts`'s `fieldNameProblem`); the message
+is built from `source::duplicate_outcome` (`libs/1-ports/source/src/duplicates.rs`), which the live
+`apps/cli/tests/duplicate_names.rs` matrix (every ordered pair of 38 field kinds through the real
+builder and OpenSearch sink; `opensearch` nextest group) pins pair by pair, a pair it can't place
+getting `Unknown` and a wording that claims nothing; a finding
+under a duplicated name carries its position (`Diagnostic.positions`, rendered by `dotted_path` as
+`orders#2.total`; the designer gets them on `DiagnosticDto.positions` and the exact text from
+`/api/preview`'s `schema_diagnostics`, shown only while the fields it describes are unchanged:
+`model/issues.ts`'s `exactDuplicateIssues`); guards: the `validation::tests` mock-catalog
 cases and `config_coverage`'s `validation_reports_a_typo_in_every_relation_position` /
 `validation_reports_a_typo_in_every_root_position`, `validation_reports_what_no_document_build_gets_past`). Every `Diagnostic` carries a
 `DiagnosticKind`, which fixes its `Severity`; a join `primary_key` naming no column is the
@@ -676,7 +709,7 @@ still fails as `connecting to Postgres`), prints every diagnostic to stderr with
 and refuses to start only on a kind that cannot work as written: `stops_the_start` matches
 `DiagnosticKind` exhaustively (`UnknownTable`/`UnknownColumn`/`UnreadSoftDeleteMarker`/
 `RelationPrimaryKey`/`TransformNotApplicable`/`RootPrimaryKeyMismatch`/`NotAnArrayColumn` stop;
-type, numeric, nullability, ignored-primary-key, `UndeclaredArrayColumn` and `RootPrimaryKey`
+type, numeric, nullability, ignored-primary-key, `UndeclaredArrayColumn`, `DuplicateFieldName` and `RootPrimaryKey`
 findings print and start, as they built or ran in 0.17), so a new kind forces a decision there; stop
 only on a state no working 0.17 deployment can be in (or on a key new since, like `array`). `DiagnosticKind` stays exhaustive for that match; `Diagnostic` and `Anchor` are
 `#[non_exhaustive]` (`Diagnostic::new` builds one). `check` still fails on every `Error`. No opt-out

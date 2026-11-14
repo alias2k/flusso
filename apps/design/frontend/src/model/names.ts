@@ -1,14 +1,20 @@
-// Names as flusso reads them. `IndexName` and `SinkName` are trimmed (Rust's
-// `str::trim`) and lowercased, then must be lowercase letters, digits and `_`
-// not starting with a digit, at most 63 characters; a `FieldName` is only
-// trimmed. The page applies a name the way flusso will read it, so it never
-// shows (or keys a save's identity by) a spelling the file does not have.
+// Names as flusso reads them. `IndexName`, `SinkName`, `TableName` and
+// `ColumnName` are trimmed (Rust's `str::trim`) and lowercased, then must be
+// lowercase letters, digits and `_` not starting with a digit, at most 63
+// characters (there is no quoting: a mixed-case table is out of reach). A
+// `FieldName` is only trimmed, then letters (either case), digits and `_`, so
+// `Email` and `email` are two fields while ` email` is `email`. The page
+// applies a name the way flusso will read it, so it never shows (or keys a
+// save's identity by) a spelling the file does not have.
 //
 // ```ts
 // identifier(" Orders") === "orders";
 // identifierProblem("my users", []) === "pattern";
 // identifierProblem("AUDIT", ["audit"]) === "taken";
 // trimmed("\u0085name ") === "name";
+// sqlName(" Created_At") === "created_at";
+// fieldNameProblem("email ", ["email", "name"]) === "taken";
+// freeFieldName("email", ["email", "email_2"]) === "email_3";
 // ```
 
 // Rust's `str::trim` set (Unicode White_Space), which JS `trim` doesn't match:
@@ -34,4 +40,45 @@ export function identifierProblem(name: string, taken: string[]): "taken" | "pat
   if (!/^[a-z_][a-z0-9_]*$/.test(norm)) return "pattern";
   if ([...norm].length > 63) return "length";
   return null;
+}
+
+/// A table or column name as flusso reads it (`TableName`, `ColumnName`):
+/// trimmed and lowercased, like an index name.
+export const sqlName = identifier;
+
+/// Why flusso would refuse a table or column name (written in quotes, which
+/// flusso has no way to read; not lowercase letters, digits and `_` not
+/// starting with a digit; or longer than 63 characters), or `null` when it
+/// reads. An empty name is `null`.
+export function sqlNameProblem(name: string): "quoted" | "pattern" | "length" | null {
+  if (name.includes('"')) return "quoted";
+  const problem = identifierProblem(name, []);
+  return problem === "taken" ? null : problem;
+}
+
+/// The kernel's `FieldName` rule, applied after its trim.
+const FIELD_NAME = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+const FIELD_NAME_MAX_CHARS = 63;
+
+/// Why a field can't take `name` at a level whose other fields are named
+/// `siblings` (another one reads the same, it isn't letters, digits and `_`
+/// not starting with a digit, or it is longer than 63 characters), or `null`.
+/// A blank name is `"pattern"`: a field always has one.
+export function fieldNameProblem(name: string, siblings: string[]): "taken" | "pattern" | "length" | null {
+  const norm = trimmed(name);
+  if (!FIELD_NAME.test(norm)) return "pattern";
+  if ([...norm].length > FIELD_NAME_MAX_CHARS) return "length";
+  if (siblings.some((n) => trimmed(n) === norm)) return "taken";
+  return null;
+}
+
+/// `base`, or the first of `base_2`, `base_3`, … that no name in `taken` reads
+/// as: the name a field added beside `taken` gets.
+export function freeFieldName(base: string, taken: string[]): string {
+  const used = new Set(taken.map(trimmed));
+  const root = trimmed(base);
+  if (!used.has(root)) return root;
+  let n = 2;
+  while (used.has(`${root}_${n}`)) n += 1;
+  return `${root}_${n}`;
 }

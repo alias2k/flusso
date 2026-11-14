@@ -1184,6 +1184,8 @@ dependencies = [
  "reqwest",
  "schemars 1.2.3",
  "serde_json",
+ "sqlx",
+ "testcontainers-modules",
  "tokio",
  "tracing",
  "tracing-opentelemetry",

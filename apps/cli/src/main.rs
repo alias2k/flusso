@@ -30,6 +30,10 @@
 //!   index on a running server (zero read-downtime; reads stay on the old copy
 //!   until the rebuild swaps in).
 
+// Dev-dependencies of the live `duplicate_names` test only.
+#[cfg(test)]
+use {sqlx as _, testcontainers_modules as _};
+
 mod adapters;
 mod backends;
 mod commands;

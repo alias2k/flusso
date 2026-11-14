@@ -18,7 +18,7 @@ Every scalar field's type key bridges a Postgres column type and an OpenSearch m
 | `decimal` | `numeric`, `money` | `double` | Lossy in storage. Use a `custom` `scaled_float` when exactness matters. |
 | `date` | `date` | `date` | |
 | `timestamp` | `timestamp`, `timestamptz`, `time` | `date` | |
-| `binary` | `bytea` | `binary` | The column's bytes, as standard base64 with no line breaks: at the root, as [`array: true`](#array) over `bytea[]`, inside joins, and in an `ids` aggregate, whatever the server's `bytea_output`. A `bytea` primary key still gives the document `_id` as Postgres hex text (`\x0102`), not base64. Before 0.18 the Postgres hex text (`\x0102…`) was indexed instead; see [Upgrade to 0.18](../operate/upgrade-to-0-18.md). |
+| `binary` | `bytea` | `binary` | The column's bytes, as standard base64 with no line breaks: at the root, as [`array: true`](#array) over `bytea[]`, inside joins, and in an `ids` aggregate, whatever the server's `bytea_output`. Under a name another field at the same level shares, a `binary` field declared last is read as Postgres hex text instead: see [One name per level](identifiers.md#one-name-per-level). A `bytea` primary key still gives the document `_id` as Postgres hex text (`\x0102`), not base64. Before 0.18 the Postgres hex text (`\x0102…`) was indexed instead; see [Upgrade to 0.18](../operate/upgrade-to-0-18.md). |
 | `json` | `json`, `jsonb` | `object` | Opaque; no children declared. The strict root refuses any key inside it, so store it with [`indexed: false`](joins.md#indexed) or declare a [`map`](objects-and-maps.md). |
 | `custom` | as declared | as declared | See [custom](#custom). |
 | `geo` | see below | `geo_point` | Not a scalar; see [geo](#geo). |

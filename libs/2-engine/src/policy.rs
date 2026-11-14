@@ -46,7 +46,8 @@ impl Default for BatchPolicy {
 ///
 /// It governs only *per-document* failures: an item-level rejection (a sink
 /// accepted the batch but refused specific documents) and a document that
-/// could not be built (a script failed on it). Transport failures, a source
+/// could not be built (a script failed on it, or an `array: true` column held
+/// an object). Transport failures, a source
 /// decode error, or a flush returning `Err` always stop the run regardless of
 /// this.
 #[derive(Debug, Clone, Default)]

@@ -71,7 +71,7 @@ const CONSTANT_OBJECT_REVISION: u8 = 1;
 /// out-of-range number after a whole one mixes: a `long` refuses `1e20` and
 /// cuts `2.5` to `2`. The mapping projection, the content hash and so the
 /// designer and the query derive all ask this.
-pub(crate) fn constant_is_stored_unindexed(value: &common::GenericValue) -> bool {
+pub fn constant_is_stored_unindexed(value: &common::GenericValue) -> bool {
     let mut kinds = Vec::new();
     !collect_constant_kinds(value, &mut kinds) || kinds.len() > 1
 }

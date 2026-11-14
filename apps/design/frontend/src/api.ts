@@ -594,6 +594,8 @@ export interface PreviewResponse {
   differs_at?: string;
   // Every script field that does not compile.
   script_errors?: ScriptErrorDto[];
+  /// What `flusso check --offline` finds in this schema, such as two fields sharing a name.
+  schema_diagnostics?: DiagnosticDto[];
 }
 
 /// A script failure: a compile error, or one raised on a sample row.
@@ -613,6 +615,8 @@ export interface DiagnosticDto {
   /// The field's path from the document root, or an index-level key alone
   /// (`table`, `primary_key`, `filters`, `soft_delete`) when `anchor` is `index_key`.
   path: string[];
+  /// For each segment of `path`, its 1-based position at its level when another field there has its name.
+  positions?: (number | null)[];
   /// What `path` names: a field, or an index-level key a root field may share a name with.
   anchor: "field" | "index_key";
   /// What the database check found, e.g. `unknown_column`; absent on client-side checks.

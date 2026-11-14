@@ -1,5 +1,8 @@
 // Path-addressed, immutable edits on the schema tree. Every canvas/inspector
 // action funnels through one of these; each returns a fresh `IndexSchema`.
+// A field they add takes a name no other field at its level has, as flusso
+// reads names (`freeFieldName`): two fields of one name would leave one out of
+// the index.
 
 import type { Column, Field, FlussoType, IndexSchema } from "../api";
 import type { Generic } from "./generic";
@@ -7,6 +10,7 @@ import { columnField, defaultField, retypeOptions, typeOptions } from "../fields
 import { childFields, withChildFields } from "./containers";
 import { cloneJson } from "./exact";
 import { stripFieldUids } from "./ids";
+import { freeFieldName, trimmed } from "./names";
 import { carryUid, nodeFields, setNodeField, withNodeFields } from "./tree";
 
 /// Include or drop a scalar field backed by `column` on the node at `path`.
@@ -21,7 +25,11 @@ export function toggleColumn(
 ): IndexSchema {
   const fields = nodeFields(schema, path);
   if (on) {
-    return withNodeFields(schema, path, [...fields, columnField(column, catalogColumn(column, ty, nullable, sqlType))]);
+    const name = freeFieldName(
+      column,
+      fields.map((f) => f.field),
+    );
+    return withNodeFields(schema, path, [...fields, columnField(name, catalogColumn(column, ty, nullable, sqlType))]);
   }
   const next = fields.filter(
     (f) => !("column" in f.source && typeof f.source.column.ty === "string" && f.source.column.column === column),
@@ -31,7 +39,12 @@ export function toggleColumn(
 
 /// Append a field (leaf or container) to the node at `path`.
 export function addField(schema: IndexSchema, path: number[], field: Field): IndexSchema {
-  return withNodeFields(schema, path, [...nodeFields(schema, path), field]);
+  const fields = nodeFields(schema, path);
+  const name = freeFieldName(
+    field.field,
+    fields.map((f) => f.field),
+  );
+  return withNodeFields(schema, path, [...fields, { ...field, field: name }]);
 }
 
 /// Include every catalog column not already present as a scalar field.
@@ -46,9 +59,14 @@ export function includeColumns(
       .filter((f) => "column" in f.source && typeof f.source.column.ty === "string")
       .map((f) => ("column" in f.source ? f.source.column.column : "")),
   );
+  const names = fields.map((f) => f.field);
   const added = columns
     .filter((c) => !present.has(c.name))
-    .map((c) => columnField(c.name, catalogColumn(c.name, c.ty ?? "keyword", c.nullable ?? true, c.sqlType)));
+    .map((c) => {
+      const name = freeFieldName(c.name, names);
+      names.push(name);
+      return columnField(name, catalogColumn(c.name, c.ty ?? "keyword", c.nullable ?? true, c.sqlType));
+    });
   return withNodeFields(schema, path, [...fields, ...added]);
 }
 
@@ -133,9 +151,10 @@ export function duplicateNode(schema: IndexSchema, path: number[]): IndexSchema 
 }
 
 function uniqueName(existing: string[], base: string): string {
-  let name = `${base}_copy`;
+  const taken = new Set(existing.map(trimmed));
+  let name = `${trimmed(base)}_copy`;
   let n = 1;
-  while (existing.includes(name)) {
+  while (taken.has(name)) {
     n += 1;
     name = `${base}_copy${n}`;
   }
@@ -145,10 +164,10 @@ function uniqueName(existing: string[], base: string): string {
 /// Append a fresh special/leaf field of `kind` (geo/map/custom/constant/aggregate
 /// op) or an `object` group to the node at `path`.
 export function addSpecial(schema: IndexSchema, path: number[], kind: string): IndexSchema {
-  const existing = nodeFields(schema, path).map((f) => f.field);
+  const existing = new Set(nodeFields(schema, path).map((f) => trimmed(f.field)));
   let name = kind === "object" ? "group" : kind;
   let n = 1;
-  while (existing.includes(name)) name = `${kind}${++n}`;
+  while (existing.has(name)) name = `${kind}${++n}`;
   return addField(schema, path, defaultField(name, kind));
 }
 
