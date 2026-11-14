@@ -34,7 +34,7 @@ use source_postgres::{
 use crate::commit::journal::Digest;
 use crate::commit::{
     self, Changed, Direction, Disk, Expect, Fix, HandStep, Holds, LockError, Outcome, ProblemKind,
-    ProjectLock, Remove, Report, State, Unusable, Write, commit, recover, strays,
+    ProjectLock, Remove, Report, Settled, State, Unusable, Write, commit, recover_telling, strays,
 };
 use crate::fspath::{MAX_PATH, on_disk};
 use crate::keep::{self, ConfigIdentity, Notice, Saved, SchemaIdentity};
@@ -710,7 +710,7 @@ pub struct SaveResponse {
 /// A file another program wrote, in place, in the instant a save replaced
 /// it: it holds the save's text, and the program's bytes went to the save's
 /// backup of it, which is kept for the user to check and delete.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisplacedFile {
     /// The file, relative to the config's folder.
     pub path: String,
@@ -816,12 +816,43 @@ pub struct SaveRecovery {
     /// before journals, or found holding other text than the save's):
     /// reported, never touched.
     pub leftovers: Vec<String>,
+    /// Copies earlier saves kept, whose notice the user dismissed, still on
+    /// disk: each says what it holds until it is deleted.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub copies: Vec<KeptCopy>,
+}
+
+/// A copy a save kept beside a file, named by a notice the user dismissed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KeptCopy {
+    /// The copy, relative to the config's folder.
+    pub copy: String,
+    /// The file it is a copy of, relative to the config's folder.
+    pub path: String,
+    /// What it holds.
+    pub holds: CopyHolds,
+    /// When the save that kept it started, in milliseconds since the Unix epoch.
+    pub started_at_ms: u64,
+}
+
+/// What a copy a save kept holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CopyHolds {
+    /// The file's text from before a save that was rolled back without it:
+    /// another program had written the file meanwhile.
+    Before,
+    /// What another program wrote to the file in the instant a save replaced it.
+    Displaced,
 }
 
 impl SaveRecovery {
     /// Whether there is nothing to tell.
     pub fn is_empty(&self) -> bool {
-        self.recovered.is_empty() && self.blocked.is_none() && self.leftovers.is_empty()
+        self.recovered.is_empty()
+            && self.blocked.is_none()
+            && self.leftovers.is_empty()
+            && self.copies.is_empty()
     }
 
     /// Whether a diff or save must stop: a save could not be settled.
@@ -845,7 +876,7 @@ impl SaveRecovery {
 }
 
 /// An interrupted save the designer settled.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecoveredSave {
     /// Which save it was: a page shows each once.
     pub id: String,
@@ -855,18 +886,22 @@ pub struct RecoveredSave {
     pub started_at_ms: u64,
     /// The files the save changed, relative to the config's folder.
     pub files: Vec<String>,
-    /// Files another program wrote during or after the save, kept as they
-    /// are instead of rolled back or finished.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// Files another program wrote or deleted during or after the save,
+    /// left as they are instead of rolled back or finished.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kept: Vec<KeptFile>,
     /// Files whose backup holds what another program wrote to them as the
     /// save replaced them ([`DisplacedFile`]).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub displaced: Vec<DisplacedFile>,
+    /// The notice could not be stored in the state folder: it is told only
+    /// until the designer stops.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unsaved: bool,
 }
 
-/// A file a recovered save left as another program wrote it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// A file a recovered save left as another program wrote it, or deleted it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeptFile {
     /// The file, relative to the config's folder.
     pub path: String,
@@ -874,10 +909,14 @@ pub struct KeptFile {
     /// user to delete or copy back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backup: Option<String>,
+    /// The file is missing: deleted during or after the save. Checked again
+    /// each time the notice is shown.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deleted: bool,
 }
 
 /// How an interrupted save was settled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryOutcome {
     /// Its files had not all been written: every file is back as before it.
@@ -1363,6 +1402,305 @@ pub fn recover_project(config_path: &Path) -> Result<SaveRecovery> {
     Ok(recover_locked(&paths, &lock, &mut Disk::default()))
 }
 
+/// The project as a page opens it: any interrupted save settled first
+/// ([`recover_project`]), then the files read, with what the page is to be
+/// told about earlier saves ([`Project::recovery`]): every save settled
+/// since, by this designer or an earlier one, until the user dismisses it
+/// ([`dismiss_recovered`]).
+///
+/// Refused with [`Interrupted`] when a save can't be settled, and with
+/// [`Unloadable`] when the files can't be read.
+pub fn open_project(config_path: &Path) -> Result<Project> {
+    let mut recovery = recover_project(config_path)?;
+    if recovery.blocked.is_some() {
+        return Err(Interrupted(recovery).into());
+    }
+    let paths = Paths::new(config_path)?;
+    recovery.recovered = notices(&paths)
+        .into_iter()
+        .filter(|n| n.pending)
+        .map(|n| n.save)
+        .collect();
+    match load_project(config_path) {
+        Ok(mut project) => {
+            project.recovery = recovery;
+            Ok(project)
+        }
+        Err(e) => Err(Unloadable {
+            message: format!("{e:#}"),
+            recovery,
+        }
+        .into()),
+    }
+}
+
+/// A project that can't be read, with what the page is to be told about
+/// earlier saves all the same.
+#[derive(Debug)]
+pub struct Unloadable {
+    /// Why it can't be read.
+    pub message: String,
+    /// What the designer found of earlier saves.
+    pub recovery: SaveRecovery,
+}
+
+impl std::fmt::Display for Unloadable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Unloadable {}
+
+/// The user dismissed the notices of the saves `ids` in the project of
+/// `config_path`.
+///
+/// A notice whose copies are all gone is forgotten; one that names a copy
+/// still on disk stays, to say what that copy holds ([`SaveRecovery::copies`]).
+pub fn dismiss_recovered(config_path: &Path, ids: &[String]) -> Result<()> {
+    let paths = Paths::new(config_path)?;
+    for mut notice in notices(&paths) {
+        if notice.pending && ids.contains(&notice.save.id) {
+            notice.pending = false;
+            if notice.copies(&paths).is_empty() {
+                forget(&notice);
+            } else {
+                if !remember(notice, &mut Disk::default()) {
+                    tracing::warn!("the dismissal is kept until the designer stops");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What the designer keeps to tell about one save, beside its save records
+/// (`commit::Notices`), or in this process when they can't be written.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredNotice {
+    format: u32,
+    /// The config's folder, resolved.
+    dir: PathBuf,
+    /// Still to be shown until the user dismisses it.
+    pending: bool,
+    save: RecoveredSave,
+}
+
+/// The notice format this designer writes and reads.
+const NOTICE_FORMAT: u32 = 1;
+
+/// The notices that [`remember`] could not write, per project folder.
+static UNSTORED: std::sync::Mutex<BTreeMap<PathBuf, Vec<StoredNotice>>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+impl StoredNotice {
+    fn new(paths: &Paths, pending: bool, save: RecoveredSave) -> Self {
+        Self {
+            format: NOTICE_FORMAT,
+            dir: paths.base.clone(),
+            pending,
+            save,
+        }
+    }
+
+    /// The notice as it can be shown now (a notice is a file anyone with the
+    /// user's rights can edit). A file is kept when the project names it
+    /// (`named`: `flusso.toml` and each index's schema file, `None` when the
+    /// config can't be read), or when it is a plain path inside the project
+    /// reached through no link. A copy is kept when it is a regular file
+    /// beside a kept file, named as the save's copy of it
+    /// (`.<name>.flusso-save.<id>.…`). A kept file is told deleted only while
+    /// it is missing. Anything else is dropped, and no path is looked at
+    /// before it passed those checks.
+    fn checked(mut self, paths: &Paths, named: Option<&HashSet<String>>) -> Self {
+        let file_ok = |rel: &str| {
+            named.is_some_and(|named| named.contains(rel)) || plain_inside(&paths.base, rel)
+        };
+        let id = self.save.id.clone();
+        let copy_of = |copy: &str, path: &str| {
+            file_ok(path) && is_save_copy(copy, path, &id) && regular_file(&paths.base.join(copy))
+        };
+        self.save.files.retain(|f| file_ok(f));
+        self.save.kept.retain(|k| file_ok(&k.path));
+        for kept in &mut self.save.kept {
+            kept.backup = kept.backup.take().filter(|b| copy_of(b, &kept.path));
+            kept.deleted = paths.base.join(&kept.path).symlink_metadata().is_err();
+        }
+        self.save.displaced.retain(|d| copy_of(&d.copy, &d.path));
+        self
+    }
+
+    /// The copies it names that are still on disk.
+    fn copies(&self, paths: &Paths) -> Vec<KeptCopy> {
+        let backups = self.save.kept.iter().filter_map(|k| {
+            k.backup
+                .as_ref()
+                .map(|copy| (copy, &k.path, CopyHolds::Before))
+        });
+        let displaced = self
+            .save
+            .displaced
+            .iter()
+            .map(|d| (&d.copy, &d.path, CopyHolds::Displaced));
+        backups
+            .chain(displaced)
+            .filter(|(copy, _, _)| regular_file(&paths.base.join(copy)))
+            .map(|(copy, path, holds)| KeptCopy {
+                copy: copy.clone(),
+                path: path.clone(),
+                holds,
+                started_at_ms: self.save.started_at_ms,
+            })
+            .collect()
+    }
+}
+
+/// Whether `rel` is a plain path inside the project at `base` (names only),
+/// reached through no link: a folder link on the way could lead out of it.
+fn plain_inside(base: &Path, rel: &str) -> bool {
+    let path = Path::new(rel);
+    if rel.is_empty() || !path.components().all(|c| matches!(c, Component::Normal(_))) {
+        return false;
+    }
+    let mut at = base.to_path_buf();
+    for folder in path.parent().into_iter().flat_map(Path::components) {
+        at.push(folder);
+        match at.symlink_metadata() {
+            Ok(meta) if meta.file_type().is_symlink() => return false,
+            Ok(_) => {}
+            Err(_) => return true,
+        }
+    }
+    true
+}
+
+/// Whether `path` is a regular file: not a link, not a folder.
+fn regular_file(path: &Path) -> bool {
+    path.symlink_metadata().is_ok_and(|m| m.is_file())
+}
+
+/// Whether `copy` is named as a copy the save `id` keeps of `path`: beside
+/// it, `.<name>.flusso-save.<id>.…`.
+fn is_save_copy(copy: &str, path: &str, id: &str) -> bool {
+    let (copy, path) = (Path::new(copy), Path::new(path));
+    let name = |p: &Path| p.file_name().and_then(|n| n.to_str()).map(str::to_owned);
+    copy.parent() == path.parent()
+        && name(path)
+            .zip(name(copy))
+            .is_some_and(|(file, copy)| copy.starts_with(&format!(".{file}.flusso-save.{id}.")))
+}
+
+/// The files the project names, as [`Paths::relative_path`] writes them:
+/// `flusso.toml` and each index's schema file. `None` when `flusso.toml`
+/// can't be read.
+fn named_files(paths: &Paths) -> Option<HashSet<String>> {
+    let text = std::fs::read_to_string(&paths.config).ok()?;
+    let config = ConfigToml::try_parse(&text).ok()?;
+    let mut named = HashSet::from([paths.relative_path(&paths.config)]);
+    for entry in &config.index {
+        if let Ok(at) = paths.at(entry.schema.as_ref()) {
+            named.insert(paths.relative_path(&at));
+        }
+    }
+    Some(named)
+}
+
+/// Keep `notice`, replacing any earlier one of its save: in the user's state
+/// folder, else in this process. Whether it is in the state folder.
+fn remember(notice: StoredNotice, disk: &mut Disk) -> bool {
+    let stored = State::open()
+        .map_err(|e| e.to_string())
+        .and_then(|state| state.notices().map_err(|e| e.to_string()))
+        .and_then(|notices| {
+            let bytes = serde_json::to_vec_pretty(&notice).map_err(|e| e.to_string())?;
+            notices
+                .put(&notice.save.id, &bytes, disk)
+                .map_err(|e| e.to_string())
+        });
+    let durable = stored.is_ok();
+    let Ok(mut unstored) = UNSTORED.lock() else {
+        return durable;
+    };
+    let kept = unstored.entry(notice.dir.clone()).or_default();
+    kept.retain(|n| n.save.id != notice.save.id);
+    if let Err(e) = stored {
+        tracing::warn!(
+            error = %e,
+            folder = %notices_folder(),
+            "could not keep what the designer did about a save in its state folder; it is told \
+             only until the designer stops"
+        );
+        kept.push(notice);
+    }
+    durable
+}
+
+/// The notices folder, for a warning.
+fn notices_folder() -> String {
+    commit::state::dir().map_or_else(
+        || "(no state folder)".to_owned(),
+        |dir| dir.join("notices").display().to_string(),
+    )
+}
+
+/// Drop `notice` wherever it is kept.
+fn forget(notice: &StoredNotice) {
+    if let Ok(notices) = State::open()
+        .map_err(|e| e.to_string())
+        .and_then(|s| s.notices().map_err(|e| e.to_string()))
+    {
+        notices.remove(&notice.save.id, &mut Disk::default()).ok();
+    }
+    if let Ok(mut unstored) = UNSTORED.lock()
+        && let Some(kept) = unstored.get_mut(&notice.dir)
+    {
+        kept.retain(|n| n.save.id != notice.save.id);
+    }
+}
+
+/// Every notice of the project, oldest save first. A dismissed one whose
+/// copies are all gone is forgotten on the way.
+fn notices(paths: &Paths) -> Vec<StoredNotice> {
+    let named = named_files(paths);
+    let mut found: Vec<StoredNotice> = State::open()
+        .ok()
+        .and_then(|state| state.notices().ok())
+        .map(|notices| notices.all())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(token, bytes)| {
+            serde_json::from_slice::<StoredNotice>(&bytes)
+                .ok()
+                .filter(|n| n.format == NOTICE_FORMAT && n.save.id == token)
+        })
+        .filter(|n| n.dir == paths.base)
+        .map(|n| n.checked(paths, named.as_ref()))
+        .collect();
+    if let Ok(unstored) = UNSTORED.lock()
+        && let Some(kept) = unstored.get(&paths.base)
+    {
+        for notice in kept {
+            if !found.iter().any(|n| n.save.id == notice.save.id) {
+                let mut notice = notice.clone().checked(paths, named.as_ref());
+                notice.save.unsaved = true;
+                found.push(notice);
+            }
+        }
+    }
+    found.retain(|notice| {
+        let done = !notice.pending && notice.copies(paths).is_empty();
+        if done {
+            forget(notice);
+        }
+        !done
+    });
+    found.sort_by(|a, b| {
+        (a.save.started_at_ms, &a.save.id).cmp(&(b.save.started_at_ms, &b.save.id))
+    });
+    found
+}
+
 fn recover_locked(paths: &Paths, lock: &ProjectLock, disk: &mut Disk) -> SaveRecovery {
     let state = State::open();
     let why = state
@@ -1370,11 +1708,22 @@ fn recover_locked(paths: &Paths, lock: &ProjectLock, disk: &mut Disk) -> SaveRec
         .err()
         .map(|e| paths.relative_text(&e.to_string()))
         .unwrap_or_default();
-    let mut recovery = recover(
+    let mut recovery = recover_telling(
         lock,
         &paths.config,
         state.as_ref().map_err(|_| why.as_str()),
         disk,
+        &mut |settled, disk| {
+            let own = OWN_CLEANUP.lock().is_ok_and(|own| {
+                settled.outcome == Outcome::Completed && own.contains(&settled.token)
+            });
+            if !own {
+                remember(
+                    StoredNotice::new(paths, true, recovered_save(paths, settled)),
+                    disk,
+                );
+            }
+        },
     );
     if let Ok(mut own) = OWN_CLEANUP.lock() {
         recovery.settled.retain(|s| {
@@ -1392,36 +1741,7 @@ fn recover_locked(paths: &Paths, lock: &ProjectLock, disk: &mut Disk) -> SaveRec
         recovered: recovery
             .settled
             .iter()
-            .map(|s| RecoveredSave {
-                outcome: match s.outcome {
-                    Outcome::RolledBack => RecoveryOutcome::RolledBack,
-                    Outcome::Completed => RecoveryOutcome::Completed,
-                },
-                id: s.token.clone(),
-                started_at_ms: s.started_at_ms,
-                files: s
-                    .files
-                    .iter()
-                    .filter(|f| !s.kept.iter().any(|k| k.path == **f))
-                    .map(rel)
-                    .collect(),
-                kept: s
-                    .kept
-                    .iter()
-                    .map(|k| KeptFile {
-                        path: rel(&k.path),
-                        backup: k.backup.as_ref().map(rel),
-                    })
-                    .collect(),
-                displaced: s
-                    .displaced
-                    .iter()
-                    .map(|d| DisplacedFile {
-                        path: rel(&d.path),
-                        copy: rel(&d.copy),
-                    })
-                    .collect(),
-            })
+            .map(|s| recovered_save(paths, s))
             .collect(),
         blocked: recovery.blocked.as_ref().map(|b| BlockedSave {
             busy: false,
@@ -1451,6 +1771,7 @@ fn recover_locked(paths: &Paths, lock: &ProjectLock, disk: &mut Disk) -> SaveRec
             keep: b.keep.as_ref().map(|k| k.iter().map(step).collect()),
         }),
         leftovers: Vec::new(),
+        copies: Vec::new(),
     };
     let completed: Vec<RecoveredSave> = out
         .recovered
@@ -1466,17 +1787,72 @@ fn recover_locked(paths: &Paths, lock: &ProjectLock, disk: &mut Disk) -> SaveRec
         let excess = saves.len().saturating_sub(COMPLETED_KEPT);
         saves.drain(..excess);
     }
+    log_recovery(&out);
     if out.blocked.is_none() {
+        let notices = notices(paths);
+        let named: HashSet<String> = notices
+            .iter()
+            .flat_map(|n| {
+                let backups = n.save.kept.iter().filter_map(|k| k.backup.clone());
+                backups.chain(n.save.displaced.iter().map(|d| d.copy.clone()))
+            })
+            .collect();
         let mut folders = project_folders(paths);
         for folder in recovery.settled.iter().flat_map(|s| &s.folders) {
             if !folders.contains(folder) {
                 folders.push(folder.clone());
             }
         }
-        out.leftovers = strays(&folders).iter().map(rel).collect();
+        out.leftovers = strays(&folders)
+            .iter()
+            .map(rel)
+            .filter(|p| !named.contains(p))
+            .collect();
+        log_leftovers(&out.leftovers);
+        out.copies = notices
+            .iter()
+            .filter(|n| !n.pending)
+            .flat_map(|n| n.copies(paths))
+            .collect();
     }
-    log_recovery(&out);
     out
+}
+
+/// What the page is told about the settled save `s`.
+fn recovered_save(paths: &Paths, s: &Settled) -> RecoveredSave {
+    let rel = |p: &PathBuf| paths.relative_path(p);
+    RecoveredSave {
+        outcome: match s.outcome {
+            Outcome::RolledBack => RecoveryOutcome::RolledBack,
+            Outcome::Completed => RecoveryOutcome::Completed,
+        },
+        id: s.token.clone(),
+        started_at_ms: s.started_at_ms,
+        files: s
+            .files
+            .iter()
+            .filter(|f| !s.kept.iter().any(|k| k.path == **f))
+            .map(rel)
+            .collect(),
+        kept: s
+            .kept
+            .iter()
+            .map(|k| KeptFile {
+                path: rel(&k.path),
+                backup: k.backup.as_ref().map(rel),
+                deleted: k.path.symlink_metadata().is_err(),
+            })
+            .collect(),
+        displaced: s
+            .displaced
+            .iter()
+            .map(|d| DisplacedFile {
+                path: rel(&d.path),
+                copy: rel(&d.copy),
+            })
+            .collect(),
+        unsaved: false,
+    }
 }
 
 fn hand_step(paths: &Paths, step: &HandStep) -> Step {
@@ -1600,8 +1976,24 @@ fn log_recovery(recovery: &SaveRecovery) {
             );
         }
         for kept in &save.kept {
+            let what = match (save.outcome, kept.deleted) {
+                (RecoveryOutcome::RolledBack, false) => {
+                    "was written by another program during or after the save, so it was not rolled \
+                     back: it keeps what that program wrote"
+                }
+                (RecoveryOutcome::RolledBack, true) => {
+                    "was deleted during or after the save, so it was not rolled back: it stays deleted"
+                }
+                (RecoveryOutcome::Completed, false) => {
+                    "was written by another program after the save: it keeps what that program wrote, \
+                     not what the save wrote"
+                }
+                (RecoveryOutcome::Completed, true) => {
+                    "was deleted after the save wrote it: it stays deleted"
+                }
+            };
             tracing::warn!(
-                "{} was written by another program during or after the save, and is kept as it is{}",
+                "{} {what}{}",
                 kept.path,
                 kept.backup
                     .as_ref()
@@ -1615,10 +2007,13 @@ fn log_recovery(recovery: &SaveRecovery) {
     {
         tracing::error!("{}", Interrupted(recovery.clone()));
     }
-    if !recovery.leftovers.is_empty() {
+}
+
+fn log_leftovers(leftovers: &[String]) {
+    if !leftovers.is_empty() {
         tracing::warn!(
             "files an earlier save left, which no journal names, are left alone: {}. Check them and delete them",
-            recovery.leftovers.join(", ")
+            leftovers.join(", ")
         );
     }
 }
@@ -2534,6 +2929,20 @@ fn save_with(config_path: &Path, request: &SaveRequest, disk: &mut Disk) -> Resu
             d.copy
         );
     }
+    if !resp.displaced.is_empty() && !disk.stopped() {
+        let save = RecoveredSave {
+            id: committed.token.clone(),
+            outcome: RecoveryOutcome::Completed,
+            started_at_ms: committed.started_at_ms,
+            files: Vec::new(),
+            kept: Vec::new(),
+            displaced: resp.displaced.clone(),
+            unsaved: false,
+        };
+        if !remember(StoredNotice::new(&paths, false, save), disk) {
+            tracing::warn!("the copy is explained until the designer stops");
+        }
+    }
     Ok(resp)
 }
 
@@ -3058,7 +3467,13 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.0).ok();
+            if let Ok(meta) = std::fs::metadata(self.state_dir().join("notices")) {
+                let mut perms = meta.permissions();
+                std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o700);
+                std::fs::set_permissions(self.state_dir().join("notices"), perms).ok();
+            }
             std::fs::remove_dir_all(self.state_dir()).ok();
+            std::fs::remove_dir_all(self.shared()).ok();
             commit::state::use_test_dir(None);
         }
     }
@@ -3111,6 +3526,11 @@ mod tests {
 
         fn state_dir(&self) -> PathBuf {
             self.0.with_extension("state")
+        }
+
+        /// A folder beside the project, for schema files outside it.
+        fn shared(&self) -> PathBuf {
+            self.0.with_extension("shared")
         }
 
         /// Whether a save in flight is past its commit point.
@@ -3173,6 +3593,769 @@ mod tests {
                 tagged("orders: 1")
             );
         }
+    }
+
+    impl Fixture {
+        /// Forget what this process remembers of the project, as a designer
+        /// restart does.
+        fn restart(&self) {
+            let base = Paths::new(&self.config()).unwrap().base;
+            COMPLETED.lock().unwrap().remove(&base);
+            UNSTORED.lock().unwrap().remove(&base);
+        }
+
+        /// Kill a swap save right after `flusso.toml` was replaced, before
+        /// its commit point.
+        fn kill_after_config(&self) {
+            let original = include_str!("../../../dev/flusso.toml");
+            for point in 10.. {
+                save_with(
+                    &self.config(),
+                    &self.swap(),
+                    &mut Disk::stopping_after(point),
+                )
+                .unwrap_err();
+                assert!(!self.committed(), "committed before flusso.toml changed");
+                if std::fs::read_to_string(self.config()).unwrap() != original {
+                    return;
+                }
+                self.settle();
+            }
+        }
+
+        /// Kill a swap save right after its commit point.
+        fn kill_after_commit(&self) {
+            for point in 1.. {
+                save_with(
+                    &self.config(),
+                    &self.swap(),
+                    &mut Disk::stopping_after(point),
+                )
+                .ok();
+                if self.committed() {
+                    return;
+                }
+                self.settle();
+            }
+        }
+
+        /// Settle a save a probe killed, and dismiss what the page is told
+        /// of it, as its user would.
+        fn settle(&self) {
+            let recovery = recover_project(&self.config()).unwrap();
+            assert!(recovery.blocked.is_none(), "{recovery:?}");
+            dismiss_recovered(&self.config(), &Self::ids(&recovery.recovered)).unwrap();
+        }
+
+        fn ids(recovered: &[RecoveredSave]) -> Vec<String> {
+            recovered.iter().map(|r| r.id.clone()).collect()
+        }
+    }
+
+    fn unloadable(result: Result<Project>) -> SaveRecovery {
+        let err = result.unwrap_err();
+        err.downcast_ref::<Unloadable>()
+            .unwrap_or_else(|| panic!("not an unloadable project: {err:#}"))
+            .recovery
+            .clone()
+    }
+
+    /// Issue #292: a save killed after `flusso.toml` was replaced, whose
+    /// `flusso.toml` then gets text that does not parse. The page that opens
+    /// the project is told what recovery did, along with why it can't load.
+    #[test]
+    fn a_recovery_is_told_when_the_config_then_does_not_parse() {
+        let fixture = Fixture::new("unparsable");
+        fixture.kill_after_config();
+        std::fs::write(fixture.config(), "not = [toml\n").unwrap();
+
+        let recovery = unloadable(open_project(&fixture.config()));
+        assert_eq!(recovery.recovered.len(), 1, "{recovery:?}");
+        let save = &recovery.recovered[0];
+        assert_eq!(save.outcome, RecoveryOutcome::RolledBack);
+        assert_eq!(save.files, ["products.schema.yml", "orders.schema.yml"]);
+        assert_eq!(save.kept.len(), 1, "{save:?}");
+        assert_eq!(save.kept[0].path, "flusso.toml");
+        assert!(save.kept[0].backup.is_some(), "{save:?}");
+    }
+
+    /// Issue #292: what recovery did outlives the designer, until the user
+    /// dismisses it: told after a restart even when the project then fails
+    /// to load, again on every load, and no more once dismissed.
+    #[test]
+    fn a_recovery_notice_outlives_a_restart_until_dismissed() {
+        let fixture = Fixture::new("outlives");
+        fixture.kill_after_config();
+        std::fs::write(fixture.config(), "not = [toml\n").unwrap();
+        recover_project(&fixture.config()).unwrap();
+        fixture.restart();
+
+        let told = unloadable(open_project(&fixture.config())).recovered;
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].outcome, RecoveryOutcome::RolledBack);
+
+        std::fs::write(fixture.config(), include_str!("../../../dev/flusso.toml")).unwrap();
+        let project = open_project(&fixture.config()).unwrap();
+        assert_eq!(
+            Fixture::ids(&project.recovery.recovered),
+            Fixture::ids(&told)
+        );
+        fixture.restart();
+        let project = open_project(&fixture.config()).unwrap();
+        assert_eq!(
+            Fixture::ids(&project.recovery.recovered),
+            Fixture::ids(&told)
+        );
+
+        dismiss_recovered(&fixture.config(), &Fixture::ids(&told)).unwrap();
+        let project = open_project(&fixture.config()).unwrap();
+        assert!(
+            project.recovery.recovered.is_empty(),
+            "{:?}",
+            project.recovery
+        );
+    }
+
+    /// Issue #292: a committed save that kept a file another program wrote
+    /// after it leaves nothing on disk; it is told after a restart all the
+    /// same.
+    #[test]
+    fn a_completed_save_that_kept_a_later_write_is_told_after_a_restart() {
+        let fixture = Fixture::new("completed-kept");
+        fixture.kill_after_commit();
+        std::fs::write(fixture.0.join("users.schema.yml"), "mine\n").unwrap();
+        std::fs::write(fixture.0.join("products.schema.yml"), tagged("mine")).unwrap();
+        recover_project(&fixture.config()).unwrap();
+        fixture.restart();
+
+        let project = open_project(&fixture.config()).unwrap();
+        let told = &project.recovery.recovered;
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].outcome, RecoveryOutcome::Completed);
+        let kept: Vec<&str> = told[0].kept.iter().map(|k| k.path.as_str()).collect();
+        assert_eq!(kept, ["products.schema.yml"], "{told:?}");
+    }
+
+    /// Issue #292: a file deleted after the kill is told as deleted, not as
+    /// written by another program.
+    #[test]
+    fn a_file_deleted_after_the_kill_is_told_as_deleted() {
+        let fixture = Fixture::new("deleted");
+        fixture.kill_mid_swap();
+        std::fs::remove_file(fixture.0.join("products.schema.yml")).unwrap();
+
+        let project = open_project(&fixture.config()).unwrap();
+        let save = &project.recovery.recovered[0];
+        assert_eq!(save.kept.len(), 1, "{save:?}");
+        assert_eq!(save.kept[0].path, "products.schema.yml");
+        assert!(save.kept[0].deleted, "{save:?}");
+        assert!(save.kept[0].backup.is_some(), "{save:?}");
+    }
+
+    /// Issue #292: the backup a rollback kept is named once, by the kept
+    /// file, not again among the leftovers no save explains; once the
+    /// notice is dismissed, every load still says what it holds, until it is
+    /// deleted.
+    #[test]
+    fn a_kept_backup_is_named_once_and_explained_after_dismiss() {
+        let fixture = Fixture::new("kept-once");
+        fixture.kill_mid_swap();
+        std::fs::write(fixture.0.join("products.schema.yml"), "mine\n").unwrap();
+
+        let project = open_project(&fixture.config()).unwrap();
+        let recovery = &project.recovery;
+        let backup = recovery.recovered[0].kept[0]
+            .backup
+            .clone()
+            .expect("a backup");
+        assert!(recovery.leftovers.is_empty(), "{recovery:?}");
+
+        dismiss_recovered(&fixture.config(), &Fixture::ids(&recovery.recovered)).unwrap();
+        fixture.restart();
+        let project = open_project(&fixture.config()).unwrap();
+        let recovery = &project.recovery;
+        assert!(
+            recovery.recovered.is_empty() && recovery.leftovers.is_empty(),
+            "{recovery:?}"
+        );
+        assert_eq!(recovery.copies.len(), 1, "{recovery:?}");
+        assert_eq!(recovery.copies[0].copy, backup);
+        assert_eq!(recovery.copies[0].path, "products.schema.yml");
+        assert_eq!(recovery.copies[0].holds, CopyHolds::Before);
+
+        std::fs::remove_file(fixture.0.join(&backup)).unwrap();
+        let project = open_project(&fixture.config()).unwrap();
+        assert!(project.recovery.is_empty(), "{:?}", project.recovery);
+    }
+
+    /// The project's files, hidden ones included, with `token` written `T`.
+    fn normalized(fixture: &Fixture, token: &str) -> BTreeMap<String, String> {
+        fixture
+            .files()
+            .into_iter()
+            .map(|(name, text)| (name.replace(token, "T"), text))
+            .collect()
+    }
+
+    /// The token of the one save in flight in `fixture`.
+    fn in_flight(fixture: &Fixture) -> String {
+        let records = State::at(fixture.state_dir()).unwrap().records();
+        assert_eq!(records.len(), 1, "{records:?}");
+        records[0].token.clone()
+    }
+
+    /// A save cut short in one of the ways recovery tells about.
+    fn cut_short(fixture: &Fixture, case: &str) {
+        let backup_of = |name: &str| {
+            fixture
+                .files()
+                .into_keys()
+                .find(|f| f.starts_with(&format!(".{name}.flusso-save.")) && f.ends_with(".bak"))
+                .unwrap()
+        };
+        match case {
+            "rollback" => fixture.kill_mid_swap(),
+            "rollback-kept" => {
+                fixture.kill_mid_swap();
+                std::fs::write(fixture.0.join("products.schema.yml"), "mine\n").unwrap();
+            }
+            "rollback-deleted" => {
+                fixture.kill_mid_swap();
+                std::fs::remove_file(fixture.0.join("products.schema.yml")).unwrap();
+            }
+            "completed" => fixture.kill_after_commit(),
+            "completed-kept" => {
+                fixture.kill_after_commit();
+                std::fs::write(fixture.0.join("products.schema.yml"), "mine\n").unwrap();
+            }
+            "displaced" => {
+                fixture.kill_after_commit();
+                std::fs::write(fixture.0.join(backup_of("flusso.toml")), "other\n").unwrap();
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Recover `case` with a disk that stops after step `stop` (never, when
+    /// `None`), then restart and open the project: the files, and what the
+    /// page is told, the save's token written `T`. `None` when recovery ran
+    /// to its end before step `stop`.
+    fn recovered_after_a_kill(
+        case: &str,
+        stop: Option<usize>,
+    ) -> Option<(BTreeMap<String, String>, Vec<serde_json::Value>)> {
+        let fixture = Fixture::new(&format!("kill-{case}-{stop:?}"));
+        cut_short(&fixture, case);
+        let token = in_flight(&fixture);
+        let paths = Paths::new(&fixture.config()).unwrap();
+        let mut disk = stop.map_or_else(Disk::default, Disk::stopping_after);
+        {
+            let lock = ProjectLock::acquire(&paths.base, Duration::ZERO).unwrap();
+            recover_locked(&paths, &lock, &mut disk);
+        }
+        if stop.is_some() && !disk.stopped() {
+            return None;
+        }
+        fixture.restart();
+        let project = open_project(&fixture.config()).unwrap();
+        let told = project
+            .recovery
+            .recovered
+            .iter()
+            .map(|r| serde_json::to_value(r).unwrap())
+            .chain(fixture_copies_as_saves(&project.recovery))
+            .map(|mut value| {
+                if let Some(save) = value.as_object_mut() {
+                    save.remove("started_at_ms");
+                }
+                serde_json::from_str(&value.to_string().replace(&token, "T")).unwrap()
+            })
+            .collect();
+        let settled = normalized(&fixture, &token);
+        std::fs::write(fixture.0.join("products.schema.yml"), "a user edit\n").unwrap();
+        let edited = fixture.files();
+        for _ in 0..2 {
+            fixture.restart();
+            open_project(&fixture.config()).unwrap();
+            assert_eq!(
+                fixture.files(),
+                edited,
+                "{case}, killed after step {stop:?}: a later load changed a file"
+            );
+        }
+        Some((settled, told))
+    }
+
+    /// The copies a load explains, as values a test can compare.
+    fn fixture_copies_as_saves(recovery: &SaveRecovery) -> Vec<serde_json::Value> {
+        recovery
+            .copies
+            .iter()
+            .map(|c| serde_json::json!({ "copy": c.copy, "path": c.path }))
+            .collect()
+    }
+
+    /// Review of #296: a kill at any step of a recovery, the writing of its
+    /// notice included, leaves the next start telling the save exactly once,
+    /// and the files as an uninterrupted recovery leaves them.
+    #[test]
+    fn every_kill_during_recovery_still_tells_the_save_once() {
+        for case in [
+            "rollback",
+            "rollback-kept",
+            "rollback-deleted",
+            "completed",
+            "completed-kept",
+            "displaced",
+        ] {
+            let (files, told) = recovered_after_a_kill(case, None).unwrap();
+            let saves = told.iter().filter(|t| t.get("id").is_some()).count();
+            assert_eq!(saves, 1, "{case}: {told:?}");
+            for stop in 1.. {
+                let Some(after) = recovered_after_a_kill(case, Some(stop)) else {
+                    break;
+                };
+                assert_eq!(
+                    after.1, told,
+                    "{case}, killed after step {stop}: what is told"
+                );
+                let differ: Vec<&String> = files
+                    .keys()
+                    .chain(after.0.keys())
+                    .filter(|f| files.get(*f) != after.0.get(*f))
+                    .collect();
+                assert!(
+                    differ.is_empty(),
+                    "{case}, killed after step {stop}: {differ:?} differ"
+                );
+            }
+        }
+    }
+
+    /// Review of #296: a notice edited by hand to name files outside the
+    /// project, or copies not of the save-copy form, never shows them.
+    #[test]
+    fn a_hand_edited_notice_never_names_files_outside_the_project() {
+        let fixture = Fixture::new("hand-edited");
+        State::at(fixture.state_dir()).unwrap();
+        let outside = fixture.state_dir().join("outside.yml");
+        std::fs::write(&outside, "secret\n").unwrap();
+        let outside_name = "outside.yml".to_owned();
+        let state_name = fixture
+            .state_dir()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let up = format!("../{state_name}/{outside_name}");
+        let base = Paths::new(&fixture.config()).unwrap().base;
+        let save = |id: &str| {
+            serde_json::json!({
+                "id": id, "outcome": "rolled_back", "started_at_ms": 1,
+                "files": ["users.schema.yml", up, outside.display().to_string()],
+                "kept": [
+                    { "path": "users.schema.yml", "backup": up },
+                    { "path": "orders.schema.yml", "backup": outside.display().to_string() },
+                    { "path": "products.schema.yml", "backup": "users.schema.yml" },
+                    { "path": up },
+                ],
+                "displaced": [
+                    { "path": "users.schema.yml", "copy": up },
+                    { "path": "users.schema.yml", "copy": "orders.schema.yml" },
+                ],
+            })
+        };
+        let notices = State::at(fixture.state_dir()).unwrap().notices().unwrap();
+        for (id, pending) in [("1-1", true), ("1-2", false)] {
+            let notice = serde_json::json!({
+                "format": 1, "dir": base, "pending": pending, "save": save(id),
+            });
+            notices
+                .put(id, notice.to_string().as_bytes(), &mut Disk::default())
+                .unwrap();
+        }
+
+        let project = open_project(&fixture.config()).unwrap();
+        let shown = serde_json::to_string(&project.recovery).unwrap();
+        assert!(!shown.contains(&outside_name), "{shown}");
+        assert!(!shown.contains(r#""copy":"orders.schema.yml""#), "{shown}");
+        assert!(project.recovery.copies.is_empty(), "{shown}");
+        let save = &project.recovery.recovered[0];
+        assert!(save.kept.iter().all(|k| k.backup.is_none()), "{shown}");
+        assert!(save.displaced.is_empty(), "{shown}");
+    }
+
+    /// Review of #296: a notice not dismissed yet says what is true at each
+    /// load: a backup moved away is no longer named, and a file put back is
+    /// no longer told as deleted.
+    #[test]
+    fn a_pending_notice_says_what_is_true_now() {
+        let fixture = Fixture::new("true-now");
+        fixture.kill_mid_swap();
+        std::fs::remove_file(fixture.0.join("products.schema.yml")).unwrap();
+        let project = open_project(&fixture.config()).unwrap();
+        let kept = &project.recovery.recovered[0].kept[0];
+        assert!(kept.deleted, "{kept:?}");
+        let backup = kept.backup.clone().expect("a backup");
+
+        std::fs::rename(
+            fixture.0.join(&backup),
+            fixture.0.join("products.schema.yml"),
+        )
+        .unwrap();
+        let project = open_project(&fixture.config()).unwrap();
+        let kept = &project.recovery.recovered[0].kept[0];
+        assert_eq!(kept.backup, None, "{kept:?}");
+        assert!(!kept.deleted, "{kept:?}");
+    }
+
+    /// The `products` index's schema moved to a folder beside the project,
+    /// named in `flusso.toml` as `../<dir>.shared/products.schema.yml`.
+    fn with_products_outside(fixture: &Fixture) -> String {
+        std::fs::create_dir_all(fixture.shared()).unwrap();
+        let shared = fixture.shared().join("products.schema.yml");
+        std::fs::rename(fixture.0.join("products.schema.yml"), &shared).unwrap();
+        let rel = format!(
+            "../{}/products.schema.yml",
+            fixture.shared().file_name().unwrap().to_str().unwrap()
+        );
+        let config = std::fs::read_to_string(fixture.config()).unwrap().replace(
+            "schema = \"products.schema.yml\"",
+            &format!("schema = \"{rel}\""),
+        );
+        std::fs::write(fixture.config(), config).unwrap();
+        rel
+    }
+
+    /// Review 2 of #296: a schema file outside the config's folder, kept by
+    /// a recovery, is told on the first load, after a reload and a restart,
+    /// and its backup explained after Dismiss.
+    #[test]
+    fn a_kept_schema_outside_the_folder_is_told() {
+        let fixture = Fixture::new("outside-schema");
+        let rel = with_products_outside(&fixture);
+        let request = || -> SaveRequest {
+            let project = load_project(&fixture.config()).unwrap();
+            serde_json::from_value(serde_json::json!({
+                "config": project.config,
+                "digests": project.digests,
+                "ops": [{ "kind": "upsert", "index": "products", "path": rel,
+                          "schema": schema("products: 1"), "base": tagged("products: 1") }],
+            }))
+            .unwrap()
+        };
+        let shared = fixture.shared().join("products.schema.yml");
+        let before = std::fs::read_to_string(&shared).unwrap();
+        for point in 1.. {
+            save_with(
+                &fixture.config(),
+                &request(),
+                &mut Disk::stopping_after(point),
+            )
+            .ok();
+            assert!(!fixture.committed());
+            if std::fs::read_to_string(&shared).unwrap() != before {
+                break;
+            }
+            fixture.settle();
+        }
+        std::fs::write(&shared, "mine\n").unwrap();
+        recover_project(&fixture.config()).unwrap();
+
+        let told = |project: &Project| -> Vec<String> {
+            project
+                .recovery
+                .recovered
+                .iter()
+                .flat_map(|r| &r.kept)
+                .map(|k| k.path.clone())
+                .collect()
+        };
+        let project = open_project(&fixture.config()).unwrap();
+        assert_eq!(told(&project), [rel.clone()], "{:?}", project.recovery);
+        let backup = project.recovery.recovered[0].kept[0]
+            .backup
+            .clone()
+            .expect("a backup");
+        assert!(open_project(&fixture.config()).is_ok_and(|p| told(&p) == [rel.clone()]));
+        fixture.restart();
+        let project = open_project(&fixture.config()).unwrap();
+        assert_eq!(told(&project), [rel.clone()], "{:?}", project.recovery);
+
+        dismiss_recovered(
+            &fixture.config(),
+            &Fixture::ids(&project.recovery.recovered),
+        )
+        .unwrap();
+        let project = open_project(&fixture.config()).unwrap();
+        let copies: Vec<(&str, &str)> = project
+            .recovery
+            .copies
+            .iter()
+            .map(|c| (c.copy.as_str(), c.path.as_str()))
+            .collect();
+        assert_eq!(copies, [(backup.as_str(), rel.as_str())]);
+    }
+
+    impl Fixture {
+        /// Make the notices folder unwritable, as a full or read-only disk
+        /// would; the fixture's drop makes it writable again.
+        fn notices_unwritable(&self) {
+            let notices = State::at(self.state_dir()).unwrap().notices().unwrap();
+            drop(notices);
+            let dir = self.state_dir().join("notices");
+            let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+            std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o500);
+            std::fs::set_permissions(&dir, perms).unwrap();
+        }
+
+        /// The users index moved to `people.schema.yml`: a save that creates
+        /// a file and removes one.
+        fn move_users(&self) -> SaveRequest {
+            let project = load_project(&self.config()).unwrap();
+            let mut config = serde_json::to_value(&project.config).unwrap();
+            for entry in config["index"].as_array_mut().unwrap() {
+                if entry["name"] == "users" {
+                    entry["schema"] = "people.schema.yml".into();
+                }
+            }
+            serde_json::from_value(serde_json::json!({
+                "config": config,
+                "digests": project.digests,
+                "ops": [{ "kind": "move", "index": "users", "path": "people.schema.yml",
+                          "from": "users.schema.yml", "schema": schema("users: 1"),
+                          "base": tagged("users: 1") }],
+            }))
+            .unwrap()
+        }
+
+        /// Kill `request`'s save at the first step after which `reached`
+        /// holds, before its commit point.
+        fn kill_when(&self, request: &SaveRequest, reached: impl Fn(&Self) -> bool) {
+            for point in 1.. {
+                save_with(&self.config(), request, &mut Disk::stopping_after(point)).unwrap_err();
+                assert!(!self.committed(), "committed before the state wanted");
+                if reached(self) {
+                    return;
+                }
+                self.settle();
+            }
+        }
+
+        /// Load the project twice more, restarting before each: neither may
+        /// change a file or block.
+        fn later_loads_change_nothing(&self, case: &str) {
+            let files = self.files();
+            for _ in 0..2 {
+                self.restart();
+                let loaded = open_project(&self.config());
+                assert!(
+                    loaded.is_ok(),
+                    "{case}: a later load failed: {:?}",
+                    loaded.err()
+                );
+                assert_eq!(self.files(), files, "{case}: a later load changed a file");
+            }
+        }
+    }
+
+    /// Review 3 of #296: with a notices folder that can't be written, the
+    /// first load settles the save once; a later load never changes or blocks
+    /// on a file the user then made, whatever it holds.
+    #[test]
+    fn a_save_settled_while_notices_cannot_be_stored_is_never_settled_again() {
+        let fixture = Fixture::new("resettle-created");
+        let people = fixture.0.join("people.schema.yml");
+        fixture.kill_when(&fixture.move_users(), |f| {
+            f.0.join("people.schema.yml").exists()
+        });
+        let written = std::fs::read_to_string(&people).unwrap();
+        fixture.notices_unwritable();
+        open_project(&fixture.config()).unwrap();
+        assert!(
+            !people.exists(),
+            "the rollback removes the file the save created"
+        );
+        std::fs::write(&people, &written).unwrap();
+        fixture.later_loads_change_nothing("a created file made again");
+
+        let fixture = Fixture::new("resettle-changed");
+        fixture.kill_mid_swap();
+        fixture.notices_unwritable();
+        open_project(&fixture.config()).unwrap();
+        std::fs::write(fixture.0.join("products.schema.yml"), tagged("orders: 1")).unwrap();
+        fixture.later_loads_change_nothing("a changed file given the save's text by hand");
+
+        let fixture = Fixture::new("resettle-removed");
+        let users = fixture.0.join("users.schema.yml");
+        fixture.kill_when(&fixture.move_users(), |f| {
+            !f.0.join("users.schema.yml").exists()
+        });
+        fixture.notices_unwritable();
+        open_project(&fixture.config()).unwrap();
+        assert!(
+            users.exists(),
+            "the rollback restores the file the save removed"
+        );
+        std::fs::remove_file(&users).unwrap();
+        fixture.later_loads_change_nothing("a removed file restored, then deleted by hand");
+    }
+
+    /// Review 3 of #296: a notice that can't be stored is told, flagged as
+    /// unsaved, until the designer stops; the journal is gone all the same.
+    #[test]
+    fn a_notice_that_cannot_be_stored_is_flagged_and_the_journal_still_goes() {
+        let fixture = Fixture::new("unstorable");
+        fixture.kill_mid_swap();
+        fixture.notices_unwritable();
+        let project = open_project(&fixture.config()).unwrap();
+        let told = &project.recovery.recovered;
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(told[0].unsaved, "{told:?}");
+        assert!(!fixture.0.join(".flusso-save.journal").exists());
+        assert!(!fixture.0.join(".flusso-save.done").exists());
+        let again = open_project(&fixture.config()).unwrap();
+        assert_eq!(Fixture::ids(&again.recovery.recovered), Fixture::ids(told));
+        fixture.restart();
+        let after = open_project(&fixture.config()).unwrap();
+        assert!(after.recovery.recovered.is_empty(), "{:?}", after.recovery);
+    }
+
+    /// Review 3 of #296: a save refused as stale leaves the files, the
+    /// journal and the notices as it found them.
+    #[test]
+    fn a_refused_save_changes_nothing_about_a_pending_notice() {
+        for unwritable in [false, true] {
+            let fixture = Fixture::new(&format!("refused-{unwritable}"));
+            fixture.kill_mid_swap();
+            if unwritable {
+                fixture.notices_unwritable();
+            }
+            let told = Fixture::ids(&open_project(&fixture.config()).unwrap().recovery.recovered);
+            assert_eq!(told.len(), 1);
+            let files = fixture.files();
+            let mut stale = fixture.swap();
+            stale
+                .digests
+                .insert("products.schema.yml".to_owned(), Some("00".repeat(32)));
+            let err = save_project(&fixture.config(), stale).unwrap_err();
+            assert!(err.downcast_ref::<Stale>().is_some(), "{err:#}");
+            assert_eq!(fixture.files(), files, "unwritable notices: {unwritable}");
+            let after = open_project(&fixture.config()).unwrap();
+            assert_eq!(Fixture::ids(&after.recovery.recovered), told);
+        }
+    }
+
+    /// Review 3 of #296: with a `flusso.toml` that can't be read, a notice
+    /// naming paths outside the folder names none of them.
+    #[test]
+    fn a_notice_with_a_broken_config_names_nothing_outside_the_folder() {
+        let fixture = Fixture::new("broken-config");
+        let base = Paths::new(&fixture.config()).unwrap().base;
+        let notice = serde_json::json!({
+            "format": 1, "dir": base, "pending": true,
+            "save": {
+                "id": "1-1", "outcome": "rolled_back", "started_at_ms": 1,
+                "files": ["/etc/passwd", "../../x", "users.schema.yml"],
+                "kept": [
+                    { "path": "/etc/passwd", "backup": "/etc/.passwd.flusso-save.1-1.0.bak" },
+                    { "path": "/nonexistent/secret" },
+                    { "path": "../../x" },
+                ],
+                "displaced": [{ "path": "/etc/passwd", "copy": "/etc/.passwd.flusso-save.1-1.0.bak" }],
+            },
+        });
+        State::at(fixture.state_dir())
+            .unwrap()
+            .notices()
+            .unwrap()
+            .put("1-1", notice.to_string().as_bytes(), &mut Disk::default())
+            .unwrap();
+        std::fs::write(fixture.config(), "not = [toml\n").unwrap();
+
+        let recovery = unloadable(open_project(&fixture.config()));
+        let shown = serde_json::to_string(&(&recovery.recovered, &recovery.copies)).unwrap();
+        for outside in ["/etc", "../../x", "nonexistent"] {
+            assert!(!shown.contains(outside), "{outside}: {shown}");
+        }
+        assert_eq!(recovery.recovered[0].files, ["users.schema.yml"]);
+    }
+
+    /// Review 2 of #296: a hand-edited notice naming a file through a folder
+    /// link leading out of the project, or a copy that is a link or a folder,
+    /// shows none of them.
+    #[test]
+    fn a_notice_never_looks_through_a_link_out_of_the_project() {
+        let fixture = Fixture::new("linked");
+        State::at(fixture.state_dir()).unwrap();
+        let outside = fixture.state_dir().join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.yml"), "secret\n").unwrap();
+        std::fs::write(outside.join(".secret.yml.flusso-save.1-1.0.bak"), "x\n").unwrap();
+        std::os::unix::fs::symlink(&outside, fixture.0.join("link")).unwrap();
+        std::os::unix::fs::symlink(
+            fixture.0.join("orders.schema.yml"),
+            fixture.0.join(".users.schema.yml.flusso-save.1-1.0.bak"),
+        )
+        .unwrap();
+        std::fs::create_dir(fixture.0.join(".orders.schema.yml.flusso-save.1-1.0.bak")).unwrap();
+        let base = Paths::new(&fixture.config()).unwrap().base;
+        let notice = serde_json::json!({
+            "format": 1, "dir": base, "pending": true,
+            "save": {
+                "id": "1-1", "outcome": "rolled_back", "started_at_ms": 1,
+                "files": ["link/secret.yml"],
+                "kept": [
+                    { "path": "link/secret.yml", "backup": "link/.secret.yml.flusso-save.1-1.0.bak" },
+                    { "path": "users.schema.yml", "backup": ".users.schema.yml.flusso-save.1-1.0.bak" },
+                    { "path": "orders.schema.yml", "backup": ".orders.schema.yml.flusso-save.1-1.0.bak" },
+                ],
+            },
+        });
+        State::at(fixture.state_dir())
+            .unwrap()
+            .notices()
+            .unwrap()
+            .put("1-1", notice.to_string().as_bytes(), &mut Disk::default())
+            .unwrap();
+
+        let project = open_project(&fixture.config()).unwrap();
+        let shown = serde_json::to_string(&(&project.recovery.recovered, &project.recovery.copies))
+            .unwrap();
+        assert!(!shown.contains("secret"), "{shown}");
+        assert!(!shown.contains(".bak"), "{shown}");
+    }
+
+    /// Issue #292: the copy of what another program wrote as a save
+    /// replaced its file is explained on later loads, not listed as a
+    /// leftover no save explains.
+    #[test]
+    fn a_displaced_copy_is_explained_after_a_restart() {
+        let fixture = Fixture::new("displaced-later");
+        let request: SaveRequest = serde_json::from_value(serde_json::json!({
+            "config": load_project(&fixture.config()).unwrap().config,
+            "digests": Fixture::loaded(),
+            "ops": [{ "kind": "upsert", "index": "users", "path": "users.schema.yml",
+                      "schema": schema("users: 1"), "base": tagged("users: 1") }],
+        }))
+        .unwrap();
+        let saved = save_with(
+            &fixture.config(),
+            &request,
+            &mut Disk::editing_after_look(1, "editor\n"),
+        )
+        .unwrap();
+        let copy = saved.displaced[0].copy.clone();
+        fixture.restart();
+
+        let project = open_project(&fixture.config()).unwrap();
+        let recovery = &project.recovery;
+        assert!(recovery.leftovers.is_empty(), "{recovery:?}");
+        assert_eq!(recovery.copies.len(), 1, "{recovery:?}");
+        assert_eq!(recovery.copies[0].copy, copy);
+        assert_eq!(recovery.copies[0].path, "users.schema.yml");
+        assert_eq!(recovery.copies[0].holds, CopyHolds::Displaced);
     }
 
     /// A schema file that loads, told apart from others by its `tag` comment.

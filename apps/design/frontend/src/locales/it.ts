@@ -586,13 +586,32 @@ export const it: Record<string, string> = {
     "{n, plural, one {Un salvataggio delle {time} è stato interrotto prima di finire. È stato annullato: {files} è com'era prima.} other {Un salvataggio delle {time} è stato interrotto prima di finire. È stato annullato: {files} sono com'erano prima.}}",
   "recovery.completed":
     "{n, plural, one {Un salvataggio delle {time} è stato interrotto durante la pulizia. È stato completato: {files} è come l'ha scritto.} other {Un salvataggio delle {time} è stato interrotto durante la pulizia. È stato completato: {files} sono come li ha scritti.}}",
-  "recovery.leftovers":
-    "File lasciati da un salvataggio precedente, che il designer non tocca: {files}. Ognuno è stato lasciato da quel salvataggio e può contenere il testo di un file prima del salvataggio o quello che ha scritto; controllali ed eliminali.",
-  "recovery.kept": "{path} è stato scritto da un altro programma durante o dopo quel salvataggio, e resta com'è.",
+  "recovery.kept":
+    "{path} è stato modificato da un altro programma durante o dopo quel salvataggio; il designer l'ha lasciato com'era.",
   "recovery.keptBackup":
-    "{path} è stato scritto da un altro programma durante o dopo quel salvataggio, e resta com'è. Il suo testo di prima del salvataggio è in {backup}: ricopialo, oppure eliminalo.",
+    "{path} è stato modificato da un altro programma durante o dopo quel salvataggio; il designer l'ha lasciato com'era. Il suo testo di prima del salvataggio è in {backup}. Per tornare a quel testo, copia {backup} su {path}, ma controlla prima {path}: {path} può essere cambiato da allora, e la copia sostituisce ciò che contiene ora. Altrimenti elimina {backup}.",
   "recovery.displaced":
     "{path} è stato scritto da un altro programma nell'istante in cui il salvataggio lo sostituiva: contiene ciò che ha scritto il salvataggio, e i byte dell'altro programma sono in {copy}. Controllali, poi elimina quel file.",
+  "recovery.unsaved":
+    "Il designer non ha potuto salvare questo avviso nella sua cartella di stato, quindi non verrà più mostrato una volta che il designer si ferma: annota ora ciò che dice.",
+  "recovery.leftoverUnknown":
+    "{copy} è stato lasciato da un salvataggio. Il designer non lo tocca: controllalo, poi eliminalo.",
+  "recovery.leftover":
+    "{copy} è una copia di {path} lasciata da un salvataggio: il suo testo di prima di quel salvataggio, ciò che il salvataggio ha scritto, o ciò che un altro programma ha scritto nell'istante in cui il salvataggio lo sostituiva. Il designer non la tocca: confrontala con {path}, poi eliminala.",
+  "recovery.copyDisplaced":
+    "{copy} contiene ciò che un altro programma ha scritto in {path} nell'istante in cui un salvataggio delle {time} lo sostituiva: controllalo, poi eliminalo.",
+  "recovery.copyBefore":
+    "{copy} contiene il testo di {path} di prima di un salvataggio delle {time}. Quel salvataggio è stato annullato, ma {path} era stato modificato o eliminato nel frattempo, quindi è rimasto com'era. Per tornare a quel testo, copia {copy} in {path}, ma controlla prima {path}: può essere cambiato da allora, e la copia sostituisce ciò che contiene ora. Altrimenti elimina {copy}.",
+  "recovery.interrupted":
+    "{outcome, select, rolled_back {Un salvataggio delle {time} è stato interrotto prima di finire. Il designer annulla un salvataggio così, ma ogni file che aveva scritto è stato modificato o eliminato nel frattempo:} other {Un salvataggio delle {time} è stato interrotto durante la pulizia. Il designer l'ha completato, ma ogni file che aveva scritto è stato modificato o eliminato in seguito:}}",
+  "recovery.keptDeletedAfter":
+    "{path} è stato eliminato dopo che quel salvataggio l'aveva scritto, e manca ancora: ciò che il salvataggio vi aveva scritto non è conservato da nessuna parte.",
+  "recovery.keptAfter":
+    "{path} è stato modificato da un altro programma dopo che quel salvataggio l'aveva scritto, quindi il designer l'ha lasciato com'era: ciò che il salvataggio vi aveva scritto non è conservato da nessuna parte.",
+  "recovery.keptDeletedBackup":
+    "{path} è stato eliminato durante o dopo quel salvataggio, e manca ancora; il designer l'ha lasciato così. Il suo testo di prima del salvataggio è in {backup}. Per riavere {path}, copia {backup} in {path}: {path} può essere cambiato da quando è stato controllato, e la copia sostituisce ciò che c'è allora. Altrimenti elimina {backup}.",
+  "recovery.keptDeleted":
+    "{path} è stato eliminato durante o dopo quel salvataggio, e manca ancora; il designer l'ha lasciato così.",
   "recovery.dismiss": "Chiudi",
   // a file changed on disk since the page loaded it
   "stale.changed": "{path} è cambiato sul disco da quando questa pagina lo ha caricato.",
@@ -663,6 +682,7 @@ export const it: Record<string, string> = {
     "Segui questi passi solo per un tuo salvataggio: rimettono il testo indicato da questo journal. Prima controlla ogni file (con il controllo di versione, per esempio).",
   "recovery.wayBack": "Per riportare il progetto com'era prima del salvataggio:",
   "recovery.wayForward": "Oppure, per tenere ciò che il salvataggio ha scritto:",
+  "recovery.wayForwardOnly": "Per tenere ciò che il salvataggio ha scritto:",
   "recovery.stepCopy": "copia {from} in {path}",
   "recovery.stepDelete": "elimina {path}",
   "recovery.wayNone":

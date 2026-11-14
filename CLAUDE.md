@@ -227,7 +227,8 @@ after a live update; constants land as written), and `an_update_of_an_unread_col
   rows scope off the jsx-a11y interaction rules), an **i18n completeness check** (`npm run check:i18n` →
   `apps/design/frontend/scripts/check-i18n.mjs`: every `t("…")` key the UI uses exists in the
   `en` base catalog and every locale defines the same key set — so a feature can't ship UI without
-  its translations), then `npm run build` + a `git diff` guard that the committed
+  its translations), `npm test` (`node --test scripts/*.test.mjs`: pure `src/model/` functions, run with
+  Node's type stripping, e.g. `model/recovery.ts`, the recovery notice's wording), then `npm run build` + a `git diff` guard that the committed
   `apps/design/dist/` matches a fresh Vite build (the embedded SPA must not drift). There is **no**
   browser e2e — the UI is validated by dogfooding; the `designer-frontend` build/lint guards plus the
   Rust round-trip are the automated net.

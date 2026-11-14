@@ -224,6 +224,12 @@ jobs:
         working-directory: apps/design/frontend
         run: npm run check:i18n
 
+      # Pure frontend logic (src/model/recovery.ts: the recovery notice's
+      # wording) under Node's own test runner, which strips the types.
+      - name: Test the frontend model
+        working-directory: apps/design/frontend
+        run: npm test
+
       # The built SPA is committed to `apps/design/dist/` so the Rust crate
       # (rust-embed) builds with no Node toolchain. Rebuild it from source and
       # fail if it drifts from what's committed — a reproducible `npm ci` + Vite

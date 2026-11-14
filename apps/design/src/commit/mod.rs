@@ -2,7 +2,7 @@
 //! when the process is killed or the power goes in the middle.
 //!
 //! **The invariant: once [`commit`] has started, the project is, or after
-//! [`recover()`] becomes, byte for byte either what it was before the save or
+//! [`recover_telling`] becomes, byte for byte either what it was before the save or
 //! what the save wrote: never a mix.** It holds for a kill or a power loss at
 //! any step, including during the journal's own writing, during an undo and
 //! during a recovery, which can itself be cut short and run again.
@@ -39,7 +39,7 @@
 //!
 //! When a step of 1–6 fails, the commit undoes it at once, the way recovery
 //! would ([`recover::roll_back`]), and removes the record. When the process
-//! dies instead, whatever opens the project next ([`recover()`], under the
+//! dies instead, whatever opens the project next ([`recover_telling`], under the
 //! same lock) finds the journal and its record: not committed, it is rolled
 //! back; committed, it is finished. Either way the record goes last, so a
 //! journal is acted on once.
@@ -90,8 +90,11 @@ pub(crate) use journal::Unusable;
 use journal::{DONE, JOURNAL, Journal, STAGING, Steps};
 pub(crate) use lock::{LockError, ProjectLock};
 use recover::Backups;
+#[cfg(test)]
+pub(crate) use recover::recover;
 pub(crate) use recover::{
-    Blocked, Direction, Fix, HandStep, Holds, Outcome, ProblemKind, Report, recover, strays,
+    Blocked, Direction, Fix, HandStep, Holds, Outcome, ProblemKind, Report, Settled,
+    recover_telling, strays,
 };
 use state::Record;
 pub(crate) use state::{State, use_dir as use_state_dir};
@@ -174,6 +177,10 @@ struct Progress {
 /// A save that stands.
 #[derive(Debug)]
 pub(crate) struct Committed {
+    /// The save's token.
+    pub(crate) token: String,
+    /// When it started, in milliseconds since the Unix epoch.
+    pub(crate) started_at_ms: u64,
     /// The save's token, when its cleanup is left to the next recovery
     /// (its commit mark could not be flushed): that recovery finishes this
     /// save, not an interrupted one.
@@ -279,6 +286,8 @@ pub(crate) fn commit(
              the designer next opens this project"
         );
         Ok(Committed {
+            token: steps.token.clone(),
+            started_at_ms: steps.started_at_ms,
             cleanup_left: Some(steps.token.clone()),
             displaced: Vec::new(),
         })
@@ -310,6 +319,8 @@ pub(crate) fn commit(
         tracing::debug!(error = %e, "could not remove the record of a finished save");
     }
     Ok(Committed {
+        token: steps.token.clone(),
+        started_at_ms: steps.started_at_ms,
         cleanup_left: None,
         displaced: finished.displaced,
     })
