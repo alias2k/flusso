@@ -140,7 +140,7 @@ A `geo` field is an OpenSearch `geo_point`, in one of two shapes.
 | GeoJSON | `{"type": "Point", "coordinates": [-71.34, 41.12]}` | lon, lat |
 | geohash | `"drm3btev3e86"` or `{"geohash": "drm3btev3e86"}` | the cell's south-west corner |
 
-A `text` column holds only the string forms; a `json`/`jsonb` column any of them. A value OpenSearch can't read as a point, or with a latitude outside ±90 or a longitude outside ±180, is an item-level rejection, handled by [`on_error`](index-and-on-error.md#on_error). On the query side, `GeoPoint` reads every form; see [Document structs](../query/document-structs.md#flusso-types-to-rust-types).
+A `text` column holds only the string forms; a `json`/`jsonb` column any of them. A value OpenSearch can't read as a point, or with a latitude outside ±90 or a longitude outside ±180, is an item-level rejection, handled by [`on_error`](index-and-on-error.md#on_error). On the query side, `GeoPoint` reads every form of one point (not `POINT EMPTY`, an empty array, or an array of several points); see [Document structs](../query/document-structs.md#flusso-types-to-rust-types).
 
 ```yaml
 - geo: location

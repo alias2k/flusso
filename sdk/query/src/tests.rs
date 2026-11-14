@@ -3325,7 +3325,10 @@ mod geo_point {
     impl<'de> serde::Deserializer<'de> for Compact {
         type Error = serde::de::value::Error;
 
-        fn deserialize_any<V: serde::de::Visitor<'de>>(self, _: V) -> Result<V::Value, Self::Error> {
+        fn deserialize_any<V: serde::de::Visitor<'de>>(
+            self,
+            _: V,
+        ) -> Result<V::Value, Self::Error> {
             Err(serde::de::Error::custom("not self-describing"))
         }
 

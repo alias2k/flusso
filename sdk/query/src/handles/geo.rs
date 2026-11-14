@@ -48,6 +48,9 @@ use crate::query::{AsQuery, Query, Root};
 ///
 /// Anything else, or a latitude outside ±90 or a longitude outside ±180, is a
 /// deserialize error; an altitude is ignored.
+///
+/// A format that is not human-readable (MessagePack, postcard, bincode) reads
+/// the `lat`, `lon` fields as `Serialize` wrote them.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct GeoPoint {
     /// Latitude in degrees.
@@ -73,6 +76,18 @@ impl GeoPoint {
 
 impl<'de> serde::Deserialize<'de> for GeoPoint {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // A format that is not self-describing writes the struct's fields in
+        // order and cannot be read as a `Value`; an array there is not `[lon, lat]`.
+        if !deserializer.is_human_readable() {
+            #[derive(serde::Deserialize)]
+            #[serde(rename = "GeoPoint")]
+            struct Fields {
+                lat: f64,
+                lon: f64,
+            }
+            let Fields { lat, lon } = Fields::deserialize(deserializer)?;
+            return Ok(Self { lat, lon });
+        }
         let written = Value::deserialize(deserializer)?;
         read_point(&written).map_err(serde::de::Error::custom)
     }
