@@ -205,6 +205,11 @@ pub use flusso_query_derive::FlussoMultiDocument;
 #[doc(hidden)]
 pub use serde_json as __serde_json;
 
+// Whether the `rc` feature is on: the derives assert it where a field holds
+// `Arc<str>`/`Rc<str>`, so the error names the feature. Hidden: not API.
+#[doc(hidden)]
+pub const __RC: bool = cfg!(feature = "rc");
+
 // `#[derive(FlussoValue)]` names `Serialize` through this path, so a crate
 // using it needs no `serde` of its own in scope. Hidden: not API.
 #[doc(hidden)]

@@ -359,6 +359,7 @@ pub(crate) fn validate(
         }
         if !field.skip {
             asserts.push(exhaustive_map_values(field.ty));
+            asserts.push(rc_feature(field.ty));
         }
         // A flattened group has no container field in the mapping — its keys
         // live at *this* level, so its type is checked against this level
@@ -1016,6 +1017,42 @@ pub(crate) fn exhaustive_map_values(ty: &Type) -> TokenStream {
             assert!(!::flusso_query::OpaqueProbe::<#value>::EXHAUSTIVE, #message);
         };
     }
+}
+
+/// For each `Arc<str>`/`Rc<str>` in `ty`, an assert that `flusso-query`'s
+/// `rc` feature is on: serde reads and writes them only with its own `rc`
+/// feature, and without it the errors name serde's traits, not the fix.
+pub(crate) fn rc_feature(ty: &Type) -> TokenStream {
+    let mut out = TokenStream::new();
+    let Type::Path(path) = ty else {
+        return out;
+    };
+    for segment in &path.path.segments {
+        let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+            continue;
+        };
+        for arg in &args.args {
+            let syn::GenericArgument::Type(inner) = arg else {
+                continue;
+            };
+            let is_str = matches!(inner, Type::Path(p) if p.path.is_ident("str"));
+            let name = segment.ident.to_string();
+            if is_str && matches!(name.as_str(), "Arc" | "Rc") {
+                let message = format!(
+                    "`{name}<str>` is a string value only with `flusso-query`'s `rc` feature \
+                     (serde reads and writes it only with its own `rc`): add `\"rc\"` to the \
+                     `features` of the `flusso-query` dependency"
+                );
+                out.extend(quote::quote_spanned! {ty.span()=>
+                    #[allow(clippy::assertions_on_constants)]
+                    const _: () = assert!(::flusso_query::__RC, #message);
+                });
+            } else {
+                out.extend(rc_feature(inner));
+            }
+        }
+    }
+    out
 }
 
 /// The key type `K` of a `HashMap<K, V>` / `BTreeMap<K, V>`.
@@ -2089,5 +2126,40 @@ pub(crate) fn embed_checks(
             const __FLUSSO_LEVEL: &[::flusso_query::FieldSpec] = #baked;
             #calls
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::rc_feature;
+
+    /// Without `flusso-query`'s `rc` feature the error names it: the assert
+    /// is emitted for each `Arc<str>`/`Rc<str>`, however deep, and for no
+    /// other type. (The `ui` harnesses build with `rc` on, so this is where
+    /// it is pinned.)
+    #[test]
+    fn an_arc_or_rc_of_str_asserts_the_rc_feature() {
+        let emitted = |ty: &str| rc_feature(&syn::parse_str(ty).unwrap()).to_string();
+        for ty in [
+            "Arc<str>",
+            "Option<std::rc::Rc<str>>",
+            "Vec<Arc<str>>",
+            "HashMap<String, Option<Arc<str>>>",
+        ] {
+            let tokens = emitted(ty);
+            assert!(tokens.contains("__RC"), "{ty}: {tokens}");
+            assert!(tokens.contains("`rc` feature"), "{ty}: {tokens}");
+        }
+        for ty in [
+            "String",
+            "Box<str>",
+            "Arc<String>",
+            "Rc<[u8]>",
+            "Vec<Option<i64>>",
+        ] {
+            assert!(emitted(ty).is_empty(), "{ty}");
+        }
     }
 }
