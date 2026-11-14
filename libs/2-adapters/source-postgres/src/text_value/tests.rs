@@ -128,3 +128,43 @@ fn a_float_reads_back_from_its_bits_as_its_text_parses() {
         GenericValue::Bytes(vec![0x01, 0xab])
     );
 }
+
+/// A year past 9999 is typed, as sqlx's binary decode gave main's backfill, so
+/// its id keeps the sign chrono writes (`+10000-01-01`).
+#[test]
+fn a_year_past_9999_is_typed() {
+    let date = NaiveDate::from_ymd_opt(10_000, 1, 1).unwrap();
+    assert_eq!(typed_value("10000-01-01", 1082), GenericValue::Date(date));
+    assert_eq!(
+        typed_value("10000-01-01 10:00:00", 1114),
+        GenericValue::Timestamp(date.and_hms_opt(10, 0, 0).unwrap())
+    );
+    assert_eq!(
+        typed_value("10000-01-01 05:30:00+05:30", 1184),
+        GenericValue::TimestampTz(Utc.from_utc_datetime(&date.and_hms_opt(0, 0, 0).unwrap()))
+    );
+    assert_eq!(date.to_string(), "+10000-01-01");
+}
+
+/// A leap day of 1 BC (proleptic year 0) is a date.
+#[test]
+fn a_bc_leap_day_is_a_date() {
+    assert_eq!(
+        typed_value("0001-02-29 BC", 1082),
+        GenericValue::Date(NaiveDate::from_ymd_opt(0, 2, 29).unwrap())
+    );
+}
+
+/// Text that only looks like a date stays text.
+#[test]
+fn a_malformed_date_stays_text() {
+    for value in [
+        "999-01-01",
+        "2024-1-01",
+        "2024-01-+1",
+        "2024-01-01x",
+        "24:00:00",
+    ] {
+        assert_eq!(typed_value(value, 1082), text(value), "{value}");
+    }
+}

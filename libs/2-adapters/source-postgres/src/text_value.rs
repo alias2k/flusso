@@ -33,7 +33,7 @@
 //! typed_value("\\x01ab", 17)               → Bytes([0x01, 0xab])
 //! ```
 
-use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use kernel::GenericValue;
 
 /// What the replication session runs before streaming: the settings its text
@@ -163,25 +163,46 @@ fn era(text: &str) -> (&str, bool) {
     }
 }
 
-fn proleptic<T: Datelike>(value: T, bc: bool) -> Option<T> {
-    if bc {
-        value.with_year(1 - value.year())
-    } else {
-        Some(value)
+/// `YYYY-MM-DD` at the start of `text`, the year any width of at least four
+/// digits (chrono's `%Y` reads no more than four), as the proleptic year when
+/// `bc`; and the text after it.
+fn ymd(text: &str, bc: bool) -> Option<(NaiveDate, &str)> {
+    let digits = text.bytes().take_while(u8::is_ascii_digit).count();
+    if digits < 4 {
+        return None;
     }
+    let (year, rest) = text.split_at(digits);
+    let rest = rest.strip_prefix('-')?;
+    let month = two_digits(rest.get(..2)?)?;
+    let rest = rest.get(2..)?.strip_prefix('-')?;
+    let day = two_digits(rest.get(..2)?)?;
+    let year: i32 = year.parse().ok()?;
+    let year = if bc { 1 - year } else { year };
+    Some((NaiveDate::from_ymd_opt(year, month, day)?, rest.get(2..)?))
+}
+
+fn two_digits(text: &str) -> Option<u32> {
+    if text.len() == 2 && text.bytes().all(|byte| byte.is_ascii_digit()) {
+        text.parse().ok()
+    } else {
+        None
+    }
+}
+
+fn time(text: &str) -> Option<NaiveTime> {
+    NaiveTime::parse_from_str(text, "%H:%M:%S%.f").ok()
 }
 
 fn date(text: &str) -> Option<NaiveDate> {
     let (text, bc) = era(text);
-    proleptic(NaiveDate::parse_from_str(text, "%Y-%m-%d").ok()?, bc)
+    let (date, rest) = ymd(text, bc)?;
+    rest.is_empty().then_some(date)
 }
 
 fn timestamp(text: &str) -> Option<NaiveDateTime> {
     let (text, bc) = era(text);
-    proleptic(
-        NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.f").ok()?,
-        bc,
-    )
+    let (date, rest) = ymd(text, bc)?;
+    Some(date.and_time(time(rest.strip_prefix(' ')?)?))
 }
 
 /// A `timestamptz` as ISO renders it: local time, then the session time
@@ -189,21 +210,13 @@ fn timestamp(text: &str) -> Option<NaiveDateTime> {
 /// time has seconds).
 fn timestamptz(text: &str) -> Option<DateTime<Utc>> {
     let (text, bc) = era(text);
-    let sign_at = text
-        .char_indices()
-        .skip(10)
-        .filter(|(_, c)| *c == '+' || *c == '-')
-        .map(|(at, _)| at)
-        .last()?;
-    let (local, offset) = text.split_at(sign_at);
-    let local = proleptic(
-        NaiveDateTime::parse_from_str(local, "%Y-%m-%d %H:%M:%S%.f").ok()?,
-        bc,
-    )?;
-    let offset = fixed_offset(offset)?;
+    let (date, rest) = ymd(text, bc)?;
+    let rest = rest.strip_prefix(' ')?;
+    let (local, offset) = rest.split_at(rest.rfind(['+', '-'])?);
+    let local = date.and_time(time(local)?);
     Some(
         local
-            .and_local_timezone(offset)
+            .and_local_timezone(fixed_offset(offset)?)
             .single()?
             .with_timezone(&Utc),
     )
