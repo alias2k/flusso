@@ -200,6 +200,23 @@ fn a_relation_message_with_the_cached_types_keeps_them() {
     assert!(column_types.caches("public", "child"));
 }
 
+/// pgoutput leaves a stored generated column, or one outside the
+/// publication's column list, out of every `Relation`. A cached column the
+/// message doesn't list says nothing about its type, so the entries stay:
+/// forgetting them would re-read the catalog after each `Relation`.
+#[test]
+fn a_relation_message_that_omits_a_cached_column_keeps_the_cached_types() {
+    let (mut decode, _ack) = state();
+    let column_types = crate::ColumnTypes::default();
+    column_types.cache("public", "child", "id", 23);
+    column_types.cache("public", "child", "generated", 17);
+    decode.column_types = Some(column_types.clone());
+
+    handle_xlog(&mut decode, &child_relation(b'd')).unwrap();
+
+    assert!(column_types.caches("public", "child"));
+}
+
 fn text(value: &str) -> Vec<u8> {
     let mut c = vec![b't'];
     c.extend_from_slice(&(value.len() as i32).to_be_bytes());
