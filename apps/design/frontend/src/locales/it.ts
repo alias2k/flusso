@@ -593,7 +593,7 @@ export const it: Record<string, string> = {
   "recovery.displaced":
     "{path} è stato scritto da un altro programma nell'istante in cui il salvataggio lo sostituiva: contiene ciò che ha scritto il salvataggio, e i byte dell'altro programma sono in {copy}. Controllali, poi elimina quel file.",
   "recovery.unsaved":
-    "Il designer non ha potuto salvare questo avviso nella sua cartella di stato, quindi non verrà più mostrato quando il designer si ferma: annota ora ciò che dice.",
+    "Il designer non ha potuto salvare questo avviso nella sua cartella di stato, quindi non verrà più mostrato una volta che il designer si ferma: annota ora ciò che dice.",
   "recovery.leftoverUnknown":
     "{copy} è stato lasciato da un salvataggio. Il designer non lo tocca: controllalo, poi eliminalo.",
   "recovery.leftover":
