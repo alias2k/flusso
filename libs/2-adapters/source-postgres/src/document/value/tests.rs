@@ -241,3 +241,131 @@ fn a_structured_element_in_a_scalar_array_fails_the_document_at_its_path() {
     .unwrap_err();
     assert_eq!(failure.field, "items[1].tags");
 }
+
+#[test]
+fn a_binary_value_reads_back_as_the_bytes_postgres_rendered_in_hex() {
+    let fields = vec![
+        column_field("blob", FlussoType::Binary),
+        column_field("empty", FlussoType::Binary),
+        column_field("upper", FlussoType::Binary),
+        array_field("blobs", FlussoType::Binary, None),
+    ];
+    let map = body(
+        json!({
+            "blob": "\\x00ff7f80",
+            "empty": "\\x",
+            "upper": "\\xABCD",
+            "blobs": ["\\x01", null, "\\x0203"],
+        }),
+        &fields,
+    );
+    assert_eq!(
+        map.get("blob"),
+        Some(&GenericValue::Bytes(vec![0x00, 0xff, 0x7f, 0x80]))
+    );
+    assert_eq!(map.get("empty"), Some(&GenericValue::Bytes(Vec::new())));
+    assert_eq!(
+        map.get("upper"),
+        Some(&GenericValue::Bytes(vec![0xab, 0xcd]))
+    );
+    assert_eq!(
+        map.get("blobs"),
+        Some(&GenericValue::Array(vec![
+            GenericValue::Bytes(vec![0x01]),
+            GenericValue::Bytes(vec![0x02, 0x03]),
+        ]))
+    );
+}
+
+#[test]
+fn a_binary_value_that_is_not_postgres_hex_stays_as_it_reads() {
+    let fields = vec![
+        column_field("odd", FlussoType::Binary),
+        column_field("bare", FlussoType::Binary),
+        column_field("junk", FlussoType::Binary),
+    ];
+    let map = body(
+        json!({ "odd": "\\x012", "bare": "0102", "junk": "\\x+1" }),
+        &fields,
+    );
+    assert_eq!(map.get("odd"), Some(&GenericValue::String("\\x012".into())));
+    assert_eq!(map.get("bare"), Some(&GenericValue::String("0102".into())));
+    assert_eq!(map.get("junk"), Some(&GenericValue::String("\\x+1".into())));
+}
+
+#[test]
+fn a_binary_ids_aggregate_reads_back_as_bytes() {
+    let aggregate = Aggregate {
+        table: kernel::TableName::try_new("files").unwrap(),
+        op: AggregateOp::Ids {
+            element_type: FlussoType::Binary,
+        },
+        key: kernel::AggregateKey::Direct(ColumnName::try_new("owner_id").unwrap()),
+        value_type: None,
+        filters: None,
+        distinct: false,
+        via: Vec::new(),
+        on: Vec::new(),
+    };
+    assert_eq!(
+        coerce_aggregate(json!(["\\x0a", "\\x0b"]), &aggregate),
+        GenericValue::Array(vec![
+            GenericValue::Bytes(vec![0x0a]),
+            GenericValue::Bytes(vec![0x0b]),
+        ])
+    );
+}
+
+fn constant_field(name: &str, value: GenericValue) -> Field {
+    Field {
+        field: FieldName::try_new(name).unwrap(),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Constant(value),
+    }
+}
+
+#[test]
+fn a_constant_builds_the_value_the_schema_holds_whatever_the_query_read() {
+    let object = GenericValue::Map(BTreeMap::from([
+        ("a".to_owned(), GenericValue::BigInt(1)),
+        (
+            "b".to_owned(),
+            GenericValue::Array(vec![GenericValue::String("x".to_owned())]),
+        ),
+    ]));
+    let constants = [
+        ("text", GenericValue::String("crm".to_owned())),
+        ("number", GenericValue::BigInt(5)),
+        ("fraction", GenericValue::Decimal("1.5".parse().unwrap())),
+        ("flag", GenericValue::Bool(true)),
+        ("object", object),
+        (
+            "list",
+            GenericValue::Array(vec![
+                GenericValue::String("a".to_owned()),
+                GenericValue::String("b".to_owned()),
+            ]),
+        ),
+        ("nothing", GenericValue::Null),
+    ];
+    let fields: Vec<Field> = constants
+        .iter()
+        .map(|(name, value)| constant_field(name, value.clone()))
+        .collect();
+    let map = body(
+        json!({
+            "text": "crm",
+            "number": "5",
+            "fraction": "1.5",
+            "flag": "true",
+            "object": null,
+            "list": null,
+            "nothing": null,
+        }),
+        &fields,
+    );
+    for (name, value) in &constants {
+        assert_eq!(map.get(*name), Some(value), "{name}");
+    }
+}

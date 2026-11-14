@@ -319,6 +319,231 @@ async fn typed_columns_coerce_to_canonical_variants_in_the_body() {
     );
 }
 
+/// A `binary` field and every kind of `constant`, built by `build` and
+/// `build_many` against a real database: the bytes come back as
+/// [`GenericValue::Bytes`] (the sink base64-encodes them), and a constant is
+/// exactly the value the schema holds, an object or a list included.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn binary_columns_and_constants_build_the_values_they_hold() {
+    binary_columns_and_constants_build_under(&[]).await;
+}
+
+/// A database set to `bytea_output = 'escape'` still builds a `binary` field
+/// as its bytes: the document builder reads every row in hex.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_database_set_to_escape_bytea_output_still_builds_the_bytes() {
+    binary_columns_and_constants_build_under(&[
+        "ALTER DATABASE postgres SET bytea_output = 'escape'",
+        "ALTER ROLE postgres SET bytea_output = 'escape'",
+    ])
+    .await;
+}
+
+async fn binary_columns_and_constants_build_under(settings: &[&'static str]) {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in settings {
+        sqlx::query(*statement).execute(&pool).await.unwrap();
+    }
+    let fresh = PgPoolOptions::new().connect(&url).await.unwrap();
+    let output: String = sqlx::query_scalar("SHOW bytea_output")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    let expected = if settings.is_empty() { "hex" } else { "escape" };
+    assert_eq!(
+        output, expected,
+        "a fresh session reads bytea as {expected}"
+    );
+    for statement in [
+        "CREATE TABLE blobs (id bigint PRIMARY KEY, blob bytea, blobs bytea[])",
+        "INSERT INTO blobs VALUES (1, '\\x00ff7f80', ARRAY['\\x01'::bytea, '\\x0203'::bytea]), \
+         (2, '\\x', NULL)",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let binary = |name: &str, array: bool| Field {
+        field: field(name),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Column(Column {
+            column: column(name),
+            ty: FlussoType::Binary,
+            nullable: true,
+            transforms: Vec::new(),
+            default: None,
+            enum_order: Vec::new(),
+            subfields: true,
+            indexed: true,
+            array,
+        }),
+    };
+    let object = GenericValue::Map(BTreeMap::from([
+        ("a".to_owned(), GenericValue::BigInt(1)),
+        (
+            "b".to_owned(),
+            GenericValue::Map(BTreeMap::from([(
+                "c".to_owned(),
+                GenericValue::String("x".to_owned()),
+            )])),
+        ),
+    ]));
+    let constants = [
+        ("text", GenericValue::String("crm".to_owned())),
+        ("number", GenericValue::BigInt(5)),
+        ("fraction", GenericValue::Decimal("1.5".parse().unwrap())),
+        ("flag", GenericValue::Bool(true)),
+        ("object", object),
+        (
+            "list",
+            GenericValue::Array(vec![GenericValue::BigInt(1), GenericValue::BigInt(2)]),
+        ),
+        (
+            "mixed",
+            GenericValue::Array(vec![
+                GenericValue::BigInt(1),
+                GenericValue::String("n/a".to_owned()),
+            ]),
+        ),
+        ("nothing", GenericValue::Null),
+    ];
+    let mut fields = vec![
+        column_field("id", "id"),
+        binary("blob", false),
+        binary("blobs", true),
+    ];
+    fields.extend(constants.iter().map(|(name, value)| Field {
+        field: field(name),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Constant(value.clone()),
+    }));
+    let schema = IndexSchema {
+        version: 1,
+        table: table("blobs"),
+        db_schema: DatabaseSchema::try_new("public").unwrap(),
+        primary_key: Some(column("id")),
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields,
+    };
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("blobs"), schema)]));
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec))
+        .await
+        .unwrap();
+    let id = |n: i64| DocumentId {
+        index: index_name("blobs"),
+        key: row_key(n),
+    };
+
+    let one = builder.build(&id(1)).await.unwrap();
+    let many = builder.build_many(&[id(1), id(2)]).await.unwrap();
+    let bodies: Vec<(&str, &GenericValue)> = [("build", &one)]
+        .into_iter()
+        .chain(many.iter().map(|doc| ("build_many", doc)))
+        .map(|(how, doc)| match doc {
+            Document::Upsert { body, .. } => (how, body),
+            other => panic!("{how}: expected an upsert, got {other:?}"),
+        })
+        .collect();
+    for (how, body) in bodies {
+        let GenericValue::Map(map) = body else {
+            panic!("{how}: expected a document object");
+        };
+        let first = map.get("id") == Some(&GenericValue::BigInt(1));
+        let (blob, blobs) = if first {
+            (
+                GenericValue::Bytes(vec![0x00, 0xff, 0x7f, 0x80]),
+                GenericValue::Array(vec![
+                    GenericValue::Bytes(vec![0x01]),
+                    GenericValue::Bytes(vec![0x02, 0x03]),
+                ]),
+            )
+        } else {
+            (GenericValue::Bytes(Vec::new()), GenericValue::Null)
+        };
+        assert_eq!(map.get("blob"), Some(&blob), "{how}: {map:?}");
+        assert_eq!(map.get("blobs"), Some(&blobs), "{how}: {map:?}");
+        for (name, value) in &constants {
+            assert_eq!(map.get(*name), Some(value), "{how}: `{name}` in {map:?}");
+        }
+    }
+}
+
+/// A row whose document fails to build (a scalar `array: true` field over a
+/// `jsonb` column holding an object) is reported as that failure, with its
+/// field path, by `document_by_id` and `sample_document`, not as a missing row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_document_that_fails_to_build_is_reported_as_the_failure() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE things (id bigint PRIMARY KEY, tags jsonb)",
+        "INSERT INTO things VALUES (1, '[\"a\", {\"b\": 1}]')",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let mut tags = column_field("tags", "tags");
+    if let FieldSource::Column(column) = &mut tags.source {
+        column.array = true;
+    }
+    let schema = IndexSchema {
+        version: 1,
+        table: table("things"),
+        db_schema: DatabaseSchema::try_new("public").unwrap(),
+        primary_key: Some(column("id")),
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields: vec![column_field("id", "id"), tags],
+    };
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("things"), schema)]));
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec))
+        .await
+        .unwrap();
+
+    for (how, built) in [
+        (
+            "document_by_id",
+            builder
+                .document_by_id(&index_name("things"), "1")
+                .await
+                .unwrap(),
+        ),
+        (
+            "sample_document",
+            builder
+                .sample_document(&index_name("things"))
+                .await
+                .unwrap(),
+        ),
+    ] {
+        match built {
+            Some(Err(failure)) => {
+                assert_eq!(failure.field, "tags", "{how}");
+                assert!(failure.message.contains("at [1]"), "{how}: {failure}");
+            }
+            other => panic!("{how}: expected the build failure, got {other:?}"),
+        }
+    }
+    assert!(
+        builder
+            .document_by_id(&index_name("things"), "2")
+            .await
+            .unwrap()
+            .is_none(),
+        "a missing row is still `None`"
+    );
+}
+
 /// `items` is a tree: 1 is the root, 2 its child, 3 its grandchild, 4 a second
 /// root with no children.
 async fn items_tree(statements: &[&'static str]) -> (impl Drop, String) {

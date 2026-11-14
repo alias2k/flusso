@@ -47,7 +47,68 @@ impl Hash for Field {
         if !emit {
             "emit".hash(state);
         }
+        if let FieldSource::Constant(value) = source
+            && constant_is_stored_unindexed(value)
+        {
+            CONSTANT_OBJECT_REVISION.hash(state);
+        }
     }
+}
+
+/// Bumped when what a `constant` stored unindexed builds changes, so only a
+/// schema with such a constant moves to a new physical index. `1`: the value
+/// is built as written (an object or list was `null`) and mapped unindexed,
+/// since the strict root refuses keys in an `object` without children and a
+/// mapped field refuses an element of another kind.
+const CONSTANT_OBJECT_REVISION: u8 = 1;
+
+/// Whether a constant is stored but not indexed: an object, or a list holding
+/// one or mixing scalar kinds (string, whole number, fractional number,
+/// boolean) at any depth, nulls aside. One OpenSearch field takes one kind,
+/// and a nested list is flattened into it, so such a value can't be indexed.
+/// A list's mapping comes from its first element, so a whole number after a
+/// fractional one is one kind (a `double` takes it), while a fractional or
+/// out-of-range number after a whole one mixes: a `long` refuses `1e20` and
+/// cuts `2.5` to `2`. The mapping projection, the content hash and so the
+/// designer and the query derive all ask this.
+pub(crate) fn constant_is_stored_unindexed(value: &common::GenericValue) -> bool {
+    let mut kinds = Vec::new();
+    !collect_constant_kinds(value, &mut kinds) || kinds.len() > 1
+}
+
+#[derive(PartialEq)]
+enum ScalarKind {
+    String,
+    Whole,
+    Fractional,
+    Boolean,
+}
+
+/// Adds each scalar kind `value` holds to `kinds`; `false` on an object.
+fn collect_constant_kinds(value: &common::GenericValue, kinds: &mut Vec<ScalarKind>) -> bool {
+    use common::GenericValue as V;
+    let kind = match value {
+        V::Map(_) => return false,
+        V::Array(items) => return items.iter().all(|item| collect_constant_kinds(item, kinds)),
+        V::Null => return true,
+        V::Bool(_) => ScalarKind::Boolean,
+        V::SmallInt(_) | V::Int(_) | V::BigInt(_) if kinds.contains(&ScalarKind::Fractional) => {
+            return true;
+        }
+        V::SmallInt(_) | V::Int(_) | V::BigInt(_) => ScalarKind::Whole,
+        V::Float(_) | V::Double(_) | V::Decimal(_) => ScalarKind::Fractional,
+        V::String(_)
+        | V::Uuid(_)
+        | V::Date(_)
+        | V::Time(_)
+        | V::Timestamp(_)
+        | V::TimestampTz(_)
+        | V::Bytes(_) => ScalarKind::String,
+    };
+    if !kinds.contains(&kind) {
+        kinds.push(kind);
+    }
+    true
 }
 
 /// Where a field's value comes from. The shapes are mutually exclusive — a field
@@ -156,8 +217,15 @@ pub(crate) fn is_enabled(flag: &bool) -> bool {
 /// built under `1`, which lacks the subfield.
 const MAP_KEY_MAPPING_REVISION: u8 = 2;
 
+/// Bumped when what a `binary` column indexes changes, so every schema with
+/// one gets a new content hash (a new physical index, rebuilt once) while no
+/// other schema moves. `1`: the bytes are indexed as base64; before, the
+/// column's Postgres hex text (`\x0102…`) was.
+pub(crate) const BINARY_ENCODING_REVISION: u8 = 1;
+
 /// Hashes the fields in declaration order (exactly what the derive did), plus
-/// `MAP_KEY_MAPPING_REVISION` for a `map` column only. `subfields` and `indexed`
+/// `MAP_KEY_MAPPING_REVISION` for a `map` column and `BINARY_ENCODING_REVISION`
+/// for a `binary` one only. `subfields` and `indexed`
 /// are hashed only when turned off, and `array` only when on, so a schema that
 /// never uses them keeps the content hash (and so the physical index) it had
 /// before they existed.
@@ -182,6 +250,9 @@ impl Hash for Column {
         enum_order.hash(state);
         if matches!(ty, FlussoType::Map { .. }) {
             MAP_KEY_MAPPING_REVISION.hash(state);
+        }
+        if matches!(ty, FlussoType::Binary) {
+            BINARY_ENCODING_REVISION.hash(state);
         }
         if !subfields {
             "subfields".hash(state);

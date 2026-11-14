@@ -146,7 +146,7 @@ Both schemas are also published per release at `https://alias2k.github.io/flusso
 
 ## script
 
-`script run` builds one document, runs its index's [script fields](scripts.md) over it, and prints the document as built, what the scripts printed, and the finished document. On a failure it prints the field, the message, and the script line with a caret, and exits non-zero. The scripts are compiled exactly as `run` compiles them.
+`script run` builds one document, runs its index's [script fields](scripts.md) over it, and prints the document as built, what the scripts printed, and the finished document. On a failure it prints the field, the message, and the script line with a caret, and exits non-zero. A row whose document fails to build before any script runs (an [`array`](field-types.md#array) element the field can't hold) prints `the document failed to build:` with the field path and the reason, and exits non-zero too; only a missing or soft-deleted row is `no document`. The scripts are compiled exactly as `run` compiles them.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |

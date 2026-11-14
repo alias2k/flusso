@@ -882,3 +882,160 @@ fn an_array_column_projects_to_an_array_of_its_element() {
     assert_eq!(by_name("attrs").mapping.mapping_type, MappingType::Object);
     assert!(!by_name("code").array);
 }
+
+fn constant_field(name: &str, value: crate::common::GenericValue) -> Field {
+    Field {
+        field: FieldName::try_new(name).unwrap(),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Constant(value),
+    }
+}
+
+fn hash_of(schema: &IndexSchema) -> String {
+    schema
+        .resolve(IndexName::try_new("products").unwrap())
+        .hash
+        .to_string()
+}
+
+/// A schema with a `binary` column, or an `ids` of `binary`, moves off the
+/// hash it had while the column was indexed as Postgres hex text, so the index
+/// is rebuilt once with the bytes as base64. The pins are the hashes before.
+#[test]
+fn a_binary_schema_moves_off_its_hex_text_hash() {
+    let binary = columns_schema(vec![
+        column_field("name", FlussoType::Text),
+        column_field("thumbnail", FlussoType::Binary),
+    ]);
+    assert_ne!(hash_of(&binary), "28a742cb");
+    assert_ne!(hash_of(&ids_schema(FlussoType::Binary)), "7690cadc");
+}
+
+#[test]
+fn a_schema_without_binary_or_an_object_constant_keeps_its_content_hash() {
+    use crate::common::GenericValue;
+    let scalars = columns_schema(vec![
+        column_field("name", FlussoType::Text),
+        constant_field("source", GenericValue::String("crm".to_owned())),
+        constant_field("weight", GenericValue::BigInt(5)),
+        constant_field(
+            "tags",
+            GenericValue::Array(vec![GenericValue::String("a".to_owned())]),
+        ),
+        constant_field("nothing", GenericValue::Null),
+    ]);
+    assert_eq!(hash_of(&scalars), "894b0c70");
+    assert_eq!(hash_of(&ids_schema(FlussoType::Long)), "4d3e4e36");
+}
+
+/// A constant holding an object is built as written and stored unindexed: the
+/// strict root refuses keys in an `object` with no children. Its schema moves
+/// off the hash it had while it built `null`; a scalar constant stays indexed.
+#[test]
+fn a_constant_holding_an_object_is_stored_unindexed_and_moves_its_hash() {
+    use crate::common::GenericValue;
+    let object = GenericValue::Map(
+        [("a".to_owned(), GenericValue::BigInt(1))]
+            .into_iter()
+            .collect(),
+    );
+    let schema = columns_schema(vec![
+        constant_field("meta", object.clone()),
+        constant_field("rows", GenericValue::Array(vec![object])),
+        constant_field("source", GenericValue::String("crm".to_owned())),
+    ]);
+    let mapping = schema.resolve(IndexName::try_new("products").unwrap());
+    let indexed: Vec<bool> = mapping.fields.iter().map(|f| f.mapping.indexed).collect();
+    assert_eq!(indexed, [false, false, true]);
+    assert_eq!(mapping.fields[0].mapping.mapping_type, MappingType::Object);
+    assert_ne!(mapping.hash.to_string(), "56ebe48b");
+}
+
+fn list_constant_schema(items: Vec<crate::common::GenericValue>) -> IndexSchema {
+    columns_schema(vec![constant_field(
+        "codes",
+        crate::common::GenericValue::Array(items),
+    )])
+}
+
+/// A list whose scalars are one kind (integers and floats are both numbers,
+/// nulls aside, nested lists flattened; a whole number after a fractional
+/// first one is fine, a `double` takes it) stays indexed and keeps the hash it
+/// had before constants were built as written. The pins are those hashes.
+#[test]
+fn a_constant_list_of_one_kind_stays_indexed_and_keeps_its_hash() {
+    use crate::common::GenericValue as V;
+    for (items, pin) in [
+        (
+            vec![
+                V::Double(2.5),
+                V::BigInt(1),
+                V::Null,
+                V::Array(vec![V::BigInt(3)]),
+            ],
+            "fdf39dda",
+        ),
+        (vec![V::BigInt(1), V::BigInt(2)], "c3c3eed1"),
+        (
+            vec![
+                V::Null,
+                V::String("a".into()),
+                V::Array(vec![V::String("b".into())]),
+            ],
+            "61fc25ce",
+        ),
+    ] {
+        let schema = list_constant_schema(items);
+        assert_eq!(hash_of(&schema), pin);
+        let mapping = schema.resolve(IndexName::try_new("products").unwrap());
+        assert!(mapping.fields[0].mapping.indexed);
+    }
+}
+
+fn mixed_constant_lists() -> Vec<(Vec<crate::common::GenericValue>, &'static str)> {
+    use crate::common::GenericValue as V;
+    vec![
+        (vec![V::BigInt(1), V::String("n/a".into())], "bc077fc0"),
+        (vec![V::Bool(true), V::BigInt(1)], "aa845af3"),
+        (
+            vec![
+                V::BigInt(1),
+                V::Double(2.5),
+                V::Null,
+                V::Array(vec![V::BigInt(3)]),
+            ],
+            "39e3f15a",
+        ),
+        (vec![V::BigInt(1), V::Double(1e20)], "92bce669"),
+        (
+            vec![
+                V::Array(vec![V::BigInt(1)]),
+                V::Array(vec![V::String("a".into())]),
+            ],
+            "2b4a291f",
+        ),
+    ]
+}
+
+/// A list mixing scalar kinds moves off the hash it had while it built
+/// `null`, so it lands in a new physical index. The pins are those hashes.
+#[test]
+fn a_constant_list_mixing_kinds_moves_its_hash() {
+    for (items, pin) in mixed_constant_lists() {
+        assert_ne!(hash_of(&list_constant_schema(items)), pin);
+    }
+}
+
+/// One OpenSearch field takes one kind, so a list mixing kinds is stored
+/// unindexed as an opaque object, like an object constant.
+#[test]
+fn a_constant_list_mixing_kinds_is_stored_unindexed() {
+    for (items, _) in mixed_constant_lists() {
+        let mapping = list_constant_schema(items).resolve(IndexName::try_new("products").unwrap());
+        let field = &mapping.fields[0];
+        assert!(!field.mapping.indexed);
+        assert_eq!(field.mapping.mapping_type, MappingType::Object);
+        assert!(!field.array);
+    }
+}

@@ -199,12 +199,13 @@ fn coerce_field(
         FieldSource::Group(fields) => coerce_object(json, fields, path)?,
         FieldSource::Relation(Relation::Join(join)) => coerce_relation(json, &join.fields, path)?,
         FieldSource::Relation(Relation::Aggregate(aggregate)) => coerce_aggregate(json, aggregate),
-        // A geo point ({lat,lon} / [lon,lat] / "lat,lon") and a bare constant
-        // carry no scalar type to coerce to; keep their natural JSON shape. A
-        // script field is a placeholder null, computed after the build.
-        FieldSource::Geo(_) | FieldSource::Constant(_) | FieldSource::Script(_) => {
-            json_to_generic(json)
-        }
+        // The query reads a constant back as untyped text, or null for an object
+        // or a list; the schema holds it exactly.
+        FieldSource::Constant(value) => value.clone(),
+        // A geo point ({lat,lon} / [lon,lat] / "lat,lon") carries no scalar type
+        // to coerce to; keep its natural JSON shape. A script field is a
+        // placeholder null, computed after the build.
+        FieldSource::Geo(_) | FieldSource::Script(_) => json_to_generic(json),
     })
 }
 
@@ -403,18 +404,39 @@ fn coerce_scalar(json: serde_json::Value, ty: &FlussoType) -> GenericValue {
             .as_str()
             .and_then(parse_temporal)
             .unwrap_or_else(|| json_to_generic(json)),
+        FlussoType::Binary => match json.as_str().and_then(postgres_hex) {
+            Some(bytes) => GenericValue::Bytes(bytes),
+            None => json_to_generic(json),
+        },
         // Text-family and the structured / escape-hatch types keep their natural
         // JSON shape.
         FlussoType::Text
         | FlussoType::Identifier
         | FlussoType::Keyword
         | FlussoType::Enum
-        | FlussoType::Binary
         | FlussoType::Json
         | FlussoType::Map { .. }
         | FlussoType::GeoPoint
         | FlussoType::Custom { .. } => json_to_generic(json),
     }
+}
+
+/// The bytes of a `bytea` as the document query's JSON carries it: Postgres
+/// renders a `bytea` inside `json_build_object` as its text output, `\x`
+/// followed by two hex digits per byte (`bytea_output = hex`, the default).
+/// `None` for anything else, which then stays the text it reads as.
+fn postgres_hex(text: &str) -> Option<Vec<u8>> {
+    let digits = text.strip_prefix("\\x")?.as_bytes();
+    if digits.len() % 2 != 0 || !digits.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    digits
+        .chunks(2)
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).ok()?;
+            u8::from_str_radix(pair, 16).ok()
+        })
+        .collect()
 }
 
 /// Parse a `Timestamp`-declared string into the tightest temporal variant: an

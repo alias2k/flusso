@@ -19,7 +19,7 @@ use clap::{Args, Subcommand};
 use config::Config;
 use kernel::{GenericValue, IndexName};
 use script::{Printer, ScriptContext, Scripts};
-use source_postgres::PgDocumentBuilder;
+use source_postgres::{Built, PgDocumentBuilder};
 
 use crate::DEFAULT_CONFIG;
 use crate::backends::source_spec;
@@ -99,15 +99,14 @@ async fn run_once(args: &RunArgs) -> anyhow::Result<()> {
     let scripts = Scripts::compile_with_printer(&spec, Some(printer))
         .map_err(|errors| anyhow!("{errors}"))?;
 
-    let (label, input) = match &args.input {
-        Some(path) => (path.display().to_string(), read_input(path)?),
+    let (label, built) = match &args.input {
+        Some(path) => (path.display().to_string(), Ok(read_input(path)?)),
         None => from_database(&config, &index, args.id.as_deref()).await?,
     };
 
     let pen = Pen::detect();
     let mut out = std::io::stdout().lock();
-    print::heading(&mut out, pen, "input", &label)?;
-    writeln!(out, "{}", pretty(&input)?)?;
+    let input = show_input(&mut out, pen, &label, built)?;
 
     let mut finished = input;
     let outcome = scripts.apply(&index, &mut finished);
@@ -140,11 +139,36 @@ async fn run_once(args: &RunArgs) -> anyhow::Result<()> {
     }
 }
 
+/// Print the document the scripts run over, or, when it failed to build, the
+/// failure with its field path, as an error.
+fn show_input(
+    out: &mut impl Write,
+    pen: Pen,
+    label: &str,
+    built: Built,
+) -> anyhow::Result<GenericValue> {
+    print::heading(out, pen, "input", label)?;
+    match built {
+        Ok(input) => {
+            writeln!(out, "{}", pretty(&input)?)?;
+            Ok(input)
+        }
+        Err(failure) => {
+            print::failure(
+                out,
+                pen,
+                &format!("the document failed to build: {failure}"),
+            )?;
+            bail!("the document failed to build")
+        }
+    }
+}
+
 async fn from_database(
     config: &Config,
     index: &IndexName,
     id: Option<&str>,
-) -> anyhow::Result<(String, GenericValue)> {
+) -> anyhow::Result<(String, Built)> {
     let (_, sql_url) = crate::backends::source_sql_url(config)?;
     let spec = Arc::new(source_spec(config));
     let documents = PgDocumentBuilder::connect(&sql_url, Arc::clone(&spec))
@@ -298,5 +322,35 @@ mod tests {
                 ("x", GenericValue::Double(1.5)),
             ])
         );
+    }
+
+    #[test]
+    fn a_document_that_failed_to_build_is_shown_as_the_failure() {
+        let failure = source::document::BuildFailure {
+            field: "variants[1].tags".to_owned(),
+            message: "the column holds an object at [0]".to_owned(),
+            position: None,
+        };
+        let mut out = Vec::new();
+        let error = show_input(&mut out, Pen::plain(), "things, id 7", Err(failure))
+            .expect_err("a failed build is an error");
+        let shown = String::from_utf8(out).unwrap();
+        assert!(shown.contains("things, id 7"), "{shown}");
+        assert!(
+            shown.contains(
+                "the document failed to build: `variants[1].tags`: the column holds an object at [0]"
+            ),
+            "{shown}"
+        );
+        assert_eq!(error.to_string(), "the document failed to build");
+    }
+
+    #[test]
+    fn a_built_document_is_shown_and_returned() {
+        let doc = map(vec![("n", GenericValue::BigInt(3))]);
+        let mut out = Vec::new();
+        let input = show_input(&mut out, Pen::plain(), "input.json", Ok(doc.clone())).unwrap();
+        assert_eq!(input, doc);
+        assert!(String::from_utf8(out).unwrap().contains("\"n\": 3"));
     }
 }

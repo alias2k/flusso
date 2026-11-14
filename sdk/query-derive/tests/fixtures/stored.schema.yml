@@ -16,6 +16,9 @@ fields:
   - json: snapshot
     required: false
     indexed: false
+  # A constant list mixing kinds: one field can't index it, so it is stored.
+  - constant: codes
+    value: [1, "n/a"]
   # A to-many join kept for display only.
   - has_many: variants
     table: variants

@@ -131,7 +131,9 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   root-table change resolves to its own id *and* walks every path back at the root — issue #167),
   and `a_root_filtered_tree_indexes_only_top_level_rows` (the guide's tree with a `parent_id
   is_null` root filter: only top-level rows are documents across child/grandchild changes,
-  re-parenting, promotion, and demotion), and `an_update_of_an_unread_column_writes_nothing` (issue #169: an update changing
+  re-parenting, promotion, and demotion), and `binary_columns_and_constants_are_indexed_as_written` (issue #291: a `bytea` at the root, as
+`bytea[]`, in every join kind and two levels deep reads back as base64 of its bytes on backfill and
+after a live update; constants land as written), and `an_update_of_an_unread_column_writes_nothing` (issue #169: an update changing
   only a column no document reads leaves the row's and its parent's `_version` alone; `wal`'s
   `an_update_of_unread_columns_rebuilds_nothing` covers root, child, aggregate, each read-column
   kind, and the no-pre-image fallback; `on_pairs_rebuild_the_parent_from_either_side` covers `on:`
@@ -855,7 +857,23 @@ so `path.*.keyword` names the exact values alone. `Column`'s
 hand-written `Hash` adds `MAP_KEY_MAPPING_REVISION` (`2`: typed keys, then the `.keyword`; both
 in 0.17.0) for a map column only, so map schemas
 moved to a new physical index when keys became typed and nothing else did
-(`a_schema_without_a_map_keeps_its_content_hash` / `a_map_schema_moves_off_its_dynamically_mapped_hash`).
+(`a_schema_without_a_map_keeps_its_content_hash` / `a_map_schema_moves_off_its_dynamically_mapped_hash`). The same
+pattern moves two more sets once (issue #291): `BINARY_ENCODING_REVISION` (a `binary` column or an
+`ids` of `binary`; the document query renders a `bytea` inside its JSON as `\x…` hex text, which
+`document/value.rs`'s `coerce_scalar` turns back into `GenericValue::Bytes` for `sink::to_json` to
+base64; `PgDocumentBuilder::connect` sets `bytea_output = 'hex'` on every pooled connection, since a
+database set to `escape` would render escape text) and `CONSTANT_OBJECT_REVISION` in `Field`'s `Hash`
+(a `constant` that `constant_is_stored_unindexed`: an object, or a list holding one or mixing scalar
+kinds — string/number/boolean, nulls aside, nested lists flattened, and a fractional or out-of-range
+number after a whole one, which the first element's `long` would refuse or cut — since one OpenSearch field takes
+one kind and the strict root refuses keys in a childless `object`; built as written by `coerce_field`
+from the schema, never from the query's untyped literal, and projected as an `indexed: false`
+`object`, so the designer and the derive (no handle) follow). Guards:
+`a_binary_schema_moves_off_its_hex_text_hash`,
+`a_schema_without_binary_or_an_object_constant_keeps_its_content_hash`,
+`a_constant_list_mixing_kinds_moves_its_hash` / `_is_stored_unindexed`,
+`a_constant_list_of_one_kind_stays_indexed_and_keeps_its_hash`, `integration`'s
+`a_database_set_to_escape_bytea_output_still_builds_the_bytes`.
 `values` must be a leaf kind (text/keyword/number/date); the conversion rejects others. An `enum:` field takes an optional `variants:` list (its own
 `EnumBody`/`Field::Enum` entity) — the variants in rank order; empty/omitted = a
 plain keyword. It lands on `Column.enum_order` (**not** on `FlussoType::Enum`,

@@ -52,6 +52,13 @@
 //!   child/grandchild insert/update/delete, re-parenting, promotion to the top
 //!   level, and demotion under another row.
 //!
+//! - [`binary_columns_and_constants_are_indexed_as_written`] — a `bytea` at the
+//!   root, as `bytea[]`, and inside `belongs_to` / `has_one` / `has_many` /
+//!   `many_to_many` and two levels deep reaches OpenSearch as base64 of its
+//!   bytes, on backfill and after a live update (issue #291: it was the column's
+//!   Postgres hex text); a `constant` number, list, list mixing kinds, and
+//!   object land as written.
+//!
 //! Each change is verified by polling a realtime `GET {index}/_doc/{id}` (reads
 //! the translog, so no refresh wait) until the index reflects the expectation or
 //! a deadline trips — so the assertions are deterministic despite async flush.
@@ -71,8 +78,8 @@ use std::time::{Duration, Instant};
 use engine::{IngestEngine, SinkControl, SinkEngine};
 use kernel::{
     Column, ColumnName, DatabaseSchema, Field, FieldName, FieldSource, Filter, FlussoType,
-    IndexName, IndexSchema, Join, JoinKind, NullCheckFilter, NullOp, Relation, Secret, SinkName,
-    SoftDelete, SoftDeleteColumn, TableName,
+    GenericValue, IndexName, IndexSchema, Join, JoinKind, NullCheckFilter, NullOp, Relation,
+    Secret, SinkName, SoftDelete, SoftDeleteColumn, TableName,
 };
 use sink::Sink;
 use sink_opensearch::OpensearchSink;
@@ -792,6 +799,295 @@ async fn a_root_filtered_tree_indexes_only_top_level_rows() {
     live.shutdown();
 }
 
+// ─────────────────────────────── binary columns ──────────────────────────────
+
+/// A 100-byte value covering every high/low nibble class, longer than the 57
+/// bytes after which Postgres's own `encode(…, 'base64')` wraps its output.
+const BLOB_HEX: &str = "00ff7f80";
+
+/// The bytes of `repeat(BLOB_HEX, n)`, decoded.
+fn blob(n: usize) -> Vec<u8> {
+    BLOB_HEX
+        .repeat(n)
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect()
+}
+
+/// `decode(repeat(BLOB_HEX, n), 'hex')`.
+fn blob_sql(n: usize) -> String {
+    format!("decode(repeat('{BLOB_HEX}', {n}), 'hex')")
+}
+
+/// Standard base64 back to bytes; `None` for anything that is not base64.
+fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let digits = text.trim_end_matches('=');
+    if text.len() % 4 != 0 || text.len() - digits.len() > 2 {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut acc = 0u32;
+    let mut bits = 0;
+    for c in digits.bytes() {
+        acc = (acc << 6) | ALPHABET.iter().position(|a| *a == c)? as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+
+/// Every `binary` value in the document at the given pointers, base64-decoded,
+/// rendered as one line per pointer so a failure shows what OpenSearch stored.
+fn blobs_at<'a>(pointers: &'a [&'a str]) -> impl Fn(&serde_json::Value) -> Vec<String> + 'a {
+    move |doc| {
+        pointers
+            .iter()
+            .map(|pointer| match doc.pointer(pointer) {
+                Some(serde_json::Value::String(text)) => match base64_decode(text) {
+                    Some(bytes) => format!("{pointer}={}", bytes.len()),
+                    None => format!("{pointer}=not base64: {text:.12}"),
+                },
+                Some(serde_json::Value::Array(items)) => format!(
+                    "{pointer}={:?}",
+                    items
+                        .iter()
+                        .map(|item| item.as_str().and_then(base64_decode).map(|b| b.len()))
+                        .collect::<Vec<_>>()
+                ),
+                other => format!("{pointer}={other:?}"),
+            })
+            .collect()
+    }
+}
+
+/// Every pointer's value (an array's first element) base64-decodes to `want`.
+fn assert_blobs(doc: &serde_json::Value, pointers: &[&str], want: &[u8], when: &str) {
+    for pointer in pointers {
+        let value = match doc.pointer(pointer) {
+            Some(serde_json::Value::Array(items)) => items.first(),
+            other => other,
+        };
+        let text = value.and_then(serde_json::Value::as_str);
+        assert_eq!(
+            text.and_then(base64_decode).as_deref(),
+            Some(want),
+            "{pointer} {when}: {text:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn binary_columns_and_constants_are_indexed_as_written() {
+    let pg = start_postgres().await;
+    let os = start_opensearch().await;
+
+    for ddl in [
+        "CREATE TABLE tags (id int PRIMARY KEY, blob bytea)",
+        "CREATE TABLE things (id int PRIMARY KEY, name text, tag_id int REFERENCES tags(id), \
+         blob bytea, blobs bytea[])",
+        "CREATE TABLE notes (id int PRIMARY KEY, thing_id int REFERENCES things(id), \
+         tag_id int REFERENCES tags(id), blob bytea)",
+        "CREATE TABLE covers (id int PRIMARY KEY, thing_id int REFERENCES things(id), blob bytea)",
+        "CREATE TABLE badges (id int PRIMARY KEY, blob bytea)",
+        "CREATE TABLE thing_badges (thing_id int REFERENCES things(id), \
+         badge_id int REFERENCES badges(id), PRIMARY KEY (thing_id, badge_id))",
+    ] {
+        create_table(&pg.pool, ddl).await;
+    }
+    for sql in [
+        format!("INSERT INTO tags VALUES (1, {})", blob_sql(25)),
+        format!(
+            "INSERT INTO things VALUES (1, 'seeded', 1, {b}, ARRAY[{b}, {c}])",
+            b = blob_sql(25),
+            c = blob_sql(1)
+        ),
+        format!("INSERT INTO notes VALUES (1, 1, 1, {})", blob_sql(25)),
+        format!("INSERT INTO covers VALUES (1, 1, {})", blob_sql(25)),
+        format!("INSERT INTO badges VALUES (1, {})", blob_sql(25)),
+        "INSERT INTO thing_badges VALUES (1, 1)".to_owned(),
+    ] {
+        exec(&pg.pool, &sql).await;
+    }
+
+    let constant = |name: &str, value: GenericValue| Field {
+        field: field(name),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Constant(value),
+    };
+    let mut things = simple_schema("things", None);
+    things.fields.extend([
+        constant("weight", GenericValue::BigInt(5)),
+        constant(
+            "labels",
+            GenericValue::Array(vec![
+                GenericValue::String("a".to_owned()),
+                GenericValue::String("b".to_owned()),
+            ]),
+        ),
+        constant(
+            "codes",
+            GenericValue::Array(vec![
+                GenericValue::BigInt(1),
+                GenericValue::String("n/a".to_owned()),
+            ]),
+        ),
+        constant(
+            "meta",
+            GenericValue::Map(BTreeMap::from([
+                ("origin".to_owned(), GenericValue::String("crm".to_owned())),
+                (
+                    "rank".to_owned(),
+                    GenericValue::Array(vec![GenericValue::BigInt(1), GenericValue::BigInt(2)]),
+                ),
+            ])),
+        ),
+        binary_field("blob", false),
+        binary_field("blobs", true),
+        join_field(
+            "tag",
+            "tags",
+            JoinKind::BelongsTo {
+                column: column("tag_id"),
+            },
+            vec![binary_field("blob", false)],
+        ),
+        join_field(
+            "cover",
+            "covers",
+            JoinKind::HasOne {
+                foreign_key: column("thing_id"),
+            },
+            vec![binary_field("blob", false)],
+        ),
+        join_field(
+            "notes",
+            "notes",
+            JoinKind::HasMany {
+                foreign_key: column("thing_id"),
+            },
+            vec![
+                binary_field("blob", false),
+                join_field(
+                    "tag",
+                    "tags",
+                    JoinKind::BelongsTo {
+                        column: column("tag_id"),
+                    },
+                    vec![binary_field("blob", false)],
+                ),
+            ],
+        ),
+        join_field(
+            "badges",
+            "badges",
+            JoinKind::ManyToMany {
+                through: kernel::Through {
+                    table: table("thing_badges"),
+                    left_key: column("thing_id"),
+                    right_key: column("badge_id"),
+                    filters: None,
+                },
+            },
+            vec![binary_field("blob", false)],
+        ),
+    ]);
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("things"), things)]));
+    let live = start_pipeline(
+        &pg,
+        &os,
+        spec,
+        &[
+            "tags",
+            "things",
+            "notes",
+            "covers",
+            "badges",
+            "thing_badges",
+        ],
+    )
+    .await;
+    live.await_seeded(1).await;
+
+    let pointers = [
+        "/blob",
+        "/blobs",
+        "/tag/blob",
+        "/cover/blob",
+        "/notes/0/blob",
+        "/notes/0/tag/blob",
+        "/badges/0/blob",
+    ];
+    let observe = blobs_at(&pointers);
+    let full = blob(25).len();
+    let expect = |len: usize| {
+        let lines = [
+            format!("/blob={len}"),
+            format!("/blobs=[Some({len}), Some({})]", blob(1).len()),
+            format!("/tag/blob={len}"),
+            format!("/cover/blob={len}"),
+            format!("/notes/0/blob={len}"),
+            format!("/notes/0/tag/blob={len}"),
+            format!("/badges/0/blob={len}"),
+        ];
+        lines
+    };
+
+    // Backfill (`build_many`): every position holds the bytes the row holds.
+    let want = expect(full);
+    let want: Vec<&str> = want.iter().map(String::as_str).collect();
+    live.assert_doc_eventually("things", "1", &observe, &want)
+        .await;
+    let doc = live.fetch_source("things", "1").await.unwrap();
+    assert_blobs(&doc, &pointers, &blob(25), "on backfill");
+    assert_eq!(doc.get("weight"), Some(&serde_json::json!(5)), "{doc}");
+    assert_eq!(
+        doc.get("labels"),
+        Some(&serde_json::json!(["a", "b"])),
+        "{doc}"
+    );
+    assert_eq!(
+        doc.get("codes"),
+        Some(&serde_json::json!([1, "n/a"])),
+        "{doc}"
+    );
+    assert_eq!(
+        doc.get("meta"),
+        Some(&serde_json::json!({ "origin": "crm", "rank": [1, 2] })),
+        "{doc}"
+    );
+
+    // Live (`build`): new bytes at every position, written through the WAL.
+    for sql in [
+        format!("UPDATE tags SET blob = {} WHERE id = 1", blob_sql(3)),
+        format!(
+            "UPDATE things SET blob = {b}, blobs = ARRAY[{b}, {c}] WHERE id = 1",
+            b = blob_sql(3),
+            c = blob_sql(1)
+        ),
+        format!("UPDATE notes SET blob = {} WHERE id = 1", blob_sql(3)),
+        format!("UPDATE covers SET blob = {} WHERE id = 1", blob_sql(3)),
+        format!("UPDATE badges SET blob = {} WHERE id = 1", blob_sql(3)),
+    ] {
+        exec(&pg.pool, &sql).await;
+    }
+    let want = expect(blob(3).len());
+    let want: Vec<&str> = want.iter().map(String::as_str).collect();
+    live.assert_doc_eventually("things", "1", &observe, &want)
+        .await;
+    let doc = live.fetch_source("things", "1").await.unwrap();
+    assert_blobs(&doc, &pointers, &blob(3), "after a live update");
+
+    live.shutdown();
+}
+
 /// The sorted `label`s of a nested array, empty when absent.
 fn labels(array: Option<&serde_json::Value>) -> Vec<String> {
     let mut out: Vec<String> = array
@@ -1433,6 +1729,16 @@ fn column_field(name: &str, col: &str) -> Field {
             array: false,
         }),
     }
+}
+
+/// A `binary` field `name` over the column of the same name.
+fn binary_field(name: &str, array: bool) -> Field {
+    let mut field = column_field(name, name);
+    if let FieldSource::Column(column) = &mut field.source {
+        column.ty = FlussoType::Binary;
+        column.array = array;
+    }
+    field
 }
 
 fn field(name: &str) -> FieldName {
