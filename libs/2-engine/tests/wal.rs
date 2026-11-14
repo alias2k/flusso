@@ -3149,7 +3149,8 @@ async fn the_pipeline_runs_through_pgbouncer_in_transaction_mode() {
     the_pipeline_runs_through_pgbouncer("transaction").await;
 }
 
-/// PgBouncer in `pool_mode` with its stock `ignore_startup_parameters`, in
+/// PgBouncer in `pool_mode`, ignoring only the `extra_float_digits` startup
+/// parameter the SQL pool sends (stock PgBouncer refuses it), in
 /// front of every connection flusso opens, the replication one included
 /// (issue #295): it refuses any parameter inside a startup `options`, so the
 /// settings a key's text depends on are set after connecting, or not needed.

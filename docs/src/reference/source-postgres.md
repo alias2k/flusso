@@ -60,7 +60,13 @@ TLS settings come from two surfaces, merged: the URL's libpq parameters (`sslmod
 
 ## Behind PgBouncer
 
-flusso connects through PgBouncer (1.23 or newer for the replication connection) in session and in transaction mode alike: it sends no startup `options`, which PgBouncer refuses, and no key it reads depends on a setting a pooled connection could drop. One thing does: a [`binary`](field-types.md) field's bytes. flusso sets `bytea_output = hex` on each connection it opens, which a transaction-mode pool may not keep, so set it on the database or role there too: `ALTER ROLE flusso SET bytea_output = 'hex'`.
+flusso connects through PgBouncer in session and in transaction mode alike, the replication connection included, once PgBouncer is set up for it:
+
+- **PgBouncer 1.23 or newer.** Older versions refuse the replication connection. flusso then logs `unsupported startup parameter: replication` on each retry and indexes nothing.
+- **`ignore_startup_parameters = extra_float_digits`.** flusso's SQL connections send that startup parameter and stock PgBouncer refuses it: `unsupported startup parameter: extra_float_digits`. Many PgBouncer images already set it.
+- **`max_prepared_statements` above `0` in transaction mode.** flusso uses prepared statements. With `0` the start fails with `prepared statement "sqlx_s_1" already exists`.
+
+No key flusso reads depends on a setting a pooled connection could drop. One thing does: a [`binary`](field-types.md) field's bytes. flusso sets `bytea_output = hex` on each connection it opens, which a transaction-mode pool may not keep, so set it on the database or role there too: `ALTER ROLE flusso SET bytea_output = 'hex'`.
 
 ## Capture
 
@@ -164,7 +170,7 @@ A root table's primary key is the document id. It must be of a type flusso reads
 | Key type | Document id |
 | --- | --- |
 | `smallint`, `integer`, `bigint` | `42` |
-| `numeric` | `1.5`, as stored (`1.50` stays `1.50`); `NaN`, `Infinity`, `-Infinity` |
+| `numeric` | `1.5`, as stored (`1.50` stays `1.50`, a zero keeps its scale: `0.00`); `NaN`, `Infinity`, `-Infinity` |
 | `real`, `double precision` | `1.5`, `-0`; `inf`, `-inf`, `NaN` |
 | `boolean` | `true` |
 | `text`, `varchar`, `char(n)`, `name`, `citext` | the text; `char(n)` keeps its padding (`ab `) |
@@ -178,7 +184,7 @@ A root table's primary key is the document id. It must be of a type flusso reads
 - **A domain** counts as its base type: a domain over `integer` is an `integer` key.
 - **A BC date** counts years from zero, as ISO 8601 does: 15 March 44 BC is `-0043-03-15`. A year past 9999 carries a `+`.
 - **Fractional seconds** have three, six or nine digits, as many as the value needs.
-- **Session settings don't change an id.** Queries render each key in a form no setting changes, and the replication connection sets `DateStyle`, `TimeZone`, `bytea_output` and `extra_float_digits` itself before it streams; a server that refuses one stops the start, naming it.
+- **Session settings don't change an id.** Queries render each key in a form no setting changes, and the replication connection sets `DateStyle`, `TimeZone`, `bytea_output` and `extra_float_digits` itself before it streams; a server that refuses one fails the stream with an error naming it, and flusso retries with backoff.
 - **An id OpenSearch can't take**, such as an empty-string key or one longer than 512 bytes: see [Document ids](sink-opensearch.md#document-ids) on the OpenSearch sink.
 
 ### A link spelled differently
