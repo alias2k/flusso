@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-engine-v0.17.0...flusso-engine-v0.18.0) - 2026-11-14
+
+### Added
+
+- *(kernel)* a column may hold an array of its type ([#276](https://github.com/alias2k/flusso/pull/276))
+- *(sink-opensearch)* trust a private CA with ca_file; never retry a refused certificate
+
+### Fixed
+
+- *(source-postgres)* resolve each change as it is buffered again ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* read a batch's root keys back in one query per index ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* read a key back as the text the WAL sends ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(design)* refuse a field name its level already has; warn about duplicates; read typed table and column names as flusso does
+- *(engine,sink-opensearch)* a rejected document's id is shown shortened; an empty-id delete is dropped
+- *(kernel)* store a constant list mixing kinds unindexed, on a new index
+- *(source-postgres)* a constant builds the value the schema holds
+- *(source-postgres)* index a binary column as its bytes, not Postgres hex text
+- *(source)* [**breaking**] settle the root-key kinds; probe transforms without a table
+
+### Other
+
+- *(source-postgres)* a type change is read by its new type without a restart ([#298](https://github.com/alias2k/flusso/pull/298))
+- *(source-postgres)* a column changing type mid-run recovers after one restart ([#298](https://github.com/alias2k/flusso/pull/298))
+- *(source-postgres)* an array of a bytea domain and a composite read as main does ([#298](https://github.com/alias2k/flusso/pull/298))
+- *(source-postgres)* every bytea value reads the same under bytea_output escape ([#298](https://github.com/alias2k/flusso/pull/298))
+- *(source-postgres)* a link or ids element of a type the key can't take (#299, #312, #313)
+- warn on a timestamp format that refuses the ISO form; pin tuned mappings
+- a naive timestamp must reach OpenSearch as ISO 8601
+- *(source-postgres)* state what PgBouncer must allow; a refused setting retries ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* a numeric link reads one root key back per change ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* key types after review; PgBouncer; guard transaction mode ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* a link of another type rebuilds what the join reads ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* temporal keys past year 9999 keep main's ids ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* a burst reads root keys back once per batch ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* the pipeline runs through PgBouncer in session mode ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* a link spelled differently rebuilds the root's own document ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* keys under other session settings and out of range ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* every key type in every relation position ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(sink-opensearch)* an id OpenSearch refuses fails the whole bulk request
+- Merge pull request #249 from alias2k/fix/check-validation-gaps
+
 ## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-engine-v0.16.0...flusso-engine-v0.17.0) - 2026-11-12
 
 ### Added

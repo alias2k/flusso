@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-kernel-v0.17.0...flusso-kernel-v0.18.0) - 2026-11-14
+
+### Added
+
+- *(kernel)* a column may hold an array of its type ([#276](https://github.com/alias2k/flusso/pull/276))
+
+### Fixed
+
+- *(source,design)* duplicate-name outcomes for constants and binary; one-line node header; palette returns focus
+- *(design)* refuse a field name its level already has; warn about duplicates; read typed table and column names as flusso does
+- *(kernel)* a constant list with a fractional number after a whole one is stored unindexed
+- *(kernel)* store a constant list mixing kinds unindexed, on a new index
+- *(source-postgres)* a constant builds the value the schema holds
+- *(source-postgres)* index a binary column as its bytes, not Postgres hex text
+
 ## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-kernel-v0.16.0...flusso-kernel-v0.17.0) - 2026-11-12
 
 ### Added

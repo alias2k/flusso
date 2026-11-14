@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-cli-v0.17.0...flusso-cli-v0.18.0) - 2026-11-14
+
+### Added
+
+- *(source)* [**breaking**] validate array columns against the catalog ([#276](https://github.com/alias2k/flusso/pull/276))
+- *(cli)* --ca-file for the indexes and reindex admin client
+
+### Fixed
+
+- *(source)* a check the database would not let run is reported, not dropped ([#324](https://github.com/alias2k/flusso/pull/324))
+- *(cli)* a refusal stops the start only when every sink refuses ([#316](https://github.com/alias2k/flusso/pull/316))
+- *(source)* [**breaking**] a schema that can never index a document stops the start (#316, #309)
+- *(source-postgres)* a table's Relation message drops its cached column types ([#298](https://github.com/alias2k/flusso/pull/298))
+- *(source-postgres)* say a lossy ids key may be stored altered; check prints a skipped probe (#299, #313)
+- *(cli)* an ids element_type that holds no key prints and starts ([#299](https://github.com/alias2k/flusso/pull/299))
+- *(source-postgres)* check reports a link or ids element the key can't take (#299, #312, #313)
+- *(source-postgres)* read every key type the same way in backfill, WAL and build
+- *(design,source)* a name applies when the press that left its box ends; key lists by identity
+- *(source,design)* duplicate-name outcomes for constants and binary; one-line node header; palette returns focus
+- *(design)* refuse a field name its level already has; warn about duplicates; read typed table and column names as flusso does
+- *(cli)* script run reports a document that fails to build as the failure
+- *(source)* a domain over an array or jsonb holds an array
+- *(source)* [**breaking**] settle the root-key kinds; probe transforms without a table
+- *(source)* report four schemas check accepted that cannot work
+
+### Other
+
+- *(agents)* add the coordinator skill and guard its paths
+- *(source)* a check the database would not let run is reported ([#324](https://github.com/alias2k/flusso/pull/324))
+- *(cli)* a refusal stops the start only when every sink refuses ([#316](https://github.com/alias2k/flusso/pull/316))
+- Merge pull request #321 from alias2k/fix/type-pairs-that-fail-at-runtime-299
+- *(cli)* check installs no logger of its own ([#299](https://github.com/alias2k/flusso/pull/299))
+- *(cli)* the duplicate-names matrix deletes only its own pair's indexes
+- *(cli)* an ids element_type that holds no key prints and starts ([#299](https://github.com/alias2k/flusso/pull/299))
+- warn on a timestamp format that refuses the ISO form; pin tuned mappings
+- Merge pull request #249 from alias2k/fix/check-validation-gaps
+
 ## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-cli-v0.16.0...flusso-cli-v0.17.0) - 2026-11-12
 
 ### Added
