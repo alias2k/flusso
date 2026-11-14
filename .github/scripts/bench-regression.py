@@ -292,7 +292,7 @@ def analyse(datas: list[dict], threshold: float, rss_threshold: float, window: i
 def report(result: dict) -> list[str]:
     lines = [f"newest run {result['newest']}: judged {result['judged_newest']} of {result['series_newest']} series"]
     if result["judged_newest"] < result["series_newest"]:
-        lines.append("  the rest had no earlier run on the same kind of machine; their verdicts come from their last judged run")
+        lines.append("  a series not judged on it had too few earlier runs on the same kind of machine; its verdict is from the last run it was judged at")
     return lines
 
 
