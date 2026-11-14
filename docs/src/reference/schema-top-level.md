@@ -7,7 +7,7 @@ One `*.schema.yml` describes one search document: the root table, the fields, an
 | `version` | int | — | Format version. Only `1` is accepted. |
 | `table` | [Postgres identifier](identifiers.md) | — | The root table the document is built from. |
 | `schema` | Postgres identifier | `public` | The database schema holding `table`. |
-| `primary_key` | Postgres identifier | none | The root primary-key column: the table's own single-column primary key, not another unique column (changes are keyed by the table's key, so any other column matches no row). Derives the document id and anchors reverse resolution; every join and aggregate requires it. |
+| `primary_key` | Postgres identifier | none | The root primary-key column: the table's own single-column primary key, not another unique column (changes are keyed by the table's key, so any other column matches no row). Derives the document id and anchors reverse resolution; every join and aggregate requires it. Its type must be one of the [key types](source-postgres.md#key-types). |
 | `doc_id` | Postgres identifier | none | **Not supported.** Setting it is a hard error; the id is always `primary_key`. Kept so older files still parse. |
 | `soft_delete` | table | none | Emit a tombstone instead of an upsert for rows matching a condition. See [Filters and soft_delete](filters-and-soft-delete.md#soft_delete). |
 | `filters` | list of filters | none | Root filters: only matching rows become documents. See [Filters and soft_delete](filters-and-soft-delete.md#root-filters). |

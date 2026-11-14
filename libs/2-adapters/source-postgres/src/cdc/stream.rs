@@ -202,7 +202,8 @@ pub(crate) fn build<C: Replication>(
 /// Look up the catalog primary key of every relation announced since the last
 /// event, then which parent links its identity can't deliver (that depends on
 /// the key). A table without one keeps an empty key and is keyed by its
-/// replica identity instead.
+/// replica identity instead. A domain column is retyped to its base type, so
+/// its values decode as the document builder reads them back.
 async fn key_relations(
     catalog: &PgPool,
     state: &mut DecodeState,
@@ -217,6 +218,7 @@ async fn key_relations(
             super::quote_ident(relation.table.as_ref())
         );
         relation.partitioned = Some(is_partitioned(catalog, &qualified).await?);
+        retype_domains(catalog, &mut relation.columns).await?;
         relation.primary_key = crate::document::primary_key_column_names(catalog, qualified)
             .await?
             .into_iter()
@@ -227,6 +229,46 @@ async fn key_relations(
             })
             .collect::<std::result::Result<_, _>>()?;
         record_untraceable(state, oid);
+    }
+    Ok(())
+}
+
+/// Replace each domain column's type OID with its base type's, through nested
+/// domains. A `Relation` names a domain column by the domain's OID, which
+/// `typed_value` doesn't know, while sqlx reads the column back as its base
+/// type: left as text, a domain key would miss its document (issue #295).
+/// Only columns of a type `typed_value` doesn't already decode are looked up.
+async fn retype_domains(catalog: &PgPool, columns: &mut [pgoutput::Column]) -> Result<()> {
+    let unknown: Vec<i64> = columns
+        .iter()
+        .filter(|column| !pgoutput::is_decoded(column.type_oid))
+        .map(|column| i64::from(column.type_oid))
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let bases: Vec<(i64, i64)> = sqlx::query_as(
+        "WITH RECURSIVE base(oid, ty) AS ( \
+           SELECT oid, oid FROM pg_type WHERE oid = ANY($1::oid[]) \
+           UNION ALL \
+           SELECT base.oid, t.typbasetype FROM base JOIN pg_type t ON t.oid = base.ty \
+           WHERE t.typtype = 'd' \
+         ) \
+         SELECT base.oid::int8, base.ty::int8 FROM base JOIN pg_type t ON t.oid = base.ty \
+         WHERE t.typtype <> 'd'",
+    )
+    .bind(unknown)
+    .fetch_all(catalog)
+    .await
+    .map_err(|e| SourceError::Query(e.to_string()))?;
+    for column in columns {
+        if let Some((_, base)) = bases
+            .iter()
+            .find(|(oid, _)| *oid == i64::from(column.type_oid))
+            && let Ok(base) = u32::try_from(*base)
+        {
+            column.type_oid = base;
+        }
     }
     Ok(())
 }

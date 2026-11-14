@@ -536,6 +536,30 @@ impl Catalog for PgDocumentBuilder {
         self.fetch_primary_key(schema, table).await.map(Some)
     }
 
+    async fn reads_key(
+        &self,
+        schema: &DatabaseSchema,
+        table: &TableName,
+        column: &ColumnName,
+    ) -> Result<bool> {
+        let sql = "WITH RECURSIVE d(oid) AS ( \
+                       SELECT a.atttypid FROM pg_attribute a \
+                       WHERE a.attrelid = to_regclass($1) AND a.attname = $2 \
+                         AND a.attnum > 0 AND NOT a.attisdropped \
+                     UNION ALL \
+                       SELECT t.typbasetype FROM pg_type t JOIN d ON t.oid = d.oid \
+                       WHERE t.typtype = 'd' \
+                   ) SELECT t.typname::text FROM d JOIN pg_type t ON t.oid = d.oid \
+                     WHERE t.typtype <> 'd'";
+        let base: Option<String> = sqlx::query_scalar(sql)
+            .bind(format!("{schema}.{table}"))
+            .bind(column.as_ref().to_owned())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(query_err)?;
+        Ok(base.is_none_or(|base| value::KEY_TYPES.contains(&base.as_str())))
+    }
+
     async fn accepts_transforms(
         &self,
         schema: &DatabaseSchema,

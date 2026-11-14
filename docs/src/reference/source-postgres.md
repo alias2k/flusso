@@ -153,6 +153,30 @@ A table without a primary key is keyed by its replica identity's columns. Under 
 
 The fix in each case is the same: give the table a primary key.
 
+## Key types
+
+A root table's primary key is the document id. It must be of a type flusso reads back as a key; the same types work as any relation's key or link column (`foreign_key`, `belongs_to` `column`, junction keys, `via` hops, `on` pairs).
+
+| Key type | Document id |
+| --- | --- |
+| `smallint`, `integer`, `bigint` | `42` |
+| `numeric` | `1.5`, as stored (`1.50` stays `1.50`) |
+| `real`, `double precision` | `1.5` |
+| `boolean` | `true` |
+| `text`, `varchar`, `char(n)`, `name`, `citext` | the text; `char(n)` keeps its padding (`ab `) |
+| `uuid` | `00000000-0000-0000-0000-00000000000a` |
+| `bytea` | `\x01ab`, the Postgres hex form |
+| `date` | `2024-02-29` |
+| `time` | `10:00:00`, `23:59:59.500` |
+| `timestamp` | `2024-02-29 10:00:00`, `2024-02-29 10:00:00.500` |
+| `timestamptz` | `2024-02-29T10:00:00+00:00`: RFC 3339, in UTC |
+
+A domain counts as its base type: a domain over `integer` is an `integer` key.
+
+Any other type (`inet`, an enum, `money`, a range, …) reads back as no key, so no document would ever be written: `flusso check` reports it as `unsupported_key_type` under `primary_key`, and [`run` refuses to start](cli.md#validation-at-start). A relation table keyed by such a type still works as a leaf (a `belongs_to` target, a `has_many` child, a `many_to_many` far table); a change two levels below it can't be traced through it.
+
+Fractional seconds in an id have three, six or nine digits, as many as the value needs.
+
 ## Updates that change nothing a document reads
 
 An update rebuilds only the documents that read a column it changed. Bumping `last_seen_at` on a row that every document embeds, when no schema reads `last_seen_at`, writes nothing to any sink.

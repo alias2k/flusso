@@ -163,7 +163,16 @@ after a live update; constants land as written), and `an_update_of_an_unread_col
   It is the only test that catches a live change rebuilt as the *wrong* op (e.g. an update
   written as a tombstone because the WAL key decoder and the read-back decoder disagree on
   the `GenericValue` variant; see `cdc/pgoutput.rs::typed_value` vs
-  `document/value.rs::decode_column`). `.config/nextest.toml` caps their concurrency and
+  `document/value.rs::decode_column`). **Every key type `decode_column` reads, `typed_value`
+  decodes to the same variant** (issue #295: `bytea`, `date`, `time`, `timestamp`, `timestamptz`
+  too; a domain column is retyped to its base type when the stream keys its `Relation`,
+  `stream.rs`'s `retype_domains`), or a live key misses its row and sqlx's cached statements get a
+  text value for a typed parameter. The backfill reads each table through **its own cursor name**
+  (`cdc/backfill.rs`): sqlx caches a statement by its text with its first row description, and its
+  integer decode reads any 1–8-byte value, so a `FETCH` shared across tables decoded a later
+  table's `text`/`bytea` key as a wrong integer. Guards: `wal`'s `every_relation_position_keyed_by_*`
+  (root, `has_many` + `on`, `belongs_to`, `many_to_many`, `via`, pre-image, backfill, ids equal to
+  the backfill's) and `pgoutput`'s `a_value_decodes_as_the_document_builder_reads_it_back`. `.config/nextest.toml` caps their concurrency and
   retries them — they're legitimately slow/flaky.
 - **The file formats are frozen for the major** (issue #109): any `flusso.toml` or
   `*.schema.yml` a release in the major accepts must keep loading on every later one, and so
@@ -672,7 +681,11 @@ and the `soft_delete` marker's column, `when` and `field` (issue #211), and the 
 the table's single-column catalog key, `RootPrimaryKey` when none or composite; the declared
 `primary_key` must exist and be that key, `RootPrimaryKeyMismatch` otherwise, since the batched
 build matches the table's key on the declared column and writes only tombstones — `wal`'s
-`a_root_primary_key_other_than_the_tables_writes_no_document`; on a root without a single-column
+`a_root_primary_key_other_than_the_tables_writes_no_document`; and of a type `Catalog::reads_key`
+accepts, `UnsupportedKeyType` otherwise (issue #295: Postgres answers from the base type through
+domains against `document::value::KEY_TYPES`, the types `decode_column` reads; any other key reads
+back null, so every build is a tombstone — `config_coverage`'s
+`a_root_key_the_builder_cannot_read_back_is_refused`); on a root without a single-column
 key a missing declared column is `UnknownColumn` only when a relation reads it, else
 `RootPrimaryKey`; anchored at the key name,
 `table`/`primary_key`/`filters`/`soft_delete`, with `Diagnostic.anchor` = `Anchor::IndexKey` so the
@@ -708,7 +721,8 @@ inside `Backends::source`, before anything is staged (`--locked` included; an un
 still fails as `connecting to Postgres`), prints every diagnostic to stderr with `check`'s printer,
 and refuses to start only on a kind that cannot work as written: `stops_the_start` matches
 `DiagnosticKind` exhaustively (`UnknownTable`/`UnknownColumn`/`UnreadSoftDeleteMarker`/
-`RelationPrimaryKey`/`TransformNotApplicable`/`RootPrimaryKeyMismatch`/`NotAnArrayColumn` stop;
+`RelationPrimaryKey`/`TransformNotApplicable`/`RootPrimaryKeyMismatch`/`UnsupportedKeyType`/
+`NotAnArrayColumn` stop;
 type, numeric, nullability, ignored-primary-key, `UndeclaredArrayColumn`, `DuplicateFieldName` and `RootPrimaryKey`
 findings print and start, as they built or ran in 0.17), so a new kind forces a decision there; stop
 only on a state no working 0.17 deployment can be in (or on a key new since, like `array`). `DiagnosticKind` stays exhaustive for that match; `Diagnostic` and `Anchor` are
