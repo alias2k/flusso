@@ -76,3 +76,6 @@ fields:
     value: [1, "x"]
   - constant: co
     value: { a: 1 }
+  - enum: ev
+    variants: [a, b]
+    required: true

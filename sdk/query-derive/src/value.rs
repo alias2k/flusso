@@ -252,10 +252,12 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
                          `{shown}` does"
                     );
                     let kind_message = format!(
-                        "`{ident}` is `#[flusso({name})]`, so it reads one string, but `{shown}` \
-                         reads no string — wrap a `String`, or a type that derives \
-                         `FlussoValue` of a string kind; a map type derives `FlussoMap`, a \
-                         sub-document `FlussoFragment`"
+                        "`{ident}` is `#[flusso({name})]`, so it stands for any `{name}` \
+                         string, but `{shown}` is a value of another kind, which reads only \
+                         its own kind's values (a date, a number, an object) — wrap a `String` \
+                         to read any string, or drop the tag so `{ident}` carries \
+                         `{shown}`'s kind (a map type derives `FlussoMap`, a sub-document \
+                         `FlussoFragment`)"
                     );
                     let array_check = quote_spanned! {read.span()=>
                         const _: () = {
@@ -406,14 +408,15 @@ fn tagged_inner<'a>(
     {
         return refuse(
             "an array",
-            "drop the tag: an untagged newtype over a `Vec` reads an array of values",
+            "drop the tag and wrap a `Vec<String>`: an untagged newtype over a `Vec` reads an \
+             array of values",
         );
     }
-    if let Some((_, reads)) = NOT_A_STRING
+    if let Some((_, reads, fix)) = NOT_A_STRING
         .iter()
-        .find(|(names, _)| leaf.as_deref().is_some_and(|leaf| names.contains(&leaf)))
+        .find(|(names, _, _)| leaf.as_deref().is_some_and(|leaf| names.contains(&leaf)))
     {
-        return refuse(reads, "wrap a `String`, or a type that reads one");
+        return refuse(reads, &fix.replace("{ident}", &ident.to_string()));
     }
     if crate::doc::is_primitive(leaf.as_deref()) && leaf.as_deref() != Some("String") {
         // Behind a wrapper, an untagged newtype has no kind to carry over.
@@ -451,8 +454,9 @@ const TRANSPARENT: &[&str] = &[
 ];
 
 /// Types the derive recognises by name as reading no single string, with what
-/// they read instead.
-const NOT_A_STRING: &[(&[&str], &str)] = &[
+/// they read instead and the fix to suggest. A date or a number reads only
+/// its own kind's values, so dropping the tag carries that kind instead.
+const NOT_A_STRING: &[(&[&str], &str, &str)] = &[
     (
         &[
             "NonZero",
@@ -470,8 +474,33 @@ const NOT_A_STRING: &[(&[&str], &str)] = &[
             "NonZeroIsize",
         ],
         "a number",
+        "wrap a `String`",
     ),
-    (&["Duration", "SystemTime", "GeoPoint"], "an object"),
+    (
+        &[
+            "NaiveDate",
+            "NaiveDateTime",
+            "NaiveTime",
+            "DateTime",
+            "OffsetDateTime",
+            "PrimitiveDateTime",
+            "Date",
+        ],
+        "only a date, not any string",
+        "wrap a `String` to read any string, or drop the tag so `{ident}` carries the date \
+         kind",
+    ),
+    (
+        &["Decimal"],
+        "only a number, not any string",
+        "wrap a `String` to read any string, or drop the tag so `{ident}` carries the decimal \
+         kind",
+    ),
+    (
+        &["Duration", "SystemTime", "GeoPoint"],
+        "an object",
+        "wrap a `String`",
+    ),
 ];
 
 fn single_generic<'a>(ty: &'a syn::Type, wrapper: &str) -> Option<&'a syn::Type> {

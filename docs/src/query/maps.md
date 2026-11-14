@@ -92,16 +92,7 @@ A map field deserializes into `HashMap<String, V>` or `BTreeMap<String, V>`, wit
 Every map's keys are `String`. The fields take no `#[flusso(…)]`. What the derive takes on trust is [one list](document-structs.md#what-the-derive-trusts).
 
 ```rust
-#[derive(serde::Deserialize, FlussoMap)]
-#[flusso(text)]
-struct Translation {
-    fallback: Option<String>,
-    #[serde(flatten)]
-    langs: BTreeMap<String, Option<String>>,   // a jsonb column may hold {"it": null}
-}
-
-#[derive(serde::Deserialize, FlussoFragment)]
-struct Localized { name: Translation }
+{{#include ../../../sdk/query-derive/tests/ui_pass/docs_map_examples.rs:translation}}
 ```
 
 Use the derive rather than a hand-written `impl FlussoMap<K>`: a fragment validates through const metadata the derive emits, so a hand impl alone compiles at a root but fails inside a `FlussoFragment`, with the error pointing at the derive. Writing that metadata by hand works too: `FlussoValueMeta` with `KINDS = [Object]` and `MAP_VALUES` set to the value kind, plus [`embeddable!`](enums-and-values.md#hand-written-values). The value kind is checked symmetrically: a `text` wrapper at a `keyword` map fails the build. Number and date maps have no derive tag; use `HashMap`/`BTreeMap` for those.

@@ -388,3 +388,16 @@ fn a_map_keeps_a_key_whose_value_is_null() {
     assert_eq!(labels.get("x"), Some(&GenericValue::Null));
     assert_eq!(labels.get("y"), Some(&GenericValue::String("a".into())));
 }
+
+/// A `timetz` column under a schema `timestamp` reads as none of the typed
+/// date variants, so it is kept as the text Postgres wrote: the query
+/// manual's date table lists it as read by `String` only (issue #294).
+#[test]
+fn a_time_with_a_zone_stays_the_text_postgres_wrote() {
+    let fields = [column_field("at", FlussoType::Timestamp)];
+    let doc = body(json!({ "at": "03:04:05.123456+02:00" }), &fields);
+    assert_eq!(
+        doc["at"],
+        GenericValue::String("03:04:05.123456+02:00".into())
+    );
+}

@@ -243,7 +243,8 @@ fn named_fields(
             format!(
                 "a map holds any key, and `deny_unknown_fields` makes `{ident}` fail on every key \
                  it does not name — remove it; a `#[serde(flatten)]` \
-                 `HashMap<String, String>` field keeps the other keys"
+                 `HashMap<String, Option<String>>` field keeps the other keys (`Option` reads a \
+                 `null` value)"
             ),
         ));
     }
@@ -274,8 +275,9 @@ fn named_fields(
                 format!(
                     "field `{name}` of the FlussoMap type `{ident}` reads its key and an alias, \
                      but a map may hold both keys, and serde then fails with `duplicate field` — \
-                     remove the alias; a `#[serde(flatten)]` `HashMap<String, String>` field \
-                     keeps the other key"
+                     remove the alias; a `#[serde(flatten)]` \
+                     `HashMap<String, Option<String>>` field keeps the other key (`Option` reads \
+                     a `null` value)"
                 ),
             ));
             continue;
@@ -326,7 +328,8 @@ fn flattened_map(ident: &syn::Ident, ty: &Type, kind: Kind) -> syn::Result<Token
             format!(
                 "`{rendered}` is `#[serde(flatten)]` in the FlussoMap type `{ident}`, where it \
                  reads the keys no other field reads, and serde flattens only a struct or a \
-                 map — declare it `HashMap<String, String>`"
+                 map — declare it `HashMap<String, Option<String>>` (`Option` reads a `null` \
+                 value)"
             ),
         ));
     }
@@ -370,8 +373,9 @@ fn not_a_map_of(what: &str, kind: Kind) -> String {
     let tag = kind.name();
     format!(
         "a `#[flusso({tag})]` FlussoMap type holds `{tag}` values, but {what}, which is not a \
-         map of `{tag}` values the derive can see into — use a `HashMap<String, String>`, or a \
-         type that derives `FlussoMap` with `#[flusso({tag})]`"
+         map of `{tag}` values the derive can see into — use a `HashMap<String, V>` of `{tag}` \
+         values (`Option<V>` if the column can hold a `null` value), or a type that derives \
+         `FlussoMap` with `#[flusso({tag})]`"
     )
 }
 

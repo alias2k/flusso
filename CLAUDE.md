@@ -1158,20 +1158,27 @@ and an opaque `json` field (object, no children) accepts any map-shaped type on 
 `Date`→`DateMap`, the numerics→`NumberMap`). Phase 2 (per-key analyzers for per-language
 stemming) is deferred.
 
-**The boundary is pinned (issue #294).** What the derive trusts is one list, owned by
-`docs/src/query/document-structs.md` ("What the derive trusts"); don't restate it here.
-`sdk/query-derive/tests/boundary.rs` places two shape lists (hand-written `named_shapes`, and
-`generated_shapes`: inner type × wrapper × newtype derive, whose declarations are compiled alone
-first so a refused one isn't placed) at every field of the `boundary` fixture (required kinds bare,
-nullable ones in `Option`, `geo`, `date`/`timestamp`, two unindexed constants) on a root and in a
-fragment, ~9100 cases, ~3 min. It compiles them in ≤50-module files through cargo in trybuild's
-target dir (`target/tests/trybuild`, same manifest plus `chrono`, so it reuses the `ui` harness's
-artifacts; a file is rewritten only when it changes), reads sample documents (null, missing keys,
-empty and many elements, a `null` map value, each date form) into what builds, and fails on a
-compile-then-fail case unless, for every document it fails on, a `TRUSTED` rule matches that
-document and its error; or on a (shape, field) whose root and fragment outcomes differ unless
-`DISAGREE` lists it; outcomes are recorded in `tests/boundary.outcomes` (re-record with
-`FLUSSO_BLESS=1`), and each rule's phrase must appear in the manual. A new shape or kind goes there.
+**The boundary is pinned (issue #294), not complete.** What the derive checks, trusts and has as
+known gaps (#306, #307) is one section, owned by `docs/src/query/document-structs.md` ("What the derive
+trusts"); don't restate it here. `sdk/query-derive/tests/boundary.rs` places two shape lists
+(hand-written `named_shapes`, and `generated_shapes`: inner type × wrapper × newtype derive; a shape
+whose declarations alone are refused is not placed) at every field of the `boundary` fixture
+(required kinds bare, nullable ones in `Option`, `geo`, `date`/`timestamp`, an `enum` with variants,
+two unindexed constants) on a root, then in a fragment only for shapes that compile at some root
+field, ~7100 cases. It covers only the kinds its fixture holds. It compiles them in ≤60-module files
+in its own crate and target dir (`target/tests/flusso-boundary/`, so the `ui` harness never waits on
+its lock; nextest group `boundary`, one at a time): the first round runs `cargo check`, later rounds
+`cargo build`; each file is named after a hash of its text and of every input (derive, `flusso-query`,
+`config`, `kernel`, fixtures, `Cargo.lock`, toolchain), and its results are cached under that name, so
+a rerun on an unchanged derive compiles nothing. It reads sample documents (null, missing keys, empty
+and many elements, a `null` map value, each date form) into what builds, and fails on a
+compile-then-fail case unless, for every document it fails on, a `TRUSTED` rule matches that document
+and its error; or on a (shape, field) whose root and fragment outcomes differ unless `DISAGREE` lists
+it (`*` = every field); outcomes are recorded in `tests/boundary.outcomes` (re-record with
+`FLUSSO_BLESS=1`), and each rule's phrase must appear in the manual. The outcome is only `refused`,
+not which check refused, so three refusals that another check backs up are pinned by their `ui`
+`.stderr` files instead (see the test's module doc). The manual's map example is included by anchor
+from `tests/ui_pass/docs_map_examples.rs`, and the plugin's is checked equal to it.
 
 **Ordered enums (issue #87).** A keyword mapping with `Mapping.enum_order` set gets the
 `Enum<S, Sub>` handle (`handles/string.rs`) instead of `Keyword`: same value ops (delegated;

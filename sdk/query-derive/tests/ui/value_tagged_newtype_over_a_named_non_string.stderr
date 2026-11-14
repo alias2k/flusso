@@ -1,4 +1,4 @@
-error: `A` is `#[flusso(keyword)]`, so it reads one string, but `NonZeroU32` reads a number — wrap a `String`, or a type that reads one
+error: `A` is `#[flusso(keyword)]`, so it reads one string, but `NonZeroU32` reads a number — wrap a `String`
   --> tests/ui/value_tagged_newtype_over_a_named_non_string.rs:15:10
    |
 15 | struct A(NonZeroU32);
@@ -10,19 +10,19 @@ error: `B` is `#[flusso(keyword)]`, so it reads one string, but `i64` reads a nu
 19 | struct B(Wrapping<i64>);
    |                   ^^^
 
-error: `C` is `#[flusso(keyword)]`, so it reads one string, but `Duration` reads an object — wrap a `String`, or a type that reads one
+error: `C` is `#[flusso(keyword)]`, so it reads one string, but `Duration` reads an object — wrap a `String`
   --> tests/ui/value_tagged_newtype_over_a_named_non_string.rs:23:10
    |
 23 | struct C(Duration);
    |          ^^^^^^^^
 
-error: `D` is `#[flusso(keyword)]`, so it reads one string, but `GeoPoint` reads an object — wrap a `String`, or a type that reads one
+error: `D` is `#[flusso(keyword)]`, so it reads one string, but `GeoPoint` reads an object — wrap a `String`
   --> tests/ui/value_tagged_newtype_over_a_named_non_string.rs:27:10
    |
 27 | struct D(GeoPoint);
    |          ^^^^^^^^
 
-error: `E` is `#[flusso(keyword)]`, so it reads one string, but `[String]` reads an array — drop the tag: an untagged newtype over a `Vec` reads an array of values
+error: `E` is `#[flusso(keyword)]`, so it reads one string, but `[String]` reads an array — drop the tag and wrap a `Vec<String>`: an untagged newtype over a `Vec` reads an array of values
   --> tests/ui/value_tagged_newtype_over_a_named_non_string.rs:31:23
    |
 31 | struct E(Cow<'static, [String]>);

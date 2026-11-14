@@ -33,8 +33,8 @@ an untagged wrapper is a compile error. The wrapper takes any shape that reads o
 over a map or named fields, so a translations type can carry a `fallback` field beside its language
 keys; a newtype over a `Vec`, an `Option` or a single value is a compile error. What it holds is
 checked against the tag: a newtype's `HashMap<String, V>` needs `V` of that kind, and a named field
-is `Option<V>` (a map may lack any key); a map's keys are `String`. What the derive checks and what it trusts (a flattened map,
-a `json` field, …) is one list in the manual:
+is `Option<V>` (a map may lack any key); a map's keys are `String`. What the derive checks, what it trusts (a flattened map, a `json` field, …) and its known gaps
+are one section of the manual:
 <https://alias2k.github.io/flusso/main/query/document-structs.html#what-the-derive-trusts>.
 
 A hand-written `impl FlussoMap<K>` works at a root but fails inside a `FlussoFragment` unless the

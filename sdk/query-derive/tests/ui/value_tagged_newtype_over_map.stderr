@@ -1,4 +1,4 @@
-error[E0080]: evaluation panicked: `Code` is `#[flusso(keyword)]`, so it reads one string, but `Codes` reads no string — wrap a `String`, or a type that derives `FlussoValue` of a string kind; a map type derives `FlussoMap`, a sub-document `FlussoFragment`
+error[E0080]: evaluation panicked: `Code` is `#[flusso(keyword)]`, so it stands for any `keyword` string, but `Codes` is a value of another kind, which reads only its own kind's values (a date, a number, an object) — wrap a `String` to read any string, or drop the tag so `Code` carries `Codes`'s kind (a map type derives `FlussoMap`, a sub-document `FlussoFragment`)
   --> tests/ui/value_tagged_newtype_over_map.rs:13:13
    |
 13 | struct Code(Codes);

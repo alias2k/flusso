@@ -1,23 +1,24 @@
 //! The map examples of the query manual (`docs/src/query/maps.md`,
-//! "Document types") and the plugin skill (`plugin/skills/flusso-query/maps.md`),
-//! as written there, compile and read a `null` map value (issue #294).
+//! "Document types", included from here by anchor) and the plugin skill
+//! (`plugin/skills/flusso-query/maps.md`, checked equal to the `plugin`
+//! anchor) compile and read a `null` map value (issue #294).
 use std::collections::{BTreeMap, HashMap};
 
 use flusso_query::{FieldSpec, FlussoFragment, FlussoMap, FlussoRoot, KindTag};
 
-// docs/src/query/maps.md
+// docs/src/query/maps.md includes this by anchor.
+// ANCHOR: translation
 #[derive(serde::Deserialize, FlussoMap)]
 #[flusso(text)]
 struct Translation {
     fallback: Option<String>,
     #[serde(flatten)]
-    langs: BTreeMap<String, Option<String>>, // a jsonb column may hold {"it": null}
+    langs: BTreeMap<String, Option<String>>,   // a jsonb column may hold {"it": null}
 }
 
 #[derive(serde::Deserialize, FlussoFragment)]
-struct Localized {
-    name: Translation,
-}
+struct Localized { name: Translation }
+// ANCHOR_END: translation
 
 // The manual's `name` is a `map` of `text` values.
 const LEVEL: &[FieldSpec] = &[FieldSpec {
@@ -32,15 +33,18 @@ const LEVEL: &[FieldSpec] = &[FieldSpec {
 
 const _: () = Localized::__flusso_check(LEVEL);
 
-// plugin/skills/flusso-query/maps.md
+// plugin/skills/flusso-query/maps.md holds this text; `boundary.rs`'s
+// `the_docs_map_examples_are_the_tested_ones` keeps them equal.
+// ANCHOR: plugin
 #[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "products")]
 struct Product {
     sku: String,
-    title: HashMap<String, Option<String>>, // map<text>    → TextMap
-    codes: Option<HashMap<String, Option<String>>>, // map<keyword> → KeywordMap (nullable)
-    prices: Option<HashMap<String, Option<f64>>>, // map<double>  → NumberMap
+    title: HashMap<String, Option<String>>,          // map<text>    → TextMap
+    codes: Option<HashMap<String, Option<String>>>,  // map<keyword> → KeywordMap (nullable)
+    prices: Option<HashMap<String, Option<f64>>>,    // map<double>  → NumberMap
 }
+// ANCHOR_END: plugin
 
 fn main() {
     let localized: Localized =

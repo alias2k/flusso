@@ -1103,6 +1103,7 @@ fn expected_leaves(mapping_type: &MappingType) -> Vec<&'static str> {
             "String",
             "NaiveDate",
             "NaiveDateTime",
+            "NaiveTime",
             "DateTime",
             "OffsetDateTime",
             "PrimitiveDateTime",

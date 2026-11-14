@@ -1,0 +1,5 @@
+error: `Amount` is `#[flusso(keyword)]`, so it reads one string, but `Decimal` reads only a number, not any string — wrap a `String` to read any string, or drop the tag so `Amount` carries the decimal kind
+ --> tests/ui/value_tagged_newtype_over_a_decimal.rs:8:15
+  |
+8 | struct Amount(Decimal);
+  |               ^^^^^^^

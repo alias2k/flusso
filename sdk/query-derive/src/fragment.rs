@@ -578,6 +578,7 @@ pub(crate) fn is_foreign_leaf(ty: &Type) -> bool {
                 | "Uuid"
                 | "NaiveDate"
                 | "NaiveDateTime"
+                | "NaiveTime"
                 | "DateTime"
                 | "OffsetDateTime"
                 | "PrimitiveDateTime"
@@ -1378,8 +1379,8 @@ fn primitive_kinds(ty: &Type) -> Option<Vec<TokenStream>> {
         // are recognised here rather than via `FlussoValueMeta`.
         "Decimal" => &["Decimal", "Double"],
         "Uuid" => &["Keyword"],
-        "NaiveDate" | "NaiveDateTime" | "DateTime" | "OffsetDateTime" | "PrimitiveDateTime"
-        | "Date" => &["Date"],
+        "NaiveDate" | "NaiveDateTime" | "NaiveTime" | "DateTime" | "OffsetDateTime"
+        | "PrimitiveDateTime" | "Date" => &["Date"],
         "GeoPoint" => &["GeoPoint"],
         _ => return None,
     };
