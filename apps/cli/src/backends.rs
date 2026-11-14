@@ -619,6 +619,13 @@ mod tests {
     }
 
     #[test]
+    fn a_check_the_database_would_not_run_warns_and_starts() {
+        let printed = starts(DiagnosticKind::CheckSkipped);
+        assert!(printed.contains("[warning]"), "{printed}");
+        assert!(!printed.contains("starting anyway"), "{printed}");
+    }
+
+    #[test]
     fn a_duplicate_that_never_builds_refuses_the_start() {
         refuses(DiagnosticKind::DuplicateFieldNameFailsToBuild);
     }

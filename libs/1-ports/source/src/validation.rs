@@ -2125,9 +2125,19 @@ mod tests {
     struct Shop;
 
     const SHOP: &[(&str, &[&str])] = &[
-        ("users", &["id", "name", "team_id"]),
+        ("users", &["id", "name", "team_id", "label"]),
         ("teams", &["id", "name"]),
-        ("orders", &["id", "user_id", "status", "region", "user_ref"]),
+        (
+            "orders",
+            &[
+                "id",
+                "user_id",
+                "status",
+                "region",
+                "user_ref",
+                "user_label",
+            ],
+        ),
         ("items", &["id", "order_id", "qty", "region"]),
         ("tags", &["id", "label"]),
         ("user_tags", &["user_id", "tag_id", "kind"]),
@@ -2187,6 +2197,9 @@ mod tests {
             _: &[Transform],
             _: bool,
         ) -> Result<bool> {
+            if column.as_ref() == "label" {
+                return Err(SourceError::Unchecked(HIDDEN.to_owned()));
+            }
             Ok(column.as_ref() == "name")
         }
 
@@ -2196,9 +2209,16 @@ mod tests {
             (_, link): (&TableName, &ColumnName),
             _: (&TableName, &ColumnName),
         ) -> Result<bool> {
+            if link.as_ref() == "user_label" {
+                return Err(SourceError::Unchecked(HIDDEN.to_owned()));
+            }
             Ok(link.as_ref() != "user_ref")
         }
     }
+
+    /// Why [`Shop`] refuses to check a `label` column's transforms and a
+    /// `user_label` link.
+    const HIDDEN: &str = "permission denied for schema hidden";
 
     fn value_filter(column: &str) -> serde_json::Value {
         json!({ "value_op": { "column": column, "op": "eq", "value": { "single": "1" } } })
@@ -3843,6 +3863,40 @@ mod tests {
                  `integer`"
             )]),
         );
+    }
+
+    /// A check the store refuses to run is a warning of its own, naming what
+    /// was not checked and the store's reason (issue #324).
+    #[test]
+    fn a_check_the_store_refuses_to_run_is_reported_as_skipped() {
+        let found = shop_problems(json!([
+            { "field": "label", "source": { "column": {
+                "column": "label", "ty": "integer", "nullable": true, "transforms": ["lowercase"],
+            } } },
+            { "field": "byLabel", "source": { "relation": { "join": {
+                "table": "orders", "kind": { "has_many": { "foreign_key": "user_label" } },
+                "primary_key": "id", "fields": [],
+            } } } },
+        ]));
+        assert_eq!(
+            found,
+            problems(&[
+                (
+                    "label",
+                    DiagnosticKind::CheckSkipped,
+                    "could not check `transforms` `lowercase` against the column's database \
+                     type `integer`: permission denied for schema hidden"
+                ),
+                (
+                    "byLabel",
+                    DiagnosticKind::CheckSkipped,
+                    "could not check `foreign_key` `orders.user_label` (`integer`) against \
+                     `users.id` (`integer`): permission denied for schema hidden"
+                ),
+            ]),
+        );
+        assert_eq!(DiagnosticKind::CheckSkipped.severity(), Severity::Warning);
+        assert_eq!(DiagnosticKind::CheckSkipped.as_str(), "check_skipped");
     }
 
     /// The designer tells a root field named like an index-level key from the

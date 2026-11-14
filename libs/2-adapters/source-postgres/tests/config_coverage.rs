@@ -2183,6 +2183,105 @@ async fn validation_reports_a_link_postgres_cannot_compare_with_its_key() {
     );
 }
 
+/// A check whose probe the role may not run (issue #324): casting to a type
+/// needs USAGE on the type's schema, reading a column of it does not. The
+/// transform and the link checks are each reported as skipped, with the
+/// database's reason, and the documents still build.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_check_the_role_may_not_run_is_reported_as_skipped() {
+    let (_pg, url) = start_seeded().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE SCHEMA hidden",
+        "CREATE DOMAIN hidden.label AS text",
+        "CREATE DOMAIN hidden.ref AS int",
+        "ALTER TABLE users ADD COLUMN label hidden.label DEFAULT 'ADA'",
+        "CREATE TABLE badges (id int PRIMARY KEY, user_ref hidden.ref, name text)",
+        "INSERT INTO badges VALUES (1, 1, 'first')",
+        "CREATE ROLE reader LOGIN PASSWORD 'reader'",
+        "GRANT SELECT ON ALL TABLES IN SCHEMA public TO reader",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let (_, address) = url.rsplit_once('@').unwrap();
+    let reader_url = format!("postgres://reader:reader@{address}");
+
+    let mut label = col("label", "label");
+    if let FieldSource::Column(column) = &mut label.source {
+        column.transforms = vec![Transform::Lowercase];
+    }
+    let badges = join_field(
+        "badges",
+        Join {
+            table: table("badges"),
+            primary_key: column("id"),
+            nullable: true,
+            kind: JoinKind::HasMany {
+                foreign_key: column("user_ref"),
+            },
+            filters: None,
+            order_by: None,
+            limit: None,
+            fields: vec![col("name", "name")],
+            indexed: true,
+            on: vec![],
+        },
+    );
+    let schema = users_schema(vec![label, badges], None);
+    let documents = builder(&reader_url, schema.clone()).await;
+    let found: Vec<_> = validate_indexes(&spec(schema), &documents)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|d| {
+            (
+                d.dotted_path(),
+                d.kind.as_str(),
+                format!("{:?}", d.severity),
+                d.message,
+            )
+        })
+        .collect();
+    let skipped = |path: &str, message: &str| {
+        (
+            path.to_owned(),
+            "check_skipped",
+            "Warning".to_owned(),
+            message.to_owned(),
+        )
+    };
+    assert_eq!(
+        found,
+        vec![
+            (
+                "label".to_owned(),
+                "type_mismatch",
+                "Error".to_owned(),
+                "declared type does not accept the column's database type `hidden.label`"
+                    .to_owned(),
+            ),
+            skipped(
+                "label",
+                "could not check `transforms` `lowercase` against the column's database type \
+                 `hidden.label`: permission denied for schema hidden",
+            ),
+            skipped(
+                "badges",
+                "could not check `foreign_key` `badges.user_ref` (`hidden.ref`) against \
+                 `users.id` (`integer`): permission denied for schema hidden",
+            ),
+        ],
+    );
+
+    let body = upsert(&documents, 1).await;
+    assert_eq!(body["label"], GenericValue::String("ada".to_owned()));
+    assert!(
+        matches!(&body["badges"], GenericValue::Array(badges) if badges.len() == 1),
+        "{body:?}"
+    );
+}
+
 /// An `ids` aggregate's `element_type` against the related table's key type
 /// (issue #299). OpenSearch maps the array as the element type: one that can
 /// hold no value of the key's type rejects every document collecting a key,
@@ -2513,28 +2612,6 @@ async fn validation_reports_what_no_document_build_gets_past() {
         )),
         "{diagnostics:?}"
     );
-
-    for statement in [
-        "CREATE SCHEMA hidden",
-        "CREATE DOMAIN hidden.label AS text",
-        "ALTER TABLE users ADD COLUMN label hidden.label DEFAULT 'ADA'",
-        "CREATE ROLE reader LOGIN PASSWORD 'reader'",
-        "GRANT SELECT ON ALL TABLES IN SCHEMA public TO reader",
-    ] {
-        sqlx::query(statement).execute(&pool).await.unwrap();
-    }
-    let (_, address) = url.rsplit_once('@').unwrap();
-    let reader_url = format!("postgres://reader:reader@{address}");
-    let schema = users_schema(vec![transformed("label", lower)], None);
-    let documents = builder(&reader_url, schema.clone()).await;
-    let diagnostics = validate_indexes(&spec(schema), &documents).await.unwrap();
-    assert!(
-        diagnostics
-            .iter()
-            .all(|d| d.kind != DiagnosticKind::TransformNotApplicable),
-        "a type the role cannot cast to is not a verdict: {diagnostics:?}"
-    );
-    assert!(upserted(&documents.build_many(&[doc(1)]).await));
 
     let keyless_root = |primary_key: Option<&str>, related: Option<Field>| {
         let mut fields = vec![col("body", "body")];
