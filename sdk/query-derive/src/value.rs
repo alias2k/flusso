@@ -243,28 +243,39 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
                 Some(kind) => {
                     let marker = kind.marker();
                     let tag = kind.tag();
+                    let read = tagged_inner(ident, inner, kind)?;
+                    let shown = crate::fragment::render(read);
+                    let name = kind.name();
                     let array_message = format!(
-                        "`{ident}` has a kind tag, so it stands for one value, but `{rendered}` \
+                        "`{ident}` has a kind tag, so it stands for one value, but `{shown}` \
                          reads an array — drop the tag, and `{ident}` reads the array as \
-                         `{rendered}` does"
+                         `{shown}` does"
                     );
-                    let object_message = format!(
-                        "`{ident}` has a kind tag, so it stands for one value, but `{rendered}` \
-                         reads an object — derive `FlussoMap` on `{ident}` for a map, or \
-                         `FlussoFragment` for a sub-document"
+                    let kind_message = format!(
+                        "`{ident}` is `#[flusso({name})]`, so it reads one string, but `{shown}` \
+                         reads no string — wrap a `String`, or a type that derives \
+                         `FlussoValue` of a string kind; a map type derives `FlussoMap`, a \
+                         sub-document `FlussoFragment`"
                     );
-                    let array_check = quote_spanned! {inner.span()=>
+                    let array_check = quote_spanned! {read.span()=>
                         const _: () = {
                             #[allow(unused_imports)]
                             use ::flusso_query::OpaqueWithoutMeta as _;
                             assert!(
-                                !::flusso_query::OpaqueProbe::<#inner>::ARRAY,
+                                !::flusso_query::OpaqueProbe::<#read>::ARRAY,
                                 #array_message
                             );
                             assert!(
-                                !::flusso_query::OpaqueProbe::<#inner>::HAS_META
-                                    || !::flusso_query::OpaqueProbe::<#inner>::AT_OBJECT,
-                                #object_message
+                                !::flusso_query::OpaqueProbe::<#read>::HAS_META
+                                    || ::flusso_query::accepts_kind(
+                                        ::flusso_query::OpaqueProbe::<#read>::KINDS,
+                                        ::flusso_query::KindTag::Keyword,
+                                    )
+                                    || ::flusso_query::accepts_kind(
+                                        ::flusso_query::OpaqueProbe::<#read>::KINDS,
+                                        ::flusso_query::KindTag::Text,
+                                    ),
+                                #kind_message
                             );
                         };
                     };
@@ -340,6 +351,91 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
             "FlussoValue cannot be derived for a union",
         )),
     }
+}
+
+/// The type a tagged newtype reads its one string through: `inner` with
+/// `Option`, `Box` and `Rc` peeled off. What it certainly can't read as one
+/// string is refused here: a map, a collection, a tuple or array, a Rust
+/// primitive other than `String`. A custom type is checked through its flusso
+/// metadata by the caller; one without metadata (a `type` alias, a plain
+/// struct, a type from another crate) the derive can't see into, and trusts.
+fn tagged_inner<'a>(
+    ident: &syn::Ident,
+    inner: &'a syn::Type,
+    kind: Kind,
+) -> syn::Result<&'a syn::Type> {
+    let mut read = inner;
+    while let Some(peeled) = crate::doc::option_inner(read)
+        .or_else(|| single_generic(read, "Box"))
+        .or_else(|| single_generic(read, "Rc"))
+    {
+        read = peeled;
+    }
+    let name = kind.name();
+    let shown = crate::fragment::render(read);
+    let refuse = |reads: &str, fix: &str| {
+        Err(syn::Error::new(
+            read.span(),
+            format!(
+                "`{ident}` is `#[flusso({name})]`, so it reads one string, but `{shown}` reads \
+                 {reads} — {fix}"
+            ),
+        ))
+    };
+    if crate::doc::map_container_value(read).is_some() {
+        return refuse(
+            "an object",
+            &format!(
+                "for a map, declare `#[derive(FlussoMap)] #[flusso({name})] struct \
+                 {ident}({shown})` instead"
+            ),
+        );
+    }
+    let leaf = crate::doc::leaf_ident(read);
+    let collection = matches!(
+        leaf.as_deref(),
+        Some("Vec" | "HashSet" | "BTreeSet" | "VecDeque" | "LinkedList" | "BinaryHeap")
+    );
+    if collection
+        || matches!(
+            read,
+            syn::Type::Tuple(_) | syn::Type::Array(_) | syn::Type::Slice(_)
+        )
+    {
+        return refuse(
+            "an array",
+            "drop the tag: an untagged newtype over a `Vec` reads an array of values",
+        );
+    }
+    if crate::doc::is_primitive(leaf.as_deref()) && leaf.as_deref() != Some("String") {
+        let reads = match leaf.as_deref() {
+            Some("bool") => "a boolean",
+            Some("char") => "a character",
+            _ => "a number",
+        };
+        return refuse(
+            reads,
+            "drop the tag: an untagged newtype carries the kind of what it wraps",
+        );
+    }
+    Ok(read)
+}
+
+fn single_generic<'a>(ty: &'a syn::Type, wrapper: &str) -> Option<&'a syn::Type> {
+    let syn::Type::Path(path) = ty else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    if segment.ident != wrapper {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|arg| match arg {
+        syn::GenericArgument::Type(inner) => Some(inner),
+        _ => None,
+    })
 }
 
 /// A newtype over `Vec<E>`: it stands for a flat array whose elements are `E`

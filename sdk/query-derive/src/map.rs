@@ -165,6 +165,9 @@ fn reads_an_object(input: &DeriveInput, kind: Kind) -> syn::Result<TokenStream> 
     if crate::doc::vec_inner(inner).is_some() {
         return Err(refuse(inner.span(), "an array"));
     }
+    if let Some(error) = crate::doc::non_string_key(inner) {
+        return Err(error);
+    }
     if let Some(value) = crate::doc::map_container_value(inner) {
         return Ok(value_check(value, kind));
     }
@@ -216,7 +219,9 @@ fn reads_an_object(input: &DeriveInput, kind: Kind) -> syn::Result<TokenStream> 
 /// field names, so each field holds one of the map's values. A map may lack
 /// any key and hold any other, so:
 ///
-/// - `#[serde(deny_unknown_fields)]` is refused (it fails on any other key);
+/// - `#[serde(deny_unknown_fields)]` is refused (it fails on any other key),
+///   and so is a field's `#[serde(alias)]` (a map may hold both keys);
+/// - every map key is `String` (see [`crate::doc::non_string_key`]);
 /// - a field reads `Option<V>`, `V` a value of the tag (`serde_json::Value`
 ///   takes anything);
 /// - a `#[serde(flatten)]` field takes the keys no other field reads, so it
@@ -257,6 +262,22 @@ fn named_fields(
             .as_ref()
             .map_or_else(String::new, ToString::to_string);
         let rendered = crate::fragment::render(&field.ty);
+        if let Some(error) = crate::doc::non_string_key(&field.ty) {
+            push(error);
+            continue;
+        }
+        if let Some(alias) = crate::serde_attr::alias(&field.attrs) {
+            push(syn::Error::new_spanned(
+                alias,
+                format!(
+                    "field `{name}` of the FlussoMap type `{ident}` reads its key and an alias, \
+                     but a map may hold both keys, and serde then fails with `duplicate field` — \
+                     remove the alias; a `#[serde(flatten)]` `HashMap<String, String>` field \
+                     keeps the other key"
+                ),
+            ));
+            continue;
+        }
         if crate::serde_attr::flatten(&field.attrs) {
             match flattened_map(ident, &field.ty, kind) {
                 Ok(check) => checks.extend(check),

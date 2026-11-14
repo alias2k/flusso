@@ -135,6 +135,15 @@ pub(crate) fn reads_with(attrs: &[Attribute]) -> bool {
         .any(|meta| matches!(meta.name.as_str(), "with" | "deserialize_with"))
 }
 
+/// The `#[serde(…)]` attribute that sets an `alias`, if any.
+pub(crate) fn alias(attrs: &[Attribute]) -> Option<&Attribute> {
+    attrs.iter().find(|attr| {
+        serde_metas(std::slice::from_ref(attr))
+            .iter()
+            .any(|meta| meta.name == "alias")
+    })
+}
+
 /// The `#[serde(…)]` attribute that sets `deny_unknown_fields`, if any.
 pub(crate) fn denies_unknown_fields(attrs: &[Attribute]) -> Option<&Attribute> {
     attrs.iter().find(|attr| {

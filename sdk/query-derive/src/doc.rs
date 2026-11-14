@@ -351,6 +351,12 @@ pub(crate) fn validate(
                 ),
             ));
         }
+        if !field.skip
+            && let Some(error) = non_string_key(field.ty)
+        {
+            errors.push(error);
+            continue;
+        }
         // A flattened group has no container field in the mapping — its keys
         // live at *this* level, so its type is checked against this level
         // instead (see `embed_checks`).
@@ -939,6 +945,52 @@ pub(crate) fn map_container_value(ty: &Type) -> Option<&Type> {
     });
     let _key = types.next()?;
     types.next()
+}
+
+/// The first `HashMap`/`BTreeMap` in `ty` (through `Option`, `Vec`, `Box`
+/// and map values) whose key is not `String`, as an error: a map's keys are
+/// document keys, which serde reads as strings, so any other key type fails
+/// on the first key it can't parse. `String` is the one key type accepted.
+pub(crate) fn non_string_key(ty: &Type) -> Option<syn::Error> {
+    let inner = option_inner(ty)
+        .or_else(|| vec_inner(ty))
+        .or_else(|| single_generic(ty, "Box"));
+    if let Some(inner) = inner {
+        return non_string_key(inner);
+    }
+    let value = map_container_value(ty)?;
+    let key = map_container_key(ty)?;
+    let is_string = matches!(key, Type::Path(path) if path.qself.is_none()
+    && path.path.segments.last().is_some_and(|segment| {
+        segment.ident == "String" && segment.arguments.is_empty()
+    }));
+    if !is_string {
+        let rendered = crate::fragment::render(ty);
+        return Some(syn::Error::new(
+            key.span(),
+            format!(
+                "`{rendered}` has `{}` keys, but a map's keys are document keys, which read as \
+                 strings — declare the key `String`",
+                crate::fragment::render(key),
+            ),
+        ));
+    }
+    non_string_key(value)
+}
+
+/// The key type `K` of a `HashMap<K, V>` / `BTreeMap<K, V>`.
+fn map_container_key(ty: &Type) -> Option<&Type> {
+    let Type::Path(path) = ty else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|arg| match arg {
+        syn::GenericArgument::Type(inner) => Some(inner),
+        _ => None,
+    })
 }
 
 /// A zero-cost assertion that `ty` implements `FlussoMap<kind>` (a whole-map

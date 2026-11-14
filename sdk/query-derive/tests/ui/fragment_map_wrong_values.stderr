@@ -1,4 +1,4 @@
-error[E0080]: evaluation panicked: fragment `Localized`: field `title` is `Translation`, a map type whose values are not `keyword` values, which the schema field here holds — tag a FlussoMap type `#[flusso(keyword)]`, or give a map `String` values
+error[E0080]: evaluation panicked: fragment `Localized`: field `title` is `Translation`, a map of `text` values, and the schema field here holds `keyword` values — tag the `FlussoMap` type `#[flusso(keyword)]`
   --> tests/ui/fragment_map_wrong_values.rs:31:15
    |
 31 | const _: () = Localized::__flusso_check(LEVEL);

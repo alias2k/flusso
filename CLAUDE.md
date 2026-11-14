@@ -1137,9 +1137,16 @@ derive's `check_type` map arm hard-checks a `HashMap`/`BTreeMap` value type and 
 is declared (issue #294, `map.rs`): a newtype's `HashMap<String, V>` gets a `FlussoValue<tag>` bound
 on `V`, any other wrapped type (and a named struct's flattened field) must carry the tag in
 `OpaqueProbe::MAP_VALUES` (so `Box<…>`/a plain struct is refused), a named field must be `Option<V>`
-with the same bound, `deny_unknown_fields` is refused. A `FlussoFragment` newtype over a map, and an
-untagged `FlussoValue` newtype over a map type, carry `MAP_VALUES` (the map's value kinds) and a
-forwarding `FlussoMap<K>` impl, so they go exactly where the map goes. The `FlussoMap` derive also emits `FlussoValueMeta` (its
+with the same bound, `deny_unknown_fields` and a field's `alias` are refused. A `FlussoFragment`
+newtype over a map (through `Option`), and an untagged `FlussoValue` newtype over a map type, carry
+`MAP_VALUES` (the map's value kinds; `[Object]` for `serde_json::Value` values, so only `json` takes
+it) and a forwarding `FlussoMap<K>` impl, so they go exactly where the map goes. Every map's key must
+be `String` (`doc::non_string_key`, run by every derive on every field). A `FlussoFragment` newtype
+over a leaf value is refused (`fragment::newtype_over_a_value`): it is a `FlussoValue`. A tagged
+`FlussoValue` newtype (`value::tagged_inner`) looks through `Option`/`Box`/`Rc`, refuses a map, a
+collection, a tuple/array or a non-`String` primitive at macro time and a flusso type that reads no
+string through const data; a type without metadata is trusted (the documented escape hatch for a
+string type from another crate). The `FlussoMap` derive also emits `FlussoValueMeta` (its
 `MAP_VALUES` carries the declared value kind) + a no-op `__flusso_check`, which is what lets
 the type sit inside a `FlussoFragment`; a hand-written `impl FlussoMap<K>` alone works only at a
 root — in a fragment it fails to compile, with the E0277 note pointing at the derive (or at a hand
@@ -1154,11 +1161,15 @@ stemming) is deferred.
 **The boundary is pinned (issue #294).** What the derive trusts (any type at a `json` field, a
 flattened map, an enum where no `variants:` are declared, `opaque`, serde attributes that change what
 is read, a `String` at `geo`) is one list in `docs/src/query/document-structs.md` ("What the derive
-trusts"). `sdk/query-derive/tests/boundary.rs` generates ~420 cases (shape × field kind of the
-`boundary` fixture × root/fragment/flattened), compiles them in ≤50-module files through cargo in
-trybuild's target dir (`target/tests/trybuild`, same manifest, so it reuses the `ui` harness's
-artifacts), reads sample documents into what builds, and fails on a compile-then-fail case no
-`TRUSTED` rule covers; outcomes are recorded in `tests/boundary.outcomes` (re-record with
+trusts"). `sdk/query-derive/tests/boundary.rs` places two shape lists (hand-written `named_shapes`, and
+`generated_shapes`: inner type × wrapper × newtype derive, whose declarations are compiled alone
+first so a refused one isn't placed) at every field of the `boundary` fixture (required kinds bare,
+nullable ones in `Option`, plus `geo`) on a root and in a fragment, ~4400 cases. It compiles them in
+≤50-module files through cargo in trybuild's target dir (`target/tests/trybuild`, same manifest, so it
+reuses the `ui` harness's artifacts; a file is rewritten only when it changes), reads sample documents
+(null, missing keys, empty and many elements) into what builds, and fails on a compile-then-fail case
+no `TRUSTED` rule covers, or a (shape, field) whose root and fragment outcomes differ unless
+`DISAGREE` lists it; outcomes are recorded in `tests/boundary.outcomes` (re-record with
 `FLUSSO_BLESS=1`), and each rule's phrase must appear in the manual. A new shape or kind goes there.
 
 **Ordered enums (issue #87).** A keyword mapping with `Mapping.enum_order` set gets the

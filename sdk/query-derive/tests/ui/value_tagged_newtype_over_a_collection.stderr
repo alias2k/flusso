@@ -1,0 +1,11 @@
+error: `Codes` is `#[flusso(keyword)]`, so it reads one string, but `HashMap<String, String>` reads an object — for a map, declare `#[derive(FlussoMap)] #[flusso(keyword)] struct Codes(HashMap<String, String>)` instead
+  --> tests/ui/value_tagged_newtype_over_a_collection.rs:10:14
+   |
+10 | struct Codes(HashMap<String, String>);
+   |              ^^^^^^^
+
+error: `Boxed` is `#[flusso(keyword)]`, so it reads one string, but `HashMap<String, String>` reads an object — for a map, declare `#[derive(FlussoMap)] #[flusso(keyword)] struct Boxed(HashMap<String, String>)` instead
+  --> tests/ui/value_tagged_newtype_over_a_collection.rs:14:18
+   |
+14 | struct Boxed(Box<HashMap<String, String>>);
+   |                  ^^^^^^^

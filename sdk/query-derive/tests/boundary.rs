@@ -72,6 +72,8 @@ struct Shape {
     map: bool,
     /// A tagged `FlussoValue` newtype over a type the derive can't see into.
     unseen: bool,
+    /// Reads one string (a `String`, or a newtype over one).
+    string: bool,
 }
 
 fn shape(name: &str, ty: &str, decls: &[&str]) -> Shape {
@@ -82,6 +84,7 @@ fn shape(name: &str, ty: &str, decls: &[&str]) -> Shape {
         attrs: "",
         map: false,
         unseen: false,
+        string: false,
     }
 }
 
@@ -93,6 +96,11 @@ impl Shape {
 
     fn unseen(mut self) -> Shape {
         self.unseen = true;
+        self
+    }
+
+    fn string(mut self) -> Shape {
+        self.string = true;
         self
     }
 
@@ -118,10 +126,10 @@ const ALIAS: &str = "pub type Ms = HashMap<String, String>;";
 /// The shapes written by hand.
 fn named_shapes() -> Vec<Shape> {
     vec![
-        shape("string", "String", &[]),
+        shape("string", "String", &[]).string(),
         shape("long", "i64", &[]),
         shape("vec_string", "Vec<String>", &[]),
-        shape("code", "Code", &[CODE]),
+        shape("code", "Code", &[CODE]).string(),
         shape(
             "tags",
             "Tags",
@@ -372,7 +380,12 @@ fn generated_shapes() -> Vec<Shape> {
                     ty,
                     attrs: "",
                     map: reads_a_map,
-                    unseen: derive == "keyword_value" && inner == "alias" && wrap == "",
+                    unseen: derive == "keyword_value"
+                        && inner == "alias"
+                        && matches!(wrap, "" | "opt_" | "box_"),
+                    string: matches!(inner, "s" | "cow" | "code")
+                        && matches!(wrap, "" | "opt_" | "box_")
+                        && derive != "map",
                 });
             }
         }
@@ -487,13 +500,29 @@ const TRUSTED: &[Trust] =
         Trust {
             rule: "geo",
             manual: "**A `String` at a `geo` field.**",
-            applies: |case| case.kind == "gp" && case.shape.ty == "String",
+            applies: |case| case.kind == "gp" && case.shape.string,
         },
     ];
 
 /// The (shape, field) pairs whose root and fragment placements may disagree,
 /// each with why. Every other pair records one outcome for both.
-const DISAGREE: &[(&str, &str, &str)] = &[];
+const DISAGREE: &[(&str, &str, &str)] = &[
+    // A `type` alias of a map at a `map` field: a root checks it with a
+    // `FlussoMap<K>` bound, which sees through the alias, and reads it; a
+    // fragment reads a type's metadata in const evaluation, which a foreign
+    // `HashMap` can't carry (a fragment walks every custom type with an
+    // inherent `__flusso_check`), so it refuses. Both are safe.
+    (
+        "field_alias",
+        "mp",
+        "a root sees through a type alias, a fragment cannot",
+    ),
+    (
+        "field_alias",
+        "mpo",
+        "a root sees through a type alias, a fragment cannot",
+    ),
+];
 
 fn cases(shapes: &[Shape], prefix: &str, flattened: bool) -> Vec<Case> {
     let mut cases = Vec::new();
