@@ -3309,3 +3309,196 @@ mod fence {
         );
     }
 }
+
+/// `GeoPoint` reads every form a `geo` field reaches `_source` in (issue #307):
+/// the two-column form writes `{lat, lon}`, a one-column field holds whatever
+/// its `text`/`jsonb` column holds, which OpenSearch indexes as a point.
+mod geo_point {
+    use serde_json::{Value, json};
+
+    use crate::GeoPoint;
+
+    /// A format that is not self-describing (MessagePack, postcard, bincode):
+    /// a struct is its fields in order, and `deserialize_any` is unsupported.
+    struct Compact(Vec<f64>);
+
+    impl<'de> serde::Deserializer<'de> for Compact {
+        type Error = serde::de::value::Error;
+
+        fn deserialize_any<V: serde::de::Visitor<'de>>(
+            self,
+            _: V,
+        ) -> Result<V::Value, Self::Error> {
+            Err(serde::de::Error::custom("not self-describing"))
+        }
+
+        fn deserialize_struct<V: serde::de::Visitor<'de>>(
+            self,
+            _: &'static str,
+            _: &'static [&'static str],
+            visitor: V,
+        ) -> Result<V::Value, Self::Error> {
+            visitor.visit_seq(serde::de::value::SeqDeserializer::new(self.0.into_iter()))
+        }
+
+        fn is_human_readable(&self) -> bool {
+            false
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes
+            byte_buf option unit unit_struct newtype_struct seq tuple tuple_struct map
+            enum identifier ignored_any
+        }
+    }
+
+    #[test]
+    fn a_compact_format_reads_the_fields_in_the_order_it_wrote_them() {
+        use serde::Deserialize;
+
+        let point = GeoPoint::deserialize(Compact(vec![1.5, 2.5])).unwrap();
+        assert_eq!((point.lat, point.lon), (1.5, 2.5));
+    }
+
+    fn read(value: Value) -> GeoPoint {
+        serde_json::from_value(value.clone())
+            .unwrap_or_else(|error| panic!("{value} should read as a point: {error}"))
+    }
+
+    #[track_caller]
+    fn assert_point(value: Value, lat: f64, lon: f64) {
+        let point = read(value.clone());
+        assert!(
+            (point.lat - lat).abs() < 1e-6 && (point.lon - lon).abs() < 1e-6,
+            "{value} read as lat {}, lon {}; expected lat {lat}, lon {lon}",
+            point.lat,
+            point.lon,
+        );
+    }
+
+    #[track_caller]
+    fn assert_rejected(value: Value) {
+        if let Ok(point) = serde_json::from_value::<GeoPoint>(value.clone()) {
+            panic!("{value} should be rejected, read as {point:?}");
+        }
+    }
+
+    #[test]
+    fn an_object_reads_lat_and_lon_by_name() {
+        assert_point(json!({ "lat": 1.5, "lon": 2.5 }), 1.5, 2.5);
+        assert_point(json!({ "lon": 2.5, "lat": 1.5 }), 1.5, 2.5);
+        assert_point(json!({ "lat": "1.5", "lon": "2.5" }), 1.5, 2.5);
+    }
+
+    #[test]
+    fn an_array_is_lon_then_lat() {
+        assert_point(json!([2.5, 1.5]), 1.5, 2.5);
+        assert_point(json!([2.5, 1.5, 7.0]), 1.5, 2.5);
+        assert_point(json!([-74, 40]), 40.0, -74.0);
+    }
+
+    #[test]
+    fn a_string_is_lat_then_lon() {
+        assert_point(json!("1.5,2.5"), 1.5, 2.5);
+        assert_point(json!(" 1.5 , 2.5 "), 1.5, 2.5);
+        assert_point(json!("1.5,2.5,7"), 1.5, 2.5);
+        assert_point(json!("1e0,2.5"), 1.0, 2.5);
+    }
+
+    #[test]
+    fn a_geohash_reads_as_its_cells_south_west_corner() {
+        assert_point(json!("s0"), 0.0, 0.0);
+        assert_point(json!("u"), 45.0, 0.0);
+        assert_point(json!("s00twy01mtw0"), 1.0, 1.0);
+        assert_point(json!({ "geohash": "u" }), 45.0, 0.0);
+    }
+
+    #[test]
+    fn a_wkt_point_is_lon_then_lat() {
+        assert_point(json!("POINT (2.5 1.5)"), 1.5, 2.5);
+        assert_point(json!("point(2.5 1.5 7)"), 1.5, 2.5);
+        assert_point(json!(" POINT ( -74 40 ) "), 40.0, -74.0);
+    }
+
+    #[test]
+    fn a_geojson_point_is_lon_then_lat() {
+        assert_point(
+            json!({ "type": "Point", "coordinates": [2.5, 1.5] }),
+            1.5,
+            2.5,
+        );
+        assert_point(
+            json!({ "coordinates": [2.5, 1.5, 3], "type": "point" }),
+            1.5,
+            2.5,
+        );
+    }
+
+    #[test]
+    fn a_null_reads_as_none() {
+        let point: Option<GeoPoint> = serde_json::from_value(Value::Null).unwrap();
+        assert!(point.is_none());
+    }
+
+    #[test]
+    fn out_of_range_coordinates_are_rejected() {
+        assert_rejected(json!({ "lat": 91, "lon": 0 }));
+        assert_rejected(json!({ "lat": 0, "lon": -181 }));
+        assert_rejected(json!([200, 0]));
+        assert_rejected(json!("1.5,200"));
+        assert_rejected(json!("POINT (0 -90.5)"));
+        assert_rejected(json!({ "type": "Point", "coordinates": [0, 95] }));
+    }
+
+    #[test]
+    fn the_wrong_number_of_coordinates_is_rejected() {
+        assert_rejected(json!([2.5]));
+        assert_rejected(json!([]));
+        assert_rejected(json!([2.5, 1.5, 7, 8]));
+        assert_rejected(json!("1.5,2.5,7,8"));
+        assert_rejected(json!("POINT (2.5)"));
+        assert_rejected(json!({ "type": "Point", "coordinates": [2.5] }));
+        assert_rejected(json!({ "lat": 1.5 }));
+        assert_rejected(json!([[2.5, 1.5]]));
+        assert_rejected(json!([{ "lat": 1.5, "lon": 2.5 }]));
+    }
+
+    #[test]
+    fn non_numeric_coordinates_are_rejected() {
+        assert_rejected(json!({ "lat": "north", "lon": 2.5 }));
+        assert_rejected(json!({ "lat": null, "lon": 2.5 }));
+        assert_rejected(json!(["2.5", "1.5"]));
+        assert_rejected(json!([null, 1.5]));
+        assert_rejected(json!("NaN,2.5"));
+        assert_rejected(json!("1.5,east"));
+        assert_rejected(json!({ "type": "Point", "coordinates": ["2.5", "1.5"] }));
+        assert_rejected(json!(true));
+        assert_rejected(json!(1.5));
+    }
+
+    #[test]
+    fn what_opensearch_refuses_as_a_point_is_rejected() {
+        assert_rejected(json!(""));
+        assert_rejected(json!("S0"));
+        assert_rejected(json!("sa"));
+        assert_rejected(json!("POINT EMPTY"));
+        assert_rejected(json!("POINT (2.5,1.5)"));
+        assert_rejected(json!("MULTIPOINT (2.5 1.5)"));
+        assert_rejected(json!({ "type": "LineString", "coordinates": [[2.5, 1.5], [3, 4]] }));
+        assert_rejected(json!({ "geohash": "s0", "lat": 1 }));
+    }
+
+    #[test]
+    fn an_object_ignores_keys_beside_lat_and_lon() {
+        // A `#[serde(flatten)]` point is handed its siblings too.
+        assert_point(json!({ "id": 7, "lat": 1.5, "lon": 2.5 }), 1.5, 2.5);
+    }
+
+    #[test]
+    fn a_point_still_serializes_as_an_object() {
+        assert_eq!(
+            serde_json::to_value(GeoPoint::new(1.5, 2.5)).unwrap(),
+            json!({ "lat": 1.5, "lon": 2.5 })
+        );
+    }
+}

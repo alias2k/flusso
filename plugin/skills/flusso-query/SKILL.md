@@ -463,7 +463,7 @@ them can't silently disarm the guarantee.
 | `timestamp` | `time::OffsetDateTime` / `chrono` | `Date` |
 | `binary` | `String` (base64) | `Binary` |
 | `json` | `serde_json::Value`, any `HashMap`/`BTreeMap<String, _>`, or a `Vec` of them | `Json` |
-| `geo` | `GeoPoint { lat, lon }` | `Geo` |
+| `geo` | `GeoPoint { lat, lon }` (reads every stored form: object, `[lon, lat]`, `"lat,lon"`, WKT, GeoJSON, geohash) | `Geo` |
 | `object` / `belongs_to` / `has_one` | struct / `Option<struct>` | object namespace |
 | `has_many` / `many_to_many` | `Vec<struct>`, or a `#[serde(transparent)]` fragment newtype over one | `Nested<S,T>` |
 | `map` | `HashMap<String, V>` or a `#[derive(FlussoMap)]` type | see [`maps.md`](maps.md) |

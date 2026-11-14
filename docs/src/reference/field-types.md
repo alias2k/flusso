@@ -120,7 +120,7 @@ A `custom` field indexes the value as Postgres renders it into JSON, unconverted
 
 A `geo` field is an OpenSearch `geo_point`, in one of two shapes.
 
-**Two columns.** A missing coordinate makes the whole point null, never `{lat: null, lon: null}`, which OpenSearch rejects.
+**Two columns.** The document holds `{"lat": …, "lon": …}`. A missing coordinate makes the whole point null, never `{lat: null, lon: null}`, which OpenSearch rejects.
 
 ```yaml
 - geo: location
@@ -129,7 +129,18 @@ A `geo` field is an OpenSearch `geo_point`, in one of two shapes.
   required: false
 ```
 
-**One column** already holding a point: a `json`/`jsonb` `{"lat": …, "lon": …}` or `[lon, lat]`, or a `text` `"lat,lon"`.
+**One column** (`json`, `jsonb`, `text` or `varchar`) already holding a point. The document holds the value as the column holds it, unconverted, so `_source` carries whichever form the column uses. OpenSearch indexes these as a point (an optional altitude `z` is ignored):
+
+| Form | Example | Order |
+| --- | --- | --- |
+| object | `{"lat": 41.12, "lon": -71.34}` | by name |
+| array | `[-71.34, 41.12]` | lon, lat |
+| coordinate string | `"41.12,-71.34"` | lat, lon |
+| WKT | `"POINT (-71.34 41.12)"` | lon, lat |
+| GeoJSON | `{"type": "Point", "coordinates": [-71.34, 41.12]}` | lon, lat |
+| geohash | `"drm3btev3e86"` or `{"geohash": "drm3btev3e86"}` | the cell's south-west corner |
+
+A `text` column holds only the string forms; a `json`/`jsonb` column any of them. A value OpenSearch can't read as a point, or with a latitude outside ±90 or a longitude outside ±180, is an item-level rejection, handled by [`on_error`](index-and-on-error.md#on_error). On the query side, `GeoPoint` reads every form of one point (not `POINT EMPTY`, an empty array, or an array of several points); see [Document structs](../query/document-structs.md#flusso-types-to-rust-types).
 
 ```yaml
 - geo: location

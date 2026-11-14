@@ -1,0 +1,11 @@
+# The `geo_points` e2e's derived root reads this at compile time; no database
+# or cluster is reached through it.
+
+[source]
+type = "postgres"
+connection_url = "postgres://app@localhost/test"
+
+[[index]]
+name = "places"
+schema = "places.schema.yml"
+enabled = true

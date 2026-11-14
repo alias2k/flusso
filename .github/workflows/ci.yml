@@ -83,7 +83,7 @@ jobs:
       # Read-side-only PRs: the same run minus the container-backed
       # Postgres/OpenSearch suites — every tests/ binary in those three crates
       # is container e2e, so excluding them by kind is exact. The query train's
-      # own live e2e (dev/query-e2e's combined_search, cursor_paging, map_keys, tls, array_columns) still run.
+      # own live e2e (dev/query-e2e's combined_search, cursor_paging, map_keys, tls, array_columns, geo_points) still run.
       - name: Test (read-side scope — full unit/integration + query e2e)
         if: steps.scope.outputs.read_side_only == 'true'
         run: cargo nextest run --profile ci --workspace --run-ignored all -E 'all() - (kind(test) & (package(flusso-source-postgres) + package(flusso-engine) + package(flusso-sink-opensearch)))'

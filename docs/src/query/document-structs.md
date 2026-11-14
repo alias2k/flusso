@@ -121,7 +121,7 @@ pub struct Product {
 | `binary` | `String` (base64) | `Binary` |
 | `json` | `serde_json::Value`, any `HashMap`/`BTreeMap<String, _>`, or a `Vec` of them; with `array: true`, see [Arrays](#arrays) | `Json`; none with `indexed: false` |
 | `map` | `HashMap<String, V>`, `BTreeMap<String, V>`, or a `#[derive(FlussoMap)]` struct | `TextMap` / `KeywordMap` / `NumberMap` / `DateMap` |
-| `geo` | `GeoPoint { lat, lon }` | `Geo` |
+| `geo` | `GeoPoint { lat, lon }`, read from every form a `geo` field is stored in ([geo](../reference/field-types.md#geo)) | `Geo` |
 | `custom` | the matching scalar, else `serde_json::Value` | by OpenSearch type |
 | `object` | a struct | object namespace |
 | `belongs_to`, `has_one` | `Option<Struct>` | object namespace |
