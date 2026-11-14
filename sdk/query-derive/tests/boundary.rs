@@ -44,6 +44,10 @@
 //! `FlussoFragment` newtype over a leaf) and `map_type_reads_no_object` (a
 //! `FlussoMap` newtype over a `Vec`).
 //!
+//! It sees only what compiles and fails to read, never a refusal of a type
+//! that would have read: the `ui_pass` cases (`map_keys_of_your_own`,
+//! `tagged_newtypes_over_named_types`) guard against over-refusal.
+//!
 //! The generated crate lives in its own folder with its own target directory
 //! (`target/tests/flusso-boundary/`), so the `ui` harness never waits on its
 //! lock. Cases go in files of at most [`CHUNK`] modules, compiled three at a
@@ -376,7 +380,8 @@ fn named_shapes() -> Vec<Shape> {
             "tagged_over_naive_date",
             "Tnd",
             &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct Tnd(pub chrono::NaiveDate);"],
-        ),
+        )
+        .unseen(),
         shape(
             "value_over_naive_date",
             "Vnd",
@@ -389,7 +394,8 @@ fn named_shapes() -> Vec<Shape> {
             "tagged_over_decimal",
             "Tdc",
             &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct Tdc(pub flusso_query::Decimal);"],
-        ),
+        )
+        .unseen(),
         shape("string_alias", "Sa", &["pub type Sa = String;"]),
         shape("naive_date_time", "chrono::NaiveDateTime", &[]).date(),
         shape("naive_time", "chrono::NaiveTime", &[]).date(),
@@ -433,17 +439,20 @@ fn named_shapes() -> Vec<Shape> {
             "tagged_over_duration",
             "Td",
             &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct Td(pub std::time::Duration);"],
-        ),
+        )
+        .unseen(),
         shape(
             "tagged_over_geo_point",
             "Tg",
             &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct Tg(pub flusso_query::GeoPoint);"],
-        ),
+        )
+        .unseen(),
         shape(
             "tagged_over_char",
             "Tch",
             &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct Tch(pub char);"],
-        ),
+        )
+        .unseen(),
         shape(
             "tagged_over_cow_str",
             "Tcw",
@@ -546,7 +555,7 @@ fn generated_shapes() -> Vec<Shape> {
                     attrs: "",
                     map: reads_a_map,
                     unseen: derive == "keyword_value"
-                        && inner == "alias"
+                        && matches!(inner, "alias" | "ch")
                         && matches!(wrap, "" | "opt_" | "box_"),
                     date: false,
                     string: matches!(inner, "s" | "cow" | "code" | "bs")
@@ -891,6 +900,10 @@ impl Project {
             "libs/0-kernel/derive/src",
             "libs/1-config/src",
             "Cargo.lock",
+            "Cargo.toml",
+            "libs/0-kernel/Cargo.toml",
+            "libs/0-kernel/derive/Cargo.toml",
+            "libs/1-config/Cargo.toml",
             "rust-toolchain.toml",
         ] {
             read_tree(&workspace.join(folder), &mut inputs);

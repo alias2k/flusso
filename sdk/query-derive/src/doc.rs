@@ -954,9 +954,11 @@ pub(crate) fn map_container_value(ty: &Type) -> Option<&Type> {
 }
 
 /// The first `HashMap`/`BTreeMap` in `ty` (through `Option`, `Vec`, `Box`
-/// and map values) whose key is not `String`, as an error: a map's keys are
-/// document keys, which serde reads as strings, so any other key type fails
-/// on the first key it can't parse. `String` is the one key type accepted.
+/// and map values) whose key type the derive knows by name reads no arbitrary
+/// string, as an error: a map's keys are document keys, so a number, `bool`,
+/// `char`, `Uuid`, tuple or unit key fails on the first key it can't parse.
+/// Any other key type (`String`, `Box<str>`, an alias, a newtype of your own)
+/// is trusted to read every key.
 pub(crate) fn non_string_key(ty: &Type) -> Option<syn::Error> {
     let inner = option_inner(ty)
         .or_else(|| vec_inner(ty))
@@ -966,17 +968,17 @@ pub(crate) fn non_string_key(ty: &Type) -> Option<syn::Error> {
     }
     let value = map_container_value(ty)?;
     let key = map_container_key(ty)?;
-    let is_string = matches!(key, Type::Path(path) if path.qself.is_none()
-    && path.path.segments.last().is_some_and(|segment| {
-        segment.ident == "String" && segment.arguments.is_empty()
-    }));
-    if !is_string {
+    let reads_no_string = matches!(key, Type::Tuple(_))
+        || (is_primitive(leaf_ident(key).as_deref())
+            && leaf_ident(key).as_deref() != Some("String"))
+        || leaf_ident(key).as_deref() == Some("Uuid");
+    if reads_no_string {
         let rendered = crate::fragment::render(ty);
         return Some(syn::Error::new(
             key.span(),
             format!(
-                "`{rendered}` has `{}` keys, but a map's keys are document keys, which read as \
-                 strings — declare the key `String`",
+                "`{rendered}` has `{}` keys, but a map's keys are document keys, which can be \
+                 any string — declare the key `String`",
                 crate::fragment::render(key),
             ),
         ));

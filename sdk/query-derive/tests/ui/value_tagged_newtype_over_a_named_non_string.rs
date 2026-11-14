@@ -1,14 +1,14 @@
 // A tagged `FlussoValue` newtype reads one string, so a type the derive knows
-// by name to read something else is refused: a number behind a std wrapper,
-// a duration, flusso's geo point, a slice behind `Cow` (issue #294).
+// by name to read something else is refused: a `NonZero*`, a number behind a
+// std wrapper, a slice behind `Cow`, a map behind `RefCell`/`Mutex` (issue
+// #294). A name a string type of your own could carry is trusted instead.
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::num::{NonZeroU32, Wrapping};
 use std::sync::Mutex;
-use std::time::Duration;
 
-use flusso_query::{FlussoValue, GeoPoint};
+use flusso_query::FlussoValue;
 
 #[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
 #[flusso(keyword)]
@@ -17,14 +17,6 @@ struct A(NonZeroU32);
 #[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
 #[flusso(keyword)]
 struct B(Wrapping<i64>);
-
-#[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
-#[flusso(keyword)]
-struct C(Duration);
-
-#[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
-#[flusso(keyword)]
-struct D(GeoPoint);
 
 #[derive(serde::Serialize, serde::Deserialize, FlussoValue)]
 #[flusso(keyword)]

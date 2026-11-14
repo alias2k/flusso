@@ -12,9 +12,7 @@ tagged_over_hash_map refused
 tagged_over_boxed_map refused
 tagged_over_long refused
 map_named_deny refused
-tagged_over_naive_date refused
 value_over_naive_date refused
-tagged_over_decimal refused
 tagged_over_non_zero refused
 tagged_over_wrapping refused
 tagged_over_reverse refused
@@ -22,9 +20,6 @@ tagged_over_cell refused
 tagged_over_ref_cell_map refused
 tagged_over_mutex_map refused
 tagged_over_cow_slice refused
-tagged_over_duration refused
-tagged_over_geo_point refused
-tagged_over_char refused
 gen/fragment_s refused
 gen/map_s refused
 gen/fragment_of_fragment_s refused
@@ -239,13 +234,11 @@ gen/map_box_mk refused
 gen/value_of_value_box_mk refused
 gen/fragment_of_fragment_box_mk refused
 gen/value_ch refused
-gen/keyword_value_ch refused
 gen/fragment_ch refused
 gen/map_ch refused
 gen/value_of_value_ch refused
 gen/fragment_of_fragment_ch refused
 gen/value_opt_ch refused
-gen/keyword_value_opt_ch refused
 gen/fragment_opt_ch refused
 gen/map_opt_ch refused
 gen/value_of_value_opt_ch refused
@@ -257,7 +250,6 @@ gen/map_vec_ch refused
 gen/value_of_value_vec_ch refused
 gen/fragment_of_fragment_vec_ch refused
 gen/value_box_ch refused
-gen/keyword_value_box_ch refused
 gen/fragment_box_ch refused
 gen/map_box_ch refused
 gen/value_of_value_box_ch refused
@@ -1313,6 +1305,27 @@ fragment/tagged_over_alias/ne refused
 fragment/tagged_over_alias/nn refused
 fragment/tagged_over_alias/ob refused
 fragment/tagged_over_alias/ts refused
+fragment/tagged_over_char/cm trusted json
+fragment/tagged_over_char/co trusted json
+fragment/tagged_over_char/dt refused
+fragment/tagged_over_char/ev reads
+fragment/tagged_over_char/gp refused
+fragment/tagged_over_char/ho refused
+fragment/tagged_over_char/js trusted json
+fragment/tagged_over_char/jsa refused
+fragment/tagged_over_char/jso trusted json
+fragment/tagged_over_char/kw trusted unseen
+fragment/tagged_over_char/kwa refused
+fragment/tagged_over_char/kwao refused
+fragment/tagged_over_char/kwo reads
+fragment/tagged_over_char/mp refused
+fragment/tagged_over_char/mpn refused
+fragment/tagged_over_char/mpo refused
+fragment/tagged_over_char/n refused
+fragment/tagged_over_char/ne refused
+fragment/tagged_over_char/nn refused
+fragment/tagged_over_char/ob refused
+fragment/tagged_over_char/ts refused
 fragment/tagged_over_cow_str/cm trusted json
 fragment/tagged_over_cow_str/co trusted json
 fragment/tagged_over_cow_str/dt refused
@@ -1334,6 +1347,90 @@ fragment/tagged_over_cow_str/ne refused
 fragment/tagged_over_cow_str/nn refused
 fragment/tagged_over_cow_str/ob refused
 fragment/tagged_over_cow_str/ts refused
+fragment/tagged_over_decimal/cm trusted json
+fragment/tagged_over_decimal/co trusted json
+fragment/tagged_over_decimal/dt refused
+fragment/tagged_over_decimal/ev trusted unseen
+fragment/tagged_over_decimal/gp refused
+fragment/tagged_over_decimal/ho refused
+fragment/tagged_over_decimal/js trusted json
+fragment/tagged_over_decimal/jsa refused
+fragment/tagged_over_decimal/jso trusted json
+fragment/tagged_over_decimal/kw trusted unseen
+fragment/tagged_over_decimal/kwa refused
+fragment/tagged_over_decimal/kwao refused
+fragment/tagged_over_decimal/kwo trusted unseen
+fragment/tagged_over_decimal/mp refused
+fragment/tagged_over_decimal/mpn refused
+fragment/tagged_over_decimal/mpo refused
+fragment/tagged_over_decimal/n refused
+fragment/tagged_over_decimal/ne refused
+fragment/tagged_over_decimal/nn refused
+fragment/tagged_over_decimal/ob refused
+fragment/tagged_over_decimal/ts refused
+fragment/tagged_over_duration/cm trusted json
+fragment/tagged_over_duration/co trusted json
+fragment/tagged_over_duration/dt refused
+fragment/tagged_over_duration/ev trusted unseen
+fragment/tagged_over_duration/gp refused
+fragment/tagged_over_duration/ho refused
+fragment/tagged_over_duration/js trusted json
+fragment/tagged_over_duration/jsa refused
+fragment/tagged_over_duration/jso trusted json
+fragment/tagged_over_duration/kw trusted unseen
+fragment/tagged_over_duration/kwa refused
+fragment/tagged_over_duration/kwao refused
+fragment/tagged_over_duration/kwo trusted unseen
+fragment/tagged_over_duration/mp refused
+fragment/tagged_over_duration/mpn refused
+fragment/tagged_over_duration/mpo refused
+fragment/tagged_over_duration/n refused
+fragment/tagged_over_duration/ne refused
+fragment/tagged_over_duration/nn refused
+fragment/tagged_over_duration/ob refused
+fragment/tagged_over_duration/ts refused
+fragment/tagged_over_geo_point/cm trusted json
+fragment/tagged_over_geo_point/co trusted json
+fragment/tagged_over_geo_point/dt refused
+fragment/tagged_over_geo_point/ev trusted unseen
+fragment/tagged_over_geo_point/gp refused
+fragment/tagged_over_geo_point/ho refused
+fragment/tagged_over_geo_point/js trusted json
+fragment/tagged_over_geo_point/jsa refused
+fragment/tagged_over_geo_point/jso trusted json
+fragment/tagged_over_geo_point/kw trusted unseen
+fragment/tagged_over_geo_point/kwa refused
+fragment/tagged_over_geo_point/kwao refused
+fragment/tagged_over_geo_point/kwo trusted unseen
+fragment/tagged_over_geo_point/mp refused
+fragment/tagged_over_geo_point/mpn refused
+fragment/tagged_over_geo_point/mpo refused
+fragment/tagged_over_geo_point/n refused
+fragment/tagged_over_geo_point/ne refused
+fragment/tagged_over_geo_point/nn refused
+fragment/tagged_over_geo_point/ob refused
+fragment/tagged_over_geo_point/ts refused
+fragment/tagged_over_naive_date/cm trusted json
+fragment/tagged_over_naive_date/co trusted json
+fragment/tagged_over_naive_date/dt refused
+fragment/tagged_over_naive_date/ev trusted unseen
+fragment/tagged_over_naive_date/gp refused
+fragment/tagged_over_naive_date/ho refused
+fragment/tagged_over_naive_date/js trusted json
+fragment/tagged_over_naive_date/jsa refused
+fragment/tagged_over_naive_date/jso trusted json
+fragment/tagged_over_naive_date/kw trusted unseen
+fragment/tagged_over_naive_date/kwa refused
+fragment/tagged_over_naive_date/kwao refused
+fragment/tagged_over_naive_date/kwo trusted unseen
+fragment/tagged_over_naive_date/mp refused
+fragment/tagged_over_naive_date/mpn refused
+fragment/tagged_over_naive_date/mpo refused
+fragment/tagged_over_naive_date/n refused
+fragment/tagged_over_naive_date/ne refused
+fragment/tagged_over_naive_date/nn refused
+fragment/tagged_over_naive_date/ob refused
+fragment/tagged_over_naive_date/ts refused
 fragment/tagged_over_plain_map_newtype/cm trusted json
 fragment/tagged_over_plain_map_newtype/co trusted json
 fragment/tagged_over_plain_map_newtype/dt refused
@@ -2951,6 +3048,27 @@ gen/fragment/keyword_value_box_bs/ne refused
 gen/fragment/keyword_value_box_bs/nn refused
 gen/fragment/keyword_value_box_bs/ob refused
 gen/fragment/keyword_value_box_bs/ts refused
+gen/fragment/keyword_value_box_ch/cm trusted json
+gen/fragment/keyword_value_box_ch/co trusted json
+gen/fragment/keyword_value_box_ch/dt refused
+gen/fragment/keyword_value_box_ch/ev reads
+gen/fragment/keyword_value_box_ch/gp refused
+gen/fragment/keyword_value_box_ch/ho refused
+gen/fragment/keyword_value_box_ch/js trusted json
+gen/fragment/keyword_value_box_ch/jsa refused
+gen/fragment/keyword_value_box_ch/jso trusted json
+gen/fragment/keyword_value_box_ch/kw trusted unseen
+gen/fragment/keyword_value_box_ch/kwa refused
+gen/fragment/keyword_value_box_ch/kwao refused
+gen/fragment/keyword_value_box_ch/kwo reads
+gen/fragment/keyword_value_box_ch/mp refused
+gen/fragment/keyword_value_box_ch/mpn refused
+gen/fragment/keyword_value_box_ch/mpo refused
+gen/fragment/keyword_value_box_ch/n refused
+gen/fragment/keyword_value_box_ch/ne refused
+gen/fragment/keyword_value_box_ch/nn refused
+gen/fragment/keyword_value_box_ch/ob refused
+gen/fragment/keyword_value_box_ch/ts refused
 gen/fragment/keyword_value_box_code/cm trusted json
 gen/fragment/keyword_value_box_code/co trusted json
 gen/fragment/keyword_value_box_code/dt refused
@@ -3035,6 +3153,27 @@ gen/fragment/keyword_value_bs/ne refused
 gen/fragment/keyword_value_bs/nn refused
 gen/fragment/keyword_value_bs/ob refused
 gen/fragment/keyword_value_bs/ts refused
+gen/fragment/keyword_value_ch/cm trusted json
+gen/fragment/keyword_value_ch/co trusted json
+gen/fragment/keyword_value_ch/dt refused
+gen/fragment/keyword_value_ch/ev reads
+gen/fragment/keyword_value_ch/gp refused
+gen/fragment/keyword_value_ch/ho refused
+gen/fragment/keyword_value_ch/js trusted json
+gen/fragment/keyword_value_ch/jsa refused
+gen/fragment/keyword_value_ch/jso trusted json
+gen/fragment/keyword_value_ch/kw trusted unseen
+gen/fragment/keyword_value_ch/kwa refused
+gen/fragment/keyword_value_ch/kwao refused
+gen/fragment/keyword_value_ch/kwo reads
+gen/fragment/keyword_value_ch/mp refused
+gen/fragment/keyword_value_ch/mpn refused
+gen/fragment/keyword_value_ch/mpo refused
+gen/fragment/keyword_value_ch/n refused
+gen/fragment/keyword_value_ch/ne refused
+gen/fragment/keyword_value_ch/nn refused
+gen/fragment/keyword_value_ch/ob refused
+gen/fragment/keyword_value_ch/ts refused
 gen/fragment/keyword_value_code/cm trusted json
 gen/fragment/keyword_value_code/co trusted json
 gen/fragment/keyword_value_code/dt refused
@@ -3119,6 +3258,27 @@ gen/fragment/keyword_value_opt_bs/ne refused
 gen/fragment/keyword_value_opt_bs/nn refused
 gen/fragment/keyword_value_opt_bs/ob refused
 gen/fragment/keyword_value_opt_bs/ts refused
+gen/fragment/keyword_value_opt_ch/cm trusted json
+gen/fragment/keyword_value_opt_ch/co trusted json
+gen/fragment/keyword_value_opt_ch/dt refused
+gen/fragment/keyword_value_opt_ch/ev reads
+gen/fragment/keyword_value_opt_ch/gp refused
+gen/fragment/keyword_value_opt_ch/ho refused
+gen/fragment/keyword_value_opt_ch/js trusted json
+gen/fragment/keyword_value_opt_ch/jsa refused
+gen/fragment/keyword_value_opt_ch/jso trusted json
+gen/fragment/keyword_value_opt_ch/kw trusted unseen
+gen/fragment/keyword_value_opt_ch/kwa refused
+gen/fragment/keyword_value_opt_ch/kwao refused
+gen/fragment/keyword_value_opt_ch/kwo reads
+gen/fragment/keyword_value_opt_ch/mp refused
+gen/fragment/keyword_value_opt_ch/mpn refused
+gen/fragment/keyword_value_opt_ch/mpo refused
+gen/fragment/keyword_value_opt_ch/n refused
+gen/fragment/keyword_value_opt_ch/ne refused
+gen/fragment/keyword_value_opt_ch/nn refused
+gen/fragment/keyword_value_opt_ch/ob refused
+gen/fragment/keyword_value_opt_ch/ts refused
 gen/fragment/keyword_value_opt_code/cm trusted json
 gen/fragment/keyword_value_opt_code/co trusted json
 gen/fragment/keyword_value_opt_code/dt refused
@@ -6059,6 +6219,27 @@ gen/root/keyword_value_box_bs/ne refused
 gen/root/keyword_value_box_bs/nn refused
 gen/root/keyword_value_box_bs/ob refused
 gen/root/keyword_value_box_bs/ts refused
+gen/root/keyword_value_box_ch/cm trusted json
+gen/root/keyword_value_box_ch/co trusted json
+gen/root/keyword_value_box_ch/dt refused
+gen/root/keyword_value_box_ch/ev reads
+gen/root/keyword_value_box_ch/gp refused
+gen/root/keyword_value_box_ch/ho refused
+gen/root/keyword_value_box_ch/js trusted json
+gen/root/keyword_value_box_ch/jsa refused
+gen/root/keyword_value_box_ch/jso trusted json
+gen/root/keyword_value_box_ch/kw trusted unseen
+gen/root/keyword_value_box_ch/kwa refused
+gen/root/keyword_value_box_ch/kwao refused
+gen/root/keyword_value_box_ch/kwo reads
+gen/root/keyword_value_box_ch/mp refused
+gen/root/keyword_value_box_ch/mpn refused
+gen/root/keyword_value_box_ch/mpo refused
+gen/root/keyword_value_box_ch/n refused
+gen/root/keyword_value_box_ch/ne refused
+gen/root/keyword_value_box_ch/nn refused
+gen/root/keyword_value_box_ch/ob refused
+gen/root/keyword_value_box_ch/ts refused
 gen/root/keyword_value_box_code/cm trusted json
 gen/root/keyword_value_box_code/co trusted json
 gen/root/keyword_value_box_code/dt refused
@@ -6143,6 +6324,27 @@ gen/root/keyword_value_bs/ne refused
 gen/root/keyword_value_bs/nn refused
 gen/root/keyword_value_bs/ob refused
 gen/root/keyword_value_bs/ts refused
+gen/root/keyword_value_ch/cm trusted json
+gen/root/keyword_value_ch/co trusted json
+gen/root/keyword_value_ch/dt refused
+gen/root/keyword_value_ch/ev reads
+gen/root/keyword_value_ch/gp refused
+gen/root/keyword_value_ch/ho refused
+gen/root/keyword_value_ch/js trusted json
+gen/root/keyword_value_ch/jsa refused
+gen/root/keyword_value_ch/jso trusted json
+gen/root/keyword_value_ch/kw trusted unseen
+gen/root/keyword_value_ch/kwa refused
+gen/root/keyword_value_ch/kwao refused
+gen/root/keyword_value_ch/kwo reads
+gen/root/keyword_value_ch/mp refused
+gen/root/keyword_value_ch/mpn refused
+gen/root/keyword_value_ch/mpo refused
+gen/root/keyword_value_ch/n refused
+gen/root/keyword_value_ch/ne refused
+gen/root/keyword_value_ch/nn refused
+gen/root/keyword_value_ch/ob refused
+gen/root/keyword_value_ch/ts refused
 gen/root/keyword_value_code/cm trusted json
 gen/root/keyword_value_code/co trusted json
 gen/root/keyword_value_code/dt refused
@@ -6227,6 +6429,27 @@ gen/root/keyword_value_opt_bs/ne refused
 gen/root/keyword_value_opt_bs/nn refused
 gen/root/keyword_value_opt_bs/ob refused
 gen/root/keyword_value_opt_bs/ts refused
+gen/root/keyword_value_opt_ch/cm trusted json
+gen/root/keyword_value_opt_ch/co trusted json
+gen/root/keyword_value_opt_ch/dt refused
+gen/root/keyword_value_opt_ch/ev reads
+gen/root/keyword_value_opt_ch/gp refused
+gen/root/keyword_value_opt_ch/ho refused
+gen/root/keyword_value_opt_ch/js trusted json
+gen/root/keyword_value_opt_ch/jsa refused
+gen/root/keyword_value_opt_ch/jso trusted json
+gen/root/keyword_value_opt_ch/kw trusted unseen
+gen/root/keyword_value_opt_ch/kwa refused
+gen/root/keyword_value_opt_ch/kwao refused
+gen/root/keyword_value_opt_ch/kwo reads
+gen/root/keyword_value_opt_ch/mp refused
+gen/root/keyword_value_opt_ch/mpn refused
+gen/root/keyword_value_opt_ch/mpo refused
+gen/root/keyword_value_opt_ch/n refused
+gen/root/keyword_value_opt_ch/ne refused
+gen/root/keyword_value_opt_ch/nn refused
+gen/root/keyword_value_opt_ch/ob refused
+gen/root/keyword_value_opt_ch/ts refused
 gen/root/keyword_value_opt_code/cm trusted json
 gen/root/keyword_value_opt_code/co trusted json
 gen/root/keyword_value_opt_code/dt refused
@@ -7802,6 +8025,27 @@ root/tagged_over_alias/ne refused
 root/tagged_over_alias/nn refused
 root/tagged_over_alias/ob refused
 root/tagged_over_alias/ts refused
+root/tagged_over_char/cm trusted json
+root/tagged_over_char/co trusted json
+root/tagged_over_char/dt refused
+root/tagged_over_char/ev reads
+root/tagged_over_char/gp refused
+root/tagged_over_char/ho refused
+root/tagged_over_char/js trusted json
+root/tagged_over_char/jsa refused
+root/tagged_over_char/jso trusted json
+root/tagged_over_char/kw trusted unseen
+root/tagged_over_char/kwa refused
+root/tagged_over_char/kwao refused
+root/tagged_over_char/kwo reads
+root/tagged_over_char/mp refused
+root/tagged_over_char/mpn refused
+root/tagged_over_char/mpo refused
+root/tagged_over_char/n refused
+root/tagged_over_char/ne refused
+root/tagged_over_char/nn refused
+root/tagged_over_char/ob refused
+root/tagged_over_char/ts refused
 root/tagged_over_cow_str/cm trusted json
 root/tagged_over_cow_str/co trusted json
 root/tagged_over_cow_str/dt refused
@@ -7823,6 +8067,90 @@ root/tagged_over_cow_str/ne refused
 root/tagged_over_cow_str/nn refused
 root/tagged_over_cow_str/ob refused
 root/tagged_over_cow_str/ts refused
+root/tagged_over_decimal/cm trusted json
+root/tagged_over_decimal/co trusted json
+root/tagged_over_decimal/dt refused
+root/tagged_over_decimal/ev trusted unseen
+root/tagged_over_decimal/gp refused
+root/tagged_over_decimal/ho refused
+root/tagged_over_decimal/js trusted json
+root/tagged_over_decimal/jsa refused
+root/tagged_over_decimal/jso trusted json
+root/tagged_over_decimal/kw trusted unseen
+root/tagged_over_decimal/kwa refused
+root/tagged_over_decimal/kwao refused
+root/tagged_over_decimal/kwo trusted unseen
+root/tagged_over_decimal/mp refused
+root/tagged_over_decimal/mpn refused
+root/tagged_over_decimal/mpo refused
+root/tagged_over_decimal/n refused
+root/tagged_over_decimal/ne refused
+root/tagged_over_decimal/nn refused
+root/tagged_over_decimal/ob refused
+root/tagged_over_decimal/ts refused
+root/tagged_over_duration/cm trusted json
+root/tagged_over_duration/co trusted json
+root/tagged_over_duration/dt refused
+root/tagged_over_duration/ev trusted unseen
+root/tagged_over_duration/gp refused
+root/tagged_over_duration/ho refused
+root/tagged_over_duration/js trusted json
+root/tagged_over_duration/jsa refused
+root/tagged_over_duration/jso trusted json
+root/tagged_over_duration/kw trusted unseen
+root/tagged_over_duration/kwa refused
+root/tagged_over_duration/kwao refused
+root/tagged_over_duration/kwo trusted unseen
+root/tagged_over_duration/mp refused
+root/tagged_over_duration/mpn refused
+root/tagged_over_duration/mpo refused
+root/tagged_over_duration/n refused
+root/tagged_over_duration/ne refused
+root/tagged_over_duration/nn refused
+root/tagged_over_duration/ob refused
+root/tagged_over_duration/ts refused
+root/tagged_over_geo_point/cm trusted json
+root/tagged_over_geo_point/co trusted json
+root/tagged_over_geo_point/dt refused
+root/tagged_over_geo_point/ev trusted unseen
+root/tagged_over_geo_point/gp refused
+root/tagged_over_geo_point/ho refused
+root/tagged_over_geo_point/js trusted json
+root/tagged_over_geo_point/jsa refused
+root/tagged_over_geo_point/jso trusted json
+root/tagged_over_geo_point/kw trusted unseen
+root/tagged_over_geo_point/kwa refused
+root/tagged_over_geo_point/kwao refused
+root/tagged_over_geo_point/kwo trusted unseen
+root/tagged_over_geo_point/mp refused
+root/tagged_over_geo_point/mpn refused
+root/tagged_over_geo_point/mpo refused
+root/tagged_over_geo_point/n refused
+root/tagged_over_geo_point/ne refused
+root/tagged_over_geo_point/nn refused
+root/tagged_over_geo_point/ob refused
+root/tagged_over_geo_point/ts refused
+root/tagged_over_naive_date/cm trusted json
+root/tagged_over_naive_date/co trusted json
+root/tagged_over_naive_date/dt refused
+root/tagged_over_naive_date/ev trusted unseen
+root/tagged_over_naive_date/gp refused
+root/tagged_over_naive_date/ho refused
+root/tagged_over_naive_date/js trusted json
+root/tagged_over_naive_date/jsa refused
+root/tagged_over_naive_date/jso trusted json
+root/tagged_over_naive_date/kw trusted unseen
+root/tagged_over_naive_date/kwa refused
+root/tagged_over_naive_date/kwao refused
+root/tagged_over_naive_date/kwo trusted unseen
+root/tagged_over_naive_date/mp refused
+root/tagged_over_naive_date/mpn refused
+root/tagged_over_naive_date/mpo refused
+root/tagged_over_naive_date/n refused
+root/tagged_over_naive_date/ne refused
+root/tagged_over_naive_date/nn refused
+root/tagged_over_naive_date/ob refused
+root/tagged_over_naive_date/ts refused
 root/tagged_over_plain_map_newtype/cm trusted json
 root/tagged_over_plain_map_newtype/co trusted json
 root/tagged_over_plain_map_newtype/dt refused

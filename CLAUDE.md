@@ -1140,13 +1140,18 @@ on `V`, any other wrapped type (and a named struct's flattened field) must carry
 with the same bound, `deny_unknown_fields` and a field's `alias` are refused. A `FlussoFragment`
 newtype over a map (through `Option`), and an untagged `FlussoValue` newtype over a map type, carry
 `MAP_VALUES` (the map's value kinds; `[Object]` for `serde_json::Value` values, so only `json` takes
-it) and a forwarding `FlussoMap<K>` impl, so they go exactly where the map goes. Every map's key must
-be `String` (`doc::non_string_key`, run by every derive on every field). A `FlussoFragment` newtype
-over a leaf value is refused (`fragment::newtype_over_a_value`): it is a `FlussoValue`. A tagged
-`FlussoValue` newtype (`value::tagged_inner`) looks through `Option`/`Box`/`Rc`, refuses a map, a
-collection, a tuple/array or a non-`String` primitive at macro time and a flusso type that reads no
-string through const data; a type without metadata is trusted (the documented escape hatch for a
-string type from another crate). The `FlussoMap` derive also emits `FlussoValueMeta` (its
+it) and a forwarding `FlussoMap<K>` impl, so they go exactly where the map goes. A map key the
+derive knows by name reads no arbitrary string (a number, `bool`, `char`, `Uuid`, a tuple) is refused
+(`doc::non_string_key`, run by every derive on every field); any other key type is trusted. **Refuse by
+name only what can't be a user's own string type** (the owner's rule: a struct that compiled on
+`main` and read real documents keeps compiling; `ui_pass/map_keys_of_your_own.rs` and
+`ui_pass/tagged_newtypes_over_named_types.rs` guard it, since the boundary test can't see
+over-refusal). A `FlussoFragment` newtype over a leaf value is refused
+(`fragment::newtype_over_a_value`): it is a `FlussoValue`. A tagged `FlussoValue` newtype
+(`value::tagged_inner`) looks through the std wrappers serde reads transparently, refuses a map, a std
+collection, a slice/tuple/array, a primitive other than `String`/`char` and `NonZero*` at macro time,
+and a flusso type that reads an object through const data; any other type (named `Date`, `Decimal`,
+a type from another crate, an alias) is trusted. The `FlussoMap` derive also emits `FlussoValueMeta` (its
 `MAP_VALUES` carries the declared value kind) + a no-op `__flusso_check`, which is what lets
 the type sit inside a `FlussoFragment`; a hand-written `impl FlussoMap<K>` alone works only at a
 root — in a fragment it fails to compile, with the E0277 note pointing at the derive (or at a hand

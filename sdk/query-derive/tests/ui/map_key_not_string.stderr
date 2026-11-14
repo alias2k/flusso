@@ -1,4 +1,4 @@
-error: `HashMap<i64, String>` has `i64` keys, but a map's keys are document keys, which read as strings — declare the key `String`
+error: `HashMap<i64, String>` has `i64` keys, but a map's keys are document keys, which can be any string — declare the key `String`
   --> tests/ui/map_key_not_string.rs:11:27
    |
 11 |     codes: Option<HashMap<i64, String>>,

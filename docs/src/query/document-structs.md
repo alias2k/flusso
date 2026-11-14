@@ -110,7 +110,7 @@ The derive checks a struct against the mapping at compile time, but a struct tha
 
 **What it checks.** A type wherever it can see it: a built-in leaf, a type with a flusso derive, the two [array newtypes](#two-kinds-of-array-newtype), and a `HashMap`/`BTreeMap<String, V>` at a field, where `V` may be `Option<V>` (one level).
 
-- A map's keys are `String`, the document's keys: any other key type is a compile error.
+- A map's keys are the document's keys, any string: a key type the derive knows reads no arbitrary string (a number, `bool`, `char`, `Uuid`, a tuple) is a compile error.
 - A map type is checked as the map it reads: a [`FlussoMap` type](maps.md#document-types)'s values against its tag, and a `FlussoFragment` or `FlussoValue` newtype over a map (or over an `Option` of one) only goes where that map goes, its values checked against the field's.
 - A `FlussoFragment` newtype over a leaf value is a compile error: it is a value, so derive `FlussoValue`.
 - An `exhaustive` enum where the schema declares no `variants:` is a compile error everywhere, a `json` field and a map's values included.
@@ -118,6 +118,7 @@ The derive checks a struct against the mapping at compile time, but a struct tha
 **What it trusts.** Each of these compiles, and a document that disagrees fails to read:
 
 - **Any type at a `json` field, or at a `constant` stored unindexed.** Neither declares anything to check against: a [`constant`](../reference/field-types.md#constant) holding an object or a list that mixes kinds is mapped like `json`.
+- **A map key type of your own.** `String`, `Box<str>`, a `type` alias or a newtype of yours is trusted to read every key.
 - **A `#[serde(flatten)]` map.** A flattened `HashMap`, `BTreeMap`, `FlussoMap` type or newtype over a map reads every key no other field reads, whatever its kind, and its value type isn't checked against them. Only `serde_json::Value` values read them all.
 - **A map value that is not an `Option`.** It is trusted never to be `null`, but a `map` over a `jsonb` column holding `{"x": null}` indexes that `null` under its key. Use `Option<V>` (`HashMap<String, Option<String>>`, or `Option` values in a `FlussoMap` type) when the column can hold one.
 - **An enum where the schema declares no `variants:`.** At a plain `keyword`, or as a map's values, every value must be one of the enum's.
@@ -128,12 +129,12 @@ The derive checks a struct against the mapping at compile time, but a struct tha
   | --- | --- | --- |
   | `date` | `2024-01-02` | `chrono::NaiveDate`, `String` |
   | `time` | `03:04:05.123456` | `chrono::NaiveTime`, `String` |
-  | `timetz` | `03:04:05.123456+02:00` | `String` only |
+  | `timetz` | `03:04:05.123456+02` | `String` only |
   | `timestamp` (no zone) | `2024-01-02 03:04:05.123456` | `String` only ([#304](https://github.com/alias2k/flusso/issues/304)) |
   | `timestamptz` | `2024-01-02T03:04:05.123456+00:00` | `chrono::DateTime<Utc>`, `String` |
 
-  `chrono::NaiveDateTime`, `time::OffsetDateTime` and `time::PrimitiveDateTime` read no form flusso writes.
-- **Any other type behind a tagged `FlussoValue` newtype.** `#[flusso(keyword)] struct Sku(SmolStr)` is how a string type from another crate goes at a `keyword` field, so it is trusted to read one string. The derive refuses what it recognises by name as reading something else, looking through `Option`, `Box`, `Rc`, `Arc`, `Cell`, `RefCell`, `Mutex`, `RwLock`, `Cow`, `Wrapping`, `Saturating` and `Reverse`: a map, a collection, a slice, tuple or array, a Rust primitive other than `String`, `NonZero*`, `Duration`, `SystemTime`, flusso's `GeoPoint`, a date type (`NaiveDate`, `DateTime`, …) or `Decimal` by name, and a flusso type of another kind (a date, a number, a map type). Everything else, a plain struct or a `type` alias included, is taken on trust.
+  `chrono::NaiveDateTime` reads none of these forms. The `time` crate's types aren't covered here: nothing in flusso's tests reads these forms with them.
+- **Any other type behind a tagged `FlussoValue` newtype.** `#[flusso(keyword)] struct Sku(SmolStr)` is how a string type from another crate goes at a `keyword` field, so it is trusted to read one string, whatever it is named (`Date`, `Decimal`, `Duration`, `chrono::NaiveDate` holding date text included). Looking through `Option`, `Box`, `Rc`, `Arc`, `Cell`, `RefCell`, `Mutex`, `RwLock`, `Cow`, `Wrapping`, `Saturating` and `Reverse`, the derive refuses exactly: a `HashMap`/`BTreeMap`, a `Vec`/`HashSet`/`BTreeSet`/`VecDeque`/`LinkedList`/`BinaryHeap`, a slice, tuple or array, a Rust primitive other than `String` and `char` (a `char` reads a one-character string), `NonZero*`, and a flusso type that reads an object (a `FlussoMap` type, a sub-document).
 - **What [`#[flusso(opaque)]`](#escape-hatches) turns off**, and a type the derive can't see into under it (`Box<…>`, a tuple, a plain struct).
 - **serde attributes that change what is read**: `with`/`deserialize_with` on a field, `from`/`try_from` on a `FlussoValue` type (validation in `try_from` is a common use), and `deny_unknown_fields` on a fragment, which then fails on every key it leaves out.
 - **A `String` at a `geo` field.** flusso writes a point as `{lat, lon}` for a two-column `geo` (`lat:`/`lon:`), which a `String` doesn't read; a one-column `geo` is written as its column holds it ([#307](https://github.com/alias2k/flusso/issues/307)), and a `custom` field mapped to `geo_point` can hold `"lat,lon"` strings.

@@ -251,13 +251,10 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
                          reads an array — drop the tag, and `{ident}` reads the array as \
                          `{shown}` does"
                     );
-                    let kind_message = format!(
-                        "`{ident}` is `#[flusso({name})]`, so it stands for any `{name}` \
-                         string, but `{shown}` is a value of another kind, which reads only \
-                         its own kind's values (a date, a number, an object) — wrap a `String` \
-                         to read any string, or drop the tag so `{ident}` carries \
-                         `{shown}`'s kind (a map type derives `FlussoMap`, a sub-document \
-                         `FlussoFragment`)"
+                    let object_message = format!(
+                        "`{ident}` is `#[flusso({name})]`, so it reads one string, but `{shown}` \
+                         reads an object — wrap a `String`; a map type derives `FlussoMap`, a \
+                         sub-document `FlussoFragment`"
                     );
                     let array_check = quote_spanned! {read.span()=>
                         const _: () = {
@@ -267,17 +264,14 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
                                 !::flusso_query::OpaqueProbe::<#read>::ARRAY,
                                 #array_message
                             );
+                            // A flusso type that reads an object (a map type, a
+                            // sub-document) reads no string. A value of another
+                            // kind (a date, a decimal) may: it is trusted.
                             assert!(
                                 !::flusso_query::OpaqueProbe::<#read>::HAS_META
-                                    || ::flusso_query::accepts_kind(
-                                        ::flusso_query::OpaqueProbe::<#read>::KINDS,
-                                        ::flusso_query::KindTag::Keyword,
-                                    )
-                                    || ::flusso_query::accepts_kind(
-                                        ::flusso_query::OpaqueProbe::<#read>::KINDS,
-                                        ::flusso_query::KindTag::Text,
-                                    ),
-                                #kind_message
+                                    || !(::flusso_query::OpaqueProbe::<#read>::AT_OBJECT
+                                        || ::flusso_query::OpaqueProbe::<#read>::AT_NESTED),
+                                #object_message
                             );
                         };
                     };
@@ -358,11 +352,10 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
 /// The type a tagged newtype reads its one string through: `inner` with the
 /// wrappers serde reads as what they hold peeled off ([`TRANSPARENT`]). What
 /// the derive recognises by name as reading no single string is refused here:
-/// a map, a collection, a slice/tuple/array (a `Cow<[T]>` too), a Rust
-/// primitive other than `String`, and the std and flusso types of
-/// [`NOT_A_STRING`]. A custom type is checked through its flusso metadata by
-/// the caller; any other type (one without metadata: another crate's, a plain
-/// struct, a `type` alias) is trusted to read one string.
+/// a map, a std collection, a slice/tuple/array (a `Cow<[T]>` too), a Rust
+/// primitive other than `String` and `char`, and `NonZero*` ([`NOT_A_STRING`]).
+/// A flusso type is refused through its metadata by the caller only when it
+/// reads an object; any other type is trusted to read one string.
 fn tagged_inner<'a>(
     ident: &syn::Ident,
     inner: &'a syn::Type,
@@ -418,17 +411,20 @@ fn tagged_inner<'a>(
     {
         return refuse(reads, &fix.replace("{ident}", &ident.to_string()));
     }
-    if crate::doc::is_primitive(leaf.as_deref()) && leaf.as_deref() != Some("String") {
+    // A `char` reads a one-character string, so it is trusted like any other.
+    if crate::doc::is_primitive(leaf.as_deref())
+        && !matches!(leaf.as_deref(), Some("String" | "char"))
+    {
         // Behind a wrapper, an untagged newtype has no kind to carry over.
-        let fix = if std::ptr::eq(read, inner) && leaf.as_deref() != Some("char") {
+        let fix = if std::ptr::eq(read, inner) {
             "drop the tag: an untagged newtype carries the kind of what it wraps"
         } else {
             "wrap a `String`"
         };
-        let reads = match leaf.as_deref() {
-            Some("char") => "a character",
-            Some("bool") => "a boolean",
-            _ => "a number",
+        let reads = if leaf.as_deref() == Some("bool") {
+            "a boolean"
+        } else {
+            "a number"
         };
         return refuse(reads, fix);
     }
@@ -454,54 +450,28 @@ const TRANSPARENT: &[&str] = &[
 ];
 
 /// Types the derive recognises by name as reading no single string, with what
-/// they read instead and the fix to suggest. A date or a number reads only
-/// its own kind's values, so dropping the tag carries that kind instead.
-const NOT_A_STRING: &[(&[&str], &str, &str)] = &[
-    (
-        &[
-            "NonZero",
-            "NonZeroU8",
-            "NonZeroU16",
-            "NonZeroU32",
-            "NonZeroU64",
-            "NonZeroU128",
-            "NonZeroUsize",
-            "NonZeroI8",
-            "NonZeroI16",
-            "NonZeroI32",
-            "NonZeroI64",
-            "NonZeroI128",
-            "NonZeroIsize",
-        ],
-        "a number",
-        "wrap a `String`",
-    ),
-    (
-        &[
-            "NaiveDate",
-            "NaiveDateTime",
-            "NaiveTime",
-            "DateTime",
-            "OffsetDateTime",
-            "PrimitiveDateTime",
-            "Date",
-        ],
-        "only a date, not any string",
-        "wrap a `String` to read any string, or drop the tag so `{ident}` carries the date \
-         kind",
-    ),
-    (
-        &["Decimal"],
-        "only a number, not any string",
-        "wrap a `String` to read any string, or drop the tag so `{ident}` carries the decimal \
-         kind",
-    ),
-    (
-        &["Duration", "SystemTime", "GeoPoint"],
-        "an object",
-        "wrap a `String`",
-    ),
-];
+/// they read instead and the fix to suggest: only names no string type of your
+/// own would carry. A name a string type of yours could have (`Date`,
+/// `Decimal`, `Duration`, …) is trusted.
+const NOT_A_STRING: &[(&[&str], &str, &str)] = &[(
+    &[
+        "NonZero",
+        "NonZeroU8",
+        "NonZeroU16",
+        "NonZeroU32",
+        "NonZeroU64",
+        "NonZeroU128",
+        "NonZeroUsize",
+        "NonZeroI8",
+        "NonZeroI16",
+        "NonZeroI32",
+        "NonZeroI64",
+        "NonZeroI128",
+        "NonZeroIsize",
+    ],
+    "a number",
+    "wrap a `String`",
+)];
 
 fn single_generic<'a>(ty: &'a syn::Type, wrapper: &str) -> Option<&'a syn::Type> {
     let syn::Type::Path(path) = ty else {

@@ -3,9 +3,3 @@ error: `Count` is `#[flusso(keyword)]`, so it reads one string, but `i64` reads 
   |
 7 | struct Count(i64);
   |              ^^^
-
-error: `Letter` is `#[flusso(keyword)]`, so it reads one string, but `char` reads a character — wrap a `String`
-  --> tests/ui/value_tagged_newtype_over_another_kind.rs:12:15
-   |
-12 | struct Letter(char);
-   |               ^^^^
