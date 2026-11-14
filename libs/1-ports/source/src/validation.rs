@@ -256,6 +256,12 @@ pub enum DiagnosticKind {
     /// its output does not fit is rejected by OpenSearch; the message says
     /// which. A schema with one still loads, as earlier releases did.
     DuplicateFieldName,
+    /// A `timestamp` field, aggregate result or script output whose
+    /// `options.format` has no pattern that reads the ISO 8601 form the
+    /// value is written in (`2024-01-02T03:04:05.123456`): OpenSearch
+    /// rejects every document holding a value. Only a format whose every
+    /// pattern is known to refuse that form is reported.
+    TimestampFormat,
 }
 
 impl DiagnosticKind {
@@ -276,7 +282,8 @@ impl DiagnosticKind {
             Self::Nullability
             | Self::IgnoredPrimaryKey
             | Self::UndeclaredArrayColumn
-            | Self::DuplicateFieldName => Severity::Warning,
+            | Self::DuplicateFieldName
+            | Self::TimestampFormat => Severity::Warning,
         }
     }
 
@@ -298,6 +305,7 @@ impl DiagnosticKind {
             Self::NotAnArrayColumn => "not_an_array_column",
             Self::UndeclaredArrayColumn => "undeclared_array_column",
             Self::DuplicateFieldName => "duplicate_field_name",
+            Self::TimestampFormat => "timestamp_format",
         }
     }
 }
@@ -2208,6 +2216,138 @@ mod tests {
                 "soft_delete": { "column": { "column": "deleted_at" } },
             })))
             .is_empty()
+        );
+    }
+
+    fn timestamp_field(name: &str, format: Option<&str>) -> serde_json::Value {
+        let mut field = json!({
+            "field": name,
+            "source": { "column": { "column": name, "ty": "timestamp", "nullable": true } },
+        });
+        if let Some(format) = format {
+            field["options"] = json!({ "format": { "String": format } });
+        }
+        field
+    }
+
+    fn with_format(mut field: serde_json::Value, format: &str) -> serde_json::Value {
+        field["options"] = json!({ "format": { "String": format } });
+        field
+    }
+
+    fn timestamp_formats(fields: serde_json::Value) -> Vec<Found> {
+        located(validate_spec(&users_spec(json!({ "fields": fields }))))
+    }
+
+    const SPACE_ONLY: &str = "yyyy-MM-dd HH:mm:ss.SSSSSS||yyyy-MM-dd HH:mm:ss";
+
+    #[test]
+    fn a_timestamp_format_that_cannot_read_the_iso_form_is_a_warning_with_no_database() {
+        assert_eq!(
+            timestamp_formats(json!([
+                int_field("id"),
+                timestamp_field("seen", Some(SPACE_ONLY))
+            ])),
+            problems(&[(
+                "seen",
+                DiagnosticKind::TimestampFormat,
+                "`format` `yyyy-MM-dd HH:mm:ss.SSSSSS||yyyy-MM-dd HH:mm:ss` has no pattern that \
+                 reads the ISO 8601 form a timestamp is written in (`2024-01-02T03:04:05.123456`), \
+                 so OpenSearch rejects every document holding a value. Add \
+                 `strict_date_optional_time`: \
+                 `strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSSSSS||yyyy-MM-dd HH:mm:ss`"
+            )]),
+        );
+    }
+
+    #[test]
+    fn every_timestamp_valued_field_kind_is_checked_at_any_depth() {
+        let script = with_format(
+            json!({ "field": "computed", "source": { "script": {
+                "source": "\"s\"", "ty": "timestamp", "nullable": true,
+            } } }),
+            "epoch_millis",
+        );
+        let latest = with_format(
+            json!({ "field": "latest", "source": { "relation": { "aggregate": {
+                "table": "orders", "op": { "max": "placed_at" },
+                "key": { "direct": "user_id" }, "value_type": "timestamp",
+            } } } }),
+            "yyyy-MM-dd HH:mm:ss",
+        );
+        let stamps = with_format(
+            json!({ "field": "stamps", "source": { "relation": { "aggregate": {
+                "table": "orders", "op": { "ids": { "element_type": "timestamp" } },
+                "key": { "direct": "user_id" },
+            } } } }),
+            "epoch_second",
+        );
+        let found: Vec<(String, DiagnosticKind)> = timestamp_formats(json!([
+            int_field("id"),
+            script,
+            latest,
+            stamps,
+            group(
+                "account",
+                json!([timestamp_field("since", Some(SPACE_ONLY))])
+            ),
+            orders_join(
+                "orders",
+                json!([timestamp_field("placed", Some(SPACE_ONLY))])
+            ),
+        ]))
+        .into_iter()
+        .map(|(at, kind, _)| (at, kind))
+        .collect();
+        let want: Vec<(String, DiagnosticKind)> = [
+            "computed",
+            "latest",
+            "stamps",
+            "account.since",
+            "orders.placed",
+        ]
+        .into_iter()
+        .map(|at| (at.to_owned(), DiagnosticKind::TimestampFormat))
+        .collect();
+        assert_eq!(found, want);
+    }
+
+    #[test]
+    fn a_timestamp_format_that_reads_or_may_read_the_iso_form_is_not_reported() {
+        let date = json!({
+            "field": "born",
+            "options": { "format": { "String": "yyyy/MM/dd" } },
+            "source": { "column": { "column": "born", "ty": "date", "nullable": true } },
+        });
+        let input_only = {
+            let mut field = timestamp_field("hidden", Some(SPACE_ONLY));
+            field["emit"] = json!(false);
+            field
+        };
+        let unindexed = {
+            let mut join = orders_join(
+                "archive",
+                json!([timestamp_field("placed", Some(SPACE_ONLY))]),
+            );
+            join["source"]["relation"]["join"]["indexed"] = json!(false);
+            join
+        };
+        assert_eq!(
+            timestamp_formats(json!([
+                int_field("id"),
+                timestamp_field("plain", None),
+                timestamp_field(
+                    "strict",
+                    Some("strict_date_optional_time||yyyy-MM-dd HH:mm:ss")
+                ),
+                timestamp_field("loose", Some("yyyy-MM-dd HH:mm:ss||date_optional_time")),
+                timestamp_field("literal", Some("yyyy-MM-dd'T'HH:mm:ss.SSSSSS")),
+                timestamp_field("unknown", Some("yyyy-MM-dd HH:mm:ss||date_hour_minute")),
+                date,
+                input_only,
+                unindexed,
+            ])),
+            problems(&[]),
         );
     }
 

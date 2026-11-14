@@ -398,3 +398,28 @@ fn a_time_with_a_zone_stays_the_text_postgres_wrote() {
     let doc = body(json!({ "at": "03:04:05.123456+02" }), &fields);
     assert_eq!(doc["at"], GenericValue::String("03:04:05.123456+02".into()));
 }
+
+/// A `default` list never holds a timestamp when it comes from a schema file,
+/// but a hand-written `flusso.lock` (`Timestamp = "…"`) or a designer request
+/// can carry one. It reaches the document in the ISO 8601 form `sink::to_json`
+/// writes a timestamp in: as the timestamp itself under a `timestamp` field,
+/// as that text under a `keyword` one.
+#[test]
+fn a_timestamp_in_a_default_list_reads_as_the_iso_8601_form() {
+    let stamp = GenericValue::Timestamp("2024-01-02T03:04:05.123".parse().unwrap());
+    let fields = vec![
+        array_field(
+            "seen",
+            FlussoType::Timestamp,
+            Some(GenericValue::Array(vec![stamp.clone()])),
+        ),
+        array_field(
+            "labels",
+            FlussoType::Keyword,
+            Some(GenericValue::Array(vec![stamp.clone()])),
+        ),
+    ];
+    let map = body(json!({ "seen": null, "labels": null }), &fields);
+    assert_eq!(map["seen"], GenericValue::Array(vec![stamp]));
+    assert_eq!(map["labels"], strings(&["2024-01-02T03:04:05.123"]));
+}
