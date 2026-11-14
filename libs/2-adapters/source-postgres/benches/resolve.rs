@@ -6,9 +6,13 @@
 //! query, so the builder's pool never connects and no Docker is needed:
 //!
 //! - `root_table`: a change on the index's root table, one id.
-//! - `unrelated_table`: a change on a table no index reads, no id.
+//! - `unrelated_table`: a change on a table no index reads, after the first
+//!   (which warns), no id.
 //! - `unread_update`: an update of a child table that changed no column the
 //!   document reads (issue #169), no id: walks the paths, skips each.
+//! - `walked_from_the_key`: a change on a junction keyed by every column
+//!   (a junction without a primary key, under `REPLICA IDENTITY FULL`): the
+//!   path is walked, and the parent is read from the key, with no query.
 //!
 //! The Docker-backed `postgres` bench measures the same `resolve` against a
 //! live database, plus the reverse lookup from a related table.
@@ -34,6 +38,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use kernel::{
     Column, ColumnName, DatabaseSchema, Field, FieldName, FieldSource, FlussoType, GenericValue,
     IndexName, IndexSchema, Join, JoinKind, Relation, SoftDelete, SoftDeleteColumn, TableName,
+    Through,
 };
 use source::document::DocumentBuilder;
 use source::{RowImage, RowKey, SourceSpec};
@@ -47,10 +52,18 @@ fn bench(c: &mut Criterion) {
         let _guard = rt.enter();
         source_postgres::bench_offline_builder(Arc::new(spec()))
     };
+    for (table, column) in [("users", "id"), ("user_tags", "user_id")] {
+        source_postgres::bench_cache_int_column(&builder, "public", table, column);
+    }
 
     let users = table("users");
     let orders = table("orders");
     let products = table("products");
+    let user_tags = table("user_tags");
+    let junction_key = RowKey(vec![
+        (column("user_id"), GenericValue::Int(4)),
+        (column("tag_id"), GenericValue::Int(7)),
+    ]);
     let user_key = row_key(4);
     let order_key = row_key(4000);
     let before = order_row("first");
@@ -85,6 +98,15 @@ fn bench(c: &mut Criterion) {
             assert!(ids.is_empty());
         });
     });
+    group.bench_function("walked_from_the_key", |b| {
+        b.to_async(&rt).iter(|| async {
+            let ids = builder
+                .resolve(&user_tags, &junction_key, None, None)
+                .await
+                .unwrap();
+            assert_eq!(ids.len(), 1);
+        });
+    });
     group.finish();
 }
 
@@ -101,7 +123,8 @@ fn order_row(note: &str) -> RowImage {
 }
 
 /// The `postgres` bench's index: `users` with its `orders` folded in as a
-/// nested one-to-many array, soft-deleted by a column.
+/// nested one-to-many array, soft-deleted by a column, plus its `tags`
+/// through the `user_tags` junction.
 fn spec() -> SourceSpec {
     let orders = Field {
         field: field("orders"),
@@ -126,6 +149,30 @@ fn spec() -> SourceSpec {
             on: vec![],
         })),
     };
+    let tags = Field {
+        field: field("tags"),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Relation(Relation::Join(Join {
+            table: table("tags"),
+            primary_key: column("id"),
+            nullable: false,
+            kind: JoinKind::ManyToMany {
+                through: Through {
+                    table: table("user_tags"),
+                    left_key: column("user_id"),
+                    right_key: column("tag_id"),
+                    filters: None,
+                },
+            },
+            filters: None,
+            order_by: None,
+            limit: None,
+            fields: vec![column_field("name", "name")],
+            indexed: true,
+            on: vec![],
+        })),
+    };
     let schema = IndexSchema {
         version: 1,
         table: table("users"),
@@ -142,6 +189,7 @@ fn spec() -> SourceSpec {
             column_field("email", "email"),
             column_field("name", "name"),
             orders,
+            tags,
         ],
     };
     SourceSpec::new(BTreeMap::from([(index_name("users"), schema)]))

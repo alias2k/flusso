@@ -140,9 +140,9 @@ impl ColumnTypes {
         }
     }
 
-    /// Cache a column of `schema.table` of type `type_oid`, for tests
-    /// elsewhere in the crate.
-    #[cfg(test)]
+    /// Cache an `integer` column of `schema.table` of type `type_oid`, for
+    /// tests elsewhere in the crate and the `resolve` bench.
+    #[cfg(any(test, feature = "bench"))]
     pub(crate) fn cache(&self, schema: &str, table: &str, column: &str, type_oid: u32) {
         self.insert(
             (schema.to_owned(), table.to_owned(), column.to_owned()),
