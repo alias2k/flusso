@@ -1,6 +1,6 @@
 # Upgrade to 0.18
 
-0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index.
+0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index. It also writes a `timestamp` column in ISO 8601, which changes stored documents and can break a tuned `format`: see [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601).
 
 ## When to use this
 
@@ -25,11 +25,52 @@ Without either, no index is rebuilt. A `constant` holding a number, a boolean, o
 ## Options and variations
 
 - **Rolling back to 0.17** returns to the old index, which missed every change made since. Run `flusso reindex <index>` for each affected index after the rollback.
-- **A `timestamp` column (without time zone)** needs no rebuild and moves no hash. Before 0.18 it was written with a space (`2024-01-02 03:04:05`), which OpenSearch's `date` refuses, so every document holding one was rejected: under `on_error = "stop"` the sink engine stopped on the first, under `"skip"` each was quarantined. 0.18 writes ISO 8601 (`2024-01-02T03:04:05`; see [Field types](../reference/field-types.md#dates-and-times)). A stopped sink engine resumes from the batch it held. Quarantined documents land at their row's next write; to fill them in now, run [`flusso reindex <index>`](../reference/cli.md#reindex). A `stdout` sink writes the `T` form from the first run.
 - **Several OpenSearch sinks** each rebuild their own copy. A `stdout` sink has no index; its output carries the corrected values from the first run.
+
+## A timestamp column is written in ISO 8601
+
+**Breaking.** A `timestamp` (without time zone) value was written with a space, `2024-01-02 03:04:05.123`; 0.18 writes `2024-01-02T03:04:05.123`, everywhere the value goes (see [Field types](../reference/field-types.md#dates-and-times)). This alone moves no content hash and rebuilds nothing. What a deployment sees depends on the field's mapping:
+
+| Mapping on 0.17 | On 0.17 | On 0.18 | What to do |
+| --- | --- | --- | --- |
+| default (no `format`) | every document holding a value rejected | indexed | Nothing; fill in what was quarantined. |
+| a `format` with only space patterns (`yyyy-MM-dd HH:mm:ss…`) | indexed | **every write holding a value rejected** | Add `strict_date_optional_time` to the `format` with the upgrade. |
+| a `format` that also reads ISO, or `ignore_malformed: true` | indexed (`ignore_malformed`: stored, not searchable) | indexed; `_source` changes at each document's next write | `flusso reindex <index>` to make every document uniform. |
+| inside an `indexed: false` join | stored | stored in the new form at each document's next write | `flusso reindex <index>`. |
+
+`flusso check` warns about the second row with [`timestamp_format`](../reference/cli.md#check), with `--offline` too, and so does the start of `run`; neither stops.
+
+1. **A default mapping.** Under `on_error = "stop"` the sink engine stopped on the first such document and resumes from the batch it held. Under `"skip"` each was quarantined: it lands at its row's next write, or run [`flusso reindex <index>`](../reference/cli.md#reindex) to fill them all in now.
+2. **A space-only `format`.** After the upgrade the first write holding a value is rejected: under `"stop"` the sink engine stops; under `"skip"` the document keeps its 0.17 version (an update is lost) and a new row is missing. Before starting 0.18, put `strict_date_optional_time` first in the `format`, keeping the space patterns so a query bound written with a space still parses:
+
+   ```yaml
+   - timestamp: placedAt
+     options:
+       format: "strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSS||yyyy-MM-dd HH:mm:ss"
+   ```
+
+   `options` is part of the content hash, so the first 0.18 run backfills that index into a new physical index, every document in the new form. Then roll out consumers and remove the old index as in step 3 above.
+3. **Stored copies.** An `ignore_malformed` field and an unindexed join hold both forms until each document is next written. `flusso reindex <index>` rewrites every one in the new form, with no restart. An `ignore_malformed` field was malformed under the default format on 0.17, so its values were stored but never searchable; once rewritten they are.
+4. **Consumers reading `_source`.** `chrono::NaiveDateTime` reads only the new form, `jiff::civil::DateTime` and `String` read both, `time::PrimitiveDateTime`'s default serde reads only the old one. Give the `time` field a format that reads the new one:
+
+   ```rust
+   time::serde::format_description!(
+       flusso_timestamp,
+       PrimitiveDateTime,
+       "[year]-[month]-[day]T[hour]:[minute]:[second][optional [.[subsecond]]]"
+   );
+
+   #[derive(serde::Deserialize)]
+   struct Order {
+       #[serde(with = "flusso_timestamp")]
+       placed_at: time::PrimitiveDateTime,
+   }
+   ```
+
+   A `stdout` sink consumer sees the new form from the first run.
 
 ## Related
 
-- [Field types](../reference/field-types.md) for what a `binary` field and a `constant` index.
+- [Field types](../reference/field-types.md) for what a `binary` field, a `constant`, and a `timestamp` index.
 - [Reindex without downtime](reindex.md) for rebuilding an index on demand.
 - [Sink: OpenSearch](../reference/sink-opensearch.md#index-naming) for hash aliases and generations.

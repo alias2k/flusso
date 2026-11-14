@@ -109,11 +109,14 @@ A `date` or `timestamp` field is mapped as an OpenSearch `date` with its default
 | Postgres | Written as | Notes |
 | --- | --- | --- |
 | `date` | `2024-01-02` | |
-| `timestamp` (without time zone) | `2024-01-02T03:04:05.123456` | No offset, so OpenSearch reads it as UTC. Fractional seconds as Postgres holds them: none, 3, or 6 digits. Before 0.18 it was written with a space (`2024-01-02 03:04:05`) and every document holding one was rejected; see [Upgrade to 0.18](../operate/upgrade-to-0-18.md). |
-| `timestamptz` | `2024-01-02T03:04:05.123456+00:00` | The UTC instant. |
+| `timestamp` (without time zone) | `2024-01-02T03:04:05.123456` | No offset, so OpenSearch reads it as UTC. No fraction when the value has none, else 3 or 6 digits: `.5` is written `.500`. Before 0.18 it was written with a space (`2024-01-02 03:04:05`); see [Upgrade to 0.18](../operate/upgrade-to-0-18.md#a-timestamp-column-is-written-in-iso-8601). |
+| `timestamptz` | `2024-01-02T03:04:05.123456+00:00` | The UTC instant, fraction as for `timestamp`. |
 | an array of any of these | each element as above | With [`array: true`](#array). |
 
+The same form is written wherever the value goes: a `min`/`max` with `value_type: timestamp`, an `ids` of `timestamp`, a script declared `timestamp`, a field inside an [`indexed: false`](joins.md#indexed) join (stored, not mapped), and the `stdout` sink.
+
 - **Precision.** A `date` field stores milliseconds, so `range` and sort see `.123456` as `.123`. `_source` keeps every digit.
+- **A `format` of your own.** `options.format` replaces the default, so it must keep a pattern that reads the forms above: put `strict_date_optional_time` first (`strict_date_optional_time||yyyy-MM-dd HH:mm:ss`). A format with none refuses every document holding a value. `flusso check` (`--offline` too) and `run` warn with [`timestamp_format`](cli.md#check) when every pattern is known to refuse the form.
 - **A time of day has no date.** A `time` or `timetz` column is accepted under `timestamp`, but the `date` mapping refuses `03:04:05`, so every document with a non-null value is an [item-level rejection](index-and-on-error.md#on_error). Declare it as a `custom` keyword instead; `HH:MM:SS` sorts correctly as text:
 
   ```yaml
