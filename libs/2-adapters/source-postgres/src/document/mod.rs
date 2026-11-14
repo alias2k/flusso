@@ -227,6 +227,8 @@ fn built(document: Document) -> Option<Built> {
     }
 }
 
+type ComparisonCache = HashMap<(String, String), std::result::Result<bool, String>>;
+
 /// Builds index documents from a Postgres database, driven by a [`SourceSpec`] —
 /// the enabled indexes and their schemas, translated from the top-level config
 /// by the composition root. Cheap to clone — the pool, spec, and primary-key
@@ -242,8 +244,9 @@ pub struct PgDocumentBuilder {
     /// Cache of each `(schema, table, column)`'s SQL type, used to cast filter
     /// operands to the column's real type rather than comparing as text.
     col_type_cache: ColumnTypes,
-    /// Whether each `(link type, key type)` pair compares, probed once.
-    comparison_cache: Arc<Mutex<HashMap<(String, String), bool>>>,
+    /// Whether each `(link type, key type)` pair compares, probed once: the
+    /// verdict, or the reason the database gave for not answering.
+    comparison_cache: Arc<Mutex<ComparisonCache>>,
     /// Tables a change arrived for that no index reads, already warned about.
     unread_warned: Arc<Mutex<HashSet<TableName>>>,
     /// Root tables without a primary key already warned about for a key with
@@ -879,11 +882,8 @@ impl Catalog for PgDocumentBuilder {
         } else {
             meta.sql_type
         };
-        let probe = query::transform_probe(&sql_type, transforms);
-        self.probe(probe, || {
-            format!("could not check `{table}.{column}`'s transforms against its type")
-        })
-        .await
+        self.probe(query::transform_probe(&sql_type, transforms))
+            .await
     }
 
     async fn compares(
@@ -900,24 +900,21 @@ impl Catalog for PgDocumentBuilder {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&pair)
-            .copied();
-        if let Some(compares) = cached {
-            return Ok(compares);
+            .cloned();
+        if let Some(answer) = cached {
+            return answer.map_err(SourceError::Unchecked);
         }
         let probe = query::comparison_probe(&pair.0, &pair.1);
-        let compares = self
-            .probe(probe, || {
-                format!(
-                    "could not check `{link_table}.{link_column}` against \
-                     `{key_table}.{key_column}`"
-                )
-            })
-            .await?;
+        let answer = match self.probe(probe).await {
+            Ok(compares) => Ok(compares),
+            Err(SourceError::Unchecked(reason)) => Err(reason),
+            Err(other) => return Err(other),
+        };
         self.comparison_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(pair, compares);
-        Ok(compares)
+            .insert(pair, answer.clone());
+        answer.map_err(SourceError::Unchecked)
     }
 }
 
@@ -926,9 +923,10 @@ impl PgDocumentBuilder {
     /// prepared statement): `false` when Postgres has no function or
     /// operator for it. The probe casts to a column's type, which needs USAGE
     /// on the type's schema; reading the column does not. So only "no such
-    /// function" is a verdict, and any other refusal leaves it unknown
-    /// (`true`, the check skipped, `what` logged).
-    async fn probe(&self, probe: query::SqlString, what: impl FnOnce() -> String) -> Result<bool> {
+    /// function" is a verdict, and any other refusal leaves it unknown:
+    /// [`SourceError::Unchecked`] with Postgres's message, which validation
+    /// reports as a skipped check.
+    async fn probe(&self, probe: query::SqlString) -> Result<bool> {
         match sqlx::raw_sql(probe).execute(&self.pool).await {
             Ok(_) => Ok(true),
             Err(sqlx::Error::Database(error))
@@ -940,11 +938,7 @@ impl PgDocumentBuilder {
                 Ok(false)
             }
             Err(sqlx::Error::Database(error)) => {
-                tracing::warn!(
-                    error = %error.message(),
-                    "{}; skipping the check", what()
-                );
-                Ok(true)
+                Err(SourceError::Unchecked(error.message().to_owned()))
             }
             Err(error) => Err(query_err(error)),
         }

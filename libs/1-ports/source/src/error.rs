@@ -45,6 +45,15 @@ pub enum SourceError {
     #[error("references unknown table `{0}`")]
     UnknownTable(String),
 
+    /// The store refused to run a check validation asked of its [`Catalog`]
+    /// (e.g. a role without a privilege the check needs), with the store's
+    /// reason. Not a verdict either way: validation reports the check as
+    /// skipped instead of aborting.
+    ///
+    /// [`Catalog`]: crate::Catalog
+    #[error("check refused: {0}")]
+    Unchecked(String),
+
     /// The configuration uses a feature the active source implementation does
     /// not support yet.
     #[error("unsupported: {0}")]

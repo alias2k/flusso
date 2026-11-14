@@ -340,7 +340,8 @@ fn stops_the_start(kind: DiagnosticKind) -> bool {
         | DiagnosticKind::IdsElementMismatch
         | DiagnosticKind::IdsElementLossy
         | DiagnosticKind::DuplicateFieldName
-        | DiagnosticKind::TimestampFormat => false,
+        | DiagnosticKind::TimestampFormat
+        | DiagnosticKind::CheckSkipped => false,
     }
 }
 
@@ -614,6 +615,13 @@ mod tests {
     #[test]
     fn a_timestamp_format_prints_and_starts() {
         let printed = starts(DiagnosticKind::TimestampFormat);
+        assert!(printed.contains("[warning]"), "{printed}");
+        assert!(!printed.contains("starting anyway"), "{printed}");
+    }
+
+    #[test]
+    fn a_check_the_database_would_not_run_warns_and_starts() {
+        let printed = starts(DiagnosticKind::CheckSkipped);
         assert!(printed.contains("[warning]"), "{printed}");
         assert!(!printed.contains("starting anyway"), "{printed}");
     }
