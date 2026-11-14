@@ -492,6 +492,25 @@ impl Blocked {
     }
 }
 
+/// Delete the journal of a save the recovery just run under `lock` settled
+/// but kept, because its notice could not be stored ([`recover_telling`]):
+/// a save is about to write its own, and the caller tells the settled one in
+/// its answer. Only call it right after a recovery that did not block.
+pub(crate) fn drop_settled_journal(lock: &ProjectLock, disk: &mut Disk) -> std::io::Result<()> {
+    for name in [JOURNAL, DONE] {
+        let journal = lock.base().join(name);
+        if journal.symlink_metadata().is_ok() {
+            tracing::warn!(
+                journal = %journal.display(),
+                "deleting the journal of a settled save whose notice could not be stored; \
+                 this save's answer tells it"
+            );
+            disk.remove_file(&journal)?;
+        }
+    }
+    Ok(())
+}
+
 /// Whether a save left a journal in `base`: what makes a diff stop to
 /// recover first. Reading it takes no lock.
 pub(crate) fn pending(base: &std::path::Path) -> bool {

@@ -570,16 +570,15 @@ export const en: Record<string, string> = {
     "{n, plural, one {A save from {time} was interrupted before it finished. It was rolled back: {files} is as it was before it.} other {A save from {time} was interrupted before it finished. It was rolled back: {files} are as they were before it.}}",
   "recovery.completed":
     "{n, plural, one {A save from {time} was interrupted while it cleaned up. It was completed: {files} is as it wrote it.} other {A save from {time} was interrupted while it cleaned up. It was completed: {files} are as it wrote them.}}",
-  "recovery.kept":
-    "{path} was changed by another program during or after that save, so the designer did not roll it back.",
+  "recovery.kept": "{path} was changed by another program during or after that save; the designer left it as it was.",
   "recovery.keptBackup":
-    "{path} was changed by another program during or after that save, so the designer did not roll it back. Its text from before the save is in {backup}. To go back to that text, copy {backup} over {path}, but check {path} first: it may have changed since, and copying replaces what it holds now. Otherwise delete {backup}.",
+    "{path} was changed by another program during or after that save; the designer left it as it was. Its text from before the save is in {backup}. To go back to that text, copy {backup} over {path}, but check {path} first: {path} may have changed since, and copying replaces what it holds now. Otherwise delete {backup}.",
   "recovery.displaced":
     "{path} was written by another program in the instant the save replaced it: it holds what the save wrote, and the other program's bytes are in {copy}. Check them, then delete that file.",
   "recovery.leftoverUnknown":
     "{copy} was left behind by a save. The designer does not touch it: check it, then delete it.",
   "recovery.leftover":
-    "{copy} is a copy of {path} that a save left behind, holding its text from before that save or what the save wrote. The designer does not touch it: compare it with {path}, then delete it.",
+    "{copy} is a copy of {path} that a save left behind: its text from before that save, what the save wrote, or what another program wrote in the instant the save replaced it. The designer does not touch it: compare it with {path}, then delete it.",
   "recovery.copyDisplaced":
     "{copy} holds what another program wrote to {path} in the instant a save from {time} replaced it: check it, then delete it.",
   "recovery.copyBefore":
@@ -591,9 +590,9 @@ export const en: Record<string, string> = {
   "recovery.keptAfter":
     "{path} was changed by another program after that save wrote it, so the designer left it as it found it: what the save wrote to it is not kept anywhere.",
   "recovery.keptDeletedBackup":
-    "{path} was deleted during or after that save, so the designer did not roll it back, and it is still missing. Its text from before the save is in {backup}. To bring {path} back, copy {backup} to {path}; it may have changed since this was checked, and copying replaces whatever is there then. Otherwise delete {backup}.",
+    "{path} was deleted during or after that save, and it is still missing; the designer left it so. Its text from before the save is in {backup}. To bring {path} back, copy {backup} to {path}: {path} may have changed since this was checked, and copying replaces whatever is there then. Otherwise delete {backup}.",
   "recovery.keptDeleted":
-    "{path} was deleted during or after that save, so the designer did not roll it back, and it is still missing.",
+    "{path} was deleted during or after that save, and it is still missing; the designer left it so.",
   "recovery.dismiss": "Dismiss",
   // a file changed on disk since the page loaded it
   "stale.changed": "{path} changed on disk since this page loaded it.",

@@ -587,15 +587,15 @@ export const it: Record<string, string> = {
   "recovery.completed":
     "{n, plural, one {Un salvataggio delle {time} è stato interrotto durante la pulizia. È stato completato: {files} è come l'ha scritto.} other {Un salvataggio delle {time} è stato interrotto durante la pulizia. È stato completato: {files} sono come li ha scritti.}}",
   "recovery.kept":
-    "{path} è stato modificato da un altro programma durante o dopo quel salvataggio, quindi il designer non l'ha annullato.",
+    "{path} è stato modificato da un altro programma durante o dopo quel salvataggio; il designer l'ha lasciato com'era.",
   "recovery.keptBackup":
-    "{path} è stato modificato da un altro programma durante o dopo quel salvataggio, quindi il designer non l'ha annullato. Il suo testo di prima del salvataggio è in {backup}. Per tornare a quel testo, copia {backup} su {path}, ma controlla prima {path}: può essere cambiato da allora, e la copia sostituisce ciò che contiene ora. Altrimenti elimina {backup}.",
+    "{path} è stato modificato da un altro programma durante o dopo quel salvataggio; il designer l'ha lasciato com'era. Il suo testo di prima del salvataggio è in {backup}. Per tornare a quel testo, copia {backup} su {path}, ma controlla prima {path}: {path} può essere cambiato da allora, e la copia sostituisce ciò che contiene ora. Altrimenti elimina {backup}.",
   "recovery.displaced":
     "{path} è stato scritto da un altro programma nell'istante in cui il salvataggio lo sostituiva: contiene ciò che ha scritto il salvataggio, e i byte dell'altro programma sono in {copy}. Controllali, poi elimina quel file.",
   "recovery.leftoverUnknown":
     "{copy} è stato lasciato da un salvataggio. Il designer non lo tocca: controllalo, poi eliminalo.",
   "recovery.leftover":
-    "{copy} è una copia di {path} lasciata da un salvataggio, con il suo testo di prima di quel salvataggio o ciò che il salvataggio ha scritto. Il designer non la tocca: confrontala con {path}, poi eliminala.",
+    "{copy} è una copia di {path} lasciata da un salvataggio: il suo testo di prima di quel salvataggio, ciò che il salvataggio ha scritto, o ciò che un altro programma ha scritto nell'istante in cui il salvataggio lo sostituiva. Il designer non la tocca: confrontala con {path}, poi eliminala.",
   "recovery.copyDisplaced":
     "{copy} contiene ciò che un altro programma ha scritto in {path} nell'istante in cui un salvataggio delle {time} lo sostituiva: controllalo, poi eliminalo.",
   "recovery.copyBefore":
@@ -607,9 +607,9 @@ export const it: Record<string, string> = {
   "recovery.keptAfter":
     "{path} è stato modificato da un altro programma dopo che quel salvataggio l'aveva scritto, quindi il designer l'ha lasciato com'era: ciò che il salvataggio vi aveva scritto non è conservato da nessuna parte.",
   "recovery.keptDeletedBackup":
-    "{path} è stato eliminato durante o dopo quel salvataggio, quindi il designer non l'ha annullato, e manca ancora. Il suo testo di prima del salvataggio è in {backup}. Per riavere {path}, copia {backup} in {path}; può essere cambiato da quando è stato controllato, e la copia sostituisce ciò che c'è allora. Altrimenti elimina {backup}.",
+    "{path} è stato eliminato durante o dopo quel salvataggio, e manca ancora; il designer l'ha lasciato così. Il suo testo di prima del salvataggio è in {backup}. Per riavere {path}, copia {backup} in {path}: {path} può essere cambiato da quando è stato controllato, e la copia sostituisce ciò che c'è allora. Altrimenti elimina {backup}.",
   "recovery.keptDeleted":
-    "{path} è stato eliminato durante o dopo quel salvataggio, quindi il designer non l'ha annullato, e manca ancora.",
+    "{path} è stato eliminato durante o dopo quel salvataggio, e manca ancora; il designer l'ha lasciato così.",
   "recovery.dismiss": "Chiudi",
   // a file changed on disk since the page loaded it
   "stale.changed": "{path} è cambiato sul disco da quando questa pagina lo ha caricato.",

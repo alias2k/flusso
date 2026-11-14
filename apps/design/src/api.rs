@@ -1461,7 +1461,9 @@ pub fn dismiss_recovered(config_path: &Path, ids: &[String]) -> Result<()> {
             if notice.copies(&paths).is_empty() {
                 forget(&notice);
             } else {
-                remember(notice, &mut Disk::default());
+                if !remember(notice, &mut Disk::default()) {
+                    tracing::warn!("the dismissal is kept until the designer stops");
+                }
             }
         }
     }
@@ -1498,20 +1500,34 @@ impl StoredNotice {
         }
     }
 
-    /// The notice as it can be shown now. Every path must be a relative one
-    /// inside the project (a notice is a file anyone with the user's rights
-    /// can edit), every copy a save copy of its file (`.<name>.flusso-save.
-    /// <id>.…` beside it) still on disk, and a kept file is told deleted only
+    /// The notice as it can be shown now (a notice is a file anyone with the
+    /// user's rights can edit). A file is kept when the project names it
+    /// (`named`: `flusso.toml` and each index's schema file; when the config
+    /// can't be read, the files the notice itself records), or when it is a
+    /// plain path inside the project reached through no link. A copy is kept
+    /// when it is a regular file beside a kept file, named as the save's copy
+    /// of it (`.<name>.flusso-save.<id>.…`). A kept file is told deleted only
     /// while it is missing. Anything else is dropped.
-    fn checked(mut self, paths: &Paths) -> Self {
+    fn checked(mut self, paths: &Paths, named: Option<&HashSet<String>>) -> Self {
+        let recorded: HashSet<String> = self
+            .save
+            .files
+            .iter()
+            .chain(self.save.kept.iter().map(|k| &k.path))
+            .chain(self.save.displaced.iter().map(|d| &d.path))
+            .cloned()
+            .collect();
+        let named = named.unwrap_or(&recorded);
+        let file_ok = |rel: &str| named.contains(rel) || plain_inside(&paths.base, rel);
         let id = self.save.id.clone();
-        let exists = |rel: &str| paths.base.join(rel).symlink_metadata().is_ok();
-        let copy_of = |copy: &str, path: &str| is_save_copy(copy, path, &id) && exists(copy);
-        self.save.files.retain(|f| inside_project(f));
-        self.save.kept.retain(|k| inside_project(&k.path));
+        let copy_of = |copy: &str, path: &str| {
+            file_ok(path) && is_save_copy(copy, path, &id) && regular_file(&paths.base.join(copy))
+        };
+        self.save.files.retain(|f| file_ok(f));
+        self.save.kept.retain(|k| file_ok(&k.path));
         for kept in &mut self.save.kept {
             kept.backup = kept.backup.take().filter(|b| copy_of(b, &kept.path));
-            kept.deleted = !exists(&kept.path);
+            kept.deleted = paths.base.join(&kept.path).symlink_metadata().is_err();
         }
         self.save.displaced.retain(|d| copy_of(&d.copy, &d.path));
         self
@@ -1531,7 +1547,7 @@ impl StoredNotice {
             .map(|d| (&d.copy, &d.path, CopyHolds::Displaced));
         backups
             .chain(displaced)
-            .filter(|(copy, _, _)| paths.base.join(copy).symlink_metadata().is_ok())
+            .filter(|(copy, _, _)| regular_file(&paths.base.join(copy)))
             .map(|(copy, path, holds)| KeptCopy {
                 copy: copy.clone(),
                 path: path.clone(),
@@ -1542,30 +1558,59 @@ impl StoredNotice {
     }
 }
 
-/// Whether `rel` is a relative path inside the project: plain names only.
-fn inside_project(rel: &str) -> bool {
-    !rel.is_empty()
-        && Path::new(rel)
-            .components()
-            .all(|c| matches!(c, Component::Normal(_)))
+/// Whether `rel` is a plain path inside the project at `base` (names only),
+/// reached through no link: a folder link on the way could lead out of it.
+fn plain_inside(base: &Path, rel: &str) -> bool {
+    let path = Path::new(rel);
+    if rel.is_empty() || !path.components().all(|c| matches!(c, Component::Normal(_))) {
+        return false;
+    }
+    let mut at = base.to_path_buf();
+    for folder in path.parent().into_iter().flat_map(Path::components) {
+        at.push(folder);
+        match at.symlink_metadata() {
+            Ok(meta) if meta.file_type().is_symlink() => return false,
+            Ok(_) => {}
+            Err(_) => return true,
+        }
+    }
+    true
 }
 
-/// Whether `copy` is a copy the save `id` keeps of `path`: beside it, named
-/// `.<name>.flusso-save.<id>.…`.
+/// Whether `path` is a regular file: not a link, not a folder.
+fn regular_file(path: &Path) -> bool {
+    path.symlink_metadata().is_ok_and(|m| m.is_file())
+}
+
+/// Whether `copy` is named as a copy the save `id` keeps of `path`: beside
+/// it, `.<name>.flusso-save.<id>.…`.
 fn is_save_copy(copy: &str, path: &str, id: &str) -> bool {
     let (copy, path) = (Path::new(copy), Path::new(path));
     let name = |p: &Path| p.file_name().and_then(|n| n.to_str()).map(str::to_owned);
-    inside_project(&copy.to_string_lossy())
-        && inside_project(&path.to_string_lossy())
-        && copy.parent() == path.parent()
+    copy.parent() == path.parent()
         && name(path)
             .zip(name(copy))
             .is_some_and(|(file, copy)| copy.starts_with(&format!(".{file}.flusso-save.{id}.")))
 }
 
+/// The files the project names, as [`Paths::relative_path`] writes them:
+/// `flusso.toml` and each index's schema file. `None` when `flusso.toml`
+/// can't be read.
+fn named_files(paths: &Paths) -> Option<HashSet<String>> {
+    let text = std::fs::read_to_string(&paths.config).ok()?;
+    let config = ConfigToml::try_parse(&text).ok()?;
+    let mut named = HashSet::from([paths.relative_path(&paths.config)]);
+    for entry in &config.index {
+        if let Ok(at) = paths.at(entry.schema.as_ref()) {
+            named.insert(paths.relative_path(&at));
+        }
+    }
+    Some(named)
+}
+
 /// Keep `notice`, replacing any earlier one of its save: in the user's state
-/// folder, else in this process.
-fn remember(notice: StoredNotice, disk: &mut Disk) {
+/// folder, else in this process. Whether it is in the state folder.
+fn remember(notice: StoredNotice, disk: &mut Disk) -> bool {
     let stored = State::open()
         .map_err(|e| e.to_string())
         .and_then(|state| state.notices().map_err(|e| e.to_string()))
@@ -1575,8 +1620,9 @@ fn remember(notice: StoredNotice, disk: &mut Disk) {
                 .put(&notice.save.id, &bytes, disk)
                 .map_err(|e| e.to_string())
         });
+    let durable = stored.is_ok();
     let Ok(mut unstored) = UNSTORED.lock() else {
-        return;
+        return durable;
     };
     let kept = unstored.entry(notice.dir.clone()).or_default();
     kept.retain(|n| n.save.id != notice.save.id);
@@ -1584,10 +1630,11 @@ fn remember(notice: StoredNotice, disk: &mut Disk) {
         tracing::warn!(
             error = %e,
             "could not keep what the designer did about a save in its state folder; it is told \
-             until the designer stops"
+             until the designer stops, and its journal is kept so the next start tells it again"
         );
         kept.push(notice);
     }
+    durable
 }
 
 /// Drop `notice` wherever it is kept.
@@ -1608,6 +1655,7 @@ fn forget(notice: &StoredNotice) {
 /// Every notice of the project, oldest save first. A dismissed one whose
 /// copies are all gone is forgotten on the way.
 fn notices(paths: &Paths) -> Vec<StoredNotice> {
+    let named = named_files(paths);
     let mut found: Vec<StoredNotice> = State::open()
         .ok()
         .and_then(|state| state.notices().ok())
@@ -1620,14 +1668,14 @@ fn notices(paths: &Paths) -> Vec<StoredNotice> {
                 .filter(|n| n.format == NOTICE_FORMAT && n.save.id == token)
         })
         .filter(|n| n.dir == paths.base)
-        .map(|n| n.checked(paths))
+        .map(|n| n.checked(paths, named.as_ref()))
         .collect();
     if let Ok(unstored) = UNSTORED.lock()
         && let Some(kept) = unstored.get(&paths.base)
     {
         for notice in kept {
             if !found.iter().any(|n| n.save.id == notice.save.id) {
-                found.push(notice.clone().checked(paths));
+                found.push(notice.clone().checked(paths, named.as_ref()));
             }
         }
     }
@@ -1660,12 +1708,10 @@ fn recover_locked(paths: &Paths, lock: &ProjectLock, disk: &mut Disk) -> SaveRec
             let own = OWN_CLEANUP.lock().is_ok_and(|own| {
                 settled.outcome == Outcome::Completed && own.contains(&settled.token)
             });
-            if !own {
-                remember(
-                    StoredNotice::new(paths, true, recovered_save(paths, settled)),
-                    disk,
-                );
-            }
+            own || remember(
+                StoredNotice::new(paths, true, recovered_save(paths, settled)),
+                disk,
+            )
         },
     );
     if let Ok(mut own) = OWN_CLEANUP.lock() {
@@ -2753,6 +2799,8 @@ fn save_with(config_path: &Path, request: &SaveRequest, disk: &mut Disk) -> Resu
     if recovery.stops() {
         return Err(Interrupted(recovery).into());
     }
+    commit::drop_settled_journal(&lock, disk)
+        .map_err(|e| anyhow::anyhow!("deleting the journal of a recovered save: {e}"))?;
     config_stale()?;
     // Before anything is written: a file this save writes would otherwise
     // read as unseen.
@@ -2880,7 +2928,9 @@ fn save_with(config_path: &Path, request: &SaveRequest, disk: &mut Disk) -> Resu
             kept: Vec::new(),
             displaced: resp.displaced.clone(),
         };
-        remember(StoredNotice::new(&paths, false, save), disk);
+        if !remember(StoredNotice::new(&paths, false, save), disk) {
+            tracing::warn!("the copy is explained until the designer stops");
+        }
     }
     Ok(resp)
 }
