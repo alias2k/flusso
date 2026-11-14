@@ -452,7 +452,7 @@ them can't silently disarm the guarantee.
 | flusso `type` | Rust | Handle |
 | --- | --- | --- |
 | `text` / `identifier` | `String` | `Text` |
-| `keyword` | `String` (or a `FlussoValue` newtype) | `Keyword` |
+| `keyword` | `String` (or a `FlussoValue` newtype); `Box<str>`/`Cow<str>`, and `Arc<str>`/`Rc<str>` with the `rc` feature, wherever `String` is a value | `Keyword` |
 | `enum` | `String` or a `#[derive(FlussoValue)]` enum | `Keyword` / `Enum` |
 | `uuid` | `String`, or `uuid::Uuid` (feature) | `Keyword` |
 | `boolean` | `bool` | `Bool` |
@@ -486,6 +486,13 @@ A newtype over either, with the same derive, is the same kind.
 Matching is by **leaf identifier and `Option` shape**: the macro compares the final type segment,
 not aliases. For exact money, declare a `custom` `scaled_float` in the schema and the derive accepts
 `rust_decimal::Decimal`.
+
+A struct that compiles can still fail to read a document: the derive never refuses a type that reads
+some stored value, so it trusts, for one, an integer newtype at a wider numeric field, `uuid::Uuid` at
+a plain `keyword`, `Decimal` at a `double`, an enum when the column holds a value outside `variants:`,
+and any type at a `custom` field it does not model. A root and a fragment accept the same types but
+in two named cases (a `type` alias; at a `custom` field, a type a fragment can't name, like `IpAddr`). The full list, with what to declare instead, is one section of the manual:
+<https://alias2k.github.io/flusso/main/query/document-structs.html#what-the-derive-trusts>.
 
 ## Nullability is checked, not guessed
 

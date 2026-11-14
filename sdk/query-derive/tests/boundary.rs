@@ -1,11 +1,13 @@
-//! The derive's boundary, pinned (issue #294): type shapes × the field kinds
-//! of one fixture × position, each compiled and read. It covers the kinds the
-//! fixture holds, not every kind a schema can declare: the manual's "Known
-//! gaps" (issue #306) lie outside it.
+//! The derive's boundary, pinned (issues #294, #306): type shapes × the field
+//! kinds of one fixture × position, each compiled and read. It covers the kinds
+//! the fixture holds: every leaf kind, a `custom` field the derive does not
+//! model, the aggregates, an `enum` with `variants:`, maps, `json`, every join
+//! verb, an unindexed join and `subfields: false` (four of these share a
+//! mapping with another field and are not placed: see [`NAMED_ONLY`]).
 //!
-//! Two shape lists are placed at each field of the `boundary` fixture index
+//! Two shape lists are placed at the fields of the `boundary` fixture index
 //! ([`KINDS`]: one of each kind it holds, required ones bare, nullable ones in
-//! `Option<…>`):
+//! `Option<…>`; the generated list skips [`NAMED_ONLY`]):
 //!
 //! - [`named_shapes`], written by hand: the shapes issue #294 and its reviews
 //!   named, field attributes (`opaque`, serde's), and the map-like shapes also
@@ -16,12 +18,15 @@
 //! A shape whose declarations alone are refused is refused everywhere, so it
 //! is compiled once and not placed. Every other shape is placed on a root,
 //! then in a fragment, but only if it compiles at some root field: the
-//! root/fragment parity check covers the shapes that compile somewhere.
+//! root/fragment parity check covers the shapes that compile somewhere. The
+//! `custom` field ([`UNMODELED`]) takes any type on a root, so a shape that
+//! compiles there alone is placed in a fragment there alone.
 //!
 //! Each case is one module in a generated crate, compiled with cargo, then read
 //! against sample documents of the index ([`DOCS`]: every field set, empty
 //! arrays and maps, `null`, missing keys, one and many elements, a `null` map
-//! value, each date form). It ends up in one of three outcomes:
+//! value, each date form, and [`EXTREME_DOC`]). It ends up in one of three
+//! outcomes:
 //!
 //! - `refused`: the derive turns it down at compile time;
 //! - `reads`: it compiles, and reads every sample document;
@@ -59,8 +64,8 @@
 //! ([`Project::inputs`]), and its results are cached under that name, so a
 //! rerun on an unchanged derive compiles nothing.
 //!
-//! `Arc<…>` is in no list: serde reads it only with its `rc` feature, which
-//! the workspace does not enable, so it never compiles.
+//! `Arc<str>` and `Rc<str>` compile because this crate's `flusso-query`
+//! dev-dependency turns on its `rc` feature (serde's `rc`).
 #![allow(
     unused_crate_dependencies,
     clippy::unwrap_used,
@@ -96,6 +101,14 @@ struct Shape {
     string: bool,
     /// A chrono date or time type, or a newtype over one.
     date: bool,
+    /// An untagged `FlussoValue` newtype over an integer type.
+    integer: bool,
+    /// `uuid::Uuid`, bare or in a collection.
+    uuid: bool,
+    /// `Decimal`, bare or in a collection.
+    decimal: bool,
+    /// A type of the test's own named like a built-in leaf.
+    namesake: bool,
 }
 
 fn shape(name: &str, ty: &str, decls: &[&str]) -> Shape {
@@ -108,6 +121,10 @@ fn shape(name: &str, ty: &str, decls: &[&str]) -> Shape {
         unseen: false,
         string: false,
         date: false,
+        integer: false,
+        uuid: false,
+        decimal: false,
+        namesake: false,
     }
 }
 
@@ -132,6 +149,26 @@ impl Shape {
         self
     }
 
+    fn integer(mut self) -> Shape {
+        self.integer = true;
+        self
+    }
+
+    fn uuid(mut self) -> Shape {
+        self.uuid = true;
+        self
+    }
+
+    fn decimal(mut self) -> Shape {
+        self.decimal = true;
+        self
+    }
+
+    fn namesake(mut self) -> Shape {
+        self.namesake = true;
+        self
+    }
+
     fn attrs(mut self, attrs: &'static str) -> Shape {
         self.attrs = attrs;
         self
@@ -152,6 +189,8 @@ const PLAIN: &str = "#[derive(Debug, Deserialize)] pub struct Plain { pub zz: St
 const ALIAS: &str = "pub type Ms = HashMap<String, String>;";
 const EN_A: &str = "#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] \
      #[serde(rename_all = \"lowercase\")] pub enum EnA { A }";
+const OWN_DATE: &str =
+    "#[derive(Debug, Serialize, Deserialize, FlussoValue)] pub struct Date(pub String);";
 const EXHAUSTIVE: &str = "#[derive(Debug, Serialize, Deserialize, FlussoValue)] \
      #[flusso(keyword, exhaustive)] #[serde(rename_all = \"lowercase\")] pub enum Ex { A, B }";
 
@@ -460,7 +499,94 @@ fn named_shapes() -> Vec<Shape> {
         )
         .unseen()
         .string(),
-
+        shape("i16", "i16", &[]),
+        shape("i32", "i32", &[]),
+        shape("f64", "f64", &[]),
+        shape("bool", "bool", &[]),
+        shape("vec_long", "Vec<i64>", &[]),
+        shape("decimal", "flusso_query::Decimal", &[]).decimal(),
+        shape("vec_decimal", "Vec<flusso_query::Decimal>", &[]).decimal(),
+        shape("uuid", "flusso_query::uuid::Uuid", &[]).uuid(),
+        shape("vec_uuid", "Vec<flusso_query::uuid::Uuid>", &[]).uuid(),
+        shape(
+            "hash_map_uuid",
+            "HashMap<String, flusso_query::uuid::Uuid>",
+            &[],
+        )
+        .map()
+        .uuid(),
+        shape(
+            "integer_newtype",
+            "Int",
+            &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] pub struct Int(pub i32);"],
+        )
+        .integer(),
+        shape(
+            "long_newtype",
+            "Big",
+            &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] pub struct Big(pub i64);"],
+        )
+        .integer(),
+        shape(
+            "short_newtype",
+            "Short",
+            &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] pub struct Short(pub i16);"],
+        )
+        .integer(),
+        shape(
+            "own_uuid",
+            "Uuid",
+            &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] pub struct Uuid(pub String);"],
+        )
+        .namesake()
+        .string(),
+        shape(
+            "own_date",
+            "Date",
+            &[OWN_DATE],
+        )
+        .namesake()
+        .string(),
+        shape(
+            "own_decimal",
+            "Decimal",
+            &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] pub struct Decimal(pub String);"],
+        )
+        .namesake()
+        .string(),
+        shape(
+            "own_geo_point",
+            "GeoPoint",
+            &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] pub struct GeoPoint(pub String);"],
+        )
+        .namesake()
+        .string(),
+        shape("arc_str", "std::sync::Arc<str>", &[]).string(),
+        shape("rc_str", "std::rc::Rc<str>", &[]).string(),
+        shape("vec_rc_str", "Vec<std::rc::Rc<str>>", &[]),
+        shape(
+            "hash_map_arc_str",
+            "HashMap<String, Option<std::sync::Arc<str>>>",
+            &[],
+        )
+        .map(),
+        shape("ip_addr", "std::net::IpAddr", &[]),
+        shape(
+            "foreign",
+            "Foreign",
+            &["#[derive(Debug, Deserialize)] pub struct Foreign(pub String);"],
+        )
+        .string(),
+        shape("vec_own_date", "Vec<Date>", &[OWN_DATE]).namesake(),
+        shape("hash_map_own_date", "HashMap<String, Option<Date>>", &[OWN_DATE])
+            .map()
+            .namesake(),
+        shape(
+            "own_value",
+            "Value",
+            &["#[derive(Debug, Deserialize)] pub struct Value { pub zz: String }"],
+        )
+        .namesake(),
     ]
 }
 
@@ -558,6 +684,12 @@ fn generated_shapes() -> Vec<Shape> {
                         && matches!(inner, "alias" | "ch")
                         && matches!(wrap, "" | "opt_" | "box_"),
                     date: false,
+                    integer: inner == "l"
+                        && matches!(derive, "value" | "value_of_value")
+                        && matches!(wrap, "" | "opt_" | "box_"),
+                    uuid: false,
+                    decimal: false,
+                    namesake: false,
                     string: matches!(inner, "s" | "cow" | "code" | "bs")
                         && matches!(wrap, "" | "opt_" | "box_")
                         && derive != "map",
@@ -591,25 +723,63 @@ const KINDS: &[(&str, bool)] = &[
     ("cm", false),
     ("co", false),
     ("ev", false),
+    ("cu", false),
+    ("ids", false),
+    ("ex", false),
+    ("av", true),
+    ("bo", true),
+    ("sh", false),
+    ("it", false),
+    ("fl", false),
+    ("db", false),
+    ("dc", false),
+    ("bi", true),
+    ("uu", false),
+    ("hu", false),
 ];
+
+/// The fields only [`named_shapes`] are placed at, to keep the test within its
+/// time budget: [`generated_shapes`] varies strings, maps and sub-documents,
+/// which these scalar and join kinds refuse or read as a field of the same
+/// shape does (`n`, `kw`, `ho`, `ne`), and the named shapes hold the types that
+/// matter at each (integers, floats, `bool`, `Decimal`, `uuid::Uuid`, integer
+/// newtypes).
+///
+/// Four fixture fields are placed at no shape: their mapping is one another
+/// field already has, which is all the derive reads (`count` `ct` is `n`'s
+/// required `long`, `subfields: false` `kns` is `kw`'s `keyword`, `belongs_to`
+/// `bt` is `ho`'s nullable object, `many_to_many` `mm` is `ne`'s `nested`).
+const NAMED_ONLY: &[&str] = &[
+    "ids", "ex", "av", "bo", "sh", "it", "fl", "db", "dc", "bi", "uu", "hu",
+];
+
+/// The `custom` field of an OpenSearch type the derive does not model.
+const UNMODELED: &str = "cu";
 
 /// Sample documents of the `boundary` index, as the sink writes them (see
 /// `sink`'s `json::tests` for the date forms): every field set with many
 /// elements; every array and map empty and every nullable field `null`;
 /// nullable keys missing, with values a plain `keyword` takes and an enum of
-/// `a`/`b` does not; one element each; and [`NULL_DOC`], a `null` under a map
-/// key. A `timestamp` field (`ts`) holds whatever its column is: a
+/// `a`/`b` does not; one element each; [`NULL_DOC`], a `null` under a map
+/// key; and [`EXTREME_DOC`]. A `timestamp` field (`ts`) holds whatever its column is: a
 /// `timestamptz`, a naive `timestamp` or a `time`.
 const DOCS: &[&str] = &[
-    r#"{"id":"1","kw":"a","n":1,"kwa":["a","b"],"ob":{"k":"a","n":1},"ne":[{"k":"a","n":1},{"k":"b","n":2}],"mp":{"x":"a","y":"b"},"mpn":{"x":1,"y":2},"js":{"any":[1]},"jsa":[1,"x"],"gp":{"lat":1.5,"lon":2.5},"kwo":"a","nn":1,"kwao":["a","b"],"ho":{"k":"a","n":1},"mpo":{"x":"a","y":"b"},"jso":{"a":1},"dt":"2024-01-02","ts":"2024-01-02T03:04:05.123456+00:00","cm":[1,"x"],"co":{"a":1},"ev":"a"}"#,
-    r#"{"id":"2","kw":"b","n":2,"kwa":[],"ob":{"k":"b","n":2},"ne":[],"mp":{},"mpn":{},"js":{},"jsa":[],"gp":{"lat":0.0,"lon":0.0},"kwo":null,"nn":null,"kwao":null,"ho":null,"mpo":null,"jso":null,"dt":"2024-01-03","ts":"2024-01-03T00:00:00+00:00","cm":[1,"x"],"co":{"a":1},"ev":"b"}"#,
-    r#"{"id":"3","kw":"z","n":3,"kwa":["z"],"ob":{"k":"z","n":3},"ne":[{"k":"z","n":3}],"mp":{"x":"z"},"mpn":{"y":3},"js":"z","jsa":["z"],"gp":{"lat":-1.0,"lon":1.0},"dt":"2024-01-04","ts":"2024-01-02T03:04:05.123456","cm":[1,"x"],"co":{"a":1},"ev":"a"}"#,
-    r#"{"id":"4","kw":"bb","n":4,"kwa":["a"],"ob":{"k":"a","n":4},"ne":[{"k":"a","n":4}],"mp":{"x":"a"},"mpn":{"x":4},"js":[1],"jsa":[{"a":1}],"gp":{"lat":2.0,"lon":3.0},"kwo":"b","nn":4,"kwao":[],"ho":{"k":"b","n":4},"mpo":{},"jso":[],"dt":"2024-01-05","ts":"03:04:05.123456","cm":[1,"x"],"co":{"a":1},"ev":"b"}"#,
-    r#"{"id":"5","kw":"a","n":5,"kwa":["a"],"ob":{"k":"a","n":5},"ne":[{"k":"a","n":5}],"mp":{"x":null,"y":"a"},"mpn":{"x":null},"js":{},"jsa":[],"gp":{"lat":1.0,"lon":1.0},"kwo":"a","nn":5,"kwao":["a"],"ho":{"k":"a","n":5},"mpo":{"x":null},"jso":{},"dt":"2024-01-06","ts":"2024-01-06T00:00:00+00:00","cm":[1,"x"],"co":{"a":1},"ev":"a"}"#,
+    r#"{"id":"1","kw":"a","n":1,"kwa":["a","b"],"ob":{"k":"a","n":1},"ne":[{"k":"a","n":1},{"k":"b","n":2}],"mp":{"x":"a","y":"b"},"mpn":{"x":1,"y":2},"js":{"any":[1]},"jsa":[1,"x"],"gp":{"lat":1.5,"lon":2.5},"kwo":"a","nn":1,"kwao":["a","b"],"ho":{"k":"a","n":1},"mpo":{"x":"a","y":"b"},"jso":{"a":1},"dt":"2024-01-02","ts":"2024-01-02T03:04:05.123456+00:00","cm":[1,"x"],"co":{"a":1},"ev":"a","cu":"192.168.0.1","ids":[1,2],"ex":true,"ct":2,"av":1.5,"bo":true,"sh":1,"it":1,"fl":1.5,"db":1.5,"dc":1.5,"bi":"AQI=","uu":"6f1c3b2a-9d4e-4c1a-8b7f-2e5d6c7a8b90","kns":"a","hu":[{"k":"a"}],"bt":{"k":"a"},"mm":[{"k":"a"},{"k":"b"}]}"#,
+    r#"{"id":"2","kw":"b","n":2,"kwa":[],"ob":{"k":"b","n":2},"ne":[],"mp":{},"mpn":{},"js":{},"jsa":[],"gp":{"lat":0.0,"lon":0.0},"kwo":null,"nn":null,"kwao":null,"ho":null,"mpo":null,"jso":null,"dt":"2024-01-03","ts":"2024-01-03T00:00:00+00:00","cm":[1,"x"],"co":{"a":1},"ev":"b","cu":"::1","ids":[],"ex":false,"ct":0,"av":null,"bo":null,"sh":0,"it":0,"fl":0.0,"db":0.0,"dc":0,"bi":null,"uu":"6f1c3b2a-9d4e-4c1a-8b7f-2e5d6c7a8b90","kns":"b","hu":[],"bt":null,"mm":[]}"#,
+    r#"{"id":"3","kw":"z","n":3,"kwa":["z"],"ob":{"k":"z","n":3},"ne":[{"k":"z","n":3}],"mp":{"x":"z"},"mpn":{"y":3},"js":"z","jsa":["z"],"gp":{"lat":-1.0,"lon":1.0},"dt":"2024-01-04","ts":"2024-01-02T03:04:05.123456","cm":[1,"x"],"co":{"a":1},"ev":"a","cu":"10.0.0.1","ids":[3],"ex":true,"ct":1,"sh":-1,"it":-1,"fl":-1.0,"db":-1.0,"dc":-1.25,"uu":"6f1c3b2a-9d4e-4c1a-8b7f-2e5d6c7a8b90","kns":"z","hu":[{"k":"z"}],"mm":[{"k":"z"}]}"#,
+    r#"{"id":"4","kw":"bb","n":4,"kwa":["a"],"ob":{"k":"a","n":4},"ne":[{"k":"a","n":4}],"mp":{"x":"a"},"mpn":{"x":4},"js":[1],"jsa":[{"a":1}],"gp":{"lat":2.0,"lon":3.0},"kwo":"b","nn":4,"kwao":[],"ho":{"k":"b","n":4},"mpo":{},"jso":[],"dt":"2024-01-05","ts":"03:04:05.123456","cm":[1,"x"],"co":{"a":1},"ev":"b","cu":"10.0.0.2","ids":[4],"ex":true,"ct":1,"av":4.0,"bo":false,"sh":4,"it":4,"fl":4.0,"db":4.0,"dc":4,"bi":"","uu":"6f1c3b2a-9d4e-4c1a-8b7f-2e5d6c7a8b90","kns":"bb","hu":[{"k":"a"}],"bt":{"k":"b"},"mm":[{"k":"a"}]}"#,
+    r#"{"id":"5","kw":"a","n":5,"kwa":["a"],"ob":{"k":"a","n":5},"ne":[{"k":"a","n":5}],"mp":{"x":null,"y":"a"},"mpn":{"x":null},"js":{},"jsa":[],"gp":{"lat":1.0,"lon":1.0},"kwo":"a","nn":5,"kwao":["a"],"ho":{"k":"a","n":5},"mpo":{"x":null},"jso":{},"dt":"2024-01-06","ts":"2024-01-06T00:00:00+00:00","cm":[1,"x"],"co":{"a":1},"ev":"a","cu":"10.0.0.3","ids":[5],"ex":true,"ct":1,"av":5.0,"bo":true,"sh":5,"it":5,"fl":5.0,"db":5.0,"dc":5,"bi":"AQI=","uu":"6f1c3b2a-9d4e-4c1a-8b7f-2e5d6c7a8b90","kns":"a","hu":[{"k":"a"}],"bt":{"k":"a"},"mm":[{"k":"a"}]}"#,
+    r#"{"id":"6","kw":"a","n":9007199254740993,"kwa":["a",1],"ob":{"k":"a","n":1},"ne":[{"k":"a","n":1},{"k":"b","n":2}],"mp":{"x":1},"mpn":{"x":1,"y":2},"js":{"any":[1]},"jsa":[1,"x"],"gp":{"lat":1.5,"lon":2.5},"kwo":"a","nn":1,"kwao":["a","b"],"ho":{"k":"a","n":1},"mpo":{"x":"a","y":"b"},"jso":{"a":1},"dt":"2024-01-02","ts":"2024-01-02T03:04:05.123456+00:00","cm":[1,"x"],"co":{"a":1},"ev":"c","cu":"192.168.0.1","ids":[9223372036854775807],"ex":true,"ct":9007199254740993,"av":1e+300,"bo":true,"sh":32767,"it":2147483647,"fl":3.4028235e+38,"db":1e+300,"dc":"1000000000000000000000000000000","bi":"AQI=","uu":"6f1c3b2a-9d4e-4c1a-8b7f-2e5d6c7a8b90","kns":"a","hu":[{"k":"a"}],"bt":{"k":"a"},"mm":[{"k":"a"},{"k":"b"}]}"#,
 ];
 
 /// The document whose only difference is a `null` under a map key.
 const NULL_DOC: usize = 4;
+
+/// The document of extremes: numbers at the edge of each kind, a `decimal`
+/// past `Decimal`'s range (written as a string, #327), a value outside the
+/// enum's `variants:`, and `jsonb` columns holding values of another type (an
+/// integer in a keyword map and in a keyword array).
+const EXTREME_DOC: usize = 5;
 
 /// Where the generator places a shape.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -662,6 +832,11 @@ const TRUSTED: &[Trust] = &[
         applies: |case, _, _| case.position == Position::Flattened && case.shape.map,
     },
     Trust {
+        rule: "outside",
+        manual: "**A stored value outside an `enum` field's `variants:`.**",
+        applies: |_, doc, error| doc == EXTREME_DOC && error.contains("unknown variant `c`"),
+    },
+    Trust {
         rule: "variants",
         manual: "**An enum where the schema declares no `variants:`.**",
         applies: |case, _, error| {
@@ -711,6 +886,51 @@ const TRUSTED: &[Trust] = &[
         },
     },
     Trust {
+        rule: "custom",
+        manual: "**Any type at a `custom` field whose OpenSearch type the derive does not model.**",
+        applies: |case, _, _| case.kind == "cu",
+    },
+    Trust {
+        rule: "integer",
+        manual: "**An untagged `FlussoValue` newtype over an integer, at a wider numeric field.**",
+        applies: |case, _, error| {
+            case.shape.integer
+                && (error.contains("floating point") || error.starts_with("invalid value: integer"))
+        },
+    },
+    Trust {
+        rule: "namesake",
+        manual: "**A type of your own named like a built-in leaf.**",
+        applies: |case, _, _| case.shape.namesake,
+    },
+    Trust {
+        rule: "uuid",
+        manual: "**`uuid::Uuid` at a `keyword` field.**",
+        applies: |case, _, error| case.shape.uuid && error.contains("UUID"),
+    },
+    Trust {
+        rule: "decimal",
+        manual: "**A number past `Decimal`'s range (±7.9 × 10^28) at a `double` or `decimal` field.**",
+        // A `decimal` value past the range is written as a string (#327),
+        // which only `serde_json::Value` reads; a number past it fails a
+        // `Decimal`.
+        applies: |case, doc, error| {
+            doc == EXTREME_DOC
+                && (case.kind == "dc"
+                    || (case.shape.decimal && error.starts_with("invalid value: floating point")))
+        },
+    },
+    Trust {
+        rule: "jsonb",
+        manual: "**A `map` or array over a `jsonb` column holding values of another type.**",
+        applies: |case, doc, error| {
+            doc == EXTREME_DOC
+                && matches!(case.kind, "mp" | "kwa")
+                // serde says "expected value" for an enum, as for `null`.
+                && (error.starts_with("invalid type: integer") || error.starts_with("expected value"))
+        },
+    },
+    Trust {
         rule: "geo",
         manual: "**A `String` at a `geo` field.**",
         applies: |case, _, _| case.kind == "gp" && case.shape.string,
@@ -735,6 +955,28 @@ const DISAGREE: &[(&str, &str, &str)] = &[
         "*",
         "a root sees through a type alias, a fragment cannot",
     ),
+    // At a `custom` field a root takes any type. A fragment takes a std type
+    // it knows by name, but `Vec<Ms>` is a `Vec` of an alias it can't see
+    // through, so it refuses it, as it refuses the bare alias everywhere.
+    (
+        "field_vec_alias",
+        "cu",
+        "a root sees through a type alias, a fragment cannot",
+    ),
+    // At a `custom` field a root takes any type. A fragment can take a type
+    // only if it can skip the walk into it, which needs the type's name (a
+    // std wrapper over generic arguments, a primitive) or flusso metadata:
+    // stable Rust has no const fn a fragment could call for any type.
+    (
+        "ip_addr",
+        "cu",
+        "a fragment cannot take a type it can't name or read metadata of",
+    ),
+    (
+        "foreign",
+        "cu",
+        "a fragment cannot take a type it can't name or read metadata of",
+    ),
 ];
 
 fn cases(shapes: &[Shape], prefix: &str, position: Position) -> Vec<Case> {
@@ -742,6 +984,9 @@ fn cases(shapes: &[Shape], prefix: &str, position: Position) -> Vec<Case> {
     if position != Position::Flattened {
         for shape in shapes {
             for &(kind, _) in KINDS {
+                if !prefix.is_empty() && NAMED_ONLY.contains(&kind) {
+                    continue;
+                }
                 cases.push(Case {
                     id: format!("{prefix}{}/{}/{kind}", position.name(), shape.name),
                     shape: shape.clone(),
@@ -1375,19 +1620,32 @@ fn every_shape_is_refused_reads_or_is_trusted() {
         })
         .collect();
     let mut observed = observe(&project, &cases);
-    let compiles: BTreeSet<String> = cases
-        .iter()
-        .zip(&observed)
-        .filter(|(case, outcome)| {
-            case.position == Position::Root && !matches!(outcome, Ok(Outcome::Refused))
-        })
-        .map(|(case, _)| case.shape.name.clone())
-        .collect();
+    // `custom` (`cu`) takes any type on a root, so it doesn't count: a shape
+    // that compiles at no other root field is placed in a fragment at `cu`
+    // alone.
+    let compiles_at = |custom: bool| -> BTreeSet<String> {
+        cases
+            .iter()
+            .zip(&observed)
+            .filter(|(case, outcome)| {
+                case.position == Position::Root
+                    && (case.kind == UNMODELED) == custom
+                    && !matches!(outcome, Ok(Outcome::Refused))
+            })
+            .map(|(case, _)| case.shape.name.clone())
+            .collect()
+    };
+    let (compiles, compiles_at_custom) = (compiles_at(false), compiles_at(true));
     let fragments: Vec<Case> = placed
         .iter()
-        .filter(|(_, shape)| compiles.contains(&shape.name))
         .flat_map(|(prefix, shape)| {
-            self::cases(std::slice::from_ref(shape), prefix, Position::Fragment)
+            let mut cases = self::cases(std::slice::from_ref(shape), prefix, Position::Fragment);
+            if !compiles.contains(&shape.name) {
+                cases.retain(|case| {
+                    case.kind == UNMODELED && compiles_at_custom.contains(&shape.name)
+                });
+            }
+            cases
         })
         .collect();
     observed.extend(observe(&project, &fragments));

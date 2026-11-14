@@ -240,6 +240,17 @@ pub const fn is_json(level: &[FieldSpec], name: &str) -> bool {
     }
 }
 
+/// Whether `name` is of a mapping kind this vocabulary does not model (a
+/// `custom` field's `ip`, for one): a root takes any type there, so a fragment
+/// does too. Absent → `false`.
+#[must_use]
+pub const fn is_unmodeled(level: &[FieldSpec], name: &str) -> bool {
+    match find(level, name) {
+        Some(field) => matches!(field.kind, KindTag::Other),
+        None => false,
+    }
+}
+
 /// Whether `name`'s mapping kind is one `accepted` Rust type can hold.
 ///
 /// `accepted` comes from the fragment's Rust field type — either inferred from a
@@ -681,8 +692,21 @@ value_meta! {
     f64 => [Double],
 }
 
+value_meta!(Box<str> => [Keyword, Text, Date]);
+
+impl FlussoValueMeta for std::borrow::Cow<'_, str> {
+    const KINDS: &'static [KindTag] = &[KindTag::Keyword, KindTag::Text, KindTag::Date];
+    const VARIANTS: &'static [&'static str] = &[];
+}
+
+#[cfg(feature = "rc")]
+value_meta! {
+    std::sync::Arc<str> => [Keyword, Text, Date],
+    std::rc::Rc<str> => [Keyword, Text, Date],
+}
+
 #[cfg(feature = "decimal")]
-value_meta!(crate::Decimal => [Decimal]);
+value_meta!(crate::Decimal => [Decimal, Double]);
 
 #[cfg(feature = "uuid")]
 value_meta!(uuid::Uuid => [Keyword]);

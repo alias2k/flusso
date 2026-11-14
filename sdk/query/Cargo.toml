@@ -26,6 +26,9 @@ decimal = ["dep:rust_decimal"]
 chrono = ["dep:chrono"]
 # Make `uuid::Uuid` a valid `keyword` value (id / foreign-key fields).
 uuid = ["dep:uuid"]
+# Make `Arc<str>` / `Rc<str>` string values, as `String` is: serde reads and
+# writes them only with its own `rc` feature, which this turns on.
+rc = ["serde/rc"]
 # `position::diesel::current` / `position::diesel_async::current`: read the
 # source position a fence waits on through the consumer's own database driver.
 diesel = ["dep:diesel"]

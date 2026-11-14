@@ -11,14 +11,14 @@ help: the trait `FlussoValueMeta` is not implemented for `Date`
    | ^^^^^^^^^^^
    = note: add `#[derive(FlussoValue)]` for a value type, `#[derive(FlussoMap)]` for a type standing in for a dynamic-key `map`, `#[derive(FlussoFragment)]` for a sub-document, or `#[flusso(opaque)]` on the field to skip checking it; a hand-written `FlussoValue` implements `FlussoValueMeta` and calls `flusso_query::embeddable!`
    = help: the following other types implement trait `FlussoValueMeta`:
+             Box<str>
+             Cow<'_, str>
              Order
+             Rc<str>
              User
              Uuid
              bool
              f32
-             f64
-             flusso_query::Decimal
-             i16
            and $N others
 
 error[E0599]: no associated item named `__flusso_check` found for struct `Date` in the current scope
@@ -43,14 +43,14 @@ help: the trait `FlussoValueMeta` is not implemented for `Date`
    | ^^^^^^^^^^^
    = note: add `#[derive(FlussoValue)]` for a value type, `#[derive(FlussoMap)]` for a type standing in for a dynamic-key `map`, `#[derive(FlussoFragment)]` for a sub-document, or `#[flusso(opaque)]` on the field to skip checking it; a hand-written `FlussoValue` implements `FlussoValueMeta` and calls `flusso_query::embeddable!`
    = help: the following other types implement trait `FlussoValueMeta`:
+             Box<str>
+             Cow<'_, str>
              Order
+             Rc<str>
              User
              Uuid
              bool
              f32
-             f64
-             flusso_query::Decimal
-             i16
            and $N others
 
 error[E0599]: no associated item named `__flusso_check` found for struct `Date` in the current scope

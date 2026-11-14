@@ -15,10 +15,10 @@ help: the trait `FlussoValue<flusso_query::kind::Keyword>` is not implemented fo
              `&str` implements `FlussoValue<flusso_query::kind::Date>`
              `&str` implements `FlussoValue<flusso_query::kind::Keyword>`
              `&str` implements `FlussoValue<flusso_query::kind::Text>`
-             `Outer` implements `FlussoValue<__FlussoK>`
-             `Uuid` implements `FlussoValue<flusso_query::kind::Keyword>`
-             `bool` implements `FlussoValue<flusso_query::kind::Bool>`
-             `f32` implements `FlussoValue<flusso_query::kind::Double>`
+             `Box<str>` implements `FlussoValue<flusso_query::kind::Date>`
+             `Box<str>` implements `FlussoValue<flusso_query::kind::Keyword>`
+             `Box<str>` implements `FlussoValue<flusso_query::kind::Text>`
+             `Cow<'_, str>` implements `FlussoValue<flusso_query::kind::Date>`
            and $N others
 note: required for `Outer` to implement `FlussoValue<flusso_query::kind::Keyword>`
   --> tests/ui/array_newtype_forwarded_misplaced.rs:10:8

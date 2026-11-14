@@ -1975,6 +1975,32 @@ pub(crate) fn embed_checks(
             // un-derived struct fails it with `FlussoValueMeta`'s directed
             // note ("add a derive, or mark the field opaque") rather than
             // only a bare "no `__flusso_check`".
+            // A std type has no check to walk into: it fits by its metadata,
+            // as in a fragment (`Box<str>` at a `json` field).
+            if crate::fragment::is_std_without_meta(element) {
+                let rendered = crate::fragment::render(element);
+                let message = format!(
+                    "field `{key}` in {scope} is `{rendered}`, which cannot hold the schema field \
+                     at this path — declare the type the schema field holds (a struct with a \
+                     flusso derive, in `Option<…>` or `Vec<…>` as the field needs)"
+                );
+                calls.extend(quote::quote_spanned! {span=>
+                    {
+                        #[allow(unused_imports)]
+                        use ::flusso_query::OpaqueWithoutMeta as _;
+                        assert!(
+                            ::flusso_query::OpaqueProbe::<#element>::HAS_META
+                                && (::flusso_query::is_json(__FLUSSO_LEVEL, #key)
+                                    || ::flusso_query::kind_is(
+                                        __FLUSSO_LEVEL, #key,
+                                        ::flusso_query::OpaqueProbe::<#element>::KINDS,
+                                    )),
+                            #message
+                        );
+                    }
+                });
+                continue;
+            }
             let map_message = format!(
                 "field `{key}` in {scope} has fields of its own, and `{}` is a map type — {}",
                 crate::fragment::render(element),
