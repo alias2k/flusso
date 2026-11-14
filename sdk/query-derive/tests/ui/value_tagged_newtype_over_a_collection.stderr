@@ -1,0 +1,29 @@
+error: `Codes` is `#[flusso(keyword)]`, so it reads one string, but `HashMap<String, String>` reads an object — for a map, declare `#[derive(FlussoMap)] #[flusso(keyword)] struct Codes(HashMap<String, String>)` instead
+  --> tests/ui/value_tagged_newtype_over_a_collection.rs:10:14
+   |
+10 | struct Codes(HashMap<String, String>);
+   |              ^^^^^^^
+
+error: `Boxed` is `#[flusso(keyword)]`, so it reads one string, but `HashMap<String, String>` reads an object — for a map, declare `#[derive(FlussoMap)] #[flusso(keyword)] struct Boxed(HashMap<String, String>)` instead
+  --> tests/ui/value_tagged_newtype_over_a_collection.rs:14:18
+   |
+14 | struct Boxed(Box<HashMap<String, String>>);
+   |                  ^^^^^^^
+
+error: `Set` is `#[flusso(keyword)]`, so it reads one string, but `HashSet<String>` reads an array — drop the tag and wrap a `Vec<String>`: an untagged newtype over a `Vec` reads an array of values
+  --> tests/ui/value_tagged_newtype_over_a_collection.rs:18:12
+   |
+18 | struct Set(HashSet<String>);
+   |            ^^^^^^^
+
+error: `Queue` is `#[flusso(keyword)]`, so it reads one string, but `VecDeque<String>` reads an array — drop the tag and wrap a `Vec<String>`: an untagged newtype over a `Vec` reads an array of values
+  --> tests/ui/value_tagged_newtype_over_a_collection.rs:22:14
+   |
+22 | struct Queue(VecDeque<String>);
+   |              ^^^^^^^^
+
+error: `Pair` is `#[flusso(keyword)]`, so it reads one string, but `(String, String)` reads an array — drop the tag and wrap a `Vec<String>`: an untagged newtype over a `Vec` reads an array of values
+  --> tests/ui/value_tagged_newtype_over_a_collection.rs:26:13
+   |
+26 | struct Pair((String, String));
+   |             ^^^^^^^^^^^^^^^^

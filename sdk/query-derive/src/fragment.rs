@@ -83,6 +83,16 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
     let mut out = embeddable(&input.ident, &fields);
     for error in fields
         .iter()
+        .filter(|field| !field.skip)
+        .filter_map(|field| doc::non_string_key(field.ty))
+    {
+        out.extend(error.to_compile_error());
+    }
+    for field in fields.iter().filter(|field| !field.skip) {
+        out.extend(doc::exhaustive_map_values(field.ty));
+    }
+    for error in fields
+        .iter()
         .flat_map(|field| doc::misplaced_attrs(field, false))
     {
         out.extend(error.to_compile_error());
@@ -155,14 +165,26 @@ pub(crate) fn embeddable(ident: &Ident, fields: &[DocField]) -> TokenStream {
     .unwrap_or_else(|| {
         quote! { &[::flusso_query::KindTag::Object, ::flusso_query::KindTag::Nested] }
     });
+    let NewtypeMap { values, map_impl } = match fields {
+        [field] => newtype_map(ident, field),
+        _ => NewtypeMap::default(),
+    };
+    let value = match fields {
+        [field] => newtype_over_a_value(ident, field),
+        _ => TokenStream::new(),
+    };
     quote! {
         impl ::flusso_query::FlussoValueMeta for #ident {
             const KINDS: &'static [::flusso_query::KindTag] = #kinds;
             const VARIANTS: &'static [&'static str] = &[];
             #array
+            #values
         }
 
+        #map_impl
+
         #declared
+        #value
 
         impl #ident {
             /// Check this shape against one mapping level. Called by the root
@@ -179,10 +201,14 @@ pub(crate) fn embeddable(ident: &Ident, fields: &[DocField]) -> TokenStream {
 }
 
 /// A newtype fragment stands where the type it wraps stands, so it reports
-/// that type's kinds: one over a value type is no sub-document.
+/// that type's kinds: one over a value type is no sub-document, and one over a
+/// `HashMap`/`BTreeMap` is an `object` (see [`newtype_map`]).
 fn newtype_kinds(field: &DocField) -> Option<TokenStream> {
     if field.ident.is_some() || field.skip {
         return None;
+    }
+    if map_container_value(strip_option(field.ty)).is_some() {
+        return Some(quote! { &[::flusso_query::KindTag::Object] });
     }
     let Some(ty) = checked_type(field, false) else {
         let inner = strip_option(field.ty);
@@ -360,6 +386,121 @@ fn newtype_array(ident: &Ident, field: &DocField) -> syn::Result<NewtypeArray> {
     })
 }
 
+/// A newtype fragment over a leaf value (`String`, a number, a
+/// `FlussoValue` type) is a value, not a sub-document: a root never takes it
+/// at a leaf, since it has no `FlussoValue` impl, so a fragment must not
+/// either. Refused where it is declared, at macro time for a built-in leaf,
+/// through const data for a custom type.
+fn newtype_over_a_value(ident: &Ident, field: &DocField) -> TokenStream {
+    if field.ident.is_some() || field.skip {
+        return TokenStream::new();
+    }
+    let inner = strip_option(field.ty);
+    if vec_inner(inner).is_some()
+        || map_container_value(inner).is_some()
+        || leaf_ident(inner).as_deref() == Some("Value")
+    {
+        return TokenStream::new();
+    }
+    let rendered = render(inner);
+    let message = format!(
+        "`{ident}` is a FlussoFragment newtype over `{rendered}`, a value, not a sub-document — \
+         derive `FlussoValue` on `{ident}` instead"
+    );
+    if primitive_kinds(inner).is_some() {
+        return syn::Error::new(inner.span(), message).to_compile_error();
+    }
+    quote_spanned! {inner.span()=>
+        const _: () = {
+            #[allow(unused_imports)]
+            use ::flusso_query::OpaqueWithoutMeta as _;
+            assert!(
+                !::flusso_query::OpaqueProbe::<#inner>::HAS_META
+                    || ::flusso_query::OpaqueProbe::<#inner>::ARRAY
+                    || ::flusso_query::OpaqueProbe::<#inner>::AT_OBJECT
+                    || ::flusso_query::OpaqueProbe::<#inner>::AT_NESTED,
+                #message
+            );
+        };
+    }
+}
+
+/// What a newtype fragment carries of the map it wraps, so a parent places it
+/// as it places that map, and checks its values.
+///
+/// An `Option` around what it wraps is looked through: the newtype then also
+/// reads `null`, which a field that is never null never hands it, and a
+/// nullable field wraps in `Option` itself.
+///
+/// - Over a `HashMap<String, V>`/`BTreeMap<String, V>`: `MAP_VALUES` holds
+///   `V`'s kinds (`object` for `serde_json::Value`, which only a `json` field
+///   takes), and the newtype is a
+///   `FlussoMap<K>` exactly where the map is, which is what a root asks of a
+///   type at a `map` field.
+/// - Over any other type that is no `Vec`: both are forwarded from it, so a
+///   newtype over a `FlussoMap` type is one too.
+fn newtype_map(ident: &Ident, field: &DocField) -> NewtypeMap {
+    if field.ident.is_some() || field.skip {
+        return NewtypeMap::default();
+    }
+    let ty = strip_option(field.ty);
+    if vec_inner(ty).is_some() {
+        return NewtypeMap::default();
+    }
+    let value = map_container_value(ty).map(strip_option);
+    let values = match value {
+        // Any value reads `serde_json::Value`, but no `map` field's values are
+        // `object`s: the newtype goes at a `json` field only, as the map does.
+        Some(value) if leaf_ident(value).as_deref() == Some("Value") => {
+            quote! { &[::flusso_query::KindTag::Object] }
+        }
+        // A value with no flusso metadata (a `Vec`, a map) has no kind any
+        // `map` field holds: `object`, so the newtype goes at `json` only.
+        Some(value) => match primitive_kinds(value) {
+            Some(tags) => quote! { &[#(#tags),*] },
+            None => quote! {
+                {
+                    #[allow(unused_imports)]
+                    use ::flusso_query::OpaqueWithoutMeta as _;
+                    if ::flusso_query::OpaqueProbe::<#value>::HAS_META {
+                        ::flusso_query::OpaqueProbe::<#value>::KINDS
+                    } else {
+                        &[::flusso_query::KindTag::Object]
+                    }
+                }
+            },
+        },
+        None if checked_type(field, false).is_none() => return NewtypeMap::default(),
+        None => quote! {
+            {
+                #[allow(unused_imports)]
+                use ::flusso_query::OpaqueWithoutMeta as _;
+                ::flusso_query::OpaqueProbe::<#ty>::MAP_VALUES
+            }
+        },
+    };
+    // Over a map, the newtype is a `FlussoMap<K>` where a value is a `K`
+    // value, as for the map written at the field; over a map type, where it is.
+    let bound = match value {
+        Some(value) => quote! { for<'__flusso> #value: ::flusso_query::FlussoValue<__FlussoK> },
+        None => quote! { for<'__flusso> #ty: ::flusso_query::FlussoMap<__FlussoK> },
+    };
+    NewtypeMap {
+        values: quote! { const MAP_VALUES: &'static [::flusso_query::KindTag] = #values; },
+        map_impl: quote! {
+            impl<__FlussoK> ::flusso_query::FlussoMap<__FlussoK> for #ident where #bound {}
+        },
+    }
+}
+
+/// What [`newtype_map`] emits: `MAP_VALUES` inside the newtype's
+/// `FlussoValueMeta` impl, and its `FlussoMap` impl.
+#[derive(Default)]
+struct NewtypeMap {
+    values: TokenStream,
+    map_impl: TokenStream,
+}
+
 /// What [`newtype_array`] emits: the checks beside the newtype, and its
 /// `ARRAY` inside its `FlussoValueMeta` impl.
 #[derive(Default)]
@@ -437,6 +578,7 @@ pub(crate) fn is_foreign_leaf(ty: &Type) -> bool {
                 | "Uuid"
                 | "NaiveDate"
                 | "NaiveDateTime"
+                | "NaiveTime"
                 | "DateTime"
                 | "OffsetDateTime"
                 | "PrimitiveDateTime"
@@ -834,6 +976,8 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
 
     // A dynamic-key map: check the declared value kind, not the container.
     if let Some(value_ty) = map_container_value(inner) {
+        // One `Option` level is the value's own: a map value can be `null`.
+        let value_ty = strip_option(value_ty);
         let container = leaf_ident(inner).unwrap_or_else(|| "HashMap".to_string());
         let mut checks = not_at_a_level(fragment, key, &format!("a `{container}`"), span);
         // `serde_json::Value` has no kind: it holds an opaque `json` field's
@@ -852,6 +996,7 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
             checks.extend(quote_spanned! {span=>
                 assert!(::flusso_query::is_json(level, #key), #msg);
             });
+            checks.extend(not_a_json_array(fragment, key, inner, span));
             return checks;
         }
         let msg = message(
@@ -863,18 +1008,28 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
                 render(value_ty)
             ),
         );
+        checks.extend(not_a_json_array(fragment, key, inner, span));
         checks.extend(match primitive_kinds(value_ty) {
             Some(tags) => quote_spanned! {span=>
                 assert!(::flusso_query::map_value_is(level, #key, &[#(#tags),*]), #msg);
             },
+            // Read through the probe: a value type with no flusso metadata
+            // (`char`, a `Vec`, a map) fits a `json` field, as on a root, and
+            // no `map`.
             None => quote_spanned! {span=>
-                assert!(
-                    ::flusso_query::map_value_is(
-                        level, #key,
-                        <#value_ty as ::flusso_query::FlussoValueMeta>::KINDS,
-                    ),
-                    #msg
-                );
+                {
+                    #[allow(unused_imports)]
+                    use ::flusso_query::OpaqueWithoutMeta as _;
+                    assert!(
+                        ::flusso_query::is_json(level, #key)
+                            || (::flusso_query::OpaqueProbe::<#value_ty>::HAS_META
+                                && ::flusso_query::map_value_is(
+                                    level, #key,
+                                    ::flusso_query::OpaqueProbe::<#value_ty>::KINDS,
+                                )),
+                        #msg
+                    );
+                }
             },
         });
         return checks;
@@ -928,10 +1083,10 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
             render(element)
         ),
     );
-    // A `json` array holds any element, as on a root.
-    let json_array = quote! {
-        (::flusso_query::is_json(level, #key) && ::flusso_query::array(level, #key))
-    };
+    // A `json` field holds any value, as on a root: its array shape is
+    // `array_shape_check`'s, and a struct is still walked into, against the
+    // no fields a `json` field declares.
+    let json_array = quote! { ::flusso_query::is_json(level, #key) };
     match primitive_kinds(element) {
         // A known leaf type — its acceptable kinds are baked right here.
         Some(tags) => checks.extend(quote_spanned! {span=>
@@ -967,38 +1122,44 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
                     render(element)
                 ),
             );
-            // `map_kind_ok` only fails for a map wrapper (a type with declared
-            // `MAP_VALUES` — always `keyword` or `text`, the derive allows no
-            // other tag), so when the schema's `values:` kind is readable the
-            // message can name the exact tag to put on it. A const panic takes
+            // `map_kind_ok` only fails for a map type (a type with declared
+            // `MAP_VALUES`: a `FlussoMap` type, tagged `keyword` or `text`, or
+            // a newtype over a map), so when the schema's `values:` kind is
+            // readable the message can name the fix. A const panic takes
             // a literal, so this is one assert per possible `values:` kind,
             // each guarded to fire only for its own case.
-            let map_text_msg = message(
-                fragment,
-                key,
-                &format!(
-                    "is `{}`, a map wrapper whose kind tag does not match — the schema \
-                     field here is a `map` of `text` values, so the type needs \
-                     `#[flusso(text)]`",
-                    render(element)
-                ),
-            );
-            let map_keyword_msg = message(
-                fragment,
-                key,
-                &format!(
-                    "is `{}`, a map wrapper whose kind tag does not match — the schema \
-                     field here is a `map` of `keyword` values, so the type needs \
-                     `#[flusso(keyword)]`",
-                    render(element)
-                ),
-            );
+            let retag_msg = |values: &str, other: &str| {
+                message(
+                    fragment,
+                    key,
+                    &format!(
+                        "is `{}`, a map of `{other}` values, and the schema field here holds \
+                         `{values}` values — tag the `FlussoMap` type `#[flusso({values})]`",
+                        render(element)
+                    ),
+                )
+            };
+            let strings_msg = |values: &str| {
+                message(
+                    fragment,
+                    key,
+                    &format!(
+                        "is `{}`, a map whose values are not strings, and the schema field here \
+                         holds `{values}` values — give it `String` values",
+                        render(element)
+                    ),
+                )
+            };
+            let (map_text_retag, map_text_strings) =
+                (retag_msg("text", "keyword"), strings_msg("text"));
+            let (map_keyword_retag, map_keyword_strings) =
+                (retag_msg("keyword", "text"), strings_msg("keyword"));
             let map_other_msg = message(
                 fragment,
                 key,
                 &format!(
-                    "is `{}`, a map wrapper — but the schema field here is a `map` of \
-                     number/date values, which a kind tag cannot name; use a \
+                    "is `{}`, a map type whose values are not the number/date values the \
+                     schema field here holds, which a kind tag cannot name; use a \
                      `HashMap`/`BTreeMap` of the matching value type instead",
                     render(element)
                 ),
@@ -1022,25 +1183,54 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
                 );
                 // A map wrapper carries its value kind, so check that too —
                 // otherwise this would only prove the field is object-ish.
-                assert!(
-                    ::flusso_query::map_kind_ok(
-                        level, #key,
-                        <#element as ::flusso_query::FlussoValueMeta>::MAP_VALUES,
-                    ) || !matches!(
-                        ::flusso_query::map_values_of(level, #key),
-                        Some(::flusso_query::KindTag::Text),
-                    ),
-                    #map_text_msg
+                let map_ok = ::flusso_query::map_kind_ok(
+                    level, #key,
+                    <#element as ::flusso_query::FlussoValueMeta>::MAP_VALUES,
+                );
+                // A map of strings that fails here is tagged for the other
+                // string kind: only a retag helps. Any other map needs strings.
+                let strings = ::flusso_query::accepts_kind(
+                    <#element as ::flusso_query::FlussoValueMeta>::MAP_VALUES,
+                    ::flusso_query::KindTag::Keyword,
+                ) || ::flusso_query::accepts_kind(
+                    <#element as ::flusso_query::FlussoValueMeta>::MAP_VALUES,
+                    ::flusso_query::KindTag::Text,
                 );
                 assert!(
-                    ::flusso_query::map_kind_ok(
-                        level, #key,
-                        <#element as ::flusso_query::FlussoValueMeta>::MAP_VALUES,
-                    ) || !matches!(
-                        ::flusso_query::map_values_of(level, #key),
-                        Some(::flusso_query::KindTag::Keyword),
-                    ),
-                    #map_keyword_msg
+                    map_ok
+                        || !strings
+                        || !matches!(
+                            ::flusso_query::map_values_of(level, #key),
+                            Some(::flusso_query::KindTag::Text),
+                        ),
+                    #map_text_retag
+                );
+                assert!(
+                    map_ok
+                        || strings
+                        || !matches!(
+                            ::flusso_query::map_values_of(level, #key),
+                            Some(::flusso_query::KindTag::Text),
+                        ),
+                    #map_text_strings
+                );
+                assert!(
+                    map_ok
+                        || !strings
+                        || !matches!(
+                            ::flusso_query::map_values_of(level, #key),
+                            Some(::flusso_query::KindTag::Keyword),
+                        ),
+                    #map_keyword_retag
+                );
+                assert!(
+                    map_ok
+                        || strings
+                        || !matches!(
+                            ::flusso_query::map_values_of(level, #key),
+                            Some(::flusso_query::KindTag::Keyword),
+                        ),
+                    #map_keyword_strings
                 );
                 assert!(
                     ::flusso_query::map_kind_ok(
@@ -1081,6 +1271,30 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
         }
     }
     checks
+}
+
+/// A map reads one object, so it never holds a `json` array: as on a root.
+fn not_a_json_array(
+    fragment: &Ident,
+    key: &str,
+    ty: &Type,
+    span: proc_macro2::Span,
+) -> TokenStream {
+    let rendered = render(ty);
+    let msg = message(
+        fragment,
+        key,
+        &format!(
+            "is `{rendered}`, which reads one object, but the schema field here is a `json` \
+             array — declare it `Vec<…>`"
+        ),
+    );
+    quote_spanned! {span=>
+        assert!(
+            !(::flusso_query::is_json(level, #key) && ::flusso_query::array(level, #key)),
+            #msg
+        );
+    }
 }
 
 /// The fix for a map type, or an array of maps, at an `object` with fields of
@@ -1165,8 +1379,8 @@ fn primitive_kinds(ty: &Type) -> Option<Vec<TokenStream>> {
         // are recognised here rather than via `FlussoValueMeta`.
         "Decimal" => &["Decimal", "Double"],
         "Uuid" => &["Keyword"],
-        "NaiveDate" | "NaiveDateTime" | "DateTime" | "OffsetDateTime" | "PrimitiveDateTime"
-        | "Date" => &["Date"],
+        "NaiveDate" | "NaiveDateTime" | "NaiveTime" | "DateTime" | "OffsetDateTime"
+        | "PrimitiveDateTime" | "Date" => &["Date"],
         "GeoPoint" => &["GeoPoint"],
         _ => return None,
     };

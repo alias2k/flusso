@@ -1,0 +1,5 @@
+error: `Count` is `#[flusso(keyword)]`, so it reads one string, but `i64` reads a number — drop the tag: an untagged newtype carries the kind of what it wraps
+ --> tests/ui/value_tagged_newtype_over_another_kind.rs:7:14
+  |
+7 | struct Count(i64);
+  |              ^^^

@@ -1,0 +1,29 @@
+error: `A` is `#[flusso(keyword)]`, so it reads one string, but `NonZeroU32` reads a number — wrap a `String`
+  --> tests/ui/value_tagged_newtype_over_a_named_non_string.rs:15:10
+   |
+15 | struct A(NonZeroU32);
+   |          ^^^^^^^^^^
+
+error: `B` is `#[flusso(keyword)]`, so it reads one string, but `i64` reads a number — wrap a `String`
+  --> tests/ui/value_tagged_newtype_over_a_named_non_string.rs:19:19
+   |
+19 | struct B(Wrapping<i64>);
+   |                   ^^^
+
+error: `E` is `#[flusso(keyword)]`, so it reads one string, but `[String]` reads an array — drop the tag and wrap a `Vec<String>`: an untagged newtype over a `Vec` reads an array of values
+  --> tests/ui/value_tagged_newtype_over_a_named_non_string.rs:23:23
+   |
+23 | struct E(Cow<'static, [String]>);
+   |                       ^^^^^^^^
+
+error: `F` is `#[flusso(keyword)]`, so it reads one string, but `HashMap<String, String>` reads an object — for a map, declare `#[derive(FlussoMap)] #[flusso(keyword)] struct F(HashMap<String, String>)` instead
+  --> tests/ui/value_tagged_newtype_over_a_named_non_string.rs:27:18
+   |
+27 | struct F(RefCell<HashMap<String, String>>);
+   |                  ^^^^^^^
+
+error: `G` is `#[flusso(keyword)]`, so it reads one string, but `HashMap<String, String>` reads an object — for a map, declare `#[derive(FlussoMap)] #[flusso(keyword)] struct G(HashMap<String, String>)` instead
+  --> tests/ui/value_tagged_newtype_over_a_named_non_string.rs:31:16
+   |
+31 | struct G(Mutex<HashMap<String, String>>);
+   |                ^^^^^^^

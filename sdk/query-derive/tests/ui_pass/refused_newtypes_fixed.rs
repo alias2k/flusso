@@ -24,7 +24,7 @@ enum Tag {
 #[derive(serde::Deserialize, FlussoValue)]
 struct Tags(Vec<Tag>);
 
-#[derive(serde::Deserialize, FlussoFragment)]
+#[derive(serde::Deserialize, FlussoValue)]
 #[serde(transparent)]
 struct Label(String);
 

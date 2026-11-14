@@ -1,0 +1,11 @@
+error[E0080]: evaluation panicked: fragment `Localized`: field `title` is `Flags`, a map whose values are not strings, and the schema field here holds `keyword` values — give it `String` values
+  --> tests/ui/fragment_newtype_over_map_wrong_values.rs:26:15
+   |
+26 | const _: () = Localized::__flusso_check(LEVEL);
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Localized::__flusso_check`
+  --> tests/ui/fragment_newtype_over_map_wrong_values.rs:13:12
+   |
+13 |     title: Flags,
+   |            ^^^^^ the failure occurred here

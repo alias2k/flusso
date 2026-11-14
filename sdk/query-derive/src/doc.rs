@@ -351,6 +351,15 @@ pub(crate) fn validate(
                 ),
             ));
         }
+        if !field.skip
+            && let Some(error) = non_string_key(field.ty)
+        {
+            errors.push(error);
+            continue;
+        }
+        if !field.skip {
+            asserts.push(exhaustive_map_values(field.ty));
+        }
         // A flattened group has no container field in the mapping — its keys
         // live at *this* level, so its type is checked against this level
         // instead (see `embed_checks`).
@@ -900,6 +909,9 @@ fn check_map_type(
     let kind = kind_of(&values.mapping_type, values.decimal);
     match map_container_value(inner) {
         Some(value_ty) => {
+            // A map value can be `null` (a `jsonb` column's `{"x": null}` is
+            // indexed as it is), so one `Option` level is the value's own.
+            let value_ty = option_inner(value_ty).unwrap_or(value_ty);
             let expected = expected_leaves(&values.mapping_type);
             let found = leaf_ident(value_ty);
             if found.as_deref().is_some_and(|f| expected.contains(&f)) {
@@ -939,6 +951,86 @@ pub(crate) fn map_container_value(ty: &Type) -> Option<&Type> {
     });
     let _key = types.next()?;
     types.next()
+}
+
+/// The first `HashMap`/`BTreeMap` in `ty` (through `Option`, `Vec`, `Box`
+/// and map values) whose key type the derive knows by name reads no arbitrary
+/// string, as an error: a map's keys are document keys, so a number, `bool`,
+/// `char`, `Uuid`, tuple or unit key fails on the first key it can't parse.
+/// Any other key type (`String`, `Box<str>`, an alias, a newtype of your own)
+/// is trusted to read every key.
+pub(crate) fn non_string_key(ty: &Type) -> Option<syn::Error> {
+    let inner = option_inner(ty)
+        .or_else(|| vec_inner(ty))
+        .or_else(|| single_generic(ty, "Box"));
+    if let Some(inner) = inner {
+        return non_string_key(inner);
+    }
+    let value = map_container_value(ty)?;
+    let key = map_container_key(ty)?;
+    let reads_no_string = matches!(key, Type::Tuple(_))
+        || (is_primitive(leaf_ident(key).as_deref())
+            && leaf_ident(key).as_deref() != Some("String"))
+        || leaf_ident(key).as_deref() == Some("Uuid");
+    if reads_no_string {
+        let rendered = crate::fragment::render(ty);
+        return Some(syn::Error::new(
+            key.span(),
+            format!(
+                "`{rendered}` has `{}` keys, but a map's keys are document keys, which can be \
+                 any string — declare the key `String`",
+                crate::fragment::render(key),
+            ),
+        ));
+    }
+    non_string_key(value)
+}
+
+/// That no map in `ty` (through `Option`, `Vec`, `Box`) holds an
+/// `exhaustive` enum: a map's values declare no `variants:`, so the enum's
+/// promise to cover them has nothing to cover. A const assert, since only the
+/// enum's metadata says it is `exhaustive`.
+pub(crate) fn exhaustive_map_values(ty: &Type) -> TokenStream {
+    let inner = option_inner(ty)
+        .or_else(|| vec_inner(ty))
+        .or_else(|| single_generic(ty, "Box"));
+    if let Some(inner) = inner {
+        return exhaustive_map_values(inner);
+    }
+    let Some(value) = map_container_value(ty) else {
+        return TokenStream::new();
+    };
+    let value = option_inner(value).unwrap_or(value);
+    if map_container_value(value).is_some() {
+        return exhaustive_map_values(value);
+    }
+    let rendered = crate::fragment::render(value);
+    let message = format!(
+        "`{rendered}` is marked `exhaustive`, but a map's values declare no `variants:`, so \
+         there is nothing to cover; drop the marker, or use a map of an enum without it"
+    );
+    quote::quote_spanned! {value.span()=>
+        const _: () = {
+            #[allow(unused_imports)]
+            use ::flusso_query::OpaqueWithoutMeta as _;
+            assert!(!::flusso_query::OpaqueProbe::<#value>::EXHAUSTIVE, #message);
+        };
+    }
+}
+
+/// The key type `K` of a `HashMap<K, V>` / `BTreeMap<K, V>`.
+fn map_container_key(ty: &Type) -> Option<&Type> {
+    let Type::Path(path) = ty else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|arg| match arg {
+        syn::GenericArgument::Type(inner) => Some(inner),
+        _ => None,
+    })
 }
 
 /// A zero-cost assertion that `ty` implements `FlussoMap<kind>` (a whole-map
@@ -1013,6 +1105,7 @@ fn expected_leaves(mapping_type: &MappingType) -> Vec<&'static str> {
             "String",
             "NaiveDate",
             "NaiveDateTime",
+            "NaiveTime",
             "DateTime",
             "OffsetDateTime",
             "PrimitiveDateTime",
@@ -1883,9 +1976,9 @@ pub(crate) fn embed_checks(
             // note ("add a derive, or mark the field opaque") rather than
             // only a bare "no `__flusso_check`".
             let map_message = format!(
-                "field `{key}` in {scope} is not a `map` — `{}` is a map type, so it can \
-                 only hold a `map` field with a matching value kind",
+                "field `{key}` in {scope} has fields of its own, and `{}` is a map type — {}",
                 crate::fragment::render(element),
+                crate::fragment::DECLARE_A_STRUCT,
             );
             calls.extend(quote::quote_spanned! {span=>
                 assert!(
@@ -1937,10 +2030,12 @@ pub(crate) fn embed_checks(
             // the meta on any other field would pile a second error onto a
             // missing derive, which `check_type`'s deferred bound already
             // reports better.
-            None if matches!(
-                resolved.mapping.mapping_type,
-                MappingType::Keyword | MappingType::Text
-            ) && resolved.mapping.map_values.is_none() =>
+            None if resolved.mapping.map_values.is_none()
+                && (matches!(
+                    resolved.mapping.mapping_type,
+                    MappingType::Keyword | MappingType::Text
+                ) || (matches!(resolved.mapping.mapping_type, MappingType::Object)
+                    && resolved.children.is_empty())) =>
             {
                 let message = format!(
                     "field `{key}` in {scope} declares no variants — the Rust type is marked \
@@ -1948,10 +2043,11 @@ pub(crate) fn embed_checks(
                      schema field or drop the marker",
                 );
                 calls.extend(quote::quote_spanned! {span=>
-                    assert!(
-                        !<#element as ::flusso_query::FlussoValueMeta>::EXHAUSTIVE,
-                        #message
-                    );
+                    {
+                        #[allow(unused_imports)]
+                        use ::flusso_query::OpaqueWithoutMeta as _;
+                        assert!(!::flusso_query::OpaqueProbe::<#element>::EXHAUSTIVE, #message);
+                    }
                 });
             }
             None => {}

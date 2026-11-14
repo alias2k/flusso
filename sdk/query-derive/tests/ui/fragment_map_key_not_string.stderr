@@ -1,0 +1,11 @@
+error: `HashMap<i64, String>` has `i64` keys, but a map's keys are document keys, which can be any string — declare the key `String`
+ --> tests/ui/fragment_map_key_not_string.rs:8:22
+  |
+8 | struct Codes(HashMap<i64, String>);
+  |                      ^^^
+
+error: `HashMap<i64, String>` has `i64` keys, but a map's keys are document keys, which can be any string — declare the key `String`
+  --> tests/ui/fragment_map_key_not_string.rs:12:20
+   |
+12 |     title: HashMap<i64, String>,
+   |                    ^^^

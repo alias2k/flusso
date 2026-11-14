@@ -1155,7 +1155,25 @@ named fields (e.g. a translations type with a `fallback` beside the language key
 **required** `#[flusso(keyword|text)]` value-kind tag (no default — untagged is a compile
 error); the
 derive's `check_type` map arm hard-checks a `HashMap`/`BTreeMap` value type and defers a
-`FlussoMap<kind>` bound otherwise. The `FlussoMap` derive also emits `FlussoValueMeta` (its
+`FlussoMap<kind>` bound otherwise. What a `FlussoMap` type holds is checked against its tag where it
+is declared (issue #294, `map.rs`): a newtype's `HashMap<String, V>` (`V` may be one `Option` level: a map value can be `null`) gets a `FlussoValue<tag>` bound
+on `V`, any other wrapped type (and a named struct's flattened field) must carry the tag in
+`OpaqueProbe::MAP_VALUES` (so `Box<…>`/a plain struct is refused), a named field must be `Option<V>`
+with the same bound, `deny_unknown_fields` and a field's `alias` are refused. A `FlussoFragment`
+newtype over a map (through `Option`), and an untagged `FlussoValue` newtype over a map type, carry
+`MAP_VALUES` (the map's value kinds; `[Object]` for `serde_json::Value` values, so only `json` takes
+it) and a forwarding `FlussoMap<K>` impl, so they go exactly where the map goes. A map key the
+derive knows by name reads no arbitrary string (a number, `bool`, `char`, `Uuid`, a tuple) is refused
+(`doc::non_string_key`, run by every derive on every field); any other key type is trusted. **Refuse by
+name only what can't be a user's own string type** (the owner's rule: a struct that compiled on
+`main` and read real documents keeps compiling; `ui_pass/map_keys_of_your_own.rs` and
+`ui_pass/tagged_newtypes_over_named_types.rs` guard it, since the boundary test can't see
+over-refusal). A `FlussoFragment` newtype over a leaf value is refused
+(`fragment::newtype_over_a_value`): it is a `FlussoValue`. A tagged `FlussoValue` newtype
+(`value::tagged_inner`) looks through the std wrappers serde reads transparently, refuses a map, a std
+collection, a slice/tuple/array, a primitive other than `String`/`char` and `NonZero*` at macro time,
+and a flusso type that reads an object through const data; any other type (named `Date`, `Decimal`,
+a type from another crate, an alias) is trusted. The `FlussoMap` derive also emits `FlussoValueMeta` (its
 `MAP_VALUES` carries the declared value kind) + a no-op `__flusso_check`, which is what lets
 the type sit inside a `FlussoFragment`; a hand-written `impl FlussoMap<K>` alone works only at a
 root — in a fragment it fails to compile, with the E0277 note pointing at the derive (or at a hand
@@ -1166,6 +1184,28 @@ and an opaque `json` field (object, no children) accepts any map-shaped type on 
 `handle_fn` dispatches on `Mapping.map_values` (`Text`→`TextMap`, `Keyword`→`KeywordMap`,
 `Date`→`DateMap`, the numerics→`NumberMap`). Phase 2 (per-key analyzers for per-language
 stemming) is deferred.
+
+**The boundary is pinned (issue #294), not complete.** What the derive checks, trusts and has as
+known gaps (#306, #307) is one section, owned by `docs/src/query/document-structs.md` ("What the derive
+trusts"); don't restate it here. `sdk/query-derive/tests/boundary.rs` places two shape lists
+(hand-written `named_shapes`, and `generated_shapes`: inner type × wrapper × newtype derive; a shape
+whose declarations alone are refused is not placed) at every field of the `boundary` fixture
+(required kinds bare, nullable ones in `Option`, `geo`, `date`/`timestamp`, an `enum` with variants,
+two unindexed constants) on a root, then in a fragment only for shapes that compile at some root
+field, ~7100 cases. It covers only the kinds its fixture holds. It compiles them in ≤60-module files
+in its own crate and target dir (`target/tests/flusso-boundary/`, so the `ui` harness never waits on
+its lock; nextest group `boundary`, one at a time): the first round runs `cargo check`, later rounds
+`cargo build`; each file is named after a hash of its text and of every input (derive, `flusso-query`,
+`config`, `kernel`, fixtures, `Cargo.lock`, toolchain), and its results are cached under that name, so
+a rerun on an unchanged derive compiles nothing. It reads sample documents (null, missing keys, empty
+and many elements, a `null` map value, each date form) into what builds, and fails on a
+compile-then-fail case unless, for every document it fails on, a `TRUSTED` rule matches that document
+and its error; or on a (shape, field) whose root and fragment outcomes differ unless `DISAGREE` lists
+it (`*` = every field); outcomes are recorded in `tests/boundary.outcomes` (re-record with
+`FLUSSO_BLESS=1`), and each rule's phrase must appear in the manual. The outcome is only `refused`,
+not which check refused, so three refusals that another check backs up are pinned by their `ui`
+`.stderr` files instead (see the test's module doc). The manual's map example is included by anchor
+from `tests/ui_pass/docs_map_examples.rs`, and the plugin's is checked equal to it.
 
 **Ordered enums (issue #87).** A keyword mapping with `Mapping.enum_order` set gets the
 `Enum<S, Sub>` handle (`handles/string.rs`) instead of `Keyword`: same value ops (delegated;

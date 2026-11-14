@@ -369,3 +369,32 @@ fn a_constant_builds_the_value_the_schema_holds_whatever_the_query_read() {
         assert_eq!(map.get(*name), Some(value), "{name}");
     }
 }
+
+/// A `map` over a `jsonb` column keeps a key whose value is JSON `null`: the
+/// document carries `{"x": null}`, so a typed map value must read `null`
+/// (`HashMap<String, Option<String>>`) to read every document (issue #294).
+#[test]
+fn a_map_keeps_a_key_whose_value_is_null() {
+    let fields = [column_field(
+        "labels",
+        FlussoType::Map {
+            values: Box::new(FlussoType::Keyword),
+        },
+    )];
+    let doc = body(json!({ "labels": { "x": null, "y": "a" } }), &fields);
+    let GenericValue::Map(labels) = &doc["labels"] else {
+        panic!("expected a map, got {:?}", doc["labels"]);
+    };
+    assert_eq!(labels.get("x"), Some(&GenericValue::Null));
+    assert_eq!(labels.get("y"), Some(&GenericValue::String("a".into())));
+}
+
+/// A `timetz` column under a schema `timestamp` reads as none of the typed
+/// date variants, so it is kept as the text Postgres wrote: the query
+/// manual's date table lists it as read by `String` only (issue #294).
+#[test]
+fn a_time_with_a_zone_stays_the_text_postgres_wrote() {
+    let fields = [column_field("at", FlussoType::Timestamp)];
+    let doc = body(json!({ "at": "03:04:05.123456+02" }), &fields);
+    assert_eq!(doc["at"], GenericValue::String("03:04:05.123456+02".into()));
+}

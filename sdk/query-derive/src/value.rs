@@ -88,7 +88,7 @@ impl Kind {
     }
 
     /// The tag as written in `#[flusso(…)]`, for the string kinds.
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Kind::Keyword => "keyword",
             Kind::Text => "text",
@@ -243,18 +243,35 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
                 Some(kind) => {
                     let marker = kind.marker();
                     let tag = kind.tag();
+                    let read = tagged_inner(ident, inner, kind)?;
+                    let shown = crate::fragment::render(read);
+                    let name = kind.name();
                     let array_message = format!(
-                        "`{ident}` has a kind tag, so it stands for one value, but `{rendered}` \
+                        "`{ident}` has a kind tag, so it stands for one value, but `{shown}` \
                          reads an array — drop the tag, and `{ident}` reads the array as \
-                         `{rendered}` does"
+                         `{shown}` does"
                     );
-                    let array_check = quote_spanned! {inner.span()=>
+                    let object_message = format!(
+                        "`{ident}` is `#[flusso({name})]`, so it reads one string, but `{shown}` \
+                         reads an object — wrap a `String`; a map type derives `FlussoMap`, a \
+                         sub-document `FlussoFragment`"
+                    );
+                    let array_check = quote_spanned! {read.span()=>
                         const _: () = {
                             #[allow(unused_imports)]
                             use ::flusso_query::OpaqueWithoutMeta as _;
                             assert!(
-                                !::flusso_query::OpaqueProbe::<#inner>::ARRAY,
+                                !::flusso_query::OpaqueProbe::<#read>::ARRAY,
                                 #array_message
+                            );
+                            // A flusso type that reads an object (a map type, a
+                            // sub-document) reads no string. A value of another
+                            // kind (a date, a decimal) may: it is trusted.
+                            assert!(
+                                !::flusso_query::OpaqueProbe::<#read>::HAS_META
+                                    || !(::flusso_query::OpaqueProbe::<#read>::AT_OBJECT
+                                        || ::flusso_query::OpaqueProbe::<#read>::AT_NESTED),
+                                #object_message
                             );
                         };
                     };
@@ -311,7 +328,14 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
                                 <#inner as ::flusso_query::FlussoValueMeta>::EXHAUSTIVE;
                             const ARRAY: bool =
                                 <#inner as ::flusso_query::FlussoValueMeta>::ARRAY;
+                            const MAP_VALUES: &'static [::flusso_query::KindTag] =
+                                <#inner as ::flusso_query::FlussoValueMeta>::MAP_VALUES;
                         }
+                        // A newtype over a map type stands where the map does.
+                        impl<__FlussoK> ::flusso_query::FlussoMap<__FlussoK> for #ident
+                        where
+                            for<'__flusso> #inner: ::flusso_query::FlussoMap<__FlussoK>,
+                        {}
                         #sub_document_check
                         #leaf_check
                     })
@@ -323,6 +347,147 @@ fn build_impl(input: &DeriveInput, attrs: ValueAttrs) -> syn::Result<TokenStream
             "FlussoValue cannot be derived for a union",
         )),
     }
+}
+
+/// The type a tagged newtype reads its one string through: `inner` with the
+/// wrappers serde reads as what they hold peeled off ([`TRANSPARENT`]). What
+/// the derive recognises by name as reading no single string is refused here:
+/// a map, a std collection, a slice/tuple/array (a `Cow<[T]>` too), a Rust
+/// primitive other than `String` and `char`, and `NonZero*` ([`NOT_A_STRING`]).
+/// A flusso type is refused through its metadata by the caller only when it
+/// reads an object; any other type is trusted to read one string.
+fn tagged_inner<'a>(
+    ident: &syn::Ident,
+    inner: &'a syn::Type,
+    kind: Kind,
+) -> syn::Result<&'a syn::Type> {
+    let mut read = inner;
+    while let Some(peeled) = TRANSPARENT
+        .iter()
+        .find_map(|wrapper| single_generic(read, wrapper))
+    {
+        read = peeled;
+    }
+    let name = kind.name();
+    let shown = crate::fragment::render(read);
+    let refuse = |reads: &str, fix: &str| {
+        Err(syn::Error::new(
+            read.span(),
+            format!(
+                "`{ident}` is `#[flusso({name})]`, so it reads one string, but `{shown}` reads \
+                 {reads} — {fix}"
+            ),
+        ))
+    };
+    if crate::doc::map_container_value(read).is_some() {
+        return refuse(
+            "an object",
+            &format!(
+                "for a map, declare `#[derive(FlussoMap)] #[flusso({name})] struct \
+                 {ident}({shown})` instead"
+            ),
+        );
+    }
+    let leaf = crate::doc::leaf_ident(read);
+    let collection = matches!(
+        leaf.as_deref(),
+        Some("Vec" | "HashSet" | "BTreeSet" | "VecDeque" | "LinkedList" | "BinaryHeap")
+    );
+    if collection
+        || matches!(
+            read,
+            syn::Type::Tuple(_) | syn::Type::Array(_) | syn::Type::Slice(_)
+        )
+    {
+        return refuse(
+            "an array",
+            "drop the tag and wrap a `Vec<String>`: an untagged newtype over a `Vec` reads an \
+             array of values",
+        );
+    }
+    if let Some((_, reads, fix)) = NOT_A_STRING
+        .iter()
+        .find(|(names, _, _)| leaf.as_deref().is_some_and(|leaf| names.contains(&leaf)))
+    {
+        return refuse(reads, &fix.replace("{ident}", &ident.to_string()));
+    }
+    // A `char` reads a one-character string, so it is trusted like any other.
+    if crate::doc::is_primitive(leaf.as_deref())
+        && !matches!(leaf.as_deref(), Some("String" | "char"))
+    {
+        // Behind a wrapper, an untagged newtype has no kind to carry over.
+        let fix = if std::ptr::eq(read, inner) {
+            "drop the tag: an untagged newtype carries the kind of what it wraps"
+        } else {
+            "wrap a `String`"
+        };
+        let reads = if leaf.as_deref() == Some("bool") {
+            "a boolean"
+        } else {
+            "a number"
+        };
+        return refuse(reads, fix);
+    }
+    Ok(read)
+}
+
+/// Wrappers serde reads as the one value they hold, by name: a tagged
+/// newtype over one is checked as what it holds. `Cow<'_, str>` peels to
+/// `str`, which reads a string; `Cow<'_, [T]>` to a slice, which doesn't.
+const TRANSPARENT: &[&str] = &[
+    "Option",
+    "Box",
+    "Rc",
+    "Arc",
+    "Cell",
+    "RefCell",
+    "Mutex",
+    "RwLock",
+    "Cow",
+    "Wrapping",
+    "Saturating",
+    "Reverse",
+];
+
+/// Types the derive recognises by name as reading no single string, with what
+/// they read instead and the fix to suggest: only names no string type of your
+/// own would carry. A name a string type of yours could have (`Date`,
+/// `Decimal`, `Duration`, …) is trusted.
+const NOT_A_STRING: &[(&[&str], &str, &str)] = &[(
+    &[
+        "NonZero",
+        "NonZeroU8",
+        "NonZeroU16",
+        "NonZeroU32",
+        "NonZeroU64",
+        "NonZeroU128",
+        "NonZeroUsize",
+        "NonZeroI8",
+        "NonZeroI16",
+        "NonZeroI32",
+        "NonZeroI64",
+        "NonZeroI128",
+        "NonZeroIsize",
+    ],
+    "a number",
+    "wrap a `String`",
+)];
+
+fn single_generic<'a>(ty: &'a syn::Type, wrapper: &str) -> Option<&'a syn::Type> {
+    let syn::Type::Path(path) = ty else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    if segment.ident != wrapper {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|arg| match arg {
+        syn::GenericArgument::Type(inner) => Some(inner),
+        _ => None,
+    })
 }
 
 /// A newtype over `Vec<E>`: it stands for a flat array whose elements are `E`

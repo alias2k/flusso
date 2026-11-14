@@ -65,7 +65,7 @@ A `#[serde(transparent)]` (or tuple) `FlussoFragment` newtype over a `Vec` of a 
 
 ### Types named like a built-in
 
-Because a macro can't resolve paths, a built-in leaf type is recognized by that last segment alone: `Date`, `NaiveDate`, `NaiveDateTime`, `DateTime`, `OffsetDateTime`, `PrimitiveDateTime`, `Uuid`, `Decimal`, `GeoPoint`, and `Value` for `serde_json::Value`. Matching the whole path instead would reject re-exports such as `sqlx::types::Uuid` or a `pub use chrono::NaiveDate` in your own crate, so a type of your own with one of these names counts as the built-in, with two exceptions where no built-in leaf could sit:
+Because a macro can't resolve paths, a built-in leaf type is recognized by that last segment alone: `Date`, `NaiveDate`, `NaiveDateTime`, `NaiveTime`, `DateTime`, `OffsetDateTime`, `PrimitiveDateTime`, `Uuid`, `Decimal`, `GeoPoint`, and `Value` for `serde_json::Value`. Matching the whole path instead would reject re-exports such as `sqlx::types::Uuid` or a `pub use chrono::NaiveDate` in your own crate, so a type of your own with one of these names counts as the built-in, with two exceptions where no built-in leaf could sit:
 
 - on a root, at an `object` or `nested` field (a level with fields of its own), it is checked as your own type;
 - on a `#[serde(flatten)]` field, root or fragment, it is checked as your own type too, except `GeoPoint`: flattened, it is taken for flusso's own, which serde can flatten and which is not checked.
@@ -100,9 +100,57 @@ pub struct Product {
 
   A fragment applies these rules where it is embedded. It reads a type's kind from the metadata a flusso derive emits, where a root checks the type's `FlussoValue` bound, so at a leaf a fragment rejects a type without that metadata, `opaque` or not; at an `object`, `nested` or `json` field `opaque` still takes a plain struct. A hand-written `FlussoValue` [carries the metadata by hand](enums-and-values.md#hand-written-values).
 - `#[flusso(rename = "…")]` picks one of a field's `#[serde(alias)]`es as the document key the derive checks; serde reads either. That is its only use: the derive already reads the key serde reads, from `#[serde(rename = "…")]` (or the `deserialize` name of `rename(serialize = …, deserialize = …)`) and `rename_all`, so set the key there. A `#[flusso(rename)]` that names no `alias` is a compile error: naming the key serde reads repeats it, and naming any other key would check the schema under a key serde never reads, so every real document would fail to deserialize. A `#[serde(flatten)]` field has no key of its own, so `rename` on one is a compile error too.
-- `#[serde(flatten)]` on a fragment field checks its fields against the enclosing level. serde flattens only a struct or a map, so a flattened `Vec`, array newtype or single value (a `String`, a `FlussoValue` newtype) is a compile error, on a root and in a fragment, `opaque` or not; an `Option` of a struct is fine. A flattened `HashMap<String, serde_json::Value>`, `BTreeMap<…>` or `serde_json::Value`, serde's catch-all for the keys no other field reads, is never checked, on a root or a fragment. `#[serde(transparent)]` newtypes are checked against the enclosing level too, as the one field serde reads: the field that is not `#[serde(skip)]`/`skip_deserializing`, `#[serde(default)]` or a `PhantomData`, in a tuple struct or a named one. No field of a transparent struct takes a `#[flusso(…)]` attribute, and one with more than one such field is a compile error, as it is in serde.
+- `#[serde(flatten)]` on a fragment field checks its fields against the enclosing level. serde flattens only a struct or a map, so a flattened `Vec`, array newtype or single value (a `String`, a `FlussoValue` newtype) is a compile error, on a root and in a fragment, `opaque` or not; an `Option` of a struct is fine. A flattened `HashMap`, `BTreeMap` or `serde_json::Value`, serde's catch-all for the keys no other field reads, is [trusted](#what-the-derive-trusts), on a root or a fragment. `#[serde(transparent)]` newtypes are checked against the enclosing level too, as the one field serde reads: the field that is not `#[serde(skip)]`/`skip_deserializing`, `#[serde(default)]` or a `PhantomData`, in a tuple struct or a named one. No field of a transparent struct takes a `#[flusso(…)]` attribute, and one with more than one such field is a compile error, as it is in serde.
 - Each `#[flusso(…)]` key is given once per field or type: a repeat is a compile error, not "last one wins".
-- serde attributes that change what serde reads are trusted: `#[serde(with)]`/`deserialize_with` on a field, `#[serde(try_from)]`/`from` on a `FlussoValue` type (validation in `try_from` is a common use). The derive checks the declared type; keeping a custom deserializer in step with it is yours. On a `FlussoFragment` or `FlussoMap` type `from`/`try_from` is a compile error: derive on the type serde reads, and convert after reading.
+- `#[serde(from)]`/`try_from` on a `FlussoFragment` or `FlussoMap` type is a compile error: serde then reads another type, so derive on the type serde reads, and convert after reading. The other serde attributes that change what is read are [trusted](#what-the-derive-trusts).
+
+## What the derive trusts
+
+The derive checks a struct against the mapping at compile time, but a struct that compiles can still fail to read a document. This section says what it checks, what it knowingly takes on trust, and the gaps known so far.
+
+**What it checks.** A type wherever it can see it: a built-in leaf, a type with a flusso derive, the two [array newtypes](#two-kinds-of-array-newtype), and a `HashMap`/`BTreeMap<String, V>` at a field, where `V` may be `Option<V>` (one level).
+
+- A map's keys are the document's keys, any string: a key type the derive knows reads no arbitrary string (a number, `bool`, `char`, `Uuid`, a tuple) is a compile error.
+- A map type is checked as the map it reads: a [`FlussoMap` type](maps.md#document-types)'s values against its tag, and a `FlussoFragment` or `FlussoValue` newtype over a map (or over an `Option` of one) only goes where that map goes, its values checked against the field's.
+- A `FlussoFragment` newtype over a leaf value is a compile error: it is a value, so derive `FlussoValue`.
+- An `exhaustive` enum where the schema declares no `variants:` is a compile error everywhere, a `json` field and a map's values included.
+
+**What it trusts.** Each of these compiles, and a document that disagrees fails to read:
+
+- **Any type at a `json` field, or at a `constant` stored unindexed.** Neither declares anything to check against: a [`constant`](../reference/field-types.md#constant) holding an object or a list that mixes kinds is mapped like `json`.
+- **A map key type of your own.** `String`, `Box<str>`, a `type` alias or a newtype of yours is trusted to read every key.
+- **A `#[serde(flatten)]` map.** A flattened `HashMap`, `BTreeMap`, `FlussoMap` type or newtype over a map reads every key no other field reads, whatever its kind, and its value type isn't checked against them. Only `serde_json::Value` values read them all.
+- **A map value that is not an `Option`.** It is trusted never to be `null`, but a `map` over a `jsonb` column holding `{"x": null}` indexes that `null` under its key. Use `Option<V>` (`HashMap<String, Option<String>>`, or `Option` values in a `FlussoMap` type) when the column can hold one.
+- **An enum where the schema declares no `variants:`.** At a plain `keyword`, or as a map's values, every value must be one of the enum's.
+- **An enum without `exhaustive` where the schema declares `variants:`.** A Rust enum may cover only some of them (a projection), so it is trusted to cover the values stored. Mark it `#[flusso(keyword, exhaustive)]` to have the derive require every declared variant.
+- **A date type at a `date` or `timestamp` field.** Both map to OpenSearch `date`, so the derive can't tell them apart, and a `timestamp` field holds whatever its column is. What flusso writes, and what reads it:
+
+  | Column | Written as | Reads into |
+  | --- | --- | --- |
+  | `date` | `2024-01-02` | `chrono::NaiveDate`, `String` |
+  | `time` | `03:04:05.123456` | `chrono::NaiveTime`, `String` |
+  | `timetz` | `03:04:05.123456+02` | `String` only |
+  | `timestamp` (no zone) | `2024-01-02 03:04:05.123456` | `String` only ([#304](https://github.com/alias2k/flusso/issues/304)) |
+  | `timestamptz` | `2024-01-02T03:04:05.123456+00:00` | `chrono::DateTime<Utc>`, `String` |
+
+  `chrono::NaiveDateTime` reads none of these forms. The `time` crate's types aren't covered here: nothing in flusso's tests reads these forms with them.
+- **Any other type behind a tagged `FlussoValue` newtype.** `#[flusso(keyword)] struct Sku(SmolStr)` is how a string type from another crate goes at a `keyword` field, so it is trusted to read one string, whatever it is named (`Date`, `Decimal`, `Duration`, `chrono::NaiveDate` holding date text included). Looking through `Option`, `Box`, `Rc`, `Arc`, `Cell`, `RefCell`, `Mutex`, `RwLock`, `Cow`, `Wrapping`, `Saturating` and `Reverse`, the derive refuses exactly: a `HashMap`/`BTreeMap`, a `Vec`/`HashSet`/`BTreeSet`/`VecDeque`/`LinkedList`/`BinaryHeap`, a slice, tuple or array, a Rust primitive other than `String` and `char` (a `char` reads a one-character string), `NonZero*`, and a flusso type that reads an object (a `FlussoMap` type, a sub-document).
+- **What [`#[flusso(opaque)]`](#escape-hatches) turns off**, and a type the derive can't see into under it (`Box<…>`, a tuple, a plain struct).
+- **serde attributes that change what is read**: `with`/`deserialize_with` on a field, `from`/`try_from` on a `FlussoValue` type (validation in `try_from` is a common use), and `deny_unknown_fields` on a fragment, which then fails on every key it leaves out.
+- **A `String` at a `geo` field.** flusso writes a point as `{lat, lon}` for a two-column `geo` (`lat:`/`lon:`), which a `String` doesn't read; a one-column `geo` is written as its column holds it ([#307](https://github.com/alias2k/flusso/issues/307)), and a `custom` field mapped to `geo_point` can hold `"lat,lon"` strings.
+
+**Known gaps.** These compile and can fail on a document flusso writes, and are neither checked nor a deliberate trust yet ([#306](https://github.com/alias2k/flusso/issues/306), unless noted):
+
+- an untagged integer newtype at a wider numeric kind;
+- a `custom` field whose OpenSearch type the derive does not model;
+- a type of your own named like a built-in (`Value`, `Date`, `Uuid`, `Decimal`): see [Types named like a built-in](#types-named-like-a-built-in);
+- `uuid::Uuid` at a plain `keyword`;
+- a stored value outside an `enum` field's `variants:`;
+- `Decimal` at a `double`;
+- a `jsonb` map or array column holding values of another type than its `values:`/element type;
+- `GeoPoint` at a one-column `geo` ([#307](https://github.com/alias2k/flusso/issues/307)).
+
+`sdk/query-derive/tests/boundary.rs` pins what it covers: it places a list of type shapes at one field of each kind in its fixture, on a root and in a fragment, and fails on one that compiles and fails to read a sample document under no rule above, or that a root and a fragment treat differently. It covers the kinds its fixture holds, not every kind, which is why the gaps above went unseen. One kind of pair differs on purpose: a `type` alias (of a map, or of `String`) reads on a root, which sees through it with a trait bound, and is a compile error in a fragment, which can't.
 
 ## flusso types to Rust types
 

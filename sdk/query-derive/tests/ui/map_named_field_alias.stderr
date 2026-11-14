@@ -1,0 +1,5 @@
+error: field `it` of the FlussoMap type `Title` reads its key and an alias, but a map may hold both keys, and serde then fails with `duplicate field` — remove the alias; a `#[serde(flatten)]` `HashMap<String, Option<String>>` field keeps the other key (`Option` reads a `null` value)
+ --> tests/ui/map_named_field_alias.rs:8:5
+  |
+8 |     #[serde(alias = "italian")]
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^

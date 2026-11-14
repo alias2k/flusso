@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: `Code` is `#[flusso(keyword)]`, so it reads one string, but `Codes` reads an object — wrap a `String`; a map type derives `FlussoMap`, a sub-document `FlussoFragment`
+  --> tests/ui/value_tagged_newtype_over_map.rs:13:13
+   |
+13 | struct Code(Codes);
+   |             ^^^^^ evaluation of `_` failed here

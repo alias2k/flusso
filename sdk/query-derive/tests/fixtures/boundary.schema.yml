@@ -1,0 +1,81 @@
+# One field of each kind the boundary generator places a type at
+# (`tests/boundary.rs`, issue #294). A required field takes the type bare, a
+# nullable one (the second group) in `Option<…>`.
+version: 1
+table: boundary
+primary_key: id
+
+fields:
+  - keyword: id
+    required: true
+  - keyword: kw
+    required: true
+  - long: n
+    required: true
+  - keyword: kwa
+    required: true
+    array: true
+  - object: ob
+    fields:
+      - keyword: k
+        column: ob_k
+        required: true
+      - long: n
+        column: ob_n
+        required: true
+  - has_many: ne
+    table: rows
+    foreign_key: boundary_id
+    primary_key: id
+    fields:
+      - keyword: k
+        required: true
+      - long: n
+        required: true
+  - map: mp
+    values: keyword
+    required: true
+  - map: mpn
+    values: long
+    required: true
+  - json: js
+    required: true
+  - json: jsa
+    required: true
+    array: true
+  - geo: gp
+    lat: gp_lat
+    lon: gp_lon
+    required: true
+  - keyword: kwo
+    required: false
+  - long: nn
+    required: false
+  - keyword: kwao
+    required: false
+    array: true
+  - has_one: ho
+    table: ones
+    foreign_key: boundary_id
+    primary_key: id
+    fields:
+      - keyword: k
+        required: true
+      - long: n
+        required: true
+  - map: mpo
+    values: keyword
+    required: false
+  - json: jso
+    required: false
+  - date: dt
+    required: true
+  - timestamp: ts
+    required: true
+  - constant: cm
+    value: [1, "x"]
+  - constant: co
+    value: { a: 1 }
+  - enum: ev
+    variants: [a, b]
+    required: true

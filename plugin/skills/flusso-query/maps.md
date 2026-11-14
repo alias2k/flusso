@@ -11,18 +11,19 @@ subfields). The derive gives it one handle per value kind: `TextMap`, `KeywordMa
 
 ## Doc side
 
-The field type is `HashMap<String, V>` (or `BTreeMap`) where `V` is a value of the declared kind, by
-blanket impl and no derive: `HashMap<String, String>` for a text or keyword map,
-`HashMap<String, f64>` for a `double` map. A nullable map is `Option<HashMap<…>>`.
+The field type is `HashMap<String, V>` (or `BTreeMap`) where `V` is a value of the declared kind, or
+`Option<V>`: `HashMap<String, Option<String>>` for a text or keyword map, `HashMap<String,
+Option<f64>>` for a `double` map. A map over a `jsonb` column is indexed as it is, `{"x": null}`
+included, and only `Option` values read that null. A nullable map is `Option<HashMap<…>>`.
 
 ```rust
 #[derive(serde::Deserialize, FlussoRoot)]
 #[flusso(index = "products")]
 struct Product {
     sku: String,
-    title: HashMap<String, String>,          // map<text>    → TextMap
-    codes: Option<HashMap<String, String>>,  // map<keyword> → KeywordMap (nullable)
-    prices: Option<HashMap<String, f64>>,    // map<double>  → NumberMap
+    title: HashMap<String, Option<String>>,          // map<text>    → TextMap
+    codes: Option<HashMap<String, Option<String>>>,  // map<keyword> → KeywordMap (nullable)
+    prices: Option<HashMap<String, Option<f64>>>,    // map<double>  → NumberMap
 }
 ```
 
@@ -30,7 +31,11 @@ A whole-map wrapper opts in with `#[derive(FlussoMap)]` and a **required** kind 
 (`#[flusso(text)]` or `#[flusso(keyword)]`, matching the schema's `values:`). There is no default;
 an untagged wrapper is a compile error. The wrapper takes any shape that reads one JSON object, newtype
 over a map or named fields, so a translations type can carry a `fallback` field beside its language
-keys; a newtype over a `Vec`, an `Option` or a single value is a compile error.
+keys; a newtype over a `Vec`, an `Option` or a single value is a compile error. What it holds is
+checked against the tag: a newtype's `HashMap<String, V>` needs `V` of that kind, and a named field
+is `Option<V>` (a map may lack any key); a map's keys are `String`. What the derive checks, what it trusts (a flattened map, a `json` field, …) and its known gaps
+are one section of the manual:
+<https://alias2k.github.io/flusso/main/query/document-structs.html#what-the-derive-trusts>.
 
 A hand-written `impl FlussoMap<K>` works at a root but fails inside a `FlussoFragment` unless the
 type also implements `FlussoValueMeta` (`KINDS = [Object]`, `MAP_VALUES` = the value kind) and

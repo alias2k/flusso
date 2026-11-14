@@ -83,19 +83,16 @@ Product::query().query(Product::name().contains("excav"))   // "Excavator", in a
 
 ## Document types
 
-A map field deserializes into `HashMap<String, V>` or `BTreeMap<String, V>`, with `V` checked against the declared value kind like a scalar. A type of your own stands in for the whole map with `#[derive(FlussoMap)]` and a **required** value-kind tag, `#[flusso(keyword)]` or `#[flusso(text)]`; untagged is a compile error. Any shape that reads one JSON object works: a newtype over a `HashMap`/`BTreeMap` (or over another map type, or `serde_json::Value`), or named fields whose on-disk form is a flat object of same-kind values. A shape that certainly reads something else is a compile error where it is declared: a unit struct, a tuple of several fields, or a newtype over a `Vec`, an `Option`, a single value, an array newtype or a `FlussoFragment` struct (whose fields serde requires: declare the ones you need on the map type, beside a `#[serde(flatten)]` map). So is `#[serde(from)]`/`try_from` on it, since serde then reads another type. The tag goes on the type, once; the fields take no `#[flusso(…)]`, since they are never checked one by one.
+A map field deserializes into `HashMap<String, V>` or `BTreeMap<String, V>`, with `V` checked against the declared value kind like a scalar. `V` may be `Option<V>`, and a map over a `jsonb` column that can hold `{"x": null}` needs it: see [What the derive trusts](document-structs.md#what-the-derive-trusts). A type of your own stands in for the whole map with `#[derive(FlussoMap)]` and a **required** value-kind tag, `#[flusso(keyword)]` or `#[flusso(text)]`; untagged is a compile error. Any shape that reads one JSON object works: a newtype over a `HashMap`/`BTreeMap` (or over another map type, or `serde_json::Value`), or named fields whose on-disk form is a flat object of same-kind values. A shape that certainly reads something else is a compile error where it is declared: a unit struct, a tuple of several fields, or a newtype over a `Vec`, an `Option`, a single value, an array newtype or a `FlussoFragment` struct (whose fields serde requires: declare the ones you need on the map type, beside a `#[serde(flatten)]` map). So is `#[serde(from)]`/`try_from` on it, since serde then reads another type. The tag goes on the type, once, and everything the type holds is checked against it:
+
+- a newtype's map: `V` in `HashMap<String, V>` (or `Option<V>`) is a value of the tag (`i64` in a `keyword` map is a compile error), and another wrapped type is a map of the tag, so a type the derive can't see into (`Box<…>`, a plain struct, a `type` alias of a map) is a compile error;
+- a named field: a map may lack any key, so it is `Option<V>`, `V` a value of the tag (which also reads a `null` value); `#[serde(deny_unknown_fields)]` and a field's `#[serde(alias)]` are compile errors, since a map holds any key, and may hold both a key and its alias;
+- a `#[serde(flatten)]` field: a map of the tag, as a newtype's.
+
+Every map's keys are `String`. The fields take no `#[flusso(…)]`. What the derive takes on trust is [one list](document-structs.md#what-the-derive-trusts).
 
 ```rust
-#[derive(serde::Deserialize, FlussoMap)]
-#[flusso(text)]
-struct Translation {
-    fallback: Option<String>,
-    #[serde(flatten)]
-    langs: BTreeMap<String, String>,
-}
-
-#[derive(serde::Deserialize, FlussoFragment)]
-struct Localized { name: Translation }
+{{#include ../../../sdk/query-derive/tests/ui_pass/docs_map_examples.rs:translation}}
 ```
 
 Use the derive rather than a hand-written `impl FlussoMap<K>`: a fragment validates through const metadata the derive emits, so a hand impl alone compiles at a root but fails inside a `FlussoFragment`, with the error pointing at the derive. Writing that metadata by hand works too: `FlussoValueMeta` with `KINDS = [Object]` and `MAP_VALUES` set to the value kind, plus [`embeddable!`](enums-and-values.md#hand-written-values). The value kind is checked symmetrically: a `text` wrapper at a `keyword` map fails the build. Number and date maps have no derive tag; use `HashMap`/`BTreeMap` for those.

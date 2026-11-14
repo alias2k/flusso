@@ -1,4 +1,4 @@
-error: `#[flusso(…)]` on a field of a `FlussoMap` type is never read — the value kind goes on the type (`#[flusso(text)] struct Translations(…)`), and the fields are never checked one by one; remove it
+error: `#[flusso(…)]` on a field of a `FlussoMap` type is never read — the value kind goes on the type (`#[flusso(text)] struct Translations(…)`), and every field holds a value of that kind; remove it
  --> tests/ui/flusso_attr_on_map_field.rs:8:5
   |
 8 |     #[flusso(opaque)]

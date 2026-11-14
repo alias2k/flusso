@@ -22,6 +22,12 @@ retries = 0
 [test-groups.docker]
 max-threads = 8
 
+# The query derive's boundary test compiles thousands of generated cases with
+# cargo (three jobs); run alone so it doesn't compete with the `ui` harness
+# for CPU and memory.
+[test-groups.boundary]
+max-threads = 1
+
 # OpenSearch-backed e2e (the `reindex`, full-pipeline `pipeline`, daemon
 # `fence`, and https `tls` binaries).
 # Each spins up a memory-hungry OpenSearch (a 512MB JVM heap), so they are
@@ -46,6 +52,13 @@ test-group = 'opensearch'
 retries = 2
 slow-timeout = { period = "120s", terminate-after = 5 }
 
+# The derive's boundary test: cold, it builds its own dependencies and every
+# case (minutes); warm, it reads its cache (seconds).
+[[profile.default.overrides]]
+filter = 'package(flusso-query-derive) & binary(boundary)'
+test-group = 'boundary'
+slow-timeout = { period = "300s", terminate-after = 3 }
+
 # CI: don't stop at the first failure, and emit JUnit for the runner to surface.
 [profile.ci]
 retries = 0
@@ -65,3 +78,8 @@ filter = 'package(flusso-sink-opensearch) & binary(reindex) | package(flusso-sin
 test-group = 'opensearch'
 retries = 2
 slow-timeout = { period = "150s", terminate-after = 5 }
+
+[[profile.ci.overrides]]
+filter = 'package(flusso-query-derive) & binary(boundary)'
+test-group = 'boundary'
+slow-timeout = { period = "300s", terminate-after = 3 }

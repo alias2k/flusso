@@ -4,6 +4,12 @@ error: field `orders` is `nested` in the schema — expected a `Vec<…>` of a s
 117 |     orders: Vec<String>,
     |             ^^^
 
+error: `Label` is a FlussoFragment newtype over `String`, a value, not a sub-document — derive `FlussoValue` on `Label` instead
+   --> tests/ui/newtype_over_vec_misplaced.rs:147:14
+    |
+147 | struct Label(String);
+    |              ^^^^^^
+
 error[E0080]: evaluation panicked: field `billingAddress` in index `users` is an `object`, not an array — `Addresses` is a newtype over a `Vec<…>`; declare a struct for it
   --> tests/ui/newtype_over_vec_misplaced.rs:24:22
    |
@@ -69,6 +75,12 @@ error[E0080]: evaluation panicked: field `orders` in index `users` is a `nested`
     |
 110 |     orders: Vec<Status>,
     |             ^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: `WrappedStatus` is a FlussoFragment newtype over `Status`, a value, not a sub-document — derive `FlussoValue` on `WrappedStatus` instead
+   --> tests/ui/newtype_over_vec_misplaced.rs:122:22
+    |
+122 | struct WrappedStatus(Status);
+    |                      ^^^^^^ evaluation of `_` failed here
 
 error[E0080]: evaluation panicked: field `orders` in index `users` is a `nested` array with fields of its own — `WrappedStatus` is not a sub-document; declare a struct for it with `#[derive(FlussoFragment)]`
    --> tests/ui/newtype_over_vec_misplaced.rs:128:13

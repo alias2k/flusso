@@ -1,4 +1,4 @@
-error[E0080]: evaluation panicked: fragment `PaymentMethod`: field `name` is `Translation`, a map wrapper whose kind tag does not match — the schema field here is a `map` of `text` values, so the type needs `#[flusso(text)]`
+error[E0080]: evaluation panicked: fragment `PaymentMethod`: field `name` is `Translation`, a map of `keyword` values, and the schema field here holds `text` values — tag the `FlussoMap` type `#[flusso(text)]`
   --> tests/ui/fragment_map_text_wanted.rs:32:15
    |
 32 | const _: () = PaymentMethod::__flusso_check(LEVEL);

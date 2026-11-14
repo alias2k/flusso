@@ -1,3 +1,9 @@
+error: `Label` is a FlussoFragment newtype over `String`, a value, not a sub-document — derive `FlussoValue` on `Label` instead
+  --> tests/ui/fragment_newtype_reads_another_array.rs:33:14
+   |
+33 | struct Label(String);
+   |              ^^^^^^
+
 error: a FlussoFragment newtype over a `Vec<…>` is an array of sub-documents, for a `nested` field, but `Vec<String>` is an array of values — derive `FlussoValue` on `Codes` instead, which reads an array of values and goes at an array leaf or a `json` array
   --> tests/ui/fragment_newtype_reads_another_array.rs:37:18
    |
