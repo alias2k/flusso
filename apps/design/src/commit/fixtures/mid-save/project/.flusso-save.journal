@@ -1,0 +1,33 @@
+{
+  "format": 2,
+  "started_at_ms": 1794627929673,
+  "pid": 1942371,
+  "token": "1942371-1794627929673413699",
+  "dirs": [
+    "new",
+    "new/deep"
+  ],
+  "writes": [
+    {
+      "dest": "users.schema.yml",
+      "before": "b564f6e197166aedb0ae56e953f87798fda346e9322da5588b21c1b8e7b3a4b4",
+      "after": "bf1cef5dbe9954f60c59a5e7feabdc2c52b2c5c2adde1d61e39c86af054fd859"
+    },
+    {
+      "dest": "new/deep/orders.schema.yml",
+      "before": null,
+      "after": "6afd4a64a0003f6f3ab763b11fdf059c60d9fc7272a63b2e32ac26af706667ba"
+    },
+    {
+      "dest": "flusso.toml",
+      "before": "f612b89bcdbc401379f644d7e48572e3470f77dcd4c39416405d80952ad7089e",
+      "after": "9c10c95f9971dfb43e5e500527ec1febc8da1d902635d7b5a8138e2afa71ada9"
+    }
+  ],
+  "removals": [
+    {
+      "path": "orders.schema.yml",
+      "before": "e0b76fb167c6043a5c34670ba649de9824468e2b9459ff2405a429533241dc2c"
+    }
+  ]
+}

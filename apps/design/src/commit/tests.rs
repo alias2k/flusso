@@ -2423,3 +2423,56 @@ fn an_undo_meeting_files_written_meanwhile_keeps_them_all() {
         );
     }
 }
+
+/// Copy the tree at `from` into `to`, folders and files.
+fn copy_dir(from: &Path, to: &Path) {
+    for entry in std::fs::read_dir(from).unwrap().flatten() {
+        let target = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            std::fs::create_dir_all(&target).unwrap();
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+/// Issue #302: a project an older designer left, killed in the middle of a
+/// save, of its recovery, or after recovery settled every file and before
+/// it deleted the journal, recovers to before the save. The fixtures were
+/// written by the designer of `056b4292` (a move-and-remove save, killed
+/// right before its commit point); the record's folder is `@DIR@`.
+#[test]
+fn a_save_an_older_designer_left_recovers() {
+    let (before, _, _) = reference(Shape::MoveAndRemove);
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/commit/fixtures");
+    for name in ["mid-save", "mid-recovery", "recovered-unsettled"] {
+        let project = Project::new(&format!("older-{name}"));
+        for file in ["flusso.toml", "users.schema.yml", "orders.schema.yml"] {
+            std::fs::remove_file(project.dir.join(file)).unwrap();
+        }
+        copy_dir(&fixtures.join(name).join("project"), &project.dir);
+        let dir = std::fs::canonicalize(&project.dir).unwrap();
+        let record = std::fs::read_to_string(fixtures.join(name).join("record.json"))
+            .unwrap()
+            .replace("@DIR@", dir.to_str().unwrap());
+        let token = serde_json::from_str::<serde_json::Value>(&record).unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        project
+            .state()
+            .create(
+                &serde_json::from_str(&record).unwrap(),
+                &mut Disk::counting(),
+            )
+            .unwrap();
+        assert_eq!(project.records().len(), 1, "{name}");
+        let recovery = project.recover(&mut Disk::counting());
+        assert!(recovery.blocked.is_none(), "{name}: {recovery:?}");
+        assert_eq!(recovery.settled.len(), 1, "{name}: {recovery:?}");
+        assert_eq!(recovery.settled[0].token, token, "{name}");
+        assert!(project.records().is_empty(), "{name}");
+        assert_eq!(snapshot(&project.dir), before, "{name}");
+    }
+}
