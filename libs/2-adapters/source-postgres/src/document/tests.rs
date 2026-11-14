@@ -4,6 +4,7 @@
 //! pool is never opened: every key column is cached as `integer`, a type whose
 //! equal values are identical, so no link is looked up on the root table.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use kernel::{
@@ -460,4 +461,72 @@ fn equal_keys_render_alike_except_for_numbers_and_loose_text() {
         assert!(!meta(loose, true).equal_is_identical(), "{loose}");
     }
     assert!(!meta("text", false).equal_is_identical());
+}
+
+thread_local! {
+    /// Catalog lookups (`column_meta` calls, cache hits included) on this thread.
+    pub(super) static COLUMN_LOOKUPS: Cell<usize> = const { Cell::new(0) };
+    /// Searches of an index's field tree for the paths to a table, on this thread.
+    pub(super) static PATH_SEARCHES: Cell<usize> = const { Cell::new(0) };
+}
+
+fn tags_through_user_tags() -> Field {
+    join_field(
+        "tags",
+        "tags",
+        JoinKind::ManyToMany {
+            through: Through {
+                table: TableName::try_new("user_tags").unwrap(),
+                left_key: column("user_id"),
+                right_key: column("tag_id"),
+                filters: None,
+            },
+        },
+    )
+}
+
+fn user_tag(user_id: i32) -> RowKey {
+    RowKey(vec![
+        (column("user_id"), GenericValue::Int(user_id)),
+        (column("tag_id"), GenericValue::Int(3)),
+    ])
+}
+
+/// Whether a path's root key needs reading back depends on the index alone,
+/// so once it is known, a change walked from its key reads no catalog.
+#[tokio::test]
+async fn a_path_walked_from_the_key_looks_up_no_column_once_known() {
+    let builder = builder_with(vec![tags_through_user_tags()]);
+    let user_tags = TableName::try_new("user_tags").unwrap();
+    builder
+        .resolve(&user_tags, &user_tag(1), None, None)
+        .await
+        .unwrap();
+
+    COLUMN_LOOKUPS.with(|count| count.set(0));
+    for user_id in 2..5 {
+        let ids = builder
+            .resolve(&user_tags, &user_tag(user_id), None, None)
+            .await
+            .unwrap();
+        assert_eq!(ids, [users_id(user_id)]);
+    }
+    assert_eq!(COLUMN_LOOKUPS.with(Cell::get), 0);
+}
+
+/// The paths from each table back to the root are found once, when the
+/// builder is built, never per change.
+#[tokio::test]
+async fn resolving_a_change_searches_no_field_tree() {
+    let builder = builder_with(vec![tags_through_user_tags(), event_count()]);
+    PATH_SEARCHES.with(|count| count.set(0));
+    for (table, key) in [
+        (users(), key()),
+        (TableName::try_new("user_tags").unwrap(), user_tag(1)),
+        (TableName::try_new("events").unwrap(), event(1, None)),
+        (TableName::try_new("products").unwrap(), key()),
+    ] {
+        builder.resolve(&table, &key, None, None).await.unwrap();
+    }
+    assert_eq!(PATH_SEARCHES.with(Cell::get), 0);
 }

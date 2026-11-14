@@ -515,6 +515,8 @@ impl PgDocumentBuilder {
         table: &TableName,
         column: &ColumnName,
     ) -> Result<ColumnMeta> {
+        #[cfg(test)]
+        tests::COLUMN_LOOKUPS.with(|count| count.set(count.get() + 1));
         let cache_key = (schema.to_string(), table.to_string(), column.to_string());
         if let Some(meta) = self.col_type_cache.get(&cache_key) {
             return Ok(meta);

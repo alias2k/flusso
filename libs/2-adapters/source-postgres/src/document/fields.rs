@@ -132,6 +132,10 @@ pub(super) fn find_paths<'a>(
     prefix: &mut Vec<Step<'a>>,
     out: &mut Vec<Vec<Step<'a>>>,
 ) {
+    #[cfg(test)]
+    if prefix.is_empty() {
+        super::tests::PATH_SEARCHES.with(|count| count.set(count.get() + 1));
+    }
     for field in fields {
         match field.relation() {
             Some(relation) => {
