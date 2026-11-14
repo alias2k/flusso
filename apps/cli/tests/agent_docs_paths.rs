@@ -7,7 +7,7 @@
 
 //! Drift guard for the agent-facing docs: every repo path they name must exist.
 //!
-//! `plugin/**` and `.claude/commands/**` are pointer-heavy by design (see
+//! `plugin/**`, `.claude/commands/**` and `.claude/skills/**` are pointer-heavy by design (see
 //! `plugin/ARCHITECTURE.md`): each meaning has one home and everything else
 //! points at it. A pointer-heavy corpus rots mostly by **moved files** — the
 //! target is renamed and the pointer silently dangles, so an agent follows it,
@@ -100,10 +100,11 @@ fn every_repo_path_named_in_the_agent_docs_exists() {
     let mut files = Vec::new();
     markdown_files(&root.join("plugin"), &mut files);
     markdown_files(&root.join(".claude/commands"), &mut files);
+    markdown_files(&root.join(".claude/skills"), &mut files);
 
     assert!(
         files.len() > 5,
-        "expected to find the agent docs under plugin/ and .claude/commands/, found {}",
+        "expected to find the agent docs under plugin/, .claude/commands/ and .claude/skills/, found {}",
         files.len()
     );
 
