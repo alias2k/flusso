@@ -326,10 +326,39 @@ async fn typed_columns_coerce_to_canonical_variants_in_the_body() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn binary_columns_and_constants_build_the_values_they_hold() {
+    binary_columns_and_constants_build_under(&[]).await;
+}
+
+/// A database set to `bytea_output = 'escape'` still builds a `binary` field
+/// as its bytes: the document builder reads every row in hex.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_database_set_to_escape_bytea_output_still_builds_the_bytes() {
+    binary_columns_and_constants_build_under(&[
+        "ALTER DATABASE postgres SET bytea_output = 'escape'",
+        "ALTER ROLE postgres SET bytea_output = 'escape'",
+    ])
+    .await;
+}
+
+async fn binary_columns_and_constants_build_under(settings: &[&'static str]) {
     let container = Postgres::default().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in settings {
+        sqlx::query(*statement).execute(&pool).await.unwrap();
+    }
+    let fresh = PgPoolOptions::new().connect(&url).await.unwrap();
+    let output: String = sqlx::query_scalar("SHOW bytea_output")
+        .fetch_one(&fresh)
+        .await
+        .unwrap();
+    let expected = if settings.is_empty() { "hex" } else { "escape" };
+    assert_eq!(
+        output, expected,
+        "a fresh session reads bytea as {expected}"
+    );
     for statement in [
         "CREATE TABLE blobs (id bigint PRIMARY KEY, blob bytea, blobs bytea[])",
         "INSERT INTO blobs VALUES (1, '\\x00ff7f80', ARRAY['\\x01'::bytea, '\\x0203'::bytea]), \
@@ -372,6 +401,13 @@ async fn binary_columns_and_constants_build_the_values_they_hold() {
         (
             "list",
             GenericValue::Array(vec![GenericValue::BigInt(1), GenericValue::BigInt(2)]),
+        ),
+        (
+            "mixed",
+            GenericValue::Array(vec![
+                GenericValue::BigInt(1),
+                GenericValue::String("n/a".to_owned()),
+            ]),
         ),
         ("nothing", GenericValue::Null),
     ];

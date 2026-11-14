@@ -139,7 +139,9 @@ pub struct PgDocumentBuilder {
 }
 
 impl PgDocumentBuilder {
-    pub fn new(pool: PgPool, spec: Arc<SourceSpec>) -> Self {
+    /// Over a pool whose connections read `bytea` as hex text, as
+    /// [`connect`](Self::connect)'s do.
+    pub(crate) fn new(pool: PgPool, spec: Arc<SourceSpec>) -> Self {
         Self {
             pool,
             reads: Arc::new(ReadColumns::new(&spec)),
@@ -203,7 +205,16 @@ impl PgDocumentBuilder {
 
     #[tracing::instrument(name = "pg.connect", skip_all, err)]
     pub async fn connect(connection_url: &str, spec: Arc<SourceSpec>) -> Result<Self> {
+        // The document query renders a `bytea` as text inside its JSON, which
+        // `value::postgres_hex` decodes. A database or role set to
+        // `bytea_output = 'escape'` would render the escape text instead.
         let pool = sqlx::postgres::PgPoolOptions::new()
+            .after_connect(|connection, _| {
+                Box::pin(async move {
+                    sqlx::Executor::execute(&mut *connection, "SET bytea_output = 'hex'").await?;
+                    Ok(())
+                })
+            })
             .connect(connection_url)
             .await
             .map_err(|e| SourceError::Connection(e.to_string()))?;
