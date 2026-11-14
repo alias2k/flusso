@@ -122,6 +122,8 @@ const FRAGMENT_OVER_MAP: &str =
     "#[derive(Debug, Deserialize, FlussoFragment)] pub struct Fm(pub HashMap<String, String>);";
 const PLAIN: &str = "#[derive(Debug, Deserialize)] pub struct Plain { pub zz: String }";
 const ALIAS: &str = "pub type Ms = HashMap<String, String>;";
+const EXHAUSTIVE: &str = "#[derive(Debug, Serialize, Deserialize, FlussoValue)] \
+     #[flusso(keyword, exhaustive)] #[serde(rename_all = \"lowercase\")] pub enum Ex { A, B }";
 
 /// The shapes written by hand.
 fn named_shapes() -> Vec<Shape> {
@@ -294,6 +296,117 @@ fn named_shapes() -> Vec<Shape> {
             "Strict",
             &["#[derive(Debug, Deserialize, FlussoFragment)] #[serde(deny_unknown_fields)] pub struct Strict { pub k: String }"],
         ),
+        shape("hash_map_option", "HashMap<String, Option<String>>", &[]).map(),
+        shape("btree_map_option_long", "BTreeMap<String, Option<i64>>", &[]).map(),
+        shape("hash_map_option_option", "HashMap<String, Option<Option<String>>>", &[]).map(),
+        shape(
+            "map_keyword_option",
+            "MapKo",
+            &["#[derive(Debug, Deserialize, FlussoMap)] #[flusso(keyword)] pub struct MapKo(pub HashMap<String, Option<String>>);"],
+        )
+        .map(),
+        shape(
+            "map_named_option_rest",
+            "NamedOpt",
+            &["#[derive(Debug, Deserialize, FlussoMap)] #[flusso(keyword)] pub struct NamedOpt { \
+               pub x: Option<String>, #[serde(flatten)] pub rest: BTreeMap<String, Option<String>> }"],
+        )
+        .map(),
+        shape(
+            "map_named_deny",
+            "NamedDeny",
+            &["#[derive(Debug, Deserialize, FlussoMap)] #[flusso(keyword)] #[serde(deny_unknown_fields)] \
+               pub struct NamedDeny { pub x: Option<String> }"],
+        )
+        .map(),
+        shape(
+            "fragment_over_option_value_map",
+            "Fov",
+            &["#[derive(Debug, Deserialize, FlussoFragment)] pub struct Fov(pub HashMap<String, Option<String>>);"],
+        )
+        .map(),
+        shape("exhaustive", "Ex", &[EXHAUSTIVE]),
+        shape("hash_map_exhaustive", "HashMap<String, Ex>", &[EXHAUSTIVE]).map(),
+        shape("hash_map_box_str", "HashMap<String, Box<str>>", &[]).map(),
+        shape("hash_map_char", "HashMap<String, char>", &[]).map(),
+        shape("hash_map_vec", "HashMap<String, Vec<String>>", &[]).map(),
+        shape("hash_map_map", "HashMap<String, HashMap<String, String>>", &[]).map(),
+        shape("hash_map_code", "HashMap<String, Code>", &[CODE]).map(),
+        shape("hash_map_sub", "HashMap<String, Sub>", &[SUB]).map(),
+        shape(
+            "hash_map_custom_hasher",
+            "HashMap<String, String, std::hash::BuildHasherDefault<std::collections::hash_map::DefaultHasher>>",
+            &[],
+        )
+        .map(),
+        shape("char", "char", &[]),
+        shape("u128", "u128", &[]),
+        shape("f32", "f32", &[]),
+        shape("box_str", "Box<str>", &[]),
+        shape("option_box_vec", "Option<Box<Vec<String>>>", &[]),
+        shape("vec_option", "Vec<Option<String>>", &[]),
+        shape("naive_date", "chrono::NaiveDate", &[]),
+        shape("naive_date_time", "chrono::NaiveDateTime", &[]),
+        shape("naive_time", "chrono::NaiveTime", &[]),
+        shape("date_time_utc", "chrono::DateTime<chrono::Utc>", &[]),
+        shape(
+            "tagged_over_non_zero",
+            "Tnz",
+            &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct Tnz(pub std::num::NonZeroU32);"],
+        ),
+        shape(
+            "tagged_over_wrapping",
+            "Tw",
+            &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct Tw(pub std::num::Wrapping<i64>);"],
+        ),
+        shape(
+            "tagged_over_reverse",
+            "Trv",
+            &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct Trv(pub std::cmp::Reverse<i64>);"],
+        ),
+        shape(
+            "tagged_over_cell",
+            "Tc",
+            &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct Tc(pub std::cell::Cell<i64>);"],
+        ),
+        shape(
+            "tagged_over_ref_cell_map",
+            "Trc",
+            &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct Trc(pub std::cell::RefCell<HashMap<String, String>>);"],
+        ),
+        shape(
+            "tagged_over_mutex_map",
+            "Tmx",
+            &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct Tmx(pub std::sync::Mutex<HashMap<String, String>>);"],
+        ),
+        shape(
+            "tagged_over_cow_slice",
+            "Tcs",
+            &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct Tcs(pub Cow<'static, [String]>);"],
+        ),
+        shape(
+            "tagged_over_duration",
+            "Td",
+            &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct Td(pub std::time::Duration);"],
+        ),
+        shape(
+            "tagged_over_geo_point",
+            "Tg",
+            &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct Tg(pub flusso_query::GeoPoint);"],
+        ),
+        shape(
+            "tagged_over_char",
+            "Tch",
+            &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct Tch(pub char);"],
+        ),
+        shape(
+            "tagged_over_cow_str",
+            "Tcw",
+            &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct Tcw(pub Cow<'static, str>);"],
+        )
+        .unseen()
+        .string(),
+
     ]
 }
 
@@ -311,6 +424,13 @@ const INNERS: &[(&str, &str, &[&str], bool)] = &[
     ("btv", "BTreeMap<String, serde_json::Value>", &[], true),
     ("alias", "Ms", &[ALIAS], true),
     ("mk", "MapKw", &[MAP_KW], true),
+    ("ch", "char", &[], false),
+    ("f", "f32", &[], false),
+    ("bs", "Box<str>", &[], false),
+    ("hmo", "HashMap<String, Option<String>>", &[], true),
+    ("hmv", "HashMap<String, Vec<String>>", &[], true),
+    ("hmm", "HashMap<String, HashMap<String, String>>", &[], true),
+    ("hme", "BTreeMap<String, En>", &[EN], true),
 ];
 
 /// The wrappers of [`generated_shapes`], around the inner type.
@@ -383,7 +503,7 @@ fn generated_shapes() -> Vec<Shape> {
                     unseen: derive == "keyword_value"
                         && inner == "alias"
                         && matches!(wrap, "" | "opt_" | "box_"),
-                    string: matches!(inner, "s" | "cow" | "code")
+                    string: matches!(inner, "s" | "cow" | "code" | "bs")
                         && matches!(wrap, "" | "opt_" | "box_")
                         && derive != "map",
                 });
@@ -411,18 +531,29 @@ const KINDS: &[(&str, bool)] = &[
     ("ho", true),
     ("mpo", true),
     ("jso", true),
+    ("dt", false),
+    ("ts", false),
+    ("cm", false),
+    ("co", false),
 ];
 
-/// Sample documents of the `boundary` index, as the sink writes them: every
-/// field set with many elements; every array and map empty and every nullable
-/// field `null`; nullable keys missing, with values a plain `keyword` takes and
-/// an enum of `a`/`b` does not; one element each.
+/// Sample documents of the `boundary` index, as the sink writes them (see
+/// `sink`'s `json::tests` for the date forms): every field set with many
+/// elements; every array and map empty and every nullable field `null`;
+/// nullable keys missing, with values a plain `keyword` takes and an enum of
+/// `a`/`b` does not; one element each; and [`NULL_DOC`], a `null` under a map
+/// key. A `timestamp` field (`ts`) holds whatever its column is: a
+/// `timestamptz`, a naive `timestamp` or a `time`.
 const DOCS: &[&str] = &[
-    r#"{"id":"1","kw":"a","n":1,"kwa":["a","b"],"ob":{"k":"a","n":1},"ne":[{"k":"a","n":1},{"k":"b","n":2}],"mp":{"x":"a","y":"b"},"mpn":{"x":1,"y":2},"js":{"any":[1]},"jsa":[1,"x"],"gp":{"lat":1.5,"lon":2.5},"kwo":"a","nn":1,"kwao":["a","b"],"ho":{"k":"a","n":1},"mpo":{"x":"a","y":"b"},"jso":{"a":1}}"#,
-    r#"{"id":"2","kw":"b","n":2,"kwa":[],"ob":{"k":"b","n":2},"ne":[],"mp":{},"mpn":{},"js":{},"jsa":[],"gp":{"lat":0.0,"lon":0.0},"kwo":null,"nn":null,"kwao":null,"ho":null,"mpo":null,"jso":null}"#,
-    r#"{"id":"3","kw":"z","n":3,"kwa":["z"],"ob":{"k":"z","n":3},"ne":[{"k":"z","n":3}],"mp":{"x":"z"},"mpn":{"y":3},"js":"z","jsa":["z"],"gp":{"lat":-1.0,"lon":1.0}}"#,
-    r#"{"id":"4","kw":"bb","n":4,"kwa":["a"],"ob":{"k":"a","n":4},"ne":[{"k":"a","n":4}],"mp":{"x":"a"},"mpn":{"x":4},"js":[1],"jsa":[{"a":1}],"gp":{"lat":2.0,"lon":3.0},"kwo":"b","nn":4,"kwao":[],"ho":{"k":"b","n":4},"mpo":{},"jso":[]}"#,
+    r#"{"id":"1","kw":"a","n":1,"kwa":["a","b"],"ob":{"k":"a","n":1},"ne":[{"k":"a","n":1},{"k":"b","n":2}],"mp":{"x":"a","y":"b"},"mpn":{"x":1,"y":2},"js":{"any":[1]},"jsa":[1,"x"],"gp":{"lat":1.5,"lon":2.5},"kwo":"a","nn":1,"kwao":["a","b"],"ho":{"k":"a","n":1},"mpo":{"x":"a","y":"b"},"jso":{"a":1},"dt":"2024-01-02","ts":"2024-01-02T03:04:05.123456+00:00","cm":[1,"x"],"co":{"a":1}}"#,
+    r#"{"id":"2","kw":"b","n":2,"kwa":[],"ob":{"k":"b","n":2},"ne":[],"mp":{},"mpn":{},"js":{},"jsa":[],"gp":{"lat":0.0,"lon":0.0},"kwo":null,"nn":null,"kwao":null,"ho":null,"mpo":null,"jso":null,"dt":"2024-01-03","ts":"2024-01-03T00:00:00+00:00","cm":[1,"x"],"co":{"a":1}}"#,
+    r#"{"id":"3","kw":"z","n":3,"kwa":["z"],"ob":{"k":"z","n":3},"ne":[{"k":"z","n":3}],"mp":{"x":"z"},"mpn":{"y":3},"js":"z","jsa":["z"],"gp":{"lat":-1.0,"lon":1.0},"dt":"2024-01-04","ts":"2024-01-02 03:04:05.123456","cm":[1,"x"],"co":{"a":1}}"#,
+    r#"{"id":"4","kw":"bb","n":4,"kwa":["a"],"ob":{"k":"a","n":4},"ne":[{"k":"a","n":4}],"mp":{"x":"a"},"mpn":{"x":4},"js":[1],"jsa":[{"a":1}],"gp":{"lat":2.0,"lon":3.0},"kwo":"b","nn":4,"kwao":[],"ho":{"k":"b","n":4},"mpo":{},"jso":[],"dt":"2024-01-05","ts":"03:04:05.123456","cm":[1,"x"],"co":{"a":1}}"#,
+    r#"{"id":"5","kw":"a","n":5,"kwa":["a"],"ob":{"k":"a","n":5},"ne":[{"k":"a","n":5}],"mp":{"x":null,"y":"a"},"mpn":{"x":null},"js":{},"jsa":[],"gp":{"lat":1.0,"lon":1.0},"kwo":"a","nn":5,"kwao":["a"],"ho":{"k":"a","n":5},"mpo":{"x":null},"jso":{},"dt":"2024-01-06","ts":"2024-01-06T00:00:00+00:00","cm":[1,"x"],"co":{"a":1}}"#,
 ];
+
+/// The document whose only difference is a `null` under a map key.
+const NULL_DOC: usize = 4;
 
 /// Where the generator places a shape.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -457,52 +588,67 @@ struct Trust {
     rule: &'static str,
     /// A phrase of the manual's list that states this rule.
     manual: &'static str,
-    applies: fn(&Case) -> bool,
+    /// Whether the rule covers this case failing on document `doc` (an
+    /// index into [`DOCS`]) with `error`: a rule is tied to the failure it
+    /// describes, not only to the shape.
+    applies: fn(&Case, usize, &str) -> bool,
 }
 
-const TRUSTED: &[Trust] =
-    &[
-        Trust {
-            rule: "json",
-            manual: "**Any type at a `json` field.**",
-            applies: |case| matches!(case.kind, "js" | "jsa" | "jso"),
+const TRUSTED: &[Trust] = &[
+    Trust {
+        rule: "json",
+        manual: "**Any type at a `json` field, or at a `constant` stored unindexed.**",
+        applies: |case, _, _| matches!(case.kind, "js" | "jsa" | "jso" | "cm" | "co"),
+    },
+    Trust {
+        rule: "flattened",
+        manual: "**A `#[serde(flatten)]` map.**",
+        applies: |case, _, _| case.position == Position::Flattened && case.shape.map,
+    },
+    Trust {
+        rule: "variants",
+        manual: "**An enum where the schema declares no `variants:`.**",
+        applies: |case, _, error| {
+            case.shape.decls.iter().any(|decl| decl == EN) && error.contains("unknown variant")
         },
-        Trust {
-            rule: "flattened",
-            manual: "**A `#[serde(flatten)]` map.**",
-            applies: |case| case.position == Position::Flattened && case.shape.map,
+    },
+    Trust {
+        rule: "null",
+        manual: "**A map value that is not an `Option`.**",
+        applies: |_, doc, error| doc == NULL_DOC && error.contains("null"),
+    },
+    Trust {
+        rule: "dates",
+        manual: "**A date type at a `date` or `timestamp` field.**",
+        applies: |case, _, _| matches!(case.kind, "dt" | "ts"),
+    },
+    Trust {
+        rule: "unseen",
+        manual: "**Any other type behind a tagged `FlussoValue` newtype.**",
+        applies: |case, _, _| case.shape.unseen,
+    },
+    Trust {
+        rule: "opaque",
+        manual: "**What [`#[flusso(opaque)]`](#escape-hatches) turns off**",
+        applies: |case, _, _| case.shape.attrs.contains("opaque"),
+    },
+    Trust {
+        rule: "serde",
+        manual: "**serde attributes that change what is read**",
+        applies: |case, _, _| {
+            case.shape.attrs.contains("with")
+                || case.shape.decls.iter().any(|decl| {
+                    decl.contains("try_from")
+                        || (decl.contains("deny_unknown_fields") && decl.contains("FlussoFragment"))
+                })
         },
-        Trust {
-            rule: "variants",
-            manual: "**An enum where the schema declares no `variants:`.**",
-            applies: |case| case.shape.decls.iter().any(|decl| decl == EN),
-        },
-        Trust {
-            rule: "unseen",
-            manual: "**A tagged `FlussoValue` newtype over a type the derive can't see into.**",
-            applies: |case| case.shape.unseen,
-        },
-        Trust {
-            rule: "opaque",
-            manual: "**What [`#[flusso(opaque)]`](#escape-hatches) turns off**",
-            applies: |case| case.shape.attrs.contains("opaque"),
-        },
-        Trust {
-            rule: "serde",
-            manual: "**serde attributes that change what is read**",
-            applies: |case| {
-                case.shape.attrs.contains("with")
-                    || case.shape.decls.iter().any(|decl| {
-                        decl.contains("try_from") || decl.contains("deny_unknown_fields")
-                    })
-            },
-        },
-        Trust {
-            rule: "geo",
-            manual: "**A `String` at a `geo` field.**",
-            applies: |case| case.kind == "gp" && case.shape.string,
-        },
-    ];
+    },
+    Trust {
+        rule: "geo",
+        manual: "**A `String` at a `geo` field.**",
+        applies: |case, _, _| case.kind == "gp" && case.shape.string,
+    },
+];
 
 /// The (shape, field) pairs whose root and fragment placements may disagree,
 /// each with why. Every other pair records one outcome for both.
@@ -636,8 +782,8 @@ fn file(units: &[Unit], members: &[usize]) -> File {
     }
     source.push_str(
         "    ];\n    for (index, read) in cases {\n        for doc in DOCS {\n            \
-         if let Err(error) = read(doc) {\n                println!(\"{index}\\t{error}\");\n                \
-         break;\n            }\n        }\n    }\n}\n",
+         if let Err(error) = read(doc) {\n                println!(\"{index}\\t{}\\t{error}\", \
+         DOCS.iter().position(|d| d == doc).unwrap());\n            }\n        }\n    }\n}\n",
     );
     File { source, lines }
 }
@@ -684,6 +830,10 @@ impl Project {
                 }
             }
         }
+        // The date shapes name chrono's types; the derive sees them by name.
+        let mut chrono = toml::Table::new();
+        chrono.insert("workspace".into(), true.into());
+        dependencies.insert("chrono".into(), chrono.into());
         let mut this = toml::Table::new();
         this.insert("path".into(), crate_dir.display().to_string().into());
         this.insert("default-features".into(), false.into());
@@ -846,7 +996,7 @@ fn compile(
     project: &Project,
     prefix: &str,
     units: &[Unit],
-) -> (BTreeSet<usize>, BTreeMap<usize, String>) {
+) -> (BTreeSet<usize>, BTreeMap<usize, Vec<(usize, String)>>) {
     let mut alive: Vec<Vec<usize>> = (0..units.len())
         .collect::<Vec<_>>()
         .chunks(CHUNK)
@@ -888,15 +1038,23 @@ fn compile(
         }
         refused.extend(now_refused);
     }
-    let mut failures = BTreeMap::new();
+    let mut failures: BTreeMap<usize, Vec<(usize, String)>> = BTreeMap::new();
     for name in files.keys() {
         let output = Command::new(project.target.join("debug").join(name))
             .output()
             .unwrap();
         assert!(output.status.success(), "{name} did not run to the end");
         for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let (index, error) = line.split_once('\t').unwrap();
-            failures.insert(index.parse::<usize>().unwrap(), error.to_string());
+            let mut parts = line.splitn(3, '\t');
+            let (index, doc, error) = (
+                parts.next().unwrap(),
+                parts.next().unwrap(),
+                parts.next().unwrap(),
+            );
+            failures
+                .entry(index.parse::<usize>().unwrap())
+                .or_default()
+                .push((doc.parse::<usize>().unwrap(), error.to_string()));
         }
     }
     (refused, failures)
@@ -906,7 +1064,8 @@ fn compile(
 enum Outcome {
     Refused,
     Reads,
-    Trusted(&'static str),
+    /// The rules covering every failing document, joined with `+`.
+    Trusted(String),
 }
 
 impl std::fmt::Display for Outcome {
@@ -931,14 +1090,20 @@ fn observe(project: &Project, prefix: &str, cases: &[Case]) -> Vec<Result<Outcom
             if refused.contains(&index) {
                 return Ok(Outcome::Refused);
             }
-            let Some(error) = failures.get(&index) else {
+            let Some(failed) = failures.get(&index) else {
                 return Ok(Outcome::Reads);
             };
-            TRUSTED
-                .iter()
-                .find(|trust| (trust.applies)(case))
-                .map(|trust| Outcome::Trusted(trust.rule))
-                .ok_or_else(|| error.clone())
+            let mut rules = BTreeSet::new();
+            for (doc, error) in failed {
+                let rule = TRUSTED
+                    .iter()
+                    .find(|trust| (trust.applies)(case, *doc, error))
+                    .ok_or_else(|| format!("document {doc}: {error}"))?;
+                rules.insert(rule.rule);
+            }
+            Ok(Outcome::Trusted(
+                rules.into_iter().collect::<Vec<_>>().join("+"),
+            ))
         })
         .collect()
 }

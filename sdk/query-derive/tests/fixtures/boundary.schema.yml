@@ -68,3 +68,11 @@ fields:
     required: false
   - json: jso
     required: false
+  - date: dt
+    required: true
+  - timestamp: ts
+    required: true
+  - constant: cm
+    value: [1, "x"]
+  - constant: co
+    value: { a: 1 }
