@@ -2929,4 +2929,33 @@ keyed_by! {
         ["1", "2"], ["1", "2"];
     every_relation_position_keyed_by_char: "char(3)", &[], ["'ab'", "'cd'"], ["ab ", "cd "];
     every_relation_position_keyed_by_float8: "float8", &[], ["1.5", "2.5"], ["1.5", "2.5"];
+    every_relation_position_keyed_by_a_numeric_nan: "numeric", &[], ["'NaN'", "1.50"], ["NaN", "1.50"];
+    every_relation_position_keyed_by_a_date_at_infinity: "date", &[],
+        ["'infinity'", "'-infinity'"], ["infinity", "-infinity"];
+    every_relation_position_keyed_by_a_timestamp_at_infinity: "timestamp", &[],
+        ["'infinity'", "'-infinity'"], ["infinity", "-infinity"];
+    every_relation_position_keyed_by_a_timestamptz_at_infinity: "timestamptz", &[],
+        ["'infinity'", "'-infinity'"], ["infinity", "-infinity"];
+    every_relation_position_keyed_by_a_date_before_christ: "date", &[],
+        ["'0044-03-15 BC'", "'2024-01-01'"], ["-0043-03-15", "2024-01-01"];
+    every_relation_position_keyed_by_a_timestamptz_before_christ: "timestamptz", &[],
+        ["'0044-03-15 10:00:00+00 BC'", "'2024-01-01 10:00:00+00'"],
+        ["-0043-03-15T10:00:00+00:00", "2024-01-01T10:00:00+00:00"];
+    every_relation_position_keyed_by_date_under_sql_datestyle: "date",
+        &["ALTER DATABASE postgres SET DateStyle = 'SQL, DMY'"],
+        ["'2024-01-31'", "'2024-02-29'"], ["2024-01-31", "2024-02-29"];
+    every_relation_position_keyed_by_timestamp_under_postgres_datestyle: "timestamp",
+        &["ALTER DATABASE postgres SET DateStyle = 'Postgres, MDY'"],
+        ["'2024-01-31 10:00:00'", "'2024-02-29 10:00:00.5'"],
+        ["2024-01-31 10:00:00", "2024-02-29 10:00:00.500"];
+    every_relation_position_keyed_by_timestamptz_under_german_datestyle: "timestamptz",
+        &["ALTER DATABASE postgres SET DateStyle = 'German'", "ALTER DATABASE postgres SET TimeZone = 'Europe/Warsaw'"],
+        ["'2024-01-31 10:00:00+00'", "'2024-07-01 12:00:00.25+02'"],
+        ["2024-01-31T10:00:00+00:00", "2024-07-01T10:00:00.250+00:00"];
+    every_relation_position_keyed_by_bytea_under_escape_output: "bytea",
+        &["ALTER DATABASE postgres SET bytea_output = 'escape'"],
+        ["'\\x01ab'", "'\\x02cd'"], ["\\x01ab", "\\x02cd"];
+    every_relation_position_keyed_by_float8_under_fewer_float_digits: "float8",
+        &["ALTER DATABASE postgres SET extra_float_digits = 0"],
+        ["'0.3333333333333333'", "2.5"], ["0.3333333333333333", "2.5"];
 }
