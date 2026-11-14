@@ -830,7 +830,8 @@ fn array_shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span
                 !array
                     || values
                     || !::flusso_query::exists(level, #key)
-                    || ::flusso_query::is_nested(level, #key),
+                    || ::flusso_query::is_nested(level, #key)
+                    || ::flusso_query::is_unmodeled(level, #key),
                 #sub_documents_at_a_leaf_msg
             );
         }
@@ -1010,9 +1011,15 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
         );
         checks.extend(not_a_json_array(fragment, key, inner, span));
         checks.extend(match primitive_kinds(value_ty) {
-            Some(tags) => quote_spanned! {span=>
-                assert!(::flusso_query::map_value_is(level, #key, &[#(#tags),*]), #msg);
-            },
+            Some(tags) => {
+                let own = own_value_kinds(value_ty, quote! { map_value_is }, key);
+                quote_spanned! {span=>
+                    assert!(
+                        ::flusso_query::map_value_is(level, #key, &[#(#tags),*]) || #own,
+                        #msg
+                    );
+                }
+            }
             // Read through the probe: a value type with no flusso metadata
             // (`char`, a `Vec`, a map) fits a `json` field, as on a root, and
             // no `map`.
@@ -1089,12 +1096,31 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
     let json_array = quote! { ::flusso_query::is_json(level, #key) };
     match primitive_kinds(element) {
         // A known leaf type — its acceptable kinds are baked right here.
-        Some(tags) => checks.extend(quote_spanned! {span=>
-            assert!(
-                ::flusso_query::kind_is(level, #key, &[#(#tags),*]) || #json_array,
-                #kind_msg
+        Some(tags) => {
+            let own = own_value_kinds(element, quote! { kind_is }, key);
+            checks.extend(quote_spanned! {span=>
+                assert!(
+                    ::flusso_query::kind_is(level, #key, &[#(#tags),*]) || #json_array || #own,
+                    #kind_msg
+                );
+            });
+        }
+        // A std type no flusso derive can reach: it has neither metadata nor
+        // a check of its own, so only a kind the derive does not model takes
+        // it, as on a root.
+        None if is_std_without_meta(element) => {
+            let msg = message(
+                fragment,
+                key,
+                &format!(
+                    "is `{}`, which has no flusso kind, so it cannot hold the schema field at                      this path; wrap it in a newtype that derives `FlussoValue`",
+                    render(element)
+                ),
             );
-        }),
+            checks.extend(quote_spanned! {span=>
+                assert!(::flusso_query::is_unmodeled(level, #key), #msg);
+            });
+        }
         // Any other type is treated uniformly: kinds + variants from its
         // metadata, then recurse. A value type's check is a no-op.
         None => {
@@ -1173,7 +1199,11 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
                     render(element)
                 ),
             );
+            // A kind the derive does not model takes any type on a root, so
+            // nothing is checked there, and the walk into the type, which
+            // would look for fields a leaf does not have, is skipped.
             checks.extend(quote_spanned! {span=>
+                if !::flusso_query::is_unmodeled(level, #key) {
                 assert!(
                     ::flusso_query::kind_is(
                         level, #key,
@@ -1267,10 +1297,79 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
                     #exhausted_msg
                 );
                 <#element>::__flusso_check(::flusso_query::children(level, #key));
+                }
             });
         }
     }
     checks
+}
+
+/// Whether a type named like a built-in leaf is a value type of its own whose
+/// kinds fit the field: its metadata says so, and it is no sub-document, map
+/// or array. A root checks such a type by its `FlussoValue` bound, so a
+/// fragment takes it by those kinds as well as by its name. `check` is
+/// `kind_is` or `map_value_is`.
+fn own_value_kinds(ty: &Type, check: TokenStream, key: &str) -> TokenStream {
+    if !is_foreign_leaf(ty) {
+        return quote! { false };
+    }
+    quote! {
+        {
+            #[allow(unused_imports)]
+            use ::flusso_query::OpaqueWithoutMeta as _;
+            ::flusso_query::OpaqueProbe::<#ty>::HAS_META
+                && !::flusso_query::OpaqueProbe::<#ty>::AT_OBJECT
+                && !::flusso_query::OpaqueProbe::<#ty>::AT_NESTED
+                && !::flusso_query::OpaqueProbe::<#ty>::ARRAY
+                && ::flusso_query::#check(
+                    level, #key, ::flusso_query::OpaqueProbe::<#ty>::KINDS,
+                )
+        }
+    }
+}
+
+/// A std type that no flusso derive can give metadata or a check: a tuple,
+/// array, slice or reference, a primitive without a flusso kind (`char`,
+/// `u128`, …), or a generic std wrapper or collection (`Box<…>`, `Cow<…>`,
+/// `Option<…>`, …). Generic arguments tell a std wrapper from a type of your
+/// own named like one.
+fn is_std_without_meta(ty: &Type) -> bool {
+    let path = match ty {
+        Type::Path(path) => path,
+        Type::Group(group) => return is_std_without_meta(&group.elem),
+        Type::Paren(paren) => return is_std_without_meta(&paren.elem),
+        _ => return true,
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return false;
+    };
+    let name = segment.ident.to_string();
+    if crate::doc::is_primitive(Some(&name)) {
+        return true;
+    }
+    matches!(segment.arguments, syn::PathArguments::AngleBracketed(_))
+        && matches!(
+            name.as_str(),
+            "Box"
+                | "Rc"
+                | "Arc"
+                | "Cow"
+                | "Option"
+                | "Vec"
+                | "Cell"
+                | "RefCell"
+                | "Mutex"
+                | "RwLock"
+                | "Wrapping"
+                | "Saturating"
+                | "Reverse"
+                | "HashSet"
+                | "BTreeSet"
+                | "VecDeque"
+                | "LinkedList"
+                | "BinaryHeap"
+                | "NonZero"
+        )
 }
 
 /// A map reads one object, so it never holds a `json` array: as on a root.

@@ -682,7 +682,10 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
                 inner
             };
             let found = leaf_ident(inner);
-            if found.as_deref().is_some_and(|f| expected.contains(&f)) {
+            if found
+                .as_deref()
+                .is_some_and(|f| expected.contains(&f) || decimal_at_a_double(scalar, f))
+            {
                 return Ok(None);
             }
             // Hybrid: a user-defined type (a path that isn't a known primitive)
@@ -914,7 +917,9 @@ fn check_map_type(
             let value_ty = option_inner(value_ty).unwrap_or(value_ty);
             let expected = expected_leaves(&values.mapping_type);
             let found = leaf_ident(value_ty);
-            if found.as_deref().is_some_and(|f| expected.contains(&f)) {
+            if found.as_deref().is_some_and(|f| {
+                expected.contains(&f) || decimal_at_a_double(&values.mapping_type, f)
+            }) {
                 return Ok(None);
             }
             if let Some(kind) = kind
@@ -1116,6 +1121,12 @@ fn expected_leaves(mapping_type: &MappingType) -> Vec<&'static str> {
         // Object/Nested handled by the caller; any other Other → accept anything.
         _ => vec![],
     }
+}
+
+/// `Decimal` at a `double`, taken by its name as a fragment takes it: it reads
+/// every double inside its range, so it is trusted with the rest.
+fn decimal_at_a_double(mapping_type: &MappingType, found: &str) -> bool {
+    found == "Decimal" && matches!(mapping_type, MappingType::Double | MappingType::ScaledFloat)
 }
 
 pub(crate) fn is_primitive(ident: Option<&str>) -> bool {

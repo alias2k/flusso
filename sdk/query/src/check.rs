@@ -240,6 +240,17 @@ pub const fn is_json(level: &[FieldSpec], name: &str) -> bool {
     }
 }
 
+/// Whether `name` is of a mapping kind this vocabulary does not model (a
+/// `custom` field's `ip`, for one): a root takes any type there, so a fragment
+/// does too. Absent → `false`.
+#[must_use]
+pub const fn is_unmodeled(level: &[FieldSpec], name: &str) -> bool {
+    match find(level, name) {
+        Some(field) => matches!(field.kind, KindTag::Other),
+        None => false,
+    }
+}
+
 /// Whether `name`'s mapping kind is one `accepted` Rust type can hold.
 ///
 /// `accepted` comes from the fragment's Rust field type — either inferred from a
