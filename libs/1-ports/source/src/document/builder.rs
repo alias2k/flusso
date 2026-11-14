@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use kernel::{GenericValue, IndexMapping, IndexName, TableName};
 
+use crate::cdc::ChangeEvent;
 use crate::{Result, RowImage, RowKey, SnapshotTable};
 
 /// Addresses one document in a target index: which index, and the root row's
@@ -181,6 +182,26 @@ pub trait DocumentBuilder: std::fmt::Debug + Send + Sync {
         before: Option<&RowImage>,
         after: Option<&RowImage>,
     ) -> Result<Vec<DocumentId>>;
+
+    /// The documents a batch of changes affects, as [`resolve`](Self::resolve)
+    /// gives each, in any order and possibly repeated. A builder whose
+    /// resolution queries can be shared across changes overrides it to run
+    /// them once per batch; the default resolves change by change.
+    async fn resolve_many(&self, changes: &[ChangeEvent]) -> Result<Vec<DocumentId>> {
+        let mut ids = Vec::new();
+        for change in changes {
+            ids.extend(
+                self.resolve(
+                    change.table(),
+                    change.key(),
+                    change.before(),
+                    change.after(),
+                )
+                .await?,
+            );
+        }
+        Ok(ids)
+    }
 
     /// Assemble one document, or report it deleted if its root row is absent.
     async fn build(&self, id: &DocumentId) -> Result<Document>;

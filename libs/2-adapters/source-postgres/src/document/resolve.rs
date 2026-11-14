@@ -27,8 +27,10 @@
 use std::collections::{HashMap, HashSet};
 
 use kernel::{
-    ColumnName, DatabaseSchema, GenericValue, IndexSchema, Relation, RelationKey, TableName,
+    ColumnName, DatabaseSchema, GenericValue, IndexName, IndexSchema, Relation, RelationKey,
+    TableName,
 };
+use source::document::DocumentId;
 use source::{Result, RowImage, RowKey, SourceError};
 
 use super::fields::Step;
@@ -305,7 +307,44 @@ impl PgDocumentBuilder {
     }
 }
 
+/// The link values a batch's paths ended on, per index: each is read back as
+/// the root row's own key by [`read_root_links`](PgDocumentBuilder::read_root_links),
+/// one query per index for the whole batch.
+#[derive(Debug, Default)]
+pub(super) struct RootLinks(HashMap<IndexName, (Vec<GenericValue>, HashSet<GenericValue>)>);
+
+impl RootLinks {
+    pub(super) fn add(&mut self, index: &IndexName, links: Vec<GenericValue>) {
+        let (ordered, seen) = self.0.entry(index.clone()).or_default();
+        for link in links {
+            if seen.insert(link.clone()) {
+                ordered.push(link);
+            }
+        }
+    }
+}
+
 impl PgDocumentBuilder {
+    /// The documents `links` name: per index, the root rows' own keys.
+    pub(super) async fn read_root_links(&self, links: RootLinks) -> Result<Vec<DocumentId>> {
+        let mut ids = Vec::new();
+        for (index, (links, _)) in links.0 {
+            let Some(schema) = self.spec.schema(&index) else {
+                continue;
+            };
+            let Some(pk) = schema.primary_key.as_ref() else {
+                continue;
+            };
+            for root in self.root_keys(schema, pk, &links).await? {
+                ids.push(DocumentId {
+                    index: index.clone(),
+                    key: RowKey(vec![(pk.clone(), root)]),
+                });
+            }
+        }
+        Ok(ids)
+    }
+
     /// Whether the root keys `path` resolves to are a link's value rather
     /// than the root row's own key, and that value may be spelled
     /// differently: a key whose equal values render differently (see

@@ -63,6 +63,7 @@ mod fields;
 mod query;
 mod reads;
 mod resolve;
+use resolve::RootLinks;
 pub(crate) mod value;
 
 use std::collections::{HashMap, HashSet};
@@ -73,6 +74,7 @@ use kernel::{
     ColumnName, DatabaseSchema, Filter, IndexMapping, IndexName, IndexSchema, SoftDelete,
     TableName, Transform,
 };
+use source::cdc::ChangeEvent;
 use source::document::{BuildFailure, Document, DocumentBuilder, DocumentId, IndexScope};
 use source::{
     Catalog, ColumnInfo, Result, RowDiff, RowImage, RowKey, SnapshotTable, SourceError, SourceSpec,
@@ -546,6 +548,132 @@ impl PgDocumentBuilder {
     }
 }
 
+impl PgDocumentBuilder {
+    /// One change's documents. A path that ends on a link's value, which may
+    /// spell the root key differently, adds it to `links` instead (see
+    /// [`reads_root_from_a_link`](Self::reads_root_from_a_link)).
+    #[tracing::instrument(
+        name = "pg.resolve",
+        level = "debug",
+        skip_all,
+        fields(table = table.as_ref()),
+        err,
+    )]
+    async fn resolve_change(
+        &self,
+        table: &TableName,
+        key: &RowKey,
+        before: Option<&RowImage>,
+        after: Option<&RowImage>,
+        links: &mut RootLinks,
+    ) -> Result<Vec<DocumentId>> {
+        let mut ids = Vec::new();
+        let mut read = false;
+        let mut skipped = 0_usize;
+        let mut unaddressed = 0_usize;
+        let diff = RowDiff::new(key, before, after);
+        for (name, schema) in self.spec.indexes() {
+            let is_root = schema.table == *table;
+            let mut seen = HashSet::new();
+            if is_root {
+                read = true;
+                if key.has_null() {
+                    unaddressed += 1;
+                    self.warn_keyless_root(schema, table, key);
+                } else if self.reads.root(name).touched_by(&diff) {
+                    ids.push(DocumentId {
+                        index: name.clone(),
+                        key: key.clone(),
+                    });
+                    // A row that is its own ancestor must not re-emit this id.
+                    if let (Some(pk_column), [(column, own)]) =
+                        (&schema.primary_key, key.0.as_slice())
+                        && column == pk_column
+                    {
+                        seen.insert(own.clone());
+                    }
+                } else {
+                    skipped += 1;
+                }
+            }
+
+            let mut paths = Vec::new();
+            let mut prefix = Vec::new();
+            find_paths(&schema.fields, table, &mut prefix, &mut paths);
+            if paths.is_empty() {
+                continue;
+            }
+            read = true;
+            let Some(pk_column) = schema.primary_key.clone() else {
+                tracing::warn!(
+                    index = %name, table = %table,
+                    "cannot reverse-resolve: index has no primary_key",
+                );
+                continue;
+            };
+
+            let mut roots = Vec::new();
+            for (n, path) in paths.iter().enumerate() {
+                if !self.reads.path(name, table, n).touched_by(&diff) {
+                    skipped += 1;
+                    continue;
+                }
+                let found = self.resolve_path(schema, table, key, before, path).await?;
+                if self
+                    .reads_root_from_a_link(schema, &pk_column, path)
+                    .await?
+                {
+                    links.add(name, found);
+                } else {
+                    roots.extend(found);
+                }
+            }
+            for root in roots {
+                if seen.insert(root.clone()) {
+                    ids.push(DocumentId {
+                        index: name.clone(),
+                        key: RowKey(vec![(pk_column.clone(), root)]),
+                    });
+                }
+            }
+        }
+        if skipped > 0 {
+            tracing::trace!(skipped, "update changed no column these documents read");
+        }
+        if unaddressed > 0 {
+            tracing::debug!(
+                unaddressed,
+                "a change whose key has a null part addresses no document of its own"
+            );
+        }
+        if !read {
+            self.warn_unread(table);
+        }
+        tracing::trace!(documents = ids.len(), "resolved affected documents");
+        Ok(ids)
+    }
+
+    /// `ids` plus the documents `links` name, read back as the root rows' own
+    /// keys, deduplicated.
+    async fn with_root_keys(
+        &self,
+        ids: Vec<DocumentId>,
+        links: RootLinks,
+    ) -> Result<Vec<DocumentId>> {
+        let mut seen = HashSet::new();
+        let mut out: Vec<DocumentId> = ids
+            .into_iter()
+            .filter(|id| seen.insert(id.clone()))
+            .collect();
+        for id in self.read_root_links(links).await? {
+            if seen.insert(id.clone()) {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    }
+}
+
 /// The Postgres source's view of its own catalog. The index mapping is derived
 /// from the self-describing schema in [`kernel`]; this is the one
 /// store-specific piece used for *validation* — how Postgres types and
@@ -636,13 +764,6 @@ const AMBIGUOUS_FUNCTION: &str = "42725";
 
 #[async_trait]
 impl DocumentBuilder for PgDocumentBuilder {
-    #[tracing::instrument(
-        name = "pg.resolve",
-        level = "debug",
-        skip_all,
-        fields(table = table.as_ref()),
-        err,
-    )]
     async fn resolve(
         &self,
         table: &TableName,
@@ -650,93 +771,31 @@ impl DocumentBuilder for PgDocumentBuilder {
         before: Option<&RowImage>,
         after: Option<&RowImage>,
     ) -> Result<Vec<DocumentId>> {
+        let mut links = RootLinks::default();
+        let ids = self
+            .resolve_change(table, key, before, after, &mut links)
+            .await?;
+        self.with_root_keys(ids, links).await
+    }
+
+    /// Every change's documents, with the root keys all their links name read
+    /// back in one query per index and link column.
+    async fn resolve_many(&self, changes: &[ChangeEvent]) -> Result<Vec<DocumentId>> {
+        let mut links = RootLinks::default();
         let mut ids = Vec::new();
-        let mut read = false;
-        let mut skipped = 0_usize;
-        let mut unaddressed = 0_usize;
-        let diff = RowDiff::new(key, before, after);
-        for (name, schema) in self.spec.indexes() {
-            let is_root = schema.table == *table;
-            let mut seen = HashSet::new();
-            if is_root {
-                read = true;
-                if key.has_null() {
-                    unaddressed += 1;
-                    self.warn_keyless_root(schema, table, key);
-                } else if self.reads.root(name).touched_by(&diff) {
-                    ids.push(DocumentId {
-                        index: name.clone(),
-                        key: key.clone(),
-                    });
-                    // A row that is its own ancestor must not re-emit this id.
-                    if let (Some(pk_column), [(column, own)]) =
-                        (&schema.primary_key, key.0.as_slice())
-                        && column == pk_column
-                    {
-                        seen.insert(own.clone());
-                    }
-                } else {
-                    skipped += 1;
-                }
-            }
-
-            let mut paths = Vec::new();
-            let mut prefix = Vec::new();
-            find_paths(&schema.fields, table, &mut prefix, &mut paths);
-            if paths.is_empty() {
-                continue;
-            }
-            read = true;
-            let Some(pk_column) = schema.primary_key.clone() else {
-                tracing::warn!(
-                    index = %name, table = %table,
-                    "cannot reverse-resolve: index has no primary_key",
-                );
-                continue;
-            };
-
-            let mut links = Vec::new();
-            let mut roots = Vec::new();
-            for (n, path) in paths.iter().enumerate() {
-                if !self.reads.path(name, table, n).touched_by(&diff) {
-                    skipped += 1;
-                    continue;
-                }
-                let found = self.resolve_path(schema, table, key, before, path).await?;
-                if self
-                    .reads_root_from_a_link(schema, &pk_column, path)
-                    .await?
-                {
-                    let mut known: HashSet<_> = links.iter().cloned().collect();
-                    links.extend(found.into_iter().filter(|link| known.insert(link.clone())));
-                } else {
-                    roots.extend(found);
-                }
-            }
-            roots.extend(self.root_keys(schema, &pk_column, &links).await?);
-            for root in roots {
-                if seen.insert(root.clone()) {
-                    ids.push(DocumentId {
-                        index: name.clone(),
-                        key: RowKey(vec![(pk_column.clone(), root)]),
-                    });
-                }
-            }
-        }
-        if skipped > 0 {
-            tracing::trace!(skipped, "update changed no column these documents read");
-        }
-        if unaddressed > 0 {
-            tracing::debug!(
-                unaddressed,
-                "a change whose key has a null part addresses no document of its own"
+        for change in changes {
+            ids.extend(
+                self.resolve_change(
+                    change.table(),
+                    change.key(),
+                    change.before(),
+                    change.after(),
+                    &mut links,
+                )
+                .await?,
             );
         }
-        if !read {
-            self.warn_unread(table);
-        }
-        tracing::trace!(documents = ids.len(), "resolved affected documents");
-        Ok(ids)
+        self.with_root_keys(ids, links).await
     }
 
     #[tracing::instrument(

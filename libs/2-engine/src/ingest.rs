@@ -235,8 +235,9 @@ impl IngestEngine {
         Ok(false)
     }
 
-    /// Resolve one live change into the batch: the documents it touches,
-    /// deduplicated, and its position.
+    /// Buffer one live change and its position. Its documents are resolved
+    /// with the rest of the batch's at commit, so the builder can share its
+    /// queries across them ([`DocumentBuilder::resolve_many`]).
     async fn buffer_live(
         &self,
         pending: &mut PendingBatch,
@@ -244,12 +245,7 @@ impl IngestEngine {
         event: ChangeEvent,
     ) -> Result<()> {
         self.observer.on_change_captured();
-        let affected = self
-            .documents
-            .resolve(event.table(), event.key(), event.before(), event.after())
-            .await?;
-        tracing::trace!(documents = affected.len(), "change resolved to documents");
-        pending.add(affected);
+        pending.push(event);
         pending.position = Some(position);
         if pending.deadline.is_none() {
             pending.deadline = Some(Instant::now() + self.batch.max_delay);
@@ -267,6 +263,9 @@ impl IngestEngine {
             return Ok(());
         }
         let started = Instant::now();
+        let affected = self.documents.resolve_many(&pending.take_changes()).await?;
+        tracing::trace!(documents = affected.len(), "changes resolved to documents");
+        pending.add(affected);
         let (envelopes, by_index) = self.build(&pending.ids, pending.position).await?;
         let stats = BuildStats {
             changes: pending.count,
@@ -449,14 +448,7 @@ impl IngestEngine {
     }
 
     async fn buffer_snapshot(&self, snapshot: &mut Snapshot, event: ChangeEvent) -> Result<()> {
-        let affected = self
-            .documents
-            .resolve(event.table(), event.key(), event.before(), event.after())
-            .await?;
-        let requested = affected
-            .into_iter()
-            .filter(|id| snapshot.indexes.contains(&id.index));
-        snapshot.batch.add(requested);
+        snapshot.batch.push(event);
         Ok(())
     }
 
@@ -467,6 +459,14 @@ impl IngestEngine {
             return Ok(());
         }
         let started = Instant::now();
+        let affected = self
+            .documents
+            .resolve_many(&snapshot.batch.take_changes())
+            .await?;
+        let requested = affected
+            .into_iter()
+            .filter(|id| snapshot.indexes.contains(&id.index));
+        snapshot.batch.add(requested);
         let (envelopes, by_index) = self.build(&snapshot.batch.ids, None).await?;
         let mut publishes = Vec::with_capacity(snapshot.requested.len());
         for (sink, indexes) in &snapshot.requested {
@@ -525,6 +525,8 @@ impl IngestEngine {
 /// batch — the last position and the flush deadline.
 #[derive(Debug)]
 struct PendingBatch {
+    /// Changes buffered since the last commit, resolved together at commit.
+    changes: Vec<ChangeEvent>,
     ids: Vec<DocumentId>,
     seen: HashSet<DocumentId>,
     count: usize,
@@ -536,6 +538,7 @@ struct PendingBatch {
 impl PendingBatch {
     fn new(capacity: usize) -> Self {
         Self {
+            changes: Vec::with_capacity(capacity),
             ids: Vec::with_capacity(capacity),
             seen: HashSet::with_capacity(capacity),
             count: 0,
@@ -545,14 +548,23 @@ impl PendingBatch {
         }
     }
 
-    /// Buffer one change's affected documents, deduplicated.
+    /// Buffer one change, to resolve at commit.
+    fn push(&mut self, change: ChangeEvent) {
+        self.changes.push(change);
+        self.count += 1;
+    }
+
+    fn take_changes(&mut self) -> Vec<ChangeEvent> {
+        std::mem::take(&mut self.changes)
+    }
+
+    /// Add the batch's affected documents, deduplicated.
     fn add(&mut self, affected: impl IntoIterator<Item = DocumentId>) {
         for id in affected {
             if self.seen.insert(id.clone()) {
                 self.ids.push(id);
             }
         }
-        self.count += 1;
     }
 
     fn is_full(&self) -> bool {
@@ -568,6 +580,7 @@ impl PendingBatch {
     }
 
     fn clear(&mut self) {
+        self.changes.clear();
         self.ids.clear();
         self.seen.clear();
         self.count = 0;
