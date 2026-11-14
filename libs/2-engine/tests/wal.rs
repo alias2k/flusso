@@ -2935,6 +2935,15 @@ keyed_by! {
         ["1", "2"], ["1", "2"];
     every_relation_position_keyed_by_char: "char(3)", &[], ["'ab'", "'cd'"], ["ab ", "cd "];
     every_relation_position_keyed_by_float8: "float8", &[], ["1.5", "2.5"], ["1.5", "2.5"];
+    every_relation_position_keyed_by_a_date_past_9999: "date", &[],
+        ["'10000-01-01'", "'2024-01-01'"], ["+10000-01-01", "2024-01-01"];
+    every_relation_position_keyed_by_a_timestamp_past_9999: "timestamp", &[],
+        ["'10000-01-01 10:00:00'", "'2024-01-01 10:00:00'"],
+        ["+10000-01-01 10:00:00", "2024-01-01 10:00:00"];
+    every_relation_position_keyed_by_a_timestamptz_past_9999_in_another_time_zone: "timestamptz",
+        &["ALTER DATABASE postgres SET TimeZone = 'Asia/Kolkata'"],
+        ["'10000-01-01 00:00:00+00'", "'2024-01-01 10:00:00+00'"],
+        ["+10000-01-01T00:00:00+00:00", "2024-01-01T10:00:00+00:00"];
     every_relation_position_keyed_by_a_numeric_nan: "numeric", &[], ["'NaN'", "1.50"], ["NaN", "1.50"];
     every_relation_position_keyed_by_a_date_at_infinity: "date", &[],
         ["'infinity'", "'-infinity'"], ["infinity", "-infinity"];
