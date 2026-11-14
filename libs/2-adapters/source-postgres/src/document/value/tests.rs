@@ -423,3 +423,222 @@ fn a_timestamp_in_a_default_list_reads_as_the_iso_8601_form() {
     assert_eq!(map["seen"], GenericValue::Array(vec![stamp]));
     assert_eq!(map["labels"], strings(&["2024-01-02T03:04:05.123"]));
 }
+
+/// `doc` as the query returns it: JSON text, parsed as the builder parses it,
+/// so a number keeps the digits Postgres wrote.
+fn body_text(doc: &str, fields: &[Field]) -> BTreeMap<String, GenericValue> {
+    match build(doc, fields).unwrap() {
+        GenericValue::Map(map) => map,
+        other => panic!("expected a map document, got {other:?}"),
+    }
+}
+
+/// Build the document `doc` (JSON text) for `fields`.
+fn build(doc: &str, fields: &[Field]) -> Result<GenericValue, BuildFailure> {
+    coerce_document(serde_json::from_str(doc).unwrap(), fields)
+}
+
+/// The exact decimal text `value` carries, `None` when it is not an exact
+/// decimal number.
+fn exact_decimal(value: Option<&GenericValue>) -> Option<String> {
+    match value? {
+        GenericValue::Decimal(d) => Some(d.to_string()),
+        _ => None,
+    }
+}
+
+fn aggregate_field(name: &str, op: AggregateOp, value_type: Option<FlussoType>) -> Field {
+    Field {
+        field: FieldName::try_new(name).unwrap(),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Relation(Relation::Aggregate(Aggregate {
+            table: kernel::TableName::try_new("parts").unwrap(),
+            op,
+            key: kernel::AggregateKey::Direct(ColumnName::try_new("owner_id").unwrap()),
+            value_type,
+            filters: None,
+            distinct: false,
+            via: Vec::new(),
+            on: Vec::new(),
+        })),
+    }
+}
+
+/// Every digit of a `numeric` reaches a `decimal` field, inside
+/// `rust_decimal`'s range or past it (issue #327): a value past ±7.9e28 or with
+/// more than 28 fractional digits is still a number, never a string, and a
+/// value within it keeps the digits `f64` would round away, trailing zeros
+/// included.
+#[test]
+fn a_decimal_keeps_every_digit_postgres_wrote() {
+    let cases = [
+        ("past", "1000000000000000000000000000000"),
+        ("negative", "-1000000000000000000000000000000.5"),
+        ("fraction", "0.123456789012345678901234567890"),
+        ("wide", "1234567890.123456789"),
+        ("scale", "12.50"),
+        ("small", "0.5"),
+        ("whole", "42"),
+    ];
+    let fields: Vec<Field> = cases
+        .iter()
+        .map(|(name, _)| column_field(name, FlussoType::Decimal))
+        .collect();
+    let doc = format!(
+        "{{{}}}",
+        cases
+            .iter()
+            .map(|(name, text)| format!("\"{name}\": {text}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let map = body_text(&doc, &fields);
+    for (name, text) in cases {
+        assert_eq!(
+            exact_decimal(map.get(name)).as_deref(),
+            Some(text),
+            "{name}: {:?}",
+            map.get(name)
+        );
+    }
+}
+
+/// The elements of a `decimal` array column, `sum`/`min`/`max` with a
+/// `decimal` result, and `ids` of `decimal` keys keep every digit too.
+#[test]
+fn a_decimal_array_and_aggregates_keep_every_digit() {
+    let big = "1000000000000000000000000000000";
+    let fraction = "0.123456789012345678901234567890";
+    let fields = vec![
+        array_field("amounts", FlussoType::Decimal, None),
+        aggregate_field(
+            "total",
+            AggregateOp::Sum(ColumnName::try_new("v").unwrap().into()),
+            Some(FlussoType::Decimal),
+        ),
+        aggregate_field(
+            "least",
+            AggregateOp::Min(ColumnName::try_new("v").unwrap().into()),
+            Some(FlussoType::Decimal),
+        ),
+        aggregate_field(
+            "most",
+            AggregateOp::Max(ColumnName::try_new("v").unwrap().into()),
+            Some(FlussoType::Decimal),
+        ),
+        aggregate_field(
+            "keys",
+            AggregateOp::Ids {
+                element_type: FlussoType::Decimal,
+            },
+            None,
+        ),
+    ];
+    let map = body_text(
+        &format!(
+            r#"{{"amounts": [{big}, null, {fraction}], "total": {big}, "least": {fraction},
+                "most": {big}, "keys": [{big}, {fraction}]}}"#
+        ),
+        &fields,
+    );
+    for name in ["amounts", "keys"] {
+        let Some(GenericValue::Array(items)) = map.get(name) else {
+            panic!("{name}: expected an array, got {:?}", map.get(name));
+        };
+        let texts: Vec<Option<String>> = items.iter().map(|i| exact_decimal(Some(i))).collect();
+        assert_eq!(
+            texts,
+            [Some(big.to_owned()), Some(fraction.to_owned())],
+            "{name}"
+        );
+    }
+    for (name, text) in [("total", big), ("least", fraction), ("most", big)] {
+        assert_eq!(
+            exact_decimal(map.get(name)).as_deref(),
+            Some(text),
+            "{name}: {:?}",
+            map.get(name)
+        );
+    }
+}
+
+/// A `double` field over a `numeric` past `rust_decimal`'s range is the
+/// nearest `f64`, as for any other `double`.
+#[test]
+fn a_double_past_the_decimal_range_is_the_nearest_double() {
+    let fields = vec![column_field("ratio", FlussoType::Double)];
+    let map = body_text(r#"{"ratio": 1000000000000000000000000000000}"#, &fields);
+    assert_eq!(map.get("ratio"), Some(&GenericValue::Double(1e30)));
+}
+
+/// A number past `rust_decimal`'s range inside a `json` field stays a number.
+#[test]
+fn a_json_number_past_the_decimal_range_stays_a_number() {
+    let fields = vec![column_field("payload", FlussoType::Json)];
+    let map = body_text(r#"{"payload": {"n": 1e30, "m": [-1e30]}}"#, &fields);
+    let want = GenericValue::Map(BTreeMap::from([
+        ("n".to_owned(), GenericValue::Double(1e30)),
+        (
+            "m".to_owned(),
+            GenericValue::Array(vec![GenericValue::Double(-1e30)]),
+        ),
+    ]));
+    assert_eq!(map.get("payload"), Some(&want));
+}
+
+/// `NaN`, `Infinity` and `-Infinity` have no JSON number: Postgres writes them
+/// as strings. Under a `decimal`, `double` or `float` field (a scalar, an array
+/// element or an aggregate) the document fails at the field's path, for
+/// `on_error` to decide, instead of holding a string where its other
+/// documents hold a number.
+#[test]
+fn a_non_finite_number_fails_the_document_at_its_field() {
+    for text in ["NaN", "Infinity", "-Infinity"] {
+        for ty in [FlussoType::Decimal, FlussoType::Double, FlussoType::Float] {
+            let fields = vec![column_field("n", ty.clone())];
+            let doc = json!({ "n": text }).to_string();
+            let failure = build(&doc, &fields).expect_err(&format!("{text} as {ty:?}"));
+            assert_eq!(failure.field, "n", "{text} as {ty:?}");
+            assert!(
+                failure.message.contains(text),
+                "{text} as {ty:?}: {}",
+                failure.message
+            );
+        }
+        let fields = vec![
+            column_field("id", FlussoType::Long),
+            array_field("amounts", FlussoType::Decimal, None),
+        ];
+        let doc = json!({ "id": 1, "amounts": [1, text] }).to_string();
+        let failure = build(&doc, &fields).expect_err(text);
+        assert_eq!(failure.field, "amounts[1]", "{text}");
+
+        let fields = vec![
+            aggregate_field(
+                "total",
+                AggregateOp::Sum(ColumnName::try_new("v").unwrap().into()),
+                Some(FlussoType::Decimal),
+            ),
+            aggregate_field(
+                "mean",
+                AggregateOp::Avg(ColumnName::try_new("v").unwrap().into()),
+                None,
+            ),
+        ];
+        for name in ["total", "mean"] {
+            let doc = json!({ name: text }).to_string();
+            let failure = build(&doc, &fields).expect_err(&format!("{name}: {text}"));
+            assert_eq!(failure.field, name, "{text}");
+        }
+    }
+}
+
+/// Text that is no number under a `decimal` field keeps its fallback: the
+/// string it is.
+#[test]
+fn text_that_is_no_number_under_a_decimal_stays_a_string() {
+    let fields = vec![column_field("n", FlussoType::Decimal)];
+    let map = body_text(r#"{"n": "n/a"}"#, &fields);
+    assert_eq!(map.get("n"), Some(&GenericValue::String("n/a".into())));
+}
