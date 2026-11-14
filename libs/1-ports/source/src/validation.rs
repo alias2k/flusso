@@ -418,6 +418,7 @@ pub async fn validate_indexes(spec: &SourceSpec, catalog: &dyn Catalog) -> Resul
             .await?;
         checker.root(schema).await?;
         duplicate_names(name, &schema.fields, &mut Vec::new(), &mut diagnostics);
+        timestamp_formats(name, &schema.fields, &mut Vec::new(), &mut diagnostics);
     }
     Ok(diagnostics)
 }
@@ -425,8 +426,10 @@ pub async fn validate_indexes(spec: &SourceSpec, catalog: &dyn Catalog) -> Resul
 /// The checks that need no database: a `soft_delete` `field` that names no
 /// field, or whose first field of that name is not a column (such a marker
 /// reads nothing, so soft-deleted rows would stay indexed), and two fields of
-/// one name at one level ([`DiagnosticKind::DuplicateFieldName`]).
-/// [`validate_indexes`] reports these too.
+/// one name at one level ([`DiagnosticKind::DuplicateFieldName`]), and a
+/// timestamp `format` that refuses the form timestamps are written in
+/// ([`DiagnosticKind::TimestampFormat`]). [`validate_indexes`] reports these
+/// too.
 pub fn validate_spec(spec: &SourceSpec) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     for (name, schema) in spec.indexes() {
@@ -442,6 +445,7 @@ pub fn validate_spec(spec: &SourceSpec) -> Vec<Diagnostic> {
             ));
         }
         duplicate_names(name, &schema.fields, &mut Vec::new(), &mut diagnostics);
+        timestamp_formats(name, &schema.fields, &mut Vec::new(), &mut diagnostics);
     }
     diagnostics
 }
@@ -486,6 +490,75 @@ fn duplicate_names(
         path.push((field.field.clone(), position(fields, at)));
         duplicate_names(index, field.children(), path, out);
         path.pop();
+    }
+}
+
+/// One [`DiagnosticKind::TimestampFormat`] per mapped field whose value is a
+/// timestamp and whose `options.format` refuses the ISO 8601 form it is
+/// written in ([`reads_iso_timestamps`](crate::reads_iso_timestamps)), at any
+/// depth. An input-only field and an `indexed: false` join are not mapped, so
+/// neither they nor what they hold are checked.
+fn timestamp_formats(
+    index: &IndexName,
+    fields: &[Field],
+    path: &mut Vec<(FieldName, Option<usize>)>,
+    out: &mut Vec<Diagnostic>,
+) {
+    for (at, field) in fields.iter().enumerate() {
+        let unindexed_join = matches!(
+            &field.source,
+            FieldSource::Relation(Relation::Join(join)) if !join.indexed
+        );
+        if !field.emit || unindexed_join {
+            continue;
+        }
+        path.push((field.field.clone(), position(fields, at)));
+        if writes_timestamps(&field.source)
+            && let Some(kernel::GenericValue::String(format)) = field.options.get("format")
+            && crate::reads_iso_timestamps(format) == Some(false)
+        {
+            out.push(Diagnostic {
+                index: index.clone(),
+                field: field.field.clone(),
+                path: path.iter().map(|(name, _)| name.clone()).collect(),
+                positions: path.iter().map(|(_, at)| *at).collect(),
+                anchor: Anchor::Field,
+                kind: DiagnosticKind::TimestampFormat,
+                severity: DiagnosticKind::TimestampFormat.severity(),
+                message: format!(
+                    "`format` `{format}` has no pattern that reads the ISO 8601 form a timestamp \
+                     is written in (`2024-01-02T03:04:05.123456`), so OpenSearch rejects every \
+                     document holding a value. Add `strict_date_optional_time`: \
+                     `strict_date_optional_time||{format}`"
+                ),
+            });
+        }
+        timestamp_formats(index, field.children(), path, out);
+        path.pop();
+    }
+}
+
+/// Whether a field's value is written as a timestamp: a `timestamp` column or
+/// script, a `min`/`max` with a `timestamp` `value_type`, or `ids` of
+/// `timestamp`.
+fn writes_timestamps(source: &FieldSource) -> bool {
+    match source {
+        FieldSource::Column(column) => column.ty == FlussoType::Timestamp,
+        FieldSource::Script(script) => script.ty == FlussoType::Timestamp,
+        FieldSource::Relation(Relation::Aggregate(aggregate)) => match &aggregate.op {
+            AggregateOp::Min(_) | AggregateOp::Max(_) => {
+                aggregate.value_type == Some(FlussoType::Timestamp)
+            }
+            AggregateOp::Ids { element_type } => *element_type == FlussoType::Timestamp,
+            AggregateOp::Count
+            | AggregateOp::Sum(_)
+            | AggregateOp::Avg(_)
+            | AggregateOp::Exists => false,
+        },
+        FieldSource::Group(_)
+        | FieldSource::Geo(_)
+        | FieldSource::Relation(Relation::Join(_))
+        | FieldSource::Constant(_) => false,
     }
 }
 
