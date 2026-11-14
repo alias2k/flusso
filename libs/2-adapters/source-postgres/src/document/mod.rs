@@ -1000,19 +1000,16 @@ impl DocumentBuilder for PgDocumentBuilder {
         // query's WHERE) → the document should not exist.
         match row {
             None => Ok(Document::Delete { id: id.clone() }),
-            Some(row) => {
-                let document: serde_json::Value = row.try_get("document").map_err(query_err)?;
-                Ok(match value::coerce_document(document, &schema.fields) {
-                    Ok(body) => Document::Upsert {
-                        id: id.clone(),
-                        body,
-                    },
-                    Err(failure) => Document::Failed {
-                        id: id.clone(),
-                        failure,
-                    },
-                })
-            }
+            Some(row) => Ok(match value::read_document(&row, &schema.fields)? {
+                Ok(body) => Document::Upsert {
+                    id: id.clone(),
+                    body,
+                },
+                Err(failure) => Document::Failed {
+                    id: id.clone(),
+                    failure,
+                },
+            }),
         }
     }
 
@@ -1084,8 +1081,7 @@ impl DocumentBuilder for PgDocumentBuilder {
                 > = HashMap::with_capacity(rows.len());
                 for row in &rows {
                     let key = value::decode_key(row, query::DOC_KEY);
-                    let document: serde_json::Value = row.try_get("document").map_err(query_err)?;
-                    bodies.insert(key, value::coerce_document(document, &schema.fields));
+                    bodies.insert(key, value::read_document(row, &schema.fields)?);
                 }
 
                 // Every requested id yields an outcome: a body present in the

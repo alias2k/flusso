@@ -7,9 +7,8 @@ pub use config::StdoutConfig;
 use std::io::Write;
 
 use async_trait::async_trait;
-use kernel::{Envelope, EnvelopeMeta, Op, SinkName};
-use serde_json::{Map, Value};
-use sink::{FlushReport, Result, Sink, SinkError, to_json};
+use kernel::{Envelope, EnvelopeMeta, GenericValue, Op, SinkName};
+use sink::{FlushReport, Json, Result, Sink, SinkError};
 
 /// Writes each document operation to stdout as a JSON envelope, stamped with
 /// this sink's configured name.
@@ -30,7 +29,7 @@ impl StdoutSink {
         Self::new(name.clone(), config.pretty)
     }
 
-    fn render(&self, envelope: &Envelope<Value>) -> Result<String> {
+    fn render(&self, envelope: &Envelope<Json<'_>>) -> Result<String> {
         let json = if self.pretty {
             serde_json::to_string_pretty(envelope)
         } else {
@@ -51,24 +50,31 @@ impl StdoutSink {
     }
 
     /// The kernel envelope as this sink writes it: the same shape, stamped with
-    /// this sink's name, the document translated to JSON, and the `meta`
+    /// this sink's name, the document rendered as [`Json`], and the `meta`
     /// summary filled in.
-    fn wire_envelope(&self, envelope: &Envelope) -> Envelope<Value> {
-        let mut wire = envelope.clone().map_document(|document| to_json(&document));
-        wire.sink = Some(self.name.clone());
-        if wire.op == Op::Upsert
-            && let Some(document) = &wire.document
-        {
-            wire.meta = Some(document_meta(document));
-        }
-        wire
+    fn wire_envelope<'a>(&self, envelope: &'a Envelope) -> Result<Envelope<Json<'a>>> {
+        let meta = match (&envelope.document, envelope.op) {
+            (Some(document), Op::Upsert) => Some(document_meta(document)?),
+            _ => envelope.meta,
+        };
+        Ok(Envelope {
+            sink: Some(self.name.clone()),
+            version: envelope.version,
+            ts: envelope.ts,
+            position: envelope.position,
+            index: envelope.index.clone(),
+            op: envelope.op,
+            id: envelope.id.clone(),
+            meta,
+            document: envelope.document.as_ref().map(Json),
+        })
     }
 }
 
 #[async_trait]
 impl Sink for StdoutSink {
     async fn apply(&self, envelope: &Envelope) -> Result<()> {
-        let line = self.render(&self.wire_envelope(envelope))?;
+        let line = self.render(&self.wire_envelope(envelope)?)?;
         self.write_line(&line)
     }
 
@@ -86,10 +92,30 @@ impl Sink for StdoutSink {
 
 /// At-a-glance facts about a serialized document: how many top-level fields it
 /// has (`None` when it isn't an object) and its compact byte size.
-fn document_meta(document: &Value) -> EnvelopeMeta {
-    EnvelopeMeta {
-        fields: document.as_object().map(Map::len),
-        bytes: document.to_string().len(),
+fn document_meta(document: &GenericValue) -> Result<EnvelopeMeta> {
+    let mut size = ByteCount(0);
+    serde_json::to_writer(&mut size, &Json(document))
+        .map_err(|e| SinkError::Serialize(e.to_string()))?;
+    Ok(EnvelopeMeta {
+        fields: match document {
+            GenericValue::Map(fields) => Some(fields.len()),
+            _ => None,
+        },
+        bytes: size.0,
+    })
+}
+
+/// A writer that only counts the bytes written to it.
+struct ByteCount(usize);
+
+impl Write for ByteCount {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 

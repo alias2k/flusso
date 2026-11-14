@@ -1,3 +1,4 @@
+mod big_decimal;
 mod column_name;
 mod field_name;
 mod generic_value;
@@ -9,6 +10,7 @@ mod schema_path;
 mod sink_name;
 mod table_name;
 
+pub use big_decimal::*;
 pub use column_name::*;
 pub use field_name::*;
 pub use generic_value::*;
