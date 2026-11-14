@@ -51,8 +51,13 @@
 //! changes one. A decision that needs no step (leave, keep) settles its file
 //! there. Each step (put back: the backup renamed over the file; remove: the
 //! file the save created renamed to its temp file, deleted once every file
-//! is settled) is one rename, then **its mark in the record**, flushed,
-//! before the next step. Completion is recorded, never read off the disk: a
+//! is settled) is one rename, then, once its folder is flushed, **its mark
+//! in the record**, flushed, before the next step. The record and the project
+//! are often on different filesystems, and even on one, flushing the state
+//! folder does not flush a rename in the project: so every project change is
+//! flushed before the record says anything more (the plan, a mark, `settled`,
+//! the record removed), and a power cut never keeps a mark without its
+//! rename. Completion is recorded, never read off the disk: a
 //! backup gone or a temp file there proves nothing, since anyone can delete
 //! or write one. A rollback running again never looks at a file whose
 //! decision needs no step or whose step is marked; every other file it
@@ -306,6 +311,7 @@ pub(crate) fn commit(
         );
         let undone = undone.and_then(|kept| {
             disk.remove_file(&staging)
+                .and_then(|()| disk.sync_dir(base))
                 .map_err(|e| {
                     Blocked::new(Vec::new(), vec![staging.clone()]).with_error(&staging, e)
                 })

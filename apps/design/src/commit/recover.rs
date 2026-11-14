@@ -35,7 +35,7 @@
 //!
 //! **A rollback decides once per file** ([`roll_back`]): every decision is in
 //! the record before the first file changes, each step's completion is
-//! marked there right after its rename, a file the record settles is never
+//! marked there right after its rename is flushed, a file the record settles is never
 //! looked at again, and once every file is settled the record says so and
 //! only the save's own files are left to delete. The commit's module docs
 //! list what a kill leaves at each point.
@@ -487,7 +487,10 @@ pub(crate) fn recover_telling(
                 ));
                 return recovery;
             }
-            if let Err(e) = disk.remove_file(&staging) {
+            if let Err(e) = disk
+                .remove_file(&staging)
+                .and_then(|()| disk.sync_dir(base))
+            {
                 recovery.blocked = Some(
                     Blocked::new(
                         vec![Problem::new(
@@ -625,8 +628,11 @@ fn settle(
     }
     disk.remove_file(file)
         .map_err(|e| failed(&steps, file, direction, file, &e))?;
+    let removed = flush_parent(file, disk)
+        .map_err(|(_, e)| e)
+        .and_then(|()| state.remove(&record.token, disk));
     if !disk.stopped()
-        && let Err(e) = state.remove(&record.token, disk)
+        && let Err(e) = removed
     {
         tracing::warn!(error = %e, "could not remove the record of a recovered save");
     }
@@ -1055,6 +1061,14 @@ fn clean(
     if journal == JournalThen::Delete {
         disk.remove_file(file).map_err(at(file))?;
     }
+    for folder in steps
+        .folders()
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(file.parent())
+    {
+        disk.sync_dir(folder).map_err(at(folder))?;
+    }
     Ok(())
 }
 
@@ -1358,24 +1372,33 @@ pub(crate) fn roll_back(
     let undo = match recorded {
         Some(undo) if undo.settled => undo,
         recorded => {
+            let mut unflushed = Unflushed::default();
+            for folder in steps
+                .folders()
+                .iter()
+                .map(PathBuf::as_path)
+                .chain(file.parent())
+            {
+                unflushed.dir(folder);
+            }
             let undo = plan(steps, file, run, recorded.as_ref())?;
             if recorded.is_none() {
-                clear_own_temps(steps, &undo, disk).map_err(fail)?;
+                clear_own_temps(steps, &undo, &mut unflushed, disk).map_err(fail)?;
             }
             let mut undo = undo;
             if recorded.as_ref() != Some(&undo) {
-                note(run, &undo, disk).map_err(fail)?;
+                note(run, &undo, &mut unflushed, disk).map_err(fail)?;
             }
-            settle_files(steps, &mut undo, run, disk).map_err(fail)?;
+            settle_files(steps, &mut undo, run, &mut unflushed, disk).map_err(fail)?;
             let settled = Undo {
                 settled: true,
                 ..undo
             };
             if run.ledger.is_some() {
                 for folder in steps.folders() {
-                    disk.sync_dir(&folder).map_err(at(&folder)).map_err(fail)?;
+                    unflushed.dir(&folder);
                 }
-                note(run, &settled, disk).map_err(fail)?;
+                note(run, &settled, &mut unflushed, disk).map_err(fail)?;
             }
             settled
         }
@@ -1384,13 +1407,50 @@ pub(crate) fn roll_back(
     Ok(kept(steps, &undo))
 }
 
-/// Write `undo` into the save's record, when it has one. A record that
-/// can't be written (a full disk) leaves the rollback as it was before it
-/// kept one: it carries on, and a recovery cut short decides again.
-fn note(run: &Rollback<'_>, undo: &Undo, disk: &mut Disk) -> Result<(), (PathBuf, io::Error)> {
+/// The project folders changed since they were last flushed. A power cut
+/// keeps a write to the record only with the changes flushed before it, so
+/// every one is flushed before the record says anything more: a step's mark
+/// never outlives its rename.
+#[derive(Debug, Default)]
+struct Unflushed(Vec<PathBuf>);
+
+impl Unflushed {
+    fn dir(&mut self, dir: &Path) {
+        if !self.0.iter().any(|d| d == dir) {
+            self.0.push(dir.to_path_buf());
+        }
+    }
+
+    /// `path`'s folder changed.
+    fn changed(&mut self, path: &Path) {
+        if let Some(dir) = path.parent() {
+            self.dir(dir);
+        }
+    }
+
+    fn flush(&mut self, disk: &mut Disk) -> Result<(), (PathBuf, io::Error)> {
+        while let Some(dir) = self.0.first().cloned() {
+            disk.sync_dir(&dir).map_err(at(&dir))?;
+            self.0.remove(0);
+        }
+        Ok(())
+    }
+}
+
+/// Write `undo` into the save's record, when it has one, once every change
+/// before it is flushed. A record that can't be written (a full disk) leaves
+/// the rollback as it was before it kept one: it carries on, and a recovery
+/// cut short decides again.
+fn note(
+    run: &Rollback<'_>,
+    undo: &Undo,
+    unflushed: &mut Unflushed,
+    disk: &mut Disk,
+) -> Result<(), (PathBuf, io::Error)> {
     let Some((state, record)) = run.ledger else {
         return Ok(());
     };
+    unflushed.flush(disk)?;
     match state.undo(record, undo, disk) {
         Err(e) if disk.stopped() => Err((state.path().to_path_buf(), e)),
         Err(e) => {
@@ -1411,61 +1471,66 @@ fn note(run: &Rollback<'_>, undo: &Undo, disk: &mut Disk) -> Result<(), (PathBuf
 fn clear_own_temps(
     steps: &Steps,
     undo: &Undo,
+    unflushed: &mut Unflushed,
     disk: &mut Disk,
 ) -> Result<(), (PathBuf, io::Error)> {
     for (write, &act) in steps.writes.iter().zip(&undo.writes).rev() {
         if own_temp_before_commit(write) || (act == Act::Remove && regular(&write.temp)) {
             disk.remove_file(&write.temp).map_err(at(&write.temp))?;
+            unflushed.changed(&write.temp);
         }
     }
     Ok(())
 }
 
 /// Take each file's step the record does not mark done, removals first, then
-/// the writes from the last: one rename each, then its mark in the record,
-/// flushed, before the next. Every step left was decided by this run from
-/// what the disk holds now, so each rename's source is there.
+/// the writes from the last: one rename each, then, its folders flushed, its
+/// mark in the record, flushed, before the next. Every step left was decided
+/// by this run from what the disk holds now, so each rename's source is there.
 fn settle_files(
     steps: &Steps,
     undo: &mut Undo,
     run: &Rollback<'_>,
+    unflushed: &mut Unflushed,
     disk: &mut Disk,
 ) -> Result<(), (PathBuf, io::Error)> {
     for (i, removal) in steps.removals.iter().enumerate().rev() {
         let act = undo.removals.get(i).copied().unwrap_or(Act::Leave);
-        match act {
+        let dropped = match act {
             Act::Restore if !undo.removal_done(i) => {
-                disk.rename(&removal.backup, &removal.path)
+                rename(&removal.backup, &removal.path, unflushed, disk)
                     .map_err(at(&removal.path))?;
                 undo.mark_removal(i);
-                note(run, undo, disk)?;
+                note(run, undo, unflushed, disk)?;
                 Ok(())
             }
             Act::Leave if holds(&removal.backup, &removal.before) => {
-                disk.remove_file(&removal.backup)
+                drop_backup(&removal.backup, unflushed, disk)
             }
-            Act::KeepDropping if regular(&removal.backup) => disk.remove_file(&removal.backup),
+            Act::KeepDropping if regular(&removal.backup) => {
+                drop_backup(&removal.backup, unflushed, disk)
+            }
             _ => Ok(()),
-        }
-        .map_err(at(&removal.path))?;
+        };
+        dropped.map_err(at(&removal.path))?;
     }
     for (i, write) in steps.writes.iter().enumerate().rev() {
         let act = undo.writes.get(i).copied().unwrap_or(Act::Leave);
         let renamed = match (act, &write.backup) {
             _ if is_step(act) && undo.write_done(i) => None,
-            (Act::Restore, Some(backup)) => Some(disk.rename(backup, &write.dest)),
-            (Act::Remove, _) => Some(disk.rename(&write.dest, &write.temp)),
+            (Act::Restore, Some(backup)) => Some(rename(backup, &write.dest, unflushed, disk)),
+            (Act::Remove, _) => Some(rename(&write.dest, &write.temp, unflushed, disk)),
             (Act::Leave, Some(backup))
                 if write
                     .before
                     .as_ref()
                     .is_some_and(|before| holds(backup, before)) =>
             {
-                disk.remove_file(backup).map_err(at(&write.dest))?;
+                drop_backup(backup, unflushed, disk).map_err(at(&write.dest))?;
                 None
             }
             (Act::KeepDropping, Some(backup)) if regular(backup) => {
-                disk.remove_file(backup).map_err(at(&write.dest))?;
+                drop_backup(backup, unflushed, disk).map_err(at(&write.dest))?;
                 None
             }
             _ => None,
@@ -1473,9 +1538,24 @@ fn settle_files(
         if let Some(renamed) = renamed {
             renamed.map_err(at(&write.dest))?;
             undo.mark_write(i);
-            note(run, undo, disk)?;
+            note(run, undo, unflushed, disk)?;
         }
     }
+    Ok(())
+}
+
+/// Delete a backup, its folder then unflushed.
+fn drop_backup(backup: &Path, unflushed: &mut Unflushed, disk: &mut Disk) -> io::Result<()> {
+    disk.remove_file(backup)?;
+    unflushed.changed(backup);
+    Ok(())
+}
+
+/// Rename `from` to `to`, both folders then unflushed.
+fn rename(from: &Path, to: &Path, unflushed: &mut Unflushed, disk: &mut Disk) -> io::Result<()> {
+    disk.rename(from, to)?;
+    unflushed.changed(from);
+    unflushed.changed(to);
     Ok(())
 }
 
@@ -1503,8 +1583,17 @@ fn clear(
     }
     if journal == JournalThen::Delete {
         disk.remove_file(file).map_err(at(file))?;
+        flush_parent(file, disk)?;
     }
     Ok(())
+}
+
+/// Flush the folder `path` is in.
+fn flush_parent(path: &Path, disk: &mut Disk) -> Result<(), (PathBuf, io::Error)> {
+    match path.parent() {
+        Some(dir) => disk.sync_dir(dir).map_err(at(dir)),
+        None => Ok(()),
+    }
 }
 
 /// Tag an error with the file it happened on.

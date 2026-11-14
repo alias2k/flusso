@@ -44,7 +44,7 @@
 //!   the journal's file name.
 //! - **A rollback's progress**: `undo`, absent until a rollback has decided
 //!   what to do with every file ([`Undo`]), is written before it changes the
-//!   first one, again after each step's rename (its mark), and with `settled`
+//!   first one, again after each step's rename is flushed (its mark), and with `settled`
 //!   once every file is settled. A record written by a designer without it
 //!   reads as a rollback not started; a designer without it can't read one
 //!   with it, and prunes it as a stray file a day later.
