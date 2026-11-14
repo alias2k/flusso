@@ -735,7 +735,7 @@ impl PgDocumentBuilder {
         let diff = RowDiff::new(key, before, after);
         for (name, schema) in self.spec.indexes() {
             let is_root = schema.table == *table;
-            let mut seen = HashSet::new();
+            let mut own = None;
             if is_root {
                 read = true;
                 if key.has_null() {
@@ -746,12 +746,11 @@ impl PgDocumentBuilder {
                         index: name.clone(),
                         key: key.clone(),
                     });
-                    // A row that is its own ancestor must not re-emit this id.
-                    if let (Some(pk_column), [(column, own)]) =
+                    if let (Some(pk_column), [(column, value)]) =
                         (&schema.primary_key, key.0.as_slice())
                         && column == pk_column
                     {
-                        seen.insert(own.clone());
+                        own = Some(value);
                     }
                 } else {
                     skipped += 1;
@@ -773,6 +772,8 @@ impl PgDocumentBuilder {
                 continue;
             };
 
+            // A row that is its own ancestor must not re-emit its own id.
+            let mut seen: HashSet<kernel::GenericValue> = own.into_iter().cloned().collect();
             let mut roots = Vec::new();
             for (n, path) in paths.iter().enumerate() {
                 if !self.reads.path(name, table, n).touched_by(&diff) {
