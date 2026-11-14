@@ -3318,6 +3318,45 @@ mod geo_point {
 
     use crate::GeoPoint;
 
+    /// A format that is not self-describing (MessagePack, postcard, bincode):
+    /// a struct is its fields in order, and `deserialize_any` is unsupported.
+    struct Compact(Vec<f64>);
+
+    impl<'de> serde::Deserializer<'de> for Compact {
+        type Error = serde::de::value::Error;
+
+        fn deserialize_any<V: serde::de::Visitor<'de>>(self, _: V) -> Result<V::Value, Self::Error> {
+            Err(serde::de::Error::custom("not self-describing"))
+        }
+
+        fn deserialize_struct<V: serde::de::Visitor<'de>>(
+            self,
+            _: &'static str,
+            _: &'static [&'static str],
+            visitor: V,
+        ) -> Result<V::Value, Self::Error> {
+            visitor.visit_seq(serde::de::value::SeqDeserializer::new(self.0.into_iter()))
+        }
+
+        fn is_human_readable(&self) -> bool {
+            false
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes
+            byte_buf option unit unit_struct newtype_struct seq tuple tuple_struct map
+            enum identifier ignored_any
+        }
+    }
+
+    #[test]
+    fn a_compact_format_reads_the_fields_in_the_order_it_wrote_them() {
+        use serde::Deserialize;
+
+        let point = GeoPoint::deserialize(Compact(vec![1.5, 2.5])).unwrap();
+        assert_eq!((point.lat, point.lon), (1.5, 2.5));
+    }
+
     fn read(value: Value) -> GeoPoint {
         serde_json::from_value(value.clone())
             .unwrap_or_else(|error| panic!("{value} should read as a point: {error}"))
