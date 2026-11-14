@@ -230,8 +230,8 @@ mapping takes, on backfill and live, under a non-UTC `TimeZone`, with a `range` 
   `flusso schema config` / `flusso schema docs`; a unit test in `apps/cli/src/commands/schema_cmd.rs`
   fails when the committed copies differ. `just schema-gen` refreshes both. The derive's error
   messages are pinned with trybuild in `libs/0-kernel/derive/tests/ui/`.
-- `apps/cli/tests/agent_docs_paths.rs` asserts every repo path named in `plugin/**` and
-  `.claude/commands/**` exists — the moved-file guard for those pointer-heavy trees. Ordinary test,
+- `apps/cli/tests/agent_docs_paths.rs` asserts every repo path named in `plugin/**`,
+  `.claude/commands/**` and `.claude/skills/**` exists — the moved-file guard for those pointer-heavy trees. Ordinary test,
   caught by the nextest step.
 - **Env-var tests live in the adapters.** `libs/2-adapters/source-postgres/tests/config_env.rs`
   and `libs/2-adapters/sink-opensearch/tests/config_env.rs` mutate the override variables
@@ -1514,7 +1514,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | Benchmarks: scenario harness, in-process + Docker benches, CI gate + history | `dev/bench/` (`flusso-bench`: `src/main.rs` phases, `scenario.rs` mixes, `scale.rs` presets, `flusso.rs` child process, `scenarios/`), `libs/2-engine/benches/{engine,pipeline}.rs`, `libs/2-adapters/source-postgres/benches/{pgoutput,postgres}.rs` + `tests/record_pgoutput.rs`, `libs/2-adapters/sink-opensearch/benches/{render,opensearch}.rs`, `.github/workflows/bench.yml`, `.github/scripts/bench-*.{py,sh}`, `docs/src/contribute/benchmarks.md`, ADR 0006 |
 | Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore`; user-facing shipping recipes in `docs/src/deploy/docker.md` |
 | Kubernetes deploy (Helm chart) | `deploy/helm/flusso/` — `Chart.yaml`, `values.yaml`, `templates/`, `README.md` |
-| Agent-facing docs (the Claude plugin + internal commands) | `plugin/` — `ARCHITECTURE.md` is the contract (one corpus/three consumers, who owns which meaning, the self-containment rule), `skills/*/SKILL.md` the knowledge corpus (`flusso-query` discloses `migration.md`/`options.md`/`maps.md`), `commands/` thin workflow entries, `agents/flusso-expert.md`, `hooks/`; `.claude/commands/{implement,new-issue}.md` the internal spine. Guarded by `apps/cli/tests/agent_docs_paths.rs` |
+| Agent-facing docs (the Claude plugin + internal commands) | `plugin/` — `ARCHITECTURE.md` is the contract (one corpus/three consumers, who owns which meaning, the self-containment rule), `skills/*/SKILL.md` the knowledge corpus (`flusso-query` discloses `migration.md`/`options.md`/`maps.md`), `commands/` thin workflow entries, `agents/flusso-expert.md`, `hooks/`; `.claude/commands/{implement,new-issue}.md` the internal spine; `.claude/skills/coordinator/SKILL.md` how a round of issues is driven through agents (order of work, the two independent reviews, merge and issue rules). Guarded by `apps/cli/tests/agent_docs_paths.rs` |
 | Domain glossary + architecture decisions | `CONTEXT.md` (the vocabulary: kernel / ports / adapters / engine / daemon, stream / lane / envelope / position / source position / fence, operation vs primitive vs transport) and `docs/adr/` (0001 adapter-owned config, 0004 the rename, 0005 lock format 3, 0006 benchmarks, 0007 reverse resolution reads the pre-image, 0008 page cursors are keyset with an opt-in point-in-time, 0009 a fence waits on the source's own position, per sink, at two observed levels: accepted; 0002/0003 the engine split: `proposed` until phase 2 of #130 lands) |
 
 ## Conventions
@@ -1595,8 +1595,8 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
   `flusso-query-derive` → `flusso-query`). The pre-0.16 names (`flusso-schema-core`, …) stay on
   crates.io at their last release; `scripts/tombstone-crates.sh` publishes a final pointer README
   under each (manual, needs a token; ADR 0004).
-- **Agent-facing docs follow `writing-for-agents`, not `docs/STYLE.md`.** `plugin/**` and
-  `.claude/commands/**` are consumed by an agent, so `plugin/ARCHITECTURE.md` is the standard: each
+- **Agent-facing docs follow `writing-for-agents`, not `docs/STYLE.md`.** `plugin/**`,
+  `.claude/commands/**` and `.claude/skills/**` are consumed by an agent, so `plugin/ARCHITECTURE.md` is the standard: each
   meaning has exactly one home and everything else points at it. **This file owns the definition of
   done** (the designer + i18n + dist rule, the editor JSON schemas, the CI order, the engine
   invariants); a skill or command restating any of it is the defect, so point here instead. The
