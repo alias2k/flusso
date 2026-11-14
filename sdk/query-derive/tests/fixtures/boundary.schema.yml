@@ -79,3 +79,66 @@ fields:
   - enum: ev
     variants: [a, b]
     required: true
+  # The kinds added by issue #306.
+  - custom: cu
+    postgres: [inet]
+    opensearch: ip
+    required: true
+  - ids: ids
+    table: rows
+    foreign_key: boundary_id
+    element_type: long
+  - exists: ex
+    table: rows
+    foreign_key: boundary_id
+  - count: ct
+    table: rows
+    foreign_key: boundary_id
+  - avg: av
+    table: rows
+    column: n
+    foreign_key: boundary_id
+  - boolean: bo
+    required: false
+  - short: sh
+    required: true
+  - integer: it
+    required: true
+  - float: fl
+    required: true
+  - double: db
+    required: true
+  - decimal: dc
+    required: true
+  - binary: bi
+    required: false
+  - uuid: uu
+    required: true
+  - keyword: kns
+    required: true
+    subfields: false
+  - has_many: hu
+    table: rows
+    foreign_key: boundary_id
+    primary_key: id
+    indexed: false
+    fields:
+      - keyword: k
+        required: true
+  - belongs_to: bt
+    table: ones
+    column: one_id
+    primary_key: id
+    fields:
+      - keyword: k
+        required: true
+  - many_to_many: mm
+    table: tags
+    through:
+      table: boundary_tags
+      left_key: boundary_id
+      right_key: tag_id
+    primary_key: id
+    fields:
+      - keyword: k
+        required: true
