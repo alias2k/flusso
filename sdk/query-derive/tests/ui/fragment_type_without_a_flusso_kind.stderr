@@ -1,0 +1,35 @@
+error[E0080]: evaluation panicked: fragment `Boxed`: field `bt` is `Box<Brand>`, which has no flusso kind, so it cannot hold the schema field at                      this path; wrap it in a newtype that derives `FlussoValue`
+  --> tests/ui/fragment_type_without_a_flusso_kind.rs:29:8
+   |
+29 |     f: Boxed,
+   |        ^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Boxed::__flusso_check`
+  --> tests/ui/fragment_type_without_a_flusso_kind.rs:12:9
+   |
+12 |     bt: Option<Box<Brand>>,
+   |         ^^^^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: fragment `Chars`: field `kwa` is `char`, which has no flusso kind, so it cannot hold the schema field at                      this path; wrap it in a newtype that derives `FlussoValue`
+  --> tests/ui/fragment_type_without_a_flusso_kind.rs:36:8
+   |
+36 |     f: Chars,
+   |        ^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Chars::__flusso_check`
+  --> tests/ui/fragment_type_without_a_flusso_kind.rs:17:10
+   |
+17 |     kwa: Vec<char>,
+   |          ^^^ the failure occurred here
+
+error[E0080]: evaluation panicked: fragment `Unsigned`: field `kwa` is `u64`, which has no flusso kind, so it cannot hold the schema field at                      this path; wrap it in a newtype that derives `FlussoValue`
+  --> tests/ui/fragment_type_without_a_flusso_kind.rs:43:8
+   |
+43 |     f: Unsigned,
+   |        ^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Unsigned::__flusso_check`
+  --> tests/ui/fragment_type_without_a_flusso_kind.rs:22:10
+   |
+22 |     kwa: Vec<u64>,
+   |          ^^^ the failure occurred here
