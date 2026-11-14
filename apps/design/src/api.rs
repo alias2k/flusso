@@ -3674,6 +3674,208 @@ mod tests {
         assert!(project.recovery.is_empty(), "{:?}", project.recovery);
     }
 
+    /// The project's files, hidden ones included, with `token` written `T`.
+    fn normalized(fixture: &Fixture, token: &str) -> BTreeMap<String, String> {
+        fixture
+            .files()
+            .into_iter()
+            .map(|(name, text)| (name.replace(token, "T"), text))
+            .collect()
+    }
+
+    /// The token of the one save in flight in `fixture`.
+    fn in_flight(fixture: &Fixture) -> String {
+        let records = State::at(fixture.state_dir()).unwrap().records();
+        assert_eq!(records.len(), 1, "{records:?}");
+        records[0].token.clone()
+    }
+
+    /// A save cut short in one of the ways recovery tells about.
+    fn cut_short(fixture: &Fixture, case: &str) {
+        let backup_of = |name: &str| {
+            fixture
+                .files()
+                .into_keys()
+                .find(|f| f.starts_with(&format!(".{name}.flusso-save.")) && f.ends_with(".bak"))
+                .unwrap()
+        };
+        match case {
+            "rollback" => fixture.kill_mid_swap(),
+            "rollback-kept" => {
+                fixture.kill_mid_swap();
+                std::fs::write(fixture.0.join("products.schema.yml"), "mine\n").unwrap();
+            }
+            "rollback-deleted" => {
+                fixture.kill_mid_swap();
+                std::fs::remove_file(fixture.0.join("products.schema.yml")).unwrap();
+            }
+            "completed" => fixture.kill_after_commit(),
+            "completed-kept" => {
+                fixture.kill_after_commit();
+                std::fs::write(fixture.0.join("products.schema.yml"), "mine\n").unwrap();
+            }
+            "displaced" => {
+                fixture.kill_after_commit();
+                std::fs::write(fixture.0.join(backup_of("flusso.toml")), "other\n").unwrap();
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Recover `case` with a disk that stops after step `stop` (never, when
+    /// `None`), then restart and open the project: the files, and what the
+    /// page is told, the save's token written `T`. `None` when recovery ran
+    /// to its end before step `stop`.
+    fn recovered_after_a_kill(
+        case: &str,
+        stop: Option<usize>,
+    ) -> Option<(BTreeMap<String, String>, Vec<serde_json::Value>)> {
+        let fixture = Fixture::new(&format!("kill-{case}-{stop:?}"));
+        cut_short(&fixture, case);
+        let token = in_flight(&fixture);
+        let paths = Paths::new(&fixture.config()).unwrap();
+        let mut disk = stop.map_or_else(Disk::default, Disk::stopping_after);
+        {
+            let lock = ProjectLock::acquire(&paths.base, Duration::ZERO).unwrap();
+            recover_locked(&paths, &lock, &mut disk);
+        }
+        if stop.is_some() && !disk.stopped() {
+            return None;
+        }
+        fixture.restart();
+        let project = open_project(&fixture.config()).unwrap();
+        let told = project
+            .recovery
+            .recovered
+            .iter()
+            .map(|r| serde_json::to_value(r).unwrap())
+            .chain(fixture_copies_as_saves(&project.recovery))
+            .map(|mut value| {
+                if let Some(save) = value.as_object_mut() {
+                    save.remove("started_at_ms");
+                }
+                serde_json::from_str(&value.to_string().replace(&token, "T")).unwrap()
+            })
+            .collect();
+        Some((normalized(&fixture, &token), told))
+    }
+
+    /// The copies a load explains, as values a test can compare.
+    fn fixture_copies_as_saves(recovery: &SaveRecovery) -> Vec<serde_json::Value> {
+        recovery
+            .copies
+            .iter()
+            .map(|c| serde_json::json!({ "copy": c.copy, "path": c.path }))
+            .collect()
+    }
+
+    /// Review of #296: a kill at any step of a recovery, the writing of its
+    /// notice included, leaves the next start telling the save exactly once,
+    /// and the files as an uninterrupted recovery leaves them.
+    #[test]
+    fn every_kill_during_recovery_still_tells_the_save_once() {
+        for case in [
+            "rollback",
+            "rollback-kept",
+            "rollback-deleted",
+            "completed",
+            "completed-kept",
+            "displaced",
+        ] {
+            let (files, told) = recovered_after_a_kill(case, None).unwrap();
+            let saves = told.iter().filter(|t| t.get("id").is_some()).count();
+            assert_eq!(saves, 1, "{case}: {told:?}");
+            for stop in 1.. {
+                let Some(after) = recovered_after_a_kill(case, Some(stop)) else {
+                    break;
+                };
+                assert_eq!(
+                    after.1, told,
+                    "{case}, killed after step {stop}: what is told"
+                );
+                let differ: Vec<&String> = files
+                    .keys()
+                    .chain(after.0.keys())
+                    .filter(|f| files.get(*f) != after.0.get(*f))
+                    .collect();
+                assert!(
+                    differ.is_empty(),
+                    "{case}, killed after step {stop}: {differ:?} differ"
+                );
+            }
+        }
+    }
+
+    /// Review of #296: a notice edited by hand to name files outside the
+    /// project, or copies not of the save-copy form, never shows them.
+    #[test]
+    fn a_hand_edited_notice_never_names_files_outside_the_project() {
+        let fixture = Fixture::new("hand-edited");
+        let outside = fixture.0.with_extension("outside");
+        std::fs::write(&outside, "secret\n").unwrap();
+        let outside_name = outside.file_name().unwrap().to_str().unwrap().to_owned();
+        let up = format!("../{outside_name}");
+        let base = Paths::new(&fixture.config()).unwrap().base;
+        let save = |id: &str| {
+            serde_json::json!({
+                "id": id, "outcome": "rolled_back", "started_at_ms": 1,
+                "files": ["users.schema.yml", up, outside.display().to_string()],
+                "kept": [
+                    { "path": "users.schema.yml", "backup": up },
+                    { "path": "orders.schema.yml", "backup": outside.display().to_string() },
+                    { "path": "products.schema.yml", "backup": "users.schema.yml" },
+                    { "path": up },
+                ],
+                "displaced": [
+                    { "path": "users.schema.yml", "copy": up },
+                    { "path": "users.schema.yml", "copy": "orders.schema.yml" },
+                ],
+            })
+        };
+        let notices = State::at(fixture.state_dir()).unwrap().notices().unwrap();
+        for (id, pending) in [("1-1", true), ("1-2", false)] {
+            let notice = serde_json::json!({
+                "format": 1, "dir": base, "pending": pending, "save": save(id),
+            });
+            notices
+                .put(id, notice.to_string().as_bytes(), &mut Disk::default())
+                .unwrap();
+        }
+
+        let project = open_project(&fixture.config()).unwrap();
+        let shown = serde_json::to_string(&project.recovery).unwrap();
+        assert!(!shown.contains(&outside_name), "{shown}");
+        assert!(!shown.contains(r#""copy":"orders.schema.yml""#), "{shown}");
+        assert!(project.recovery.copies.is_empty(), "{shown}");
+        let save = &project.recovery.recovered[0];
+        assert!(save.kept.iter().all(|k| k.backup.is_none()), "{shown}");
+        assert!(save.displaced.is_empty(), "{shown}");
+    }
+
+    /// Review of #296: a notice not dismissed yet says what is true at each
+    /// load: a backup moved away is no longer named, and a file put back is
+    /// no longer told as deleted.
+    #[test]
+    fn a_pending_notice_says_what_is_true_now() {
+        let fixture = Fixture::new("true-now");
+        fixture.kill_mid_swap();
+        std::fs::remove_file(fixture.0.join("products.schema.yml")).unwrap();
+        let project = open_project(&fixture.config()).unwrap();
+        let kept = &project.recovery.recovered[0].kept[0];
+        assert!(kept.deleted, "{kept:?}");
+        let backup = kept.backup.clone().expect("a backup");
+
+        std::fs::rename(
+            fixture.0.join(&backup),
+            fixture.0.join("products.schema.yml"),
+        )
+        .unwrap();
+        let project = open_project(&fixture.config()).unwrap();
+        let kept = &project.recovery.recovered[0].kept[0];
+        assert_eq!(kept.backup, None, "{kept:?}");
+        assert!(!kept.deleted, "{kept:?}");
+    }
+
     /// Issue #292: the copy of what another program wrote as a save
     /// replaced its file is explained on later loads, not listed as a
     /// leftover no save explains.

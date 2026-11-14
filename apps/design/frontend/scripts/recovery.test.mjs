@@ -77,3 +77,20 @@ test('the way forward starts with "Or" only after a way back', () => {
   assert.match(en["recovery.wayForward"], /^Or, /);
   assert.doesNotMatch(en["recovery.wayForwardOnly"] ?? "", /^Or\b/);
 });
+
+test("a sentence that tells to copy over a file says the file may have changed since", () => {
+  for (const key of ["recovery.keptBackup", "recovery.keptDeletedBackup", "recovery.copyBefore"]) {
+    assert.match(en[key], /changed since/, key);
+  }
+});
+
+test("each leftover copy is told with the file it is a copy of", () => {
+  const recovery = {
+    ...empty,
+    leftovers: [".users.schema.yml.flusso-save.1-2.0.bak", "schemas/.a.yml.flusso-save.3-4.1.tmp"],
+  };
+  const lines = noticeLines(t, recovery, time);
+  assert.deepEqual(keys(lines), ["recovery.leftover", "recovery.leftover"]);
+  assert.match(lines[0].text, /"path":"users\.schema\.yml"/);
+  assert.match(lines[1].text, /"path":"schemas\/a\.yml"/);
+});

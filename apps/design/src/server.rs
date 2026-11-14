@@ -319,3 +319,17 @@ impl IntoResponse for ApiError {
             .into_response()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    /// Review of #296: a dismiss naming a field it does not take is refused.
+    #[test]
+    fn a_dismiss_with_an_unknown_field_is_refused() {
+        assert!(serde_json::from_str::<Dismissed>(r#"{"ids":["1-2"]}"#).is_ok());
+        assert!(serde_json::from_str::<Dismissed>(r#"{"ids":["1-2"],"extra":1}"#).is_err());
+    }
+}
