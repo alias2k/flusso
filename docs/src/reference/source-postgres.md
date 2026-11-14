@@ -187,7 +187,7 @@ A link column can hold a value equal to its parent's key but written differently
 
 A link column of another type than the key (`char(5)` against `text`) is compared with it as the document query joins them, so the documents a change rebuilds are the ones the join reads.
 
-That costs one query per batch, per index and link column, for a root key whose equal values can be written differently (`numeric`, `real`, `double precision`, `citext`, a nondeterministic collation), and for a link column of another type than the key it names. Every other key costs nothing extra.
+That costs one query per change, per index and link column, for a root key whose equal values can be written differently (`numeric`, `real`, `double precision`, `citext`, a nondeterministic collation), and for a link column of another type than the key it names. Every other key costs nothing extra.
 
 ### Unsupported key types
 

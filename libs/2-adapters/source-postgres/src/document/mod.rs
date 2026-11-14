@@ -74,7 +74,6 @@ use kernel::{
     ColumnName, DatabaseSchema, Filter, IndexMapping, IndexName, IndexSchema, SoftDelete,
     TableName, Transform,
 };
-use source::cdc::ChangeEvent;
 use source::document::{BuildFailure, Document, DocumentBuilder, DocumentId, IndexScope};
 use source::{
     Catalog, ColumnInfo, Result, RowDiff, RowImage, RowKey, SnapshotTable, SourceError, SourceSpec,
@@ -775,26 +774,6 @@ impl DocumentBuilder for PgDocumentBuilder {
         let ids = self
             .resolve_change(table, key, before, after, &mut links)
             .await?;
-        self.with_root_keys(ids, links).await
-    }
-
-    /// Every change's documents, with the root keys all their links name read
-    /// back in one query per index and link column.
-    async fn resolve_many(&self, changes: &[ChangeEvent]) -> Result<Vec<DocumentId>> {
-        let mut links = RootLinks::default();
-        let mut ids = Vec::new();
-        for change in changes {
-            ids.extend(
-                self.resolve_change(
-                    change.table(),
-                    change.key(),
-                    change.before(),
-                    change.after(),
-                    &mut links,
-                )
-                .await?,
-            );
-        }
         self.with_root_keys(ids, links).await
     }
 

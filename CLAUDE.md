@@ -187,10 +187,11 @@ after a live update; constants land as written), and `an_update_of_an_unread_col
   the root row's own key** (`resolve.rs`'s `reads_root_from_a_link` / `root_keys`): where a path
   ends on a link column's value (`row_link` of its first step) and the root key's equal values can
   render differently (`ColumnMeta::equal_is_identical`: `numeric`, floats, `citext`, a
-  nondeterministic collation) or the link column's type differs from the key's, the builder reads the
-  keys back from the root table, **one query per batch** per index and link column
-  (`DocumentBuilder::resolve_many` gathers a batch's links in `RootLinks`; `root_keys_query` casts each
-  link from its bound type to its link column's type); every other key type costs no query. **A
+  nondeterministic collation) or the link column's type differs from the key's, `resolve` reads the
+  keys back from the root table, **one query per change** per index and link column (`RootLinks`;
+  `root_keys_query` casts each link from its bound type to its link column's type), as the change is
+  resolved: a batched read was tried and dropped, since resolving at commit slowed the engine's
+  `live_drain` bench by 13% and moved when the database is read; every other key type costs no query. **A
   resolved value is compared as the join compares its column** (`resolve.rs`'s `cast_types`): every
   reverse query casts a bound value to the type of the column it was read from (the hop's origin: a
   `belongs_to` target key, a junction's far key, the previous hop's link), so a `char(5)` link against
@@ -200,7 +201,7 @@ after a live update; constants land as written), and `an_update_of_an_unread_col
   `bytea_output = escape`, `extra_float_digits = 0`, `±infinity`, BC and numeric `NaN` keys) and
   `*_rebuilds_the_roots_own_document` (citext, numeric, float8, a nondeterministic collation, `char(5)`
   ↔ `text`), `the_pipeline_runs_through_pgbouncer_in_{session,transaction}_mode` (PgBouncer 1.26),
-  `a_burst_of_links_reads_root_keys_back_once_per_batch` / `a_burst_of_int_links_reads_no_root_key_back`
+  `a_burst_of_numeric_links_reads_one_root_key_back_per_change` / `a_burst_of_int_links_reads_no_root_key_back`
   (`pg_stat_statements`), the `*_past_9999` cases,
   `text_value::tests`, `pgoutput`'s `a_value_decodes_as_the_document_builder_reads_it_back`, and
   `document::tests`' `equal_keys_render_alike_except_for_numbers_and_loose_text`. `.config/nextest.toml` caps their concurrency and
@@ -500,9 +501,7 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   `a_stalled_sibling_blocks_an_all_sinks_fence_but_not_one_on_the_healthy_sink`,
   `idle_source_progress_wakes_a_waiter`); the CLI's `http::tests`; and the `fence` live e2e.
 - **Built once; build order is delivery order.** A batch buffers `(Position, ChangeEvent)`s,
-  resolves them together at commit (`DocumentBuilder::resolve_many`, whose default resolves change by
-  change; the Postgres builder shares its root-key lookups across the batch) to `DocumentId`s, dedups,
-  then `build_many` assembles each touched document
+  resolves each to `DocumentId`s, dedups, then `build_many` assembles each touched document
   **once** for all sinks. Snapshot rows go through the same path but are published *without* a
   position and *only* to the requesting lanes, ending with `LaneItem::SnapshotComplete`; snapshot
   and live builds are serialized on the one ingest task, so on any lane a later message is the

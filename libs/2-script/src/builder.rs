@@ -22,7 +22,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use kernel::{IndexMapping, TableName};
-use source::cdc::ChangeEvent;
 use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
 use source::{Result, RowImage, RowKey};
 
@@ -86,10 +85,6 @@ impl DocumentBuilder for ScriptedBuilder {
         after: Option<&RowImage>,
     ) -> Result<Vec<DocumentId>> {
         self.inner.resolve(table, key, before, after).await
-    }
-
-    async fn resolve_many(&self, changes: &[ChangeEvent]) -> Result<Vec<DocumentId>> {
-        self.inner.resolve_many(changes).await
     }
 
     async fn build(&self, id: &DocumentId) -> Result<Document> {

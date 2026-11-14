@@ -354,10 +354,10 @@ impl PgDocumentBuilder {
     }
 }
 
-/// The link values a batch's paths ended on, per index and link column: each
-/// is read back as the root row's own key by
+/// The link values a change's paths ended on, per index and link column:
+/// each is read back as the root row's own key by
 /// [`read_root_links`](PgDocumentBuilder::read_root_links), one query per
-/// index and link column for the whole batch.
+/// index and link column for the change.
 #[derive(Debug, Default)]
 pub(super) struct RootLinks(HashMap<(IndexName, Link), (Vec<GenericValue>, HashSet<GenericValue>)>);
 
