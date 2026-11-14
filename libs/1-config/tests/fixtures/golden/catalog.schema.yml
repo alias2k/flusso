@@ -49,7 +49,7 @@ fields:
     variants: [low, high]
     array: true
     script: '["low"]'
-  - keyword: tags
+  - keyword: labels
     required: false
     array: true
     transforms: [lowercase]
