@@ -23,8 +23,10 @@
 //! The result is the project before the save, or after it, plus the other
 //! program's writes: never a mix of the save's text and the text before.
 //!
-//! Either way it then deletes the journal and removes the record, so a
-//! journal is acted on once. `.flusso-save.journal.tmp` with a record of
+//! Either way it then deletes the journal, hands what it did to the caller
+//! ([`recover_telling`]: the designer keeps it as a notice), and removes the
+//! record last, so a journal is acted on once and a settled save is never
+//! left untold. `.flusso-save.journal.tmp` with a record of
 //! this folder and no journal means nothing was done yet: it is deleted. A
 //! record of this folder with no journal left at all is removed.
 //!
@@ -362,11 +364,25 @@ impl Blocked {
 /// Settle whatever save a dead process left in `lock`'s project, whose
 /// config file is `config`, acting only on a journal `state` holds a record
 /// of (`Err` says why there are no records to check).
+#[cfg(test)]
 pub(crate) fn recover(
     lock: &ProjectLock,
     config: &Path,
     state: Result<&State, &str>,
     disk: &mut Disk,
+) -> Recovery {
+    recover_telling(lock, config, state, disk, &mut |_, _| {})
+}
+
+/// [`recover`], handing each save it settles to `tell` before the save's
+/// record is removed: a kill in between leaves the record, never a settled
+/// save nobody heard of.
+pub(crate) fn recover_telling(
+    lock: &ProjectLock,
+    config: &Path,
+    state: Result<&State, &str>,
+    disk: &mut Disk,
+    tell: &mut dyn FnMut(&Settled, &mut Disk),
 ) -> Recovery {
     let base = lock.base();
     let mut recovery = Recovery::default();
@@ -380,7 +396,7 @@ pub(crate) fn recover(
     match journals.as_slice() {
         [] => {}
         [file] => {
-            match settle(base, config, file, state, disk) {
+            match settle(base, config, file, state, disk, tell) {
                 Ok(settled) => recovery.settled.push(settled),
                 Err(blocked) => {
                     recovery.blocked = Some(blocked);
@@ -476,6 +492,7 @@ fn settle(
     file: &Path,
     state: Result<&State, &str>,
     disk: &mut Disk,
+    tell: &mut dyn FnMut(&Settled, &mut Disk),
 ) -> Result<Settled, Blocked> {
     let refuse = |refused: Refused, recorded_for: Option<PathBuf>| {
         report(base, vec![file.to_path_buf()], recorded_for, refused)
@@ -538,14 +555,9 @@ fn settle(
             },
         )
     };
-    if !disk.stopped()
-        && let Err(e) = state.remove(&record.token, disk)
-    {
-        tracing::warn!(error = %e, "could not remove the record of a recovered save");
-    }
     let mut folders = steps.folders();
     folders.extend(steps.dirs.iter().cloned());
-    Ok(Settled {
+    let settled = Settled {
         folders,
         outcome,
         started_at_ms: steps.started_at_ms,
@@ -553,7 +565,16 @@ fn settle(
         token: steps.token,
         kept,
         displaced,
-    })
+    };
+    if !disk.stopped() {
+        tell(&settled, disk);
+    }
+    if !disk.stopped()
+        && let Err(e) = state.remove(&record.token, disk)
+    {
+        tracing::warn!(error = %e, "could not remove the record of a recovered save");
+    }
+    Ok(settled)
 }
 
 /// Read-only looks at the files inside the config's folder: a path outside

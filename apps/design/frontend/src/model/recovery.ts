@@ -17,38 +17,61 @@ export interface NoticeLine {
 }
 
 /// Every line of the notice about earlier saves: what happened to which file,
-/// and what is left to do.
+/// and what is left to do. Each file is named once: a copy a line explains is
+/// left out of the leftovers no save explains.
 export const noticeLines = (t: Translate, recovery: SaveRecovery, time: (ms: number) => string): NoticeLine[] => {
   const lines: NoticeLine[] = [];
+  const named = new Set<string>();
   for (const save of recovery.recovered) {
+    const back = save.outcome === "rolled_back";
     const vars = { time: time(save.started_at_ms), files: save.files.join(", "), n: save.files.length };
-    if (save.files.length > 0) {
-      lines.push({
-        key: save.id,
-        text: save.outcome === "rolled_back" ? t("recovery.rolledBack", vars) : t("recovery.completed", vars),
-      });
-    }
+    lines.push({
+      key: save.id,
+      text:
+        save.files.length === 0
+          ? t("recovery.interrupted", { ...vars, outcome: save.outcome })
+          : back
+            ? t("recovery.rolledBack", vars)
+            : t("recovery.completed", vars),
+    });
     for (const k of save.kept ?? []) {
-      lines.push({
-        key: `${save.id}:${k.path}`,
-        text: k.backup
-          ? t("recovery.keptBackup", { path: k.path, backup: k.backup })
-          : t("recovery.kept", { path: k.path }),
-      });
+      const kept = { path: k.path, backup: k.backup ?? "" };
+      if (k.backup) named.add(k.backup);
+      let text: string;
+      if (!back) text = k.deleted ? t("recovery.keptDeletedAfter", kept) : t("recovery.keptAfter", kept);
+      else if (k.deleted) text = k.backup ? t("recovery.keptDeletedBackup", kept) : t("recovery.keptDeleted", kept);
+      else text = k.backup ? t("recovery.keptBackup", kept) : t("recovery.kept", kept);
+      lines.push({ key: `${save.id}:${k.path}`, text });
     }
   }
   const displaced = [...(recovery.displaced ?? []), ...recovery.recovered.flatMap((s) => s.displaced ?? [])];
   for (const d of displaced) {
+    named.add(d.copy);
     lines.push({ key: d.copy, text: t("recovery.displaced", { path: d.path, copy: d.copy }) });
   }
-  if (recovery.leftovers.length > 0) {
-    lines.push({ key: "leftovers", text: t("recovery.leftovers", { files: recovery.leftovers.join(", ") }) });
+  for (const c of recovery.copies ?? []) {
+    if (named.has(c.copy)) continue;
+    named.add(c.copy);
+    const vars = { copy: c.copy, path: c.path, time: time(c.started_at_ms) };
+    lines.push({
+      key: c.copy,
+      text: c.holds === "before" ? t("recovery.copyBefore", vars) : t("recovery.copyDisplaced", vars),
+    });
+  }
+  const leftovers = recovery.leftovers.filter((file) => !named.has(file));
+  if (leftovers.length > 0) {
+    lines.push({ key: "leftovers", text: t("recovery.leftovers", { files: leftovers.join(", ") }) });
   }
   return lines;
 };
 
-/// The lead-in of each way out of a journal the server does not act on.
+/// The lead-in of each way out of a journal the server does not act on: the
+/// way forward offers itself as the other choice only after a way back.
 export const routeLeads = (t: Translate, report: JournalReport): { back?: string; forward?: string } => ({
   back: report.back_route ? t("recovery.wayBack") : undefined,
-  forward: report.forward_route ? t("recovery.wayForward") : undefined,
+  forward: report.forward_route
+    ? report.back_route
+      ? t("recovery.wayForward")
+      : t("recovery.wayForwardOnly")
+    : undefined,
 });

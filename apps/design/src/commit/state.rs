@@ -48,6 +48,12 @@
 //! killed write left goes once its process is gone ([`TEMP_AGE`] where that
 //! can't be checked).
 //!
+//! Beside the records, `notices/` keeps what the designer is to tell the user
+//! about saves it settled ([`Notices`]): one `<token>.json` per save, written
+//! before the save's record is removed, so a recovery the user was never told
+//! about outlives the designer. The API owns what one says; it is pruned
+//! once older than [`MAX_AGE`].
+//!
 //! ```ignore
 //! let state = State::open()?;
 //! let record = Record::new(&token, &journal_bytes, base);
@@ -69,6 +75,10 @@ use super::journal::{Digest, read_at_most, token_ok};
 /// The folder that holds the records, in the state folder.
 #[cfg(not(test))]
 const RECORDS: &str = "design-saves";
+/// The folder that holds the notices, in the records folder.
+const NOTICES: &str = "notices";
+/// The largest notice read.
+const MAX_NOTICE: u64 = 1024 * 1024;
 /// The record format this designer writes and reads.
 const FORMAT: u32 = 1;
 /// The largest record read: far beyond any real one.
@@ -178,6 +188,13 @@ impl State {
     /// The folder.
     pub(crate) fn path(&self) -> &Path {
         &self.dir
+    }
+
+    /// The notices of settled saves, in their folder, made when missing.
+    pub(crate) fn notices(&self) -> io::Result<Notices> {
+        let dir = self.dir.join(NOTICES);
+        private_dir(&dir)?;
+        Ok(Notices { dir })
     }
 
     fn file(&self, token: &str) -> PathBuf {
@@ -290,6 +307,80 @@ impl State {
             };
             if stale {
                 tracing::debug!(path = %path.display(), "pruning a save record");
+                std::fs::remove_file(&path).ok();
+            }
+        }
+        if let Ok(notices) = self.notices() {
+            notices.prune();
+        }
+    }
+}
+
+/// What the designer is to tell the user about saves it settled, one
+/// private file per save (see the module docs). Its bytes are the API's.
+#[derive(Debug)]
+pub(crate) struct Notices {
+    dir: PathBuf,
+}
+
+impl Notices {
+    fn file(&self, token: &str) -> Option<PathBuf> {
+        token_ok(token).then(|| self.dir.join(format!("{token}.json")))
+    }
+
+    /// Write the notice of the save `token`, replacing any earlier one.
+    pub(crate) fn put(&self, token: &str, bytes: &[u8], disk: &mut Disk) -> io::Result<()> {
+        let file = self
+            .file(token)
+            .ok_or_else(|| io::Error::other("not a save's token"))?;
+        disk.replace_private(&file, bytes)
+    }
+
+    /// Every readable notice, by its save's token.
+    pub(crate) fn all(&self) -> Vec<(String, Vec<u8>)> {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|entry| {
+                let token = entry
+                    .file_name()
+                    .to_str()?
+                    .strip_suffix(".json")
+                    .filter(|t| token_ok(t))?
+                    .to_owned();
+                let bytes = read_private(&entry.path(), MAX_NOTICE).ok().flatten()?;
+                Some((token, bytes))
+            })
+            .collect()
+    }
+
+    /// Remove the notice of the save `token`.
+    pub(crate) fn remove(&self, token: &str, disk: &mut Disk) -> io::Result<()> {
+        match self.file(token) {
+            Some(file) => disk.remove_file(&file),
+            None => Ok(()),
+        }
+    }
+
+    /// Remove the notices older than [`MAX_AGE`], and the temp files a killed
+    /// write left once older than [`TEMP_AGE`].
+    fn prune(&self) {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let temp = path.extension().is_some_and(|e| e == "tmp");
+            let elapsed = path
+                .symlink_metadata()
+                .ok()
+                .filter(|m| m.is_file())
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.elapsed().ok());
+            if elapsed.is_some_and(|e| e > if temp { TEMP_AGE } else { MAX_AGE }) {
+                tracing::debug!(path = %path.display(), "pruning a save notice");
                 std::fs::remove_file(&path).ok();
             }
         }

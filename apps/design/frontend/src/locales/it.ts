@@ -587,12 +587,27 @@ export const it: Record<string, string> = {
   "recovery.completed":
     "{n, plural, one {Un salvataggio delle {time} è stato interrotto durante la pulizia. È stato completato: {files} è come l'ha scritto.} other {Un salvataggio delle {time} è stato interrotto durante la pulizia. È stato completato: {files} sono come li ha scritti.}}",
   "recovery.leftovers":
-    "File lasciati da un salvataggio precedente, che il designer non tocca: {files}. Ognuno è stato lasciato da quel salvataggio e può contenere il testo di un file prima del salvataggio o quello che ha scritto; controllali ed eliminali.",
-  "recovery.kept": "{path} è stato scritto da un altro programma durante o dopo quel salvataggio, e resta com'è.",
+    "Copie lasciate da un salvataggio accanto ai suoi file, che il designer non tocca: {files}. Ognuna contiene un testo del file con cui inizia il suo nome (di prima di un salvataggio, o ciò che uno ha scritto), e al designer non serve più: confrontala con quel file, poi eliminala.",
+  "recovery.kept":
+    "{path} è stato scritto da un altro programma durante o dopo quel salvataggio, quindi non è stato annullato: tiene ciò che quel programma ha scritto.",
   "recovery.keptBackup":
-    "{path} è stato scritto da un altro programma durante o dopo quel salvataggio, e resta com'è. Il suo testo di prima del salvataggio è in {backup}: ricopialo, oppure eliminalo.",
+    "{path} è stato scritto da un altro programma durante o dopo quel salvataggio, quindi non è stato annullato: tiene ciò che quel programma ha scritto. Il suo testo di prima del salvataggio è in {backup}: per tornare a quel testo, copia {backup} su {path}; altrimenti elimina {backup}.",
   "recovery.displaced":
     "{path} è stato scritto da un altro programma nell'istante in cui il salvataggio lo sostituiva: contiene ciò che ha scritto il salvataggio, e i byte dell'altro programma sono in {copy}. Controllali, poi elimina quel file.",
+  "recovery.copyDisplaced":
+    "{copy} contiene ciò che un altro programma ha scritto in {path} nell'istante in cui un salvataggio delle {time} lo sostituiva: controllalo, poi eliminalo.",
+  "recovery.copyBefore":
+    "{copy} contiene il testo di {path} di prima di un salvataggio delle {time}, annullato mentre {path} teneva ciò che un altro programma aveva scritto: per tornare a quel testo, copia {copy} su {path}; altrimenti elimina {copy}.",
+  "recovery.interrupted":
+    "{outcome, select, rolled_back {Un salvataggio delle {time} è stato interrotto prima di finire. Il designer annulla un salvataggio così, ma ogni file che aveva scritto è stato modificato o eliminato nel frattempo:} other {Un salvataggio delle {time} è stato interrotto durante la pulizia. Il designer l'ha completato, ma ogni file che aveva scritto è stato modificato o eliminato in seguito:}}",
+  "recovery.keptDeletedAfter":
+    "{path} è stato eliminato dopo che quel salvataggio l'aveva scritto: resta eliminato, e ciò che il salvataggio vi aveva scritto non c'è più.",
+  "recovery.keptAfter":
+    "{path} è stato scritto da un altro programma dopo quel salvataggio: tiene ciò che quel programma ha scritto, e ciò che il salvataggio vi aveva scritto non c'è più.",
+  "recovery.keptDeletedBackup":
+    "{path} è stato eliminato durante o dopo quel salvataggio, quindi non è stato annullato: resta eliminato. Il suo testo di prima del salvataggio è in {backup}: per riavere {path}, copia {backup} in {path}; altrimenti elimina {backup}.",
+  "recovery.keptDeleted":
+    "{path} è stato eliminato durante o dopo quel salvataggio, quindi non è stato annullato: resta eliminato.",
   "recovery.dismiss": "Chiudi",
   // a file changed on disk since the page loaded it
   "stale.changed": "{path} è cambiato sul disco da quando questa pagina lo ha caricato.",
@@ -663,6 +678,7 @@ export const it: Record<string, string> = {
     "Segui questi passi solo per un tuo salvataggio: rimettono il testo indicato da questo journal. Prima controlla ogni file (con il controllo di versione, per esempio).",
   "recovery.wayBack": "Per riportare il progetto com'era prima del salvataggio:",
   "recovery.wayForward": "Oppure, per tenere ciò che il salvataggio ha scritto:",
+  "recovery.wayForwardOnly": "Per tenere ciò che il salvataggio ha scritto:",
   "recovery.stepCopy": "copia {from} in {path}",
   "recovery.stepDelete": "elimina {path}",
   "recovery.wayNone":

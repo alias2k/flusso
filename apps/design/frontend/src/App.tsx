@@ -298,6 +298,13 @@ export default function App() {
       displaced: [...(shown?.displaced ?? []), ...(displaced ?? [])],
     }));
   };
+  // The server tells a settled save on every load until it hears it was
+  // dismissed; a failed request only means it is told again.
+  const dismissRecovery = () => {
+    const ids = recovery?.recovered.map((r) => r.id) ?? [];
+    setRecovery(null);
+    if (ids.length) api.dismissRecovery(ids).catch(() => undefined);
+  };
   // The files the open review overwrites anyway, by path, with what changed
   // on disk; and a key that opens each review fresh.
   const [overwrites, setOverwrites] = useState<Record<string, StaleFile[]>>({});
@@ -390,7 +397,14 @@ export default function App() {
         const route = parseRoute(window.location.pathname);
         if (route) applyRouteRef.current(route);
       })
-      .catch((e) => (e instanceof RecoveryError ? setBlocked(e.recovery) : setError(String(e))));
+      .catch((e) => {
+        if (e instanceof RecoveryError && e.recovery.blocked) return setBlocked(e.recovery);
+        if (e instanceof RecoveryError) {
+          unshownRecoveries(e.recovery.recovered);
+          setRecovery(e.recovery);
+        }
+        setError(String(e));
+      });
     api
       .catalog()
       .then(setCatalog)
@@ -1283,7 +1297,12 @@ export default function App() {
 
   if (blocked) return <RecoveryBlocked recovery={blocked} />;
   if (!project || !doc || !config)
-    return <div className="p-10 text-muted-foreground">{error || t("common.loading")}</div>;
+    return (
+      <>
+        {recovery && <RecoveryNotice recovery={recovery} onDismiss={dismissRecovery} />}
+        <div className="p-10 text-muted-foreground">{error || t("common.loading")}</div>
+      </>
+    );
 
   return (
     <div className="flex h-screen flex-col">
@@ -1441,7 +1460,7 @@ export default function App() {
       {(error || previewError) && (
         <div className="banner error bg-destructive/10 px-4 py-2 text-xs text-destructive">{error || previewError}</div>
       )}
-      {recovery && <RecoveryNotice recovery={recovery} onDismiss={() => setRecovery(null)} />}
+      {recovery && <RecoveryNotice recovery={recovery} onDismiss={dismissRecovery} />}
       {catalog?.error && (
         <div className="banner warn bg-warn/10 px-4 py-2 text-xs text-warn">{t("topbar.offlineBanner")}</div>
       )}

@@ -90,8 +90,11 @@ pub(crate) use journal::Unusable;
 use journal::{DONE, JOURNAL, Journal, STAGING, Steps};
 pub(crate) use lock::{LockError, ProjectLock};
 use recover::Backups;
+#[cfg(test)]
+pub(crate) use recover::recover;
 pub(crate) use recover::{
-    Blocked, Direction, Fix, HandStep, Holds, Outcome, ProblemKind, Report, recover, strays,
+    Blocked, Direction, Fix, HandStep, Holds, Outcome, ProblemKind, Report, Settled,
+    recover_telling, strays,
 };
 use state::Record;
 pub(crate) use state::{State, use_dir as use_state_dir};
@@ -174,6 +177,10 @@ struct Progress {
 /// A save that stands.
 #[derive(Debug)]
 pub(crate) struct Committed {
+    /// The save's token.
+    pub(crate) token: String,
+    /// When it started, in milliseconds since the Unix epoch.
+    pub(crate) started_at_ms: u64,
     /// The save's token, when its cleanup is left to the next recovery
     /// (its commit mark could not be flushed): that recovery finishes this
     /// save, not an interrupted one.
@@ -279,6 +286,8 @@ pub(crate) fn commit(
              the designer next opens this project"
         );
         Ok(Committed {
+            token: steps.token.clone(),
+            started_at_ms: steps.started_at_ms,
             cleanup_left: Some(steps.token.clone()),
             displaced: Vec::new(),
         })
@@ -310,6 +319,8 @@ pub(crate) fn commit(
         tracing::debug!(error = %e, "could not remove the record of a finished save");
     }
     Ok(Committed {
+        token: steps.token.clone(),
+        started_at_ms: steps.started_at_ms,
         cleanup_left: None,
         displaced: finished.displaced,
     })

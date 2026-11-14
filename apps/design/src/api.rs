@@ -34,7 +34,7 @@ use source_postgres::{
 use crate::commit::journal::Digest;
 use crate::commit::{
     self, Changed, Direction, Disk, Expect, Fix, HandStep, Holds, LockError, Outcome, ProblemKind,
-    ProjectLock, Remove, Report, State, Unusable, Write, commit, recover, strays,
+    ProjectLock, Remove, Report, Settled, State, Unusable, Write, commit, recover_telling, strays,
 };
 use crate::fspath::{MAX_PATH, on_disk};
 use crate::keep::{self, ConfigIdentity, Notice, Saved, SchemaIdentity};
@@ -710,7 +710,7 @@ pub struct SaveResponse {
 /// A file another program wrote, in place, in the instant a save replaced
 /// it: it holds the save's text, and the program's bytes went to the save's
 /// backup of it, which is kept for the user to check and delete.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisplacedFile {
     /// The file, relative to the config's folder.
     pub path: String,
@@ -849,7 +849,10 @@ pub enum CopyHolds {
 impl SaveRecovery {
     /// Whether there is nothing to tell.
     pub fn is_empty(&self) -> bool {
-        self.recovered.is_empty() && self.blocked.is_none() && self.leftovers.is_empty()
+        self.recovered.is_empty()
+            && self.blocked.is_none()
+            && self.leftovers.is_empty()
+            && self.copies.is_empty()
     }
 
     /// Whether a diff or save must stop: a save could not be settled.
@@ -873,7 +876,7 @@ impl SaveRecovery {
 }
 
 /// An interrupted save the designer settled.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecoveredSave {
     /// Which save it was: a page shows each once.
     pub id: String,
@@ -883,18 +886,18 @@ pub struct RecoveredSave {
     pub started_at_ms: u64,
     /// The files the save changed, relative to the config's folder.
     pub files: Vec<String>,
-    /// Files another program wrote during or after the save, kept as they
-    /// are instead of rolled back or finished.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// Files another program wrote or deleted during or after the save,
+    /// left as they are instead of rolled back or finished.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kept: Vec<KeptFile>,
     /// Files whose backup holds what another program wrote to them as the
     /// save replaced them ([`DisplacedFile`]).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub displaced: Vec<DisplacedFile>,
 }
 
-/// A file a recovered save left as another program wrote it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// A file a recovered save left as another program wrote it, or deleted it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeptFile {
     /// The file, relative to the config's folder.
     pub path: String,
@@ -903,12 +906,12 @@ pub struct KeptFile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backup: Option<String>,
     /// The file was deleted, not written: it stays deleted.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deleted: bool,
 }
 
 /// How an interrupted save was settled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryOutcome {
     /// Its files had not all been written: every file is back as before it.
@@ -1396,18 +1399,34 @@ pub fn recover_project(config_path: &Path) -> Result<SaveRecovery> {
 
 /// The project as a page opens it: any interrupted save settled first
 /// ([`recover_project`]), then the files read, with what the page is to be
-/// told about earlier saves ([`Project::recovery`]).
+/// told about earlier saves ([`Project::recovery`]): every save settled
+/// since, by this designer or an earlier one, until the user dismisses it
+/// ([`dismiss_recovered`]).
 ///
 /// Refused with [`Interrupted`] when a save can't be settled, and with
 /// [`Unloadable`] when the files can't be read.
 pub fn open_project(config_path: &Path) -> Result<Project> {
-    let recovery = recover_project(config_path)?;
+    let mut recovery = recover_project(config_path)?;
     if recovery.blocked.is_some() {
         return Err(Interrupted(recovery).into());
     }
-    let mut project = load_project(config_path)?;
-    project.recovery = recovery;
-    Ok(project)
+    let paths = Paths::new(config_path)?;
+    recovery.recovered = notices(&paths)
+        .into_iter()
+        .filter(|n| n.pending)
+        .map(|n| n.save)
+        .collect();
+    match load_project(config_path) {
+        Ok(mut project) => {
+            project.recovery = recovery;
+            Ok(project)
+        }
+        Err(e) => Err(Unloadable {
+            message: format!("{e:#}"),
+            recovery,
+        }
+        .into()),
+    }
 }
 
 /// A project that can't be read, with what the page is to be told about
@@ -1430,9 +1449,157 @@ impl std::error::Error for Unloadable {}
 
 /// The user dismissed the notices of the saves `ids` in the project of
 /// `config_path`.
+///
+/// A notice whose copies are all gone is forgotten; one that names a copy
+/// still on disk stays, to say what that copy holds ([`SaveRecovery::copies`]).
 pub fn dismiss_recovered(config_path: &Path, ids: &[String]) -> Result<()> {
-    let _ = (config_path, ids);
+    let paths = Paths::new(config_path)?;
+    for mut notice in notices(&paths) {
+        if notice.pending && ids.contains(&notice.save.id) {
+            notice.pending = false;
+            if notice.copies(&paths).is_empty() {
+                forget(&notice);
+            } else {
+                remember(notice, &mut Disk::default());
+            }
+        }
+    }
     Ok(())
+}
+
+/// What the designer keeps to tell about one save, beside its save records
+/// (`commit::Notices`), or in this process when they can't be written.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredNotice {
+    format: u32,
+    /// The config's folder, resolved.
+    dir: PathBuf,
+    /// Still to be shown until the user dismisses it.
+    pending: bool,
+    save: RecoveredSave,
+}
+
+/// The notice format this designer writes and reads.
+const NOTICE_FORMAT: u32 = 1;
+
+/// The notices that [`remember`] could not write, per project folder.
+static UNSTORED: std::sync::Mutex<BTreeMap<PathBuf, Vec<StoredNotice>>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+impl StoredNotice {
+    fn new(paths: &Paths, pending: bool, save: RecoveredSave) -> Self {
+        Self {
+            format: NOTICE_FORMAT,
+            dir: paths.base.clone(),
+            pending,
+            save,
+        }
+    }
+
+    /// The copies it names that are still on disk.
+    fn copies(&self, paths: &Paths) -> Vec<KeptCopy> {
+        let backups = self.save.kept.iter().filter_map(|k| {
+            k.backup
+                .as_ref()
+                .map(|copy| (copy, &k.path, CopyHolds::Before))
+        });
+        let displaced = self
+            .save
+            .displaced
+            .iter()
+            .map(|d| (&d.copy, &d.path, CopyHolds::Displaced));
+        backups
+            .chain(displaced)
+            .filter(|(copy, _, _)| paths.base.join(copy).symlink_metadata().is_ok())
+            .map(|(copy, path, holds)| KeptCopy {
+                copy: copy.clone(),
+                path: path.clone(),
+                holds,
+                started_at_ms: self.save.started_at_ms,
+            })
+            .collect()
+    }
+}
+
+/// Keep `notice`, replacing any earlier one of its save: in the user's state
+/// folder, else in this process.
+fn remember(notice: StoredNotice, disk: &mut Disk) {
+    let stored = State::open()
+        .map_err(|e| e.to_string())
+        .and_then(|state| state.notices().map_err(|e| e.to_string()))
+        .and_then(|notices| {
+            let bytes = serde_json::to_vec_pretty(&notice).map_err(|e| e.to_string())?;
+            notices
+                .put(&notice.save.id, &bytes, disk)
+                .map_err(|e| e.to_string())
+        });
+    let Ok(mut unstored) = UNSTORED.lock() else {
+        return;
+    };
+    let kept = unstored.entry(notice.dir.clone()).or_default();
+    kept.retain(|n| n.save.id != notice.save.id);
+    if let Err(e) = stored {
+        tracing::warn!(
+            error = %e,
+            "could not keep what the designer did about a save in its state folder; it is told \
+             until the designer stops"
+        );
+        kept.push(notice);
+    }
+}
+
+/// Drop `notice` wherever it is kept.
+fn forget(notice: &StoredNotice) {
+    if let Ok(notices) = State::open()
+        .map_err(|e| e.to_string())
+        .and_then(|s| s.notices().map_err(|e| e.to_string()))
+    {
+        notices.remove(&notice.save.id, &mut Disk::default()).ok();
+    }
+    if let Ok(mut unstored) = UNSTORED.lock()
+        && let Some(kept) = unstored.get_mut(&notice.dir)
+    {
+        kept.retain(|n| n.save.id != notice.save.id);
+    }
+}
+
+/// Every notice of the project, oldest save first. A dismissed one whose
+/// copies are all gone is forgotten on the way.
+fn notices(paths: &Paths) -> Vec<StoredNotice> {
+    let mut found: Vec<StoredNotice> = State::open()
+        .ok()
+        .and_then(|state| state.notices().ok())
+        .map(|notices| notices.all())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(token, bytes)| {
+            serde_json::from_slice::<StoredNotice>(&bytes)
+                .ok()
+                .filter(|n| n.format == NOTICE_FORMAT && n.save.id == token)
+        })
+        .filter(|n| n.dir == paths.base)
+        .collect();
+    if let Ok(unstored) = UNSTORED.lock()
+        && let Some(kept) = unstored.get(&paths.base)
+    {
+        for notice in kept {
+            if !found.iter().any(|n| n.save.id == notice.save.id) {
+                found.push(notice.clone());
+            }
+        }
+    }
+    found.retain(|notice| {
+        let done = !notice.pending && notice.copies(paths).is_empty();
+        if done {
+            forget(notice);
+        }
+        !done
+    });
+    found.sort_by(|a, b| {
+        (a.save.started_at_ms, &a.save.id).cmp(&(b.save.started_at_ms, &b.save.id))
+    });
+    found
 }
 
 fn recover_locked(paths: &Paths, lock: &ProjectLock, disk: &mut Disk) -> SaveRecovery {
@@ -1442,11 +1609,22 @@ fn recover_locked(paths: &Paths, lock: &ProjectLock, disk: &mut Disk) -> SaveRec
         .err()
         .map(|e| paths.relative_text(&e.to_string()))
         .unwrap_or_default();
-    let mut recovery = recover(
+    let mut recovery = recover_telling(
         lock,
         &paths.config,
         state.as_ref().map_err(|_| why.as_str()),
         disk,
+        &mut |settled, disk| {
+            let own = OWN_CLEANUP.lock().is_ok_and(|own| {
+                settled.outcome == Outcome::Completed && own.contains(&settled.token)
+            });
+            if !own {
+                remember(
+                    StoredNotice::new(paths, true, recovered_save(paths, settled)),
+                    disk,
+                );
+            }
+        },
     );
     if let Ok(mut own) = OWN_CLEANUP.lock() {
         recovery.settled.retain(|s| {
@@ -1464,37 +1642,7 @@ fn recover_locked(paths: &Paths, lock: &ProjectLock, disk: &mut Disk) -> SaveRec
         recovered: recovery
             .settled
             .iter()
-            .map(|s| RecoveredSave {
-                outcome: match s.outcome {
-                    Outcome::RolledBack => RecoveryOutcome::RolledBack,
-                    Outcome::Completed => RecoveryOutcome::Completed,
-                },
-                id: s.token.clone(),
-                started_at_ms: s.started_at_ms,
-                files: s
-                    .files
-                    .iter()
-                    .filter(|f| !s.kept.iter().any(|k| k.path == **f))
-                    .map(rel)
-                    .collect(),
-                kept: s
-                    .kept
-                    .iter()
-                    .map(|k| KeptFile {
-                        path: rel(&k.path),
-                        backup: k.backup.as_ref().map(rel),
-                        deleted: false,
-                    })
-                    .collect(),
-                displaced: s
-                    .displaced
-                    .iter()
-                    .map(|d| DisplacedFile {
-                        path: rel(&d.path),
-                        copy: rel(&d.copy),
-                    })
-                    .collect(),
-            })
+            .map(|s| recovered_save(paths, s))
             .collect(),
         blocked: recovery.blocked.as_ref().map(|b| BlockedSave {
             busy: false,
@@ -1540,17 +1688,71 @@ fn recover_locked(paths: &Paths, lock: &ProjectLock, disk: &mut Disk) -> SaveRec
         let excess = saves.len().saturating_sub(COMPLETED_KEPT);
         saves.drain(..excess);
     }
+    log_recovery(&out);
     if out.blocked.is_none() {
+        let notices = notices(paths);
+        let named: HashSet<String> = notices
+            .iter()
+            .flat_map(|n| {
+                let backups = n.save.kept.iter().filter_map(|k| k.backup.clone());
+                backups.chain(n.save.displaced.iter().map(|d| d.copy.clone()))
+            })
+            .collect();
         let mut folders = project_folders(paths);
         for folder in recovery.settled.iter().flat_map(|s| &s.folders) {
             if !folders.contains(folder) {
                 folders.push(folder.clone());
             }
         }
-        out.leftovers = strays(&folders).iter().map(rel).collect();
+        out.leftovers = strays(&folders)
+            .iter()
+            .map(rel)
+            .filter(|p| !named.contains(p))
+            .collect();
+        log_leftovers(&out.leftovers);
+        out.copies = notices
+            .iter()
+            .filter(|n| !n.pending)
+            .flat_map(|n| n.copies(paths))
+            .collect();
     }
-    log_recovery(&out);
     out
+}
+
+/// What the page is told about the settled save `s`.
+fn recovered_save(paths: &Paths, s: &Settled) -> RecoveredSave {
+    let rel = |p: &PathBuf| paths.relative_path(p);
+    RecoveredSave {
+        outcome: match s.outcome {
+            Outcome::RolledBack => RecoveryOutcome::RolledBack,
+            Outcome::Completed => RecoveryOutcome::Completed,
+        },
+        id: s.token.clone(),
+        started_at_ms: s.started_at_ms,
+        files: s
+            .files
+            .iter()
+            .filter(|f| !s.kept.iter().any(|k| k.path == **f))
+            .map(rel)
+            .collect(),
+        kept: s
+            .kept
+            .iter()
+            .map(|k| KeptFile {
+                path: rel(&k.path),
+                backup: k.backup.as_ref().map(rel),
+                deleted: k.path.symlink_metadata().is_err(),
+            })
+            .collect(),
+        displaced: s
+            .displaced
+            .iter()
+            .map(|d| DisplacedFile {
+                path: rel(&d.path),
+                copy: rel(&d.copy),
+            })
+            .collect(),
+    }
 }
 
 fn hand_step(paths: &Paths, step: &HandStep) -> Step {
@@ -1674,8 +1876,24 @@ fn log_recovery(recovery: &SaveRecovery) {
             );
         }
         for kept in &save.kept {
+            let what = match (save.outcome, kept.deleted) {
+                (RecoveryOutcome::RolledBack, false) => {
+                    "was written by another program during or after the save, so it was not rolled \
+                     back: it keeps what that program wrote"
+                }
+                (RecoveryOutcome::RolledBack, true) => {
+                    "was deleted during or after the save, so it was not rolled back: it stays deleted"
+                }
+                (RecoveryOutcome::Completed, false) => {
+                    "was written by another program after the save: it keeps what that program wrote, \
+                     not what the save wrote"
+                }
+                (RecoveryOutcome::Completed, true) => {
+                    "was deleted after the save wrote it: it stays deleted"
+                }
+            };
             tracing::warn!(
-                "{} was written by another program during or after the save, and is kept as it is{}",
+                "{} {what}{}",
                 kept.path,
                 kept.backup
                     .as_ref()
@@ -1689,10 +1907,13 @@ fn log_recovery(recovery: &SaveRecovery) {
     {
         tracing::error!("{}", Interrupted(recovery.clone()));
     }
-    if !recovery.leftovers.is_empty() {
+}
+
+fn log_leftovers(leftovers: &[String]) {
+    if !leftovers.is_empty() {
         tracing::warn!(
             "files an earlier save left, which no journal names, are left alone: {}. Check them and delete them",
-            recovery.leftovers.join(", ")
+            leftovers.join(", ")
         );
     }
 }
@@ -2608,6 +2829,17 @@ fn save_with(config_path: &Path, request: &SaveRequest, disk: &mut Disk) -> Resu
             d.copy
         );
     }
+    if !resp.displaced.is_empty() && !disk.stopped() {
+        let save = RecoveredSave {
+            id: committed.token.clone(),
+            outcome: RecoveryOutcome::Completed,
+            started_at_ms: committed.started_at_ms,
+            files: Vec::new(),
+            kept: Vec::new(),
+            displaced: resp.displaced.clone(),
+        };
+        remember(StoredNotice::new(&paths, false, save), disk);
+    }
     Ok(resp)
 }
 
@@ -3255,6 +3487,7 @@ mod tests {
         fn restart(&self) {
             let base = Paths::new(&self.config()).unwrap().base;
             COMPLETED.lock().unwrap().remove(&base);
+            UNSTORED.lock().unwrap().remove(&base);
         }
 
         /// Kill a swap save right after `flusso.toml` was replaced, before

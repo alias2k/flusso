@@ -450,9 +450,9 @@ export interface RecoveredSave {
   started_at_ms: number;
   /// The files it changed, relative to flusso.toml.
   files: string[];
-  /// Files another program wrote during or after the save, kept as they are,
-  /// with the save's backup of the text before when it kept one.
-  kept?: { path: string; backup?: string }[];
+  /// Files another program wrote or deleted during or after the save, left as
+  /// they are, with the save's backup of the text before when it kept one.
+  kept?: { path: string; backup?: string; deleted?: boolean }[];
   /// Files whose backup holds what another program wrote as the save replaced them.
   displaced?: DisplacedFile[];
 }
@@ -533,6 +533,18 @@ export interface SaveRecovery {
   leftovers: string[];
   /// Files a save of this page found written by another program as it replaced them.
   displaced?: DisplacedFile[];
+  /// Copies earlier saves kept, whose notice was dismissed, still on disk.
+  copies?: KeptCopy[];
+}
+
+/// A copy a save kept beside a file, still on disk after its notice was dismissed.
+export interface KeptCopy {
+  copy: string;
+  path: string;
+  /// `before`: the file's text from before a save rolled back without it;
+  /// `displaced`: what another program wrote as a save replaced the file.
+  holds: "before" | "displaced";
+  started_at_ms: number;
 }
 
 /// A save the server refused because files it writes changed on disk since the
@@ -759,6 +771,13 @@ export const api = {
         digests = p.digests;
         return p;
       }),
+  /// The user dismissed the notice of these settled saves: the server stops telling them.
+  dismissRecovery: (ids: string[]) =>
+    fetch("/api/recovery/dismiss", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ids }),
+    }).then((r) => (r.ok ? undefined : json<undefined>(r))),
   /// The registered adapters and their option schemas.
   adapters: () => fetch("/api/adapters").then((r) => json<AdapterDescription[]>(r)),
   /// Parse a raw schema buffer into the validated model (Code mode's live sync).
