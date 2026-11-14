@@ -82,7 +82,7 @@ The keys go into the array as they are, so `element_type` has to hold the key's 
 | `binary` | `bytea` | | anything else: indexed as written, not as bytes | |
 | `json` | | | | any type |
 
-- **Holds none** is `ids_element_mismatch`: OpenSearch rejects every document that collects a key, so [`run` refuses to start](cli.md#validation-at-start).
+- **Holds none** is `ids_element_mismatch`, an error: OpenSearch rejects every document that collects a key. `check` fails on it; [`run` prints it and starts](cli.md#validation-at-start), since a document whose `ids` array is empty still indexes.
 - **Holds only some** and **changes them** are `ids_element_lossy`, a warning. A document whose keys don't fit is rejected by OpenSearch; its index's [`on_error`](index-and-on-error.md#on_error) decides what happens next.
 - **Special values.** Even a matching pair can't hold a `numeric` or float `NaN` or infinity, or an infinite date; a document collecting one is rejected the same way.
 

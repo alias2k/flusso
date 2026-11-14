@@ -793,8 +793,9 @@ still fails as `connecting to Postgres`), prints every diagnostic to stderr with
 and refuses to start only on a kind that cannot work as written: `stops_the_start` matches
 `DiagnosticKind` exhaustively (`UnknownTable`/`UnknownColumn`/`UnreadSoftDeleteMarker`/
 `RelationPrimaryKey`/`TransformNotApplicable`/`RootPrimaryKeyMismatch`/`UnsupportedKeyType`/
-`NotAnArrayColumn`/`LinkTypeMismatch`/`IdsElementMismatch` stop;
-type, numeric, nullability, ignored-primary-key, `UndeclaredArrayColumn`, `IdsElementLossy`, `DuplicateFieldName`, `RootPrimaryKey`
+`NotAnArrayColumn`/`LinkTypeMismatch` stop;
+type, numeric, nullability, ignored-primary-key, `UndeclaredArrayColumn`, `IdsElementMismatch` (an empty
+`ids` array still indexes), `IdsElementLossy`, `DuplicateFieldName`, `RootPrimaryKey`
 and `TimestampFormat` (issue #304: a timestamp `options.format` no pattern of which reads the ISO
 form, `source::reads_iso_timestamps`, checked offline in `validate_spec`) findings print and start, as they built or ran in 0.17), so a new kind forces a decision there; stop
 only on a state no working 0.17 deployment can be in (or on a key new since, like `array`). `DiagnosticKind` stays exhaustive for that match; `Diagnostic` and `Anchor` are
