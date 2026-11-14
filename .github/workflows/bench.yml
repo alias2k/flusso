@@ -14,8 +14,8 @@ name: bench
 #                scenarios at CI scale on the real binary. Every result becomes
 #                a data point on the `benchmarks` branch (rendered under
 #                /bench/ on the Pages site), and the regression script calls a
-#                regression only when two consecutive points cross the
-#                threshold against the rolling median.
+#                regression only when the two newest points cross the
+#                threshold against earlier runs on the same kind of runner.
 
 on:
   pull_request:
@@ -161,6 +161,7 @@ jobs:
           set -euo pipefail
           jq -s 'add' bench-out/inprocess.json bench-out/components.json bench-out/scenarios/*/smaller.json > bench-out/smaller.json
           jq -s 'add' bench-out/scenarios/*/bigger.json > bench-out/bigger.json
+          python3 .github/scripts/bench-runner-facts.py bench-out/smaller.json bench-out/bigger.json
           jq length bench-out/smaller.json bench-out/bigger.json
 
       - name: Upload the raw results
@@ -203,8 +204,11 @@ jobs:
           fail-on-alert: false
           max-items-in-chart: 200
 
-      # Two consecutive main points past 25% (20% for RSS), and past the series'
-      # own swing, against the rolling median of the previous five → one issue, kept current, self-closing.
+      # The two newest judged main points each past 25% (20% for RSS) and past
+      # the series' noise, against earlier runs on the same kind of runner (or
+      # past every earlier run when none matches); held at the level before the
+      # step until it goes away → one issue, kept current, self-closing. An
+      # unreadable data file fails this step and leaves the issue alone.
       - name: Regression check
         env:
           GH_TOKEN: ${{ github.token }}
@@ -213,7 +217,9 @@ jobs:
           git fetch --quiet origin benchmarks
           git show origin/benchmarks:smaller/data.js > /tmp/smaller.js
           git show origin/benchmarks:bigger/data.js > /tmp/bigger.js
-          python3 .github/scripts/bench-regression.py 25 --rss-threshold 20 --issue /tmp/smaller.js /tmp/bigger.js
+          python3 .github/scripts/bench-regression.py 25 --rss-threshold 20 --issue /tmp/smaller.js /tmp/bigger.js \
+            | tee /tmp/regression.txt
+          { echo '### Regression check'; echo '```'; cat /tmp/regression.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       # The storage action pushed with the workflow token, and GitHub does not
       # start workflows from such pushes — so the `benchmarks` push trigger in

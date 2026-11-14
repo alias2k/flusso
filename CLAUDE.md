@@ -90,10 +90,17 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   a breach is confirmed when the re-run or the mean of both passes is past 10%, cleared only when both
   are within it; on a `main` push, `scenarios` runs everything and stores the
   points via `github-action-benchmark` on the `benchmarks` data branch (folded into Pages at
-  `/bench/`), then `bench-regression.py` compares each point to the median of the previous five and
-  calls a regression only on two consecutive points past 25% (20% RSS) and past three times the
-  window's median absolute deviation (a noisy series needs a larger move, issue #317), image-tag change restarts
-  the window, one self-maintained issue. `just load` is the soak script — not a benchmark.
+  `/bench/`), then `bench-regression.py` judges every run: against the same series on earlier
+  *matching runs* (runner facts stamped by `bench-runner-facts.py`, CPU model + cores + no-flusso
+  calibrations within 5%; for older points, the other suites' series within 5%; last 40 runs), or,
+  with no match, across all runners (real only past every earlier point). A regression is the two
+  newest judged points each real and each past 25% (20% RSS); one with a same-runner point **holds**
+  the series at its pre-step level until three same-runner runs are back within half the threshold
+  (or an image change, the 200-run history ends, or the series is gone 3 runs). An image change
+  restarts a series. It prints each finding's basis, the newest run's judging, the too-noisy series;
+  an unreadable file exits 1 before `gh`; one self-maintained issue (issues #317, #331; tests: `python3
+  -m unittest discover -s .github/scripts -p 'test_*.py'` over the real 79-run history in
+  `.github/scripts/fixtures/`, CI's `scripts` job). `just load` is the soak script — not a benchmark.
 - The `#[ignore]`d e2e tests live in `source-postgres`'s `integration`,
   `config_coverage`, `publication`, `introspection`, `tls`, `wal_idle`, `continuity`, and `partitions` binaries
   (`tls` boots a hostssl-only PG 16 with a committed throwaway self-signed cert and
@@ -254,7 +261,9 @@ mapping takes, on backfill and live, under a non-UTC `TimeZone`, with a `range` 
   --include-fragments --root-dir docs/book 'docs/book/**/*.html'`), and runs
   `.github/scripts/check-manual-links.sh`. A separate `fuzz` job runs a 60-second
   `pgoutput_decode` smoke fuzz on nightly (see below); the `query.rs` proptests need no special
-  handling — they're ordinary tests caught by the nextest step. Outside `ci.yml`, `audit.yml`'s
+  handling — they're ordinary tests caught by the nextest step. A `scripts` job runs the stdlib
+  unit tests under `.github/scripts` (`python3 -m unittest discover -s .github/scripts -p
+  'test_*.py'`; `bench-regression.py` over the real history, `bench-runner-facts.py`). Outside `ci.yml`, `audit.yml`'s
   `advisories (cargo deny)` job runs `cargo deny check advisories --all-features` weekly and on
   changes to a `Cargo.toml`/`Cargo.lock` — advisory only, never a required check — and
   `.github/dependabot.yml` opens grouped weekly `chore(deps)` PRs (cargo, npm, actions; skips

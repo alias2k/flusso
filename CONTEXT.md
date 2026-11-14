@@ -241,8 +241,20 @@ _Avoid_: KPI, stat, measurement
 The stored headline metrics and component bench results for the main branch, the thing a new run is compared to.
 _Avoid_: reference (taken by the scenario name), golden, snapshot
 
+**Matching run**:
+An earlier run of main on the same kind of machine as this one. With runner facts recorded: the same CPU model and core count, and calibrations within 5% of each other (median over them). Without: the series of the other suites within 5% (median over them). A point is compared to its matching runs when it has enough of them, otherwise across all runners.
+_Avoid_: runner type (the machine is inferred, not named), similar run
+
+**Runner facts**:
+What `bench-runner-facts.py` records about the machine in every data point: CPU model, core count, and calibrations of fixed work that runs no flusso code.
+_Avoid_: floors, environment
+
+**Hold**:
+The state of a series after a regression confirmed against matching runs: later points are compared to the level before the step until three runs in a row are back within half the threshold.
+_Avoid_: latch, pin
+
 **Regression**:
-A headline metric crossing its threshold against the baseline on two consecutive runs of main. One bad run is noise until the next confirms it.
+A headline metric crossing its threshold against the baseline on each of the two newest judged runs of main. One bad run is noise until the next confirms it. The baseline is the same metric on matching runs (or on all runners when there are none); after a regression confirmed against matching runs it is held at the level before the step.
 _Avoid_: slowdown, degradation, alert (that is the notification, not the fact)
 
 **Soak**:

@@ -140,6 +140,17 @@ jobs:
       - name: Check the repo's deep links into the manual
         run: .github/scripts/check-manual-links.sh docs/book
 
+  scripts:
+    name: CI scripts (tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Stdlib only, no Docker: bench-regression.py replayed over a snapshot
+      # of the real `main` history.
+      - name: Test the CI scripts
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
+
   fuzz:
     name: fuzz (pgoutput decoder)
     runs-on: ubuntu-latest
