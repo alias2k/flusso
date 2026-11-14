@@ -2982,7 +2982,7 @@ keyed_by! {
 /// `id`, the root's stored spelling, through the pre-image too, and the root's
 /// delete leaves no other.
 async fn a_link_spelled_differently_resolves_to_the_roots_own_key(
-    sql_type: &str,
+    [sql_type, link_type]: [&str; 2],
     setup: &[&str],
     [root, link]: [&str; 2],
     id: &str,
@@ -2997,11 +2997,11 @@ async fn a_link_spelled_differently_resolves_to_the_roots_own_key(
     }
     for statement in [
         format!("CREATE TABLE parents (id {sql_type} PRIMARY KEY, name text)"),
-        format!("CREATE TABLE kids (id int PRIMARY KEY, parent {sql_type}, name text)"),
+        format!("CREATE TABLE kids (id int PRIMARY KEY, parent {link_type}, name text)"),
         "CREATE TABLE grandkids (id int PRIMARY KEY, kid_id int, name text)".to_owned(),
         format!("CREATE TABLE fars (id {sql_type} PRIMARY KEY, name text)"),
         format!(
-            "CREATE TABLE links (parent {sql_type}, far {sql_type}, PRIMARY KEY (parent, far))"
+            "CREATE TABLE links (parent {link_type}, far {sql_type}, PRIMARY KEY (parent, far))"
         ),
         "ALTER TABLE kids REPLICA IDENTITY FULL".to_owned(),
         "ALTER TABLE grandkids REPLICA IDENTITY FULL".to_owned(),
@@ -3063,7 +3063,7 @@ async fn a_link_spelled_differently_resolves_to_the_roots_own_key(
             "a row a `via` hop reaches",
         ),
         (
-            format!("INSERT INTO links VALUES ({link}, {link})"),
+            format!("INSERT INTO links VALUES ({link}, {root})"),
             ops(&[&parent]),
             "a junction row",
         ),
@@ -3115,7 +3115,7 @@ macro_rules! linked_by_another_spelling {
         #[ignore = "requires docker"]
         async fn $test() {
             a_link_spelled_differently_resolves_to_the_roots_own_key(
-                $sql_type, $setup, [$root, $link], $id,
+                [$sql_type, $sql_type], $setup, [$root, $link], $id,
             )
             .await;
         }
@@ -3355,4 +3355,26 @@ async fn a_burst_of_links_reads_root_keys_back_once_per_batch() {
 #[ignore = "requires docker"]
 async fn a_burst_of_int_links_reads_no_root_key_back() {
     assert_eq!(root_key_lookups_for_a_burst("int", "1", "1", "1").await, 0);
+}
+
+macro_rules! linked_from_another_type {
+    ($($test:ident: [$sql_type:literal, $link_type:literal], [$root:literal, $link:literal], $id:literal;)*) => {$(
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires docker"]
+        async fn $test() {
+            a_link_spelled_differently_resolves_to_the_roots_own_key(
+                [$sql_type, $link_type], &[], [$root, $link], $id,
+            )
+            .await;
+        }
+    )*};
+}
+
+// A link column of another type is compared as the document query joins it,
+// so resolution finds what the build reads.
+linked_from_another_type! {
+    a_char_link_to_a_text_key_rebuilds_the_roots_own_document:
+        ["text", "char(5)"], ["'ab'", "'ab'"], "ab";
+    a_text_link_to_a_char_key_rebuilds_the_roots_own_document:
+        ["char(5)", "text"], ["'ab'", "'ab'"], "ab   ";
 }
