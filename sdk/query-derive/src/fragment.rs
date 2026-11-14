@@ -90,7 +90,6 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
     }
     for field in fields.iter().filter(|field| !field.skip) {
         out.extend(doc::exhaustive_map_values(field.ty));
-        out.extend(doc::rc_feature(field.ty));
     }
     for error in fields
         .iter()

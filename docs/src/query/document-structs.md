@@ -191,7 +191,7 @@ Dates sit behind a feature so a caller picks `time` or `chrono` (or `String` for
 
 ### String alternatives
 
-Wherever `String` is a value (`text`, `keyword`, `uuid`, an `enum`, `date`/`timestamp`, a map's values, an array's elements), `Box<str>` and `Cow<'_, str>` go too, and `Arc<str>` and `Rc<str>` with the `rc` feature (serde reads and writes those two only with its own `rc` feature, which it turns on; without it, the compile error names the feature). They are field types on a root and in a fragment, and query values: `User::email().eq(Box::<str>::from("a@b.c"))`. A `binary` or `geo` field, which takes `String` by its name, doesn't take them.
+Wherever `String` is a value (`text`, `keyword`, `uuid`, an `enum`, `date`/`timestamp`, a map's values, an array's elements), `Box<str>` and `Cow<'_, str>` go too, and `Arc<str>` and `Rc<str>` with the `rc` feature (serde reads and writes those two only with its own `rc` feature, which it turns on; without it, the compile error is serde's own, about `Deserialize`). They are field types on a root and in a fragment, and query values: `User::email().eq(Box::<str>::from("a@b.c"))`. A `binary` or `geo` field, which takes `String` by its name, doesn't take them.
 
 ## Arrays
 
