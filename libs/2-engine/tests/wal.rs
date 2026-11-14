@@ -2566,12 +2566,12 @@ fn aggregate_field(name: &str, aggregate: Aggregate) -> Field {
 }
 
 /// A root `primary_key` naming a unique column other than the table's own key
-/// writes no document (issue #225): the backfill and every root change carry
-/// the table's key, the batched build matches it against the declared column,
-/// finds nothing and writes a tombstone; a change on a related table is
-/// addressed by the declared column and stops the engine. This is why
-/// `root_primary_key_mismatch` refuses the start; if a build ever gets past
-/// it, revisit that decision.
+/// never keeps a document (issue #225): the backfill and every root change
+/// carry the table's key, the batched build matches it against the declared
+/// column, finds nothing and writes a tombstone; a change on a related table
+/// is addressed by the declared column, so its document is written under
+/// that value, and the next root change deletes it again. This is why
+/// `root_primary_key_mismatch` refuses the start.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn a_root_primary_key_other_than_the_tables_writes_no_document() {
@@ -2649,15 +2649,21 @@ async fn a_root_primary_key_other_than_the_tables_writes_no_document() {
         recorded.lock().unwrap()
     );
 
-    sqlx::query("INSERT INTO orders VALUES (11, 'u1', '7')")
-        .execute(&pool)
-        .await
-        .unwrap();
-    let stopped = tokio::time::timeout(Duration::from_secs(30), engine)
-        .await
-        .expect("a change on the related table kept the engine running")
-        .unwrap();
-    assert!(stopped.is_err());
+    for (sql, op) in [
+        (
+            "INSERT INTO orders VALUES (11, 'u1', '7')",
+            "upsert users u1",
+        ),
+        (
+            "UPDATE users SET email = 'y@x' WHERE id = 1",
+            "delete users 1",
+        ),
+    ] {
+        recorded.lock().unwrap().clear();
+        sqlx::query(sql).execute(&pool).await.unwrap();
+        expect_op(&mut engine, &recorded, op).await;
+    }
+    engine.abort();
 }
 
 /// Every relation position keyed by one SQL type (issue #295): a root

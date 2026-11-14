@@ -285,7 +285,7 @@ impl PgDocumentBuilder {
         let mut seen = HashSet::new();
         let mut roots = Vec::new();
         for row in &rows {
-            let value = value::decode_named_column(row, result_column);
+            let value = value::decode_key(row, result_column);
             if !matches!(value, GenericValue::Null) && seen.insert(value.clone()) {
                 roots.push(value);
             }

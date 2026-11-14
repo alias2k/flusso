@@ -139,7 +139,7 @@ pub struct PgDocumentBuilder {
 }
 
 impl PgDocumentBuilder {
-    /// Over a pool whose connections read `bytea` as hex text, as
+    /// Over a pool whose connections run with `text_value::SESSION_OPTIONS`, as
     /// [`connect`](Self::connect)'s do.
     pub(crate) fn new(pool: PgPool, spec: Arc<SourceSpec>) -> Self {
         Self {
@@ -205,17 +205,10 @@ impl PgDocumentBuilder {
 
     #[tracing::instrument(name = "pg.connect", skip_all, err)]
     pub async fn connect(connection_url: &str, spec: Arc<SourceSpec>) -> Result<Self> {
-        // The document query renders a `bytea` as text inside its JSON, which
-        // `value::postgres_hex` decodes. A database or role set to
-        // `bytea_output = 'escape'` would render the escape text instead.
+        // The document query renders a `bytea` as text inside its JSON, and a
+        // key is read back as its text: both parse what these settings fix.
         let pool = sqlx::postgres::PgPoolOptions::new()
-            .after_connect(|connection, _| {
-                Box::pin(async move {
-                    sqlx::Executor::execute(&mut *connection, "SET bytea_output = 'hex'").await?;
-                    Ok(())
-                })
-            })
-            .connect(connection_url)
+            .connect_with(crate::text_value::connect_options(connection_url)?)
             .await
             .map_err(|e| SourceError::Connection(e.to_string()))?;
         tracing::info!(indexes = spec.indexes().count(), "connected to Postgres");
@@ -257,7 +250,8 @@ impl PgDocumentBuilder {
             return Ok(None);
         };
         let sql = format!(
-            "SELECT \"{pk}\" FROM \"{db_schema}\".\"{table}\" WHERE \"{pk}\" IS NOT NULL LIMIT 1",
+            "SELECT {key} FROM \"{db_schema}\".\"{table}\" WHERE \"{pk}\" IS NOT NULL LIMIT 1",
+            key = value::key_select(&format!("\"{pk_column}\""), "key"),
             pk = pk_column,
             db_schema = schema.db_schema,
             table = schema.table,
@@ -269,7 +263,7 @@ impl PgDocumentBuilder {
         let Some(row) = row else {
             return Ok(None);
         };
-        let key_value = value::first_column_to_generic(&row);
+        let key_value = value::decode_key(&row, "key");
         if matches!(key_value, kernel::GenericValue::Null) {
             return Ok(None);
         }
@@ -798,14 +792,14 @@ impl DocumentBuilder for PgDocumentBuilder {
                 let rows = statement.fetch_all(&self.pool).await.map_err(query_err)?;
 
                 // Map each returned root key to its assembled body. `doc_key` is
-                // the first column, decoded through the same path live-change
-                // keys take, so it matches the ids' key values exactly.
+                // parsed as live-change keys are, so it matches the ids' key
+                // values exactly.
                 let mut bodies: HashMap<
                     kernel::GenericValue,
                     std::result::Result<kernel::GenericValue, source::document::BuildFailure>,
                 > = HashMap::with_capacity(rows.len());
                 for row in &rows {
-                    let key = value::first_column_to_generic(row);
+                    let key = value::decode_key(row, query::DOC_KEY);
                     let document: serde_json::Value = row.try_get("document").map_err(query_err)?;
                     bodies.insert(key, value::coerce_document(document, &schema.fields));
                 }

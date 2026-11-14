@@ -20,9 +20,10 @@
 //!
 //! [`ReplicationEvent::XLogData`]: pgwire_replication::ReplicationEvent::XLogData
 
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use kernel::{ColumnName, DatabaseSchema, GenericValue, TableName};
 use source::{RowImage, RowKey, SourceError};
+
+use crate::text_value::typed_value;
 
 /// A decoded pgoutput message — only the variants this source acts on.
 #[derive(Debug)]
@@ -195,92 +196,6 @@ pub(crate) fn post_image(rel: &Relation, old: &Tuple, new: &Tuple) -> RowImage {
         pairs.push((col.name.clone(), value));
     }
     RowImage(pairs)
-}
-
-/// Interpret a pgoutput text value by its Postgres type OID.
-///
-/// A WAL key must decode into the **same** [`GenericValue`] variant the document
-/// builder reads the column back as (`value::decode_column`): the engine matches
-/// a live change's key against the rebuilt row's key by variant-exact equality.
-/// A width or type drift — a WAL `BigInt` against a read-back `Int(i32)`, or a
-/// WAL `String` against a read-back `Uuid` — makes the match miss, so every live
-/// insert/update on that table looks like a tombstone and the document is
-/// silently deleted. So mirror every type `decode_column` decodes: the integer
-/// widths, `uuid`, `bytea`, and the temporal types (issue #295). A domain's
-/// column arrives under its domain's OID; the stream swaps in the base type's
-/// before decoding (`stream.rs`'s `retype_domains`).
-///
-/// Unknown or unparseable types (`infinity`, a BC date) fall back to the text
-/// itself.
-fn typed_value(text: &str, type_oid: u32) -> GenericValue {
-    let as_text = || GenericValue::String(text.to_owned());
-    match type_oid {
-        // bool
-        16 => match text {
-            "t" => GenericValue::Bool(true),
-            "f" => GenericValue::Bool(false),
-            _ => as_text(),
-        },
-        // int2 / int4 / int8 (+ oid) — width-exact, matching `decode_column`.
-        21 => text
-            .parse::<i16>()
-            .map_or_else(|_| as_text(), GenericValue::SmallInt),
-        23 => text
-            .parse::<i32>()
-            .map_or_else(|_| as_text(), GenericValue::Int),
-        20 | 26 => text
-            .parse::<i64>()
-            .map_or_else(|_| as_text(), GenericValue::BigInt),
-        // float4 / float8 / numeric — split, matching `decode_column`.
-        700 => text
-            .parse::<f32>()
-            .map_or_else(|_| as_text(), GenericValue::Float),
-        701 => text
-            .parse::<f64>()
-            .map_or_else(|_| as_text(), GenericValue::Double),
-        1700 => rust_decimal::Decimal::from_str_exact(text)
-            .map_or_else(|_| as_text(), GenericValue::Decimal),
-        // uuid — decode, so a uuid key matches the read-back `Uuid`.
-        2950 => uuid::Uuid::parse_str(text).map_or_else(|_| as_text(), GenericValue::Uuid),
-        17 => bytea(text).map_or_else(as_text, GenericValue::Bytes),
-        1082 => NaiveDate::parse_from_str(text, "%Y-%m-%d")
-            .map_or_else(|_| as_text(), GenericValue::Date),
-        1083 => NaiveTime::parse_from_str(text, "%H:%M:%S%.f")
-            .map_or_else(|_| as_text(), GenericValue::Time),
-        1114 => NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.f")
-            .map_or_else(|_| as_text(), GenericValue::Timestamp),
-        1184 => DateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.f%#z").map_or_else(
-            |_| as_text(),
-            |at| GenericValue::TimestampTz(at.with_timezone(&Utc)),
-        ),
-        // everything else (text, varchar, citext, …) stays text
-        _ => as_text(),
-    }
-}
-
-/// Whether [`typed_value`] decodes values of `type_oid` (any other type stays
-/// text).
-pub(crate) fn is_decoded(type_oid: u32) -> bool {
-    matches!(
-        type_oid,
-        16 | 21 | 23 | 20 | 26 | 700 | 701 | 1700 | 2950 | 17 | 1082 | 1083 | 1114 | 1184
-    )
-}
-
-/// A `bytea` in its `hex` text output (`\x01ab`), the default since PG 9.0.
-fn bytea(text: &str) -> Option<Vec<u8>> {
-    let hex = text.strip_prefix("\\x")?;
-    if hex.len() % 2 != 0 {
-        return None;
-    }
-    hex.as_bytes()
-        .chunks(2)
-        .map(|pair| {
-            std::str::from_utf8(pair)
-                .ok()
-                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
-        })
-        .collect()
 }
 
 /// Decode one raw pgoutput message.

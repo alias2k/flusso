@@ -235,13 +235,14 @@ async fn key_relations(
 
 /// Replace each domain column's type OID with its base type's, through nested
 /// domains. A `Relation` names a domain column by the domain's OID, which
-/// `typed_value` doesn't know, while sqlx reads the column back as its base
-/// type: left as text, a domain key would miss its document (issue #295).
-/// Only columns of a type `typed_value` doesn't already decode are looked up.
+/// `text_value::typed_value` doesn't know, while a query's row description
+/// names it by its base type: left as text, a domain key would miss its
+/// document (issue #295). Only columns of a type `typed_value` doesn't
+/// already decode are looked up.
 async fn retype_domains(catalog: &PgPool, columns: &mut [pgoutput::Column]) -> Result<()> {
     let unknown: Vec<i64> = columns
         .iter()
-        .filter(|column| !pgoutput::is_decoded(column.type_oid))
+        .filter(|column| !crate::text_value::is_decoded(column.type_oid))
         .map(|column| i64::from(column.type_oid))
         .collect();
     if unknown.is_empty() {

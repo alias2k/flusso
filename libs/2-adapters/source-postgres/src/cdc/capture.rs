@@ -107,12 +107,21 @@ impl WalChangeCapture {
     ///
     /// `config.publication` names one publication: the one
     /// [`CaptureProvisioning`] inspects and provisions. Without an
-    /// `application_name`, the connection reports itself as `flusso`.
+    /// `application_name`, the connection reports itself as `flusso`. The
+    /// session renders values with flusso's own `DateStyle`, `bytea_output`
+    /// and `extra_float_digits`, whatever the database or role sets.
     pub fn new(config: ReplicationConfig, connection_url: impl Into<String>) -> Self {
         let named = config.application_name.is_some();
+        // Ours go last, so they win over a caller's own `-c` for the same name:
+        // the decoder parses the text these settings fix.
+        let options = match config.options.as_deref() {
+            Some(theirs) => format!("{theirs} {}", crate::text_value::startup_options()),
+            None => crate::text_value::startup_options(),
+        };
         let config = config
             .with_status_interval(STATUS_INTERVAL)
-            .with_wakeup_interval(STATUS_INTERVAL);
+            .with_wakeup_interval(STATUS_INTERVAL)
+            .with_options(options);
         Self {
             config: if named {
                 config

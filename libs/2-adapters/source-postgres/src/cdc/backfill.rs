@@ -44,6 +44,9 @@ use sqlx::{PgPool, Postgres};
 use super::quote_ident;
 use crate::document::value;
 
+/// The alias each table's key is selected under.
+const KEY: &str = "key";
+
 /// How many keys to pull from a cursor per round-trip.
 const FETCH_SIZE: usize = 1024;
 
@@ -57,7 +60,7 @@ pub(crate) async fn snapshot(
     // (its snapshot transaction) for the duration.
     let pool = PgPoolOptions::new()
         .max_connections(2)
-        .connect(connection_url)
+        .connect_with(crate::text_value::connect_options(connection_url)?)
         .await
         .map_err(|e| SourceError::Connection(e.to_string()))?;
     let tables = resolve_tables(&pool, tables).await?;
@@ -252,7 +255,7 @@ impl Backfill {
                         }
                     } else {
                         for row in &rows {
-                            let value = value::first_column_to_generic(row);
+                            let value = value::decode_key(row, KEY);
                             buf.push_back(RowKey(vec![(current.pk.clone(), value)]));
                         }
                         self.phase = Phase::Reading {
@@ -297,7 +300,9 @@ async fn begin_snapshot(conn: &mut PoolConnection<Postgres>) -> Result<()> {
 async fn declare_cursor(conn: &mut PoolConnection<Postgres>, table: &BackfillTable) -> Result<()> {
     let sql = format!(
         "DECLARE {} NO SCROLL CURSOR FOR SELECT {} FROM {}",
-        table.cursor, table.pk_quoted, table.qualified,
+        table.cursor,
+        value::key_select(&table.pk_quoted, KEY),
+        table.qualified,
     );
     sqlx::query(sqlx::AssertSqlSafe(sql))
         .execute(&mut **conn)

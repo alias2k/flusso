@@ -131,6 +131,20 @@ fn sql_string(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
 }
 
+/// The cast a bound key takes: `::<sql_type>`, or `::text::<sql_type>` for a
+/// key carried as text (a value its type's parser can't represent, like
+/// `infinity`), so the database parses it as it rendered it.
+///
+/// The two spellings are two statements: sqlx caches a prepared statement by
+/// its text with the parameter types of its first use, so a text value bound
+/// where a typed one was prepared would be sent in the wrong binary format.
+pub(super) fn key_cast(value: &GenericValue, sql_type: &str) -> String {
+    match value {
+        GenericValue::String(_) => format!("::text::{sql_type}"),
+        _ => format!("::{sql_type}"),
+    }
+}
+
 pub(super) fn qident(ident: &str) -> String {
     format!("\"{ident}\"")
 }

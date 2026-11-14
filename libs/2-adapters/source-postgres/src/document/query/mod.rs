@@ -41,6 +41,9 @@ type PgQuery<'q> = sqlx::query::Query<'q, Postgres, PgArguments>;
 
 const ROOT: &str = "root";
 
+/// The alias the batched build selects each row's root key under.
+pub(super) const DOC_KEY: &str = "doc_key";
+
 /// SQL assembled by this module's query builder, ready to hand to
 /// [`sqlx::query`](fn@sqlx::query).
 ///
@@ -129,7 +132,7 @@ pub(super) fn document_query(
 
     let mut conditions = Vec::new();
     for (column, value) in key {
-        let placeholder = builder.typed_placeholder(value.clone(), &schema.table, column)?;
+        let placeholder = builder.key_placeholder(value.clone(), &schema.table, column)?;
         conditions.push(format!("{} = {placeholder}", qcol(ROOT, column)));
     }
     if let Some(predicate) = builder.soft_delete_predicate(schema)? {
@@ -152,17 +155,17 @@ pub(super) fn document_query(
 
 /// Build a single query that assembles every document whose root key is in
 /// `keys`, for an index with a single-column root key (`pk_column`). Selects
-/// the root key as the first column (`doc_key`) beside the assembled document,
-/// so the caller can match each row back to its id; a key with no matching
-/// row simply doesn't come back, which the caller reads as a tombstone.
+/// the root key (under [`DOC_KEY`]) beside the assembled document, so the
+/// caller can match each row back to its id; a key with no matching row
+/// simply doesn't come back, which the caller reads as a tombstone.
 ///
 /// The document is assembled exactly as in [`document_query`] — same nested
 /// `json_build_object` / `json_agg` — differing only in selecting the key and
 /// matching the root with `IN (…)` instead of a single equality. The key is
-/// selected **raw** (not `to_json`-wrapped) so it decodes by its real column
-/// type into the same typed [`GenericValue`] variant the requested keys carry —
-/// a `uuid` key comes back as a `Uuid`, not a JSON string — so the caller's
-/// key-to-body match is exact.
+/// selected with [`key_select`](super::value::key_select), so it parses into
+/// the same typed [`GenericValue`] variant the requested keys carry — a `uuid`
+/// key comes back as a `Uuid`, not a string — and the key-to-body match is
+/// exact.
 pub(super) fn documents_query(
     schema: &IndexSchema,
     pk_column: &ColumnName,
@@ -184,7 +187,7 @@ pub(super) fn documents_query(
 
     let mut placeholders = Vec::with_capacity(keys.len());
     for key in keys {
-        placeholders.push(builder.typed_placeholder(key.clone(), &schema.table, pk_column)?);
+        placeholders.push(builder.key_placeholder(key.clone(), &schema.table, pk_column)?);
     }
     let mut predicate = format!("{} IN ({})", qcol(ROOT, pk_column), placeholders.join(", "),);
     if let Some(soft_delete) = builder.soft_delete_predicate(schema)? {
@@ -196,10 +199,10 @@ pub(super) fn documents_query(
     predicate.push_str(&root_filters);
 
     let sql = format!(
-        "SELECT {key} AS \"doc_key\", {object} AS \"document\" \
+        "SELECT {key}, {object} AS \"document\" \
          FROM {} AS \"{ROOT}\" WHERE {predicate}",
         qtable(&schema.db_schema, &schema.table),
-        key = qcol(ROOT, pk_column),
+        key = super::value::key_select(&qcol(ROOT, pk_column), DOC_KEY),
     );
     Ok((SqlString::new(sql), builder.params))
 }
@@ -231,9 +234,10 @@ pub(super) fn reverse_query(
             })?;
         params.push(value.clone());
         conditions.push(format!(
-            "{} = ${}::{sql_type}",
+            "{} = ${}{}",
             qident(column.as_ref()),
-            params.len()
+            params.len(),
+            sql::key_cast(value, sql_type),
         ));
     }
     if conditions.is_empty() {
@@ -241,7 +245,7 @@ pub(super) fn reverse_query(
     }
     let sql = format!(
         "SELECT {} FROM {} WHERE {}",
-        qident(select_column.as_ref()),
+        super::value::key_select(&qident(select_column.as_ref()), select_column.as_ref()),
         qtable(db, table),
         conditions.join(" AND "),
     );
