@@ -3312,33 +3312,19 @@ async fn root_key_lookups_for_a_burst(sql_type: &str, root: &str, link: &str, id
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO kids VALUES (5000, NULL, 'marker')")
+    // Committed after the burst, so its document comes after every kid's.
+    sqlx::query("INSERT INTO parents VALUES (99, 'marker')")
         .execute(&pool)
         .await
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !recorded
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|op| op == &format!("upsert parents {id}"))
-    {
-        assert!(
-            Instant::now() < deadline,
-            "the burst never rebuilt its parent"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    expect_op(&mut engine, &recorded, "upsert parents 99").await;
+    let recorded = recorded.lock().unwrap().clone();
     assert!(
         recorded
-            .lock()
-            .unwrap()
             .iter()
-            .filter(|op| op.contains("parents"))
+            .filter(|op| op.contains("parents") && *op != "upsert parents 99")
             .all(|op| op == &format!("upsert parents {id}")),
-        "{:?}",
-        recorded.lock().unwrap()
+        "{recorded:?}"
     );
     engine.abort();
 
@@ -3351,15 +3337,13 @@ async fn root_key_lookups_for_a_burst(sql_type: &str, root: &str, link: &str, id
     .unwrap()
 }
 
-/// A numeric key's links are read back once per batch, not once per change.
+/// A numeric key's links are read back once per change: 1,000 changes, 1,000
+/// lookups, each run as its change is resolved.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
-async fn a_burst_of_links_reads_root_keys_back_once_per_batch() {
+async fn a_burst_of_numeric_links_reads_one_root_key_back_per_change() {
     let lookups = root_key_lookups_for_a_burst("numeric", "1.5", "1.50", "1.5").await;
-    assert!(
-        (1..=10).contains(&lookups),
-        "{lookups} lookups for 1,000 changes in about four batches"
-    );
+    assert_eq!(lookups, 1_000, "one lookup per change");
 }
 
 /// An int key's links are its own keys: no lookup at all.
