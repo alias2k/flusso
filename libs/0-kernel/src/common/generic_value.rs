@@ -59,8 +59,8 @@ pub enum GenericValue {
     Bytes(Vec<u8>),
     Array(Vec<GenericValue>),
     Map(BTreeMap<String, GenericValue>),
-    /// `numeric` / `decimal` past [`Decimal`]'s range (beyond ±7.9e28, or
-    /// more than 28 fractional digits) — exact, as its text.
+    /// A declared `decimal`'s value — exact, as the text the source wrote, in
+    /// [`Decimal`]'s range (±7.9e28, 28 fractional digits) or past it.
     BigDecimal(BigDecimal),
 }
 

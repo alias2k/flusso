@@ -71,18 +71,25 @@ Without either, no index is rebuilt. A `constant` holding a number, a boolean, o
 
 ## A decimal is written with every digit
 
-**Breaking.** A `decimal` value was rounded to the nearest `f64` on its way to the document, and one past `rust_decimal`'s range (±7.9 × 10^28, or more than 28 fractional digits) was written as a JSON string. 0.18 writes the number Postgres stores, every digit, wherever a `decimal` is declared: a column, an array element, a `sum`/`min`/`max`, an `ids` key, a `map` value (see [numbers](../reference/field-types.md#numbers)). No content hash moves and nothing is rebuilt; search, sort and aggregations still see a `double`. Every other number, a `json` field's included, is written as before.
+**Breaking.** A `decimal` value was rounded to the nearest `f64` on its way to the document, and one past `rust_decimal`'s range (±7.9 × 10^28, or more than 28 fractional digits) was written as a JSON string. 0.18 writes the number as Postgres wrote it into the document, every digit, wherever a `decimal` is declared: a column, an array element, a `sum`/`min`/`max`, an `ids` key, a `map` value, a script field (see [numbers](../reference/field-types.md#numbers)). No content hash moves and nothing is rebuilt. Every other number, a `json` field's included, is written as before.
 
 | Value under `decimal` | 0.17 `_source` | 0.18 `_source` |
 | --- | --- | --- |
-| `12.50` | `12.5` | `12.50` |
-| `100` | `100.0` | `100` |
-| `1234567890.123456789` | `1234567890.1234567` | `1234567890.123456789` |
+| `5` | `5.0` | `5` |
+| `5.00`, `1.10` | `5.0`, `1.1` | `5.00`, `1.10` |
+| `1234567890.123456789`, a `bigint`-sized value | rounded to 17 digits | every digit |
 | `1e30` | `"1000000000000000000000000000000"` | `1000000000000000000000000000000` |
+| `"2.5"`, a text value in a `map` with `values: decimal` | `"2.5"` | `2.5` |
+| a `float8` column: `1e-07`, `9.007199254740992e+15`, `1e+308` | `1e-7`, `9007199254740992.0`, a string of 309 digits | as Postgres wrote it |
 | `1e2` in a `json` column | `100.0` | `1e2` |
 
-1. **Stored documents.** Each document takes the new form at its row's next write. Run [`flusso reindex <index>`](../reference/cli.md#reindex) on each index with a `decimal` field to rewrite every one now, with no restart.
-2. **Consumers.** A field read as `String` because it could hold the string form now fails on that document: read it as `f64` or `serde_json::Value` (see [What the derive trusts](../query/document-structs.md#what-the-derive-trusts)). A `rust_decimal::Decimal` still can't hold a value past its range.
+A level of more than 50 fields is built as `jsonb`, which writes a number without an exponent (`0.0000001`, `100`).
+
+1. **Indexed values.** OpenSearch now parses the exact text, where 0.17 parsed a rounded one. For about a fifth of long values the indexed `double` moves by one unit in the last place, so a `term` query for a previously stored double can miss, and range, sort and histogram edges next to those values shift. A number literal longer than 1000 characters (a `numeric` like `1e-1200`, which 0.17 indexed as `0.0`) and a value of `1e309` or more are item-level rejections the index's [`on_error`](../reference/index-and-on-error.md#on_error) decides; under `stop` the sink engine stops. In 0.17, `1e309` or more failed the whole batch's document query.
+2. **`_source` filtering.** `_source_includes`/`_source_excludes` make OpenSearch render the numbers again (`12.50` comes back `12.5`): the exact text is only in the unfiltered `_source`.
+3. **Consumers.** `f64` and `rust_decimal::Decimal` read the same values as before. A `serde_json::Value` changes shape: `5.0` becomes the integer `5`, and a past-range string becomes a number. A field read as `String` because it could hold the string form now fails on that document: read it as `f64` or `serde_json::Value` (see [What the derive trusts](../query/document-structs.md#what-the-derive-trusts)). A `rust_decimal::Decimal` still can't hold a value past its range.
+4. **Scripts.** A declared decimal reaches a script with every digit `Decimal` holds: `to_string` keeps trailing zeros (a `keyword` script field built from `1.10` was `1.1`), comparisons use every digit, and `Decimal::MAX` is a decimal where it was a string (so `* 2` overflows and fails the document). A `decimal` script field's result is written with every digit, and one returning a string that holds a decimal number writes that number instead of failing.
+5. **Stored documents.** Each document takes the new form at its row's next write. Run [`flusso reindex <index>`](../reference/cli.md#reindex) on each index with a `decimal` field to rewrite every one now, with no restart.
 
 ## Related
 

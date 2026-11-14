@@ -1,9 +1,9 @@
-//! [`BigDecimal`]: an exact decimal number past [`Decimal`]'s range, held as
-//! its text.
+//! [`BigDecimal`]: a declared `decimal`'s exact value, held as its text.
 //!
 //! A [`Decimal`] holds a 96-bit mantissa and at most 28 fractional digits
-//! (about ±7.9e28). A Postgres `numeric` holds far more. A value past
-//! [`Decimal`] keeps the exact text the source wrote, and a sink writes that
+//! (about ±7.9e28), and a value read through `f64` keeps about 17 digits. A
+//! Postgres `numeric` holds far more. A declared `decimal` keeps the exact text
+//! the source wrote, in [`Decimal`]'s range or past it, and a sink writes that
 //! text as a JSON number: JSON numbers have no precision limit.
 //!
 //! The text is always a JSON number literal (`-?digits[.digits][e±digits]`),
@@ -28,8 +28,8 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// An exact decimal number too large or too precise for
-/// [`Decimal`](rust_decimal::Decimal), held as its JSON number text.
+/// An exact decimal number, in [`Decimal`](rust_decimal::Decimal)'s range or
+/// past it, held as its JSON number text.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BigDecimal(Box<str>);
 
