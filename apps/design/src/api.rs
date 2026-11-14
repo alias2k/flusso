@@ -3406,7 +3406,13 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.0).ok();
+            if let Ok(meta) = std::fs::metadata(self.state_dir().join("notices")) {
+                let mut perms = meta.permissions();
+                std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o700);
+                std::fs::set_permissions(self.state_dir().join("notices"), perms).ok();
+            }
             std::fs::remove_dir_all(self.state_dir()).ok();
+            std::fs::remove_dir_all(self.shared()).ok();
             commit::state::use_test_dir(None);
         }
     }
@@ -3459,6 +3465,11 @@ mod tests {
 
         fn state_dir(&self) -> PathBuf {
             self.0.with_extension("state")
+        }
+
+        /// A folder beside the project, for schema files outside it.
+        fn shared(&self) -> PathBuf {
+            self.0.with_extension("shared")
         }
 
         /// Whether a save in flight is past its commit point.
@@ -3853,10 +3864,18 @@ mod tests {
     #[test]
     fn a_hand_edited_notice_never_names_files_outside_the_project() {
         let fixture = Fixture::new("hand-edited");
-        let outside = fixture.0.with_extension("outside");
+        State::at(fixture.state_dir()).unwrap();
+        let outside = fixture.state_dir().join("outside.yml");
         std::fs::write(&outside, "secret\n").unwrap();
-        let outside_name = outside.file_name().unwrap().to_str().unwrap().to_owned();
-        let up = format!("../{outside_name}");
+        let outside_name = "outside.yml".to_owned();
+        let state_name = fixture
+            .state_dir()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let up = format!("../{state_name}/{outside_name}");
         let base = Paths::new(&fixture.config()).unwrap().base;
         let save = |id: &str| {
             serde_json::json!({
@@ -3916,6 +3935,176 @@ mod tests {
         let kept = &project.recovery.recovered[0].kept[0];
         assert_eq!(kept.backup, None, "{kept:?}");
         assert!(!kept.deleted, "{kept:?}");
+    }
+
+    /// The `products` index's schema moved to a folder beside the project,
+    /// named in `flusso.toml` as `../<dir>.shared/products.schema.yml`.
+    fn with_products_outside(fixture: &Fixture) -> String {
+        std::fs::create_dir_all(fixture.shared()).unwrap();
+        let shared = fixture.shared().join("products.schema.yml");
+        std::fs::rename(fixture.0.join("products.schema.yml"), &shared).unwrap();
+        let rel = format!(
+            "../{}/products.schema.yml",
+            fixture.shared().file_name().unwrap().to_str().unwrap()
+        );
+        let config = std::fs::read_to_string(fixture.config()).unwrap().replace(
+            "schema = \"products.schema.yml\"",
+            &format!("schema = \"{rel}\""),
+        );
+        std::fs::write(fixture.config(), config).unwrap();
+        rel
+    }
+
+    /// Review 2 of #296: a schema file outside the config's folder, kept by
+    /// a recovery, is told on the first load, after a reload and a restart,
+    /// and its backup explained after Dismiss.
+    #[test]
+    fn a_kept_schema_outside_the_folder_is_told() {
+        let fixture = Fixture::new("outside-schema");
+        let rel = with_products_outside(&fixture);
+        let request = || -> SaveRequest {
+            let project = load_project(&fixture.config()).unwrap();
+            serde_json::from_value(serde_json::json!({
+                "config": project.config,
+                "digests": project.digests,
+                "ops": [{ "kind": "upsert", "index": "products", "path": rel,
+                          "schema": schema("products: 1"), "base": tagged("products: 1") }],
+            }))
+            .unwrap()
+        };
+        let shared = fixture.shared().join("products.schema.yml");
+        let before = std::fs::read_to_string(&shared).unwrap();
+        for point in 1.. {
+            save_with(
+                &fixture.config(),
+                &request(),
+                &mut Disk::stopping_after(point),
+            )
+            .ok();
+            assert!(!fixture.committed());
+            if std::fs::read_to_string(&shared).unwrap() != before {
+                break;
+            }
+            fixture.settle();
+        }
+        std::fs::write(&shared, "mine\n").unwrap();
+        recover_project(&fixture.config()).unwrap();
+
+        let told = |project: &Project| -> Vec<String> {
+            project
+                .recovery
+                .recovered
+                .iter()
+                .flat_map(|r| &r.kept)
+                .map(|k| k.path.clone())
+                .collect()
+        };
+        let project = open_project(&fixture.config()).unwrap();
+        assert_eq!(told(&project), [rel.clone()], "{:?}", project.recovery);
+        let backup = project.recovery.recovered[0].kept[0]
+            .backup
+            .clone()
+            .expect("a backup");
+        assert!(open_project(&fixture.config()).is_ok_and(|p| told(&p) == [rel.clone()]));
+        fixture.restart();
+        let project = open_project(&fixture.config()).unwrap();
+        assert_eq!(told(&project), [rel.clone()], "{:?}", project.recovery);
+
+        dismiss_recovered(
+            &fixture.config(),
+            &Fixture::ids(&project.recovery.recovered),
+        )
+        .unwrap();
+        let project = open_project(&fixture.config()).unwrap();
+        let copies: Vec<(&str, &str)> = project
+            .recovery
+            .copies
+            .iter()
+            .map(|c| (c.copy.as_str(), c.path.as_str()))
+            .collect();
+        assert_eq!(copies, [(backup.as_str(), rel.as_str())]);
+    }
+
+    /// Review 2 of #296: with a notices folder that can't be written, the
+    /// journal stays until a notice is stored, so every start tells the save
+    /// again; a save still goes through.
+    #[test]
+    fn a_notice_that_cannot_be_stored_keeps_the_journal() {
+        let fixture = Fixture::new("unstorable");
+        let notices = fixture.state_dir().join("notices");
+        State::at(fixture.state_dir()).unwrap().notices().unwrap();
+        let mode = |m: u32| {
+            let mut perms = std::fs::metadata(&notices).unwrap().permissions();
+            std::os::unix::fs::PermissionsExt::set_mode(&mut perms, m);
+            std::fs::set_permissions(&notices, perms).unwrap();
+        };
+        fixture.kill_mid_swap();
+        mode(0o500);
+        recover_project(&fixture.config()).unwrap();
+        for _ in 0..2 {
+            fixture.restart();
+            let project = open_project(&fixture.config()).unwrap();
+            assert_eq!(
+                project.recovery.recovered.len(),
+                1,
+                "{:?}",
+                project.recovery
+            );
+            assert!(fixture.0.join(".flusso-save.journal").exists());
+        }
+        let saved = save_project(&fixture.config(), fixture.swap()).unwrap();
+        assert!(
+            !saved.written.is_empty() || !saved.moved.is_empty(),
+            "{saved:?}"
+        );
+        assert!(!fixture.0.join(".flusso-save.journal").exists());
+        mode(0o700);
+        open_project(&fixture.config()).unwrap();
+    }
+
+    /// Review 2 of #296: a hand-edited notice naming a file through a folder
+    /// link leading out of the project, or a copy that is a link or a folder,
+    /// shows none of them.
+    #[test]
+    fn a_notice_never_looks_through_a_link_out_of_the_project() {
+        let fixture = Fixture::new("linked");
+        State::at(fixture.state_dir()).unwrap();
+        let outside = fixture.state_dir().join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.yml"), "secret\n").unwrap();
+        std::fs::write(outside.join(".secret.yml.flusso-save.1-1.0.bak"), "x\n").unwrap();
+        std::os::unix::fs::symlink(&outside, fixture.0.join("link")).unwrap();
+        std::os::unix::fs::symlink(
+            fixture.0.join("orders.schema.yml"),
+            fixture.0.join(".users.schema.yml.flusso-save.1-1.0.bak"),
+        )
+        .unwrap();
+        std::fs::create_dir(fixture.0.join(".orders.schema.yml.flusso-save.1-1.0.bak")).unwrap();
+        let base = Paths::new(&fixture.config()).unwrap().base;
+        let notice = serde_json::json!({
+            "format": 1, "dir": base, "pending": true,
+            "save": {
+                "id": "1-1", "outcome": "rolled_back", "started_at_ms": 1,
+                "files": ["link/secret.yml"],
+                "kept": [
+                    { "path": "link/secret.yml", "backup": "link/.secret.yml.flusso-save.1-1.0.bak" },
+                    { "path": "users.schema.yml", "backup": ".users.schema.yml.flusso-save.1-1.0.bak" },
+                    { "path": "orders.schema.yml", "backup": ".orders.schema.yml.flusso-save.1-1.0.bak" },
+                ],
+            },
+        });
+        State::at(fixture.state_dir())
+            .unwrap()
+            .notices()
+            .unwrap()
+            .put("1-1", notice.to_string().as_bytes(), &mut Disk::default())
+            .unwrap();
+
+        let project = open_project(&fixture.config()).unwrap();
+        let shown = serde_json::to_string(&(&project.recovery.recovered, &project.recovery.copies))
+            .unwrap();
+        assert!(!shown.contains("secret"), "{shown}");
+        assert!(!shown.contains(".bak"), "{shown}");
     }
 
     /// Issue #292: the copy of what another program wrote as a save

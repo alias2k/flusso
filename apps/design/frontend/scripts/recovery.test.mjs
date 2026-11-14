@@ -94,3 +94,17 @@ test("each leftover copy is told with the file it is a copy of", () => {
   assert.match(lines[0].text, /"path":"users\.schema\.yml"/);
   assert.match(lines[1].text, /"path":"schemas\/a\.yml"/);
 });
+
+test("a kept file's line is true whether or not an earlier attempt rolled it back", () => {
+  for (const key of ["recovery.kept", "recovery.keptBackup", "recovery.keptDeleted", "recovery.keptDeletedBackup"]) {
+    assert.doesNotMatch(en[key], /did not roll it back/, key);
+  }
+});
+
+test("a leftover's line also covers a copy of what another program wrote", () => {
+  assert.match(en["recovery.leftover"], /another program/);
+});
+
+test("the deleted file's backup line names the file that may have changed", () => {
+  assert.match(en["recovery.keptDeletedBackup"], /\{path\} may have changed since/);
+});
