@@ -8,10 +8,10 @@ use std::collections::BTreeSet;
 
 use async_trait::async_trait;
 use kernel::{Envelope, IndexMapping, IndexName, Op};
-use sink::{FlushReport, RejectedDocument, Result, Sink, SinkError, Visibility, to_json};
+use sink::{FlushReport, RejectedDocument, Result, Sink, SinkError, Visibility};
 use tracing::{debug, info, warn};
 
-use crate::bulk::{BulkAction, bulk_action_fragment, plan_chunks, refused_id};
+use crate::bulk::{BulkAction, bulk_action_fragment, plan_chunks, refused_id, render_document};
 use crate::generations::{generation_name, next_generation, parse_generation};
 use crate::{IndexTarget, OpensearchSink};
 
@@ -136,7 +136,7 @@ impl Sink for OpensearchSink {
             (Op::Upsert, Some(document)) => BulkAction::Index {
                 index,
                 id,
-                doc: to_json(document),
+                doc: render_document(document)?,
                 require_alias,
             },
             (Op::Upsert, None) => {

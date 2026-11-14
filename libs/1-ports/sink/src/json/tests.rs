@@ -31,15 +31,95 @@ fn decimal_becomes_a_number() {
     assert_eq!(to_json(&value), serde_json::json!(12.34));
 }
 
-/// The largest `Decimal` is written as the nearest `f64`, which rounds it up
-/// past `Decimal::MAX`: an `f64` reads it back, a `Decimal` doesn't. What the
-/// query manual's `decimal` trusted rule states below the range (issue #306).
+/// What a document holds: the compact JSON [`Json`] writes.
+fn written(value: &GenericValue) -> String {
+    serde_json::to_string(&Json(value)).unwrap()
+}
+
+/// A decimal is written as a JSON number holding its exact text, trailing
+/// zeros included (issue #327; before, it was the nearest `f64`, issue #306).
+/// A reader without `serde_json`'s `arbitrary_precision` still reads it
+/// through `f64`: the largest `Decimal` is then the `f64` past its range.
 #[test]
-fn the_largest_decimal_is_written_as_a_double_past_its_range() {
-    let written = to_json(&GenericValue::Decimal(Decimal::MAX));
-    assert_eq!(written, serde_json::json!(7.922_816_251_426_434e28));
-    assert!(serde_json::from_value::<f64>(written.clone()).is_ok());
-    assert!(serde_json::from_value::<Decimal>(written).is_err());
+fn a_decimal_is_written_as_its_exact_text() {
+    assert_eq!(
+        written(&GenericValue::Decimal(Decimal::MAX)),
+        "79228162514264337593543950335"
+    );
+    assert_eq!(
+        written(&GenericValue::Decimal(Decimal::MIN)),
+        "-79228162514264337593543950335"
+    );
+    assert_eq!(
+        written(&GenericValue::Decimal(
+            "0.0000000000000000000000000001".parse().unwrap()
+        )),
+        "0.0000000000000000000000000001"
+    );
+    assert_eq!(
+        written(&GenericValue::Decimal(Decimal::new(1250, 2))),
+        "12.50"
+    );
+    let max = written(&GenericValue::Decimal(Decimal::MAX));
+    assert_eq!(
+        serde_json::from_str::<f64>(&max).unwrap(),
+        7.922_816_251_426_434e28
+    );
+    assert!(serde_json::from_str::<Decimal>(&max).is_err());
+    let price = written(&GenericValue::Decimal(Decimal::new(1250, 2)));
+    assert_eq!(
+        serde_json::from_str::<Decimal>(&price).unwrap(),
+        Decimal::new(125, 1)
+    );
+}
+
+/// A decimal past `Decimal`'s range is a JSON number with every digit, inside
+/// an object or an array too; `f64` reads it, `Decimal` can't (issue #327).
+#[test]
+fn a_big_decimal_is_written_as_a_number_with_every_digit() {
+    let big = |text: &str| GenericValue::BigDecimal(kernel::BigDecimal::parse(text).unwrap());
+    let value = GenericValue::Map(BTreeMap::from([
+        ("past".to_owned(), big("1000000000000000000000000000000")),
+        (
+            "list".to_owned(),
+            GenericValue::Array(vec![big("-0.123456789012345678901234567890")]),
+        ),
+    ]));
+    let json = written(&value);
+    assert_eq!(
+        json,
+        r#"{"list":[-0.123456789012345678901234567890],"past":1000000000000000000000000000000}"#
+    );
+    let pretty = serde_json::to_string_pretty(&Json(&value)).unwrap();
+    assert!(
+        pretty.contains("\"past\": 1000000000000000000000000000000"),
+        "{pretty}"
+    );
+    let past = written(&big("1000000000000000000000000000000"));
+    assert_eq!(serde_json::from_str::<f64>(&past).unwrap(), 1e30);
+    assert!(serde_json::from_str::<Decimal>(&past).is_err());
+}
+
+/// [`to_json`]'s value tree holds a number as an `f64`.
+#[test]
+fn to_json_holds_a_decimal_as_the_nearest_double() {
+    let big = GenericValue::BigDecimal(
+        kernel::BigDecimal::parse("1000000000000000000000000000000").unwrap(),
+    );
+    assert_eq!(to_json(&big), serde_json::json!(1e30));
+    assert_eq!(
+        to_json(&GenericValue::Decimal(Decimal::MAX)),
+        serde_json::json!(7.922_816_251_426_434e28)
+    );
+}
+
+/// A non-finite float is written as `null`.
+#[test]
+fn a_non_finite_float_is_written_as_null() {
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(written(&GenericValue::Double(value)), "null");
+    }
+    assert_eq!(written(&GenericValue::Float(f32::NAN)), "null");
 }
 
 /// A map value that is null is written as `null` under its key, not dropped:

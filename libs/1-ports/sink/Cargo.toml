@@ -21,7 +21,9 @@ workspace = true
 kernel.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
-serde_json.workspace = true
+serde.workspace = true
+# `raw_value`: a decimal is written as the exact number text it holds.
+serde_json = { workspace = true, features = ["raw_value"] }
 rust_decimal.workspace = true
 
 [dev-dependencies]

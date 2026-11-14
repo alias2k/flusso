@@ -27,7 +27,7 @@ pub fn bench_render_bulk(envelopes: &[kernel::Envelope]) -> Result<String> {
             (kernel::Op::Upsert, Some(document)) => BulkAction::Index {
                 index: envelope.index.to_string(),
                 id: envelope.id.clone(),
-                doc: sink::to_json(document),
+                doc: bulk::render_document(document)?,
                 require_alias: false,
             },
             (kernel::Op::Upsert, None) => {

@@ -31,8 +31,9 @@
 //! Validation Failed: 1: id [aaa…] is too long, must be no longer than 512 bytes but was: 513;
 //! ```
 
+use kernel::GenericValue;
 use serde_json::{Value, json};
-use sink::{RejectedDocument, Result, SinkError};
+use sink::{Json, RejectedDocument, Result, SinkError};
 
 /// A buffered write destined for OpenSearch.
 #[derive(Debug)]
@@ -40,7 +41,8 @@ pub(crate) enum BulkAction {
     Index {
         index: String,
         id: String,
-        doc: Value,
+        /// The `_source` line: the document as [`render_document`] wrote it.
+        doc: String,
         /// `index` is an alias that must exist; never auto-create it.
         require_alias: bool,
     },
@@ -62,6 +64,12 @@ impl BulkAction {
             BulkAction::Index { id, .. } | BulkAction::Delete { id, .. } => id,
         }
     }
+}
+
+/// A document as the JSON `_source` line of a bulk index action: every
+/// number as a JSON number, a decimal with its exact digits ([`sink::Json`]).
+pub(crate) fn render_document(document: &GenericValue) -> Result<String> {
+    serde_json::to_string(&Json(document)).map_err(|e| SinkError::Serialize(e.to_string()))
 }
 
 /// The longest `_id` OpenSearch accepts, in UTF-8 bytes.
@@ -131,11 +139,10 @@ pub(crate) fn bulk_action_fragment(action: &BulkAction) -> Result<String> {
             };
             let meta =
                 serde_json::to_string(&meta).map_err(|e| SinkError::Serialize(e.to_string()))?;
-            let source =
-                serde_json::to_string(doc).map_err(|e| SinkError::Serialize(e.to_string()))?;
+            fragment.reserve(meta.len() + doc.len() + 2);
             fragment.push_str(&meta);
             fragment.push('\n');
-            fragment.push_str(&source);
+            fragment.push_str(doc);
             fragment.push('\n');
         }
         BulkAction::Delete { index, id } => {

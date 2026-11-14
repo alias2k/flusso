@@ -104,6 +104,7 @@ fn scalar_literal(value: &GenericValue) -> Option<String> {
         GenericValue::Float(f) => f.to_string(),
         GenericValue::Double(f) => f.to_string(),
         GenericValue::Decimal(d) => d.to_string(),
+        GenericValue::BigDecimal(d) => d.as_str().to_owned(),
         GenericValue::String(s) => s.clone(),
         GenericValue::Uuid(u) => u.to_string(),
         GenericValue::Date(d) => d.to_string(),
@@ -140,7 +141,7 @@ fn sql_string(text: &str) -> String {
 /// where a typed one was prepared would be sent in the wrong binary format.
 pub(super) fn key_cast(value: &GenericValue, sql_type: &str) -> String {
     match value {
-        GenericValue::String(_) => format!("::text::{sql_type}"),
+        GenericValue::String(_) | GenericValue::BigDecimal(_) => format!("::text::{sql_type}"),
         _ => format!("::{sql_type}"),
     }
 }
@@ -155,7 +156,7 @@ pub(super) fn bound_type(value: &GenericValue) -> Option<&'static str> {
         GenericValue::Float(_) => "float4",
         GenericValue::Double(_) => "float8",
         GenericValue::Decimal(_) => "numeric",
-        GenericValue::String(_) => "text",
+        GenericValue::String(_) | GenericValue::BigDecimal(_) => "text",
         GenericValue::Uuid(_) => "uuid",
         GenericValue::Date(_) => "date",
         GenericValue::Time(_) => "time",

@@ -23,10 +23,7 @@ fn column_field(name: &str, ty: FlussoType) -> Field {
 }
 
 fn body(doc: serde_json::Value, fields: &[Field]) -> BTreeMap<String, GenericValue> {
-    match coerce_document(doc, fields).unwrap() {
-        GenericValue::Map(map) => map,
-        other => panic!("expected a map document, got {other:?}"),
-    }
+    body_text(&doc.to_string(), fields)
 }
 
 #[test]
@@ -193,7 +190,7 @@ fn a_json_array_column_keeps_structured_elements_and_drops_only_top_level_nulls(
 #[test]
 fn a_structured_element_in_a_scalar_array_fails_the_document_at_its_path() {
     let fields = vec![array_field("tags", FlussoType::Keyword, None)];
-    let failure = coerce_document(json!({ "tags": ["a", { "b": 1 }] }), &fields).unwrap_err();
+    let failure = build(&json!({ "tags": ["a", { "b": 1 }] }).to_string(), &fields).unwrap_err();
     assert_eq!(failure.field, "tags");
     assert!(
         failure.message.contains("an object at [1]"),
@@ -201,14 +198,14 @@ fn a_structured_element_in_a_scalar_array_fails_the_document_at_its_path() {
         failure.message
     );
 
-    let failure = coerce_document(json!({ "tags": [["a"]] }), &fields).unwrap_err();
+    let failure = build(&json!({ "tags": [["a"]] }).to_string(), &fields).unwrap_err();
     assert!(
         failure.message.contains("an array at [0]"),
         "{}",
         failure.message
     );
 
-    let failure = coerce_document(json!({ "tags": { "b": 1 } }), &fields).unwrap_err();
+    let failure = build(&json!({ "tags": { "b": 1 } }).to_string(), &fields).unwrap_err();
     assert!(
         failure.message.starts_with("the column holds an object,"),
         "{}",
@@ -234,8 +231,8 @@ fn a_structured_element_in_a_scalar_array_fails_the_document_at_its_path() {
             on: Vec::new(),
         })),
     }];
-    let failure = coerce_document(
-        json!({ "items": [{ "tags": ["a"] }, { "tags": [{}] }] }),
+    let failure = build(
+        &json!({ "items": [{ "tags": ["a"] }, { "tags": [{}] }] }).to_string(),
         &joined,
     )
     .unwrap_err();
@@ -307,8 +304,15 @@ fn a_binary_ids_aggregate_reads_back_as_bytes() {
         via: Vec::new(),
         on: Vec::new(),
     };
+    let fields = [Field {
+        field: FieldName::try_new("files").unwrap(),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Relation(Relation::Aggregate(aggregate)),
+    }];
+    let doc = body(json!({ "files": ["\\x0a", "\\x0b"] }), &fields);
     assert_eq!(
-        coerce_aggregate(json!(["\\x0a", "\\x0b"]), &aggregate),
+        doc["files"],
         GenericValue::Array(vec![
             GenericValue::Bytes(vec![0x0a]),
             GenericValue::Bytes(vec![0x0b]),
@@ -435,7 +439,11 @@ fn body_text(doc: &str, fields: &[Field]) -> BTreeMap<String, GenericValue> {
 
 /// Build the document `doc` (JSON text) for `fields`.
 fn build(doc: &str, fields: &[Field]) -> Result<GenericValue, BuildFailure> {
-    coerce_document(serde_json::from_str(doc).unwrap(), fields)
+    match coerce_document(doc.as_bytes(), fields) {
+        Ok(body) => Ok(body),
+        Err(DocumentError::Failed(failure)) => Err(failure),
+        Err(DocumentError::Malformed(error)) => panic!("malformed {doc}: {error}"),
+    }
 }
 
 /// The exact decimal text `value` carries, `None` when it is not an exact
@@ -443,6 +451,7 @@ fn build(doc: &str, fields: &[Field]) -> Result<GenericValue, BuildFailure> {
 fn exact_decimal(value: Option<&GenericValue>) -> Option<String> {
     match value? {
         GenericValue::Decimal(d) => Some(d.to_string()),
+        GenericValue::BigDecimal(d) => Some(d.as_str().to_owned()),
         _ => None,
     }
 }
@@ -588,14 +597,21 @@ fn a_json_number_past_the_decimal_range_stays_a_number() {
 }
 
 /// `NaN`, `Infinity` and `-Infinity` have no JSON number: Postgres writes them
-/// as strings. Under a `decimal`, `double` or `float` field (a scalar, an array
-/// element or an aggregate) the document fails at the field's path, for
-/// `on_error` to decide, instead of holding a string where its other
-/// documents hold a number.
+/// as strings. Under a number field (a scalar, an array element or an
+/// aggregate) the document fails at the field's path, for `on_error` to
+/// decide, instead of holding a string where its other documents hold a
+/// number.
 #[test]
 fn a_non_finite_number_fails_the_document_at_its_field() {
     for text in ["NaN", "Infinity", "-Infinity"] {
-        for ty in [FlussoType::Decimal, FlussoType::Double, FlussoType::Float] {
+        for ty in [
+            FlussoType::Decimal,
+            FlussoType::Double,
+            FlussoType::Float,
+            FlussoType::Long,
+            FlussoType::Integer,
+            FlussoType::Short,
+        ] {
             let fields = vec![column_field("n", ty.clone())];
             let doc = json!({ "n": text }).to_string();
             let failure = build(&doc, &fields).expect_err(&format!("{text} as {ty:?}"));
@@ -641,4 +657,24 @@ fn text_that_is_no_number_under_a_decimal_stays_a_string() {
     let fields = vec![column_field("n", FlussoType::Decimal)];
     let map = body_text(r#"{"n": "n/a"}"#, &fields);
     assert_eq!(map.get("n"), Some(&GenericValue::String("n/a".into())));
+}
+
+/// Two fields sharing a name at one level (issue #284): the query writes both
+/// keys, and the document holds the last value read through the first
+/// declaration; a first `constant` builds its own value.
+#[test]
+fn a_namesake_reads_the_last_value_through_the_first_declaration() {
+    let fields = vec![
+        column_field("n", FlussoType::Decimal),
+        column_field("n", FlussoType::Keyword),
+    ];
+    let map = body_text(r#"{"n": "1", "n": "2.50"}"#, &fields);
+    assert_eq!(exact_decimal(map.get("n")).as_deref(), Some("2.50"));
+
+    let fields = vec![
+        constant_field("c", GenericValue::BigInt(5)),
+        column_field("c", FlussoType::Keyword),
+    ];
+    let map = body_text(r#"{"c": "5", "c": "x"}"#, &fields);
+    assert_eq!(map.get("c"), Some(&GenericValue::BigInt(5)));
 }

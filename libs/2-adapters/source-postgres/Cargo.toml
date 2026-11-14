@@ -43,7 +43,8 @@ url.workspace = true
 rust_decimal.workspace = true
 chrono.workspace = true
 uuid.workspace = true
-serde_json.workspace = true
+# `raw_value`: a `decimal` field reads the exact number text Postgres wrote.
+serde_json = { workspace = true, features = ["raw_value"] }
 
 [dev-dependencies]
 source.workspace = true

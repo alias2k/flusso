@@ -43,6 +43,19 @@ fn a_decimal_round_trips_exactly() {
     assert_eq!(back, Ok(GenericValue::Decimal(price)));
 }
 
+/// A decimal past `Decimal`'s range reaches a script as its exact text: Rhai's
+/// decimal can't hold it.
+#[test]
+fn a_decimal_past_the_decimal_range_crosses_as_its_text() {
+    let big = kernel::BigDecimal::parse("1000000000000000000000000000000").unwrap();
+    assert_eq!(
+        to_dynamic(&GenericValue::BigDecimal(big))
+            .into_string()
+            .unwrap(),
+        "1000000000000000000000000000000"
+    );
+}
+
 #[test]
 fn an_integer_widens_to_a_number_but_not_the_reverse() {
     assert_eq!(

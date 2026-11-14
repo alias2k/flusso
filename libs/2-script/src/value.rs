@@ -10,6 +10,7 @@
 //! | `SmallInt` / `Int` / `BigInt` | `i64` |
 //! | `Float` / `Double` | `f64` |
 //! | `Decimal` | `Decimal` |
+//! | `BigDecimal` (past `Decimal`'s range) | string, its exact digits |
 //! | `String`, `Uuid` | string |
 //! | `Date` / `Time` / `Timestamp` / `TimestampTz` | RFC 3339 string |
 //! | `Bytes` | blob |
@@ -45,6 +46,7 @@ pub fn to_dynamic(value: &GenericValue) -> Dynamic {
         GenericValue::Float(f) => Dynamic::from_float(f64::from(*f)),
         GenericValue::Double(f) => Dynamic::from_float(*f),
         GenericValue::Decimal(d) => Dynamic::from_decimal(*d),
+        GenericValue::BigDecimal(d) => Dynamic::from(d.as_str().to_owned()),
         GenericValue::String(s) => Dynamic::from(s.clone()),
         GenericValue::Uuid(u) => Dynamic::from(u.to_string()),
         GenericValue::Date(d) => Dynamic::from(d.format("%Y-%m-%d").to_string()),
