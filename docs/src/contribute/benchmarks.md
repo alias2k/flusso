@@ -71,28 +71,46 @@ To compare a branch by hand: run `just bench main` on `main`, `just bench pr` on
 
 The storage action's own alerting is off. `.github/scripts/bench-regression.py` reads the history after every `main` run and decides. The hard part is the runners: GitHub runs `main` on a few kinds of machine, and each kind moves the numbers its own way. On one kind nearly every series is 40% faster; on another the Postgres benches are 20% faster while the OpenSearch ones are 20% slower. Compared to its own recent median, a series swings by 10–30% from run to run with no code change behind it. Compared to earlier runs on the same kind of machine, most series swing by 1–6%.
 
-So the rule compares like with like:
+### Matching runs
 
-1. **Matching runs.** An earlier run *matches* the current one when their values, across every series both have, differ by less than 5% (the median of the absolute differences, so a few regressed series don't change the match). Only the last 40 runs are searched.
-2. **Against its matches.** Each point is compared to the median of its series over the matching runs. A point with fewer than three matching runs isn't judged: nothing comparable ran before it.
-3. **Held baseline.** While a series stays worse than its matches by more than three of its swings (below), the runs since it first did are left out of its matches. A lasting step stays measured against the level before it instead of being absorbed. The new level becomes the baseline only once fewer than three matching runs from before the step remain in the 40-run lookback.
-4. **Regression.** The series' two newest judged points, against the 20 judged points before them, must be both:
-   - **real**: each is worse than its matches by more than three times the series' *swing*, the median change of that comparison from one judged point to the next (divided by √2, which makes it the median absolute deviation for steady noise; unlike that deviation, a step inside the window doesn't inflate it);
-   - **large**: on average, worse than their matches by more than 25% (20% for peak RSS).
+Two runs *match* when they ran on the same kind of machine. That is told from evidence no flusso change can move, so a regression can't hide by changing which runs match:
 
-One bad run is noise until the next confirms it. A series is judged once it has five judged points before the newest two, and a change in the container image tags restarts its comparisons.
+- the CPU model, where both runs recorded one (`bench-runner-facts.py` stamps it into every data point's `extra`);
+- the **floors**: `components/baseline/select_1` and `components/baseline/pg_select_1` (a bare `sqlx` `SELECT 1`) and `runner/sha256_64mib` (a SHA-256 pass over 64 MiB, recorded since #317). Two runs match when these differ by less than 5% on average, over the ones both have.
 
-Replayed over the first 78 runs of history, a lasting step of 30% injected at a random run is caught within four runs about 85% of the time (by the second run, two times in three). The misses are mostly the noisiest series: the two p99 visible latencies swing by about 40% even on matching runs, so they need a move of more than three times that before it counts as real.
+The floors are the runner's evidence, so they are never judged themselves.
 
-> **Note:** a change that slows most series at once also moves its run away from every earlier run, so it has no matches and goes unjudged until it does. Catching that is the PR gate's job: its A/B runs base and PR on one runner.
+### The rule
 
-The script's tests replay it over a snapshot of that history (`.github/scripts/fixtures/bench-history.json`):
+1. **Comparison.** A point is compared to the median of its series over its matching runs among the last 40. With fewer than three, it isn't judged.
+2. **Swing.** A series' noise: the median change of that comparison from one judged point to the next, over the last 20, divided by √2. For steady noise that's the median absolute deviation; a step doesn't inflate it. It takes five judged points.
+3. **Regression.** Two judged points in a row are each worse than their matches by more than three swings (*real*), and on average by more than 25%, or 20% for peak RSS (*large*).
+4. **Hold.** From then on the series is held at the level before the step, which starts at the first of those points, or earlier if the points before them were already past three swings:
+   - every later point is compared to its matching runs from *before* the step, however old;
+   - a point with fewer than three of those is skipped. It doesn't end the hold or move it;
+   - the swing stops taking in points.
+
+   The hold ends when two judged points in a row are each back within half the threshold (12.5%, or 10% for RSS). It also ends on an image-tag change, or once the stored history (200 runs) no longer reaches back before the step.
+5. **Image-tag changes.** The first judged point on a new image measures the image's own step against the old image's matches and isn't judged. From the next judged point on, the series is judged with that step taken out.
+
+So a lasting regression stays in the issue until it goes away; nothing is absorbed quietly. There's no switch to accept one: a slowdown kept on purpose stays listed until an image change, or until the stored history no longer reaches back before it.
+
+### What it can't see
+
+- **The floors and the calibration.** A change that moves them (a `sqlx` or Postgres upgrade, a new GitHub fleet) reads as a new kind of machine. No run matches until three runs of the new kind are stored.
+- **Runs on a kind of machine seen fewer than three times in the last 40.** They're skipped. The output says how many series the newest run was judged on, and a finding names the last run it was judged at.
+- **The first judged run on a new image.** A regression landing in the same run as an image change is taken for the image's own step. The earliest call is on the image's third judged run, as before the change.
+- **Series too noisy for the threshold.** When three swings are more than the threshold, a step just past the threshold can't count as real. Every run prints these series with the smallest step each can still catch. As of November 2026, in the `ci` scale history, they are the two visible p99 latencies (about +180% and +200%), `bulk_index/1` (+57%), `bulk_index/100` (+39%), the two `flush_p99_ms` (+30–38%), `change_burst/1` (+31%) and `reference/ci/peak_rss_mib` (+24% against its 20%). Their headline stages are covered by the p50 and the component benches.
+
+> **Note:** "too noisy" is a fact about the `ci` scale, not about flusso. A longer confirmation (more runs in a row) would make these series slower to call and pass more of their spikes; more samples per run is the real fix.
+
+The script's tests replay it over a snapshot of the real history (`.github/scripts/fixtures/bench-history.json`), and CI's `scripts` job runs them:
 
 ```sh
 python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 ```
 
-When a regression is found the script opens one issue, "Performance regression on main", keeps it current on later runs, and closes it when no series is flagged: each is back within its threshold, or its step has outlived the lookback.
+When a series is held, the script opens one issue, "Performance regression on main". It keeps the issue current on later runs, with the last run each finding was judged at and the run its step started. It closes the issue when no series is held. The verdict also goes to the `scenarios` job's summary.
 
 ## Re-recording the pgoutput fixture
 

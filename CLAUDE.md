@@ -91,10 +91,13 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   are within it; on a `main` push, `scenarios` runs everything and stores the
   points via `github-action-benchmark` on the `benchmarks` data branch (folded into Pages at
   `/bench/`), then `bench-regression.py` compares each point to the same series on earlier
-  *matching runs* (the same kind of runner: every series within 5%, median over series, last 40 runs),
-  holds the pre-step baseline while a series stays past three swings, and calls a regression when the
-  two newest judged points are each past three swings and on average past 25% (20% RSS); image-tag
-  change restarts it, one self-maintained issue (issue #317; tests: `python3 -m unittest discover -s
+  *matching runs* (the same kind of runner, told only by evidence flusso can't move: CPU model,
+  stamped by `bench-runner-facts.py`, and the floors `select_1`/`pg_select_1`/`runner/sha256_64mib`
+  within 5%; last 40 runs), calls a regression when two judged points in a row are each past three
+  swings and on average past 25% (20% RSS), then **holds** the series at its pre-step level until two
+  judged points are back within half the threshold (or an image change, or the 200-run history ends);
+  an image change costs one judged run; it prints the newest run's judged count and the too-noisy
+  series; one self-maintained issue (issues #317, #331; tests: `python3 -m unittest discover -s
   .github/scripts -p 'test_*.py'` over the real history in `.github/scripts/fixtures/`, CI's `scripts`
   job). `just load` is the soak script — not a benchmark.
 - The `#[ignore]`d e2e tests live in `source-postgres`'s `integration`,
@@ -259,7 +262,7 @@ mapping takes, on backfill and live, under a non-UTC `TimeZone`, with a `range` 
   `pgoutput_decode` smoke fuzz on nightly (see below); the `query.rs` proptests need no special
   handling — they're ordinary tests caught by the nextest step. A `scripts` job runs the stdlib
   unit tests under `.github/scripts` (`python3 -m unittest discover -s .github/scripts -p
-  'test_*.py'`; today `bench-regression.py` over the real history). Outside `ci.yml`, `audit.yml`'s
+  'test_*.py'`; `bench-regression.py` over the real history, `bench-runner-facts.py`). Outside `ci.yml`, `audit.yml`'s
   `advisories (cargo deny)` job runs `cargo deny check advisories --all-features` weekly and on
   changes to a `Cargo.toml`/`Cargo.lock` — advisory only, never a required check — and
   `.github/dependabot.yml` opens grouped weekly `chore(deps)` PRs (cargo, npm, actions; skips
