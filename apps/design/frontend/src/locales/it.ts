@@ -650,10 +650,13 @@ export const it: Record<string, string> = {
   "recovery.problemUnreadable": "non è stato possibile leggerlo",
   "recovery.problemJournalUnusable": "il designer non usa il journal di questo salvataggio",
   "recovery.problemFailed": "un passo del recupero non è riuscito",
+  "recovery.problemInTheWay": "non è del salvataggio, ed è d'intralcio",
   "recovery.leftoverList": "File lasciati sul disco dal salvataggio:",
   "recovery.helpUnreadable":
     "Se {path} può essere reso leggibile, fallo e ricarica: il designer riprende da dove si è fermato.",
   "recovery.helpFailed": "Risolvi la causa e ricarica: il designer riprende da dove si è fermato.",
+  "recovery.helpInTheWay":
+    "Per rimuovere {file}, creato dal salvataggio, il designer ha bisogno del nome {path}, dove c'è qualcosa che il salvataggio non ha scritto. Sposta {path} altrove e ricarica: il designer riprende da dove si è fermato.",
   "recovery.busyTitle": "Un altro designer sta salvando questo progetto",
   "recovery.busy": "Un altro designer è nel mezzo di un salvataggio. Ricarica tra un momento.",
   "recovery.causeTooLarge": "È più grande di qualsiasi salvataggio, quindi il designer non l'ha letto.",

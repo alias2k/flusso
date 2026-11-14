@@ -235,13 +235,18 @@ after a live update; constants land as written), and `an_update_of_an_unread_col
 - **A designer save is crash-safe, and a rollback settles each file once** (`apps/design/src/commit/`;
   its module docs hold the table of what a kill leaves and what the next start does). A rollback
   writes its per-file decisions into the save's record (state folder) before changing a file, takes
-  each step as one rename whose result marks it done (a restored file's backup is gone; a created
-  file is renamed to its temp file), and marks the record `settled` before deleting the save's own
-  files, so a kill then a user edit never re-settles a file (issue #302). Guards: the commit kill
-  matrices (`a_save_killed_after_any_step_*`, `a_recovery_killed_after_any_step_*`,
-  `a_file_recovery_settled_keeps_what_the_user_wrote_since`, `a_rollback_resumed_twice_keeps_what_it_decided`),
+  each step as one rename (a backup over its file; a created file to its temp name) followed by that
+  step's mark in the record, and marks the record `settled` before deleting the save's own files, so
+  a kill then a user edit never re-settles a file (issue #302). Completion is recorded, never read off
+  the disk: an unmarked step is decided again from what the disk holds, as a fresh rollback would,
+  so a deleted backup blocks instead of reading as "restored" (review of #305). Guards: the commit
+  kill matrices (`a_save_killed_after_any_step_*`, `a_recovery_killed_after_any_step_*`,
+  `a_file_recovery_settled_keeps_what_the_user_wrote_since`, `a_rollback_resumed_twice_keeps_what_it_decided`,
+  `a_save_file_gone_after_the_plan_never_reads_as_a_step_done`, each asserting the promise: unblocked
+  means every untouched file holds its pre-save bytes or is told kept),
   `a_save_an_older_designer_left_recovers` (fixtures in `commit/fixtures/`, written by `056b4292`), and
-  `api`'s `every_kill_during_recovery_still_tells_the_save_once` / `a_file_recovery_settled_is_never_settled_again`.
+  `api`'s `every_kill_during_recovery_still_tells_the_save_once` / `a_file_recovery_settled_is_never_settled_again`
+  / `a_file_in_the_way_of_a_removal_is_its_own_problem`.
 - **The designer frontend is Tailwind v4 + shadcn/Radix, atomic-design.** UI primitives are
   shadcn components in `apps/design/frontend/src/components/ui/` (`button`/`input`/`select`/
   `checkbox`/`dialog`/`tooltip`/`popover`/`command`/…), tuned to the flusso palette; molecules like

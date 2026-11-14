@@ -26,7 +26,9 @@
 //!   "undo": {
 //!     "settled": false,
 //!     "writes": ["restore", "leave", "remove"],
-//!     "removals": ["keep"]
+//!     "removals": ["keep"],
+//!     "writes_done": [true, false, false],
+//!     "removals_done": [false]
 //!   }
 //! }
 //! ```
@@ -42,8 +44,10 @@
 //!   the journal's file name.
 //! - **A rollback's progress**: `undo`, absent until a rollback has decided
 //!   what to do with every file ([`Undo`]), is written before it changes the
-//!   first one, and again with `settled` once every file is settled. A record
-//!   written by a designer without it reads as a rollback not started.
+//!   first one, again after each step's rename (its mark), and with `settled`
+//!   once every file is settled. A record written by a designer without it
+//!   reads as a rollback not started; a designer without it can't read one
+//!   with it, and prunes it as a stray file a day later.
 //!
 //! The folder is created mode 0700, a record mode 0600 with `create_new`
 //! (never replacing a file), and neither is ever opened through a link or
@@ -137,6 +141,40 @@ pub(crate) struct Undo {
     pub(crate) writes: Vec<Act>,
     /// One per file the journal removes, in its order.
     pub(crate) removals: Vec<Act>,
+    /// Per write, whether its step ([`Act::Restore`], [`Act::Remove`]) is
+    /// done: marked, flushed, right after its rename and before the next.
+    #[serde(default)]
+    pub(crate) writes_done: Vec<bool>,
+    /// Per removal, likewise.
+    #[serde(default)]
+    pub(crate) removals_done: Vec<bool>,
+}
+
+impl Undo {
+    /// Whether the record marks the step of write `i` done.
+    pub(crate) fn write_done(&self, i: usize) -> bool {
+        self.writes_done.get(i).copied().unwrap_or(false)
+    }
+
+    /// Whether the record marks the step of removal `i` done.
+    pub(crate) fn removal_done(&self, i: usize) -> bool {
+        self.removals_done.get(i).copied().unwrap_or(false)
+    }
+
+    pub(crate) fn mark_write(&mut self, i: usize) {
+        mark(&mut self.writes_done, self.writes.len(), i);
+    }
+
+    pub(crate) fn mark_removal(&mut self, i: usize) {
+        mark(&mut self.removals_done, self.removals.len(), i);
+    }
+}
+
+fn mark(done: &mut Vec<bool>, len: usize, i: usize) {
+    done.resize(len, false);
+    if let Some(slot) = done.get_mut(i) {
+        *slot = true;
+    }
 }
 
 /// What a rollback does to one file.
@@ -150,10 +188,10 @@ pub(crate) enum Act {
     Keep,
     /// It holds a third text: it stays, and its backup is deleted.
     KeepDropping,
-    /// Its backup is renamed back over it: done once the backup is gone.
+    /// Its backup is renamed back over it.
     Restore,
     /// The save created it: it is renamed to its temp file, which is deleted
-    /// once every file is settled. Done once the temp file is there.
+    /// once every file is settled.
     Remove,
 }
 

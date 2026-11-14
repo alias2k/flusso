@@ -48,16 +48,29 @@
 //! whatever the user does to it before a rollback cut short runs again. A
 //! rollback decides every file first (put back, remove, leave, keep:
 //! [`state::Act`]) and writes that into the record, flushed, before it
-//! changes one. Each step is then one rename whose result is the mark that
-//! it is done, in a file the save owns and the user doesn't edit: a file
-//! put back has no backup left, and a file the save created is renamed to
-//! its temp file rather than deleted. A rollback running again takes only
-//! the steps not done, and decides again only those files, from what they
-//! hold now (an edit the user made to a file not put back yet is kept, as
-//! always), recording any changed decision before it acts. Once every file
-//! is settled and the project's folders are flushed, it marks the record
-//! `settled`; from then on only the save's own files are deleted. Finishing
-//! a committed save never changes a project file, so it needs no marks.
+//! changes one. A decision that needs no step (leave, keep) settles its file
+//! there. Each step (put back: the backup renamed over the file; remove: the
+//! file the save created renamed to its temp file, deleted once every file
+//! is settled) is one rename, then **its mark in the record**, flushed,
+//! before the next step. Completion is recorded, never read off the disk: a
+//! backup gone or a temp file there proves nothing, since anyone can delete
+//! or write one. A rollback running again never looks at a file whose
+//! decision needs no step or whose step is marked; every other file it
+//! decides again from what the disk holds now, exactly as a fresh rollback
+//! would (an edit to a file not put back yet is kept, as always), recording
+//! any changed decision before it acts. Once every file is settled and the
+//! project's folders are flushed, it marks the record `settled`; from then on
+//! only the save's own files are deleted. Finishing a committed save never
+//! changes a project file, so it needs no marks.
+//!
+//! **The promise: recovery reports a save rolled back only when every file
+//! it names holds its bytes from before the save (a created file: gone), or
+//! is told kept as another program's, or was settled and then changed by the
+//! user.** The one step a kill can catch between its rename and its mark is
+//! decided again: done, it needs nothing now; its file changed since (given
+//! the save's text, or deleted where the save had removed it), with its
+//! backup gone, the rollback blocks as any rollback without a backup does,
+//! and changes nothing.
 //!
 //! What a kill leaves, at any point, and what the next start does (the
 //! record in the state folder, the rest in the config's folder):
@@ -69,7 +82,9 @@
 //! | a record, `.flusso-save.journal.tmp` | deletes it (nothing was changed), then removes the record |
 //! | a journal or `.done`, no record of it for this folder | changes nothing; reports it, with the way out by hand |
 //! | a journal, a record without `undo` (a save cut short; or a rollback cut short before it recorded, or by a designer from before `undo`) | rolls back from scratch: decides every file from what it holds, records, settles |
-//! | a journal, a record with `undo`, not settled | takes the steps not done; decides again only the files they touch, from what they hold now |
+//! | a journal, a record with `undo`, not settled: every step marked or none begun | takes the unmarked steps, each decided again from what the disk holds now |
+//! | the same, a step's rename done and its mark not written | decides that file again: it holds its text from before (or a created file is gone), so it needs nothing |
+//! | the same, and that file changed since, its backup gone (or a created file's temp name taken) | blocks as a fresh rollback would (backup missing; a file in the way), changes nothing |
 //! | a journal, a record with `undo`, settled | deletes the save's temp files and empty folders, tells the save, deletes the journal, removes the record: no project file is looked at |
 //! | a journal or `.done`, a committed record | finishes: deletes backups and temp files holding the save's text, tells the save, deletes the journal, removes the record; keeps any file holding another text |
 //! | no journal, a stored notice, a record | removes the record; the notice is told until dismissed |
@@ -79,7 +94,10 @@
 //! does one an older designer cut short (its record has no `undo`): the
 //! files it had settled are told apart from the rest by what they hold, as
 //! that designer did, so an edit made between its kill and this start is
-//! handled as that designer would have.
+//! handled as that designer would have. The other way round, an older
+//! designer can't read a record with `undo`: it only reports the journal,
+//! and prunes the record a day later, after which this designer can only
+//! report it too (see the manual).
 //!
 //! **A journal is acted on only when this user's designer has a record of
 //! it, for this folder** ([`state`]): it is a file in the project, and

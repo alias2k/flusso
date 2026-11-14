@@ -2607,8 +2607,9 @@ fn a_file_recovery_settled_keeps_what_the_user_wrote_since() {
                         assert!(recovery.blocked.is_none(), "{recovery:?}");
                         user_files(&scratch.dir)
                     };
+                    let caught = unmarked_steps(&project);
                     for (file, bytes) in &edit {
-                        if killed.get(file) != half.get(file) {
+                        if killed.get(file) != half.get(file) && !caught.contains(file) {
                             match bytes {
                                 Some(bytes) => expected.insert(file.clone(), bytes.clone()),
                                 None => expected.remove(file),
@@ -2619,8 +2620,27 @@ fn a_file_recovery_settled_keeps_what_the_user_wrote_since() {
                     for load in 1..=3 {
                         let label =
                             format!("{shape:?}: save {n}, recovery {m}, {action}, load {load}");
+                        let left = snapshot(&project.dir);
                         let recovery = project.recover(&mut Disk::counting());
-                        assert!(recovery.blocked.is_none(), "{label}: {recovery:?}");
+                        if let Some(blocked) = &recovery.blocked {
+                            // The one block left: a kill between a step's rename and its mark,
+                            // then that file given another text. Decided as never begun.
+                            let base = std::fs::canonicalize(&project.dir).unwrap();
+                            assert!(
+                                load == 1
+                                    && blocked.problems.iter().all(|p| {
+                                        p.kind == ProblemKind::BackupMissing
+                                            && p.path.strip_prefix(&base).is_ok_and(|f| {
+                                                caught.contains(f)
+                                                    && killed.get(f) != half.get(f)
+                                                    && edit.contains_key(f)
+                                            })
+                                    })
+                                    && snapshot(&project.dir) == left,
+                                "{label}: {recovery:?}"
+                            );
+                            break;
+                        }
                         kept.extend(recovery.settled.iter().flat_map(|s| s.kept.clone()));
                         keeps_the_promise(&label, &project.dir, &pre_save(), &kept, &edit);
                         assert_eq!(user_files(&project.dir), expected, "{label}");
@@ -2722,6 +2742,36 @@ fn promise(
         ));
     }
     Ok(())
+}
+
+/// The files whose step the rollback in flight in `project` decided and has
+/// not marked done (relative): a kill may have caught one between its rename
+/// and its mark.
+fn unmarked_steps(project: &Project) -> std::collections::BTreeSet<PathBuf> {
+    let Some(undo) = project.records().first().and_then(|r| r.undo.clone()) else {
+        return Default::default();
+    };
+    let Some(steps) = in_flight_steps(project) else {
+        return Default::default();
+    };
+    let base = std::fs::canonicalize(&project.dir).unwrap();
+    let step = |act: &state::Act| matches!(act, state::Act::Restore | state::Act::Remove);
+    let writes = steps
+        .writes
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| undo.writes.get(*i).is_some_and(step) && !undo.write_done(*i))
+        .map(|(_, w)| w.dest.clone());
+    let removals = steps
+        .removals
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| undo.removals.get(*i).is_some_and(step) && !undo.removal_done(*i))
+        .map(|(_, r)| r.path.clone());
+    writes
+        .chain(removals)
+        .map(|p| p.strip_prefix(&base).unwrap().to_path_buf())
+        .collect()
 }
 
 /// The journal of the save in flight in `project`, resolved: `None` once

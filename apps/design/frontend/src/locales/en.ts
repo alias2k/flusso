@@ -633,10 +633,13 @@ export const en: Record<string, string> = {
   "recovery.problemUnreadable": "it could not be read",
   "recovery.problemJournalUnusable": "the designer does not act on this save's journal",
   "recovery.problemFailed": "a recovery step failed",
+  "recovery.problemInTheWay": "it is not the save's, and it is in the way",
   "recovery.leftoverList": "Files the save left on disk:",
   "recovery.helpUnreadable":
     "If {path} can be made readable, do so and reload: the designer then carries on where it stopped.",
   "recovery.helpFailed": "Fix the cause and reload: the designer carries on where it stopped.",
+  "recovery.helpInTheWay":
+    "To remove {file}, which the save created, the designer needs the name {path}, and something the save did not write is there. Move {path} away and reload: the designer then carries on where it stopped.",
   "recovery.busyTitle": "Another designer is saving this project",
   "recovery.busy": "Another designer is in the middle of a save. Reload in a moment.",
   "recovery.causeTooLarge": "It is larger than any save writes, so the designer did not read it.",

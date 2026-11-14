@@ -1131,6 +1131,10 @@ pub struct BlockedFile {
     /// A file that holds the file's text from before the save right now.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub before_copy: Option<String>,
+    /// For a file in the way: the file the save created whose removal needs
+    /// its name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<String>,
 }
 
 /// Why a file stops recovery.
@@ -1147,6 +1151,10 @@ pub enum BlockedProblem {
     JournalUnusable,
     /// A step of the recovery failed.
     Failed,
+    /// A file the save did not write is at the name the designer needs to
+    /// remove a file the save created ([`BlockedFile::blocks`]): it is the
+    /// user's, never one of the save's leftovers.
+    InTheWay,
 }
 
 /// A load, diff or save refused because of an interrupted save: one can't
@@ -1260,6 +1268,12 @@ fn problem_help(problem: &BlockedFile, direction: Option<RecoveryDirection>) -> 
         BlockedProblem::Failed => format!(
             "A recovery step failed on {path} ({detail}). Fix the cause and reload: the designer \
              carries on where it stopped."
+        ),
+        BlockedProblem::InTheWay => format!(
+            "{path} holds something the save did not write, at the name the designer needs to \
+             remove {}, which the save created. Move {path} away (it is not the save's) and \
+             reload: the designer then carries on where it stopped.",
+            problem.blocks.as_deref().unwrap_or("a file")
         ),
     }
 }
@@ -1768,11 +1782,13 @@ fn recover_locked(paths: &Paths, lock: &ProjectLock, disk: &mut Disk) -> SaveRec
                         ProblemKind::Unreadable => BlockedProblem::Unreadable,
                         ProblemKind::JournalUnusable => BlockedProblem::JournalUnusable,
                         ProblemKind::Failed => BlockedProblem::Failed,
+                        ProblemKind::InTheWay => BlockedProblem::InTheWay,
                     },
                     detail: p.detail.as_ref().map(|d| paths.relative_text(d)),
                     backup: p.backup.as_ref().map(rel),
                     fix: p.fix.as_deref().map(step),
                     before_copy: p.before_copy.as_ref().map(rel),
+                    blocks: p.blocks.as_deref().map(rel),
                 })
                 .collect(),
             leftovers: b.leftovers.iter().map(rel).collect(),
@@ -4077,6 +4093,46 @@ mod tests {
         project_files(&fixture)
     }
 
+    /// The files whose step the rollback in flight in `fixture` decided and
+    /// has not marked done: a kill may have caught one between its rename and
+    /// its mark.
+    fn unmarked_steps(fixture: &Fixture) -> std::collections::BTreeSet<String> {
+        let state = State::at(fixture.state_dir()).unwrap();
+        let Some(undo) = state.records().first().and_then(|r| r.undo.clone()) else {
+            return Default::default();
+        };
+        let Ok(bytes) = std::fs::read(fixture.0.join(".flusso-save.journal")) else {
+            return Default::default();
+        };
+        let base = Paths::new(&fixture.config()).unwrap().base;
+        let steps = commit::journal::Journal::parse(&bytes)
+            .unwrap()
+            .steps(&base, &base.join("flusso.toml"))
+            .unwrap();
+        let step = |act: &commit::state::Act| {
+            matches!(
+                act,
+                commit::state::Act::Restore | commit::state::Act::Remove
+            )
+        };
+        let writes = steps
+            .writes
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| undo.writes.get(*i).is_some_and(step) && !undo.write_done(*i))
+            .map(|(_, w)| w.dest.clone());
+        let removals = steps
+            .removals
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| undo.removals.get(*i).is_some_and(step) && !undo.removal_done(*i))
+            .map(|(_, r)| r.path.clone());
+        writes
+            .chain(removals)
+            .map(|p| p.strip_prefix(&base).unwrap().display().to_string())
+            .collect()
+    }
+
     /// What opening the project tells of earlier saves, whether or not the
     /// project then loads.
     fn opened(fixture: &Fixture) -> Result<SaveRecovery, String> {
@@ -4084,7 +4140,10 @@ mod tests {
             Ok(project) => Ok(project.recovery),
             Err(e) => match e.downcast::<Unloadable>() {
                 Ok(unloadable) => Ok(unloadable.recovery),
-                Err(e) => Err(format!("{e:#}")),
+                Err(e) => match e.downcast::<Interrupted>() {
+                    Ok(Interrupted(recovery)) => Ok(recovery),
+                    Err(e) => Err(format!("{e:#}")),
+                },
             },
         }
     }
@@ -4135,11 +4194,12 @@ mod tests {
                     let killed = project_files(&fixture);
                     let edit = user_edit(action, &half, &killed, &settled);
                     apply(&fixture, &edit);
+                    let caught = unmarked_steps(&fixture);
                     let scratch = recovered_from_scratch(case, &edit);
                     commit::state::use_test_dir(Some(fixture.state_dir()));
                     let mut expected = scratch.clone();
                     for (file, text) in &edit {
-                        if killed.get(file) != half.get(file) {
+                        if killed.get(file) != half.get(file) && !caught.contains(file) {
                             match text {
                                 Some(text) => expected.insert(file.clone(), text.clone()),
                                 None => expected.remove(file),
@@ -4150,8 +4210,25 @@ mod tests {
                     for load in 1..=3 {
                         let label =
                             format!("{case}, killed after step {stop}, {action}, load {load}");
+                        let left = fixture.files();
                         let recovery = match opened(&fixture) {
                             Ok(recovery) if recovery.blocked.is_none() => recovery,
+                            // The one block left: a kill between a step's rename and its mark,
+                            // then that file given another text. Decided as never begun.
+                            Ok(recovery)
+                                if load == 1
+                                    && fixture.files() == left
+                                    && recovery.blocked.as_ref().is_some_and(|b| {
+                                        b.problems.iter().all(|p| {
+                                            p.problem == BlockedProblem::BackupMissing
+                                                && caught.contains(&p.path)
+                                                && killed.get(&p.path) != half.get(&p.path)
+                                                && edit.contains_key(&p.path)
+                                        })
+                                    }) =>
+                            {
+                                continue 'actions;
+                            }
                             other => {
                                 failures.push(format!("{label}: blocked: {other:?}"));
                                 continue 'actions;

@@ -459,7 +459,7 @@ export interface RecoveredSave {
   unsaved?: boolean;
 }
 
-export type BlockedProblem = "backup_missing" | "unreadable" | "journal_unusable" | "failed";
+export type BlockedProblem = "backup_missing" | "unreadable" | "journal_unusable" | "failed" | "in_the_way";
 
 /// Why the server does not act on a save's journal.
 export type JournalCause =
@@ -517,6 +517,8 @@ export interface BlockedSave {
     fix?: HandStep;
     /// A file that holds the file's text from before the save right now.
     before_copy?: string;
+    /// For a file in the way: the file the save created whose removal needs its name.
+    blocks?: string;
   }[];
   /// The journal, temp files and backups still on disk.
   leftovers: string[];
