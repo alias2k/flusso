@@ -462,6 +462,7 @@ fn generic_value(value: &GenericValue) -> Result<Value> {
         GenericValue::Float(n) => Value::from(f64::from(*n)),
         GenericValue::Double(n) => Value::from(*n),
         GenericValue::Decimal(d) => decimal_value(d),
+        GenericValue::BigDecimal(d) => Value::from(d.to_f64()),
         GenericValue::String(s) => Value::from(s.as_str()),
         GenericValue::Uuid(v) => serde_yaml::to_value(v)?,
         GenericValue::Date(v) => serde_yaml::to_value(v)?,

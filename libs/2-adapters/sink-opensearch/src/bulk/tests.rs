@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn bulk_body_index_produces_two_ndjson_lines() {
-    let doc = json!({ "email": "ada@x.io" });
+    let doc = json!({ "email": "ada@x.io" }).to_string();
     let actions = vec![BulkAction::Index {
         index: "users".to_owned(),
         id: "42".to_owned(),
@@ -42,7 +42,7 @@ fn bulk_body_mixed_operations_are_ordered() {
         BulkAction::Index {
             index: "users".to_owned(),
             id: "1".to_owned(),
-            doc: json!({ "name": "alice" }),
+            doc: json!({ "name": "alice" }).to_string(),
             require_alias: false,
         },
         BulkAction::Delete {
@@ -118,7 +118,7 @@ fn bulk_rejected_maps_position_to_the_originating_action() {
         BulkAction::Index {
             index: "users_ab12".to_owned(),
             id: "2".to_owned(),
-            doc: json!({}),
+            doc: json!({}).to_string(),
             require_alias: false,
         },
     ];
@@ -191,7 +191,7 @@ fn an_alias_targeted_index_action_requires_the_alias() {
     let actions = vec![BulkAction::Index {
         index: "users_ab12".to_owned(),
         id: "1".to_owned(),
-        doc: json!({}),
+        doc: json!({}).to_string(),
         require_alias: true,
     }];
     let body = build_bulk_body(&actions).unwrap();
@@ -207,7 +207,7 @@ fn a_generation_targeted_index_action_omits_require_alias() {
     let actions = vec![BulkAction::Index {
         index: "users_ab12_2".to_owned(),
         id: "1".to_owned(),
-        doc: json!({}),
+        doc: json!({}).to_string(),
         require_alias: false,
     }];
     let body = build_bulk_body(&actions).unwrap();
@@ -220,7 +220,7 @@ fn a_missing_alias_fails_the_whole_flush() {
     let actions = [BulkAction::Index {
         index: "users_ab12".to_owned(),
         id: "1".to_owned(),
-        doc: json!({}),
+        doc: json!({}).to_string(),
         require_alias: true,
     }];
     let resp = json!({
@@ -254,7 +254,7 @@ fn index_action(id: &str) -> BulkAction {
     BulkAction::Index {
         index: "users_1".to_owned(),
         id: id.to_owned(),
-        doc: json!({}),
+        doc: json!({}).to_string(),
         require_alias: false,
     }
 }

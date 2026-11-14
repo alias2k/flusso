@@ -881,7 +881,7 @@ fragment/f64/cm trusted json
 fragment/f64/co trusted json
 fragment/f64/cu trusted custom
 fragment/f64/db reads
-fragment/f64/dc trusted decimal
+fragment/f64/dc reads
 fragment/f64/dt refused
 fragment/f64/ev refused
 fragment/f64/ex refused
@@ -1664,7 +1664,7 @@ fragment/integer_newtype/cm trusted json
 fragment/integer_newtype/co trusted json
 fragment/integer_newtype/cu trusted custom
 fragment/integer_newtype/db trusted integer
-fragment/integer_newtype/dc trusted decimal+integer
+fragment/integer_newtype/dc trusted integer
 fragment/integer_newtype/dt refused
 fragment/integer_newtype/ev refused
 fragment/integer_newtype/ex refused
@@ -1733,7 +1733,7 @@ fragment/long_newtype/cm trusted json
 fragment/long_newtype/co trusted json
 fragment/long_newtype/cu trusted custom
 fragment/long_newtype/db refused
-fragment/long_newtype/dc trusted decimal+integer
+fragment/long_newtype/dc trusted integer
 fragment/long_newtype/dt refused
 fragment/long_newtype/ev refused
 fragment/long_newtype/ex refused
@@ -2311,7 +2311,7 @@ fragment/short_newtype/cm trusted json
 fragment/short_newtype/co trusted json
 fragment/short_newtype/cu trusted custom
 fragment/short_newtype/db trusted integer
-fragment/short_newtype/dc trusted decimal+integer
+fragment/short_newtype/dc trusted integer
 fragment/short_newtype/dt refused
 fragment/short_newtype/ev refused
 fragment/short_newtype/ex refused
@@ -9855,7 +9855,7 @@ root/f64/cm trusted json
 root/f64/co trusted json
 root/f64/cu trusted custom
 root/f64/db reads
-root/f64/dc trusted decimal
+root/f64/dc reads
 root/f64/dt refused
 root/f64/ev refused
 root/f64/ex refused
@@ -10739,7 +10739,7 @@ root/integer_newtype/cm trusted json
 root/integer_newtype/co trusted json
 root/integer_newtype/cu trusted custom
 root/integer_newtype/db trusted integer
-root/integer_newtype/dc trusted decimal+integer
+root/integer_newtype/dc trusted integer
 root/integer_newtype/dt refused
 root/integer_newtype/ev refused
 root/integer_newtype/ex refused
@@ -10841,7 +10841,7 @@ root/long_newtype/cm trusted json
 root/long_newtype/co trusted json
 root/long_newtype/cu trusted custom
 root/long_newtype/db refused
-root/long_newtype/dc trusted decimal+integer
+root/long_newtype/dc trusted integer
 root/long_newtype/dt refused
 root/long_newtype/ev refused
 root/long_newtype/ex refused
@@ -11453,7 +11453,7 @@ root/short_newtype/cm trusted json
 root/short_newtype/co trusted json
 root/short_newtype/cu trusted custom
 root/short_newtype/db trusted integer
-root/short_newtype/dc trusted decimal+integer
+root/short_newtype/dc trusted integer
 root/short_newtype/dt refused
 root/short_newtype/ev refused
 root/short_newtype/ex refused

@@ -137,9 +137,14 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
 after a live update; constants land as written), and `date_and_time_columns_are_indexed_and_queryable`
 (issue #304: `date`/`timestamp`/`timestamptz` and their arrays land as ISO 8601 a default `date`
 mapping takes, on backfill and live, under a non-UTC `TimeZone`, with a `range` and a sort over each;
-`sink::to_json` writes a naive timestamp with a `T`) and `a_tuned_timestamp_mapping_meets_the_iso_form`
+`sink::Json` writes a naive timestamp with a `T`) and `a_tuned_timestamp_mapping_meets_the_iso_form`
 (a space-only `format` rejects each document holding a value, `strict_date_optional_time` or
-`ignore_malformed` takes it, an `indexed: false` join stores the `T` form), and `an_update_of_an_unread_column_writes_nothing` (issue #169: an update changing
+`ignore_malformed` takes it, an `indexed: false` join stores the `T` form), and
+`a_numeric_keeps_every_digit_as_a_json_number` (issue #327: a `decimal` scalar, array element and
+`sum`/`max` hold every digit as a JSON number, past `rust_decimal`'s range too, on backfill and live;
+asserted on `_source`'s raw text) and `a_non_finite_number_is_a_failed_document_decided_by_on_error`
+(`NaN`/`Infinity` is a `Document::Failed` the ingest engine's `on_error` decides; the harness hands
+`on_error` to both engines, as the daemon does), and `an_update_of_an_unread_column_writes_nothing` (issue #169: an update changing
   only a column no document reads leaves the row's and its parent's `_version` alone; `wal`'s
   `an_update_of_unread_columns_rebuilds_nothing` covers root, child, aggregate, each read-column
   kind, and the no-pre-image fallback; `on_pairs_rebuild_the_parent_from_either_side` covers `on:`
@@ -1013,7 +1018,7 @@ moved to a new physical index when keys became typed and nothing else did
 (`a_schema_without_a_map_keeps_its_content_hash` / `a_map_schema_moves_off_its_dynamically_mapped_hash`). The same
 pattern moves two more sets once (issue #291): `BINARY_ENCODING_REVISION` (a `binary` column or an
 `ids` of `binary`; the document query renders a `bytea` inside its JSON as `\x…` hex text, which
-`document/value.rs`'s `coerce_scalar` turns back into `GenericValue::Bytes` for `sink::to_json` to
+`document/value.rs`'s `coerce_scalar` turns back into `GenericValue::Bytes` for `sink::Json` to
 base64). That text is rendered **in the query, not by the session's `bytea_output`** (issue #298: a
 transaction-mode pooler drops a session `SET`): `PgDocumentBuilder::byte_columns` finds every value
 column whose base type is `bytea`, or an array whose element is (`ColumnMeta.element_name`: `typelem`
@@ -1062,9 +1067,15 @@ order with no script; out-of-set values sort after. Parsing lives in
 `Column.array` (hashed only when set), projected to `ResolvedField.array`; the mapping stays the
 element type. The Postgres builder renders `transforms` per string element over `to_jsonb(column)`
 (`sql::element_transformed`, one path for `[]` and `json`/`jsonb`) and leaves an array `default`
-(a list) to the decoder. `value::coerce_document` is **fallible** (`Result<_, BuildFailure>`, with
-the field path): an array column's null takes the default, a lone value is wrapped, null elements are
-dropped, and an object/array element of a non-`json` field is a `BuildFailure` that `build`/
+(a list) to the decoder. `value::coerce_document` reads the row's raw `document` JSON bytes in one
+pass (a schema-guided `DeserializeSeed`: `Level`/`FieldSeed`/`Joined`, no intermediate `Value` tree;
+the field path is rendered only on a failure) and is **fallible** (`DocumentError::Failed(BuildFailure)`,
+with the field path; `Malformed` is a query error). A `decimal` position (column, array element,
+`sum`/`min`/`max`, `ids`) reads its raw number text (`&RawValue`): `Decimal::from_str_exact` within
+range, `GenericValue::BigDecimal` (the exact text, appended last to the enum) past it, never through
+`f64` (issue #327); `NaN`/`Infinity`/`-Infinity` under any number type is a `BuildFailure`. Two
+fields sharing a name read the last value through the first declaration. An array column's null
+takes the default, a lone value is wrapped, null elements are dropped, and an object/array element of a non-`json` field is a `BuildFailure` that `build`/
 `build_many` return as `Document::Failed` (so `on_error` decides). `Catalog::accepts_transforms`
 takes `element: bool` (Postgres probes the `[]` base type, `text` for `json`/`jsonb`);
 `NotAnArrayColumn`/`UndeclaredArrayColumn` are the catalog checks; they read `ColumnInfo.base_type`
@@ -1554,8 +1565,12 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
   fine-grained (numerics split by width; `Date`/`Time`/`Timestamp`/`TimestampTz`; `Uuid`;
   `Bytes`) so no type is erased in transit, and its serde is **derived/format-agnostic** (a
   queue may encode it however it likes; it round-trips losslessly). A sink converts it to its
-  own representation at its boundary (`sink::to_json` is the OpenSearch JSON translation,
-  where e.g. `bytea`→base64 lives) — core picks no wire format.
+  own representation at its boundary (`sink::Json` is the JSON translation the OpenSearch and
+  stdout sinks write, a `Serialize` view where e.g. `bytea`→base64 lives and a `Decimal`/`BigDecimal`
+  is written as its exact number text through serde_json's raw value; `sink::to_json` builds a
+  `Value` tree from it, which holds numbers as `f64`) — core picks no wire format. serde_json's
+  `arbitrary_precision` stays off: it is global, allocates per number, and breaks numbers under
+  serde's buffered (`flatten`/`untagged`) deserialization.
 - Sources/sinks are `#[async_trait]` trait objects; mock them in tests as the engine tests do.
 - **Every `reqwest` client flusso builds pins its trust roots.** reqwest 0.13 verifies against the
   OS trust store by default; the OpenSearch sink, `flusso-query` and the CLI's admin client each

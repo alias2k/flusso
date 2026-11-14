@@ -219,7 +219,7 @@ fn from_json(json: serde_json::Value) -> GenericValue {
 }
 
 fn pretty(value: &GenericValue) -> anyhow::Result<String> {
-    Ok(serde_json::to_string_pretty(&sink::to_json(value))?)
+    Ok(serde_json::to_string_pretty(&sink::Json(value))?)
 }
 
 /// The value at a dotted path with `[n]` array positions.

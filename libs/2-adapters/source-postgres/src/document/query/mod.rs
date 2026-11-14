@@ -98,6 +98,7 @@ pub(super) fn bind_param<'q>(query: PgQuery<'q>, value: &GenericValue) -> Result
         GenericValue::Float(f) => query.bind(*f),
         GenericValue::Double(f) => query.bind(*f),
         GenericValue::Decimal(d) => query.bind(*d),
+        GenericValue::BigDecimal(d) => query.bind(d.as_str().to_owned()),
         GenericValue::String(s) => query.bind(s.clone()),
         GenericValue::Uuid(u) => query.bind(*u),
         GenericValue::Date(d) => query.bind(*d),

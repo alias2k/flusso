@@ -35,6 +35,7 @@ fn key_part(value: &GenericValue) -> String {
         GenericValue::Float(f) => f.to_string(),
         GenericValue::Double(f) => f.to_string(),
         GenericValue::Decimal(d) => d.to_string(),
+        GenericValue::BigDecimal(d) => d.as_str().to_owned(),
         GenericValue::String(s) => s.clone(),
         GenericValue::Uuid(u) => u.to_string(),
         GenericValue::Date(d) => d.to_string(),

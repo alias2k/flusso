@@ -13,9 +13,9 @@ Every scalar field's type key bridges a Postgres column type and an OpenSearch m
 | `short` | `smallint` | `short` | |
 | `integer` | `integer` | `integer` | |
 | `long` | `bigint` | `long` | |
-| `float` | `real` | `float` | |
-| `double` | `double precision` | `double` | |
-| `decimal` | `numeric`, `money` | `double` | Lossy in storage. Use a `custom` `scaled_float` when exactness matters. |
+| `float` | `real` | `float` | See [numbers](#numbers). |
+| `double` | `double precision` | `double` | See [numbers](#numbers). |
+| `decimal` | `numeric`, `money` | `double` | `_source` keeps every digit; search, sort and aggregations are `double`. Use a `custom` `scaled_float` when exact search matters. See [numbers](#numbers). |
 | `date` | `date` | `date` | Written as `2024-01-02`. See [dates and times](#dates-and-times). |
 | `timestamp` | `timestamp`, `timestamptz`, `time` | `date` | Written as ISO 8601, stored to the millisecond. A `time` column's values are refused by OpenSearch. See [dates and times](#dates-and-times). |
 | `binary` | `bytea` | `binary` | The column's bytes, as standard base64 with no line breaks: at the root, as [`array: true`](#array) over `bytea[]`, inside joins, and in an `ids`, `min` or `max` aggregate, whatever the server's `bytea_output`, behind a connection pooler too ([the exceptions](source-postgres.md#behind-pgbouncer)). A domain over `bytea`, and an array of one, read the same way. Under a name another field at the same level shares, a `binary` field declared last is read as Postgres hex text instead: see [One name per level](identifiers.md#one-name-per-level). A `bytea` primary key still gives the document `_id` as Postgres hex text (`\x0102`), not base64. Before 0.18 the Postgres hex text (`\x0102…`) was indexed instead; see [Upgrade to 0.18](../operate/upgrade-to-0-18.md). |
@@ -139,6 +139,15 @@ The same form is written wherever the value goes: a `min`/`max` with `value_type
   ```
 
 - **Values outside the format.** A BC date, `infinity` and `-infinity`, and a year past 9999 reach the document as Postgres renders them (`0044-03-15 BC`, `infinity`), which the `date` mapping refuses, so that one document is rejected and `on_error` decides.
+
+## numbers
+
+Every number is written as a JSON number. A `numeric` has no JSON number for `NaN` or an infinity, so neither does any number field.
+
+- **`decimal` keeps every digit Postgres stores.** The JSON number is the column's text: `12.50` stays `12.50`, `1234567890.123456789` keeps all 19 digits, and a value past `rust_decimal`'s range (±7.9 × 10^28, or more than 28 fractional digits) is a number too, `1000000000000000000000000000000`. The same goes for a `decimal` [array](#array) element, a `sum`/`min`/`max` with `value_type: decimal`, and an `ids` of `decimal` keys. OpenSearch indexes the field as `double`, so a query, a sort and an aggregation see the nearest `double`; only `_source` is exact. What a Rust consumer reads it into: [What the derive trusts](../query/document-structs.md#what-the-derive-trusts).
+- **`float` and `double` are the nearest float**, whatever the column: a `numeric` `1e30` under `double` is written `1e+30`.
+- **`NaN`, `Infinity` and `-Infinity` fail the document** under any number field (`short` to `decimal`), a scalar, an array element or an aggregate alike. The document isn't built: the index's [`on_error`](index-and-on-error.md#on_error) decides, on the ingest side, so no sink receives it. Under `skip` every sink keeps the document's previous version. Keep such a value out with a [filter](filters-and-soft-delete.md), or read the column under `keyword`.
+- **A number in a `json` field** is a number, the nearest `double` when it is past `rust_decimal`'s range.
 
 ## custom
 

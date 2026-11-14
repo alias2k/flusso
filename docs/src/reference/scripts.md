@@ -65,7 +65,7 @@ A document value enters Rhai as:
 | --- | --- |
 | integers | `i64` |
 | `float`, `double` | `f64` |
-| `decimal` | `Decimal`, exact |
+| `decimal` | `Decimal`, exact; a value past its range (±7.9 × 10^28, or more than 28 fractional digits) as a string of its digits |
 | text, `uuid` | string |
 | `date`, `timestamp` | RFC 3339 string (`2024-05-01`, `2024-05-01T12:00:00Z`) |
 | `binary` | blob |

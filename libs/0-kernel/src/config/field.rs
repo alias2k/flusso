@@ -96,7 +96,7 @@ fn collect_constant_kinds(value: &common::GenericValue, kinds: &mut Vec<ScalarKi
             return true;
         }
         V::SmallInt(_) | V::Int(_) | V::BigInt(_) => ScalarKind::Whole,
-        V::Float(_) | V::Double(_) | V::Decimal(_) => ScalarKind::Fractional,
+        V::Float(_) | V::Double(_) | V::Decimal(_) | V::BigDecimal(_) => ScalarKind::Fractional,
         V::String(_)
         | V::Uuid(_)
         | V::Date(_)

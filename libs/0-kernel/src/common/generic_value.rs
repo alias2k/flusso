@@ -6,6 +6,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::BigDecimal;
+
 /// The canonical value vocabulary every layer trades in — the **middle type**
 /// between a source and a sink.
 ///
@@ -57,6 +59,9 @@ pub enum GenericValue {
     Bytes(Vec<u8>),
     Array(Vec<GenericValue>),
     Map(BTreeMap<String, GenericValue>),
+    /// `numeric` / `decimal` past [`Decimal`]'s range (beyond ±7.9e28, or
+    /// more than 28 fractional digits) — exact, as its text.
+    BigDecimal(BigDecimal),
 }
 
 impl GenericValue {
@@ -81,7 +86,8 @@ impl GenericValue {
             | GenericValue::Time(_)
             | GenericValue::Timestamp(_)
             | GenericValue::TimestampTz(_)
-            | GenericValue::Bytes(_) => true,
+            | GenericValue::Bytes(_)
+            | GenericValue::BigDecimal(_) => true,
             GenericValue::Null | GenericValue::Array(_) | GenericValue::Map(_) => false,
         }
     }
@@ -112,6 +118,7 @@ impl PartialEq for GenericValue {
             (Bytes(a), Bytes(b)) => a == b,
             (Array(a), Array(b)) => a == b,
             (Map(a), Map(b)) => a == b,
+            (BigDecimal(a), BigDecimal(b)) => a == b,
             _ => false,
         }
     }
@@ -141,6 +148,7 @@ impl Hash for GenericValue {
             Bytes(v) => v.hash(state),
             Array(v) => v.hash(state),
             Map(v) => v.hash(state),
+            BigDecimal(v) => v.hash(state),
         }
     }
 }
