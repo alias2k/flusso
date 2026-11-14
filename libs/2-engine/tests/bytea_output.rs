@@ -9,6 +9,10 @@
 //! and `custom`, a column `default`, a domain over `bytea`, a `belongs_to`
 //! and a `has_many` (`json_agg`), an `ids` aggregate over a `bytea` key, and
 //! `min`/`max` over a `bytea` column (Postgres 18 and later), so PG 18 runs it.
+//! An array of a domain over `bytea`, and a domain over that, are rendered too.
+//! A `bytea` inside a composite is out of the query's reach: over a direct
+//! connection the builder's own session setting still renders it as hex,
+//! behind the pooler it follows the server's setting.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -48,19 +52,44 @@ use common::{column, field, index_name, table};
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn a_bytea_value_reads_as_hex_under_bytea_output_hex() {
-    every_bytea_value_reads_as_hex("hex").await;
+    every_bytea_value_reads_as_hex("hex", Route::Pooler).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn a_bytea_value_reads_as_hex_under_bytea_output_escape() {
-    every_bytea_value_reads_as_hex("escape").await;
+    every_bytea_value_reads_as_hex("escape", Route::Pooler).await;
 }
 
-/// The documents of `docs`, backfilled then changed live, on a database whose
-/// `bytea_output` is `setting`, read through a pooler that resets every
-/// server connection after each transaction.
-async fn every_bytea_value_reads_as_hex(setting: &str) {
+/// A direct connection reads every shape as hex text, the ones the query
+/// can't reach (inside a composite) included, as it did before #298.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_bytea_value_reads_as_hex_over_a_direct_connection_under_escape() {
+    every_bytea_value_reads_as_hex("escape", Route::Direct).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_bytea_value_reads_as_hex_over_a_direct_connection_under_hex() {
+    every_bytea_value_reads_as_hex("hex", Route::Direct).await;
+}
+
+/// How the document builder reaches Postgres.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    Direct,
+    /// PgBouncer in transaction mode, resetting each server connection after
+    /// every transaction: no session `SET` reaches the next query.
+    Pooler,
+}
+
+/// PG 18 with logical replication: the first with `min`/`max` over `bytea`.
+async fn start_postgres() -> (
+    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
+    u16,
+    String,
+) {
     let postgres = Postgres::default()
         .with_tag("18-alpine")
         .with_cmd([
@@ -77,32 +106,21 @@ async fn every_bytea_value_reads_as_hex(setting: &str) {
         .unwrap();
     let port = postgres.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
-    for statement in [
-        format!("ALTER DATABASE postgres SET bytea_output = '{setting}'"),
-        "CREATE DOMAIN blob AS bytea".to_owned(),
-        "CREATE TABLE owners (id int PRIMARY KEY, avatar bytea)".to_owned(),
-        "CREATE TABLE docs (id int PRIMARY KEY, owner_id int, blob bytea, blobs bytea[], \
-         tag bytea, wrapped blob, spare bytea)"
-            .to_owned(),
-        "CREATE TABLE parts (id bytea PRIMARY KEY, doc_id int, blob bytea)".to_owned(),
-        "ALTER TABLE parts REPLICA IDENTITY FULL".to_owned(),
-        "CREATE PUBLICATION flusso FOR TABLE owners, docs, parts".to_owned(),
-        r"INSERT INTO owners VALUES (1, '\x0a0b')".to_owned(),
-        r"INSERT INTO docs VALUES (1, 1, '\x0102ff', ARRAY['\x01'::bytea, NULL, '\xff00'], '\x6869', '\x7f', NULL)"
-            .to_owned(),
-        r"INSERT INTO parts VALUES ('\x0001', 1, '\x5c00'), ('\x0002', 1, '\x')".to_owned(),
-    ] {
-        sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
-    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
-        .execute(&pool)
-        .await
-        .unwrap();
+    (postgres, port, url)
+}
 
+/// The URL the builder connects with over `route`, and the pooler, if any.
+async fn connect_over(
+    route: Route,
+    postgres: &testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
+    url: &str,
+) -> (
+    String,
+    Option<testcontainers_modules::testcontainers::ContainerAsync<GenericImage>>,
+) {
+    if route == Route::Direct {
+        return (url.to_owned(), None);
+    }
     let host = postgres.get_bridge_ip_address().await.unwrap().to_string();
     let bouncer = GenericImage::new("edoburu/pgbouncer", "v1.26.1-p0")
         .with_exposed_port(5432.tcp())
@@ -128,6 +146,49 @@ async fn every_bytea_value_reads_as_hex(setting: &str) {
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+    (bounced, Some(bouncer))
+}
+
+/// The documents of `docs`, backfilled then changed live, on a database whose
+/// `bytea_output` is `setting`, read over `route`.
+async fn every_bytea_value_reads_as_hex(setting: &str, route: Route) {
+    let (postgres, port, url) = start_postgres().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        format!("ALTER DATABASE postgres SET bytea_output = '{setting}'"),
+        "CREATE DOMAIN blob AS bytea".to_owned(),
+        "CREATE DOMAIN blobs_of_blob AS blob[]".to_owned(),
+        "CREATE TYPE pair AS (n int, b bytea)".to_owned(),
+        "CREATE TABLE owners (id int PRIMARY KEY, avatar bytea)".to_owned(),
+        "CREATE TABLE docs (id int PRIMARY KEY, owner_id int, blob bytea, blobs bytea[], \
+         tag bytea, wrapped blob, spare bytea, elems blob[], nested blobs_of_blob, pair pair)"
+            .to_owned(),
+        "CREATE TABLE parts (id bytea PRIMARY KEY, doc_id int, blob bytea)".to_owned(),
+        "ALTER TABLE parts REPLICA IDENTITY FULL".to_owned(),
+        "CREATE PUBLICATION flusso FOR TABLE owners, docs, parts".to_owned(),
+        r"INSERT INTO owners VALUES (1, '\x0a0b')".to_owned(),
+        r"INSERT INTO docs VALUES (1, 1, '\x0102ff', ARRAY['\x01'::bytea, NULL, '\xff00'], '\x6869', '\x7f', NULL, ARRAY['\x09', '\x5c5c']::blob[], ARRAY['\x0a']::blobs_of_blob, ROW(1, '\x0aff'))"
+            .to_owned(),
+        r"INSERT INTO parts VALUES ('\x0001', 1, '\x5c00'), ('\x0002', 1, '\x')".to_owned(),
+    ] {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (bounced, _bouncer) = connect_over(route, &postgres, &url).await;
+    // A `bytea` inside a composite is past the query's reach: behind a pooler
+    // that drops the session's `SET`, it follows the server's setting.
+    let pair = if route == Route::Pooler && setting == "escape" {
+        json!({ "n": 1, "b": r"\012\377" })
+    } else {
+        json!({ "n": 1, "b": r"\x0aff" })
+    };
 
     let spec = SourceSpec::new(BTreeMap::from([(index_name("docs"), docs_schema())]));
     let documents = PgDocumentBuilder::connect(&bounced, Arc::new(spec))
@@ -141,11 +202,15 @@ async fn every_bytea_value_reads_as_hex(setting: &str) {
     ));
 
     let backfilled = document(&mut engine, &recorded, "1").await;
-    assert_eq!(backfilled, expected_doc_1(json!("")), "the backfill");
+    assert_eq!(
+        backfilled,
+        expected_doc_1(json!(""), pair.clone()),
+        "the backfill"
+    );
 
     for statement in [
         r"UPDATE parts SET blob = '\xabcd' WHERE id = '\x0002'",
-        r"INSERT INTO docs VALUES (2, NULL, '\x', '{}', NULL, NULL, '\x00')",
+        r"INSERT INTO docs VALUES (2, NULL, '\x', '{}', NULL, NULL, '\x00', NULL, NULL, NULL)",
     ] {
         sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
             .execute(&pool)
@@ -167,6 +232,10 @@ async fn every_bytea_value_reads_as_hex(setting: &str) {
             "partIds": [],
             "firstPart": null,
             "lastPart": null,
+            "elems": null,
+            "elemsCustom": null,
+            "nested": null,
+            "pair": null,
         }),
         "a live insert"
     );
@@ -180,14 +249,15 @@ async fn every_bytea_value_reads_as_hex(setting: &str) {
         .unwrap();
     assert_eq!(
         rebuilt,
-        expected_doc_1(json!("q80=")),
+        expected_doc_1(json!("q80="), pair),
         "a live change on a child"
     );
     engine.abort();
 }
 
-/// Document 1, with `second_blob` as its second part's `blob`.
-fn expected_doc_1(second_blob: Value) -> Value {
+/// Document 1, with `second_blob` as its second part's `blob` and `pair` as
+/// its composite.
+fn expected_doc_1(second_blob: Value, pair: Value) -> Value {
     json!({
         "blob": "AQL/",
         "blobs": ["AQ==", "/wA="],
@@ -204,6 +274,10 @@ fn expected_doc_1(second_blob: Value) -> Value {
         "partIds": ["AAE=", "AAI="],
         "firstPart": "AAE=",
         "lastPart": "AAI=",
+        "elems": ["CQ==", "XFw="],
+        "elemsCustom": [r"\x09", r"\x5c5c"],
+        "nested": ["Cg=="],
+        "pair": pair,
     })
 }
 
@@ -254,10 +328,7 @@ fn docs_schema() -> IndexSchema {
             on: vec![],
         })
     };
-    let mut blobs = column_of("blobs", "blobs", FlussoType::Binary);
-    if let FieldSource::Column(column) = &mut blobs.source {
-        column.array = true;
-    }
+    let blobs = array_of("blobs", "blobs", FlussoType::Binary);
     let mut fallback = column_of("fallback", "spare", FlussoType::Keyword);
     if let FieldSource::Column(column) = &mut fallback.source {
         column.default = Some(kernel::GenericValue::String(r"\x0909".to_owned()));
@@ -310,8 +381,27 @@ fn docs_schema() -> IndexSchema {
                     Some(FlussoType::Binary),
                 ),
             ),
+            array_of("elems", "elems", FlussoType::Binary),
+            array_of(
+                "elemsCustom",
+                "elems",
+                FlussoType::Custom {
+                    postgres: vec!["blob[]".to_owned()],
+                    opensearch: "keyword".to_owned(),
+                },
+            ),
+            array_of("nested", "nested", FlussoType::Binary),
+            column_of("pair", "pair", FlussoType::Json),
         ],
     }
+}
+
+fn array_of(name: &str, col: &str, ty: FlussoType) -> Field {
+    let mut field = column_of(name, col, ty);
+    if let FieldSource::Column(column) = &mut field.source {
+        column.array = true;
+    }
+    field
 }
 
 fn column_of(name: &str, col: &str, ty: FlussoType) -> Field {
