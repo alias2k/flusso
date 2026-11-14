@@ -203,8 +203,8 @@ jobs:
           fail-on-alert: false
           max-items-in-chart: 200
 
-      # Two consecutive main points past 25% (20% for RSS) against the rolling
-      # median of the previous five → one issue, kept current, self-closing.
+      # Two consecutive main points past 25% (20% for RSS), and past the series'
+      # own swing, against the rolling median of the previous five → one issue, kept current, self-closing.
       - name: Regression check
         env:
           GH_TOKEN: ${{ github.token }}

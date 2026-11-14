@@ -2,13 +2,15 @@
 """Call regressions from the benchmark history the way the glossary defines them.
 
     bench-regression.py <threshold-percent> [--rss-threshold <percent>]
-                        [--window 5] [--issue] <data.js>...
+                        [--window 5] [--spread 3] [--issue] <data.js>...
 
 Reads github-action-benchmark `data.js` files (the `benchmarks` branch, one per
 direction: `smaller/data.js` and `bigger/data.js`). For every
 series, each point is compared to the **median of the previous `--window`
 accepted points**. A point is "over" when it is worse than that median by more
-than the threshold (`--rss-threshold` for `peak_rss_mib` series). A **regression**
+than the threshold (`--rss-threshold` for `peak_rss_mib` series) *and* by more
+than `--spread` (default 3) times the window's own median absolute deviation, so
+a series that swings from run to run needs a move larger than its swings. A **regression**
 is the newest point being over *and* the point before it being over against
 its own window — two consecutive runs. An image-tag change (in a point's
 `extra`) restarts the window.
@@ -51,7 +53,7 @@ def worse_by(value: float, baseline: float, smaller_is_better: bool) -> float:
     return change if smaller_is_better else -change
 
 
-def analyse(data: dict, threshold: float, rss_threshold: float, window: int) -> list[dict]:
+def analyse(data: dict, threshold: float, rss_threshold: float, window: int, spread: float = 3.0) -> list[dict]:
     findings = []
     for suite, points in data.get("entries", {}).items():
         smaller = points and points[-1].get("tool") == "customSmallerIsBetter"
@@ -72,7 +74,9 @@ def analyse(data: dict, threshold: float, rss_threshold: float, window: int) -> 
                     return False, 0.0, value
                 base = statistics.median(prior)
                 pct = worse_by(value, base, smaller)
-                return pct > limit, pct, base
+                swing = statistics.median(abs(v - base) for v in prior)
+                beyond_swings = abs(value - base) > spread * swing
+                return pct > limit and beyond_swings, pct, base
 
             last_over, last_pct, base = over(len(history) - 1)
             prev_over, _, _ = over(len(history) - 2)
@@ -100,7 +104,7 @@ def upsert_issue(findings: list[dict]) -> None:
             subprocess.run(["gh", "issue", "close", str(issue["number"]), "--comment", "Every series is back within its threshold."], check=True)
         return
     lines = [
-        "Two consecutive runs on `main` crossed the threshold against the rolling median of the previous five points.",
+        "Two consecutive runs on `main` crossed the threshold, and the series' own run-to-run swing, against the rolling median of the previous five points.",
         "",
         "| suite | series | worse by | baseline | now | commit |",
         "| --- | --- | ---: | ---: | ---: | --- |",
@@ -122,12 +126,13 @@ def main() -> int:
     parser.add_argument("data", nargs="+")
     parser.add_argument("--rss-threshold", type=float, default=None)
     parser.add_argument("--window", type=int, default=5)
+    parser.add_argument("--spread", type=float, default=3.0)
     parser.add_argument("--issue", action="store_true")
     args = parser.parse_args()
     rss = args.rss_threshold if args.rss_threshold is not None else args.threshold
     findings = []
     for path in args.data:
-        findings += analyse(load(path), args.threshold, rss, args.window)
+        findings += analyse(load(path), args.threshold, rss, args.window, args.spread)
     if findings:
         print(f"{len(findings)} regression(s):")
         for f in findings:
