@@ -245,6 +245,19 @@ impl FlussoValue<kind::Keyword> for &uuid::Uuid {}
 impl FlussoValue<kind::Text> for String {}
 impl FlussoValue<kind::Text> for &str {}
 
+/// The other owned strings serde reads one string into: values wherever
+/// `String` is.
+macro_rules! string_values {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl FlussoValue<kind::Keyword> for $ty {}
+        impl FlussoValue<kind::Text> for $ty {}
+        impl FlussoValue<kind::Date> for $ty {}
+    )+};
+}
+string_values!(Box<str>, std::borrow::Cow<'_, str>);
+#[cfg(feature = "rc")]
+string_values!(std::sync::Arc<str>, std::rc::Rc<str>);
+
 impl FlussoValue<kind::Bool> for bool {}
 
 // A numeric type is a valid value for a numeric kind iff it widens into that
@@ -264,6 +277,10 @@ number_values!(kind::Double: i8, i16, i32, f32, f64);
 number_values!(kind::Decimal: i8, i16, i32, i64);
 #[cfg(feature = "decimal")]
 impl FlussoValue<kind::Decimal> for crate::Decimal {}
+/// A `double` holds what a `Decimal` does inside its range, so it reads one
+/// and compares with one.
+#[cfg(feature = "decimal")]
+impl FlussoValue<kind::Double> for crate::Decimal {}
 
 impl FlussoValue<kind::Date> for String {}
 impl FlussoValue<kind::Date> for &str {}

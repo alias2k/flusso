@@ -1,0 +1,44 @@
+error[E0277]: `std::string::String` is not a valid value for a `flusso_query::kind::Double` field
+  --> tests/ui/own_decimal_at_a_double.rs:11:9
+   |
+11 |     db: Decimal,
+   |         ^^^^^^^ unsupported field type
+   |
+   = help: the trait `FlussoValue<flusso_query::kind::Double>` is not implemented for `std::string::String`
+   = note: use a built-in leaf type, or a type with `#[derive(FlussoValue)]` of the matching kind
+help: the following other types implement trait `FlussoValue<K>`
+  --> $WORKSPACE/sdk/query/src/handles/mod.rs
+   |
+   | impl FlussoValue<kind::Keyword> for String {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `std::string::String` implements `FlussoValue<flusso_query::kind::Keyword>`
+...
+   | impl FlussoValue<kind::Text> for String {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `std::string::String` implements `FlussoValue<flusso_query::kind::Text>`
+...
+   | impl FlussoValue<kind::Date> for String {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `std::string::String` implements `FlussoValue<flusso_query::kind::Date>`
+note: required for `Decimal` to implement `FlussoValue<flusso_query::kind::Double>`
+  --> tests/ui/own_decimal_at_a_double.rs:6:8
+   |
+ 5 | #[derive(Debug, serde::Serialize, serde::Deserialize, FlussoValue)]
+   |                                                       ----------- type parameter would need to implement `FlussoValue<flusso_query::kind::Double>`
+ 6 | struct Decimal(String);
+   |        ^^^^^^^
+   = help: consider manually implementing `FlussoValue<flusso_query::kind::Double>` to avoid undesired bounds
+note: required by a bound in `__assert_field_value`
+  --> tests/ui/own_decimal_at_a_double.rs:11:9
+   |
+11 |     db: Decimal,
+   |         ^^^^^^^ required by this bound in `__assert_field_value`
+
+error[E0080]: evaluation panicked: fragment `Fragment`: field `db` is `Decimal`, which cannot hold the schema field at this path (a type named `Decimal` is judged by the kinds its flusso derive gives it, and `rust_decimal::Decimal`'s are `decimal` and `double`)
+  --> tests/ui/own_decimal_at_a_double.rs:23:8
+   |
+23 |     f: Fragment,
+   |        ^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `Fragment::__flusso_check`
+  --> tests/ui/own_decimal_at_a_double.rs:16:9
+   |
+16 |     db: Decimal,
+   |         ^^^^^^^ the failure occurred here

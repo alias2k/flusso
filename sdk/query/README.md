@@ -66,8 +66,9 @@ Values are typed by **kind**: numerics widen losslessly (`eq(5)` on a `long`, ne
 | Feature | Adds |
 | --- | --- |
 | `derive` | `FlussoRoot`, `FlussoFragment`, `FlussoValue`, `FlussoMap`, `FlussoMultiDocument` |
-| `decimal` | `rust_decimal::Decimal` as a decimal value |
+| `decimal` | `rust_decimal::Decimal` as a `decimal` or `double` value |
 | `uuid` | `uuid::Uuid` as a keyword value |
+| `rc` | `Arc<str>` and `Rc<str>` as string values, like `String` (turns on serde's `rc`); `Box<str>` and `Cow<str>` need no feature |
 | `time`, `chrono` | the date types for `date`/`timestamp` fields |
 | `diesel`, `diesel-async` | `position::diesel::current` / `position::diesel_async::current`: read the position a fenced read waits on |
 

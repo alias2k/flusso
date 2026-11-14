@@ -692,8 +692,21 @@ value_meta! {
     f64 => [Double],
 }
 
+value_meta!(Box<str> => [Keyword, Text, Date]);
+
+impl FlussoValueMeta for std::borrow::Cow<'_, str> {
+    const KINDS: &'static [KindTag] = &[KindTag::Keyword, KindTag::Text, KindTag::Date];
+    const VARIANTS: &'static [&'static str] = &[];
+}
+
+#[cfg(feature = "rc")]
+value_meta! {
+    std::sync::Arc<str> => [Keyword, Text, Date],
+    std::rc::Rc<str> => [Keyword, Text, Date],
+}
+
 #[cfg(feature = "decimal")]
-value_meta!(crate::Decimal => [Decimal]);
+value_meta!(crate::Decimal => [Decimal, Double]);
 
 #[cfg(feature = "uuid")]
 value_meta!(uuid::Uuid => [Keyword]);

@@ -682,10 +682,7 @@ fn check_type(field: &DocField, resolved: &ResolvedField) -> syn::Result<Option<
                 inner
             };
             let found = leaf_ident(inner);
-            if found
-                .as_deref()
-                .is_some_and(|f| expected.contains(&f) || decimal_at_a_double(scalar, f))
-            {
+            if found.as_deref().is_some_and(|f| expected.contains(&f)) {
                 return Ok(None);
             }
             // Hybrid: a user-defined type (a path that isn't a known primitive)
@@ -917,9 +914,7 @@ fn check_map_type(
             let value_ty = option_inner(value_ty).unwrap_or(value_ty);
             let expected = expected_leaves(&values.mapping_type);
             let found = leaf_ident(value_ty);
-            if found.as_deref().is_some_and(|f| {
-                expected.contains(&f) || decimal_at_a_double(&values.mapping_type, f)
-            }) {
+            if found.as_deref().is_some_and(|f| expected.contains(&f)) {
                 return Ok(None);
             }
             if let Some(kind) = kind
@@ -1121,12 +1116,6 @@ fn expected_leaves(mapping_type: &MappingType) -> Vec<&'static str> {
         // Object/Nested handled by the caller; any other Other → accept anything.
         _ => vec![],
     }
-}
-
-/// `Decimal` at a `double`, taken by its name as a fragment takes it: it reads
-/// every double inside its range, so it is trusted with the rest.
-fn decimal_at_a_double(mapping_type: &MappingType, found: &str) -> bool {
-    found == "Decimal" && matches!(mapping_type, MappingType::Double | MappingType::ScaledFloat)
 }
 
 pub(crate) fn is_primitive(ident: Option<&str>) -> bool {
@@ -1986,6 +1975,32 @@ pub(crate) fn embed_checks(
             // un-derived struct fails it with `FlussoValueMeta`'s directed
             // note ("add a derive, or mark the field opaque") rather than
             // only a bare "no `__flusso_check`".
+            // A std type has no check to walk into: it fits by its metadata,
+            // as in a fragment (`Box<str>` at a `json` field).
+            if crate::fragment::is_std_without_meta(element) {
+                let rendered = crate::fragment::render(element);
+                let message = format!(
+                    "field `{key}` in {scope} is `{rendered}`, which cannot hold the schema field \
+                     at this path — declare the type the schema field holds (a struct with a \
+                     flusso derive, in `Option<…>` or `Vec<…>` as the field needs)"
+                );
+                calls.extend(quote::quote_spanned! {span=>
+                    {
+                        #[allow(unused_imports)]
+                        use ::flusso_query::OpaqueWithoutMeta as _;
+                        assert!(
+                            ::flusso_query::OpaqueProbe::<#element>::HAS_META
+                                && (::flusso_query::is_json(__FLUSSO_LEVEL, #key)
+                                    || ::flusso_query::kind_is(
+                                        __FLUSSO_LEVEL, #key,
+                                        ::flusso_query::OpaqueProbe::<#element>::KINDS,
+                                    )),
+                            #message
+                        );
+                    }
+                });
+                continue;
+            }
             let map_message = format!(
                 "field `{key}` in {scope} has fields of its own, and `{}` is a map type — {}",
                 crate::fragment::render(element),

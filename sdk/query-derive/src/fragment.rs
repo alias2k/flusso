@@ -1013,11 +1013,12 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
         checks.extend(match primitive_kinds(value_ty) {
             Some(tags) => {
                 let own = own_value_kinds(value_ty, quote! { map_value_is }, key);
+                let named = by_name(
+                    value_ty,
+                    quote! { ::flusso_query::map_value_is(level, #key, &[#(#tags),*]) },
+                );
                 quote_spanned! {span=>
-                    assert!(
-                        ::flusso_query::map_value_is(level, #key, &[#(#tags),*]) || #own,
-                        #msg
-                    );
+                    assert!(#named || #own, #msg);
                 }
             }
             // Read through the probe: a value type with no flusso metadata
@@ -1073,7 +1074,11 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
 
     let mut checks = TokenStream::new();
 
-    let named_like_a_leaf = if is_foreign_leaf(element) {
+    let named_like_a_leaf = if leaf_ident(element).as_deref() == Some("Decimal") {
+        " (a type named `Decimal` is judged by the kinds its flusso derive gives it, and \
+         `rust_decimal::Decimal`'s are `decimal` and `double`)"
+            .to_string()
+    } else if is_foreign_leaf(element) {
         let name = leaf_ident(element).unwrap_or_default();
         format!(
             " (a fragment takes `{name}` for the built-in leaf type by its name, so a type of \
@@ -1098,27 +1103,47 @@ fn shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span) -> T
         // A known leaf type — its acceptable kinds are baked right here.
         Some(tags) => {
             let own = own_value_kinds(element, quote! { kind_is }, key);
+            let named = by_name(
+                element,
+                quote! { ::flusso_query::kind_is(level, #key, &[#(#tags),*]) },
+            );
             checks.extend(quote_spanned! {span=>
-                assert!(
-                    ::flusso_query::kind_is(level, #key, &[#(#tags),*]) || #json_array || #own,
-                    #kind_msg
-                );
+                assert!(#named || #json_array || #own, #kind_msg);
             });
         }
         // A std type no flusso derive can reach: it has neither metadata nor
         // a check of its own, so only a kind the derive does not model takes
         // it, as on a root.
+        // A std type no flusso derive can reach has no check of its own to
+        // walk into: it fits by the kinds of its metadata (`Box<str>` is a
+        // string), and only a kind the derive does not model takes it without.
         None if is_std_without_meta(element) => {
-            let msg = message(
+            let rendered = render(element);
+            let no_kind_msg = message(
                 fragment,
                 key,
                 &format!(
-                    "is `{}`, which has no flusso kind, so it cannot hold the schema field at                      this path; wrap it in a newtype that derives `FlussoValue`",
-                    render(element)
+                    "is `{rendered}`, which has no flusso kind, so only a `custom` field whose \
+                     OpenSearch type the derive does not model takes it — declare the type the \
+                     schema field holds (`String`, a number, `bool`, a struct with a flusso \
+                     derive, …, in `Option<…>` or `Vec<…>` as the field needs)"
                 ),
             );
+            let fits = value_kinds_fit(element, quote! { kind_is }, key);
             checks.extend(quote_spanned! {span=>
-                assert!(::flusso_query::is_unmodeled(level, #key), #msg);
+                {
+                    #[allow(unused_imports)]
+                    use ::flusso_query::OpaqueWithoutMeta as _;
+                    assert!(
+                        ::flusso_query::is_unmodeled(level, #key)
+                            || ::flusso_query::OpaqueProbe::<#element>::HAS_META,
+                        #no_kind_msg
+                    );
+                }
+                assert!(
+                    ::flusso_query::is_unmodeled(level, #key) || #json_array || #fits,
+                    #kind_msg
+                );
             });
         }
         // Any other type is treated uniformly: kinds + variants from its
@@ -1313,6 +1338,12 @@ fn own_value_kinds(ty: &Type, check: TokenStream, key: &str) -> TokenStream {
     if !is_foreign_leaf(ty) {
         return quote! { false };
     }
+    value_kinds_fit(ty, check, key)
+}
+
+/// Whether `ty` is a value type whose metadata's kinds fit the field: no
+/// sub-document, map or array. `check` is `kind_is` or `map_value_is`.
+fn value_kinds_fit(ty: &Type, check: TokenStream, key: &str) -> TokenStream {
     quote! {
         {
             #[allow(unused_imports)]
@@ -1328,12 +1359,29 @@ fn own_value_kinds(ty: &Type, check: TokenStream, key: &str) -> TokenStream {
     }
 }
 
+/// `named`, the check of a built-in leaf by its name, except for `Decimal`:
+/// `rust_decimal::Decimal` carries its kinds, so a type named `Decimal` with
+/// metadata is judged by it alone ([`own_value_kinds`]), and by its name only
+/// without.
+fn by_name(ty: &Type, named: TokenStream) -> TokenStream {
+    if leaf_ident(ty).as_deref() != Some("Decimal") {
+        return named;
+    }
+    quote! {
+        ({
+            #[allow(unused_imports)]
+            use ::flusso_query::OpaqueWithoutMeta as _;
+            !::flusso_query::OpaqueProbe::<#ty>::HAS_META
+        } && #named)
+    }
+}
+
 /// A std type that no flusso derive can give metadata or a check: a tuple,
 /// array, slice or reference, a primitive without a flusso kind (`char`,
 /// `u128`, …), or a generic std wrapper or collection (`Box<…>`, `Cow<…>`,
 /// `Option<…>`, …). Generic arguments tell a std wrapper from a type of your
 /// own named like one.
-fn is_std_without_meta(ty: &Type) -> bool {
+pub(crate) fn is_std_without_meta(ty: &Type) -> bool {
     let path = match ty {
         Type::Path(path) => path,
         Type::Group(group) => return is_std_without_meta(&group.elem),
@@ -1476,7 +1524,7 @@ fn primitive_kinds(ty: &Type) -> Option<Vec<TokenStream>> {
         "f64" => &["Double", "Decimal"],
         // Foreign leaf types behind a feature: no derive of their own, so they
         // are recognised here rather than via `FlussoValueMeta`.
-        "Decimal" => &["Decimal", "Double"],
+        "Decimal" => &["Decimal"],
         "Uuid" => &["Keyword"],
         "NaiveDate" | "NaiveDateTime" | "NaiveTime" | "DateTime" | "OffsetDateTime"
         | "PrimitiveDateTime" | "Date" => &["Date"],

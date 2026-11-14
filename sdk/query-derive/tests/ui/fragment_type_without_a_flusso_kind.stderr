@@ -1,4 +1,4 @@
-error[E0080]: evaluation panicked: fragment `Boxed`: field `bt` is `Box<Brand>`, which has no flusso kind, so it cannot hold the schema field at                      this path; wrap it in a newtype that derives `FlussoValue`
+error[E0080]: evaluation panicked: fragment `Boxed`: field `bt` is `Box<Brand>`, which has no flusso kind, so only a `custom` field whose OpenSearch type the derive does not model takes it — declare the type the schema field holds (`String`, a number, `bool`, a struct with a flusso derive, …, in `Option<…>` or `Vec<…>` as the field needs)
   --> tests/ui/fragment_type_without_a_flusso_kind.rs:29:8
    |
 29 |     f: Boxed,
@@ -10,7 +10,7 @@ note: inside `Boxed::__flusso_check`
 12 |     bt: Option<Box<Brand>>,
    |         ^^^^^^ the failure occurred here
 
-error[E0080]: evaluation panicked: fragment `Chars`: field `kwa` is `char`, which has no flusso kind, so it cannot hold the schema field at                      this path; wrap it in a newtype that derives `FlussoValue`
+error[E0080]: evaluation panicked: fragment `Chars`: field `kwa` is `char`, which has no flusso kind, so only a `custom` field whose OpenSearch type the derive does not model takes it — declare the type the schema field holds (`String`, a number, `bool`, a struct with a flusso derive, …, in `Option<…>` or `Vec<…>` as the field needs)
   --> tests/ui/fragment_type_without_a_flusso_kind.rs:36:8
    |
 36 |     f: Chars,
@@ -22,7 +22,7 @@ note: inside `Chars::__flusso_check`
 17 |     kwa: Vec<char>,
    |          ^^^ the failure occurred here
 
-error[E0080]: evaluation panicked: fragment `Unsigned`: field `kwa` is `u64`, which has no flusso kind, so it cannot hold the schema field at                      this path; wrap it in a newtype that derives `FlussoValue`
+error[E0080]: evaluation panicked: fragment `Unsigned`: field `kwa` is `u64`, which has no flusso kind, so only a `custom` field whose OpenSearch type the derive does not model takes it — declare the type the schema field holds (`String`, a number, `bool`, a struct with a flusso derive, …, in `Option<…>` or `Vec<…>` as the field needs)
   --> tests/ui/fragment_type_without_a_flusso_kind.rs:43:8
    |
 43 |     f: Unsigned,
