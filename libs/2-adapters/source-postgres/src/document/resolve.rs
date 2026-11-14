@@ -34,6 +34,7 @@ use source::document::DocumentId;
 use source::{Result, RowImage, RowKey, SourceError};
 
 use super::fields::Step;
+use super::reads::PathReads;
 use super::{PgDocumentBuilder, query, query_err, value};
 
 impl PgDocumentBuilder {
@@ -214,9 +215,15 @@ impl PgDocumentBuilder {
                     .unwrap_or_else(|| (target_table.clone(), target_column.clone()))
             })
             .await?;
-        let base = self.base_name(schema, parent_table, parent_pk).await?;
-        let (sql, params) =
-            query::reverse_query(schema, parent_table, parent_pk, &base, &key, &col_types)?;
+        let base = self.column_meta(schema, parent_table, parent_pk).await?;
+        let (sql, params) = query::reverse_query(
+            schema,
+            parent_table,
+            parent_pk,
+            &base.base_name,
+            &key,
+            &col_types,
+        )?;
         self.run_reverse(sql, params, parent_pk.as_ref()).await
     }
 
@@ -238,9 +245,15 @@ impl PgDocumentBuilder {
                     .unwrap_or_else(|| (child.clone(), column.clone()))
             })
             .await?;
-        let base = self.base_name(schema, child, foreign_key).await?;
-        let (sql, params) =
-            query::reverse_query(schema, child, foreign_key, &base, &child_key.0, &col_types)?;
+        let base = self.column_meta(schema, child, foreign_key).await?;
+        let (sql, params) = query::reverse_query(
+            schema,
+            child,
+            foreign_key,
+            &base.base_name,
+            &child_key.0,
+            &col_types,
+        )?;
         self.run_reverse(sql, params, foreign_key.as_ref()).await
     }
 
@@ -264,9 +277,15 @@ impl PgDocumentBuilder {
                     .unwrap_or_else(|| (far_table.clone(), far_column.clone()))
             })
             .await?;
-        let base = self.base_name(schema, junction, left_key).await?;
-        let (sql, params) =
-            query::reverse_query(schema, junction, left_key, &base, &key, &col_types)?;
+        let base = self.column_meta(schema, junction, left_key).await?;
+        let (sql, params) = query::reverse_query(
+            schema,
+            junction,
+            left_key,
+            &base.base_name,
+            &key,
+            &col_types,
+        )?;
         self.run_reverse(sql, params, left_key.as_ref()).await
     }
 
@@ -288,12 +307,12 @@ impl PgDocumentBuilder {
                     .unwrap_or_else(|| (junction.clone(), column.clone()))
             })
             .await?;
-        let base = self.base_name(schema, junction, left_key).await?;
+        let base = self.column_meta(schema, junction, left_key).await?;
         let (sql, params) = query::reverse_query(
             schema,
             junction,
             left_key,
-            &base,
+            &base.base_name,
             &junction_key.0,
             &col_types,
         )?;
@@ -365,6 +384,11 @@ pub(super) struct RootLinks(HashMap<(IndexName, Link), (Vec<GenericValue>, HashS
 pub(super) type Link = (TableName, ColumnName);
 
 impl RootLinks {
+    /// Whether no path ended on a link, so no root key needs reading back.
+    pub(super) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub(super) fn add(&mut self, index: &IndexName, link: Link, links: Vec<GenericValue>) {
         let (ordered, seen) = self.0.entry((index.clone(), link)).or_default();
         for link in links {
@@ -402,23 +426,33 @@ impl PgDocumentBuilder {
     /// `ColumnMeta::equal_is_identical`), or a link column of another type
     /// than the key. Those go through [`root_keys`](Self::root_keys). A
     /// `belongs_to` from the root reads the root's own key: never.
+    ///
+    /// The answer depends on the two columns' types alone, so it is kept on
+    /// the path until the column-type cache drops an entry.
     pub(super) async fn reads_root_from_a_link(
         &self,
         schema: &IndexSchema,
         pk: &ColumnName,
-        path: &[Step<'_>],
+        path: &PathReads,
+        steps: &[Step<'_>],
     ) -> Result<Option<Link>> {
-        let Some((table, column)) = path.first().and_then(|step| step.row_link()) else {
-            return Ok(None);
+        let generation = self.col_type_cache.generation();
+        if let Some(link) = path.root_link(generation) {
+            return Ok(link);
+        }
+        let link = match steps.first().and_then(|step| step.row_link()) {
+            None => None,
+            Some((table, column)) => {
+                let root = self
+                    .column_meta(&schema.db_schema, &schema.table, pk)
+                    .await?;
+                let link = self.column_meta(&schema.db_schema, table, column).await?;
+                (!root.equal_is_identical() || link.sql_type != root.sql_type)
+                    .then(|| (table.clone(), column.clone()))
+            }
         };
-        let root = self
-            .column_meta(&schema.db_schema, &schema.table, pk)
-            .await?;
-        let link = self.column_meta(&schema.db_schema, table, column).await?;
-        Ok(
-            (!root.equal_is_identical() || link.sql_type != root.sql_type)
-                .then(|| (table.clone(), column.clone())),
-        )
+        path.know_root_link(generation, link.clone());
+        Ok(link)
     }
 
     /// The root rows' own keys for `links`, values read from the `link` column
@@ -439,12 +473,14 @@ impl PgDocumentBuilder {
         let sql_type = self
             .column_type(&schema.db_schema, link_table, link_column)
             .await?;
-        let base = self.base_name(&schema.db_schema, &schema.table, pk).await?;
+        let base = self
+            .column_meta(&schema.db_schema, &schema.table, pk)
+            .await?;
         let (sql, params) = query::root_keys_query(
             &schema.db_schema,
             &schema.table,
             pk,
-            &base,
+            &base.base_name,
             links,
             &sql_type,
         )?;

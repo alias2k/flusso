@@ -67,7 +67,8 @@ use resolve::RootLinks;
 pub(crate) mod value;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use async_trait::async_trait;
 use kernel::{
@@ -80,11 +81,11 @@ use source::{
 };
 use sqlx::{PgPool, Row};
 
-use fields::find_paths;
 use reads::ReadColumns;
 
-/// Cache of each `(schema, table, column)`'s catalog metadata.
-type ColTypeCache = HashMap<(String, String, String), ColumnMeta>;
+/// Each `schema` → `table` → `column`'s catalog metadata, nested so a lookup
+/// borrows the names instead of building a key.
+type ColTypeCache = HashMap<String, HashMap<String, HashMap<String, Arc<ColumnMeta>>>>;
 
 /// The document builder's cache of column types, which shapes every document
 /// query it writes. Cheap to clone; clones share it.
@@ -95,22 +96,42 @@ type ColTypeCache = HashMap<(String, String, String), ColumnMeta>;
 /// reads a `Relation` message (sent after a table's definition changes)
 /// whose column types differ from the cached ones.
 #[derive(Debug, Clone, Default)]
-pub struct ColumnTypes(Arc<Mutex<ColTypeCache>>);
+pub struct ColumnTypes(Arc<CachedTypes>);
+
+#[derive(Debug, Default)]
+struct CachedTypes {
+    columns: Mutex<ColTypeCache>,
+    /// Bumped every time a table's entries are dropped.
+    generation: AtomicU64,
+}
 
 impl ColumnTypes {
-    fn get(&self, key: &(String, String, String)) -> Option<ColumnMeta> {
-        self.lock().get(key).cloned()
+    fn get(&self, schema: &str, table: &str, column: &str) -> Option<Arc<ColumnMeta>> {
+        self.lock().get(schema)?.get(table)?.get(column).cloned()
     }
 
-    fn insert(&self, key: (String, String, String), meta: ColumnMeta) {
-        self.lock().insert(key, meta);
+    fn insert(&self, schema: &str, table: &str, column: &str, meta: Arc<ColumnMeta>) {
+        self.lock()
+            .entry(schema.to_owned())
+            .or_default()
+            .entry(table.to_owned())
+            .or_default()
+            .insert(column.to_owned(), meta);
+    }
+
+    /// How many times cached entries were dropped so far. An answer derived
+    /// from cached types is current while this has not moved since.
+    fn generation(&self) -> u64 {
+        self.0.generation.load(Ordering::Acquire)
     }
 
     /// Forget every cached column of `schema.table`.
     pub(crate) fn forget_table(&self, schema: &str, table: &str) {
-        self.lock().retain(|(cached_schema, cached_table, _), _| {
-            cached_schema != schema || cached_table != table
-        });
+        let mut columns = self.lock();
+        if let Some(tables) = columns.get_mut(schema) {
+            tables.remove(table);
+        }
+        self.0.generation.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Forget `schema.table`'s cached columns when one of them has another
@@ -127,26 +148,29 @@ impl ColumnTypes {
     ) {
         let changed = self
             .lock()
-            .iter()
-            .any(|((cached_schema, cached_table, column), meta)| {
-                cached_schema == schema
-                    && cached_table == table
-                    && columns
-                        .clone()
-                        .any(|(name, type_oid)| name == column && type_oid != meta.type_oid)
+            .get(schema)
+            .and_then(|tables| tables.get(table))
+            .is_some_and(|cached| {
+                columns.clone().any(|(name, type_oid)| {
+                    cached
+                        .get(name)
+                        .is_some_and(|meta| meta.type_oid != type_oid)
+                })
             });
         if changed {
             self.forget_table(schema, table);
         }
     }
 
-    /// Cache a column of `schema.table` of type `type_oid`, for tests
-    /// elsewhere in the crate.
-    #[cfg(test)]
+    /// Cache an `integer` column of `schema.table` of type `type_oid`, for
+    /// tests elsewhere in the crate and the `resolve` bench.
+    #[cfg(any(test, feature = "bench"))]
     pub(crate) fn cache(&self, schema: &str, table: &str, column: &str, type_oid: u32) {
         self.insert(
-            (schema.to_owned(), table.to_owned(), column.to_owned()),
-            ColumnMeta {
+            schema,
+            table,
+            column,
+            Arc::new(ColumnMeta {
                 sql_type: "integer".to_owned(),
                 type_oid,
                 base_type: None,
@@ -154,20 +178,24 @@ impl ColumnTypes {
                 element_name: None,
                 deterministic: true,
                 nullable: true,
-            },
+            }),
         );
     }
 
     /// Whether any column of `schema.table` is cached.
     #[cfg(test)]
     pub(crate) fn caches(&self, schema: &str, table: &str) -> bool {
-        self.lock().keys().any(|(cached_schema, cached_table, _)| {
-            cached_schema == schema && cached_table == table
-        })
+        self.lock()
+            .get(schema)
+            .and_then(|tables| tables.get(table))
+            .is_some_and(|columns| !columns.is_empty())
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, ColTypeCache> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.0
+            .columns
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -248,10 +276,20 @@ pub struct PgDocumentBuilder {
     /// verdict, or the reason the database gave for not answering.
     comparison_cache: Arc<Mutex<ComparisonCache>>,
     /// Tables a change arrived for that no index reads, already warned about.
-    unread_warned: Arc<Mutex<HashSet<TableName>>>,
+    unread_warned: Arc<RwLock<HashSet<TableName>>>,
     /// Root tables without a primary key already warned about for a key with
     /// a null part.
     keyless_warned: Arc<Mutex<HashSet<TableName>>>,
+}
+
+/// A builder whose pool never connects, for the `resolve` bench.
+#[cfg(feature = "bench")]
+pub(crate) fn offline_builder(spec: Arc<SourceSpec>) -> PgDocumentBuilder {
+    let options = sqlx::postgres::PgConnectOptions::new()
+        .host("127.0.0.1")
+        .port(1);
+    let pool = sqlx::postgres::PgPoolOptions::new().connect_lazy_with(options);
+    PgDocumentBuilder::new(pool, spec)
 }
 
 impl PgDocumentBuilder {
@@ -265,7 +303,7 @@ impl PgDocumentBuilder {
             pk_cache: Arc::new(Mutex::new(HashMap::new())),
             col_type_cache: ColumnTypes::default(),
             comparison_cache: Arc::new(Mutex::new(HashMap::new())),
-            unread_warned: Arc::new(Mutex::new(HashSet::new())),
+            unread_warned: Arc::new(RwLock::new(HashSet::new())),
             keyless_warned: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -274,9 +312,17 @@ impl PgDocumentBuilder {
     /// so a change streamed under an unexpected name (a partition's, say) isn't
     /// dropped silently.
     fn warn_unread(&self, table: &TableName) {
+        let warned = self
+            .unread_warned
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(table);
+        if warned {
+            return;
+        }
         let first = self
             .unread_warned
-            .lock()
+            .write()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(table.clone());
         if first {
@@ -375,12 +421,12 @@ impl PgDocumentBuilder {
         let Some(pk_column) = schema.primary_key.clone() else {
             return Ok(None);
         };
-        let pk_base = self
-            .base_name(&schema.db_schema, &schema.table, &pk_column)
+        let pk_meta = self
+            .column_meta(&schema.db_schema, &schema.table, &pk_column)
             .await?;
         let sql = format!(
             "SELECT {key} FROM \"{db_schema}\".\"{table}\" WHERE \"{pk}\" IS NOT NULL LIMIT 1",
-            key = value::key_select(&format!("\"{pk_column}\""), "key", &pk_base),
+            key = value::key_select(&format!("\"{pk_column}\""), "key", &pk_meta.base_name),
             pk = pk_column,
             db_schema = schema.db_schema,
             table = schema.table,
@@ -476,23 +522,17 @@ impl PgDocumentBuilder {
     /// (e.g. `numeric`, `integer`, `timestamp with time zone`). A thin view over
     /// [`column_meta`](Self::column_meta) for callers that only need the type to
     /// cast a query operand.
-    /// The `pg_type.typname` of `column`'s type, through every domain.
-    pub(super) async fn base_name(
-        &self,
-        schema: &DatabaseSchema,
-        table: &TableName,
-        column: &ColumnName,
-    ) -> Result<String> {
-        Ok(self.column_meta(schema, table, column).await?.base_name)
-    }
-
     pub(super) async fn column_type(
         &self,
         schema: &DatabaseSchema,
         table: &TableName,
         column: &ColumnName,
     ) -> Result<String> {
-        Ok(self.column_meta(schema, table, column).await?.sql_type)
+        Ok(self
+            .column_meta(schema, table, column)
+            .await?
+            .sql_type
+            .clone())
     }
 
     /// The Postgres catalog's view of a column — its cast-ready SQL type and
@@ -504,9 +544,13 @@ impl PgDocumentBuilder {
         schema: &DatabaseSchema,
         table: &TableName,
         column: &ColumnName,
-    ) -> Result<ColumnMeta> {
-        let cache_key = (schema.to_string(), table.to_string(), column.to_string());
-        if let Some(meta) = self.col_type_cache.get(&cache_key) {
+    ) -> Result<Arc<ColumnMeta>> {
+        #[cfg(test)]
+        tests::COLUMN_LOOKUPS.with(|count| count.set(count.get() + 1));
+        if let Some(meta) =
+            self.col_type_cache
+                .get(schema.as_ref(), table.as_ref(), column.as_ref())
+        {
             return Ok(meta);
         }
         // `format_type` yields a canonical, re-parseable type name, so it can be
@@ -555,7 +599,7 @@ impl PgDocumentBuilder {
             .fetch_optional(&self.pool)
             .await
             .map_err(query_err)?;
-        let meta = match row {
+        let meta = Arc::new(match row {
             Some(row) => {
                 let sql_type: String = row.try_get("sql_type").map_err(query_err)?;
                 let type_oid: i64 = row.try_get("type_oid").map_err(query_err)?;
@@ -579,8 +623,13 @@ impl PgDocumentBuilder {
                     "{schema}.{table}.{column}"
                 )));
             }
-        };
-        self.col_type_cache.insert(cache_key, meta.clone());
+        });
+        self.col_type_cache.insert(
+            schema.as_ref(),
+            table.as_ref(),
+            column.as_ref(),
+            Arc::clone(&meta),
+        );
         Ok(meta)
     }
 
@@ -725,7 +774,7 @@ impl PgDocumentBuilder {
         let diff = RowDiff::new(key, before, after);
         for (name, schema) in self.spec.indexes() {
             let is_root = schema.table == *table;
-            let mut seen = HashSet::new();
+            let mut own = None;
             if is_root {
                 read = true;
                 if key.has_null() {
@@ -736,26 +785,23 @@ impl PgDocumentBuilder {
                         index: name.clone(),
                         key: key.clone(),
                     });
-                    // A row that is its own ancestor must not re-emit this id.
-                    if let (Some(pk_column), [(column, own)]) =
+                    if let (Some(pk_column), [(column, value)]) =
                         (&schema.primary_key, key.0.as_slice())
                         && column == pk_column
                     {
-                        seen.insert(own.clone());
+                        own = Some(value);
                     }
                 } else {
                     skipped += 1;
                 }
             }
 
-            let mut paths = Vec::new();
-            let mut prefix = Vec::new();
-            find_paths(&schema.fields, table, &mut prefix, &mut paths);
+            let paths = self.reads.paths(name, table);
             if paths.is_empty() {
                 continue;
             }
             read = true;
-            let Some(pk_column) = schema.primary_key.clone() else {
+            let Some(pk_column) = schema.primary_key.as_ref() else {
                 tracing::warn!(
                     index = %name, table = %table,
                     "cannot reverse-resolve: index has no primary_key",
@@ -763,15 +809,22 @@ impl PgDocumentBuilder {
                 continue;
             };
 
+            // A row that is its own ancestor must not re-emit its own id.
+            let mut seen: HashSet<kernel::GenericValue> = own.into_iter().cloned().collect();
             let mut roots = Vec::new();
-            for (n, path) in paths.iter().enumerate() {
-                if !self.reads.path(name, table, n).touched_by(&diff) {
+            for path in paths {
+                if !path.columns.touched_by(&diff) {
                     skipped += 1;
                     continue;
                 }
-                let found = self.resolve_path(schema, table, key, before, path).await?;
+                let steps = path.address.steps(&schema.fields).ok_or_else(|| {
+                    SourceError::Query("internal: a path's address is not in its index".into())
+                })?;
+                let found = self
+                    .resolve_path(schema, table, key, before, &steps)
+                    .await?;
                 if let Some(link) = self
-                    .reads_root_from_a_link(schema, &pk_column, path)
+                    .reads_root_from_a_link(schema, pk_column, path, &steps)
                     .await?
                 {
                     links.add(name, link, found);
@@ -805,7 +858,8 @@ impl PgDocumentBuilder {
     }
 
     /// `ids` plus the documents `links` name, read back as the root rows' own
-    /// keys, deduplicated.
+    /// keys, deduplicated. Only for a change with links: `ids` alone are
+    /// already unique, one set per index.
     async fn with_root_keys(
         &self,
         ids: Vec<DocumentId>,
@@ -840,8 +894,8 @@ impl Catalog for PgDocumentBuilder {
     ) -> Result<ColumnInfo> {
         let meta = self.column_meta(schema, table, column).await?;
         Ok(ColumnInfo {
-            sql_type: meta.sql_type,
-            base_type: meta.base_type,
+            sql_type: meta.sql_type.clone(),
+            base_type: meta.base_type.clone(),
             nullable: meta.nullable,
         })
     }
@@ -880,7 +934,7 @@ impl Catalog for PgDocumentBuilder {
         let sql_type = if element {
             element_type(meta.base_type.as_deref().unwrap_or(&meta.sql_type))
         } else {
-            meta.sql_type
+            meta.sql_type.clone()
         };
         self.probe(query::transform_probe(&sql_type, transforms))
             .await
@@ -894,7 +948,7 @@ impl Catalog for PgDocumentBuilder {
     ) -> Result<bool> {
         let link = self.column_meta(schema, link_table, link_column).await?;
         let key = self.column_meta(schema, key_table, key_column).await?;
-        let pair = (link.sql_type, key.sql_type);
+        let pair = (link.sql_type.clone(), key.sql_type.clone());
         let cached = self
             .comparison_cache
             .lock()
@@ -963,6 +1017,9 @@ impl DocumentBuilder for PgDocumentBuilder {
         let ids = self
             .resolve_change(table, key, before, after, &mut links)
             .await?;
+        if links.is_empty() {
+            return Ok(ids);
+        }
         self.with_root_keys(ids, links).await
     }
 
@@ -1054,16 +1111,17 @@ impl DocumentBuilder for PgDocumentBuilder {
             let mut col_types = self.filter_column_types(schema).await?;
             self.add_key_column_types(schema, &[&pk_column], &mut col_types)
                 .await?;
-            let pk_base = self
-                .base_name(&schema.db_schema, &schema.table, &pk_column)
+            let pk_meta = self
+                .column_meta(&schema.db_schema, &schema.table, &pk_column)
                 .await?;
+            let pk_base = &pk_meta.base_name;
             let bytes = self.byte_columns(schema, &pks).await?;
 
             for chunk in keyed.chunks(BUILD_CHUNK) {
                 let keys: Vec<kernel::GenericValue> =
                     chunk.iter().map(|(value, _)| (*value).clone()).collect();
                 let (sql, params) = query::documents_query(
-                    schema, &pk_column, &pk_base, &keys, &pks, &col_types, &bytes,
+                    schema, &pk_column, pk_base, &keys, &pks, &col_types, &bytes,
                 )?;
 
                 let mut statement = sqlx::query(sql);

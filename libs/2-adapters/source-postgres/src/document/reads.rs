@@ -1,18 +1,21 @@
-//! The columns every index reads, per part, derived once when the builder is
-//! built so resolving a change only looks them up.
+//! What each index reads, derived once when the builder is built, so
+//! resolving a change only looks it up.
 //!
 //! For each index: the [`ColumnUse`] of its root row, and, per table a relation
-//! reads, one [`ColumnUse`] per path back to the root, in the order
-//! [`find_paths`] yields those paths (the last step of each path decides, see
-//! [`source::relation_columns`] and [`source::via_columns`]). A path with no
-//! entry counts as touched.
+//! reads, one [`PathReads`] per path back to the root, in the order
+//! [`find_paths`] yields those paths: where the path is, what it reads from
+//! the table (the last step of each path decides, see
+//! [`source::relation_columns`] and [`source::via_columns`]), and, once a
+//! change has asked, whether its root keys are read back from a link.
 
 use std::collections::HashMap;
+use std::sync::{Mutex, PoisonError};
 
 use kernel::{Field, IndexName, IndexSchema, RelationKey, TableName};
 use source::{ColumnUse, SourceSpec, relation_columns, root_columns, via_columns};
 
-use super::fields::{Step, find_paths};
+use super::fields::{PathAddress, Step, find_paths};
+use super::resolve::Link;
 
 #[derive(Debug, Default)]
 pub(super) struct ReadColumns {
@@ -22,7 +25,40 @@ pub(super) struct ReadColumns {
 #[derive(Debug)]
 struct IndexReads {
     root: ColumnUse,
-    paths: HashMap<TableName, Vec<ColumnUse>>,
+    paths: HashMap<TableName, Vec<PathReads>>,
+}
+
+/// One path from a table back to an index's root.
+#[derive(Debug)]
+pub(super) struct PathReads {
+    /// Where the path is in the index's field tree.
+    pub(super) address: PathAddress,
+    /// What the path reads from the table it starts at.
+    pub(super) columns: ColumnUse,
+    /// Whether its root keys are read back from a link, with the column-type
+    /// generation the answer was derived at.
+    root_link: Mutex<Option<(u64, Option<Link>)>>,
+}
+
+impl PathReads {
+    /// The link this path's root keys are read back from, as known at
+    /// `generation`; `None` when not known then.
+    pub(super) fn root_link(&self, generation: u64) -> Option<Option<Link>> {
+        self.root_link
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .filter(|(known, _)| *known == generation)
+            .map(|(_, link)| link.clone())
+    }
+
+    /// Remember `link` as this path's answer, derived at `generation`.
+    pub(super) fn know_root_link(&self, generation: u64, link: Option<Link>) {
+        *self
+            .root_link
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some((generation, link));
+    }
 }
 
 impl ReadColumns {
@@ -41,14 +77,13 @@ impl ReadColumns {
             .map_or(&ColumnUse::All, |reads| &reads.root)
     }
 
-    /// What the `n`th path from `table` back to `index`'s root reads from
-    /// `table`; [`ColumnUse::All`] if unknown.
-    pub(super) fn path(&self, index: &IndexName, table: &TableName, n: usize) -> &ColumnUse {
+    /// Every path from `table` back to `index`'s root; none when no relation
+    /// of the index reads `table`.
+    pub(super) fn paths(&self, index: &IndexName, table: &TableName) -> &[PathReads] {
         self.indexes
             .get(index)
             .and_then(|reads| reads.paths.get(table))
-            .and_then(|paths| paths.get(n))
-            .unwrap_or(&ColumnUse::All)
+            .map_or(&[], Vec::as_slice)
     }
 }
 
@@ -59,17 +94,25 @@ impl IndexReads {
         let paths = tables
             .into_iter()
             .map(|table| {
-                let mut found = Vec::new();
-                find_paths(&schema.fields, table, &mut Vec::new(), &mut found);
-                let uses = found
-                    .iter()
-                    .map(|path| match path.last() {
-                        Some(Step::Relation(relation)) => relation_columns(schema, relation, table),
-                        Some(Step::Via { hop, next_on }) => via_columns(schema, hop, next_on),
-                        None => ColumnUse::All,
+                let paths = find_paths(&schema.fields, table)
+                    .into_iter()
+                    .map(|address| {
+                        let steps = address.steps(&schema.fields).unwrap_or_default();
+                        let columns = match steps.last() {
+                            Some(Step::Relation(relation)) => {
+                                relation_columns(schema, relation, table)
+                            }
+                            Some(Step::Via { hop, next_on }) => via_columns(schema, hop, next_on),
+                            None => ColumnUse::All,
+                        };
+                        PathReads {
+                            address,
+                            columns,
+                            root_link: Mutex::new(None),
+                        }
                     })
                     .collect();
-                (table.clone(), uses)
+                (table.clone(), paths)
             })
             .collect();
         Self {

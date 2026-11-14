@@ -38,3 +38,27 @@ pub fn fuzz_pgoutput_decode(data: &[u8]) {
 pub fn bench_pgoutput_decode(data: &[u8]) -> bool {
     cdc::bench_decode(data)
 }
+
+/// Benchmark entry point for reverse resolution: a [`PgDocumentBuilder`] over a
+/// pool that never connects, for the changes `resolve` answers with no query
+/// (a root-table row, a table no index reads, an update of unread columns).
+/// Used by the `resolve` bench; gated behind the `bench` feature and not part
+/// of the stable API.
+#[cfg(feature = "bench")]
+pub fn bench_offline_builder(spec: std::sync::Arc<source::SourceSpec>) -> PgDocumentBuilder {
+    document::offline_builder(spec)
+}
+
+/// Benchmark entry point: cache `schema.table.column` as an `integer` in
+/// `builder`'s column types, so a bench over
+/// [`bench_offline_builder`] reads it with no query. Gated behind the `bench`
+/// feature and not part of the stable API.
+#[cfg(feature = "bench")]
+pub fn bench_cache_int_column(
+    builder: &PgDocumentBuilder,
+    schema: &str,
+    table: &str,
+    column: &str,
+) {
+    builder.column_types().cache(schema, table, column, 23);
+}

@@ -4,6 +4,7 @@
 //! pool is never opened: every key column is cached as `integer`, a type whose
 //! equal values are identical, so no link is looked up on the root table.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use kernel::{
@@ -77,15 +78,12 @@ fn builder_with(extra: Vec<Field>) -> PgDocumentBuilder {
 /// Cache `integer` as the type of each `(table, column)`, as the catalog would
 /// report it, so resolving reads no catalog either.
 fn seed_integer_columns(builder: &PgDocumentBuilder, columns: &[(&str, &str)]) {
-    let mut cache = builder.col_type_cache.lock();
     for (table, column) in columns {
-        cache.insert(
-            (
-                "public".to_owned(),
-                (*table).to_owned(),
-                (*column).to_owned(),
-            ),
-            ColumnMeta {
+        builder.col_type_cache.insert(
+            "public",
+            table,
+            column,
+            Arc::new(ColumnMeta {
                 sql_type: "integer".to_owned(),
                 type_oid: 23,
                 base_type: None,
@@ -93,7 +91,7 @@ fn seed_integer_columns(builder: &PgDocumentBuilder, columns: &[(&str, &str)]) {
                 element_name: None,
                 deterministic: true,
                 nullable: true,
-            },
+            }),
         );
     }
 }
@@ -460,4 +458,166 @@ fn equal_keys_render_alike_except_for_numbers_and_loose_text() {
         assert!(!meta(loose, true).equal_is_identical(), "{loose}");
     }
     assert!(!meta("text", false).equal_is_identical());
+}
+
+thread_local! {
+    /// Catalog lookups (`column_meta` calls, cache hits included) on this thread.
+    pub(super) static COLUMN_LOOKUPS: Cell<usize> = const { Cell::new(0) };
+    /// Searches of an index's field tree for the paths to a table, on this thread.
+    pub(super) static PATH_SEARCHES: Cell<usize> = const { Cell::new(0) };
+}
+
+fn tags_through_user_tags() -> Field {
+    join_field(
+        "tags",
+        "tags",
+        JoinKind::ManyToMany {
+            through: Through {
+                table: TableName::try_new("user_tags").unwrap(),
+                left_key: column("user_id"),
+                right_key: column("tag_id"),
+                filters: None,
+            },
+        },
+    )
+}
+
+fn user_tag(user_id: i32) -> RowKey {
+    RowKey(vec![
+        (column("user_id"), GenericValue::Int(user_id)),
+        (column("tag_id"), GenericValue::Int(3)),
+    ])
+}
+
+/// Whether a path's root key needs reading back depends on the index alone,
+/// so once it is known, a change walked from its key reads no catalog.
+#[tokio::test]
+async fn a_path_walked_from_the_key_looks_up_no_column_once_known() {
+    let builder = builder_with(vec![tags_through_user_tags()]);
+    let user_tags = TableName::try_new("user_tags").unwrap();
+    builder
+        .resolve(&user_tags, &user_tag(1), None, None)
+        .await
+        .unwrap();
+
+    COLUMN_LOOKUPS.with(|count| count.set(0));
+    for user_id in 2..5 {
+        let ids = builder
+            .resolve(&user_tags, &user_tag(user_id), None, None)
+            .await
+            .unwrap();
+        assert_eq!(ids, [users_id(user_id)]);
+    }
+    assert_eq!(COLUMN_LOOKUPS.with(Cell::get), 0);
+}
+
+/// The paths from each table back to the root are found once, when the
+/// builder is built, never per change.
+#[tokio::test]
+async fn resolving_a_change_searches_no_field_tree() {
+    let builder = builder_with(vec![tags_through_user_tags(), event_count()]);
+    PATH_SEARCHES.with(|count| count.set(0));
+    for (table, key) in [
+        (users(), key()),
+        (TableName::try_new("user_tags").unwrap(), user_tag(1)),
+        (TableName::try_new("events").unwrap(), event(1, None)),
+        (TableName::try_new("products").unwrap(), key()),
+    ] {
+        builder.resolve(&table, &key, None, None).await.unwrap();
+    }
+    assert_eq!(PATH_SEARCHES.with(Cell::get), 0);
+}
+
+fn cache_type(builder: &PgDocumentBuilder, table: &str, column: &str, sql_type: &str, oid: u32) {
+    builder.col_type_cache.insert(
+        "public",
+        table,
+        column,
+        Arc::new(ColumnMeta {
+            sql_type: sql_type.to_owned(),
+            type_oid: oid,
+            base_type: None,
+            base_name: sql_type.to_owned(),
+            element_name: None,
+            deterministic: true,
+            nullable: true,
+        }),
+    );
+}
+
+/// The kept answer follows the column types: a `Relation` message naming a
+/// new type for the link column (`forget_changed`), and a failed document
+/// query (`forget_table`), each make the next change ask again.
+#[tokio::test]
+async fn a_changed_column_type_reaches_the_kept_root_link_answer() {
+    let builder = builder_with(vec![tags_through_user_tags()]);
+    let user_tags = TableName::try_new("user_tags").unwrap();
+    let schema = builder
+        .spec
+        .schema(&IndexName::try_new("users").unwrap())
+        .unwrap();
+    let path = builder
+        .reads
+        .paths(&IndexName::try_new("users").unwrap(), &user_tags)
+        .first()
+        .unwrap();
+    let steps = path.address.steps(&schema.fields).unwrap();
+    let ask = async || {
+        builder
+            .reads_root_from_a_link(schema, &column("id"), path, &steps)
+            .await
+            .unwrap()
+    };
+    assert_eq!(ask().await, None, "an integer link to an integer key");
+
+    builder
+        .col_type_cache
+        .forget_changed("public", "user_tags", [("user_id", 25)].into_iter());
+    cache_type(&builder, "user_tags", "user_id", "text", 25);
+    assert_eq!(
+        ask().await,
+        Some((user_tags.clone(), column("user_id"))),
+        "a text link to an integer key is read back"
+    );
+
+    builder.col_type_cache.forget_table("public", "user_tags");
+    cache_type(&builder, "user_tags", "user_id", "integer", 23);
+    assert_eq!(ask().await, None, "back to integer after a failed query");
+}
+
+/// Counts the `WARN` events logged on this thread while it is the default.
+#[derive(Default)]
+struct Warnings(std::sync::atomic::AtomicUsize);
+
+impl tracing::Subscriber for Warnings {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        if *event.metadata().level() == tracing::Level::WARN {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+#[tokio::test]
+async fn a_change_on_an_unread_table_warns_once_per_table() {
+    let warnings = Arc::new(Warnings::default());
+    let _default = tracing::subscriber::set_default(Arc::clone(&warnings));
+    let builder = builder();
+    for table in ["products", "products", "products", "reviews", "reviews"] {
+        let ids = builder
+            .resolve(&TableName::try_new(table).unwrap(), &key(), None, None)
+            .await
+            .unwrap();
+        assert!(ids.is_empty());
+    }
+    assert_eq!(warnings.0.load(std::sync::atomic::Ordering::Relaxed), 2);
 }

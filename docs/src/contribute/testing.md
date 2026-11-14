@@ -22,7 +22,7 @@ Match this before assuming green:
 
 1. `cargo fmt --all --check`
 2. `cargo clippy --workspace`
-3. `cargo check --workspace --all-targets --features flusso-source-postgres/bench,flusso-sink-opensearch/bench` (compiles benches and examples, which clippy and nextest skip; the features unlock the two in-process bench targets)
+3. `cargo check --workspace --all-targets --features flusso-source-postgres/bench,flusso-sink-opensearch/bench` (compiles benches and examples, which clippy and nextest skip; the features unlock the three feature-gated in-process bench targets)
 4. `cargo check -p flusso-cli --no-default-features` (the server-only image build)
 5. `cargo nextest run --profile ci --workspace --run-ignored all`
 6. `cargo test --workspace --doc`
