@@ -1,22 +1,34 @@
 //! The derive's boundary, pinned (issue #294): every type shape × field kind
 //! × position, each compiled and read.
 //!
-//! The generator places each [`SHAPES`] type at each field of the `boundary`
-//! fixture index ([`KINDS`]), on a root and in a fragment, plus the map-like
-//! shapes `#[serde(flatten)]`ed into a root ([`FLATTENED`]). Each case is one
-//! module in a generated crate, compiled with cargo, then read against
-//! sample documents of that index ([`DOCS`]). It ends up in one of three
-//! outcomes:
+//! Two shape lists are placed at each field of the `boundary` fixture index
+//! ([`KINDS`]: one of each kind, required ones bare, nullable ones in
+//! `Option<…>`), on a root and in a fragment:
+//!
+//! - [`named_shapes`], written by hand: the shapes issue #294 and its reviews
+//!   named, field attributes (`opaque`, serde's), and the map-like shapes also
+//!   `#[serde(flatten)]`ed into a root;
+//! - [`generated_shapes`], an independent cross product: an inner type ×
+//!   a wrapper around it × a newtype derive over that. A generated shape whose
+//!   declarations alone are refused is refused everywhere, so it is compiled
+//!   once, not placed.
+//!
+//! Each case is one module in a generated crate, compiled with cargo, then read
+//! against sample documents of the index ([`DOCS`]: every field set, empty
+//! arrays and maps, `null`, missing keys, one and many elements). It ends up in
+//! one of three outcomes:
 //!
 //! - `refused`: the derive turns it down at compile time;
 //! - `reads`: it compiles, and reads every sample document;
 //! - `trusted <rule>`: it compiles, and a sample document fails to read —
-//!   allowed only under a rule of [`TRUSTED`], each the manual's list of what
-//!   the derive trusts (`docs/src/query/document-structs.md`).
+//!   allowed only under a rule of [`TRUSTED`], each one line of the manual's
+//!   list of what the derive trusts (`docs/src/query/document-structs.md`).
 //!
-//! A case that compiles and fails to read under no rule fails the test. The
-//! outcomes are recorded in `tests/boundary.outcomes`, so a change to what the
-//! derive refuses or reads shows up there as a diff to review; re-record with
+//! A case that compiles and fails to read under no rule fails the test, and so
+//! does a shape whose root and fragment placements at one field disagree,
+//! unless [`DISAGREE`] lists the pair. The outcomes are recorded in
+//! `tests/boundary.outcomes`, so a change to what the derive refuses or reads
+//! shows up there as a diff to review; re-record with
 //! `FLUSSO_BLESS=1 cargo nextest run -p flusso-query-derive --test boundary`.
 //!
 //! The generated crate shares trybuild's target directory and dependency set,
@@ -24,7 +36,11 @@
 //! [`CHUNK`] modules, compiled three at a time: generated derives are heavy
 //! on `rustc`'s memory. A file's refused cases can hide the next phase's
 //! errors in the same file, so refused cases are dropped and the rest are
-//! compiled again until everything left builds.
+//! compiled again until everything left builds; a file is rewritten only when
+//! its content changes, so only those files recompile.
+//!
+//! `Arc<…>` is in no list: serde reads it only with its `rc` feature, which
+//! the workspace does not enable, so it never compiles.
 #![allow(
     unused_crate_dependencies,
     clippy::unwrap_used,
@@ -43,133 +59,356 @@ const CHUNK: usize = 50;
 
 const MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
-/// A Rust type the generator places: the declarations it needs, and the
-/// type as a field writes it.
+/// A Rust type the generator places: the declarations it needs, the type as a
+/// field writes it, and attributes on that field.
+#[derive(Clone)]
 struct Shape {
-    name: &'static str,
-    decls: &'static [&'static str],
-    ty: &'static str,
+    name: String,
+    decls: Vec<String>,
+    ty: String,
+    attrs: &'static str,
+    /// Reads one JSON object of dynamic keys: placed `#[serde(flatten)]` too,
+    /// where the `flattened` rule covers it.
+    map: bool,
+    /// A tagged `FlussoValue` newtype over a type the derive can't see into.
+    unseen: bool,
 }
 
-const SUB: &str = "#[derive(Debug, Deserialize, FlussoFragment)] pub struct Sub { pub k: String }";
+fn shape(name: &str, ty: &str, decls: &[&str]) -> Shape {
+    Shape {
+        name: name.to_string(),
+        decls: decls.iter().map(ToString::to_string).collect(),
+        ty: ty.to_string(),
+        attrs: "",
+        map: false,
+        unseen: false,
+    }
+}
+
+impl Shape {
+    fn map(mut self) -> Shape {
+        self.map = true;
+        self
+    }
+
+    fn unseen(mut self) -> Shape {
+        self.unseen = true;
+        self
+    }
+
+    fn attrs(mut self, attrs: &'static str) -> Shape {
+        self.attrs = attrs;
+        self
+    }
+}
+
+const SUB: &str =
+    "#[derive(Debug, Serialize, Deserialize, FlussoFragment)] pub struct Sub { pub k: String }";
 const EN: &str = "#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] \
      #[serde(rename_all = \"lowercase\")] pub enum En { A, B }";
+const CODE: &str =
+    "#[derive(Debug, Serialize, Deserialize, FlussoValue)] pub struct Code(pub String);";
 const MAP_KW: &str = "#[derive(Debug, Serialize, Deserialize, FlussoMap)] #[flusso(keyword)] \
      pub struct MapKw(pub HashMap<String, String>);";
 const FRAGMENT_OVER_MAP: &str =
     "#[derive(Debug, Deserialize, FlussoFragment)] pub struct Fm(pub HashMap<String, String>);";
+const PLAIN: &str = "#[derive(Debug, Deserialize)] pub struct Plain { pub zz: String }";
+const ALIAS: &str = "pub type Ms = HashMap<String, String>;";
 
-macro_rules! shape {
-    ($name:literal, $ty:literal) => {
-        Shape { name: $name, decls: &[], ty: $ty }
-    };
-    ($name:literal, $ty:literal, $($decl:expr),+) => {
-        Shape { name: $name, decls: &[$($decl),+], ty: $ty }
-    };
+/// The shapes written by hand.
+fn named_shapes() -> Vec<Shape> {
+    vec![
+        shape("string", "String", &[]),
+        shape("long", "i64", &[]),
+        shape("vec_string", "Vec<String>", &[]),
+        shape("code", "Code", &[CODE]),
+        shape(
+            "tags",
+            "Tags",
+            &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] pub struct Tags(pub Vec<String>);"],
+        ),
+        shape("enum", "En", &[EN]),
+        shape("value", "serde_json::Value", &[]).map(),
+        shape("geo_point", "flusso_query::GeoPoint", &[]),
+        shape("sub", "Sub", &[SUB]),
+        shape("vec_sub", "Vec<Sub>", &[SUB]),
+        shape(
+            "subs",
+            "Subs",
+            &[SUB, "#[derive(Debug, Deserialize, FlussoFragment)] pub struct Subs(pub Vec<Sub>);"],
+        ),
+        shape("hash_map", "HashMap<String, String>", &[]).map(),
+        shape("btree_map_long", "BTreeMap<String, i64>", &[]).map(),
+        shape("hash_map_enum", "HashMap<String, En>", &[EN]).map(),
+        shape("hash_map_long_key", "HashMap<i64, String>", &[]).map(),
+        shape("fragment_over_map", "Fm", &[FRAGMENT_OVER_MAP]).map(),
+        shape("vec_fragment_over_map", "Vec<Fm>", &[FRAGMENT_OVER_MAP]),
+        shape(
+            "fragment_over_option_map",
+            "Fo",
+            &["#[derive(Debug, Deserialize, FlussoFragment)] pub struct Fo(pub Option<HashMap<String, String>>);"],
+        )
+        .map(),
+        shape(
+            "fragment_over_value_map",
+            "Fv",
+            &["#[derive(Debug, Deserialize, FlussoFragment)] pub struct Fv(pub HashMap<String, serde_json::Value>);"],
+        )
+        .map(),
+        shape(
+            "fragment_over_long_key_map",
+            "Fk",
+            &["#[derive(Debug, Deserialize, FlussoFragment)] pub struct Fk(pub HashMap<i64, String>);"],
+        )
+        .map(),
+        shape("map_keyword", "MapKw", &[MAP_KW]).map(),
+        shape(
+            "map_text",
+            "MapTx",
+            &["#[derive(Debug, Deserialize, FlussoMap)] #[flusso(text)] pub struct MapTx(pub HashMap<String, String>);"],
+        )
+        .map(),
+        shape(
+            "map_keyword_of_long",
+            "MapKl",
+            &["#[derive(Debug, Deserialize, FlussoMap)] #[flusso(keyword)] pub struct MapKl(pub HashMap<String, i64>);"],
+        )
+        .map(),
+        shape(
+            "map_keyword_long_key",
+            "MapLk",
+            &["#[derive(Debug, Deserialize, FlussoMap)] #[flusso(keyword)] pub struct MapLk(pub HashMap<i64, String>);"],
+        )
+        .map(),
+        shape(
+            "map_named",
+            "Named",
+            &["#[derive(Debug, Deserialize, FlussoMap)] #[flusso(keyword)] pub struct Named { \
+               pub x: Option<String>, #[serde(flatten)] pub rest: HashMap<String, String> }"],
+        )
+        .map(),
+        shape(
+            "map_named_required",
+            "NamedReq",
+            &["#[derive(Debug, Deserialize, FlussoMap)] #[flusso(keyword)] pub struct NamedReq { pub x: String }"],
+        )
+        .map(),
+        shape(
+            "map_named_alias",
+            "NamedAlias",
+            &["#[derive(Debug, Deserialize, FlussoMap)] #[flusso(keyword)] pub struct NamedAlias { \
+               #[serde(alias = \"y\")] pub x: Option<String> }"],
+        )
+        .map(),
+        shape(
+            "map_over_box",
+            "Boxed",
+            &["#[derive(Debug, Deserialize, FlussoMap)] #[flusso(keyword)] pub struct Boxed(pub Box<String>);"],
+        )
+        .map(),
+        shape(
+            "map_over_alias",
+            "MapAl",
+            &[ALIAS, "#[derive(Debug, Deserialize, FlussoMap)] #[flusso(keyword)] pub struct MapAl(pub Ms);"],
+        )
+        .map(),
+        shape(
+            "map_over_map_type",
+            "Mm",
+            &[MAP_KW, "#[derive(Debug, Deserialize, FlussoMap)] #[flusso(keyword)] pub struct Mm(pub MapKw);"],
+        )
+        .map(),
+        shape(
+            "value_over_map",
+            "Vm",
+            &[MAP_KW, "#[derive(Debug, Serialize, Deserialize, FlussoValue)] pub struct Vm(pub MapKw);"],
+        )
+        .map(),
+        shape(
+            "fragment_over_map_type",
+            "Fmt",
+            &[MAP_KW, "#[derive(Debug, Deserialize, FlussoFragment)] pub struct Fmt(pub MapKw);"],
+        )
+        .map(),
+        shape(
+            "tagged_over_map_type",
+            "Tm",
+            &[MAP_KW, "#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct Tm(pub MapKw);"],
+        ),
+        shape(
+            "tagged_over_hash_map",
+            "Th",
+            &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct Th(pub HashMap<String, String>);"],
+        ),
+        shape(
+            "tagged_over_boxed_map",
+            "Tb",
+            &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct Tb(pub Box<HashMap<String, String>>);"],
+        ),
+        shape(
+            "tagged_over_long",
+            "Tl",
+            &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct Tl(pub i64);"],
+        ),
+        shape(
+            "tagged_over_alias",
+            "Ta",
+            &[ALIAS, "#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct Ta(pub Ms);"],
+        )
+        .unseen(),
+        shape(
+            "tagged_over_plain_map_newtype",
+            "Tp",
+            &[
+                "#[derive(Debug, Serialize, Deserialize)] pub struct Pm(pub HashMap<String, String>);",
+                "#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct Tp(pub Pm);",
+            ],
+        )
+        .unseen(),
+        shape("opaque_plain", "Plain", &[PLAIN]).attrs("#[flusso(opaque)]"),
+        shape(
+            "deserialize_with",
+            "String",
+            &["pub fn number_as_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> { \
+               i64::deserialize(d).map(|n| n.to_string()) }"],
+        )
+        .attrs("#[serde(deserialize_with = \"number_as_string\")]"),
+        shape(
+            "try_from",
+            "Long",
+            &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] \
+               #[serde(try_from = \"String\")] pub struct Long(pub String);",
+              "impl TryFrom<String> for Long { type Error = String; fn try_from(s: String) -> Result<Self, String> { \
+               if s.len() > 1 { Ok(Long(s)) } else { Err(format!(\"too short: {s}\")) } } }"],
+        ),
+        shape(
+            "deny_unknown_fields",
+            "Strict",
+            &["#[derive(Debug, Deserialize, FlussoFragment)] #[serde(deny_unknown_fields)] pub struct Strict { pub k: String }"],
+        ),
+    ]
 }
 
-const SHAPES: &[Shape] = &[
-    shape!("string", "String"),
-    shape!("long", "i64"),
-    shape!("vec_string", "Vec<String>"),
-    shape!(
-        "code",
-        "Code",
-        "#[derive(Debug, Serialize, Deserialize, FlussoValue)] pub struct Code(pub String);"
+/// The inner types of [`generated_shapes`]: name, type, declarations, and
+/// whether it reads a map.
+const INNERS: &[(&str, &str, &[&str], bool)] = &[
+    ("s", "String", &[], false),
+    ("l", "i64", &[], false),
+    ("cow", "Cow<'static, str>", &[], false),
+    ("code", "Code", &[CODE], false),
+    ("sub", "Sub", &[SUB], false),
+    ("hm", "HashMap<String, String>", &[], true),
+    ("hml", "HashMap<String, i64>", &[], true),
+    ("hmk", "HashMap<i64, String>", &[], true),
+    ("btv", "BTreeMap<String, serde_json::Value>", &[], true),
+    ("alias", "Ms", &[ALIAS], true),
+    ("mk", "MapKw", &[MAP_KW], true),
+];
+
+/// The wrappers of [`generated_shapes`], around the inner type.
+const WRAPPERS: &[(&str, &str)] = &[
+    ("", "{}"),
+    ("opt_", "Option<{}>"),
+    ("vec_", "Vec<{}>"),
+    ("box_", "Box<{}>"),
+];
+
+/// The derives of [`generated_shapes`], over the wrapped type `{}`: the field
+/// itself, or a newtype (of a newtype) over it.
+const DERIVES: &[(&str, &[&str])] = &[
+    ("field", &[]),
+    (
+        "value",
+        &["#[derive(Debug, Serialize, Deserialize, FlussoValue)] pub struct N(pub {});"],
     ),
-    shape!(
-        "tags",
-        "Tags",
-        "#[derive(Debug, Serialize, Deserialize, FlussoValue)] pub struct Tags(pub Vec<String>);"
+    (
+        "keyword_value",
+        &[
+            "#[derive(Debug, Serialize, Deserialize, FlussoValue)] #[flusso(keyword)] pub struct N(pub {});",
+        ],
     ),
-    shape!("enum", "En", EN),
-    shape!("value", "serde_json::Value"),
-    shape!("sub", "Sub", SUB),
-    shape!("vec_sub", "Vec<Sub>", SUB),
-    shape!(
-        "subs",
-        "Subs",
-        SUB,
-        "#[derive(Debug, Deserialize, FlussoFragment)] pub struct Subs(pub Vec<Sub>);"
+    (
+        "fragment",
+        &["#[derive(Debug, Deserialize, FlussoFragment)] pub struct N(pub {});"],
     ),
-    shape!("hash_map", "HashMap<String, String>"),
-    shape!("btree_map_long", "BTreeMap<String, i64>"),
-    shape!("hash_map_enum", "HashMap<String, En>", EN),
-    shape!("fragment_over_map", "Fm", FRAGMENT_OVER_MAP),
-    shape!("vec_fragment_over_map", "Vec<Fm>", FRAGMENT_OVER_MAP),
-    shape!("map_keyword", "MapKw", MAP_KW),
-    shape!(
-        "map_text",
-        "MapTx",
-        "#[derive(Debug, Deserialize, FlussoMap)] #[flusso(text)] \
-         pub struct MapTx(pub HashMap<String, String>);"
+    (
+        "map",
+        &["#[derive(Debug, Deserialize, FlussoMap)] #[flusso(keyword)] pub struct N(pub {});"],
     ),
-    shape!(
-        "map_keyword_of_long",
-        "MapKl",
-        "#[derive(Debug, Deserialize, FlussoMap)] #[flusso(keyword)] \
-         pub struct MapKl(pub HashMap<String, i64>);"
+    (
+        "value_of_value",
+        &[
+            "#[derive(Debug, Serialize, Deserialize, FlussoValue)] pub struct N0(pub {});",
+            "#[derive(Debug, Serialize, Deserialize, FlussoValue)] pub struct N(pub N0);",
+        ],
     ),
-    shape!(
-        "map_named",
-        "Named",
-        "#[derive(Debug, Deserialize, FlussoMap)] #[flusso(keyword)] pub struct Named { \
-         pub x: Option<String>, #[serde(flatten)] pub rest: HashMap<String, String> }"
-    ),
-    shape!(
-        "map_named_required",
-        "NamedReq",
-        "#[derive(Debug, Deserialize, FlussoMap)] #[flusso(keyword)] \
-         pub struct NamedReq { pub x: String }"
-    ),
-    shape!(
-        "map_over_box",
-        "Boxed",
-        "#[derive(Debug, Deserialize, FlussoMap)] #[flusso(keyword)] \
-         pub struct Boxed(pub Box<String>);"
-    ),
-    shape!(
-        "map_over_map_type",
-        "Mm",
-        MAP_KW,
-        "#[derive(Debug, Deserialize, FlussoMap)] #[flusso(keyword)] pub struct Mm(pub MapKw);"
-    ),
-    shape!(
-        "value_over_map",
-        "Vm",
-        MAP_KW,
-        "#[derive(Debug, Serialize, Deserialize, FlussoValue)] pub struct Vm(pub MapKw);"
-    ),
-    shape!(
-        "fragment_over_map_type",
-        "Fmt",
-        MAP_KW,
-        "#[derive(Debug, Deserialize, FlussoFragment)] pub struct Fmt(pub MapKw);"
+    (
+        "fragment_of_fragment",
+        &[
+            "#[derive(Debug, Deserialize, FlussoFragment)] pub struct N0(pub {});",
+            "#[derive(Debug, Deserialize, FlussoFragment)] pub struct N(pub N0);",
+        ],
     ),
 ];
 
-/// The fields of the `boundary` fixture index: one of each kind.
-const KINDS: &[&str] = &["kw", "n", "kwa", "ob", "ne", "mp", "mpn", "js", "jsa"];
+/// The second, independent shape list: every inner type × wrapper × derive.
+fn generated_shapes() -> Vec<Shape> {
+    let mut shapes = Vec::new();
+    for &(inner, inner_ty, inner_decls, map) in INNERS {
+        for &(wrap, wrapper) in WRAPPERS {
+            let wrapped = wrapper.replace("{}", inner_ty);
+            for &(derive, derive_decls) in DERIVES {
+                let mut decls: Vec<String> = inner_decls.iter().map(ToString::to_string).collect();
+                decls.extend(derive_decls.iter().map(|decl| decl.replace("{}", &wrapped)));
+                let ty = if derive_decls.is_empty() {
+                    wrapped.clone()
+                } else {
+                    "N".to_string()
+                };
+                let reads_a_map = map && matches!(wrap, "" | "box_") && derive != "keyword_value";
+                shapes.push(Shape {
+                    name: format!("{derive}_{wrap}{inner}"),
+                    decls,
+                    ty,
+                    attrs: "",
+                    map: reads_a_map,
+                    unseen: derive == "keyword_value" && inner == "alias" && wrap == "",
+                });
+            }
+        }
+    }
+    shapes
+}
 
-/// The shapes also placed `#[serde(flatten)]` beside `kw` on a root, where
-/// they read every other key of the document.
-const FLATTENED: &[&str] = &[
-    "hash_map",
-    "btree_map_long",
-    "value",
-    "sub",
-    "map_keyword",
-    "map_named",
-    "fragment_over_map",
+/// A field of the `boundary` fixture index, and whether it is nullable.
+const KINDS: &[(&str, bool)] = &[
+    ("kw", false),
+    ("n", false),
+    ("kwa", false),
+    ("ob", false),
+    ("ne", false),
+    ("mp", false),
+    ("mpn", false),
+    ("js", false),
+    ("jsa", false),
+    ("gp", false),
+    ("kwo", true),
+    ("nn", true),
+    ("kwao", true),
+    ("ho", true),
+    ("mpo", true),
+    ("jso", true),
 ];
 
 /// Sample documents of the `boundary` index, as the sink writes them: every
-/// field set, then every array and map empty, then values a plain `keyword`
-/// takes and an enum of `a`/`b` does not.
+/// field set with many elements; every array and map empty and every nullable
+/// field `null`; nullable keys missing, with values a plain `keyword` takes and
+/// an enum of `a`/`b` does not; one element each.
 const DOCS: &[&str] = &[
-    r#"{"id":"1","kw":"a","n":1,"kwa":["a"],"ob":{"k":"a","n":1},"ne":[{"k":"a","n":1}],"mp":{"x":"a"},"mpn":{"x":1},"js":{"any":[1]},"jsa":[1,"x"]}"#,
-    r#"{"id":"2","kw":"b","n":2,"kwa":[],"ob":{"k":"b","n":2},"ne":[],"mp":{},"mpn":{},"js":{},"jsa":[]}"#,
-    r#"{"id":"3","kw":"z","n":3,"kwa":["z"],"ob":{"k":"z","n":3},"ne":[{"k":"z","n":3}],"mp":{"x":"z"},"mpn":{"y":3},"js":"z","jsa":["z"]}"#,
+    r#"{"id":"1","kw":"a","n":1,"kwa":["a","b"],"ob":{"k":"a","n":1},"ne":[{"k":"a","n":1},{"k":"b","n":2}],"mp":{"x":"a","y":"b"},"mpn":{"x":1,"y":2},"js":{"any":[1]},"jsa":[1,"x"],"gp":{"lat":1.5,"lon":2.5},"kwo":"a","nn":1,"kwao":["a","b"],"ho":{"k":"a","n":1},"mpo":{"x":"a","y":"b"},"jso":{"a":1}}"#,
+    r#"{"id":"2","kw":"b","n":2,"kwa":[],"ob":{"k":"b","n":2},"ne":[],"mp":{},"mpn":{},"js":{},"jsa":[],"gp":{"lat":0.0,"lon":0.0},"kwo":null,"nn":null,"kwao":null,"ho":null,"mpo":null,"jso":null}"#,
+    r#"{"id":"3","kw":"z","n":3,"kwa":["z"],"ob":{"k":"z","n":3},"ne":[{"k":"z","n":3}],"mp":{"x":"z"},"mpn":{"y":3},"js":"z","jsa":["z"],"gp":{"lat":-1.0,"lon":1.0}}"#,
+    r#"{"id":"4","kw":"bb","n":4,"kwa":["a"],"ob":{"k":"a","n":4},"ne":[{"k":"a","n":4}],"mp":{"x":"a"},"mpn":{"x":4},"js":[1],"jsa":[{"a":1}],"gp":{"lat":2.0,"lon":3.0},"kwo":"b","nn":4,"kwao":[],"ho":{"k":"b","n":4},"mpo":{},"jso":[]}"#,
 ];
 
 /// Where the generator places a shape.
@@ -195,7 +434,7 @@ impl Position {
 
 struct Case {
     id: String,
-    shape: &'static Shape,
+    shape: Shape,
     kind: &'static str,
     position: Position,
 }
@@ -208,67 +447,115 @@ struct Trust {
     applies: fn(&Case) -> bool,
 }
 
-const TRUSTED: &[Trust] = &[
-    Trust {
-        rule: "json",
-        manual: "**Any type at a `json` field.**",
-        applies: |case| matches!(case.kind, "js" | "jsa") && case.position != Position::Flattened,
-    },
-    Trust {
-        rule: "flattened",
-        manual: "**A `#[serde(flatten)]` map.**",
-        applies: |case| case.position == Position::Flattened,
-    },
-    Trust {
-        rule: "variants",
-        manual: "**An enum where the schema declares no `variants:`.**",
-        applies: |case| case.shape.decls.contains(&EN),
-    },
-];
+const TRUSTED: &[Trust] =
+    &[
+        Trust {
+            rule: "json",
+            manual: "**Any type at a `json` field.**",
+            applies: |case| matches!(case.kind, "js" | "jsa" | "jso"),
+        },
+        Trust {
+            rule: "flattened",
+            manual: "**A `#[serde(flatten)]` map.**",
+            applies: |case| case.position == Position::Flattened && case.shape.map,
+        },
+        Trust {
+            rule: "variants",
+            manual: "**An enum where the schema declares no `variants:`.**",
+            applies: |case| case.shape.decls.iter().any(|decl| decl == EN),
+        },
+        Trust {
+            rule: "unseen",
+            manual: "**A tagged `FlussoValue` newtype over a type the derive can't see into.**",
+            applies: |case| case.shape.unseen,
+        },
+        Trust {
+            rule: "opaque",
+            manual: "**What [`#[flusso(opaque)]`](#escape-hatches) turns off**",
+            applies: |case| case.shape.attrs.contains("opaque"),
+        },
+        Trust {
+            rule: "serde",
+            manual: "**serde attributes that change what is read**",
+            applies: |case| {
+                case.shape.attrs.contains("with")
+                    || case.shape.decls.iter().any(|decl| {
+                        decl.contains("try_from") || decl.contains("deny_unknown_fields")
+                    })
+            },
+        },
+        Trust {
+            rule: "geo",
+            manual: "**A `String` at a `geo` field.**",
+            applies: |case| case.kind == "gp" && case.shape.ty == "String",
+        },
+    ];
 
-fn cases() -> Vec<Case> {
+/// The (shape, field) pairs whose root and fragment placements may disagree,
+/// each with why. Every other pair records one outcome for both.
+const DISAGREE: &[(&str, &str, &str)] = &[];
+
+fn cases(shapes: &[Shape], prefix: &str, flattened: bool) -> Vec<Case> {
     let mut cases = Vec::new();
     for position in [Position::Root, Position::Fragment] {
-        for shape in SHAPES {
-            for kind in KINDS {
+        for shape in shapes {
+            for &(kind, _) in KINDS {
                 cases.push(Case {
-                    id: format!("{}/{}/{kind}", position.name(), shape.name),
-                    shape,
+                    id: format!("{prefix}{}/{}/{kind}", position.name(), shape.name),
+                    shape: shape.clone(),
                     kind,
                     position,
                 });
             }
         }
     }
-    for name in FLATTENED {
-        let shape = SHAPES.iter().find(|shape| shape.name == *name).unwrap();
-        cases.push(Case {
-            id: format!("flattened/{name}"),
-            shape,
-            kind: "",
-            position: Position::Flattened,
-        });
+    if flattened {
+        for shape in shapes
+            .iter()
+            .filter(|shape| shape.map || shape.name == "sub")
+        {
+            cases.push(Case {
+                id: format!("{prefix}flattened/{}", shape.name),
+                shape: shape.clone(),
+                kind: "",
+                position: Position::Flattened,
+            });
+        }
     }
     cases
 }
 
-const HEADER: &str =
-    "#![allow(unused_crate_dependencies, dead_code, unused_imports, non_snake_case)]
+const HEADER: &str = "#![allow(unused_crate_dependencies, dead_code, unused_imports, non_snake_case, non_camel_case_types)]
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use flusso_query::{FlussoFragment, FlussoMap, FlussoRoot, FlussoValue};
 use serde::{Deserialize, Serialize};
 ";
 
-/// One case as a module, with a `read` that deserializes a document into its
-/// root.
-fn module(index: usize, case: &Case) -> String {
-    let ty = case.shape.ty;
-    let kind = case.kind;
+/// One unit of a generated file: a module body, and whether it has a root
+/// to read documents into.
+struct Unit {
+    body: String,
+    reads: bool,
+}
+
+/// A case as a module body, with a `read` that deserializes a document into
+/// its root.
+fn case_unit(case: &Case) -> Unit {
+    let nullable = KINDS
+        .iter()
+        .any(|&(kind, nullable)| kind == case.kind && nullable);
+    let ty = if nullable {
+        format!("Option<{}>", case.shape.ty)
+    } else {
+        case.shape.ty.clone()
+    };
+    let (kind, attrs) = (case.kind, case.shape.attrs);
     let (fragment, root) = match case.position {
-        Position::Root => (String::new(), format!("pub {kind}: {ty}")),
+        Position::Root => (String::new(), format!("{attrs} pub {kind}: {ty}")),
         Position::Fragment => (
             format!(
-                "#[derive(Debug, Deserialize, FlussoFragment)] pub struct F {{ pub {kind}: {ty} }}"
+                "#[derive(Debug, Deserialize, FlussoFragment)] pub struct F {{ {attrs} pub {kind}: {ty} }}"
             ),
             "#[serde(flatten)] pub f: F".to_string(),
         ),
@@ -277,21 +564,24 @@ fn module(index: usize, case: &Case) -> String {
             format!("pub kw: String, #[serde(flatten)] pub rest: {ty}"),
         ),
     };
-    format!(
-        "mod c{index} {{\nuse super::*;\n{}\n{fragment}\n\
-         #[derive(Debug, Deserialize, FlussoRoot)] #[flusso(index = \"boundary\")] pub struct R {{ {root} }}\n\
-         pub fn read(doc: &str) -> Result<(), String> {{ serde_json::from_str::<R>(doc).map(drop).map_err(|e| e.to_string()) }}\n}}\n",
-        case.shape.decls.join("\n")
-    )
+    Unit {
+        body: format!(
+            "{}\n{fragment}\n\
+             #[derive(Debug, Deserialize, FlussoRoot)] #[flusso(index = \"boundary\")] pub struct R {{ {root} }}\n\
+             pub fn read(doc: &str) -> Result<(), String> {{ serde_json::from_str::<R>(doc).map(drop).map_err(|e| e.to_string()) }}\n",
+            case.shape.decls.join("\n")
+        ),
+        reads: true,
+    }
 }
 
-/// A generated file: its source, and the line range each case owns.
+/// A generated file: its source, and the line range each unit owns.
 struct File {
     source: String,
     lines: Vec<(usize, std::ops::Range<usize>)>,
 }
 
-fn file(cases: &[Case], members: &[usize]) -> File {
+fn file(units: &[Unit], members: &[usize]) -> File {
     let mut source = HEADER.to_string();
     let docs = DOCS
         .iter()
@@ -302,12 +592,17 @@ fn file(cases: &[Case], members: &[usize]) -> File {
     let mut lines = Vec::new();
     for &index in members {
         let start = source.lines().count() + 1;
-        source.push_str(&module(index, &cases[index]));
+        writeln!(
+            source,
+            "mod c{index} {{\nuse super::*;\n{}}}",
+            units[index].body
+        )
+        .unwrap();
         lines.push((index, start..source.lines().count() + 1));
     }
     source
         .push_str("fn main() {\n    let cases: &[(usize, fn(&str) -> Result<(), String>)] = &[\n");
-    for &index in members {
+    for &index in members.iter().filter(|&&index| units[index].reads) {
         writeln!(source, "        ({index}, c{index}::read),").unwrap();
     }
     source.push_str(
@@ -337,7 +632,10 @@ impl Project {
             .join("../..")
             .canonicalize()
             .unwrap();
-        std::fs::copy(workspace.join("Cargo.lock"), dir.join("Cargo.lock")).unwrap();
+        write_if_changed(
+            &dir.join("Cargo.lock"),
+            &std::fs::read_to_string(workspace.join("Cargo.lock")).unwrap(),
+        );
         Project { dir, target }
     }
 
@@ -430,6 +728,12 @@ impl Project {
     }
 }
 
+fn write_if_changed(path: &Path, content: &str) {
+    if std::fs::read_to_string(path).ok().as_deref() != Some(content) {
+        std::fs::write(path, content).unwrap();
+    }
+}
+
 fn read_toml(path: &Path) -> toml::Table {
     toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
@@ -446,9 +750,9 @@ fn absolute(spec: toml::Value, base: &Path) -> toml::Value {
     toml::Value::Table(table)
 }
 
-/// The cases each error of a build belongs to, by its primary span's line in
+/// The units each error of a build belongs to, by its primary span's line in
 /// a generated file (following a macro expansion back to its call site). An
-/// error no case owns is returned as text.
+/// error no unit owns is returned as text.
 fn refused_by(messages: &str, files: &BTreeMap<String, File>) -> (BTreeSet<usize>, Vec<String>) {
     let mut refused = BTreeSet::new();
     let mut unowned = Vec::new();
@@ -506,29 +810,15 @@ fn owner(span: &serde_json::Value, files: &BTreeMap<String, File>) -> Option<usi
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Outcome {
-    Refused,
-    Reads,
-    Trusted(&'static str),
-}
-
-impl std::fmt::Display for Outcome {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Outcome::Refused => f.write_str("refused"),
-            Outcome::Reads => f.write_str("reads"),
-            Outcome::Trusted(rule) => write!(f, "trusted {rule}"),
-        }
-    }
-}
-
-/// Compile every case, then read the documents into each one that builds.
-/// A case that compiles and fails to read under no rule is returned as an
-/// error with what it failed on.
-fn observe(cases: &[Case]) -> Vec<Result<Outcome, String>> {
-    let project = Project::new();
-    let mut alive: Vec<Vec<usize>> = (0..cases.len())
+/// Compile every unit (as bins named `{prefix}_{chunk}`), dropping refused
+/// ones until the rest builds, then run what reads. Returns the refused units
+/// and, per unit that builds, the first document it failed to read.
+fn compile(
+    project: &Project,
+    prefix: &str,
+    units: &[Unit],
+) -> (BTreeSet<usize>, BTreeMap<usize, String>) {
+    let mut alive: Vec<Vec<usize>> = (0..units.len())
         .collect::<Vec<_>>()
         .chunks(CHUNK)
         .map(<[usize]>::to_vec)
@@ -541,21 +831,19 @@ fn observe(cases: &[Case]) -> Vec<Result<Outcome, String>> {
             "the generated cases never stopped failing to build"
         );
         files.clear();
-        for entry in std::fs::read_dir(project.dir.join("src")).unwrap() {
-            std::fs::remove_file(entry.unwrap().path()).unwrap();
-        }
-        for (chunk, members) in alive.iter().enumerate().filter(|(_, m)| !m.is_empty()) {
-            let name = format!("flusso_boundary_{chunk}");
-            let generated = file(cases, members);
-            std::fs::write(
-                project.dir.join(format!("src/{name}.rs")),
-                &generated.source,
-            )
-            .unwrap();
+        for (chunk, members) in alive.iter().enumerate() {
+            let name = format!("{prefix}_{chunk}");
+            let path = project.dir.join(format!("src/{name}.rs"));
+            if members.is_empty() {
+                let _ = std::fs::remove_file(path);
+                continue;
+            }
+            let generated = file(units, members);
+            write_if_changed(&path, &generated.source);
             files.insert(name, generated);
         }
         let bins: Vec<String> = files.keys().cloned().collect();
-        std::fs::write(project.dir.join("Cargo.toml"), project.manifest(&bins)).unwrap();
+        write_if_changed(&project.dir.join("Cargo.toml"), &project.manifest(&bins));
         let (built, messages) = project.build(&bins);
         let (now_refused, unowned) = refused_by(&messages, &files);
         if built {
@@ -582,6 +870,31 @@ fn observe(cases: &[Case]) -> Vec<Result<Outcome, String>> {
             failures.insert(index.parse::<usize>().unwrap(), error.to_string());
         }
     }
+    (refused, failures)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Outcome {
+    Refused,
+    Reads,
+    Trusted(&'static str),
+}
+
+impl std::fmt::Display for Outcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Outcome::Refused => f.write_str("refused"),
+            Outcome::Reads => f.write_str("reads"),
+            Outcome::Trusted(rule) => write!(f, "trusted {rule}"),
+        }
+    }
+}
+
+/// Compile and read every case. A case that compiles and fails to read under
+/// no rule is an error with what it failed on.
+fn observe(project: &Project, prefix: &str, cases: &[Case]) -> Vec<Result<Outcome, String>> {
+    let units: Vec<Unit> = cases.iter().map(case_unit).collect();
+    let (refused, failures) = compile(project, prefix, &units);
     cases
         .iter()
         .enumerate()
@@ -601,15 +914,38 @@ fn observe(cases: &[Case]) -> Vec<Result<Outcome, String>> {
         .collect()
 }
 
+/// The generated shapes whose declarations alone the derives refuse.
+fn refused_declarations(project: &Project, shapes: &[Shape]) -> BTreeSet<usize> {
+    let units: Vec<Unit> = shapes
+        .iter()
+        .map(|shape| Unit {
+            body: shape.decls.join("\n") + "\n",
+            reads: false,
+        })
+        .collect();
+    compile(project, "flusso_boundary_decls", &units).0
+}
+
 const OUTCOMES: &str = "tests/boundary.outcomes";
 
 #[test]
 fn every_shape_is_refused_reads_or_is_trusted() {
-    let cases = cases();
     let started = std::time::Instant::now();
-    let observed = observe(&cases);
+    let project = Project::new();
+    let mut cases = cases(&named_shapes(), "", true);
+    let generated = generated_shapes();
+    let refused_shapes = refused_declarations(&project, &generated);
+    let placed: Vec<Shape> = generated
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !refused_shapes.contains(index))
+        .map(|(_, shape)| shape.clone())
+        .collect();
+    cases.extend(self::cases(&placed, "gen/", false));
+    let observed = observe(&project, "flusso_boundary", &cases);
     println!(
-        "compiled and read {} cases in {:?}",
+        "{} declarations, {} cases compiled and read in {:?}",
+        generated.len(),
         cases.len(),
         started.elapsed()
     );
@@ -626,18 +962,49 @@ fn every_shape_is_refused_reads_or_is_trusted() {
         .collect();
     assert!(
         untrusted.is_empty(),
-        "these cases compile and fail to read a document, and no rule of what the derive trusts \
+        "{} cases compile and fail to read a document, and no rule of what the derive trusts \
          covers them — refuse them in the derive, or add a rule to `TRUSTED` and to the manual's \
          list:\n{}",
+        untrusted.len(),
         untrusted.join("\n")
+    );
+
+    let outcome_of: BTreeMap<&str, String> = cases
+        .iter()
+        .zip(&observed)
+        .map(|(case, outcome)| (case.id.as_str(), outcome.as_ref().unwrap().to_string()))
+        .collect();
+    let mut disagree = Vec::new();
+    for (id, outcome) in &outcome_of {
+        let Some((prefix, rest)) = id.split_once("root/") else {
+            continue;
+        };
+        let other = &outcome_of[format!("{prefix}fragment/{rest}").as_str()];
+        let (shape, kind) = rest.rsplit_once('/').unwrap();
+        let excepted = DISAGREE.iter().any(|&(s, k, _)| s == shape && k == kind);
+        if outcome != other && !excepted {
+            disagree.push(format!("{id}: root `{outcome}`, fragment `{other}`"));
+        }
+    }
+    assert!(
+        disagree.is_empty(),
+        "root and fragment disagree on {} placements — make them agree, or list the pair in \
+         `DISAGREE` with why:\n{}",
+        disagree.len(),
+        disagree.join("\n")
     );
 
     let mut rendered = String::from(
         "# What the derive does with each generated case (tests/boundary.rs).\n\
          # Re-record: FLUSSO_BLESS=1 cargo nextest run -p flusso-query-derive --test boundary\n",
     );
-    for (case, outcome) in cases.iter().zip(&observed) {
-        writeln!(rendered, "{} {}", case.id, outcome.as_ref().unwrap()).unwrap();
+    for (index, shape) in generated.iter().enumerate() {
+        if refused_shapes.contains(&index) {
+            writeln!(rendered, "gen/{} refused", shape.name).unwrap();
+        }
+    }
+    for (id, outcome) in &outcome_of {
+        writeln!(rendered, "{id} {outcome}").unwrap();
     }
     let path = Path::new(MANIFEST_DIR).join(OUTCOMES);
     if std::env::var_os("FLUSSO_BLESS").is_some() {
@@ -645,25 +1012,28 @@ fn every_shape_is_refused_reads_or_is_trusted() {
         return;
     }
     let recorded = std::fs::read_to_string(&path).unwrap_or_default();
-    let recorded: BTreeMap<&str, &str> = recorded
-        .lines()
-        .filter(|line| !line.starts_with('#'))
-        .filter_map(|line| line.split_once(' '))
-        .collect();
-    let changed: Vec<String> = rendered
-        .lines()
-        .filter(|line| !line.starts_with('#'))
-        .filter_map(|line| line.split_once(' '))
-        .filter(|(id, outcome)| recorded.get(id) != Some(outcome))
-        .map(|(id, outcome)| {
+    let lines = |text: &str| -> BTreeMap<String, String> {
+        text.lines()
+            .filter(|line| !line.starts_with('#'))
+            .filter_map(|line| line.split_once(' '))
+            .map(|(id, outcome)| (id.to_string(), outcome.to_string()))
+            .collect()
+    };
+    let (recorded, now) = (lines(&recorded), lines(&rendered));
+    let ids: BTreeSet<&String> = recorded.keys().chain(now.keys()).collect();
+    let changed: Vec<String> = ids
+        .into_iter()
+        .filter(|id| recorded.get(*id) != now.get(*id))
+        .map(|id| {
             format!(
-                "{id}: recorded `{}`, now `{outcome}`",
-                recorded.get(id).copied().unwrap_or("nothing")
+                "{id}: recorded `{}`, now `{}`",
+                recorded.get(id).map_or("nothing", String::as_str),
+                now.get(id).map_or("nothing", String::as_str)
             )
         })
         .collect();
     assert!(
-        changed.is_empty() && recorded.len() == cases.len(),
+        changed.is_empty(),
         "the derive's boundary moved — review, then re-record with FLUSSO_BLESS=1:\n{}",
         changed.join("\n")
     );

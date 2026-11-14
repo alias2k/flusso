@@ -30,3 +30,11 @@ fn decimal_becomes_a_number() {
     let value = GenericValue::Decimal(Decimal::new(1234, 2)); // 12.34
     assert_eq!(to_json(&value), serde_json::json!(12.34));
 }
+
+/// A map value that is null is written as `null` under its key, not dropped:
+/// what the OpenSearch sink indexes for a `map` field over `{"x": null}`.
+#[test]
+fn a_null_map_value_is_written_under_its_key() {
+    let value = GenericValue::Map([("x".to_owned(), GenericValue::Null)].into_iter().collect());
+    assert_eq!(to_json(&value), serde_json::json!({ "x": null }));
+}
