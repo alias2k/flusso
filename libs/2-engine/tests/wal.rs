@@ -2965,3 +2965,163 @@ keyed_by! {
         &["ALTER DATABASE postgres SET extra_float_digits = 0"],
         ["'0.3333333333333333'", "2.5"], ["0.3333333333333333", "2.5"];
 }
+
+/// A link spelled differently from the key it equals (issue #295): `kids`,
+/// `links` and the `via` hop name the root as `link`, which Postgres compares
+/// equal to the root's stored `root` (a citext's case, a numeric's scale, a
+/// float's `-0`). Every document they rebuild is the root's own, under
+/// `id`, the root's stored spelling, through the pre-image too, and the root's
+/// delete leaves no other.
+async fn a_link_spelled_differently_resolves_to_the_roots_own_key(
+    sql_type: &str,
+    setup: &[&str],
+    [root, link]: [&str; 2],
+    id: &str,
+) {
+    let (_container, port, url) = start_logical_postgres().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in setup {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(*statement))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    for statement in [
+        format!("CREATE TABLE parents (id {sql_type} PRIMARY KEY, name text)"),
+        format!("CREATE TABLE kids (id int PRIMARY KEY, parent {sql_type}, name text)"),
+        "CREATE TABLE grandkids (id int PRIMARY KEY, kid_id int, name text)".to_owned(),
+        format!("CREATE TABLE fars (id {sql_type} PRIMARY KEY, name text)"),
+        format!(
+            "CREATE TABLE links (parent {sql_type}, far {sql_type}, PRIMARY KEY (parent, far))"
+        ),
+        "ALTER TABLE kids REPLICA IDENTITY FULL".to_owned(),
+        "ALTER TABLE grandkids REPLICA IDENTITY FULL".to_owned(),
+        "ALTER TABLE links REPLICA IDENTITY FULL".to_owned(),
+        "CREATE PUBLICATION flusso FOR TABLE parents, kids, grandkids, fars, links".to_owned(),
+        format!("INSERT INTO parents VALUES ({root}, 'pa')"),
+        format!("INSERT INTO fars VALUES ({root}, 'fa')"),
+    ] {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let documents = Arc::new(
+        PgDocumentBuilder::connect(&url, Arc::new(keyed_parents_spec()))
+            .await
+            .unwrap(),
+    );
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = tokio::spawn(run_deployment(
+        Arc::new(WalChangeCapture::new(replication(port), url.clone())),
+        Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
+        Arc::new(RecordingSink::new(&recorded)),
+    ));
+    let parent = format!("upsert parents {id}");
+    expect_op(&mut engine, &recorded, &parent).await;
+
+    let marker_sql = "INSERT INTO grandkids (id) VALUES ($1)";
+    let mut marker = 900;
+    let mut rebuilt = async |sql: String| {
+        marker += 1;
+        rebuilt_by(
+            &mut engine,
+            &recorded,
+            &pool,
+            &sql,
+            marker_sql,
+            marker,
+            &format!("upsert grandkids {marker}"),
+        )
+        .await
+    };
+    let ops = |ops: &[&str]| sorted(ops);
+
+    for (sql, expected, what) in [
+        (
+            format!("INSERT INTO kids VALUES (2, {link}, 'k2')"),
+            ops(&[&parent, "upsert kids 2"]),
+            "a has_many child",
+        ),
+        (
+            "INSERT INTO grandkids VALUES (101, 2, NULL)".to_owned(),
+            ops(&[&parent, "upsert grandkids 101"]),
+            "a row a `via` hop reaches",
+        ),
+        (
+            format!("INSERT INTO links VALUES ({link}, {link})"),
+            ops(&[&parent]),
+            "a junction row",
+        ),
+        (
+            format!("UPDATE fars SET name = 'fa2' WHERE id = {root}"),
+            ops(&[&parent]),
+            "a far row, through the junction",
+        ),
+        (
+            format!("UPDATE parents SET name = 'pa2' WHERE id = {root}"),
+            ops(&[&parent, "upsert kids 2"]),
+            "the root, and the kid that `belongs_to` it",
+        ),
+        (
+            "UPDATE kids SET parent = NULL WHERE id = 2".to_owned(),
+            ops(&[&parent, "upsert kids 2"]),
+            "a kid leaving, through its pre-image",
+        ),
+        (
+            format!("UPDATE kids SET parent = {link} WHERE id = 2"),
+            ops(&[&parent, "upsert kids 2"]),
+            "a kid coming back",
+        ),
+        (
+            "DELETE FROM kids WHERE id = 2".to_owned(),
+            ops(&[&parent, "delete kids 2"]),
+            "a deleted kid, through its pre-image",
+        ),
+        (
+            "DELETE FROM links".to_owned(),
+            ops(&[&parent]),
+            "a deleted junction row",
+        ),
+        (
+            format!("DELETE FROM parents WHERE id = {root}"),
+            ops(&[&format!("delete parents {id}")]),
+            "the root's delete",
+        ),
+    ] {
+        assert_eq!(rebuilt(sql).await, expected, "{what}");
+    }
+
+    engine.abort();
+}
+
+macro_rules! linked_by_another_spelling {
+    ($($test:ident: $sql_type:literal, $setup:expr, [$root:literal, $link:literal], $id:literal;)*) => {$(
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires docker"]
+        async fn $test() {
+            a_link_spelled_differently_resolves_to_the_roots_own_key(
+                $sql_type, $setup, [$root, $link], $id,
+            )
+            .await;
+        }
+    )*};
+}
+
+linked_by_another_spelling! {
+    a_citext_link_in_another_case_rebuilds_the_roots_own_document:
+        "citext", &["CREATE EXTENSION citext"], ["'Ab'", "'AB'"], "Ab";
+    a_numeric_link_at_another_scale_rebuilds_the_roots_own_document:
+        "numeric", &[], ["1.5", "1.500"], "1.5";
+    a_float8_link_of_negative_zero_rebuilds_the_roots_own_document:
+        "float8", &[], ["'0'", "'-0'"], "0";
+    a_case_insensitive_text_link_rebuilds_the_roots_own_document:
+        "text COLLATE folded",
+        &["CREATE COLLATION folded (provider = icu, locale = 'und-u-ks-level2', deterministic = false)"],
+        ["'Ab'", "'AB'"], "Ab";
+}
