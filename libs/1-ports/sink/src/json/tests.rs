@@ -81,3 +81,35 @@ fn each_date_kind_is_written_in_one_form_and_read_by_few_types() {
     assert_eq!(reads(&timestamp), [false, false, false, false, true]);
     assert_eq!(reads(&timestamptz), [false, false, false, true, true]);
 }
+
+#[test]
+fn a_naive_timestamp_is_written_in_iso_8601_with_a_t() {
+    let written = |text: &str| to_json(&GenericValue::Timestamp(text.parse().unwrap()));
+    assert_eq!(written("2024-01-02T03:04:05"), "2024-01-02T03:04:05");
+    assert_eq!(
+        written("2024-01-02T03:04:05.123"),
+        "2024-01-02T03:04:05.123"
+    );
+    assert_eq!(
+        written("2024-01-02T03:04:05.123456"),
+        "2024-01-02T03:04:05.123456"
+    );
+}
+
+#[test]
+fn the_other_temporals_keep_their_written_form() {
+    assert_eq!(
+        to_json(&GenericValue::Date("2024-01-02".parse().unwrap())),
+        "2024-01-02"
+    );
+    assert_eq!(
+        to_json(&GenericValue::Time("03:04:05.123456".parse().unwrap())),
+        "03:04:05.123456"
+    );
+    assert_eq!(
+        to_json(&GenericValue::TimestampTz(
+            "2024-01-02T03:04:05.123456Z".parse().unwrap()
+        )),
+        "2024-01-02T03:04:05.123456+00:00"
+    );
+}
