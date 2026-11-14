@@ -815,7 +815,8 @@ impl PgDocumentBuilder {
     }
 
     /// `ids` plus the documents `links` name, read back as the root rows' own
-    /// keys, deduplicated.
+    /// keys, deduplicated. Only for a change with links: `ids` alone are
+    /// already unique, one set per index.
     async fn with_root_keys(
         &self,
         ids: Vec<DocumentId>,
@@ -973,6 +974,9 @@ impl DocumentBuilder for PgDocumentBuilder {
         let ids = self
             .resolve_change(table, key, before, after, &mut links)
             .await?;
+        if links.is_empty() {
+            return Ok(ids);
+        }
         self.with_root_keys(ids, links).await
     }
 

@@ -365,6 +365,11 @@ pub(super) struct RootLinks(HashMap<(IndexName, Link), (Vec<GenericValue>, HashS
 pub(super) type Link = (TableName, ColumnName);
 
 impl RootLinks {
+    /// Whether no path ended on a link, so no root key needs reading back.
+    pub(super) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub(super) fn add(&mut self, index: &IndexName, link: Link, links: Vec<GenericValue>) {
         let (ordered, seen) = self.0.entry((index.clone(), link)).or_default();
         for link in links {
