@@ -1402,6 +1402,7 @@ dependencies = [
  "flusso-config",
  "flusso-kernel",
  "flusso-source",
+ "proptest",
  "rhai",
  "rust_decimal",
  "serde_json",

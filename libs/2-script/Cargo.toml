@@ -32,6 +32,7 @@ serde_json.workspace = true
 config.workspace = true
 tokio = { workspace = true, features = ["rt", "macros"] }
 criterion.workspace = true
+proptest.workspace = true
 
 [[bench]]
 name = "scripted"

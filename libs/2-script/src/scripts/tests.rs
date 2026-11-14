@@ -317,3 +317,34 @@ fn a_tiny_decimal_written_with_an_exponent_reaches_a_script_as_a_decimal() {
         assert_eq!(get(&body, "float"), Some(&GenericValue::Double(1.0)), "{x}");
     }
 }
+
+/// A string returned to a `decimal` script field fails the document with
+/// `main`'s message, whatever it holds (issue #327's third review): a value
+/// past `Decimal`'s range reaches a script as a string, so `+` concatenates
+/// it into a number ten times too large.
+#[test]
+fn a_string_returned_to_a_decimal_field_fails_the_document() {
+    for source in [
+        r#"this.x + parse_decimal("0.10")"#,
+        "this.v.to_string()",
+        r#""12.5""#,
+        r#""abc""#,
+    ] {
+        let fields = format!(
+            "  - decimal: x\n    required: false\n  \
+               - decimal: v\n    required: false\n  \
+               - decimal: out\n    required: false\n    script: '{source}'\n"
+        );
+        let scripts = Scripts::compile(&spec(&fields)).unwrap();
+        let mut body = doc(&[
+            ("x", big("79228162514264337593543950336")),
+            ("v", big("12.5")),
+        ]);
+        let failure = scripts.apply(&products(), &mut body).unwrap_err();
+        assert_eq!(failure.field, "out", "{source}");
+        assert_eq!(
+            failure.message, "returned a string, expected a decimal (or an integer)",
+            "{source}"
+        );
+    }
+}
