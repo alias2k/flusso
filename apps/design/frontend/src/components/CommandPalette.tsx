@@ -323,6 +323,7 @@ export function CommandPalette({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
+        data-keeps-name-draft
         showCloseButton={false}
         aria-describedby={undefined}
         className="top-[11%] translate-y-0 gap-0 overflow-hidden p-0 sm:max-w-3xl"

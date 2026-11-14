@@ -64,7 +64,7 @@ Once connected, and before any index is touched, `run` runs the same check as [`
   - [`array: true`](field-types.md#array) over a column that holds no array (neither a `[]` type nor `json`/`jsonb`).
 
   The three before the last fail document builds of the index, so 0.17 started and then wrote nothing, or failed on the first build. The last is a key new in 0.18, so no running deployment has it. `run` exits non-zero with `the schemas cannot be built against this database (N problem(s) above)`. Under Kubernetes or compose that's a restart loop with the same message each time, until the config is fixed. Nothing is staged, no slot is created, no index is touched.
-- **Everything else is printed and the start goes on**, errors included: a declared type or aggregate `value_type` that doesn't accept the column's type (e.g. `keyword` over a Postgres enum or domain, which the database reports by its own type name), an expression or geo column that isn't numeric, `required` over a nullable column, a join `primary_key` that names no column, a `[]` column without `array: true` (it indexes as before; the query side can't read it as an array), and a root table without a single-column primary key (none, or a composite one: the backfill skips it, its live changes are still indexed; see [Tables without a primary key](source-postgres.md#tables-without-a-primary-key)). On such a root, with no relation in the index, a `primary_key` that names no column is printed too: a root change built by its whole key never reads it (one whose key is a single column does, and fails, as do `flusso script run --id` and the designer's sample). The documents build as they did in 0.16; `check` still exits non-zero on the errors.
+- **Everything else is printed and the start goes on**, errors included: a declared type or aggregate `value_type` that doesn't accept the column's type (e.g. `keyword` over a Postgres enum or domain, which the database reports by its own type name), an expression or geo column that isn't numeric, `required` over a nullable column, a join `primary_key` that names no column, a `[]` column without `array: true` (it indexes as before; the query side can't read it as an array), two fields of one name at one level, and a root table without a single-column primary key (none, or a composite one: the backfill skips it, its live changes are still indexed; see [Tables without a primary key](source-postgres.md#tables-without-a-primary-key)). On such a root, with no relation in the index, a `primary_key` that names no column is printed too: a root change built by its whole key never reads it (one whose key is a single column does, and fails, as do `flusso script run --id` and the designer's sample). The documents build as they did in 0.16; `check` still exits non-zero on the errors.
 - **An unreachable database** fails as it always has, as `connecting to Postgres`, before validation runs.
 
 There's no flag to skip it. Run `flusso check` before deploying a changed config to see the same list without stopping anything.
@@ -93,7 +93,7 @@ Every problem of one run is listed together, each naming the index, the field pa
   A missing table is reported once, and nothing on it is looked up.
 - **Root keys, on the root table.** That the table has a single-column primary key, reported under `table`; that the declared `primary_key` column exists and is that key, reported under `primary_key`, whether or not a field reads it; the columns of the top-level value and null-check [`filters`](filters-and-soft-delete.md#root-filters), reported under `filters`, and the [`soft_delete`](filters-and-soft-delete.md#soft_delete) marker, reported under `soft_delete`: its `column`, its `when` columns, and its `field` (see [How the marker is verified](filters-and-soft-delete.md#how-the-marker-is-verified)).
 
-Everything above is an error except the three warnings: `required` over a nullable column, a join `primary_key` that names no column, and a `[]` column without `array: true`. Which errors also stop `run` is in [Validation at start](#validation-at-start). `--offline` still reports the one problem that needs no database: a `soft_delete` `field` that reads no column.
+Everything above is an error except the three warnings: `required` over a nullable column, a join `primary_key` that names no column, and a `[]` column without `array: true`. Which errors also stop `run` is in [Validation at start](#validation-at-start). `--offline` still reports the two problems that need no database: a `soft_delete` `field` that reads no column (an error), and two fields sharing a name at one level, at any depth (a warning, with the database too; see [One name per level](identifiers.md#one-name-per-level)).
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -104,7 +104,7 @@ Everything above is an error except the three warnings: `required` over a nullab
 | `--manage-replica-identity <bool>` | config, else `true` | Affects the replica-identity report's phrasing only. |
 | `--format <human\|json>` | `human` | `json` prints one machine-readable document. |
 
-Exit status is non-zero when validation fails or any diagnostic is an error. `--format json` lists the diagnostics under `diagnostics`, also with `--offline`: each has `index`, `field`, `path`, `anchor`, `severity` (`error`/`warning`), `kind`, and `message`. `anchor` says what `path` names: `field`, a field's path from the document root, or `index_key`, one of the index-level keys `table`, `primary_key`, `filters`, `soft_delete` (a root field may have the same name). `kind` is one of:
+Exit status is non-zero when validation fails or any diagnostic is an error. `--format json` lists the diagnostics under `diagnostics`, also with `--offline`: each has `index`, `field`, `path`, `anchor`, `severity` (`error`/`warning`), `kind`, and `message`. `anchor` says what `path` names: `field`, a field's path from the document root (a segment that another field at its level shares carries its position, `orders#2.total`; see [One name per level](identifiers.md#one-name-per-level)), or `index_key`, one of the index-level keys `table`, `primary_key`, `filters`, `soft_delete` (a root field may have the same name). `kind` is one of:
 
 | `kind` | Found | Severity | Stops `run` |
 | --- | --- | --- | --- |
@@ -121,6 +121,7 @@ Exit status is non-zero when validation fails or any diagnostic is an error. `--
 | `nullability` | `required` over a nullable column. | warning | no |
 | `ignored_primary_key` | A join `primary_key` that names no column. | warning | no |
 | `undeclared_array_column` | A `[]` column (or a domain over one) read by a field without `array: true`. | warning | no |
+| `duplicate_field_name` | Two fields of one name at one level; the message names each by position and says what the index keeps. | warning | no |
 
 ## design
 

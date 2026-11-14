@@ -27,6 +27,8 @@ export const en: Record<string, string> = {
   "typeWarn.ignore": "Ignore",
   "diag.requiredDefault": 'required, but its source column "{col}" is nullable — set a default value',
   "diag.typeMismatch": 'type "{ty}" is a sharp change from source column "{col}" ({src}) — values may fail to index',
+  "diag.duplicateName":
+    '{n} fields here are named "{name}": at most one of them reaches the index, and a document may hold none of them or a mix of them. Rename all but one.',
   "topbar.upToDate": "Up to date",
   "topbar.language": "Language",
 
@@ -49,6 +51,7 @@ export const en: Record<string, string> = {
     'The schema of index "{name}" could not be loaded, so it cannot move from {from} to {path}: fix the file first, or put the path back.',
   "toast.nameRefusedSave": 'Index "{row}": {reason}. Change the name, or leave the box to keep "{row}".',
   "toast.sinkNameRefusedSave": 'Sink "{row}": {reason}. Change the name, or leave the box to keep "{row}".',
+  "toast.fieldNameRefusedSave": 'Field "{row}": {reason} Change the name, or leave the box to keep "{row}".',
   "toast.sharedSchemaClash":
     'Indexes "{a}" and "{b}" share one schema file but their schemas differ: give one of them its own file.',
   "toast.dbNotReachableErr": "Database not reachable: {err}",
@@ -154,6 +157,10 @@ export const en: Record<string, string> = {
   "common.column": "column",
   "common.noMatch": "No match",
   "common.useValue": 'Use "{v}"',
+  "names.sqlPattern":
+    "“{name}” is not a valid table or column name: flusso reads it lowercased, and it must be letters a–z, digits and _, starting with a letter or _",
+  "names.sqlLength": "A table or column name has at most 63 characters",
+  "names.sqlQuoted": "flusso has no quoted table or column names: type the name without quotes",
   "common.loading": "Loading project…",
 
   // inspector
@@ -173,8 +180,9 @@ export const en: Record<string, string> = {
   "inspector.join": "Join",
   "inspector.field": "Field",
   "inspector.fieldName": "field name",
-  "inspector.fieldNameInvalid":
-    "Letters, digits and _, not starting with a digit, at most 63 characters. The preview leaves this field out until it has one.",
+  "inspector.fieldNameInvalid": "Letters, digits and _, not starting with a digit, at most 63 characters.",
+  "inspector.fieldNameTaken":
+    'Another field here is already named "{name}": the index can\'t keep both. To swap two names, give one of them a temporary name first.',
   "inspector.verb": "verb",
   "inspector.table": "table",
   "inspector.btColumn": "column (this table → target)",

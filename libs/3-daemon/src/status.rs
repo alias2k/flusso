@@ -458,23 +458,25 @@ pub struct StatusSnapshot {
     pub errors: u64,
     /// The most recent engine error.
     pub last_error: Option<String>,
-    /// Per index, the documents a script failed on, under either policy. Only
-    /// indexes with a failure appear.
+    /// Per index, the documents that failed to build (a script failed, or an
+    /// `array: true` column held an object), under either policy. Only indexes
+    /// with a failure appear.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub script_failures: BTreeMap<String, ScriptFailures>,
     pub sinks: BTreeMap<String, SinkSnapshot>,
 }
 
-/// Script failures on one index since the daemon started.
+/// Build failures on one index since the daemon started: a script's, or an
+/// `array: true` column's.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ScriptFailures {
-    /// Documents a script failed on (a `stop` index counts each retry).
+    /// Documents that failed to build (a `stop` index counts each retry).
     pub count: u64,
     /// The most recent one.
     pub last: Option<LastScriptFailure>,
 }
 
-/// The most recent script failure on an index.
+/// The most recent build failure on an index.
 #[derive(Debug, Clone, Serialize)]
 pub struct LastScriptFailure {
     /// The document id.

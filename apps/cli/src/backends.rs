@@ -204,7 +204,8 @@ fn stops_the_start(kind: DiagnosticKind) -> bool {
         | DiagnosticKind::Nullability
         | DiagnosticKind::IgnoredPrimaryKey
         | DiagnosticKind::RootPrimaryKey
-        | DiagnosticKind::UndeclaredArrayColumn => false,
+        | DiagnosticKind::UndeclaredArrayColumn
+        | DiagnosticKind::DuplicateFieldName => false,
     }
 }
 
@@ -440,6 +441,13 @@ mod tests {
     fn an_ignored_join_primary_key_prints_and_starts() {
         let printed = starts(DiagnosticKind::IgnoredPrimaryKey);
         assert!(printed.contains("[warning]"), "{printed}");
+    }
+
+    #[test]
+    fn a_duplicate_field_name_prints_and_starts() {
+        let printed = starts(DiagnosticKind::DuplicateFieldName);
+        assert!(printed.contains("[warning]"), "{printed}");
+        assert!(!printed.contains("starting anyway"), "{printed}");
     }
 
     #[test]

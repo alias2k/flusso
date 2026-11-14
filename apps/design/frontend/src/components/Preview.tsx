@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ChevronDown, Database, Play } from "lucide-react";
 import type { DiagnosticDto, DocumentNode, PreviewResponse, SampleResponse, ScriptErrorDto } from "../api";
 import { useT } from "../i18n";
+import { diagnosticPath } from "../model/issues";
 import { typeClass } from "../theme";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -189,7 +190,7 @@ export function Preview({
                     )}
                   >
                     <span className="font-mono text-muted-foreground">
-                      {d.index}.{d.path.join(".")}
+                      {d.index}.{diagnosticPath(d)}
                     </span>{" "}
                     {d.message}
                   </div>

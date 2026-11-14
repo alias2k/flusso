@@ -28,6 +28,8 @@ export const it: Record<string, string> = {
   "diag.requiredDefault": 'obbligatorio, ma la colonna sorgente "{col}" ammette null — imposta un valore predefinito',
   "diag.typeMismatch":
     'il tipo "{ty}" è un cambiamento netto rispetto alla colonna sorgente "{col}" ({src}) — i valori potrebbero non indicizzarsi',
+  "diag.duplicateName":
+    '{n} campi qui si chiamano "{name}": al massimo uno di loro arriva all\'indice, e un documento può non contenerne nessuno o un misto di loro. Rinominali tutti tranne uno.',
   "topbar.upToDate": "Aggiornato",
   "topbar.language": "Lingua",
 
@@ -50,6 +52,7 @@ export const it: Record<string, string> = {
     'Lo schema dell\'indice "{name}" non si è potuto caricare, quindi non può spostarsi da {from} a {path}: correggi prima il file, o ripristina il percorso.',
   "toast.nameRefusedSave": 'Indice "{row}": {reason}. Cambia il nome, o esci dalla casella per mantenere "{row}".',
   "toast.sinkNameRefusedSave": 'Sink "{row}": {reason}. Cambia il nome, o esci dalla casella per mantenere "{row}".',
+  "toast.fieldNameRefusedSave": 'Campo "{row}": {reason} Cambia il nome, oppure esci dalla casella per tenere "{row}".',
   "toast.sharedSchemaClash":
     'Gli indici "{a}" e "{b}" condividono un file schema ma i loro schemi differiscono: assegna a uno dei due un file proprio.',
   "toast.dbNotReachableErr": "Database non raggiungibile: {err}",
@@ -158,6 +161,10 @@ export const it: Record<string, string> = {
   "common.column": "colonna",
   "common.noMatch": "Nessun risultato",
   "common.useValue": 'Usa "{v}"',
+  "names.sqlPattern":
+    "“{name}” non è un nome di tabella o colonna valido: flusso lo legge in minuscolo, e deve contenere lettere a–z, cifre e _, iniziando con una lettera o _",
+  "names.sqlLength": "Un nome di tabella o colonna ha al massimo 63 caratteri",
+  "names.sqlQuoted": "flusso non ha nomi di tabella o colonna tra virgolette: scrivi il nome senza virgolette",
   "common.loading": "Caricamento del progetto…",
 
   // inspector
@@ -177,8 +184,9 @@ export const it: Record<string, string> = {
   "inspector.join": "Relazione",
   "inspector.field": "Campo",
   "inspector.fieldName": "nome campo",
-  "inspector.fieldNameInvalid":
-    "Lettere, cifre e _, senza iniziare con una cifra, al massimo 63 caratteri. L'anteprima esclude questo campo finché non ne ha uno.",
+  "inspector.fieldNameInvalid": "Lettere, cifre e _, senza iniziare con una cifra, al massimo 63 caratteri.",
+  "inspector.fieldNameTaken":
+    'Un altro campo qui si chiama già "{name}": l\'indice non può tenerli entrambi. Per scambiare due nomi, dai prima a uno dei due un nome provvisorio.',
   "inspector.verb": "verbo",
   "inspector.table": "tabella",
   "inspector.btColumn": "colonna (questa tabella → destinazione)",

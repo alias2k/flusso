@@ -84,14 +84,22 @@ export function Canvas() {
     const graph = projectGraph(schema);
     const auto = autoLayout(graph.nodes, estimateHeight);
     const overrides = loadOverrides(indexName);
+    // An existing node keeps what React Flow knows of it (its measured size,
+    // its selection): a node without them is hidden until it is measured
+    // again, so a press landing in that moment (the second click of a double
+    // click right after a rename applied) would reach the pane instead.
     setNodes((prev) => {
-      const prevPos = new Map(prev.map((n) => [n.id, n.position]));
-      return graph.nodes.map((n) => ({
-        id: n.id,
-        type: "doc",
-        position: overrides[n.id] ?? prevPos.get(n.id) ?? auto[n.id] ?? { x: 0, y: 0 },
-        data: { node: n },
-      }));
+      const before = new Map(prev.map((n) => [n.id, n]));
+      return graph.nodes.map((n) => {
+        const old = before.get(n.id);
+        return {
+          ...old,
+          id: n.id,
+          type: "doc",
+          position: overrides[n.id] ?? old?.position ?? auto[n.id] ?? { x: 0, y: 0 },
+          data: { node: n },
+        };
+      });
     });
     setEdges(
       graph.edges.map((e) => ({

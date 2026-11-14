@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode, useEffect, useRef, useState } from "react";
+import { Fragment, type ReactNode, useState } from "react";
 import { Copy, Plug, Plus, Search, Terminal } from "lucide-react";
 import type { AdapterDescription, ConfigToml, IndexEntry } from "../api";
 import { useT } from "../i18n";
@@ -7,9 +7,11 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useAdapters } from "../model/adapters";
 import { defaultSchemaPath, indexName } from "../model/indexRows";
-import { useUiStore } from "../store/ui";
-import { identifier, identifierProblem } from "../model/names";
-import { type NameKind, useNameRefusal } from "./nameRefusal";
+import { identifierProblem } from "../model/names";
+import { reKeyIndexSinks as reKeyIndexSinksIn } from "../model/renames";
+import { useDesignStore } from "../store/design";
+import { useNameDraft } from "./nameDraft";
+import { type NameKind, useNameRefusal, useRenameProblemText } from "./nameRefusal";
 import { AdapterForm, KindBadge, KindToggle } from "./AdapterForm";
 import { Check, Drawer, Field, Num, PanelTitle, RemoveButton, Select, Text } from "./widgets";
 import {
@@ -43,60 +45,55 @@ function splitEntry(entry: Record<string, unknown> | undefined): { kind: string;
 const INDEX_COLS = "grid grid-cols-[minmax(6rem,1fr)_minmax(9rem,1.6fr)_8.5rem_6rem_2rem_2rem] items-center gap-x-2";
 
 /// An index or sink name input that applies the name, as flusso reads it, once
-/// the box is left (or on Enter), so a rename settles once. A name flusso
+/// the box is left (or on Enter), so a rename settles once. It renames the row
+/// or sink by its id, as it and its siblings are at that moment. A name flusso
 /// would refuse (another index or sink has it, compared as flusso reads names;
 /// or it isn't a valid name) is marked with the reason and never applied:
-/// leaving the box keeps the old name. Save is refused while it shows.
+/// leaving the box keeps the old name. Save is refused while it shows. The
+/// reason floats under the box, so showing or hiding it moves nothing.
 function NameField({
   kind,
+  id,
   value,
   taken,
-  onChange,
   className,
 }: {
   kind: NameKind;
+  /// The index row's id, or the sink's.
+  id: string;
   value: string;
   taken: string[];
-  onChange: (v: string) => void;
   className?: string;
 }) {
   const { t } = useT();
   const refusal = useNameRefusal(kind);
-  const [draft, setDraft] = useState<string | null>(null);
-  const setNameDraft = useUiStore((s) => s.setNameDraft);
-  const typing = useRef(false);
-  useEffect(
-    () => () => {
-      if (typing.current) setNameDraft(null);
+  const problemText = useRenameProblemText(kind);
+  const draft = useNameDraft({
+    kind,
+    row: value,
+    refusal: (text) => refusal(text, taken),
+    apply: (text) => {
+      const store = useDesignStore.getState();
+      return problemText(kind === "index" ? store.renameIndex(id, text) : store.renameSink(id, text), text);
     },
-    [setNameDraft],
-  );
-  const reason = draft === null ? null : refusal(draft, taken);
-  const settle = () => {
-    const name = draft === null ? "" : identifier(draft);
-    if (name && !reason && name !== value) onChange(name);
-    typing.current = false;
-    setDraft(null);
-    setNameDraft(null);
-  };
+  });
+  const reason = draft.refused;
   return (
-    <span className="flex flex-col gap-0.5" title={reason ?? undefined}>
+    <span className="relative flex flex-col" title={reason ?? undefined}>
       <Text
-        value={draft ?? value}
+        value={draft.text ?? value}
         invalid={!!reason}
         className={className}
-        onChange={(v) => {
-          typing.current = true;
-          setDraft(v);
-          setNameDraft({ kind, row: value, name: v, refused: refusal(v, taken) });
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") e.currentTarget.blur();
-        }}
-        onBlur={settle}
+        onChange={draft.change}
+        onKeyDown={draft.keyDown}
+        onBlur={draft.blur}
         placeholder={t("config.name")}
       />
-      {reason && <span className="text-2xs text-destructive">{reason}</span>}
+      {reason && (
+        <span className="absolute top-full left-0 z-20 mt-0.5 w-64 rounded border border-destructive/40 bg-background px-1.5 py-0.5 text-2xs text-destructive shadow">
+          {reason}
+        </span>
+      )}
     </span>
   );
 }
@@ -131,19 +128,7 @@ export function ConfigPanel({
     next[i] = e;
     onChange({ ...config, index: next });
   };
-  const setSink = (name: string, sink: Sink) => onChange({ ...config, sinks: { ...sinks, [name]: sink } });
-  // Per-index sink options are keyed by sink name, so they follow a rename and
-  // go with a removal; a dangling key would fail validation.
-  const reKeyIndexSinks = (from: string, to: string | undefined) =>
-    index.map((e) => {
-      if (!e.sinks || !(from in e.sinks)) return e;
-      const next: Record<string, Record<string, unknown>> = {};
-      for (const [k, v] of Object.entries(e.sinks)) {
-        if (k !== from) next[k] = v;
-        else if (to) next[to] = v;
-      }
-      return { ...e, sinks: Object.keys(next).length ? next : undefined };
-    });
+  const reKeyIndexSinks = (from: string, to: string | undefined) => reKeyIndexSinksIn(config, from, to);
   // A sink switched to an adapter that takes no per-index options drops them
   // too: the drawer would no longer show them, and they would fail the build.
   const changeSink = (name: string, sink: Sink) => {
@@ -171,20 +156,6 @@ export function ConfigPanel({
     else delete next[sink];
     setEntry(i, { ...e, sinks: Object.keys(next).length ? next : undefined });
   };
-  // Rename a sink (a config-map key) in place, preserving declaration order,
-  // under its name as flusso reads it. A no-op on a name flusso would refuse,
-  // so a refused name never reaches the config or the save's identity.
-  const renameSink = (from: string, to: string) => {
-    const name = identifier(to);
-    const others = Object.keys(sinks).filter((n) => n !== from);
-    if (!name || name === from || identifierProblem(name, others)) return;
-    const next: Record<string, Sink> = {};
-    for (const [k, v] of Object.entries(sinks)) next[k === from ? name : k] = v;
-    const sinkIds: Record<string, string> = {};
-    for (const [k, v] of Object.entries(config.sinkIds ?? {})) sinkIds[k === from ? name : k] = v;
-    onChange({ ...config, sinks: next, sinkIds, index: reKeyIndexSinks(from, name) });
-  };
-
   return (
     <div className="config-panel max-w-3xl">
       <PanelTitle>{t("sidebar.deployment")}</PanelTitle>
@@ -325,9 +296,9 @@ export function ConfigPanel({
                 <div className={cn(INDEX_COLS, "px-3 py-1.5")}>
                   <NameField
                     kind="index"
+                    id={e.id ?? ""}
                     value={e.name}
                     taken={index.filter((_, j) => j !== i).map((x) => indexName(x.name))}
-                    onChange={(name) => setEntry(i, { ...e, name })}
                   />
                   <Text
                     value={e.schema}
@@ -402,13 +373,13 @@ export function ConfigPanel({
       <Stage step={3} tone="bg-primary" title={t("config.sinks")} hint={t("config.stageSinksHint")}>
         {Object.entries(sinks).map(([name, sink]) => (
           <SinkEditor
-            key={name}
+            key={config.sinkIds?.[name] ?? name}
+            id={config.sinkIds?.[name] ?? name}
             name={name}
             sink={sink}
             adapters={sinkAdapters}
             taken={Object.keys(sinks).filter((n) => n !== name)}
             onChange={(s) => changeSink(name, s)}
-            onRename={(to) => renameSink(name, to)}
             onRemove={() => removeSink(name)}
           />
         ))}
@@ -416,7 +387,12 @@ export function ConfigPanel({
           label={t("config.sink")}
           onClick={() => {
             const first = sinkAdapters[0];
-            setSink(freeSinkName(Object.keys(sinks)), first ? { type: first.kind, ...first.example } : {});
+            const name = freeSinkName(Object.keys(sinks));
+            onChange({
+              ...config,
+              sinks: { ...sinks, [name]: first ? { type: first.kind, ...first.example } : {} },
+              sinkIds: { ...config.sinkIds, [name]: crypto.randomUUID() },
+            });
           }}
         />
       </Stage>
@@ -515,17 +491,18 @@ function SinkEditor({
   name,
   sink,
   adapters,
+  id,
   taken,
   onChange,
-  onRename,
   onRemove,
 }: {
+  /// The sink's id: what a rename addresses.
+  id: string;
   name: string;
   sink: Sink;
   adapters: AdapterDescription[];
   taken: string[];
   onChange: (s: Sink) => void;
-  onRename: (to: string) => void;
   onRemove: () => void;
 }) {
   const { t } = useT();
@@ -545,7 +522,7 @@ function SinkEditor({
       )}
     >
       <div className="sink-head flex items-start gap-2.5">
-        <NameField kind="sink" value={name} taken={taken} onChange={onRename} className="w-40 font-semibold" />
+        <NameField kind="sink" id={id} value={name} taken={taken} className="w-40 font-semibold" />
         <KindToggle
           kinds={adapters.map((a) => a.kind)}
           value={kind}

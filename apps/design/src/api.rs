@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use source::document::BuildFailure;
 use source::{
     Diagnostic, JunctionCandidate, RelationalCatalog, SchemaIntrospection, Severity, SourceSpec,
-    junction_candidates, validate_indexes,
+    junction_candidates, validate_indexes, validate_spec,
 };
 use source_postgres::{
     PgDocumentBuilder, PostgresConfig, WalChangeCapture, replication_config, sql_connection_url,
@@ -409,6 +409,10 @@ pub struct PreviewResponse {
     /// Every script field that does not compile, with where.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub script_errors: Vec<ScriptErrorDto>,
+    /// What the schema check that needs no database finds in this schema
+    /// (`flusso check --offline`), such as two fields sharing a name.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub schema_diagnostics: Vec<DiagnosticDto>,
 }
 
 /// A script failure — a compile error, or one raised while running over a
@@ -485,6 +489,14 @@ pub fn build_preview(config_path: &Path, request: PreviewRequest) -> Result<Prev
     let script_errors = compile_index(&request.index, &request.schema, None)
         .err()
         .unwrap_or_default();
+    let spec = SourceSpec::new(BTreeMap::from([(
+        request.index.clone(),
+        request.schema.clone(),
+    )]));
+    let schema_diagnostics = validate_spec(&spec)
+        .into_iter()
+        .map(diagnostic_dto)
+        .collect();
     Ok(PreviewResponse {
         yaml,
         preview,
@@ -492,6 +504,7 @@ pub fn build_preview(config_path: &Path, request: PreviewRequest) -> Result<Prev
         differs_at,
         parse_error,
         script_errors,
+        schema_diagnostics,
     })
 }
 
@@ -3061,6 +3074,9 @@ pub struct DiagnosticDto {
     /// The field's path from the document root, or an index-level key alone
     /// (`table`, `primary_key`, `filters`, `soft_delete`); see `anchor`.
     pub path: Vec<String>,
+    /// For each segment of `path`, its 1-based position among the fields of
+    /// its level when another field there has the same name, else `null`.
+    pub positions: Vec<Option<usize>>,
     /// `field` when `path` names a field, `index_key` when it names an
     /// index-level key (a root field may share its name).
     pub anchor: String,
@@ -3344,6 +3360,7 @@ fn diagnostic_dto(diagnostic: Diagnostic) -> DiagnosticDto {
         index: diagnostic.index.to_string(),
         field: diagnostic.field.to_string(),
         path: diagnostic.path.iter().map(ToString::to_string).collect(),
+        positions: diagnostic.positions.clone(),
         anchor: diagnostic.anchor.as_str().to_owned(),
         kind: diagnostic.kind.as_str().to_owned(),
         severity: match diagnostic.severity {

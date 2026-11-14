@@ -98,7 +98,7 @@ impl Observer for ScriptFailureLog {
         let consequence = match policy {
             FailurePolicy::Skip => "the document keeps its indexed version (on_error = skip)",
             FailurePolicy::Stop => {
-                "stopping until the script or the row is fixed (on_error = stop)"
+                "stopping until the schema, its scripts or the row is fixed (on_error = stop)"
             }
         };
         let field = field_label(&failure.field);
@@ -109,14 +109,14 @@ impl Observer for ScriptFailureLog {
                 id,
                 field = %failure.field,
                 suppressed,
-                "script failed; {consequence}\n{failure}"
+                "a document failed to build; {consequence}\n{failure}"
             ),
             None => tracing::debug!(
                 target: "script",
                 index = %index,
                 id,
                 field = %failure.field,
-                "script failed (suppressed): {}",
+                "a document failed to build (suppressed): {}",
                 failure.message
             ),
         }

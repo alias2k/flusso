@@ -1,4 +1,13 @@
-import { useContext, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import {
+  useContext,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type FocusEvent,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import { CheckIcon, ChevronDownIcon, ChevronRight, Link2, Plus, X } from "lucide-react";
 import { api, type ColumnShape, type ValueCheck, type ValueSlot } from "../api";
 import { useT, type Translate } from "../i18n";
@@ -7,6 +16,8 @@ import { settlePendingValue, trackPendingValue } from "../model/pending";
 import { type Generic, genericText } from "../model/generic";
 import { LABEL, NO_PW_MANAGER } from "../styles";
 import { typeClass } from "../theme";
+import { sqlName } from "../model/names";
+import { useSqlNameRefusal } from "./nameRefusal";
 import { ValueTargetContext } from "./valueTarget";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -171,7 +182,7 @@ export function Text({
   invalid?: boolean;
   className?: string;
   onKeyDown?: (e: KeyboardEvent<HTMLInputElement>) => void;
-  onBlur?: () => void;
+  onBlur?: (e: FocusEvent<HTMLInputElement>) => void;
 }) {
   // A *stable* id (not the per-render counter) — otherwise every keystroke
   // re-renders with a new id, orphaning the open datalist so picks do nothing.
@@ -536,13 +547,17 @@ export function Select<T extends string>({
 /// type-to-filter, and — with `allowCustom` — you can enter a value the list
 /// doesn't have (so it replaces a free-text + datalist field). Options carry the
 /// same `description`/`className` as `Select`, shown as a trailing detail and a
-/// label colour.
+/// label colour. A typed value is offered as `normalize` reads it (the spelling
+/// the model will hold), and not at all when `refuse` gives a reason, which
+/// then shows in its place; a current value `refuse` refuses marks the box.
 export function Combobox({
   value,
   onChange,
   options,
   placeholder,
   allowCustom = false,
+  normalize,
+  refuse,
   className,
 }: {
   value: string;
@@ -550,12 +565,17 @@ export function Combobox({
   options: Opt<string>[];
   placeholder?: string;
   allowCustom?: boolean;
+  normalize?: (v: string) => string;
+  refuse?: (v: string) => string | null;
   className?: string;
 }) {
   const { t } = useT();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const selected = options.find((o) => o.value === value);
+  const custom = normalize ? normalize(query) : query;
+  const customRefused = custom ? (refuse?.(query) ?? null) : null;
+  const valueRefused = value && !selected ? (refuse?.(value) ?? null) : null;
   const pick = (v: string) => {
     onChange(v);
     setOpen(false);
@@ -568,8 +588,10 @@ export function Combobox({
       <PopoverTrigger asChild>
         <button
           type="button"
+          title={valueRefused ?? undefined}
           className={cn(
             "flex w-full cursor-pointer items-center justify-between gap-2 rounded-md border border-border bg-secondary px-2.5 py-1 text-sm whitespace-nowrap transition-colors outline-none hover:border-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50",
+            valueRefused && "border-destructive",
             className,
           )}
         >
@@ -585,11 +607,18 @@ export function Combobox({
           <CommandInput value={query} onValueChange={setQuery} placeholder={placeholder} />
           <CommandList>
             <CommandEmpty>{allowCustom ? "" : t("common.noMatch")}</CommandEmpty>
-            {allowCustom && query && !options.some((o) => o.value === query) && (
-              <CommandItem value={query} onSelect={() => pick(query)}>
-                {t("common.useValue", { v: query })}
-              </CommandItem>
-            )}
+            {allowCustom &&
+              custom &&
+              !options.some((o) => o.value === custom) &&
+              (customRefused ? (
+                <CommandItem value={query} forceMount disabled className="text-destructive">
+                  {customRefused}
+                </CommandItem>
+              ) : (
+                <CommandItem value={query} forceMount onSelect={() => pick(custom)}>
+                  {t("common.useValue", { v: custom })}
+                </CommandItem>
+              ))}
             {options.map((o) => (
               <CommandItem key={o.value} value={o.value} onSelect={() => pick(o.value)}>
                 {o.icon && <span className="shrink-0 text-muted-foreground">{o.icon}</span>}
@@ -615,7 +644,8 @@ export function Combobox({
 }
 
 /// The shared column picker: a [`Combobox`] over catalog columns, coloured by
-/// type family, `allowCustom` for offline / hand-typed names.
+/// type family, `allowCustom` for offline / hand-typed names, read as flusso
+/// reads a column name (lowercased; one it can't read is refused).
 export function ColumnPicker({
   value,
   columns,
@@ -635,11 +665,14 @@ export function ColumnPicker({
     description: c.sql_type,
     className: typeClass((c.suggested_type ?? c.sql_type) as string),
   }));
+  const refuse = useSqlNameRefusal();
   return (
     <Combobox
       value={value}
       options={options}
       allowCustom
+      normalize={sqlName}
+      refuse={refuse}
       onChange={onChange}
       placeholder={placeholder}
       className={className}
@@ -649,7 +682,8 @@ export function ColumnPicker({
 
 /// The shared table picker: a [`Combobox`] over catalog table names, marking
 /// junction tables with a link glyph so many-to-many `through` picks are
-/// obvious. `allowCustom` for offline / hand-typed names.
+/// obvious. `allowCustom` for offline / hand-typed names, read as flusso reads
+/// a table name (as [`ColumnPicker`] reads a column).
 export function TablePicker({
   value,
   tables,
@@ -672,11 +706,14 @@ export function TablePicker({
     icon: junctions?.has(name) ? <Link2 className="size-3.5" /> : undefined,
     description: junctions?.has(name) ? t("catalog.junction") : undefined,
   }));
+  const refuse = useSqlNameRefusal();
   return (
     <Combobox
       value={value}
       options={options}
       allowCustom
+      normalize={sqlName}
+      refuse={refuse}
       onChange={onChange}
       placeholder={placeholder}
       className={className}

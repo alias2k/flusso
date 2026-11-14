@@ -20,6 +20,7 @@ pub use filter::*;
 pub use flusso_type::*;
 pub use index_mapping::*;
 pub use join::*;
+pub use projection::constant_mapping_type;
 pub use schema::*;
 pub use secret::*;
 pub use soft_delete::*;

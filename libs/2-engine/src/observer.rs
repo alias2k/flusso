@@ -116,7 +116,8 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
         let _ = (sink, index, id, reason);
     }
 
-    /// A document could not be built (a script failed on it). Reported under
+    /// A document could not be built (a script failed on it, or an `array:
+    /// true` column held an object). Reported under
     /// either `policy`: `Skip` left it out, so every sink keeps its indexed
     /// version; `Stop` is about to stop the ingest engine.
     fn on_document_failed(

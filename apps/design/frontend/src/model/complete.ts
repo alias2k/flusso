@@ -6,19 +6,12 @@
 // live preview.
 
 import type { Aggregate, AggregateKey, ColumnPair, Field } from "../api";
-import { trimmed } from "./names";
+import { fieldNameProblem } from "./names";
 import { scriptIncomplete } from "./scripts";
 import { joinOf } from "./tree";
 
-/// The kernel's `FieldName` rule, applied after its trim.
-const FIELD_NAME = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
-const FIELD_NAME_MAX_CHARS = 63;
-
 /// Is this a name the backend's `FieldName` refuses (blank included)?
-export function nameInvalid(raw: string): boolean {
-  const name = trimmed(raw);
-  return !FIELD_NAME.test(name) || [...name].length > FIELD_NAME_MAX_CHARS;
-}
+export const nameInvalid = (raw: string): boolean => fieldNameProblem(raw, []) !== null;
 
 /// Is this field's name one the backend's `FieldName` refuses (blank included)?
 export const nameIncomplete = (field: Field | undefined): boolean => !!field && nameInvalid(field.field);

@@ -65,7 +65,8 @@ impl OtelObserver {
             script_failures: meter
                 .u64_counter("flusso.script.failures")
                 .with_description(
-                    "Documents a script failed on, by index, field path (array positions folded \
+                    "Documents that failed to build (a script failed, or an `array: true` \
+                     column held an object), by index, field path (array positions folded \
                      to `[]`) and policy: `skip` left the document at its indexed version, \
                      `stop` stopped the ingest engine. A non-zero value means documents are \
                      going stale — alert on it.",

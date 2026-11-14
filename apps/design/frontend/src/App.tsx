@@ -94,9 +94,19 @@ import type { ParseErrorInfo } from "./model/anchors";
 import { removeAt, removeFields, removeNode } from "./model/edit";
 import { adoptIds, fieldIds, stripUids } from "./model/ids";
 import { cleanSchemaPath, indexName, isConfigFile, pairRows, type RowPair, schemaPath } from "./model/indexRows";
-import { useNameRefusal } from "./components/nameRefusal";
+import { sqlName } from "./model/names";
+import { keepFocus } from "./components/nameDraft";
+import { useNameRefusal, useSqlNameRefusal } from "./components/nameRefusal";
 import { formatRoute, parseRoute, type Route } from "./router";
-import { countTypeMismatches, fixAllTypes, requiredDefaultIssues } from "./model/issues";
+import {
+  countTypeMismatches,
+  diagnosticPath,
+  duplicateNameIssues,
+  DUPLICATE_FIELD_NAME,
+  exactDuplicateIssues,
+  fixAllTypes,
+  requiredDefaultIssues,
+} from "./model/issues";
 import { pruneIncomplete } from "./model/prune";
 import type { SearchRecord } from "./model/search";
 import { DesignProvider } from "./state";
@@ -472,11 +482,23 @@ export default function App() {
 
   // Database diagnostics (from Validate) plus always-on, catalog-only schema
   // checks (e.g. required-over-nullable needs a default) — same channel, so
-  // both highlight the fields and list in the preview.
+  // both highlight the fields and list in the preview. A duplicated name is
+  // flagged while the schema has it, in the words of the last preview's
+  // offline check (which say what the index keeps) for as long as the fields
+  // they describe are unchanged, else in words true in every case.
+  const [previewFor, setPreviewFor] = useState<{ index: string; schema: IndexSchema } | null>(null);
   const allDiagnostics = useMemo(() => {
-    const live = schema ? requiredDefaultIssues(schema, catalog, active, t) : [];
-    return [...(diagnostics ?? []), ...live];
-  }, [schema, catalog, active, diagnostics, t]);
+    const server = (diagnostics ?? []).filter((d) => d.kind !== DUPLICATE_FIELD_NAME);
+    if (!schema) return server;
+    const checked = previewFor?.index === active ? previewFor.schema : undefined;
+    const duplicates = exactDuplicateIssues(
+      duplicateNameIssues(schema, active, t),
+      preview?.schema_diagnostics ?? [],
+      checked,
+      schema,
+    );
+    return [...server, ...requiredDefaultIssues(schema, catalog, active, t), ...duplicates];
+  }, [schema, catalog, active, diagnostics, preview, previewFor, t]);
 
   // Count of fields whose chosen type is a sharp change from the source column,
   // and a one-click bulk fix. The "ignore" dismissal resets per active index.
@@ -504,6 +526,7 @@ export default function App() {
         .then((p) => {
           if (!current) return;
           setPreview(p);
+          setPreviewFor({ index: active, schema: pruned.schema });
           setPreviewError("");
         })
         .catch((e) => current && setPreviewError(String(e)));
@@ -945,12 +968,17 @@ export default function App() {
       const at = { row: nameDraft.row, reason: nameDraft.refused };
       setToast({
         kind: "error",
-        text: nameDraft.kind === "index" ? t("toast.nameRefusedSave", at) : t("toast.sinkNameRefusedSave", at),
+        text:
+          nameDraft.kind === "index"
+            ? t("toast.nameRefusedSave", at)
+            : nameDraft.kind === "sink"
+              ? t("toast.sinkNameRefusedSave", at)
+              : t("toast.fieldNameRefusedSave", at),
       });
       return;
     }
-    // Leaving the name box applies the name typed in it.
-    if (nameDraft && document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    // The name typed in a name box is applied first.
+    nameDraft?.settle();
     setSaving(true);
     try {
       const unread = await flushPendingValues();
@@ -1060,9 +1088,29 @@ export default function App() {
     }
   };
 
-  // Reset the edited document to the last-saved snapshot. In Code mode the
-  // buffer re-seeds from the reverted schema (the seed effect).
-  const reset = revertChanges;
+  // A name typed in a name box and not applied yet: Undo and Redo discard it
+  // and do nothing else; with none, they step through the history. Their
+  // buttons keep the focus in the box (`keepFocus`), so the draft is still
+  // there when they act (see `components/nameDraft.ts`).
+  const dropNameDraft = (): boolean => {
+    const draft = useUiStore.getState().nameDraft;
+    draft?.drop();
+    return draft !== null;
+  };
+  const undoTyped = () => {
+    if (!dropNameDraft()) undo();
+  };
+  const redoTyped = () => {
+    if (!dropNameDraft()) redo();
+  };
+
+  // Reset the edited document to the last-saved snapshot, discarding a name
+  // still in its box. In Code mode the buffer re-seeds from the reverted
+  // schema (the seed effect).
+  const reset = () => {
+    dropNameDraft();
+    revertChanges();
+  };
 
   const openRaw = () =>
     void flushPendingValues().then(() => {
@@ -1190,7 +1238,7 @@ export default function App() {
       shortcut: "⌘Z",
       detail: { body: t("search.descUndo"), enter: runAction },
       run: () => {
-        if (canUndo) undo();
+        if (canUndo || typingName) undoTyped();
       },
     },
     {
@@ -1201,7 +1249,7 @@ export default function App() {
       shortcut: "⇧⌘Z",
       detail: { body: t("search.descRedo"), enter: runAction },
       run: () => {
-        if (canRedo) redo();
+        if (canRedo || typingName) redoTyped();
       },
     },
   ];
@@ -1264,8 +1312,8 @@ export default function App() {
     if (mod && e.key.toLowerCase() === "z") {
       if (editing) return;
       e.preventDefault();
-      if (e.shiftKey) redo();
-      else undo();
+      if (e.shiftKey) redoTyped();
+      else undoTyped();
       return;
     }
     if (e.key === "Escape") {
@@ -1352,12 +1400,26 @@ export default function App() {
         <div className="flex flex-1 items-center justify-end gap-3">
           {/* global: edit history */}
           <Hint label={t("topbar.undo")}>
-            <Button variant="ghost" size="icon-sm" aria-label={t("topbar.undo")} disabled={!canUndo} onClick={undo}>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label={t("topbar.undo")}
+              disabled={!canUndo && !typingName}
+              onMouseDown={keepFocus}
+              onClick={undoTyped}
+            >
               <Icon name="undo" />
             </Button>
           </Hint>
           <Hint label={t("topbar.redo")}>
-            <Button variant="ghost" size="icon-sm" aria-label={t("topbar.redo")} disabled={!canRedo} onClick={redo}>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label={t("topbar.redo")}
+              disabled={!canRedo && !typingName}
+              onMouseDown={keepFocus}
+              onClick={redoTyped}
+            >
               <Icon name="redo" />
             </Button>
           </Hint>
@@ -1433,7 +1495,13 @@ export default function App() {
             </Button>
           </Hint>
           <Hint label={t("topbar.resetHint")}>
-            <Button variant="secondary" size="sm" onClick={reset} disabled={!(dirty || textsPending) || saving}>
+            <Button
+              variant="secondary"
+              size="sm"
+              onMouseDown={keepFocus}
+              onClick={reset}
+              disabled={!(dirty || textsPending || typingName) || saving}
+            >
               <span className={BTN_ICON}>
                 <RotateCcw />
               </span>
@@ -1847,7 +1915,7 @@ function ValidationDetail({ check }: { check: Check }) {
       {diagnostics.map((d, i) => (
         <div key={i} className={cn("py-0.5", d.severity === "warning" ? "text-warn" : "text-destructive")}>
           <span className="font-mono text-muted-foreground">
-            {d.index}.{d.path.join(".")}
+            {d.index}.{diagnosticPath(d)}
           </span>{" "}
           {d.message}
         </div>
@@ -2470,10 +2538,11 @@ function NewIndex({
     setOverrideName("");
   };
   const nameRefusal = useNameRefusal()(name, taken);
-  const detailsOk = !!indexName(name) && !nameRefusal && !!table;
+  const tableRefusal = useSqlNameRefusal()(table);
+  const detailsOk = !!indexName(name) && !nameRefusal && !!sqlName(table) && !tableRefusal;
   const create = () => {
     if (!detailsOk || !effectivePath) return;
-    onCreate(name, table, effectivePath);
+    onCreate(name, sqlName(table), effectivePath);
     reset();
   };
 
@@ -2532,7 +2601,15 @@ function NewIndex({
                     }))}
                   />
                 ) : (
-                  <Text value={table} onChange={setTable} placeholder={t("sidebar.rootTable")} />
+                  <>
+                    <Text
+                      value={table}
+                      onChange={setTable}
+                      invalid={!!tableRefusal}
+                      placeholder={t("sidebar.rootTable")}
+                    />
+                    {tableRefusal && <span className="text-2xs text-destructive">{tableRefusal}</span>}
+                  </>
                 )}
               </Field>
             </div>
