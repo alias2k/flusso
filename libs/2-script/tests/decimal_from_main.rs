@@ -17,9 +17,9 @@
 //!   counts those rows.
 //! - `zero`, `exponent`: the kind and `${x}` as on `main`. A value that rounds
 //!   to zero, or is written with an exponent, reads as `main` read it.
-//! - `long`, `exact`: the kind as on `main`, and `${x}` is the input, every
-//!   digit, where `main` kept about 17; an input with more digits than
-//!   `Decimal` holds reads as `main` read it.
+//! - `long`, `exact`: the kind as on `main`, and `${x}` is the nearest
+//!   `Decimal` to the input: every digit up to 28 fractional ones, where `main`
+//!   kept about 17.
 //! - `past`: the kind (a string). Its text is the exact digits, where `main`'s
 //!   went through `f64`.
 //! - `max`: nothing. A value `Decimal` holds exactly but `f64` rounds past its
@@ -179,12 +179,11 @@ fn a_declared_decimal_reaches_a_script_as_main_gave_it() {
             problems.push("text");
         }
         if matches!(label, "long" | "exact") {
-            let held_exactly = rust_decimal::Decimal::from_str_exact(input).is_ok();
-            if held_exactly && branch[3] != input {
-                problems.push("every digit");
-            }
-            if !held_exactly && branch[3] != main[3] {
-                problems.push("text");
+            let nearest = <rust_decimal::Decimal as std::str::FromStr>::from_str(input)
+                .unwrap()
+                .to_string();
+            if branch[3] != nearest {
+                problems.push("nearest decimal");
             }
         }
         if branch[2] == "decimal" {

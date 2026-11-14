@@ -10,7 +10,7 @@
 //! | `SmallInt` / `Int` / `BigInt` | `i64` |
 //! | `Float` / `Double` | `f64` |
 //! | `Decimal` | `Decimal` |
-//! | `BigDecimal` (a declared `decimal`) | `Decimal`: exact when it holds the text, else as read through `f64`; a string of its digits past `Decimal`'s range |
+//! | `BigDecimal` (a declared `decimal`) | `Decimal`: the nearest to its text (rounded past 28 fractional digits), or as read through `f64` when written with an exponent or zero; a string of its digits past `Decimal`'s range |
 //! | `String`, `Uuid` | string |
 //! | `Date` / `Time` / `Timestamp` / `TimestampTz` | RFC 3339 string |
 //! | `Bytes` | blob |
@@ -185,20 +185,22 @@ fn leaf(value: Dynamic, out: &Output<'_>) -> Result<GenericValue, String> {
     }
 }
 
-/// A declared decimal in Rhai. A value `Decimal` holds exactly is that
-/// decimal, every digit kept. Any other (written with an exponent, more than
-/// 28 fractional digits, zero, past the range) reads as `main` read it before
-/// issue #327, through `f64`, so a tiny value is the same zero and a value past
-/// ±7.9e28 is a string, here of its exact digits.
+/// A declared decimal in Rhai. Written without an exponent, it is the nearest
+/// `Decimal` (every digit up to 28 fractional ones, rounded past them). Written
+/// with an exponent, or zero, it reads as `main` read it before issue #327,
+/// through `f64`, so a tiny value is the same zero. Past ±7.9e28 it is a string
+/// of its exact digits.
 // Out of line: the common arms of `to_dynamic` stay small and fast.
 #[inline(never)]
 fn declared_decimal(value: &kernel::BigDecimal) -> Dynamic {
     let text = value.as_str();
-    match Decimal::from_str_exact(text) {
-        Ok(d) if !d.is_zero() => Dynamic::from_decimal(d),
-        _ => as_read_through_f64(text)
-            .map_or_else(|| Dynamic::from(text.to_owned()), Dynamic::from_decimal),
+    if !text.contains(['e', 'E'])
+        && let Ok(d) = Decimal::from_str(text)
+        && !d.is_zero()
+    {
+        return Dynamic::from_decimal(d);
     }
+    as_read_through_f64(text).map_or_else(|| Dynamic::from(text.to_owned()), Dynamic::from_decimal)
 }
 
 /// `text`, a JSON number, as the `Decimal` a `serde_json` number read gave:
@@ -210,8 +212,10 @@ fn as_read_through_f64(text: &str) -> Option<Decimal> {
         .or_else(|| number.as_f64().and_then(|f| Decimal::try_from(f).ok()))
 }
 
-/// A `decimal` script field's result, written with every digit it holds.
+/// A `decimal` script field's result, written with every digit it holds; a
+/// zero without a sign.
 fn exact(value: &Decimal) -> GenericValue {
+    let value = &if value.is_zero() { value.abs() } else { *value };
     let mut text = DecimalText::default();
     let written = std::fmt::Write::write_fmt(&mut text, format_args!("{value}")).is_ok();
     written
