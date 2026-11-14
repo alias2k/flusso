@@ -20,10 +20,12 @@
 //! 4. The sink indexes what is left under the last emitted one's mapping, and
 //!    may reject it.
 //!
-//! [`duplicate_outcome`] classifies a set of namesakes. The `duplicate_names`
+//! [`duplicate_outcome`] classifies a set of namesakes, and [`never_indexed`]
+//! says whether they never give an indexed document, which makes the
+//! diagnostic an error that stops `flusso run`. The `duplicate_names`
 //! live test (`apps/cli/tests/duplicate_names.rs`) builds every ordered pair
-//! of field kinds through the real builder and OpenSearch sink and asserts the
-//! classification. A pair it can't place with certainty is
+//! of field kinds through the real builder and OpenSearch sink and asserts
+//! both. A pair it can't place with certainty is
 //! [`DuplicateOutcome::Unknown`], whose wording claims nothing.
 //!
 //! ```
@@ -426,7 +428,7 @@ fn constant_fits(value: &GenericValue, last: &Field) -> Option<bool> {
     let object = scalar_leaves(value, &mut leaves);
     match mapped_as(last) {
         Mapped::Unindexed | Mapped::Itself => Some(true),
-        Mapped::Structured if object => None,
+        Mapped::Structured if object => strict_refuses(value, last).then_some(false),
         Mapped::Structured => Some(leaves.is_empty()),
         _ if object => Some(false),
         Mapped::Anything => Some(true),
@@ -435,6 +437,24 @@ fn constant_fits(value: &GenericValue, last: &Field) -> Option<bool> {
             .iter()
             .try_fold(true, |all, leaf| Some(all && scalar_fits(leaf, &ty)?)),
     }
+}
+
+/// Whether the strict mapping of `last`, a join, an `object` or a `json`
+/// column, refuses the object constant `value`: a key names none of its child
+/// fields. A `map` takes any key.
+fn strict_refuses(value: &GenericValue, last: &Field) -> bool {
+    let GenericValue::Map(keys) = value else {
+        return false;
+    };
+    let dynamic =
+        matches!(&last.source, FieldSource::Column(c) if matches!(c.ty, FlussoType::Map { .. }));
+    !dynamic
+        && keys.keys().any(|key| {
+            !last
+                .children()
+                .iter()
+                .any(|child| child.field.as_ref() == key)
+        })
 }
 
 /// Whether a `geo_point` takes the constant `value`: a `[lon, lat]` pair
@@ -763,4 +783,76 @@ pub(crate) fn described(field: &Field) -> String {
     } else {
         format!("{what}, `emit: false`")
     }
+}
+
+/// Why namesakes never produce an indexed document, whatever the data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NeverIndexed {
+    /// Every document fails to build, so the ingest engine stops on it.
+    FailsToBuild,
+    /// OpenSearch refuses every document, `ignore_malformed` or not.
+    Refused,
+}
+
+/// Whether the namesakes `same` never produce an indexed document, whatever
+/// the rows hold. Two classes do, and only with every namesake emitted:
+///
+/// - **Fails to build.** The first is an `array: true` column of scalars and
+///   the last an `object`. An object is built for every row, nulls and all,
+///   and the array refuses an object element.
+/// - **Refused.** The first is a constant the last one's mapping refuses
+///   even with `ignore_malformed`, and the last sets no mapping `options`. A
+///   constant is the same in every document. Under an indexed join,
+///   `object`, `json` or `map`: a scalar or a list (a concrete value under an
+///   object mapping), or an object with a key the strict mapping has no child
+///   for (a `map` takes it). Under a `binary` column: an object.
+///
+/// Every other pair indexes some document: a related row, a point or an
+/// object value can be absent, and a script can return nothing. The
+/// `duplicate_names` live matrix pins this for every pair of field kinds.
+pub fn never_indexed(same: &[&Field]) -> Option<NeverIndexed> {
+    let last = same.last()?;
+    if !same.iter().all(|field| field.emit) {
+        return None;
+    }
+    match duplicate_outcome(same) {
+        DuplicateOutcome::FailsToBuild { .. } if matches!(last.source, FieldSource::Group(_)) => {
+            Some(NeverIndexed::FailsToBuild)
+        }
+        DuplicateOutcome::Rejected {
+            reason: Rejection::FirstConstant,
+            ..
+        } if own_options(last).is_empty()
+            && (matches!(mapped_as(last), Mapped::Structured)
+                || (is_binary(last)
+                    && matches!(
+                        same.first().map(|f| &f.source),
+                        Some(FieldSource::Constant(GenericValue::Map(_)))
+                    ))) =>
+        {
+            Some(NeverIndexed::Refused)
+        }
+        _ => None,
+    }
+}
+
+/// The mapping `options` a field sets itself. A `map` column's `dynamic:
+/// true` is not one: flusso injects it, and setting it changes nothing. Any
+/// other `dynamic`, on any field, is.
+fn own_options(field: &Field) -> Vec<&String> {
+    let is_map =
+        matches!(&field.source, FieldSource::Column(c) if matches!(c.ty, FlussoType::Map { .. }));
+    field
+        .options
+        .iter()
+        .filter(|(key, value)| {
+            !(is_map && *key == "dynamic" && **value == GenericValue::Bool(true))
+        })
+        .map(|(key, _)| key)
+        .collect()
+}
+
+fn is_binary(field: &Field) -> bool {
+    matches!(&field.source, FieldSource::Column(c) if c.ty == FlussoType::Binary && c.indexed)
 }

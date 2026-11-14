@@ -85,11 +85,39 @@ export function requiredDefaultIssues(
 /// validation's own copy is dropped.
 export const DUPLICATE_FIELD_NAME = "duplicate_field_name";
 
+/// The server's kinds for two namesakes that never index a document: errors that
+/// stop `flusso run`. They describe the same fields as `DUPLICATE_FIELD_NAME`.
+export const DUPLICATE_FAILS_TO_BUILD = "duplicate_field_name_fails_to_build";
+export const DUPLICATE_REFUSED = "duplicate_field_name_refused";
+
+/// The server's kind for a time-of-day column under a `timestamp` or `date` field.
+export const TIME_OF_DAY_AS_DATE = "time_of_day_as_date";
+
+/// Whether a server diagnostic is about fields that share a name.
+export const isDuplicateKind = (kind: string | undefined): boolean =>
+  kind === DUPLICATE_FIELD_NAME || kind === DUPLICATE_FAILS_TO_BUILD || kind === DUPLICATE_REFUSED;
+
+/// What a diagnostic of a kind that stops `flusso run` means for the deployment;
+/// `null` for any other kind.
+export function stopNote(kind: string | undefined, t: Translate): string | null {
+  switch (kind) {
+    case DUPLICATE_FAILS_TO_BUILD:
+      return t("diag.neverBuilds");
+    case DUPLICATE_REFUSED:
+      return t("diag.neverIndexed");
+    case TIME_OF_DAY_AS_DATE:
+      return t("diag.timeOfDayAsDate");
+    default:
+      return null;
+  }
+}
+
 /// One warning per name two or more fields share at one level, as flusso reads
 /// field names (trimmed), at any depth: at most one reaches the index. A
 /// file written by hand may hold such a schema; the Inspector refuses to make one.
 /// Its words are true whatever the fields are; `exactDuplicateIssues` swaps in
-/// the server's, which say what the index keeps.
+/// the server's, which say what the index keeps (and, for namesakes that never
+/// index a document, that it is an error).
 export function duplicateNameIssues(schema: IndexSchema, index: string, t: Translate): DiagnosticDto[] {
   const issues: DiagnosticDto[] = [];
   const walk = (fields: Field[], parent: string[], parentPositions: (number | null)[]) => {
@@ -153,13 +181,13 @@ export function exactDuplicateIssues(
       checked &&
       exact.find(
         (s) =>
-          s.kind === DUPLICATE_FIELD_NAME &&
+          isDuplicateKind(s.kind) &&
           s.index === d.index &&
           samePath(s.path, d.path) &&
           samePath((s.positions ?? []).map(String), (d.positions ?? []).map(String)) &&
           duplicateSignature(checked, s.path, s.positions) === duplicateSignature(schema, s.path, s.positions),
       );
-    return told ? { ...d, message: told.message } : d;
+    return told ? { ...d, kind: told.kind, severity: told.severity, message: told.message } : d;
   });
 }
 

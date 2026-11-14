@@ -117,14 +117,25 @@ The same form is written wherever the value goes: a `min`/`max` with `value_type
 
 - **Precision.** A `date` field stores milliseconds, so `range` and sort see `.123456` as `.123`. `_source` keeps every digit.
 - **A `format` of your own.** `options.format` replaces the default, so it must keep a pattern that reads the forms above: put `strict_date_optional_time` first (`strict_date_optional_time||yyyy-MM-dd HH:mm:ss`). A format with none refuses every document holding a value. `flusso check` (`--offline` too) and `run` warn with [`timestamp_format`](cli.md#check) when every pattern is known to refuse the form.
-- **A time of day has no date.** A `time` or `timetz` column is accepted under `timestamp`, but the `date` mapping refuses `03:04:05`, so every document with a non-null value is an [item-level rejection](index-and-on-error.md#on_error). Declare it as a `custom` keyword instead; `HH:MM:SS` sorts correctly as text:
+- **A time of day has no date.** A `time` or `timetz` column is accepted under `timestamp`, but the `date` mapping refuses `03:04:05`, so every document with a non-null value is an [item-level rejection](index-and-on-error.md#on_error). With the database, `check` reports it as [`time_of_day_as_date`](cli.md#check), and `run` stops at start, for a `timestamp` or `date` field with no `options` at the root or in a plain object (see [Validation at start](cli.md#validation-at-start)). A field inside a join, or a `min`/`max` over such a column, is refused only for a parent with a related row, so it isn't reported. Two ways out, checked against OpenSearch 2, each leaving `check` with nothing to report. Declare it as a `custom` keyword; `HH:MM:SS` sorts correctly as text:
 
   ```yaml
   - custom: opensAt
     column: opens_at
-    postgres: [time without time zone]
+    postgres: [time without time zone]   # [time with time zone] for timetz
     opensearch: keyword
     required: false
+  ```
+
+  Or keep a `date` mapping with a `timestamp` field (a `date` field takes only a `date` column) whose format reads a time of day with any number of fraction digits, led by the default pattern:
+
+  ```yaml
+  - timestamp: opensAt
+    column: opens_at
+    required: false
+    options:
+      format: "strict_date_optional_time||HH:mm:ss[.SSSSSS][.SSSSS][.SSSS][.SSS][.SS][.S]"
+      # timetz: "strict_date_optional_time||HH:mm:ss[.SSSSSS][.SSSSS][.SSSS][.SSS][.SS][.S]XXX||HH:mm:ss[.SSSSSS][.SSSSS][.SSSS][.SSS][.SS][.S]X"
   ```
 
 - **Values outside the format.** A BC date, `infinity` and `-infinity`, and a year past 9999 reach the document as Postgres renders them (`0044-03-15 BC`, `infinity`), which the `date` mapping refuses, so that one document is rejected and `on_error` decides.

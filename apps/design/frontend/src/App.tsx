@@ -102,8 +102,8 @@ import {
   countTypeMismatches,
   diagnosticPath,
   duplicateNameIssues,
-  DUPLICATE_FIELD_NAME,
   exactDuplicateIssues,
+  isDuplicateKind,
   fixAllTypes,
   requiredDefaultIssues,
 } from "./model/issues";
@@ -488,7 +488,7 @@ export default function App() {
   // they describe are unchanged, else in words true in every case.
   const [previewFor, setPreviewFor] = useState<{ index: string; schema: IndexSchema } | null>(null);
   const allDiagnostics = useMemo(() => {
-    const server = (diagnostics ?? []).filter((d) => d.kind !== DUPLICATE_FIELD_NAME);
+    const server = (diagnostics ?? []).filter((d) => !isDuplicateKind(d.kind));
     if (!schema) return server;
     const checked = previewFor?.index === active ? previewFor.schema : undefined;
     const duplicates = exactDuplicateIssues(

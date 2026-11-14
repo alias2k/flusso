@@ -775,7 +775,13 @@ document (the designer refuses to make one: `model/names.ts`'s `fieldNameProblem
 is built from `source::duplicate_outcome` (`libs/1-ports/source/src/duplicates.rs`), which the live
 `apps/cli/tests/duplicate_names.rs` matrix (every ordered pair of 38 field kinds through the real
 builder and OpenSearch sink; `opensearch` nextest group) pins pair by pair, a pair it can't place
-getting `Unknown` and a wording that claims nothing; a finding
+getting `Unknown` and a wording that claims nothing; a pair that never gives an indexed document
+whatever the rows (issue #316: `source::never_indexed` — an `array: true` scalar column before an
+`object` fails every build, a constant a structured or `binary` last one's mapping refuses even
+with `ignore_malformed` is refused in every document) is `DuplicateFieldNameFailsToBuild` /
+`DuplicateFieldNameRefused` instead, an error; the matrix asserts `never_indexed` for every pair
+against a third, all-null row (scripts return nothing on it) and a re-run under
+`index.mapping.ignore_malformed`; a finding
 under a duplicated name carries its position (`Diagnostic.positions`, rendered by `dotted_path` as
 `orders#2.total`; the designer gets them on `DiagnosticDto.positions` and the exact text from
 `/api/preview`'s `schema_diagnostics`, shown only while the fields it describes are unchanged:
@@ -795,15 +801,30 @@ still fails as `connecting to Postgres`), prints every diagnostic to stderr with
 and refuses to start only on a kind that cannot work as written: `stops_the_start` matches
 `DiagnosticKind` exhaustively (`UnknownTable`/`UnknownColumn`/`UnreadSoftDeleteMarker`/
 `RelationPrimaryKey`/`TransformNotApplicable`/`RootPrimaryKeyMismatch`/`UnsupportedKeyType`/
-`NotAnArrayColumn`/`LinkTypeMismatch` stop;
+`NotAnArrayColumn`/`LinkTypeMismatch`/`DuplicateFieldNameFailsToBuild`/`DuplicateFieldNameRefused`/`TimeOfDayAsDate`
+stop; the last two only while `a_sink_refuses` — every sink is an OpenSearch sink `plain_opensearch` can prove
+plain: an allow-list (no `pipeline`, only `PLAIN_SETTINGS` index settings, plus
+`ignore_malformed` where it doesn't lift the refusal; every `OpensearchConfig` field is destructured
+by name, so a new option must be decided) — any state it doesn't model means no stop
+(`refused_only_by_a_mapping`);
 type, numeric, nullability, ignored-primary-key, `UndeclaredArrayColumn`, `IdsElementMismatch` (an empty
 `ids` array still indexes), `IdsElementLossy`, `DuplicateFieldName`, `RootPrimaryKey`
 and `TimestampFormat` (issue #304: a timestamp `options.format` no pattern of which reads the ISO
 form, `source::reads_iso_timestamps`, checked offline in `validate_spec`) findings print and start, as they built or ran in 0.17), so a new kind forces a decision there; stop
 only on a state no working 0.17 deployment can be in (or on a key new since, like `array`). `DiagnosticKind` stays exhaustive for that match; `Diagnostic` and `Anchor` are
 `#[non_exhaustive]` (`Diagnostic::new` builds one). `check` still fails on every `Error`. No opt-out
-flag. Guards: `backends::tests` (one per kind) and `config_coverage`'s
-`an_enum_or_domain_column_is_a_type_mismatch_that_still_builds`. The daemon
+flag. The stopping kinds apply only where every document carries the value, mapped as declared:
+the root and plain objects (`validation.rs`'s `carries`: a `Group`, emitted, no `options`); a pair
+elsewhere is the plain `DuplicateFieldName`. `TimeOfDayAsDate` (issue #309): a `time`/`timetz`
+column under a `timestamp`/`date` field there (`Checker.date_mapped`: no namesake, no `options`
+at all); not a `min`/`max` or a field in a join (a parent with no related row indexes). Guards:
+`backends::tests` (one per kind, plus `only_an_opensearch_sink_that_maps_the_value_as_written_refuses_it`),
+`config_coverage`'s `an_enum_or_domain_column_is_a_type_mismatch_that_still_builds` and
+`a_time_of_day_under_a_date_mapping_is_reported`, `apps/cli/tests/time_columns.rs` (live Postgres
++ OpenSearch: reported only where no document indexes; the workarounds index and leave `check`
+silent), and the two `*_some_document_survives_starts_and_indexes` tests (in `duplicate_names.rs`
+and `time_columns.rs`: the real `flusso run` binary, via `tests/common`, starts and indexes each
+configuration the review found refused, and still refuses the root cases). The daemon
 wires a `StatusObserver` (`observer.rs`) that updates a shared per-sink `Status` (`status.rs`),
 runs the engines under `supervise.rs` (stage every sink engine → spawn them + the ingest engine
 as independent tasks → restart a failed one with backoff while the others keep going; the

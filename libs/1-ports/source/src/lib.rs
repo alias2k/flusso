@@ -13,7 +13,9 @@ mod validation;
 pub mod cdc;
 pub mod document;
 
-pub use duplicates::{DuplicateOutcome, Rejection, Text, duplicate_outcome};
+pub use duplicates::{
+    DuplicateOutcome, NeverIndexed, Rejection, Text, duplicate_outcome, never_indexed,
+};
 pub use error::*;
 pub use introspection::*;
 pub use provisioning::*;

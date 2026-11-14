@@ -20,11 +20,21 @@
 //! ([`DuplicateOutcome::Unknown`]), anything goes: its wording says so.
 //!
 //! Row 1 has related rows and a set `belongs_to` link; row 2 has none, so a
-//! pair whose outcome depends on related rows is seen both ways.
+//! pair whose outcome depends on related rows is seen both ways. The outcome
+//! is classified on those two.
+//!
+//! Row 3 holds only its key: every column null, no related row, and the
+//! scripts return nothing for it. A pair no row indexes is written again
+//! through a sink with `index.mapping.ignore_malformed`. A pair indexes
+//! nothing when no row of either run is indexed, and that must match
+//! [`source::never_indexed`], the rule that stops the start: it fails every
+//! build, or OpenSearch refuses every document however lenient its settings.
 //!
 //! `DUPLICATE_MATRIX=print` prints the whole matrix as a Markdown table. The
 //! manual's "One name per level" table is written by hand; check it against
 //! that print when an outcome changes.
+
+mod common;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -37,7 +47,7 @@ use serde_json::{Value, json};
 use sink::Sink;
 use sink_opensearch::OpensearchSink;
 use source::document::{Document, DocumentId};
-use source::{DuplicateOutcome, RowKey, SourceSpec};
+use source::{DuplicateOutcome, NeverIndexed, RowKey, SourceSpec};
 use source_postgres::PgDocumentBuilder;
 use sqlx::AssertSqlSafe;
 use sqlx::postgres::{PgPool, PgPoolOptions};
@@ -136,11 +146,11 @@ const KINDS: &[(&str, &str)] = &[
     ("constant object", "- constant: v\n  value: { a: 1 }"),
     (
         "script",
-        "- keyword: v\n  script: '\"s\"'\n  required: false",
+        "- keyword: v\n  script: 'if root.id == 3 { () } else { \"s\" }'\n  required: false",
     ),
     (
         "script array",
-        "- keyword: v\n  script: '[\"s\"]'\n  array: true\n  required: false",
+        "- keyword: v\n  script: 'if root.id == 3 { () } else { [\"s\"] }'\n  array: true\n  required: false",
     ),
     (
         "keyword emit: false",
@@ -164,6 +174,7 @@ INSERT INTO t VALUES
      '[{\"a\": 1}]', 1, 1.25),
     (2, 'y', 8, 2.5, false, '2026-02-03T04:05:06Z', '6f1c2b1a-0000-4000-8000-000000000002', 'b',
      '\\x0304', '{\"b\": 2}', '{\"it\": \"ciao\"}', 3.5, 4.5, '{r}', '[{\"b\": 2}]', NULL, 2.5);
+INSERT INTO t (id) VALUES (3);
 INSERT INTO r VALUES (10, 1, 'one'), (11, 1, 'two');
 INSERT INTO tj VALUES (1, 10);
 ";
@@ -218,8 +229,10 @@ async fn the_duplicate_warning_says_what_a_live_pipeline_does() {
     for (i, (_, yaml)) in KINDS.iter().enumerate() {
         let index = format!("alone_{i}");
         let (run, mapping) = build(&pg.url, &index, schema(&[yaml])).await;
-        let sink = opensearch_sink(&os.url);
-        alone.push(write(&sink, &http, &os.url, &index, run, mapping).await);
+        let sink = opensearch_sink(&os.url, false);
+        alone.push(classified(
+            &write(&sink, &http, &os.url, &index, run, mapping).await,
+        ));
     }
 
     let gate = Arc::new(Semaphore::new(6));
@@ -233,20 +246,54 @@ async fn the_duplicate_warning_says_what_a_live_pipeline_does() {
                 let _permit = gate.acquire_owned().await.unwrap();
                 let index = format!("p_{a}_{b}");
                 let fields = schema.fields.clone();
-                let (run, mapping) = build(&url, &index, schema).await;
+                let (run, mapping) = build(&url, &index, schema.clone()).await;
                 // A sink per pair: a flush covers everything its sink holds.
-                let sink = opensearch_sink(&os_url);
+                let sink = opensearch_sink(&os_url, false);
                 let run = write(&sink, &http, &os_url, &index, run, mapping).await;
-                (a, b, fields, run)
+                // A pair no row indexes is tried again with every malformed
+                // value dropped instead of refused: "never" must hold then too.
+                let lenient = if indexed(&run) {
+                    None
+                } else {
+                    let index = format!("m_{a}_{b}");
+                    let (again, mapping) = build(&url, &index, schema).await;
+                    let sink = opensearch_sink(&os_url, true);
+                    Some(write(&sink, &http, &os_url, &index, again, mapping).await)
+                };
+                (a, b, fields, run, lenient)
             }));
         }
     }
 
     let mut table = Vec::new();
     let mut mismatches = Vec::new();
+    let mut never = Vec::new();
     for task in tasks {
-        let (a, b, fields, run) = task.await.unwrap();
+        let (a, b, fields, full, lenient) = task.await.unwrap();
         let named: Vec<&Field> = fields.iter().filter(|f| f.field.as_ref() == "v").collect();
+        let seen_never = match &lenient {
+            Some(lenient) if !indexed(lenient) => Some(if full.rows.iter().all(Result::is_err) {
+                NeverIndexed::FailsToBuild
+            } else {
+                NeverIndexed::Refused
+            }),
+            _ => None,
+        };
+        let predicted_never = source::never_indexed(&named);
+        if seen_never.is_some() {
+            never.push(format!(
+                "{} then {}: {seen_never:?}",
+                KINDS[a].0, KINDS[b].0
+            ));
+        }
+        if predicted_never != seen_never {
+            mismatches.push(format!(
+                "{} then {}: never_indexed says {predicted_never:?}, saw {seen_never:?} ({full:?}, \
+                 with ignore_malformed: {lenient:?})",
+                KINDS[a].0, KINDS[b].0
+            ));
+        }
+        let run = classified(&full);
         let predicted = source::duplicate_outcome(&named);
         let firsts_children = named[0]
             .children()
@@ -298,6 +345,9 @@ async fn the_duplicate_warning_says_what_a_live_pipeline_does() {
             );
         }
     }
+    if std::env::var("DUPLICATE_MATRIX").as_deref() == Ok("print") {
+        println!("\nNever indexed ({}):\n{}", never.len(), never.join("\n"));
+    }
     assert!(
         mismatches.is_empty(),
         "{} of {} pairs disagree with the warning:\n{}",
@@ -305,6 +355,147 @@ async fn the_duplicate_warning_says_what_a_live_pipeline_does() {
         table.len(),
         mismatches.join("\n")
     );
+}
+
+/// The data behind the start cases: two root rows, one related row under the
+/// first.
+const START_SETUP: &str = "
+CREATE TABLE t (id int PRIMARY KEY, k text, tags text[], tm time);
+CREATE TABLE r (id int PRIMARY KEY, t_id int, k text, tags text[]);
+INSERT INTO t VALUES (1, 'x', '{a}', '03:04:05'), (2, NULL, NULL, NULL);
+INSERT INTO r VALUES (10, 1, 'y', '{b}');
+";
+
+/// A pair that stops only where every document carries it, on a sink flusso
+/// can prove plain (issue #316 review): each deployment that indexes documents
+/// on 0.17 starts and indexes the same, through the real `flusso run`; the
+/// stopping pair at the root still refuses the start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_pair_some_document_survives_starts_and_indexes() {
+    let (_pg, pg_url) = common::start_postgres(START_SETUP).await;
+    let (_os, os_url) = common::start_opensearch().await;
+    common::pipeline_removing_v(&os_url, "drop-v").await;
+
+    let pair = "- constant: v\n  value: 5\n- object: v\n  fields:\n    - keyword: k\n      required: false";
+    let nested = |extra: &str, inner: &str| {
+        let inner: String = inner.lines().map(|l| format!("    {l}\n")).collect();
+        format!(
+            "- has_many: rel\n  table: r\n  foreign_key: t_id\n  primary_key: id{extra}\n  fields:\n{inner}"
+        )
+    };
+    let tags_then_object = "- keyword: v\n  column: tags\n  array: true\n  required: false\n\
+                            - object: v\n  fields:\n    - keyword: k\n      required: false";
+    let keyed_then = |last: &str| format!("- constant: v\n  value: {{ a: 1 }}\n{last}");
+    let cases: Vec<(&str, String, &str, &str, u64)> = vec![
+        (
+            "unindexed_join",
+            nested("\n  indexed: false", pair),
+            "",
+            "",
+            2,
+        ),
+        (
+            "input_only_join",
+            nested("\n  emit: false", pair),
+            "",
+            "",
+            2,
+        ),
+        ("indexed_join", nested("", pair), "", "", 1),
+        (
+            "skipped_build",
+            nested("", tags_then_object),
+            "on_error = \"skip\"",
+            "",
+            1,
+        ),
+        (
+            "dynamic_object",
+            keyed_then(
+                "- object: v\n  options:\n    dynamic: true\n  fields:\n    - keyword: k\n      required: false",
+            ),
+            "",
+            "",
+            2,
+        ),
+        (
+            "undynamic_object",
+            keyed_then(
+                "- object: v\n  options:\n    dynamic: false\n  fields:\n    - keyword: k\n      required: false",
+            ),
+            "",
+            "",
+            2,
+        ),
+        (
+            "dynamic_json",
+            keyed_then("- json: v\n  column: k\n  required: false\n  options:\n    dynamic: true"),
+            "",
+            "",
+            2,
+        ),
+        (
+            "index_pipeline",
+            pair.to_owned(),
+            "[index.sinks.primary]\nindex_settings = { default_pipeline = \"drop-v\" }",
+            "",
+            2,
+        ),
+        (
+            "sink_pipeline_setting",
+            pair.to_owned(),
+            "",
+            "index_settings = { \"index.final_pipeline\" = \"drop-v\" }",
+            2,
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for (name, fields, index_extra, sink_extra, expected) in &cases {
+        let deployment = common::Deployment {
+            name,
+            fields,
+            index_extra,
+            sink_extra,
+        };
+        match common::run(&pg_url, &os_url, &deployment, *expected).await {
+            common::Outcome::Indexed(_) => {}
+            other => wrong.push(format!(
+                "{name}: expected {expected} documents, got {other:?}"
+            )),
+        }
+    }
+    let stopping = common::Deployment {
+        name: "root_pair",
+        fields: pair,
+        index_extra: "",
+        sink_extra: "",
+    };
+    match common::run(&pg_url, &os_url, &stopping, 2).await {
+        common::Outcome::Exited(stderr) if stderr.contains("cannot be built") => {}
+        other => wrong.push(format!(
+            "root_pair: expected a refused start, got {other:?}"
+        )),
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// Whether the sink indexed at least one row.
+fn indexed(run: &Run) -> bool {
+    run.rows
+        .iter()
+        .zip(&run.rejected)
+        .any(|(row, rejected)| row.is_ok() && rejected.is_none())
+}
+
+/// The rows the outcome is classified on: rows 1 and 2. Row 3, all null, only
+/// decides whether a pair indexes nothing whatever the data.
+fn classified(run: &Run) -> Run {
+    Run {
+        rows: run.rows.iter().take(2).cloned().collect(),
+        rejected: run.rejected.iter().take(2).cloned().collect(),
+        bodies: run.bodies.iter().take(2).cloned().collect(),
+    }
 }
 
 /// The pair's outcome: a failed build first, then what the documents hold.
@@ -451,7 +642,7 @@ fn schema(fields: &[&str]) -> IndexSchema {
         .unwrap_or_else(|e| panic!("{e}\n{yaml}"))
 }
 
-/// Build rows 1 and 2 of `schema` as index `index` the way `flusso run` does.
+/// Build rows 1 to 3 of `schema` as index `index` the way `flusso run` does.
 async fn build(url: &str, index: &str, schema: IndexSchema) -> (Run, kernel::IndexMapping) {
     let name = IndexName::try_new(index).unwrap();
     let spec = SourceSpec::new(BTreeMap::from([(name.clone(), schema)]));
@@ -461,7 +652,7 @@ async fn build(url: &str, index: &str, schema: IndexSchema) -> (Run, kernel::Ind
         .await
         .unwrap();
     let builder = ScriptedBuilder::wrap(Arc::new(builder), scripts);
-    let ids: Vec<DocumentId> = [1, 2]
+    let ids: Vec<DocumentId> = [1, 2, 3]
         .into_iter()
         .map(|id| DocumentId {
             index: name.clone(),
@@ -586,7 +777,14 @@ async fn start_opensearch() -> Os {
     }
 }
 
-fn opensearch_sink(os_url: &str) -> OpensearchSink {
+/// The sink the matrix writes through; `lenient` drops a malformed value
+/// instead of refusing the document (`index.mapping.ignore_malformed`).
+fn opensearch_sink(os_url: &str, lenient: bool) -> OpensearchSink {
+    let index_settings = if lenient {
+        serde_json::from_value(json!({ "index.mapping.ignore_malformed": true })).unwrap()
+    } else {
+        Default::default()
+    };
     let config = sink_opensearch::OpensearchConfig {
         url: Secret::Value(os_url.to_owned()),
         username: None,
@@ -603,7 +801,7 @@ fn opensearch_sink(os_url: &str) -> OpensearchSink {
         refresh_interval: "1s".to_owned(),
         text_analysis: sink_opensearch::TextAnalysis::Builtin,
         auto_subfields: true,
-        index_settings: Default::default(),
+        index_settings,
     };
     OpensearchSink::from_config(&SinkName::try_new("e2e").unwrap(), &config).unwrap()
 }
