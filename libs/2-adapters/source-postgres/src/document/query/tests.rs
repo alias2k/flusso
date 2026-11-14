@@ -118,8 +118,15 @@ fn keyed_predicate_casts_a_uuid_primary_key() {
         single.as_str()
     );
 
-    let (batched, _) =
-        documents_query(&schema, &c("id"), &[key], &HashMap::new(), &col_types).unwrap();
+    let (batched, _) = documents_query(
+        &schema,
+        &c("id"),
+        "uuid",
+        &[key],
+        &HashMap::new(),
+        &col_types,
+    )
+    .unwrap();
     assert!(
         batched
             .as_str()
@@ -161,6 +168,7 @@ fn root_filters_fold_into_both_query_forms() {
     let (sql, _) = documents_query(
         &schema,
         &c("id"),
+        "int8",
         &[GenericValue::Int(7)],
         &HashMap::new(),
         &col_types,
@@ -513,6 +521,7 @@ fn documents_query_keys_with_in_and_selects_the_key() {
     let (sql, params) = documents_query(
         &schema,
         &c("id"),
+        "int8",
         &[GenericValue::Int(7), GenericValue::Int(9)],
         &HashMap::new(),
         &id_types(),
@@ -538,6 +547,7 @@ fn documents_query_folds_soft_delete_into_where() {
     let (sql, _) = documents_query(
         &schema,
         &c("id"),
+        "int8",
         &[GenericValue::Int(1)],
         &HashMap::new(),
         &id_types(),
@@ -584,6 +594,7 @@ fn soft_delete_field_inside_a_relation_reads_the_root_column() {
     let (sql, _) = documents_query(
         &schema,
         &c("id"),
+        "int8",
         &[GenericValue::Int(1)],
         &pks,
         &id_types(),
@@ -671,6 +682,7 @@ fn a_key_carried_as_text_is_cast_from_text() {
     let (batched, _) = documents_query(
         &schema,
         &c("id"),
+        "int8",
         &[key.clone()],
         &HashMap::new(),
         &col_types,
@@ -683,8 +695,15 @@ fn a_key_carried_as_text_is_cast_from_text() {
         "{}",
         batched.as_str()
     );
-    let (reverse, _) =
-        reverse_query(&db(), &t("users"), &c("id"), &[(c("id"), key)], &col_types).unwrap();
+    let (reverse, _) = reverse_query(
+        &db(),
+        &t("users"),
+        &c("id"),
+        "date",
+        &[(c("id"), key)],
+        &col_types,
+    )
+    .unwrap();
     assert!(
         reverse.as_str().ends_with(r#"WHERE "id" = $1::text::date"#),
         "{}",
@@ -698,6 +717,7 @@ fn reverse_query_selects_foreign_key() {
         &db(),
         &t("orders"),
         &c("user_id"),
+        "int8",
         &[(c("id"), GenericValue::Int(9))],
         &types(&[("orders", "id", "bigint")]),
     )
@@ -1174,6 +1194,7 @@ fn root_keys_query_casts_each_link_from_its_bound_type() {
         &db(),
         &t("users"),
         &c("id"),
+        "numeric",
         &[
             GenericValue::Decimal("1.500".parse().unwrap()),
             GenericValue::String("NaN".to_owned()),

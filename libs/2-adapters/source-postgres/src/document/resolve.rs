@@ -194,8 +194,9 @@ impl PgDocumentBuilder {
         let value = local_target_value(relation, target_key)?.clone();
         let key = [(column.clone(), value)];
         let col_types = self.key_types(schema, parent_table, &key).await?;
+        let base = self.base_name(schema, parent_table, parent_pk).await?;
         let (sql, params) =
-            query::reverse_query(schema, parent_table, parent_pk, &key, &col_types)?;
+            query::reverse_query(schema, parent_table, parent_pk, &base, &key, &col_types)?;
         self.run_reverse(sql, params, parent_pk.as_ref()).await
     }
 
@@ -210,8 +211,9 @@ impl PgDocumentBuilder {
         child_key: &RowKey,
     ) -> Result<Vec<GenericValue>> {
         let col_types = self.key_types(schema, child, &child_key.0).await?;
+        let base = self.base_name(schema, child, foreign_key).await?;
         let (sql, params) =
-            query::reverse_query(schema, child, foreign_key, &child_key.0, &col_types)?;
+            query::reverse_query(schema, child, foreign_key, &base, &child_key.0, &col_types)?;
         self.run_reverse(sql, params, foreign_key.as_ref()).await
     }
 
@@ -228,7 +230,9 @@ impl PgDocumentBuilder {
         let far_pk = single_far_key(far_key)?.clone();
         let key = [(right_key.clone(), far_pk)];
         let col_types = self.key_types(schema, junction, &key).await?;
-        let (sql, params) = query::reverse_query(schema, junction, left_key, &key, &col_types)?;
+        let base = self.base_name(schema, junction, left_key).await?;
+        let (sql, params) =
+            query::reverse_query(schema, junction, left_key, &base, &key, &col_types)?;
         self.run_reverse(sql, params, left_key.as_ref()).await
     }
 
@@ -243,8 +247,15 @@ impl PgDocumentBuilder {
         junction_key: &RowKey,
     ) -> Result<Vec<GenericValue>> {
         let col_types = self.key_types(schema, junction, &junction_key.0).await?;
-        let (sql, params) =
-            query::reverse_query(schema, junction, left_key, &junction_key.0, &col_types)?;
+        let base = self.base_name(schema, junction, left_key).await?;
+        let (sql, params) = query::reverse_query(
+            schema,
+            junction,
+            left_key,
+            &base,
+            &junction_key.0,
+            &col_types,
+        )?;
         self.run_reverse(sql, params, left_key.as_ref()).await
     }
 
@@ -335,8 +346,15 @@ impl PgDocumentBuilder {
         let sql_type = self
             .column_type(&schema.db_schema, &schema.table, pk)
             .await?;
-        let (sql, params) =
-            query::root_keys_query(&schema.db_schema, &schema.table, pk, links, &sql_type)?;
+        let base = self.base_name(&schema.db_schema, &schema.table, pk).await?;
+        let (sql, params) = query::root_keys_query(
+            &schema.db_schema,
+            &schema.table,
+            pk,
+            &base,
+            links,
+            &sql_type,
+        )?;
         self.run_reverse(sql, params, pk.as_ref()).await
     }
 }

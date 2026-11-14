@@ -60,7 +60,7 @@ pub(crate) async fn snapshot(
     // (its snapshot transaction) for the duration.
     let pool = PgPoolOptions::new()
         .max_connections(2)
-        .connect_with(crate::text_value::connect_options(connection_url)?)
+        .connect(connection_url)
         .await
         .map_err(|e| SourceError::Connection(e.to_string()))?;
     let tables = resolve_tables(&pool, tables).await?;
@@ -72,8 +72,9 @@ pub(crate) async fn snapshot(
 struct BackfillTable {
     /// `"schema"."table"`, quoted and ready to interpolate.
     qualified: String,
-    /// `"pk"`, quoted and ready to interpolate.
-    pk_quoted: String,
+    /// The cursor's select list: the key, rendered as
+    /// [`value::key_select`] reads it back.
+    key_select: String,
     /// The table name as it appears in change events.
     table: TableName,
     /// The primary-key column name carried in each [`RowKey`].
@@ -98,15 +99,35 @@ async fn resolve_tables(pool: &PgPool, tables: &[SnapshotTable]) -> Result<Vec<B
         let Some(pk) = primary_key(pool, schema, name).await? else {
             continue; // reason already logged
         };
+        let qualified = format!("{}.{}", quote_ident(schema), quote_ident(name));
+        let pk_base = base_name(pool, &qualified, pk.as_ref()).await?;
         out.push(BackfillTable {
-            qualified: format!("{}.{}", quote_ident(schema), quote_ident(name)),
-            pk_quoted: quote_ident(pk.as_ref()),
+            qualified,
+            key_select: value::key_select(&quote_ident(pk.as_ref()), KEY, &pk_base),
             table: table.table.clone(),
             pk,
             cursor: format!("flusso_backfill_{n}"),
         });
     }
     Ok(out)
+}
+
+/// The `pg_type.typname` of `column`'s type on `qualified`, through every
+/// domain.
+async fn base_name(pool: &PgPool, qualified: &str, column: &str) -> Result<String> {
+    sqlx::query_scalar(
+        "WITH RECURSIVE d(oid) AS ( \
+           SELECT a.atttypid FROM pg_attribute a \
+           WHERE a.attrelid = $1::regclass AND a.attname = $2 \
+         UNION ALL \
+           SELECT t.typbasetype FROM pg_type t JOIN d ON t.oid = d.oid WHERE t.typtype = 'd' \
+         ) SELECT t.typname::text FROM d JOIN pg_type t ON t.oid = d.oid WHERE t.typtype <> 'd'",
+    )
+    .bind(qualified)
+    .bind(column)
+    .fetch_one(pool)
+    .await
+    .map_err(query_err)
 }
 
 /// The single-column primary key of a table from the catalog, or `None` (with a
@@ -300,9 +321,7 @@ async fn begin_snapshot(conn: &mut PoolConnection<Postgres>) -> Result<()> {
 async fn declare_cursor(conn: &mut PoolConnection<Postgres>, table: &BackfillTable) -> Result<()> {
     let sql = format!(
         "DECLARE {} NO SCROLL CURSOR FOR SELECT {} FROM {}",
-        table.cursor,
-        value::key_select(&table.pk_quoted, KEY),
-        table.qualified,
+        table.cursor, table.key_select, table.qualified,
     );
     sqlx::query(sqlx::AssertSqlSafe(sql))
         .execute(&mut **conn)

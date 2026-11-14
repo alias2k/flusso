@@ -96,10 +96,35 @@ fn a_key_type_is_a_decoded_or_text_type() {
     }
 }
 
+/// A key is rendered in a form no session setting changes: `bytea` as hex,
+/// a float as its bits; the rest through its output function.
 #[test]
-fn the_replication_session_takes_every_setting_as_a_startup_option() {
+fn a_key_renders_independently_of_session_settings() {
+    assert_eq!(key_text("k", "bytea"), r"'\x' || encode(k, 'hex')");
+    assert_eq!(key_text("k", "float8"), "encode(float8send(k), 'hex')");
+    assert_eq!(key_text("k", "float4"), "encode(float4send(k), 'hex')");
+    assert_eq!(key_text("k", "numeric"), "format('%s', k)");
+    assert_eq!(key_text("k", "bpchar"), "format('%s', k)");
+}
+
+/// A float read back from its bits is the value its shortest text parses to.
+#[test]
+fn a_float_reads_back_from_its_bits_as_its_text_parses() {
+    for value in [0.0, -0.0, 1.5, 1.0 / 3.0, f64::INFINITY, f64::MIN_POSITIVE] {
+        let bits = format!("{:016x}", value.to_bits());
+        assert_eq!(
+            read_back(&bits, 701),
+            typed_value(&value.to_string(), 701),
+            "{value}"
+        );
+    }
+    let third = 1.0_f32 / 3.0;
     assert_eq!(
-        startup_options(),
-        "-c DateStyle=ISO -c bytea_output=hex -c extra_float_digits=1"
+        read_back(&format!("{:08x}", third.to_bits()), 700),
+        GenericValue::Float(third)
+    );
+    assert_eq!(
+        read_back("\\x01ab", 17),
+        GenericValue::Bytes(vec![0x01, 0xab])
     );
 }

@@ -158,7 +158,7 @@ pub struct PgDocumentBuilder {
 }
 
 impl PgDocumentBuilder {
-    /// Over a pool whose connections run with `text_value::SESSION_OPTIONS`, as
+    /// Over a pool whose connections read `bytea` as hex text, as
     /// [`connect`](Self::connect)'s do.
     pub(crate) fn new(pool: PgPool, spec: Arc<SourceSpec>) -> Self {
         Self {
@@ -224,10 +224,17 @@ impl PgDocumentBuilder {
 
     #[tracing::instrument(name = "pg.connect", skip_all, err)]
     pub async fn connect(connection_url: &str, spec: Arc<SourceSpec>) -> Result<Self> {
-        // The document query renders a `bytea` as text inside its JSON, and a
-        // key is read back as its text: both parse what these settings fix.
+        // The document query renders a `bytea` as text inside its JSON, which
+        // `value::postgres_hex` decodes. A database or role set to
+        // `bytea_output = 'escape'` would render the escape text instead.
         let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_with(crate::text_value::connect_options(connection_url)?)
+            .after_connect(|connection, _| {
+                Box::pin(async move {
+                    sqlx::Executor::execute(&mut *connection, "SET bytea_output = 'hex'").await?;
+                    Ok(())
+                })
+            })
+            .connect(connection_url)
             .await
             .map_err(|e| SourceError::Connection(e.to_string()))?;
         tracing::info!(indexes = spec.indexes().count(), "connected to Postgres");
@@ -268,9 +275,12 @@ impl PgDocumentBuilder {
         let Some(pk_column) = schema.primary_key.clone() else {
             return Ok(None);
         };
+        let pk_base = self
+            .base_name(&schema.db_schema, &schema.table, &pk_column)
+            .await?;
         let sql = format!(
             "SELECT {key} FROM \"{db_schema}\".\"{table}\" WHERE \"{pk}\" IS NOT NULL LIMIT 1",
-            key = value::key_select(&format!("\"{pk_column}\""), "key"),
+            key = value::key_select(&format!("\"{pk_column}\""), "key", &pk_base),
             pk = pk_column,
             db_schema = schema.db_schema,
             table = schema.table,
@@ -366,6 +376,16 @@ impl PgDocumentBuilder {
     /// (e.g. `numeric`, `integer`, `timestamp with time zone`). A thin view over
     /// [`column_meta`](Self::column_meta) for callers that only need the type to
     /// cast a query operand.
+    /// The `pg_type.typname` of `column`'s type, through every domain.
+    pub(super) async fn base_name(
+        &self,
+        schema: &DatabaseSchema,
+        table: &TableName,
+        column: &ColumnName,
+    ) -> Result<String> {
+        Ok(self.column_meta(schema, table, column).await?.base_name)
+    }
+
     pub(super) async fn column_type(
         &self,
         schema: &DatabaseSchema,
@@ -806,12 +826,15 @@ impl DocumentBuilder for PgDocumentBuilder {
             let mut col_types = self.filter_column_types(schema).await?;
             self.add_key_column_types(schema, &[&pk_column], &mut col_types)
                 .await?;
+            let pk_base = self
+                .base_name(&schema.db_schema, &schema.table, &pk_column)
+                .await?;
 
             for chunk in keyed.chunks(BUILD_CHUNK) {
                 let keys: Vec<kernel::GenericValue> =
                     chunk.iter().map(|(value, _)| (*value).clone()).collect();
                 let (sql, params) =
-                    query::documents_query(schema, &pk_column, &keys, &pks, &col_types)?;
+                    query::documents_query(schema, &pk_column, &pk_base, &keys, &pks, &col_types)?;
 
                 let mut statement = sqlx::query(sql);
                 for param in &params {

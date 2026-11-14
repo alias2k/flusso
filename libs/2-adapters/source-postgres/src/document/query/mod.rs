@@ -169,6 +169,7 @@ pub(super) fn document_query(
 pub(super) fn documents_query(
     schema: &IndexSchema,
     pk_column: &ColumnName,
+    pk_base: &str,
     keys: &[GenericValue],
     pks: &HashMap<String, ColumnName>,
     col_types: &HashMap<(String, String), String>,
@@ -202,7 +203,7 @@ pub(super) fn documents_query(
         "SELECT {key}, {object} AS \"document\" \
          FROM {} AS \"{ROOT}\" WHERE {predicate}",
         qtable(&schema.db_schema, &schema.table),
-        key = super::value::key_select(&qcol(ROOT, pk_column), DOC_KEY),
+        key = super::value::key_select(&qcol(ROOT, pk_column), DOC_KEY, pk_base),
     );
     Ok((SqlString::new(sql), builder.params))
 }
@@ -217,6 +218,7 @@ pub(super) fn root_keys_query(
     db: &DatabaseSchema,
     table: &TableName,
     pk: &ColumnName,
+    pk_base: &str,
     links: &[GenericValue],
     sql_type: &str,
 ) -> Result<(SqlString, Vec<GenericValue>)> {
@@ -229,7 +231,7 @@ pub(super) fn root_keys_query(
     let column = qident(pk.as_ref());
     let sql = format!(
         "SELECT {} FROM {} WHERE {column} IN ({})",
-        super::value::key_select(&column, pk.as_ref()),
+        super::value::key_select(&column, pk.as_ref(), pk_base),
         qtable(db, table),
         placeholders.join(", "),
     );
@@ -245,6 +247,7 @@ pub(super) fn reverse_query(
     db: &DatabaseSchema,
     table: &TableName,
     select_column: &ColumnName,
+    select_base: &str,
     key: &[(ColumnName, GenericValue)],
     col_types: &HashMap<(String, String), String>,
 ) -> Result<(SqlString, Vec<GenericValue>)> {
@@ -274,7 +277,11 @@ pub(super) fn reverse_query(
     }
     let sql = format!(
         "SELECT {} FROM {} WHERE {}",
-        super::value::key_select(&qident(select_column.as_ref()), select_column.as_ref()),
+        super::value::key_select(
+            &qident(select_column.as_ref()),
+            select_column.as_ref(),
+            select_base,
+        ),
         qtable(db, table),
         conditions.join(" AND "),
     );

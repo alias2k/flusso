@@ -107,21 +107,15 @@ impl WalChangeCapture {
     ///
     /// `config.publication` names one publication: the one
     /// [`CaptureProvisioning`] inspects and provisions. Without an
-    /// `application_name`, the connection reports itself as `flusso`. The
-    /// session renders values with flusso's own `DateStyle`, `bytea_output`
-    /// and `extra_float_digits`, whatever the database or role sets.
+    /// `application_name`, the connection reports itself as `flusso`. Before
+    /// streaming, the session sets the `DateStyle`, `TimeZone`, `bytea_output`
+    /// and `extra_float_digits` the decoder parses, whatever the database or
+    /// role sets; a server or pooler that refuses one stops the start.
     pub fn new(config: ReplicationConfig, connection_url: impl Into<String>) -> Self {
         let named = config.application_name.is_some();
-        // Ours go last, so they win over a caller's own `-c` for the same name:
-        // the decoder parses the text these settings fix.
-        let options = match config.options.as_deref() {
-            Some(theirs) => format!("{theirs} {}", crate::text_value::startup_options()),
-            None => crate::text_value::startup_options(),
-        };
         let config = config
             .with_status_interval(STATUS_INTERVAL)
-            .with_wakeup_interval(STATUS_INTERVAL)
-            .with_options(options);
+            .with_wakeup_interval(STATUS_INTERVAL);
         Self {
             config: if named {
                 config
@@ -324,7 +318,19 @@ impl ChangeCapture for WalChangeCapture {
         self.ensure_slot().await?;
 
         let catalog = self.admin_pool().await?.clone();
-        let client = ReplicationClient::connect(self.config.clone())
+        let mut client = ReplicationClient::connect_gated(self.config.clone())
+            .await
+            .map_err(|e| SourceError::Connection(e.to_string()))?;
+        for setting in crate::text_value::REPLICATION_SETTINGS {
+            client.simple_query(setting).await.map_err(|e| {
+                SourceError::Connection(format!(
+                    "the replication session refused `{setting}`, which flusso needs to read \
+                     keys from the WAL: {e}"
+                ))
+            })?;
+        }
+        client
+            .start()
             .await
             .map_err(|e| SourceError::Connection(e.to_string()))?;
 

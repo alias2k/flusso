@@ -420,7 +420,7 @@ proptest! {
     fn documents_query_is_structurally_valid(schema in index_schema()) {
         let pk = ColumnName::try_new("id").unwrap();
         let keys = [GenericValue::Int(1), GenericValue::Int(2)];
-        let result = documents_query(&schema, &pk, &keys, &pk_map(), &col_type_map());
+        let result = documents_query(&schema, &pk, "int8", &keys, &pk_map(), &col_type_map());
         prop_assert!(result.is_ok(), "builder errored: {:?}", result.err());
         let (sql, params) = result.unwrap();
         assert_valid(sql.as_str(), params.len())?;
@@ -434,7 +434,7 @@ proptest! {
     ) {
         let key = [(key_column, GenericValue::Int(5))];
         let (sql, params) =
-            reverse_query(&db_schema(), &table, &select_column, &key, &col_type_map()).unwrap();
+            reverse_query(&db_schema(), &table, &select_column, "int8", &key, &col_type_map()).unwrap();
         assert_valid(sql.as_str(), params.len())?;
     }
 }

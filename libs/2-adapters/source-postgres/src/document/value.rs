@@ -15,21 +15,23 @@ use sqlx::postgres::PgRow;
 use sqlx::{Column as _, Row, TypeInfo, ValueRef as _};
 use uuid::Uuid;
 
-/// The SQL that selects `expr` as a key [`decode_key`] reads under `alias`:
-/// its text output, beside the value itself, which is never decoded (a query's
-/// row description names its type, a domain by its base type).
-///
-/// `format('%s', …)` renders through the type's output function, as the WAL
-/// does; `::text` would trim a `char(n)`'s padding.
-pub(crate) fn key_select(expr: &str, alias: &str) -> String {
-    format!("format('%s', {expr}) AS \"{alias}\", {expr} AS \"{alias}{TYPED}\"")
+/// The SQL that selects `expr`, a key of base type `base_name`
+/// (`pg_type.typname`), as [`decode_key`] reads it under `alias`: its
+/// [`key_text`](crate::text_value::key_text), beside the value itself, which
+/// is never decoded (a query's row description names its type, a domain by
+/// its base type).
+pub(crate) fn key_select(expr: &str, alias: &str, base_name: &str) -> String {
+    format!(
+        "{} AS \"{alias}\", {expr} AS \"{alias}{TYPED}\"",
+        crate::text_value::key_text(expr, base_name)
+    )
 }
 
 const TYPED: &str = ":typed";
 
-/// The key [`key_select`] selected under `alias`: its text parsed by
-/// [`typed_value`](crate::text_value::typed_value), the parser the WAL's keys
-/// go through, so a key read back is the very value a live change carries.
+/// The key [`key_select`] selected under `alias`, parsed by
+/// [`read_back`](crate::text_value::read_back) into the very value a live
+/// change carries for it.
 /// [`GenericValue::Null`] for a null, a missing column, or a type that can't
 /// be a key (warned).
 pub(crate) fn decode_key(row: &PgRow, alias: &str) -> GenericValue {
@@ -50,7 +52,7 @@ pub(crate) fn decode_key(row: &PgRow, alias: &str) -> GenericValue {
         return GenericValue::Null;
     }
     match row.try_get::<String, _>(alias) {
-        Ok(text) => crate::text_value::typed_value(&text, oid),
+        Ok(text) => crate::text_value::read_back(&text, oid),
         Err(error) => {
             tracing::warn!(column = %alias, %error, "could not read a key; treating as null");
             GenericValue::Null
