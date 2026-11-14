@@ -584,3 +584,40 @@ async fn a_changed_column_type_reaches_the_kept_root_link_answer() {
     cache_type(&builder, "user_tags", "user_id", "integer", 23);
     assert_eq!(ask().await, None, "back to integer after a failed query");
 }
+
+/// Counts the `WARN` events logged on this thread while it is the default.
+#[derive(Default)]
+struct Warnings(std::sync::atomic::AtomicUsize);
+
+impl tracing::Subscriber for Warnings {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        if *event.metadata().level() == tracing::Level::WARN {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+#[tokio::test]
+async fn a_change_on_an_unread_table_warns_once_per_table() {
+    let warnings = Arc::new(Warnings::default());
+    let _default = tracing::subscriber::set_default(Arc::clone(&warnings));
+    let builder = builder();
+    for table in ["products", "products", "products", "reviews", "reviews"] {
+        let ids = builder
+            .resolve(&TableName::try_new(table).unwrap(), &key(), None, None)
+            .await
+            .unwrap();
+        assert!(ids.is_empty());
+    }
+    assert_eq!(warnings.0.load(std::sync::atomic::Ordering::Relaxed), 2);
+}
