@@ -23,6 +23,7 @@
 #![allow(clippy::unwrap_used, unused_crate_dependencies)]
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -253,6 +254,144 @@ async fn every_bytea_value_reads_as_hex(setting: &str, route: Route) {
         "a live change on a child"
     );
     engine.abort();
+}
+
+/// A column changing type while the pipeline runs (`bytea` → `text`): the
+/// builder's cached column types go stale, the document query built from
+/// them fails once, and the restarted engine builds from fresh types instead
+/// of failing the same way until the process restarts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_column_changing_type_mid_run_recovers_after_one_restart() {
+    let (_postgres, port, url) = start_postgres().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE kws (id int PRIMARY KEY, b_kw bytea, t_kw text)",
+        "CREATE PUBLICATION flusso FOR TABLE kws",
+        r"INSERT INTO kws VALUES (1, '\x0102', 'hello')",
+    ] {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("kws"), kws_schema())]));
+    let documents = PgDocumentBuilder::connect(&url, Arc::new(spec))
+        .await
+        .unwrap();
+    let capture = WalChangeCapture::new(replication(port), url.clone());
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let restarts = Arc::new(AtomicUsize::new(0));
+    let mut engine = tokio::spawn(supervise(
+        Arc::new(capture),
+        Arc::new(documents),
+        Arc::new(DocumentSink(Arc::clone(&recorded))),
+        Arc::clone(&restarts),
+    ));
+    let expect = |b_kw: &str, t_kw: &str| json!({ "bKw": b_kw, "tKw": t_kw });
+
+    document_reaches(&mut engine, &recorded, "1", &expect(r"\x0102", "hello")).await;
+    alter(
+        &pool,
+        "ALTER TABLE kws ALTER COLUMN b_kw TYPE text USING encode(b_kw, 'hex'); \
+         UPDATE kws SET b_kw = 'now-text' WHERE id = 1",
+    )
+    .await;
+    document_reaches(&mut engine, &recorded, "1", &expect("now-text", "hello")).await;
+    alter(
+        &pool,
+        r"ALTER TABLE kws ALTER COLUMN t_kw TYPE bytea USING convert_to(t_kw, 'UTF8'); UPDATE kws SET t_kw = '\x0a0b' WHERE id = 1",
+    )
+    .await;
+    document_reaches(&mut engine, &recorded, "1", &expect("now-text", r"\x0a0b")).await;
+    assert!(
+        restarts.load(Ordering::SeqCst) <= 1,
+        "restarted {} times",
+        restarts.load(Ordering::SeqCst)
+    );
+    engine.abort();
+}
+
+/// `kws` indexed as `{ bKw, tKw }`, both `keyword`.
+fn kws_schema() -> IndexSchema {
+    IndexSchema {
+        version: 1,
+        table: table("kws"),
+        db_schema: DatabaseSchema::try_new("public").unwrap(),
+        primary_key: Some(column("id")),
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields: vec![
+            column_of("bKw", "b_kw", FlussoType::Keyword),
+            column_of("tKw", "t_kw", FlussoType::Keyword),
+        ],
+    }
+}
+
+async fn alter(pool: &sqlx::PgPool, sql: &str) {
+    sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_owned()))
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// Run the deployment the way the daemon supervises it: restart it after an
+/// error, counting the restarts, until it ends cleanly or has restarted five
+/// times.
+async fn supervise(
+    capture: Arc<dyn ChangeCapture>,
+    documents: Arc<dyn DocumentBuilder>,
+    sink: Arc<dyn Sink>,
+    restarts: Arc<AtomicUsize>,
+) -> engine::Result<()> {
+    loop {
+        let result = run_deployment(
+            Arc::clone(&capture),
+            Arc::clone(&documents),
+            Arc::clone(&sink),
+        )
+        .await;
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) if restarts.fetch_add(1, Ordering::SeqCst) >= 4 => return Err(error),
+            Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
+        }
+    }
+}
+
+/// Wait until the latest document recorded for `id` is `expected`.
+async fn document_reaches(
+    engine: &mut tokio::task::JoinHandle<engine::Result<()>>,
+    recorded: &Arc<Mutex<Vec<(String, Value)>>>,
+    id: &str,
+    expected: &Value,
+) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if engine.is_finished() {
+            panic!("engine stopped before {expected}: {:?}", engine.await);
+        }
+        let latest = recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(recorded_id, _)| recorded_id == id)
+            .map(|(_, document)| document.clone());
+        if latest.as_ref() == Some(expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {expected}; latest {latest:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// Document 1, with `second_blob` as its second part's `blob` and `pair` as
