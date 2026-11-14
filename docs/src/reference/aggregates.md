@@ -67,6 +67,25 @@ An aggregate reduces rows of a related table to one value. The operation is the 
 
 `ids` collects the related table's **primary key** into a flat scalar array. It takes no `column`. OpenSearch has no array type, so the mapping is the element type and the value is multi-valued. Project it as a bare `Vec<_>` on the query side, never `Option<Vec<_>>`.
 
+The keys go into the array as they are, so `element_type` has to hold the key's type. [`flusso check`](cli.md#check) compares the two:
+
+| `element_type` | Holds every key of | Holds only some (warning) | Changes them (warning) | Holds none (error) |
+| --- | --- | --- | --- | --- |
+| `keyword`, `text`, `identifier`, `enum`, `uuid` | any type | | | |
+| `short` | `smallint` | wider integers, `numeric`, floats, text | | anything else |
+| `integer` | `smallint`, `integer` | `bigint`, `numeric`, floats, text | | anything else |
+| `long` | the integers | `numeric`, floats, text | | anything else |
+| `float` | `smallint`, `real` | `numeric`, `double precision`, text | `integer`, `bigint`: rounded past 2^24 | anything else |
+| `double`, `decimal` | `smallint`, `integer`, `numeric`, floats | text | `bigint`: rounded past 2^53 | anything else |
+| `date`, `timestamp` | `date`, `timestamp`, `timestamptz` | `numeric`, floats, text | the integers: read as epoch milliseconds | anything else |
+| `boolean` | `boolean` | text | | anything else |
+| `binary` | `bytea` | | anything else: indexed as written, not as bytes | |
+| `json` | | | | any type |
+
+- **Holds none** is `ids_element_mismatch`: OpenSearch rejects every document that collects a key, so [`run` refuses to start](cli.md#validation-at-start).
+- **Holds only some** and **changes them** are `ids_element_lossy`, a warning. A document whose keys don't fit is rejected by OpenSearch; its index's [`on_error`](index-and-on-error.md#on_error) decides what happens next.
+- **Special values.** Even a matching pair can't hold a `numeric` or float `NaN` or infinity, or an infinite date; a document collecting one is rejected the same way.
+
 ## exists
 
 `exists` is `true` when at least one row of `table` matches, after every filter, and `false` otherwise. It is never null, so project it as a bare `bool`. It works on a `foreign_key`, `through`, or `via` aggregate alike; use it instead of a `count` when the list only filters on presence.

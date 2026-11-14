@@ -731,6 +731,37 @@ impl Catalog for PgDocumentBuilder {
             meta.sql_type
         };
         let probe = query::transform_probe(&sql_type, transforms);
+        self.probe(probe, || {
+            format!("could not check `{table}.{column}`'s transforms against its type")
+        })
+        .await
+    }
+
+    async fn compares(
+        &self,
+        schema: &DatabaseSchema,
+        (link_table, link_column): (&TableName, &ColumnName),
+        (key_table, key_column): (&TableName, &ColumnName),
+    ) -> Result<bool> {
+        let link = self.column_meta(schema, link_table, link_column).await?;
+        let key = self.column_meta(schema, key_table, key_column).await?;
+        let probe = query::comparison_probe(&link.sql_type, &key.sql_type);
+        self.probe(probe, || {
+            format!(
+                "could not check `{link_table}.{link_column}` against `{key_table}.{key_column}`"
+            )
+        })
+        .await
+    }
+}
+
+impl PgDocumentBuilder {
+    /// Run a table-free `probe`: `false` when Postgres has no function or
+    /// operator for it. The probe casts to a column's type, which needs USAGE
+    /// on the type's schema; reading the column does not. So only "no such
+    /// function" is a verdict, and any other refusal leaves it unknown
+    /// (`true`, the check skipped, `what` logged).
+    async fn probe(&self, probe: query::SqlString, what: impl FnOnce() -> String) -> Result<bool> {
         match sqlx::query(probe).execute(&self.pool).await {
             Ok(_) => Ok(true),
             Err(sqlx::Error::Database(error))
@@ -741,13 +772,10 @@ impl Catalog for PgDocumentBuilder {
             {
                 Ok(false)
             }
-            // The probe casts to the column's type, which needs USAGE on the
-            // type's schema; reading the column does not. Only "no such
-            // function" is a verdict, so any other refusal leaves it unknown.
             Err(sqlx::Error::Database(error)) => {
                 tracing::warn!(
-                    %table, %column, sql_type, error = %error.message(),
-                    "could not check the column's transforms against its type; skipping the check"
+                    error = %error.message(),
+                    "{}; skipping the check", what()
                 );
                 Ok(true)
             }

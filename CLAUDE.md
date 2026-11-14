@@ -732,7 +732,18 @@ enclosing level; guard: `wal`'s `a_raw_filter_reading_the_root_row_rebuilds_on_t
 "the type of *this* column" (plus "what is *this* table's primary key" and "do *these*
 `transforms` take *this* column", two methods whose defaults mean "unknown, skip the check";
 Postgres answers the second with a table-free `SELECT lower(NULL::<format_type>)`, so validation
-takes no lock — issue #225; and "does *this* table exist": `validate_indexes` walks every
+takes no lock — issue #225; "do *these* two columns compare", `compares`, the same way with
+`SELECT NULL::<link> = NULL::<key>`: every link is checked against the key it names (`belongs_to`
+`column`, `foreign_key` against the parent's or last hop's key, both junction keys, each hop's
+`foreign_key`, both sides of each `on:` pair), and a pair with no `=` operator is
+`LinkTypeMismatch`, since the document query fails to plan — issue #313; pairs that compare across
+types, at any value, never stop the engine: a link no key can equal matches no parent — issue #312,
+`wal`'s `linked_by_a_value_no_key_equals!` cases; an `ids` `element_type` is checked against the
+related key's type by `validation/element.rs`'s `fit` (verdicts measured on OpenSearch 2):
+`IdsElementMismatch` when it holds no key, `IdsElementLossy` (a warning) when it holds only some or
+changes them — issue #299; guards: `config_coverage`'s
+`validation_reports_a_link_postgres_cannot_compare_with_its_key` and
+`validation_checks_an_ids_element_type_against_the_related_key`; and "does *this* table exist": `validate_indexes` walks every
 relation at any depth and looks up its table, key, junction keys, `via` hops, both sides of each
 `on:` pair, value/null-check filter columns, `order_by` and a join's `primary_key` on the table
 each lives on — issue #202; a missing table is a `SourceError::UnknownTable` diagnostic, reported
@@ -782,8 +793,8 @@ still fails as `connecting to Postgres`), prints every diagnostic to stderr with
 and refuses to start only on a kind that cannot work as written: `stops_the_start` matches
 `DiagnosticKind` exhaustively (`UnknownTable`/`UnknownColumn`/`UnreadSoftDeleteMarker`/
 `RelationPrimaryKey`/`TransformNotApplicable`/`RootPrimaryKeyMismatch`/`UnsupportedKeyType`/
-`NotAnArrayColumn` stop;
-type, numeric, nullability, ignored-primary-key, `UndeclaredArrayColumn`, `DuplicateFieldName`, `RootPrimaryKey`
+`NotAnArrayColumn`/`LinkTypeMismatch`/`IdsElementMismatch` stop;
+type, numeric, nullability, ignored-primary-key, `UndeclaredArrayColumn`, `IdsElementLossy`, `DuplicateFieldName`, `RootPrimaryKey`
 and `TimestampFormat` (issue #304: a timestamp `options.format` no pattern of which reads the ISO
 form, `source::reads_iso_timestamps`, checked offline in `validate_spec`) findings print and start, as they built or ran in 0.17), so a new kind forces a decision there; stop
 only on a state no working 0.17 deployment can be in (or on a key new since, like `array`). `DiagnosticKind` stays exhaustive for that match; `Diagnostic` and `Anchor` are

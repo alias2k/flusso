@@ -191,9 +191,22 @@ A root table's primary key is the document id. It must be of a type flusso reads
 
 A link column can hold a value equal to its parent's key but written differently: `AB` for a `citext` key `Ab`, `1.500` for a `numeric` `1.5`, `-0` for a float `0`, or any text under a nondeterministic collation. The document it rebuilds is still the parent's own, under the parent's stored key: flusso reads that key back from the root table.
 
-A link column of another type than the key (`char(5)` against `text`) is compared with it as the document query joins them, so the documents a change rebuilds are the ones the join reads.
-
 That costs one query per change, per index and link column, for a root key whose equal values can be written differently (`numeric`, `real`, `double precision`, `citext`, a nondeterministic collation), and for a link column of another type than the key it names. Every other key costs nothing extra.
+
+### A link of another type
+
+A link column (`foreign_key`, `belongs_to` `column`, a junction key, a `via` hop's `foreign_key`, either side of an `on` pair) may be of another type than the key it names, as long as Postgres compares the two with `=`:
+
+| Key | Links it compares with |
+| --- | --- |
+| `smallint`, `integer`, `bigint`, `numeric`, `real`, `double precision` | any of these |
+| `text`, `varchar`, `char(n)`, `name`, `citext` | any of these |
+| `date`, `timestamp`, `timestamptz` | any of these |
+| any other type | its own type only |
+
+- **Compared as the join compares them.** A change is traced to the documents the document query's join reads: `char(5)` against `text` drops the padding, `integer` against `bigint` compares the numbers.
+- **A link no key can equal matches no parent.** A `bigint` link past the `integer` range, a `numeric` `NaN` or fraction against an integer key, an infinite timestamp against a `date` key, text longer than a `char(n)` key: the row joins nothing, and a change to it rebuilds only the documents it names itself. The engine doesn't stop on it, in the backfill or live.
+- **A pair Postgres can't compare fails every build.** `text` against `uuid`, `integer` against `text`, `bytea` against anything else, `time` against `timestamp`: the document query can't be planned, whatever the rows hold. `flusso check` reports it as `link_type_mismatch` on the relation's field, and [`run` refuses to start](cli.md#validation-at-start). Change one column's type, or join through a column of the key's type.
 
 ### Unsupported key types
 
