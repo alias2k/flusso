@@ -2615,11 +2615,14 @@ fn a_file_recovery_settled_keeps_what_the_user_wrote_since() {
                             };
                         }
                     }
+                    let mut kept = Vec::new();
                     for load in 1..=3 {
                         let label =
                             format!("{shape:?}: save {n}, recovery {m}, {action}, load {load}");
                         let recovery = project.recover(&mut Disk::counting());
                         assert!(recovery.blocked.is_none(), "{label}: {recovery:?}");
+                        kept.extend(recovery.settled.iter().flat_map(|s| s.kept.clone()));
+                        keeps_the_promise(&label, &project.dir, &pre_save(), &kept, &edit);
                         assert_eq!(user_files(&project.dir), expected, "{label}");
                         assert!(project.records().is_empty(), "{label}");
                     }
@@ -2667,4 +2670,165 @@ fn a_rollback_resumed_twice_keeps_what_it_decided() {
         assert_eq!(std::fs::read(&users).unwrap(), saved);
     }
     assert!(project.records().is_empty());
+}
+
+/// The project's files before any save: what [`Project::new`] writes.
+fn pre_save() -> BTreeMap<PathBuf, Vec<u8>> {
+    [
+        ("flusso.toml", "config\n"),
+        ("users.schema.yml", "users\n"),
+        ("orders.schema.yml", "orders\n"),
+    ]
+    .into_iter()
+    .map(|(name, text)| (PathBuf::from(name), text.as_bytes().to_vec()))
+    .collect()
+}
+
+/// The promise of a rollback that ends unblocked: every file the user did not
+/// touch (`edit`) holds its bytes from before the save (or is absent, when
+/// the save created it), unless a recovery kept it and told so (`kept`).
+fn keeps_the_promise(
+    label: &str,
+    dir: &Path,
+    pre_save: &BTreeMap<PathBuf, Vec<u8>>,
+    kept: &[Kept],
+    edit: &UserEdit,
+) {
+    if let Err(broken) = promise(dir, pre_save, kept, edit) {
+        panic!("{label}: {broken}");
+    }
+}
+
+/// [`keeps_the_promise`], saying how it is broken.
+fn promise(
+    dir: &Path,
+    pre_save: &BTreeMap<PathBuf, Vec<u8>>,
+    kept: &[Kept],
+    edit: &UserEdit,
+) -> Result<(), String> {
+    let now = user_files(dir);
+    for file in now.keys().chain(pre_save.keys()) {
+        if edit.contains_key(file)
+            || now.get(file) == pre_save.get(file)
+            || kept.iter().any(|k| k.path == dir.join(file))
+        {
+            continue;
+        }
+        return Err(format!(
+            "{} neither holds its text from before the save nor is told as kept: {:?}",
+            file.display(),
+            now.get(file)
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+        ));
+    }
+    Ok(())
+}
+
+/// The journal of the save in flight in `project`, resolved: `None` once
+/// it is deleted.
+fn in_flight_steps(project: &Project) -> Option<journal::Steps> {
+    let bytes = std::fs::read(project.dir.join(journal::JOURNAL)).ok()?;
+    let dir = std::fs::canonicalize(&project.dir).unwrap();
+    Some(
+        journal::Journal::parse(&bytes)
+            .unwrap()
+            .steps(&dir, &dir.join("flusso.toml"))
+            .unwrap(),
+    )
+}
+
+/// Review of #305: a save file gone or replaced after a rollback recorded its
+/// plan (a backup deleted by hand or by `git clean`, something written at a
+/// created file's temp name) is never read as a step done. For every shape,
+/// save stop before the commit point, and recovery stop after the plan is
+/// recorded: each backup deleted alone, all of them, and each created file's
+/// temp name taken. The next recovery either blocks and changes nothing, or
+/// leaves every file as it was before the save unless it tells it kept.
+#[test]
+fn a_save_file_gone_after_the_plan_never_reads_as_a_step_done() {
+    let mut runs = 0;
+    let mut broken = Vec::new();
+    for shape in SHAPES {
+        let point = commit_point(shape);
+        for n in 1..point {
+            'stops: for m in 1.. {
+                let cut = |tag: &str| {
+                    let project = Project::new(&format!("gone-{shape:?}-{n}-{m}-{tag}"));
+                    project.commit(shape, &mut Disk::stopping_after(n)).ok();
+                    let mut stopped = Disk::stopping_after(m);
+                    project.recover(&mut stopped);
+                    (project, stopped.stopped())
+                };
+                let (probe, stopped) = cut("probe");
+                if !stopped {
+                    break 'stops;
+                }
+                if probe.records().first().is_none_or(|r| r.undo.is_none()) {
+                    continue;
+                }
+                let baks = backups(&probe.dir).len();
+                let created = in_flight_steps(&probe)
+                    .map(|s| s.writes.iter().filter(|w| w.before.is_none()).count())
+                    .unwrap_or(0);
+                drop(probe);
+                let mut variants: Vec<(String, Vec<usize>, bool)> = (0..baks)
+                    .map(|b| (format!("delete backup {b}"), vec![b], false))
+                    .collect();
+                if baks > 1 {
+                    variants.push(("delete every backup".into(), (0..baks).collect(), false));
+                }
+                if created > 0 {
+                    variants.push((
+                        "foreign bytes at each created file's temp name".into(),
+                        vec![],
+                        true,
+                    ));
+                }
+                for (i, (variant, delete, foreign)) in variants.iter().enumerate() {
+                    let (project, _) = cut(&i.to_string());
+                    let found = backups(&project.dir);
+                    for &b in delete {
+                        std::fs::remove_file(&found[b]).unwrap();
+                    }
+                    if *foreign {
+                        for write in in_flight_steps(&project).unwrap().writes {
+                            if write.before.is_none() {
+                                // A folder the rollback removed already has no temp name left.
+                                std::fs::write(&write.temp, "foreign\n").ok();
+                            }
+                        }
+                    }
+                    let label = format!("{shape:?}: save {n}, recovery {m}, {variant}");
+                    let left = snapshot(&project.dir);
+                    let recovery = project.recover(&mut Disk::counting());
+                    runs += 1;
+                    match &recovery.blocked {
+                        Some(_) if snapshot(&project.dir) != left => {
+                            broken.push(format!("{label}: blocked, but changed files"));
+                        }
+                        Some(_) => {}
+                        None => {
+                            let kept: Vec<Kept> = recovery
+                                .settled
+                                .iter()
+                                .flat_map(|s| s.kept.clone())
+                                .collect();
+                            if let Err(why) =
+                                promise(&project.dir, &pre_save(), &kept, &UserEdit::new())
+                            {
+                                broken.push(format!("{label}: told rolled back, but {why}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(runs > 0);
+    assert!(
+        broken.is_empty(),
+        "{} of {runs} runs:\n{}",
+        broken.len(),
+        broken.join("\n")
+    );
 }

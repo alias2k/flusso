@@ -4178,6 +4178,40 @@ mod tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
+    /// Review of #305: a file at the name a rollback needs to remove a file
+    /// the save created stops it with a problem of its own, naming that file
+    /// and the one it blocks, and is never listed among the save's leftovers.
+    #[test]
+    fn a_file_in_the_way_of_a_removal_is_its_own_problem() {
+        let fixture = Fixture::new("in-the-way");
+        fixture.kill_before_commit(&fixture.relocate());
+        let token = in_flight(&fixture);
+        let temp = format!(".orders2.schema.yml.flusso-save.{token}.0.tmp");
+        std::fs::write(fixture.0.join(&temp), "mine\n").unwrap();
+        let left = fixture.files();
+
+        let recovery = serde_json::to_value(recover_project(&fixture.config()).unwrap()).unwrap();
+        let blocked = &recovery["blocked"];
+        assert_eq!(
+            blocked["problems"].as_array().unwrap().len(),
+            1,
+            "{recovery}"
+        );
+        let problem = &blocked["problems"][0];
+        assert_eq!(problem["problem"], "in_the_way", "{recovery}");
+        assert_eq!(problem["path"], temp.as_str(), "{recovery}");
+        assert_eq!(problem["blocks"], "orders2.schema.yml", "{recovery}");
+        assert!(problem.get("detail").is_none(), "{recovery}");
+        let leftovers: Vec<&str> = blocked["leftovers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|l| l.as_str())
+            .collect();
+        assert!(!leftovers.contains(&temp.as_str()), "{recovery}");
+        assert_eq!(fixture.files(), left);
+    }
+
     /// Review of #296: a notice edited by hand to name files outside the
     /// project, or copies not of the save-copy form, never shows them.
     #[test]
