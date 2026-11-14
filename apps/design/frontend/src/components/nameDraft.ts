@@ -14,14 +14,31 @@
 //   draft pending, for the palette's own actions to settle or drop. Closing
 //   the palette puts the focus back in the box (`refocus`), so leaving the box
 //   applies the name as usual.
-// - Escape and Ctrl+Z (⌘Z) in the box drop it; Ctrl+Shift+Z is the input's own
-//   redo.
+// - Escape and Ctrl+Z (⌘Z) in the box drop it, and keep the focus there (an
+//   Escape with nothing typed does what Escape does on the page); Ctrl+Shift+Z
+//   (⌘⇧Z) brings back the name Ctrl+Z dropped.
 //
-// Applying a name must move nothing on the page: a press that left the box
-// would otherwise end on another control, and its click would be lost. So the
-// boxes show reasons in an overlay, rename chips sit in a row of fixed height
-// and fixed order (`model/renameChips.ts`), and the canvas title box lies over
-// the title, out of the header's flow.
+// **A name applies when the press that left the box ends**, never inside it
+// (`model/press.ts`). Leaving a box with the pointer blurs it at pointerdown;
+// applying the name there would re-render the page mid-press, and a control
+// that moved or was re-created under the pointer gets no click. So the blur
+// waits: the name applies after the click has run its handlers (or when no
+// click comes: a drag, a cancelled touch). Every other way out (Tab, Enter, an
+// unmount, Save) applies it at once. Consequences, each deliberate:
+//
+// - The pressed control acts first, on the state with the old name, then the
+//   name applies: two undo steps, the action's first. Selecting another field
+//   or index, ticking a column, switching to Code mode all read the same either
+//   way, since a rename goes by identity.
+// - A control that acts on the renamed thing or reads its name settles the
+//   draft first (`settleNameDraft`), so it sees the new name: Save, duplicate,
+//   remove, the switch to Code mode.
+// - A rename chip drops the typed name: the chip is what was pressed.
+//
+// Layout still never moves when a name applies (reasons float and let the
+// pointer through, rename chips keep their places, a node header is one line);
+// that matters for the keyboard and for a press that starts after the name
+// applied.
 //
 // ```tsx
 // const draft = useNameDraft({ kind: "field", row: field.field, refusal, apply });
@@ -39,7 +56,67 @@ import {
   type KeyboardEvent,
   type MouseEvent,
 } from "react";
+import { idle, press, type PressEffect, type PressEvent } from "../model/press";
 import { useUiStore, type NameDraft } from "../store/ui";
+
+/// How long after the last pointerup a press with no click is over.
+const PRESS_FALLBACK_MS = 600;
+
+/// The page's one press tracker, fed by document-level capture listeners.
+const tracker = {
+  state: idle,
+  waiting: new Set<() => void>(),
+  fallback: undefined as number | undefined,
+  installed: false,
+};
+
+function flushWaiting() {
+  window.clearTimeout(tracker.fallback);
+  const settles = [...tracker.waiting];
+  tracker.waiting.clear();
+  settles.forEach((settle) => settle());
+}
+
+function runEffect(effect: PressEffect) {
+  if (effect === "settleNow") flushWaiting();
+  // After the whole dispatch: the click's own handlers (and the updates React
+  // flushes for them) run first.
+  else if (effect === "settleAfterDispatch") window.setTimeout(flushWaiting, 0);
+  else if (effect === "armFallback") {
+    window.clearTimeout(tracker.fallback);
+    tracker.fallback = window.setTimeout(() => dispatchPress({ type: "fallback" }), PRESS_FALLBACK_MS);
+  }
+}
+
+function dispatchPress(event: PressEvent) {
+  const [state, effect] = press(tracker.state, event);
+  tracker.state = state;
+  runEffect(effect);
+}
+
+function installPressTracker() {
+  if (tracker.installed) return;
+  tracker.installed = true;
+  document.addEventListener("pointerdown", (e) => dispatchPress({ type: "down", pointer: e.pointerId }), true);
+  document.addEventListener("pointerup", (e) => dispatchPress({ type: "up", pointer: e.pointerId }), true);
+  document.addEventListener("pointercancel", (e) => dispatchPress({ type: "cancel", pointer: e.pointerId }), true);
+  document.addEventListener("click", () => dispatchPress({ type: "click" }), true);
+  window.addEventListener("blur", () => dispatchPress({ type: "windowBlur" }));
+}
+
+/// Run `settle` now, or when the pointer press going on ends.
+function settleAfterPress(settle: () => void) {
+  const [state, effect] = press(tracker.state, { type: "blur" });
+  tracker.state = state;
+  if (effect === "settleNow") settle();
+  else tracker.waiting.add(settle);
+}
+
+/// Apply the name pending in a name box now, for a control whose action must
+/// see it (Save, duplicate, remove, Code mode).
+export function settleNameDraft() {
+  useUiStore.getState().nameDraft?.settle();
+}
 
 /// Focus moving into an element marked `data-keeps-name-draft` (the command
 /// palette) leaves the draft pending.
@@ -73,6 +150,9 @@ export function useNameDraft({
     callbacks.current = { refusal, apply };
   });
   const typed = useRef<string | null>(null);
+  // The name Ctrl+Z dropped, for Ctrl+Shift+Z to bring back.
+  const undone = useRef<string | null>(null);
+  useEffect(installPressTracker, []);
   const box = useRef<HTMLInputElement | null>(null);
   const refocus = useCallback(() => {
     const input = box.current;
@@ -106,30 +186,44 @@ export function useNameDraft({
     () => () => {
       const value = typed.current;
       if (value === null) return;
+      typed.current = null;
       if (!callbacks.current.refusal(value)) callbacks.current.apply(value);
       setNameDraft(null);
     },
     [setNameDraft],
   );
+  const change = (value: string) => {
+    box.current = document.activeElement instanceof HTMLInputElement ? document.activeElement : box.current;
+    typed.current = value;
+    undone.current = null;
+    setText(value);
+    setLate(null);
+    setNameDraft({ kind, row, name: value, refused: refusal(value), settle, drop, refocus });
+  };
   return {
     text,
     refused: late ?? (text === null ? null : refusal(text)),
-    change: (value: string) => {
-      box.current = document.activeElement instanceof HTMLInputElement ? document.activeElement : box.current;
-      typed.current = value;
-      setText(value);
-      setLate(null);
-      setNameDraft({ kind, row, name: value, refused: refusal(value), settle, drop, refocus });
-    },
+    change,
     blur: (e: FocusEvent) => {
-      if (!keepsNameDraft(e.relatedTarget)) settle();
+      if (!keepsNameDraft(e.relatedTarget)) settleAfterPress(settle);
     },
     keyDown: (e: KeyboardEvent<HTMLInputElement>) => {
+      const undoKey = (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z";
       if (e.key === "Enter") e.currentTarget.blur();
-      else if (e.key === "Escape") drop();
-      else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "z" && typed.current !== null) {
+      else if (e.key === "Escape" && typed.current !== null) {
+        // Only the name: the page's Escape (closing the Inspector) waits for
+        // an Escape with nothing typed.
         e.preventDefault();
+        e.stopPropagation();
         drop();
+      } else if (undoKey && !e.shiftKey && typed.current !== null) {
+        e.preventDefault();
+        const value = typed.current;
+        drop();
+        undone.current = value;
+      } else if (undoKey && e.shiftKey && undone.current !== null) {
+        e.preventDefault();
+        change(undone.current);
       }
     },
     settle,

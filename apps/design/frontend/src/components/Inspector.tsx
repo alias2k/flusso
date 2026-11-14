@@ -39,7 +39,7 @@ import { drasticTypeChange, typeClass } from "../theme";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Hint } from "./Hint";
-import { useNameDraft } from "./nameDraft";
+import { settleNameDraft, useNameDraft } from "./nameDraft";
 import { useFieldNameRefusal, useRenameProblemText } from "./nameRefusal";
 import { ValueTargetContext } from "./valueTarget";
 import { Filters } from "./Filters";
@@ -131,6 +131,7 @@ function HeaderActions() {
   if (!selection) return null;
   const canModify = (selection.kind === "node" && selection.path.length > 0) || selection.kind === "field";
   const duplicate = () => {
+    settleNameDraft();
     if (selection.kind === "node") {
       apply((s) => edit.duplicateNode(s, selection.path));
       select({ kind: "node", path: [...selection.path.slice(0, -1), selection.path[selection.path.length - 1] + 1] });
@@ -140,6 +141,7 @@ function HeaderActions() {
     }
   };
   const remove = () => {
+    settleNameDraft();
     if (selection.kind === "node") apply((s) => edit.removeNode(s, selection.path));
     else if (selection.kind === "field") apply((s) => edit.removeAt(s, selection.path, selection.index));
     select(null);
@@ -221,6 +223,8 @@ function nameSuggestions(field: Field): string[] {
 
 export function Inspector() {
   const { selection, schema, indexName } = useDesign();
+  // The index row's id, not its name: renaming the index must not re-mount the panel.
+  const indexId = useDesignStore((s) => s.doc?.config.index?.find((e) => e.name === indexName)?.id) ?? indexName;
   const { t } = useT();
   if (!selection) return <div className="inspector empty">{t("inspector.selectPrompt")}</div>;
   if (selection.kind === "columns") return <ColumnsInspector path={selection.path} names={selection.names} />;
@@ -228,10 +232,10 @@ export function Inspector() {
   // instead of handing this one's boxes (and what they hold) to that field.
   const key =
     selection.kind === "root"
-      ? indexName
+      ? indexId
       : selection.kind === "node"
-        ? `${indexName}/${fieldAtPath(schema, selection.path)?.uid ?? selection.path.join(".")}`
-        : `${indexName}/${nodeFields(schema, selection.path)[selection.index]?.uid ?? `${selection.path.join(".")}:${selection.index}`}`;
+        ? `${indexId}/${fieldAtPath(schema, selection.path)?.uid ?? selection.path.join(".")}`
+        : `${indexId}/${nodeFields(schema, selection.path)[selection.index]?.uid ?? `${selection.path.join(".")}:${selection.index}`}`;
   return (
     <>
       <div className="mb-2.5 flex items-center justify-between gap-2">
@@ -766,7 +770,11 @@ function NameField({ field }: { field: Field; set: (f: Field) => void }) {
             )}
             aria-hidden={current ? true : undefined}
             tabIndex={current ? -1 : undefined}
-            onClick={() => rename(n)}
+            onClick={() => {
+              // The chip is what was pressed: it wins over the typed name.
+              draft.drop();
+              rename(n);
+            }}
           >
             {n}
           </button>

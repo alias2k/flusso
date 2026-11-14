@@ -55,6 +55,7 @@ const KINDS: &[(&str, &str)] = &[
     ("text", "- text: v\n  column: k\n  required: false"),
     ("integer", "- integer: v\n  column: n\n  required: false"),
     ("double", "- double: v\n  column: f\n  required: false"),
+    ("decimal", "- decimal: v\n  column: dec\n  required: false"),
     ("boolean", "- boolean: v\n  column: b\n  required: false"),
     (
         "timestamp",
@@ -122,8 +123,14 @@ const KINDS: &[(&str, &str)] = &[
         "- ids: v\n  table: r\n  foreign_key: t_id\n  element_type: integer",
     ),
     ("exists", "- exists: v\n  table: r\n  foreign_key: t_id"),
+    (
+        "sum decimal",
+        "- sum: v\n  table: r\n  foreign_key: t_id\n  column: id\n  value_type: decimal",
+    ),
     ("constant", "- constant: v\n  value: 5"),
     ("constant string", "- constant: v\n  value: hello"),
+    ("constant true", "- constant: v\n  value: true"),
+    ("constant 2.5", "- constant: v\n  value: 2.5"),
     ("constant list", "- constant: v\n  value: [1, 2]"),
     ("constant mixed list", "- constant: v\n  value: [1, a]"),
     ("constant object", "- constant: v\n  value: { a: 1 }"),
@@ -146,7 +153,7 @@ CREATE TABLE c2 (id int PRIMARY KEY, label text, kind text);
 CREATE TABLE t (
     id int PRIMARY KEY, k text, n int, f float8, b bool, d timestamptz, u uuid, e text,
     bin bytea, j jsonb, m jsonb, lat float8, lon float8, tags text[], jarr jsonb,
-    c_id int REFERENCES c2(id)
+    c_id int REFERENCES c2(id), dec numeric
 );
 CREATE TABLE r (id int PRIMARY KEY, t_id int, label text);
 CREATE TABLE tj (t_id int, r_id int, PRIMARY KEY (t_id, r_id));
@@ -154,9 +161,9 @@ INSERT INTO c2 VALUES (1, 'cat', 'pet');
 INSERT INTO t VALUES
     (1, 'x', 7, 1.5, true, '2026-01-02T03:04:05Z', '6f1c2b1a-0000-4000-8000-000000000001', 'a',
      '\\x0102', '{\"a\": 1, \"label\": \"j\"}', '{\"en\": \"hi\"}', 1.5, 2.5, '{p,q}',
-     '[{\"a\": 1}]', 1),
+     '[{\"a\": 1}]', 1, 1.25),
     (2, 'y', 8, 2.5, false, '2026-02-03T04:05:06Z', '6f1c2b1a-0000-4000-8000-000000000002', 'b',
-     '\\x0304', '{\"b\": 2}', '{\"it\": \"ciao\"}', 3.5, 4.5, '{r}', '[{\"b\": 2}]', NULL);
+     '\\x0304', '{\"b\": 2}', '{\"it\": \"ciao\"}', 3.5, 4.5, '{r}', '[{\"b\": 2}]', NULL, 2.5);
 INSERT INTO r VALUES (10, 1, 'one'), (11, 1, 'two');
 INSERT INTO tj VALUES (1, 10);
 ";
@@ -252,7 +259,7 @@ async fn the_duplicate_warning_says_what_a_live_pipeline_does() {
             DuplicateOutcome::FailsToBuild { .. } => seen == Seen::FailsToBuild,
             DuplicateOutcome::Nothing => seen == Seen::Nothing,
             DuplicateOutcome::Null => seen == Seen::Null,
-            DuplicateOutcome::AsText => seen == Seen::AsText,
+            DuplicateOutcome::AsText { .. } => seen == Seen::AsText,
             // Namesakes that build the same on their own can't be told apart.
             DuplicateOutcome::Holds(at) => {
                 seen == Seen::Holds(*at)
@@ -422,7 +429,7 @@ fn short(outcome: &DuplicateOutcome) -> String {
         DuplicateOutcome::Wrapped => "wrapped".to_owned(),
         DuplicateOutcome::Nothing => "nothing".to_owned(),
         DuplicateOutcome::Null => "null".to_owned(),
-        DuplicateOutcome::AsText => "as text".to_owned(),
+        DuplicateOutcome::AsText { .. } => "as text".to_owned(),
         DuplicateOutcome::FailsToBuild { .. } => "fails to build".to_owned(),
         DuplicateOutcome::Rejected { .. } => "rejected".to_owned(),
         _ => "general wording".to_owned(),

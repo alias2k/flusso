@@ -2530,10 +2530,53 @@ mod tests {
                 tags,
                 constant(json!({ "BigInt": 5 }))
             ])),
-            "the index maps the last one, and a document holds the last one's value as the \
-             document query renders it, as text #2 does not convert back (a number or boolean \
-             constant as a string, a `binary` column as Postgres hex, `\\x0102`), in a \
-             one-element array when #2 is an `array: true` column"
+            "the index maps the last one, and a document holds the last one's value as text, \
+             in a one-element array since #2 is an `array: true` column: #3 is a number \
+             constant, which reaches #2 as a string (`\"5\"`), and only a `decimal` field \
+             reads a string as a number"
+        );
+        let column = |name: &str, ty: &str| {
+            json!({ "field": "v", "source": { "column": {
+                "column": name, "ty": ty, "nullable": true,
+            } } })
+        };
+        assert_eq!(
+            message(json!([
+                int_field("id"),
+                column("k", "keyword"),
+                column("bin", "binary")
+            ])),
+            "the index maps the last one, and a document holds the last one's value as text: \
+             #3 is a `binary` column, whose bytes reach #2 as Postgres hex text \
+             (`\"\\x0102\"`), not base64: only a `binary` field decodes them"
+        );
+        assert_eq!(
+            message(json!([
+                int_field("id"),
+                column("bin", "binary"),
+                column("bin", "binary")
+            ])),
+            "the index maps the last one, and a document holds the last one's value, read as \
+             the first one declares it"
+        );
+        assert_eq!(
+            message(json!([
+                int_field("id"),
+                column("n", "integer"),
+                constant(json!({ "Bool": true }))
+            ])),
+            "the index maps the last one, and a document holds the last one's value as text: \
+             #3 is a boolean constant, which reaches #2 as the string `\"true\"` or \
+             `\"false\"`"
+        );
+        assert_eq!(
+            message(json!([
+                int_field("id"),
+                column("dec", "decimal"),
+                constant(json!({ "Double": 2.5 }))
+            ])),
+            "the index maps the last one, and a document holds the last one's value, read as \
+             the first one declares it"
         );
         assert_eq!(
             message(json!([

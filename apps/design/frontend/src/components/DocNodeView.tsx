@@ -21,7 +21,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { cn } from "@/lib/utils";
 import { sqlName, trimmed } from "../model/names";
 import { siblingNames } from "../model/selection";
-import { keepsNameDraft, useNameDraft } from "./nameDraft";
+import { keepsNameDraft, settleNameDraft, useNameDraft } from "./nameDraft";
 import { useFieldNameRefusal, useRenameProblemText, useSqlNameRefusal } from "./nameRefusal";
 
 const FIELD_KINDS = ["object", "geo", "map", "custom", "constant", "script"] as const;
@@ -287,6 +287,7 @@ export function DocNodeView({ data, selected }: NodeProps) {
             title={t("common.remove")}
             onClick={(e) => {
               e.stopPropagation();
+              settleNameDraft();
               apply((s) => edit.removeNode(s, node.path));
               select(null);
             }}

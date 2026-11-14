@@ -68,11 +68,14 @@ pub enum DuplicateOutcome {
     /// Every document holds `null` under the name: the last one is a constant
     /// holding a list or an object, which the document query reads as `null`.
     Null,
-    /// The last one's value as the document query renders it, as text, which
-    /// the first one's declaration does not convert back: a number or boolean
-    /// constant (`"5"`), a `binary` column (Postgres hex, `\x0102`). In a
-    /// one-element array when the first one is an `array: true` column.
-    AsText,
+    /// The last one's value as text, which the first one's declaration does
+    /// not convert back.
+    AsText {
+        /// What the last one is, and so what the text looks like.
+        text: Text,
+        /// In a one-element array: the first one is an `array: true` column.
+        wrapped: bool,
+    },
     /// Some documents fail to build; `documents` says which.
     FailsToBuild {
         /// Which documents, in a few words.
@@ -90,6 +93,20 @@ pub enum DuplicateOutcome {
     /// It depends on both declarations and on the data: either value, an
     /// empty one, a failed build or a rejection.
     Unknown,
+}
+
+/// A last namesake whose value reaches the build as text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Text {
+    /// A number constant: the query emits every scalar constant as text
+    /// (`"5"`), and only a `decimal` declaration parses it back.
+    NumberConstant,
+    /// A boolean constant, as `"true"` or `"false"`.
+    BooleanConstant,
+    /// A `binary` column, as Postgres hex (`"\x0102"`), which only a `binary`
+    /// declaration decodes to base64.
+    Binary,
 }
 
 /// What a document holds that the last namesake's mapping refuses.
@@ -155,8 +172,11 @@ pub fn duplicate_outcome(same: &[&Field]) -> DuplicateOutcome {
             DuplicateOutcome::Null
         };
     }
-    if read_as_text(first, last) {
-        return DuplicateOutcome::AsText;
+    if let Some(text) = read_as_text(first, last) {
+        return DuplicateOutcome::AsText {
+            text,
+            wrapped: array_column(first),
+        };
     }
     // A `custom` column may hold anything: not pinned beside a namesake.
     if scalar_array(first) && is_custom(last) {
@@ -224,14 +244,32 @@ pub(crate) fn duplicate_message(name: &FieldName, same: &[(usize, &Field)]) -> S
              document keeps its previous indexed version (none on a first backfill)",
             position(0)
         ),
-        DuplicateOutcome::AsText => format!(
-            "the index maps the last one, and a document holds the last one's value as the \
-             document query renders it, as text #{} does not convert back (a number or \
-             boolean constant as a string, a `binary` column as Postgres hex, `\\x0102`), in \
-             a one-element array when #{} is an `array: true` column",
-            position(0),
-            position(0)
-        ),
+        DuplicateOutcome::AsText { text, wrapped } => {
+            let (last, first) = (position(fields.len() - 1), position(0));
+            let what = match text {
+                Text::NumberConstant => format!(
+                    "#{last} is a number constant, which reaches #{first} as a string (`\"5\"`), \
+                     and only a `decimal` field reads a string as a number"
+                ),
+                Text::BooleanConstant => format!(
+                    "#{last} is a boolean constant, which reaches #{first} as the string \
+                     `\"true\"` or `\"false\"`"
+                ),
+                Text::Binary => format!(
+                    "#{last} is a `binary` column, whose bytes reach #{first} as Postgres hex \
+                     text (`\"\\x0102\"`), not base64: only a `binary` field decodes them"
+                ),
+            };
+            let array = if wrapped {
+                format!(", in a one-element array since #{first} is an `array: true` column")
+            } else {
+                String::new()
+            };
+            format!(
+                "the index maps the last one, and a document holds the last one's value as \
+                 text{array}: {what}"
+            )
+        }
         DuplicateOutcome::Wrapped => "the index maps the last one, and a document holds the last \
                                       one's value wrapped in a one-element array (the first one \
                                       is an `array: true` column)"
@@ -347,23 +385,37 @@ fn read_as_null(value: &GenericValue) -> bool {
     matches!(value, GenericValue::Array(_) | GenericValue::Map(_))
 }
 
-/// Whether `last`'s value reaches the build as text `first` keeps: a number
-/// or boolean constant (the query emits every scalar constant as text), or a
-/// `binary` column, which only a `binary` declaration decodes.
-fn read_as_text(first: &Field, last: &Field) -> bool {
-    let binary = |field: &Field| matches!(&field.source, FieldSource::Column(c) if c.ty == FlussoType::Binary);
+/// How `last`'s value reaches the build as text `first` keeps, if it does: a
+/// number constant unless `first` is `decimal` (the query emits every scalar
+/// constant as text, and only `coerce_decimal` parses a string), a boolean
+/// constant, or a `binary` column unless `first` is `binary`.
+fn read_as_text(first: &Field, last: &Field) -> Option<Text> {
+    let typed = |field: &Field, ty: FlussoType| match &field.source {
+        FieldSource::Column(c) => c.ty == ty,
+        FieldSource::Relation(Relation::Aggregate(a)) => {
+            matches!(
+                a.op,
+                AggregateOp::Sum(_) | AggregateOp::Min(_) | AggregateOp::Max(_)
+            ) && a.value_type.as_ref() == Some(&ty)
+        }
+        _ => false,
+    };
     match &last.source {
-        FieldSource::Constant(value) => matches!(
-            value,
-            GenericValue::Bool(_)
-                | GenericValue::SmallInt(_)
-                | GenericValue::Int(_)
-                | GenericValue::BigInt(_)
-                | GenericValue::Float(_)
-                | GenericValue::Double(_)
-                | GenericValue::Decimal(_)
-        ),
-        _ => binary(last) && !binary(first),
+        FieldSource::Constant(GenericValue::Bool(_)) => Some(Text::BooleanConstant),
+        FieldSource::Constant(
+            GenericValue::SmallInt(_)
+            | GenericValue::Int(_)
+            | GenericValue::BigInt(_)
+            | GenericValue::Float(_)
+            | GenericValue::Double(_)
+            | GenericValue::Decimal(_),
+        ) if !typed(first, FlussoType::Decimal) => Some(Text::NumberConstant),
+        FieldSource::Column(c)
+            if c.ty == FlussoType::Binary && !typed(first, FlussoType::Binary) =>
+        {
+            Some(Text::Binary)
+        }
+        _ => None,
     }
 }
 

@@ -95,7 +95,7 @@ import { removeAt, removeFields, removeNode } from "./model/edit";
 import { adoptIds, fieldIds, stripUids } from "./model/ids";
 import { cleanSchemaPath, indexName, isConfigFile, pairRows, type RowPair, schemaPath } from "./model/indexRows";
 import { sqlName } from "./model/names";
-import { keepFocus } from "./components/nameDraft";
+import { keepFocus, settleNameDraft } from "./components/nameDraft";
 import { useNameRefusal, useSqlNameRefusal } from "./components/nameRefusal";
 import { formatRoute, parseRoute, type Route } from "./router";
 import {
@@ -1112,11 +1112,13 @@ export default function App() {
     revertChanges();
   };
 
-  const openRaw = () =>
+  const openRaw = () => {
+    settleNameDraft();
     void flushPendingValues().then(() => {
       const current = useDesignStore.getState().doc?.schemas[active];
       if (!codeBlocked(current ? pruneIncomplete(current).left : undefined)) setRawMode(true);
     });
+  };
   const closeRaw = () => leaveBuffer(() => setRawMode(false));
 
   const validate = async () => {
@@ -1614,7 +1616,7 @@ export default function App() {
               <div className={NAV_HEADING}>{t("sidebar.indexes")}</div>
               {(config.index ?? []).map((e) => (
                 <button
-                  key={e.name}
+                  key={e.id ?? e.name}
                   className={cn(NAV, active === e.name && !browseCatalog && NAV_ACTIVE)}
                   onClick={() => {
                     // The buffer's own index is not a way out of it: from Tables
@@ -1781,7 +1783,7 @@ export default function App() {
                 </DrawerClose>
               </DrawerHeader>
               <Preview
-                index={active}
+                index={doc?.config.index?.find((e) => e.name === active)?.id ?? active}
                 preview={preview}
                 left={pruned?.left ?? []}
                 diagnostics={allDiagnostics.filter((d) => d.index === active)}

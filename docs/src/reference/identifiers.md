@@ -24,14 +24,17 @@ What happens is decided in this order:
 3. An `emit: false` namesake strips the name.
 4. OpenSearch indexes what is left under the last emitted one's mapping, and may refuse it.
 
-The outcomes below come from a live test (`apps/cli/tests/duplicate_names.rs`). It builds every ordered pair of 34 field kinds through the real builder and OpenSearch sink: each leaf type, `array: true`, `json` with and without `indexed`, `map`, `geo`, `custom`, each join kind with and without related rows, `object`, the aggregates, constants (a number, a string, a list, a mixed list, an object), scripts and `emit: false`. Each outcome is checked against the classification the warning's wording is built from; the table below is written from that test's results.
+The outcomes below come from a live test (`apps/cli/tests/duplicate_names.rs`). It builds every ordered pair of 38 field kinds through the real builder and OpenSearch sink: each leaf type, `array: true`, `json` with and without `indexed`, `map`, `geo`, `custom`, each join kind with and without related rows, `object`, the aggregates (one with `value_type: decimal`), `decimal`, constants (a whole and a fractional number, `true`, a string, a list, a mixed list, an object), scripts and `emit: false`. Each outcome is checked against the classification the warning's wording is built from; the table below is written from that test's results.
 
 | First | Last | A document holds |
 | --- | --- | --- |
 | any | any, when one of them is `emit: false` | nothing under the name (the mapping still lists the last emitted one) |
 | a constant | anything | the first one's constant, under the last one's mapping: **OpenSearch rejects** every document when that mapping can't take it (a number or boolean under a `geo` point or a join, a string that isn't a number under a numeric field, an object under a scalar field) |
 | anything but a constant | a constant holding a list or an object | `null` |
-| anything but a constant or a `binary` column | a number or boolean constant, a `binary` column | the last one's value as text: `"5"`, `"true"`, or Postgres hex (`"\x0102"`) instead of base64; in a one-element array when the first one is an `array: true` column |
+| anything but a constant or a `decimal` field | a number constant | the last one's value as text (`"5"`); in a one-element array when the first one is an `array: true` column |
+| a `decimal` column, or `sum`/`min`/`max` with `value_type: decimal` | a number constant | the number (a `decimal` field reads text as a number); in a one-element array when the first one is an `array: true` column |
+| anything but a constant | a boolean constant | `"true"` or `"false"`, as text |
+| anything but a constant or a `binary` column | a `binary` column | its bytes as Postgres hex text (`"\x0102"`), not base64 |
 | a value (column, aggregate, geo) | anything else | the last one's value: read as the first one's type when both are values, as raw JSON otherwise |
 | a join or object | a join or object whose child fields it declares too | the last one's value, its child fields read as the first one declares them |
 | a join or object | a join or object with child fields it doesn't declare | only the child fields both declare; with none, every element (or the object) is empty: `has_many: orders` twice, first with `status`, then with `total` and `note`, gives `"orders": [{}, {}]` |

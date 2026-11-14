@@ -109,7 +109,8 @@ export function Preview({
   diagnostics,
   onSample,
 }: {
-  /// The active index name — keys the sample so it resets when the index changes.
+  /// The active index's row id (its name when it has none) — keys the sample,
+  /// so it resets when another index is opened but survives a rename.
   index: string;
   preview: PreviewResponse | null;
   /// Paths of the incomplete pieces the preview leaves out (see `pruneIncomplete`).
@@ -210,7 +211,8 @@ export function Preview({
         {tab === "mapping" && <CodeBlock text={JSON.stringify(preview.preview.mapping, null, 2)} lang="json" />}
 
         {/* Kept mounted (hidden) so a fetched sample survives tab switches;
-            keyed by index so it resets when you switch indexes. */}
+            keyed by the index's row id so it resets when you switch indexes,
+            not when you rename one. */}
         {onSample && (
           <div className={cn(tab !== "sample" && "hidden")}>
             <SampleDoc key={index} onSample={onSample} />

@@ -253,17 +253,20 @@ after a live update; constants land as written), and `an_update_of_an_unread_col
   `[var(--x)]`/`[0.6875rem]`** (`text-string`, not `text-[var(--string)]`).
   Every name box (index, sink, field, canvas title) goes through `components/nameDraft.ts`'s
   `useNameDraft`: the typed name is a draft in the UI store with its own `settle`/`drop` (Save
-  settles, Undo/Redo/Reset drop; their buttons `keepFocus`), applied on blur at once and on unmount
-  through the store's `renameField`/`renameIndex`/`renameSink`, which take an identity (uid, row id,
-  sink id) and read the current state (`model/renames.ts`), never a closure's snapshot. Applying a
-  name must move no layout (a press that blurred the box would end elsewhere and lose its click:
-  reasons float and take no pointer events, the rename-chip row has a fixed height and a fixed
-  order, `model/renameChips.ts`, and a canvas node header is one non-wrapping line, the title
-  ending in an ellipsis and the title box covering its slot; closing the command palette hands the
-  focus back through the draft's `refocus`, and an Escape that closes it doesn't also clear the
-  selection; no test runs a browser, so a
-  change here needs a by-hand check that each control near a pending name still takes its
-  click), and the canvas keeps React Flow's
+  settles, Undo/Redo/Reset drop; their buttons `keepFocus`), applied through the store's
+  `renameField`/`renameIndex`/`renameSink`, which take an identity (uid, row id, sink id) and read
+  the current state (`model/renames.ts`), never a closure's snapshot. **A blur inside a pointer
+  press applies the name when the press ends**, after the click's handlers ran (`model/press.ts`,
+  a pure reducer; the document-level capture listeners that feed it live in `nameDraft.ts`), so
+  nothing re-renders mid-press and no click is lost to a moved or re-created control; Tab, Enter,
+  unmount and Save apply at once, and a control acting on the renamed thing calls
+  `settleNameDraft()` first (Save, duplicate, remove, Code mode). Lists are keyed by identity,
+  never by a name a box can change (sidebar `e.id`, sink cards and per-sink sections
+  `sinkIds[name]`, the Inspector by index row id + uid). Layout still never moves when a name
+  applies (reasons float and take no pointer events, `model/renameChips.ts` keeps chips in place,
+  a node header is one non-wrapping line); closing the palette hands the focus back through the
+  draft's `refocus`. No test runs a browser, so a change here needs a by-hand check that each
+  control near a pending name still takes its click; the canvas keeps React Flow's
   `measured`/`selected` across a re-projection, or every node is hidden until re-measured (issue #284).
 - **The toolchain is pinned in `rust-toolchain.toml`** (CI's `dtolnay/rust-toolchain@stable`
   installs stable, but rustup honors the pin and switches to it). This exists because
@@ -682,7 +685,7 @@ first as text, or as `null` for a list or object, and a `binary` column as hex t
 `emit: false` namesake strips the name from every
 document (the designer refuses to make one: `model/names.ts`'s `fieldNameProblem`); the message
 is built from `source::duplicate_outcome` (`libs/1-ports/source/src/duplicates.rs`), which the live
-`apps/cli/tests/duplicate_names.rs` matrix (every ordered pair of 34 field kinds through the real
+`apps/cli/tests/duplicate_names.rs` matrix (every ordered pair of 38 field kinds through the real
 builder and OpenSearch sink; `opensearch` nextest group) pins pair by pair, a pair it can't place
 getting `Unknown` and a wording that claims nothing; a finding
 under a duplicated name carries its position (`Diagnostic.positions`, rendered by `dotted_path` as

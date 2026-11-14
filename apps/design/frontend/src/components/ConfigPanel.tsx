@@ -10,7 +10,7 @@ import { defaultSchemaPath, indexName } from "../model/indexRows";
 import { identifierProblem } from "../model/names";
 import { reKeyIndexSinks as reKeyIndexSinksIn } from "../model/renames";
 import { useDesignStore } from "../store/design";
-import { useNameDraft } from "./nameDraft";
+import { settleNameDraft, useNameDraft } from "./nameDraft";
 import { type NameKind, useNameRefusal, useRenameProblemText } from "./nameRefusal";
 import { AdapterForm, KindBadge, KindToggle } from "./AdapterForm";
 import { Check, Drawer, Field, Num, PanelTitle, RemoveButton, Select, Text } from "./widgets";
@@ -338,18 +338,27 @@ export function ConfigPanel({
                     className="shrink-0 text-muted-foreground hover:text-foreground"
                     title={t("config.duplicate")}
                     aria-label={t("config.duplicate")}
-                    onClick={() => onDuplicate(i)}
+                    onClick={() => {
+                      settleNameDraft();
+                      onDuplicate(i);
+                    }}
                   >
                     <Copy />
                   </Button>
-                  <RemoveButton label={t("common.remove")} onClick={() => setPendingRemove(i)} />
+                  <RemoveButton
+                    label={t("common.remove")}
+                    onClick={() => {
+                      settleNameDraft();
+                      setPendingRemove(i);
+                    }}
+                  />
                 </div>
                 {sinksWithIndexOptions.length > 0 && (
                   <div className="px-3 pb-2">
                     <Drawer title={t("config.sinkOptions")} count={Object.keys(e.sinks ?? {}).length || undefined}>
                       <p className="mb-2 text-2xs text-muted-foreground">{t("config.sinkOptionsHint")}</p>
                       {sinksWithIndexOptions.map(({ name, description }) => (
-                        <div key={name} className="mb-2 last:mb-0">
+                        <div key={config.sinkIds?.[name] ?? name} className="mb-2 last:mb-0">
                           <div className="mb-1 flex items-center gap-1.5 font-mono text-2xs text-foreground">
                             {kindIcon(description.kind)}
                             {name}
@@ -381,7 +390,10 @@ export function ConfigPanel({
             adapters={sinkAdapters}
             taken={Object.keys(sinks).filter((n) => n !== name)}
             onChange={(s) => changeSink(name, s)}
-            onRemove={() => removeSink(name)}
+            onRemove={() => {
+              settleNameDraft();
+              removeSink(name);
+            }}
           />
         ))}
         <AddDashed
