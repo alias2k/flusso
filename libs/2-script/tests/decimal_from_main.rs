@@ -8,10 +8,13 @@
 //! input's label and JSON text, then `type_of(x)`, `${x}` and `x.to_float()`.
 //!
 //! What must hold, by label:
-//! - every decimal: `to_float()` is the `f64` nearest the decimal the script
-//!   holds, its `${x}` parsed (`0.0` for a zero). `main`'s was `Decimal::to_f64`
-//!   of a value serde_json's default float parser read, so a long value could
-//!   land one unit in the last place off; the test counts those rows.
+//! - every decimal: `to_float()` is its `${x}` parsed as `f64` (`0.0` for a
+//!   zero). That reference is the algorithm under test, so it proves the
+//!   sandbox's own `to_float` is the one called; `the_nearest_double_is_known`
+//!   checks the rounding itself against doubles known independently. `main`'s
+//!   was `Decimal::to_f64` of a value serde_json's default float parser read,
+//!   so a long value could land one unit in the last place off; the test
+//!   counts those rows.
 //! - `zero`, `exponent`: the kind and `${x}` as on `main`. A value that rounds
 //!   to zero, or is written with an exponent, reads as `main` read it.
 //! - `long`, `exact`: the kind as on `main`, and `${x}` is the input, every
@@ -211,4 +214,23 @@ fn a_declared_decimal_reaches_a_script_as_main_gave_it() {
         wrong.len(),
         wrong.join("\n")
     );
+}
+
+/// `to_float()` of a declared decimal is the nearest double, against values
+/// whose nearest double is known independently of Rust's parser.
+#[test]
+fn the_nearest_double_is_known() {
+    let schema = IndexSchema::try_from(SchemaYaml::try_parse(SCHEMA).unwrap()).unwrap();
+    let index = IndexName::try_new("products").unwrap();
+    let scripts =
+        Scripts::compile(&SourceSpec::new(BTreeMap::from([(index.clone(), schema)]))).unwrap();
+    for (text, nearest) in [
+        ("3.14159265358979323846", "3.141592653589793"),
+        ("1689181831.774158792227902", "1689181831.7741587"),
+        ("0.1", "0.1"),
+        ("9007199254740993", "9007199254740992.0"),
+    ] {
+        let seen = run(&scripts, &index, declared(text));
+        assert_eq!(seen.split('\t').nth(2), Some(nearest), "{text}: {seen}");
+    }
 }

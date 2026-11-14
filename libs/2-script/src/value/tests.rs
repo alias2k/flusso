@@ -48,6 +48,12 @@ fn a_decimal_round_trips_exactly() {
     );
 }
 
+fn negative_zero(scale: u32) -> Decimal {
+    let mut zero = Decimal::new(0, scale);
+    zero.set_sign_negative(true);
+    zero
+}
+
 fn big(text: &str) -> GenericValue {
     GenericValue::BigDecimal(kernel::BigDecimal::parse(text).unwrap())
 }
@@ -73,6 +79,52 @@ fn a_declared_decimal_crosses_as_a_decimal_unless_past_the_range() {
             .unwrap(),
         "1000000000000000000000000000000"
     );
+}
+
+/// A declared decimal with more than 28 fractional digits and no exponent
+/// reaches a script as the nearest `Decimal`, 28 fractional digits, like its
+/// neighbour with 28; only an exponent or a zero takes `main`'s `f64` path.
+#[test]
+fn a_decimal_past_28_fractional_digits_crosses_as_the_nearest_decimal() {
+    for (text, want) in [
+        (
+            "1.123456789012345678901234567891",
+            "1.1234567890123456789012345679",
+        ),
+        (
+            "3.141592653589793238462643383279",
+            "3.1415926535897932384626433833",
+        ),
+        (
+            "1.000000000000000000000000000000",
+            "1.0000000000000000000000000000",
+        ),
+        (
+            "-0.123456789012345678901234567890",
+            "-0.1234567890123456789012345679",
+        ),
+    ] {
+        let rhai = to_dynamic(&big(text));
+        assert_eq!(
+            rhai.as_decimal().map(|d| d.to_string()),
+            Ok(want.to_owned()),
+            "{text}"
+        );
+    }
+}
+
+/// A zero `decimal` result is written without a sign: `-0` reaches a script
+/// from a tiny negative value, and `main` wrote such a zero as `0.0`.
+#[test]
+fn a_zero_decimal_result_is_written_without_a_sign() {
+    let out = out(&FlussoType::Decimal);
+    for (zero, want) in [(negative_zero(0), "0"), (negative_zero(3), "0.000")] {
+        assert_eq!(
+            from_dynamic(Dynamic::from_decimal(zero), &out),
+            Ok(big(want)),
+            "{zero}"
+        );
+    }
 }
 
 /// A `decimal` script field refuses any string, as on `main`, a string

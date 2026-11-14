@@ -348,3 +348,21 @@ fn a_string_returned_to_a_decimal_field_fails_the_document() {
         );
     }
 }
+
+/// A zero result of a `decimal` script field, a scalar or array element, is
+/// written without a sign: a tiny negative value reaches the script as `-0`.
+#[test]
+fn a_zero_decimal_script_result_has_no_sign() {
+    let fields = "  - decimal: x\n    required: false\n  \
+                    - decimal: same\n    required: false\n    script: 'this.x'\n  \
+                    - decimal: both\n    required: false\n    array: true\n    \
+                      script: '[this.x, this.x * 2]'\n";
+    let scripts = Scripts::compile(&spec(fields)).unwrap();
+    let mut body = doc(&[("x", big("-2.5E-29"))]);
+    scripts.apply(&products(), &mut body).unwrap();
+    assert_eq!(get(&body, "same"), Some(&big("0")));
+    assert_eq!(
+        get(&body, "both"),
+        Some(&GenericValue::Array(vec![big("0"), big("0")]))
+    );
+}
