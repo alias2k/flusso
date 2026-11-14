@@ -28,7 +28,9 @@ pub fn to_json(value: &GenericValue) -> Value {
         GenericValue::Uuid(u) => Value::String(u.to_string()),
         GenericValue::Date(d) => Value::String(d.to_string()),
         GenericValue::Time(t) => Value::String(t.to_string()),
-        GenericValue::Timestamp(ts) => Value::String(ts.to_string()),
+        // chrono's `Display` puts a space between date and time, which a
+        // `date` field's default format refuses.
+        GenericValue::Timestamp(ts) => Value::String(ts.format("%Y-%m-%dT%H:%M:%S%.f").to_string()),
         GenericValue::TimestampTz(ts) => Value::String(ts.to_rfc3339()),
         GenericValue::Bytes(bytes) => Value::String(base64_encode(bytes)),
         GenericValue::Array(items) => Value::Array(items.iter().map(to_json).collect()),

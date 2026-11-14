@@ -130,10 +130,10 @@ The derive checks a struct against the mapping at compile time, but a struct tha
   | `date` | `2024-01-02` | `chrono::NaiveDate`, `String` |
   | `time` | `03:04:05.123456` | `chrono::NaiveTime`, `String` |
   | `timetz` | `03:04:05.123456+02` | `String` only |
-  | `timestamp` (no zone) | `2024-01-02 03:04:05.123456` | `String` only ([#304](https://github.com/alias2k/flusso/issues/304)) |
+  | `timestamp` (no zone) | `2024-01-02T03:04:05.123456` | `chrono::NaiveDateTime`, `String` |
   | `timestamptz` | `2024-01-02T03:04:05.123456+00:00` | `chrono::DateTime<Utc>`, `String` |
 
-  `chrono::NaiveDateTime` reads none of these forms. The `time` crate's types aren't covered here: nothing in flusso's tests reads these forms with them.
+  The `time` crate's types aren't covered here: nothing in flusso's tests reads these forms with them.
 - **Any other type behind a tagged `FlussoValue` newtype.** `#[flusso(keyword)] struct Sku(SmolStr)` is how a string type from another crate goes at a `keyword` field, so it is trusted to read one string, whatever it is named (`Date`, `Decimal`, `Duration`, `chrono::NaiveDate` holding date text included). Looking through `Option`, `Box`, `Rc`, `Arc`, `Cell`, `RefCell`, `Mutex`, `RwLock`, `Cow`, `Wrapping`, `Saturating` and `Reverse`, the derive refuses exactly: a `HashMap`/`BTreeMap`, a `Vec`/`HashSet`/`BTreeSet`/`VecDeque`/`LinkedList`/`BinaryHeap`, a slice, tuple or array, a Rust primitive other than `String` and `char` (a `char` reads a one-character string), `NonZero*`, and a flusso type that reads an object (a `FlussoMap` type, a sub-document).
 - **What [`#[flusso(opaque)]`](#escape-hatches) turns off**, and a type the derive can't see into under it (`Box<…>`, a tuple, a plain struct).
 - **serde attributes that change what is read**: `with`/`deserialize_with` on a field, `from`/`try_from` on a `FlussoValue` type (validation in `try_from` is a common use), and `deny_unknown_fields` on a fragment, which then fails on every key it leaves out.

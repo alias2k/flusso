@@ -134,7 +134,12 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   is_null` root filter: only top-level rows are documents across child/grandchild changes,
   re-parenting, promotion, and demotion), and `binary_columns_and_constants_are_indexed_as_written` (issue #291: a `bytea` at the root, as
 `bytea[]`, in every join kind and two levels deep reads back as base64 of its bytes on backfill and
-after a live update; constants land as written), and `an_update_of_an_unread_column_writes_nothing` (issue #169: an update changing
+after a live update; constants land as written), and `date_and_time_columns_are_indexed_and_queryable`
+(issue #304: `date`/`timestamp`/`timestamptz` and their arrays land as ISO 8601 a default `date`
+mapping takes, on backfill and live, under a non-UTC `TimeZone`, with a `range` and a sort over each;
+`sink::to_json` writes a naive timestamp with a `T`) and `a_tuned_timestamp_mapping_meets_the_iso_form`
+(a space-only `format` rejects each document holding a value, `strict_date_optional_time` or
+`ignore_malformed` takes it, an `indexed: false` join stores the `T` form), and `an_update_of_an_unread_column_writes_nothing` (issue #169: an update changing
   only a column no document reads leaves the row's and its parent's `_version` alone; `wal`'s
   `an_update_of_unread_columns_rebuilds_nothing` covers root, child, aggregate, each read-column
   kind, and the no-pre-image fallback; `on_pairs_rebuild_the_parent_from_either_side` covers `on:`
@@ -778,8 +783,9 @@ and refuses to start only on a kind that cannot work as written: `stops_the_star
 `DiagnosticKind` exhaustively (`UnknownTable`/`UnknownColumn`/`UnreadSoftDeleteMarker`/
 `RelationPrimaryKey`/`TransformNotApplicable`/`RootPrimaryKeyMismatch`/`UnsupportedKeyType`/
 `NotAnArrayColumn` stop;
-type, numeric, nullability, ignored-primary-key, `UndeclaredArrayColumn`, `DuplicateFieldName` and `RootPrimaryKey`
-findings print and start, as they built or ran in 0.17), so a new kind forces a decision there; stop
+type, numeric, nullability, ignored-primary-key, `UndeclaredArrayColumn`, `DuplicateFieldName`, `RootPrimaryKey`
+and `TimestampFormat` (issue #304: a timestamp `options.format` no pattern of which reads the ISO
+form, `source::reads_iso_timestamps`, checked offline in `validate_spec`) findings print and start, as they built or ran in 0.17), so a new kind forces a decision there; stop
 only on a state no working 0.17 deployment can be in (or on a key new since, like `array`). `DiagnosticKind` stays exhaustive for that match; `Diagnostic` and `Anchor` are
 `#[non_exhaustive]` (`Diagnostic::new` builds one). `check` still fails on every `Error`. No opt-out
 flag. Guards: `backends::tests` (one per kind) and `config_coverage`'s

@@ -206,7 +206,8 @@ fn stops_the_start(kind: DiagnosticKind) -> bool {
         | DiagnosticKind::IgnoredPrimaryKey
         | DiagnosticKind::RootPrimaryKey
         | DiagnosticKind::UndeclaredArrayColumn
-        | DiagnosticKind::DuplicateFieldName => false,
+        | DiagnosticKind::DuplicateFieldName
+        | DiagnosticKind::TimestampFormat => false,
     }
 }
 
@@ -452,6 +453,13 @@ mod tests {
     #[test]
     fn a_duplicate_field_name_prints_and_starts() {
         let printed = starts(DiagnosticKind::DuplicateFieldName);
+        assert!(printed.contains("[warning]"), "{printed}");
+        assert!(!printed.contains("starting anyway"), "{printed}");
+    }
+
+    #[test]
+    fn a_timestamp_format_prints_and_starts() {
+        let printed = starts(DiagnosticKind::TimestampFormat);
         assert!(printed.contains("[warning]"), "{printed}");
         assert!(!printed.contains("starting anyway"), "{printed}");
     }

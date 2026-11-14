@@ -124,6 +124,7 @@ Exit status is non-zero when validation fails or any diagnostic is an error. `--
 | `ignored_primary_key` | A join `primary_key` that names no column. | warning | no |
 | `undeclared_array_column` | A `[]` column (or a domain over one) read by a field without `array: true`. | warning | no |
 | `duplicate_field_name` | Two fields of one name at one level; the message names each by position and says what the index keeps. | warning | no |
+| `timestamp_format` | A `timestamp` field, aggregate result or script output whose `options.format` has no pattern that reads the ISO 8601 form timestamps are written in (see [dates and times](field-types.md#dates-and-times)). Reported only when every pattern is known to refuse it. | warning | no |
 
 ## design
 

@@ -255,7 +255,9 @@ fn generic_to_json(value: &GenericValue) -> serde_json::Value {
         GenericValue::Uuid(u) => serde_json::Value::String(u.to_string()),
         GenericValue::Date(d) => serde_json::Value::String(d.to_string()),
         GenericValue::Time(t) => serde_json::Value::String(t.to_string()),
-        GenericValue::Timestamp(ts) => serde_json::Value::String(ts.to_string()),
+        GenericValue::Timestamp(ts) => {
+            serde_json::Value::String(ts.format("%Y-%m-%dT%H:%M:%S%.f").to_string())
+        }
         GenericValue::TimestampTz(ts) => serde_json::Value::String(ts.to_rfc3339()),
         GenericValue::Array(items) => items.iter().map(generic_to_json).collect(),
         GenericValue::Map(map) => serde_json::Value::Object(

@@ -59,6 +59,19 @@
 //!   Postgres hex text); a `constant` number, list, list mixing kinds, and
 //!   object land as written.
 //!
+//! - [`date_and_time_columns_are_indexed_and_queryable`] — `date`, `timestamp`
+//!   (without time zone) and `timestamptz` columns, plain and as arrays, at 0,
+//!   3 and 6 fractional digits, land on backfill and after a live insert and
+//!   update, under a non-UTC database `TimeZone`; a `range` query and a sort
+//!   over each see the instants Postgres holds (issue #304: a naive timestamp
+//!   was written with a space, which a `date` field refuses).
+//!
+//! - [`a_tuned_timestamp_mapping_meets_the_iso_form`] — what the ISO 8601
+//!   form does to mappings tuned for the old space form: a space-only
+//!   `format` rejects each document holding a value, adding
+//!   `strict_date_optional_time` or `ignore_malformed` takes it, and an
+//!   `indexed: false` join stores it as written (issue #304).
+//!
 //! - [`an_id_past_512_bytes_is_decided_by_on_error`] — a text key OpenSearch
 //!   refuses as an `_id` (over 512 bytes) is one rejected document, decided by
 //!   `on_error`: `skip` quarantines it and acks the batch, `stop` stops the sink
@@ -1094,6 +1107,381 @@ async fn binary_columns_and_constants_are_indexed_as_written() {
     live.shutdown();
 }
 
+/// The `date` / `timestamp` / `timestamptz` value each `moments` row holds, as
+/// written to its document, for the fields [`date_and_time_columns_are_indexed_and_queryable`] reads.
+fn moments(doc: &serde_json::Value) -> Vec<String> {
+    ["/d", "/ts", "/tz", "/ds", "/tss", "/tzs"]
+        .iter()
+        .map(|pointer| {
+            format!(
+                "{pointer}={}",
+                doc.pointer(pointer).unwrap_or(&serde_json::Value::Null)
+            )
+        })
+        .collect()
+}
+
+/// The ids of the `moments` documents `body` finds, in hit order, after a refresh.
+async fn search_ids(live: &Pipeline, body: serde_json::Value) -> Vec<String> {
+    live.http
+        .post(format!("{}/moments/_refresh", live.os_url))
+        .send()
+        .await
+        .unwrap();
+    let found: serde_json::Value = live
+        .http
+        .post(format!("{}/moments/_search", live.os_url))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    found
+        .pointer("/hits/hits")
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or_else(|| panic!("search failed: {found}"))
+        .iter()
+        .filter_map(|hit| hit.get("_id").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A `date`, a `timestamp without time zone`, and a `timestamptz` column, each
+/// also as an array, land in OpenSearch on backfill and after a live insert and
+/// update, as ISO 8601 a `date` field takes with its default format, and a
+/// `range` query and a sort over them see the instants Postgres holds (issue
+/// #304: a naive timestamp was written with a space and every document holding
+/// one was rejected). The database's `TimeZone` is not UTC, so a `timestamptz`
+/// is still written as its UTC instant and a naive one as written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn date_and_time_columns_are_indexed_and_queryable() {
+    let pg = start_postgres().await;
+    let os = start_opensearch().await;
+    exec(
+        &pg.pool,
+        "ALTER DATABASE postgres SET timezone = 'America/New_York'",
+    )
+    .await;
+    create_table(
+        &pg.pool,
+        "CREATE TABLE moments (id int PRIMARY KEY, name text, d date, ts timestamp, \
+         tz timestamptz, ds date[], tss timestamp[], tzs timestamptz[])",
+    )
+    .await;
+    exec(
+        &pg.pool,
+        "INSERT INTO moments VALUES \
+         (1, 'one', '2024-01-01', '2024-01-01 10:00:00', '2024-01-01 10:00:00+00', \
+          '{2024-01-01}', '{\"2024-01-01 10:00:00\"}', '{\"2024-01-01 10:00:00+00\"}'), \
+         (2, 'two', '2024-01-02', '2024-01-02 03:04:05.123', '2024-01-02 03:04:05.123+00', \
+          '{2024-01-02}', '{\"2024-01-02 03:04:05.123\"}', '{\"2024-01-02 03:04:05.123+00\"}'), \
+         (3, 'three', '2024-01-03', '2024-01-03 03:04:05.123456', \
+          '2024-01-03 03:04:05.123456+00', '{2024-01-03}', '{\"2024-01-03 03:04:05.123456\"}', \
+          '{\"2024-01-03 03:04:05.123456+00\"}')",
+    )
+    .await;
+
+    let mut schema = simple_schema("moments", None);
+    schema.fields.extend([
+        typed_field("d", FlussoType::Date, false),
+        typed_field("ts", FlussoType::Timestamp, false),
+        typed_field("tz", FlussoType::Timestamp, false),
+        typed_field("ds", FlussoType::Date, true),
+        typed_field("tss", FlussoType::Timestamp, true),
+        typed_field("tzs", FlussoType::Timestamp, true),
+    ]);
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("moments"), schema)]));
+    let live = start_pipeline(&pg, &os, spec, &["moments"]).await;
+    live.await_seeded(1).await;
+
+    let row = |day: &str, ts: &str, tz: &str| -> Vec<String> {
+        vec![
+            format!("/d=\"{day}\""),
+            format!("/ts=\"{ts}\""),
+            format!("/tz=\"{tz}\""),
+            format!("/ds=[\"{day}\"]"),
+            format!("/tss=[\"{ts}\"]"),
+            format!("/tzs=[\"{tz}\"]"),
+        ]
+    };
+    let assert_row = async |id: &str, want: Vec<String>| {
+        let want: Vec<&str> = want.iter().map(String::as_str).collect();
+        live.assert_doc_eventually("moments", id, &moments, &want)
+            .await;
+    };
+
+    assert_row(
+        "1",
+        row(
+            "2024-01-01",
+            "2024-01-01T10:00:00",
+            "2024-01-01T10:00:00+00:00",
+        ),
+    )
+    .await;
+    assert_row(
+        "2",
+        row(
+            "2024-01-02",
+            "2024-01-02T03:04:05.123",
+            "2024-01-02T03:04:05.123+00:00",
+        ),
+    )
+    .await;
+    assert_row(
+        "3",
+        row(
+            "2024-01-03",
+            "2024-01-03T03:04:05.123456",
+            "2024-01-03T03:04:05.123456+00:00",
+        ),
+    )
+    .await;
+
+    exec(
+        &pg.pool,
+        "INSERT INTO moments VALUES (4, 'four', '2024-01-04', '2024-01-04 00:00:00.5', \
+         '2024-01-04 00:00:00.5+00', '{2024-01-04}', '{\"2024-01-04 00:00:00.5\"}', \
+         '{\"2024-01-04 00:00:00.5+00\"}')",
+    )
+    .await;
+    exec(
+        &pg.pool,
+        "UPDATE moments SET d = '2024-01-05', ts = '2024-01-05 12:00:00', \
+         tz = '2024-01-05 12:00:00+00', ds = '{2024-01-05}', tss = '{\"2024-01-05 12:00:00\"}', \
+         tzs = '{\"2024-01-05 12:00:00+00\"}' WHERE id = 1",
+    )
+    .await;
+    assert_row(
+        "4",
+        row(
+            "2024-01-04",
+            "2024-01-04T00:00:00.500",
+            "2024-01-04T00:00:00.500+00:00",
+        ),
+    )
+    .await;
+    assert_row(
+        "1",
+        row(
+            "2024-01-05",
+            "2024-01-05T12:00:00",
+            "2024-01-05T12:00:00+00:00",
+        ),
+    )
+    .await;
+
+    for field in ["d", "ts", "tz", "ds", "tss", "tzs"] {
+        let range = search_ids(
+            &live,
+            serde_json::json!({
+                "query": { "range": { field: { "gte": "2024-01-02", "lt": "2024-01-04" } } },
+                "sort": [{ field: "asc" }],
+            }),
+        )
+        .await;
+        assert_eq!(range, ["2", "3"], "range over {field}");
+        let sorted = search_ids(&live, serde_json::json!({ "sort": [{ field: "desc" }] })).await;
+        assert_eq!(sorted, ["1", "4", "3", "2"], "sort over {field}");
+    }
+    let to_the_millisecond = search_ids(
+        &live,
+        serde_json::json!({
+            "query": { "range": { "ts": { "gte": "2024-01-02T03:04:05.123", "lte": "2024-01-02T03:04:05.123" } } },
+        }),
+    )
+    .await;
+    assert_eq!(to_the_millisecond, ["2"]);
+
+    live.shutdown();
+}
+
+/// A `timestamp` field over `ts` whose mapping carries `options`.
+fn timestamp_with(options: &[(&str, GenericValue)]) -> Field {
+    let mut field = typed_field("ts", FlussoType::Timestamp, false);
+    field.options = options
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), value.clone()))
+        .collect();
+    field
+}
+
+/// What a timestamp written in ISO 8601 (issue #304) does to the mappings a
+/// deployment may have tuned for the space form flusso wrote before 0.18:
+///
+/// - a `format` with only space patterns refuses it: each document holding a
+///   value is an item-level rejection (`skip` here), the rest land;
+/// - adding `strict_date_optional_time` to that `format` takes it;
+/// - `ignore_malformed: true` takes it and `_source` holds the `T` form;
+/// - an `indexed: false` join (`has_many`, `belongs_to`, plain and
+///   `array: true`) stores the `T` form.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_tuned_timestamp_mapping_meets_the_iso_form() {
+    let pg = start_postgres().await;
+    let os = start_opensearch().await;
+    for ddl in [
+        "CREATE TABLE stamps (id int PRIMARY KEY, name text, ts timestamp)",
+        "CREATE TABLE events (id int PRIMARY KEY, parent_id int, at timestamp, ats timestamp[])",
+        "CREATE TABLE parents (id int PRIMARY KEY, name text, latest_id int REFERENCES events(id))",
+    ] {
+        create_table(&pg.pool, ddl).await;
+    }
+    for sql in [
+        "INSERT INTO stamps VALUES (1, 'stamped', '2024-01-02 03:04:05.123'), (2, 'blank', NULL)",
+        "INSERT INTO events VALUES (1, 1, '2024-01-02 03:04:05', '{\"2024-01-02 03:04:05.5\"}')",
+        "INSERT INTO parents VALUES (1, 'parent', 1)",
+    ] {
+        exec(&pg.pool, sql).await;
+    }
+
+    let space_only =
+        GenericValue::String("yyyy-MM-dd HH:mm:ss.SSS||yyyy-MM-dd HH:mm:ss".to_owned());
+    let with_iso = GenericValue::String(
+        "strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSS||yyyy-MM-dd HH:mm:ss".to_owned(),
+    );
+    let stamps = |name: &str, field: Field| {
+        let mut schema = simple_schema("stamps", None);
+        schema.fields.push(field);
+        (index_name(name), schema)
+    };
+    let unindexed = |name: &str, table: &str, kind: JoinKind| {
+        let mut join = join_field(
+            name,
+            table,
+            kind,
+            vec![
+                typed_field("at", FlussoType::Timestamp, false),
+                typed_field("ats", FlussoType::Timestamp, true),
+            ],
+        );
+        if let FieldSource::Relation(Relation::Join(join)) = &mut join.source {
+            join.indexed = false;
+        }
+        join
+    };
+    let mut parents = simple_schema("parents", None);
+    parents.fields.extend([
+        unindexed(
+            "events",
+            "events",
+            JoinKind::HasMany {
+                foreign_key: column("parent_id"),
+            },
+        ),
+        unindexed(
+            "latest",
+            "events",
+            JoinKind::BelongsTo {
+                column: column("latest_id"),
+            },
+        ),
+    ]);
+    let spec = SourceSpec::new(BTreeMap::from([
+        stamps("spaced", timestamp_with(&[("format", space_only)])),
+        stamps("widened", timestamp_with(&[("format", with_iso)])),
+        stamps(
+            "lenient",
+            timestamp_with(&[("ignore_malformed", GenericValue::Bool(true))]),
+        ),
+        (index_name("parents"), parents),
+    ]));
+    exec(
+        &pg.pool,
+        "CREATE PUBLICATION flusso FOR TABLE stamps, events, parents",
+    )
+    .await;
+    exec(
+        &pg.pool,
+        "SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')",
+    )
+    .await;
+    let live = spawn_pipeline_with(&pg, &os, spec, FailurePolicies::new(FailurePolicy::Skip)).await;
+    live.await_seeded(4).await;
+
+    let ts = |doc: &serde_json::Value| {
+        vec![
+            doc.get("ts")
+                .map_or("absent".to_owned(), ToString::to_string),
+        ]
+    };
+    let assert_rejected_beside = async |index: &str, rejected: &str, landed: &str| {
+        live.assert_eventually(index, landed, Some(landed_name(landed)))
+            .await
+            .unwrap_or_else(|got| panic!("{index}/{landed} did not land, saw {got}"));
+        assert_eq!(
+            live.fetch_source(index, rejected).await,
+            None,
+            "{index}/{rejected}: a space-only format refuses the ISO form"
+        );
+    };
+    assert_rejected_beside("spaced", "1", "2").await;
+    for index in ["widened", "lenient"] {
+        live.assert_doc_eventually(index, "1", &ts, &["\"2024-01-02T03:04:05.123\""])
+            .await;
+        live.assert_doc_eventually(index, "2", &ts, &["null"]).await;
+    }
+    let stored = |doc: &serde_json::Value| {
+        ["/events/0/at", "/events/0/ats", "/latest/at", "/latest/ats"]
+            .iter()
+            .map(|pointer| {
+                format!(
+                    "{pointer}={}",
+                    doc.pointer(pointer).unwrap_or(&serde_json::Value::Null)
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let iso = [
+        "/events/0/at=\"2024-01-02T03:04:05\"",
+        "/events/0/ats=[\"2024-01-02T03:04:05.500\"]",
+        "/latest/at=\"2024-01-02T03:04:05\"",
+        "/latest/ats=[\"2024-01-02T03:04:05.500\"]",
+    ];
+    live.assert_doc_eventually("parents", "1", &stored, &iso)
+        .await;
+
+    exec(
+        &pg.pool,
+        "INSERT INTO stamps VALUES (3, 'live', '2024-01-03 00:00:00'), (4, 'live blank', NULL)",
+    )
+    .await;
+    assert_rejected_beside("spaced", "3", "4").await;
+    live.assert_doc_eventually("widened", "3", &ts, &["\"2024-01-03T00:00:00\""])
+        .await;
+    exec(
+        &pg.pool,
+        "UPDATE events SET at = '2024-01-04 05:06:07' WHERE id = 1",
+    )
+    .await;
+    live.assert_doc_eventually(
+        "parents",
+        "1",
+        &stored,
+        &[
+            "/events/0/at=\"2024-01-04T05:06:07\"",
+            "/events/0/ats=[\"2024-01-02T03:04:05.500\"]",
+            "/latest/at=\"2024-01-04T05:06:07\"",
+            "/latest/ats=[\"2024-01-02T03:04:05.500\"]",
+        ],
+    )
+    .await;
+
+    live.shutdown();
+}
+
+/// The `name` the `stamps` rows of [`a_tuned_timestamp_mapping_meets_the_iso_form`] hold.
+fn landed_name(id: &str) -> &'static str {
+    match id {
+        "2" => "blank",
+        "4" => "live blank",
+        _ => "?",
+    }
+}
+
 /// The sorted `label`s of a nested array, empty when absent.
 fn labels(array: Option<&serde_json::Value>) -> Vec<String> {
     let mut out: Vec<String> = array
@@ -1863,9 +2251,14 @@ fn column_field(name: &str, col: &str) -> Field {
 
 /// A `binary` field `name` over the column of the same name.
 fn binary_field(name: &str, array: bool) -> Field {
+    typed_field(name, FlussoType::Binary, array)
+}
+
+/// A field `name` of type `ty` over the column of the same name.
+fn typed_field(name: &str, ty: FlussoType, array: bool) -> Field {
     let mut field = column_field(name, name);
     if let FieldSource::Column(column) = &mut field.source {
-        column.ty = FlussoType::Binary;
+        column.ty = ty;
         column.array = array;
     }
     field
