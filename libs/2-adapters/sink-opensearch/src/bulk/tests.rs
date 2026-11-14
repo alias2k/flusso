@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::json;
 
 #[test]
 fn bulk_body_index_produces_two_ndjson_lines() {
@@ -294,4 +295,41 @@ fn an_empty_id_is_refused_on_both_ops_and_a_long_delete_id_is_not() {
     assert!(refused_id(&delete_action("")).unwrap().contains("empty"));
     assert_eq!(refused_id(&delete_action(&"a".repeat(513))), None);
     assert_eq!(refused_id(&index_action("42")), None);
+}
+
+/// The action lines are byte for byte what the bulk body always held: the
+/// metadata as `serde_json` renders a `json!` object, keys in that order, every
+/// string escaped as JSON escapes it.
+#[test]
+fn action_lines_are_written_as_before() {
+    for (index, id) in [
+        ("users", "42"),
+        ("odd \"index\"", "a\"b\\c\n\u{1}é\u{2028}"),
+        ("", ""),
+    ] {
+        let delete = bulk_action_fragment(&BulkAction::Delete {
+            index: index.to_owned(),
+            id: id.to_owned(),
+        })
+        .unwrap();
+        let want =
+            serde_json::to_string(&json!({ "delete": { "_index": index, "_id": id } })).unwrap();
+        assert_eq!(delete, format!("{want}\n"));
+        for require_alias in [false, true] {
+            let fragment = bulk_action_fragment(&BulkAction::Index {
+                index: index.to_owned(),
+                id: id.to_owned(),
+                doc: r#"{"a":1}"#.to_owned(),
+                require_alias,
+            })
+            .unwrap();
+            let meta = if require_alias {
+                json!({ "index": { "_index": index, "_id": id, "require_alias": true } })
+            } else {
+                json!({ "index": { "_index": index, "_id": id } })
+            };
+            let meta = serde_json::to_string(&meta).unwrap();
+            assert_eq!(fragment, format!("{meta}\n{{\"a\":1}}\n"));
+        }
+    }
 }

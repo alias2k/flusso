@@ -32,7 +32,7 @@
 //! ```
 
 use kernel::GenericValue;
-use serde_json::{Value, json};
+use serde_json::Value;
 use sink::{Json, RejectedDocument, Result, SinkError};
 
 /// A buffered write destined for OpenSearch.
@@ -124,7 +124,6 @@ pub(crate) fn build_bulk_body(actions: &[BulkAction]) -> Result<String> {
 /// single place the bulk wire format is produced; the crate-private `build_bulk_body`
 /// and the byte-aware chunking in `flush` both go through it.
 pub(crate) fn bulk_action_fragment(action: &BulkAction) -> Result<String> {
-    let mut fragment = String::new();
     match action {
         BulkAction::Index {
             index,
@@ -132,27 +131,39 @@ pub(crate) fn bulk_action_fragment(action: &BulkAction) -> Result<String> {
             doc,
             require_alias,
         } => {
-            let meta = if *require_alias {
-                json!({ "index": { "_index": index, "_id": id, "require_alias": true } })
-            } else {
-                json!({ "index": { "_index": index, "_id": id } })
-            };
-            let meta =
-                serde_json::to_string(&meta).map_err(|e| SinkError::Serialize(e.to_string()))?;
-            fragment.reserve(meta.len() + doc.len() + 2);
-            fragment.push_str(&meta);
-            fragment.push('\n');
+            let mut fragment = action_line("index", index, id, *require_alias, doc.len() + 1)?;
             fragment.push_str(doc);
             fragment.push('\n');
+            Ok(fragment)
         }
-        BulkAction::Delete { index, id } => {
-            let meta = serde_json::to_string(&json!({ "delete": { "_index": index, "_id": id } }))
-                .map_err(|e| SinkError::Serialize(e.to_string()))?;
-            fragment.push_str(&meta);
-            fragment.push('\n');
-        }
+        BulkAction::Delete { index, id } => action_line("delete", index, id, false, 0),
     }
-    Ok(fragment)
+}
+
+/// The action's metadata line, `{"<op>":{"_index":…,"_id":…}}` and a newline,
+/// with room for `extra` more bytes. Written directly: no value tree.
+fn action_line(
+    op: &str,
+    index: &str,
+    id: &str,
+    require_alias: bool,
+    extra: usize,
+) -> Result<String> {
+    let quoted =
+        |text: &str| serde_json::to_string(text).map_err(|e| SinkError::Serialize(e.to_string()));
+    let (index, id) = (quoted(index)?, quoted(id)?);
+    let mut line = String::with_capacity(48 + op.len() + index.len() + id.len() + extra);
+    line.push_str("{\"");
+    line.push_str(op);
+    line.push_str("\":{\"_index\":");
+    line.push_str(&index);
+    line.push_str(",\"_id\":");
+    line.push_str(&id);
+    if require_alias {
+        line.push_str(",\"require_alias\":true");
+    }
+    line.push_str("}}\n");
+    Ok(line)
 }
 
 /// Group action `sizes` (serialized NDJSON byte lengths, in order) into bulk
