@@ -16,7 +16,7 @@ error[E0080]: evaluation panicked: field `orders` in index `users` is a `nested`
 31 |     orders: Order,
    |             ^^^^^ evaluation of `_` failed here
 
-error[E0080]: evaluation panicked: fragment `Billing`: field `billingAddress` is `Addresses`, a newtype over a `Vec<…>`, which reads an array, but the schema field here is not an array — declare its element type here
+error[E0080]: evaluation panicked: fragment `Billing`: field `billingAddress` is `Addresses`, a newtype over a `Vec<…>`, which reads an array, but the schema field here is not an array — it takes one value, so declare a type that reads one
   --> tests/ui/newtype_over_vec_misplaced.rs:45:14
    |
 45 |     billing: Billing,

@@ -40,7 +40,7 @@ error[E0080]: evaluation panicked: field `id` is a single `keyword` in the schem
 15 |     id: Outer,
    |         ^^^^^ evaluation of `_` failed here
 
-error[E0080]: evaluation panicked: fragment `PlainLine`: field `sku` is `Outer`, a newtype over a `Vec<…>`, which reads an array, but the schema field here is not an array — declare its element type here
+error[E0080]: evaluation panicked: fragment `PlainLine`: field `sku` is `Outer`, a newtype over a `Vec<…>`, which reads an array, but the schema field here is not an array — it takes one value, so declare a type that reads one
   --> tests/ui/array_newtype_forwarded_misplaced.rs:28:12
    |
 28 |     lines: Vec<PlainLine>,
@@ -64,7 +64,7 @@ note: inside `ArrayOfArrays::__flusso_check`
 34 |     codes: Vec<Outer>,
    |            ^^^ the failure occurred here
 
-error[E0080]: evaluation panicked: fragment `Flat`: field `id` is `Outer`, a newtype over a `Vec<…>`, which reads an array, but the schema field here is not an array — declare its element type here
+error[E0080]: evaluation panicked: fragment `Flat`: field `id` is `Outer`, a newtype over a `Vec<…>`, which reads an array, but the schema field here is not an array — it takes one value, so declare a type that reads one
   --> tests/ui/array_newtype_forwarded_misplaced.rs:53:11
    |
 53 |     flat: Flat,

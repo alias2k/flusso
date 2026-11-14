@@ -328,9 +328,8 @@ export interface FileOp {
   path: string;
   /// Source path for a move, relative to flusso.toml.
   from?: string;
-  /// Content for upsert/move (raw wins over schema).
+  /// Content for upsert/move.
   schema?: IndexSchema;
-  raw?: string;
   /// The text to write `schema` into, keeping its comments (the Code-mode
   /// buffer); absent, the file on disk is used.
   base?: string;

@@ -58,7 +58,7 @@ error[E0080]: evaluation panicked: a FlussoMap type reads one JSON object, but `
 47 | struct OverAValue(Code);
    |                   ^^^^ evaluation of `_` failed here
 
-error[E0080]: evaluation panicked: a FlussoMap type reads one JSON object of dynamic keys, but `OverASubDocument` wraps `Contact`, a sub-document, whose fields serde requires — declare the fields you need on `OverASubDocument` itself, beside a `#[serde(flatten)]` map for the rest
+error[E0080]: evaluation panicked: a FlussoMap type reads one JSON object of dynamic keys, but `OverASubDocument` wraps `Contact`, a sub-document, whose fields serde requires — declare the fields you need on `OverASubDocument` itself as `Option<…>` (a map may lack any key), beside a `#[serde(flatten)]` map for the rest
   --> tests/ui/map_type_reads_no_object.rs:56:25
    |
 56 | struct OverASubDocument(Contact);

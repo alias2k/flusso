@@ -183,7 +183,8 @@ fn reads_an_object(input: &DeriveInput) -> syn::Result<TokenStream> {
     let sub_document = format!(
         "a FlussoMap type reads one JSON object of dynamic keys, but `{ident}` wraps `{rendered}`, \
          a sub-document, whose fields serde requires — declare the fields you need on `{ident}` \
-         itself, beside a `#[serde(flatten)]` map for the rest"
+         itself as `Option<…>` (a map may lack any key), beside a `#[serde(flatten)]` map for \
+         the rest"
     );
     Ok(quote::quote_spanned! {inner.span()=>
         const _: () = {

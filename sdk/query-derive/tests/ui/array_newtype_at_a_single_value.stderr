@@ -4,7 +4,7 @@ error[E0080]: evaluation panicked: field `billingAddress` in index `users` is an
 24 |     billing_address: Addresses,
    |                      ^^^^^^^^^ evaluation of `_` failed here
 
-error[E0080]: evaluation panicked: fragment `OpaqueObject`: field `billingAddress` is `Addresses`, a newtype over a `Vec<…>`, which reads an array, but the schema field here is not an array — declare its element type here
+error[E0080]: evaluation panicked: fragment `OpaqueObject`: field `billingAddress` is `Addresses`, a newtype over a `Vec<…>`, which reads an array, but the schema field here is not an array — it takes one value, so declare a type that reads one
   --> tests/ui/array_newtype_at_a_single_value.rs:39:11
    |
 39 |     flat: OpaqueObject,
@@ -16,7 +16,7 @@ note: inside `OpaqueObject::__flusso_check`
 31 |     billing_address: Addresses,
    |                      ^^^^^^^^^ the failure occurred here
 
-error[E0080]: evaluation panicked: fragment `Leaves`: field `email` is `Codes`, a newtype over a `Vec<…>`, which reads an array, but the schema field here is not an array — declare its element type here
+error[E0080]: evaluation panicked: fragment `Leaves`: field `email` is `Codes`, a newtype over a `Vec<…>`, which reads an array, but the schema field here is not an array — it takes one value, so declare a type that reads one
   --> tests/ui/array_newtype_at_a_single_value.rs:52:11
    |
 52 |     flat: Leaves,
@@ -28,7 +28,7 @@ note: inside `Leaves::__flusso_check`
 44 |     email: Codes,
    |            ^^^^^ the failure occurred here
 
-error[E0080]: evaluation panicked: fragment `AtAGeoPoint`: field `location` is `Codes`, a newtype over a `Vec<…>`, which reads an array, but the schema field here is not an array — declare its element type here
+error[E0080]: evaluation panicked: fragment `AtAGeoPoint`: field `location` is `Codes`, a newtype over a `Vec<…>`, which reads an array, but the schema field here is not an array — it takes one value, so declare a type that reads one
   --> tests/ui/array_newtype_at_a_single_value.rs:65:11
    |
 65 |     flat: AtAGeoPoint,
@@ -40,7 +40,7 @@ note: inside `AtAGeoPoint::__flusso_check`
 57 |     location: Option<Codes>,
    |               ^^^^^^ the failure occurred here
 
-error[E0080]: evaluation panicked: fragment `AtAMap`: field `codes` is `Addresses`, a newtype over a `Vec<…>`, which reads an array, but the schema field here is not an array — declare its element type here
+error[E0080]: evaluation panicked: fragment `AtAMap`: field `codes` is `Addresses`, a newtype over a `Vec<…>`, which reads an array, but the schema field here is not an array — it takes one value, so declare a type that reads one
   --> tests/ui/array_newtype_at_a_single_value.rs:78:11
    |
 78 |     flat: AtAMap,

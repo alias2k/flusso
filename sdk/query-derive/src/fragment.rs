@@ -652,7 +652,7 @@ fn array_shape_check(fragment: &Ident, field: &DocField, span: proc_macro2::Span
         key,
         &format!(
             "is `{rendered}`, a newtype over a `Vec<…>`, which reads an array, but the schema \
-             field here is not an array — declare its element type here"
+             field here is not an array — it takes one value, so declare a type that reads one"
         ),
     );
     let values_at_nested_msg = message(
