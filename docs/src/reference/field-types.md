@@ -13,8 +13,8 @@ Every scalar field's type key bridges a Postgres column type and an OpenSearch m
 | `short` | `smallint` | `short` | |
 | `integer` | `integer` | `integer` | |
 | `long` | `bigint` | `long` | |
-| `float` | `real` | `float` | See [numbers](#numbers). |
-| `double` | `double precision` | `double` | See [numbers](#numbers). |
+| `float` | `real` | `float` | |
+| `double` | `double precision` | `double` | |
 | `decimal` | `numeric`, `money` | `double` | `_source` keeps every digit; search, sort and aggregations are `double`. Use a `custom` `scaled_float` when exact search matters. See [numbers](#numbers). |
 | `date` | `date` | `date` | Written as `2024-01-02`. See [dates and times](#dates-and-times). |
 | `timestamp` | `timestamp`, `timestamptz`, `time` | `date` | Written as ISO 8601, stored to the millisecond. A `time` column's values are refused by OpenSearch. See [dates and times](#dates-and-times). |
@@ -142,12 +142,9 @@ The same form is written wherever the value goes: a `min`/`max` with `value_type
 
 ## numbers
 
-Every number is written as a JSON number. A `numeric` has no JSON number for `NaN` or an infinity, so neither does any number field.
-
-- **`decimal` keeps every digit Postgres stores.** The JSON number is the column's text: `12.50` stays `12.50`, `1234567890.123456789` keeps all 19 digits, and a value past `rust_decimal`'s range (±7.9 × 10^28, or more than 28 fractional digits) is a number too, `1000000000000000000000000000000`. The same goes for a `decimal` [array](#array) element, a `sum`/`min`/`max` with `value_type: decimal`, and an `ids` of `decimal` keys. OpenSearch indexes the field as `double`, so a query, a sort and an aggregation see the nearest `double`; only `_source` is exact. What a Rust consumer reads it into: [What the derive trusts](../query/document-structs.md#what-the-derive-trusts).
-- **`float` and `double` are the nearest float**, whatever the column: a `numeric` `1e30` under `double` is written `1e+30`.
-- **`NaN`, `Infinity` and `-Infinity` fail the document** under any number field (`short` to `decimal`), a scalar, an array element or an aggregate alike. The document isn't built: the index's [`on_error`](index-and-on-error.md#on_error) decides, on the ingest side, so no sink receives it. Under `skip` every sink keeps the document's previous version. Keep such a value out with a [filter](filters-and-soft-delete.md), or read the column under `keyword`.
-- **A number in a `json` field** is a number, the nearest `double` when it is past `rust_decimal`'s range.
+- **A `decimal` keeps every digit Postgres stores.** The JSON number is the text Postgres wrote: `12.50` stays `12.50`, `1234567890.123456789` keeps all 19 digits, and a value past `rust_decimal`'s range (±7.9 × 10^28, or more than 28 fractional digits) is a number too, `1000000000000000000000000000000`. The same goes for a `decimal` [array](#array) element, a `sum`/`min`/`max` with `value_type: decimal`, an `ids` of `decimal` keys, and each value of a [`map`](objects-and-maps.md) with `values: decimal`. A number written with an exponent keeps it (a `json` column holding `1e2` gives `1e2`), and a string holding a decimal number (`"12.50"`) is written as that number. OpenSearch indexes the field as `double`, so a query, a sort and an aggregation see the nearest `double`; only `_source` is exact. What a Rust consumer reads it into: [What the derive trusts](../query/document-structs.md#what-the-derive-trusts).
+- **Every other number goes through `f64`.** `float` and `double` are the nearest float (`1e30` is written `1e+30`). A number under a field with no number type (a `keyword` or `text` over a `numeric` column, a `json` field, a `map` of another kind, a `custom` field) keeps the form it always had: about 17 significant digits, a fraction kept (`5.0` stays `5.0`), and a magnitude past ±7.9 × 10^28 written as a string of its digits.
+- **`NaN`, `Infinity` and `-Infinity`** have no JSON number, so Postgres writes them as strings and they reach the sink so. A number field OpenSearch indexes refuses the string: an item-level rejection the index's [`on_error`](index-and-on-error.md#on_error) decides. With `ignore_malformed`, in an [unindexed](joins.md#indexed) join or an input-only field the document is kept.
 
 ## custom
 

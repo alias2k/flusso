@@ -65,14 +65,14 @@ A document value enters Rhai as:
 | --- | --- |
 | integers | `i64` |
 | `float`, `double` | `f64` |
-| `decimal` | `Decimal`, exact; a value past its range (±7.9 × 10^28, or more than 28 fractional digits) as a string of its digits |
+| `decimal` | `Decimal`, rounded past 28 fractional digits; a value past its range (±7.9 × 10^28) as a string of its digits |
 | text, `uuid` | string |
 | `date`, `timestamp` | RFC 3339 string (`2024-05-01`, `2024-05-01T12:00:00Z`) |
 | `binary` | blob |
 | object, array | object map, array |
 | null | `()` |
 
-The result is checked against the declared type, strictly. The one widening allowed: an integer for a `float`, `double` or `decimal` field (a `float` result is stored as 32-bit). A `date` result must be `YYYY-MM-DD`; a `timestamp` result an RFC 3339 timestamp, with or without the offset. A `uuid` result must parse as a uuid. `()` is null, accepted only when `required: false`; an array holds no nulls.
+The result is checked against the declared type, strictly. The widenings allowed: an integer for a `float`, `double` or `decimal` field (a `float` result is stored as 32-bit), and a string holding a decimal number for a `decimal` field, written as that number (a value past `Decimal`'s range passed through). A `date` result must be `YYYY-MM-DD`; a `timestamp` result an RFC 3339 timestamp, with or without the offset. A `uuid` result must parse as a uuid. `()` is null, accepted only when `required: false`; an array holds no nulls.
 
 ## The sandbox
 

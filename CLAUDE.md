@@ -144,11 +144,12 @@ mapping takes, on backfill and live, under a non-UTC `TimeZone`, with a `range` 
 `sink::Json` writes a naive timestamp with a `T`) and `a_tuned_timestamp_mapping_meets_the_iso_form`
 (a space-only `format` rejects each document holding a value, `strict_date_optional_time` or
 `ignore_malformed` takes it, an `indexed: false` join stores the `T` form), and
-`a_numeric_keeps_every_digit_as_a_json_number` (issue #327: a `decimal` scalar, array element and
-`sum`/`max` hold every digit as a JSON number, past `rust_decimal`'s range too, on backfill and live;
-asserted on `_source`'s raw text) and `a_non_finite_number_is_a_failed_document_decided_by_on_error`
-(`NaN`/`Infinity` is a `Document::Failed` the ingest engine's `on_error` decides; the harness hands
-`on_error` to both engines, as the daemon does), and `an_update_of_an_unread_column_writes_nothing` (issue #169: an update changing
+`a_numeric_keeps_every_digit_as_a_json_number` (issue #327: a `decimal` scalar, array element,
+`sum`/`max` and `map` value hold every digit as a JSON number, past `rust_decimal`'s range too, an
+exponent form as written, on backfill and live; asserted on `_source`'s raw text) and
+`a_non_finite_number_reaches_the_sink_as_postgres_wrote_it` (`NaN`/`Infinity` stay the strings
+Postgres wrote: a mapped number field is an item-level rejection `on_error` decides at the sink;
+`ignore_malformed`, an unindexed join and a namesake's discarded value keep it), and `an_update_of_an_unread_column_writes_nothing` (issue #169: an update changing
   only a column no document reads leaves the row's and its parent's `_version` alone; `wal`'s
   `an_update_of_unread_columns_rebuilds_nothing` covers root, child, aggregate, each read-column
   kind, and the no-pre-image fallback; `on_pairs_rebuild_the_parent_from_either_side` covers `on:`
@@ -1082,13 +1083,22 @@ order with no script; out-of-set values sort after. Parsing lives in
 element type. The Postgres builder renders `transforms` per string element over `to_jsonb(column)`
 (`sql::element_transformed`, one path for `[]` and `json`/`jsonb`) and leaves an array `default`
 (a list) to the decoder. `value::coerce_document` reads the row's raw `document` JSON bytes in one
-pass (a schema-guided `DeserializeSeed`: `Level`/`FieldSeed`/`Joined`, no intermediate `Value` tree;
-the field path is rendered only on a failure) and is **fallible** (`DocumentError::Failed(BuildFailure)`,
-with the field path; `Malformed` is a query error). A `decimal` position (column, array element,
-`sum`/`min`/`max`, `ids`) reads its raw number text (`&RawValue`): `Decimal::from_str_exact` within
-range, `GenericValue::BigDecimal` (the exact text, appended last to the enum) past it, never through
-`f64` (issue #327); `NaN`/`Infinity`/`-Infinity` under any number type is a `BuildFailure`. Two
-fields sharing a name read the last value through the first declaration. An array column's null
+pass (a schema-guided `DeserializeSeed`: `Level`/`FieldSeed`/`Joined`, no intermediate `Value` tree)
+through a per-index `DocumentPlan` the builder builds once (the first field declared under each name:
+a key resolves in one lookup in any order, and a namesake reads through its first declaration even
+when `jsonb` sorted the keys of a >50-field document), and is **fallible**
+(`DocumentError::Failed(BuildFailure)`, with the field path; `Malformed` is a query error). **Only a
+declared `decimal` reads differently from a `serde_json::Value` walk** (issue #327): a column, array
+element, `sum`/`min`/`max`, `ids` key or `map` value of `decimal` reads its raw number text
+(`&RawValue`) into `GenericValue::BigDecimal` (the exact text, appended last to the enum), never
+through `f64`; every other value, untyped numbers included, reads as `main` did (`json_to_generic`,
+`float`), `NaN`/`Infinity` stay strings, and reading goes on past a failure so a malformed document
+is `Malformed` wherever it is and the failure reported is the first in declaration order; a raw value
+read again may open no more levels than the document had left (`Untyped.remaining`), and skipped
+values are checked (`Skip`). Guard: `value/differential.rs`, 6171 cases (every field kind but
+`decimal`, aggregates, joins, namesakes, wide documents, depths) whose sink bytes were recorded from
+`main`'s reader and render into `differential.expected` (re-bless with `FLUSSO_BLESS=1` only for a
+deliberate change). An array column's null
 takes the default, a lone value is wrapped, null elements are dropped, and an object/array element of a non-`json` field is a `BuildFailure` that `build`/
 `build_many` return as `Document::Failed` (so `on_error` decides). `Catalog::accepts_transforms`
 takes `element: bool` (Postgres probes the `[]` base type, `text` for `json`/`jsonb`);
@@ -1580,9 +1590,10 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
   `Bytes`) so no type is erased in transit, and its serde is **derived/format-agnostic** (a
   queue may encode it however it likes; it round-trips losslessly). A sink converts it to its
   own representation at its boundary (`sink::Json` is the JSON translation the OpenSearch and
-  stdout sinks write, a `Serialize` view where e.g. `bytea`→base64 lives and a `Decimal`/`BigDecimal`
-  is written as its exact number text through serde_json's raw value; `sink::to_json` builds a
-  `Value` tree from it, which holds numbers as `f64`) — core picks no wire format. serde_json's
+  stdout sinks write, a `Serialize` view where e.g. `bytea`→base64 lives, a `BigDecimal` is written as
+  its exact number text through serde_json's raw value and a `Decimal` as its nearest `f64`, as
+  always; `sink::to_json` is the same as a `Value` tree, numbers as `f64`, a `BigDecimal` past
+  `f64`'s range as its text) — core picks no wire format. serde_json's
   `arbitrary_precision` stays off: it is global, allocates per number, and breaks numbers under
   serde's buffered (`flatten`/`untagged`) deserialization.
 - Sources/sinks are `#[async_trait]` trait objects; mock them in tests as the engine tests do.
