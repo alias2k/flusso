@@ -960,7 +960,8 @@ fn list_constant_schema(items: Vec<crate::common::GenericValue>) -> IndexSchema 
 }
 
 /// A list whose scalars are one kind (integers and floats are both numbers,
-/// nulls aside, nested lists flattened) stays indexed and keeps the hash it
+/// nulls aside, nested lists flattened; a whole number after a fractional
+/// first one is fine, a `double` takes it) stays indexed and keeps the hash it
 /// had before constants were built as written. The pins are those hashes.
 #[test]
 fn a_constant_list_of_one_kind_stays_indexed_and_keeps_its_hash() {
@@ -968,13 +969,14 @@ fn a_constant_list_of_one_kind_stays_indexed_and_keeps_its_hash() {
     for (items, pin) in [
         (
             vec![
-                V::BigInt(1),
                 V::Double(2.5),
+                V::BigInt(1),
                 V::Null,
                 V::Array(vec![V::BigInt(3)]),
             ],
-            "39e3f15a",
+            "fdf39dda",
         ),
+        (vec![V::BigInt(1), V::BigInt(2)], "c3c3eed1"),
         (
             vec![
                 V::Null,
@@ -996,6 +998,16 @@ fn mixed_constant_lists() -> Vec<(Vec<crate::common::GenericValue>, &'static str
     vec![
         (vec![V::BigInt(1), V::String("n/a".into())], "bc077fc0"),
         (vec![V::Bool(true), V::BigInt(1)], "aa845af3"),
+        (
+            vec![
+                V::BigInt(1),
+                V::Double(2.5),
+                V::Null,
+                V::Array(vec![V::BigInt(3)]),
+            ],
+            "39e3f15a",
+        ),
+        (vec![V::BigInt(1), V::Double(1e20)], "92bce669"),
         (
             vec![
                 V::Array(vec![V::BigInt(1)]),

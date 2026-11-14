@@ -159,7 +159,7 @@ A fixed value in every document, exactly as written. It has no source column.
 | a list mixing kinds of scalar | the list | `object`, stored but not indexed, like [`indexed: false`](joins.md#indexed): one field takes one kind |
 | an object, or a list holding one | the value, every level included | `object`, stored but not indexed: the strict root refuses keys in an `object` with no declared children |
 
-The kinds are string, number (whole or not) and boolean; a `null` element counts as none, and a list inside a list counts with its elements, as OpenSearch flattens it. So `[1, 2.5, null]` and `[["a"], "b"]` are one kind, `[1, "n/a"]` and `[true, 1]` mix kinds. Before 0.18 a number or boolean was indexed as its text (`"5"`) and an object or list as `null`; see [Upgrade to 0.18](../operate/upgrade-to-0-18.md).
+The kinds are string, number and boolean; a `null` element counts as none, and a list inside a list counts with its elements, as OpenSearch flattens it. A list of numbers is one kind when its first number is fractional (`[2.5, 1]` is a `double`) or every number is whole; a fractional number, or one outside the `long` range, after a whole one mixes kinds, because a `long` field would refuse `1e20` and cut `2.5` to `2`. So `[1, 2, null]`, `[2.5, 1]` and `[["a"], "b"]` are one kind; `[1, "n/a"]`, `[true, 1]` and `[1, 2.5]` mix kinds. A list that starts with `null` or an empty list is mapped `keyword`, which takes any scalar. Before 0.18 a number or boolean was indexed as its text (`"5"`) and an object or list as `null`; see [Upgrade to 0.18](../operate/upgrade-to-0-18.md).
 
 ## transforms
 

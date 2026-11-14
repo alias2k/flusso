@@ -7,7 +7,7 @@
 A deployment going from 0.17 to 0.18. The steps apply when its schemas declare, anywhere in the document, joined tables included:
 
 - a [`binary`](../reference/field-types.md) field, or an `ids` aggregate with `element_type: binary`;
-- a [`constant`](../reference/field-types.md#constant) whose `value` is an object, or a list holding one or mixing kinds of scalar (`[1, "n/a"]`).
+- a [`constant`](../reference/field-types.md#constant) whose `value` is an object, or a list holding one or mixing kinds of scalar (`[1, "n/a"]`, or `[1, 2.5]`: a fractional number after a whole one).
 
 Without either, no index is rebuilt. A `constant` holding a number, a boolean, or a list of one kind of scalar needs nothing either: see the last step.
 

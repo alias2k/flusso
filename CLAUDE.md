@@ -864,7 +864,8 @@ pattern moves two more sets once (issue #291): `BINARY_ENCODING_REVISION` (a `bi
 base64; `PgDocumentBuilder::connect` sets `bytea_output = 'hex'` on every pooled connection, since a
 database set to `escape` would render escape text) and `CONSTANT_OBJECT_REVISION` in `Field`'s `Hash`
 (a `constant` that `constant_is_stored_unindexed`: an object, or a list holding one or mixing scalar
-kinds — string/number/boolean, nulls aside, nested lists flattened — since one OpenSearch field takes
+kinds — string/number/boolean, nulls aside, nested lists flattened, and a fractional or out-of-range
+number after a whole one, which the first element's `long` would refuse or cut — since one OpenSearch field takes
 one kind and the strict root refuses keys in a childless `object`; built as written by `coerce_field`
 from the schema, never from the query's untyped literal, and projected as an `indexed: false`
 `object`, so the designer and the derive (no handle) follow). Guards:

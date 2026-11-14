@@ -63,10 +63,14 @@ impl Hash for Field {
 const CONSTANT_OBJECT_REVISION: u8 = 1;
 
 /// Whether a constant is stored but not indexed: an object, or a list holding
-/// one or mixing scalar kinds (string, number, boolean) at any depth, nulls
-/// aside. One OpenSearch field takes one kind, and a nested list is flattened
-/// into it, so such a value can't be indexed. The mapping projection, the
-/// content hash and so the designer and the query derive all ask this.
+/// one or mixing scalar kinds (string, whole number, fractional number,
+/// boolean) at any depth, nulls aside. One OpenSearch field takes one kind,
+/// and a nested list is flattened into it, so such a value can't be indexed.
+/// A list's mapping comes from its first element, so a whole number after a
+/// fractional one is one kind (a `double` takes it), while a fractional or
+/// out-of-range number after a whole one mixes: a `long` refuses `1e20` and
+/// cuts `2.5` to `2`. The mapping projection, the content hash and so the
+/// designer and the query derive all ask this.
 pub(crate) fn constant_is_stored_unindexed(value: &common::GenericValue) -> bool {
     let mut kinds = Vec::new();
     !collect_constant_kinds(value, &mut kinds) || kinds.len() > 1
@@ -75,7 +79,8 @@ pub(crate) fn constant_is_stored_unindexed(value: &common::GenericValue) -> bool
 #[derive(PartialEq)]
 enum ScalarKind {
     String,
-    Number,
+    Whole,
+    Fractional,
     Boolean,
 }
 
@@ -87,9 +92,11 @@ fn collect_constant_kinds(value: &common::GenericValue, kinds: &mut Vec<ScalarKi
         V::Array(items) => return items.iter().all(|item| collect_constant_kinds(item, kinds)),
         V::Null => return true,
         V::Bool(_) => ScalarKind::Boolean,
-        V::SmallInt(_) | V::Int(_) | V::BigInt(_) | V::Float(_) | V::Double(_) | V::Decimal(_) => {
-            ScalarKind::Number
+        V::SmallInt(_) | V::Int(_) | V::BigInt(_) if kinds.contains(&ScalarKind::Fractional) => {
+            return true;
         }
+        V::SmallInt(_) | V::Int(_) | V::BigInt(_) => ScalarKind::Whole,
+        V::Float(_) | V::Double(_) | V::Decimal(_) => ScalarKind::Fractional,
         V::String(_)
         | V::Uuid(_)
         | V::Date(_)
