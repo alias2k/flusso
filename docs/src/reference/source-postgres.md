@@ -58,6 +58,16 @@ TLS settings come from two surfaces, merged: the URL's libpq parameters (`sslmod
 - **Mutual TLS** needs both `ssl_cert` and `ssl_key` (or both URL parameters). One without the other is a config error.
 - **`ssl_sni_hostname`** is for connecting by IP or through a load balancer while the certificate names the real host. `verify-full` to an IP address requires it. It has no URL parameter and applies to the replication stream only.
 
+## Behind PgBouncer
+
+flusso connects through PgBouncer in session and in transaction mode alike, the replication connection included, once PgBouncer is set up for it:
+
+- **PgBouncer 1.23 or newer.** Older versions refuse the replication connection. flusso then logs `unsupported startup parameter: replication` on each retry and indexes nothing.
+- **`ignore_startup_parameters = extra_float_digits`.** flusso's SQL connections send that startup parameter and stock PgBouncer refuses it: `unsupported startup parameter: extra_float_digits`. Many PgBouncer images already set it.
+- **`max_prepared_statements` above `0` in transaction mode.** flusso uses prepared statements. With `0` the start fails with `prepared statement "sqlx_s_1" already exists`.
+
+No key flusso reads depends on a setting a pooled connection could drop. One thing does: a [`binary`](field-types.md) field's bytes. flusso sets `bytea_output = hex` on each connection it opens, which a transaction-mode pool may not keep, so set it on the database or role there too: `ALTER ROLE flusso SET bytea_output = 'hex'`.
+
 ## Capture
 
 flusso consumes a logical replication **slot** and subscribes to a **publication**. Both names are the `slot` and `publication` keys above; the `--slot` and `--publication` flags of [`run`](cli.md#run) override them.
@@ -152,6 +162,42 @@ A table without a primary key is keyed by its replica identity's columns. Under 
 | Index root | No. Backfill skips the table with a warning, live documents are keyed by the whole row, so an update moves a document to a new id, and a row with a null column addresses no document (warned once per table). A composite primary key is skipped by the backfill too. `flusso check` reports both as `root_primary_key`; see [Validation at start](cli.md#validation-at-start) for `run`. |
 
 The fix in each case is the same: give the table a primary key.
+
+## Key types
+
+A root table's primary key is the document id. It must be of a type flusso reads back as a key; the same types work as any relation's key or link column (`foreign_key`, `belongs_to` `column`, junction keys, `via` hops, `on` pairs).
+
+| Key type | Document id |
+| --- | --- |
+| `smallint`, `integer`, `bigint` | `42` |
+| `numeric` | `1.5`, as stored (`1.50` stays `1.50`, a zero keeps its scale: `0.00`); `NaN`, `Infinity`, `-Infinity` |
+| `real`, `double precision` | `1.5`, `-0`; `inf`, `-inf`, `NaN` |
+| `boolean` | `true` |
+| `text`, `varchar`, `char(n)`, `name`, `citext` | the text; `char(n)` keeps its padding (`ab `) |
+| `uuid` | `00000000-0000-0000-0000-00000000000a` |
+| `bytea` | `\x01ab`, the Postgres hex form |
+| `date` | `2024-02-29`, `+10000-01-01`; `infinity`, `-infinity` |
+| `time` | `10:00:00`, `23:59:59.500` |
+| `timestamp` | `2024-02-29 10:00:00`, `2024-02-29 10:00:00.500`, `+10000-01-01 10:00:00`; `infinity`, `-infinity` |
+| `timestamptz` | `2024-02-29T10:00:00+00:00`: RFC 3339, in UTC; `infinity`, `-infinity` |
+
+- **A domain** counts as its base type: a domain over `integer` is an `integer` key.
+- **A BC date** counts years from zero, as ISO 8601 does: 15 March 44 BC is `-0043-03-15`. A year past 9999 carries a `+`.
+- **Fractional seconds** have three, six or nine digits, as many as the value needs.
+- **Session settings don't change an id.** Queries render each key in a form no setting changes, and the replication connection sets `DateStyle`, `TimeZone`, `bytea_output` and `extra_float_digits` itself before it streams; a server that refuses one fails the stream with an error naming it, and flusso retries with backoff.
+- **An id OpenSearch can't take**, such as an empty-string key or one longer than 512 bytes: see [Document ids](sink-opensearch.md#document-ids) on the OpenSearch sink.
+
+### A link spelled differently
+
+A link column can hold a value equal to its parent's key but written differently: `AB` for a `citext` key `Ab`, `1.500` for a `numeric` `1.5`, `-0` for a float `0`, or any text under a nondeterministic collation. The document it rebuilds is still the parent's own, under the parent's stored key: flusso reads that key back from the root table.
+
+A link column of another type than the key (`char(5)` against `text`) is compared with it as the document query joins them, so the documents a change rebuilds are the ones the join reads.
+
+That costs one query per change, per index and link column, for a root key whose equal values can be written differently (`numeric`, `real`, `double precision`, `citext`, a nondeterministic collation), and for a link column of another type than the key it names. Every other key costs nothing extra.
+
+### Unsupported key types
+
+Any other type (`inet`, an enum, `money`, `json`, `jsonb`, a range, …) reads back as no key, so no document would ever be written: `flusso check` reports it as `unsupported_key_type` under `primary_key`, and [`run` refuses to start](cli.md#validation-at-start). A relation table keyed by such a type still works as a leaf (a `belongs_to` target, a `has_many` child, a `many_to_many` far table); a change two levels below it can't be traced through it.
 
 ## Updates that change nothing a document reads
 

@@ -23,6 +23,8 @@
 use kernel::{ColumnName, DatabaseSchema, GenericValue, TableName};
 use source::{RowImage, RowKey, SourceError};
 
+use crate::text_value::typed_value;
+
 /// A decoded pgoutput message — only the variants this source acts on.
 #[derive(Debug)]
 pub(crate) enum Decoded {
@@ -194,54 +196,6 @@ pub(crate) fn post_image(rel: &Relation, old: &Tuple, new: &Tuple) -> RowImage {
         pairs.push((col.name.clone(), value));
     }
     RowImage(pairs)
-}
-
-/// Interpret a pgoutput text value by its Postgres type OID.
-///
-/// A WAL key must decode into the **same** [`GenericValue`] variant the document
-/// builder reads the column back as (`value::decode_column`): the engine matches
-/// a live change's key against the rebuilt row's key by variant-exact equality.
-/// A width or type drift — a WAL `BigInt` against a read-back `Int(i32)`, or a
-/// WAL `String` against a read-back `Uuid` — makes the match miss, so every live
-/// insert/update on that table looks like a tombstone and the document is
-/// silently deleted. So mirror the integer widths and decode `uuid` here.
-///
-/// Unknown or unparseable types fall back to the text itself. Temporal and bytea
-/// keys are *not* mirrored (pathological as keys); a drift there surfaces as a
-/// loud bind error, not silent loss.
-fn typed_value(text: &str, type_oid: u32) -> GenericValue {
-    let as_text = || GenericValue::String(text.to_owned());
-    match type_oid {
-        // bool
-        16 => match text {
-            "t" => GenericValue::Bool(true),
-            "f" => GenericValue::Bool(false),
-            _ => as_text(),
-        },
-        // int2 / int4 / int8 (+ oid) — width-exact, matching `decode_column`.
-        21 => text
-            .parse::<i16>()
-            .map_or_else(|_| as_text(), GenericValue::SmallInt),
-        23 => text
-            .parse::<i32>()
-            .map_or_else(|_| as_text(), GenericValue::Int),
-        20 | 26 => text
-            .parse::<i64>()
-            .map_or_else(|_| as_text(), GenericValue::BigInt),
-        // float4 / float8 / numeric — split, matching `decode_column`.
-        700 => text
-            .parse::<f32>()
-            .map_or_else(|_| as_text(), GenericValue::Float),
-        701 => text
-            .parse::<f64>()
-            .map_or_else(|_| as_text(), GenericValue::Double),
-        1700 => rust_decimal::Decimal::from_str_exact(text)
-            .map_or_else(|_| as_text(), GenericValue::Decimal),
-        // uuid — decode, so a uuid key matches the read-back `Uuid`.
-        2950 => uuid::Uuid::parse_str(text).map_or_else(|_| as_text(), GenericValue::Uuid),
-        // everything else (text, varchar, timestamps, bytea, …) stays text
-        _ => as_text(),
-    }
 }
 
 /// Decode one raw pgoutput message.

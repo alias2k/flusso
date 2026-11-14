@@ -14,6 +14,8 @@
 //! nulls in its other columns included; a `count:` over a child without one
 //! stops the engine on its first change instead of resolving to nothing. A
 //! root `primary_key` other than the table's own key writes no document.
+//! Each key type the document builder reads works in every relation position
+//! and the backfill, with the same document ids from both.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -1889,13 +1891,16 @@ async fn rebuilt_by(
     engine: &mut tokio::task::JoinHandle<engine::Result<()>>,
     recorded: &Arc<Mutex<Vec<String>>>,
     pool: &sqlx::PgPool,
-    sql: &'static str,
+    sql: &str,
     marker_sql: &'static str,
     marker: i32,
     marker_op: &str,
 ) -> Vec<String> {
     recorded.lock().unwrap().clear();
-    sqlx::raw_sql(sql).execute(pool).await.unwrap();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+        .execute(pool)
+        .await
+        .unwrap();
     sqlx::query(marker_sql)
         .bind(marker)
         .execute(pool)
@@ -2561,12 +2566,12 @@ fn aggregate_field(name: &str, aggregate: Aggregate) -> Field {
 }
 
 /// A root `primary_key` naming a unique column other than the table's own key
-/// writes no document (issue #225): the backfill and every root change carry
-/// the table's key, the batched build matches it against the declared column,
-/// finds nothing and writes a tombstone; a change on a related table is
-/// addressed by the declared column and stops the engine. This is why
-/// `root_primary_key_mismatch` refuses the start; if a build ever gets past
-/// it, revisit that decision.
+/// never keeps a document (issue #225): the backfill and every root change
+/// carry the table's key, the batched build matches it against the declared
+/// column, finds nothing and writes a tombstone; a change on a related table
+/// is addressed by the declared column, so its document is written under
+/// that value, and the next root change deletes it again. This is why
+/// `root_primary_key_mismatch` refuses the start.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn a_root_primary_key_other_than_the_tables_writes_no_document() {
@@ -2644,13 +2649,729 @@ async fn a_root_primary_key_other_than_the_tables_writes_no_document() {
         recorded.lock().unwrap()
     );
 
-    sqlx::query("INSERT INTO orders VALUES (11, 'u1', '7')")
+    for (sql, op) in [
+        (
+            "INSERT INTO orders VALUES (11, 'u1', '7')",
+            "upsert users u1",
+        ),
+        (
+            "UPDATE users SET email = 'y@x' WHERE id = 1",
+            "delete users 1",
+        ),
+    ] {
+        recorded.lock().unwrap().clear();
+        sqlx::query(sql).execute(&pool).await.unwrap();
+        expect_op(&mut engine, &recorded, op).await;
+    }
+    engine.abort();
+}
+
+/// Every relation position keyed by one SQL type (issue #295): a root
+/// `parents` keyed by `sql_type`, its `has_many` `kids` (whose `parent` link is
+/// of that type, joined `on` it once more), a `count` reaching `grandkids`
+/// `via` the kids, and a
+/// `many_to_many` to `fars` (also keyed by that type) through `links`; plus a
+/// `kids` index whose `owner` is a `belongs_to` back to `parents`. `a` and `b`
+/// are SQL literals of the type; `id_a` and `id_b` the document ids the
+/// backfill gives them. Every live change must rebuild the same ids, as
+/// upserts.
+async fn every_relation_position_keyed_by(
+    sql_type: &str,
+    setup: &[&str],
+    [a, b]: [&str; 2],
+    [id_a, id_b]: [&str; 2],
+) {
+    let (_container, port, url) = start_logical_postgres().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in setup {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(*statement))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    for statement in [
+        format!("CREATE TABLE parents (id {sql_type} PRIMARY KEY, name text)"),
+        format!("CREATE TABLE kids (id int PRIMARY KEY, parent {sql_type}, name text)"),
+        "CREATE TABLE grandkids (id int PRIMARY KEY, kid_id int, name text)".to_owned(),
+        format!("CREATE TABLE fars (id {sql_type} PRIMARY KEY, name text)"),
+        format!(
+            "CREATE TABLE links (parent {sql_type}, far {sql_type}, PRIMARY KEY (parent, far))"
+        ),
+        "ALTER TABLE kids REPLICA IDENTITY FULL".to_owned(),
+        "ALTER TABLE grandkids REPLICA IDENTITY FULL".to_owned(),
+        "ALTER TABLE links REPLICA IDENTITY FULL".to_owned(),
+        "CREATE PUBLICATION flusso FOR TABLE parents, kids, grandkids, fars, links".to_owned(),
+        format!("INSERT INTO parents VALUES ({a}, 'pa'), ({b}, 'pb')"),
+        format!("INSERT INTO kids VALUES (1, {a}, 'k1')"),
+        "INSERT INTO grandkids VALUES (100, 1, NULL)".to_owned(),
+        format!("INSERT INTO fars VALUES ({a}, 'fa')"),
+        format!("INSERT INTO links VALUES ({a}, {a})"),
+    ] {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
         .execute(&pool)
         .await
         .unwrap();
-    let stopped = tokio::time::timeout(Duration::from_secs(30), engine)
+
+    let documents = Arc::new(
+        PgDocumentBuilder::connect(&url, Arc::new(keyed_parents_spec()))
+            .await
+            .unwrap(),
+    );
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = tokio::spawn(run_deployment(
+        Arc::new(WalChangeCapture::new(replication(port), url.clone())),
+        Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
+        Arc::new(RecordingSink::new(&recorded)),
+    ));
+    let parent = |id: &str| format!("upsert parents {id}");
+    expect_op(&mut engine, &recorded, &parent(id_a)).await;
+    expect_op(&mut engine, &recorded, &parent(id_b)).await;
+    expect_op(&mut engine, &recorded, "upsert kids 1").await;
+
+    let marker_sql = "INSERT INTO grandkids (id) VALUES ($1)";
+    let mut marker = 900;
+    let mut rebuilt = async |sql: String| {
+        marker += 1;
+        rebuilt_by(
+            &mut engine,
+            &recorded,
+            &pool,
+            &sql,
+            marker_sql,
+            marker,
+            &format!("upsert grandkids {marker}"),
+        )
         .await
-        .expect("a change on the related table kept the engine running")
+    };
+    let ops = |ops: &[&str]| sorted(ops);
+
+    assert_eq!(
+        rebuilt(format!("UPDATE parents SET name = 'pa2' WHERE id = {a}")).await,
+        ops(&[&parent(id_a), "upsert kids 1"]),
+        "a root change rebuilds itself and the kid that `belongs_to` it"
+    );
+    assert_eq!(
+        rebuilt(format!("INSERT INTO kids VALUES (2, {a}, 'k2')")).await,
+        ops(&[&parent(id_a), "upsert kids 2"]),
+        "a new kid rebuilds its parent"
+    );
+    assert_eq!(
+        rebuilt("UPDATE kids SET name = 'k2b' WHERE id = 2".to_owned()).await,
+        ops(&[&parent(id_a), "upsert kids 2"]),
+        "an updated kid rebuilds its parent"
+    );
+    assert_eq!(
+        rebuilt(format!("UPDATE kids SET parent = {b} WHERE id = 2")).await,
+        ops(&[&parent(id_a), &parent(id_b), "upsert kids 2"]),
+        "a re-parented kid rebuilds the parent it left and the one it joined"
+    );
+    assert_eq!(
+        rebuilt("DELETE FROM kids WHERE id = 2".to_owned()).await,
+        ops(&[&parent(id_b), "delete kids 2"]),
+        "a deleted kid rebuilds the parent it left"
+    );
+    assert_eq!(
+        rebuilt("INSERT INTO grandkids VALUES (101, 1, NULL)".to_owned()).await,
+        ops(&[&parent(id_a), "upsert grandkids 101"]),
+        "a grandkid rebuilds its parent `via` its kid"
+    );
+    assert_eq!(
+        rebuilt(format!("UPDATE fars SET name = 'fa2' WHERE id = {a}")).await,
+        ops(&[&parent(id_a)]),
+        "a far row rebuilds every parent it is linked to"
+    );
+    assert_eq!(
+        rebuilt(format!("INSERT INTO links VALUES ({b}, {a})")).await,
+        ops(&[&parent(id_b)]),
+        "a new link rebuilds its parent"
+    );
+    assert_eq!(
+        rebuilt(format!("DELETE FROM links WHERE parent = {b}")).await,
+        ops(&[&parent(id_b)]),
+        "a deleted link rebuilds the parent it left"
+    );
+    assert_eq!(
+        rebuilt(format!("DELETE FROM parents WHERE id = {b}")).await,
+        ops(&[&format!("delete parents {id_b}")]),
+        "a deleted root is a tombstone"
+    );
+
+    engine.abort();
+}
+
+/// The two indexes of [`every_relation_position_keyed_by`].
+fn keyed_parents_spec() -> SourceSpec {
+    let join = |target: &str, kind: JoinKind| Join {
+        table: table(target),
+        kind,
+        primary_key: column("id"),
+        nullable: true,
+        filters: None,
+        order_by: None,
+        limit: None,
+        fields: vec![column_field("name", "name")],
+        indexed: true,
+        on: vec![],
+    };
+    let relation = |name: &str, relation: Relation| Field {
+        field: field(name),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Relation(relation),
+    };
+    let grandkids = Aggregate {
+        table: table("grandkids"),
+        op: AggregateOp::Count,
+        key: AggregateKey::Direct(column("kid_id")),
+        value_type: None,
+        filters: None,
+        distinct: false,
+        via: vec![ViaHop {
+            table: table("kids"),
+            foreign_key: column("parent"),
+            filters: None,
+            on: vec![],
+        }],
+        on: vec![],
+    };
+    let schema = |root: &str, fields: Vec<Field>| IndexSchema {
+        version: 1,
+        table: table(root),
+        db_schema: DatabaseSchema::try_new("public").unwrap(),
+        primary_key: Some(column("id")),
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields: [vec![column_field("name", "name")], fields].concat(),
+    };
+    let parents = schema(
+        "parents",
+        vec![
+            relation(
+                "kids",
+                Relation::Join(Join {
+                    on: vec![kernel::ColumnPair {
+                        local: column("id"),
+                        related: column("parent"),
+                    }],
+                    ..join(
+                        "kids",
+                        JoinKind::HasMany {
+                            foreign_key: column("parent"),
+                        },
+                    )
+                }),
+            ),
+            aggregate_field("grandkidCount", grandkids),
+            relation(
+                "fars",
+                Relation::Join(join(
+                    "fars",
+                    JoinKind::ManyToMany {
+                        through: Through {
+                            table: table("links"),
+                            left_key: column("parent"),
+                            right_key: column("far"),
+                            filters: None,
+                        },
+                    },
+                )),
+            ),
+        ],
+    );
+    let kids = schema(
+        "kids",
+        vec![relation(
+            "owner",
+            Relation::Join(join(
+                "parents",
+                JoinKind::BelongsTo {
+                    column: column("parent"),
+                },
+            )),
+        )],
+    );
+    let grandkids = schema("grandkids", vec![]);
+    SourceSpec::new(BTreeMap::from([
+        (index_name("parents"), parents),
+        (index_name("kids"), kids),
+        (index_name("grandkids"), grandkids),
+    ]))
+}
+
+macro_rules! keyed_by {
+    ($($test:ident: $sql_type:literal, $setup:expr, [$a:literal, $b:literal], [$id_a:literal, $id_b:literal];)*) => {$(
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires docker"]
+        async fn $test() {
+            every_relation_position_keyed_by($sql_type, $setup, [$a, $b], [$id_a, $id_b]).await;
+        }
+    )*};
+}
+
+keyed_by! {
+    every_relation_position_keyed_by_int: "int", &[], ["1", "2"], ["1", "2"];
+    every_relation_position_keyed_by_text: "text", &[], ["'a'", "'b'"], ["a", "b"];
+    every_relation_position_keyed_by_uuid: "uuid", &[],
+        ["'00000000-0000-0000-0000-00000000000a'", "'00000000-0000-0000-0000-00000000000b'"],
+        ["00000000-0000-0000-0000-00000000000a", "00000000-0000-0000-0000-00000000000b"];
+    every_relation_position_keyed_by_bytea: "bytea", &[], ["'\\x01ab'", "'\\x02cd'"], ["\\x01ab", "\\x02cd"];
+    every_relation_position_keyed_by_numeric: "numeric", &[], ["1.5", "2.25"], ["1.5", "2.25"];
+    every_relation_position_keyed_by_date: "date", &[], ["'2024-01-01'", "'2024-02-29'"], ["2024-01-01", "2024-02-29"];
+    every_relation_position_keyed_by_timestamp: "timestamp", &[],
+        ["'2024-01-01 10:00:00'", "'2024-01-01 10:00:00.5'"],
+        ["2024-01-01 10:00:00", "2024-01-01 10:00:00.500"];
+    every_relation_position_keyed_by_timestamptz: "timestamptz", &[],
+        ["'2024-01-01 10:00:00+00'", "'2024-01-01 12:00:00.25+02'"],
+        ["2024-01-01T10:00:00+00:00", "2024-01-01T10:00:00.250+00:00"];
+    every_relation_position_keyed_by_time: "time", &[], ["'10:00:00'", "'23:59:59.5'"], ["10:00:00", "23:59:59.500"];
+    every_relation_position_keyed_by_citext: "citext", &["CREATE EXTENSION citext"], ["'Ab'", "'cd'"], ["Ab", "cd"];
+    every_relation_position_keyed_by_a_domain: "positive", &["CREATE DOMAIN positive AS int CHECK (VALUE > 0)"],
+        ["1", "2"], ["1", "2"];
+    every_relation_position_keyed_by_char: "char(3)", &[], ["'ab'", "'cd'"], ["ab ", "cd "];
+    every_relation_position_keyed_by_float8: "float8", &[], ["1.5", "2.5"], ["1.5", "2.5"];
+    every_relation_position_keyed_by_a_date_past_9999: "date", &[],
+        ["'10000-01-01'", "'2024-01-01'"], ["+10000-01-01", "2024-01-01"];
+    every_relation_position_keyed_by_a_timestamp_past_9999: "timestamp", &[],
+        ["'10000-01-01 10:00:00'", "'2024-01-01 10:00:00'"],
+        ["+10000-01-01 10:00:00", "2024-01-01 10:00:00"];
+    every_relation_position_keyed_by_a_timestamptz_past_9999_in_another_time_zone: "timestamptz",
+        &["ALTER DATABASE postgres SET TimeZone = 'Asia/Kolkata'"],
+        ["'10000-01-01 00:00:00+00'", "'2024-01-01 10:00:00+00'"],
+        ["+10000-01-01T00:00:00+00:00", "2024-01-01T10:00:00+00:00"];
+    every_relation_position_keyed_by_a_numeric_nan: "numeric", &[], ["'NaN'", "1.50"], ["NaN", "1.50"];
+    every_relation_position_keyed_by_a_date_at_infinity: "date", &[],
+        ["'infinity'", "'-infinity'"], ["infinity", "-infinity"];
+    every_relation_position_keyed_by_a_timestamp_at_infinity: "timestamp", &[],
+        ["'infinity'", "'-infinity'"], ["infinity", "-infinity"];
+    every_relation_position_keyed_by_a_timestamptz_at_infinity: "timestamptz", &[],
+        ["'infinity'", "'-infinity'"], ["infinity", "-infinity"];
+    every_relation_position_keyed_by_a_date_before_christ: "date", &[],
+        ["'0044-03-15 BC'", "'2024-01-01'"], ["-0043-03-15", "2024-01-01"];
+    every_relation_position_keyed_by_a_timestamptz_before_christ: "timestamptz", &[],
+        ["'0044-03-15 10:00:00+00 BC'", "'2024-01-01 10:00:00+00'"],
+        ["-0043-03-15T10:00:00+00:00", "2024-01-01T10:00:00+00:00"];
+    every_relation_position_keyed_by_date_under_sql_datestyle: "date",
+        &["ALTER DATABASE postgres SET DateStyle = 'SQL, DMY'"],
+        ["'2024-01-31'", "'2024-02-29'"], ["2024-01-31", "2024-02-29"];
+    every_relation_position_keyed_by_timestamp_under_postgres_datestyle: "timestamp",
+        &["ALTER DATABASE postgres SET DateStyle = 'Postgres, MDY'"],
+        ["'2024-01-31 10:00:00'", "'2024-02-29 10:00:00.5'"],
+        ["2024-01-31 10:00:00", "2024-02-29 10:00:00.500"];
+    every_relation_position_keyed_by_timestamptz_under_german_datestyle: "timestamptz",
+        &["ALTER DATABASE postgres SET DateStyle = 'German'", "ALTER DATABASE postgres SET TimeZone = 'Europe/Warsaw'"],
+        ["'2024-01-31 10:00:00+00'", "'2024-07-01 12:00:00.25+02'"],
+        ["2024-01-31T10:00:00+00:00", "2024-07-01T10:00:00.250+00:00"];
+    every_relation_position_keyed_by_bytea_under_escape_output: "bytea",
+        &["ALTER DATABASE postgres SET bytea_output = 'escape'"],
+        ["'\\x01ab'", "'\\x02cd'"], ["\\x01ab", "\\x02cd"];
+    every_relation_position_keyed_by_float8_under_fewer_float_digits: "float8",
+        &["ALTER DATABASE postgres SET extra_float_digits = 0"],
+        ["'0.3333333333333333'", "2.5"], ["0.3333333333333333", "2.5"];
+}
+
+/// A link spelled differently from the key it equals (issue #295): `kids`,
+/// `links` and the `via` hop name the root as `link`, which Postgres compares
+/// equal to the root's stored `root` (a citext's case, a numeric's scale, a
+/// float's `-0`). Every document they rebuild is the root's own, under
+/// `id`, the root's stored spelling, through the pre-image too, and the root's
+/// delete leaves no other.
+async fn a_link_spelled_differently_resolves_to_the_roots_own_key(
+    [sql_type, link_type]: [&str; 2],
+    setup: &[&str],
+    [root, link]: [&str; 2],
+    id: &str,
+) {
+    let (_container, port, url) = start_logical_postgres().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in setup {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(*statement))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    for statement in [
+        format!("CREATE TABLE parents (id {sql_type} PRIMARY KEY, name text)"),
+        format!("CREATE TABLE kids (id int PRIMARY KEY, parent {link_type}, name text)"),
+        "CREATE TABLE grandkids (id int PRIMARY KEY, kid_id int, name text)".to_owned(),
+        format!("CREATE TABLE fars (id {sql_type} PRIMARY KEY, name text)"),
+        format!(
+            "CREATE TABLE links (parent {link_type}, far {sql_type}, PRIMARY KEY (parent, far))"
+        ),
+        "ALTER TABLE kids REPLICA IDENTITY FULL".to_owned(),
+        "ALTER TABLE grandkids REPLICA IDENTITY FULL".to_owned(),
+        "ALTER TABLE links REPLICA IDENTITY FULL".to_owned(),
+        "CREATE PUBLICATION flusso FOR TABLE parents, kids, grandkids, fars, links".to_owned(),
+        format!("INSERT INTO parents VALUES ({root}, 'pa')"),
+        format!("INSERT INTO fars VALUES ({root}, 'fa')"),
+    ] {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
+        .execute(&pool)
+        .await
         .unwrap();
-    assert!(stopped.is_err());
+
+    let documents = Arc::new(
+        PgDocumentBuilder::connect(&url, Arc::new(keyed_parents_spec()))
+            .await
+            .unwrap(),
+    );
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = tokio::spawn(run_deployment(
+        Arc::new(WalChangeCapture::new(replication(port), url.clone())),
+        Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
+        Arc::new(RecordingSink::new(&recorded)),
+    ));
+    let parent = format!("upsert parents {id}");
+    expect_op(&mut engine, &recorded, &parent).await;
+
+    let marker_sql = "INSERT INTO grandkids (id) VALUES ($1)";
+    let mut marker = 900;
+    let mut rebuilt = async |sql: String| {
+        marker += 1;
+        rebuilt_by(
+            &mut engine,
+            &recorded,
+            &pool,
+            &sql,
+            marker_sql,
+            marker,
+            &format!("upsert grandkids {marker}"),
+        )
+        .await
+    };
+    let ops = |ops: &[&str]| sorted(ops);
+
+    for (sql, expected, what) in [
+        (
+            format!("INSERT INTO kids VALUES (2, {link}, 'k2')"),
+            ops(&[&parent, "upsert kids 2"]),
+            "a has_many child",
+        ),
+        (
+            "INSERT INTO grandkids VALUES (101, 2, NULL)".to_owned(),
+            ops(&[&parent, "upsert grandkids 101"]),
+            "a row a `via` hop reaches",
+        ),
+        (
+            format!("INSERT INTO links VALUES ({link}, {root})"),
+            ops(&[&parent]),
+            "a junction row",
+        ),
+        (
+            format!("UPDATE fars SET name = 'fa2' WHERE id = {root}"),
+            ops(&[&parent]),
+            "a far row, through the junction",
+        ),
+        (
+            format!("UPDATE parents SET name = 'pa2' WHERE id = {root}"),
+            ops(&[&parent, "upsert kids 2"]),
+            "the root, and the kid that `belongs_to` it",
+        ),
+        (
+            "UPDATE kids SET parent = NULL WHERE id = 2".to_owned(),
+            ops(&[&parent, "upsert kids 2"]),
+            "a kid leaving, through its pre-image",
+        ),
+        (
+            format!("UPDATE kids SET parent = {link} WHERE id = 2"),
+            ops(&[&parent, "upsert kids 2"]),
+            "a kid coming back",
+        ),
+        (
+            "DELETE FROM kids WHERE id = 2".to_owned(),
+            ops(&[&parent, "delete kids 2"]),
+            "a deleted kid, through its pre-image",
+        ),
+        (
+            "DELETE FROM links".to_owned(),
+            ops(&[&parent]),
+            "a deleted junction row",
+        ),
+        (
+            format!("DELETE FROM parents WHERE id = {root}"),
+            ops(&[&format!("delete parents {id}")]),
+            "the root's delete",
+        ),
+    ] {
+        assert_eq!(rebuilt(sql).await, expected, "{what}");
+    }
+
+    engine.abort();
+}
+
+macro_rules! linked_by_another_spelling {
+    ($($test:ident: $sql_type:literal, $setup:expr, [$root:literal, $link:literal], $id:literal;)*) => {$(
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires docker"]
+        async fn $test() {
+            a_link_spelled_differently_resolves_to_the_roots_own_key(
+                [$sql_type, $sql_type], $setup, [$root, $link], $id,
+            )
+            .await;
+        }
+    )*};
+}
+
+linked_by_another_spelling! {
+    a_citext_link_in_another_case_rebuilds_the_roots_own_document:
+        "citext", &["CREATE EXTENSION citext"], ["'Ab'", "'AB'"], "Ab";
+    a_numeric_link_at_another_scale_rebuilds_the_roots_own_document:
+        "numeric", &[], ["1.5", "1.500"], "1.5";
+    a_float8_link_of_negative_zero_rebuilds_the_roots_own_document:
+        "float8", &[], ["'0'", "'-0'"], "0";
+    a_case_insensitive_text_link_rebuilds_the_roots_own_document:
+        "text COLLATE folded",
+        &["CREATE COLLATION folded (provider = icu, locale = 'und-u-ks-level2', deterministic = false)"],
+        ["'Ab'", "'AB'"], "Ab";
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn the_pipeline_runs_through_pgbouncer_in_session_mode() {
+    the_pipeline_runs_through_pgbouncer("session").await;
+}
+
+/// In transaction mode a session `SET` may land on another server
+/// connection than the next query: no key a query reads depends on one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn the_pipeline_runs_through_pgbouncer_in_transaction_mode() {
+    the_pipeline_runs_through_pgbouncer("transaction").await;
+}
+
+/// PgBouncer in `pool_mode`, ignoring only the `extra_float_digits` startup
+/// parameter the SQL pool sends (stock PgBouncer refuses it), in
+/// front of every connection flusso opens, the replication one included
+/// (issue #295): it refuses any parameter inside a startup `options`, so the
+/// settings a key's text depends on are set after connecting, or not needed.
+/// A `bytea` key under `bytea_output = escape` backfills and follows.
+async fn the_pipeline_runs_through_pgbouncer(pool_mode: &str) {
+    use testcontainers_modules::testcontainers::GenericImage;
+    use testcontainers_modules::testcontainers::core::IntoContainerPort;
+
+    let (postgres, _port, url) = start_logical_postgres().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "ALTER DATABASE postgres SET bytea_output = 'escape'",
+        "CREATE TABLE users (id bytea PRIMARY KEY, email text)",
+        "CREATE PUBLICATION flusso FOR TABLE users",
+        "INSERT INTO users VALUES ('\\x01', 'a@x')",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let host = postgres.get_bridge_ip_address().await.unwrap().to_string();
+    let bouncer = GenericImage::new("edoburu/pgbouncer", "v1.26.1-p0")
+        .with_exposed_port(5432.tcp())
+        .with_env_var("DB_HOST", host)
+        .with_env_var("DB_PORT", "5432")
+        .with_env_var("DB_USER", "postgres")
+        .with_env_var("DB_PASSWORD", "postgres")
+        .with_env_var("AUTH_TYPE", "scram-sha-256")
+        .with_env_var("POOL_MODE", pool_mode)
+        .with_env_var("IGNORE_STARTUP_PARAMETERS", "extra_float_digits")
+        .start()
+        .await
+        .unwrap();
+    let port = bouncer.get_host_port_ipv4(5432.tcp()).await.unwrap();
+    let bounced = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while PgPoolOptions::new().connect(&bounced).await.is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "PgBouncer never accepted a connection"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    let users = IndexSchema {
+        fields: vec![column_field("email", "email")],
+        ..users_schema(vec![])
+    };
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("users"), users)]));
+    let documents = PgDocumentBuilder::connect(&bounced, Arc::new(spec))
+        .await
+        .unwrap();
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = tokio::spawn(run_deployment(
+        Arc::new(WalChangeCapture::new(replication(port), bounced.clone())),
+        Arc::new(documents),
+        Arc::new(RecordingSink::new(&recorded)),
+    ));
+    expect_op(&mut engine, &recorded, "upsert users \\x01").await;
+    sqlx::query("INSERT INTO users VALUES ('\\x02', 'b@x')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    expect_op(&mut engine, &recorded, "upsert users \\x02").await;
+    engine.abort();
+}
+
+/// How many times the builder read root keys back from `parents` while 1,000
+/// kids, inserted in one transaction, rebuilt their parent (issue #295): a
+/// `parents` keyed by `sql_type`, the kids linking to it as `link`.
+async fn root_key_lookups_for_a_burst(sql_type: &str, root: &str, link: &str, id: &str) -> i64 {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .with_cmd([
+            "postgres",
+            "-c",
+            "wal_level=logical",
+            "-c",
+            "max_wal_senders=10",
+            "-c",
+            "max_replication_slots=10",
+            "-c",
+            "shared_preload_libraries=pg_stat_statements",
+        ])
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE EXTENSION pg_stat_statements".to_owned(),
+        format!("CREATE TABLE parents (id {sql_type} PRIMARY KEY, name text)"),
+        format!("CREATE TABLE kids (id int PRIMARY KEY, parent {sql_type}, name text)"),
+        "ALTER TABLE kids REPLICA IDENTITY FULL".to_owned(),
+        "CREATE PUBLICATION flusso FOR TABLE parents, kids".to_owned(),
+        format!("INSERT INTO parents VALUES ({root}, 'pa')"),
+    ] {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let kids = Join {
+        table: table("kids"),
+        kind: JoinKind::HasMany {
+            foreign_key: column("parent"),
+        },
+        primary_key: column("id"),
+        nullable: true,
+        filters: None,
+        order_by: None,
+        limit: None,
+        fields: vec![column_field("name", "name")],
+        indexed: true,
+        on: vec![],
+    };
+    let parents = IndexSchema {
+        table: table("parents"),
+        fields: vec![
+            column_field("name", "name"),
+            Field {
+                field: field("kids"),
+                options: Default::default(),
+                emit: true,
+                source: FieldSource::Relation(Relation::Join(kids)),
+            },
+        ],
+        ..users_schema(vec![])
+    };
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("parents"), parents)]));
+    let documents = PgDocumentBuilder::connect(&url, Arc::new(spec))
+        .await
+        .unwrap();
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = tokio::spawn(run_deployment(
+        Arc::new(WalChangeCapture::new(replication(port), url.clone())),
+        Arc::new(documents),
+        Arc::new(RecordingSink::new(&recorded)),
+    ));
+    expect_op(&mut engine, &recorded, &format!("upsert parents {id}")).await;
+    sqlx::query("SELECT pg_stat_statements_reset()")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    recorded.lock().unwrap().clear();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO kids SELECT n, {link}, 'k' FROM generate_series(1, 1000) n; \
+         UPDATE parents SET name = 'marker' WHERE id = {root}"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Committed after the burst, so its document comes after every kid's.
+    sqlx::query("INSERT INTO parents VALUES (99, 'marker')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    expect_op(&mut engine, &recorded, "upsert parents 99").await;
+    let recorded = recorded.lock().unwrap().clone();
+    assert!(
+        recorded
+            .iter()
+            .filter(|op| op.contains("parents") && *op != "upsert parents 99")
+            .all(|op| op == &format!("upsert parents {id}")),
+        "{recorded:?}"
+    );
+    engine.abort();
+
+    sqlx::query_scalar(
+        "SELECT coalesce(sum(calls), 0)::int8 FROM pg_stat_statements \
+         WHERE query LIKE '%FROM \"public\".\"parents\" WHERE \"id\" IN (%'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+}
+
+/// A numeric key's links are read back once per change: 1,000 changes, 1,000
+/// lookups, each run as its change is resolved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_burst_of_numeric_links_reads_one_root_key_back_per_change() {
+    let lookups = root_key_lookups_for_a_burst("numeric", "1.5", "1.50", "1.5").await;
+    assert_eq!(lookups, 1_000, "one lookup per change");
+}
+
+/// An int key's links are its own keys: no lookup at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_burst_of_int_links_reads_no_root_key_back() {
+    assert_eq!(root_key_lookups_for_a_burst("int", "1", "1", "1").await, 0);
+}
+
+macro_rules! linked_from_another_type {
+    ($($test:ident: [$sql_type:literal, $link_type:literal], [$root:literal, $link:literal], $id:literal;)*) => {$(
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires docker"]
+        async fn $test() {
+            a_link_spelled_differently_resolves_to_the_roots_own_key(
+                [$sql_type, $link_type], &[], [$root, $link], $id,
+            )
+            .await;
+        }
+    )*};
+}
+
+// A link column of another type is compared as the document query joins it,
+// so resolution finds what the build reads.
+linked_from_another_type! {
+    a_char_link_to_a_text_key_rebuilds_the_roots_own_document:
+        ["text", "char(5)"], ["'ab'", "'ab'"], "ab";
+    a_text_link_to_a_char_key_rebuilds_the_roots_own_document:
+        ["char(5)", "text"], ["'ab'", "'ab'"], "ab   ";
 }

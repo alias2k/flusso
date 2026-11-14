@@ -131,6 +131,41 @@ fn sql_string(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
 }
 
+/// The cast a bound key takes: `::<sql_type>`, or `::text::<sql_type>` for a
+/// key carried as text (a value its type's parser can't represent, like
+/// `infinity`), so the database parses it as it rendered it.
+///
+/// The two spellings are two statements: sqlx caches a prepared statement by
+/// its text with the parameter types of its first use, so a text value bound
+/// where a typed one was prepared would be sent in the wrong binary format.
+pub(super) fn key_cast(value: &GenericValue, sql_type: &str) -> String {
+    match value {
+        GenericValue::String(_) => format!("::text::{sql_type}"),
+        _ => format!("::{sql_type}"),
+    }
+}
+
+/// The SQL type a value is bound as; `None` for one that can't be bound.
+pub(super) fn bound_type(value: &GenericValue) -> Option<&'static str> {
+    Some(match value {
+        GenericValue::Bool(_) => "bool",
+        GenericValue::SmallInt(_) => "int2",
+        GenericValue::Int(_) => "int4",
+        GenericValue::BigInt(_) => "int8",
+        GenericValue::Float(_) => "float4",
+        GenericValue::Double(_) => "float8",
+        GenericValue::Decimal(_) => "numeric",
+        GenericValue::String(_) => "text",
+        GenericValue::Uuid(_) => "uuid",
+        GenericValue::Date(_) => "date",
+        GenericValue::Time(_) => "time",
+        GenericValue::Timestamp(_) => "timestamp",
+        GenericValue::TimestampTz(_) => "timestamptz",
+        GenericValue::Bytes(_) => "bytea",
+        GenericValue::Null | GenericValue::Array(_) | GenericValue::Map(_) => return None,
+    })
+}
+
 pub(super) fn qident(ident: &str) -> String {
     format!("\"{ident}\"")
 }

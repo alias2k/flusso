@@ -11,115 +11,79 @@ use kernel::{
 };
 use rust_decimal::Decimal;
 use source::document::BuildFailure;
-use sqlx::postgres::{PgColumn, PgRow};
-use sqlx::{Column as _, Row, TypeInfo};
+use sqlx::postgres::PgRow;
+use sqlx::{Column as _, Row, TypeInfo, ValueRef as _};
 use uuid::Uuid;
 
-/// Decode one named column of a row into a [`GenericValue`], or
-/// [`GenericValue::Null`] if the row has no such column.
-pub(super) fn decode_named_column(row: &PgRow, name: &str) -> GenericValue {
-    match row.columns().iter().find(|col| col.name() == name) {
-        Some(col) => decode_column(row, col),
-        None => GenericValue::Null,
-    }
+/// The SQL that selects `expr`, a key of base type `base_name`
+/// (`pg_type.typname`), as [`decode_key`] reads it under `alias`: its
+/// [`key_text`](crate::text_value::key_text), beside the value itself, which
+/// is never decoded (a query's row description names its type, a domain by
+/// its base type).
+pub(crate) fn key_select(expr: &str, alias: &str, base_name: &str) -> String {
+    format!(
+        "{} AS \"{alias}\", {expr} AS \"{alias}{TYPED}\"",
+        crate::text_value::key_text(expr, base_name)
+    )
 }
 
-/// Decode a single column by its Postgres type. Unsupported types and decode
-/// failures degrade to [`GenericValue::Null`] with a warning rather than
-/// failing the whole document.
-fn decode_column(row: &PgRow, col: &PgColumn) -> GenericValue {
-    let idx = col.ordinal();
-    let name = col.name();
-    match col.type_info().name() {
-        "INT2" => finish(
-            row.try_get::<Option<i16>, _>(idx),
-            GenericValue::SmallInt,
-            name,
-        ),
-        "INT4" => finish(row.try_get::<Option<i32>, _>(idx), GenericValue::Int, name),
-        "INT8" => finish(
-            row.try_get::<Option<i64>, _>(idx),
-            GenericValue::BigInt,
-            name,
-        ),
-        "BOOL" => finish(
-            row.try_get::<Option<bool>, _>(idx),
-            GenericValue::Bool,
-            name,
-        ),
-        "FLOAT4" => finish(
-            row.try_get::<Option<f32>, _>(idx),
-            GenericValue::Float,
-            name,
-        ),
-        "FLOAT8" => finish(
-            row.try_get::<Option<f64>, _>(idx),
-            GenericValue::Double,
-            name,
-        ),
-        "NUMERIC" => finish(
-            row.try_get::<Option<Decimal>, _>(idx),
-            GenericValue::Decimal,
-            name,
-        ),
-        "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" | "CHAR" | "CITEXT" => finish(
-            row.try_get::<Option<String>, _>(idx),
-            GenericValue::String,
-            name,
-        ),
-        "TIMESTAMP" => finish(
-            row.try_get::<Option<chrono::NaiveDateTime>, _>(idx),
-            GenericValue::Timestamp,
-            name,
-        ),
-        "TIMESTAMPTZ" => finish(
-            row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(idx),
-            GenericValue::TimestampTz,
-            name,
-        ),
-        "DATE" => finish(
-            row.try_get::<Option<chrono::NaiveDate>, _>(idx),
-            GenericValue::Date,
-            name,
-        ),
-        "TIME" => finish(
-            row.try_get::<Option<chrono::NaiveTime>, _>(idx),
-            GenericValue::Time,
-            name,
-        ),
-        "UUID" => finish(
-            row.try_get::<Option<uuid::Uuid>, _>(idx),
-            GenericValue::Uuid,
-            name,
-        ),
-        "BYTEA" => finish(
-            row.try_get::<Option<Vec<u8>>, _>(idx),
-            GenericValue::Bytes,
-            name,
-        ),
-        "JSON" | "JSONB" => finish(
-            row.try_get::<Option<serde_json::Value>, _>(idx),
-            json_to_generic,
-            name,
-        ),
-        other => {
-            tracing::warn!(column = %name, r#type = %other, "unsupported column type; treating as null");
+const TYPED: &str = ":typed";
+
+/// The key [`key_select`] selected under `alias`, parsed by
+/// [`read_back`](crate::text_value::read_back) into the very value a live
+/// change carries for it.
+/// [`GenericValue::Null`] for a null, a missing column, or a type that can't
+/// be a key (warned).
+pub(crate) fn decode_key(row: &PgRow, alias: &str) -> GenericValue {
+    let typed = format!("{alias}{TYPED}");
+    let Some(column) = row.columns().iter().find(|column| column.name() == typed) else {
+        return GenericValue::Null;
+    };
+    if row
+        .try_get_raw(column.ordinal())
+        .map_or(true, |raw| raw.is_null())
+    {
+        return GenericValue::Null;
+    }
+    let info = column.type_info();
+    let oid = info.oid().map_or(0, |oid| oid.0);
+    if !crate::text_value::is_key_type(oid, info.name()) {
+        tracing::warn!(column = %alias, r#type = %info.name(), "unsupported key type; treating as null");
+        return GenericValue::Null;
+    }
+    match row.try_get::<String, _>(alias) {
+        Ok(text) => crate::text_value::read_back(&text, oid),
+        Err(error) => {
+            tracing::warn!(column = %alias, %error, "could not read a key; treating as null");
             GenericValue::Null
         }
     }
 }
 
-/// Decode the first column of a single-column row into a [`GenericValue`],
-/// using the same per-type decoding as the rest of the read path. The initial
-/// backfill selects one primary-key column per row and turns it into a
-/// [`RowKey`](source::RowKey) value this way, so a snapshotted key matches
-/// what a live change would produce.
-pub(crate) fn first_column_to_generic(row: &PgRow) -> GenericValue {
-    match row.columns().first() {
-        Some(col) => decode_column(row, col),
-        None => GenericValue::Null,
-    }
-}
+/// The base types (`pg_type.typname`) a key may have: the ones
+/// [`decode_key`] reads (`text_value::is_key_type` by OID). A key of any
+/// other type reads as null: no document is ever written for it, which
+/// `validate_indexes` reports (`DiagnosticKind::UnsupportedKeyType`).
+pub(crate) const KEY_TYPES: &[&str] = &[
+    "int2",
+    "int4",
+    "int8",
+    "bool",
+    "float4",
+    "float8",
+    "numeric",
+    "text",
+    "varchar",
+    "bpchar",
+    "name",
+    "citext",
+    "timestamp",
+    "timestamptz",
+    "date",
+    "time",
+    "uuid",
+    "bytea",
+];
 
 /// Convert a JSON value (e.g. a server-assembled document) into the value tree.
 pub(super) fn json_to_generic(value: serde_json::Value) -> GenericValue {
@@ -404,7 +368,7 @@ fn coerce_scalar(json: serde_json::Value, ty: &FlussoType) -> GenericValue {
             .as_str()
             .and_then(parse_temporal)
             .unwrap_or_else(|| json_to_generic(json)),
-        FlussoType::Binary => match json.as_str().and_then(postgres_hex) {
+        FlussoType::Binary => match json.as_str().and_then(crate::text_value::postgres_hex) {
             Some(bytes) => GenericValue::Bytes(bytes),
             None => json_to_generic(json),
         },
@@ -419,24 +383,6 @@ fn coerce_scalar(json: serde_json::Value, ty: &FlussoType) -> GenericValue {
         | FlussoType::GeoPoint
         | FlussoType::Custom { .. } => json_to_generic(json),
     }
-}
-
-/// The bytes of a `bytea` as the document query's JSON carries it: Postgres
-/// renders a `bytea` inside `json_build_object` as its text output, `\x`
-/// followed by two hex digits per byte (`bytea_output = hex`, the default).
-/// `None` for anything else, which then stays the text it reads as.
-fn postgres_hex(text: &str) -> Option<Vec<u8>> {
-    let digits = text.strip_prefix("\\x")?.as_bytes();
-    if digits.len() % 2 != 0 || !digits.iter().all(u8::is_ascii_hexdigit) {
-        return None;
-    }
-    digits
-        .chunks(2)
-        .map(|pair| {
-            let pair = std::str::from_utf8(pair).ok()?;
-            u8::from_str_radix(pair, 16).ok()
-        })
-        .collect()
 }
 
 /// Parse a `Timestamp`-declared string into the tightest temporal variant: an
@@ -464,23 +410,6 @@ fn coerce_decimal(json: serde_json::Value) -> GenericValue {
         _ => None,
     };
     parsed.map_or_else(|| json_to_generic(json), GenericValue::Decimal)
-}
-
-/// Resolve a decoded column: SQL `NULL` → [`GenericValue::Null`], a value runs
-/// through `f`, a decode error warns and falls back to null.
-fn finish<T>(
-    decoded: Result<Option<T>, sqlx::Error>,
-    f: impl FnOnce(T) -> GenericValue,
-    column: &str,
-) -> GenericValue {
-    match decoded {
-        Ok(Some(value)) => f(value),
-        Ok(None) => GenericValue::Null,
-        Err(e) => {
-            tracing::warn!(column = %column, error = %e, "failed to decode column; treating as null");
-            GenericValue::Null
-        }
-    }
 }
 
 /// Floats have no dedicated [`GenericValue`]; keep precision as a decimal where

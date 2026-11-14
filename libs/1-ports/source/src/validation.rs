@@ -29,7 +29,9 @@
 //! The root's own keys are checked on the root table: that it has a
 //! single-column primary key ([`DiagnosticKind::RootPrimaryKey`]), that the
 //! declared `primary_key` exists and is that key
-//! ([`DiagnosticKind::RootPrimaryKeyMismatch`]), the columns its `filters` name, and the `soft_delete` marker — its
+//! ([`DiagnosticKind::RootPrimaryKeyMismatch`]) and of a type the source reads
+//! back as a document key ([`DiagnosticKind::UnsupportedKeyType`]), the
+//! columns its `filters` name, and the `soft_delete` marker — its
 //! `column` (or the column behind its `field`) and its `when` filters. A
 //! diagnostic on one of these is anchored at the key's name (`table`,
 //! `primary_key`, `filters`, `soft_delete`) instead of a field, and its
@@ -170,6 +172,20 @@ pub trait Catalog: Send + Sync {
     ) -> Result<bool> {
         Ok(true)
     }
+
+    /// Whether the source reads a value of `column` in `table` back as a
+    /// document key, so a row keyed by it addresses its document. Only asked
+    /// of a root table's own single-column primary key, which exists.
+    ///
+    /// The default is `true`: the check is skipped.
+    async fn reads_key(
+        &self,
+        _schema: &DatabaseSchema,
+        _table: &TableName,
+        _column: &ColumnName,
+    ) -> Result<bool> {
+        Ok(true)
+    }
 }
 
 /// How serious a [`Diagnostic`] is.
@@ -221,6 +237,10 @@ pub enum DiagnosticKind {
     /// table's own key while the build matches on the declared column, so no
     /// document is ever written.
     RootPrimaryKeyMismatch,
+    /// The root table's primary key is of a type the source can't read back
+    /// as a document key (e.g. a Postgres `inet` or enum): every row's key
+    /// reads as null, so no document is ever written.
+    UnsupportedKeyType,
     /// A field declares `array: true` over a column that holds no array:
     /// neither a `[]` type nor `json`/`jsonb`.
     NotAnArrayColumn,
@@ -251,6 +271,7 @@ impl DiagnosticKind {
             | Self::TransformNotApplicable
             | Self::RootPrimaryKey
             | Self::RootPrimaryKeyMismatch
+            | Self::UnsupportedKeyType
             | Self::NotAnArrayColumn => Severity::Error,
             Self::Nullability
             | Self::IgnoredPrimaryKey
@@ -273,6 +294,7 @@ impl DiagnosticKind {
             Self::TransformNotApplicable => "transform_not_applicable",
             Self::RootPrimaryKey => "root_primary_key",
             Self::RootPrimaryKeyMismatch => "root_primary_key_mismatch",
+            Self::UnsupportedKeyType => "unsupported_key_type",
             Self::NotAnArrayColumn => "not_an_array_column",
             Self::UndeclaredArrayColumn => "undeclared_array_column",
             Self::DuplicateFieldName => "duplicate_field_name",
@@ -600,8 +622,9 @@ impl Checker<'_> {
     /// primary key; the batched build matches it on the declared column.
     ///
     /// - A single-column key: the declared column must exist
-    ///   ([`DiagnosticKind::UnknownColumn`]) and be that key
-    ///   ([`DiagnosticKind::RootPrimaryKeyMismatch`]).
+    ///   ([`DiagnosticKind::UnknownColumn`]), be that key
+    ///   ([`DiagnosticKind::RootPrimaryKeyMismatch`]), and be of a type the
+    ///   source reads back ([`DiagnosticKind::UnsupportedKeyType`]).
     /// - None or a composite one: [`DiagnosticKind::RootPrimaryKey`] at
     ///   `table`. A root change is then built by its whole key, so a declared
     ///   column that doesn't exist is only read by a relation (which keys on
@@ -655,20 +678,34 @@ impl Checker<'_> {
                 ),
                 Err(e) => return Err(e),
             }
-        } else if self
-            .column(table, declared, Some(PRIMARY_KEY))
-            .await?
-            .is_some()
-            && let Some(single) = single.filter(|single| single != declared)
-        {
-            self.report(
-                DiagnosticKind::RootPrimaryKeyMismatch,
-                format!(
-                    "`primary_key` is `{declared}`, but `{}.{table}` is keyed by `{single}`: \
-                     the backfill and every root change would match the wrong row or none",
-                    self.db_schema
+        } else if let Some(info) = self.column(table, declared, Some(PRIMARY_KEY)).await? {
+            match single {
+                Some(single) if single != *declared => self.report(
+                    DiagnosticKind::RootPrimaryKeyMismatch,
+                    format!(
+                        "`primary_key` is `{declared}`, but `{}.{table}` is keyed by \
+                         `{single}`: the backfill and every root change would match the wrong \
+                         row or none",
+                        self.db_schema
+                    ),
                 ),
-            );
+                Some(_)
+                    if !self
+                        .catalog
+                        .reads_key(self.db_schema, table, declared)
+                        .await? =>
+                {
+                    self.report(
+                        DiagnosticKind::UnsupportedKeyType,
+                        format!(
+                            "`primary_key` `{declared}` is `{}`, a type that can't be read back \
+                             as a document key: no document would ever be written",
+                            info.sql_type
+                        ),
+                    );
+                }
+                _ => {}
+            }
         }
         self.path.pop();
         Ok(())
@@ -2826,6 +2863,62 @@ mod tests {
                 DiagnosticKind::RootPrimaryKeyMismatch,
                 "`primary_key` is `team_id`, but `public.users` is keyed by `id`: the backfill \
                  and every root change would match the wrong row or none"
+            )]),
+        );
+    }
+
+    /// A root keyed by a type the source can't read back writes no document
+    /// (issue #295); a relation keyed by one is not asked about.
+    #[test]
+    fn a_root_key_the_source_cannot_read_back_is_reported_at_primary_key() {
+        struct Unreadable;
+
+        #[async_trait]
+        impl Catalog for Unreadable {
+            async fn column(
+                &self,
+                schema: &DatabaseSchema,
+                table: &TableName,
+                column: &ColumnName,
+            ) -> Result<ColumnInfo> {
+                Shop.column(schema, table, column).await
+            }
+
+            async fn has_table(&self, schema: &DatabaseSchema, table: &TableName) -> Result<bool> {
+                Shop.has_table(schema, table).await
+            }
+
+            async fn primary_key(
+                &self,
+                schema: &DatabaseSchema,
+                table: &TableName,
+            ) -> Result<Option<Vec<ColumnName>>> {
+                Shop.primary_key(schema, table).await
+            }
+
+            async fn reads_key(
+                &self,
+                _: &DatabaseSchema,
+                _: &TableName,
+                _: &ColumnName,
+            ) -> Result<bool> {
+                Ok(false)
+            }
+        }
+
+        let spec = users_spec(json!({
+            "fields": [{ "field": "team", "source": { "relation": { "join": {
+                "table": "teams", "kind": { "belongs_to": { "column": "team_id" } },
+                "primary_key": "id", "nullable": true, "fields": [],
+            } } } }],
+        }));
+        assert_eq!(
+            located(futures::executor::block_on(validate_indexes(&spec, &Unreadable)).unwrap()),
+            problems(&[(
+                "@primary_key",
+                DiagnosticKind::UnsupportedKeyType,
+                "`primary_key` `id` is `integer`, a type that can't be read back as a document \
+                 key: no document would ever be written"
             )]),
         );
     }

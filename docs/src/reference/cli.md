@@ -58,7 +58,8 @@ Once connected, and before any index is touched, `run` runs the same check as [`
   - a column the document query reads that doesn't exist: a field's column, a key (`column`, `foreign_key`, `left_key`, `right_key`, a hop's `foreign_key`), either side of an `on:` pair, a value or null-check filter column (relation, junction, hop, root `filters`, `soft_delete` `when`), an `order_by` column, a geo coordinate, an aggregate's input column or expression operand, and the `soft_delete` column;
   - a `soft_delete` `field` that reads no column;
   - a root `primary_key` that names no column, when the root table has a single-column primary key or the index has any relation (a relation keys on the root, or traces a change back to it, by that column);
-  - a root `primary_key` that names a column other than the root table's single-column primary key: changes and the backfill carry the table's key, the build matches it on the declared column, so a document is built from another row or written as a tombstone, and a change on a related table fails;
+  - a root `primary_key` that names a column other than the root table's single-column primary key: changes and the backfill carry the table's key, the build matches it on the declared column, so a document is built from another row or written as a tombstone, and a change on a related table writes a document under the declared column's value that the next root change deletes;
+  - a root `primary_key` of a type flusso can't read back as a document id (`inet`, an enum, …; see [Key types](source-postgres.md#key-types)): every key reads as none, so no document is ever written;
   - a relation table without a single-column primary key (none, or a composite one): a join's, an aggregate's or a `via` hop's table, at any depth (a junction needs none);
   - [`transforms`](field-types.md#transforms) the column's type doesn't take, such as `lowercase` over an `integer` or an enum column. When flusso can't ask (the role has no `USAGE` on the type's schema), it warns and skips this check;
   - [`array: true`](field-types.md#array) over a column that holds no array (neither a `[]` type nor `json`/`jsonb`).
@@ -91,7 +92,7 @@ Every problem of one run is listed together, each naming the index, the field pa
   - that the related table, and each hop's, has a single-column primary key.
 
   A missing table is reported once, and nothing on it is looked up.
-- **Root keys, on the root table.** That the table has a single-column primary key, reported under `table`; that the declared `primary_key` column exists and is that key, reported under `primary_key`, whether or not a field reads it; the columns of the top-level value and null-check [`filters`](filters-and-soft-delete.md#root-filters), reported under `filters`, and the [`soft_delete`](filters-and-soft-delete.md#soft_delete) marker, reported under `soft_delete`: its `column`, its `when` columns, and its `field` (see [How the marker is verified](filters-and-soft-delete.md#how-the-marker-is-verified)).
+- **Root keys, on the root table.** That the table has a single-column primary key, reported under `table`; that the declared `primary_key` column exists, is that key, and is of a [key type](source-postgres.md#key-types) flusso reads, reported under `primary_key`, whether or not a field reads it; the columns of the top-level value and null-check [`filters`](filters-and-soft-delete.md#root-filters), reported under `filters`, and the [`soft_delete`](filters-and-soft-delete.md#soft_delete) marker, reported under `soft_delete`: its `column`, its `when` columns, and its `field` (see [How the marker is verified](filters-and-soft-delete.md#how-the-marker-is-verified)).
 
 Everything above is an error except the three warnings: `required` over a nullable column, a join `primary_key` that names no column, and a `[]` column without `array: true`. Which errors also stop `run` is in [Validation at start](#validation-at-start). `--offline` still reports the two problems that need no database: a `soft_delete` `field` that reads no column (an error), and two fields sharing a name at one level, at any depth (a warning, with the database too; see [One name per level](identifiers.md#one-name-per-level)).
 
@@ -114,6 +115,7 @@ Exit status is non-zero when validation fails or any diagnostic is an error. `--
 | `relation_primary_key` | A relation table without a single-column primary key. | error | yes |
 | `transform_not_applicable` | `transforms` the column's type doesn't take. | error | yes |
 | `root_primary_key_mismatch` | A root `primary_key` other than the table's own single-column key. | error | yes |
+| `unsupported_key_type` | A root `primary_key` of a type flusso can't read back as a document id (see [Key types](source-postgres.md#key-types)). | error | yes |
 | `not_an_array_column` | `array: true` over a column that's neither a `[]` type nor `json`/`jsonb`, nor a domain over one. | error | yes |
 | `root_primary_key` | A root table with no primary key or a composite one (the message says which); on one, with no relation, a `primary_key` that names no column. | error | no |
 | `type_mismatch` | A declared type that doesn't accept the column's type. | error | no |

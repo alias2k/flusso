@@ -8,6 +8,7 @@ mod cdc;
 mod config;
 mod connection_url;
 mod document;
+mod text_value;
 mod tls;
 
 pub use cdc::WalChangeCapture;

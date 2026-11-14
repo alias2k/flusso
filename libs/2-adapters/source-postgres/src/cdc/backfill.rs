@@ -44,12 +44,11 @@ use sqlx::{PgPool, Postgres};
 use super::quote_ident;
 use crate::document::value;
 
-/// Name of the single server-side cursor reused across tables. The snapshot owns
-/// its own connection for its whole lifetime, so a fixed name never collides.
-const CURSOR: &str = "flusso_backfill_cursor";
+/// The alias each table's key is selected under.
+const KEY: &str = "key";
 
-/// How many keys to pull from the cursor per round-trip.
-const FETCH_SQL: &str = "FETCH FORWARD 1024 FROM flusso_backfill_cursor";
+/// How many keys to pull from a cursor per round-trip.
+const FETCH_SIZE: usize = 1024;
 
 /// Connect a query connection and stream the current rows of `tables` as
 /// `Upsert` changes. Returns an empty stream when nothing is in scope.
@@ -73,12 +72,20 @@ pub(crate) async fn snapshot(
 struct BackfillTable {
     /// `"schema"."table"`, quoted and ready to interpolate.
     qualified: String,
-    /// `"pk"`, quoted and ready to interpolate.
-    pk_quoted: String,
+    /// The cursor's select list: the key, rendered as
+    /// [`value::key_select`] reads it back.
+    key_select: String,
     /// The table name as it appears in change events.
     table: TableName,
     /// The primary-key column name carried in each [`RowKey`].
     pk: ColumnName,
+    /// The server-side cursor this table is read through, unique within the
+    /// snapshot. sqlx caches each statement by its text, with the row types it
+    /// was first described with: a `FETCH` shared by every table would decode
+    /// each later table's key as the first one's type (issue #295), and its
+    /// integer decode reads any value of up to 8 bytes, so a `text` or `bytea`
+    /// key became a wrong integer instead of an error.
+    cursor: String,
 }
 
 /// Pair each requested table with its single-column primary key, skipping (with
@@ -86,20 +93,41 @@ struct BackfillTable {
 /// address keyless rows.
 async fn resolve_tables(pool: &PgPool, tables: &[SnapshotTable]) -> Result<Vec<BackfillTable>> {
     let mut out = Vec::with_capacity(tables.len());
-    for table in tables {
+    for (n, table) in tables.iter().enumerate() {
         let schema = table.db_schema.as_ref();
         let name = table.table.as_ref();
         let Some(pk) = primary_key(pool, schema, name).await? else {
             continue; // reason already logged
         };
+        let qualified = format!("{}.{}", quote_ident(schema), quote_ident(name));
+        let pk_base = base_name(pool, &qualified, pk.as_ref()).await?;
         out.push(BackfillTable {
-            qualified: format!("{}.{}", quote_ident(schema), quote_ident(name)),
-            pk_quoted: quote_ident(pk.as_ref()),
+            qualified,
+            key_select: value::key_select(&quote_ident(pk.as_ref()), KEY, &pk_base),
             table: table.table.clone(),
             pk,
+            cursor: format!("flusso_backfill_{n}"),
         });
     }
     Ok(out)
+}
+
+/// The `pg_type.typname` of `column`'s type on `qualified`, through every
+/// domain.
+async fn base_name(pool: &PgPool, qualified: &str, column: &str) -> Result<String> {
+    sqlx::query_scalar(
+        "WITH RECURSIVE d(oid) AS ( \
+           SELECT a.atttypid FROM pg_attribute a \
+           WHERE a.attrelid = $1::regclass AND a.attname = $2 \
+         UNION ALL \
+           SELECT t.typbasetype FROM pg_type t JOIN d ON t.oid = d.oid WHERE t.typtype = 'd' \
+         ) SELECT t.typname::text FROM d JOIN pg_type t ON t.oid = d.oid WHERE t.typtype <> 'd'",
+    )
+    .bind(qualified)
+    .bind(column)
+    .fetch_one(pool)
+    .await
+    .map_err(query_err)
 }
 
 /// The single-column primary key of a table from the catalog, or `None` (with a
@@ -218,13 +246,13 @@ impl Backfill {
                         return Some(Ok(change));
                     }
 
-                    let rows = match fetch_batch(&mut conn).await {
+                    let rows = match fetch_batch(&mut conn, &current).await {
                         Ok(rows) => rows,
                         Err(e) => return Some(Err(e)),
                     };
 
                     if rows.is_empty() {
-                        if let Err(e) = close_cursor(&mut conn).await {
+                        if let Err(e) = close_cursor(&mut conn, &current).await {
                             return Some(Err(e));
                         }
                         match remaining.pop_front() {
@@ -248,7 +276,7 @@ impl Backfill {
                         }
                     } else {
                         for row in &rows {
-                            let value = value::first_column_to_generic(row);
+                            let value = value::decode_key(row, KEY);
                             buf.push_back(RowKey(vec![(current.pk.clone(), value)]));
                         }
                         self.phase = Phase::Reading {
@@ -292,8 +320,8 @@ async fn begin_snapshot(conn: &mut PoolConnection<Postgres>) -> Result<()> {
 /// [`sqlx::AssertSqlSafe`].
 async fn declare_cursor(conn: &mut PoolConnection<Postgres>, table: &BackfillTable) -> Result<()> {
     let sql = format!(
-        "DECLARE {CURSOR} NO SCROLL CURSOR FOR SELECT {} FROM {}",
-        table.pk_quoted, table.qualified,
+        "DECLARE {} NO SCROLL CURSOR FOR SELECT {} FROM {}",
+        table.cursor, table.key_select, table.qualified,
     );
     sqlx::query(sqlx::AssertSqlSafe(sql))
         .execute(&mut **conn)
@@ -302,15 +330,19 @@ async fn declare_cursor(conn: &mut PoolConnection<Postgres>, table: &BackfillTab
     Ok(())
 }
 
-async fn fetch_batch(conn: &mut PoolConnection<Postgres>) -> Result<Vec<PgRow>> {
-    sqlx::query(FETCH_SQL)
+async fn fetch_batch(
+    conn: &mut PoolConnection<Postgres>,
+    table: &BackfillTable,
+) -> Result<Vec<PgRow>> {
+    let sql = format!("FETCH FORWARD {FETCH_SIZE} FROM {}", table.cursor);
+    sqlx::query(sqlx::AssertSqlSafe(sql))
         .fetch_all(&mut **conn)
         .await
         .map_err(query_err)
 }
 
-async fn close_cursor(conn: &mut PoolConnection<Postgres>) -> Result<()> {
-    sqlx::query("CLOSE flusso_backfill_cursor")
+async fn close_cursor(conn: &mut PoolConnection<Postgres>, table: &BackfillTable) -> Result<()> {
+    sqlx::query(sqlx::AssertSqlSafe(format!("CLOSE {}", table.cursor)))
         .execute(&mut **conn)
         .await
         .map_err(query_err)?;

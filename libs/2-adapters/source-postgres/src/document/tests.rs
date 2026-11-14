@@ -1,7 +1,8 @@
 //! The root row's own document follows the changed-columns rule, a key with a
 //! null part addresses no document, and a key carrying a hop's link names the
 //! parent itself. These schemas resolve without touching the database, so the
-//! pool is never opened.
+//! pool is never opened: every key column is cached as `integer`, a type whose
+//! equal values are identical, so no link is looked up on the root table.
 
 use std::collections::BTreeMap;
 
@@ -59,7 +60,40 @@ fn builder_with(extra: Vec<Field>) -> PgDocumentBuilder {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused@localhost/unused")
         .unwrap();
-    PgDocumentBuilder::new(pool, Arc::new(spec))
+    let builder = PgDocumentBuilder::new(pool, Arc::new(spec));
+    seed_integer_columns(
+        &builder,
+        &[
+            ("users", "id"),
+            ("users", "parent_id"),
+            ("orders", "user_id"),
+            ("events", "user_id"),
+            ("user_tags", "user_id"),
+        ],
+    );
+    builder
+}
+
+/// Cache `integer` as the type of each `(table, column)`, as the catalog would
+/// report it, so resolving reads no catalog either.
+fn seed_integer_columns(builder: &PgDocumentBuilder, columns: &[(&str, &str)]) {
+    let mut cache = builder.col_type_cache.lock().unwrap();
+    for (table, column) in columns {
+        cache.insert(
+            (
+                "public".to_owned(),
+                (*table).to_owned(),
+                (*column).to_owned(),
+            ),
+            ColumnMeta {
+                sql_type: "integer".to_owned(),
+                base_type: None,
+                base_name: "int4".to_owned(),
+                deterministic: true,
+                nullable: true,
+            },
+        );
+    }
 }
 
 fn key() -> RowKey {
@@ -393,4 +427,33 @@ async fn a_self_referencing_row_with_a_null_key_rebuilds_the_parent_its_old_row_
         .await
         .unwrap();
     assert_eq!(ids, [users_id(5)], "the old parent, never the row itself");
+}
+
+/// Only a key whose equal values can render differently has its links read
+/// back from the root table (issue #295).
+#[test]
+fn equal_keys_render_alike_except_for_numbers_and_loose_text() {
+    let meta = |base_name: &str, deterministic: bool| ColumnMeta {
+        sql_type: base_name.to_owned(),
+        base_type: None,
+        base_name: base_name.to_owned(),
+        deterministic,
+        nullable: false,
+    };
+    for exact in [
+        "int4",
+        "int8",
+        "uuid",
+        "bytea",
+        "date",
+        "timestamptz",
+        "text",
+        "bpchar",
+    ] {
+        assert!(meta(exact, true).equal_is_identical(), "{exact}");
+    }
+    for loose in ["numeric", "float4", "float8", "citext"] {
+        assert!(!meta(loose, true).equal_is_identical(), "{loose}");
+    }
+    assert!(!meta("text", false).equal_is_identical());
 }

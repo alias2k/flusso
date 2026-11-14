@@ -436,6 +436,27 @@ impl Builder<'_> {
         Ok(format!("{placeholder}::{sql_type}"))
     }
 
+    /// [`typed_placeholder`](Self::typed_placeholder) for a key, whose value
+    /// is typed, or the text a type's value stays when it can't be (see
+    /// [`key_cast`](super::sql::key_cast)).
+    pub(super) fn key_placeholder(
+        &mut self,
+        value: GenericValue,
+        table: &TableName,
+        column: &ColumnName,
+    ) -> Result<String> {
+        let sql_type = self
+            .col_types
+            .get(&(table.to_string(), column.to_string()))
+            .ok_or_else(|| {
+                SourceError::Query(format!("internal: missing type for `{table}.{column}`"))
+            })?
+            .clone();
+        let cast = super::sql::key_cast(&value, &sql_type);
+        let placeholder = self.placeholder(value)?;
+        Ok(format!("{placeholder}{cast}"))
+    }
+
     /// [`typed_placeholder`](Self::typed_placeholder) for a filter operand, whose
     /// value is carried as a raw string.
     fn typed_param(

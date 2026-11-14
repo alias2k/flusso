@@ -63,6 +63,7 @@ mod fields;
 mod query;
 mod reads;
 mod resolve;
+use resolve::RootLinks;
 pub(crate) mod value;
 
 use std::collections::{HashMap, HashSet};
@@ -99,7 +100,26 @@ struct ColumnMeta {
     sql_type: String,
     /// A domain's type resolved through every domain; `None` for no domain.
     base_type: Option<String>,
+    /// The `pg_type.typname` of the type, through every domain.
+    base_name: String,
+    /// Whether the column's collation compares by identity (always, for a
+    /// type without one).
+    deterministic: bool,
     nullable: bool,
+}
+
+impl ColumnMeta {
+    /// Whether two values that compare equal always render the same text, so
+    /// one key value has one document id. Not so for a `numeric` (`1.5` and
+    /// `1.50`), a float (`0` and `-0`), a `citext` or a nondeterministic
+    /// collation (`Ab` and `AB`).
+    fn equal_is_identical(&self) -> bool {
+        self.deterministic
+            && !matches!(
+                self.base_name.as_str(),
+                "numeric" | "float4" | "float8" | "citext"
+            )
+    }
 }
 
 /// One root row's document as [`PgDocumentBuilder::document_by_id`] and
@@ -256,8 +276,12 @@ impl PgDocumentBuilder {
         let Some(pk_column) = schema.primary_key.clone() else {
             return Ok(None);
         };
+        let pk_base = self
+            .base_name(&schema.db_schema, &schema.table, &pk_column)
+            .await?;
         let sql = format!(
-            "SELECT \"{pk}\" FROM \"{db_schema}\".\"{table}\" WHERE \"{pk}\" IS NOT NULL LIMIT 1",
+            "SELECT {key} FROM \"{db_schema}\".\"{table}\" WHERE \"{pk}\" IS NOT NULL LIMIT 1",
+            key = value::key_select(&format!("\"{pk_column}\""), "key", &pk_base),
             pk = pk_column,
             db_schema = schema.db_schema,
             table = schema.table,
@@ -269,7 +293,7 @@ impl PgDocumentBuilder {
         let Some(row) = row else {
             return Ok(None);
         };
-        let key_value = value::first_column_to_generic(&row);
+        let key_value = value::decode_key(&row, "key");
         if matches!(key_value, kernel::GenericValue::Null) {
             return Ok(None);
         }
@@ -353,6 +377,16 @@ impl PgDocumentBuilder {
     /// (e.g. `numeric`, `integer`, `timestamp with time zone`). A thin view over
     /// [`column_meta`](Self::column_meta) for callers that only need the type to
     /// cast a query operand.
+    /// The `pg_type.typname` of `column`'s type, through every domain.
+    pub(super) async fn base_name(
+        &self,
+        schema: &DatabaseSchema,
+        table: &TableName,
+        column: &ColumnName,
+    ) -> Result<String> {
+        Ok(self.column_meta(schema, table, column).await?.base_name)
+    }
+
     pub(super) async fn column_type(
         &self,
         schema: &DatabaseSchema,
@@ -386,18 +420,26 @@ impl PgDocumentBuilder {
         // dropped straight into a `$n::<type>` cast. `attnotnull` is the column's
         // NOT NULL constraint — the nullability mapping resolution needs, read
         // from the same catalog row as the type. `base_type` follows a domain
-        // through `typbasetype` to the first type that is no domain.
+        // through `typbasetype` to the first type that is no domain, and
+        // `base_name` names that type. `collisdeterministic` is read through
+        // `to_jsonb` because Postgres before 12 has no such column (and only
+        // deterministic collations).
         let sql = "SELECT format_type(a.atttypid, a.atttypmod) AS sql_type, \
-                          (WITH RECURSIVE d(oid, typmod) AS ( \
+                          b.base_type, b.base_name, \
+                          coalesce((SELECT (to_jsonb(c) ->> 'collisdeterministic')::boolean \
+                                    FROM pg_collation c WHERE c.oid = a.attcollation), \
+                                   true) AS deterministic, \
+                          a.attnotnull AS not_null \
+                   FROM pg_attribute a, LATERAL ( \
+                          WITH RECURSIVE d(oid, typmod) AS ( \
                                SELECT a.atttypid, a.atttypmod \
                              UNION ALL \
                                SELECT t.typbasetype, t.typtypmod \
                                FROM pg_type t JOIN d ON t.oid = d.oid WHERE t.typtype = 'd' \
-                           ) SELECT format_type(d.oid, d.typmod) \
-                             FROM d JOIN pg_type t ON t.oid = d.oid WHERE t.typtype <> 'd') \
-                          AS base_type, \
-                          a.attnotnull AS not_null \
-                   FROM pg_attribute a \
+                          ) SELECT format_type(d.oid, d.typmod) AS base_type, \
+                                   t.typname::text AS base_name \
+                            FROM d JOIN pg_type t ON t.oid = d.oid WHERE t.typtype <> 'd' \
+                        ) b \
                    WHERE a.attrelid = to_regclass($1) AND a.attname = $2 \
                      AND a.attnum > 0 AND NOT a.attisdropped";
         let row = sqlx::query(sql)
@@ -413,6 +455,8 @@ impl PgDocumentBuilder {
                 let not_null: bool = row.try_get("not_null").map_err(query_err)?;
                 ColumnMeta {
                     base_type: base_type.filter(|base| *base != sql_type),
+                    base_name: row.try_get("base_name").map_err(query_err)?,
+                    deterministic: row.try_get("deterministic").map_err(query_err)?,
                     sql_type,
                     nullable: !not_null,
                 }
@@ -503,6 +547,132 @@ impl PgDocumentBuilder {
     }
 }
 
+impl PgDocumentBuilder {
+    /// One change's documents. A path that ends on a link's value, which may
+    /// spell the root key differently, adds it to `links` instead (see
+    /// [`reads_root_from_a_link`](Self::reads_root_from_a_link)).
+    #[tracing::instrument(
+        name = "pg.resolve",
+        level = "debug",
+        skip_all,
+        fields(table = table.as_ref()),
+        err,
+    )]
+    async fn resolve_change(
+        &self,
+        table: &TableName,
+        key: &RowKey,
+        before: Option<&RowImage>,
+        after: Option<&RowImage>,
+        links: &mut RootLinks,
+    ) -> Result<Vec<DocumentId>> {
+        let mut ids = Vec::new();
+        let mut read = false;
+        let mut skipped = 0_usize;
+        let mut unaddressed = 0_usize;
+        let diff = RowDiff::new(key, before, after);
+        for (name, schema) in self.spec.indexes() {
+            let is_root = schema.table == *table;
+            let mut seen = HashSet::new();
+            if is_root {
+                read = true;
+                if key.has_null() {
+                    unaddressed += 1;
+                    self.warn_keyless_root(schema, table, key);
+                } else if self.reads.root(name).touched_by(&diff) {
+                    ids.push(DocumentId {
+                        index: name.clone(),
+                        key: key.clone(),
+                    });
+                    // A row that is its own ancestor must not re-emit this id.
+                    if let (Some(pk_column), [(column, own)]) =
+                        (&schema.primary_key, key.0.as_slice())
+                        && column == pk_column
+                    {
+                        seen.insert(own.clone());
+                    }
+                } else {
+                    skipped += 1;
+                }
+            }
+
+            let mut paths = Vec::new();
+            let mut prefix = Vec::new();
+            find_paths(&schema.fields, table, &mut prefix, &mut paths);
+            if paths.is_empty() {
+                continue;
+            }
+            read = true;
+            let Some(pk_column) = schema.primary_key.clone() else {
+                tracing::warn!(
+                    index = %name, table = %table,
+                    "cannot reverse-resolve: index has no primary_key",
+                );
+                continue;
+            };
+
+            let mut roots = Vec::new();
+            for (n, path) in paths.iter().enumerate() {
+                if !self.reads.path(name, table, n).touched_by(&diff) {
+                    skipped += 1;
+                    continue;
+                }
+                let found = self.resolve_path(schema, table, key, before, path).await?;
+                if let Some(link) = self
+                    .reads_root_from_a_link(schema, &pk_column, path)
+                    .await?
+                {
+                    links.add(name, link, found);
+                } else {
+                    roots.extend(found);
+                }
+            }
+            for root in roots {
+                if seen.insert(root.clone()) {
+                    ids.push(DocumentId {
+                        index: name.clone(),
+                        key: RowKey(vec![(pk_column.clone(), root)]),
+                    });
+                }
+            }
+        }
+        if skipped > 0 {
+            tracing::trace!(skipped, "update changed no column these documents read");
+        }
+        if unaddressed > 0 {
+            tracing::debug!(
+                unaddressed,
+                "a change whose key has a null part addresses no document of its own"
+            );
+        }
+        if !read {
+            self.warn_unread(table);
+        }
+        tracing::trace!(documents = ids.len(), "resolved affected documents");
+        Ok(ids)
+    }
+
+    /// `ids` plus the documents `links` name, read back as the root rows' own
+    /// keys, deduplicated.
+    async fn with_root_keys(
+        &self,
+        ids: Vec<DocumentId>,
+        links: RootLinks,
+    ) -> Result<Vec<DocumentId>> {
+        let mut seen = HashSet::new();
+        let mut out: Vec<DocumentId> = ids
+            .into_iter()
+            .filter(|id| seen.insert(id.clone()))
+            .collect();
+        for id in self.read_root_links(links).await? {
+            if seen.insert(id.clone()) {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    }
+}
+
 /// The Postgres source's view of its own catalog. The index mapping is derived
 /// from the self-describing schema in [`kernel`]; this is the one
 /// store-specific piece used for *validation* — how Postgres types and
@@ -534,6 +704,16 @@ impl Catalog for PgDocumentBuilder {
         table: &TableName,
     ) -> Result<Option<Vec<ColumnName>>> {
         self.fetch_primary_key(schema, table).await.map(Some)
+    }
+
+    async fn reads_key(
+        &self,
+        schema: &DatabaseSchema,
+        table: &TableName,
+        column: &ColumnName,
+    ) -> Result<bool> {
+        let meta = self.column_meta(schema, table, column).await?;
+        Ok(value::KEY_TYPES.contains(&meta.base_name.as_str()))
     }
 
     async fn accepts_transforms(
@@ -583,13 +763,6 @@ const AMBIGUOUS_FUNCTION: &str = "42725";
 
 #[async_trait]
 impl DocumentBuilder for PgDocumentBuilder {
-    #[tracing::instrument(
-        name = "pg.resolve",
-        level = "debug",
-        skip_all,
-        fields(table = table.as_ref()),
-        err,
-    )]
     async fn resolve(
         &self,
         table: &TableName,
@@ -597,80 +770,11 @@ impl DocumentBuilder for PgDocumentBuilder {
         before: Option<&RowImage>,
         after: Option<&RowImage>,
     ) -> Result<Vec<DocumentId>> {
-        let mut ids = Vec::new();
-        let mut read = false;
-        let mut skipped = 0_usize;
-        let mut unaddressed = 0_usize;
-        let diff = RowDiff::new(key, before, after);
-        for (name, schema) in self.spec.indexes() {
-            let is_root = schema.table == *table;
-            let mut seen = HashSet::new();
-            if is_root {
-                read = true;
-                if key.has_null() {
-                    unaddressed += 1;
-                    self.warn_keyless_root(schema, table, key);
-                } else if self.reads.root(name).touched_by(&diff) {
-                    ids.push(DocumentId {
-                        index: name.clone(),
-                        key: key.clone(),
-                    });
-                    // A row that is its own ancestor must not re-emit this id.
-                    if let (Some(pk_column), [(column, own)]) =
-                        (&schema.primary_key, key.0.as_slice())
-                        && column == pk_column
-                    {
-                        seen.insert(own.clone());
-                    }
-                } else {
-                    skipped += 1;
-                }
-            }
-
-            let mut paths = Vec::new();
-            let mut prefix = Vec::new();
-            find_paths(&schema.fields, table, &mut prefix, &mut paths);
-            if paths.is_empty() {
-                continue;
-            }
-            read = true;
-            let Some(pk_column) = schema.primary_key.clone() else {
-                tracing::warn!(
-                    index = %name, table = %table,
-                    "cannot reverse-resolve: index has no primary_key",
-                );
-                continue;
-            };
-
-            for (n, path) in paths.iter().enumerate() {
-                if !self.reads.path(name, table, n).touched_by(&diff) {
-                    skipped += 1;
-                    continue;
-                }
-                for root in self.resolve_path(schema, table, key, before, path).await? {
-                    if seen.insert(root.clone()) {
-                        ids.push(DocumentId {
-                            index: name.clone(),
-                            key: RowKey(vec![(pk_column.clone(), root)]),
-                        });
-                    }
-                }
-            }
-        }
-        if skipped > 0 {
-            tracing::trace!(skipped, "update changed no column these documents read");
-        }
-        if unaddressed > 0 {
-            tracing::debug!(
-                unaddressed,
-                "a change whose key has a null part addresses no document of its own"
-            );
-        }
-        if !read {
-            self.warn_unread(table);
-        }
-        tracing::trace!(documents = ids.len(), "resolved affected documents");
-        Ok(ids)
+        let mut links = RootLinks::default();
+        let ids = self
+            .resolve_change(table, key, before, after, &mut links)
+            .await?;
+        self.with_root_keys(ids, links).await
     }
 
     #[tracing::instrument(
@@ -760,12 +864,15 @@ impl DocumentBuilder for PgDocumentBuilder {
             let mut col_types = self.filter_column_types(schema).await?;
             self.add_key_column_types(schema, &[&pk_column], &mut col_types)
                 .await?;
+            let pk_base = self
+                .base_name(&schema.db_schema, &schema.table, &pk_column)
+                .await?;
 
             for chunk in keyed.chunks(BUILD_CHUNK) {
                 let keys: Vec<kernel::GenericValue> =
                     chunk.iter().map(|(value, _)| (*value).clone()).collect();
                 let (sql, params) =
-                    query::documents_query(schema, &pk_column, &keys, &pks, &col_types)?;
+                    query::documents_query(schema, &pk_column, &pk_base, &keys, &pks, &col_types)?;
 
                 let mut statement = sqlx::query(sql);
                 for param in &params {
@@ -774,14 +881,14 @@ impl DocumentBuilder for PgDocumentBuilder {
                 let rows = statement.fetch_all(&self.pool).await.map_err(query_err)?;
 
                 // Map each returned root key to its assembled body. `doc_key` is
-                // the first column, decoded through the same path live-change
-                // keys take, so it matches the ids' key values exactly.
+                // parsed as live-change keys are, so it matches the ids' key
+                // values exactly.
                 let mut bodies: HashMap<
                     kernel::GenericValue,
                     std::result::Result<kernel::GenericValue, source::document::BuildFailure>,
                 > = HashMap::with_capacity(rows.len());
                 for row in &rows {
-                    let key = value::first_column_to_generic(row);
+                    let key = value::decode_key(row, query::DOC_KEY);
                     let document: serde_json::Value = row.try_get("document").map_err(query_err)?;
                     bodies.insert(key, value::coerce_document(document, &schema.fields));
                 }

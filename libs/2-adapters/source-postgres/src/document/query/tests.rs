@@ -100,12 +100,10 @@ fn columns_only() {
 
 #[test]
 fn keyed_predicate_casts_a_uuid_primary_key() {
-    // Regression: a uuid PK decodes to a string and re-binds as `text`; without
-    // the `::uuid` cast Postgres rejects `uuid = text`. Both the single-key and
-    // batched (`IN`) forms must cast.
+    // Both the single-key and batched (`IN`) forms cast to the column's type.
     let schema = index(Some("id"), None, vec![col_field("id", "id")]);
     let col_types = types(&[("users", "id", "uuid")]);
-    let key = GenericValue::String("3f2a1b9c-0000-0000-0000-000000000000".to_owned());
+    let key = GenericValue::Uuid("3f2a1b9c-0000-0000-0000-000000000000".parse().unwrap());
 
     let (single, _) = document_query(
         &schema,
@@ -120,8 +118,15 @@ fn keyed_predicate_casts_a_uuid_primary_key() {
         single.as_str()
     );
 
-    let (batched, _) =
-        documents_query(&schema, &c("id"), &[key], &HashMap::new(), &col_types).unwrap();
+    let (batched, _) = documents_query(
+        &schema,
+        &c("id"),
+        "uuid",
+        &[key],
+        &HashMap::new(),
+        &col_types,
+    )
+    .unwrap();
     assert!(
         batched
             .as_str()
@@ -163,6 +168,7 @@ fn root_filters_fold_into_both_query_forms() {
     let (sql, _) = documents_query(
         &schema,
         &c("id"),
+        "int8",
         &[GenericValue::Int(7)],
         &HashMap::new(),
         &col_types,
@@ -515,6 +521,7 @@ fn documents_query_keys_with_in_and_selects_the_key() {
     let (sql, params) = documents_query(
         &schema,
         &c("id"),
+        "int8",
         &[GenericValue::Int(7), GenericValue::Int(9)],
         &HashMap::new(),
         &id_types(),
@@ -522,7 +529,7 @@ fn documents_query_keys_with_in_and_selects_the_key() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT "root"."id" AS "doc_key", json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" IN ($1::bigint, $2::bigint)"#
+        r#"SELECT format('%s', "root"."id") AS "doc_key", "root"."id" AS "doc_key:typed", json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" IN ($1::bigint, $2::bigint)"#
     );
     assert_eq!(params, vec![GenericValue::Int(7), GenericValue::Int(9)]);
 }
@@ -540,6 +547,7 @@ fn documents_query_folds_soft_delete_into_where() {
     let (sql, _) = documents_query(
         &schema,
         &c("id"),
+        "int8",
         &[GenericValue::Int(1)],
         &HashMap::new(),
         &id_types(),
@@ -586,6 +594,7 @@ fn soft_delete_field_inside_a_relation_reads_the_root_column() {
     let (sql, _) = documents_query(
         &schema,
         &c("id"),
+        "int8",
         &[GenericValue::Int(1)],
         &pks,
         &id_types(),
@@ -647,19 +656,75 @@ fn document_at_the_chunk_boundary_stays_a_single_call() {
     assert!(!sql.contains(" || "));
 }
 
+/// A key its type's parser can't represent stays text and is cast from text,
+/// a statement of its own (issue #295): bound where a typed key was
+/// prepared, sqlx would send it in the wrong format.
+#[test]
+fn a_key_carried_as_text_is_cast_from_text() {
+    let schema = index(Some("id"), None, vec![col_field("id", "id")]);
+    let col_types = types(&[("users", "id", "date")]);
+    let key = GenericValue::String("infinity".to_owned());
+
+    let (single, _) = document_query(
+        &schema,
+        &[(c("id"), key.clone())],
+        &HashMap::new(),
+        &col_types,
+    )
+    .unwrap();
+    assert!(
+        single
+            .as_str()
+            .ends_with(r#"WHERE "root"."id" = $1::text::date"#),
+        "{}",
+        single.as_str()
+    );
+    let (batched, _) = documents_query(
+        &schema,
+        &c("id"),
+        "int8",
+        &[key.clone()],
+        &HashMap::new(),
+        &col_types,
+    )
+    .unwrap();
+    assert!(
+        batched
+            .as_str()
+            .ends_with(r#"WHERE "root"."id" IN ($1::text::date)"#),
+        "{}",
+        batched.as_str()
+    );
+    let (reverse, _) = reverse_query(
+        &db(),
+        &t("users"),
+        &c("id"),
+        "date",
+        &[(c("id"), key)],
+        &col_types,
+    )
+    .unwrap();
+    assert!(
+        reverse.as_str().ends_with(r#"WHERE "id" = $1::text::date"#),
+        "{}",
+        reverse.as_str()
+    );
+}
+
 #[test]
 fn reverse_query_selects_foreign_key() {
     let (sql, params) = reverse_query(
         &db(),
         &t("orders"),
         &c("user_id"),
+        "int8",
         &[(c("id"), GenericValue::Int(9))],
         &types(&[("orders", "id", "bigint")]),
     )
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT "user_id" FROM "public"."orders" WHERE "id" = $1::bigint"#
+        r#"SELECT format('%s', "user_id") AS "user_id", "user_id" AS "user_id:typed" FROM "public"."orders" WHERE "id" = $1::bigint"#
     );
     assert_eq!(params, vec![GenericValue::Int(9)]);
 }
@@ -1119,4 +1184,27 @@ fn an_array_column_applies_its_transforms_to_each_string_element() {
         "{}",
         sql.as_str()
     );
+}
+
+/// The root-key lookup names each link's bound type, so links of different
+/// types never share a prepared statement.
+#[test]
+fn root_keys_query_casts_each_link_from_its_bound_type() {
+    let (sql, params) = root_keys_query(
+        &db(),
+        &t("users"),
+        &c("id"),
+        "numeric",
+        &[
+            GenericValue::Decimal("1.500".parse().unwrap()),
+            GenericValue::String("NaN".to_owned()),
+        ],
+        "numeric",
+    )
+    .unwrap();
+    assert_eq!(
+        sql.as_str(),
+        r#"SELECT format('%s', "id") AS "id", "id" AS "id:typed" FROM "public"."users" WHERE "id" IN ($1::numeric::numeric, $2::text::numeric)"#
+    );
+    assert_eq!(params.len(), 2);
 }

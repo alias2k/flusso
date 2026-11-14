@@ -198,6 +198,7 @@ fn stops_the_start(kind: DiagnosticKind) -> bool {
         | DiagnosticKind::RelationPrimaryKey
         | DiagnosticKind::TransformNotApplicable
         | DiagnosticKind::RootPrimaryKeyMismatch
+        | DiagnosticKind::UnsupportedKeyType
         | DiagnosticKind::NotAnArrayColumn => true,
         DiagnosticKind::TypeMismatch
         | DiagnosticKind::NotNumeric
@@ -395,6 +396,11 @@ mod tests {
     #[test]
     fn a_root_primary_key_other_than_the_tables_refuses_the_start() {
         refuses(DiagnosticKind::RootPrimaryKeyMismatch);
+    }
+
+    #[test]
+    fn a_root_key_of_a_type_the_source_cannot_read_back_refuses_the_start() {
+        refuses(DiagnosticKind::UnsupportedKeyType);
     }
 
     #[test]
