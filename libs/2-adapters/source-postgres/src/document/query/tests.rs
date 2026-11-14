@@ -1165,3 +1165,25 @@ fn an_array_column_applies_its_transforms_to_each_string_element() {
         sql.as_str()
     );
 }
+
+/// The root-key lookup names each link's bound type, so links of different
+/// types never share a prepared statement.
+#[test]
+fn root_keys_query_casts_each_link_from_its_bound_type() {
+    let (sql, params) = root_keys_query(
+        &db(),
+        &t("users"),
+        &c("id"),
+        &[
+            GenericValue::Decimal("1.500".parse().unwrap()),
+            GenericValue::String("NaN".to_owned()),
+        ],
+        "numeric",
+    )
+    .unwrap();
+    assert_eq!(
+        sql.as_str(),
+        r#"SELECT format('%s', "id") AS "id", "id" AS "id:typed" FROM "public"."users" WHERE "id" IN ($1::numeric::numeric, $2::text::numeric)"#
+    );
+    assert_eq!(params.len(), 2);
+}

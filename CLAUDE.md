@@ -162,17 +162,33 @@ after a live update; constants land as written), and `an_update_of_an_unread_col
   the docker/opensearch group caps and retries.
   It is the only test that catches a live change rebuilt as the *wrong* op (e.g. an update
   written as a tombstone because the WAL key decoder and the read-back decoder disagree on
-  the `GenericValue` variant; see `cdc/pgoutput.rs::typed_value` vs
-  `document/value.rs::decode_column`). **Every key type `decode_column` reads, `typed_value`
-  decodes to the same variant** (issue #295: `bytea`, `date`, `time`, `timestamp`, `timestamptz`
-  too; a domain column is retyped to its base type when the stream keys its `Relation`,
-  `stream.rs`'s `retype_domains`), or a live key misses its row and sqlx's cached statements get a
-  text value for a typed parameter. The backfill reads each table through **its own cursor name**
-  (`cdc/backfill.rs`): sqlx caches a statement by its text with its first row description, and its
-  integer decode reads any 1–8-byte value, so a `FETCH` shared across tables decoded a later
-  table's `text`/`bytea` key as a wrong integer. Guards: `wal`'s `every_relation_position_keyed_by_*`
-  (root, `has_many` + `on`, `belongs_to`, `many_to_many`, `via`, pre-image, backfill, ids equal to
-  the backfill's) and `pgoutput`'s `a_value_decodes_as_the_document_builder_reads_it_back`. `.config/nextest.toml` caps their concurrency and
+  the `GenericValue` variant). **A key is parsed by one function on both sides** (issue #295,
+  `src/text_value.rs`'s `typed_value`): the WAL decoder on each cell, and every read-back of a key
+  (backfill cursor, the batched build's `doc_key`, reverse queries, the root-key lookup) selects it
+  with `value::key_select` — `format('%s', col)` (the output function; `::text` trims `char(n)`) beside
+  the column itself, never decoded, whose row description gives the base type OID — and parses it in
+  `value::decode_key`; a type outside `text_value::is_key_type` reads as null (refused at start). Text
+  depends on session settings, so the replication session (startup `options`) and the builder and
+  snapshot pools (`text_value::connect_options`) run with `SESSION_OPTIONS` (`DateStyle=ISO`,
+  `bytea_output=hex`, `extra_float_digits=1`); a domain column is retyped to its base OID when the
+  stream keys its `Relation` (`stream.rs`'s `retype_domains`). A value the parser can't hold
+  (`infinity`, numeric `NaN`) stays text on both sides and binds as `$n::text::<type>`
+  (`sql::key_cast`): sqlx caches a statement by its text with its first parameter types, so a text
+  value bound where a typed one was prepared fails in binary format. The backfill reads each table
+  through **its own cursor name** (`cdc/backfill.rs`) for the same cache reason (a shared `FETCH`
+  decoded a later table's key with the first table's row description). **A resolved document id is
+  the root row's own key** (`resolve.rs`'s `reads_root_from_a_link` / `root_keys`): where a path
+  ends on a link column's value (`row_link` of its first step) and the root key's equal values can
+  render differently (`ColumnMeta::equal_is_identical`: `numeric`, floats, `citext`, a
+  nondeterministic collation) or the link column's type differs from the key's, `resolve` reads the
+  keys back from the root table, one query per change per index (`root_keys_query`, each link cast
+  from its bound type); every other key type costs no query. Guards: `wal`'s
+  `every_relation_position_keyed_by_*` (root, `has_many` + `on`, `belongs_to`, `many_to_many`,
+  `via`, pre-image, backfill, ids equal to the backfill's; also under non-ISO `DateStyle`s,
+  `bytea_output = escape`, `extra_float_digits = 0`, `±infinity`, BC and numeric `NaN` keys) and
+  `*_rebuilds_the_roots_own_document` (citext, numeric, float8, a nondeterministic collation),
+  `text_value::tests`, `pgoutput`'s `a_value_decodes_as_the_document_builder_reads_it_back`, and
+  `document::tests`' `equal_keys_render_alike_except_for_numbers_and_loose_text`. `.config/nextest.toml` caps their concurrency and
   retries them — they're legitimately slow/flaky.
 - **The file formats are frozen for the major** (issue #109): any `flusso.toml` or
   `*.schema.yml` a release in the major accepts must keep loading on every later one, and so
@@ -683,8 +699,8 @@ the table's single-column catalog key, `RootPrimaryKey` when none or composite; 
 build matches the table's key on the declared column and writes only tombstones — `wal`'s
 `a_root_primary_key_other_than_the_tables_writes_no_document`; and of a type `Catalog::reads_key`
 accepts, `UnsupportedKeyType` otherwise (issue #295: Postgres answers from the base type through
-domains against `document::value::KEY_TYPES`, the types `decode_column` reads; any other key reads
-back null, so every build is a tombstone — `config_coverage`'s
+domains against `document::value::KEY_TYPES`, the types `decode_key` reads — not `json`/`jsonb`;
+any other key reads back null, so every build is a tombstone — `config_coverage`'s
 `a_root_key_the_builder_cannot_read_back_is_refused`); on a root without a single-column
 key a missing declared column is `UnknownColumn` only when a relation reads it, else
 `RootPrimaryKey`; anchored at the key name,

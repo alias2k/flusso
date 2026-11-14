@@ -294,6 +294,53 @@ impl PgDocumentBuilder {
     }
 }
 
+impl PgDocumentBuilder {
+    /// Whether the root keys `path` resolves to are a link's value rather
+    /// than the root row's own key, and that value may be spelled
+    /// differently: a key whose equal values render differently (see
+    /// `ColumnMeta::equal_is_identical`), or a link column of another type
+    /// than the key. Those go through [`root_keys`](Self::root_keys). A
+    /// `belongs_to` from the root reads the root's own key: never.
+    pub(super) async fn reads_root_from_a_link(
+        &self,
+        schema: &IndexSchema,
+        pk: &ColumnName,
+        path: &[Step<'_>],
+    ) -> Result<bool> {
+        let Some((table, link)) = path.first().and_then(|step| step.row_link()) else {
+            return Ok(false);
+        };
+        let root = self
+            .column_meta(&schema.db_schema, &schema.table, pk)
+            .await?;
+        if !root.equal_is_identical() {
+            return Ok(true);
+        }
+        let link = self.column_meta(&schema.db_schema, table, link).await?;
+        Ok(link.sql_type != root.sql_type)
+    }
+
+    /// The root rows' own keys for `links`, values that compare equal to them:
+    /// the document ids they name, spelled as the backfill and the root's own
+    /// changes spell them. A link no root row equals names no document.
+    pub(super) async fn root_keys(
+        &self,
+        schema: &IndexSchema,
+        pk: &ColumnName,
+        links: &[GenericValue],
+    ) -> Result<Vec<GenericValue>> {
+        if links.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sql_type = self
+            .column_type(&schema.db_schema, &schema.table, pk)
+            .await?;
+        let (sql, params) =
+            query::root_keys_query(&schema.db_schema, &schema.table, pk, links, &sql_type)?;
+        self.run_reverse(sql, params, pk.as_ref()).await
+    }
+}
+
 /// The column on `row_table` that names its parent across `step`, when the
 /// link lives on that row: a direct child's or `via` table's `foreign_key`, or
 /// a junction's `left_key` when the junction itself changed. Read from the

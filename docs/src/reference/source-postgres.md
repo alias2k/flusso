@@ -160,22 +160,32 @@ A root table's primary key is the document id. It must be of a type flusso reads
 | Key type | Document id |
 | --- | --- |
 | `smallint`, `integer`, `bigint` | `42` |
-| `numeric` | `1.5`, as stored (`1.50` stays `1.50`) |
-| `real`, `double precision` | `1.5` |
+| `numeric` | `1.5`, as stored (`1.50` stays `1.50`); `NaN`, `Infinity`, `-Infinity` |
+| `real`, `double precision` | `1.5`, `-0`; `inf`, `-inf`, `NaN` |
 | `boolean` | `true` |
 | `text`, `varchar`, `char(n)`, `name`, `citext` | the text; `char(n)` keeps its padding (`ab `) |
 | `uuid` | `00000000-0000-0000-0000-00000000000a` |
 | `bytea` | `\x01ab`, the Postgres hex form |
-| `date` | `2024-02-29` |
+| `date` | `2024-02-29`; `infinity`, `-infinity` |
 | `time` | `10:00:00`, `23:59:59.500` |
-| `timestamp` | `2024-02-29 10:00:00`, `2024-02-29 10:00:00.500` |
-| `timestamptz` | `2024-02-29T10:00:00+00:00`: RFC 3339, in UTC |
+| `timestamp` | `2024-02-29 10:00:00`, `2024-02-29 10:00:00.500`; `infinity`, `-infinity` |
+| `timestamptz` | `2024-02-29T10:00:00+00:00`: RFC 3339, in UTC; `infinity`, `-infinity` |
 
-A domain counts as its base type: a domain over `integer` is an `integer` key.
+- **A domain** counts as its base type: a domain over `integer` is an `integer` key.
+- **A BC date** counts years from zero, as ISO 8601 does: 15 March 44 BC is `-0043-03-15`.
+- **Fractional seconds** have three, six or nine digits, as many as the value needs.
+- **Session settings don't matter.** The connections flusso reads values through, the replication one included, run with `DateStyle = ISO`, `bytea_output = hex` and `extra_float_digits = 1`, whatever the database or role sets, so an id never depends on them.
+- **An id longer than 512 bytes** is refused by OpenSearch: a long `text` or `bytea` key indexes nothing.
 
-Any other type (`inet`, an enum, `money`, a range, …) reads back as no key, so no document would ever be written: `flusso check` reports it as `unsupported_key_type` under `primary_key`, and [`run` refuses to start](cli.md#validation-at-start). A relation table keyed by such a type still works as a leaf (a `belongs_to` target, a `has_many` child, a `many_to_many` far table); a change two levels below it can't be traced through it.
+### A link spelled differently
 
-Fractional seconds in an id have three, six or nine digits, as many as the value needs.
+A link column can hold a value equal to its parent's key but written differently: `AB` for a `citext` key `Ab`, `1.500` for a `numeric` `1.5`, `-0` for a float `0`, or any text under a nondeterministic collation. The document it rebuilds is still the parent's own, under the parent's stored key: flusso reads that key back from the root table.
+
+That costs one query per change, per index, for a root key whose equal values can be written differently (`numeric`, `real`, `double precision`, `citext`, a nondeterministic collation), and for a link column of another type than the key it names. Every other key costs nothing extra.
+
+### Unsupported key types
+
+Any other type (`inet`, an enum, `money`, `json`, `jsonb`, a range, …) reads back as no key, so no document would ever be written: `flusso check` reports it as `unsupported_key_type` under `primary_key`, and [`run` refuses to start](cli.md#validation-at-start). A relation table keyed by such a type still works as a leaf (a `belongs_to` target, a `has_many` child, a `many_to_many` far table); a change two levels below it can't be traced through it.
 
 ## Updates that change nothing a document reads
 

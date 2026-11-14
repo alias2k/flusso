@@ -207,6 +207,35 @@ pub(super) fn documents_query(
     Ok((SqlString::new(sql), builder.params))
 }
 
+/// Build the query that reads back the root rows whose key equals one of
+/// `links`, selecting each row's own key: the document ids those links name.
+///
+/// Each link is cast from the type it is bound as to the key's (`$n::<bound>
+/// ::<sql_type>`), so the statement text names every parameter's type: links
+/// read from columns of different types never share a prepared statement.
+pub(super) fn root_keys_query(
+    db: &DatabaseSchema,
+    table: &TableName,
+    pk: &ColumnName,
+    links: &[GenericValue],
+    sql_type: &str,
+) -> Result<(SqlString, Vec<GenericValue>)> {
+    let mut placeholders = Vec::with_capacity(links.len());
+    for (n, link) in links.iter().enumerate() {
+        let bound = sql::bound_type(link)
+            .ok_or_else(|| SourceError::Query("cannot bind null, array, or map as a key".into()))?;
+        placeholders.push(format!("${}::{bound}::{sql_type}", n + 1));
+    }
+    let column = qident(pk.as_ref());
+    let sql = format!(
+        "SELECT {} FROM {} WHERE {column} IN ({})",
+        super::value::key_select(&column, pk.as_ref()),
+        qtable(db, table),
+        placeholders.join(", "),
+    );
+    Ok((SqlString::new(sql), links.to_vec()))
+}
+
 /// Build a reverse-resolution query: one column from a table, filtered by a key.
 ///
 /// Each key column is matched with its operand cast to the column's catalog SQL

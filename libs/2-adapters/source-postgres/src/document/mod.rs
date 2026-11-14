@@ -99,7 +99,26 @@ struct ColumnMeta {
     sql_type: String,
     /// A domain's type resolved through every domain; `None` for no domain.
     base_type: Option<String>,
+    /// The `pg_type.typname` of the type, through every domain.
+    base_name: String,
+    /// Whether the column's collation compares by identity (always, for a
+    /// type without one).
+    deterministic: bool,
     nullable: bool,
+}
+
+impl ColumnMeta {
+    /// Whether two values that compare equal always render the same text, so
+    /// one key value has one document id. Not so for a `numeric` (`1.5` and
+    /// `1.50`), a float (`0` and `-0`), a `citext` or a nondeterministic
+    /// collation (`Ab` and `AB`).
+    fn equal_is_identical(&self) -> bool {
+        self.deterministic
+            && !matches!(
+                self.base_name.as_str(),
+                "numeric" | "float4" | "float8" | "citext"
+            )
+    }
 }
 
 /// One root row's document as [`PgDocumentBuilder::document_by_id`] and
@@ -380,18 +399,26 @@ impl PgDocumentBuilder {
         // dropped straight into a `$n::<type>` cast. `attnotnull` is the column's
         // NOT NULL constraint — the nullability mapping resolution needs, read
         // from the same catalog row as the type. `base_type` follows a domain
-        // through `typbasetype` to the first type that is no domain.
+        // through `typbasetype` to the first type that is no domain, and
+        // `base_name` names that type. `collisdeterministic` is read through
+        // `to_jsonb` because Postgres before 12 has no such column (and only
+        // deterministic collations).
         let sql = "SELECT format_type(a.atttypid, a.atttypmod) AS sql_type, \
-                          (WITH RECURSIVE d(oid, typmod) AS ( \
+                          b.base_type, b.base_name, \
+                          coalesce((SELECT (to_jsonb(c) ->> 'collisdeterministic')::boolean \
+                                    FROM pg_collation c WHERE c.oid = a.attcollation), \
+                                   true) AS deterministic, \
+                          a.attnotnull AS not_null \
+                   FROM pg_attribute a, LATERAL ( \
+                          WITH RECURSIVE d(oid, typmod) AS ( \
                                SELECT a.atttypid, a.atttypmod \
                              UNION ALL \
                                SELECT t.typbasetype, t.typtypmod \
                                FROM pg_type t JOIN d ON t.oid = d.oid WHERE t.typtype = 'd' \
-                           ) SELECT format_type(d.oid, d.typmod) \
-                             FROM d JOIN pg_type t ON t.oid = d.oid WHERE t.typtype <> 'd') \
-                          AS base_type, \
-                          a.attnotnull AS not_null \
-                   FROM pg_attribute a \
+                          ) SELECT format_type(d.oid, d.typmod) AS base_type, \
+                                   t.typname::text AS base_name \
+                            FROM d JOIN pg_type t ON t.oid = d.oid WHERE t.typtype <> 'd' \
+                        ) b \
                    WHERE a.attrelid = to_regclass($1) AND a.attname = $2 \
                      AND a.attnum > 0 AND NOT a.attisdropped";
         let row = sqlx::query(sql)
@@ -407,6 +434,8 @@ impl PgDocumentBuilder {
                 let not_null: bool = row.try_get("not_null").map_err(query_err)?;
                 ColumnMeta {
                     base_type: base_type.filter(|base| *base != sql_type),
+                    base_name: row.try_get("base_name").map_err(query_err)?,
+                    deterministic: row.try_get("deterministic").map_err(query_err)?,
                     sql_type,
                     nullable: !not_null,
                 }
@@ -536,22 +565,8 @@ impl Catalog for PgDocumentBuilder {
         table: &TableName,
         column: &ColumnName,
     ) -> Result<bool> {
-        let sql = "WITH RECURSIVE d(oid) AS ( \
-                       SELECT a.atttypid FROM pg_attribute a \
-                       WHERE a.attrelid = to_regclass($1) AND a.attname = $2 \
-                         AND a.attnum > 0 AND NOT a.attisdropped \
-                     UNION ALL \
-                       SELECT t.typbasetype FROM pg_type t JOIN d ON t.oid = d.oid \
-                       WHERE t.typtype = 'd' \
-                   ) SELECT t.typname::text FROM d JOIN pg_type t ON t.oid = d.oid \
-                     WHERE t.typtype <> 'd'";
-        let base: Option<String> = sqlx::query_scalar(sql)
-            .bind(format!("{schema}.{table}"))
-            .bind(column.as_ref().to_owned())
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(query_err)?;
-        Ok(base.is_none_or(|base| value::KEY_TYPES.contains(&base.as_str())))
+        let meta = self.column_meta(schema, table, column).await?;
+        Ok(value::KEY_TYPES.contains(&meta.base_name.as_str()))
     }
 
     async fn accepts_transforms(
@@ -660,18 +675,31 @@ impl DocumentBuilder for PgDocumentBuilder {
                 continue;
             };
 
+            let mut links = Vec::new();
+            let mut roots = Vec::new();
             for (n, path) in paths.iter().enumerate() {
                 if !self.reads.path(name, table, n).touched_by(&diff) {
                     skipped += 1;
                     continue;
                 }
-                for root in self.resolve_path(schema, table, key, before, path).await? {
-                    if seen.insert(root.clone()) {
-                        ids.push(DocumentId {
-                            index: name.clone(),
-                            key: RowKey(vec![(pk_column.clone(), root)]),
-                        });
-                    }
+                let found = self.resolve_path(schema, table, key, before, path).await?;
+                if self
+                    .reads_root_from_a_link(schema, &pk_column, path)
+                    .await?
+                {
+                    let mut known: HashSet<_> = links.iter().cloned().collect();
+                    links.extend(found.into_iter().filter(|link| known.insert(link.clone())));
+                } else {
+                    roots.extend(found);
+                }
+            }
+            roots.extend(self.root_keys(schema, &pk_column, &links).await?);
+            for root in roots {
+                if seen.insert(root.clone()) {
+                    ids.push(DocumentId {
+                        index: name.clone(),
+                        key: RowKey(vec![(pk_column.clone(), root)]),
+                    });
                 }
             }
         }
