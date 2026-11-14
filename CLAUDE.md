@@ -78,7 +78,8 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   over the channel stream with mocks), `source-postgres`'s `pgoutput` (the decoder over the recorded
   `benches/fixtures/pgoutput.bin`; `tests/record_pgoutput.rs`, an `#[ignore]`d Docker test in the
   nextest `docker` group, re-records it), `source-postgres`'s `resolve` (`PgDocumentBuilder::resolve`
-  for the changes that need no query — root table, unread table, update of unread columns — over
+  for the changes that need no query — root table, unread table, update of unread columns, a path walked
+  from the key — over
   `bench_offline_builder`, a pool that never connects; its group is `resolve_no_io`, apart from the
   Docker `postgres` bench's `resolve`; issue #332), `sink-opensearch`'s `render`, `script`'s `scripted` (public
   API, no feature; `bench-in-process.sh` skips a bench a PR base predates). `pgoutput`, `resolve` and `render` sit behind each
@@ -200,7 +201,12 @@ mapping takes, on backfill and live, under a non-UTC `TimeZone`, with a `range` 
   keys back from the root table, **one query per change** per index and link column (`RootLinks`;
   `root_keys_query` casts each link from its bound type to its link column's type), as the change is
   resolved: a batched read was tried and dropped, since resolving at commit slowed the engine's
-  `live_drain` bench by 13% and moved when the database is read; every other key type costs no query. **A
+  `live_drain` bench by 13% and moved when the database is read; every other key type costs no query.
+  Whether a path reads its keys back is decided once per path and kept on its `PathReads`
+  (`document/reads.rs`), tagged with the column-type cache's generation, which every
+  `ColumnTypes::forget_table` bumps (issue #332; guards: `document::tests`'
+  `a_path_walked_from_the_key_looks_up_no_column_once_known`,
+  `a_changed_column_type_reaches_the_kept_root_link_answer`). **A
   resolved value is compared as the join compares its column** (`resolve.rs`'s `cast_types`): every
   reverse query casts a bound value to the type of the column it was read from (the hop's origin: a
   `belongs_to` target key, a junction's far key, the previous hop's link), so a `char(5)` link against
@@ -724,7 +730,9 @@ rows by their own identity while the `Relation` flags the root's, so placeholder
 real), and `PgDocumentBuilder::resolve` emits the root row's own id only when `source::root_columns`
 was touched and walks a path only when `source::relation_columns` of its last relation was
 (`ColumnUse::touched_by` over a per-change `RowDiff`: a missing image or column, or a key change,
-counts as touched; the sets are derived once per builder in `document/reads.rs`). Those functions
+counts as touched; the sets are derived once per builder in `document/reads.rs`, beside each path's
+`fields::PathAddress`, so resolving a change never searches the field tree: guard
+`resolving_a_change_searches_no_field_tree`). Those functions
 (`libs/1-ports/source/src/spec/columns.rs`, beside `row_link`, which `pre_image_columns` and the
 resolver's `link_on_row` share, and `soft_delete_column`, which the document query's soft-delete
 predicate uses too) are the one derivation of "which columns a path reads" — fields, filters,
@@ -1044,7 +1052,10 @@ the CLI hands it to `WalChangeCapture::with_column_types`, and the stream drops 
 `Relation` message (Postgres sends one after a definition change) naming another type OID than a cached
 column's (`ColumnTypes::forget_changed`; unchanged types keep them, so a stream start costs no lookup), and a failed document query
 (`failed_query`) drops those of every table its index reads, so a type change never loops the ingest
-engine on a stale cast or `encode`. No query per build. Guards: `stream::tests`'
+engine on a stale cast or `encode`. No query per build. The cache is nested by schema, table and
+column, looked up by borrowed names, and hands out `Arc<ColumnMeta>`, so a hit allocates nothing; each
+`forget_table` bumps its generation, which answers derived from it (the per-path root-link decision)
+check. Guards: `stream::tests`'
 `a_relation_message_with_{other,the_cached}_types_*`, `bytea_output`'s `a_column_changing_type_mid_run_*`;
 the same e2e
 (direct, and through PgBouncer in transaction mode resetting each server connection, PG 18 for `min`/`max` over `bytea`,

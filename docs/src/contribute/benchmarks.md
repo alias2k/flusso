@@ -10,7 +10,7 @@ The vocabulary (benchmark, component bench, scenario, headline metric, baseline,
 | --- | --- | --- | --- | --- |
 | Scenarios | the shipped `flusso` binary as a child process, a seeded store, a seeded change writer | Docker | `dev/bench` (`flusso-bench`) | `main` pushes |
 | Component benches, Docker-backed | Criterion over a live Postgres / OpenSearch: document build and resolve, bulk indexing, the full pipeline's change and burst paths | Docker | `benches/` in `source-postgres`, `sink-opensearch`, `engine` | `main` pushes |
-| Component benches, in-process | Criterion with no I/O: the two engines over the channel stream with mocks, pgoutput decode over a recorded fixture, resolving the changes that need no query (root table, unread table, update of unread columns) over a builder whose pool never connects, sink rendering, script fields over built documents | nothing | `benches/engine.rs`, `benches/pgoutput.rs`, `benches/resolve.rs`, `benches/render.rs`, `benches/scripted.rs` | every PR, A/B |
+| Component benches, in-process | Criterion with no I/O: the two engines over the channel stream with mocks, pgoutput decode over a recorded fixture, resolving the changes that need no query (root table, unread table, update of unread columns, a path walked from the key) over a builder whose pool never connects, sink rendering, script fields over built documents | nothing | `benches/engine.rs`, `benches/pgoutput.rs`, `benches/resolve.rs`, `benches/render.rs`, `benches/scripted.rs` | every PR, A/B |
 
 The scenario numbers are what gets watched. The component benches exist so that when a headline metric moves, the stage that moved is already on record for the same commit.
 
