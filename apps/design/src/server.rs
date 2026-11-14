@@ -182,18 +182,10 @@ async fn blocking<T: Send + 'static>(
 /// keeps the project from loading (a 409 naming the files).
 async fn project(State(state): State<AppState>) -> Result<Response, ApiError> {
     let config_path = Arc::clone(&state.config_path);
-    let (mut recovery, mut project) = blocking(move || {
-        let recovery = api::recover_project(&config_path)?;
-        if recovery.blocked.is_some() {
-            return Err(anyhow::Error::new(api::Interrupted(recovery)));
-        }
-        Ok((recovery, api::load_project(&config_path)?))
-    })
-    .await?;
+    let mut project = blocking(move || api::open_project(&config_path)).await?;
     if let Ok(mut earlier) = state.recovered.lock() {
-        recovery.recovered.splice(0..0, earlier.drain(..));
+        project.recovery.recovered.splice(0..0, earlier.drain(..));
     }
-    project.recovery = recovery;
     Ok(Json(project).into_response())
 }
 

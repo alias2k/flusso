@@ -1,6 +1,7 @@
 import { Button } from "@/components/ui/button";
 import type { BlockedProblem, FileHolds, HandStep, JournalCause, JournalReport, SaveRecovery } from "../api";
 import { useT, type Translate } from "../i18n";
+import { noticeLines, routeLeads } from "../model/recovery";
 
 const problemText = (t: Translate, problem: BlockedProblem): string => {
   switch (problem) {
@@ -99,11 +100,10 @@ function Steps({ steps }: { steps: HandStep[] }) {
 }
 
 /// The steps that take every file inside the project to one side of the save.
-function Route({ steps, back }: { steps: HandStep[]; back: boolean }) {
-  const { t } = useT();
+function Route({ steps, lead }: { steps: HandStep[]; lead: string }) {
   return (
     <div>
-      <p>{back ? t("recovery.wayBack") : t("recovery.wayForward")}</p>
+      <p>{lead}</p>
       <Steps steps={steps} />
     </div>
   );
@@ -115,6 +115,7 @@ function JournalFiles({ report }: { report: JournalReport }) {
   const { t } = useT();
   const journals = report.journals.join(", ");
   const possible = report.back_route !== undefined || report.forward_route !== undefined;
+  const leads = routeLeads(t, report);
   return (
     <div className="mt-2 space-y-2">
       <p>{causeText(t, report)}</p>
@@ -155,8 +156,8 @@ function JournalFiles({ report }: { report: JournalReport }) {
       {possible ? (
         <>
           {report.cause !== "other_folder" && <p>{t("recovery.wayCaution")}</p>}
-          {report.back_route && <Route steps={report.back_route} back />}
-          {report.forward_route && <Route steps={report.forward_route} back={false} />}
+          {report.back_route && leads.back && <Route steps={report.back_route} lead={leads.back} />}
+          {report.forward_route && leads.forward && <Route steps={report.forward_route} lead={leads.forward} />}
         </>
       ) : (
         report.files.length > 0 && <p>{t("recovery.wayNone")}</p>
@@ -210,36 +211,14 @@ function Keep({ steps, files, back }: { steps: HandStep[]; files: string; back: 
 /// names.
 export function RecoveryNotice({ recovery, onDismiss }: { recovery: SaveRecovery; onDismiss: () => void }) {
   const { t, lang } = useT();
-  const displaced = [...(recovery.displaced ?? []), ...recovery.recovered.flatMap((s) => s.displaced ?? [])];
-  if (recovery.recovered.length === 0 && recovery.leftovers.length === 0 && displaced.length === 0) return null;
+  const lines = noticeLines(t, recovery, (ms) => new Date(ms).toLocaleString(lang));
+  if (lines.length === 0) return null;
   return (
     <div role="status" className="banner warn flex items-center gap-3 bg-warn/10 px-4 py-2 text-xs text-warn">
       <div className="flex-1 space-y-1">
-        {recovery.recovered.map((save) => {
-          const vars = {
-            time: new Date(save.started_at_ms).toLocaleString(lang),
-            files: save.files.join(", "),
-            n: save.files.length,
-          };
-          return (
-            <div key={save.id} className="space-y-0.5">
-              {save.files.length > 0 && (
-                <p>{save.outcome === "rolled_back" ? t("recovery.rolledBack", vars) : t("recovery.completed", vars)}</p>
-              )}
-              {save.kept?.map((k) => (
-                <p key={k.path}>
-                  {k.backup
-                    ? t("recovery.keptBackup", { path: k.path, backup: k.backup })
-                    : t("recovery.kept", { path: k.path })}
-                </p>
-              ))}
-            </div>
-          );
-        })}
-        {displaced.map((d) => (
-          <p key={d.copy}>{t("recovery.displaced", { path: d.path, copy: d.copy })}</p>
+        {lines.map((line) => (
+          <p key={line.key}>{line.text}</p>
         ))}
-        {recovery.leftovers.length > 0 && <p>{t("recovery.leftovers", { files: recovery.leftovers.join(", ") })}</p>}
       </div>
       <Button variant="ghost" size="xs" onClick={onDismiss}>
         {t("recovery.dismiss")}
