@@ -575,6 +575,8 @@ export const en: Record<string, string> = {
     "{path} was changed by another program during or after that save; the designer left it as it was. Its text from before the save is in {backup}. To go back to that text, copy {backup} over {path}, but check {path} first: {path} may have changed since, and copying replaces what it holds now. Otherwise delete {backup}.",
   "recovery.displaced":
     "{path} was written by another program in the instant the save replaced it: it holds what the save wrote, and the other program's bytes are in {copy}. Check them, then delete that file.",
+  "recovery.unsaved":
+    "The designer could not save this notice in its state folder, so it is not shown again once the designer stops: note what it says now.",
   "recovery.leftoverUnknown":
     "{copy} was left behind by a save. The designer does not touch it: check it, then delete it.",
   "recovery.leftover":

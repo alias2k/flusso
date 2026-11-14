@@ -455,6 +455,8 @@ export interface RecoveredSave {
   kept?: { path: string; backup?: string; deleted?: boolean }[];
   /// Files whose backup holds what another program wrote as the save replaced them.
   displaced?: DisplacedFile[];
+  /// The notice could not be stored: it is shown only until the designer stops.
+  unsaved?: boolean;
 }
 
 export type BlockedProblem = "backup_missing" | "unreadable" | "journal_unusable" | "failed";

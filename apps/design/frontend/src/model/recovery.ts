@@ -34,6 +34,7 @@ export const noticeLines = (t: Translate, recovery: SaveRecovery, time: (ms: num
             ? t("recovery.rolledBack", vars)
             : t("recovery.completed", vars),
     });
+    if (save.unsaved) lines.push({ key: `${save.id}:unsaved`, text: t("recovery.unsaved") });
     for (const k of save.kept ?? []) {
       const kept = { path: k.path, backup: k.backup ?? "" };
       if (k.backup) named.add(k.backup);

@@ -373,18 +373,18 @@ pub(crate) fn recover(
     state: Result<&State, &str>,
     disk: &mut Disk,
 ) -> Recovery {
-    recover_telling(lock, config, state, disk, &mut |_, _| true)
+    recover_telling(lock, config, state, disk, &mut |_, _| {})
 }
 
 /// Settle whatever save a dead process left in `lock`'s project, whose
 /// config file is `config`, acting only on a journal `state` holds a record
 /// of (`Err` says why there are no records to check). Each save it settles
 /// is handed to `tell` once its files are settled and before its journal is
-/// deleted, and the journal goes only when `tell` answers that the save is
-/// told durably: a kill before that, or a notice that could not be stored,
-/// leaves the journal and its record, so the next start settles the save
-/// again (its files are settled already, so it tells the same thing) and
-/// tells it then.
+/// deleted: a kill before the journal goes leaves it and its record, so the
+/// next start settles the save again from the state the kill left (its files
+/// are settled already, so it tells the same thing). The journal is deleted
+/// in the same recovery whatever `tell` managed to keep, so a save is never
+/// settled twice over files the user may have changed since.
 ///
 /// A record of this folder with no journal left is removed, and logged: no
 /// save it names is untold. Such a record is left by a kill before the save
@@ -396,7 +396,7 @@ pub(crate) fn recover_telling(
     config: &Path,
     state: Result<&State, &str>,
     disk: &mut Disk,
-    tell: &mut dyn FnMut(&Settled, &mut Disk) -> bool,
+    tell: &mut dyn FnMut(&Settled, &mut Disk),
 ) -> Recovery {
     let base = lock.base();
     let mut recovery = Recovery::default();
@@ -489,12 +489,7 @@ pub(crate) fn recover_telling(
         }
         Err(_) => {}
     }
-    let journal_left = [JOURNAL, DONE]
-        .iter()
-        .any(|name| base.join(name).symlink_metadata().is_ok());
-    if let Ok(state) = state
-        && !journal_left
-    {
+    if let Ok(state) = state {
         for record in state.for_dir(base) {
             tracing::info!(
                 token = %record.token,
@@ -517,7 +512,7 @@ fn settle(
     file: &Path,
     state: Result<&State, &str>,
     disk: &mut Disk,
-    tell: &mut dyn FnMut(&Settled, &mut Disk) -> bool,
+    tell: &mut dyn FnMut(&Settled, &mut Disk),
 ) -> Result<Settled, Blocked> {
     let refuse = |refused: Refused, recorded_for: Option<PathBuf>| {
         report(base, vec![file.to_path_buf()], recorded_for, refused)
@@ -599,8 +594,8 @@ fn settle(
     if disk.stopped() {
         return Ok(settled);
     }
-    let told = tell(&settled, disk);
-    if disk.stopped() || !told {
+    tell(&settled, disk);
+    if disk.stopped() {
         return Ok(settled);
     }
     disk.remove_file(file)

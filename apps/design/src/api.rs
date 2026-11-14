@@ -1506,23 +1506,17 @@ impl StoredNotice {
 
     /// The notice as it can be shown now (a notice is a file anyone with the
     /// user's rights can edit). A file is kept when the project names it
-    /// (`named`: `flusso.toml` and each index's schema file; when the config
-    /// can't be read, the files the notice itself records), or when it is a
-    /// plain path inside the project reached through no link. A copy is kept
-    /// when it is a regular file beside a kept file, named as the save's copy
-    /// of it (`.<name>.flusso-save.<id>.…`). A kept file is told deleted only
-    /// while it is missing. Anything else is dropped.
+    /// (`named`: `flusso.toml` and each index's schema file, `None` when the
+    /// config can't be read), or when it is a plain path inside the project
+    /// reached through no link. A copy is kept when it is a regular file
+    /// beside a kept file, named as the save's copy of it
+    /// (`.<name>.flusso-save.<id>.…`). A kept file is told deleted only while
+    /// it is missing. Anything else is dropped, and no path is looked at
+    /// before it passed those checks.
     fn checked(mut self, paths: &Paths, named: Option<&HashSet<String>>) -> Self {
-        let recorded: HashSet<String> = self
-            .save
-            .files
-            .iter()
-            .chain(self.save.kept.iter().map(|k| &k.path))
-            .chain(self.save.displaced.iter().map(|d| &d.path))
-            .cloned()
-            .collect();
-        let named = named.unwrap_or(&recorded);
-        let file_ok = |rel: &str| named.contains(rel) || plain_inside(&paths.base, rel);
+        let file_ok = |rel: &str| {
+            named.is_some_and(|named| named.contains(rel)) || plain_inside(&paths.base, rel)
+        };
         let id = self.save.id.clone();
         let copy_of = |copy: &str, path: &str| {
             file_ok(path) && is_save_copy(copy, path, &id) && regular_file(&paths.base.join(copy))
@@ -1633,12 +1627,21 @@ fn remember(notice: StoredNotice, disk: &mut Disk) -> bool {
     if let Err(e) = stored {
         tracing::warn!(
             error = %e,
+            folder = %notices_folder(),
             "could not keep what the designer did about a save in its state folder; it is told \
-             until the designer stops, and its journal is kept so the next start tells it again"
+             only until the designer stops"
         );
         kept.push(notice);
     }
     durable
+}
+
+/// The notices folder, for a warning.
+fn notices_folder() -> String {
+    commit::state::dir().map_or_else(
+        || "(no state folder)".to_owned(),
+        |dir| dir.join("notices").display().to_string(),
+    )
 }
 
 /// Drop `notice` wherever it is kept.
@@ -1679,7 +1682,9 @@ fn notices(paths: &Paths) -> Vec<StoredNotice> {
     {
         for notice in kept {
             if !found.iter().any(|n| n.save.id == notice.save.id) {
-                found.push(notice.clone().checked(paths, named.as_ref()));
+                let mut notice = notice.clone().checked(paths, named.as_ref());
+                notice.save.unsaved = true;
+                found.push(notice);
             }
         }
     }
@@ -1712,10 +1717,12 @@ fn recover_locked(paths: &Paths, lock: &ProjectLock, disk: &mut Disk) -> SaveRec
             let own = OWN_CLEANUP.lock().is_ok_and(|own| {
                 settled.outcome == Outcome::Completed && own.contains(&settled.token)
             });
-            own || remember(
-                StoredNotice::new(paths, true, recovered_save(paths, settled)),
-                disk,
-            )
+            if !own {
+                remember(
+                    StoredNotice::new(paths, true, recovered_save(paths, settled)),
+                    disk,
+                );
+            }
         },
     );
     if let Ok(mut own) = OWN_CLEANUP.lock() {
@@ -2804,8 +2811,6 @@ fn save_with(config_path: &Path, request: &SaveRequest, disk: &mut Disk) -> Resu
     if recovery.stops() {
         return Err(Interrupted(recovery).into());
     }
-    commit::drop_settled_journal(&lock, disk)
-        .map_err(|e| anyhow::anyhow!("deleting the journal of a recovered save: {e}"))?;
     config_stale()?;
     // Before anything is written: a file this save writes would otherwise
     // read as unseen.
