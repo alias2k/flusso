@@ -89,7 +89,8 @@ A keyword field whose schema declares `variants` gets the `Enum` handle instead 
 
 | Feature | Adds |
 | --- | --- |
-| `decimal` | `rust_decimal::Decimal` re-exported and implemented as `FlussoValue<kind::Decimal>`. A `decimal` field takes `Decimal` or a lossless integer, never `f64`. Query precision is `f64`-bound (JSON has no arbitrary precision). |
+| `decimal` | `rust_decimal::Decimal` re-exported and implemented as `FlussoValue<kind::Decimal>` and `FlussoValue<kind::Double>`. A `decimal` field takes `Decimal` or a lossless integer, never `f64`; a `double` field takes `Decimal` too, as a field type and a query value. Query precision is `f64`-bound (JSON has no arbitrary precision). What a `Decimal` field fails to read is [trusted](document-structs.md#what-the-derive-trusts). |
+| `rc` | `Arc<str>` and `Rc<str>` as [string values](document-structs.md#string-alternatives), like `String`; turns on serde's `rc`, which they need to be read and written. Without it, a field of either is a compile error that names this feature. |
 | `uuid` | `uuid::Uuid` as a keyword value: `Customer::owner_id().eq(some_uuid)` with no `.to_string()`, and `Uuid` struct fields with no skip. |
 | `time`, `chrono` | the date types the derive expects for `date`/`timestamp` fields and accepts in `Date` operators |
 

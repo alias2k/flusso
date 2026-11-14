@@ -143,7 +143,12 @@ The derive checks a struct against the mapping at compile time, but a struct tha
 - **An untagged `FlussoValue` newtype over an integer, at a wider numeric field.** `struct Qty(i32)` takes `i32`'s query kinds, which widen: it compiles at a `long`, `count`, `ids`, `double`, `decimal` or `avg` field, and fails on a value past `i32` or with a fraction. A bare `i32` there is a compile error. Wrap the field's own type (`i64` at a `long`, `f64` at a `double`).
 - **A type of your own named like a built-in leaf.** It is taken for the built-in by its name ([Types named like a built-in](#types-named-like-a-built-in)), so a struct of your own named `Value` compiles at any field, and a `#[derive(FlussoValue)] struct GeoPoint(String)` at a two-column `geo`, where it fails on the `{lat, lon}` object. Rename it to have it checked as your own.
 - **`uuid::Uuid` at a `keyword` field.** A `uuid` field maps to `keyword`, so the derive can't tell the two apart: `Uuid` reads every `uuid` field and fails on a plain `keyword` value that isn't a UUID. Use `String` at a `keyword`.
-- **`Decimal` at a `double` or `decimal` field.** It reads every value inside its range (±7.9 × 10^28), and fails past it: a large `double`, and a `decimal` column's largest values, which flusso writes through an `f64` that rounds them up past it. Use `f64` when the column can hold them.
+- **A number past `Decimal`'s range (±7.9 × 10^28) at a `double` or `decimal` field.** `Decimal` reads every value inside the range.
+  - A `double` past it is written as a number: `f64` reads it, `Decimal` doesn't.
+  - A `decimal` field's largest values inside the range are written as the nearest `f64`, which rounds them up past it (`Decimal::MAX` is written `7.922816251426434e28`): `f64` reads them, `Decimal` doesn't.
+  - A `decimal` field's value past the range is written as a JSON string, `"1000000000000000000000000000000"` ([#327](https://github.com/alias2k/flusso/issues/327)): neither `f64` nor `Decimal` reads it.
+
+  When a `decimal` column can hold values past the range, read the field as `serde_json::Value`, or as a type of your own that reads a number or a string, with a [hand-written `FlussoValue`](enums-and-values.md#hand-written-values) of `kind::Decimal`.
 - **A `map` or array over a `jsonb` column holding values of another type.** flusso writes such a column as it is: `{"x": 1}` under a `keyword` map, or `["a", 1]` in a `keyword` array, is indexed (OpenSearch coerces the number), and `_source` keeps the number, which `HashMap<String, String>` or `Vec<String>` fails on. Use `serde_json::Value` values when the column isn't uniform.
 
 ### Root and fragment
@@ -186,7 +191,7 @@ Dates sit behind a feature so a caller picks `time` or `chrono` (or `String` for
 
 ### String alternatives
 
-Wherever `String` is a value (`text`, `keyword`, `uuid`, an `enum`, `date`/`timestamp`, a map's values, an array's elements), `Box<str>` and `Cow<'_, str>` go too, and `Arc<str>` and `Rc<str>` with the `rc` feature (serde reads and writes those two only with its own `rc` feature, which it turns on). They are field types on a root and in a fragment, and query values: `User::email().eq(Box::<str>::from("a@b.c"))`. A `binary` or `geo` field, which takes `String` by its name, doesn't take them.
+Wherever `String` is a value (`text`, `keyword`, `uuid`, an `enum`, `date`/`timestamp`, a map's values, an array's elements), `Box<str>` and `Cow<'_, str>` go too, and `Arc<str>` and `Rc<str>` with the `rc` feature (serde reads and writes those two only with its own `rc` feature, which it turns on; without it, the compile error names the feature). They are field types on a root and in a fragment, and query values: `User::email().eq(Box::<str>::from("a@b.c"))`. A `binary` or `geo` field, which takes `String` by its name, doesn't take them.
 
 ## Arrays
 

@@ -31,6 +31,17 @@ fn decimal_becomes_a_number() {
     assert_eq!(to_json(&value), serde_json::json!(12.34));
 }
 
+/// The largest `Decimal` is written as the nearest `f64`, which rounds it up
+/// past `Decimal::MAX`: an `f64` reads it back, a `Decimal` doesn't. What the
+/// query manual's `decimal` trusted rule states below the range (issue #306).
+#[test]
+fn the_largest_decimal_is_written_as_a_double_past_its_range() {
+    let written = to_json(&GenericValue::Decimal(Decimal::MAX));
+    assert_eq!(written, serde_json::json!(7.922_816_251_426_434e28));
+    assert!(serde_json::from_value::<f64>(written.clone()).is_ok());
+    assert!(serde_json::from_value::<Decimal>(written).is_err());
+}
+
 /// A map value that is null is written as `null` under its key, not dropped:
 /// what the OpenSearch sink indexes for a `map` field over `{"x": null}`.
 #[test]
