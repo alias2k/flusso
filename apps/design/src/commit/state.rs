@@ -22,7 +22,12 @@
 //!   "journal": "<sha-256 of the journal's exact bytes>",
 //!   "dir": "/home/me/project",
 //!   "committed": false,
-//!   "created_at_ms": 1763030000000
+//!   "created_at_ms": 1763030000000,
+//!   "undo": {
+//!     "settled": false,
+//!     "writes": ["restore", "leave", "remove"],
+//!     "removals": ["keep"]
+//!   }
 //! }
 //! ```
 //!
@@ -35,6 +40,10 @@
 //! - **The commit point**: `committed` turns true, durably, once every file is
 //!   in place. Recovery reads roll back or finish from the record, never from
 //!   the journal's file name.
+//! - **A rollback's progress**: `undo`, absent until a rollback has decided
+//!   what to do with every file ([`Undo`]), is written before it changes the
+//!   first one, and again with `settled` once every file is settled. A record
+//!   written by a designer without it reads as a rollback not started.
 //!
 //! The folder is created mode 0700, a record mode 0600 with `create_new`
 //! (never replacing a file), and neither is ever opened through a link or
@@ -110,6 +119,42 @@ pub(crate) struct Record {
     /// Whether every file was in place: the commit point.
     pub(crate) committed: bool,
     created_at_ms: u64,
+    /// How a rollback settles each file, once it has decided: written before
+    /// it changes the first one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) undo: Option<Undo>,
+}
+
+/// A rollback's decision for every file of a save, kept in its record so a
+/// rollback cut short carries on from it instead of deciding again over
+/// what the user wrote since (see `recover`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Undo {
+    /// Every file is settled: only the save's own files are left to delete.
+    pub(crate) settled: bool,
+    /// One per file the journal writes, in its order.
+    pub(crate) writes: Vec<Act>,
+    /// One per file the journal removes, in its order.
+    pub(crate) removals: Vec<Act>,
+}
+
+/// What a rollback does to one file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Act {
+    /// It already holds its text from before the save (or, created by it, is
+    /// not there): only a backup holding that text is deleted.
+    Leave,
+    /// It holds a third text: it stays, and so does its backup.
+    Keep,
+    /// It holds a third text: it stays, and its backup is deleted.
+    KeepDropping,
+    /// Its backup is renamed back over it: done once the backup is gone.
+    Restore,
+    /// The save created it: it is renamed to its temp file, which is deleted
+    /// once every file is settled. Done once the temp file is there.
+    Remove,
 }
 
 impl Record {
@@ -123,6 +168,7 @@ impl Record {
             dir: dir.to_path_buf(),
             committed: false,
             created_at_ms: now_ms(),
+            undo: None,
         }
     }
 
@@ -217,6 +263,17 @@ impl State {
             ..record.clone()
         };
         disk.replace_private(&self.file(&record.token), &committed.encode()?)
+    }
+
+    /// Write `undo` into `record`, durably: the rollback acts on it from
+    /// now on, even after a kill.
+    pub(crate) fn undo(&self, record: &Record, undo: &Undo, disk: &mut Disk) -> io::Result<()> {
+        let undoing = Record {
+            undo: Some(undo.clone()),
+            ..record.clone()
+        };
+        disk.replace_private(&self.file(&record.token), &undoing.encode()?)?;
+        disk.sync_dir(&self.dir)
     }
 
     /// Remove the record of the save `token`.

@@ -232,6 +232,16 @@ after a live update; constants land as written), and `an_update_of_an_unread_col
   `apps/design/dist/` matches a fresh Vite build (the embedded SPA must not drift). There is **no**
   browser e2e — the UI is validated by dogfooding; the `designer-frontend` build/lint guards plus the
   Rust round-trip are the automated net.
+- **A designer save is crash-safe, and a rollback settles each file once** (`apps/design/src/commit/`;
+  its module docs hold the table of what a kill leaves and what the next start does). A rollback
+  writes its per-file decisions into the save's record (state folder) before changing a file, takes
+  each step as one rename whose result marks it done (a restored file's backup is gone; a created
+  file is renamed to its temp file), and marks the record `settled` before deleting the save's own
+  files, so a kill then a user edit never re-settles a file (issue #302). Guards: the commit kill
+  matrices (`a_save_killed_after_any_step_*`, `a_recovery_killed_after_any_step_*`,
+  `a_file_recovery_settled_keeps_what_the_user_wrote_since`, `a_rollback_resumed_twice_keeps_what_it_decided`),
+  `a_save_an_older_designer_left_recovers` (fixtures in `commit/fixtures/`, written by `056b4292`), and
+  `api`'s `every_kill_during_recovery_still_tells_the_save_once` / `a_file_recovery_settled_is_never_settled_again`.
 - **The designer frontend is Tailwind v4 + shadcn/Radix, atomic-design.** UI primitives are
   shadcn components in `apps/design/frontend/src/components/ui/` (`button`/`input`/`select`/
   `checkbox`/`dialog`/`tooltip`/`popover`/`command`/…), tuned to the flusso palette; molecules like
