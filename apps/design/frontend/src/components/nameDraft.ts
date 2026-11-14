@@ -31,8 +31,9 @@
 //   or index, ticking a column, switching to Code mode all read the same either
 //   way, since a rename goes by identity.
 // - A control that acts on the renamed thing or reads its name settles the
-//   draft first (`settleNameDraft`), so it sees the new name: Save, duplicate,
-//   remove, the switch to Code mode.
+//   draft first (`settleNameDraft`), so it sees the new name: Save, Validate,
+//   duplicate, remove, the switch to Code mode. So does the palette's New
+//   index, whose dialog takes the focus the palette would hand back.
 // - A rename chip drops the typed name: the chip is what was pressed.
 //
 // Layout still never moves when a name applies (reasons float and let the

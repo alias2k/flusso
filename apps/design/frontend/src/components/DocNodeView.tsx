@@ -455,6 +455,7 @@ export function DocNodeView({ data, selected }: NodeProps) {
                         aria-label={t("common.remove")}
                         onClick={(e) => {
                           e.stopPropagation();
+                          settleNameDraft();
                           apply((s) => edit.removeAt(s, node.path, l.index));
                         }}
                       >

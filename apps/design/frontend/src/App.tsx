@@ -1123,10 +1123,12 @@ export default function App() {
 
   const validate = async () => {
     if (!doc || validating) return;
+    settleNameDraft();
+    const current = useDesignStore.getState().doc ?? doc;
     setValidating(true);
     try {
-      const indexes = Object.entries(doc.schemas).map(([name, s]) => ({ name, schema: s }));
-      const res = await api.validate(doc.config, indexes);
+      const indexes = Object.entries(current.schemas).map(([name, s]) => ({ name, schema: s }));
+      const res = await api.validate(current.config, indexes);
       if (!res.db_reachable) {
         setDiagnostics(null);
         setToast({ kind: "error", text: t("toast.dbNotReachableErr", { err: res.error ?? "unknown" }) });
@@ -1230,7 +1232,10 @@ export default function App() {
       title: t("sidebar.newIndex"),
       keywords: "new index create add schema file",
       detail: { body: t("search.descNewIndex"), enter: runAction },
-      run: () => setNewIndexOpen(true),
+      run: () => {
+        settleNameDraft();
+        setNewIndexOpen(true);
+      },
     },
     {
       id: "cmd.undo",
