@@ -1758,6 +1758,8 @@ async fn a_root_key_the_builder_cannot_read_back_is_refused() {
         ("inet", "'10.0.0.1'", false),
         ("mood", "'calm'", false),
         ("money", "'1.00'", false),
+        ("jsonb", "'{}'", false),
+        ("\"char\"", "'a'", false),
         ("bytea", "'\\x01'", true),
         ("citext", "'Ada'", true),
         ("score", "1", true),
