@@ -227,6 +227,8 @@ fn built(document: Document) -> Option<Built> {
     }
 }
 
+type ComparisonCache = HashMap<(String, String), std::result::Result<bool, String>>;
+
 /// Builds index documents from a Postgres database, driven by a [`SourceSpec`] —
 /// the enabled indexes and their schemas, translated from the top-level config
 /// by the composition root. Cheap to clone — the pool, spec, and primary-key
@@ -242,8 +244,9 @@ pub struct PgDocumentBuilder {
     /// Cache of each `(schema, table, column)`'s SQL type, used to cast filter
     /// operands to the column's real type rather than comparing as text.
     col_type_cache: ColumnTypes,
-    /// Whether each `(link type, key type)` pair compares, probed once.
-    comparison_cache: Arc<Mutex<HashMap<(String, String), bool>>>,
+    /// Whether each `(link type, key type)` pair compares, probed once: the
+    /// verdict, or the reason the database gave for not answering.
+    comparison_cache: Arc<Mutex<ComparisonCache>>,
     /// Tables a change arrived for that no index reads, already warned about.
     unread_warned: Arc<Mutex<HashSet<TableName>>>,
     /// Root tables without a primary key already warned about for a key with
@@ -897,17 +900,21 @@ impl Catalog for PgDocumentBuilder {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&pair)
-            .copied();
-        if let Some(compares) = cached {
-            return Ok(compares);
+            .cloned();
+        if let Some(answer) = cached {
+            return answer.map_err(SourceError::Unchecked);
         }
         let probe = query::comparison_probe(&pair.0, &pair.1);
-        let compares = self.probe(probe).await?;
+        let answer = match self.probe(probe).await {
+            Ok(compares) => Ok(compares),
+            Err(SourceError::Unchecked(reason)) => Err(reason),
+            Err(other) => return Err(other),
+        };
         self.comparison_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(pair, compares);
-        Ok(compares)
+            .insert(pair, answer.clone());
+        answer.map_err(SourceError::Unchecked)
     }
 }
 
