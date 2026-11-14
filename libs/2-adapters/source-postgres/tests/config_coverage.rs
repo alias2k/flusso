@@ -2183,6 +2183,68 @@ async fn validation_reports_a_link_postgres_cannot_compare_with_its_key() {
     );
 }
 
+/// A link pair the role may not probe is asked about once per builder, like a
+/// pair that compares: the refusal is cached, so the same builder still
+/// reports the check as skipped after the role is granted USAGE, and a new
+/// builder probes again (issue #324).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_refused_link_probe_is_asked_once_per_type_pair() {
+    let (_pg, url) = start_seeded().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE SCHEMA hidden",
+        "CREATE DOMAIN hidden.ref AS int",
+        "CREATE TABLE badges (id int PRIMARY KEY, user_ref hidden.ref, name text)",
+        "CREATE ROLE reader LOGIN PASSWORD 'reader'",
+        "GRANT SELECT ON ALL TABLES IN SCHEMA public TO reader",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let (_, address) = url.rsplit_once('@').unwrap();
+    let reader_url = format!("postgres://reader:reader@{address}");
+    let badges = join_field(
+        "badges",
+        Join {
+            table: table("badges"),
+            primary_key: column("id"),
+            nullable: true,
+            kind: JoinKind::HasMany {
+                foreign_key: column("user_ref"),
+            },
+            filters: None,
+            order_by: None,
+            limit: None,
+            fields: vec![col("name", "name")],
+            indexed: true,
+            on: vec![],
+        },
+    );
+    let schema = users_schema(vec![badges], None);
+    let kinds = |found: Vec<source::Diagnostic>| -> Vec<&'static str> {
+        found.into_iter().map(|d| d.kind.as_str()).collect()
+    };
+
+    let documents = builder(&reader_url, schema.clone()).await;
+    let first = validate_indexes(&spec(schema.clone()), &documents)
+        .await
+        .unwrap();
+    assert_eq!(kinds(first), ["check_skipped"]);
+
+    sqlx::query("GRANT USAGE ON SCHEMA hidden TO reader")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let again = validate_indexes(&spec(schema.clone()), &documents)
+        .await
+        .unwrap();
+    assert_eq!(kinds(again), ["check_skipped"]);
+
+    let fresh = builder(&reader_url, schema.clone()).await;
+    let probed = validate_indexes(&spec(schema), &fresh).await.unwrap();
+    assert_eq!(kinds(probed), [] as [&str; 0]);
+}
+
 /// A check whose probe the role may not run (issue #324): casting to a type
 /// needs USAGE on the type's schema, reading a column of it does not. The
 /// transform and the link checks are each reported as skipped, with the
