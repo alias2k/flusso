@@ -209,10 +209,10 @@ array = true
 enum_order = ["low", "high"]
 
 [[config.indexes.catalog.schema.fields]]
-field = "tags"
+field = "labels"
 
 [config.indexes.catalog.schema.fields.source.column]
-column = "tags"
+column = "labels"
 ty = "keyword"
 nullable = true
 transforms = ["lowercase"]
