@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::disk::Edit;
+use super::disk::{Call, Edit};
 use super::recover::Kept;
 use super::recover::{Problem, Recovery};
 use super::state::Record;
@@ -294,7 +294,8 @@ fn a_failed_restore_names_the_backups_left_and_recovery_finishes_it() {
     let err = project
         .commit(
             Shape::MoveAndRemove,
-            &mut Disk::failing(vec![commit_point, commit_point + 1]),
+            // The step after the commit mark records the undo, then the first restore.
+            &mut Disk::failing(vec![commit_point, commit_point + 2]),
         )
         .unwrap_err()
         .to_string();
@@ -305,6 +306,25 @@ fn a_failed_restore_names_the_backups_left_and_recovery_finishes_it() {
     let recovery = project.recover(&mut Disk::counting());
     assert_eq!(recovery.settled.len(), 1, "{recovery:?}");
     assert_eq!(recovery.settled[0].outcome, Outcome::RolledBack);
+    assert_eq!(snapshot(&project.dir), before);
+}
+
+/// Issue #302: a commit whose undo can't record its plan (a full disk) still
+/// undoes the save at once, as it did before it kept one.
+#[test]
+fn an_undo_that_cannot_record_its_plan_still_undoes() {
+    let (before, _, _) = reference(Shape::MoveAndRemove);
+    let commit_point = commit_point(Shape::MoveAndRemove);
+    let project = Project::new("unrecorded-undo");
+    let err = project
+        .commit(
+            Shape::MoveAndRemove,
+            &mut Disk::failing(vec![commit_point, commit_point + 1]),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(!err.contains("restoring the project failed"), "{err}");
+    assert!(project.records().is_empty());
     assert_eq!(snapshot(&project.dir), before);
 }
 
@@ -2422,4 +2442,671 @@ fn an_undo_meeting_files_written_meanwhile_keeps_them_all() {
             &format!("undo killed after {k}"),
         );
     }
+}
+
+/// Copy the tree at `from` into `to`, folders and files.
+fn copy_dir(from: &Path, to: &Path) {
+    for entry in std::fs::read_dir(from).unwrap().flatten() {
+        let target = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            std::fs::create_dir_all(&target).unwrap();
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+/// Issue #302: a project an older designer left, killed in the middle of a
+/// save, of its recovery, or after recovery settled every file and before
+/// it deleted the journal, recovers to before the save. The fixtures were
+/// written by the designer of `056b4292` (a move-and-remove save, killed
+/// right before its commit point); the record's folder is `@DIR@`.
+#[test]
+fn a_save_an_older_designer_left_recovers() {
+    let (before, _, _) = reference(Shape::MoveAndRemove);
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/commit/fixtures");
+    for name in ["mid-save", "mid-recovery", "recovered-unsettled"] {
+        let project = Project::new(&format!("older-{name}"));
+        for file in ["flusso.toml", "users.schema.yml", "orders.schema.yml"] {
+            std::fs::remove_file(project.dir.join(file)).unwrap();
+        }
+        copy_dir(&fixtures.join(name).join("project"), &project.dir);
+        let dir = std::fs::canonicalize(&project.dir).unwrap();
+        let record = std::fs::read_to_string(fixtures.join(name).join("record.json"))
+            .unwrap()
+            .replace("@DIR@", dir.to_str().unwrap());
+        let token = serde_json::from_str::<serde_json::Value>(&record).unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        project
+            .state()
+            .create(
+                &serde_json::from_str(&record).unwrap(),
+                &mut Disk::counting(),
+            )
+            .unwrap();
+        assert_eq!(project.records().len(), 1, "{name}");
+        let recovery = project.recover(&mut Disk::counting());
+        assert!(recovery.blocked.is_none(), "{name}: {recovery:?}");
+        assert_eq!(recovery.settled.len(), 1, "{name}: {recovery:?}");
+        assert_eq!(recovery.settled[0].token, token, "{name}");
+        assert!(project.records().is_empty(), "{name}");
+        assert_eq!(snapshot(&project.dir), before, "{name}");
+    }
+}
+
+/// The project's own files under `dir`, without the save's journal, temp
+/// files and backups, nor folders: what a user edits.
+fn user_files(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    snapshot(dir)
+        .into_iter()
+        .filter(|(path, _)| !path.to_string_lossy().contains(".flusso-save"))
+        .filter_map(|(path, bytes)| bytes.map(|b| (path, b)))
+        .collect()
+}
+
+/// What a user did between a kill and the restart: each file given bytes
+/// (`None`: deleted).
+type UserEdit = BTreeMap<PathBuf, Option<Vec<u8>>>;
+
+const USER_ACTIONS: [&str; 5] = [
+    "re-create",
+    "save-text",
+    "delete",
+    "half-saved",
+    "unrelated",
+];
+
+/// Issue #302's user actions, given the files as the save left them
+/// (`half`), as the kill left them (`killed`), and as an uninterrupted
+/// recovery leaves them (`settled`).
+fn user_edit(
+    action: &str,
+    half: &BTreeMap<PathBuf, Vec<u8>>,
+    killed: &BTreeMap<PathBuf, Vec<u8>>,
+    settled: &BTreeMap<PathBuf, Vec<u8>>,
+) -> UserEdit {
+    let undone = half
+        .keys()
+        .chain(settled.keys())
+        .filter(|f| half.get(*f) != settled.get(*f));
+    match action {
+        "re-create" => undone
+            .filter(|f| !settled.contains_key(*f) && !killed.contains_key(*f))
+            .map(|f| (f.clone(), half.get(f).cloned()))
+            .collect(),
+        "save-text" => undone
+            .filter(|f| settled.contains_key(*f) && half.contains_key(*f))
+            .map(|f| (f.clone(), half.get(f).cloned()))
+            .collect(),
+        "delete" => undone
+            .filter(|f| settled.contains_key(*f))
+            .map(|f| (f.clone(), None))
+            .collect(),
+        "half-saved" => undone.map(|f| (f.clone(), half.get(f).cloned())).collect(),
+        "unrelated" => [(PathBuf::from("unrelated.yml"), Some(b"mine\n".to_vec()))]
+            .into_iter()
+            .collect(),
+        _ => unreachable!(),
+    }
+}
+
+fn apply_edit(dir: &Path, edit: &UserEdit) {
+    for (file, bytes) in edit {
+        let path = dir.join(file);
+        match bytes {
+            Some(bytes) => {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, bytes).unwrap();
+            }
+            None => {
+                std::fs::remove_file(path).ok();
+            }
+        }
+    }
+}
+
+/// Issue #302 at the commit's level: for every save of [`SHAPES`] killed
+/// before its commit point, recovery killed after any of its steps, then
+/// each user action, three recoveries keep every file recovery had settled
+/// as the user left it, settle every other one as a recovery from scratch
+/// does, never block, and leave no record.
+#[test]
+fn a_file_recovery_settled_keeps_what_the_user_wrote_since() {
+    for shape in SHAPES {
+        let point = commit_point(shape);
+        for n in 1..point {
+            let cut = |tag: &str| {
+                let project = Project::new(&format!("resettle-{shape:?}-{n}-{tag}"));
+                project.commit(shape, &mut Disk::stopping_after(n)).ok();
+                project
+            };
+            let settled = {
+                let project = cut("settled");
+                project.recover(&mut Disk::counting());
+                user_files(&project.dir)
+            };
+            'stops: for m in 1.. {
+                for action in USER_ACTIONS {
+                    let project = cut(action);
+                    let half = user_files(&project.dir);
+                    let mut stopped = Disk::stopping_after(m);
+                    project.recover(&mut stopped);
+                    if !stopped.stopped() {
+                        break 'stops;
+                    }
+                    let killed = user_files(&project.dir);
+                    let edit = user_edit(action, &half, &killed, &settled);
+                    apply_edit(&project.dir, &edit);
+                    let mut expected = {
+                        let scratch = cut(&format!("{action}-scratch"));
+                        apply_edit(&scratch.dir, &edit);
+                        let recovery = scratch.recover(&mut Disk::counting());
+                        assert!(recovery.blocked.is_none(), "{recovery:?}");
+                        user_files(&scratch.dir)
+                    };
+                    let caught = unmarked_steps(&project);
+                    for (file, bytes) in &edit {
+                        if killed.get(file) != half.get(file)
+                            && (bytes.is_some() || !caught.contains(file))
+                        {
+                            match bytes {
+                                Some(bytes) => expected.insert(file.clone(), bytes.clone()),
+                                None => expected.remove(file),
+                            };
+                        }
+                    }
+                    let mut kept = Vec::new();
+                    for load in 1..=3 {
+                        let label =
+                            format!("{shape:?}: save {n}, recovery {m}, {action}, load {load}");
+                        let left = snapshot(&project.dir);
+                        let recovery = project.recover(&mut Disk::counting());
+                        if let Some(blocked) = &recovery.blocked {
+                            // The one block left: a kill between a step's rename and its mark,
+                            // then that file deleted, or replaced by a new file: no recorded
+                            // identity proves the rename ran, so it is decided as never begun.
+                            let base = std::fs::canonicalize(&project.dir).unwrap();
+                            assert!(
+                                load == 1
+                                    && blocked.problems.iter().all(|p| {
+                                        p.kind == ProblemKind::BackupMissing
+                                            && p.path.strip_prefix(&base).is_ok_and(|f| {
+                                                caught.contains(f)
+                                                    && killed.get(f) != half.get(f)
+                                                    && edit.contains_key(f)
+                                            })
+                                    })
+                                    && snapshot(&project.dir) == left,
+                                "{label}: {recovery:?}"
+                            );
+                            break;
+                        }
+                        kept.extend(recovery.settled.iter().flat_map(|s| s.kept.clone()));
+                        keeps_the_promise(&label, &project.dir, &pre_save(), &kept, &edit);
+                        assert_eq!(user_files(&project.dir), expected, "{label}");
+                        assert!(project.records().is_empty(), "{label}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Issue #302: a rollback killed twice. The first resumed recovery keeps a
+/// file the user changed before it was restored, and is killed before it
+/// marks every file settled; the user then writes the save's text into
+/// that file. The next recovery keeps it too: the decision is recorded.
+#[test]
+fn a_rollback_resumed_twice_keeps_what_it_decided() {
+    let project = half_swapped("twice");
+    let users = project.dir.join("users.schema.yml");
+    let saved = std::fs::read(&users).unwrap();
+    let plan_written = (1..)
+        .find(|&m| {
+            let probe = half_swapped(&format!("twice-probe-{m}"));
+            probe.recover(&mut Disk::stopping_after(m));
+            probe.records()[0].undo.is_some()
+        })
+        .unwrap();
+    project.recover(&mut Disk::stopping_after(plan_written));
+    assert_eq!(std::fs::read(&users).unwrap(), saved, "not restored yet");
+    std::fs::write(&users, "mine\n").unwrap();
+    let resumed = (1..)
+        .find(|&m| {
+            let mut disk = Disk::stopping_after(m);
+            let probe = half_swapped(&format!("twice-resume-{m}"));
+            probe.recover(&mut Disk::stopping_after(plan_written));
+            std::fs::write(probe.dir.join("users.schema.yml"), "mine\n").unwrap();
+            probe.recover(&mut disk);
+            let undo = probe.records()[0].undo.clone().unwrap();
+            undo.writes[0] == state::Act::Keep && !undo.settled
+        })
+        .unwrap();
+    project.recover(&mut Disk::stopping_after(resumed));
+    std::fs::write(&users, &saved).unwrap();
+    for _ in 0..3 {
+        let recovery = project.recover(&mut Disk::counting());
+        assert!(recovery.blocked.is_none(), "{recovery:?}");
+        assert_eq!(std::fs::read(&users).unwrap(), saved);
+    }
+    assert!(project.records().is_empty());
+}
+
+/// The project's files before any save: what [`Project::new`] writes.
+fn pre_save() -> BTreeMap<PathBuf, Vec<u8>> {
+    [
+        ("flusso.toml", "config\n"),
+        ("users.schema.yml", "users\n"),
+        ("orders.schema.yml", "orders\n"),
+    ]
+    .into_iter()
+    .map(|(name, text)| (PathBuf::from(name), text.as_bytes().to_vec()))
+    .collect()
+}
+
+/// The promise of a rollback that ends unblocked: every file the user did not
+/// touch (`edit`) holds its bytes from before the save (or is absent, when
+/// the save created it), unless a recovery kept it and told so (`kept`).
+fn keeps_the_promise(
+    label: &str,
+    dir: &Path,
+    pre_save: &BTreeMap<PathBuf, Vec<u8>>,
+    kept: &[Kept],
+    edit: &UserEdit,
+) {
+    if let Err(broken) = promise(dir, pre_save, kept, edit) {
+        panic!("{label}: {broken}");
+    }
+}
+
+/// [`keeps_the_promise`], saying how it is broken.
+fn promise(
+    dir: &Path,
+    pre_save: &BTreeMap<PathBuf, Vec<u8>>,
+    kept: &[Kept],
+    edit: &UserEdit,
+) -> Result<(), String> {
+    let now = user_files(dir);
+    for file in now.keys().chain(pre_save.keys()) {
+        if edit.contains_key(file)
+            || now.get(file) == pre_save.get(file)
+            || kept.iter().any(|k| k.path == dir.join(file))
+        {
+            continue;
+        }
+        return Err(format!(
+            "{} neither holds its text from before the save nor is told as kept: {:?}",
+            file.display(),
+            now.get(file)
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+        ));
+    }
+    Ok(())
+}
+
+/// The files whose step the rollback in flight in `project` decided and has
+/// not marked done (relative): a kill may have caught one between its rename
+/// and its mark.
+fn unmarked_steps(project: &Project) -> std::collections::BTreeSet<PathBuf> {
+    let Some(undo) = project.records().first().and_then(|r| r.undo.clone()) else {
+        return Default::default();
+    };
+    let Some(steps) = in_flight_steps(project) else {
+        return Default::default();
+    };
+    let base = std::fs::canonicalize(&project.dir).unwrap();
+    let step = |act: &state::Act| matches!(act, state::Act::Restore | state::Act::Remove);
+    let writes = steps
+        .writes
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| undo.writes.get(*i).is_some_and(step) && !undo.write_done(*i))
+        .map(|(_, w)| w.dest.clone());
+    let removals = steps
+        .removals
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| undo.removals.get(*i).is_some_and(step) && !undo.removal_done(*i))
+        .map(|(_, r)| r.path.clone());
+    writes
+        .chain(removals)
+        .map(|p| p.strip_prefix(&base).unwrap().to_path_buf())
+        .collect()
+}
+
+/// The journal of the save in flight in `project`, resolved: `None` once
+/// it is deleted.
+fn in_flight_steps(project: &Project) -> Option<journal::Steps> {
+    let bytes = std::fs::read(project.dir.join(journal::JOURNAL)).ok()?;
+    let dir = std::fs::canonicalize(&project.dir).unwrap();
+    Some(
+        journal::Journal::parse(&bytes)
+            .unwrap()
+            .steps(&dir, &dir.join("flusso.toml"))
+            .unwrap(),
+    )
+}
+
+/// Review of #305: a save file gone or replaced after a rollback recorded its
+/// plan (a backup deleted by hand or by `git clean`, something written at a
+/// created file's temp name) is never read as a step done. For every shape,
+/// save stop before the commit point, and recovery stop after the plan is
+/// recorded: each backup deleted alone, all of them, and each created file's
+/// temp name taken. The next recovery either blocks and changes nothing, or
+/// leaves every file as it was before the save unless it tells it kept.
+#[test]
+fn a_save_file_gone_after_the_plan_never_reads_as_a_step_done() {
+    let mut runs = 0;
+    let mut broken = Vec::new();
+    for shape in SHAPES {
+        let point = commit_point(shape);
+        for n in 1..point {
+            'stops: for m in 1.. {
+                let cut = |tag: &str| {
+                    let project = Project::new(&format!("gone-{shape:?}-{n}-{m}-{tag}"));
+                    project.commit(shape, &mut Disk::stopping_after(n)).ok();
+                    let mut stopped = Disk::stopping_after(m);
+                    project.recover(&mut stopped);
+                    (project, stopped.stopped())
+                };
+                let (probe, stopped) = cut("probe");
+                if !stopped {
+                    break 'stops;
+                }
+                if probe.records().first().is_none_or(|r| r.undo.is_none()) {
+                    continue;
+                }
+                let baks = backups(&probe.dir).len();
+                let created = in_flight_steps(&probe)
+                    .map(|s| s.writes.iter().filter(|w| w.before.is_none()).count())
+                    .unwrap_or(0);
+                drop(probe);
+                let mut variants: Vec<(String, Vec<usize>, bool)> = (0..baks)
+                    .map(|b| (format!("delete backup {b}"), vec![b], false))
+                    .collect();
+                if baks > 1 {
+                    variants.push(("delete every backup".into(), (0..baks).collect(), false));
+                }
+                if created > 0 {
+                    variants.push((
+                        "foreign bytes at each created file's temp name".into(),
+                        vec![],
+                        true,
+                    ));
+                }
+                for (i, (variant, delete, foreign)) in variants.iter().enumerate() {
+                    let (project, _) = cut(&i.to_string());
+                    let found = backups(&project.dir);
+                    for &b in delete {
+                        std::fs::remove_file(&found[b]).unwrap();
+                    }
+                    if *foreign {
+                        for write in in_flight_steps(&project).unwrap().writes {
+                            if write.before.is_none() {
+                                // A folder the rollback removed already has no temp name left.
+                                std::fs::write(&write.temp, "foreign\n").ok();
+                            }
+                        }
+                    }
+                    let label = format!("{shape:?}: save {n}, recovery {m}, {variant}");
+                    let left = snapshot(&project.dir);
+                    let recovery = project.recover(&mut Disk::counting());
+                    runs += 1;
+                    match &recovery.blocked {
+                        Some(_) if snapshot(&project.dir) != left => {
+                            broken.push(format!("{label}: blocked, but changed files"));
+                        }
+                        Some(_) => {}
+                        None => {
+                            let kept: Vec<Kept> = recovery
+                                .settled
+                                .iter()
+                                .flat_map(|s| s.kept.clone())
+                                .collect();
+                            if let Err(why) =
+                                promise(&project.dir, &pre_save(), &kept, &UserEdit::new())
+                            {
+                                broken.push(format!("{label}: told rolled back, but {why}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(runs > 0);
+    assert!(
+        broken.is_empty(),
+        "{} of {runs} runs:\n{}",
+        broken.len(),
+        broken.join("\n")
+    );
+}
+
+/// [`flushed_before_recorded`] over `calls`, a breach added to `broken`.
+fn checked_order(project: &Project, label: &str, calls: &[Call], broken: &mut Vec<String>) {
+    if let Err(why) = flushed_before_recorded(project, calls) {
+        broken.push(format!("{label}: {why}"));
+    }
+}
+
+/// Every change in the project (a rename, a removal, a file or folder made)
+/// is flushed, its folder (both, for a rename across two) synced, before the
+/// next change in the state folder: a mark, `settled`, a notice, a record
+/// removed. Otherwise a power cut can keep the mark and lose the change, and
+/// the next recovery trusts a step that is undone on disk.
+fn flushed_before_recorded(project: &Project, calls: &[Call]) -> Result<(), String> {
+    let base = std::fs::canonicalize(&project.dir).unwrap();
+    let state = std::fs::canonicalize(&project.state).unwrap_or_else(|_| project.state.clone());
+    let in_state = |p: &Path| p.starts_with(&state) || p.starts_with(&project.state);
+    let in_project = |p: &Path| p.starts_with(&base) || p.starts_with(&project.dir);
+    let mut dirty: std::collections::BTreeSet<PathBuf> = Default::default();
+    for (i, call) in calls.iter().enumerate() {
+        let changed: Vec<&PathBuf> = match call {
+            Call::Made(p) | Call::Removed(p) => vec![p],
+            Call::Renamed(from, to) => vec![from, to],
+            Call::Flushed(dir) => {
+                dirty.remove(dir);
+                continue;
+            }
+        };
+        if changed.iter().any(|p| in_state(p)) {
+            if !dirty.is_empty() {
+                let last = calls[..i]
+                    .iter()
+                    .rev()
+                    .find(|c| !matches!(c, Call::Flushed(_)));
+                return Err(format!(
+                    "{call:?} after {last:?}, before {dirty:?} is flushed"
+                ));
+            }
+            continue;
+        }
+        for path in changed {
+            assert!(in_project(path), "{path:?} is neither project nor state");
+            dirty.insert(path.parent().unwrap().to_path_buf());
+        }
+    }
+    Ok(())
+}
+
+/// Review of #305: a power cut keeps what was flushed, so each step's mark
+/// may only be written once its rename is on the device. Otherwise a cut can
+/// keep the mark and lose the rename (the restore of `flusso.toml` in an edit,
+/// the removal of `new/deep/orders.schema.yml` or the restore of
+/// `orders.schema.yml` in a move), and the next recovery skips that step and
+/// tells the save rolled back over a tree still holding its text. Checked
+/// through the `Disk` seam, for every shape: a commit failing at any step (its
+/// own undo), and a recovery after a save killed at any step, itself killed
+/// at any step and run again.
+#[test]
+fn every_change_is_flushed_before_the_record_says_it_happened() {
+    let mut broken = Vec::new();
+    let mut runs = 0;
+    for shape in SHAPES {
+        let (_, _, steps) = reference(shape);
+        for n in 1..=steps {
+            let project = Project::new(&format!("order-fail-{shape:?}-{n}"));
+            let mut disk = Disk::failing(vec![n]);
+            project.commit(shape, &mut disk).ok();
+            runs += 1;
+            checked_order(
+                &project,
+                &format!("{shape:?}: step {n} failed"),
+                disk.calls(),
+                &mut broken,
+            );
+        }
+        for n in 0..steps {
+            for m in 0.. {
+                let project = Project::new(&format!("order-{shape:?}-{n}-{m}"));
+                project.commit(shape, &mut Disk::stopping_after(n)).ok();
+                let mut cut = Disk::stopping_after(m);
+                project.recover(&mut cut);
+                let label = format!("{shape:?}: save killed after {n}, recovery after {m}");
+                checked_order(&project, &label, cut.calls(), &mut broken);
+                let finished = !cut.stopped();
+                let mut again = Disk::counting();
+                project.recover(&mut again);
+                checked_order(
+                    &project,
+                    &format!("{label}, run again"),
+                    again.calls(),
+                    &mut broken,
+                );
+                runs += 2;
+                if finished {
+                    break;
+                }
+            }
+        }
+    }
+    let renames = broken
+        .iter()
+        .filter(|b| b.contains("after Some(Renamed"))
+        .count();
+    assert!(
+        broken.is_empty(),
+        "{} of {runs} runs ({renames} a mark right after a rename):\n{}",
+        broken.len(),
+        broken.join("\n")
+    );
+}
+
+/// A `shape` save killed right before its commit point, then its recovery
+/// killed right after the rename of the step `caught` names and before that
+/// step's mark: `caught` sees the project and the record's plan.
+fn caught_between_rename_and_mark(
+    shape: Shape,
+    tag: &str,
+    caught: impl Fn(&Project, &journal::Steps, &state::Undo) -> bool,
+) -> Project {
+    let point = commit_point(shape);
+    let cut = |m: usize| {
+        let project = Project::new(&format!("caught-{tag}-{m}"));
+        project
+            .commit(shape, &mut Disk::stopping_after(point - 1))
+            .ok();
+        project.recover(&mut Disk::stopping_after(m));
+        project
+    };
+    let m = (1..40)
+        .find(|&m| {
+            let probe = cut(m);
+            let (Some(steps), Some(undo)) = (
+                in_flight_steps(&probe),
+                probe.records().first().and_then(|r| r.undo.clone()),
+            ) else {
+                return false;
+            };
+            caught(&probe, &steps, &undo)
+        })
+        .expect("no recovery stop between that rename and its mark");
+    cut(m)
+}
+
+/// Review of #305: recovery killed after it renamed a file the save created
+/// (`new/deep/orders.schema.yml`) to its temp name, before the mark; the user
+/// then makes that file again, with the text the save gave it. The next
+/// recovery keeps it, and says so.
+#[test]
+fn a_file_made_again_after_its_removal_ran_is_kept_and_named() {
+    let project = caught_between_rename_and_mark(Shape::MoveAndRemove, "remake", |p, s, u| {
+        let created = s.writes.iter().position(|w| w.before.is_none()).unwrap();
+        let write = &s.writes[created];
+        u.writes[created] == state::Act::Remove
+            && !u.write_done(created)
+            && write.temp.exists()
+            && !write.dest.exists()
+            && p.dir.join("new/deep").is_dir()
+    });
+    let file = project.dir.join("new/deep/orders.schema.yml");
+    std::fs::write(&file, "orders moved\n").unwrap();
+    for load in 1..=3 {
+        let recovery = project.recover(&mut Disk::counting());
+        assert!(recovery.blocked.is_none(), "load {load}: {recovery:?}");
+        assert_eq!(
+            std::fs::read_to_string(&file).ok().as_deref(),
+            Some("orders moved\n"),
+            "load {load}"
+        );
+        if load == 1 {
+            let settled = &recovery.settled[0];
+            assert_eq!(settled.outcome, Outcome::RolledBack);
+            let kept: Vec<_> = settled.kept.iter().map(|k| k.path.clone()).collect();
+            let base = std::fs::canonicalize(&project.dir).unwrap();
+            assert_eq!(kept, vec![base.join("new/deep/orders.schema.yml")]);
+        }
+    }
+    assert!(project.records().is_empty());
+}
+
+/// The mirror for a restore: recovery killed after it renamed the backup of
+/// `flusso.toml` back over it, before the mark; the user then writes the
+/// save's text into it, in place. The next recovery keeps it, and says so.
+#[test]
+fn a_file_given_the_saves_text_after_its_restore_ran_is_kept_and_named() {
+    let project = caught_between_rename_and_mark(Shape::Edits, "restore", |p, s, u| {
+        let config = s.writes.len() - 1;
+        u.writes[config] == state::Act::Restore
+            && !u.write_done(config)
+            && std::fs::read_to_string(p.dir.join("flusso.toml")).unwrap() == "config\n"
+    });
+    let config = project.dir.join("flusso.toml");
+    std::fs::write(&config, "config 2\n").unwrap();
+    for load in 1..=3 {
+        let recovery = project.recover(&mut Disk::counting());
+        assert!(recovery.blocked.is_none(), "load {load}: {recovery:?}");
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "config 2\n",
+            "load {load}"
+        );
+        if load == 1 {
+            let settled = &recovery.settled[0];
+            assert_eq!(settled.outcome, Outcome::RolledBack);
+            let kept: Vec<_> = settled.kept.iter().map(|k| k.path.clone()).collect();
+            let base = std::fs::canonicalize(&project.dir).unwrap();
+            assert_eq!(kept, vec![base.join("flusso.toml")]);
+        }
+    }
+    assert!(project.records().is_empty());
+}
+
+/// A plan written without file identities (no release writes one; this
+/// branch's earlier records did) still loads, and proves no step.
+#[test]
+fn a_plan_without_file_identities_still_loads() {
+    let undo: state::Undo = serde_json::from_str(
+        r#"{"settled":false,"writes":["restore","remove"],"removals":["restore"],
+            "writes_done":[true,false],"removals_done":[false]}"#,
+    )
+    .unwrap();
+    assert!(undo.write_done(0) && !undo.write_done(1));
+    assert_eq!((undo.write_id(1), undo.removal_id(0)), (None, None));
+    let written = serde_json::to_value(&undo).unwrap();
+    assert!(written.get("write_ids").is_none(), "{written}");
 }

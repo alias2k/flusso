@@ -26,11 +26,19 @@
 //! Either way it then hands what it did to the caller ([`recover_telling`]:
 //! the designer keeps it as a notice), deletes the journal, and removes the
 //! record last, so a journal is acted on once. A kill before the journal is
-//! deleted makes the next start settle the save again, which finds the files
-//! already settled and tells the same thing (a notice is kept per save, so it
-//! is replaced, never doubled); a kill after it leaves the notice told. `.flusso-save.journal.tmp` with a record of
-//! this folder and no journal means nothing was done yet: it is deleted. A
-//! record of this folder with no journal left at all is removed.
+//! deleted makes the next start carry on: a rollback from the decisions its
+//! record holds (see below), so it tells the same thing (a notice is kept per
+//! save, so it is replaced, never doubled); a kill after it leaves the notice
+//! told. `.flusso-save.journal.tmp` with a record of this folder and no
+//! journal means nothing was done yet: it is deleted. A record of this folder
+//! with no journal left at all is removed.
+//!
+//! **A rollback decides once per file** ([`roll_back`]): every decision is in
+//! the record before the first file changes, each step's completion is
+//! marked there right after its rename is flushed, a file the record settles is never
+//! looked at again, and once every file is settled the record says so and
+//! only the save's own files are left to delete. The commit's module docs
+//! list what a kill leaves at each point.
 //!
 //! Any other journal (no record, a record of another folder, too large,
 //! unreadable, damaged, naming what no save writes, or `.journal` and
@@ -59,7 +67,8 @@
 //! - a backup is deleted, or put back, only when it holds the text from
 //!   before the save;
 //! - a file is replaced only when it holds the text from before or after the
-//!   save, and removed only when it holds the text the save created it with;
+//!   save, and removed (renamed to its temp file, free or holding the save's
+//!   text) only when it holds the text the save created it with;
 //! - a folder the journal says the save created is removed only when empty.
 //!
 //! Anything else is left as it is, and listed: a temp file or backup that
@@ -68,7 +77,8 @@
 //! rollback with no copy of a file's text from before, stops it before it
 //! changes anything. Each step looks at the disk before it acts, so running
 //! recovery again after it was itself cut short carries on from where it
-//! stopped.
+//! stopped, and the record keeps it from deciding again over a file it
+//! settled.
 
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -79,7 +89,7 @@ use super::journal::{
     Unusable, is_save_file, read_capped,
 };
 use super::lock::ProjectLock;
-use super::state::State;
+use super::state::{Act, FileId, Record, State, Undo};
 
 /// What recovery found and did.
 #[derive(Debug, Default)]
@@ -318,6 +328,8 @@ pub(crate) struct Problem {
     pub(crate) fix: Option<Box<HandStep>>,
     /// A file that holds the file's text from before the save now.
     pub(crate) before_copy: Option<PathBuf>,
+    /// For [`ProblemKind::InTheWay`]: the file whose removal needs the name.
+    pub(crate) blocks: Option<Box<PathBuf>>,
 }
 
 /// Why a file stops recovery.
@@ -331,6 +343,9 @@ pub(crate) enum ProblemKind {
     JournalUnusable,
     /// A step failed.
     Failed,
+    /// Something the save did not write is at the name the rollback needs
+    /// to remove a file the save created ([`Problem::blocks`]).
+    InTheWay,
 }
 
 impl Problem {
@@ -342,6 +357,7 @@ impl Problem {
             backup: None,
             fix: None,
             before_copy: None,
+            blocks: None,
         }
     }
 }
@@ -381,10 +397,9 @@ pub(crate) fn recover(
 /// of (`Err` says why there are no records to check). Each save it settles
 /// is handed to `tell` once its files are settled and before its journal is
 /// deleted: a kill before the journal goes leaves it and its record, so the
-/// next start settles the save again from the state the kill left (its files
-/// are settled already, so it tells the same thing). The journal is deleted
-/// in the same recovery whatever `tell` managed to keep, so a save is never
-/// settled twice over files the user may have changed since.
+/// next start carries on from the record, settles nothing again, and tells
+/// the same thing. The journal is deleted in the same recovery whatever
+/// `tell` managed to keep.
 ///
 /// A record of this folder with no journal left is removed, and logged: no
 /// save it names is untold. Such a record is left by a kill before the save
@@ -472,7 +487,10 @@ pub(crate) fn recover_telling(
                 ));
                 return recovery;
             }
-            if let Err(e) = disk.remove_file(&staging) {
+            if let Err(e) = disk
+                .remove_file(&staging)
+                .and_then(|()| disk.sync_dir(base))
+            {
                 recovery.blocked = Some(
                     Blocked::new(
                         vec![Problem::new(
@@ -575,7 +593,17 @@ fn settle(
             Outcome::RolledBack,
             Direction::RollBack,
             Finished {
-                kept: roll_back_with(&steps, file, Backups::Keep, JournalThen::Keep, disk)?,
+                kept: roll_back(
+                    &steps,
+                    file,
+                    &Rollback {
+                        backups: Backups::Keep,
+                        ledger: Some((state, &record)),
+                        reached: None,
+                        journal: JournalThen::Keep,
+                    },
+                    disk,
+                )?,
                 displaced: Vec::new(),
             },
         )
@@ -600,8 +628,11 @@ fn settle(
     }
     disk.remove_file(file)
         .map_err(|e| failed(&steps, file, direction, file, &e))?;
+    let removed = flush_parent(file, disk)
+        .map_err(|(_, e)| e)
+        .and_then(|()| state.remove(&record.token, disk));
     if !disk.stopped()
-        && let Err(e) = state.remove(&record.token, disk)
+        && let Err(e) = removed
     {
         tracing::warn!(error = %e, "could not remove the record of a recovered save");
     }
@@ -949,7 +980,7 @@ pub(crate) fn finish(steps: &Steps, file: &Path, disk: &mut Disk) -> Result<Fini
 
 /// What settling a save does with its journal once the files are settled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum JournalThen {
+pub(crate) enum JournalThen {
     /// Delete it: the save is over.
     Delete,
     /// Leave it to the caller, which tells about the save first: a kill
@@ -1030,6 +1061,14 @@ fn clean(
     if journal == JournalThen::Delete {
         disk.remove_file(file).map_err(at(file))?;
     }
+    for folder in steps
+        .folders()
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(file.parent())
+    {
+        disk.sync_dir(folder).map_err(at(folder))?;
+    }
     Ok(())
 }
 
@@ -1048,52 +1087,43 @@ pub(crate) enum Backups {
     Drop,
 }
 
-/// What undoing `write` needs to do, or why it can't.
-enum WriteUndo {
-    Nothing,
-    /// Put the backup back over the file.
-    Restore,
-    /// A backup beside a file that was never replaced: drop it.
-    DropBackup,
-    /// Remove a file the save created.
-    Remove,
-    /// The file holds a third text: leave it, and drop its backup when
-    /// `drop_backup`.
-    Keep {
-        drop_backup: bool,
-        kept: Kept,
-    },
+/// How a rollback runs.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Rollback<'a> {
+    /// What becomes of the backup of a file it keeps.
+    pub(crate) backups: Backups,
+    /// The save's record and its folder: the rollback writes its decisions
+    /// there before it acts, and carries on from them when one is there.
+    /// `None` for a save without a record, which only its own process undoes.
+    pub(crate) ledger: Option<(&'a State, &'a Record)>,
+    /// For a commit stopped by [`super::Changed`]: how many files it had
+    /// renamed into place, and removed. A file past those was never touched:
+    /// it is left as it is, and kept when it changed.
+    pub(crate) reached: Option<(usize, usize)>,
+    /// What becomes of the journal once the files are settled.
+    pub(crate) journal: JournalThen,
 }
 
-/// The [`Kept`] record of `path`, and whether its backup goes: one holding
-/// the kept file's own bytes always, one holding the text from before
-/// unless `backups` keeps it, anything else never (a leftover reported).
-fn keep(
-    path: &Path,
+/// What a file holding a third text keeps of its backup: dropped when it
+/// holds the file's own bytes (a hard link edited in place), or the text from
+/// before unless `backups` keeps it.
+fn keep_act(
     now: Option<&Digest>,
     before: Option<&Digest>,
     backup: Option<&PathBuf>,
     backups: Backups,
-) -> (bool, Kept) {
-    let at = |b: &PathBuf| Digest::at(b).ok().flatten();
-    let backup_holds = backup.and_then(at);
+) -> Act {
+    let backup_holds = backup.and_then(|b| Digest::at(b).ok().flatten());
     let redundant = backup_holds.is_some() && backup_holds.as_ref() == now;
     let before_text = backup_holds.is_some() && backup_holds.as_ref() == before;
-    let drop_backup = redundant || (before_text && backups == Backups::Drop);
-    let named = (before_text && !drop_backup)
-        .then(|| backup.cloned())
-        .flatten();
-    (
-        drop_backup,
-        Kept {
-            path: path.to_path_buf(),
-            before: before.cloned(),
-            backup: named,
-        },
-    )
+    if redundant || (before_text && backups == Backups::Drop) {
+        Act::KeepDropping
+    } else {
+        Act::Keep
+    }
 }
 
-fn plan_write(write: &FileWrite, backups: Backups) -> Result<WriteUndo, Problem> {
+fn plan_write(write: &FileWrite, backups: Backups) -> Result<Act, Problem> {
     let now = state(&write.dest)?;
     let backed_up = write
         .backup
@@ -1101,71 +1131,61 @@ fn plan_write(write: &FileWrite, backups: Backups) -> Result<WriteUndo, Problem>
         .zip(write.before.as_ref())
         .is_some_and(|(backup, before)| holds(backup, before));
     let third = || {
-        let (drop_backup, kept) = keep(
-            &write.dest,
+        keep_act(
             now.as_ref(),
             write.before.as_ref(),
             write.backup.as_ref(),
             backups,
-        );
-        Ok(WriteUndo::Keep { drop_backup, kept })
+        )
     };
     let Some(before) = &write.before else {
         return match now {
-            None => Ok(WriteUndo::Nothing),
-            Some(d) if d == write.after => Ok(WriteUndo::Remove),
-            Some(_) => third(),
+            None => Ok(Act::Leave),
+            Some(d) if d == write.after => removable(write).map(|()| Act::Remove),
+            Some(_) => Ok(third()),
         };
     };
     match now {
-        // Never renamed over, or already put back. A hard-linked backup is the
-        // same file, and renaming one link over the other does nothing, so
-        // the backup is removed instead. One that holds anything else stays.
-        Some(d) if d == *before => Ok(if backed_up {
-            WriteUndo::DropBackup
-        } else {
-            WriteUndo::Nothing
-        }),
-        Some(d) if d == write.after && backed_up => Ok(WriteUndo::Restore),
+        Some(d) if d == *before => Ok(Act::Leave),
+        Some(d) if d == write.after && backed_up => Ok(Act::Restore),
         Some(d) if d == write.after => Err(Problem {
             backup: write.backup.clone(),
             ..Problem::new(&write.dest, ProblemKind::BackupMissing, None)
         }),
-        _ => third(),
+        _ => Ok(third()),
     }
 }
 
-/// What undoing `removal` needs to do.
-enum RemovalUndo {
-    Nothing,
-    Restore,
-    DropBackup,
-    /// Made again with another text: leave it, as [`WriteUndo::Keep`].
-    Keep {
-        drop_backup: bool,
-        kept: Kept,
-    },
+/// Whether the file the save created at `write` can be renamed to its temp
+/// file: nothing is there, or the save's own text (deleted before a fresh
+/// rollback acts, renamed over otherwise). Anything else is in the way.
+fn removable(write: &FileWrite) -> Result<(), Problem> {
+    match write.temp.symlink_metadata() {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Ok(_) if holds(&write.temp, &write.after) => Ok(()),
+        Err(e) => Err(Problem::new(
+            &write.temp,
+            ProblemKind::Unreadable,
+            Some(e.to_string()),
+        )),
+        Ok(_) => Err(Problem {
+            blocks: Some(Box::new(write.dest.clone())),
+            ..Problem::new(&write.temp, ProblemKind::InTheWay, None)
+        }),
+    }
 }
 
-fn plan_removal(removal: &Removal, backups: Backups) -> Result<RemovalUndo, Problem> {
+fn plan_removal(removal: &Removal, backups: Backups) -> Result<Act, Problem> {
     let backed_up = holds(&removal.backup, &removal.before);
     match state(&removal.path)? {
-        Some(d) if d == removal.before => Ok(if backed_up {
-            RemovalUndo::DropBackup
-        } else {
-            RemovalUndo::Nothing
-        }),
-        Some(d) => {
-            let (drop_backup, kept) = keep(
-                &removal.path,
-                Some(&d),
-                Some(&removal.before),
-                Some(&removal.backup),
-                backups,
-            );
-            Ok(RemovalUndo::Keep { drop_backup, kept })
-        }
-        None if backed_up => Ok(RemovalUndo::Restore),
+        Some(d) if d == removal.before => Ok(Act::Leave),
+        Some(d) => Ok(keep_act(
+            Some(&d),
+            Some(&removal.before),
+            Some(&removal.backup),
+            backups,
+        )),
+        None if backed_up => Ok(Act::Restore),
         None => Err(Problem {
             backup: Some(removal.backup.clone()),
             ..Problem::new(&removal.path, ProblemKind::BackupMissing, None)
@@ -1173,140 +1193,458 @@ fn plan_removal(removal: &Removal, backups: Backups) -> Result<RemovalUndo, Prob
     }
 }
 
-/// Undo the save `steps` describes and delete `file`, its journal. Every
-/// file is checked before anything changes; one holding a third text is
-/// kept (see the module docs), its backup as `backups` says.
+/// What a file the commit never reached gets: left when it holds its text
+/// from before, else kept; its backup goes either way.
+fn unreached(path: &Path, before: Option<&Digest>) -> Act {
+    if Digest::at(path).ok().flatten().as_ref() == before {
+        Act::Leave
+    } else {
+        Act::KeepDropping
+    }
+}
+
+/// Whether `act` changes its file: a step whose completion the record marks.
+fn is_step(act: Act) -> bool {
+    matches!(act, Act::Restore | Act::Remove)
+}
+
+/// One file's decision: what the rollback does to it, whether its step is
+/// done, and the file the step renames.
+#[derive(Debug, Clone, Copy)]
+struct Decided {
+    act: Act,
+    done: bool,
+    id: Option<FileId>,
+}
+
+impl Decided {
+    /// A decision with nothing done yet, renaming the file at `source` when
+    /// it is a step.
+    fn fresh(act: Act, source: Option<&Path>) -> Self {
+        Self {
+            act,
+            done: false,
+            id: source.filter(|_| is_step(act)).and_then(FileId::of),
+        }
+    }
+
+    /// A step a kill caught between its rename and its mark, whose renamed
+    /// file is at its destination name: done. A file the user made or wrote
+    /// since at the name the step left (`changed`) is kept as it is, and named.
+    fn ran(act: Act, changed: bool, id: Option<FileId>) -> Self {
+        Self {
+            act: if changed { Act::Keep } else { act },
+            done: !changed,
+            id,
+        }
+    }
+}
+
+/// Whether the file recorded as `id` is at `path`: the rename that takes it
+/// there ran.
+fn renamed_to(id: Option<FileId>, path: &Path) -> bool {
+    id.is_some() && FileId::of(path) == id
+}
+
+/// Decide every file of a fresh rollback, or, carrying on from `undo`,
+/// every file whose step the record does not mark done. A step whose renamed
+/// file sits at its destination name ran, and a kill caught it before its
+/// mark: it is done, and whatever the user put since at the name it left is
+/// kept. Every other one is decided again from what the disk holds now, as
+/// a fresh rollback would (where no file identity is recorded, the one a kill
+/// caught between its rename and its mark included: done, it now needs
+/// nothing; anything else is decided, or blocks, as if it were never begun).
+/// A decision the record holds otherwise is never looked at again. All or
+/// nothing: a problem with any file blocks it.
+fn plan(
+    steps: &Steps,
+    file: &Path,
+    run: &Rollback<'_>,
+    undo: Option<&Undo>,
+) -> Result<Undo, Blocked> {
+    let mut problems = Vec::new();
+    let (renamed, removed) = run
+        .reached
+        .unwrap_or((steps.writes.len(), steps.removals.len()));
+    let mut decide = |planned: Result<Act, Problem>| {
+        planned.unwrap_or_else(|p| {
+            problems.push(p);
+            Act::Leave
+        })
+    };
+    let settled = |act: Option<&Act>, done: bool, id: Option<FileId>| {
+        act.copied()
+            .filter(|&a| !is_step(a) || done)
+            .map(|act| Decided {
+                act,
+                done: is_step(act),
+                id,
+            })
+    };
+    let removals: Vec<Decided> = steps
+        .removals
+        .iter()
+        .enumerate()
+        .map(|(i, removal)| {
+            let recorded = undo.and_then(|u| u.removals.get(i).copied());
+            let id = undo.and_then(|u| u.removal_id(i));
+            if let Some(decided) =
+                undo.and_then(|u| settled(u.removals.get(i), u.removal_done(i), id))
+            {
+                return decided;
+            }
+            match recorded {
+                Some(Act::Restore) if renamed_to(id, &removal.path) => {
+                    let now = Digest::at(&removal.path).ok().flatten();
+                    Decided::ran(Act::Restore, now.as_ref() != Some(&removal.before), id)
+                }
+                _ if i >= removed => {
+                    Decided::fresh(unreached(&removal.path, Some(&removal.before)), None)
+                }
+                _ => Decided::fresh(
+                    decide(plan_removal(removal, run.backups)),
+                    Some(&removal.backup),
+                ),
+            }
+        })
+        .collect();
+    let writes: Vec<Decided> = steps
+        .writes
+        .iter()
+        .enumerate()
+        .map(|(i, write)| {
+            let recorded = undo.and_then(|u| u.writes.get(i).copied());
+            let id = undo.and_then(|u| u.write_id(i));
+            if let Some(decided) = undo.and_then(|u| settled(u.writes.get(i), u.write_done(i), id))
+            {
+                return decided;
+            }
+            match recorded {
+                Some(Act::Restore) if renamed_to(id, &write.dest) => {
+                    let now = Digest::at(&write.dest).ok().flatten();
+                    Decided::ran(Act::Restore, now.as_ref() != write.before.as_ref(), id)
+                }
+                Some(Act::Remove) if renamed_to(id, &write.temp) => {
+                    Decided::ran(Act::Remove, write.dest.symlink_metadata().is_ok(), id)
+                }
+                _ if i >= renamed => {
+                    Decided::fresh(unreached(&write.dest, write.before.as_ref()), None)
+                }
+                _ => {
+                    let act = decide(plan_write(write, run.backups));
+                    let source = match act {
+                        Act::Remove => Some(write.dest.as_path()),
+                        _ => write.backup.as_deref(),
+                    };
+                    Decided::fresh(act, source)
+                }
+            }
+        })
+        .collect();
+    let undo = Undo {
+        settled: false,
+        writes: writes.iter().map(|d| d.act).collect(),
+        removals: removals.iter().map(|d| d.act).collect(),
+        writes_done: writes.iter().map(|d| d.done).collect(),
+        removals_done: removals.iter().map(|d| d.done).collect(),
+        write_ids: writes.iter().map(|d| d.id).collect(),
+        removal_ids: removals.iter().map(|d| d.id).collect(),
+    };
+    if problems.is_empty() {
+        return Ok(undo);
+    }
+    let in_the_way: Vec<PathBuf> = problems
+        .iter()
+        .filter(|p| p.kind == ProblemKind::InTheWay)
+        .map(|p| p.path.clone())
+        .collect();
+    let mut leftovers = on_disk(steps, file);
+    leftovers.retain(|l| !in_the_way.contains(l));
+    Err(Blocked {
+        keep: keepable(&problems).then(|| by_hand(steps, file, &undo)),
+        ..Blocked::new(problems, leftovers).going(Direction::RollBack)
+    })
+}
+
+/// The steps by hand that settle every file `undo` still changes, then the
+/// save's own files: the way out that keeps the files that changed.
+fn by_hand(steps: &Steps, file: &Path, undo: &Undo) -> Vec<HandStep> {
+    let mut hand = Vec::new();
+    for (i, (removal, &act)) in steps.removals.iter().zip(&undo.removals).enumerate() {
+        if act == Act::Restore && !undo.removal_done(i) {
+            hand.push(HandStep::Copy {
+                from: removal.backup.clone(),
+                to: removal.path.clone(),
+            });
+        }
+    }
+    for (i, (write, &act)) in steps.writes.iter().zip(&undo.writes).enumerate() {
+        match (act, &write.backup) {
+            _ if undo.write_done(i) => {}
+            (Act::Restore, Some(backup)) => hand.push(HandStep::Copy {
+                from: backup.clone(),
+                to: write.dest.clone(),
+            }),
+            (Act::Remove, _) => hand.push(HandStep::Delete(write.dest.clone())),
+            _ => {}
+        }
+    }
+    hand.extend(clear_by_hand(steps, file));
+    hand
+}
+
+/// The files `undo` keeps, each with the backup holding its text from
+/// before when the rollback keeps that too.
+fn kept(steps: &Steps, undo: &Undo) -> Vec<Kept> {
+    let named = |act: Act, backup: Option<&PathBuf>, before: Option<&Digest>| {
+        (act == Act::Keep)
+            .then(|| backup.zip(before).filter(|(b, d)| holds(b, d)))
+            .flatten()
+            .map(|(b, _)| b.clone())
+    };
+    let removals = steps
+        .removals
+        .iter()
+        .zip(&undo.removals)
+        .filter(|(_, act)| matches!(act, Act::Keep | Act::KeepDropping))
+        .map(|(removal, &act)| Kept {
+            path: removal.path.clone(),
+            before: Some(removal.before.clone()),
+            backup: named(act, Some(&removal.backup), Some(&removal.before)),
+        });
+    let writes = steps
+        .writes
+        .iter()
+        .zip(&undo.writes)
+        .filter(|(_, act)| matches!(act, Act::Keep | Act::KeepDropping))
+        .map(|(write, &act)| Kept {
+            path: write.dest.clone(),
+            before: write.before.clone(),
+            backup: named(act, write.backup.as_ref(), write.before.as_ref()),
+        });
+    removals.chain(writes).collect()
+}
+
+/// Undo the save `steps` describes, its journal `file` last as `run` says.
+/// Every file is checked before anything changes; one holding a third text
+/// is kept (see the module docs), its backup as `run.backups` says.
 pub(crate) fn roll_back(
     steps: &Steps,
     file: &Path,
-    backups: Backups,
+    run: &Rollback<'_>,
     disk: &mut Disk,
 ) -> Result<Vec<Kept>, Blocked> {
-    roll_back_with(steps, file, backups, JournalThen::Delete, disk)
+    let recorded = run
+        .ledger
+        .and_then(|(_, record)| record.undo.clone())
+        .filter(|u| {
+            u.writes.len() == steps.writes.len() && u.removals.len() == steps.removals.len()
+        });
+    let fail =
+        |(path, e): (PathBuf, io::Error)| failed(steps, file, Direction::RollBack, &path, &e);
+    let undo = match recorded {
+        Some(undo) if undo.settled => undo,
+        recorded => {
+            let mut unflushed = Unflushed::default();
+            for folder in steps
+                .folders()
+                .iter()
+                .map(PathBuf::as_path)
+                .chain(file.parent())
+            {
+                unflushed.dir(folder);
+            }
+            let undo = plan(steps, file, run, recorded.as_ref())?;
+            if recorded.is_none() {
+                clear_own_temps(steps, &undo, &mut unflushed, disk).map_err(fail)?;
+            }
+            let mut undo = undo;
+            if recorded.as_ref() != Some(&undo) {
+                note(run, &undo, &mut unflushed, disk).map_err(fail)?;
+            }
+            settle_files(steps, &mut undo, run, &mut unflushed, disk).map_err(fail)?;
+            let settled = Undo {
+                settled: true,
+                ..undo
+            };
+            if run.ledger.is_some() {
+                for folder in steps.folders() {
+                    unflushed.dir(&folder);
+                }
+                note(run, &settled, &mut unflushed, disk).map_err(fail)?;
+            }
+            settled
+        }
+    };
+    clear(steps, file, run.journal, disk).map_err(fail)?;
+    Ok(kept(steps, &undo))
 }
 
-/// [`roll_back`], deleting the journal or not as `journal` says.
-fn roll_back_with(
-    steps: &Steps,
-    file: &Path,
-    backups: Backups,
-    journal: JournalThen,
-    disk: &mut Disk,
-) -> Result<Vec<Kept>, Blocked> {
-    let mut problems = Vec::new();
-    let removals: Vec<(&Removal, RemovalUndo)> = steps
-        .removals
-        .iter()
-        .filter_map(|r| {
-            plan_removal(r, backups)
-                .map(|u| (r, u))
-                .map_err(|p| problems.push(p))
-                .ok()
-        })
-        .collect();
-    let writes: Vec<(&FileWrite, WriteUndo)> = steps
-        .writes
-        .iter()
-        .filter_map(|w| {
-            plan_write(w, backups)
-                .map(|u| (w, u))
-                .map_err(|p| problems.push(p))
-                .ok()
-        })
-        .collect();
-    if !problems.is_empty() {
-        let keep = keepable(&problems).then(|| {
-            let mut hand = Vec::new();
-            for (removal, undo) in &removals {
-                if let RemovalUndo::Restore = undo {
-                    hand.push(HandStep::Copy {
-                        from: removal.backup.clone(),
-                        to: removal.path.clone(),
-                    });
-                }
-            }
-            for (write, undo) in &writes {
-                match (undo, &write.backup) {
-                    (WriteUndo::Restore, Some(backup)) => hand.push(HandStep::Copy {
-                        from: backup.clone(),
-                        to: write.dest.clone(),
-                    }),
-                    (WriteUndo::Remove, _) => hand.push(HandStep::Delete(write.dest.clone())),
-                    _ => {}
-                }
-            }
-            hand.extend(clear_by_hand(steps, file));
-            hand
-        });
-        return Err(Blocked {
-            keep,
-            ..Blocked::new(problems, on_disk(steps, file)).going(Direction::RollBack)
-        });
+/// The project folders changed since they were last flushed. A power cut
+/// keeps a write to the record only with the changes flushed before it, so
+/// every one is flushed before the record says anything more: a step's mark
+/// never outlives its rename.
+#[derive(Debug, Default)]
+struct Unflushed(Vec<PathBuf>);
+
+impl Unflushed {
+    fn dir(&mut self, dir: &Path) {
+        if !self.0.iter().any(|d| d == dir) {
+            self.0.push(dir.to_path_buf());
+        }
     }
-    let temps: Vec<&Path> = steps
-        .writes
-        .iter()
-        .rev()
-        .filter(|w| own_temp_before_commit(w))
-        .map(|w| w.temp.as_path())
-        .collect();
-    let kept: Vec<Kept> = removals
-        .iter()
-        .filter_map(|(_, u)| match u {
-            RemovalUndo::Keep { kept, .. } => Some(kept.clone()),
-            _ => None,
-        })
-        .chain(writes.iter().filter_map(|(_, u)| match u {
-            WriteUndo::Keep { kept, .. } => Some(kept.clone()),
-            _ => None,
-        }))
-        .collect();
 
-    undo(steps, &removals, &writes, &temps, file, journal, disk)
-        .map_err(|(path, e)| failed(steps, file, Direction::RollBack, &path, &e))?;
-    Ok(kept)
+    /// `path`'s folder changed.
+    fn changed(&mut self, path: &Path) {
+        if let Some(dir) = path.parent() {
+            self.dir(dir);
+        }
+    }
+
+    fn flush(&mut self, disk: &mut Disk) -> Result<(), (PathBuf, io::Error)> {
+        while let Some(dir) = self.0.first().cloned() {
+            disk.sync_dir(&dir).map_err(at(&dir))?;
+            self.0.remove(0);
+        }
+        Ok(())
+    }
 }
 
-fn undo(
+/// Write `undo` into the save's record, when it has one, once every change
+/// before it is flushed. A record that can't be written (a full disk) leaves
+/// the rollback as it was before it kept one: it carries on, and a recovery
+/// cut short decides again.
+fn note(
+    run: &Rollback<'_>,
+    undo: &Undo,
+    unflushed: &mut Unflushed,
+    disk: &mut Disk,
+) -> Result<(), (PathBuf, io::Error)> {
+    let Some((state, record)) = run.ledger else {
+        return Ok(());
+    };
+    unflushed.flush(disk)?;
+    match state.undo(record, undo, disk) {
+        Err(e) if disk.stopped() => Err((state.path().to_path_buf(), e)),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "could not record how the save is being undone; if the designer is killed \
+                 before it is done, the next start decides again over what each file holds then"
+            );
+            Ok(())
+        }
+        Ok(()) => Ok(()),
+    }
+}
+
+/// Delete the temp files a fresh rollback finds that are the save's own,
+/// before it records anything: none is a project file, and a removal needs
+/// its file's temp name free.
+fn clear_own_temps(
     steps: &Steps,
-    removals: &[(&Removal, RemovalUndo)],
-    writes: &[(&FileWrite, WriteUndo)],
-    temps: &[&Path],
+    undo: &Undo,
+    unflushed: &mut Unflushed,
+    disk: &mut Disk,
+) -> Result<(), (PathBuf, io::Error)> {
+    for (write, &act) in steps.writes.iter().zip(&undo.writes).rev() {
+        if own_temp_before_commit(write) || (act == Act::Remove && regular(&write.temp)) {
+            disk.remove_file(&write.temp).map_err(at(&write.temp))?;
+            unflushed.changed(&write.temp);
+        }
+    }
+    Ok(())
+}
+
+/// Take each file's step the record does not mark done, removals first, then
+/// the writes from the last: one rename each, then, its folders flushed, its
+/// mark in the record, flushed, before the next. Every step left was decided
+/// by this run from what the disk holds now, so each rename's source is there.
+fn settle_files(
+    steps: &Steps,
+    undo: &mut Undo,
+    run: &Rollback<'_>,
+    unflushed: &mut Unflushed,
+    disk: &mut Disk,
+) -> Result<(), (PathBuf, io::Error)> {
+    for (i, removal) in steps.removals.iter().enumerate().rev() {
+        let act = undo.removals.get(i).copied().unwrap_or(Act::Leave);
+        let dropped = match act {
+            Act::Restore if !undo.removal_done(i) => {
+                rename(&removal.backup, &removal.path, unflushed, disk)
+                    .map_err(at(&removal.path))?;
+                undo.mark_removal(i);
+                note(run, undo, unflushed, disk)?;
+                Ok(())
+            }
+            Act::Leave if holds(&removal.backup, &removal.before) => {
+                drop_backup(&removal.backup, unflushed, disk)
+            }
+            Act::KeepDropping if regular(&removal.backup) => {
+                drop_backup(&removal.backup, unflushed, disk)
+            }
+            _ => Ok(()),
+        };
+        dropped.map_err(at(&removal.path))?;
+    }
+    for (i, write) in steps.writes.iter().enumerate().rev() {
+        let act = undo.writes.get(i).copied().unwrap_or(Act::Leave);
+        let renamed = match (act, &write.backup) {
+            _ if is_step(act) && undo.write_done(i) => None,
+            (Act::Restore, Some(backup)) => Some(rename(backup, &write.dest, unflushed, disk)),
+            (Act::Remove, _) => Some(rename(&write.dest, &write.temp, unflushed, disk)),
+            (Act::Leave, Some(backup))
+                if write
+                    .before
+                    .as_ref()
+                    .is_some_and(|before| holds(backup, before)) =>
+            {
+                drop_backup(backup, unflushed, disk).map_err(at(&write.dest))?;
+                None
+            }
+            (Act::KeepDropping, Some(backup)) if regular(backup) => {
+                drop_backup(backup, unflushed, disk).map_err(at(&write.dest))?;
+                None
+            }
+            _ => None,
+        };
+        if let Some(renamed) = renamed {
+            renamed.map_err(at(&write.dest))?;
+            undo.mark_write(i);
+            note(run, undo, unflushed, disk)?;
+        }
+    }
+    Ok(())
+}
+
+/// Delete a backup, its folder then unflushed.
+fn drop_backup(backup: &Path, unflushed: &mut Unflushed, disk: &mut Disk) -> io::Result<()> {
+    disk.remove_file(backup)?;
+    unflushed.changed(backup);
+    Ok(())
+}
+
+/// Rename `from` to `to`, both folders then unflushed.
+fn rename(from: &Path, to: &Path, unflushed: &mut Unflushed, disk: &mut Disk) -> io::Result<()> {
+    disk.rename(from, to)?;
+    unflushed.changed(from);
+    unflushed.changed(to);
+    Ok(())
+}
+
+/// Delete what is left of a settled rollback: the temp files holding the
+/// save's text (a removed file among them), the folders it created once
+/// empty, then, flushed, its journal as `journal` says.
+fn clear(
+    steps: &Steps,
     file: &Path,
     journal: JournalThen,
     disk: &mut Disk,
 ) -> Result<(), (PathBuf, io::Error)> {
-    for (removal, undo) in removals.iter().rev() {
-        match undo {
-            RemovalUndo::Nothing
-            | RemovalUndo::Keep {
-                drop_backup: false, ..
-            } => Ok(()),
-            RemovalUndo::Restore => disk.rename(&removal.backup, &removal.path),
-            RemovalUndo::DropBackup
-            | RemovalUndo::Keep {
-                drop_backup: true, ..
-            } => disk.remove_file(&removal.backup),
+    for write in steps.writes.iter().rev() {
+        if holds(&write.temp, &write.after) {
+            disk.remove_file(&write.temp).map_err(at(&write.temp))?;
         }
-        .map_err(at(&removal.path))?;
-    }
-    for (write, undo) in writes.iter().rev() {
-        match (undo, &write.backup) {
-            (WriteUndo::Restore, Some(backup)) => disk.rename(backup, &write.dest),
-            (
-                WriteUndo::DropBackup
-                | WriteUndo::Keep {
-                    drop_backup: true, ..
-                },
-                Some(backup),
-            ) => disk.remove_file(backup),
-            (WriteUndo::Remove, _) => disk.remove_file(&write.dest),
-            _ => Ok(()),
-        }
-        .map_err(at(&write.dest))?;
-    }
-    for temp in temps {
-        disk.remove_file(temp).map_err(at(temp))?;
     }
     for dir in steps.dirs.iter().rev() {
         if dir.symlink_metadata().is_ok_and(|m| m.is_dir()) {
@@ -1318,8 +1656,17 @@ fn undo(
     }
     if journal == JournalThen::Delete {
         disk.remove_file(file).map_err(at(file))?;
+        flush_parent(file, disk)?;
     }
     Ok(())
+}
+
+/// Flush the folder `path` is in.
+fn flush_parent(path: &Path, disk: &mut Disk) -> Result<(), (PathBuf, io::Error)> {
+    match path.parent() {
+        Some(dir) => disk.sync_dir(dir).map_err(at(dir)),
+        None => Ok(()),
+    }
 }
 
 /// Tag an error with the file it happened on.

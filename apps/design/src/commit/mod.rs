@@ -44,6 +44,75 @@
 //! back; committed, it is finished. Either way the record goes last, so a
 //! journal is acted on once.
 //!
+//! **A file a rollback has settled is never settled again** (issue #302),
+//! whatever the user does to it before a rollback cut short runs again. A
+//! rollback decides every file first (put back, remove, leave, keep:
+//! [`state::Act`]) and writes that into the record, flushed, before it
+//! changes one. A decision that needs no step (leave, keep) settles its file
+//! there. Each step (put back: the backup renamed over the file; remove: the
+//! file the save created renamed to its temp file, deleted once every file
+//! is settled) is one rename, then, once its folder is flushed, **its mark
+//! in the record**, flushed, before the next step. The record and the project
+//! are often on different filesystems, and even on one, flushing the state
+//! folder does not flush a rename in the project: so every project change is
+//! flushed before the record says anything more (the plan, a mark, `settled`,
+//! the record removed), and a power cut never keeps a mark without its
+//! rename. Completion is recorded, never read off the disk: a
+//! backup gone or a temp file there proves nothing, since anyone can delete
+//! or write one. A rollback running again never looks at a file whose
+//! decision needs no step or whose step is marked; every other file it
+//! decides again from what the disk holds now, exactly as a fresh rollback
+//! would (an edit to a file not put back yet is kept, as always), recording
+//! any changed decision before it acts. Once every file is settled and the
+//! project's folders are flushed, it marks the record `settled`; from then on
+//! only the save's own files are deleted. Finishing a committed save never
+//! changes a project file, so it needs no marks.
+//!
+//! **The promise: recovery reports a save rolled back only when every file
+//! it names holds its bytes from before the save (a created file: gone), or
+//! is told kept as another program's, or was settled and then changed by the
+//! user.** The one step a kill can catch between its rename and its mark is
+//! told apart by **the file it moves**: the plan records each step's file
+//! identity (device and inode, Unix only: [`state::FileId`]), and that file
+//! at the step's destination name proves the rename ran. The step is then
+//! done, and whatever the user put since at the name it left (a file the save
+//! created, made again; a file put back, written to) is kept and named. With
+//! no proof (another platform, or the file deleted or replaced by a new one
+//! since) the step is decided again: done, it needs nothing now; its file
+//! changed since (given the save's text, or deleted where the save had
+//! removed it), with its backup gone, the rollback blocks as any rollback
+//! without a backup does, and changes nothing. An inode reused in that
+//! window can only make a step read as done whose file then holds its text
+//! from before (nothing to do) or another text (kept and named): never a
+//! silent mix.
+//!
+//! What a kill leaves, at any point, and what the next start does (the
+//! record in the state folder, the rest in the config's folder):
+//!
+//! | Left by the kill | Next start |
+//! | --- | --- |
+//! | nothing of the save | nothing |
+//! | a record, no journal | removes the record: nothing was changed, or the save stood, was undone in its process, or was recovered and told |
+//! | a record, `.flusso-save.journal.tmp` | deletes it (nothing was changed), then removes the record |
+//! | a journal or `.done`, no record of it for this folder | changes nothing; reports it, with the way out by hand |
+//! | a journal, a record without `undo` (a save cut short; or a rollback cut short before it recorded, or by a designer from before `undo`) | rolls back from scratch: decides every file from what it holds, records, settles |
+//! | a journal, a record with `undo`, not settled: every step marked or none begun | takes the unmarked steps, each decided again from what the disk holds now |
+//! | the same, a step's rename done and its mark not written | the step's file is at its destination name (Unix): marks it done, keeps and names what the user put since at the name it left; else decides that file again: it holds its text from before (or a created file is gone), so it needs nothing |
+//! | the same, no proof, and that file changed since, its backup gone (or a created file's temp name taken) | blocks as a fresh rollback would (backup missing; a file in the way), changes nothing |
+//! | a journal, a record with `undo`, settled | deletes the save's temp files and empty folders, tells the save, deletes the journal, removes the record: no project file is looked at |
+//! | a journal or `.done`, a committed record | finishes: deletes backups and temp files holding the save's text, tells the save, deletes the journal, removes the record; keeps any file holding another text |
+//! | no journal, a stored notice, a record | removes the record; the notice is told until dismissed |
+//!
+//! A rollback that can't write its record (a full disk) carries on without
+//! it, as before records kept a rollback: cut short, it decides again. So
+//! does one an older designer cut short (its record has no `undo`): the
+//! files it had settled are told apart from the rest by what they hold, as
+//! that designer did, so an edit made between its kill and this start is
+//! handled as that designer would have. The other way round, an older
+//! designer can't read a record with `undo`: it only reports the journal,
+//! and prunes the record a day later, after which this designer can only
+//! report it too (see the manual).
+//!
 //! **A journal is acted on only when this user's designer has a record of
 //! it, for this folder** ([`state`]): it is a file in the project, and
 //! anyone who can put files there could write one, or bring a copy of one
@@ -89,9 +158,9 @@ pub(crate) use disk::Edit;
 pub(crate) use journal::Unusable;
 use journal::{DONE, JOURNAL, Journal, STAGING, Steps};
 pub(crate) use lock::{LockError, ProjectLock};
-use recover::Backups;
 #[cfg(test)]
 pub(crate) use recover::recover;
+use recover::{Backups, JournalThen, Rollback};
 pub(crate) use recover::{
     Blocked, Direction, Fix, HandStep, Holds, Outcome, ProblemKind, Report, Settled,
     recover_telling, strays,
@@ -235,13 +304,23 @@ pub(crate) fn commit(
             return Err(failed);
         }
         let staging = base.join(STAGING);
-        let undone = if failed.is::<Changed>() {
-            undo_reached(&steps, &progress, &journal_path, disk)
-        } else {
-            recover::roll_back(&steps, &journal_path, Backups::Drop, disk)
-        };
+        let reached = failed
+            .is::<Changed>()
+            .then_some((progress.renamed, progress.removed));
+        let undone = recover::roll_back(
+            &steps,
+            &journal_path,
+            &Rollback {
+                backups: Backups::Drop,
+                ledger: state.map(|s| (s, &record)),
+                reached,
+                journal: JournalThen::Delete,
+            },
+            disk,
+        );
         let undone = undone.and_then(|kept| {
             disk.remove_file(&staging)
+                .and_then(|()| disk.sync_dir(base))
                 .map_err(|e| {
                     Blocked::new(Vec::new(), vec![staging.clone()]).with_error(&staging, e)
                 })
@@ -349,67 +428,6 @@ fn with_kept(failed: anyhow::Error, kept: Vec<recover::Kept>) -> anyhow::Error {
                 .join(", ")
         ),
     }
-}
-
-/// Undo a commit stopped by [`Changed`] at `progress`. The files it had not
-/// reached were never replaced: their temp files and backups (a backup is a
-/// second name, never the file itself) are deleted, and each that no longer
-/// holds its text from before is kept as another program's. The rest is
-/// rolled back as any failed commit, keeping a file written since its rename.
-fn undo_reached(
-    steps: &Steps,
-    progress: &Progress,
-    journal: &std::path::Path,
-    disk: &mut Disk,
-) -> Result<Vec<recover::Kept>, Blocked> {
-    let mut kept = Vec::new();
-    for write in steps.writes.iter().skip(progress.renamed) {
-        if journal::Digest::at(&write.dest).ok().flatten() != write.before {
-            kept.push(recover::Kept {
-                path: write.dest.clone(),
-                before: write.before.clone(),
-                backup: None,
-            });
-        }
-    }
-    for removal in steps.removals.iter().skip(progress.removed) {
-        if journal::Digest::at(&removal.path).ok().flatten().as_ref() != Some(&removal.before) {
-            kept.push(recover::Kept {
-                path: removal.path.clone(),
-                before: Some(removal.before.clone()),
-                backup: None,
-            });
-        }
-    }
-    let failed = |path: &std::path::Path, e| {
-        Blocked::new(Vec::new(), vec![path.to_path_buf()]).with_error(path, e)
-    };
-    for write in steps.writes.iter().skip(progress.renamed) {
-        disk.remove_file(&write.temp)
-            .map_err(|e| failed(&write.temp, e))?;
-        if let Some(backup) = &write.backup {
-            disk.remove_file(backup).map_err(|e| failed(backup, e))?;
-        }
-    }
-    let reached = Steps {
-        started_at_ms: steps.started_at_ms,
-        token: steps.token.clone(),
-        dirs: steps.dirs.clone(),
-        writes: steps
-            .writes
-            .iter()
-            .take(progress.renamed)
-            .cloned()
-            .collect(),
-        removals: steps
-            .removals
-            .iter()
-            .take(progress.removed)
-            .cloned()
-            .collect(),
-    };
-    kept.extend(recover::roll_back(&reached, journal, Backups::Drop, disk)?);
-    Ok(kept)
 }
 
 /// Steps 2–5: everything up to the commit point. Right before each rename

@@ -13,6 +13,8 @@ const problemText = (t: Translate, problem: BlockedProblem): string => {
       return t("recovery.problemJournalUnusable");
     case "failed":
       return t("recovery.problemFailed");
+    case "in_the_way":
+      return t("recovery.problemInTheWay");
   }
 };
 
@@ -191,6 +193,8 @@ const problemHelp = (t: Translate, p: BlockedFile, back: boolean): string[] => {
       return [];
     case "failed":
       return [t("recovery.helpFailed")];
+    case "in_the_way":
+      return [t("recovery.helpInTheWay", { path, file: p.blocks ?? "" })];
   }
 };
 

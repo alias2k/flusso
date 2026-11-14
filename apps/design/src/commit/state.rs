@@ -22,7 +22,16 @@
 //!   "journal": "<sha-256 of the journal's exact bytes>",
 //!   "dir": "/home/me/project",
 //!   "committed": false,
-//!   "created_at_ms": 1763030000000
+//!   "created_at_ms": 1763030000000,
+//!   "undo": {
+//!     "settled": false,
+//!     "writes": ["restore", "leave", "remove"],
+//!     "removals": ["keep"],
+//!     "writes_done": [true, false, false],
+//!     "removals_done": [false],
+//!     "write_ids": [{ "dev": 2049, "ino": 1311 }, null, { "dev": 2049, "ino": 1315 }],
+//!     "removal_ids": [null]
+//!   }
 //! }
 //! ```
 //!
@@ -35,6 +44,13 @@
 //! - **The commit point**: `committed` turns true, durably, once every file is
 //!   in place. Recovery reads roll back or finish from the record, never from
 //!   the journal's file name.
+//! - **A rollback's progress**: `undo`, absent until a rollback has decided
+//!   what to do with every file ([`Undo`]), is written before it changes the
+//!   first one (with the file each step moves: `write_ids`/`removal_ids`,
+//!   Unix only), again after each step's rename is flushed (its mark), and with `settled`
+//!   once every file is settled. A record written by a designer without it
+//!   reads as a rollback not started; a designer without it can't read one
+//!   with it, and prunes it as a stray file a day later.
 //!
 //! The folder is created mode 0700, a record mode 0600 with `create_new`
 //! (never replacing a file), and neither is ever opened through a link or
@@ -110,6 +126,120 @@ pub(crate) struct Record {
     /// Whether every file was in place: the commit point.
     pub(crate) committed: bool,
     created_at_ms: u64,
+    /// How a rollback settles each file, once it has decided: written before
+    /// it changes the first one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) undo: Option<Undo>,
+}
+
+/// A rollback's decision for every file of a save, kept in its record so a
+/// rollback cut short carries on from it instead of deciding again over
+/// what the user wrote since (see `recover`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Undo {
+    /// Every file is settled: only the save's own files are left to delete.
+    pub(crate) settled: bool,
+    /// One per file the journal writes, in its order.
+    pub(crate) writes: Vec<Act>,
+    /// One per file the journal removes, in its order.
+    pub(crate) removals: Vec<Act>,
+    /// Per write, whether its step ([`Act::Restore`], [`Act::Remove`]) is
+    /// done: marked, flushed, right after its rename and before the next.
+    #[serde(default)]
+    pub(crate) writes_done: Vec<bool>,
+    /// Per removal, likewise.
+    #[serde(default)]
+    pub(crate) removals_done: Vec<bool>,
+    /// Per write, the file its step renames ([`FileId`]), recorded with the
+    /// decision: found at the step's destination name, the rename ran.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) write_ids: Vec<Option<FileId>>,
+    /// Per removal, likewise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) removal_ids: Vec<Option<FileId>>,
+}
+
+/// Which file a path names, apart from what it holds: its device and inode.
+/// Unix only; elsewhere there is none, and a step caught between its rename
+/// and its mark is decided again from what the file holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct FileId {
+    dev: u64,
+    ino: u64,
+}
+
+impl FileId {
+    /// The file at `path` (a link itself, never what it points at).
+    #[cfg(unix)]
+    pub(crate) fn of(path: &Path) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt as _;
+        let meta = path.symlink_metadata().ok()?;
+        Some(Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        })
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn of(_path: &Path) -> Option<Self> {
+        None
+    }
+}
+
+impl Undo {
+    /// Whether the record marks the step of write `i` done.
+    pub(crate) fn write_done(&self, i: usize) -> bool {
+        self.writes_done.get(i).copied().unwrap_or(false)
+    }
+
+    /// Whether the record marks the step of removal `i` done.
+    pub(crate) fn removal_done(&self, i: usize) -> bool {
+        self.removals_done.get(i).copied().unwrap_or(false)
+    }
+
+    /// The file the step of write `i` renames, when recorded.
+    pub(crate) fn write_id(&self, i: usize) -> Option<FileId> {
+        self.write_ids.get(i).copied().flatten()
+    }
+
+    /// The file the step of removal `i` renames, when recorded.
+    pub(crate) fn removal_id(&self, i: usize) -> Option<FileId> {
+        self.removal_ids.get(i).copied().flatten()
+    }
+
+    pub(crate) fn mark_write(&mut self, i: usize) {
+        mark(&mut self.writes_done, self.writes.len(), i);
+    }
+
+    pub(crate) fn mark_removal(&mut self, i: usize) {
+        mark(&mut self.removals_done, self.removals.len(), i);
+    }
+}
+
+fn mark(done: &mut Vec<bool>, len: usize, i: usize) {
+    done.resize(len, false);
+    if let Some(slot) = done.get_mut(i) {
+        *slot = true;
+    }
+}
+
+/// What a rollback does to one file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Act {
+    /// It already holds its text from before the save (or, created by it, is
+    /// not there): only a backup holding that text is deleted.
+    Leave,
+    /// It holds a third text: it stays, and so does its backup.
+    Keep,
+    /// It holds a third text: it stays, and its backup is deleted.
+    KeepDropping,
+    /// Its backup is renamed back over it.
+    Restore,
+    /// The save created it: it is renamed to its temp file, which is deleted
+    /// once every file is settled.
+    Remove,
 }
 
 impl Record {
@@ -123,6 +253,7 @@ impl Record {
             dir: dir.to_path_buf(),
             committed: false,
             created_at_ms: now_ms(),
+            undo: None,
         }
     }
 
@@ -217,6 +348,17 @@ impl State {
             ..record.clone()
         };
         disk.replace_private(&self.file(&record.token), &committed.encode()?)
+    }
+
+    /// Write `undo` into `record`, durably: the rollback acts on it from
+    /// now on, even after a kill.
+    pub(crate) fn undo(&self, record: &Record, undo: &Undo, disk: &mut Disk) -> io::Result<()> {
+        let undoing = Record {
+            undo: Some(undo.clone()),
+            ..record.clone()
+        };
+        disk.replace_private(&self.file(&record.token), &undoing.encode()?)?;
+        disk.sync_dir(&self.dir)
     }
 
     /// Remove the record of the save `token`.
