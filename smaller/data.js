@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794648973711,
+  "lastUpdate": 1794650919974,
   "repoUrl": "https://github.com/alias2k/flusso",
   "entries": {
     "flusso (smaller is better)": [
@@ -18989,6 +18989,277 @@ window.BENCHMARK_DATA = {
           {
             "name": "reference/ci/flush_p99_ms",
             "value": 441.5909090909079,
+            "unit": "ms",
+            "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":10000,\"items_per_order\":3,\"name\":\"ci\",\"orders\":25000,\"orders_per_user\":0,\"probe_rate_per_s\":20,\"probes\":200,\"products\":1000,\"reviews_per_product\":2,\"rss_cap_mib\":2048,\"tags\":0,\"tags_per_user\":0,\"users\":5000,\"wall_cap_secs\":900,\"writers\":8}}"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "89390131+JakubWasilczyk-Alias2k@users.noreply.github.com",
+            "name": "Jakub Wasilczyk",
+            "username": "JakubWasilczyk-Alias2k"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1588e786a689e03a3aac4191da46ea2db02f31b2",
+          "message": "Merge pull request #323 from alias2k/test/duplicate-names-wildcard-delete\n\ntest(cli): the duplicate-names matrix deletes only its own pair's indexes",
+          "timestamp": "2026-11-14T10:50:18+01:00",
+          "tree_id": "92691c2303cb00c0657d64971235b4290fa60b88",
+          "url": "https://github.com/alias2k/flusso/commit/1588e786a689e03a3aac4191da46ea2db02f31b2"
+        },
+        "date": 1794650919258,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "inprocess/decode/fixture",
+            "value": 3899101.230769231,
+            "unit": "ns"
+          },
+          {
+            "name": "inprocess/live_drain/sinks1/1",
+            "value": 131209633.12222221,
+            "unit": "ns"
+          },
+          {
+            "name": "inprocess/live_drain/sinks1/256",
+            "value": 45712593.7962963,
+            "unit": "ns"
+          },
+          {
+            "name": "inprocess/live_drain/sinks1/64",
+            "value": 85619849.8888889,
+            "unit": "ns"
+          },
+          {
+            "name": "inprocess/live_drain/sinks2/1",
+            "value": 154978669.5625,
+            "unit": "ns"
+          },
+          {
+            "name": "inprocess/live_drain/sinks2/256",
+            "value": 47044074.09444444,
+            "unit": "ns"
+          },
+          {
+            "name": "inprocess/live_drain/sinks2/64",
+            "value": 101719569.34722222,
+            "unit": "ns"
+          },
+          {
+            "name": "inprocess/render/delete",
+            "value": 831027.311622807,
+            "unit": "ns"
+          },
+          {
+            "name": "inprocess/render/mid",
+            "value": 10884461.1,
+            "unit": "ns"
+          },
+          {
+            "name": "inprocess/render/wide",
+            "value": 134355060.5,
+            "unit": "ns"
+          },
+          {
+            "name": "inprocess/scripted/flat",
+            "value": 7074579,
+            "unit": "ns"
+          },
+          {
+            "name": "inprocess/scripted/nested",
+            "value": 31245772,
+            "unit": "ns"
+          },
+          {
+            "name": "inprocess/snapshot/rows",
+            "value": 167351199.6666667,
+            "unit": "ns"
+          },
+          {
+            "name": "components/baseline/os_flush_1",
+            "value": 11770869.083333332,
+            "unit": "ns"
+          },
+          {
+            "name": "components/baseline/pg_select_1",
+            "value": 330773.80909712723,
+            "unit": "ns"
+          },
+          {
+            "name": "components/baseline/resolve_unrelated",
+            "value": 750.2403643483287,
+            "unit": "ns"
+          },
+          {
+            "name": "components/baseline/select_1",
+            "value": 329625.49014778325,
+            "unit": "ns"
+          },
+          {
+            "name": "components/batch_size/100",
+            "value": 1169525972,
+            "unit": "ns"
+          },
+          {
+            "name": "components/batch_size/1000",
+            "value": 330480705.25,
+            "unit": "ns"
+          },
+          {
+            "name": "components/batch_size/500",
+            "value": 417841145.75,
+            "unit": "ns"
+          },
+          {
+            "name": "components/batch_size/5000",
+            "value": 213217170,
+            "unit": "ns"
+          },
+          {
+            "name": "components/build/0",
+            "value": 425331.92388306675,
+            "unit": "ns"
+          },
+          {
+            "name": "components/build/1",
+            "value": 422974.28008974675,
+            "unit": "ns"
+          },
+          {
+            "name": "components/build/10",
+            "value": 485779.3178210678,
+            "unit": "ns"
+          },
+          {
+            "name": "components/build/100",
+            "value": 891570.443495935,
+            "unit": "ns"
+          },
+          {
+            "name": "components/bulk_index/1",
+            "value": 14733276.8125,
+            "unit": "ns"
+          },
+          {
+            "name": "components/bulk_index/100",
+            "value": 20504794.86904762,
+            "unit": "ns"
+          },
+          {
+            "name": "components/bulk_index/1000",
+            "value": 62315109.4,
+            "unit": "ns"
+          },
+          {
+            "name": "components/bulk_index/5000",
+            "value": 276320786.5,
+            "unit": "ns"
+          },
+          {
+            "name": "components/change/item_update",
+            "value": 18203635.14285714,
+            "unit": "ns"
+          },
+          {
+            "name": "components/change_burst/1",
+            "value": 292165764.1666666,
+            "unit": "ns"
+          },
+          {
+            "name": "components/change_burst/16",
+            "value": 98851573.33333334,
+            "unit": "ns"
+          },
+          {
+            "name": "components/change_burst/256",
+            "value": 76215971.29166666,
+            "unit": "ns"
+          },
+          {
+            "name": "components/resolve/related_table",
+            "value": 348405.51590501796,
+            "unit": "ns"
+          },
+          {
+            "name": "components/resolve/root_table",
+            "value": 1152.8727752418852,
+            "unit": "ns"
+          },
+          {
+            "name": "complex/ci/visible_latency_p50_ms",
+            "value": 28.279577,
+            "unit": "ms",
+            "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":4000,\"items_per_order\":4,\"name\":\"ci\",\"orders\":0,\"orders_per_user\":5,\"probe_rate_per_s\":20,\"probes\":150,\"products\":0,\"reviews_per_product\":0,\"rss_cap_mib\":2048,\"tags\":8,\"tags_per_user\":4,\"users\":2000,\"wall_cap_secs\":900,\"writers\":8}}"
+          },
+          {
+            "name": "complex/ci/visible_latency_p99_ms",
+            "value": 193.092496,
+            "unit": "ms",
+            "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":4000,\"items_per_order\":4,\"name\":\"ci\",\"orders\":0,\"orders_per_user\":5,\"probe_rate_per_s\":20,\"probes\":150,\"products\":0,\"reviews_per_product\":0,\"rss_cap_mib\":2048,\"tags\":8,\"tags_per_user\":4,\"users\":2000,\"wall_cap_secs\":900,\"writers\":8}}"
+          },
+          {
+            "name": "complex/ci/peak_rss_mib",
+            "value": 84.61328125,
+            "unit": "MiB",
+            "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":4000,\"items_per_order\":4,\"name\":\"ci\",\"orders\":0,\"orders_per_user\":5,\"probe_rate_per_s\":20,\"probes\":150,\"products\":0,\"reviews_per_product\":0,\"rss_cap_mib\":2048,\"tags\":8,\"tags_per_user\":4,\"users\":2000,\"wall_cap_secs\":900,\"writers\":8}}"
+          },
+          {
+            "name": "complex/ci/cpu_seconds",
+            "value": 4,
+            "unit": "s",
+            "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":4000,\"items_per_order\":4,\"name\":\"ci\",\"orders\":0,\"orders_per_user\":5,\"probe_rate_per_s\":20,\"probes\":150,\"products\":0,\"reviews_per_product\":0,\"rss_cap_mib\":2048,\"tags\":8,\"tags_per_user\":4,\"users\":2000,\"wall_cap_secs\":900,\"writers\":8}}"
+          },
+          {
+            "name": "complex/ci/flush_p50_ms",
+            "value": 19.21353251318102,
+            "unit": "ms",
+            "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":4000,\"items_per_order\":4,\"name\":\"ci\",\"orders\":0,\"orders_per_user\":5,\"probe_rate_per_s\":20,\"probes\":150,\"products\":0,\"reviews_per_product\":0,\"rss_cap_mib\":2048,\"tags\":8,\"tags_per_user\":4,\"users\":2000,\"wall_cap_secs\":900,\"writers\":8}}"
+          },
+          {
+            "name": "complex/ci/flush_p99_ms",
+            "value": 218.64285714285725,
+            "unit": "ms",
+            "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":4000,\"items_per_order\":4,\"name\":\"ci\",\"orders\":0,\"orders_per_user\":5,\"probe_rate_per_s\":20,\"probes\":150,\"products\":0,\"reviews_per_product\":0,\"rss_cap_mib\":2048,\"tags\":8,\"tags_per_user\":4,\"users\":2000,\"wall_cap_secs\":900,\"writers\":8}}"
+          },
+          {
+            "name": "reference/ci/visible_latency_p50_ms",
+            "value": 48.560285,
+            "unit": "ms",
+            "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":10000,\"items_per_order\":3,\"name\":\"ci\",\"orders\":25000,\"orders_per_user\":0,\"probe_rate_per_s\":20,\"probes\":200,\"products\":1000,\"reviews_per_product\":2,\"rss_cap_mib\":2048,\"tags\":0,\"tags_per_user\":0,\"users\":5000,\"wall_cap_secs\":900,\"writers\":8}}"
+          },
+          {
+            "name": "reference/ci/visible_latency_p99_ms",
+            "value": 245.14024600000002,
+            "unit": "ms",
+            "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":10000,\"items_per_order\":3,\"name\":\"ci\",\"orders\":25000,\"orders_per_user\":0,\"probe_rate_per_s\":20,\"probes\":200,\"products\":1000,\"reviews_per_product\":2,\"rss_cap_mib\":2048,\"tags\":0,\"tags_per_user\":0,\"users\":5000,\"wall_cap_secs\":900,\"writers\":8}}"
+          },
+          {
+            "name": "reference/ci/peak_rss_mib",
+            "value": 78.26171875,
+            "unit": "MiB",
+            "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":10000,\"items_per_order\":3,\"name\":\"ci\",\"orders\":25000,\"orders_per_user\":0,\"probe_rate_per_s\":20,\"probes\":200,\"products\":1000,\"reviews_per_product\":2,\"rss_cap_mib\":2048,\"tags\":0,\"tags_per_user\":0,\"users\":5000,\"wall_cap_secs\":900,\"writers\":8}}"
+          },
+          {
+            "name": "reference/ci/cpu_seconds",
+            "value": 35,
+            "unit": "s",
+            "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":10000,\"items_per_order\":3,\"name\":\"ci\",\"orders\":25000,\"orders_per_user\":0,\"probe_rate_per_s\":20,\"probes\":200,\"products\":1000,\"reviews_per_product\":2,\"rss_cap_mib\":2048,\"tags\":0,\"tags_per_user\":0,\"users\":5000,\"wall_cap_secs\":900,\"writers\":8}}"
+          },
+          {
+            "name": "reference/ci/flush_p50_ms",
+            "value": 57.54950495049505,
+            "unit": "ms",
+            "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":10000,\"items_per_order\":3,\"name\":\"ci\",\"orders\":25000,\"orders_per_user\":0,\"probe_rate_per_s\":20,\"probes\":200,\"products\":1000,\"reviews_per_product\":2,\"rss_cap_mib\":2048,\"tags\":0,\"tags_per_user\":0,\"users\":5000,\"wall_cap_secs\":900,\"writers\":8}}"
+          },
+          {
+            "name": "reference/ci/flush_p99_ms",
+            "value": 447.04545454545365,
             "unit": "ms",
             "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":10000,\"items_per_order\":3,\"name\":\"ci\",\"orders\":25000,\"orders_per_user\":0,\"probe_rate_per_s\":20,\"probes\":200,\"products\":1000,\"reviews_per_product\":2,\"rss_cap_mib\":2048,\"tags\":0,\"tags_per_user\":0,\"users\":5000,\"wall_cap_secs\":900,\"writers\":8}}"
           }
