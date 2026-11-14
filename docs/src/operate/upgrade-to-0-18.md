@@ -33,7 +33,7 @@ Without either, no index is rebuilt. A `constant` holding a number, a boolean, o
 
 | Mapping on 0.17 | On 0.17 | On 0.18 | What to do |
 | --- | --- | --- | --- |
-| default (no `format`) | every document holding a value rejected | indexed | Nothing; fill in what was quarantined. |
+| default (no `format`) | every document holding a value rejected | indexed | Nothing to change; `flusso reindex` fills in documents that were quarantined. |
 | a `format` with only space patterns (`yyyy-MM-dd HH:mm:ss…`) | indexed | **every write holding a value rejected** | Add `strict_date_optional_time` to the `format` with the upgrade. |
 | a `format` that also reads ISO, or `ignore_malformed: true` | indexed (`ignore_malformed`: stored, not searchable) | indexed; `_source` changes at each document's next write | `flusso reindex <index>` to make every document uniform. |
 | inside an `indexed: false` join | stored | stored in the new form at each document's next write | `flusso reindex <index>`. |
@@ -49,7 +49,7 @@ Without either, no index is rebuilt. A `constant` holding a number, a boolean, o
        format: "strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSS||yyyy-MM-dd HH:mm:ss"
    ```
 
-   `options` is part of the content hash, so the first 0.18 run backfills that index into a new physical index, every document in the new form. Then roll out consumers and remove the old index as in step 3 above.
+   `options` is part of the content hash, so the first 0.18 run backfills that index into a new physical index, every document in the new form. Then roll out consumers and remove the old index as in [Steps](#steps).
 3. **Stored copies.** An `ignore_malformed` field and an unindexed join hold both forms until each document is next written. `flusso reindex <index>` rewrites every one in the new form, with no restart. An `ignore_malformed` field was malformed under the default format on 0.17, so its values were stored but never searchable; once rewritten they are.
 4. **Consumers reading `_source`.** `chrono::NaiveDateTime` reads only the new form, `jiff::civil::DateTime` and `String` read both, `time::PrimitiveDateTime`'s default serde reads only the old one. Give the `time` field a format that reads the new one:
 

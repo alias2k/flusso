@@ -259,7 +259,7 @@ pub enum DiagnosticKind {
     /// A `timestamp` field, aggregate result or script output whose
     /// `options.format` has no pattern that reads the ISO 8601 form the
     /// value is written in (`2024-01-02T03:04:05.123456`): OpenSearch
-    /// rejects every document holding a value. Only a format whose every
+    /// rejects a document holding a timestamp. Only a format whose every
     /// pattern is known to refuse that form is reported.
     TimestampFormat,
 }
@@ -527,8 +527,8 @@ fn timestamp_formats(
                 severity: DiagnosticKind::TimestampFormat.severity(),
                 message: format!(
                     "`format` `{format}` has no pattern that reads the ISO 8601 form a timestamp \
-                     is written in (`2024-01-02T03:04:05.123456`), so OpenSearch rejects every \
-                     document holding a value. Add `strict_date_optional_time`: \
+                     is written in (`2024-01-02T03:04:05.123456`), so OpenSearch rejects a \
+                     document holding a timestamp. Add `strict_date_optional_time`: \
                      `strict_date_optional_time||{format}`"
                 ),
             });
@@ -2326,7 +2326,7 @@ mod tests {
                 DiagnosticKind::TimestampFormat,
                 "`format` `yyyy-MM-dd HH:mm:ss.SSSSSS||yyyy-MM-dd HH:mm:ss` has no pattern that \
                  reads the ISO 8601 form a timestamp is written in (`2024-01-02T03:04:05.123456`), \
-                 so OpenSearch rejects every document holding a value. Add \
+                 so OpenSearch rejects a document holding a timestamp. Add \
                  `strict_date_optional_time`: \
                  `strict_date_optional_time||yyyy-MM-dd HH:mm:ss.SSSSSS||yyyy-MM-dd HH:mm:ss`"
             )]),

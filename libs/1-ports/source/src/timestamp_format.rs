@@ -13,10 +13,11 @@
 //! pattern (`||` separates them):
 //!
 //! - a named format that reads it (`strict_date_optional_time`,
-//!   `date_optional_time`, …) or a literal pattern quoting `'T'`: reads it;
+//!   `date_optional_time`, …, or its camelCase spelling) or a literal pattern
+//!   quoting `'T'`: reads it;
 //! - `epoch_millis`, `epoch_second`, or a literal pattern without `'T'`:
 //!   refuses it;
-//! - any other named format: unknown.
+//! - any other name (letters, digits and `_` only): unknown.
 //!
 //! One reading pattern makes the format read it; only a format whose every
 //! pattern refuses it refuses it. Anything else is unknown, and unknown is never
@@ -61,18 +62,32 @@ fn pattern_reads(pattern: &str) -> Option<bool> {
     let named = !pattern.is_empty()
         && pattern
             .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+            .all(|c| c.is_ascii_alphanumeric() || c == '_');
     if !named {
         return Some(pattern.contains("'T'"));
     }
-    let name = pattern.strip_prefix("strict_").unwrap_or(pattern);
-    if READING.contains(&pattern) || READING.contains(&name) {
+    let snake = snake_case(pattern);
+    let name = snake.strip_prefix("strict_").unwrap_or(&snake);
+    if READING.contains(&snake.as_str()) || READING.contains(&name) {
         Some(true)
     } else if REFUSING.contains(&pattern) {
         Some(false)
     } else {
         None
     }
+}
+
+/// OpenSearch still accepts the camelCase spelling of its named formats
+/// (`strictDateOptionalTime`).
+fn snake_case(name: &str) -> String {
+    let mut snake = String::with_capacity(name.len() + 4);
+    for c in name.chars() {
+        if c.is_ascii_uppercase() {
+            snake.push('_');
+        }
+        snake.push(c.to_ascii_lowercase());
+    }
+    snake
 }
 
 #[cfg(test)]
