@@ -4199,7 +4199,9 @@ mod tests {
                     commit::state::use_test_dir(Some(fixture.state_dir()));
                     let mut expected = scratch.clone();
                     for (file, text) in &edit {
-                        if killed.get(file) != half.get(file) && !caught.contains(file) {
+                        if killed.get(file) != half.get(file)
+                            && (text.is_some() || !caught.contains(file))
+                        {
                             match text {
                                 Some(text) => expected.insert(file.clone(), text.clone()),
                                 None => expected.remove(file),
@@ -4214,7 +4216,8 @@ mod tests {
                         let recovery = match opened(&fixture) {
                             Ok(recovery) if recovery.blocked.is_none() => recovery,
                             // The one block left: a kill between a step's rename and its mark,
-                            // then that file given another text. Decided as never begun.
+                            // then that file deleted, or replaced by a new file: no recorded
+                            // identity proves the rename ran, so it is decided as never begun.
                             Ok(recovery)
                                 if load == 1
                                     && fixture.files() == left

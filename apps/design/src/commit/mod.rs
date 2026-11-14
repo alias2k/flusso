@@ -72,10 +72,19 @@
 //! it names holds its bytes from before the save (a created file: gone), or
 //! is told kept as another program's, or was settled and then changed by the
 //! user.** The one step a kill can catch between its rename and its mark is
-//! decided again: done, it needs nothing now; its file changed since (given
-//! the save's text, or deleted where the save had removed it), with its
-//! backup gone, the rollback blocks as any rollback without a backup does,
-//! and changes nothing.
+//! told apart by **the file it moves**: the plan records each step's file
+//! identity (device and inode, Unix only: [`state::FileId`]), and that file
+//! at the step's destination name proves the rename ran. The step is then
+//! done, and whatever the user put since at the name it left (a file the save
+//! created, made again; a file put back, written to) is kept and named. With
+//! no proof (another platform, or the file deleted or replaced by a new one
+//! since) the step is decided again: done, it needs nothing now; its file
+//! changed since (given the save's text, or deleted where the save had
+//! removed it), with its backup gone, the rollback blocks as any rollback
+//! without a backup does, and changes nothing. An inode reused in that
+//! window can only make a step read as done whose file then holds its text
+//! from before (nothing to do) or another text (kept and named): never a
+//! silent mix.
 //!
 //! What a kill leaves, at any point, and what the next start does (the
 //! record in the state folder, the rest in the config's folder):
@@ -88,8 +97,8 @@
 //! | a journal or `.done`, no record of it for this folder | changes nothing; reports it, with the way out by hand |
 //! | a journal, a record without `undo` (a save cut short; or a rollback cut short before it recorded, or by a designer from before `undo`) | rolls back from scratch: decides every file from what it holds, records, settles |
 //! | a journal, a record with `undo`, not settled: every step marked or none begun | takes the unmarked steps, each decided again from what the disk holds now |
-//! | the same, a step's rename done and its mark not written | decides that file again: it holds its text from before (or a created file is gone), so it needs nothing |
-//! | the same, and that file changed since, its backup gone (or a created file's temp name taken) | blocks as a fresh rollback would (backup missing; a file in the way), changes nothing |
+//! | the same, a step's rename done and its mark not written | the step's file is at its destination name (Unix): marks it done, keeps and names what the user put since at the name it left; else decides that file again: it holds its text from before (or a created file is gone), so it needs nothing |
+//! | the same, no proof, and that file changed since, its backup gone (or a created file's temp name taken) | blocks as a fresh rollback would (backup missing; a file in the way), changes nothing |
 //! | a journal, a record with `undo`, settled | deletes the save's temp files and empty folders, tells the save, deletes the journal, removes the record: no project file is looked at |
 //! | a journal or `.done`, a committed record | finishes: deletes backups and temp files holding the save's text, tells the save, deletes the journal, removes the record; keeps any file holding another text |
 //! | no journal, a stored notice, a record | removes the record; the notice is told until dismissed |

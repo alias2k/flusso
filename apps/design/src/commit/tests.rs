@@ -2609,7 +2609,9 @@ fn a_file_recovery_settled_keeps_what_the_user_wrote_since() {
                     };
                     let caught = unmarked_steps(&project);
                     for (file, bytes) in &edit {
-                        if killed.get(file) != half.get(file) && !caught.contains(file) {
+                        if killed.get(file) != half.get(file)
+                            && (bytes.is_some() || !caught.contains(file))
+                        {
                             match bytes {
                                 Some(bytes) => expected.insert(file.clone(), bytes.clone()),
                                 None => expected.remove(file),
@@ -2624,7 +2626,8 @@ fn a_file_recovery_settled_keeps_what_the_user_wrote_since() {
                         let recovery = project.recover(&mut Disk::counting());
                         if let Some(blocked) = &recovery.blocked {
                             // The one block left: a kill between a step's rename and its mark,
-                            // then that file given another text. Decided as never begun.
+                            // then that file deleted, or replaced by a new file: no recorded
+                            // identity proves the rename ran, so it is decided as never begun.
                             let base = std::fs::canonicalize(&project.dir).unwrap();
                             assert!(
                                 load == 1
@@ -3091,4 +3094,19 @@ fn a_file_given_the_saves_text_after_its_restore_ran_is_kept_and_named() {
         }
     }
     assert!(project.records().is_empty());
+}
+
+/// A plan written without file identities (no release writes one; this
+/// branch's earlier records did) still loads, and proves no step.
+#[test]
+fn a_plan_without_file_identities_still_loads() {
+    let undo: state::Undo = serde_json::from_str(
+        r#"{"settled":false,"writes":["restore","remove"],"removals":["restore"],
+            "writes_done":[true,false],"removals_done":[false]}"#,
+    )
+    .unwrap();
+    assert!(undo.write_done(0) && !undo.write_done(1));
+    assert_eq!((undo.write_id(1), undo.removal_id(0)), (None, None));
+    let written = serde_json::to_value(&undo).unwrap();
+    assert!(written.get("write_ids").is_none(), "{written}");
 }

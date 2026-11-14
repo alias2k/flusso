@@ -89,7 +89,7 @@ use super::journal::{
     Unusable, is_save_file, read_capped,
 };
 use super::lock::ProjectLock;
-use super::state::{Act, Record, State, Undo};
+use super::state::{Act, FileId, Record, State, Undo};
 
 /// What recovery found and did.
 #[derive(Debug, Default)]
@@ -1208,10 +1208,51 @@ fn is_step(act: Act) -> bool {
     matches!(act, Act::Restore | Act::Remove)
 }
 
+/// One file's decision: what the rollback does to it, whether its step is
+/// done, and the file the step renames.
+#[derive(Debug, Clone, Copy)]
+struct Decided {
+    act: Act,
+    done: bool,
+    id: Option<FileId>,
+}
+
+impl Decided {
+    /// A decision with nothing done yet, renaming the file at `source` when
+    /// it is a step.
+    fn fresh(act: Act, source: Option<&Path>) -> Self {
+        Self {
+            act,
+            done: false,
+            id: source.filter(|_| is_step(act)).and_then(FileId::of),
+        }
+    }
+
+    /// A step a kill caught between its rename and its mark, whose renamed
+    /// file is at its destination name: done. A file the user made or wrote
+    /// since at the name the step left (`changed`) is kept as it is, and named.
+    fn ran(act: Act, changed: bool, id: Option<FileId>) -> Self {
+        Self {
+            act: if changed { Act::Keep } else { act },
+            done: !changed,
+            id,
+        }
+    }
+}
+
+/// Whether the file recorded as `id` is at `path`: the rename that takes it
+/// there ran.
+fn renamed_to(id: Option<FileId>, path: &Path) -> bool {
+    id.is_some() && FileId::of(path) == id
+}
+
 /// Decide every file of a fresh rollback, or, carrying on from `undo`,
-/// every file whose step the record does not mark done: those are decided
-/// again from what the disk holds now, as a fresh rollback would (the one a
-/// kill caught between its rename and its mark included: done, it now needs
+/// every file whose step the record does not mark done. A step whose renamed
+/// file sits at its destination name ran, and a kill caught it before its
+/// mark: it is done, and whatever the user put since at the name it left is
+/// kept. Every other one is decided again from what the disk holds now, as
+/// a fresh rollback would (where no file identity is recorded, the one a kill
+/// caught between its rename and its mark included: done, it now needs
 /// nothing; anything else is decided, or blocks, as if it were never begun).
 /// A decision the record holds otherwise is never looked at again. All or
 /// nothing: a problem with any file blocks it.
@@ -1231,51 +1272,83 @@ fn plan(
             Act::Leave
         })
     };
-    let settled = |act: Option<&Act>, done: bool| act.copied().filter(|&a| !is_step(a) || done);
-    let removals: Vec<Act> = steps
+    let settled = |act: Option<&Act>, done: bool, id: Option<FileId>| {
+        act.copied()
+            .filter(|&a| !is_step(a) || done)
+            .map(|act| Decided {
+                act,
+                done: is_step(act),
+                id,
+            })
+    };
+    let removals: Vec<Decided> = steps
         .removals
         .iter()
         .enumerate()
         .map(|(i, removal)| {
-            let recorded = undo.and_then(|u| settled(u.removals.get(i), u.removal_done(i)));
+            let recorded = undo.and_then(|u| u.removals.get(i).copied());
+            let id = undo.and_then(|u| u.removal_id(i));
+            if let Some(decided) =
+                undo.and_then(|u| settled(u.removals.get(i), u.removal_done(i), id))
+            {
+                return decided;
+            }
             match recorded {
-                Some(act) => act,
-                None if i >= removed => unreached(&removal.path, Some(&removal.before)),
-                None => decide(plan_removal(removal, run.backups)),
+                Some(Act::Restore) if renamed_to(id, &removal.path) => {
+                    let now = Digest::at(&removal.path).ok().flatten();
+                    Decided::ran(Act::Restore, now.as_ref() != Some(&removal.before), id)
+                }
+                _ if i >= removed => {
+                    Decided::fresh(unreached(&removal.path, Some(&removal.before)), None)
+                }
+                _ => Decided::fresh(
+                    decide(plan_removal(removal, run.backups)),
+                    Some(&removal.backup),
+                ),
             }
         })
         .collect();
-    let writes: Vec<Act> = steps
+    let writes: Vec<Decided> = steps
         .writes
         .iter()
         .enumerate()
         .map(|(i, write)| {
-            let recorded = undo.and_then(|u| settled(u.writes.get(i), u.write_done(i)));
+            let recorded = undo.and_then(|u| u.writes.get(i).copied());
+            let id = undo.and_then(|u| u.write_id(i));
+            if let Some(decided) = undo.and_then(|u| settled(u.writes.get(i), u.write_done(i), id))
+            {
+                return decided;
+            }
             match recorded {
-                Some(act) => act,
-                None if i >= renamed => unreached(&write.dest, write.before.as_ref()),
-                None => decide(plan_write(write, run.backups)),
+                Some(Act::Restore) if renamed_to(id, &write.dest) => {
+                    let now = Digest::at(&write.dest).ok().flatten();
+                    Decided::ran(Act::Restore, now.as_ref() != write.before.as_ref(), id)
+                }
+                Some(Act::Remove) if renamed_to(id, &write.temp) => {
+                    Decided::ran(Act::Remove, write.dest.symlink_metadata().is_ok(), id)
+                }
+                _ if i >= renamed => {
+                    Decided::fresh(unreached(&write.dest, write.before.as_ref()), None)
+                }
+                _ => {
+                    let act = decide(plan_write(write, run.backups));
+                    let source = match act {
+                        Act::Remove => Some(write.dest.as_path()),
+                        _ => write.backup.as_deref(),
+                    };
+                    Decided::fresh(act, source)
+                }
             }
         })
         .collect();
-    let keeps_marks = |acts: &[Act], recorded: Option<&Vec<Act>>, done: &dyn Fn(usize) -> bool| {
-        acts.iter()
-            .enumerate()
-            .map(|(i, act)| {
-                is_step(*act) && recorded.and_then(|r| r.get(i)) == Some(act) && done(i)
-            })
-            .collect()
-    };
     let undo = Undo {
         settled: false,
-        writes_done: keeps_marks(&writes, undo.map(|u| &u.writes), &|i| {
-            undo.is_some_and(|u| u.write_done(i))
-        }),
-        removals_done: keeps_marks(&removals, undo.map(|u| &u.removals), &|i| {
-            undo.is_some_and(|u| u.removal_done(i))
-        }),
-        writes,
-        removals,
+        writes: writes.iter().map(|d| d.act).collect(),
+        removals: removals.iter().map(|d| d.act).collect(),
+        writes_done: writes.iter().map(|d| d.done).collect(),
+        removals_done: removals.iter().map(|d| d.done).collect(),
+        write_ids: writes.iter().map(|d| d.id).collect(),
+        removal_ids: removals.iter().map(|d| d.id).collect(),
     };
     if problems.is_empty() {
         return Ok(undo);

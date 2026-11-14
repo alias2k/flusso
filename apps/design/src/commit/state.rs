@@ -28,7 +28,9 @@
 //!     "writes": ["restore", "leave", "remove"],
 //!     "removals": ["keep"],
 //!     "writes_done": [true, false, false],
-//!     "removals_done": [false]
+//!     "removals_done": [false],
+//!     "write_ids": [{ "dev": 2049, "ino": 1311 }, null, { "dev": 2049, "ino": 1315 }],
+//!     "removal_ids": [null]
 //!   }
 //! }
 //! ```
@@ -44,7 +46,8 @@
 //!   the journal's file name.
 //! - **A rollback's progress**: `undo`, absent until a rollback has decided
 //!   what to do with every file ([`Undo`]), is written before it changes the
-//!   first one, again after each step's rename is flushed (its mark), and with `settled`
+//!   first one (with the file each step moves: `write_ids`/`removal_ids`,
+//!   Unix only), again after each step's rename is flushed (its mark), and with `settled`
 //!   once every file is settled. A record written by a designer without it
 //!   reads as a rollback not started; a designer without it can't read one
 //!   with it, and prunes it as a stray file a day later.
@@ -148,6 +151,40 @@ pub(crate) struct Undo {
     /// Per removal, likewise.
     #[serde(default)]
     pub(crate) removals_done: Vec<bool>,
+    /// Per write, the file its step renames ([`FileId`]), recorded with the
+    /// decision: found at the step's destination name, the rename ran.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) write_ids: Vec<Option<FileId>>,
+    /// Per removal, likewise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) removal_ids: Vec<Option<FileId>>,
+}
+
+/// Which file a path names, apart from what it holds: its device and inode.
+/// Unix only; elsewhere there is none, and a step caught between its rename
+/// and its mark is decided again from what the file holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct FileId {
+    dev: u64,
+    ino: u64,
+}
+
+impl FileId {
+    /// The file at `path` (a link itself, never what it points at).
+    #[cfg(unix)]
+    pub(crate) fn of(path: &Path) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt as _;
+        let meta = path.symlink_metadata().ok()?;
+        Some(Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        })
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn of(_path: &Path) -> Option<Self> {
+        None
+    }
 }
 
 impl Undo {
@@ -159,6 +196,16 @@ impl Undo {
     /// Whether the record marks the step of removal `i` done.
     pub(crate) fn removal_done(&self, i: usize) -> bool {
         self.removals_done.get(i).copied().unwrap_or(false)
+    }
+
+    /// The file the step of write `i` renames, when recorded.
+    pub(crate) fn write_id(&self, i: usize) -> Option<FileId> {
+        self.write_ids.get(i).copied().flatten()
+    }
+
+    /// The file the step of removal `i` renames, when recorded.
+    pub(crate) fn removal_id(&self, i: usize) -> Option<FileId> {
+        self.removal_ids.get(i).copied().flatten()
     }
 
     pub(crate) fn mark_write(&mut self, i: usize) {
