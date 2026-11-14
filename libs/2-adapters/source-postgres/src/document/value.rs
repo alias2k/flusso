@@ -24,7 +24,7 @@ pub(super) fn decode_named_column(row: &PgRow, name: &str) -> GenericValue {
     }
 }
 
-/// The base types (`pg_type.typname`) [`decode_column`] reads, so a key of
+/// The base types (`pg_type.typname`) [`decode_column`] reads as a scalar, so a key of
 /// one addresses its document. A key of any other type reads as null: no
 /// document is ever written for it, which `validate_indexes` reports
 /// (`DiagnosticKind::UnsupportedKeyType`). Keep in step with `decode_column`.
@@ -47,8 +47,6 @@ pub(crate) const KEY_TYPES: &[&str] = &[
     "time",
     "uuid",
     "bytea",
-    "json",
-    "jsonb",
 ];
 
 /// Decode a single column by its Postgres type. Unsupported types and decode
@@ -90,7 +88,7 @@ fn decode_column(row: &PgRow, col: &PgColumn) -> GenericValue {
             name,
         ),
         // An extension type goes by its catalog name, lowercase.
-        "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" | "CHAR" | "citext" => finish(
+        "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" | "citext" => finish(
             row.try_get::<Option<String>, _>(idx),
             GenericValue::String,
             name,
