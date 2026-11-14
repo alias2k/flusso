@@ -82,7 +82,7 @@ Two classes of pair never give an indexed document, whatever the rows hold, wher
 | a constant holding a scalar or a list | an indexed join, an `object`, an indexed `json` (or `json` array), a `map` | OpenSearch refuses a value that isn't an object under an object mapping, `ignore_malformed` or not | `duplicate_field_name_refused` |
 | a constant holding an object | an indexed join, an `object` or an indexed `json` with no child field for one of its keys, or a `binary` column | the strict mapping refuses the key; `binary` takes no `ignore_malformed` | `duplicate_field_name_refused` |
 
-Each holds only when every namesake is emitted and the last one sets no mapping `options` of its own: an object with `enabled: false` takes anything, and one with a `dynamic` of your own takes unknown keys. A `map`'s own `dynamic: true` isn't counted. The refused class stops `run` only while a [plain OpenSearch sink](cli.md#validation-at-start) writes the index: a stdout sink, an ingest pipeline or a setting flusso doesn't model may let the document in.
+Each holds only when every namesake is emitted and the last one sets no mapping `options` of its own: an object with `enabled: false` takes anything, and one with a `dynamic` of your own takes unknown keys. A `map`'s own `dynamic: true` isn't counted. The refused class stops `run` only while every sink is a [plain OpenSearch sink](cli.md#validation-at-start): a stdout sink, an ingest pipeline or a setting flusso doesn't model may let the document in.
 
 Anywhere else the same pair stays the `duplicate_field_name` warning. Inside a join, a parent with no related row indexes. Under `emit: false` or `indexed: false`, the pair is never mapped.
 

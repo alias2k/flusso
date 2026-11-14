@@ -802,8 +802,8 @@ and refuses to start only on a kind that cannot work as written: `stops_the_star
 `DiagnosticKind` exhaustively (`UnknownTable`/`UnknownColumn`/`UnreadSoftDeleteMarker`/
 `RelationPrimaryKey`/`TransformNotApplicable`/`RootPrimaryKeyMismatch`/`UnsupportedKeyType`/
 `NotAnArrayColumn`/`LinkTypeMismatch`/`DuplicateFieldNameFailsToBuild`/`DuplicateFieldNameRefused`/`TimeOfDayAsDate`
-stop; the last two only while `a_sink_refuses` — some OpenSearch sink `plain_opensearch` can prove
-plain writes the index: an allow-list (no `pipeline`, only `PLAIN_SETTINGS` index settings, plus
+stop; the last two only while `a_sink_refuses` — every sink is an OpenSearch sink `plain_opensearch` can prove
+plain: an allow-list (no `pipeline`, only `PLAIN_SETTINGS` index settings, plus
 `ignore_malformed` where it doesn't lift the refusal; every `OpensearchConfig` field is destructured
 by name, so a new option must be decided) — any state it doesn't model means no stop
 (`refused_only_by_a_mapping`);

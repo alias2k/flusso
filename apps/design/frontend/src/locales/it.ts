@@ -32,9 +32,9 @@ export const it: Record<string, string> = {
     '{n} campi qui si chiamano "{name}": al massimo uno di loro arriva all\'indice, e un documento può non contenerne nessuno o un misto di loro. Rinominali tutti tranne uno.',
   "diag.neverBuilds": "`flusso run` rifiuta di avviarsi: nessun documento di questo indice può essere costruito.",
   "diag.neverIndexed":
-    "`flusso run` rifiuta di avviarsi finché un sink OpenSearch semplice scrive questo indice (senza pipeline di ingest né impostazioni d’indice che flusso non modella): OpenSearch rifiuta ogni documento.",
+    "`flusso run` rifiuta di avviarsi finché ogni sink è un sink OpenSearch semplice (senza pipeline di ingest né impostazioni d’indice che flusso non modella): OpenSearch rifiuta ogni documento.",
   "diag.timeOfDayAsDate":
-    "`flusso run` rifiuta di avviarsi finché un sink OpenSearch semplice scrive questo indice (senza pipeline di ingest né impostazioni d’indice che flusso non modella): OpenSearch rifiuta ogni documento che contiene un orario.",
+    "`flusso run` rifiuta di avviarsi finché ogni sink è un sink OpenSearch semplice (senza pipeline di ingest né impostazioni d’indice che flusso non modella): OpenSearch rifiuta ogni documento che contiene un orario.",
   "topbar.upToDate": "Aggiornato",
   "topbar.language": "Lingua",
 

@@ -177,14 +177,15 @@ fn refused_only_by_a_mapping(kind: DiagnosticKind) -> Option<bool> {
     }
 }
 
-/// Whether some sink of the deployment provably refuses what a mapping
-/// refuses on `index`: an OpenSearch sink in a state flusso models in full
-/// ([`plain_opensearch`]). A stdout sink takes anything, and a sink in any
-/// other state may accept the value or never see it, so neither counts.
+/// Whether every sink of the deployment provably refuses what a mapping
+/// refuses on `index`: each is an OpenSearch sink in a state flusso models in
+/// full ([`plain_opensearch`]). One sink that takes the document (stdout, or
+/// an OpenSearch sink in any other state, which may accept the value or never
+/// see it) is a deployment that indexes it, so nothing stops.
 fn a_sink_refuses(config: &Config, index: &IndexName, dropped: bool) -> anyhow::Result<bool> {
     for (name, entry) in &config.sinks {
         let SinkConfig::Opensearch(sink) = adapters::sink_config(name, entry)? else {
-            continue;
+            return Ok(false);
         };
         let mut settings = sink.index_settings.clone();
         if let Some((_, own)) = opensearch_index_settings(config, name)?
@@ -193,11 +194,11 @@ fn a_sink_refuses(config: &Config, index: &IndexName, dropped: bool) -> anyhow::
         {
             settings = settings.layered(&own);
         }
-        if plain_opensearch(&sink, &settings, dropped)? {
-            return Ok(true);
+        if !plain_opensearch(&sink, &settings, dropped)? {
+            return Ok(false);
         }
     }
-    Ok(false)
+    Ok(!config.sinks.is_empty())
 }
 
 /// Index settings known to leave a document's values as the mapping reads
