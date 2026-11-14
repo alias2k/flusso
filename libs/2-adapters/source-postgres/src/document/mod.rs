@@ -879,11 +879,8 @@ impl Catalog for PgDocumentBuilder {
         } else {
             meta.sql_type
         };
-        let probe = query::transform_probe(&sql_type, transforms);
-        self.probe(probe, || {
-            format!("could not check `{table}.{column}`'s transforms against its type")
-        })
-        .await
+        self.probe(query::transform_probe(&sql_type, transforms))
+            .await
     }
 
     async fn compares(
@@ -905,14 +902,7 @@ impl Catalog for PgDocumentBuilder {
             return Ok(compares);
         }
         let probe = query::comparison_probe(&pair.0, &pair.1);
-        let compares = self
-            .probe(probe, || {
-                format!(
-                    "could not check `{link_table}.{link_column}` against \
-                     `{key_table}.{key_column}`"
-                )
-            })
-            .await?;
+        let compares = self.probe(probe).await?;
         self.comparison_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -926,9 +916,10 @@ impl PgDocumentBuilder {
     /// prepared statement): `false` when Postgres has no function or
     /// operator for it. The probe casts to a column's type, which needs USAGE
     /// on the type's schema; reading the column does not. So only "no such
-    /// function" is a verdict, and any other refusal leaves it unknown
-    /// (`true`, the check skipped, `what` logged).
-    async fn probe(&self, probe: query::SqlString, what: impl FnOnce() -> String) -> Result<bool> {
+    /// function" is a verdict, and any other refusal leaves it unknown:
+    /// [`SourceError::Unchecked`] with Postgres's message, which validation
+    /// reports as a skipped check.
+    async fn probe(&self, probe: query::SqlString) -> Result<bool> {
         match sqlx::raw_sql(probe).execute(&self.pool).await {
             Ok(_) => Ok(true),
             Err(sqlx::Error::Database(error))
@@ -940,11 +931,7 @@ impl PgDocumentBuilder {
                 Ok(false)
             }
             Err(sqlx::Error::Database(error)) => {
-                tracing::warn!(
-                    error = %error.message(),
-                    "{}; skipping the check", what()
-                );
-                Ok(true)
+                Err(SourceError::Unchecked(error.message().to_owned()))
             }
             Err(error) => Err(query_err(error)),
         }

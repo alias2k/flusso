@@ -33,6 +33,11 @@
 //! related table's key type ([`DiagnosticKind::IdsElementMismatch`],
 //! [`DiagnosticKind::IdsElementLossy`]).
 //!
+//! The transform and link checks ask the store to try the operation. A store
+//! that refuses to (a role without a privilege the check needs) answers
+//! [`SourceError::Unchecked`], and the check is reported as skipped
+//! ([`DiagnosticKind::CheckSkipped`], a warning) with the store's reason.
+//!
 //! The root's own keys are checked on the root table: that it has a
 //! single-column primary key ([`DiagnosticKind::RootPrimaryKey`]), that the
 //! declared `primary_key` exists and is that key
@@ -187,7 +192,9 @@ pub trait Catalog: Send + Sync {
     /// element's type is the one asked about (`text` for a `json`/`jsonb`
     /// column, whose elements are unknown).
     ///
-    /// The default is `true`: the check is skipped.
+    /// The default is `true`: the check is skipped. A store that refuses to
+    /// run the check answers [`SourceError::Unchecked`], which is reported as
+    /// [`DiagnosticKind::CheckSkipped`].
     async fn accepts_transforms(
         &self,
         _schema: &DatabaseSchema,
@@ -217,7 +224,9 @@ pub trait Catalog: Send + Sync {
     /// column) compare for equality, as the document query joins a link
     /// column to the key it names. Only asked of two columns that exist.
     ///
-    /// The default is `true`: the check is skipped.
+    /// The default is `true`: the check is skipped. A store that refuses to
+    /// run the check answers [`SourceError::Unchecked`], which is reported as
+    /// [`DiagnosticKind::CheckSkipped`].
     async fn compares(
         &self,
         _schema: &DatabaseSchema,
@@ -335,6 +344,10 @@ pub enum DiagnosticKind {
     /// `options`, at the root or in plain objects: OpenSearch refuses every
     /// document holding a non-null value.
     TimeOfDayAsDate,
+    /// A check the store refused to run (e.g. the transform or link check,
+    /// under a role without USAGE on a type's schema): the message names what
+    /// was not checked and the store's reason. Nothing is known either way.
+    CheckSkipped,
 }
 
 impl DiagnosticKind {
@@ -362,7 +375,8 @@ impl DiagnosticKind {
             | Self::UndeclaredArrayColumn
             | Self::IdsElementLossy
             | Self::DuplicateFieldName
-            | Self::TimestampFormat => Severity::Warning,
+            | Self::TimestampFormat
+            | Self::CheckSkipped => Severity::Warning,
         }
     }
 
@@ -391,6 +405,7 @@ impl DiagnosticKind {
             Self::DuplicateFieldNameFailsToBuild => "duplicate_field_name_fails_to_build",
             Self::DuplicateFieldNameRefused => "duplicate_field_name_refused",
             Self::TimeOfDayAsDate => "time_of_day_as_date",
+            Self::CheckSkipped => "check_skipped",
         }
     }
 }
@@ -1256,8 +1271,20 @@ impl Checker<'_> {
         ) else {
             return Ok(());
         };
-        if self.catalog.compares(self.db_schema, link, key).await? {
-            return Ok(());
+        match self.catalog.compares(self.db_schema, link, key).await {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(SourceError::Unchecked(reason)) => {
+                self.report(
+                    DiagnosticKind::CheckSkipped,
+                    format!(
+                        "could not check `{role}` `{}.{}` (`{}`) against `{}.{}` (`{}`): {reason}",
+                        link.0, link.1, link_info.sql_type, key.0, key.1, key_info.sql_type,
+                    ),
+                );
+                return Ok(());
+            }
+            Err(e) => return Err(e),
         }
         self.report(
             DiagnosticKind::LinkTypeMismatch,
@@ -1607,8 +1634,14 @@ impl Checker<'_> {
             );
         }
 
-        if !column.transforms.is_empty()
-            && !self
+        if !column.transforms.is_empty() {
+            let names = column
+                .transforms
+                .iter()
+                .map(|transform| format!("`{}`", transform_name(*transform)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let accepted = self
                 .catalog
                 .accepts_transforms(
                     self.db_schema,
@@ -1617,21 +1650,26 @@ impl Checker<'_> {
                     &column.transforms,
                     column.array,
                 )
-                .await?
-        {
-            let names = column
-                .transforms
-                .iter()
-                .map(|transform| format!("`{}`", transform_name(*transform)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            self.report(
-                DiagnosticKind::TransformNotApplicable,
-                format!(
-                    "`transforms` {names} do not apply to the column's database type `{}`",
-                    info.sql_type
+                .await;
+            match accepted {
+                Ok(true) => {}
+                Ok(false) => self.report(
+                    DiagnosticKind::TransformNotApplicable,
+                    format!(
+                        "`transforms` {names} do not apply to the column's database type `{}`",
+                        info.sql_type
+                    ),
                 ),
-            );
+                Err(SourceError::Unchecked(reason)) => self.report(
+                    DiagnosticKind::CheckSkipped,
+                    format!(
+                        "could not check `transforms` {names} against the column's database \
+                         type `{}`: {reason}",
+                        info.sql_type
+                    ),
+                ),
+                Err(e) => return Err(e),
+            }
         }
 
         // A primary key or a `default` makes the field non-null regardless, so only

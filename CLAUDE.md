@@ -736,7 +736,11 @@ takes no lock — issue #225; "do *these* two columns compare", `compares`, the 
 `SELECT NULL::<link> = NULL::<key>`: every link is checked against the key it names (`belongs_to`
 `column`, `foreign_key` against the parent's or last hop's key, both junction keys, each hop's
 `foreign_key`, both sides of each `on:` pair; one simple-protocol statement per distinct type pair,
-cached, at start only; a refusal other than "no such operator" is no verdict), and a pair with no
+cached, at start only; a refusal other than "no such operator" is no verdict: the probe answers
+`SourceError::Unchecked` with Postgres's message and validation reports `CheckSkipped`, a warning
+naming what wasn't checked and why, for the transform probe too — issue #324, since `check` installs
+no logger; guards: `config_coverage`'s `a_check_the_role_may_not_run_is_reported_as_skipped`, the
+mock-catalog `a_check_the_store_refuses_to_run_is_reported_as_skipped`), and a pair with no
 `=` operator is `LinkTypeMismatch`, since the document query fails to plan for any root row,
 whatever the related rows hold — issue #313; pairs that compare across
 types, at any value, never stop the engine: a link no key can equal matches no parent — issue #312,
@@ -810,7 +814,7 @@ by name, so a new option must be decided) — any state it doesn't model means n
 type, numeric, nullability, ignored-primary-key, `UndeclaredArrayColumn`, `IdsElementMismatch` (an empty
 `ids` array still indexes), `IdsElementLossy`, `DuplicateFieldName`, `RootPrimaryKey`
 and `TimestampFormat` (issue #304: a timestamp `options.format` no pattern of which reads the ISO
-form, `source::reads_iso_timestamps`, checked offline in `validate_spec`) findings print and start, as they built or ran in 0.17), so a new kind forces a decision there; stop
+form, `source::reads_iso_timestamps`, checked offline in `validate_spec`) and `CheckSkipped` findings print and start, as they built or ran in 0.17), so a new kind forces a decision there; stop
 only on a state no working 0.17 deployment can be in (or on a key new since, like `array`). `DiagnosticKind` stays exhaustive for that match; `Diagnostic` and `Anchor` are
 `#[non_exhaustive]` (`Diagnostic::new` builds one). `check` still fails on every `Error`. No opt-out
 flag. The stopping kinds apply only where every document carries the value, mapped as declared:

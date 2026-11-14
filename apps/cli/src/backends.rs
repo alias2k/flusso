@@ -340,7 +340,8 @@ fn stops_the_start(kind: DiagnosticKind) -> bool {
         | DiagnosticKind::IdsElementMismatch
         | DiagnosticKind::IdsElementLossy
         | DiagnosticKind::DuplicateFieldName
-        | DiagnosticKind::TimestampFormat => false,
+        | DiagnosticKind::TimestampFormat
+        | DiagnosticKind::CheckSkipped => false,
     }
 }
 
