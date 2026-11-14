@@ -234,3 +234,36 @@ fn an_unchanged_toast_value_outside_the_identity_is_left_out_of_the_post_image()
     assert_eq!(image.get(&ColumnName::try_new("label").unwrap()), None);
     assert_eq!(image.0.len(), 2);
 }
+
+/// A WAL value decodes into the variant the document builder reads the column
+/// back as (`decode_column`), so a key of that type addresses its document
+/// (issue #295). Text a type can't parse stays text.
+#[test]
+fn a_value_decodes_as_the_document_builder_reads_it_back() {
+    use chrono::{NaiveDate, TimeZone, Utc};
+
+    let date = NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
+    let at = date.and_hms_milli_opt(10, 0, 0, 500).unwrap();
+    for (oid, text, value) in [
+        (17, "\\x01ab", GenericValue::Bytes(vec![0x01, 0xab])),
+        (17, "\\x", GenericValue::Bytes(Vec::new())),
+        (1082, "2024-02-29", GenericValue::Date(date)),
+        (1083, "10:00:00.5", GenericValue::Time(at.time())),
+        (1114, "2024-02-29 10:00:00.5", GenericValue::Timestamp(at)),
+        (
+            1184,
+            "2024-02-29 12:00:00.5+02",
+            GenericValue::TimestampTz(Utc.from_utc_datetime(&at)),
+        ),
+        (
+            1184,
+            "2024-02-29 15:30:00.5+05:30",
+            GenericValue::TimestampTz(Utc.from_utc_datetime(&at)),
+        ),
+        (17, "\\x1", GenericValue::String("\\x1".into())),
+        (1082, "infinity", GenericValue::String("infinity".into())),
+        (1184, "-infinity", GenericValue::String("-infinity".into())),
+    ] {
+        assert_eq!(typed_value(text, oid), value, "{oid} {text}");
+    }
+}

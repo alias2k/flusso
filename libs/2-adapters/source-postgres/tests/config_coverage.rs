@@ -1737,6 +1737,92 @@ async fn an_enum_or_domain_column_is_a_type_mismatch_that_still_builds() {
     assert_eq!(str_of(&body, "contact"), "ada@example.com");
 }
 
+/// A root keyed by a type the document builder can't read back is refused at
+/// `primary_key` (issue #295): every key reads back as null, so even a row
+/// that exists builds as a tombstone. Every type it reads, through a domain
+/// too, passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_root_key_the_builder_cannot_read_back_is_refused() {
+    let (_pg, url) = start_seeded().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE EXTENSION citext",
+        "CREATE TYPE mood AS ENUM ('calm', 'busy')",
+        "CREATE DOMAIN score AS int",
+        "CREATE DOMAIN tag AS citext",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let keyed = [
+        ("inet", "'10.0.0.1'", false),
+        ("mood", "'calm'", false),
+        ("money", "'1.00'", false),
+        ("bytea", "'\\x01'", true),
+        ("citext", "'Ada'", true),
+        ("score", "1", true),
+        ("tag", "'Ada'", true),
+        ("char(4)", "'AB'", true),
+        ("numeric", "1.5", true),
+        ("date", "'2024-01-01'", true),
+        ("time", "'10:00'", true),
+        ("timestamp", "'2024-01-01 10:00'", true),
+        ("timestamptz", "'2024-01-01 10:00+00'", true),
+    ];
+    for (n, (sql_type, value, _)) in keyed.iter().enumerate() {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "CREATE TABLE keyed_{n} (id {sql_type} PRIMARY KEY, name text); \
+             INSERT INTO keyed_{n} VALUES ({value}, 'a')"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    for (n, (sql_type, value, readable)) in keyed.into_iter().enumerate() {
+        let mut schema = users_schema(vec![col("name", "name")], None);
+        schema.table = table(&format!("keyed_{n}"));
+        let documents = builder(&url, schema.clone()).await;
+        let found: Vec<_> = validate_indexes(&spec(schema), &documents)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|d| (d.dotted_path(), d.kind.as_str(), d.message))
+            .collect();
+        if readable {
+            assert_eq!(found, vec![], "{sql_type}");
+            continue;
+        }
+        assert_eq!(
+            found,
+            vec![(
+                "primary_key".to_owned(),
+                "unsupported_key_type",
+                format!(
+                    "`primary_key` `id` is `{sql_type}`, a type that can't be read back as a \
+                     document key: no document would ever be written"
+                ),
+            )],
+            "{sql_type}"
+        );
+        let key = value.trim_matches('\'');
+        let build = documents.build_many(&[doc_keyed(key)]).await.unwrap();
+        assert!(
+            matches!(build.as_slice(), [Document::Delete { .. }]),
+            "an existing `{sql_type}` row builds as a tombstone: {build:?}"
+        );
+    }
+}
+
+/// A document keyed as a live change carries a value of a type the WAL
+/// decoder leaves as text.
+fn doc_keyed(key: &str) -> DocumentId {
+    DocumentId {
+        index: index_name("users"),
+        key: RowKey(vec![(column("id"), GenericValue::String(key.to_owned()))]),
+    }
+}
+
 /// What `validate_indexes` reports that a document build can't get past
 /// (issue #225), each against what the build really does:
 ///
