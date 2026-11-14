@@ -421,8 +421,10 @@ mod tests {
     }
 
     #[test]
-    fn an_ids_element_type_that_holds_no_key_refuses_the_start() {
-        refuses(DiagnosticKind::IdsElementMismatch);
+    fn an_ids_element_type_that_holds_no_key_prints_and_starts() {
+        let printed = starts(DiagnosticKind::IdsElementMismatch);
+        assert!(printed.contains("[error]"), "{printed}");
+        assert!(printed.contains("starting anyway"), "{printed}");
     }
 
     #[test]
