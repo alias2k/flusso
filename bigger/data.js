@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794648975438,
+  "lastUpdate": 1794650923068,
   "repoUrl": "https://github.com/alias2k/flusso",
   "entries": {
     "flusso (bigger is better)": [
@@ -3406,6 +3406,54 @@ window.BENCHMARK_DATA = {
           {
             "name": "reference/ci/drain_changes_per_s",
             "value": 572.7825649779646,
+            "unit": "changes/s",
+            "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":10000,\"items_per_order\":3,\"name\":\"ci\",\"orders\":25000,\"orders_per_user\":0,\"probe_rate_per_s\":20,\"probes\":200,\"products\":1000,\"reviews_per_product\":2,\"rss_cap_mib\":2048,\"tags\":0,\"tags_per_user\":0,\"users\":5000,\"wall_cap_secs\":900,\"writers\":8}}"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "89390131+JakubWasilczyk-Alias2k@users.noreply.github.com",
+            "name": "Jakub Wasilczyk",
+            "username": "JakubWasilczyk-Alias2k"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1588e786a689e03a3aac4191da46ea2db02f31b2",
+          "message": "Merge pull request #323 from alias2k/test/duplicate-names-wildcard-delete\n\ntest(cli): the duplicate-names matrix deletes only its own pair's indexes",
+          "timestamp": "2026-11-14T10:50:18+01:00",
+          "tree_id": "92691c2303cb00c0657d64971235b4290fa60b88",
+          "url": "https://github.com/alias2k/flusso/commit/1588e786a689e03a3aac4191da46ea2db02f31b2"
+        },
+        "date": 1794650922437,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "complex/ci/backfill_docs_per_s",
+            "value": 681.5218904086636,
+            "unit": "docs/s",
+            "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":4000,\"items_per_order\":4,\"name\":\"ci\",\"orders\":0,\"orders_per_user\":5,\"probe_rate_per_s\":20,\"probes\":150,\"products\":0,\"reviews_per_product\":0,\"rss_cap_mib\":2048,\"tags\":8,\"tags_per_user\":4,\"users\":2000,\"wall_cap_secs\":900,\"writers\":8}}"
+          },
+          {
+            "name": "complex/ci/drain_changes_per_s",
+            "value": 505.35870298098035,
+            "unit": "changes/s",
+            "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":4000,\"items_per_order\":4,\"name\":\"ci\",\"orders\":0,\"orders_per_user\":5,\"probe_rate_per_s\":20,\"probes\":150,\"products\":0,\"reviews_per_product\":0,\"rss_cap_mib\":2048,\"tags\":8,\"tags_per_user\":4,\"users\":2000,\"wall_cap_secs\":900,\"writers\":8}}"
+          },
+          {
+            "name": "reference/ci/backfill_docs_per_s",
+            "value": 408.6877202453629,
+            "unit": "docs/s",
+            "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":10000,\"items_per_order\":3,\"name\":\"ci\",\"orders\":25000,\"orders_per_user\":0,\"probe_rate_per_s\":20,\"probes\":200,\"products\":1000,\"reviews_per_product\":2,\"rss_cap_mib\":2048,\"tags\":0,\"tags_per_user\":0,\"users\":5000,\"wall_cap_secs\":900,\"writers\":8}}"
+          },
+          {
+            "name": "reference/ci/drain_changes_per_s",
+            "value": 615.3001684658707,
             "unit": "changes/s",
             "extra": "{\"images\":{\"opensearch\":\"opensearchproject/opensearch:2\",\"postgres\":\"postgres:16-alpine\"},\"scale\":{\"burst\":10000,\"items_per_order\":3,\"name\":\"ci\",\"orders\":25000,\"orders_per_user\":0,\"probe_rate_per_s\":20,\"probes\":200,\"products\":1000,\"reviews_per_product\":2,\"rss_cap_mib\":2048,\"tags\":0,\"tags_per_user\":0,\"users\":5000,\"wall_cap_secs\":900,\"writers\":8}}"
           }
