@@ -37,7 +37,7 @@ OpenSearch accepted a bulk request but refused one document: a value that doesn'
 - **Global default.** `on_error = "skip"` at the top level makes it the default for every index; a per-index `stop` then opts one back in.
 - **One `stop` halts the batch.** In a batch touching a `stop` index and a `skip` index, a rejection in the `stop` index halts the whole batch before any quarantine is recorded.
 - **The sink never retries a rejection**; re-sending re-rejects. Only transient transport failures are retried, per `max_retries`.
-- **A script that fails on a document** is governed by the same policy, one step earlier: `skip` publishes nothing for it, so it keeps its indexed version on every sink. It's counted in `flusso_script_failures_total`, not as a quarantine; alert on it too: `increase(flusso_script_failures_total[10m]) > 0`. See [Script fields](../reference/scripts.md#failures).
+- **A document that fails to build** (a script failed on it, or a number field held `NaN` or an [infinity](../reference/field-types.md#numbers)) is governed by the same policy, one step earlier: `skip` publishes nothing for it, so it keeps its indexed version on every sink. It's counted in `flusso_script_failures_total`, not as a quarantine; alert on it too: `increase(flusso_script_failures_total[10m]) > 0`. See [Script fields](../reference/scripts.md#failures).
 
 ## Related
 

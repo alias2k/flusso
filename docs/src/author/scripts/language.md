@@ -29,7 +29,7 @@ Every document value arrives as a Rhai value; the full mapping is in [Values in 
 | --- | --- | --- |
 | an integer column | `i64` | `type_of(x) == "i64"` |
 | `float`, `double` | `f64` | `"f64"` |
-| `decimal` | `decimal`, exact | `"decimal"` |
+| `decimal` | `decimal`, exact (past its range, a string) | `"decimal"` |
 | text, `uuid`, `date`, `timestamp` | string | `"string"` |
 | a group, a to-one join, a `map` | object map | `"map"` |
 | a to-many join, an `ids` aggregate | array | `"array"` |

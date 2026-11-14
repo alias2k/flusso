@@ -1,6 +1,6 @@
 # Upgrade to 0.18
 
-0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index. It also writes a `timestamp` column in ISO 8601, which changes stored documents and can break a tuned `format`: see [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601).
+0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index. It also writes a `timestamp` column in ISO 8601, which changes stored documents and can break a tuned `format`: see [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601). A `decimal` field is written with every digit, and a `NaN` or infinity in a number field fails its document: see [A decimal is written with every digit](#a-decimal-is-written-with-every-digit).
 
 ## When to use this
 
@@ -69,8 +69,23 @@ Without either, no index is rebuilt. A `constant` holding a number, a boolean, o
 
    A `stdout` sink consumer sees the new form from the first run.
 
+## A decimal is written with every digit
+
+**Breaking.** A `decimal` value was rounded to the nearest `f64` on its way to the document, and one past `rust_decimal`'s range (±7.9 × 10^28, or more than 28 fractional digits) was written as a JSON string, `"1000000000000000000000000000000"`. 0.18 writes the number Postgres stores, every digit, everywhere a `decimal` goes: a column, an array element, a `sum`/`min`/`max`, an `ids` key (see [numbers](../reference/field-types.md#numbers)). No content hash moves and nothing is rebuilt; search, sort and aggregations still see a `double`.
+
+| Value | 0.17 `_source` | 0.18 `_source` |
+| --- | --- | --- |
+| `12.50` | `12.5` | `12.50` |
+| `1234567890.123456789` | `1234567890.1234567` | `1234567890.123456789` |
+| `1e30` | `"1000000000000000000000000000000"` | `1000000000000000000000000000000` |
+| `NaN`, `Infinity`, `-Infinity` | the string, which OpenSearch rejects | the document fails to build |
+
+1. **Stored documents.** Each document takes the new form at its row's next write. Run [`flusso reindex <index>`](../reference/cli.md#reindex) on each index with a `decimal` field to rewrite every one now, with no restart.
+2. **Consumers.** A field read as `String` because it could hold the string form now fails on that document: read it as `f64` or `serde_json::Value` (see [What the derive trusts](../query/document-structs.md#what-the-derive-trusts)). A `rust_decimal::Decimal` still can't hold a value past its range.
+3. **`NaN` and infinities.** A `NaN`, `Infinity` or `-Infinity` under any number field now fails the document on the ingest side, decided by [`on_error`](../reference/index-and-on-error.md#on_error), where OpenSearch used to reject the string at the sink. Under `stop` the ingest engine stops before any sink receives the batch (`DocumentFailed` in the log, not a rejection); under `skip` no sink receives the document and each keeps its previous version, where 0.17 quarantined it. A `stdout` sink no longer prints such a document.
+
 ## Related
 
-- [Field types](../reference/field-types.md) for what a `binary` field, a `constant`, and a `timestamp` index.
+- [Field types](../reference/field-types.md) for what a `binary` field, a `constant`, a `timestamp` and a [number](../reference/field-types.md#numbers) index.
 - [Reindex without downtime](reindex.md) for rebuilding an index on demand.
 - [Sink: OpenSearch](../reference/sink-opensearch.md#index-naming) for hash aliases and generations.
