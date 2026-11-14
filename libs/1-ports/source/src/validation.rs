@@ -46,8 +46,22 @@
 //! Two checks need no database at all: a `soft_delete` `field` that names no
 //! column field, and two fields sharing a name at one level
 //! ([`DiagnosticKind::DuplicateFieldName`], a warning, since such a schema
-//! has always loaded). [`validate_spec`] reports them on their own (`flusso
-//! check --offline`) and [`validate_indexes`] reports them with the rest.
+//! has always loaded; an error of its own kind for a pair that never gives an
+//! indexed document, see [`never_indexed`](crate::never_indexed)).
+//! [`validate_spec`] reports them on their own (`flusso check --offline`) and
+//! [`validate_indexes`] reports them with the rest.
+//!
+//! A `time` or `timetz` column under a `timestamp` or `date` field is
+//! [`DiagnosticKind::TimeOfDayAsDate`]: OpenSearch's `date` mapping refuses
+//! every non-null value. Only where every document carries the field, mapped
+//! as declared, is it reported: at the root or in plain objects (emitted, no
+//! `options`), with no `options` on the field and no namesake. A field in a
+//! join or a `min`/`max` is refused only where a related row holds a time,
+//! so neither is reported.
+//!
+//! The same rule decides where a duplicate pair that never indexes gets its
+//! own kind: under a join, an input-only or unindexed ancestor, or an object
+//! with `options`, it is the plain warning.
 //!
 //! The one store-specific piece is the [`Catalog`] trait: how a store reports a
 //! table and a column, and, when it can, a table's primary key, whether a
@@ -291,10 +305,13 @@ pub enum DiagnosticKind {
     /// [`FieldName`] reads it: trimmed, case kept). The index maps the last
     /// one; a document holds the last one's value, read as the first one
     /// declares it, and an input-only (`emit: false`) one strips the name from
-    /// every document. Some pairs fail every document: an `array: true` column
+    /// every document. Some pairs fail documents: an `array: true` column
     /// before a field holding objects fails the build, a script before a field
     /// its output does not fit is rejected by OpenSearch; the message says
-    /// which. A schema with one still loads, as earlier releases did.
+    /// which. A pair that fails every document whatever the data is
+    /// [`DuplicateFieldNameFailsToBuild`](Self::DuplicateFieldNameFailsToBuild)
+    /// or [`DuplicateFieldNameRefused`](Self::DuplicateFieldNameRefused)
+    /// instead. A schema with one still loads, as earlier releases did.
     DuplicateFieldName,
     /// A `timestamp` field, aggregate result or script output whose
     /// `options.format` has no pattern that reads the ISO 8601 form the
@@ -302,6 +319,22 @@ pub enum DiagnosticKind {
     /// rejects a document holding a timestamp. Only a format whose every
     /// pattern is known to refuse that form is reported.
     TimestampFormat,
+    /// Two fields at one level share a name, and every document fails to
+    /// build whatever the data: an `array: true` column of scalars before an
+    /// `object` (see [`never_indexed`](crate::never_indexed)), at the root or
+    /// in plain objects only.
+    DuplicateFieldNameFailsToBuild,
+    /// Two fields at one level share a name, and OpenSearch refuses every
+    /// document whatever the data, `ignore_malformed` or not: a scalar or list
+    /// constant before an indexed join, `object`, `json` or `map` with no
+    /// `options` (see [`never_indexed`](crate::never_indexed)), at the root or
+    /// in plain objects only. A sink that does not map the index (`stdout`)
+    /// takes it.
+    DuplicateFieldNameRefused,
+    /// A `timestamp` or `date` field over a `time` or `timetz` column, with no
+    /// `options`, at the root or in plain objects: OpenSearch refuses every
+    /// document holding a non-null value.
+    TimeOfDayAsDate,
 }
 
 impl DiagnosticKind {
@@ -320,7 +353,10 @@ impl DiagnosticKind {
             | Self::UnsupportedKeyType
             | Self::NotAnArrayColumn
             | Self::LinkTypeMismatch
-            | Self::IdsElementMismatch => Severity::Error,
+            | Self::IdsElementMismatch
+            | Self::DuplicateFieldNameFailsToBuild
+            | Self::DuplicateFieldNameRefused
+            | Self::TimeOfDayAsDate => Severity::Error,
             Self::Nullability
             | Self::IgnoredPrimaryKey
             | Self::UndeclaredArrayColumn
@@ -352,6 +388,9 @@ impl DiagnosticKind {
             Self::IdsElementLossy => "ids_element_lossy",
             Self::DuplicateFieldName => "duplicate_field_name",
             Self::TimestampFormat => "timestamp_format",
+            Self::DuplicateFieldNameFailsToBuild => "duplicate_field_name_fails_to_build",
+            Self::DuplicateFieldNameRefused => "duplicate_field_name_refused",
+            Self::TimeOfDayAsDate => "time_of_day_as_date",
         }
     }
 }
@@ -457,13 +496,21 @@ pub async fn validate_indexes(spec: &SourceSpec, catalog: &dyn Catalog) -> Resul
             path: Vec::new(),
             positions: Vec::new(),
             anchor: Anchor::Field,
+            uncarried: 0,
+            date_mapped: false,
             out: &mut diagnostics,
         };
         checker
             .fields(&schema.table, &schema.fields, schema.primary_key.as_ref())
             .await?;
         checker.root(schema).await?;
-        duplicate_names(name, &schema.fields, &mut Vec::new(), &mut diagnostics);
+        duplicate_names(
+            name,
+            &schema.fields,
+            true,
+            &mut Vec::new(),
+            &mut diagnostics,
+        );
         timestamp_formats(name, &schema.fields, &mut Vec::new(), &mut diagnostics);
     }
     Ok(diagnostics)
@@ -490,17 +537,26 @@ pub fn validate_spec(spec: &SourceSpec) -> Vec<Diagnostic> {
                 message,
             ));
         }
-        duplicate_names(name, &schema.fields, &mut Vec::new(), &mut diagnostics);
+        duplicate_names(
+            name,
+            &schema.fields,
+            true,
+            &mut Vec::new(),
+            &mut diagnostics,
+        );
         timestamp_formats(name, &schema.fields, &mut Vec::new(), &mut diagnostics);
     }
     diagnostics
 }
 
 /// One [`DiagnosticKind::DuplicateFieldName`] per name declared more than
-/// once at a level of `fields`, at any depth, anchored at that name.
+/// once at a level of `fields`, at any depth, anchored at that name. A pair
+/// that never gives an indexed document gets its own kind, but only where
+/// every document carries the level (`carried`: see [`carries`]).
 fn duplicate_names(
     index: &IndexName,
     fields: &[Field],
+    carried: bool,
     path: &mut Vec<(FieldName, Option<usize>)>,
     out: &mut Vec<Diagnostic>,
 ) {
@@ -520,21 +576,36 @@ fn duplicate_names(
         }
         reported.push(name);
         path.push((name.clone(), None));
+        let fields: Vec<&Field> = same.iter().map(|(_, field)| *field).collect();
+        let never = carried.then(|| crate::never_indexed(&fields)).flatten();
+        let kind = match never {
+            Some(crate::NeverIndexed::FailsToBuild) => {
+                DiagnosticKind::DuplicateFieldNameFailsToBuild
+            }
+            Some(crate::NeverIndexed::Refused) => DiagnosticKind::DuplicateFieldNameRefused,
+            None => DiagnosticKind::DuplicateFieldName,
+        };
         out.push(Diagnostic {
             index: index.clone(),
             field: name.clone(),
             path: path.iter().map(|(name, _)| name.clone()).collect(),
             positions: path.iter().map(|(_, at)| *at).collect(),
             anchor: Anchor::Field,
-            kind: DiagnosticKind::DuplicateFieldName,
-            severity: DiagnosticKind::DuplicateFieldName.severity(),
+            kind,
+            severity: kind.severity(),
             message: crate::duplicates::duplicate_message(name, &same),
         });
         path.pop();
     }
     for (at, field) in fields.iter().enumerate() {
         path.push((field.field.clone(), position(fields, at)));
-        duplicate_names(index, field.children(), path, out);
+        duplicate_names(
+            index,
+            field.children(),
+            carried && carries(field),
+            path,
+            out,
+        );
         path.pop();
     }
 }
@@ -608,6 +679,14 @@ fn writes_timestamps(source: &FieldSource) -> bool {
     }
 }
 
+/// Whether every document that carries `field`'s level carries its children
+/// too, as mapped: a plain object (emitted, no `options`). A join may have no
+/// related row; an input-only or unindexed field, or one with `options` (an
+/// object with `enabled: false`, say), is not mapped as its children declare.
+fn carries(field: &Field) -> bool {
+    matches!(field.source, FieldSource::Group(_)) && field.emit && field.options.is_empty()
+}
+
 /// The 1-based position of `fields[at]` when another field of `fields` has
 /// its name.
 fn position(fields: &[Field], at: usize) -> Option<usize> {
@@ -657,6 +736,13 @@ struct Checker<'a> {
     /// pushed after the fields, have none).
     positions: Vec<Option<usize>>,
     anchor: Anchor,
+    /// How many enclosing fields some document lacks the subtree of, as
+    /// mapped: any field but a plain object (see [`carries`]).
+    uncarried: usize,
+    /// Whether the field being checked is mapped as its own declaration says,
+    /// so a time of day under a `date` mapping is refused
+    /// ([`DiagnosticKind::TimeOfDayAsDate`]).
+    date_mapped: bool,
     out: &'a mut Vec<Diagnostic>,
 }
 
@@ -671,6 +757,36 @@ const NUMERIC: &[FlussoType] = &[
 
 fn is_numeric(sql_type: &str) -> bool {
     NUMERIC.iter().any(|ty| ty.accepts_pg(sql_type))
+}
+
+/// A `date` format that reads every `time` value (any number of fraction
+/// digits), led by the default pattern so the ISO form still reads
+/// ([`DiagnosticKind::TimestampFormat`] stays quiet).
+const TIME_FORMAT: &str =
+    "strict_date_optional_time||HH:mm:ss[.SSSSSS][.SSSSS][.SSSS][.SSS][.SS][.S]";
+
+/// A `date` format that reads every `timetz` value Postgres writes: any
+/// number of fraction digits, an offset with or without minutes.
+const TIMETZ_FORMAT: &str = "strict_date_optional_time||\
+                             HH:mm:ss[.SSSSSS][.SSSSS][.SSSS][.SSS][.SS][.S]XXX||\
+                             HH:mm:ss[.SSSSSS][.SSSSS][.SSSS][.SSS][.SS][.S]X";
+
+/// Whether a Postgres type (array and precision ignored) is a time of day:
+/// `Some(true)` with a zone (`timetz`), `Some(false)` without, else `None`.
+fn time_of_day_type(sql_type: &str) -> Option<bool> {
+    let base = sql_type.trim().trim_end_matches("[]").to_ascii_lowercase();
+    let bare = match base.split_once('(') {
+        Some((head, rest)) => match rest.split_once(')') {
+            Some((_, tail)) => format!("{head}{tail}"),
+            None => base.clone(),
+        },
+        None => base.clone(),
+    };
+    match bare.trim() {
+        "time" | "time without time zone" => Some(false),
+        "timetz" | "time with time zone" => Some(true),
+        _ => None,
+    }
 }
 
 impl Checker<'_> {
@@ -873,7 +989,15 @@ impl Checker<'_> {
         field: &Field,
         primary_key: Option<&ColumnName>,
     ) -> Result<()> {
-        match &field.source {
+        // A namesake's value is mapped by the last one of the name, so only an
+        // unshared field is known to be mapped as it declares.
+        let shared = self.positions.last().copied().flatten().is_some();
+        self.date_mapped = self.uncarried == 0 && field.emit && !shared && field.options.is_empty();
+        let hides = !carries(field);
+        if hides {
+            self.uncarried += 1;
+        }
+        let checked = match &field.source {
             FieldSource::Column(column) => self.column_field(table, column, primary_key).await,
             FieldSource::Relation(Relation::Aggregate(aggregate)) => {
                 self.aggregate(table, aggregate).await
@@ -882,7 +1006,46 @@ impl Checker<'_> {
             FieldSource::Group(fields) => self.fields(table, fields, primary_key).await,
             FieldSource::Geo(geo) => self.geo(table, geo).await,
             FieldSource::Constant(_) | FieldSource::Script(_) => Ok(()),
+        };
+        if hides {
+            self.uncarried -= 1;
         }
+        checked
+    }
+
+    /// Report a `timestamp` or `date` field over a `time`/`timetz` column
+    /// ([`DiagnosticKind::TimeOfDayAsDate`]) when every document carries it,
+    /// mapped as declared (`date_mapped`); `true` when reported.
+    fn time_of_day(&mut self, ty: &FlussoType, info: &ColumnInfo) -> bool {
+        let base = info.base_type.as_deref().unwrap_or(&info.sql_type);
+        let Some(zoned) = time_of_day_type(base) else {
+            return false;
+        };
+        let declared = match ty {
+            FlussoType::Timestamp => "timestamp",
+            FlussoType::Date => "date",
+            _ => return false,
+        };
+        if !self.date_mapped {
+            return false;
+        }
+        let (postgres, format) = if zoned {
+            ("time with time zone", TIMETZ_FORMAT)
+        } else {
+            ("time without time zone", TIME_FORMAT)
+        };
+        self.report(
+            DiagnosticKind::TimeOfDayAsDate,
+            format!(
+                "a `{declared}` field over the column's database type `{}`: a time of day is no \
+                 date to OpenSearch, so it refuses every document whose value is not null. \
+                 Index it as text with a `custom` field (`postgres: [{postgres}]`, `opensearch: \
+                 keyword`), or as a `timestamp` field (a `date` field takes only a `date` \
+                 column) with `options: {{ format: \"{format}\" }}`",
+                info.sql_type
+            ),
+        );
+        true
     }
 
     /// Whether `table` exists (cached).
@@ -1433,7 +1596,8 @@ impl Checker<'_> {
         let unknown_elements = column.array
             && holds_json
             && !matches!(column.ty, FlussoType::Json | FlussoType::Custom { .. });
-        if !unknown_elements && !column.ty.accepts_pg(&info.sql_type) {
+        let time_of_day = self.time_of_day(&column.ty, &info);
+        if !time_of_day && !unknown_elements && !column.ty.accepts_pg(&info.sql_type) {
             self.report(
                 DiagnosticKind::TypeMismatch,
                 format!(
@@ -2727,6 +2891,162 @@ mod tests {
                 ),
             ]),
         );
+    }
+
+    /// Namesakes that can never build or index a document are errors of their
+    /// own kinds, with no database (issue #316); every other pair stays the
+    /// warning.
+    #[test]
+    fn namesakes_that_never_index_are_errors_with_no_database() {
+        let kind = |fields: serde_json::Value| {
+            let found = duplicates(fields);
+            assert_eq!(found.len(), 1, "{found:?}");
+            found[0].1
+        };
+        let tags = json!({ "field": "v", "source": { "column": {
+            "column": "tags", "ty": "keyword", "nullable": true, "array": true,
+        } } });
+        let five = json!({ "field": "v", "source": { "constant": { "BigInt": 5 } } });
+        let keyed =
+            json!({ "field": "v", "source": { "constant": { "Map": { "a": { "BigInt": 1 } } } } });
+        let object = group("v", json!([column_field("k", "k")]));
+        let map = json!({ "field": "v", "source": { "column": {
+            "column": "m", "ty": { "map": { "values": "keyword" } }, "nullable": true,
+        } }, "options": { "dynamic": { "Bool": true } } });
+
+        assert_eq!(
+            kind(json!([int_field("id"), tags.clone(), object.clone()])),
+            DiagnosticKind::DuplicateFieldNameFailsToBuild
+        );
+        assert_eq!(
+            kind(json!([int_field("id"), five.clone(), object.clone()])),
+            DiagnosticKind::DuplicateFieldNameRefused
+        );
+        assert_eq!(
+            kind(json!([int_field("id"), five.clone(), map.clone()])),
+            DiagnosticKind::DuplicateFieldNameRefused
+        );
+        assert_eq!(
+            kind(json!([int_field("id"), keyed.clone(), object.clone()])),
+            DiagnosticKind::DuplicateFieldNameRefused
+        );
+        assert_eq!(
+            DiagnosticKind::DuplicateFieldNameFailsToBuild.severity(),
+            Severity::Error
+        );
+        assert_eq!(
+            DiagnosticKind::DuplicateFieldNameRefused.severity(),
+            Severity::Error
+        );
+
+        let k = group("v", json!([column_field("a", "a")]));
+        let disabled = json!({ "field": "v", "source": { "group": [column_field("k", "k")] },
+            "options": { "enabled": { "Bool": false } } });
+        let quiet = json!({ "field": "v", "emit": false, "source": { "column": {
+            "column": "tags", "ty": "keyword", "nullable": true, "array": true,
+        } } });
+        for still_a_warning in [
+            json!([int_field("id"), tags.clone(), column_field("v", "k")]),
+            json!([int_field("id"), quiet, object.clone()]),
+            json!([int_field("id"), keyed.clone(), k]),
+            json!([int_field("id"), keyed, map]),
+            json!([int_field("id"), five.clone(), disabled]),
+            json!([int_field("id"), five, column_field("v", "k")]),
+        ] {
+            assert_eq!(
+                kind(still_a_warning.clone()),
+                DiagnosticKind::DuplicateFieldName,
+                "{still_a_warning}"
+            );
+        }
+    }
+
+    /// A stopping pair stops only where every document carries it: at the
+    /// root, or in plain objects all the way up. Under a join (a parent with
+    /// no related row indexes), an input-only or unindexed ancestor (the pair
+    /// is never mapped), or an object with `options`, it is the warning. A
+    /// `dynamic` the user sets counts as an option of their own.
+    #[test]
+    fn a_stopping_pair_stops_only_where_every_document_carries_it() {
+        let kind = |fields: serde_json::Value| {
+            let found = duplicates(fields);
+            assert_eq!(found.len(), 1, "{found:?}");
+            found[0].1
+        };
+        let five = json!({ "field": "v", "source": { "constant": { "BigInt": 5 } } });
+        let keyed =
+            json!({ "field": "v", "source": { "constant": { "Map": { "a": { "BigInt": 1 } } } } });
+        let tags = json!({ "field": "v", "source": { "column": {
+            "column": "tags", "ty": "keyword", "nullable": true, "array": true,
+        } } });
+        let object = group("v", json!([column_field("k", "k")]));
+        let pair = json!([five.clone(), object.clone()]);
+        let with = |mut field: serde_json::Value, key: &str, value: serde_json::Value| {
+            field[key] = value;
+            field
+        };
+        let unindexed = {
+            let mut join = orders_join("rel", pair.clone());
+            join["source"]["relation"]["join"]["indexed"] = json!(false);
+            join
+        };
+
+        assert_eq!(
+            kind(json!([
+                int_field("id"),
+                group("o", json!([group("p", pair.clone())]))
+            ])),
+            DiagnosticKind::DuplicateFieldNameRefused
+        );
+        for still_a_warning in [
+            json!([int_field("id"), unindexed]),
+            json!([
+                int_field("id"),
+                with(orders_join("rel", pair.clone()), "emit", json!(false))
+            ]),
+            json!([int_field("id"), orders_join("rel", pair.clone())]),
+            json!([int_field("id"), to_one("rel", pair.clone())]),
+            json!([
+                int_field("id"),
+                orders_join("rel", json!([tags, object.clone()]))
+            ]),
+            json!([
+                int_field("id"),
+                group("o", json!([orders_join("rel", pair.clone())]))
+            ]),
+            json!([
+                int_field("id"),
+                with(group("o", pair.clone()), "emit", json!(false))
+            ]),
+            json!([
+                int_field("id"),
+                with(
+                    group("o", pair),
+                    "options",
+                    json!({ "enabled": { "Bool": false } })
+                )
+            ]),
+            json!([
+                int_field("id"),
+                keyed.clone(),
+                with(
+                    object.clone(),
+                    "options",
+                    json!({ "dynamic": { "Bool": true } })
+                )
+            ]),
+            json!([
+                int_field("id"),
+                keyed,
+                with(object, "options", json!({ "dynamic": { "Bool": false } }))
+            ]),
+        ] {
+            assert_eq!(
+                kind(still_a_warning.clone()),
+                DiagnosticKind::DuplicateFieldName,
+                "{still_a_warning}"
+            );
+        }
     }
 
     fn group(name: &str, fields: serde_json::Value) -> serde_json::Value {

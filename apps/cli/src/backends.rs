@@ -130,7 +130,7 @@ async fn build_documents(
     let builder = PgDocumentBuilder::connect(connection_url, Arc::clone(&spec))
         .await
         .context("connecting to Postgres")?;
-    validate_at_start(&spec, &builder).await?;
+    validate_at_start(&spec, &builder, config).await?;
     let column_types = builder.column_types();
     Ok((
         ScriptedBuilder::wrap(Arc::new(builder), scripts),
@@ -143,24 +143,134 @@ async fn build_documents(
 /// start on one that cannot work as written (see [`stops_the_start`]). Runs on
 /// the document builder's own connection, so an unreachable database fails
 /// exactly as the connect above does.
-async fn validate_at_start(spec: &SourceSpec, catalog: &dyn Catalog) -> anyhow::Result<()> {
+async fn validate_at_start(
+    spec: &SourceSpec,
+    catalog: &dyn Catalog,
+    config: &Config,
+) -> anyhow::Result<()> {
     let diagnostics = source::validate_indexes(spec, catalog)
         .await
         .context("validating the schemas against the database")?;
+    let mut refused = Vec::new();
+    for diagnostic in &diagnostics {
+        refused.push(match refused_only_by_a_mapping(diagnostic.kind) {
+            Some(dropped) => a_sink_refuses(config, &diagnostic.index, dropped)?,
+            None => true,
+        });
+    }
     start_verdict(
         &mut std::io::stderr().lock(),
         print::Pen::detect_stderr(),
         &diagnostics,
+        &|at| refused.get(at).copied().unwrap_or(true),
     )
+}
+
+/// For a kind whose documents only the sink's mapping refuses, whether
+/// `index.mapping.ignore_malformed` lets them in (the value is dropped);
+/// `None` for every other kind.
+fn refused_only_by_a_mapping(kind: DiagnosticKind) -> Option<bool> {
+    match kind {
+        DiagnosticKind::DuplicateFieldNameRefused => Some(false),
+        DiagnosticKind::TimeOfDayAsDate => Some(true),
+        _ => None,
+    }
+}
+
+/// Whether some sink of the deployment provably refuses what a mapping
+/// refuses on `index`: an OpenSearch sink in a state flusso models in full
+/// ([`plain_opensearch`]). A stdout sink takes anything, and a sink in any
+/// other state may accept the value or never see it, so neither counts.
+fn a_sink_refuses(config: &Config, index: &IndexName, dropped: bool) -> anyhow::Result<bool> {
+    for (name, entry) in &config.sinks {
+        let SinkConfig::Opensearch(sink) = adapters::sink_config(name, entry)? else {
+            continue;
+        };
+        let mut settings = sink.index_settings.clone();
+        if let Some((_, own)) = opensearch_index_settings(config, name)?
+            .into_iter()
+            .find(|(of, _)| of == index)
+        {
+            settings = settings.layered(&own);
+        }
+        if plain_opensearch(&sink, &settings, dropped)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Index settings known to leave a document's values as the mapping reads
+/// them: shard counts, and limits that can only refuse more.
+const PLAIN_SETTINGS: &[&str] = &[
+    "index.number_of_shards",
+    "index.number_of_replicas",
+    "index.max_result_window",
+    "index.mapping.total_fields.limit",
+    "index.mapping.nested_fields.limit",
+    "index.mapping.nested_objects.limit",
+    "index.mapping.depth.limit",
+    "index.mapping.field_name_length.limit",
+];
+
+/// Whether an OpenSearch sink writes `index` (with the merged `settings`) the
+/// plain way: no ingest pipeline, and only settings known to leave the value
+/// alone. `index.mapping.ignore_malformed` is plain when off, and when on
+/// only for a refusal it doesn't lift (`dropped` false). This is an
+/// allow-list: an option or setting not modelled here means no stop.
+fn plain_opensearch(
+    sink: &sink_opensearch::OpensearchConfig,
+    settings: &IndexSettings,
+    dropped: bool,
+) -> anyhow::Result<bool> {
+    // Every option is named, so a new one fails to compile until it is
+    // decided here. Only text/keyword leaves read `text_analysis` and
+    // `auto_subfields`; the rest concern transport, batching and refresh.
+    let sink_opensearch::OpensearchConfig {
+        url: _,
+        username: _,
+        password: _,
+        tls_verify: _,
+        ca_file: _,
+        batch_size: _,
+        max_bytes: _,
+        timeout_secs: _,
+        max_retries: _,
+        number_of_shards: _,
+        number_of_replicas: _,
+        refresh_interval: _,
+        text_analysis: _,
+        auto_subfields: _,
+        index_settings: _,
+        pipeline,
+    } = sink;
+    if pipeline.is_some() {
+        return Ok(false);
+    }
+    let serde_json::Value::Object(entries) =
+        serde_json::to_value(settings).context("reading the sink's index settings")?
+    else {
+        return Ok(false);
+    };
+    Ok(entries.iter().all(|(key, value)| {
+        if key == "index.mapping.ignore_malformed" {
+            let on = value == &serde_json::json!(true) || value == &serde_json::json!("true");
+            return !(on && dropped);
+        }
+        PLAIN_SETTINGS.contains(&key.as_str())
+    }))
 }
 
 /// Print `diagnostics` (nothing when there are none) and fail when any
 /// [stops the start](stops_the_start). Every other diagnostic, error or
-/// warning, is printed and the start goes on.
+/// warning, is printed and the start goes on. `refused(i)` says whether a sink
+/// refuses what `diagnostics[i]` describes, for a kind only a sink's mapping
+/// refuses (see [`a_sink_refuses`]).
 fn start_verdict(
     out: &mut impl Write,
     pen: print::Pen,
     diagnostics: &[Diagnostic],
+    refused: &dyn Fn(usize) -> bool,
 ) -> anyhow::Result<()> {
     if diagnostics.is_empty() {
         return Ok(());
@@ -169,7 +279,8 @@ fn start_verdict(
     writeln!(out)?;
     let blocking = diagnostics
         .iter()
-        .filter(|d| stops_the_start(d.kind))
+        .enumerate()
+        .filter(|(at, d)| stops_the_start(d.kind) && refused(*at))
         .count();
     ensure!(
         blocking == 0,
@@ -193,8 +304,12 @@ fn start_verdict(
 /// the index fails on either), a root `primary_key` other than the table's
 /// own key (every document is written as a tombstone), `array: true` over a
 /// column that holds no array (a key new in 0.18, so no running deployment has
-/// it), or a link column Postgres can't compare with its key (every build of
-/// the index fails to plan).
+/// it), a link column Postgres can't compare with its key (every build of
+/// the index fails to plan), two namesakes that fail every build or that
+/// OpenSearch refuses in every document, or a time of day under a `date`
+/// mapping, which OpenSearch refuses whenever it is not null. The last two
+/// stop only when an OpenSearch sink writes the index as written
+/// ([`a_sink_refuses`]).
 /// A type, numeric or nullability disagreement still builds, as it did before
 /// `run` validated, so it only prints. So does an `ids` `element_type` that
 /// holds no key, or only some: a document whose `ids` array is empty, or
@@ -211,7 +326,10 @@ fn stops_the_start(kind: DiagnosticKind) -> bool {
         | DiagnosticKind::RootPrimaryKeyMismatch
         | DiagnosticKind::UnsupportedKeyType
         | DiagnosticKind::NotAnArrayColumn
-        | DiagnosticKind::LinkTypeMismatch => true,
+        | DiagnosticKind::LinkTypeMismatch
+        | DiagnosticKind::DuplicateFieldNameFailsToBuild
+        | DiagnosticKind::DuplicateFieldNameRefused
+        | DiagnosticKind::TimeOfDayAsDate => true,
         DiagnosticKind::TypeMismatch
         | DiagnosticKind::NotNumeric
         | DiagnosticKind::Nullability
@@ -352,7 +470,9 @@ mod tests {
 
     fn verdict(diagnostics: &[Diagnostic]) -> (anyhow::Result<()>, String) {
         let mut out = Vec::new();
-        let result = start_verdict(&mut out, print::Pen::detect_stderr(), diagnostics);
+        let result = start_verdict(&mut out, print::Pen::detect_stderr(), diagnostics, &|_| {
+            true
+        });
         (result, String::from_utf8(out).unwrap())
     }
 
@@ -495,6 +615,146 @@ mod tests {
         let printed = starts(DiagnosticKind::TimestampFormat);
         assert!(printed.contains("[warning]"), "{printed}");
         assert!(!printed.contains("starting anyway"), "{printed}");
+    }
+
+    #[test]
+    fn a_duplicate_that_never_builds_refuses_the_start() {
+        refuses(DiagnosticKind::DuplicateFieldNameFailsToBuild);
+    }
+
+    #[test]
+    fn a_duplicate_opensearch_refuses_in_every_document_refuses_the_start() {
+        refuses(DiagnosticKind::DuplicateFieldNameRefused);
+    }
+
+    #[test]
+    fn a_time_of_day_under_a_date_field_refuses_the_start() {
+        refuses(DiagnosticKind::TimeOfDayAsDate);
+    }
+
+    #[test]
+    fn a_finding_no_sink_refuses_prints_and_starts() {
+        let diagnostics = [diagnostic(DiagnosticKind::TimeOfDayAsDate)];
+        let mut out = Vec::new();
+        let result = start_verdict(&mut out, print::Pen::detect_stderr(), &diagnostics, &|_| {
+            false
+        });
+        assert!(result.is_ok());
+        let printed = String::from_utf8(out).unwrap();
+        assert!(printed.contains("starting anyway"), "{printed}");
+    }
+
+    /// A deployment with `sinks` and the index `products`, whose own sink
+    /// tables are `index_sinks`.
+    fn deployment(sinks: &str, index_sinks: &str) -> Config {
+        let raw = format!("[source]\ntype = \"postgres\"\n{sinks}");
+        let mut config = Config::from(ConfigToml::try_parse(&raw).unwrap());
+        let entry = format!(
+            "[[index]]\nname = \"products\"\nschema = \"products.schema.yml\"\nenabled = true\n{index_sinks}"
+        );
+        let mut draft =
+            ConfigToml::try_parse(&format!("[source]\ntype = \"postgres\"\n{entry}")).unwrap();
+        for entry in std::mem::take(&mut draft.index) {
+            let schema = serde_json::from_value(serde_json::json!({
+                "version": 1, "table": "products", "db_schema": "public", "fields": []
+            }))
+            .unwrap();
+            config.indexes.insert(
+                entry.name,
+                config::Index {
+                    enabled: true,
+                    schema,
+                    on_error: None,
+                    sinks: entry.sinks,
+                },
+            );
+        }
+        config
+    }
+
+    #[test]
+    fn only_an_opensearch_sink_that_maps_the_value_as_written_refuses_it() {
+        let products = IndexName::try_new("products").unwrap();
+        let opensearch = "[sinks.primary]\ntype = \"opensearch\"\nurl = \"http://search:9200\"\n";
+        let refuses =
+            |config: &Config, dropped: bool| a_sink_refuses(config, &products, dropped).unwrap();
+
+        let plain = deployment(opensearch, "");
+        assert!(refuses(&plain, false) && refuses(&plain, true));
+
+        let stdout = deployment("[sinks.out]\ntype = \"stdout\"\n", "");
+        assert!(!refuses(&stdout, false) && !refuses(&stdout, true));
+        let none = deployment("", "");
+        assert!(!refuses(&none, false) && !refuses(&none, true));
+
+        let pipeline = deployment(&format!("{opensearch}pipeline = \"fix\"\n"), "");
+        assert!(!refuses(&pipeline, false) && !refuses(&pipeline, true));
+
+        let lenient = deployment(
+            &format!("{opensearch}index_settings = {{ \"mapping.ignore_malformed\" = true }}\n"),
+            "",
+        );
+        assert!(refuses(&lenient, false) && !refuses(&lenient, true));
+
+        let lenient_here = deployment(
+            opensearch,
+            "[index.sinks.primary]\nindex_settings = { mapping = { ignore_malformed = true } }\n",
+        );
+        assert!(refuses(&lenient_here, false) && !refuses(&lenient_here, true));
+
+        let one_strict = deployment(
+            &format!(
+                "{opensearch}index_settings = {{ \"mapping.ignore_malformed\" = true }}\n\
+                 [sinks.audit]\ntype = \"opensearch\"\nurl = \"http://audit:9200\"\n"
+            ),
+            "",
+        );
+        assert!(refuses(&one_strict, true));
+    }
+
+    /// A refusal stops the start only on a sink flusso can prove plain: any
+    /// index setting it doesn't model (an ingest pipeline set as an index
+    /// setting, `coerce`, anything new) means no stop; the settings it knows
+    /// leave the value alone (shard counts, field limits) keep the stop.
+    #[test]
+    fn a_setting_flusso_does_not_model_means_no_stop() {
+        let products = IndexName::try_new("products").unwrap();
+        let opensearch = "[sinks.primary]\ntype = \"opensearch\"\nurl = \"http://search:9200\"\n";
+        let sink_wide = |settings: &str| {
+            deployment(
+                &format!("{opensearch}index_settings = {{ {settings} }}\n"),
+                "",
+            )
+        };
+        let here = |settings: &str| {
+            deployment(
+                opensearch,
+                &format!("[index.sinks.primary]\nindex_settings = {{ {settings} }}\n"),
+            )
+        };
+        for config in [
+            sink_wide("default_pipeline = \"drop-v\""),
+            sink_wide("\"index.default_pipeline\" = \"drop-v\""),
+            sink_wide("final_pipeline = \"drop-v\""),
+            here("default_pipeline = \"drop-v\""),
+            here("index = { final_pipeline = \"drop-v\" }"),
+            here("mapping = { coerce = false }"),
+            here("\"query.default_field\" = \"v\""),
+        ] {
+            assert!(!a_sink_refuses(&config, &products, false).unwrap());
+            assert!(!a_sink_refuses(&config, &products, true).unwrap());
+        }
+        for config in [
+            sink_wide("number_of_shards = 2, \"mapping.total_fields.limit\" = 5000"),
+            here("max_result_window = 20000, mapping = { nested_fields = { limit = 100 } }"),
+            here("\"mapping.ignore_malformed\" = false"),
+        ] {
+            assert!(a_sink_refuses(&config, &products, false).unwrap());
+            assert!(a_sink_refuses(&config, &products, true).unwrap());
+        }
+        let other_index = here("default_pipeline = \"drop-v\"");
+        let users = IndexName::try_new("users").unwrap();
+        assert!(a_sink_refuses(&other_index, &users, true).unwrap());
     }
 
     #[test]

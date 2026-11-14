@@ -47,7 +47,7 @@ slow-timeout = { period = "90s", terminate-after = 4 }
 
 # OpenSearch-backed e2e: serialized via the `opensearch` group, generous startup.
 [[profile.default.overrides]]
-filter = 'package(flusso-sink-opensearch) & binary(reindex) | package(flusso-sink-opensearch) & binary(map_keys) | package(flusso-sink-opensearch) & binary(tls) | package(flusso-sink-opensearch) & binary(document_ids) | package(flusso-engine) & binary(pipeline) | package(flusso-daemon) & binary(fence) | package(flusso-query-e2e) & binary(combined_search) | package(flusso-query-e2e) & binary(cursor_paging) | package(flusso-query-e2e) & binary(map_keys) | package(flusso-query-e2e) & binary(tls) | package(flusso-query-e2e) & binary(array_columns) | package(flusso-query-e2e) & binary(geo_points) | package(flusso-cli) & binary(duplicate_names)'
+filter = 'package(flusso-sink-opensearch) & binary(reindex) | package(flusso-sink-opensearch) & binary(map_keys) | package(flusso-sink-opensearch) & binary(tls) | package(flusso-sink-opensearch) & binary(document_ids) | package(flusso-engine) & binary(pipeline) | package(flusso-daemon) & binary(fence) | package(flusso-query-e2e) & binary(combined_search) | package(flusso-query-e2e) & binary(cursor_paging) | package(flusso-query-e2e) & binary(map_keys) | package(flusso-query-e2e) & binary(tls) | package(flusso-query-e2e) & binary(array_columns) | package(flusso-query-e2e) & binary(geo_points) | package(flusso-cli) & binary(duplicate_names) | package(flusso-cli) & binary(time_columns)'
 test-group = 'opensearch'
 retries = 2
 slow-timeout = { period = "120s", terminate-after = 5 }
@@ -74,7 +74,7 @@ retries = 2
 slow-timeout = { period = "120s", terminate-after = 5 }
 
 [[profile.ci.overrides]]
-filter = 'package(flusso-sink-opensearch) & binary(reindex) | package(flusso-sink-opensearch) & binary(map_keys) | package(flusso-sink-opensearch) & binary(tls) | package(flusso-sink-opensearch) & binary(document_ids) | package(flusso-engine) & binary(pipeline) | package(flusso-daemon) & binary(fence) | package(flusso-query-e2e) & binary(combined_search) | package(flusso-query-e2e) & binary(cursor_paging) | package(flusso-query-e2e) & binary(map_keys) | package(flusso-query-e2e) & binary(tls) | package(flusso-query-e2e) & binary(array_columns) | package(flusso-query-e2e) & binary(geo_points) | package(flusso-cli) & binary(duplicate_names)'
+filter = 'package(flusso-sink-opensearch) & binary(reindex) | package(flusso-sink-opensearch) & binary(map_keys) | package(flusso-sink-opensearch) & binary(tls) | package(flusso-sink-opensearch) & binary(document_ids) | package(flusso-engine) & binary(pipeline) | package(flusso-daemon) & binary(fence) | package(flusso-query-e2e) & binary(combined_search) | package(flusso-query-e2e) & binary(cursor_paging) | package(flusso-query-e2e) & binary(map_keys) | package(flusso-query-e2e) & binary(tls) | package(flusso-query-e2e) & binary(array_columns) | package(flusso-query-e2e) & binary(geo_points) | package(flusso-cli) & binary(duplicate_names) | package(flusso-cli) & binary(time_columns)'
 test-group = 'opensearch'
 retries = 2
 slow-timeout = { period = "150s", terminate-after = 5 }

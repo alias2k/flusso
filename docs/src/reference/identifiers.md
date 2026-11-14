@@ -51,7 +51,7 @@ The outcomes below come from a live test (`apps/cli/tests/duplicate_names.rs`). 
 
 The warning names each field by its position (`#3`) and says which row applies. Where the outcome depends on the data or on a declaration it can't see, it says so instead of guessing: "the index maps the last one; what a document holds depends on both declarations: it may hold either value, be empty, fail to build or be refused by the sink (run `flusso script run` on a row to see)". That covers:
 
-- a constant first whose value the last one's mapping may or may not take: an object under a join, an object, a `json` or `map` column; a string under a date, `binary` or `geo` field;
+- a constant first whose value the last one's mapping may or may not take: an object under a `map`, or under a join, an object or a `json` column whose child fields name every key; a string under a date, `binary` or `geo` field;
 - an `array: true` column with a `default` before a constant holding a list or an object (the column's `default` replaces the `null`);
 - a `custom` column after an `array: true` one or after a join or object;
 - an indexed `json` column (or `json` array) after a join, an object, or another array (a `json` field holding keys is refused by the strict mapping on its own).
@@ -71,6 +71,22 @@ Elsewhere:
 - **`flusso-query` derive:** a compile error on the two handles, unless one is `emit: false` or `indexed: false`.
 
 `flusso check`, `--offline` included, and `run` warn with [`duplicate_field_name`](cli.md#check). A finding on one of the namesakes carries the position in its path: `orders#2.total`. Rename all but one.
+
+### Pairs that stop the start
+
+Two classes of pair never give an indexed document, whatever the rows hold, where every document carries them: at the root, or in a plain object (no `emit: false`, no `options`) under plain objects up to the root. There, `check` reports them as errors, `--offline` included, and `run` stops at start (see [Validation at start](cli.md#validation-at-start)):
+
+| First | Last | Why never | `kind` |
+| --- | --- | --- | --- |
+| an `array: true` column of scalars | an `object` | an object is built for every row, nulls and all, and the array refuses it | `duplicate_field_name_fails_to_build` |
+| a constant holding a scalar or a list | an indexed join, an `object`, an indexed `json` (or `json` array), a `map` | OpenSearch refuses a value that isn't an object under an object mapping, `ignore_malformed` or not | `duplicate_field_name_refused` |
+| a constant holding an object | an indexed join, an `object` or an indexed `json` with no child field for one of its keys, or a `binary` column | the strict mapping refuses the key; `binary` takes no `ignore_malformed` | `duplicate_field_name_refused` |
+
+Each holds only when every namesake is emitted and the last one sets no mapping `options` of its own: an object with `enabled: false` takes anything, and one with a `dynamic` of your own takes unknown keys. A `map`'s own `dynamic: true` isn't counted. The refused class stops `run` only while a [plain OpenSearch sink](cli.md#validation-at-start) writes the index: a stdout sink, an ingest pipeline or a setting flusso doesn't model may let the document in.
+
+Anywhere else the same pair stays the `duplicate_field_name` warning. Inside a join, a parent with no related row indexes. Under `emit: false` or `indexed: false`, the pair is never mapped.
+
+Every other failing pair can index some document, so it stays the warning: a related row, a point or an object value may be absent, a script may return nothing, and a scalar mapping drops what it can't read under `index.mapping.ignore_malformed`. The live test pins this too: a third row holds only nulls and has no related rows, its scripts return nothing, and a pair no row indexes is written again with `index.mapping.ignore_malformed`. Over the 1,444 pairs at the root, 57 never index (1 fails to build, 56 refused), and the rule above names exactly those. A second live test starts the real `flusso run` on the cases that index some document (a pair inside a join, under `emit: false` or `indexed: false`, with `on_error = "skip"`, a `dynamic` of your own, a pipeline set as an index setting) and checks each starts and indexes what it did before.
 
 ## What loading enforces
 

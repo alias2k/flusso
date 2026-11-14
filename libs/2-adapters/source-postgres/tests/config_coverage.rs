@@ -1737,6 +1737,141 @@ async fn an_enum_or_domain_column_is_a_type_mismatch_that_still_builds() {
     assert_eq!(str_of(&body, "contact"), "ada@example.com");
 }
 
+/// A `time` or `timetz` column under a `timestamp` or `date` field (issue
+/// #309): OpenSearch refuses every non-null value under a `date` mapping with
+/// no `format`, so `validate_indexes` reports it where every document carries
+/// the field (the root, a plain object), through a domain, and instead of the
+/// `date` type mismatch. Not reported: a field that sets any `options` (a
+/// `format`, `ignore_malformed`, a `type` of its own), an input-only one, one
+/// in a join (a parent with no related row indexes), and a `min`/`max` (a
+/// parent with no related rows indexes).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_time_of_day_under_a_date_mapping_is_reported() {
+    let (_pg, url) = start_seeded().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE DOMAIN opening AS time(3)",
+        "ALTER TABLE users ADD COLUMN opens time, ADD COLUMN closes timetz, \
+         ADD COLUMN slots time[], ADD COLUMN door opening",
+        "ALTER TABLE orders ADD COLUMN slot time with time zone",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let column = |name: &str, source: &str, ty: &str, extra: serde_json::Value| {
+        let mut field = serde_json::json!({ "field": name, "source": { "column": {
+            "column": source, "ty": ty, "nullable": true,
+        } } });
+        if let (Some(field), Some(extra)) = (field.as_object_mut(), extra.as_object()) {
+            for (key, value) in extra {
+                if key == "array" {
+                    field["source"]["column"]["array"] = value.clone();
+                } else {
+                    field.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        field
+    };
+    let none = serde_json::json!({});
+    let latest = |name: &str, ty: &str| {
+        serde_json::json!({ "field": name, "source": { "relation": {
+        "aggregate": {
+            "table": "orders", "op": { "max": "slot" }, "key": { "direct": "user_id" },
+            "value_type": ty,
+        },
+    } } })
+    };
+    let orders = |indexed: bool| {
+        serde_json::json!({ "field": if indexed { "orders" } else { "raw" },
+        "source": { "relation": { "join": {
+            "table": "orders", "kind": { "has_many": { "foreign_key": "user_id" } },
+            "primary_key": "id", "indexed": indexed,
+            "fields": [column("slot", "slot", "timestamp", serde_json::json!({}))],
+        } } } })
+    };
+    let fields: Vec<Field> = serde_json::from_value(serde_json::json!([
+        column("opens", "opens", "timestamp", none.clone()),
+        column("closes", "closes", "date", none.clone()),
+        column(
+            "slots",
+            "slots",
+            "timestamp",
+            serde_json::json!({ "array": true })
+        ),
+        column("door", "door", "timestamp", none.clone()),
+        latest("latest", "timestamp"),
+        orders(true),
+        column(
+            "formatted",
+            "opens",
+            "timestamp",
+            serde_json::json!({ "options": { "format": { "String": "strict_date_optional_time||HH:mm:ss" } } })
+        ),
+        column(
+            "lenient",
+            "closes",
+            "timestamp",
+            serde_json::json!({ "options": { "ignore_malformed": { "Bool": true } } })
+        ),
+        column(
+            "hidden",
+            "opens",
+            "timestamp",
+            serde_json::json!({ "emit": false })
+        ),
+        orders(false),
+        column("placed", "joined", "date", none.clone()),
+        column(
+            "typed",
+            "opens",
+            "timestamp",
+            serde_json::json!({ "options": { "type": { "String": "keyword" } } })
+        ),
+        serde_json::json!({ "field": "hours", "source": { "group": [
+            column("opens", "opens", "timestamp", none),
+        ] } }),
+    ]))
+    .unwrap();
+    let schema = users_schema(fields, None);
+    let spec = spec(schema.clone());
+    let documents = builder(&url, schema).await;
+
+    let found: Vec<_> = validate_indexes(&spec, &documents)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|d| (d.dotted_path(), d.kind))
+        .collect();
+    let time = |path: &str| (path.to_owned(), DiagnosticKind::TimeOfDayAsDate);
+    assert_eq!(
+        found,
+        vec![
+            time("opens"),
+            time("closes"),
+            time("slots"),
+            time("door"),
+            time("hours.opens"),
+        ]
+    );
+    let message = validate_indexes(&spec, &documents)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|d| d.dotted_path() == "closes")
+        .unwrap()
+        .message;
+    assert_eq!(
+        message,
+        "a `date` field over the column's database type `time with time zone`: a time of day \
+         is no date to OpenSearch, so it refuses every document whose value is not null. Index \
+         it as text with a `custom` field (`postgres: [time with time zone]`, `opensearch: \
+         keyword`), or as a `timestamp` field (a `date` field takes only a `date` column) \
+         with `options: { format: \
+         \"strict_date_optional_time||HH:mm:ss[.SSSSSS][.SSSSS][.SSSS][.SSS][.SS][.S]XXX||HH:mm:ss[.SSSSSS][.SSSSS][.SSSS][.SSS][.SS][.S]X\" }`"
+    );
+}
+
 /// A root keyed by a type the document builder can't read back is refused at
 /// `primary_key` (issue #295): every key reads back as null, so even a row
 /// that exists builds as a tombstone. Every type it reads, through a domain

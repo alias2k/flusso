@@ -2,7 +2,7 @@ import { useState } from "react";
 import { ChevronDown, Database, Play } from "lucide-react";
 import type { DiagnosticDto, DocumentNode, PreviewResponse, SampleResponse, ScriptErrorDto } from "../api";
 import { useT } from "../i18n";
-import { diagnosticPath } from "../model/issues";
+import { diagnosticPath, stopNote } from "../model/issues";
 import { typeClass } from "../theme";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -194,6 +194,7 @@ export function Preview({
                       {d.index}.{diagnosticPath(d)}
                     </span>{" "}
                     {d.message}
+                    {stopNote(d.kind, t) ? <span className="font-semibold"> {stopNote(d.kind, t)}</span> : null}
                   </div>
                 ))}
               </div>

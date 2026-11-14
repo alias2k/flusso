@@ -29,6 +29,11 @@ export const en: Record<string, string> = {
   "diag.typeMismatch": 'type "{ty}" is a sharp change from source column "{col}" ({src}) — values may fail to index',
   "diag.duplicateName":
     '{n} fields here are named "{name}": at most one of them reaches the index, and a document may hold none of them or a mix of them. Rename all but one.',
+  "diag.neverBuilds": "`flusso run` refuses to start: no document of this index can be built.",
+  "diag.neverIndexed":
+    "`flusso run` refuses to start while a plain OpenSearch sink writes this index (no ingest pipeline, no index setting flusso does not model): OpenSearch refuses every document.",
+  "diag.timeOfDayAsDate":
+    "`flusso run` refuses to start while a plain OpenSearch sink writes this index (no ingest pipeline, no index setting flusso does not model): OpenSearch refuses every document holding a time.",
   "topbar.upToDate": "Up to date",
   "topbar.language": "Language",
 
