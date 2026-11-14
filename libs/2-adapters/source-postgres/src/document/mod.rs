@@ -113,10 +113,12 @@ impl ColumnTypes {
         });
     }
 
-    /// Forget `schema.table`'s cached columns when one of them is gone from
-    /// `columns` (each name with its type OID, as a `Relation` lists them) or
-    /// has another type there. A table whose types are unchanged keeps its
-    /// entries, so a stream's first `Relation` costs no lookup.
+    /// Forget `schema.table`'s cached columns when one of them has another
+    /// type in `columns` (each name with its type OID, as a `Relation` lists
+    /// them). A table whose types are unchanged keeps its entries, so a
+    /// stream's first `Relation` costs no lookup. A cached column `columns`
+    /// leaves out is no evidence: pgoutput omits stored generated columns
+    /// and columns outside a publication's column list from every `Relation`.
     pub(crate) fn forget_changed<'a>(
         &self,
         schema: &str,
@@ -129,9 +131,9 @@ impl ColumnTypes {
             .any(|((cached_schema, cached_table, column), meta)| {
                 cached_schema == schema
                     && cached_table == table
-                    && !columns
+                    && columns
                         .clone()
-                        .any(|(name, type_oid)| name == column && type_oid == meta.type_oid)
+                        .any(|(name, type_oid)| name == column && type_oid != meta.type_oid)
             });
         if changed {
             self.forget_table(schema, table);

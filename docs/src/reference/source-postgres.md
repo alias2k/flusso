@@ -68,7 +68,7 @@ flusso connects through PgBouncer in session and in transaction mode alike, the 
 
 No key depends on a setting a pooled connection could drop. Nor does a `bytea` column a document reads as a value: queries render it in a form no session setting changes. That covers any field type, a domain over `bytea`, [`array: true`](field-types.md#array) over `bytea[]`, over an array of such a domain or over a domain of either, joins, and `ids`, `min` and `max` aggregates.
 
-A `bytea` nested inside another value is different: a field of a composite type, an array of composites, or a range. Postgres renders it by the session's `bytea_output`. flusso sets `bytea_output = hex` on each connection it opens, and a transaction-mode pool may not keep it. If a document reads such a value, set it on the database or role too: `ALTER ROLE flusso SET bytea_output = 'hex'`.
+A `bytea` nested inside another value is different: a field of a composite type, an array of composites, a range, or a multi-dimensional `bytea[]` read by a field that isn't `binary`. So is a column changed to `bytea` while flusso runs, until its table's next change or a restart. Postgres renders it by the session's `bytea_output`. flusso sets `bytea_output = hex` on each connection it opens, and a transaction-mode pool may not keep it. If a document reads such a value, set it on the database or role too: `ALTER ROLE flusso SET bytea_output = 'hex'`.
 
 ## Capture
 
