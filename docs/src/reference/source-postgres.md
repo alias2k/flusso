@@ -58,6 +58,10 @@ TLS settings come from two surfaces, merged: the URL's libpq parameters (`sslmod
 - **Mutual TLS** needs both `ssl_cert` and `ssl_key` (or both URL parameters). One without the other is a config error.
 - **`ssl_sni_hostname`** is for connecting by IP or through a load balancer while the certificate names the real host. `verify-full` to an IP address requires it. It has no URL parameter and applies to the replication stream only.
 
+## Behind PgBouncer
+
+flusso connects through PgBouncer (1.23 or newer for the replication connection) in session and in transaction mode alike: it sends no startup `options`, which PgBouncer refuses, and no key it reads depends on a setting a pooled connection could drop. One thing does: a [`binary`](field-types.md) field's bytes. flusso sets `bytea_output = hex` on each connection it opens, which a transaction-mode pool may not keep, so set it on the database or role there too: `ALTER ROLE flusso SET bytea_output = 'hex'`.
+
 ## Capture
 
 flusso consumes a logical replication **slot** and subscribes to a **publication**. Both names are the `slot` and `publication` keys above; the `--slot` and `--publication` flags of [`run`](cli.md#run) override them.
@@ -166,22 +170,24 @@ A root table's primary key is the document id. It must be of a type flusso reads
 | `text`, `varchar`, `char(n)`, `name`, `citext` | the text; `char(n)` keeps its padding (`ab `) |
 | `uuid` | `00000000-0000-0000-0000-00000000000a` |
 | `bytea` | `\x01ab`, the Postgres hex form |
-| `date` | `2024-02-29`; `infinity`, `-infinity` |
+| `date` | `2024-02-29`, `+10000-01-01`; `infinity`, `-infinity` |
 | `time` | `10:00:00`, `23:59:59.500` |
-| `timestamp` | `2024-02-29 10:00:00`, `2024-02-29 10:00:00.500`; `infinity`, `-infinity` |
+| `timestamp` | `2024-02-29 10:00:00`, `2024-02-29 10:00:00.500`, `+10000-01-01 10:00:00`; `infinity`, `-infinity` |
 | `timestamptz` | `2024-02-29T10:00:00+00:00`: RFC 3339, in UTC; `infinity`, `-infinity` |
 
 - **A domain** counts as its base type: a domain over `integer` is an `integer` key.
-- **A BC date** counts years from zero, as ISO 8601 does: 15 March 44 BC is `-0043-03-15`.
+- **A BC date** counts years from zero, as ISO 8601 does: 15 March 44 BC is `-0043-03-15`. A year past 9999 carries a `+`.
 - **Fractional seconds** have three, six or nine digits, as many as the value needs.
-- **Session settings don't matter.** The connections flusso reads values through, the replication one included, run with `DateStyle = ISO`, `bytea_output = hex` and `extra_float_digits = 1`, whatever the database or role sets, so an id never depends on them.
-- **An id longer than 512 bytes** is refused by OpenSearch: a long `text` or `bytea` key indexes nothing.
+- **Session settings don't change an id.** Queries render each key in a form no setting changes, and the replication connection sets `DateStyle`, `TimeZone`, `bytea_output` and `extra_float_digits` itself before it streams; a server that refuses one stops the start, naming it.
+- **An id OpenSearch can't take**, such as an empty-string key or one longer than 512 bytes: see [Document ids](sink-opensearch.md#document-ids) on the OpenSearch sink.
 
 ### A link spelled differently
 
 A link column can hold a value equal to its parent's key but written differently: `AB` for a `citext` key `Ab`, `1.500` for a `numeric` `1.5`, `-0` for a float `0`, or any text under a nondeterministic collation. The document it rebuilds is still the parent's own, under the parent's stored key: flusso reads that key back from the root table.
 
-That costs one query per change, per index, for a root key whose equal values can be written differently (`numeric`, `real`, `double precision`, `citext`, a nondeterministic collation), and for a link column of another type than the key it names. Every other key costs nothing extra.
+A link column of another type than the key (`char(5)` against `text`) is compared with it as the document query joins them, so the documents a change rebuilds are the ones the join reads.
+
+That costs one query per batch, per index and link column, for a root key whose equal values can be written differently (`numeric`, `real`, `double precision`, `citext`, a nondeterministic collation), and for a link column of another type than the key it names. Every other key costs nothing extra.
 
 ### Unsupported key types
 

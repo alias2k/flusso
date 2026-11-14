@@ -3135,14 +3135,26 @@ linked_by_another_spelling! {
         ["'Ab'", "'AB'"], "Ab";
 }
 
-/// PgBouncer in session mode with its stock `ignore_startup_parameters`, in
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn the_pipeline_runs_through_pgbouncer_in_session_mode() {
+    the_pipeline_runs_through_pgbouncer("session").await;
+}
+
+/// In transaction mode a session `SET` may land on another server
+/// connection than the next query: no key a query reads depends on one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn the_pipeline_runs_through_pgbouncer_in_transaction_mode() {
+    the_pipeline_runs_through_pgbouncer("transaction").await;
+}
+
+/// PgBouncer in `pool_mode` with its stock `ignore_startup_parameters`, in
 /// front of every connection flusso opens, the replication one included
 /// (issue #295): it refuses any parameter inside a startup `options`, so the
 /// settings a key's text depends on are set after connecting, or not needed.
 /// A `bytea` key under `bytea_output = escape` backfills and follows.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires docker"]
-async fn the_pipeline_runs_through_pgbouncer_in_session_mode() {
+async fn the_pipeline_runs_through_pgbouncer(pool_mode: &str) {
     use testcontainers_modules::testcontainers::GenericImage;
     use testcontainers_modules::testcontainers::core::IntoContainerPort;
 
@@ -3169,7 +3181,7 @@ async fn the_pipeline_runs_through_pgbouncer_in_session_mode() {
         .with_env_var("DB_USER", "postgres")
         .with_env_var("DB_PASSWORD", "postgres")
         .with_env_var("AUTH_TYPE", "scram-sha-256")
-        .with_env_var("POOL_MODE", "session")
+        .with_env_var("POOL_MODE", pool_mode)
         .with_env_var("IGNORE_STARTUP_PARAMETERS", "extra_float_digits")
         .start()
         .await
