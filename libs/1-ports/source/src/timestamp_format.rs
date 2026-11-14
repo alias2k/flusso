@@ -96,6 +96,11 @@ mod tests {
             ("yyyy-MM-dd HH:mm:ss||date_hour_minute_second", None),
             ("date_time", None),
             ("yyyy", None),
+            ("strictDateOptionalTime", Some(true)),
+            ("dateOptionalTime||epoch_millis", Some(true)),
+            ("epochMillis", None),
+            ("basicDateTime||yyyy-MM-dd HH:mm:ss", None),
+            ("yyyyMMdd", None),
         ] {
             assert_eq!(reads_iso_timestamps(format), expected, "{format}");
         }
