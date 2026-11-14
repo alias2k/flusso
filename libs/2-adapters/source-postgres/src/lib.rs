@@ -14,7 +14,7 @@ mod tls;
 pub use cdc::WalChangeCapture;
 pub use config::{Connection, PostgresConfig, SslMode, Tls};
 pub use connection_url::{ConnectionUrl, ConnectionUrlError, Scheme};
-pub use document::{Built, PgDocumentBuilder};
+pub use document::{Built, ColumnTypes, PgDocumentBuilder};
 pub use tls::{replication_config, sql_connection_url};
 
 // Re-exported so callers can build a capture without depending on

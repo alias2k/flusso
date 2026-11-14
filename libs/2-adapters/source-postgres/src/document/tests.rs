@@ -77,7 +77,7 @@ fn builder_with(extra: Vec<Field>) -> PgDocumentBuilder {
 /// Cache `integer` as the type of each `(table, column)`, as the catalog would
 /// report it, so resolving reads no catalog either.
 fn seed_integer_columns(builder: &PgDocumentBuilder, columns: &[(&str, &str)]) {
-    let mut cache = builder.col_type_cache.lock().unwrap();
+    let mut cache = builder.col_type_cache.lock();
     for (table, column) in columns {
         cache.insert(
             (

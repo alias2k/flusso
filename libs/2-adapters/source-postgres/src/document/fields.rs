@@ -168,6 +168,21 @@ pub(super) fn collect_relation_tables(fields: &[Field], out: &mut Vec<TableName>
     }
 }
 
+/// Collect every table below the root a document reads: each relation's own
+/// table, its junction and its `via` hops, at any depth.
+pub(super) fn collect_tables(fields: &[Field], out: &mut Vec<TableName>) {
+    for field in fields {
+        if let Some(relation) = field.relation() {
+            out.push(relation.table().clone());
+            if let RelationKey::Through(through) = relation.key() {
+                out.push(through.table.clone());
+            }
+            out.extend(relation.via().iter().map(|hop| hop.table.clone()));
+        }
+        collect_tables(field.children(), out);
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests;

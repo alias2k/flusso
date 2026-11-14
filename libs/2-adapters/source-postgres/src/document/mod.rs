@@ -86,6 +86,38 @@ use reads::ReadColumns;
 /// Cache of each `(schema, table, column)`'s catalog metadata.
 type ColTypeCache = HashMap<(String, String, String), ColumnMeta>;
 
+/// The document builder's cache of column types, which shapes every document
+/// query it writes. Cheap to clone; clones share it.
+///
+/// A table's types can change while flusso runs (`ALTER COLUMN … TYPE`), so
+/// entries are dropped per table: when a document query fails (its retry
+/// looks the types up again), and when the WAL capture this is handed to
+/// reads a `Relation` message, which Postgres sends after a table's
+/// definition changes.
+#[derive(Debug, Clone, Default)]
+pub struct ColumnTypes(Arc<Mutex<ColTypeCache>>);
+
+impl ColumnTypes {
+    fn get(&self, key: &(String, String, String)) -> Option<ColumnMeta> {
+        self.lock().get(key).cloned()
+    }
+
+    fn insert(&self, key: (String, String, String), meta: ColumnMeta) {
+        self.lock().insert(key, meta);
+    }
+
+    /// Forget every cached column of `schema.table`.
+    pub(crate) fn forget_table(&self, schema: &str, table: &str) {
+        self.lock().retain(|(cached_schema, cached_table, _), _| {
+            cached_schema != schema || cached_table != table
+        });
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ColTypeCache> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// Most keys per batched `build_many` query. Bounds the SQL length and the
 /// prepared-statement cache churn from the `IN (…)` list growing with key
 /// count; larger id sets are split across several round-trips.
@@ -153,7 +185,7 @@ pub struct PgDocumentBuilder {
     pk_cache: Arc<Mutex<HashMap<(String, String), ColumnName>>>,
     /// Cache of each `(schema, table, column)`'s SQL type, used to cast filter
     /// operands to the column's real type rather than comparing as text.
-    col_type_cache: Arc<Mutex<ColTypeCache>>,
+    col_type_cache: ColumnTypes,
     /// Whether each `(link type, key type)` pair compares, probed once.
     comparison_cache: Arc<Mutex<HashMap<(String, String), bool>>>,
     /// Tables a change arrived for that no index reads, already warned about.
@@ -172,7 +204,7 @@ impl PgDocumentBuilder {
             reads: Arc::new(ReadColumns::new(&spec)),
             spec,
             pk_cache: Arc::new(Mutex::new(HashMap::new())),
-            col_type_cache: Arc::new(Mutex::new(HashMap::new())),
+            col_type_cache: ColumnTypes::default(),
             comparison_cache: Arc::new(Mutex::new(HashMap::new())),
             unread_warned: Arc::new(Mutex::new(HashSet::new())),
             keyless_warned: Arc::new(Mutex::new(HashSet::new())),
@@ -415,14 +447,8 @@ impl PgDocumentBuilder {
         column: &ColumnName,
     ) -> Result<ColumnMeta> {
         let cache_key = (schema.to_string(), table.to_string(), column.to_string());
-        {
-            let cache = self
-                .col_type_cache
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            if let Some(meta) = cache.get(&cache_key) {
-                return Ok(meta.clone());
-            }
+        if let Some(meta) = self.col_type_cache.get(&cache_key) {
+            return Ok(meta);
         }
         // `format_type` yields a canonical, re-parseable type name, so it can be
         // dropped straight into a `$n::<type>` cast. `attnotnull` is the column's
@@ -492,10 +518,7 @@ impl PgDocumentBuilder {
                 )));
             }
         };
-        self.col_type_cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(cache_key, meta.clone());
+        self.col_type_cache.insert(cache_key, meta.clone());
         Ok(meta)
     }
 
@@ -543,6 +566,26 @@ impl PgDocumentBuilder {
             types.insert(key, sql_type);
         }
         Ok(types)
+    }
+
+    /// The cache of column types this builder writes its queries from, to
+    /// hand to the WAL capture so it can drop a table's entries when the table
+    /// changes.
+    pub fn column_types(&self) -> ColumnTypes {
+        self.col_type_cache.clone()
+    }
+
+    /// A document query of `schema` failed: forget the column types of every
+    /// table it reads, since a type that changed under the cache fails it the
+    /// same way on every retry otherwise, then report the error.
+    fn failed_query(&self, schema: &IndexSchema, error: sqlx::Error) -> SourceError {
+        let mut tables = vec![schema.table.clone()];
+        fields::collect_tables(&schema.fields, &mut tables);
+        for table in tables {
+            self.col_type_cache
+                .forget_table(schema.db_schema.as_ref(), table.as_ref());
+        }
+        query_err(error)
     }
 
     /// The columns `schema`'s documents read as values whose base type is
@@ -898,7 +941,7 @@ impl DocumentBuilder for PgDocumentBuilder {
         let row = statement
             .fetch_optional(&self.pool)
             .await
-            .map_err(query_err)?;
+            .map_err(|error| self.failed_query(schema, error))?;
 
         // No row means the root is absent or soft-deleted (both folded into the
         // query's WHERE) → the document should not exist.
@@ -974,7 +1017,10 @@ impl DocumentBuilder for PgDocumentBuilder {
                 for param in &params {
                     statement = query::bind_param(statement, param)?;
                 }
-                let rows = statement.fetch_all(&self.pool).await.map_err(query_err)?;
+                let rows = statement
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(|error| self.failed_query(schema, error))?;
 
                 // Map each returned root key to its assembled body. `doc_key` is
                 // parsed as live-change keys are, so it matches the ids' key
