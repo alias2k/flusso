@@ -1250,20 +1250,23 @@ and an opaque `json` field (object, no children) accepts any map-shaped type on 
 `Date`→`DateMap`, the numerics→`NumberMap`). Phase 2 (per-key analyzers for per-language
 stemming) is deferred.
 
-**The boundary is pinned (issue #294), not complete.** What the derive checks, trusts and has as
-known gaps (#306, #307) is one section, owned by `docs/src/query/document-structs.md` ("What the derive
-trusts"); don't restate it here. `sdk/query-derive/tests/boundary.rs` places two shape lists
-(hand-written `named_shapes`, and `generated_shapes`: inner type × wrapper × newtype derive; a shape
-whose declarations alone are refused is not placed) at every field of the `boundary` fixture
-(required kinds bare, nullable ones in `Option`, `geo`, `date`/`timestamp`, an `enum` with variants,
-two unindexed constants) on a root, then in a fragment only for shapes that compile at some root
-field, ~7100 cases. It covers only the kinds its fixture holds. It compiles them in ≤60-module files
+**The boundary is pinned (issues #294, #306).** What the derive checks and trusts, and the two
+places a root and a fragment differ, is one section, owned by `docs/src/query/document-structs.md`
+("What the derive trusts"); don't restate it here. `sdk/query-derive/tests/boundary.rs` places two
+shape lists (hand-written `named_shapes`, and `generated_shapes`: inner type × wrapper × newtype
+derive; a shape whose declarations alone are refused is not placed) at the fields of the `boundary`
+fixture (every leaf kind, `custom` `ip`, the aggregates, an `enum` with variants, maps, `json`, every
+join verb, an unindexed join, `subfields: false`; required kinds bare, nullable ones in `Option`;
+generated shapes skip the `NAMED_ONLY` kinds, a time-budget cut) on a root, then in a fragment for
+shapes that compile at some root field other than `custom` (at `custom` alone otherwise), ~11,900
+cases; cold ~245 s, which is near the nextest slow-timeout, so widen it with care. It compiles them in ≤60-module files
 in its own crate and target dir (`target/tests/flusso-boundary/`, so the `ui` harness never waits on
 its lock; nextest group `boundary`, one at a time): the first round runs `cargo check`, later rounds
 `cargo build`; each file is named after a hash of its text and of every input (derive, `flusso-query`,
 `config`, `kernel`, fixtures, `Cargo.lock`, toolchain), and its results are cached under that name, so
 a rerun on an unchanged derive compiles nothing. It reads sample documents (null, missing keys, empty
-and many elements, a `null` map value, each date form) into what builds, and fails on a
+and many elements, a `null` map value, each date form, and an extreme one: numbers at each kind's edge,
+a value outside `variants:`, `jsonb` values of another type) into what builds, and fails on a
 compile-then-fail case unless, for every document it fails on, a `TRUSTED` rule matches that document
 and its error; or on a (shape, field) whose root and fragment outcomes differ unless `DISAGREE` lists
 it (`*` = every field); outcomes are recorded in `tests/boundary.outcomes` (re-record with
