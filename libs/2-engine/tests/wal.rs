@@ -3198,3 +3198,152 @@ async fn the_pipeline_runs_through_pgbouncer_in_session_mode() {
     expect_op(&mut engine, &recorded, "upsert users \\x02").await;
     engine.abort();
 }
+
+/// How many times the builder read root keys back from `parents` while 1,000
+/// kids, inserted in one transaction, rebuilt their parent (issue #295): a
+/// `parents` keyed by `sql_type`, the kids linking to it as `link`.
+async fn root_key_lookups_for_a_burst(sql_type: &str, root: &str, link: &str, id: &str) -> i64 {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .with_cmd([
+            "postgres",
+            "-c",
+            "wal_level=logical",
+            "-c",
+            "max_wal_senders=10",
+            "-c",
+            "max_replication_slots=10",
+            "-c",
+            "shared_preload_libraries=pg_stat_statements",
+        ])
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE EXTENSION pg_stat_statements".to_owned(),
+        format!("CREATE TABLE parents (id {sql_type} PRIMARY KEY, name text)"),
+        format!("CREATE TABLE kids (id int PRIMARY KEY, parent {sql_type}, name text)"),
+        "ALTER TABLE kids REPLICA IDENTITY FULL".to_owned(),
+        "CREATE PUBLICATION flusso FOR TABLE parents, kids".to_owned(),
+        format!("INSERT INTO parents VALUES ({root}, 'pa')"),
+    ] {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let kids = Join {
+        table: table("kids"),
+        kind: JoinKind::HasMany {
+            foreign_key: column("parent"),
+        },
+        primary_key: column("id"),
+        nullable: true,
+        filters: None,
+        order_by: None,
+        limit: None,
+        fields: vec![column_field("name", "name")],
+        indexed: true,
+        on: vec![],
+    };
+    let parents = IndexSchema {
+        table: table("parents"),
+        fields: vec![
+            column_field("name", "name"),
+            Field {
+                field: field("kids"),
+                options: Default::default(),
+                emit: true,
+                source: FieldSource::Relation(Relation::Join(kids)),
+            },
+        ],
+        ..users_schema(vec![])
+    };
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("parents"), parents)]));
+    let documents = PgDocumentBuilder::connect(&url, Arc::new(spec))
+        .await
+        .unwrap();
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = tokio::spawn(run_deployment(
+        Arc::new(WalChangeCapture::new(replication(port), url.clone())),
+        Arc::new(documents),
+        Arc::new(RecordingSink::new(&recorded)),
+    ));
+    expect_op(&mut engine, &recorded, &format!("upsert parents {id}")).await;
+    sqlx::query("SELECT pg_stat_statements_reset()")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    recorded.lock().unwrap().clear();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO kids SELECT n, {link}, 'k' FROM generate_series(1, 1000) n; \
+         UPDATE parents SET name = 'marker' WHERE id = {root}"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO kids VALUES (5000, NULL, 'marker')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !recorded
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|op| op == &format!("upsert parents {id}"))
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the burst never rebuilt its parent"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|op| op.contains("parents"))
+            .all(|op| op == &format!("upsert parents {id}")),
+        "{:?}",
+        recorded.lock().unwrap()
+    );
+    engine.abort();
+
+    sqlx::query_scalar(
+        "SELECT coalesce(sum(calls), 0)::int8 FROM pg_stat_statements \
+         WHERE query LIKE '%FROM \"public\".\"parents\" WHERE \"id\" IN (%'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+}
+
+/// A numeric key's links are read back once per batch, not once per change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_burst_of_links_reads_root_keys_back_once_per_batch() {
+    let lookups = root_key_lookups_for_a_burst("numeric", "1.5", "1.50", "1.5").await;
+    assert!(
+        (1..=10).contains(&lookups),
+        "{lookups} lookups for 1,000 changes in about four batches"
+    );
+}
+
+/// An int key's links are its own keys: no lookup at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_burst_of_int_links_reads_no_root_key_back() {
+    assert_eq!(root_key_lookups_for_a_burst("int", "1", "1", "1").await, 0);
+}
