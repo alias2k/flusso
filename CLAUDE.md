@@ -256,8 +256,10 @@ after a live update; constants land as written), and `an_update_of_an_unread_col
   settles, Undo/Redo/Reset drop; their buttons `keepFocus`), applied through the store's
   `renameField`/`renameIndex`/`renameSink`, which take an identity (uid, row id, sink id) and read
   the current state (`model/renames.ts`), never a closure's snapshot. **A blur inside a pointer
-  press applies the name when the press ends**, after the click's handlers ran (`model/press.ts`,
-  a pure reducer; the document-level capture listeners that feed it live in `nameDraft.ts`), so
+  press applies the name when the press ends**, after the click's handlers ran (`model/press.ts`:
+  the pure reducer and `createPressTracker` on injectable timers, both under `npm test` in
+  `scripts/press.test.mjs`, as `model/renameChips.ts` is in `scripts/renameChips.test.mjs`; the
+  document-level capture listeners that feed it live in `nameDraft.ts`), so
   nothing re-renders mid-press and no click is lost to a moved or re-created control; Tab, Enter,
   unmount and Save apply at once, and a control acting on the renamed thing calls
   `settleNameDraft()` first (Save, duplicate, remove, Code mode). Lists are keyed by identity,

@@ -56,60 +56,24 @@ import {
   type KeyboardEvent,
   type MouseEvent,
 } from "react";
-import { idle, press, type PressEffect, type PressEvent } from "../model/press";
+import { createPressTracker } from "../model/press";
 import { useUiStore, type NameDraft } from "../store/ui";
 
-/// How long after the last pointerup a press with no click is over.
-const PRESS_FALLBACK_MS = 600;
-
 /// The page's one press tracker, fed by document-level capture listeners.
-const tracker = {
-  state: idle,
-  waiting: new Set<() => void>(),
-  fallback: undefined as number | undefined,
-  installed: false,
-};
-
-function flushWaiting() {
-  window.clearTimeout(tracker.fallback);
-  const settles = [...tracker.waiting];
-  tracker.waiting.clear();
-  settles.forEach((settle) => settle());
-}
-
-function runEffect(effect: PressEffect) {
-  if (effect === "settleNow") flushWaiting();
-  // After the whole dispatch: the click's own handlers (and the updates React
-  // flushes for them) run first.
-  else if (effect === "settleAfterDispatch") window.setTimeout(flushWaiting, 0);
-  else if (effect === "armFallback") {
-    window.clearTimeout(tracker.fallback);
-    tracker.fallback = window.setTimeout(() => dispatchPress({ type: "fallback" }), PRESS_FALLBACK_MS);
-  }
-}
-
-function dispatchPress(event: PressEvent) {
-  const [state, effect] = press(tracker.state, event);
-  tracker.state = state;
-  runEffect(effect);
-}
+const tracker = createPressTracker({
+  set: (run, ms) => window.setTimeout(run, ms),
+  clear: (handle) => window.clearTimeout(handle as number | undefined),
+});
+let trackerInstalled = false;
 
 function installPressTracker() {
-  if (tracker.installed) return;
-  tracker.installed = true;
-  document.addEventListener("pointerdown", (e) => dispatchPress({ type: "down", pointer: e.pointerId }), true);
-  document.addEventListener("pointerup", (e) => dispatchPress({ type: "up", pointer: e.pointerId }), true);
-  document.addEventListener("pointercancel", (e) => dispatchPress({ type: "cancel", pointer: e.pointerId }), true);
-  document.addEventListener("click", () => dispatchPress({ type: "click" }), true);
-  window.addEventListener("blur", () => dispatchPress({ type: "windowBlur" }));
-}
-
-/// Run `settle` now, or when the pointer press going on ends.
-function settleAfterPress(settle: () => void) {
-  const [state, effect] = press(tracker.state, { type: "blur" });
-  tracker.state = state;
-  if (effect === "settleNow") settle();
-  else tracker.waiting.add(settle);
+  if (trackerInstalled) return;
+  trackerInstalled = true;
+  document.addEventListener("pointerdown", (e) => tracker.dispatch({ type: "down", pointer: e.pointerId }), true);
+  document.addEventListener("pointerup", (e) => tracker.dispatch({ type: "up", pointer: e.pointerId }), true);
+  document.addEventListener("pointercancel", (e) => tracker.dispatch({ type: "cancel", pointer: e.pointerId }), true);
+  document.addEventListener("click", () => tracker.dispatch({ type: "click" }), true);
+  window.addEventListener("blur", () => tracker.dispatch({ type: "windowBlur" }));
 }
 
 /// Apply the name pending in a name box now, for a control whose action must
@@ -182,15 +146,19 @@ export function useNameDraft({
   const drop = useCallback(() => {
     if (typed.current !== null) end();
   }, [end]);
+  // Save, Enter and a palette action apply the name at once, and a wait for a
+  // press to end must not apply it a second time.
+  const settleNow = useCallback(() => tracker.now(settle), [settle]);
   useEffect(
     () => () => {
+      tracker.forget(settle);
       const value = typed.current;
       if (value === null) return;
       typed.current = null;
       if (!callbacks.current.refusal(value)) callbacks.current.apply(value);
       setNameDraft(null);
     },
-    [setNameDraft],
+    [setNameDraft, settle],
   );
   const change = (value: string) => {
     box.current = document.activeElement instanceof HTMLInputElement ? document.activeElement : box.current;
@@ -198,14 +166,14 @@ export function useNameDraft({
     undone.current = null;
     setText(value);
     setLate(null);
-    setNameDraft({ kind, row, name: value, refused: refusal(value), settle, drop, refocus });
+    setNameDraft({ kind, row, name: value, refused: refusal(value), settle: settleNow, drop, refocus });
   };
   return {
     text,
     refused: late ?? (text === null ? null : refusal(text)),
     change,
     blur: (e: FocusEvent) => {
-      if (!keepsNameDraft(e.relatedTarget)) settleAfterPress(settle);
+      if (!keepsNameDraft(e.relatedTarget)) tracker.afterPress(settle);
     },
     keyDown: (e: KeyboardEvent<HTMLInputElement>) => {
       const undoKey = (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z";
@@ -226,7 +194,7 @@ export function useNameDraft({
         change(undone.current);
       }
     },
-    settle,
+    settle: settleNow,
     drop,
   };
 }

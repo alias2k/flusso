@@ -79,3 +79,62 @@ export function press(state: PressState, event: PressEvent): [PressState, PressE
       return state.deferred ? [idle, "settleNow"] : [idle, "none"];
   }
 }
+
+/// How long after the last pointerup a press with no click is over.
+export const PRESS_FALLBACK_MS = 600;
+
+/// The timers a tracker uses: the page's in the app, fake ones in a test.
+export interface Timers {
+  set: (run: () => void, ms: number) => unknown;
+  clear: (handle: unknown) => void;
+}
+
+/// The press tracker: feed it the document's pointer events (`dispatch`) and
+/// hand it a name box's `settle` on blur (`afterPress`); it runs each `settle`
+/// at the moment `press` says.
+export function createPressTracker(timers: Timers) {
+  let state = idle;
+  const waiting = new Set<() => void>();
+  let fallback: unknown;
+  const flush = () => {
+    timers.clear(fallback);
+    const settles = [...waiting];
+    waiting.clear();
+    settles.forEach((settle) => settle());
+  };
+  const run = (effect: PressEffect) => {
+    if (effect === "settleNow") flush();
+    // After the whole dispatch: the click's own handlers (and the updates React
+    // flushes for them) run first.
+    else if (effect === "settleAfterDispatch") timers.set(flush, 0);
+    else if (effect === "armFallback") {
+      timers.clear(fallback);
+      fallback = timers.set(() => dispatch({ type: "fallback" }), PRESS_FALLBACK_MS);
+    }
+  };
+  const dispatch = (event: PressEvent) => {
+    const [next, effect] = press(state, event);
+    state = next;
+    run(effect);
+  };
+  return {
+    dispatch,
+    /// Run `settle` now, or once the press going on ends.
+    afterPress(settle: () => void) {
+      const [next, effect] = press(state, { type: "blur" });
+      state = next;
+      if (effect === "settleNow") settle();
+      else waiting.add(settle);
+    },
+    /// Run `settle` now and drop its wait (Save, Enter, a palette action).
+    now(settle: () => void) {
+      waiting.delete(settle);
+      settle();
+    },
+    /// Drop `settle`'s wait without running it (the box went away and applied
+    /// its name itself).
+    forget(settle: () => void) {
+      waiting.delete(settle);
+    },
+  };
+}
