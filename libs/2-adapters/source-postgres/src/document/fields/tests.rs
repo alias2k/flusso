@@ -61,12 +61,15 @@ fn children(fields: Vec<Field>) -> Field {
 }
 
 fn path_names(fields: &[Field], target: &str) -> Vec<Vec<String>> {
-    let mut prefix = Vec::new();
-    let mut paths = Vec::new();
-    find_paths(fields, &table(target), &mut prefix, &mut paths);
-    paths
+    find_paths(fields, &table(target))
         .iter()
-        .map(|path| path.iter().map(|hop| hop.table().to_string()).collect())
+        .map(|path| {
+            path.steps(fields)
+                .unwrap()
+                .iter()
+                .map(|hop| hop.table().to_string())
+                .collect()
+        })
         .collect()
 }
 

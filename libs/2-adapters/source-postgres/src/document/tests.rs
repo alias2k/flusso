@@ -78,15 +78,12 @@ fn builder_with(extra: Vec<Field>) -> PgDocumentBuilder {
 /// Cache `integer` as the type of each `(table, column)`, as the catalog would
 /// report it, so resolving reads no catalog either.
 fn seed_integer_columns(builder: &PgDocumentBuilder, columns: &[(&str, &str)]) {
-    let mut cache = builder.col_type_cache.lock();
     for (table, column) in columns {
-        cache.insert(
-            (
-                "public".to_owned(),
-                (*table).to_owned(),
-                (*column).to_owned(),
-            ),
-            ColumnMeta {
+        builder.col_type_cache.insert(
+            "public",
+            table,
+            column,
+            Arc::new(ColumnMeta {
                 sql_type: "integer".to_owned(),
                 type_oid: 23,
                 base_type: None,
@@ -94,7 +91,7 @@ fn seed_integer_columns(builder: &PgDocumentBuilder, columns: &[(&str, &str)]) {
                 element_name: None,
                 deterministic: true,
                 nullable: true,
-            },
+            }),
         );
     }
 }
@@ -529,4 +526,61 @@ async fn resolving_a_change_searches_no_field_tree() {
         builder.resolve(&table, &key, None, None).await.unwrap();
     }
     assert_eq!(PATH_SEARCHES.with(Cell::get), 0);
+}
+
+fn cache_type(builder: &PgDocumentBuilder, table: &str, column: &str, sql_type: &str, oid: u32) {
+    builder.col_type_cache.insert(
+        "public",
+        table,
+        column,
+        Arc::new(ColumnMeta {
+            sql_type: sql_type.to_owned(),
+            type_oid: oid,
+            base_type: None,
+            base_name: sql_type.to_owned(),
+            element_name: None,
+            deterministic: true,
+            nullable: true,
+        }),
+    );
+}
+
+/// The kept answer follows the column types: a `Relation` message naming a
+/// new type for the link column (`forget_changed`), and a failed document
+/// query (`forget_table`), each make the next change ask again.
+#[tokio::test]
+async fn a_changed_column_type_reaches_the_kept_root_link_answer() {
+    let builder = builder_with(vec![tags_through_user_tags()]);
+    let user_tags = TableName::try_new("user_tags").unwrap();
+    let schema = builder
+        .spec
+        .schema(&IndexName::try_new("users").unwrap())
+        .unwrap();
+    let path = builder
+        .reads
+        .paths(&IndexName::try_new("users").unwrap(), &user_tags)
+        .first()
+        .unwrap();
+    let steps = path.address.steps(&schema.fields).unwrap();
+    let ask = async || {
+        builder
+            .reads_root_from_a_link(schema, &column("id"), path, &steps)
+            .await
+            .unwrap()
+    };
+    assert_eq!(ask().await, None, "an integer link to an integer key");
+
+    builder
+        .col_type_cache
+        .forget_changed("public", "user_tags", [("user_id", 25)].into_iter());
+    cache_type(&builder, "user_tags", "user_id", "text", 25);
+    assert_eq!(
+        ask().await,
+        Some((user_tags.clone(), column("user_id"))),
+        "a text link to an integer key is read back"
+    );
+
+    builder.col_type_cache.forget_table("public", "user_tags");
+    cache_type(&builder, "user_tags", "user_id", "integer", 23);
+    assert_eq!(ask().await, None, "back to integer after a failed query");
 }
