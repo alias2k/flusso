@@ -619,11 +619,11 @@ impl PgDocumentBuilder {
                     continue;
                 }
                 let found = self.resolve_path(schema, table, key, before, path).await?;
-                if self
+                if let Some(link) = self
                     .reads_root_from_a_link(schema, &pk_column, path)
                     .await?
                 {
-                    links.add(name, found);
+                    links.add(name, link, found);
                 } else {
                     roots.extend(found);
                 }

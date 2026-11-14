@@ -211,9 +211,11 @@ pub(super) fn documents_query(
 /// Build the query that reads back the root rows whose key equals one of
 /// `links`, selecting each row's own key: the document ids those links name.
 ///
-/// Each link is cast from the type it is bound as to the key's (`$n::<bound>
-/// ::<sql_type>`), so the statement text names every parameter's type: links
-/// read from columns of different types never share a prepared statement.
+/// Each link is cast from the type it is bound as to its link column's,
+/// `sql_type` (`$n::<bound>::<sql_type>`), so the key compares with it as the
+/// document query's join compares the two columns, and the statement text
+/// names every parameter's type: links bound as different types never share a
+/// prepared statement.
 pub(super) fn root_keys_query(
     db: &DatabaseSchema,
     table: &TableName,
