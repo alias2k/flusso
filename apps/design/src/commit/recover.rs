@@ -23,10 +23,12 @@
 //! The result is the project before the save, or after it, plus the other
 //! program's writes: never a mix of the save's text and the text before.
 //!
-//! Either way it then deletes the journal, hands what it did to the caller
-//! ([`recover_telling`]: the designer keeps it as a notice), and removes the
-//! record last, so a journal is acted on once and a settled save is never
-//! left untold. `.flusso-save.journal.tmp` with a record of
+//! Either way it then hands what it did to the caller ([`recover_telling`]:
+//! the designer keeps it as a notice), deletes the journal, and removes the
+//! record last, so a journal is acted on once. A kill before the journal is
+//! deleted makes the next start settle the save again, which finds the files
+//! already settled and tells the same thing (a notice is kept per save, so it
+//! is replaced, never doubled); a kill after it leaves the notice told. `.flusso-save.journal.tmp` with a record of
 //! this folder and no journal means nothing was done yet: it is deleted. A
 //! record of this folder with no journal left at all is removed.
 //!
@@ -374,9 +376,19 @@ pub(crate) fn recover(
     recover_telling(lock, config, state, disk, &mut |_, _| {})
 }
 
-/// [`recover`], handing each save it settles to `tell` before the save's
-/// record is removed: a kill in between leaves the record, never a settled
-/// save nobody heard of.
+/// Settle whatever save a dead process left in `lock`'s project, whose
+/// config file is `config`, acting only on a journal `state` holds a record
+/// of (`Err` says why there are no records to check). Each save it settles
+/// is handed to `tell` once its files are settled and before its journal is
+/// deleted: a kill before `tell`
+/// is done leaves the journal, so the next start settles the save again and
+/// tells it then.
+///
+/// A record of this folder with no journal left is removed, and logged: no
+/// save it names is untold. Such a record is left by a kill before the save
+/// wrote its journal (nothing was changed), after the save's own cleanup or
+/// undo deleted the journal (the save stood, or was undone in the process
+/// that made it), or after a recovery deleted it (told already).
 pub(crate) fn recover_telling(
     lock: &ProjectLock,
     config: &Path,
@@ -477,6 +489,12 @@ pub(crate) fn recover_telling(
     }
     if let Ok(state) = state {
         for record in state.for_dir(base) {
+            tracing::info!(
+                token = %record.token,
+                committed = record.committed,
+                "removing the record of a save whose journal is gone: it changed nothing, \
+                 stood or was undone by itself, or was recovered and told already"
+            );
             if disk.stopped() || state.remove(&record.token, disk).is_err() {
                 break;
             }
@@ -544,13 +562,18 @@ fn settle(
             ));
         }
     };
-    let (outcome, Finished { kept, displaced }) = if record.committed {
-        (Outcome::Completed, finish(&steps, file, disk)?)
+    let (outcome, direction, Finished { kept, displaced }) = if record.committed {
+        (
+            Outcome::Completed,
+            Direction::Finish,
+            finish_with(&steps, file, JournalThen::Keep, disk)?,
+        )
     } else {
         (
             Outcome::RolledBack,
+            Direction::RollBack,
             Finished {
-                kept: roll_back(&steps, file, Backups::Keep, disk)?,
+                kept: roll_back_with(&steps, file, Backups::Keep, JournalThen::Keep, disk)?,
                 displaced: Vec::new(),
             },
         )
@@ -562,13 +585,19 @@ fn settle(
         outcome,
         started_at_ms: steps.started_at_ms,
         files: steps.files(),
-        token: steps.token,
+        token: steps.token.clone(),
         kept,
         displaced,
     };
-    if !disk.stopped() {
-        tell(&settled, disk);
+    if disk.stopped() {
+        return Ok(settled);
     }
+    tell(&settled, disk);
+    if disk.stopped() {
+        return Ok(settled);
+    }
+    disk.remove_file(file)
+        .map_err(|e| failed(&steps, file, direction, file, &e))?;
     if !disk.stopped()
         && let Err(e) = state.remove(&record.token, disk)
     {
@@ -913,6 +942,26 @@ fn own_temp_before_commit(write: &FileWrite) -> bool {
 /// place at the commit point, so one holding another text now, or a removed
 /// one made again, was written since: it is kept as it is, and listed.
 pub(crate) fn finish(steps: &Steps, file: &Path, disk: &mut Disk) -> Result<Finished, Blocked> {
+    finish_with(steps, file, JournalThen::Delete, disk)
+}
+
+/// What settling a save does with its journal once the files are settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JournalThen {
+    /// Delete it: the save is over.
+    Delete,
+    /// Leave it to the caller, which tells about the save first: a kill
+    /// before the journal goes makes the next start settle the save again.
+    Keep,
+}
+
+/// [`finish`], deleting the journal or not as `journal` says.
+fn finish_with(
+    steps: &Steps,
+    file: &Path,
+    journal: JournalThen,
+    disk: &mut Disk,
+) -> Result<Finished, Blocked> {
     let mut kept = Vec::new();
     let mut displaced = Vec::new();
     let mut unreadable = Vec::new();
@@ -949,12 +998,17 @@ pub(crate) fn finish(steps: &Steps, file: &Path, disk: &mut Disk) -> Result<Fini
     if !unreadable.is_empty() {
         return Err(Blocked::new(unreadable, on_disk(steps, file)).going(Direction::Finish));
     }
-    clean(steps, file, disk)
+    clean(steps, file, journal, disk)
         .map_err(|(path, e)| failed(steps, file, Direction::Finish, &path, &e))?;
     Ok(Finished { kept, displaced })
 }
 
-fn clean(steps: &Steps, file: &Path, disk: &mut Disk) -> Result<(), (PathBuf, io::Error)> {
+fn clean(
+    steps: &Steps,
+    file: &Path,
+    journal: JournalThen,
+    disk: &mut Disk,
+) -> Result<(), (PathBuf, io::Error)> {
     for write in &steps.writes {
         if let (Some(backup), Some(before)) = (&write.backup, &write.before)
             && holds(backup, before)
@@ -971,7 +1025,10 @@ fn clean(steps: &Steps, file: &Path, disk: &mut Disk) -> Result<(), (PathBuf, io
                 .map_err(at(&removal.backup))?;
         }
     }
-    disk.remove_file(file).map_err(at(file))
+    if journal == JournalThen::Delete {
+        disk.remove_file(file).map_err(at(file))?;
+    }
+    Ok(())
 }
 
 /// What a file holds, against what the save expects of it.
@@ -1123,6 +1180,17 @@ pub(crate) fn roll_back(
     backups: Backups,
     disk: &mut Disk,
 ) -> Result<Vec<Kept>, Blocked> {
+    roll_back_with(steps, file, backups, JournalThen::Delete, disk)
+}
+
+/// [`roll_back`], deleting the journal or not as `journal` says.
+fn roll_back_with(
+    steps: &Steps,
+    file: &Path,
+    backups: Backups,
+    journal: JournalThen,
+    disk: &mut Disk,
+) -> Result<Vec<Kept>, Blocked> {
     let mut problems = Vec::new();
     let removals: Vec<(&Removal, RemovalUndo)> = steps
         .removals
@@ -1192,7 +1260,7 @@ pub(crate) fn roll_back(
         }))
         .collect();
 
-    undo(steps, &removals, &writes, &temps, file, disk)
+    undo(steps, &removals, &writes, &temps, file, journal, disk)
         .map_err(|(path, e)| failed(steps, file, Direction::RollBack, &path, &e))?;
     Ok(kept)
 }
@@ -1203,6 +1271,7 @@ fn undo(
     writes: &[(&FileWrite, WriteUndo)],
     temps: &[&Path],
     file: &Path,
+    journal: JournalThen,
     disk: &mut Disk,
 ) -> Result<(), (PathBuf, io::Error)> {
     for (removal, undo) in removals.iter().rev() {
@@ -1245,7 +1314,10 @@ fn undo(
     for folder in steps.folders() {
         disk.sync_dir(&folder).map_err(at(&folder))?;
     }
-    disk.remove_file(file).map_err(at(file))
+    if journal == JournalThen::Delete {
+        disk.remove_file(file).map_err(at(file))?;
+    }
+    Ok(())
 }
 
 /// Tag an error with the file it happened on.

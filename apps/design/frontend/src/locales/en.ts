@@ -570,27 +570,30 @@ export const en: Record<string, string> = {
     "{n, plural, one {A save from {time} was interrupted before it finished. It was rolled back: {files} is as it was before it.} other {A save from {time} was interrupted before it finished. It was rolled back: {files} are as they were before it.}}",
   "recovery.completed":
     "{n, plural, one {A save from {time} was interrupted while it cleaned up. It was completed: {files} is as it wrote it.} other {A save from {time} was interrupted while it cleaned up. It was completed: {files} are as it wrote them.}}",
-  "recovery.leftovers":
-    "Copies a save left beside its files, which the designer does not touch: {files}. Each holds a text of the file whose name its own name starts with (from before a save, or what one wrote), and the designer no longer needs it: compare it with that file, then delete it.",
   "recovery.kept":
-    "{path} was written by another program during or after that save, so it was not rolled back: it keeps what that program wrote.",
+    "{path} was changed by another program during or after that save, so the designer did not roll it back.",
   "recovery.keptBackup":
-    "{path} was written by another program during or after that save, so it was not rolled back: it keeps what that program wrote. Its text from before the save is in {backup}: to go back to that text, copy {backup} over {path}; otherwise delete {backup}.",
+    "{path} was changed by another program during or after that save, so the designer did not roll it back. Its text from before the save is in {backup}. To go back to that text, copy {backup} over {path}, but check {path} first: it may have changed since, and copying replaces what it holds now. Otherwise delete {backup}.",
   "recovery.displaced":
     "{path} was written by another program in the instant the save replaced it: it holds what the save wrote, and the other program's bytes are in {copy}. Check them, then delete that file.",
+  "recovery.leftoverUnknown":
+    "{copy} was left behind by a save. The designer does not touch it: check it, then delete it.",
+  "recovery.leftover":
+    "{copy} is a copy of {path} that a save left behind, holding its text from before that save or what the save wrote. The designer does not touch it: compare it with {path}, then delete it.",
   "recovery.copyDisplaced":
     "{copy} holds what another program wrote to {path} in the instant a save from {time} replaced it: check it, then delete it.",
   "recovery.copyBefore":
-    "{copy} holds {path}'s text from before a save from {time}. That save was rolled back, but {path} had been changed or deleted meanwhile, so it was left as it was: to go back to that text, copy {copy} to {path}; otherwise delete {copy}.",
+    "{copy} holds {path}'s text from before a save from {time}. That save was rolled back, but {path} had been changed or deleted meanwhile, so it was left as it was. To go back to that text, copy {copy} to {path}, but check {path} first: it may have changed since, and copying replaces what it holds now. Otherwise delete {copy}.",
   "recovery.interrupted":
     "{outcome, select, rolled_back {A save from {time} was interrupted before it finished. The designer undoes such a save, but every file it wrote was changed or deleted meanwhile:} other {A save from {time} was interrupted while it cleaned up. The designer finished it, but every file it wrote was changed or deleted afterwards:}}",
   "recovery.keptDeletedAfter":
-    "{path} was deleted after that save wrote it: it stays deleted, and what the save wrote to it is gone.",
+    "{path} was deleted after that save wrote it, and it is still missing: what the save wrote to it is not kept anywhere.",
   "recovery.keptAfter":
-    "{path} was written by another program after that save: it keeps what that program wrote, and what the save wrote to it is gone.",
+    "{path} was changed by another program after that save wrote it, so the designer left it as it found it: what the save wrote to it is not kept anywhere.",
   "recovery.keptDeletedBackup":
-    "{path} was deleted during or after that save, so it was not rolled back: it stays deleted. Its text from before the save is in {backup}: to bring {path} back, copy {backup} to {path}; otherwise delete {backup}.",
-  "recovery.keptDeleted": "{path} was deleted during or after that save, so it was not rolled back: it stays deleted.",
+    "{path} was deleted during or after that save, so the designer did not roll it back, and it is still missing. Its text from before the save is in {backup}. To bring {path} back, copy {backup} to {path}; it may have changed since this was checked, and copying replaces whatever is there then. Otherwise delete {backup}.",
+  "recovery.keptDeleted":
+    "{path} was deleted during or after that save, so the designer did not roll it back, and it is still missing.",
   "recovery.dismiss": "Dismiss",
   // a file changed on disk since the page loaded it
   "stale.changed": "{path} changed on disk since this page loaded it.",

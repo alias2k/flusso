@@ -2,7 +2,7 @@
 //! when the process is killed or the power goes in the middle.
 //!
 //! **The invariant: once [`commit`] has started, the project is, or after
-//! [`recover()`] becomes, byte for byte either what it was before the save or
+//! [`recover_telling`] becomes, byte for byte either what it was before the save or
 //! what the save wrote: never a mix.** It holds for a kill or a power loss at
 //! any step, including during the journal's own writing, during an undo and
 //! during a recovery, which can itself be cut short and run again.
@@ -39,7 +39,7 @@
 //!
 //! When a step of 1–6 fails, the commit undoes it at once, the way recovery
 //! would ([`recover::roll_back`]), and removes the record. When the process
-//! dies instead, whatever opens the project next ([`recover()`], under the
+//! dies instead, whatever opens the project next ([`recover_telling`], under the
 //! same lock) finds the journal and its record: not committed, it is rolled
 //! back; committed, it is finished. Either way the record goes last, so a
 //! journal is acted on once.

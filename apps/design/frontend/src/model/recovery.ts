@@ -58,11 +58,25 @@ export const noticeLines = (t: Translate, recovery: SaveRecovery, time: (ms: num
       text: c.holds === "before" ? t("recovery.copyBefore", vars) : t("recovery.copyDisplaced", vars),
     });
   }
-  const leftovers = recovery.leftovers.filter((file) => !named.has(file));
-  if (leftovers.length > 0) {
-    lines.push({ key: "leftovers", text: t("recovery.leftovers", { files: leftovers.join(", ") }) });
+  for (const copy of recovery.leftovers.filter((file) => !named.has(file))) {
+    const path = copyOwner(copy);
+    lines.push({
+      key: copy,
+      text: path ? t("recovery.leftover", { copy, path }) : t("recovery.leftoverUnknown", { copy }),
+    });
   }
   return lines;
+};
+
+/// The file a save's copy belongs to: `.<name>.flusso-save.<…>` beside it is
+/// a copy of `<name>`. `undefined` for a name of another form.
+export const copyOwner = (copy: string): string | undefined => {
+  const slash = copy.lastIndexOf("/");
+  const dir = copy.slice(0, slash + 1);
+  const name = copy.slice(slash + 1);
+  const at = name.indexOf(".flusso-save.");
+  if (!name.startsWith(".") || at <= 1) return undefined;
+  return dir + name.slice(1, at);
 };
 
 /// The lead-in of each way out of a journal the server does not act on: the

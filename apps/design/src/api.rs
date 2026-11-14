@@ -905,7 +905,8 @@ pub struct KeptFile {
     /// user to delete or copy back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backup: Option<String>,
-    /// The file was deleted, not written: it stays deleted.
+    /// The file is missing: deleted during or after the save. Checked again
+    /// each time the notice is shown.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deleted: bool,
 }
@@ -1497,6 +1498,25 @@ impl StoredNotice {
         }
     }
 
+    /// The notice as it can be shown now. Every path must be a relative one
+    /// inside the project (a notice is a file anyone with the user's rights
+    /// can edit), every copy a save copy of its file (`.<name>.flusso-save.
+    /// <id>.…` beside it) still on disk, and a kept file is told deleted only
+    /// while it is missing. Anything else is dropped.
+    fn checked(mut self, paths: &Paths) -> Self {
+        let id = self.save.id.clone();
+        let exists = |rel: &str| paths.base.join(rel).symlink_metadata().is_ok();
+        let copy_of = |copy: &str, path: &str| is_save_copy(copy, path, &id) && exists(copy);
+        self.save.files.retain(|f| inside_project(f));
+        self.save.kept.retain(|k| inside_project(&k.path));
+        for kept in &mut self.save.kept {
+            kept.backup = kept.backup.take().filter(|b| copy_of(b, &kept.path));
+            kept.deleted = !exists(&kept.path);
+        }
+        self.save.displaced.retain(|d| copy_of(&d.copy, &d.path));
+        self
+    }
+
     /// The copies it names that are still on disk.
     fn copies(&self, paths: &Paths) -> Vec<KeptCopy> {
         let backups = self.save.kept.iter().filter_map(|k| {
@@ -1520,6 +1540,27 @@ impl StoredNotice {
             })
             .collect()
     }
+}
+
+/// Whether `rel` is a relative path inside the project: plain names only.
+fn inside_project(rel: &str) -> bool {
+    !rel.is_empty()
+        && Path::new(rel)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+}
+
+/// Whether `copy` is a copy the save `id` keeps of `path`: beside it, named
+/// `.<name>.flusso-save.<id>.…`.
+fn is_save_copy(copy: &str, path: &str, id: &str) -> bool {
+    let (copy, path) = (Path::new(copy), Path::new(path));
+    let name = |p: &Path| p.file_name().and_then(|n| n.to_str()).map(str::to_owned);
+    inside_project(&copy.to_string_lossy())
+        && inside_project(&path.to_string_lossy())
+        && copy.parent() == path.parent()
+        && name(path)
+            .zip(name(copy))
+            .is_some_and(|(file, copy)| copy.starts_with(&format!(".{file}.flusso-save.{id}.")))
 }
 
 /// Keep `notice`, replacing any earlier one of its save: in the user's state
@@ -1579,13 +1620,14 @@ fn notices(paths: &Paths) -> Vec<StoredNotice> {
                 .filter(|n| n.format == NOTICE_FORMAT && n.save.id == token)
         })
         .filter(|n| n.dir == paths.base)
+        .map(|n| n.checked(paths))
         .collect();
     if let Ok(unstored) = UNSTORED.lock()
         && let Some(kept) = unstored.get(&paths.base)
     {
         for notice in kept {
             if !found.iter().any(|n| n.save.id == notice.save.id) {
-                found.push(notice.clone());
+                found.push(notice.clone().checked(paths));
             }
         }
     }

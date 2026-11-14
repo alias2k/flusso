@@ -185,6 +185,7 @@ async fn project(State(state): State<AppState>) -> Result<Response, ApiError> {
 
 /// The saves whose notice the user dismissed.
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Dismissed {
     ids: Vec<String>,
 }
