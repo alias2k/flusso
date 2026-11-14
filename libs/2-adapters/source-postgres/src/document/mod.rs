@@ -68,7 +68,7 @@ pub(crate) mod value;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use async_trait::async_trait;
 use kernel::{
@@ -276,7 +276,7 @@ pub struct PgDocumentBuilder {
     /// verdict, or the reason the database gave for not answering.
     comparison_cache: Arc<Mutex<ComparisonCache>>,
     /// Tables a change arrived for that no index reads, already warned about.
-    unread_warned: Arc<Mutex<HashSet<TableName>>>,
+    unread_warned: Arc<RwLock<HashSet<TableName>>>,
     /// Root tables without a primary key already warned about for a key with
     /// a null part.
     keyless_warned: Arc<Mutex<HashSet<TableName>>>,
@@ -303,7 +303,7 @@ impl PgDocumentBuilder {
             pk_cache: Arc::new(Mutex::new(HashMap::new())),
             col_type_cache: ColumnTypes::default(),
             comparison_cache: Arc::new(Mutex::new(HashMap::new())),
-            unread_warned: Arc::new(Mutex::new(HashSet::new())),
+            unread_warned: Arc::new(RwLock::new(HashSet::new())),
             keyless_warned: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -312,9 +312,17 @@ impl PgDocumentBuilder {
     /// so a change streamed under an unexpected name (a partition's, say) isn't
     /// dropped silently.
     fn warn_unread(&self, table: &TableName) {
+        let warned = self
+            .unread_warned
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(table);
+        if warned {
+            return;
+        }
         let first = self
             .unread_warned
-            .lock()
+            .write()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(table.clone());
         if first {
