@@ -529,7 +529,9 @@ async fn write(
         let row: usize = rejection.id.parse::<usize>().unwrap() - 1;
         run.rejected[row] = Some(rejection.reason);
     }
-    let _ = http.delete(format!("{os_url}/{index}*")).send().await;
+    // `{index}_*`, not `{index}*`: `p_1_2*` also matches `p_1_20…`, the indexes
+    // of pairs still being written.
+    let _ = http.delete(format!("{os_url}/{index}_*")).send().await;
     run
 }
 
