@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::disk::Edit;
+use super::disk::{Call, Edit};
 use super::recover::Kept;
 use super::recover::{Problem, Recovery};
 use super::state::Record;
@@ -2878,6 +2878,116 @@ fn a_save_file_gone_after_the_plan_never_reads_as_a_step_done() {
     assert!(
         broken.is_empty(),
         "{} of {runs} runs:\n{}",
+        broken.len(),
+        broken.join("\n")
+    );
+}
+
+/// [`flushed_before_recorded`] over `calls`, a breach added to `broken`.
+fn checked_order(project: &Project, label: &str, calls: &[Call], broken: &mut Vec<String>) {
+    if let Err(why) = flushed_before_recorded(project, calls) {
+        broken.push(format!("{label}: {why}"));
+    }
+}
+
+/// Every change in the project (a rename, a removal, a file or folder made)
+/// is flushed, its folder (both, for a rename across two) synced, before the
+/// next change in the state folder: a mark, `settled`, a notice, a record
+/// removed. Otherwise a power cut can keep the mark and lose the change, and
+/// the next recovery trusts a step that is undone on disk.
+fn flushed_before_recorded(project: &Project, calls: &[Call]) -> Result<(), String> {
+    let base = std::fs::canonicalize(&project.dir).unwrap();
+    let state = std::fs::canonicalize(&project.state).unwrap_or_else(|_| project.state.clone());
+    let in_state = |p: &Path| p.starts_with(&state) || p.starts_with(&project.state);
+    let in_project = |p: &Path| p.starts_with(&base) || p.starts_with(&project.dir);
+    let mut dirty: std::collections::BTreeSet<PathBuf> = Default::default();
+    for (i, call) in calls.iter().enumerate() {
+        let changed: Vec<&PathBuf> = match call {
+            Call::Made(p) | Call::Removed(p) => vec![p],
+            Call::Renamed(from, to) => vec![from, to],
+            Call::Flushed(dir) => {
+                dirty.remove(dir);
+                continue;
+            }
+        };
+        if changed.iter().any(|p| in_state(p)) {
+            if !dirty.is_empty() {
+                let last = calls[..i]
+                    .iter()
+                    .rev()
+                    .find(|c| !matches!(c, Call::Flushed(_)));
+                return Err(format!(
+                    "{call:?} after {last:?}, before {dirty:?} is flushed"
+                ));
+            }
+            continue;
+        }
+        for path in changed {
+            assert!(in_project(path), "{path:?} is neither project nor state");
+            dirty.insert(path.parent().unwrap().to_path_buf());
+        }
+    }
+    Ok(())
+}
+
+/// Review of #305: a power cut keeps what was flushed, so each step's mark
+/// may only be written once its rename is on the device. Otherwise a cut can
+/// keep the mark and lose the rename (the restore of `flusso.toml` in an edit,
+/// the removal of `new/deep/orders.schema.yml` or the restore of
+/// `orders.schema.yml` in a move), and the next recovery skips that step and
+/// tells the save rolled back over a tree still holding its text. Checked
+/// through the `Disk` seam, for every shape: a commit failing at any step (its
+/// own undo), and a recovery after a save killed at any step, itself killed
+/// at any step and run again.
+#[test]
+fn every_change_is_flushed_before_the_record_says_it_happened() {
+    let mut broken = Vec::new();
+    let mut runs = 0;
+    for shape in SHAPES {
+        let (_, _, steps) = reference(shape);
+        for n in 1..=steps {
+            let project = Project::new(&format!("order-fail-{shape:?}-{n}"));
+            let mut disk = Disk::failing(vec![n]);
+            project.commit(shape, &mut disk).ok();
+            runs += 1;
+            checked_order(
+                &project,
+                &format!("{shape:?}: step {n} failed"),
+                disk.calls(),
+                &mut broken,
+            );
+        }
+        for n in 0..steps {
+            for m in 0.. {
+                let project = Project::new(&format!("order-{shape:?}-{n}-{m}"));
+                project.commit(shape, &mut Disk::stopping_after(n)).ok();
+                let mut cut = Disk::stopping_after(m);
+                project.recover(&mut cut);
+                let label = format!("{shape:?}: save killed after {n}, recovery after {m}");
+                checked_order(&project, &label, cut.calls(), &mut broken);
+                let finished = !cut.stopped();
+                let mut again = Disk::counting();
+                project.recover(&mut again);
+                checked_order(
+                    &project,
+                    &format!("{label}, run again"),
+                    again.calls(),
+                    &mut broken,
+                );
+                runs += 2;
+                if finished {
+                    break;
+                }
+            }
+        }
+    }
+    let renames = broken
+        .iter()
+        .filter(|b| b.contains("after Some(Renamed"))
+        .count();
+    assert!(
+        broken.is_empty(),
+        "{} of {runs} runs ({renames} a mark right after a rename):\n{}",
         broken.len(),
         broken.join("\n")
     );

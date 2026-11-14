@@ -64,6 +64,21 @@ pub(crate) struct Disk {
     /// Writes another program makes right after a step (1-based).
     #[cfg(test)]
     edits_after: Vec<Edit>,
+    /// Every change and folder flush made, in order.
+    #[cfg(test)]
+    calls: Vec<Call>,
+}
+
+/// One change or folder flush a [`Disk`] made, for a test of their order.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Call {
+    /// A file or folder made, or a file replaced in one rename, at the path.
+    Made(std::path::PathBuf),
+    Renamed(std::path::PathBuf, std::path::PathBuf),
+    Removed(std::path::PathBuf),
+    /// A folder flushed.
+    Flushed(std::path::PathBuf),
 }
 
 /// A write another program makes to a file, for a test.
@@ -96,6 +111,8 @@ impl Default for Disk {
             edit_after_look: false,
             #[cfg(test)]
             edits_after: Vec::new(),
+            #[cfg(test)]
+            calls: Vec::new(),
         }
     }
 }
@@ -199,6 +216,19 @@ impl Disk {
         }
     }
 
+    /// Every change and folder flush made so far, in order.
+    #[cfg(test)]
+    pub(crate) fn calls(&self) -> &[Call] {
+        &self.calls
+    }
+
+    #[cfg(test)]
+    fn log(&mut self, result: &io::Result<()>, call: Call) {
+        if result.is_ok() {
+            self.calls.push(call);
+        }
+    }
+
     /// Steps taken so far.
     #[cfg(test)]
     pub(crate) fn steps(&self) -> usize {
@@ -240,7 +270,10 @@ impl Disk {
     }
 
     pub(crate) fn create_dir(&mut self, dir: &Path) -> io::Result<()> {
-        self.step(|| std::fs::create_dir(dir))
+        let result = self.step(|| std::fs::create_dir(dir));
+        #[cfg(test)]
+        self.log(&result, Call::Made(dir.to_path_buf()));
+        result
     }
 
     /// Write `bytes` to a new file at `path`, with the permissions of `like`
@@ -253,7 +286,7 @@ impl Disk {
         like: Option<&Path>,
     ) -> io::Result<()> {
         let sync = self.sync;
-        self.step(|| {
+        let result = self.step(|| {
             not_a_link(path)?;
             let mut file =
                 no_follow(OpenOptions::new().write(true).create(true).truncate(true)).open(path)?;
@@ -265,13 +298,16 @@ impl Disk {
                 file.sync_all()?;
             }
             Ok(())
-        })
+        });
+        #[cfg(test)]
+        self.log(&result, Call::Made(path.to_path_buf()));
+        result
     }
 
     /// Keep `path` at `backup`: a hard link, else a flushed copy.
     pub(crate) fn keep(&mut self, path: &Path, backup: &Path) -> io::Result<()> {
         let sync = self.sync;
-        self.step(|| {
+        let result = self.step(|| {
             if std::fs::hard_link(path, backup).is_ok() {
                 return Ok(());
             }
@@ -280,7 +316,10 @@ impl Disk {
                 File::open(backup)?.sync_all()?;
             }
             Ok(())
-        })
+        });
+        #[cfg(test)]
+        self.log(&result, Call::Made(backup.to_path_buf()));
+        result
     }
 
     /// Create `path` holding `bytes`, private to the user (mode 0600 on
@@ -289,7 +328,7 @@ impl Disk {
     /// links don't work, created with `create_new` at `path` itself.
     pub(crate) fn create_private(&mut self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         let (sync, fail) = (self.sync, self.fail_private_write);
-        self.step(|| {
+        let result = self.step(|| {
             let temp = private_temp(path);
             write_new_private(&temp, bytes, sync, fail)?;
             let linked = std::fs::hard_link(&temp, path);
@@ -303,20 +342,26 @@ impl Disk {
                 Some(dir) if sync => sync_dir(dir),
                 _ => Ok(()),
             }
-        })
+        });
+        #[cfg(test)]
+        self.log(&result, Call::Made(path.to_path_buf()));
+        result
     }
 
     /// Replace `path` with a private file holding `bytes`, in one rename.
     /// The caller flushes the folder.
     pub(crate) fn replace_private(&mut self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         let (sync, fail) = (self.sync, self.fail_private_write);
-        self.step(|| {
+        let result = self.step(|| {
             let temp = private_temp(path);
             write_new_private(&temp, bytes, sync, fail)?;
             std::fs::rename(&temp, path).inspect_err(|_| {
                 std::fs::remove_file(&temp).ok();
             })
-        })
+        });
+        #[cfg(test)]
+        self.log(&result, Call::Made(path.to_path_buf()));
+        result
     }
 
     /// Whether `path` holds exactly `expected` (`None`: no file) now. Not a
@@ -351,21 +396,27 @@ impl Disk {
     }
 
     pub(crate) fn rename(&mut self, from: &Path, to: &Path) -> io::Result<()> {
-        self.step(|| std::fs::rename(from, to))
+        let result = self.step(|| std::fs::rename(from, to));
+        #[cfg(test)]
+        self.log(&result, Call::Renamed(from.to_path_buf(), to.to_path_buf()));
+        result
     }
 
     /// Remove a file; one already gone counts as removed.
     pub(crate) fn remove_file(&mut self, path: &Path) -> io::Result<()> {
-        self.step(|| match std::fs::remove_file(path) {
+        let result = self.step(|| match std::fs::remove_file(path) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
-        })
+        });
+        #[cfg(test)]
+        self.log(&result, Call::Removed(path.to_path_buf()));
+        result
     }
 
     /// Remove an empty folder; one already gone, or holding a file someone
     /// else put there, is left as it is.
     pub(crate) fn remove_dir(&mut self, dir: &Path) -> io::Result<()> {
-        self.step(|| match std::fs::remove_dir(dir) {
+        let result = self.step(|| match std::fs::remove_dir(dir) {
             Err(e)
                 if !matches!(
                     e.kind(),
@@ -375,13 +426,16 @@ impl Disk {
                 Err(e)
             }
             _ => Ok(()),
-        })
+        });
+        #[cfg(test)]
+        self.log(&result, Call::Removed(dir.to_path_buf()));
+        result
     }
 
     /// Flush a folder's entries, so the renames in it survive a power loss.
     /// Not a step. A platform or filesystem that can't flush a folder is
     /// skipped; a folder already gone has nothing to flush.
-    pub(crate) fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+    pub(crate) fn sync_dir(&mut self, dir: &Path) -> io::Result<()> {
         if self.fail_sync_from.is_some_and(|n| self.steps >= n) {
             return Err(io::Error::other(format!(
                 "flushing {} failed after step {}",
@@ -389,10 +443,10 @@ impl Disk {
                 self.steps
             )));
         }
-        if !self.sync {
-            return Ok(());
-        }
-        sync_dir(dir)
+        let result = if self.sync { sync_dir(dir) } else { Ok(()) };
+        #[cfg(test)]
+        self.log(&result, Call::Flushed(dir.to_path_buf()));
+        result
     }
 }
 
