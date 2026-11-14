@@ -151,6 +151,8 @@ pub struct PgDocumentBuilder {
     /// Cache of each `(schema, table, column)`'s SQL type, used to cast filter
     /// operands to the column's real type rather than comparing as text.
     col_type_cache: Arc<Mutex<ColTypeCache>>,
+    /// Whether each `(link type, key type)` pair compares, probed once.
+    comparison_cache: Arc<Mutex<HashMap<(String, String), bool>>>,
     /// Tables a change arrived for that no index reads, already warned about.
     unread_warned: Arc<Mutex<HashSet<TableName>>>,
     /// Root tables without a primary key already warned about for a key with
@@ -168,6 +170,7 @@ impl PgDocumentBuilder {
             spec,
             pk_cache: Arc::new(Mutex::new(HashMap::new())),
             col_type_cache: Arc::new(Mutex::new(HashMap::new())),
+            comparison_cache: Arc::new(Mutex::new(HashMap::new())),
             unread_warned: Arc::new(Mutex::new(HashSet::new())),
             keyless_warned: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -745,24 +748,42 @@ impl Catalog for PgDocumentBuilder {
     ) -> Result<bool> {
         let link = self.column_meta(schema, link_table, link_column).await?;
         let key = self.column_meta(schema, key_table, key_column).await?;
-        let probe = query::comparison_probe(&link.sql_type, &key.sql_type);
-        self.probe(probe, || {
-            format!(
-                "could not check `{link_table}.{link_column}` against `{key_table}.{key_column}`"
-            )
-        })
-        .await
+        let pair = (link.sql_type, key.sql_type);
+        let cached = self
+            .comparison_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&pair)
+            .copied();
+        if let Some(compares) = cached {
+            return Ok(compares);
+        }
+        let probe = query::comparison_probe(&pair.0, &pair.1);
+        let compares = self
+            .probe(probe, || {
+                format!(
+                    "could not check `{link_table}.{link_column}` against \
+                     `{key_table}.{key_column}`"
+                )
+            })
+            .await?;
+        self.comparison_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(pair, compares);
+        Ok(compares)
     }
 }
 
 impl PgDocumentBuilder {
-    /// Run a table-free `probe`: `false` when Postgres has no function or
+    /// Run a table-free `probe`, in one round trip (the simple protocol, no
+    /// prepared statement): `false` when Postgres has no function or
     /// operator for it. The probe casts to a column's type, which needs USAGE
     /// on the type's schema; reading the column does not. So only "no such
     /// function" is a verdict, and any other refusal leaves it unknown
     /// (`true`, the check skipped, `what` logged).
     async fn probe(&self, probe: query::SqlString, what: impl FnOnce() -> String) -> Result<bool> {
-        match sqlx::query(probe).execute(&self.pool).await {
+        match sqlx::raw_sql(probe).execute(&self.pool).await {
             Ok(_) => Ok(true),
             Err(sqlx::Error::Database(error))
                 if matches!(

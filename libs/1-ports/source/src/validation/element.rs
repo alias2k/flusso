@@ -189,6 +189,61 @@ mod tests {
         assert_eq!(fit(&FlussoType::Json, "inet"), Fit::Rejects);
     }
 
+    /// A pair that holds every key exactly is never reported: a warning on
+    /// every start of a correct deployment would be a regression.
+    #[test]
+    fn a_pair_that_holds_every_key_exactly_is_never_reported() {
+        let textual = [
+            "text",
+            "character varying(36)",
+            "character(3)",
+            "name",
+            "citext",
+        ];
+        let exact: Vec<(FlussoType, &str)> = [
+            (FlussoType::Short, "smallint"),
+            (FlussoType::Integer, "smallint"),
+            (FlussoType::Integer, "integer"),
+            (FlussoType::Long, "smallint"),
+            (FlussoType::Long, "integer"),
+            (FlussoType::Long, "bigint"),
+            (FlussoType::Float, "smallint"),
+            (FlussoType::Float, "real"),
+            (FlussoType::Double, "smallint"),
+            (FlussoType::Double, "integer"),
+            (FlussoType::Double, "real"),
+            (FlussoType::Double, "double precision"),
+            (FlussoType::Decimal, "integer"),
+            (FlussoType::Decimal, "numeric(10,2)"),
+            (FlussoType::Boolean, "boolean"),
+            (FlussoType::Uuid, "uuid"),
+            (FlussoType::Keyword, "uuid"),
+            (FlussoType::Binary, "bytea"),
+            (FlussoType::Date, "date"),
+            (FlussoType::Date, "timestamp with time zone"),
+            (FlussoType::Timestamp, "timestamp with time zone"),
+        ]
+        .into_iter()
+        .chain(textual.iter().flat_map(|key| {
+            [
+                FlussoType::Keyword,
+                FlussoType::Text,
+                FlussoType::Identifier,
+                FlussoType::Enum,
+            ]
+            .map(|element| (element, *key))
+        }))
+        .collect();
+        for (element, key) in exact {
+            assert_eq!(
+                fit(&element, key),
+                Fit::Holds,
+                "{} over {key}",
+                name(&element)
+            );
+        }
+    }
+
     #[test]
     fn the_verdicts_match_what_opensearch_did_with_each_pair() {
         let cases = [

@@ -735,8 +735,10 @@ Postgres answers the second with a table-free `SELECT lower(NULL::<format_type>)
 takes no lock — issue #225; "do *these* two columns compare", `compares`, the same way with
 `SELECT NULL::<link> = NULL::<key>`: every link is checked against the key it names (`belongs_to`
 `column`, `foreign_key` against the parent's or last hop's key, both junction keys, each hop's
-`foreign_key`, both sides of each `on:` pair), and a pair with no `=` operator is
-`LinkTypeMismatch`, since the document query fails to plan — issue #313; pairs that compare across
+`foreign_key`, both sides of each `on:` pair; one simple-protocol statement per distinct type pair,
+cached, at start only; a refusal other than "no such operator" is no verdict), and a pair with no
+`=` operator is `LinkTypeMismatch`, since the document query fails to plan for any root row,
+whatever the related rows hold — issue #313; pairs that compare across
 types, at any value, never stop the engine: a link no key can equal matches no parent — issue #312,
 `wal`'s `linked_by_a_value_no_key_equals!` cases; an `ids` `element_type` is checked against the
 related key's type by `validation/element.rs`'s `fit` (verdicts measured on OpenSearch 2):
