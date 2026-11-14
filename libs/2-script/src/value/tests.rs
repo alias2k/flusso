@@ -40,7 +40,12 @@ fn a_decimal_round_trips_exactly() {
         to_dynamic(&GenericValue::Decimal(price)),
         &out(&FlussoType::Decimal),
     );
-    assert_eq!(back, Ok(GenericValue::Decimal(price)));
+    assert_eq!(
+        back,
+        Ok(GenericValue::BigDecimal(
+            kernel::BigDecimal::parse("19.99").unwrap()
+        ))
+    );
 }
 
 fn big(text: &str) -> GenericValue {

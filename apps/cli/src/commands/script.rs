@@ -345,6 +345,14 @@ mod tests {
         assert_eq!(error.to_string(), "the document failed to build");
     }
 
+    /// A `decimal` is shown with every digit it will be written with.
+    #[test]
+    fn a_decimal_is_shown_with_every_digit() {
+        let exact = kernel::BigDecimal::parse("1234567890.123456789").unwrap();
+        let shown = pretty(&map(vec![("same", GenericValue::BigDecimal(exact))])).unwrap();
+        assert!(shown.contains("\"same\": 1234567890.123456789"), "{shown}");
+    }
+
     #[test]
     fn a_built_document_is_shown_and_returned() {
         let doc = map(vec![("n", GenericValue::BigInt(3))]);

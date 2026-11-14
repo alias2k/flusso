@@ -9,11 +9,9 @@
 )]
 
 use std::collections::BTreeMap;
-use std::str::FromStr;
 
 use config::yaml::SchemaYaml;
 use kernel::{GenericValue, IndexName, IndexSchema, ParseFrom};
-use rust_decimal::Decimal;
 use script::Scripts;
 use source::SourceSpec;
 
@@ -62,7 +60,7 @@ fn typed(json: serde_json::Value) -> GenericValue {
                 .map(|(key, value)| {
                     let value = match (key.as_str(), value) {
                         ("price", serde_json::Value::String(s)) => {
-                            GenericValue::Decimal(Decimal::from_str(&s).unwrap())
+                            GenericValue::BigDecimal(kernel::BigDecimal::parse(&s).unwrap())
                         }
                         ("createdAt", serde_json::Value::String(s)) => GenericValue::TimestampTz(
                             chrono::DateTime::parse_from_rfc3339(&s).unwrap().to_utc(),
@@ -118,7 +116,7 @@ fn every_recipe_in_the_manual_produces_what_it_says() {
     assert_eq!(get(&doc, "onSale"), &GenericValue::Bool(true));
     assert_eq!(
         get(&doc, "grossPrice"),
-        &GenericValue::Decimal(Decimal::from_str("15.25").unwrap())
+        &GenericValue::BigDecimal(kernel::BigDecimal::parse("15.25").unwrap())
     );
     assert_eq!(get(&doc, "stockBand"), &text("low"));
     assert_eq!(get(&doc, "popularity"), &GenericValue::Double(8.5));
