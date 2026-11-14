@@ -40,7 +40,7 @@ max-threads = 1
 # `#[ignore]`d by default (run with `--run-ignored all`). Put them in the
 # `docker` group, retry transient failures, and allow a slow startup.
 [[profile.default.overrides]]
-filter = 'package(flusso-source-postgres) & binary(integration) | package(flusso-engine) & binary(wal) | package(flusso-engine) & binary(wal_release) | package(flusso-source-postgres) & binary(config_coverage) | package(flusso-source-postgres) & binary(publication) | package(flusso-source-postgres) & binary(introspection) | package(flusso-source-postgres) & binary(tls) | package(flusso-source-postgres) & binary(wal_idle) | package(flusso-source-postgres) & binary(partitions) | package(flusso-source-postgres) & binary(continuity) | package(flusso-source-postgres) & binary(record_pgoutput)'
+filter = 'package(flusso-source-postgres) & binary(integration) | package(flusso-engine) & binary(wal) | package(flusso-engine) & binary(wal_release) | package(flusso-engine) & binary(bytea_output) | package(flusso-source-postgres) & binary(config_coverage) | package(flusso-source-postgres) & binary(publication) | package(flusso-source-postgres) & binary(introspection) | package(flusso-source-postgres) & binary(tls) | package(flusso-source-postgres) & binary(wal_idle) | package(flusso-source-postgres) & binary(partitions) | package(flusso-source-postgres) & binary(continuity) | package(flusso-source-postgres) & binary(record_pgoutput)'
 test-group = 'docker'
 retries = 2
 slow-timeout = { period = "90s", terminate-after = 4 }
@@ -68,7 +68,7 @@ fail-fast = false
 path = "junit.xml"
 
 [[profile.ci.overrides]]
-filter = 'package(flusso-source-postgres) & binary(integration) | package(flusso-engine) & binary(wal) | package(flusso-engine) & binary(wal_release) | package(flusso-source-postgres) & binary(config_coverage) | package(flusso-source-postgres) & binary(publication) | package(flusso-source-postgres) & binary(introspection) | package(flusso-source-postgres) & binary(tls) | package(flusso-source-postgres) & binary(wal_idle) | package(flusso-source-postgres) & binary(partitions) | package(flusso-source-postgres) & binary(continuity) | package(flusso-source-postgres) & binary(record_pgoutput)'
+filter = 'package(flusso-source-postgres) & binary(integration) | package(flusso-engine) & binary(wal) | package(flusso-engine) & binary(wal_release) | package(flusso-engine) & binary(bytea_output) | package(flusso-source-postgres) & binary(config_coverage) | package(flusso-source-postgres) & binary(publication) | package(flusso-source-postgres) & binary(introspection) | package(flusso-source-postgres) & binary(tls) | package(flusso-source-postgres) & binary(wal_idle) | package(flusso-source-postgres) & binary(partitions) | package(flusso-source-postgres) & binary(continuity) | package(flusso-source-postgres) & binary(record_pgoutput)'
 test-group = 'docker'
 retries = 2
 slow-timeout = { period = "120s", terminate-after = 5 }

@@ -19,6 +19,7 @@ use tokio::sync::OnceCell;
 
 use super::ack::{Listeners, Positions};
 use super::{backfill, publication, replica_identity, stream};
+use crate::ColumnTypes;
 
 /// How often the replication client reports the confirmed position to the
 /// server, and how long an idle connection waits before reporting anyway.
@@ -93,6 +94,10 @@ pub struct WalChangeCapture {
     /// Set by [`prepare`](ChangeCapture::prepare) once it has ensured coverage,
     /// taken by the next [`live`](ChangeCapture::live) so it doesn't repeat it.
     coverage_ensured: Arc<AtomicBool>,
+    /// The document builder's column types, dropped per table as each
+    /// stream reads its `Relation`; set via
+    /// [`with_column_types`](Self::with_column_types).
+    column_types: Option<ColumnTypes>,
 }
 
 impl WalChangeCapture {
@@ -131,7 +136,19 @@ impl WalChangeCapture {
             positions: Arc::new(Mutex::new(None)),
             listeners: Arc::new(Listeners::default()),
             coverage_ensured: Arc::new(AtomicBool::new(false)),
+            column_types: None,
         }
+    }
+
+    /// Hand over the document builder's column types
+    /// ([`PgDocumentBuilder::column_types`](crate::PgDocumentBuilder::column_types)).
+    /// Postgres sends a table's `Relation` message before its first change in
+    /// a stream and again after its definition changes; one that names another
+    /// type than a cached column's drops that table's cached types, so a change
+    /// after an `ALTER COLUMN … TYPE` is built from the column's new type.
+    pub fn with_column_types(mut self, column_types: ColumnTypes) -> Self {
+        self.column_types = Some(column_types);
+        self
     }
 
     /// Declare the tables the publication must cover and whether to provision
@@ -353,6 +370,7 @@ impl ChangeCapture for WalChangeCapture {
             catalog,
             self.pre_image_columns.clone(),
             positions,
+            self.column_types.clone(),
         ))
     }
 

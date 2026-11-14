@@ -66,7 +66,9 @@ flusso connects through PgBouncer in session and in transaction mode alike, the 
 - **`ignore_startup_parameters = extra_float_digits`.** flusso's SQL connections send that startup parameter and stock PgBouncer refuses it: `unsupported startup parameter: extra_float_digits`. Many PgBouncer images already set it.
 - **`max_prepared_statements` above `0` in transaction mode.** flusso uses prepared statements. With `0` the start fails with `prepared statement "sqlx_s_1" already exists`.
 
-No key flusso reads depends on a setting a pooled connection could drop. One thing does: a [`binary`](field-types.md) field's bytes. flusso sets `bytea_output = hex` on each connection it opens, which a transaction-mode pool may not keep, so set it on the database or role there too: `ALTER ROLE flusso SET bytea_output = 'hex'`.
+No key depends on a setting a pooled connection could drop. Nor does a `bytea` column a document reads as a value: queries render it in a form no session setting changes. That covers any field type, a domain over `bytea`, [`array: true`](field-types.md#array) over `bytea[]`, over an array of such a domain or over a domain of either, joins, and `ids`, `min` and `max` aggregates.
+
+A `bytea` nested inside another value is different: a field of a composite type, an array of composites, a range, or a multi-dimensional `bytea[]` read by a field that isn't `binary`. So is a column changed to `bytea` while flusso runs, until its table's next change or a restart. Postgres renders it by the session's `bytea_output`. flusso sets `bytea_output = hex` on each connection it opens, and a transaction-mode pool may not keep it. If a document reads such a value, set it on the database or role too: `ALTER ROLE flusso SET bytea_output = 'hex'`.
 
 ## Capture
 
@@ -84,6 +86,7 @@ flusso consumes a logical replication **slot** and subscribes to a **publication
 
   A slow or stalled sink still holds the slot back: the confirmed position is the slowest sink's.
 - **The replication connection is named `flusso`.** It shows as `application_name = 'flusso'` in `pg_stat_replication` and `pg_stat_activity`, so its walsender is easy to tell from other consumers'. The SQL connections keep whatever `application_name` the `connection_url` sets; that parameter doesn't rename the replication connection.
+- **A column type change is followed without a restart.** After an `ALTER TABLE … ALTER COLUMN … TYPE` on a table an index reads, the next change on that table is built with the column's new type. A document query that fails anyway (its table changed before flusso read that change) reads the types afresh, and the ingest engine's restart builds it.
 - **Backfill** snapshots the root tables of unseeded indexes before live capture. `--skip-backfill` skips it. A partitioned root is read through the parent, every partition included.
 
 ## Server requirements

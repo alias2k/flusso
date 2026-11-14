@@ -77,7 +77,7 @@ fn builder_with(extra: Vec<Field>) -> PgDocumentBuilder {
 /// Cache `integer` as the type of each `(table, column)`, as the catalog would
 /// report it, so resolving reads no catalog either.
 fn seed_integer_columns(builder: &PgDocumentBuilder, columns: &[(&str, &str)]) {
-    let mut cache = builder.col_type_cache.lock().unwrap();
+    let mut cache = builder.col_type_cache.lock();
     for (table, column) in columns {
         cache.insert(
             (
@@ -87,8 +87,10 @@ fn seed_integer_columns(builder: &PgDocumentBuilder, columns: &[(&str, &str)]) {
             ),
             ColumnMeta {
                 sql_type: "integer".to_owned(),
+                type_oid: 23,
                 base_type: None,
                 base_name: "int4".to_owned(),
+                element_name: None,
                 deterministic: true,
                 nullable: true,
             },
@@ -435,8 +437,10 @@ async fn a_self_referencing_row_with_a_null_key_rebuilds_the_parent_its_old_row_
 fn equal_keys_render_alike_except_for_numbers_and_loose_text() {
     let meta = |base_name: &str, deterministic: bool| ColumnMeta {
         sql_type: base_name.to_owned(),
+        type_oid: 0,
         base_type: None,
         base_name: base_name.to_owned(),
+        element_name: None,
         deterministic,
         nullable: false,
     };

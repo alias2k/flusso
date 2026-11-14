@@ -11,17 +11,17 @@
 use std::collections::HashMap;
 
 use kernel::{
-    Aggregate, AggregateKey, AggregateOp, ColumnName, ColumnPair, DatabaseSchema, Field,
-    FieldSource, Filter, FilterOp, FilterValue, GenericValue, IndexSchema, Join, JoinKind, NullOp,
-    Relation, SoftDelete, TableName, ValueOpFilter, ViaHop,
+    Aggregate, AggregateKey, AggregateOp, Column, ColumnName, ColumnPair, DatabaseSchema,
+    Expression, Field, FieldSource, Filter, FilterOp, FilterValue, GenericValue, IndexSchema, Join,
+    JoinKind, NullOp, Relation, SoftDelete, TableName, ValueOpFilter, ViaHop,
 };
 use source::{Result, SourceError};
 
-use super::ROOT;
 use super::sql::{
-    agg_function, column_value, geo_value, ids_agg, json_agg_subquery, json_key, limit_clause,
-    literal_or_null, order_clause, qcol, qident, qtable,
+    agg_function, column_value, element_transformed, geo_value, hex_array, hex_text, ids_agg,
+    json_agg_subquery, json_key, limit_clause, literal_or_null, order_clause, qcol, qident, qtable,
 };
+use super::{ByteColumns, Bytes, ROOT};
 
 /// Most `(key, value)` field pairs one `json_build_object` can hold: Postgres
 /// caps a function call at 100 arguments and each pair spends two.
@@ -33,6 +33,7 @@ pub(super) struct Builder<'a> {
     pub(super) pks: &'a HashMap<String, ColumnName>,
     /// `(table, column)` → SQL type, for casting filter operands.
     pub(super) col_types: &'a HashMap<(String, String), String>,
+    pub(super) bytes: &'a ByteColumns,
     pub(super) params: Vec<GenericValue>,
     pub(super) seq: usize,
 }
@@ -70,12 +71,13 @@ impl Builder<'_> {
     pub(super) fn object(
         &mut self,
         fields: &[Field],
+        table: &TableName,
         parent_alias: &str,
         parent_pk: Option<&ColumnName>,
     ) -> Result<String> {
         let mut pairs = Vec::with_capacity(fields.len());
         for field in fields {
-            let value = self.field_value(field, parent_alias, parent_pk)?;
+            let value = self.field_value(field, table, parent_alias, parent_pk)?;
             pairs.push(format!("{}, {value}", json_key(field.field.as_ref())));
         }
         if pairs.len() <= MAX_PAIRS_PER_OBJECT {
@@ -91,6 +93,7 @@ impl Builder<'_> {
     fn field_value(
         &mut self,
         field: &Field,
+        table: &TableName,
         parent_alias: &str,
         parent_pk: Option<&ColumnName>,
     ) -> Result<String> {
@@ -101,14 +104,8 @@ impl Builder<'_> {
             FieldSource::Relation(Relation::Aggregate(aggregate)) => {
                 self.aggregate_value(aggregate, parent_alias, parent_pk)
             }
-            FieldSource::Column(column) => Ok(column_value(
-                &column.column,
-                &column.transforms,
-                column.default.as_ref(),
-                column.array,
-                parent_alias,
-            )),
-            FieldSource::Group(nested) => self.object(nested, parent_alias, parent_pk),
+            FieldSource::Column(column) => Ok(self.column_value(column, table, parent_alias)),
+            FieldSource::Group(nested) => self.object(nested, table, parent_alias, parent_pk),
             FieldSource::Geo(geo) => Ok(geo_value(geo, parent_alias)),
             FieldSource::Constant(value) => Ok(literal_or_null(value)),
             FieldSource::Script(_) => Ok("NULL".to_owned()),
@@ -128,7 +125,7 @@ impl Builder<'_> {
                 let target = &join.table;
                 let target_pk = self.pk_of(target)?;
                 let alias = self.alias();
-                let object = self.object(&join.fields, &alias, Some(&target_pk))?;
+                let object = self.object(&join.fields, target, &alias, Some(&target_pk))?;
                 let filters = self.filters(join.filters.as_deref(), &alias, target)?;
                 Ok(format!(
                     "(SELECT {object} FROM {} AS {} WHERE {} = {}{}{filters} LIMIT 1)",
@@ -144,7 +141,7 @@ impl Builder<'_> {
                 let child = &join.table;
                 let child_pk = self.pk_of(child)?;
                 let alias = self.alias();
-                let object = self.object(&join.fields, &alias, Some(&child_pk))?;
+                let object = self.object(&join.fields, child, &alias, Some(&child_pk))?;
                 let filters = self.filters(join.filters.as_deref(), &alias, child)?;
                 let order = order_clause(join.order_by.as_deref(), &alias);
                 Ok(format!(
@@ -161,7 +158,7 @@ impl Builder<'_> {
                 let child = &join.table;
                 let child_pk = self.pk_of(child)?;
                 let derived = self.alias();
-                let object = self.object(&join.fields, &derived, Some(&child_pk))?;
+                let object = self.object(&join.fields, child, &derived, Some(&child_pk))?;
                 let inner = self.alias();
                 let filters = self.filters(join.filters.as_deref(), &inner, child)?;
                 let inner_sql = format!(
@@ -186,7 +183,7 @@ impl Builder<'_> {
                 let far = &join.table;
                 let far_pk = self.pk_of(far)?;
                 let derived = self.alias();
-                let object = self.object(&join.fields, &derived, Some(&far_pk))?;
+                let object = self.object(&join.fields, far, &derived, Some(&far_pk))?;
                 let far_alias = self.alias();
                 let junction_alias = self.alias();
                 let filters = self.filters(join.filters.as_deref(), &far_alias, far)?;
@@ -228,15 +225,10 @@ impl Builder<'_> {
     ) -> Result<String> {
         let parent_pk = require_pk(parent_pk)?;
         let parent = self.parent_match(&aggregate.via, parent_alias, parent_pk)?;
-        let is_ids = matches!(&aggregate.op, AggregateOp::Ids { .. });
         let rows = match &aggregate.key {
             AggregateKey::Direct(foreign_key) => {
                 let alias = self.alias();
-                let function = if is_ids {
-                    ids_agg(&alias, &self.pk_of(&aggregate.table)?)
-                } else {
-                    agg_function(&aggregate.op, &alias)
-                };
+                let function = self.aggregate_function(aggregate, &alias)?;
                 let filters =
                     self.filters(aggregate.filters.as_deref(), &alias, &aggregate.table)?;
                 format!(
@@ -250,11 +242,7 @@ impl Builder<'_> {
                 let far_pk = self.pk_of(&aggregate.table)?;
                 let alias = self.alias();
                 let junction_alias = self.alias();
-                let function = if is_ids {
-                    ids_agg(&alias, &far_pk)
-                } else {
-                    agg_function(&aggregate.op, &alias)
-                };
+                let function = self.aggregate_function(aggregate, &alias)?;
                 let junction_filters =
                     self.filters(through.filters.as_deref(), &junction_alias, &through.table)?;
                 let filters =
@@ -282,6 +270,75 @@ impl Builder<'_> {
         } else {
             rows
         })
+    }
+
+    /// What an aggregate selects over its rows aliased `alias`. A `bytea` it
+    /// returns is rendered as hex text ([`hex_text`]): `min`/`max` over a
+    /// `bytea` column, and each key of an `ids` over a `bytea` key.
+    fn aggregate_function(&self, aggregate: &Aggregate, alias: &str) -> Result<String> {
+        let table = &aggregate.table;
+        if let AggregateOp::Ids { .. } = aggregate.op {
+            let pk = self.pk_of(table)?;
+            let key = qcol(alias, &pk);
+            return Ok(ids_agg(&match self.bytes_of(table, &pk) {
+                Some(Bytes::Scalar) => hex_text(&key),
+                _ => key,
+            }));
+        }
+        let function = agg_function(&aggregate.op, alias);
+        Ok(match &aggregate.op {
+            AggregateOp::Min(Expression::Column(column))
+            | AggregateOp::Max(Expression::Column(column))
+                if self.bytes_of(table, column) == Some(Bytes::Scalar) =>
+            {
+                hex_text(&function)
+            }
+            _ => function,
+        })
+    }
+
+    /// A column's value. A `bytea` (or `bytea[]`) one is rendered as the hex
+    /// text `bytea_output = hex` gives, in the query itself: a session setting
+    /// may not reach this query through a transaction-mode pooler. No transform
+    /// takes a `bytea`, so a scalar one with transforms is left to fail as before.
+    fn column_value(&self, column: &Column, table: &TableName, alias: &str) -> String {
+        let plain = || {
+            column_value(
+                &column.column,
+                &column.transforms,
+                column.default.as_ref(),
+                column.array,
+                alias,
+            )
+        };
+        let Some(bytes) = self.bytes_of(table, &column.column) else {
+            return plain();
+        };
+        if !column.array && !column.transforms.is_empty() {
+            return plain();
+        }
+        let value = column_value(
+            &column.column,
+            &[],
+            column.default.as_ref(),
+            column.array,
+            alias,
+        );
+        let hex = match bytes {
+            Bytes::Scalar => hex_text(&value),
+            Bytes::Array => hex_array(&value),
+        };
+        if column.array {
+            element_transformed(hex, &column.transforms)
+        } else {
+            hex
+        }
+    }
+
+    fn bytes_of(&self, table: &TableName, column: &ColumnName) -> Option<Bytes> {
+        self.bytes
+            .get(&(table.to_string(), column.to_string()))
+            .copied()
     }
 
     /// What ties an aggregate's rows to its parent row: the parent itself for

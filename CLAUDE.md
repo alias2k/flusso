@@ -180,8 +180,8 @@ mapping takes, on backfill and live, under a non-UTC `TimeZone`, with a `range` 
   null (refused at start). **No startup `options`** anywhere (PgBouncer refuses them; issue #295's
   second review): the replication session runs `text_value::REPLICATION_SETTINGS` (`DateStyle`,
   `TimeZone`, `bytea_output`, `extra_float_digits`) as `SET`s on a gated `pgwire-replication` session
-  before `START_REPLICATION` (`capture.rs`'s `live`), a refusal stopping the start; the builder keeps
-  its after-connect `SET bytea_output` for document bodies only. The temporal parser reads any year
+  before `START_REPLICATION` (`capture.rs`'s `live`), a refusal stopping the start. The builder's pool keeps an
+  after-connect `SET bytea_output = 'hex'` only as a backstop for a `bytea` the query can't reach (below). The temporal parser reads any year
   width by hand (chrono's `%Y` stops at four digits), so a year past 9999 is typed and keeps its
   `+10000-01-01` id. A domain column is retyped to its base OID when the
   stream keys its `Relation` (`stream.rs`'s `retype_domains`). A value the parser can't hold
@@ -989,8 +989,17 @@ moved to a new physical index when keys became typed and nothing else did
 pattern moves two more sets once (issue #291): `BINARY_ENCODING_REVISION` (a `binary` column or an
 `ids` of `binary`; the document query renders a `bytea` inside its JSON as `\x…` hex text, which
 `document/value.rs`'s `coerce_scalar` turns back into `GenericValue::Bytes` for `sink::to_json` to
-base64; `PgDocumentBuilder::connect` sets `bytea_output = 'hex'` on every pooled connection, since a
-database set to `escape` would render escape text) and `CONSTANT_OBJECT_REVISION` in `Field`'s `Hash`
+base64). That text is rendered **in the query, not by the session's `bytea_output`** (issue #298: a
+transaction-mode pooler drops a session `SET`): `PgDocumentBuilder::byte_columns` finds every value
+column whose base type is `bytea`, or an array whose element is (`ColumnMeta.element_name`: `typelem`
+then every domain, so `blob[]` of a domain `blob` counts) (`fields::collect_value_columns`: column
+fields at any depth, `min`/`max` over a plain column, an `ids` key) from the cached catalog lookup, and
+the `Builder` wraps it in `sql::hex_text` (`E'\\x' || encode(…, 'hex')`) or `sql::hex_array`, whatever
+the declared type (a `keyword` over `bytea` keeps its `\x…` text), so the bytes under `hex` are
+unchanged and `escape` stores the same. A `bytea` nested in a composite, a range or an array of
+composites is out of reach: the pool's after-connect `SET bytea_output = 'hex'` stays as the backstop
+(a direct connection reads it as before; behind a transaction-mode pooler it follows the server, which
+the manual's "Behind PgBouncer" states), and `CONSTANT_OBJECT_REVISION` in `Field`'s `Hash`
 (a `constant` that `constant_is_stored_unindexed`: an object, or a list holding one or mixing scalar
 kinds — string/number/boolean, nulls aside, nested lists flattened, and a fractional or out-of-range
 number after a whole one, which the first element's `long` would refuse or cut — since one OpenSearch field takes
@@ -1001,7 +1010,17 @@ from the schema, never from the query's untyped literal, and projected as an `in
 `a_schema_without_binary_or_an_object_constant_keeps_its_content_hash`,
 `a_constant_list_mixing_kinds_moves_its_hash` / `_is_stored_unindexed`,
 `a_constant_list_of_one_kind_stays_indexed_and_keeps_its_hash`, `integration`'s
-`a_database_set_to_escape_bytea_output_still_builds_the_bytes`.
+`a_database_set_to_escape_bytea_output_still_builds_the_bytes`, the `engine` `bytea_output` e2e. **The
+column-type cache follows the table** (`document/mod.rs`'s `ColumnTypes`, `PgDocumentBuilder::column_types`):
+the CLI hands it to `WalChangeCapture::with_column_types`, and the stream drops a table's entries on a
+`Relation` message (Postgres sends one after a definition change) naming another type OID than a cached
+column's (`ColumnTypes::forget_changed`; unchanged types keep them, so a stream start costs no lookup), and a failed document query
+(`failed_query`) drops those of every table its index reads, so a type change never loops the ingest
+engine on a stale cast or `encode`. No query per build. Guards: `stream::tests`'
+`a_relation_message_with_{other,the_cached}_types_*`, `bytea_output`'s `a_column_changing_type_mid_run_*`;
+the same e2e
+(direct, and through PgBouncer in transaction mode resetting each server connection, PG 18 for `min`/`max` over `bytea`,
+`hex` and `escape` databases, backfill and live) and `query::tests`' `a_bytea_*`.
 `values` must be a leaf kind (text/keyword/number/date); the conversion rejects others. An `enum:` field takes an optional `variants:` list (its own
 `EnumBody`/`Field::Enum` entity) — the variants in rank order; empty/omitted = a
 plain keyword. It lands on `Column.enum_order` (**not** on `FlussoType::Enum`,

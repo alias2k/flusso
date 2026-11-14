@@ -89,6 +89,7 @@ fn columns_only() {
         &[(c("id"), GenericValue::Int(7))],
         &HashMap::new(),
         &id_types(),
+        &ByteColumns::new(),
     )
     .unwrap();
     assert_eq!(
@@ -110,6 +111,7 @@ fn keyed_predicate_casts_a_uuid_primary_key() {
         &[(c("id"), key.clone())],
         &HashMap::new(),
         &col_types,
+        &ByteColumns::new(),
     )
     .unwrap();
     assert!(
@@ -125,6 +127,7 @@ fn keyed_predicate_casts_a_uuid_primary_key() {
         &[key],
         &HashMap::new(),
         &col_types,
+        &ByteColumns::new(),
     )
     .unwrap();
     assert!(
@@ -151,6 +154,7 @@ fn root_filters_fold_into_both_query_forms() {
         &[(c("id"), GenericValue::Int(7))],
         &HashMap::new(),
         &col_types,
+        &ByteColumns::new(),
     )
     .unwrap();
     assert_eq!(
@@ -172,6 +176,7 @@ fn root_filters_fold_into_both_query_forms() {
         &[GenericValue::Int(7)],
         &HashMap::new(),
         &col_types,
+        &ByteColumns::new(),
     )
     .unwrap();
     assert!(
@@ -214,6 +219,7 @@ fn has_many_with_order_and_limit() {
         &[(c("id"), GenericValue::Int(1))],
         &pks,
         &id_types(),
+        &ByteColumns::new(),
     )
     .unwrap();
     assert_eq!(
@@ -251,6 +257,7 @@ fn belongs_to_correlates_on_the_parent_column() {
         &[(c("id"), GenericValue::Int(1))],
         &pks,
         &id_types(),
+        &ByteColumns::new(),
     )
     .unwrap();
     // The target is matched by ITS primary key against the parent's own
@@ -284,6 +291,7 @@ fn aggregate_count() {
         &[(c("id"), GenericValue::Int(1))],
         &HashMap::new(),
         &id_types(),
+        &ByteColumns::new(),
     )
     .unwrap();
     assert_eq!(
@@ -319,6 +327,7 @@ fn aggregate_ids_direct_collects_the_related_pk() {
         &[(c("id"), GenericValue::Int(1))],
         &pks,
         &id_types(),
+        &ByteColumns::new(),
     )
     .unwrap();
     assert_eq!(
@@ -369,6 +378,7 @@ fn through_aggregate_sql(
         &[(c("id"), GenericValue::Int(1))],
         &pks,
         &types(&[("users", "id", "bigint"), ("order_items", "status", "text")]),
+        &ByteColumns::new(),
     )
     .unwrap();
     sql.as_str().to_owned()
@@ -479,6 +489,7 @@ fn many_to_many_join_applies_junction_filters() {
         &[(c("id"), GenericValue::Int(1))],
         &pks,
         &id_types(),
+        &ByteColumns::new(),
     )
     .unwrap();
     assert!(
@@ -504,6 +515,7 @@ fn soft_delete_folds_into_where() {
         &[(c("id"), GenericValue::Int(1))],
         &HashMap::new(),
         &id_types(),
+        &ByteColumns::new(),
     )
     .unwrap();
     assert!(sql.as_str().contains(
@@ -525,6 +537,7 @@ fn documents_query_keys_with_in_and_selects_the_key() {
         &[GenericValue::Int(7), GenericValue::Int(9)],
         &HashMap::new(),
         &id_types(),
+        &ByteColumns::new(),
     )
     .unwrap();
     assert_eq!(
@@ -551,6 +564,7 @@ fn documents_query_folds_soft_delete_into_where() {
         &[GenericValue::Int(1)],
         &HashMap::new(),
         &id_types(),
+        &ByteColumns::new(),
     )
     .unwrap();
     assert!(sql.as_str().contains(
@@ -598,6 +612,7 @@ fn soft_delete_field_inside_a_relation_reads_the_root_column() {
         &[GenericValue::Int(1)],
         &pks,
         &id_types(),
+        &ByteColumns::new(),
     )
     .unwrap();
     assert!(
@@ -623,6 +638,7 @@ fn wide_document_chunks_into_jsonb_concatenation() {
         &[(c("id"), GenericValue::Int(7))],
         &HashMap::new(),
         &id_types(),
+        &ByteColumns::new(),
     )
     .unwrap();
     let sql = sql.as_str();
@@ -648,6 +664,7 @@ fn document_at_the_chunk_boundary_stays_a_single_call() {
         &[(c("id"), GenericValue::Int(7))],
         &HashMap::new(),
         &id_types(),
+        &ByteColumns::new(),
     )
     .unwrap();
     let sql = sql.as_str();
@@ -670,6 +687,7 @@ fn a_key_carried_as_text_is_cast_from_text() {
         &[(c("id"), key.clone())],
         &HashMap::new(),
         &col_types,
+        &ByteColumns::new(),
     )
     .unwrap();
     assert!(
@@ -686,6 +704,7 @@ fn a_key_carried_as_text_is_cast_from_text() {
         &[key.clone()],
         &HashMap::new(),
         &col_types,
+        &ByteColumns::new(),
     )
     .unwrap();
     assert!(
@@ -769,6 +788,7 @@ fn aggregate_sql(aggregate: Aggregate) -> String {
             ("projects", "archived", "boolean"),
             ("tasks", "status", "text"),
         ]),
+        &ByteColumns::new(),
     )
     .unwrap();
     sql.as_str().to_owned()
@@ -968,6 +988,7 @@ fn on_pairs_join_every_join_kind_to_its_parent_row_at_any_depth() {
         &[(c("id"), GenericValue::Int(1))],
         &pks,
         &id_types(),
+        &ByteColumns::new(),
     )
     .unwrap();
     assert_eq!(
@@ -1145,6 +1166,7 @@ fn an_array_column_without_transforms_reads_the_column_and_leaves_its_default_to
         &[(c("id"), GenericValue::Int(7))],
         &HashMap::new(),
         &id_types(),
+        &ByteColumns::new(),
     )
     .unwrap();
     assert_eq!(
@@ -1169,6 +1191,7 @@ fn an_array_column_applies_its_transforms_to_each_string_element() {
         &[(c("id"), GenericValue::Int(7))],
         &HashMap::new(),
         &id_types(),
+        &ByteColumns::new(),
     )
     .unwrap();
     let column = r#""root"."tags""#;
@@ -1207,4 +1230,166 @@ fn root_keys_query_casts_each_link_from_its_bound_type() {
         r#"SELECT format('%s', "id") AS "id", "id" AS "id:typed" FROM "public"."users" WHERE "id" IN ($1::numeric::numeric, $2::text::numeric)"#
     );
     assert_eq!(params.len(), 2);
+}
+
+fn bytes(entries: &[(&str, &str, Bytes)]) -> ByteColumns {
+    entries
+        .iter()
+        .map(|(table, column, kind)| (((*table).to_owned(), (*column).to_owned()), *kind))
+        .collect()
+}
+
+fn bytes_sql(fields: Vec<Field>, pks: &HashMap<String, ColumnName>, bytes: &ByteColumns) -> String {
+    let schema = index(Some("id"), None, fields);
+    let (single, _) = document_query(
+        &schema,
+        &[(c("id"), GenericValue::Int(7))],
+        pks,
+        &id_types(),
+        bytes,
+    )
+    .unwrap();
+    let (batched, _) = documents_query(
+        &schema,
+        &c("id"),
+        "int8",
+        &[GenericValue::Int(7)],
+        pks,
+        &id_types(),
+        bytes,
+    )
+    .unwrap();
+    let object = |sql: &str| {
+        sql.split(" AS \"document\"")
+            .next()
+            .and_then(|head| head.split("json_build_object").nth(1))
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(object(single.as_str()), object(batched.as_str()));
+    single.as_str().to_owned()
+}
+
+/// What `bytea_output = hex` renders, whatever the session says (issue #298).
+const HEX: &str = r"E'\\x' || encode(";
+
+#[test]
+fn a_bytea_column_renders_as_hex_text_whatever_its_declared_type() {
+    let mut fallback = col_field("fallback", "spare");
+    if let FieldSource::Column(column) = &mut fallback.source {
+        column.default = Some(GenericValue::String(r"\x0909".to_owned()));
+    }
+    let sql = bytes_sql(
+        vec![
+            col_field("blob", "blob"),
+            fallback,
+            col_field("email", "email"),
+        ],
+        &HashMap::new(),
+        &bytes(&[
+            ("users", "blob", Bytes::Scalar),
+            ("users", "spare", Bytes::Scalar),
+        ]),
+    );
+    assert!(
+        sql.contains(&format!(r#"'blob', ({HEX}"root"."blob", 'hex'))"#)),
+        "{sql}"
+    );
+    assert!(
+        sql.contains(&format!(
+            r#"'fallback', ({HEX}coalesce("root"."spare", '\x0909'), 'hex'))"#
+        )),
+        "{sql}"
+    );
+    assert!(sql.contains(r#"'email', "root"."email")"#), "{sql}");
+}
+
+#[test]
+fn a_bytea_array_renders_each_element_as_hex_text_in_order() {
+    let sql = bytes_sql(
+        vec![array_field("blobs", Vec::new(), None)],
+        &HashMap::new(),
+        &bytes(&[("users", "blobs", Bytes::Array)]),
+    );
+    let column = r#""root"."blobs""#;
+    assert!(
+        sql.contains(&format!(
+            "'blobs', CASE WHEN array_ndims({column}) = 1 THEN (SELECT json_agg(({HEX}flusso_bytes.b, 'hex')) \
+             ORDER BY flusso_bytes.n) FROM unnest({column}) WITH ORDINALITY AS flusso_bytes(b, n)) \
+             ELSE to_json({column}) END)"
+        )),
+        "{sql}"
+    );
+}
+
+#[test]
+fn an_array_field_over_a_bytea_applies_its_transforms_to_the_hex_text() {
+    let sql = bytes_sql(
+        vec![array_field(
+            "blob",
+            vec![kernel::Transform::Lowercase],
+            None,
+        )],
+        &HashMap::new(),
+        &bytes(&[("users", "blob", Bytes::Scalar)]),
+    );
+    assert!(
+        sql.contains(&format!(r#"to_jsonb(({HEX}"root"."blob", 'hex')))"#)),
+        "{sql}"
+    );
+}
+
+#[test]
+fn a_bytea_inside_a_join_and_an_aggregate_renders_as_hex_text() {
+    let parts = join_field(
+        "parts",
+        "parts",
+        JoinKind::HasMany {
+            foreign_key: c("user_id"),
+        },
+        Vec::new(),
+        vec![col_field("blob", "blob")],
+    );
+    let over_parts = |name: &str, op: AggregateOp| Field {
+        field: f(name),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Relation(Relation::Aggregate(Aggregate {
+            table: t("parts"),
+            op,
+            key: AggregateKey::Direct(c("user_id")),
+            value_type: Some(kernel::FlussoType::Binary),
+            filters: None,
+            distinct: false,
+            via: Vec::new(),
+            on: vec![],
+        })),
+    };
+    let pks = HashMap::from([("parts".to_owned(), c("id"))]);
+    let sql = bytes_sql(
+        vec![
+            parts,
+            over_parts(
+                "partIds",
+                AggregateOp::Ids {
+                    element_type: kernel::FlussoType::Binary,
+                },
+            ),
+            over_parts("first", AggregateOp::Min(c("id").into())),
+            over_parts("last", AggregateOp::Max(c("id").into())),
+        ],
+        &pks,
+        &bytes(&[
+            ("parts", "blob", Bytes::Scalar),
+            ("parts", "id", Bytes::Scalar),
+        ]),
+    );
+    for expected in [
+        format!(r#"'blob', ({HEX}"rel1"."blob", 'hex'))"#),
+        format!(r#"json_agg(({HEX}"rel3"."id", 'hex')))"#),
+        format!(r#"(SELECT ({HEX}min("rel4"."id"), 'hex')) FROM"#),
+        format!(r#"(SELECT ({HEX}max("rel5"."id"), 'hex')) FROM"#),
+    ] {
+        assert!(sql.contains(&expected), "{expected}\n{sql}");
+    }
 }

@@ -86,6 +86,91 @@ use reads::ReadColumns;
 /// Cache of each `(schema, table, column)`'s catalog metadata.
 type ColTypeCache = HashMap<(String, String, String), ColumnMeta>;
 
+/// The document builder's cache of column types, which shapes every document
+/// query it writes. Cheap to clone; clones share it.
+///
+/// A table's types can change while flusso runs (`ALTER COLUMN … TYPE`), so
+/// entries are dropped per table: when a document query fails (its retry
+/// looks the types up again), and when the WAL capture this is handed to
+/// reads a `Relation` message (sent after a table's definition changes)
+/// whose column types differ from the cached ones.
+#[derive(Debug, Clone, Default)]
+pub struct ColumnTypes(Arc<Mutex<ColTypeCache>>);
+
+impl ColumnTypes {
+    fn get(&self, key: &(String, String, String)) -> Option<ColumnMeta> {
+        self.lock().get(key).cloned()
+    }
+
+    fn insert(&self, key: (String, String, String), meta: ColumnMeta) {
+        self.lock().insert(key, meta);
+    }
+
+    /// Forget every cached column of `schema.table`.
+    pub(crate) fn forget_table(&self, schema: &str, table: &str) {
+        self.lock().retain(|(cached_schema, cached_table, _), _| {
+            cached_schema != schema || cached_table != table
+        });
+    }
+
+    /// Forget `schema.table`'s cached columns when one of them has another
+    /// type in `columns` (each name with its type OID, as a `Relation` lists
+    /// them). A table whose types are unchanged keeps its entries, so a
+    /// stream's first `Relation` costs no lookup. A cached column `columns`
+    /// leaves out is no evidence: pgoutput omits stored generated columns
+    /// and columns outside a publication's column list from every `Relation`.
+    pub(crate) fn forget_changed<'a>(
+        &self,
+        schema: &str,
+        table: &str,
+        columns: impl Iterator<Item = (&'a str, u32)> + Clone,
+    ) {
+        let changed = self
+            .lock()
+            .iter()
+            .any(|((cached_schema, cached_table, column), meta)| {
+                cached_schema == schema
+                    && cached_table == table
+                    && columns
+                        .clone()
+                        .any(|(name, type_oid)| name == column && type_oid != meta.type_oid)
+            });
+        if changed {
+            self.forget_table(schema, table);
+        }
+    }
+
+    /// Cache a column of `schema.table` of type `type_oid`, for tests
+    /// elsewhere in the crate.
+    #[cfg(test)]
+    pub(crate) fn cache(&self, schema: &str, table: &str, column: &str, type_oid: u32) {
+        self.insert(
+            (schema.to_owned(), table.to_owned(), column.to_owned()),
+            ColumnMeta {
+                sql_type: "integer".to_owned(),
+                type_oid,
+                base_type: None,
+                base_name: "int4".to_owned(),
+                element_name: None,
+                deterministic: true,
+                nullable: true,
+            },
+        );
+    }
+
+    /// Whether any column of `schema.table` is cached.
+    #[cfg(test)]
+    pub(crate) fn caches(&self, schema: &str, table: &str) -> bool {
+        self.lock().keys().any(|(cached_schema, cached_table, _)| {
+            cached_schema == schema && cached_table == table
+        })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ColTypeCache> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// Most keys per batched `build_many` query. Bounds the SQL length and the
 /// prepared-statement cache churn from the `IN (…)` list growing with key
 /// count; larger id sets are split across several round-trips.
@@ -98,10 +183,16 @@ const BUILD_CHUNK: usize = 512;
 #[derive(Debug, Clone)]
 struct ColumnMeta {
     sql_type: String,
+    /// `pg_attribute.atttypid`: the type OID a `Relation` message names the
+    /// column by.
+    type_oid: u32,
     /// A domain's type resolved through every domain; `None` for no domain.
     base_type: Option<String>,
     /// The `pg_type.typname` of the type, through every domain.
     base_name: String,
+    /// For an array, the `pg_type.typname` of its element type, through every
+    /// domain; `None` for any other type.
+    element_name: Option<String>,
     /// Whether the column's collation compares by identity (always, for a
     /// type without one).
     deterministic: bool,
@@ -150,7 +241,7 @@ pub struct PgDocumentBuilder {
     pk_cache: Arc<Mutex<HashMap<(String, String), ColumnName>>>,
     /// Cache of each `(schema, table, column)`'s SQL type, used to cast filter
     /// operands to the column's real type rather than comparing as text.
-    col_type_cache: Arc<Mutex<ColTypeCache>>,
+    col_type_cache: ColumnTypes,
     /// Whether each `(link type, key type)` pair compares, probed once.
     comparison_cache: Arc<Mutex<HashMap<(String, String), bool>>>,
     /// Tables a change arrived for that no index reads, already warned about.
@@ -169,7 +260,7 @@ impl PgDocumentBuilder {
             reads: Arc::new(ReadColumns::new(&spec)),
             spec,
             pk_cache: Arc::new(Mutex::new(HashMap::new())),
-            col_type_cache: Arc::new(Mutex::new(HashMap::new())),
+            col_type_cache: ColumnTypes::default(),
             comparison_cache: Arc::new(Mutex::new(HashMap::new())),
             unread_warned: Arc::new(Mutex::new(HashSet::new())),
             keyless_warned: Arc::new(Mutex::new(HashSet::new())),
@@ -228,9 +319,11 @@ impl PgDocumentBuilder {
 
     #[tracing::instrument(name = "pg.connect", skip_all, err)]
     pub async fn connect(connection_url: &str, spec: Arc<SourceSpec>) -> Result<Self> {
-        // The document query renders a `bytea` as text inside its JSON, which
-        // `value::postgres_hex` decodes. A database or role set to
-        // `bytea_output = 'escape'` would render the escape text instead.
+        // The document query renders the `bytea` it can reach itself (see
+        // `byte_columns`). One nested in a composite, a range or a `json` it
+        // builds is rendered by the session's `bytea_output`, which this sets
+        // on every connection a direct link keeps. A transaction-mode pooler
+        // may not.
         let pool = sqlx::postgres::PgPoolOptions::new()
             .after_connect(|connection, _| {
                 Box::pin(async move {
@@ -410,25 +503,23 @@ impl PgDocumentBuilder {
         column: &ColumnName,
     ) -> Result<ColumnMeta> {
         let cache_key = (schema.to_string(), table.to_string(), column.to_string());
-        {
-            let cache = self
-                .col_type_cache
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            if let Some(meta) = cache.get(&cache_key) {
-                return Ok(meta.clone());
-            }
+        if let Some(meta) = self.col_type_cache.get(&cache_key) {
+            return Ok(meta);
         }
         // `format_type` yields a canonical, re-parseable type name, so it can be
         // dropped straight into a `$n::<type>` cast. `attnotnull` is the column's
         // NOT NULL constraint — the nullability mapping resolution needs, read
         // from the same catalog row as the type. `base_type` follows a domain
         // through `typbasetype` to the first type that is no domain, and
-        // `base_name` names that type. `collisdeterministic` is read through
+        // `base_name` names that type. For an array, `element_name` names its
+        // element type the same way (`typelem`, then every domain), so an
+        // array of a domain over `bytea` reads as one of `bytea`.
+        // `collisdeterministic` is read through
         // `to_jsonb` because Postgres before 12 has no such column (and only
         // deterministic collations).
         let sql = "SELECT format_type(a.atttypid, a.atttypmod) AS sql_type, \
-                          b.base_type, b.base_name, \
+                          a.atttypid::int8 AS type_oid, \
+                          b.base_type, b.base_name, el.element_name, \
                           coalesce((SELECT (to_jsonb(c) ->> 'collisdeterministic')::boolean \
                                     FROM pg_collation c WHERE c.oid = a.attcollation), \
                                    true) AS deterministic, \
@@ -440,9 +531,19 @@ impl PgDocumentBuilder {
                                SELECT t.typbasetype, t.typtypmod \
                                FROM pg_type t JOIN d ON t.oid = d.oid WHERE t.typtype = 'd' \
                           ) SELECT format_type(d.oid, d.typmod) AS base_type, \
-                                   t.typname::text AS base_name \
+                                   t.typname::text AS base_name, t.oid AS base_oid \
                             FROM d JOIN pg_type t ON t.oid = d.oid WHERE t.typtype <> 'd' \
                         ) b \
+                   LEFT JOIN LATERAL ( \
+                          WITH RECURSIVE e(oid) AS ( \
+                               SELECT a.typelem FROM pg_type a \
+                               WHERE a.oid = b.base_oid AND a.typelem <> 0 AND a.typlen = -1 \
+                             UNION ALL \
+                               SELECT t.typbasetype FROM pg_type t JOIN e ON t.oid = e.oid \
+                               WHERE t.typtype = 'd' \
+                          ) SELECT t.typname::text AS element_name \
+                            FROM e JOIN pg_type t ON t.oid = e.oid WHERE t.typtype <> 'd' \
+                        ) el ON true \
                    WHERE a.attrelid = to_regclass($1) AND a.attname = $2 \
                      AND a.attnum > 0 AND NOT a.attisdropped";
         let row = sqlx::query(sql)
@@ -454,13 +555,16 @@ impl PgDocumentBuilder {
         let meta = match row {
             Some(row) => {
                 let sql_type: String = row.try_get("sql_type").map_err(query_err)?;
+                let type_oid: i64 = row.try_get("type_oid").map_err(query_err)?;
                 let base_type: Option<String> = row.try_get("base_type").map_err(query_err)?;
                 let not_null: bool = row.try_get("not_null").map_err(query_err)?;
                 ColumnMeta {
                     base_type: base_type.filter(|base| *base != sql_type),
                     base_name: row.try_get("base_name").map_err(query_err)?,
+                    element_name: row.try_get("element_name").map_err(query_err)?,
                     deterministic: row.try_get("deterministic").map_err(query_err)?,
                     sql_type,
+                    type_oid: u32::try_from(type_oid).unwrap_or_default(),
                     nullable: !not_null,
                 }
             }
@@ -473,10 +577,7 @@ impl PgDocumentBuilder {
                 )));
             }
         };
-        self.col_type_cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(cache_key, meta.clone());
+        self.col_type_cache.insert(cache_key, meta.clone());
         Ok(meta)
     }
 
@@ -524,6 +625,51 @@ impl PgDocumentBuilder {
             types.insert(key, sql_type);
         }
         Ok(types)
+    }
+
+    /// The cache of column types this builder writes its queries from, to
+    /// hand to the WAL capture so it can drop a table's entries when the table
+    /// changes.
+    pub fn column_types(&self) -> ColumnTypes {
+        self.col_type_cache.clone()
+    }
+
+    /// A document query of `schema` failed: forget the column types of every
+    /// table it reads, since a type that changed under the cache fails it the
+    /// same way on every retry otherwise, then report the error.
+    fn failed_query(&self, schema: &IndexSchema, error: sqlx::Error) -> SourceError {
+        let mut tables = vec![schema.table.clone()];
+        fields::collect_tables(&schema.fields, &mut tables);
+        for table in tables {
+            self.col_type_cache
+                .forget_table(schema.db_schema.as_ref(), table.as_ref());
+        }
+        query_err(error)
+    }
+
+    /// The columns `schema`'s documents read as values whose base type is
+    /// `bytea` or `bytea[]`, which the document query renders itself. Each
+    /// type comes from the cached catalog lookup validation already made.
+    async fn byte_columns(
+        &self,
+        schema: &IndexSchema,
+        pks: &HashMap<String, ColumnName>,
+    ) -> Result<query::ByteColumns> {
+        let mut columns = Vec::new();
+        fields::collect_value_columns(&schema.fields, &schema.table, pks, &mut columns);
+        let mut bytes = query::ByteColumns::new();
+        for (table, column) in columns {
+            let meta = self.column_meta(&schema.db_schema, &table, &column).await?;
+            let kind = if meta.base_name == "bytea" {
+                query::Bytes::Scalar
+            } else if meta.element_name.as_deref() == Some("bytea") {
+                query::Bytes::Array
+            } else {
+                continue;
+            };
+            bytes.insert((table.to_string(), column.to_string()), kind);
+        }
+        Ok(bytes)
     }
 
     /// Ensure `types` carries the catalog SQL type of each root-table key column,
@@ -844,7 +990,8 @@ impl DocumentBuilder for PgDocumentBuilder {
         let key_columns: Vec<&ColumnName> = id.key.0.iter().map(|(column, _)| column).collect();
         self.add_key_column_types(schema, &key_columns, &mut col_types)
             .await?;
-        let (sql, params) = query::document_query(schema, &id.key.0, &pks, &col_types)?;
+        let bytes = self.byte_columns(schema, &pks).await?;
+        let (sql, params) = query::document_query(schema, &id.key.0, &pks, &col_types, &bytes)?;
 
         let mut statement = sqlx::query(sql);
         for param in &params {
@@ -853,7 +1000,7 @@ impl DocumentBuilder for PgDocumentBuilder {
         let row = statement
             .fetch_optional(&self.pool)
             .await
-            .map_err(query_err)?;
+            .map_err(|error| self.failed_query(schema, error))?;
 
         // No row means the root is absent or soft-deleted (both folded into the
         // query's WHERE) → the document should not exist.
@@ -916,18 +1063,23 @@ impl DocumentBuilder for PgDocumentBuilder {
             let pk_base = self
                 .base_name(&schema.db_schema, &schema.table, &pk_column)
                 .await?;
+            let bytes = self.byte_columns(schema, &pks).await?;
 
             for chunk in keyed.chunks(BUILD_CHUNK) {
                 let keys: Vec<kernel::GenericValue> =
                     chunk.iter().map(|(value, _)| (*value).clone()).collect();
-                let (sql, params) =
-                    query::documents_query(schema, &pk_column, &pk_base, &keys, &pks, &col_types)?;
+                let (sql, params) = query::documents_query(
+                    schema, &pk_column, &pk_base, &keys, &pks, &col_types, &bytes,
+                )?;
 
                 let mut statement = sqlx::query(sql);
                 for param in &params {
                     statement = query::bind_param(statement, param)?;
                 }
-                let rows = statement.fetch_all(&self.pool).await.map_err(query_err)?;
+                let rows = statement
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(|error| self.failed_query(schema, error))?;
 
                 // Map each returned root key to its assembled body. `doc_key` is
                 // parsed as live-change keys are, so it matches the ids' key

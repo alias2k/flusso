@@ -22,7 +22,8 @@ use source::cdc::ChangeCapture;
 use source::document::DocumentBuilder;
 use source::{CaptureProvisioning, Catalog, Diagnostic, DiagnosticKind, Severity, SourceSpec};
 use source_postgres::{
-    PgDocumentBuilder, PostgresConfig, WalChangeCapture, replication_config, sql_connection_url,
+    ColumnTypes, PgDocumentBuilder, PostgresConfig, WalChangeCapture, replication_config,
+    sql_connection_url,
 };
 use stream::Stream;
 use stream_channel::ChannelStream;
@@ -60,12 +61,13 @@ impl Backends for FlussoBackends {
             .context("applying the source TLS settings to the connection URL")?;
 
         let spec = source_spec(&config);
+        let (documents, column_types) = build_documents(&sql_url, &config).await?;
         let capture: Arc<dyn ChangeCapture> = Arc::new(
             WalChangeCapture::new(replication, sql_url.clone())
                 .with_publication_management(spec.all_tables(), postgres.manage_publication)
-                .with_pre_image_management(spec.pre_images(), postgres.manage_replica_identity),
+                .with_pre_image_management(spec.pre_images(), postgres.manage_replica_identity)
+                .with_column_types(column_types),
         );
-        let documents = build_documents(&sql_url, &config).await?;
 
         Ok(SourceParts { capture, documents })
     }
@@ -117,17 +119,23 @@ fn resolve_connection_url(postgres: &PostgresConfig) -> anyhow::Result<String> {
     Ok(url.as_ref().to_owned())
 }
 
+/// The document builder, scripts applied, beside its column types, which the
+/// capture drops a table's entries from as the table changes.
 async fn build_documents(
     connection_url: &str,
     config: &Config,
-) -> anyhow::Result<Arc<dyn DocumentBuilder>> {
+) -> anyhow::Result<(Arc<dyn DocumentBuilder>, ColumnTypes)> {
     let scripts = compile_scripts(config)?;
     let spec = Arc::new(source_spec(config));
     let builder = PgDocumentBuilder::connect(connection_url, Arc::clone(&spec))
         .await
         .context("connecting to Postgres")?;
     validate_at_start(&spec, &builder).await?;
-    Ok(ScriptedBuilder::wrap(Arc::new(builder), scripts))
+    let column_types = builder.column_types();
+    Ok((
+        ScriptedBuilder::wrap(Arc::new(builder), scripts),
+        column_types,
+    ))
 }
 
 /// Check the schemas against the database once, before anything is staged,
