@@ -91,7 +91,8 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   are within it; on a `main` push, `scenarios` runs everything and stores the
   points via `github-action-benchmark` on the `benchmarks` data branch (folded into Pages at
   `/bench/`), then `bench-regression.py` compares each point to the median of the previous five and
-  calls a regression only on two consecutive points past 25% (20% RSS), image-tag change restarts
+  calls a regression only on two consecutive points past 25% (20% RSS) and past three times the
+  window's median absolute deviation (a noisy series needs a larger move, issue #317), image-tag change restarts
   the window, one self-maintained issue. `just load` is the soak script — not a benchmark.
 - The `#[ignore]`d e2e tests live in `source-postgres`'s `integration`,
   `config_coverage`, `publication`, `introspection`, `tls`, `wal_idle`, `continuity`, and `partitions` binaries
