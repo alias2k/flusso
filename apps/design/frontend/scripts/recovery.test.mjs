@@ -108,3 +108,14 @@ test("a leftover's line also covers a copy of what another program wrote", () =>
 test("the deleted file's backup line names the file that may have changed", () => {
   assert.match(en["recovery.keptDeletedBackup"], /\{path\} may have changed since/);
 });
+
+test("a notice that could not be saved says it is not shown again after the designer stops", () => {
+  const unsaved = { ...save("rolled_back", ["a.yml"]), unsaved: true };
+  assert.deepEqual(keys(noticeLines(t, { ...empty, recovered: [unsaved] }, time)), [
+    "recovery.rolledBack",
+    "recovery.unsaved",
+  ]);
+  assert.deepEqual(keys(noticeLines(t, { ...empty, recovered: [save("rolled_back", ["a.yml"])] }, time)), [
+    "recovery.rolledBack",
+  ]);
+});

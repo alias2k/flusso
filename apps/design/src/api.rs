@@ -894,6 +894,10 @@ pub struct RecoveredSave {
     /// save replaced them ([`DisplacedFile`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub displaced: Vec<DisplacedFile>,
+    /// The notice could not be stored in the state folder: it is told only
+    /// until the designer stops.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unsaved: bool,
 }
 
 /// A file a recovered save left as another program wrote it, or deleted it.
@@ -1840,6 +1844,7 @@ fn recovered_save(paths: &Paths, s: &Settled) -> RecoveredSave {
                 copy: rel(&d.copy),
             })
             .collect(),
+        unsaved: false,
     }
 }
 
@@ -2927,6 +2932,7 @@ fn save_with(config_path: &Path, request: &SaveRequest, disk: &mut Disk) -> Resu
             files: Vec::new(),
             kept: Vec::new(),
             displaced: resp.displaced.clone(),
+            unsaved: false,
         };
         if !remember(StoredNotice::new(&paths, false, save), disk) {
             tracing::warn!("the copy is explained until the designer stops");
@@ -3860,7 +3866,19 @@ mod tests {
                 serde_json::from_str(&value.to_string().replace(&token, "T")).unwrap()
             })
             .collect();
-        Some((normalized(&fixture, &token), told))
+        let settled = normalized(&fixture, &token);
+        std::fs::write(fixture.0.join("products.schema.yml"), "a user edit\n").unwrap();
+        let edited = fixture.files();
+        for _ in 0..2 {
+            fixture.restart();
+            open_project(&fixture.config()).unwrap();
+            assert_eq!(
+                fixture.files(),
+                edited,
+                "{case}, killed after step {stop:?}: a later load changed a file"
+            );
+        }
+        Some((settled, told))
     }
 
     /// The copies a load explains, as values a test can compare.
@@ -4075,41 +4093,188 @@ mod tests {
         assert_eq!(copies, [(backup.as_str(), rel.as_str())]);
     }
 
-    /// Review 2 of #296: with a notices folder that can't be written, the
-    /// journal stays until a notice is stored, so every start tells the save
-    /// again; a save still goes through.
-    #[test]
-    fn a_notice_that_cannot_be_stored_keeps_the_journal() {
-        let fixture = Fixture::new("unstorable");
-        let notices = fixture.state_dir().join("notices");
-        State::at(fixture.state_dir()).unwrap().notices().unwrap();
-        let mode = |m: u32| {
-            let mut perms = std::fs::metadata(&notices).unwrap().permissions();
-            std::os::unix::fs::PermissionsExt::set_mode(&mut perms, m);
-            std::fs::set_permissions(&notices, perms).unwrap();
-        };
-        fixture.kill_mid_swap();
-        mode(0o500);
-        recover_project(&fixture.config()).unwrap();
-        for _ in 0..2 {
-            fixture.restart();
-            let project = open_project(&fixture.config()).unwrap();
-            assert_eq!(
-                project.recovery.recovered.len(),
-                1,
-                "{:?}",
-                project.recovery
-            );
-            assert!(fixture.0.join(".flusso-save.journal").exists());
+    impl Fixture {
+        /// Make the notices folder unwritable, as a full or read-only disk
+        /// would; the fixture's drop makes it writable again.
+        fn notices_unwritable(&self) {
+            let notices = State::at(self.state_dir()).unwrap().notices().unwrap();
+            drop(notices);
+            let dir = self.state_dir().join("notices");
+            let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+            std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o500);
+            std::fs::set_permissions(&dir, perms).unwrap();
         }
-        let saved = save_project(&fixture.config(), fixture.swap()).unwrap();
-        assert!(
-            !saved.written.is_empty() || !saved.moved.is_empty(),
-            "{saved:?}"
-        );
-        assert!(!fixture.0.join(".flusso-save.journal").exists());
-        mode(0o700);
+
+        /// The users index moved to `people.schema.yml`: a save that creates
+        /// a file and removes one.
+        fn move_users(&self) -> SaveRequest {
+            let project = load_project(&self.config()).unwrap();
+            let mut config = serde_json::to_value(&project.config).unwrap();
+            for entry in config["index"].as_array_mut().unwrap() {
+                if entry["name"] == "users" {
+                    entry["schema"] = "people.schema.yml".into();
+                }
+            }
+            serde_json::from_value(serde_json::json!({
+                "config": config,
+                "digests": project.digests,
+                "ops": [{ "kind": "move", "index": "users", "path": "people.schema.yml",
+                          "from": "users.schema.yml", "schema": schema("users: 1"),
+                          "base": tagged("users: 1") }],
+            }))
+            .unwrap()
+        }
+
+        /// Kill `request`'s save at the first step after which `reached`
+        /// holds, before its commit point.
+        fn kill_when(&self, request: &SaveRequest, reached: impl Fn(&Self) -> bool) {
+            for point in 1.. {
+                save_with(&self.config(), request, &mut Disk::stopping_after(point)).unwrap_err();
+                assert!(!self.committed(), "committed before the state wanted");
+                if reached(self) {
+                    return;
+                }
+                self.settle();
+            }
+        }
+
+        /// Load the project twice more, restarting before each: neither may
+        /// change a file or block.
+        fn later_loads_change_nothing(&self, case: &str) {
+            let files = self.files();
+            for _ in 0..2 {
+                self.restart();
+                let loaded = open_project(&self.config());
+                assert!(
+                    loaded.is_ok(),
+                    "{case}: a later load failed: {:?}",
+                    loaded.err()
+                );
+                assert_eq!(self.files(), files, "{case}: a later load changed a file");
+            }
+        }
+    }
+
+    /// Review 3 of #296: with a notices folder that can't be written, the
+    /// first load settles the save once; a later load never changes or blocks
+    /// on a file the user then made, whatever it holds.
+    #[test]
+    fn a_save_settled_while_notices_cannot_be_stored_is_never_settled_again() {
+        let fixture = Fixture::new("resettle-created");
+        let people = fixture.0.join("people.schema.yml");
+        fixture.kill_when(&fixture.move_users(), |f| {
+            f.0.join("people.schema.yml").exists()
+        });
+        let written = std::fs::read_to_string(&people).unwrap();
+        fixture.notices_unwritable();
         open_project(&fixture.config()).unwrap();
+        assert!(
+            !people.exists(),
+            "the rollback removes the file the save created"
+        );
+        std::fs::write(&people, &written).unwrap();
+        fixture.later_loads_change_nothing("a created file made again");
+
+        let fixture = Fixture::new("resettle-changed");
+        fixture.kill_mid_swap();
+        fixture.notices_unwritable();
+        open_project(&fixture.config()).unwrap();
+        std::fs::write(fixture.0.join("products.schema.yml"), tagged("orders: 1")).unwrap();
+        fixture.later_loads_change_nothing("a changed file given the save's text by hand");
+
+        let fixture = Fixture::new("resettle-removed");
+        let users = fixture.0.join("users.schema.yml");
+        fixture.kill_when(&fixture.move_users(), |f| {
+            !f.0.join("users.schema.yml").exists()
+        });
+        fixture.notices_unwritable();
+        open_project(&fixture.config()).unwrap();
+        assert!(
+            users.exists(),
+            "the rollback restores the file the save removed"
+        );
+        std::fs::remove_file(&users).unwrap();
+        fixture.later_loads_change_nothing("a removed file restored, then deleted by hand");
+    }
+
+    /// Review 3 of #296: a notice that can't be stored is told, flagged as
+    /// unsaved, until the designer stops; the journal is gone all the same.
+    #[test]
+    fn a_notice_that_cannot_be_stored_is_flagged_and_the_journal_still_goes() {
+        let fixture = Fixture::new("unstorable");
+        fixture.kill_mid_swap();
+        fixture.notices_unwritable();
+        let project = open_project(&fixture.config()).unwrap();
+        let told = &project.recovery.recovered;
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(told[0].unsaved, "{told:?}");
+        assert!(!fixture.0.join(".flusso-save.journal").exists());
+        assert!(!fixture.0.join(".flusso-save.done").exists());
+        let again = open_project(&fixture.config()).unwrap();
+        assert_eq!(Fixture::ids(&again.recovery.recovered), Fixture::ids(told));
+        fixture.restart();
+        let after = open_project(&fixture.config()).unwrap();
+        assert!(after.recovery.recovered.is_empty(), "{:?}", after.recovery);
+    }
+
+    /// Review 3 of #296: a save refused as stale leaves the files, the
+    /// journal and the notices as it found them.
+    #[test]
+    fn a_refused_save_changes_nothing_about_a_pending_notice() {
+        for unwritable in [false, true] {
+            let fixture = Fixture::new(&format!("refused-{unwritable}"));
+            fixture.kill_mid_swap();
+            if unwritable {
+                fixture.notices_unwritable();
+            }
+            let told = Fixture::ids(&open_project(&fixture.config()).unwrap().recovery.recovered);
+            assert_eq!(told.len(), 1);
+            let files = fixture.files();
+            let mut stale = fixture.swap();
+            stale
+                .digests
+                .insert("products.schema.yml".to_owned(), Some("00".repeat(32)));
+            let err = save_project(&fixture.config(), stale).unwrap_err();
+            assert!(err.downcast_ref::<Stale>().is_some(), "{err:#}");
+            assert_eq!(fixture.files(), files, "unwritable notices: {unwritable}");
+            let after = open_project(&fixture.config()).unwrap();
+            assert_eq!(Fixture::ids(&after.recovery.recovered), told);
+        }
+    }
+
+    /// Review 3 of #296: with a `flusso.toml` that can't be read, a notice
+    /// naming paths outside the folder names none of them.
+    #[test]
+    fn a_notice_with_a_broken_config_names_nothing_outside_the_folder() {
+        let fixture = Fixture::new("broken-config");
+        let base = Paths::new(&fixture.config()).unwrap().base;
+        let notice = serde_json::json!({
+            "format": 1, "dir": base, "pending": true,
+            "save": {
+                "id": "1-1", "outcome": "rolled_back", "started_at_ms": 1,
+                "files": ["/etc/passwd", "../../x", "users.schema.yml"],
+                "kept": [
+                    { "path": "/etc/passwd", "backup": "/etc/.passwd.flusso-save.1-1.0.bak" },
+                    { "path": "/nonexistent/secret" },
+                    { "path": "../../x" },
+                ],
+                "displaced": [{ "path": "/etc/passwd", "copy": "/etc/.passwd.flusso-save.1-1.0.bak" }],
+            },
+        });
+        State::at(fixture.state_dir())
+            .unwrap()
+            .notices()
+            .unwrap()
+            .put("1-1", notice.to_string().as_bytes(), &mut Disk::default())
+            .unwrap();
+        std::fs::write(fixture.config(), "not = [toml\n").unwrap();
+
+        let recovery = unloadable(open_project(&fixture.config()));
+        let shown = serde_json::to_string(&(&recovery.recovered, &recovery.copies)).unwrap();
+        for outside in ["/etc", "../../x", "nonexistent"] {
+            assert!(!shown.contains(outside), "{outside}: {shown}");
+        }
+        assert_eq!(recovery.recovered[0].files, ["users.schema.yml"]);
     }
 
     /// Review 2 of #296: a hand-edited notice naming a file through a folder
