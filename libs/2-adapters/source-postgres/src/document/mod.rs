@@ -254,6 +254,16 @@ pub struct PgDocumentBuilder {
     keyless_warned: Arc<Mutex<HashSet<TableName>>>,
 }
 
+/// A builder whose pool never connects, for the `resolve` bench.
+#[cfg(feature = "bench")]
+pub(crate) fn offline_builder(spec: Arc<SourceSpec>) -> PgDocumentBuilder {
+    let options = sqlx::postgres::PgConnectOptions::new()
+        .host("127.0.0.1")
+        .port(1);
+    let pool = sqlx::postgres::PgPoolOptions::new().connect_lazy_with(options);
+    PgDocumentBuilder::new(pool, spec)
+}
+
 impl PgDocumentBuilder {
     /// Over a pool whose connections read `bytea` as hex text, as
     /// [`connect`](Self::connect)'s do.

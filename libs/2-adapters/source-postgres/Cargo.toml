@@ -70,3 +70,11 @@ harness = false
 name = "pgoutput"
 harness = false
 required-features = ["bench"]
+
+# In-process component bench: reverse resolution of the changes that need no
+# query (root table, unread table, update of unread columns), over a builder
+# whose pool never connects. No Docker; a PR-gating bench. Needs `--features bench`.
+[[bench]]
+name = "resolve"
+harness = false
+required-features = ["bench"]

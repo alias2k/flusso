@@ -2,8 +2,8 @@ name: bench
 
 # Two jobs, two purposes (docs/src/contribute/benchmarks.md; ADR 0006):
 #
-#   in-process   PR gate. The four no-Docker Criterion benches (engine loop,
-#                pgoutput decode, sink render, script fields) run twice on the same runner —
+#   in-process   PR gate. The five no-Docker Criterion benches (engine loop,
+#                pgoutput decode, resolve, sink render, script fields) run twice on the same runner —
 #                the PR's base, then the PR, each from its own build. A bench
 #                more than 10% slower is re-measured on its own (base, then
 #                PR) and the job fails when the re-run, or the mean of both
