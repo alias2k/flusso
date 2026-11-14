@@ -150,7 +150,7 @@ See `examples/aggregate.schema.yml`.
 
 ## Geo — a `geo` field → OpenSearch `geo_point`
 
-Two columns (`lat:` + `lon:`) **or** one `column:` holding a geo-shaped value (`{lat,lon}` json, `[lon,lat]`, or `"lat,lon"` text). PostGIS `geometry` / PG `point` are **not** accepted — expose a generated `jsonb`/`text` column. See `examples/geo.schema.yml`.
+Two columns (`lat:` + `lon:`) **or** one `column:` holding a geo-shaped value (`{lat,lon}`, `[lon,lat]`, GeoJSON or a geohash object in json; `"lat,lon"`, WKT `POINT (lon lat)` or a geohash in text — stored as the column holds it). PostGIS `geometry` / PG `point` are **not** accepted — expose a generated `jsonb`/`text` column. See `examples/geo.schema.yml`.
 
 ## Filters — narrow related rows, root rows, or soft-delete scope
 

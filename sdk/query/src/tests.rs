@@ -3443,8 +3443,13 @@ mod geo_point {
         assert_rejected(json!("POINT (2.5,1.5)"));
         assert_rejected(json!("MULTIPOINT (2.5 1.5)"));
         assert_rejected(json!({ "type": "LineString", "coordinates": [[2.5, 1.5], [3, 4]] }));
-        assert_rejected(json!({ "lat": 1.5, "lon": 2.5, "z": 3 }));
         assert_rejected(json!({ "geohash": "s0", "lat": 1 }));
+    }
+
+    #[test]
+    fn an_object_ignores_keys_beside_lat_and_lon() {
+        // A `#[serde(flatten)]` point is handed its siblings too.
+        assert_point(json!({ "id": 7, "lat": 1.5, "lon": 2.5 }), 1.5, 2.5);
     }
 
     #[test]
