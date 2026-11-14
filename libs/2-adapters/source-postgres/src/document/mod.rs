@@ -254,6 +254,16 @@ pub struct PgDocumentBuilder {
     keyless_warned: Arc<Mutex<HashSet<TableName>>>,
 }
 
+/// A builder whose pool never connects, for the `resolve` bench.
+#[cfg(feature = "bench")]
+pub(crate) fn offline_builder(spec: Arc<SourceSpec>) -> PgDocumentBuilder {
+    let options = sqlx::postgres::PgConnectOptions::new()
+        .host("127.0.0.1")
+        .port(1);
+    let pool = sqlx::postgres::PgPoolOptions::new().connect_lazy_with(options);
+    PgDocumentBuilder::new(pool, spec)
+}
+
 impl PgDocumentBuilder {
     /// Over a pool whose connections read `bytea` as hex text, as
     /// [`connect`](Self::connect)'s do.
@@ -725,7 +735,7 @@ impl PgDocumentBuilder {
         let diff = RowDiff::new(key, before, after);
         for (name, schema) in self.spec.indexes() {
             let is_root = schema.table == *table;
-            let mut seen = HashSet::new();
+            let mut own = None;
             if is_root {
                 read = true;
                 if key.has_null() {
@@ -736,12 +746,11 @@ impl PgDocumentBuilder {
                         index: name.clone(),
                         key: key.clone(),
                     });
-                    // A row that is its own ancestor must not re-emit this id.
-                    if let (Some(pk_column), [(column, own)]) =
+                    if let (Some(pk_column), [(column, value)]) =
                         (&schema.primary_key, key.0.as_slice())
                         && column == pk_column
                     {
-                        seen.insert(own.clone());
+                        own = Some(value);
                     }
                 } else {
                     skipped += 1;
@@ -763,6 +772,8 @@ impl PgDocumentBuilder {
                 continue;
             };
 
+            // A row that is its own ancestor must not re-emit its own id.
+            let mut seen: HashSet<kernel::GenericValue> = own.into_iter().cloned().collect();
             let mut roots = Vec::new();
             for (n, path) in paths.iter().enumerate() {
                 if !self.reads.path(name, table, n).touched_by(&diff) {
@@ -805,7 +816,8 @@ impl PgDocumentBuilder {
     }
 
     /// `ids` plus the documents `links` name, read back as the root rows' own
-    /// keys, deduplicated.
+    /// keys, deduplicated. Only for a change with links: `ids` alone are
+    /// already unique, one set per index.
     async fn with_root_keys(
         &self,
         ids: Vec<DocumentId>,
@@ -963,6 +975,9 @@ impl DocumentBuilder for PgDocumentBuilder {
         let ids = self
             .resolve_change(table, key, before, after, &mut links)
             .await?;
+        if links.is_empty() {
+            return Ok(ids);
+        }
         self.with_root_keys(ids, links).await
     }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the four in-process (no Docker) Criterion benches, saving their results
+# Run the five in-process (no Docker) Criterion benches, saving their results
 # under one Criterion baseline name so two runs can be compared side by side.
 #
 #   bench-in-process.sh <baseline-name> [<bench-id>]
@@ -18,12 +18,13 @@
 # Results go to `$CRITERION_HOME` (default: `$CARGO_TARGET_DIR/criterion`).
 #
 # A bench whose source file is missing is skipped: a PR base that predates the
-# script bench still yields the other three. With none of the four present the
+# script or resolve bench still yields the others. With none of the five present the
 # script runs nothing and exits 78, so a caller can tell "this tree has no
 # in-process benches" apart from a failure.
 #
-# The pgoutput and render benches sit behind each crate's `bench` feature, which
-# exposes the crate-private decoder / renderer to them.
+# The pgoutput, resolve and render benches sit behind each crate's `bench`
+# feature, which exposes the crate-private decoder / an offline document
+# builder / the renderer to them.
 set -euo pipefail
 baseline="${1:?usage: bench-in-process.sh <baseline-name> [<bench-id>]}"
 args=(--bench --save-baseline "$baseline")
@@ -63,6 +64,7 @@ bench() {
 
 bench libs/2-engine/benches/engine.rs flusso-engine engine
 bench libs/2-adapters/source-postgres/benches/pgoutput.rs flusso-source-postgres pgoutput --features bench
+bench libs/2-adapters/source-postgres/benches/resolve.rs flusso-source-postgres resolve --features bench
 bench libs/2-adapters/sink-opensearch/benches/render.rs flusso-sink-opensearch render --features bench
 bench libs/2-script/benches/scripted.rs flusso-script scripted
 

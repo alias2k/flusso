@@ -52,7 +52,7 @@ cargo nextest run --run-ignored all        # + Postgres e2e (needs a running Doc
 cargo nextest run -E 'test(name_substr)'   # a single test by name
 cargo test --doc                           # doctests — nextest does NOT run these
 cargo clippy --workspace                   # lint (NOT --all-targets; see below)
-just bench                                 # in-process benches (engine loop, pgoutput decode, sink render); no Docker
+just bench                                 # in-process benches (engine loop, pgoutput decode, resolve, sink render, script fields); no Docker
 just bench-components                      # Docker-backed Criterion benches (postgres, opensearch, engine pipeline)
 just bench-scenario reference ci           # a scenario on the real binary (dev/bench); see docs/src/contribute/benchmarks.md
 cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-adapters/source-postgres)
@@ -77,8 +77,11 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   is gone). (3) **In-process benches**, no Docker, the PR gate: `engine`'s `engine` (both engines
   over the channel stream with mocks), `source-postgres`'s `pgoutput` (the decoder over the recorded
   `benches/fixtures/pgoutput.bin`; `tests/record_pgoutput.rs`, an `#[ignore]`d Docker test in the
-  nextest `docker` group, re-records it), `sink-opensearch`'s `render`, `script`'s `scripted` (public
-  API, no feature; `bench-in-process.sh` skips it on a PR base that predates the crate). `pgoutput` and `render` sit behind each
+  nextest `docker` group, re-records it), `source-postgres`'s `resolve` (`PgDocumentBuilder::resolve`
+  for the changes that need no query — root table, unread table, update of unread columns — over
+  `bench_offline_builder`, a pool that never connects; its group is `resolve_no_io`, apart from the
+  Docker `postgres` bench's `resolve`; issue #332), `sink-opensearch`'s `render`, `script`'s `scripted` (public
+  API, no feature; `bench-in-process.sh` skips a bench a PR base predates). `pgoutput`, `resolve` and `render` sit behind each
   crate's `bench` cargo feature (like `fuzzing`), so CI's `cargo check --all-targets` passes
   `--features flusso-source-postgres/bench,flusso-sink-opensearch/bench`. `.github/workflows/bench.yml`:
   on a PR, `in-process` runs the in-process benches on the base (its own worktree **and its own
@@ -242,7 +245,7 @@ mapping takes, on backfill and live, under a non-UTC `TimeZone`, with a `range` 
 - CI's `test` job runs, in order: `cargo fmt --all --check` → `cargo clippy --workspace` →
   `cargo check --workspace --all-targets --features flusso-source-postgres/bench,flusso-sink-opensearch/bench`
   (compiles benches + examples, which clippy and nextest skip — clippy omits `--all-targets`,
-  nextest only builds test targets; the features unlock the two in-process bench targets) → `cargo check -p
+  nextest only builds test targets; the features unlock the three feature-gated in-process bench targets) → `cargo check -p
   flusso-cli --no-default-features` (the server-only image build) → `cargo nextest run
   --profile ci --run-ignored all` → `cargo test --doc` → `RUSTDOCFLAGS="-D warnings" cargo doc
   --workspace --no-deps --document-private-items` (broken/ambiguous/redundant intra-doc links fail
@@ -1511,7 +1514,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | Query client (`flusso-query`) | `sdk/query/src/` (`cursor.rs`: page cursors; `walk.rs`: streaming a walk; `fence.rs`: fenced reads; `position.rs`: reading the source position) |
 | `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]` proc-macros | `sdk/query-derive/src/` — `lib.rs` (entry points + `Attrs`), `doc.rs` (field parsing/validation + the recursive handle tree + `embed_checks`), `fragment.rs` (the location-free shape check), `spec.rs` (baking a level into `&[FieldSpec]`), `resolve.rs` (finding `flusso.toml`); the const-check vocabulary is `sdk/query/src/check.rs`. Plus the `flusso-query-derive` memory note |
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |
-| Benchmarks: scenario harness, in-process + Docker benches, CI gate + history | `dev/bench/` (`flusso-bench`: `src/main.rs` phases, `scenario.rs` mixes, `scale.rs` presets, `flusso.rs` child process, `scenarios/`), `libs/2-engine/benches/{engine,pipeline}.rs`, `libs/2-adapters/source-postgres/benches/{pgoutput,postgres}.rs` + `tests/record_pgoutput.rs`, `libs/2-adapters/sink-opensearch/benches/{render,opensearch}.rs`, `.github/workflows/bench.yml`, `.github/scripts/bench-*.{py,sh}`, `docs/src/contribute/benchmarks.md`, ADR 0006 |
+| Benchmarks: scenario harness, in-process + Docker benches, CI gate + history | `dev/bench/` (`flusso-bench`: `src/main.rs` phases, `scenario.rs` mixes, `scale.rs` presets, `flusso.rs` child process, `scenarios/`), `libs/2-engine/benches/{engine,pipeline}.rs`, `libs/2-adapters/source-postgres/benches/{pgoutput,resolve,postgres}.rs` + `tests/record_pgoutput.rs`, `libs/2-adapters/sink-opensearch/benches/{render,opensearch}.rs`, `.github/workflows/bench.yml`, `.github/scripts/bench-*.{py,sh}`, `docs/src/contribute/benchmarks.md`, ADR 0006 |
 | Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore`; user-facing shipping recipes in `docs/src/deploy/docker.md` |
 | Kubernetes deploy (Helm chart) | `deploy/helm/flusso/` — `Chart.yaml`, `values.yaml`, `templates/`, `README.md` |
 | Agent-facing docs (the Claude plugin + internal commands) | `plugin/` — `ARCHITECTURE.md` is the contract (one corpus/three consumers, who owns which meaning, the self-containment rule), `skills/*/SKILL.md` the knowledge corpus (`flusso-query` discloses `migration.md`/`options.md`/`maps.md`), `commands/` thin workflow entries, `agents/flusso-expert.md`, `hooks/`; `.claude/commands/{implement,new-issue}.md` the internal spine; `.claude/skills/coordinator/SKILL.md` how a round of issues is driven through agents (order of work, the two independent reviews, merge and issue rules). Guarded by `apps/cli/tests/agent_docs_paths.rs` |
