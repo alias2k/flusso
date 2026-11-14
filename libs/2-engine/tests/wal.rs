@@ -3125,3 +3125,76 @@ linked_by_another_spelling! {
         &["CREATE COLLATION folded (provider = icu, locale = 'und-u-ks-level2', deterministic = false)"],
         ["'Ab'", "'AB'"], "Ab";
 }
+
+/// PgBouncer in session mode with its stock `ignore_startup_parameters`, in
+/// front of every connection flusso opens, the replication one included
+/// (issue #295): it refuses any parameter inside a startup `options`, so the
+/// settings a key's text depends on are set after connecting, or not needed.
+/// A `bytea` key under `bytea_output = escape` backfills and follows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn the_pipeline_runs_through_pgbouncer_in_session_mode() {
+    use testcontainers_modules::testcontainers::GenericImage;
+    use testcontainers_modules::testcontainers::core::IntoContainerPort;
+
+    let (postgres, _port, url) = start_logical_postgres().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "ALTER DATABASE postgres SET bytea_output = 'escape'",
+        "CREATE TABLE users (id bytea PRIMARY KEY, email text)",
+        "CREATE PUBLICATION flusso FOR TABLE users",
+        "INSERT INTO users VALUES ('\\x01', 'a@x')",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    sqlx::query("SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let host = postgres.get_bridge_ip_address().await.unwrap().to_string();
+    let bouncer = GenericImage::new("edoburu/pgbouncer", "v1.26.1-p0")
+        .with_exposed_port(5432.tcp())
+        .with_env_var("DB_HOST", host)
+        .with_env_var("DB_PORT", "5432")
+        .with_env_var("DB_USER", "postgres")
+        .with_env_var("DB_PASSWORD", "postgres")
+        .with_env_var("AUTH_TYPE", "scram-sha-256")
+        .with_env_var("POOL_MODE", "session")
+        .with_env_var("IGNORE_STARTUP_PARAMETERS", "extra_float_digits")
+        .start()
+        .await
+        .unwrap();
+    let port = bouncer.get_host_port_ipv4(5432.tcp()).await.unwrap();
+    let bounced = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while PgPoolOptions::new().connect(&bounced).await.is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "PgBouncer never accepted a connection"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    let users = IndexSchema {
+        fields: vec![column_field("email", "email")],
+        ..users_schema(vec![])
+    };
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("users"), users)]));
+    let documents = PgDocumentBuilder::connect(&bounced, Arc::new(spec))
+        .await
+        .unwrap();
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = tokio::spawn(run_deployment(
+        Arc::new(WalChangeCapture::new(replication(port), bounced.clone())),
+        Arc::new(documents),
+        Arc::new(RecordingSink::new(&recorded)),
+    ));
+    expect_op(&mut engine, &recorded, "upsert users \\x01").await;
+    sqlx::query("INSERT INTO users VALUES ('\\x02', 'b@x')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    expect_op(&mut engine, &recorded, "upsert users \\x02").await;
+    engine.abort();
+}
