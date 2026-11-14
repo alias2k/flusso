@@ -7,44 +7,49 @@
 Reads github-action-benchmark `data.js` files (the `benchmarks` branch, one per
 direction: `smaller/data.js` and `bigger/data.js`). A run is one commit across
 every file, ordered by the time its points were stored. Values are compared as
-logs, signed so that up is worse (`customSmallerIsBetter` as is,
-`customBiggerIsBetter` negated).
+logs, signed so that up is worse. Each series belongs to a suite: `inprocess`,
+`components`, or the scenarios.
 
 1. **Matching runs.** GitHub runs `main` on a few kinds of machine, and each
-   kind moves the series its own way. Two runs *match* when they ran on the
-   same kind, told by evidence no flusso change can move: the same CPU model
-   where both recorded one, and the `FLOORS` series (two `SELECT 1`
-   round-trips and a SHA-256 calibration) within 5% on average.
-2. **Comparison.** A point is compared to the median of its series over its
-   matching runs among the last `LOOKBACK` runs. With fewer than
-   `MIN_MATCHES` of them it is not judged.
-3. **Regression.** Two judged points in a row are each worse than their
-   matches by more than `--spread` times the series' swing, and on average by
-   more than the threshold (`--rss-threshold` for `peak_rss_mib`). The swing is
-   the median change of the comparison from one judged point to the next, over
-   sqrt 2: the median absolute deviation for steady noise, which a step does
-   not inflate. It needs `MIN_NOISE` judged points.
-4. **Hold.** From the first of those points (or the start of the run of
-   points past the swing that led to them), the series is held: every later
-   point is compared to its matching runs from *before* that point, of any
-   age, and points with fewer than `MIN_MATCHES` of those are skipped. The
-   swing stops taking in points. The hold ends when two judged points in a
-   row are each within half the threshold, on an image-tag change, or when
-   the stored history no longer reaches back before it.
-5. **Image-tag changes.** The first judged point on a new image measures the
-   image's own step against the old image's matches and is not judged; the
-   series is judged again from the next one, with that step taken out.
+   kind moves the series its own way. Two runs match, for a series, when:
+   - both recorded runner facts (`bench-runner-facts.py`): the same CPU model
+     and core count, and calibrations (CPU, memory, disk; no flusso code)
+     within 5% (median over the calibrations);
+   - otherwise: the series of the *other* suites within 5% (median over
+     them), so a step confined to one suite can't move its own match.
+2. **Same-runner comparison.** With at least `MIN_MATCHES` matching runs
+   among the last `LOOKBACK`, and `MIN_NOISE` earlier same-runner
+   comparisons, a point is compared to the median of its matching runs. It
+   is *real* past `--spread` swings: the median change of that comparison
+   from one point to the next, over sqrt 2 (the median absolute deviation
+   for steady noise; a step doesn't inflate it).
+3. **All-runners comparison.** Otherwise, with at least two earlier points,
+   a point is compared to the median of its series' last `LOOKBACK` points
+   on any runner, and is *real* when it is past every one of them. Points
+   already past everything (the run it belongs to) are left out of that pool.
+4. **Regression.** The two newest judged points are each real and each worse
+   than their comparison by more than the threshold (`--rss-threshold` for
+   `peak_rss_mib`).
+5. **Hold.** When at least one of those two points is a same-runner one, the
+   series is held from the start of its run of real points: later points are
+   compared to points from before it (matching runs of any age, or the last
+   `LOOKBACK` on any runner). Across all runners alone there is no level to
+   hold to (a new kind of machine also moves past everything before), so
+   such a regression is reported only while it lasts. The hold ends when the
+   `RELEASE` newest judged points are all same-runner and each within half
+   the threshold, on an image-tag change, when the stored history no longer
+   reaches back before the step, or when the series is missing from the
+   newest `GONE_AFTER` runs.
+6. **Image-tag change.** A series restarts on a new image: only points on the
+   new image count, so the first two runs on it are its baseline.
 
-Series named in `FLOORS` are the runner's evidence and are not judged. A
-series whose `--spread` swings exceed its threshold cannot catch a step of
-the threshold and is printed as too noisy, with the smallest step it can
-catch.
-
-Prints the verdict, how many series the newest run could be judged on, and the
-too-noisy series. With `--issue`, opens (or updates) a single GitHub issue
-titled "Performance regression on main" via `gh`, and closes it when no series
-is held. Malformed entries are skipped with a warning on stderr. Exit code is
-always 0 — a regression is a signal, not a broken job.
+Prints each finding with the basis it was judged against and, for a hold, the
+last judged run before the step and the first one past it; how the newest run
+was judged; and the series too noisy to catch a step of the threshold. With
+`--issue`, opens (or updates) a single GitHub issue titled "Performance
+regression on main" via `gh`, and closes it when no series is flagged. A
+malformed entry is skipped with a warning; an unreadable file fails the run
+(exit 1) before the issue is touched. Otherwise the exit code is 0.
 """
 import argparse
 import json
@@ -55,13 +60,14 @@ import sys
 from typing import NamedTuple
 
 ISSUE_TITLE = "Performance regression on main"
-# The runner's evidence: two plain `SELECT 1` round-trips and a SHA-256 calibration
-# (`bench-runner-facts.py`, recorded since #317). No flusso change can move them.
-FLOORS = ("components/baseline/select_1", "components/baseline/pg_select_1", "runner/sha256_64mib")
 SAME_RUNNER = math.log(1.05)
 LOOKBACK = 40
 MIN_MATCHES = 3
 MIN_NOISE = 5
+MIN_SHARED = 5
+GONE_AFTER = 3
+RELEASE = 3
+SAME, ALL = "same runner", "all runners"
 
 Run = tuple[str, int]
 Key = tuple[str, str]
@@ -78,8 +84,9 @@ class Point(NamedTuple):
 class RunFacts(NamedTuple):
     order: int
     commit: dict
-    cpu: str
-    floors: dict
+    machine: tuple | None
+    calibration: dict
+    values: dict
 
 
 def warn(message: str) -> None:
@@ -88,15 +95,24 @@ def warn(message: str) -> None:
 
 def load(path: str) -> dict:
     text = open(path, encoding="utf-8").read()
-    start = text.index("{")
-    return json.loads(text[start:])
+    data = json.loads(text[text.index("{"):])
+    if not isinstance(data, dict):
+        raise ValueError("not a benchmark data object")
+    return data
+
+
+def suite_of(name: str) -> str:
+    head = name.split("/", 1)[0]
+    return head if head in ("inprocess", "components") else "scenarios"
 
 
 def extra_of(bench: dict) -> dict:
-    try:
-        extra = json.loads(bench.get("extra") or "{}")
-    except (TypeError, ValueError):
-        return {}
+    extra = bench.get("extra")
+    if isinstance(extra, str):
+        try:
+            extra = json.loads(extra)
+        except ValueError:
+            return {}
     return extra if isinstance(extra, dict) else {}
 
 
@@ -105,21 +121,24 @@ def images(extra: dict) -> str:
     return json.dumps(found, sort_keys=True) if found else ""
 
 
-def cpu(extra: dict) -> str:
-    runner = extra.get("runner")
-    return str(runner.get("cpu", "")) if isinstance(runner, dict) else ""
+def runner(extra: dict) -> tuple[tuple, dict] | None:
+    facts = extra.get("runner")
+    if not isinstance(facts, dict) or not facts.get("cpu"):
+        return None
+    calibration = {k: math.log(v) for k, v in (facts.get("calibration") or {}).items()
+                   if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0}
+    return (str(facts["cpu"]), facts.get("cores")), calibration
 
 
 def collect(datas: list[dict]) -> tuple[list[Run], dict[Run, RunFacts], dict[Key, tuple[float, list[Point]]]]:
-    """Every run in time order with its runner facts, and every series: its direction sign and points."""
+    """Every run in time order with its facts, and every series: its direction sign and points."""
     stamps: dict[Run, tuple[float, int]] = {}
     commits: dict[Run, dict] = {}
-    cpus: dict[Run, str] = {}
-    raw: dict[Key, tuple[float, list[tuple[Run, float, str, float, dict]]]] = {}
-    seen_order = 0
+    machines: dict[Run, tuple[tuple, dict]] = {}
+    raw: dict[Key, tuple[float, list[tuple]]] = {}
     for data in datas:
-        entries = data.get("entries") if isinstance(data, dict) else None
-        for suite, points in (entries or {}).items():
+        entries = data.get("entries")
+        for suite, points in (entries if isinstance(entries, dict) else {}).items():
             if not isinstance(points, list):
                 warn(f"{suite}: entries are not a list, skipped")
                 continue
@@ -135,10 +154,11 @@ def collect(datas: list[dict]) -> tuple[list[Run], dict[Run, RunFacts], dict[Key
                 run = (cid, occurrences.get(cid, 0))
                 occurrences[cid] = run[1] + 1
                 date = point.get("date")
-                stamp = float(date) if isinstance(date, (int, float)) else math.inf
-                if run not in stamps or stamp < stamps[run][0]:
-                    stamps[run] = (stamp, stamps.get(run, (0, seen_order))[1])
-                    seen_order += 1
+                stamp = float(date) if isinstance(date, (int, float)) and not isinstance(date, bool) else math.inf
+                if run not in stamps:
+                    stamps[run] = (stamp, len(stamps))
+                elif stamp < stamps[run][0]:
+                    stamps[run] = (stamp, stamps[run][1])
                 commits.setdefault(run, commit)
                 for bench in point.get("benches") or []:
                     name = bench.get("name") if isinstance(bench, dict) else None
@@ -147,152 +167,187 @@ def collect(datas: list[dict]) -> tuple[list[Run], dict[Run, RunFacts], dict[Key
                         warn(f"{suite} at {cid[:12]}: bench {name!r} has no usable value ({value!r}), skipped")
                         continue
                     extra = extra_of(bench)
-                    if cpu(extra):
-                        cpus[run] = cpu(extra)
+                    facts = runner(extra)
+                    if facts:
+                        machines[run] = facts
                     _, history = raw.setdefault((suite, name), (sign, []))
                     history.append((run, sign * math.log(value), images(extra), float(value), commit))
     runs = sorted(stamps, key=lambda r: stamps[r])
     order = {run: i for i, run in enumerate(runs)}
+    values: dict[Run, dict] = {run: {} for run in runs}
     series: dict[Key, tuple[float, list[Point]]] = {}
-    floors: dict[Run, dict] = {run: {} for run in runs}
     for key, (sign, history) in raw.items():
         points = sorted((Point(*p) for p in history), key=lambda p: order[p.run])
         series[key] = (sign, points)
-        if key[1] in FLOORS:
-            for p in points:
-                floors[p.run][key[1]] = p.worse
-    facts = {run: RunFacts(order[run], commits[run], cpus.get(run, ""), floors[run]) for run in runs}
+        for p in points:
+            values[p.run][key[1]] = p.worse
+    facts = {run: RunFacts(order[run], commits[run], *(machines.get(run) or (None, {})), values[run]) for run in runs}
     return runs, facts, series
 
 
-def same_runner(a: RunFacts, b: RunFacts) -> bool:
-    """Two runs ran on the same kind of machine: same CPU model where both recorded one, `SELECT 1` within 5%."""
-    if a.cpu and b.cpu and a.cpu != b.cpu:
-        return False
-    shared = [abs(a.floors[k] - b.floors[k]) for k in FLOORS if k in a.floors and k in b.floors]
-    return bool(shared) and statistics.fmean(shared) < SAME_RUNNER
+class Matcher:
+    """Whether two runs ran on the same kind of machine, as seen by one suite's series."""
+
+    def __init__(self, facts: dict[Run, RunFacts]):
+        self.facts = facts
+        self.cache: dict[tuple, bool] = {}
+
+    def same(self, a: Run, b: Run, suite: str) -> bool:
+        key = (a, b, suite)
+        if key not in self.cache:
+            self.cache[key] = self._same(self.facts[a], self.facts[b], suite)
+        return self.cache[key]
+
+    @staticmethod
+    def _same(a: RunFacts, b: RunFacts, suite: str) -> bool:
+        if a.machine and b.machine:
+            shared = [abs(a.calibration[k] - b.calibration[k]) for k in a.calibration if k in b.calibration]
+            return a.machine == b.machine and bool(shared) and statistics.median(shared) < SAME_RUNNER
+        shared = [abs(v - b.values[k]) for k, v in a.values.items() if k in b.values and suite_of(k) != suite]
+        return len(shared) >= MIN_SHARED and statistics.median(shared) < SAME_RUNNER
 
 
 def swing(noise: list[float]) -> float:
-    """A series' noise: the median change of its comparison from one judged point to the next, over sqrt 2."""
+    """A series' noise: the median change of its comparison from one point to the next, over sqrt 2."""
     return statistics.median(abs(b - a) for a, b in zip(noise, noise[1:])) / math.sqrt(2)
 
 
 class Judged(NamedTuple):
     point: Point
     excess: float
+    basis: str
+    real: bool
 
 
 class State(NamedTuple):
     """Where a series stands after its newest point."""
-    held_since: Point | None
+    held: bool
+    confirmed: bool
+    after: Point | None
+    by: Point | None
     judged: list[Judged]
     swing: float | None
-    newest_judged: bool
 
 
-def walk(history: list[Point], facts: dict[Run, RunFacts], limit: float, window: int, spread: float) -> State:
+def walk(history: list[Point], suite: str, facts: dict[Run, RunFacts], match: Matcher,
+         limit: float, window: int, spread: float) -> State:
     """Replay one series through the rule, oldest point first."""
-    offsets: dict[str, float] = {}
-    usable: list[tuple[Point, float]] = []  # each point with its image's step taken out
+    large = math.log1p(limit / 100)
+    usable: list[Point] = []
     judged: list[Judged] = []
     noise: list[tuple[int, float]] = []
+    image: str | None = None
     streak: int | None = None
     held: int | None = None
-    held_point: Point | None = None
-    current_image: str | None = None
-    newest_judged = False
-    large = math.log1p(limit / 100)
+    calm: Point | None = None
+    after: Point | None = None
+    by: Point | None = None
+    outside: int | None = None
     for p in history:
-        here = facts[p.run]
-        newest_judged = False
-        if current_image is not None and p.images != current_image and p.images not in offsets:
-            held, held_point, streak = None, None, None
-        current_image = p.images
-        if held is not None and not any(facts[q.run].order < held for q, _ in usable):
-            held, held_point, streak = None, None, None
-        if held is not None:
-            pool = [v for q, v in usable if facts[q.run].order < held and same_runner(facts[q.run], here)]
-        else:
-            start = streak if streak is not None else here.order
-            pool = [v for q, v in usable
-                    if here.order - LOOKBACK <= facts[q.run].order < start and same_runner(facts[q.run], here)]
-        if len(pool) < MIN_MATCHES:
-            if p.images in offsets or not usable:
-                offsets.setdefault(p.images, 0.0)
-                usable.append((p, p.worse - offsets[p.images]))
-            continue
-        baseline = statistics.median(pool)
-        if p.images not in offsets and usable:
-            offsets[p.images] = p.worse - baseline
-            usable += [(q, q.worse - offsets[q.images]) for q in history
-                       if q.images == p.images and facts[q.run].order <= here.order]
-            continue
-        offsets.setdefault(p.images, 0.0)
-        value = p.worse - offsets[p.images]
-        excess = value - baseline
-        recent_noise = [e for _, e in noise][-window:]
-        bar = spread * swing(recent_noise) if len(recent_noise) >= MIN_NOISE else None
-        beyond = bar is not None and excess > bar
-        judged.append(Judged(p, excess))
-        newest_judged = True
+        here = facts[p.run].order
+        if p.images != image:
+            if image is not None:
+                usable, judged, held, streak, calm, outside = [], [], None, None, None, None
+            image = p.images
+        if held is not None and not any(facts[q.run].order < held for q in usable):
+            held, streak = None, None
+        end = held if held is not None else streak if streak is not None else here
+        earlier = [q for q in usable if facts[q.run].order < end]
         if held is None:
-            noise.append((here.order, excess))
-            if not beyond:
-                streak = None
-            elif streak is None:
-                streak = here.order
-            pair = judged[-2:]
-            if beyond and len(pair) == 2 and all(j.excess > bar for j in pair) and statistics.fmean(j.excess for j in pair) > large:
-                held = streak if streak is not None else facts[pair[0].point.run].order
-                held_point = next(j.point for j in judged if facts[j.point.run].order >= held)
-                noise = [(o, e) for o, e in noise if o < held]
+            earlier = [q for q in earlier if facts[q.run].order >= here - LOOKBACK]
+        same = [q.worse for q in earlier if match.same(q.run, p.run, suite)]
+        same_excess = p.worse - statistics.median(same) if len(same) >= MIN_MATCHES else None
+        recent = [e for _, e in noise][-window:]
+        if same_excess is not None and len(recent) >= MIN_NOISE:
+            entry = Judged(p, same_excess, SAME, same_excess > spread * swing(recent))
+        elif len([q for q in earlier if outside is None or facts[q.run].order < outside]) >= 2:
+            pool = [q.worse for q in earlier if outside is None or facts[q.run].order < outside][-LOOKBACK:]
+            centre = statistics.median(pool)
+            entry = Judged(p, p.worse - centre, ALL,
+                           p.worse > max(pool))
         else:
-            pair = judged[-2:]
-            if len(pair) == 2 and all(j.excess <= large / 2 and facts[j.point.run].order >= held for j in pair):
-                held, held_point, streak = None, None, None
-        usable.append((p, value))
-    recent_noise = [e for _, e in noise][-window:]
-    return State(held_point, judged, swing(recent_noise) if len(recent_noise) >= MIN_NOISE else None, newest_judged)
+            usable.append(p)
+            continue
+        if entry.basis == ALL and same_excess is not None and held is None:
+            noise.append((here, same_excess))
+        judged.append(entry)
+        outside = (outside if outside is not None else here) if entry.basis == ALL and entry.real else None
+        pair = judged[-2:]
+        if held is None:
+            if entry.basis == SAME:
+                noise.append((here, entry.excess))
+            if not entry.real:
+                streak, calm = None, p if entry.basis == SAME else calm
+            elif streak is None:
+                streak = here
+            if len(pair) == 2 and any(j.basis == SAME for j in pair) and all(j.real and j.excess > large for j in pair):
+                held, after = streak if streak is not None else facts[pair[0].point.run].order, calm
+                by = next(j.point for j in judged if facts[j.point.run].order >= held)
+                noise = [(o, e) for o, e in noise if o < held]
+        elif len(judged) >= RELEASE and all(j.basis == SAME and facts[j.point.run].order >= held and j.excess <= large / 2
+                                            for j in judged[-RELEASE:]):
+            held, streak = None, None
+        usable.append(p)
+    recent = [e for _, e in noise][-window:]
+    pair = judged[-2:]
+    confirmed = len(pair) == 2 and all(j.real and j.excess > large for j in pair)
+    return State(held is not None, confirmed, after, by, judged, swing(recent) if len(recent) >= MIN_NOISE else None)
+
+
+def short(point: Point | None) -> str:
+    return str(point.commit.get("id", ""))[:12] if point else ""
 
 
 def analyse(datas: list[dict], threshold: float, rss_threshold: float, window: int = 20, spread: float = 3.0) -> dict:
     runs, facts, series = collect(datas)
+    match = Matcher(facts)
     newest = runs[-1] if runs else None
-    findings, watch = [], []
-    judged_newest = total = 0
+    findings, watch, gone = [], [], []
+    bases = {SAME: 0, ALL: 0, None: 0}
     for (suite, name), (sign, history) in series.items():
-        if name in FLOORS or not history:
+        if not history:
             continue
         limit = rss_threshold if name.endswith("peak_rss_mib") else threshold
-        state = walk(history, facts, limit, window, spread)
+        state = walk(history, suite_of(name), facts, match, limit, window, spread)
+        last_judged = state.judged[-1] if state.judged else None
         if history[-1].run == newest:
-            total += 1
-            judged_newest += state.newest_judged
+            bases[last_judged.basis if last_judged and last_judged.point.run == newest else None] += 1
+        elif newest is not None and facts[history[-1].run].order < facts[newest].order - GONE_AFTER + 1:
+            if state.held:
+                gone.append({"suite": suite, "series": name})
+            continue
         if state.swing is not None and spread * state.swing > math.log1p(limit / 100):
             watch.append({"suite": suite, "series": name, "smallest_step_percent": round((math.exp(spread * state.swing) - 1) * 100)})
-        if state.held_since is not None and state.judged:
-            last = state.judged[-2:]
-            mean = statistics.fmean(j.excess for j in last)
-            point = last[-1].point
+        if (state.held or state.confirmed) and last_judged:
+            pair = state.judged[-2:]
+            point = last_judged.point
             findings.append({
                 "suite": suite,
                 "series": name,
-                "worse_by_percent": round((math.exp(mean) - 1) * 100, 1),
-                "baseline": math.exp(sign * (point.worse - last[-1].excess)),
+                "worse_by_percent": round((math.exp(statistics.fmean(j.excess for j in pair)) - 1) * 100, 1),
+                "baseline": math.exp(sign * (point.worse - last_judged.excess)),
                 "value": point.value,
-                "commit": str(point.commit.get("id", ""))[:12],
+                "basis": last_judged.basis,
+                "commit": short(point),
                 "url": point.commit.get("url", ""),
-                "since": str(state.held_since.commit.get("id", ""))[:12],
+                "held": state.held,
+                "after": short(state.after) if state.held else "",
+                "by": short(state.by) if state.held else short(state.judged[-2].point),
             })
-    newest_commit = str(facts[newest].commit.get("id", ""))[:12] if newest else ""
-    return {"findings": findings, "watch": watch, "newest": newest_commit, "judged_newest": judged_newest, "series_newest": total}
+    return {"findings": findings, "watch": watch, "gone": gone, "bases": bases,
+            "newest": short(Point(newest, 0, "", 0, facts[newest].commit)) if newest else ""}
+
+
+def step_text(f: dict) -> str:
+    return f"after {f['after']}, by {f['by']}" if f["after"] else f"at or before {f['by']}"
 
 
 def report(result: dict) -> list[str]:
-    lines = [f"newest run {result['newest']}: judged {result['judged_newest']} of {result['series_newest']} series"]
-    if result["judged_newest"] < result["series_newest"]:
-        lines.append("  a series not judged on it had too few earlier runs on the same kind of machine; its verdict is from the last run it was judged at")
+    b = result["bases"]
+    lines = [f"newest run {result['newest']}: {b[SAME]} series judged against the same runner, "
+             f"{b[ALL]} against all runners, {b[None]} not yet judgeable (too few points)"]
+    for g in result["gone"]:
+        lines.append(f"no longer recorded, hold ended: {g['suite']} {g['series']}")
     return lines
 
 
@@ -305,21 +360,29 @@ def upsert_issue(result: dict) -> None:
     existing = [i for i in json.loads(listed.stdout or "[]") if i["title"] == ISSUE_TITLE]
     if not findings:
         for issue in existing:
-            subprocess.run(["gh", "issue", "close", str(issue["number"]), "--comment", "No series is flagged any more: each is back within half its threshold of the level before its step."], check=True)
+            subprocess.run(["gh", "issue", "close", str(issue["number"]), "--comment",
+                            "No series is flagged any more: each held series had three judged runs in a row back within half its "
+                            "threshold of the level before its step, an image-tag change, or is no longer recorded."], check=True)
         return
     lines = [
-        "These series are slower than on earlier runs of the same kind of machine before their step: two judged runs in a row, each past the series' own swing, on average past the threshold. A series stays here until two judged runs in a row are back within its swing and within half the threshold.",
+        "Two judged runs in a row, each worse than its comparison by more than the threshold and by more than the "
+        "series' own noise. *Held* series are compared to their level before the step and stay here until three judged "
+        "runs in a row on the same runner are each back within half the threshold; the others were judged only "
+        "across all runners and are listed while they last.",
         "",
-        "| suite | series | worse by | before the step | now | last judged | step since |",
-        "| --- | --- | ---: | ---: | ---: | --- | --- |",
+        "| suite | series | worse by | compared to | now | judged against | held | last judged | step |",
+        "| --- | --- | ---: | ---: | ---: | --- | --- | --- | --- |",
     ]
     for f in findings:
         commit = f"[`{f['commit']}`]({f['url']})" if f["url"] else f"`{f['commit']}`"
-        lines.append(f"| {f['suite']} | `{f['series']}` | {f['worse_by_percent']:+.1f}% | {f['baseline']:.3g} | {f['value']:.3g} | {commit} | `{f['since']}` |")
+        lines.append(f"| {f['suite']} | `{f['series']}` | {f['worse_by_percent']:+.1f}% | {f['baseline']:.3g} | "
+                     f"{f['value']:.3g} | {f['basis']} | {'yes' if f['held'] else 'no'} | {commit} | {step_text(f)} |")
     lines += ["", *report(result)]
     if result["watch"]:
-        lines += ["", "Too noisy to catch a step of the threshold (smallest step each can catch): " + ", ".join(f"`{w['series']}` +{w['smallest_step_percent']}%" for w in result["watch"]) + "."]
-    lines += ["", "History: https://alias2k.github.io/flusso/bench/", "", "This issue is maintained by `.github/scripts/bench-regression.py`; it closes itself once the series recover."]
+        lines += ["", "Too noisy to catch a step of the threshold (smallest step each can catch): "
+                  + ", ".join(f"`{w['series']}` +{w['smallest_step_percent']}%" for w in result["watch"]) + "."]
+    lines += ["", "History: https://alias2k.github.io/flusso/bench/", "",
+              "This issue is maintained by `.github/scripts/bench-regression.py`; it closes itself once the series recover."]
     body = "\n".join(lines)
     if existing:
         subprocess.run(["gh", "issue", "edit", str(existing[0]["number"]), "--body", body], check=True)
@@ -332,7 +395,7 @@ def main() -> int:
     parser.add_argument("threshold", type=float)
     parser.add_argument("data", nargs="+")
     parser.add_argument("--rss-threshold", type=float, default=None)
-    parser.add_argument("--window", type=int, default=20, help="judged points a series' swing is measured over")
+    parser.add_argument("--window", type=int, default=20, help="same-runner comparisons a series' swing is measured over")
     parser.add_argument("--spread", type=float, default=3.0, help="how many swings a point must be past to count as real")
     parser.add_argument("--issue", action="store_true")
     args = parser.parse_args()
@@ -342,15 +405,18 @@ def main() -> int:
         try:
             datas.append(load(path))
         except (OSError, ValueError) as error:
-            warn(f"{path}: cannot read ({error}), skipped")
+            print(f"error: {path}: cannot read ({error}); nothing judged, the issue is left as it is", file=sys.stderr)
+            return 1
     result = analyse(datas, args.threshold, rss, args.window, args.spread)
     findings = result["findings"]
     if findings:
         print(f"{len(findings)} regression(s):")
         for f in findings:
-            print(f"  {f['suite']} {f['series']}: {f['worse_by_percent']:+.1f}% vs {f['baseline']:.3g} before the step (now {f['value']:.3g}) at {f['commit']}, step since {f['since']}")
+            print(f"  {f['suite']} {f['series']}: {f['worse_by_percent']:+.1f}% vs {f['baseline']:.3g} "
+                  f"(now {f['value']:.3g}) against {f['basis']}, {'held' if f['held'] else 'not held'}, "
+                  f"last judged at {f['commit']}, step {step_text(f)}")
     else:
-        print("no regression: no series is past its threshold and its own swing on two judged runs in a row")
+        print("no regression: no series is flagged")
     for line in report(result):
         print(line)
     for w in result["watch"]:
