@@ -36,43 +36,6 @@ fn written(value: &GenericValue) -> String {
     serde_json::to_string(&Json(value)).unwrap()
 }
 
-/// A decimal is written as a JSON number holding its exact text, trailing
-/// zeros included (issue #327; before, it was the nearest `f64`, issue #306).
-/// A reader without `serde_json`'s `arbitrary_precision` still reads it
-/// through `f64`: the largest `Decimal` is then the `f64` past its range.
-#[test]
-fn a_decimal_is_written_as_its_exact_text() {
-    assert_eq!(
-        written(&GenericValue::Decimal(Decimal::MAX)),
-        "79228162514264337593543950335"
-    );
-    assert_eq!(
-        written(&GenericValue::Decimal(Decimal::MIN)),
-        "-79228162514264337593543950335"
-    );
-    assert_eq!(
-        written(&GenericValue::Decimal(
-            "0.0000000000000000000000000001".parse().unwrap()
-        )),
-        "0.0000000000000000000000000001"
-    );
-    assert_eq!(
-        written(&GenericValue::Decimal(Decimal::new(1250, 2))),
-        "12.50"
-    );
-    let max = written(&GenericValue::Decimal(Decimal::MAX));
-    assert_eq!(
-        serde_json::from_str::<f64>(&max).unwrap(),
-        7.922_816_251_426_434e28
-    );
-    assert!(serde_json::from_str::<Decimal>(&max).is_err());
-    let price = written(&GenericValue::Decimal(Decimal::new(1250, 2)));
-    assert_eq!(
-        serde_json::from_str::<Decimal>(&price).unwrap(),
-        Decimal::new(125, 1)
-    );
-}
-
 /// A decimal past `Decimal`'s range is a JSON number with every digit, inside
 /// an object or an array too; `f64` reads it, `Decimal` can't (issue #327).
 #[test]
@@ -98,19 +61,6 @@ fn a_big_decimal_is_written_as_a_number_with_every_digit() {
     let past = written(&big("1000000000000000000000000000000"));
     assert_eq!(serde_json::from_str::<f64>(&past).unwrap(), 1e30);
     assert!(serde_json::from_str::<Decimal>(&past).is_err());
-}
-
-/// [`to_json`]'s value tree holds a number as an `f64`.
-#[test]
-fn to_json_holds_a_decimal_as_the_nearest_double() {
-    let big = GenericValue::BigDecimal(
-        kernel::BigDecimal::parse("1000000000000000000000000000000").unwrap(),
-    );
-    assert_eq!(to_json(&big), serde_json::json!(1e30));
-    assert_eq!(
-        to_json(&GenericValue::Decimal(Decimal::MAX)),
-        serde_json::json!(7.922_816_251_426_434e28)
-    );
 }
 
 /// A non-finite float is written as `null`.
@@ -200,4 +150,33 @@ fn the_other_temporals_keep_their_written_form() {
         )),
         "2024-01-02T03:04:05.123456+00:00"
     );
+}
+
+/// [`to_json`] is total: a decimal past `f64`'s range is its exact text as a
+/// string in the value tree, and the rest of the tree is kept.
+#[test]
+fn to_json_keeps_a_decimal_past_the_double_range_as_its_text() {
+    let past = GenericValue::BigDecimal(kernel::BigDecimal::parse("1e400").unwrap());
+    let value = GenericValue::Map(BTreeMap::from([
+        ("a".to_owned(), GenericValue::Int(1)),
+        ("b".to_owned(), past),
+    ]));
+    assert_eq!(to_json(&value), serde_json::json!({ "a": 1, "b": "1e400" }));
+}
+
+/// Every value but a declared decimal is written as before (issue #327's
+/// review): a `Decimal` the reader made from an untyped float is the nearest
+/// `f64`, `100.0` and not `100`, through [`Json`] and [`to_json`] alike.
+#[test]
+fn a_decimal_is_written_as_the_nearest_double_as_before() {
+    for (decimal, json) in [
+        (Decimal::new(1000, 1), "100.0"),
+        (Decimal::new(5, 0), "5.0"),
+        (Decimal::new(1250, 2), "12.5"),
+        (Decimal::MAX, "7.922816251426434e28"),
+    ] {
+        let value = GenericValue::Decimal(decimal);
+        assert_eq!(written(&value), json, "{decimal}");
+        assert_eq!(to_json(&value).to_string(), json, "{decimal}");
+    }
 }

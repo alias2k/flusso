@@ -581,54 +581,32 @@ fn a_double_past_the_decimal_range_is_the_nearest_double() {
     assert_eq!(map.get("ratio"), Some(&GenericValue::Double(1e30)));
 }
 
-/// A number past `rust_decimal`'s range inside a `json` field stays a number.
-#[test]
-fn a_json_number_past_the_decimal_range_stays_a_number() {
-    let fields = vec![column_field("payload", FlussoType::Json)];
-    let map = body_text(r#"{"payload": {"n": 1e30, "m": [-1e30]}}"#, &fields);
-    let want = GenericValue::Map(BTreeMap::from([
-        ("n".to_owned(), GenericValue::Double(1e30)),
-        (
-            "m".to_owned(),
-            GenericValue::Array(vec![GenericValue::Double(-1e30)]),
-        ),
-    ]));
-    assert_eq!(map.get("payload"), Some(&want));
-}
-
 /// `NaN`, `Infinity` and `-Infinity` have no JSON number: Postgres writes them
-/// as strings. Under a number field (a scalar, an array element or an
-/// aggregate) the document fails at the field's path, for `on_error` to
-/// decide, instead of holding a string where its other documents hold a
-/// number.
+/// as strings, and the string passes through to the sink under any field, a
+/// declared `decimal` included, as an array element and an aggregate too. The
+/// sink's `on_error` decides; a field that never reaches the index (`emit:
+/// false`, an unindexed join, `ignore_malformed`, a namesake's discarded value)
+/// keeps it without trouble (issue #327's review).
 #[test]
-fn a_non_finite_number_fails_the_document_at_its_field() {
+fn a_non_finite_number_passes_through_as_postgres_wrote_it() {
+    let nan = |text: &str| GenericValue::String(text.to_owned());
     for text in ["NaN", "Infinity", "-Infinity"] {
         for ty in [
             FlussoType::Decimal,
             FlussoType::Double,
             FlussoType::Float,
             FlussoType::Long,
-            FlussoType::Integer,
-            FlussoType::Short,
         ] {
             let fields = vec![column_field("n", ty.clone())];
-            let doc = json!({ "n": text }).to_string();
-            let failure = build(&doc, &fields).expect_err(&format!("{text} as {ty:?}"));
-            assert_eq!(failure.field, "n", "{text} as {ty:?}");
-            assert!(
-                failure.message.contains(text),
-                "{text} as {ty:?}: {}",
-                failure.message
-            );
+            let map = body(json!({ "n": text }), &fields);
+            assert_eq!(map.get("n"), Some(&nan(text)), "{text} as {ty:?}");
         }
-        let fields = vec![
-            column_field("id", FlussoType::Long),
-            array_field("amounts", FlussoType::Decimal, None),
-        ];
-        let doc = json!({ "id": 1, "amounts": [1, text] }).to_string();
-        let failure = build(&doc, &fields).expect_err(text);
-        assert_eq!(failure.field, "amounts[1]", "{text}");
+        let fields = vec![array_field("amounts", FlussoType::Decimal, None)];
+        let map = body(json!({ "amounts": [1, text] }), &fields);
+        let Some(GenericValue::Array(items)) = map.get("amounts") else {
+            panic!("{text}: {map:?}");
+        };
+        assert_eq!(items.get(1), Some(&nan(text)), "{text}");
 
         let fields = vec![
             aggregate_field(
@@ -641,12 +619,96 @@ fn a_non_finite_number_fails_the_document_at_its_field() {
                 AggregateOp::Avg(ColumnName::try_new("v").unwrap().into()),
                 None,
             ),
+            aggregate_field(
+                "keys",
+                AggregateOp::Ids {
+                    element_type: FlussoType::Decimal,
+                },
+                None,
+            ),
         ];
-        for name in ["total", "mean"] {
-            let doc = json!({ name: text }).to_string();
-            let failure = build(&doc, &fields).expect_err(&format!("{name}: {text}"));
-            assert_eq!(failure.field, name, "{text}");
-        }
+        let map = body(
+            json!({ "total": text, "mean": text, "keys": [text] }),
+            &fields,
+        );
+        assert_eq!(map.get("total"), Some(&nan(text)));
+        assert_eq!(map.get("mean"), Some(&nan(text)));
+        assert_eq!(map.get("keys"), Some(&GenericValue::Array(vec![nan(text)])));
+    }
+}
+
+/// A `map` with `values: decimal` keeps every digit of each value, as any
+/// declared `decimal` does; a value that is no number keeps its fallback.
+#[test]
+fn a_decimal_map_keeps_every_digit_of_each_value() {
+    let fields = vec![column_field(
+        "m",
+        FlussoType::Map {
+            values: Box::new(FlussoType::Decimal),
+        },
+    )];
+    let map = body_text(
+        r#"{"m": {"x": 1234567890.123456789, "y": 12.50, "z": null, "w": "abc",
+                  "v": 1000000000000000000000000000000}}"#,
+        &fields,
+    );
+    let Some(GenericValue::Map(values)) = map.get("m") else {
+        panic!("expected a map, got {map:?}");
+    };
+    assert_eq!(
+        exact_decimal(values.get("x")).as_deref(),
+        Some("1234567890.123456789")
+    );
+    assert_eq!(exact_decimal(values.get("y")).as_deref(), Some("12.50"));
+    assert_eq!(
+        exact_decimal(values.get("v")).as_deref(),
+        Some("1000000000000000000000000000000")
+    );
+    assert_eq!(values.get("z"), Some(&GenericValue::Null));
+    assert_eq!(values.get("w"), Some(&GenericValue::String("abc".into())));
+}
+
+/// A value nested past `serde_json`'s 128 levels under a declared `decimal`
+/// (a scalar, an array element, an `ids` key) fails the read as the rest of the
+/// document does, never reads as `null`; one level less still reads.
+#[test]
+fn a_decimal_nested_past_the_depth_limit_fails_the_read() {
+    let fields = vec![
+        column_field("d", FlussoType::Decimal),
+        array_field("ds", FlussoType::Decimal, None),
+        aggregate_field(
+            "keys",
+            AggregateOp::Ids {
+                element_type: FlussoType::Decimal,
+            },
+            None,
+        ),
+    ];
+    // The root object is one level and an array of decimals another, so a
+    // value at `d` may open 126 more, one inside `ds` or `keys` 125.
+    let nested = |levels: usize| format!("{}1{}", "[".repeat(levels), "]".repeat(levels));
+    for (key, inside) in [("d", 0), ("ds", 1), ("keys", 1)] {
+        let wrap = |levels: usize| {
+            let value = nested(levels);
+            if inside == 0 {
+                format!(r#"{{"{key}": {value}}}"#)
+            } else {
+                format!(r#"{{"{key}": [{value}]}}"#)
+            }
+        };
+        let fits = 126 - inside;
+        assert!(
+            matches!(coerce_document(wrap(fits).as_bytes(), &fields), Ok(_)),
+            "{key} at {fits} levels reads"
+        );
+        assert!(
+            matches!(
+                coerce_document(wrap(fits + 1).as_bytes(), &fields),
+                Err(DocumentError::Malformed(_))
+            ),
+            "{key} at {} levels fails the read",
+            fits + 1
+        );
     }
 }
 

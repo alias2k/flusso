@@ -43,17 +43,45 @@ fn a_decimal_round_trips_exactly() {
     assert_eq!(back, Ok(GenericValue::Decimal(price)));
 }
 
-/// A decimal past `Decimal`'s range reaches a script as its exact text: Rhai's
-/// decimal can't hold it.
+fn big(text: &str) -> GenericValue {
+    GenericValue::BigDecimal(kernel::BigDecimal::parse(text).unwrap())
+}
+
+/// A declared `decimal` reaches a script as a decimal wherever `Decimal` can
+/// hold its magnitude (rounded past 28 fractional digits, an exponent read),
+/// as before issue #327; only a magnitude past `Decimal`'s range is a string of
+/// its digits.
 #[test]
-fn a_decimal_past_the_decimal_range_crosses_as_its_text() {
-    let big = kernel::BigDecimal::parse("1000000000000000000000000000000").unwrap();
+fn a_declared_decimal_crosses_as_a_decimal_unless_past_the_range() {
+    for (text, want) in [
+        ("1.000000000000000000000000000000", Decimal::ONE),
+        ("12.50", Decimal::new(1250, 2)),
+        ("1e2", Decimal::new(100, 0)),
+        ("-1.5E+3", Decimal::new(-1500, 0)),
+    ] {
+        let rhai = to_dynamic(&big(text));
+        assert_eq!(rhai.as_decimal(), Ok(want), "{text}");
+    }
     assert_eq!(
-        to_dynamic(&GenericValue::BigDecimal(big))
+        to_dynamic(&big("1000000000000000000000000000000"))
             .into_string()
             .unwrap(),
         "1000000000000000000000000000000"
     );
+}
+
+/// A `decimal` script field that returns a string holding a decimal number
+/// (the pass-through of a value past the range) takes it as that number.
+#[test]
+fn a_decimal_field_takes_a_string_holding_a_decimal_number() {
+    let out = out(&FlussoType::Decimal);
+    let text = "1000000000000000000000000000000";
+    assert_eq!(
+        from_dynamic(Dynamic::from(text.to_owned()), &out),
+        Ok(big(text))
+    );
+    assert!(from_dynamic(Dynamic::from("abc".to_owned()), &out).is_err());
+    assert!(from_dynamic(Dynamic::from("NaN".to_owned()), &out).is_err());
 }
 
 #[test]

@@ -916,3 +916,6 @@ fn float(v: f64) -> GenericValue {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod differential;
