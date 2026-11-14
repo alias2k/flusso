@@ -22,7 +22,13 @@ HISTORY = json.loads((HERE / "fixtures" / "bench-history.json").read_text(encodi
 IMAGES = {"opensearch": "opensearchproject/opensearch:2", "postgres": "postgres:16-alpine"}
 
 
-def data_js(suite: dict, upto: int, steps: dict, image_change: dict) -> str:
+FLOORS = {"components/baseline/select_1", "components/baseline/pg_select_1"}
+JUDGED = [name for suite in HISTORY["suites"].values() for name in suite["series"] if name not in FLOORS]
+P99 = {"complex/ci/visible_latency_p99_ms", "reference/ci/visible_latency_p99_ms"}
+SCENARIOS = [name for name in JUDGED if "/ci/" in name]
+
+
+def data_js(key: str, suite: dict, upto: int, steps: dict, image_change: dict, mutate) -> str:
     entries = []
     for run in range(upto + 1):
         benches = []
@@ -30,9 +36,9 @@ def data_js(suite: dict, upto: int, steps: dict, image_change: dict) -> str:
             value = values[run]
             if value is None:
                 continue
-            factor = steps.get(name, (None, 1.0))
-            if factor[0] is not None and run >= factor[0]:
-                value = value * factor[1] if suite["tool"] == "customSmallerIsBetter" else value / factor[1]
+            start, factor, *end = steps.get(name, (None, 1.0))
+            if start is not None and run >= start and (not end or run <= end[0]):
+                value = value * factor if suite["tool"] == "customSmallerIsBetter" else value / factor
             bench = {"name": name, "value": value, "unit": ""}
             if "/ci/" in name:
                 images = dict(IMAGES)
@@ -47,24 +53,35 @@ def data_js(suite: dict, upto: int, steps: dict, image_change: dict) -> str:
             "tool": suite["tool"],
             "benches": benches,
         })
+    if mutate:
+        entries = mutate(key, entries)
     return "window.BENCHMARK_DATA = " + json.dumps({"entries": {suite["name"]: entries}})
 
 
-def flagged(upto: int, steps: dict | None = None, image_change: dict | None = None) -> set[str]:
-    """The series the script calls regressed when `main` is at run `upto`."""
-    steps = steps or {}
-    image_change = image_change or {}
+def run_script(upto: int, steps: dict | None = None, image_change: dict | None = None, mutate=None) -> subprocess.CompletedProcess:
+    """The script's run, as `bench.yml` makes it, with `main` at run `upto`."""
     with tempfile.TemporaryDirectory() as tmp:
         paths = []
         for key, suite in HISTORY["suites"].items():
             path = pathlib.Path(tmp) / f"{key}.js"
-            path.write_text(data_js(suite, upto, steps, image_change), encoding="utf-8")
+            path.write_text(data_js(key, suite, upto, steps or {}, image_change or {}, mutate), encoding="utf-8")
             paths.append(str(path))
-        out = subprocess.run(
+        return subprocess.run(
             [sys.executable, str(SCRIPT), "25", "--rss-threshold", "20", *paths],
             check=True, capture_output=True, text=True,
-        ).stdout
+        )
+
+
+def flagged(upto: int, steps: dict | None = None, image_change: dict | None = None, mutate=None) -> set[str]:
+    """The series the script calls regressed when `main` is at run `upto`."""
+    out = run_script(upto, steps, image_change, mutate).stdout
     return set(re.findall(r"^  flusso \(\w+ is better\) (\S+):", out, re.M))
+
+
+def too_noisy(upto: int, steps: dict | None = None, image_change: dict | None = None) -> set[str]:
+    """The series the script reports as too noisy to catch a step of the threshold."""
+    out = run_script(upto, steps, image_change).stdout
+    return set(re.findall(r"^too noisy for the threshold: flusso \(\w+ is better\) (\S+) ", out, re.M))
 
 
 class RunnerWideShifts(unittest.TestCase):
@@ -133,10 +150,133 @@ class CatchesARegression(unittest.TestCase):
                   if "reference/ci/peak_rss_mib" in flagged(run, {"reference/ci/peak_rss_mib": (60, 1.25)})]
         self.assertTrue(caught)
 
-    def test_an_image_change_restarts_the_window(self):
+    def test_a_step_landing_with_an_image_change_is_read_as_the_images_own(self):
         name = "reference/ci/flush_p50_ms"
         self.assertNotIn(name, flagged(62, {name: (60, 1.6)}, {name: 60}))
         self.assertIn(name, flagged(62, {name: (60, 1.6)}))
+
+
+class HeldSteps(unittest.TestCase):
+    """A lasting step stays flagged for as long as the history goes, and lets go once the series is back."""
+
+    def test_a_30_percent_step_at_run_45_is_flagged_on_every_run_after_it_is_called(self):
+        for name in ("reference/ci/flush_p50_ms", "components/build/1", "inprocess/decode/fixture",
+                     "complex/ci/backfill_docs_per_s"):
+            for run in range(50, 78):
+                with self.subTest(series=name, run=run):
+                    self.assertIn(name, flagged(run, {name: (45, 1.3)}))
+
+    def test_a_step_that_goes_away_is_let_go(self):
+        name = "components/build/1"
+        steps = {name: (50, 1.5, 60)}
+        self.assertIn(name, flagged(60, steps))
+        self.assertNotIn(name, flagged(66, steps))
+
+
+class GroupSteps(unittest.TestCase):
+    """A regression that moves many series at once, up to every series, is caught and stays caught.
+
+    The two `SELECT 1` floors are the runner's evidence: no flusso change can move them, so no
+    case here moves them either.
+    """
+
+    GROUPS = {
+        "every tenth series": JUDGED[::10],
+        "the components suite": [n for n in JUDGED if n.startswith("components/")],
+        "the in-process suite": [n for n in JUDGED if n.startswith("inprocess/")],
+        "the scenarios": SCENARIOS,
+        "every series": JUDGED,
+    }
+
+    def assert_caught(self, group: list[str], upto: int, steps: dict) -> None:
+        noisy = too_noisy(upto, steps)
+        self.assertLessEqual(len(noisy), 10, noisy)
+        missed = set(group) - P99 - noisy - flagged(upto, steps)
+        self.assertEqual(missed, set())
+
+    def test_a_doubling_in_the_last_two_runs_is_caught(self):
+        for label, group in self.GROUPS.items():
+            with self.subTest(group=label):
+                self.assert_caught(group, 77, {name: (76, 2.0) for name in group})
+
+    def test_a_50_percent_step_stays_caught_for_25_runs(self):
+        # Runs 54 and 55 ran on machines no earlier run matches, so they are not judged:
+        # the first look after the step at 52 with two judged runs past it is 57.
+        for label, group in self.GROUPS.items():
+            steps = {name: (52, 1.5) for name in group}
+            for run in (57, 65, 77):
+                with self.subTest(group=label, run=run):
+                    self.assert_caught(group, run, steps)
+
+
+class ImageChanges(unittest.TestCase):
+    """After an image-tag change a series is judged again from the image's third run."""
+
+    def test_a_step_four_or_six_runs_after_an_image_change_is_caught(self):
+        for back in (4, 6):
+            change = {name: 78 - back for name in SCENARIOS}
+            steps = {name: (76, 1.5) for name in SCENARIOS}
+            with self.subTest(runs_back=back):
+                missed = set(SCENARIOS) - P99 - too_noisy(77, steps, change) - flagged(77, steps, change)
+                self.assertEqual(missed, set())
+
+
+class Reporting(unittest.TestCase):
+    """What the script says about itself."""
+
+    def test_the_series_too_noisy_for_the_threshold_are_named(self):
+        self.assertTrue(P99 <= too_noisy(77))
+
+    def test_a_newest_run_on_an_unseen_runner_is_reported_as_not_judged(self):
+        steps = {name: (77, 1.6) for name in FLOORS}
+        out = run_script(77, steps).stdout
+        self.assertRegex(out, r"newest run 7a22e7536658: judged 0 of \d+ series")
+        self.assertIn("components/resolve/root_table", flagged(77, steps))
+
+    def test_runs_are_ordered_by_time_when_one_file_lacks_a_run(self):
+        def drop_run_10(key, entries):
+            return [e for e in entries if not (key == "smaller" and e["date"] == 10)]
+
+        out = run_script(77, mutate=drop_run_10).stdout
+        self.assertIn("newest run 7a22e7536658", out)
+        self.assertEqual(flagged(77, mutate=drop_run_10), flagged(77))
+
+    def test_malformed_entries_are_skipped_with_a_warning(self):
+        def damage(key, entries):
+            if key == "smaller":
+                benches = entries[-1]["benches"]
+                benches[0]["value"] = None
+                benches[1]["value"] = "fast"
+                del benches[2]["name"]
+                entries[5]["commit"] = None
+            return entries
+
+        done = run_script(77, mutate=damage)
+        self.assertEqual(done.returncode, 0)
+        self.assertIn("warning:", done.stderr)
+        self.assertIn("components/resolve/root_table", flagged(77, mutate=damage))
+
+
+class RunnerFacts(unittest.TestCase):
+    """`bench-runner-facts.py` stamps each data point with the runner it ran on."""
+
+    def test_every_point_is_stamped_and_a_calibration_point_is_added(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            smaller = pathlib.Path(tmp) / "smaller.json"
+            bigger = pathlib.Path(tmp) / "bigger.json"
+            smaller.write_text(json.dumps([{"name": "inprocess/a", "unit": "ns", "value": 1.0}]))
+            bigger.write_text(json.dumps([{"name": "reference/ci/b", "unit": "docs/s", "value": 2.0,
+                                           "extra": json.dumps({"images": IMAGES})}]))
+            subprocess.run([sys.executable, str(HERE / "bench-runner-facts.py"), str(smaller), str(bigger)],
+                           check=True, capture_output=True, text=True)
+            small, big = json.loads(smaller.read_text()), json.loads(bigger.read_text())
+        self.assertEqual([p["name"] for p in small], ["inprocess/a", "runner/sha256_64mib"])
+        self.assertGreater(small[-1]["value"], 0)
+        for point in small + big:
+            runner = json.loads(point["extra"])["runner"]
+            self.assertTrue(runner["cpu"])
+            self.assertGreater(runner["cores"], 0)
+        self.assertEqual(json.loads(big[0]["extra"])["images"], IMAGES)
 
 
 if __name__ == "__main__":
