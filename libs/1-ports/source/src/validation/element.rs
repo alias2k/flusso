@@ -20,7 +20,8 @@ use kernel::FlussoType;
 pub(super) enum Fit {
     /// Every key indexes as itself.
     Holds,
-    /// Some keys index; the sink rejects a document collecting another.
+    /// Some keys index as themselves; another is rejected, or stored
+    /// altered.
     Some,
     /// Every key indexes, as something else: how.
     Changes(&'static str),
@@ -48,8 +49,8 @@ enum Key {
     Other,
 }
 
-const ROUNDED_TO_FLOAT: &str = "a key past 2^24 is rounded to the nearest `float`";
-const ROUNDED_TO_DOUBLE: &str = "a key past 2^53 is rounded to the nearest `double`";
+const ROUNDED_TO_FLOAT: &str = "a key past 2^24 is rounded to the nearest `float`, so two keys can become equal; `long` holds them exactly";
+const ROUNDED_TO_DOUBLE: &str = "a key past 2^53 is rounded to the nearest `double`, so two keys can become equal; `long` holds them exactly";
 const EPOCH_MILLIS: &str = "they are read as milliseconds since 1970";
 const NOT_BYTES: &str = "they are indexed as written, not as bytes";
 
@@ -242,6 +243,32 @@ mod tests {
                 name(&element)
             );
         }
+    }
+
+    #[test]
+    fn a_numeric_key_under_decimal_is_the_declared_type_and_reports_nothing() {
+        for element in [FlussoType::Decimal, FlussoType::Double] {
+            assert_eq!(fit(&element, "numeric"), Fit::Holds);
+            assert_eq!(fit(&element, "numeric(30,9)"), Fit::Holds);
+        }
+    }
+
+    #[test]
+    fn a_timestamp_key_under_timestamp_is_the_declared_type_and_reports_nothing() {
+        for key in ["timestamp(6) without time zone", "timestamp with time zone"] {
+            assert_eq!(fit(&FlussoType::Timestamp, key), Fit::Holds);
+            assert_eq!(fit(&FlussoType::Date, key), Fit::Holds);
+        }
+    }
+
+    #[test]
+    fn a_bigint_key_under_double_names_long() {
+        assert_eq!(
+            fit(&FlussoType::Double, "bigint"),
+            Fit::Changes(ROUNDED_TO_DOUBLE)
+        );
+        assert!(ROUNDED_TO_DOUBLE.contains("`long`"));
+        assert!(ROUNDED_TO_FLOAT.contains("`long`"));
     }
 
     #[test]

@@ -195,14 +195,14 @@ That costs one query per change, per index and link column, for a root key whose
 
 ### A link of another type
 
-A link column (`foreign_key`, `belongs_to` `column`, a junction key, a `via` hop's `foreign_key`, either side of an `on` pair) may be of another type than the key it names, as long as Postgres compares the two with `=`:
+A link column (`foreign_key`, `belongs_to` `column`, a junction key, a `via` hop's `foreign_key`, either side of an `on` pair) may be of another type than the key it names, as long as Postgres compares the two with `=`. `flusso check` asks Postgres, so the rule is exactly that: any pair Postgres compares with `=` works, and a domain counts as its base type. The common cases:
 
 | Key | Links it compares with |
 | --- | --- |
 | `smallint`, `integer`, `bigint`, `numeric`, `real`, `double precision` | any of these |
 | `text`, `varchar`, `char(n)`, `name`, `citext` | any of these |
 | `date`, `timestamp`, `timestamptz` | any of these |
-| any other type | its own type only |
+| any other type | its own type, and any other Postgres compares it with: `oid` and `regclass` with the integers, `"char"` with the text types, `time`, `timetz` and `interval` with each other, `inet` with `cidr`, `bit` with `bit varying` |
 
 - **Compared as the join compares them.** A change is traced to the documents the document query's join reads: `char(5)` against `text` drops the padding, `integer` against `bigint` compares the numbers.
 - **A link no key can equal matches no parent.** A `bigint` link past the `integer` range, a `numeric` `NaN` or fraction against an integer key, an infinite timestamp against a `date` key, text longer than a `char(n)` key: the row joins nothing, and a change to it rebuilds only the documents it names itself. The engine doesn't stop on it, in the backfill or live.

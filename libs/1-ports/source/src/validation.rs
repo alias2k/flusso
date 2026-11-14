@@ -282,9 +282,10 @@ pub enum DiagnosticKind {
     /// rejects every document that collects a key.
     IdsElementMismatch,
     /// An `ids` aggregate's `element_type` holds only some values of the
-    /// related table's key type (e.g. `integer` over a `bigint` key), or
-    /// changes them (e.g. `date` over an integer key, read as epoch
-    /// milliseconds). Values that fit index as before.
+    /// related table's key type (e.g. `integer` over a `bigint` key: another
+    /// is rejected, or stored altered), or changes them (e.g. `date` over an
+    /// integer key, read as epoch milliseconds). Values that fit index as
+    /// before.
     IdsElementLossy,
     /// Two fields at one level of the document share a name (as
     /// [`FieldName`] reads it: trimmed, case kept). The index maps the last
@@ -1144,7 +1145,8 @@ impl Checker<'_> {
                 DiagnosticKind::IdsElementLossy,
                 format!(
                     "`element_type` `{element_name}` holds only some `{sql_type}` keys of \
-                     `{table}`: OpenSearch rejects a document that collects another"
+                     `{table}`: OpenSearch rejects a document that collects another, or stores \
+                     the key altered (a fraction truncated), so two keys can become equal"
                 ),
             ),
             Fit::Changes(how) => self.report(

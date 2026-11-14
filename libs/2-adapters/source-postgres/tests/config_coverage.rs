@@ -2118,7 +2118,8 @@ async fn validation_checks_an_ids_element_type_against_the_related_key() {
     let some = |element: &str, key: &str, table: &str| {
         format!(
             "`element_type` `{element}` holds only some `{key}` keys of `{table}`: OpenSearch \
-             rejects a document that collects another"
+             rejects a document that collects another, or stores the key altered (a fraction \
+             truncated), so two keys can become equal"
         )
     };
     let changes = |element: &str, key: &str, table: &str, how: &str| {

@@ -63,6 +63,18 @@ enum OutputFormat {
 }
 
 pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
+    // A check the source skips (a probe the role may not run) says so with a
+    // warning; without a subscriber `check` would drop it silently.
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .without_time()
+        .with_target(false)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+        .try_init();
     let mut config = config::load(&args.config)
         .with_context(|| format!("loading config from {}", args.config.display()))?;
     adapters::apply_overrides(

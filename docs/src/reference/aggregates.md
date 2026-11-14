@@ -75,16 +75,17 @@ The keys go into the array as they are, so `element_type` has to hold the key's 
 | `short` | `smallint` | wider integers, `numeric`, floats, text | | anything else |
 | `integer` | `smallint`, `integer` | `bigint`, `numeric`, floats, text | | anything else |
 | `long` | the integers | `numeric`, floats, text | | anything else |
-| `float` | `smallint`, `real` | `numeric`, `double precision`, text | `integer`, `bigint`: rounded past 2^24 | anything else |
-| `double`, `decimal` | `smallint`, `integer`, `numeric`, floats | text | `bigint`: rounded past 2^53 | anything else |
-| `date`, `timestamp` | `date`, `timestamp`, `timestamptz` | `numeric`, floats, text | the integers: read as epoch milliseconds | anything else |
+| `float` | `smallint`, `real` | `numeric`, `double precision`, text | `integer`, `bigint`: rounded past 2^24 (`long` is exact) | anything else |
+| `double`, `decimal` | `smallint`, `integer`, `numeric` (see below), floats | text | `bigint`: rounded past 2^53 (`long` is exact) | anything else |
+| `date`, `timestamp` | `date`, `timestamp`, `timestamptz` (see below) | `numeric`, floats, text | the integers: read as epoch milliseconds | anything else |
 | `boolean` | `boolean` | text | | anything else |
 | `binary` | `bytea` | | anything else: indexed as written, not as bytes | |
 | `json` | | | | any type |
 
 - **Holds none** is `ids_element_mismatch`, an error: OpenSearch rejects every document that collects a key. `check` fails on it; [`run` prints it and starts](cli.md#validation-at-start), since a document whose `ids` array is empty still indexes.
-- **Holds only some** and **changes them** are `ids_element_lossy`, a warning. A document whose keys don't fit is rejected by OpenSearch; its index's [`on_error`](index-and-on-error.md#on_error) decides what happens next.
-- **Special values.** Even a matching pair can't hold a `numeric` or float `NaN` or infinity, or an infinite date; a document collecting one is rejected the same way.
+- **Holds only some** and **changes them** are `ids_element_lossy`, a warning. A key that doesn't fit has one of two outcomes. OpenSearch either rejects the document, and the index's [`on_error`](index-and-on-error.md#on_error) decides what happens next, or stores the key altered: a fraction under `short`/`integer`/`long` is truncated (`1.5` → `1`), so two keys can become equal.
+- **Precision of the declared types, not reported.** A `numeric` key under `decimal` or `double` is stored as a double, about 15 to 17 significant digits ([Field types](field-types.md): `decimal` is lossy in storage), so keys beyond that are rounded and two can collide. A `timestamp` or `timestamptz` key under `date` or `timestamp` is stored to the millisecond ([Dates and times](field-types.md#dates-and-times)), so two keys a microsecond apart become equal. These are the natural declarations for those columns, so `check` stays quiet; `keyword` keeps every key exact.
+- **Special values.** Even a matching pair can't hold a `numeric` or float `NaN` or infinity, or an infinite date; a document collecting one is rejected.
 
 ## exists
 
