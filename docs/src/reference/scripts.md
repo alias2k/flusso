@@ -65,14 +65,17 @@ A document value enters Rhai as:
 | --- | --- |
 | integers | `i64` |
 | `float`, `double` | `f64` |
-| `decimal` | `Decimal`, rounded past 28 fractional digits; a value past its range (±7.9 × 10^28) as a string of its digits |
+| `decimal` | `Decimal`: every digit when `Decimal` holds the value exactly, otherwise (an exponent, more than 28 fractional digits) the nearest it holds; past its range (±7.9 × 10^28) a string of its digits |
 | text, `uuid` | string |
 | `date`, `timestamp` | RFC 3339 string (`2024-05-01`, `2024-05-01T12:00:00Z`) |
 | `binary` | blob |
 | object, array | object map, array |
 | null | `()` |
 
-The result is checked against the declared type, strictly. The widenings allowed: an integer for a `float`, `double` or `decimal` field (a `float` result is stored as 32-bit), and a string holding a decimal number for a `decimal` field, written as that number (a value past `Decimal`'s range passed through). A `date` result must be `YYYY-MM-DD`; a `timestamp` result an RFC 3339 timestamp, with or without the offset. A `uuid` result must parse as a uuid. `()` is null, accepted only when `required: false`; an array holds no nulls.
+The result is checked against the declared type, strictly. The one widening allowed: an integer for a `float`, `double` or `decimal` field (a `float` result is stored as 32-bit). A `decimal` result is written with every digit it holds. A `date` result must be `YYYY-MM-DD`; a `timestamp` result an RFC 3339 timestamp, with or without the offset. A `uuid` result must parse as a uuid. `()` is null, accepted only when `required: false`; an array holds no nulls.
+
+- **A decimal past `Decimal`'s range** reaches a script as a string of its digits, and a `decimal` script field refuses a string (`returned a string, expected a decimal (or an integer)`): return such a value to a `keyword` field. A value of exactly ±79228162514264337593543950335 (`Decimal::MAX`) is a decimal, so `+ 1` overflows and fails the document.
+- **`to_float()`** of a decimal is the `f64` nearest its exact value.
 
 ## The sandbox
 
