@@ -1010,8 +1010,16 @@ from the schema, never from the query's untyped literal, and projected as an `in
 `a_schema_without_binary_or_an_object_constant_keeps_its_content_hash`,
 `a_constant_list_mixing_kinds_moves_its_hash` / `_is_stored_unindexed`,
 `a_constant_list_of_one_kind_stays_indexed_and_keeps_its_hash`, `integration`'s
-`a_database_set_to_escape_bytea_output_still_builds_the_bytes`, the `engine` `bytea_output` e2e
-(PgBouncer in transaction mode resetting each server connection, PG 18 for `min`/`max` over `bytea`,
+`a_database_set_to_escape_bytea_output_still_builds_the_bytes`, the `engine` `bytea_output` e2e. **The
+column-type cache follows the table** (`document/mod.rs`'s `ColumnTypes`, `PgDocumentBuilder::column_types`):
+the CLI hands it to `WalChangeCapture::with_column_types`, and the stream drops a table's entries on a
+`Relation` message (Postgres sends one after a definition change) naming another type OID than a cached
+column's (`ColumnTypes::forget_changed`; unchanged types keep them, so a stream start costs no lookup), and a failed document query
+(`failed_query`) drops those of every table its index reads, so a type change never loops the ingest
+engine on a stale cast or `encode`. No query per build. Guards: `stream::tests`'
+`a_relation_message_with_{other,the_cached}_types_*`, `bytea_output`'s `a_column_changing_type_mid_run_*`;
+the same e2e
+(direct, and through PgBouncer in transaction mode resetting each server connection, PG 18 for `min`/`max` over `bytea`,
 `hex` and `escape` databases, backfill and live) and `query::tests`' `a_bytea_*`.
 `values` must be a leaf kind (text/keyword/number/date); the conversion rejects others. An `enum:` field takes an optional `variants:` list (its own
 `EnumBody`/`Field::Enum` entity) — the variants in rank order; empty/omitted = a

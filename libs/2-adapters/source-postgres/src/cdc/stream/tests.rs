@@ -18,6 +18,7 @@ fn state() -> (DecodeState, Arc<Positions>) {
         pending: VecDeque::new(),
         ack: Arc::clone(&ack),
         done: false,
+        column_types: None,
     };
     (decode, ack)
 }
@@ -165,6 +166,38 @@ fn child_relation(identity: u8) -> Vec<u8> {
         m.extend_from_slice(&(-1i32).to_be_bytes());
     }
     m
+}
+
+/// A `Relation` message, sent before a table's first change in a stream and
+/// after its definition changes, drops that table's cached column types when
+/// it names other types than the cache, and no other table's.
+#[test]
+fn a_relation_message_with_other_types_forgets_its_tables_column_types() {
+    let (mut decode, _ack) = state();
+    let column_types = crate::ColumnTypes::default();
+    column_types.cache("public", "child", "parent_id", 17);
+    column_types.cache("public", "parent", "id", 17);
+    decode.column_types = Some(column_types.clone());
+
+    handle_xlog(&mut decode, &child_relation(b'd')).unwrap();
+
+    assert!(!column_types.caches("public", "child"));
+    assert!(column_types.caches("public", "parent"));
+}
+
+/// A `Relation` naming the cached types keeps them: a stream's first one
+/// costs no lookup.
+#[test]
+fn a_relation_message_with_the_cached_types_keeps_them() {
+    let (mut decode, _ack) = state();
+    let column_types = crate::ColumnTypes::default();
+    column_types.cache("public", "child", "id", 23);
+    column_types.cache("public", "child", "parent_id", 23);
+    decode.column_types = Some(column_types.clone());
+
+    handle_xlog(&mut decode, &child_relation(b'd')).unwrap();
+
+    assert!(column_types.caches("public", "child"));
 }
 
 fn text(value: &str) -> Vec<u8> {
@@ -586,7 +619,7 @@ async fn a_confirmation_reaches_the_client_without_a_replication_event() {
     let catalog = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused@127.0.0.1/unused")
         .unwrap();
-    let mut stream = build(client, catalog, Default::default(), Arc::clone(&ack));
+    let mut stream = build(client, catalog, Default::default(), Arc::clone(&ack), None);
     let reader = tokio::spawn(async move { stream.next().await.is_some() });
 
     tokio::time::sleep(Duration::from_millis(50)).await;

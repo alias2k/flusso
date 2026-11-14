@@ -86,6 +86,7 @@ flusso consumes a logical replication **slot** and subscribes to a **publication
 
   A slow or stalled sink still holds the slot back: the confirmed position is the slowest sink's.
 - **The replication connection is named `flusso`.** It shows as `application_name = 'flusso'` in `pg_stat_replication` and `pg_stat_activity`, so its walsender is easy to tell from other consumers'. The SQL connections keep whatever `application_name` the `connection_url` sets; that parameter doesn't rename the replication connection.
+- **A column type change is followed without a restart.** After an `ALTER TABLE … ALTER COLUMN … TYPE` on a table an index reads, the next change on that table is built with the column's new type. A document query that fails anyway (its table changed before flusso read that change) reads the types afresh, and the ingest engine's restart builds it.
 - **Backfill** snapshots the root tables of unseeded indexes before live capture. `--skip-backfill` skips it. A partitioned root is read through the parent, every partition included.
 
 ## Server requirements

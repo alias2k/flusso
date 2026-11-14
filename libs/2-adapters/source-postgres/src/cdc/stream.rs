@@ -35,6 +35,7 @@ use sqlx::PgPool;
 use super::ack::Positions;
 use super::pgoutput::{self, Decoded, Relation};
 use super::replica_identity;
+use crate::ColumnTypes;
 
 /// What the stream needs from the replication connection: its events, and a
 /// place to report the confirmed position. A seam so tests can stand in for
@@ -97,6 +98,9 @@ struct DecodeState {
     ack: Arc<Positions>,
     /// Set once the underlying stream is finished; drains `pending`, then ends.
     done: bool,
+    /// The document builder's column types: a `Relation` naming other types
+    /// than the cached ones drops its table's.
+    column_types: Option<ColumnTypes>,
 }
 
 impl DecodeState {
@@ -129,6 +133,7 @@ pub(crate) fn build<C: Replication>(
     catalog: PgPool,
     pre_image_links: PreImageColumns,
     ack: Arc<Positions>,
+    column_types: Option<ColumnTypes>,
 ) -> BoxStream<'static, Result<LiveChange>> {
     let state = State {
         client,
@@ -144,6 +149,7 @@ pub(crate) fn build<C: Replication>(
             pending: VecDeque::new(),
             ack,
             done: false,
+            column_types,
         },
     };
 
@@ -333,6 +339,16 @@ fn handle(
 fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), SourceError> {
     match pgoutput::decode(data)? {
         Decoded::Relation(relation) => {
+            if let Some(column_types) = &state.column_types {
+                column_types.forget_changed(
+                    relation.namespace.as_ref(),
+                    relation.table.as_ref(),
+                    relation
+                        .columns
+                        .iter()
+                        .map(|column| (column.name.as_ref(), column.type_oid)),
+                );
+            }
             state.unkeyed.push(relation.oid);
             state.relations.insert(relation.oid, relation);
         }

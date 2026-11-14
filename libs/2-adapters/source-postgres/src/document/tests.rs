@@ -87,6 +87,7 @@ fn seed_integer_columns(builder: &PgDocumentBuilder, columns: &[(&str, &str)]) {
             ),
             ColumnMeta {
                 sql_type: "integer".to_owned(),
+                type_oid: 23,
                 base_type: None,
                 base_name: "int4".to_owned(),
                 element_name: None,
@@ -436,6 +437,7 @@ async fn a_self_referencing_row_with_a_null_key_rebuilds_the_parent_its_old_row_
 fn equal_keys_render_alike_except_for_numbers_and_loose_text() {
     let meta = |base_name: &str, deterministic: bool| ColumnMeta {
         sql_type: base_name.to_owned(),
+        type_oid: 0,
         base_type: None,
         base_name: base_name.to_owned(),
         element_name: None,

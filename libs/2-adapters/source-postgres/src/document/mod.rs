@@ -92,8 +92,8 @@ type ColTypeCache = HashMap<(String, String, String), ColumnMeta>;
 /// A table's types can change while flusso runs (`ALTER COLUMN … TYPE`), so
 /// entries are dropped per table: when a document query fails (its retry
 /// looks the types up again), and when the WAL capture this is handed to
-/// reads a `Relation` message, which Postgres sends after a table's
-/// definition changes.
+/// reads a `Relation` message (sent after a table's definition changes)
+/// whose column types differ from the cached ones.
 #[derive(Debug, Clone, Default)]
 pub struct ColumnTypes(Arc<Mutex<ColTypeCache>>);
 
@@ -113,6 +113,57 @@ impl ColumnTypes {
         });
     }
 
+    /// Forget `schema.table`'s cached columns when one of them is gone from
+    /// `columns` (each name with its type OID, as a `Relation` lists them) or
+    /// has another type there. A table whose types are unchanged keeps its
+    /// entries, so a stream's first `Relation` costs no lookup.
+    pub(crate) fn forget_changed<'a>(
+        &self,
+        schema: &str,
+        table: &str,
+        columns: impl Iterator<Item = (&'a str, u32)> + Clone,
+    ) {
+        let changed = self
+            .lock()
+            .iter()
+            .any(|((cached_schema, cached_table, column), meta)| {
+                cached_schema == schema
+                    && cached_table == table
+                    && !columns
+                        .clone()
+                        .any(|(name, type_oid)| name == column && type_oid == meta.type_oid)
+            });
+        if changed {
+            self.forget_table(schema, table);
+        }
+    }
+
+    /// Cache a column of `schema.table` of type `type_oid`, for tests
+    /// elsewhere in the crate.
+    #[cfg(test)]
+    pub(crate) fn cache(&self, schema: &str, table: &str, column: &str, type_oid: u32) {
+        self.insert(
+            (schema.to_owned(), table.to_owned(), column.to_owned()),
+            ColumnMeta {
+                sql_type: "integer".to_owned(),
+                type_oid,
+                base_type: None,
+                base_name: "int4".to_owned(),
+                element_name: None,
+                deterministic: true,
+                nullable: true,
+            },
+        );
+    }
+
+    /// Whether any column of `schema.table` is cached.
+    #[cfg(test)]
+    pub(crate) fn caches(&self, schema: &str, table: &str) -> bool {
+        self.lock().keys().any(|(cached_schema, cached_table, _)| {
+            cached_schema == schema && cached_table == table
+        })
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, ColTypeCache> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -130,6 +181,9 @@ const BUILD_CHUNK: usize = 512;
 #[derive(Debug, Clone)]
 struct ColumnMeta {
     sql_type: String,
+    /// `pg_attribute.atttypid`: the type OID a `Relation` message names the
+    /// column by.
+    type_oid: u32,
     /// A domain's type resolved through every domain; `None` for no domain.
     base_type: Option<String>,
     /// The `pg_type.typname` of the type, through every domain.
@@ -462,6 +516,7 @@ impl PgDocumentBuilder {
         // `to_jsonb` because Postgres before 12 has no such column (and only
         // deterministic collations).
         let sql = "SELECT format_type(a.atttypid, a.atttypmod) AS sql_type, \
+                          a.atttypid::int8 AS type_oid, \
                           b.base_type, b.base_name, el.element_name, \
                           coalesce((SELECT (to_jsonb(c) ->> 'collisdeterministic')::boolean \
                                     FROM pg_collation c WHERE c.oid = a.attcollation), \
@@ -498,6 +553,7 @@ impl PgDocumentBuilder {
         let meta = match row {
             Some(row) => {
                 let sql_type: String = row.try_get("sql_type").map_err(query_err)?;
+                let type_oid: i64 = row.try_get("type_oid").map_err(query_err)?;
                 let base_type: Option<String> = row.try_get("base_type").map_err(query_err)?;
                 let not_null: bool = row.try_get("not_null").map_err(query_err)?;
                 ColumnMeta {
@@ -506,6 +562,7 @@ impl PgDocumentBuilder {
                     element_name: row.try_get("element_name").map_err(query_err)?,
                     deterministic: row.try_get("deterministic").map_err(query_err)?,
                     sql_type,
+                    type_oid: u32::try_from(type_oid).unwrap_or_default(),
                     nullable: !not_null,
                 }
             }
