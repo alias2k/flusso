@@ -161,6 +161,9 @@ jobs:
           set -euo pipefail
           jq -s 'add' bench-out/inprocess.json bench-out/components.json bench-out/scenarios/*/smaller.json > bench-out/smaller.json
           jq -s 'add' bench-out/scenarios/*/bigger.json > bench-out/bigger.json
+          # Records the machine in every point (issue #317); never fails the job.
+          python3 .github/scripts/bench-runner-facts.py bench-out/smaller.json bench-out/bigger.json \
+            || echo "warning: runner facts not recorded"
           jq length bench-out/smaller.json bench-out/bigger.json
 
       - name: Upload the raw results
@@ -205,6 +208,8 @@ jobs:
 
       # Two consecutive main points past 25% (20% for RSS), and past the series'
       # own swing, against the rolling median of the previous five → one issue, kept current, self-closing.
+      # The verdict and the series too noisy to watch go to the job summary; an
+      # unreadable history fails this step and leaves the issue alone.
       - name: Regression check
         env:
           GH_TOKEN: ${{ github.token }}
@@ -213,7 +218,9 @@ jobs:
           git fetch --quiet origin benchmarks
           git show origin/benchmarks:smaller/data.js > /tmp/smaller.js
           git show origin/benchmarks:bigger/data.js > /tmp/bigger.js
-          python3 .github/scripts/bench-regression.py 25 --rss-threshold 20 --issue /tmp/smaller.js /tmp/bigger.js
+          python3 .github/scripts/bench-regression.py 25 --rss-threshold 20 --issue /tmp/smaller.js /tmp/bigger.js \
+            | tee /tmp/regression.txt
+          { echo '### Regression check'; echo '```'; cat /tmp/regression.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       # The storage action pushed with the workflow token, and GitHub does not
       # start workflows from such pushes — so the `benchmarks` push trigger in
