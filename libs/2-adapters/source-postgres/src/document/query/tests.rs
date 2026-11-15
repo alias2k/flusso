@@ -1435,3 +1435,22 @@ fn a_bytea_inside_a_join_and_an_aggregate_renders_as_hex_text() {
         assert!(sql.contains(&expected), "{expected}\n{sql}");
     }
 }
+
+/// A `decimal` past `Decimal`'s range is a `BigDecimal`: it is bound as its
+/// text and cast from `text`, like any key carried as text, so its statement
+/// is not shared with a `numeric`-bound one.
+#[test]
+fn a_big_decimal_key_binds_as_text() {
+    let big = GenericValue::BigDecimal(
+        kernel::BigDecimal::parse("100000000000000000000000000000.5").unwrap(),
+    );
+    assert_eq!(
+        sql::key_cast(&big, "pg_catalog.numeric").as_deref(),
+        Some("::text::pg_catalog.numeric")
+    );
+    let decimal = GenericValue::Decimal("1.5".parse().unwrap());
+    assert_eq!(
+        sql::key_cast(&decimal, "pg_catalog.numeric").as_deref(),
+        Some("::numeric::pg_catalog.numeric")
+    );
+}

@@ -84,3 +84,16 @@ fn an_id_no_row_equals_is_a_tombstone() {
         ["delete", "delete", "upsert"]
     );
 }
+
+/// A `BigDecimal` (a `decimal` past `Decimal`'s range) renders as its exact
+/// text, so the row holding that text serves the id and another number's
+/// does not.
+#[test]
+fn a_big_decimal_key_matches_the_row_holding_its_text() {
+    let big = |text: &str| GenericValue::BigDecimal(kernel::BigDecimal::parse(text).unwrap());
+    let requested = [big("1e30"), big("2e30")];
+    assert_eq!(
+        outcomes(vec![(big("1e30"), body("a"))], &requested),
+        ["upsert", "delete"]
+    );
+}
