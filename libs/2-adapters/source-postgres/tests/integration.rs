@@ -1571,3 +1571,34 @@ fields:
         assert!(first.contains(r#"String("a")"#), "{first}");
     }
 }
+
+/// A server that refuses `SET jit = off` still serves the builder (issue
+/// #335): Postgres 10 has no `jit` parameter, so the `SET` after connect
+/// fails; that is a warning, the connection keeps the server's setting and
+/// the pool opens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_server_that_refuses_the_jit_setting_still_connects() {
+    let container = Postgres::default()
+        .with_tag("10-alpine")
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    let refused = sqlx::query("SET jit = off").execute(&pool).await;
+    assert!(refused.is_err(), "Postgres 10 has no jit parameter");
+    sqlx::query("CREATE TABLE plain (id int PRIMARY KEY)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let spec = SourceSpec::new(BTreeMap::from([(
+        index_name("plain"),
+        schema_from(
+            "version: 1\ntable: plain\nprimary_key: id\nfields:\n  - integer: id\n    required: true\n",
+        ),
+    )]));
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec)).await;
+    assert!(builder.is_ok(), "{:?}", builder.err());
+}
