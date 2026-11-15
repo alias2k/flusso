@@ -1588,3 +1588,46 @@ fn keys_of_several_kinds_keep_their_positions() {
         ]
     );
 }
+
+/// With no column to order by (the document reads nothing on the root but
+/// its key) every row sharing a key builds the same document: a single
+/// build takes any, and a batch orders by its key alone. No `ORDER BY` is
+/// left without a term.
+#[test]
+fn a_tie_break_with_nothing_to_order_by_renders_no_order() {
+    let schema = index(Some("id"), None, vec![col_field("id", "id")]);
+    let any_row = TieBreak::read_columns(&[]);
+    let (single, _) = document_query(
+        &schema,
+        &[(c("id"), GenericValue::Int(7))],
+        &HashMap::new(),
+        &id_types(),
+        &ByteColumns::new(),
+    )
+    .unwrap();
+    let single = first_row(single, &any_row);
+    assert!(
+        single
+            .as_str()
+            .ends_with(r#"WHERE "root"."id" = $1::int4::bigint"#),
+        "{}",
+        single.as_str()
+    );
+    let (batched, _) = documents_query(
+        &schema,
+        &c("id"),
+        &[GenericValue::Int(7)],
+        &HashMap::new(),
+        &id_types(),
+        &ByteColumns::new(),
+        &RootKey::Shared(any_row),
+    )
+    .unwrap();
+    assert!(
+        batched
+            .as_str()
+            .contains(r#"ORDER BY "root"."id") AS "flusso_built""#),
+        "{}",
+        batched.as_str()
+    );
+}

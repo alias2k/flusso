@@ -1298,6 +1298,8 @@ async fn a_key_several_rows_share_builds_the_same_row_both_ways() {
         "CREATE TABLE ranged_old PARTITION OF ranged FOR VALUES FROM ('2000-01-01') TO ('2020-01-01')",
         "CREATE TABLE ranged_new PARTITION OF ranged FOR VALUES FROM ('2020-01-01') TO ('2040-01-01')",
         "INSERT INTO keyless VALUES (1, 'b'), (1, 'a'), (2, 'c'), (3, 'e'), (3, 'd'), (3, 'f')",
+        "CREATE TABLE kids (id int PRIMARY KEY, keyless_id int NOT NULL)",
+        "INSERT INTO kids VALUES (1, 1), (2, 1), (3, 3)",
         "INSERT INTO composite VALUES (1, 2, 'b'), (1, 1, 'a'), (2, 1, 'c'), (3, 3, 'e'), \
          (3, 2, 'd'), (3, 1, 'f')",
         "INSERT INTO ranged VALUES (1, '2030-01-01', 'b'), (1, '2010-01-01', 'a'), \
@@ -1323,6 +1325,22 @@ fields:
         (index_name("keyless"), schema("keyless")),
         (index_name("composite"), schema("composite")),
         (index_name("ranged"), schema("ranged")),
+        (
+            index_name("counted"),
+            schema_from(
+                "
+version: 1
+table: keyless
+primary_key: id
+fields:
+  - integer: id
+    required: true
+  - count: kidCount
+    table: kids
+    foreign_key: keyless_id
+",
+            ),
+        ),
     ]));
     let builder = PgDocumentBuilder::connect(&url, Arc::new(spec))
         .await
@@ -1351,10 +1369,33 @@ fields:
                 _ => None,
             })
             .collect();
-        assert_eq!(names, expected, "{index}: the row whose text sorts first");
+        assert_eq!(
+            names, expected,
+            "{index}: the row its tie-break orders first"
+        );
         assert!(matches!(forward[3], Document::Delete { .. }));
         assert_eq!(format!("{:?}", backward[4]), format!("{:?}", forward[0]));
     }
+
+    // A document that reads no root column but its key: every row sharing
+    // the key builds the same document, so any of them answers.
+    let counted = assert_both_builds_agree(&builder, &int_ids("counted", [1, 2, 3, 4])).await;
+    let bodies: Vec<String> = counted
+        .iter()
+        .map(|document| match document {
+            Document::Upsert { body, .. } => format!("{}", sink::to_json(body)),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        bodies[..3],
+        [
+            r#"{"id":1,"kidCount":2}"#,
+            r#"{"id":2,"kidCount":0}"#,
+            r#"{"id":3,"kidCount":1}"#
+        ]
+    );
+    assert_both_builds_agree(&builder, &int_ids("counted", [3, 1, 1])).await;
 }
 
 /// The batched build pairs rows with positions in a hash or merge join, never
