@@ -182,9 +182,95 @@ pub(super) fn bind_param<'q>(query: PgQuery<'q>, value: &GenericValue) -> Result
         GenericValue::Timestamp(ts) => query.bind(*ts),
         GenericValue::TimestampTz(ts) => query.bind(*ts),
         GenericValue::Bytes(bytes) => query.bind(bytes.clone()),
-        GenericValue::Null | GenericValue::Array(_) | GenericValue::Map(_) => {
+        GenericValue::Array(items) => bind_array(query, items)?,
+        GenericValue::Null | GenericValue::Map(_) => {
             return Err(SourceError::Query(
-                "cannot bind null, array, or map as a parameter".into(),
+                "cannot bind null or map as a parameter".into(),
+            ));
+        }
+    })
+}
+
+/// Bind an array of scalars of one kind (a batch's keys, [`key_list`]) as
+/// the array of the type [`sql::bound_type`] names for them.
+fn bind_array<'q>(query: PgQuery<'q>, items: &[GenericValue]) -> Result<PgQuery<'q>> {
+    fn all<T>(items: &[GenericValue], take: impl Fn(&GenericValue) -> Option<T>) -> Result<Vec<T>> {
+        items
+            .iter()
+            .map(|item| {
+                take(item).ok_or_else(|| {
+                    SourceError::Query("internal: an array parameter mixes kinds".into())
+                })
+            })
+            .collect()
+    }
+    use GenericValue as V;
+    Ok(match items.first() {
+        None => {
+            return Err(SourceError::Query(
+                "internal: an empty array parameter".into(),
+            ));
+        }
+        Some(V::Bool(_)) => query.bind(all(items, |v| match v {
+            V::Bool(b) => Some(*b),
+            _ => None,
+        })?),
+        Some(V::SmallInt(_)) => query.bind(all(items, |v| match v {
+            V::SmallInt(i) => Some(*i),
+            _ => None,
+        })?),
+        Some(V::Int(_)) => query.bind(all(items, |v| match v {
+            V::Int(i) => Some(*i),
+            _ => None,
+        })?),
+        Some(V::BigInt(_)) => query.bind(all(items, |v| match v {
+            V::BigInt(i) => Some(*i),
+            _ => None,
+        })?),
+        Some(V::Float(_)) => query.bind(all(items, |v| match v {
+            V::Float(f) => Some(*f),
+            _ => None,
+        })?),
+        Some(V::Double(_)) => query.bind(all(items, |v| match v {
+            V::Double(f) => Some(*f),
+            _ => None,
+        })?),
+        Some(V::Decimal(_)) => query.bind(all(items, |v| match v {
+            V::Decimal(d) => Some(*d),
+            _ => None,
+        })?),
+        Some(V::String(_) | V::BigDecimal(_)) => query.bind(all(items, |v| match v {
+            V::String(s) => Some(s.clone()),
+            V::BigDecimal(d) => Some(d.as_str().to_owned()),
+            _ => None,
+        })?),
+        Some(V::Uuid(_)) => query.bind(all(items, |v| match v {
+            V::Uuid(u) => Some(*u),
+            _ => None,
+        })?),
+        Some(V::Date(_)) => query.bind(all(items, |v| match v {
+            V::Date(d) => Some(*d),
+            _ => None,
+        })?),
+        Some(V::Time(_)) => query.bind(all(items, |v| match v {
+            V::Time(t) => Some(*t),
+            _ => None,
+        })?),
+        Some(V::Timestamp(_)) => query.bind(all(items, |v| match v {
+            V::Timestamp(t) => Some(*t),
+            _ => None,
+        })?),
+        Some(V::TimestampTz(_)) => query.bind(all(items, |v| match v {
+            V::TimestampTz(t) => Some(*t),
+            _ => None,
+        })?),
+        Some(V::Bytes(_)) => query.bind(all(items, |v| match v {
+            V::Bytes(b) => Some(b.clone()),
+            _ => None,
+        })?),
+        Some(V::Null | V::Array(_) | V::Map(_)) => {
+            return Err(SourceError::Query(
+                "cannot bind null, array, or map in an array parameter".into(),
             ));
         }
     })
@@ -372,13 +458,9 @@ fn batched(
         schema.primary_key.as_ref(),
     )?;
 
-    let mut values = Vec::with_capacity(keys.len());
-    for key in keys {
-        values.push(builder.key_placeholder(key.clone(), &schema.table, pk_column)?);
-    }
-    let values = values.join(", ");
+    let requested = key_list(&mut builder, keys, &schema.table, pk_column)?;
     let root_pk = qcol(ROOT, pk_column);
-    let mut predicate = format!("{root_pk} = ANY(ARRAY[{values}])");
+    let mut predicate = format!("{root_pk} = ANY({})", requested.any);
     if let Some(soft_delete) = builder.soft_delete_predicate(schema)? {
         predicate = format!("{predicate} AND NOT ({soft_delete})");
     }
@@ -416,14 +498,74 @@ fn batched(
     let paired = format!(
         "SELECT \"{KEYS}\".\"{POSITION}\" AS \"{DOC_POSITION}\", \"{BUILT}\".\"document\" \
          FROM ({built}) AS \"{BUILT}\" \
-         FULL JOIN unnest(ARRAY[{values}]) WITH ORDINALITY AS \"{KEYS}\"(\"{KEY}\", \"{POSITION}\") \
-         ON \"{BUILT}\".\"{KEY}\" = \"{KEYS}\".\"{KEY}\" OFFSET 0"
+         FULL JOIN {rows} AS \"{KEYS}\"(\"{KEY}\", \"{POSITION}\") \
+         ON \"{BUILT}\".\"{KEY}\" = \"{KEYS}\".\"{KEY}\" OFFSET 0",
+        rows = requested.rows,
     );
     let sql = format!(
         "SELECT \"{DOC_POSITION}\", \"document\" FROM ({paired}) AS \"{PAIRED}\" \
          WHERE \"{PAIRED}\".\"document\" IS NOT NULL"
     );
     Ok((SqlString::new(sql), builder.params))
+}
+
+/// A batch's requested keys as SQL: `any`, the array `= ANY(…)` reads, and
+/// `rows`, a `FROM` item of `(key, position)`.
+#[derive(Debug)]
+struct KeyList {
+    any: String,
+    rows: String,
+}
+
+/// The keys as one array parameter per type they are bound as, each cast
+/// element by element to the key column's type ([`Builder::key_array`]), in
+/// a fixed order of those types. The statement text so depends on the kinds
+/// of keys, never on how many there are, and names every type it binds.
+///
+/// Keys of one kind (the usual batch) keep their order, so `unnest … WITH
+/// ORDINALITY` numbers them. Keys of several kinds are unnested beside a
+/// `bigint[]` of their positions, one `unnest` per kind, so each keeps the
+/// position it was requested at.
+fn key_list(
+    builder: &mut Builder<'_>,
+    keys: &[GenericValue],
+    table: &TableName,
+    column: &ColumnName,
+) -> Result<KeyList> {
+    let mut kinds: Vec<(&'static str, Vec<GenericValue>, Vec<i64>)> = Vec::new();
+    for (at, key) in keys.iter().enumerate() {
+        let bound = sql::bound_type(key)
+            .ok_or_else(|| SourceError::Query("cannot bind null, array, or map as a key".into()))?;
+        let position = i64::try_from(at + 1)
+            .map_err(|_| SourceError::Query("too many keys in one batch".into()))?;
+        match kinds.iter_mut().find(|(kind, _, _)| *kind == bound) {
+            Some((_, values, positions)) => {
+                values.push(key.clone());
+                positions.push(position);
+            }
+            None => kinds.push((bound, vec![key.clone()], vec![position])),
+        }
+    }
+    kinds.sort_by_key(|(kind, _, _)| *kind);
+    if let [(bound, values, _)] = kinds.as_mut_slice() {
+        let array = builder.key_array(std::mem::take(values), bound, table, column)?;
+        return Ok(KeyList {
+            rows: format!("unnest({array}) WITH ORDINALITY"),
+            any: array,
+        });
+    }
+    let mut arrays = Vec::with_capacity(kinds.len());
+    let mut unnests = Vec::with_capacity(kinds.len());
+    for (bound, values, positions) in kinds {
+        let array = builder.key_array(values, bound, table, column)?;
+        let positions = builder.positions(positions);
+        unnests.push(format!("SELECT * FROM unnest({array}, {positions})"));
+        arrays.push(array);
+    }
+    Ok(KeyList {
+        any: arrays.join(" || "),
+        rows: format!("({})", unnests.join(" UNION ALL ")),
+    })
 }
 
 /// Build the query that reads back the root rows whose key equals one of

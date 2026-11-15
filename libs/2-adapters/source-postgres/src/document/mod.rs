@@ -202,10 +202,10 @@ impl ColumnTypes {
     }
 }
 
-/// Most keys per batched `build_many` query. Bounds the SQL length and the
-/// prepared-statement cache churn from the key array growing with key count
-/// (one statement text per array length); larger id sets are split across
-/// several round-trips.
+/// Most keys per batched `build_many` query. The keys travel as one array
+/// parameter per kind, so the statement's text no longer grows with them;
+/// this bounds what one round-trip builds and holds. Larger id sets are split
+/// across several.
 const BUILD_CHUNK: usize = 512;
 
 /// What the Postgres catalog says about a column: its cast-ready SQL type and
