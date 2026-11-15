@@ -82,11 +82,13 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   testcontainers without them. **`just review-ab [base]`** (`review-ab.sh`, issue #340) is the
   reviewer's A/B: an exclusive `flock` on `~/.cache/flusso/review-ab/lock` for the whole run (a second run
   fails at once); containers of a killed run removed (`review-ab-housekeeping.py stale`: labelled `flusso.review-ab.owner` with this host and pid namespace,
-  pid gone; the cache must carry `.flusso-review-ab` or a `stamp.json`, so `--clean` deletes nothing else); the base in a warm
+  pid gone; `review-ab-housekeeping.py cache-state`: the cache must be new, empty, carry `.flusso-review-ab`, or be
+  a pre-marker cache whose `stamp.json` has exactly a stamp's keys with nothing foreign beside it; anything else is
+  refused and left untouched); the base in a warm
   tree checked out with a private index (no `git worktree`), reset to the base commit before each build,
   with its own target dir; the head's bench sources laid over it (`--own-benches` opts out and refuses a
   base whose benches predate `REVIEW_AB_PG_URL`); reused without cargo when `review-ab-stamp.py check`
-  says it is current (commit, toolchain, `RUSTFLAGS`/`CARGO_PROFILE_*` + `bench-in-process.sh`'s hash + cargo config files,
+  says it is current (commit, toolchain, `RUSTFLAGS`/`CARGO_PROFILE_*` + `bench-in-process.sh`'s hash + `CARGO_TARGET_<TRIPLE>_{RUSTFLAGS,LINKER}` + cargo config files,
   overlaid files, the executables' sha256, the benches asked for); `bench-in-process.sh` builds only those
   (`BENCH_SET=docker BENCH_ONLY=… BENCH_BUILD_ONLY=1`); named `flusso-review-<pid>-*` containers
   (`--pg 14,16,18`, an OpenSearch for `pipeline`) removed by a trap; CPU pinning (`review-ab-housekeeping.py cpus`: the bench
@@ -98,7 +100,7 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   each side's two fastest runs, which narrows with more rounds, pinned by `SpreadSimulation`), each
   flagged case is re-run alone (`--exact`, base then head) and `--confirm` decides with the gate's rule (`confirmed()`,
   shared with `bench-gate.sh`'s path); exit 1 only on a confirmed case. Never fetches. Keeps the last 5
-  `target/review-ab/<timestamp>` dirs; `--clean` deletes the cache. Tests: `test_review_ab.py` (the script
+  `target/review-ab/<timestamp>` dirs; `--clean` deletes the cache, `--clean-results` the results. Tests: `test_review_ab.py` (the script
   end to end over fake `cargo`/`docker`/bench executables in a throwaway repo). (3) **In-process benches**, no Docker, the PR gate: `engine`'s `engine` (both engines
   over the channel stream with mocks), `source-postgres`'s `pgoutput` (the decoder over the recorded
   `benches/fixtures/pgoutput.bin`; `tests/record_pgoutput.rs`, an `#[ignore]`d Docker test in the

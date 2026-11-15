@@ -3,6 +3,7 @@
 
     review-ab-housekeeping.py stale --owner OWNER < listing   # prints the stale container names
     review-ab-housekeeping.py prune <dir> <keep>
+    review-ab-housekeeping.py cache-state <dir>      # new | empty | ours | legacy | foreign
     review-ab-housekeeping.py cpus --nproc N --taskset 0|1 [--bench LIST] [--servers LIST] [--off]
 
 `stale` reads `<name>\t<owner label>` lines and prints the containers a run
@@ -11,6 +12,12 @@ with this `OWNER` (host name and pid namespace, `flusso.review-ab.owner`), and
 whose `<pid>` is no longer running. A pid only means something in its own
 namespace, so a container another namespace started (a devcontainer sharing the
 Docker socket) or one without the label is never printed.
+
+`cache-state` says whether `<dir>` may be used (and deleted) as review-ab's
+cache: `new` (missing), `empty`, `ours` (it carries `.flusso-review-ab`),
+`legacy` (a cache from before the marker: its `stamp.json` holds exactly a
+stamp's keys and nothing but the tool's own entries sit beside it) or
+`foreign` (anything else, never written to or deleted).
 
 `cpus` prints three lines: the cores the bench process runs on (a `taskset
 -c` list), the cores the Postgres and OpenSearch containers get
@@ -25,6 +32,7 @@ overlap (exit 2 otherwise).
 `YYYYMMDD-HHMMSS`, so the name orders them) and deletes the rest. Anything else
 in `<dir>` is left alone.
 """
+import json
 import os
 import pathlib
 import re
@@ -59,6 +67,30 @@ def prune(root: pathlib.Path, keep: int) -> None:
     runs = sorted(p for p in root.iterdir() if p.is_dir() and RUN_DIR.fullmatch(p.name))
     for old in runs[: max(len(runs) - keep, 0)]:
         shutil.rmtree(old)
+
+
+MARKER = ".flusso-review-ab"
+CACHE_ENTRIES = {"lock", "index", "index.lock", "stamp.json", "tree", "target", MARKER}
+STAMP_KEYS = ({"commit", "toolchain", "files", "executables"}, {"commit", "toolchain", "build_env", "files", "executables"})
+
+
+def cache_state(root: pathlib.Path) -> str:
+    if not root.exists():
+        return "new"
+    if not root.is_dir():
+        return "foreign"
+    entries = {p.name for p in root.iterdir()}
+    if not entries:
+        return "empty"
+    if MARKER in entries:
+        return "ours"
+    try:
+        stamp = json.loads((root / "stamp.json").read_text())
+    except (OSError, ValueError):
+        return "foreign"
+    if isinstance(stamp, dict) and set(stamp) in STAMP_KEYS and entries <= CACHE_ENTRIES:
+        return "legacy"
+    return "foreign"
 
 
 def cores(spec: str) -> set[int]:
@@ -109,6 +141,9 @@ def cpus(argv: list[str]) -> int:
 
 
 def main() -> int:
+    if sys.argv[1:2] == ["cache-state"] and len(sys.argv) == 3:
+        print(cache_state(pathlib.Path(sys.argv[2])))
+        return 0
     if sys.argv[1:2] == ["cpus"]:
         return cpus(sys.argv[2:])
     if sys.argv[1:3] == ["stale", "--owner"] and len(sys.argv) == 4:

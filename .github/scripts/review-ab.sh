@@ -4,7 +4,8 @@
 #   review-ab.sh [<base>] [--pg 14,16,18] [--bench postgres,cases,pipeline]
 #                [--filter <criterion filter>] [--limit <percent>] [--rounds <n>]
 #                [--own-benches] [--bench-cpus LIST --server-cpus LIST | --no-pin]
-#   review-ab.sh --clean
+#   review-ab.sh --clean            # the warm cache (~/.cache/flusso/review-ab)
+#   review-ab.sh --clean-results    # the results under <head target>/review-ab
 #
 # <base> defaults to origin/main, as last fetched: the command never fetches.
 # Run from the head tree (the working tree, uncommitted changes included).
@@ -13,8 +14,9 @@
 # 1. One run at a time: an exclusive flock on `$FLUSSO_REVIEW_HOME/lock`
 #    (default ~/.cache/flusso/review-ab) for the whole run, since the warm tree,
 #    its target dir and the stamp are shared. A second run fails at once.
-#    The cache must carry its marker (`.flusso-review-ab`), or be new or empty:
-#    no other directory is written to or deleted. Containers a killed run left
+#    The cache must carry its marker (`.flusso-review-ab`), be new or empty, or
+#    be a pre-marker cache (a real stamp, nothing foreign beside it): no other
+#    directory is written to or deleted. Containers a killed run left
 #    (`flusso-review-<pid>-*`, labelled with this host and pid namespace, pid
 #    gone) are removed, and old result dirs pruned to the last 5.
 # 2. The base is checked out into the warm tree with a private index (no git
@@ -44,7 +46,7 @@
 #    a confirmed case. Results: `<head target>/review-ab/<timestamp>/`.
 set -euo pipefail
 
-usage="usage: review-ab.sh [<base>] [--pg 16] [--bench postgres,cases,pipeline] [--filter <f>] [--limit 5] [--rounds 3] [--own-benches] [--bench-cpus LIST --server-cpus LIST | --no-pin] | --clean"
+usage="usage: review-ab.sh [<base>] [--pg 16] [--bench postgres,cases,pipeline] [--filter <f>] [--limit 5] [--rounds 3] [--own-benches] [--bench-cpus LIST --server-cpus LIST | --no-pin] | --clean | --clean-results"
 base=origin/main
 pg_versions=16
 benches=postgres,cases,pipeline
@@ -53,6 +55,7 @@ limit=5
 rounds=3
 own_benches=0
 clean=0
+clean_results=0
 keep=5
 bench_cpus=${REVIEW_AB_BENCH_CPUS:-}
 server_cpus=${REVIEW_AB_SERVER_CPUS:-}
@@ -70,6 +73,7 @@ while [ $# -gt 0 ]; do
     --server-cpus) server_cpus=${2:?$usage}; shift 2 ;;
     --no-pin) pin=0; shift ;;
     --clean) clean=1; shift ;;
+    --clean-results) clean_results=1; shift ;;
     -h | --help) echo "$usage"; exit 0 ;;
     -*) echo "$usage" >&2; exit 2 ;;
     *)
@@ -88,30 +92,33 @@ head_target=$(realpath -m "${CARGO_TARGET_DIR:-$head_tree/target}")
 results=$head_target/review-ab
 stamp=$home/stamp.json
 
-# The cache is ours only if it carries the marker (or is new or empty, or a
-# cache from before the marker, recognised by its stamp.json): a
+# The cache is ours only if it carries the marker, is new or empty, or is a
+# cache from before the marker (a real stamp, nothing foreign beside it): a
 # FLUSSO_REVIEW_HOME pointing anywhere else is never written to or deleted.
 marker=$home/.flusso-review-ab
-if [ ! -e "$home" ] || [ -z "$(ls -A "$home" 2>/dev/null)" ]; then
-  if [ "$clean" -eq 0 ]; then
-    mkdir -p "$home"
-    : >"$marker"
-  fi
-elif [ ! -f "$marker" ] && [ -f "$home/stamp.json" ]; then
-  : >"$marker"
-elif [ ! -f "$marker" ]; then
-  echo "error: $home is not a review-ab cache (no $(basename "$marker")); set FLUSSO_REVIEW_HOME to an empty or new directory" >&2
+cache=$(python3 "$scripts/review-ab-housekeeping.py" cache-state "$home")
+if [ "$cache" = foreign ]; then
+  echo "error: $home is not a review-ab cache; FLUSSO_REVIEW_HOME must be new, empty, or an existing review-ab cache" >&2
   exit 2
 fi
-if [ "$clean" -eq 1 ] && { [ "$home" = / ] || [ "$home" = "$(realpath -m "$HOME")" ]; }; then
-  echo "error: refusing to delete $home" >&2
-  exit 2
-fi
-
-if [ "$clean" -eq 1 ] && [ ! -e "$home" ]; then
+if [ "$clean_results" -eq 1 ]; then
+  [ -e "$results" ] && echo "removing $results ($(du -sh "$results" 2>/dev/null | cut -f1))"
   rm -rf "$results"
-  echo "nothing to remove at $home; removed $results"
-  exit 0
+fi
+if [ "$clean" -eq 1 ]; then
+  if [ "$cache" = new ] || [ "$cache" = empty ]; then
+    echo "nothing to clean at $home"
+    exit 0
+  fi
+  if [ "$home" = / ] || [ "$home" = "$(realpath -m "$HOME")" ]; then
+    echo "error: refusing to delete $home" >&2
+    exit 2
+  fi
+fi
+[ "$clean" -eq 1 ] || [ "$clean_results" -eq 0 ] || exit 0
+if [ "$clean" -eq 0 ]; then
+  mkdir -p "$home"
+  [ "$cache" = ours ] || : >"$marker"
 fi
 exec 9>"$home/lock"
 if ! flock -n 9; then
@@ -120,10 +127,8 @@ if ! flock -n 9; then
 fi
 
 if [ "$clean" -eq 1 ]; then
-  for path in "$home" "$results"; do
-    [ -e "$path" ] && echo "removing $path ($(du -sh "$path" 2>/dev/null | cut -f1))"
-  done
-  rm -rf "$home" "$results"
+  echo "removing $home ($(du -sh "$home" 2>/dev/null | cut -f1)), the warm base tree and its build"
+  rm -rf "$home"
   exit 0
 fi
 
@@ -176,7 +181,7 @@ for rel in "${overlay[@]}"; do
   stamp_args+=(--file "$rel")
 done
 build_env() {
-  env | grep -E '^(RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_RUSTFLAGS|CARGO_PROFILE_[A-Z0-9_]+)=' | sort || true
+  env | grep -E '^(RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_RUSTFLAGS|CARGO_PROFILE_[A-Z0-9_]+|CARGO_TARGET_[A-Z0-9_]+_(RUSTFLAGS|LINKER))=' | sort || true
   echo "bench-in-process.sh $(sha256sum <"$scripts/bench-in-process.sh" | cut -d' ' -f1)"
   # Cargo's own configuration: $CARGO_HOME's, then every .cargo/ from the base
   # tree up to /. An absent file contributes nothing.

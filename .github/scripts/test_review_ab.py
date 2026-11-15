@@ -631,6 +631,18 @@ class Script(unittest.TestCase):
         result = self.review(self.with_cases, "--bench", "cases")
         self.assertIn("build settings changed", result.stdout)
 
+    def test_a_target_specific_rustflags_change_rebuilds_the_base(self) -> None:
+        self.assertEqual(self.review(self.with_cases, "--bench", "cases").returncode, 0)
+        result = self.review(
+            self.with_cases, "--bench", "cases", CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-Ctarget-cpu=native"
+        )
+        self.assertIn("build settings changed", result.stdout)
+
+    def test_a_target_specific_linker_change_rebuilds_the_base(self) -> None:
+        self.assertEqual(self.review(self.with_cases, "--bench", "cases").returncode, 0)
+        result = self.review(self.with_cases, "--bench", "cases", CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="clang")
+        self.assertIn("build settings changed", result.stdout)
+
     def test_a_cargo_home_config_change_rebuilds_the_base(self) -> None:
         cargo_home = self.dir / "cargo-home"
         cargo_home.mkdir()
@@ -778,7 +790,12 @@ class Script(unittest.TestCase):
 
     def test_a_cache_from_before_the_marker_is_recognised_by_its_stamp(self) -> None:
         self.home.mkdir(parents=True)
-        (self.home / "stamp.json").write_text("{}")
+        (self.home / "stamp.json").write_text(
+            json.dumps({"commit": "a", "toolchain": "t", "files": {}, "executables": {}})
+        )
+        for name in ("tree", "target"):
+            (self.home / name).mkdir()
+        (self.home / "lock").write_text("")
         result = self.review(self.with_cases, "--bench", "cases")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue((self.home / ".flusso-review-ab").is_file())
@@ -788,13 +805,49 @@ class Script(unittest.TestCase):
         result = self.review("--clean")
         self.assertIn(f"removing {self.home}", result.stdout)
 
-    def test_clean_removes_the_cache_and_the_results(self) -> None:
+    def test_clean_removes_the_cache_and_keeps_the_results(self) -> None:
         self.review(self.with_cases, "--bench", "cases")
         self.assertTrue(self.home.is_dir())
         result = self.review("--clean")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(self.home.exists())
+        self.assertTrue((self.dir / "head-target" / "review-ab").is_dir())
+
+    def test_clean_results_removes_the_results(self) -> None:
+        self.review(self.with_cases, "--bench", "cases")
+        result = self.review("--clean-results")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("removing " + str(self.dir / "head-target" / "review-ab"), result.stdout)
         self.assertFalse((self.dir / "head-target" / "review-ab").exists())
+        self.assertTrue(self.home.is_dir())
+
+    def test_clean_leaves_an_empty_folder_it_did_not_create(self) -> None:
+        empty = self.dir / "empty"
+        empty.mkdir()
+        result = self.review("--clean", FLUSSO_REVIEW_HOME=str(empty))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("nothing to clean", result.stdout)
+        self.assertTrue(empty.is_dir())
+
+    def foreign(self, stamp: str) -> pathlib.Path:
+        other = self.dir / "notes"
+        other.mkdir()
+        (other / "stamp.json").write_text(stamp)
+        (other / "precious").write_text("keep me")
+        return other
+
+    def assert_untouched(self, result: subprocess.CompletedProcess, other: pathlib.Path) -> None:
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertEqual(sorted(p.name for p in other.iterdir()), ["precious", "stamp.json"])
+
+    def test_a_stamp_json_that_is_not_a_stamp_is_not_a_cache(self) -> None:
+        other = self.foreign("my notes")
+        self.assert_untouched(self.review("--clean", FLUSSO_REVIEW_HOME=str(other)), other)
+        self.assert_untouched(self.review(self.with_cases, "--bench", "cases", FLUSSO_REVIEW_HOME=str(other)), other)
+
+    def test_a_valid_stamp_beside_a_foreign_file_is_not_a_cache(self) -> None:
+        other = self.foreign(json.dumps({"commit": "a", "toolchain": "t", "build_env": "", "files": {}, "executables": {}}))
+        self.assert_untouched(self.review("--clean", FLUSSO_REVIEW_HOME=str(other)), other)
 
 
 if __name__ == "__main__":
