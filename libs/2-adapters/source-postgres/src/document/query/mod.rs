@@ -115,15 +115,6 @@ pub(super) struct Shape<'a> {
     pub(super) form: KeyForm,
 }
 
-impl<'a> From<&'a RootKey> for Shape<'a> {
-    fn from(root_key: &'a RootKey) -> Self {
-        Self {
-            root_key,
-            form: KeyForm::Constructor,
-        }
-    }
-}
-
 /// How the rows sharing a key are ordered to pick the one that builds: an
 /// `ORDER BY` list over the root row. It reads no column the document
 /// doesn't read, so a wide column the document leaves alone is never fetched:
@@ -447,21 +438,21 @@ pub(super) fn document_query(
 /// The pairing costs a light document about a quarter of its build, so a
 /// batch whose keys pair by value (`matching::pairs_by_key`) runs the inner
 /// level alone instead: [`documents_by_key_query`].
-pub(super) fn documents_query<'a>(
+pub(super) fn documents_query(
     schema: &IndexSchema,
     pk_column: &ColumnName,
     keys: &[GenericValue],
     pks: &HashMap<String, ColumnName>,
     col_types: &HashMap<(String, String), String>,
     bytes: &ByteColumns,
-    shape: impl Into<Shape<'a>>,
+    shape: Shape<'_>,
 ) -> Result<(SqlString, Vec<GenericValue>)> {
     batched(
         schema,
         pk_column,
         keys,
         (pks, col_types, bytes),
-        shape.into(),
+        shape,
         None,
     )
 }
@@ -471,21 +462,21 @@ pub(super) fn documents_query<'a>(
 /// `base_name`, a deterministic collation) and every key is of the kind the
 /// column reads back as. Main's own query: the inner level alone, selecting
 /// the row's key under [`DOC_KEY`] beside its document, with no join.
-pub(super) fn documents_by_key_query<'a>(
+pub(super) fn documents_by_key_query(
     schema: &IndexSchema,
     pk_column: &ColumnName,
     keys: &[GenericValue],
     pks: &HashMap<String, ColumnName>,
     col_types: &HashMap<(String, String), String>,
     bytes: &ByteColumns,
-    (shape, key_type, base_name): (impl Into<Shape<'a>>, &str, &str),
+    (shape, key_type, base_name): (Shape<'_>, &str, &str),
 ) -> Result<(SqlString, Vec<GenericValue>)> {
     batched(
         schema,
         pk_column,
         keys,
         (pks, col_types, bytes),
-        shape.into(),
+        shape,
         Some((key_type, base_name)),
     )
 }

@@ -10,6 +10,14 @@ use kernel::{
 
 use super::*;
 
+/// A batch written as an array constructor, as one under sixteen keys is.
+fn constructor(root_key: &RootKey) -> Shape<'_> {
+    Shape {
+        root_key,
+        form: KeyForm::Constructor,
+    }
+}
+
 fn db() -> DatabaseSchema {
     DatabaseSchema::try_new("public").unwrap()
 }
@@ -129,7 +137,7 @@ fn keyed_predicate_casts_a_uuid_primary_key() {
         &HashMap::new(),
         &col_types,
         &ByteColumns::new(),
-        &RootKey::Unique,
+        constructor(&RootKey::Unique),
     )
     .unwrap();
     assert!(
@@ -178,7 +186,7 @@ fn root_filters_fold_into_both_query_forms() {
         &HashMap::new(),
         &col_types,
         &ByteColumns::new(),
-        &RootKey::Unique,
+        constructor(&RootKey::Unique),
     )
     .unwrap();
     assert!(
@@ -548,7 +556,7 @@ fn keys_bound_as_different_types_are_different_statements() {
             &HashMap::new(),
             &id_types(),
             &ByteColumns::new(),
-            &RootKey::Unique,
+            constructor(&RootKey::Unique),
         )
         .unwrap();
         let (reverse, _) = reverse_query(
@@ -582,7 +590,7 @@ fn documents_query_pairs_each_key_with_its_position() {
         &HashMap::new(),
         &id_types(),
         &ByteColumns::new(),
-        &RootKey::Unique,
+        constructor(&RootKey::Unique),
     )
     .unwrap();
     assert_eq!(
@@ -616,7 +624,7 @@ fn documents_query_folds_soft_delete_into_the_root_lookup() {
         &HashMap::new(),
         &id_types(),
         &ByteColumns::new(),
-        &RootKey::Unique,
+        constructor(&RootKey::Unique),
     )
     .unwrap();
     assert!(sql.as_str().contains(
@@ -664,7 +672,7 @@ fn soft_delete_field_inside_a_relation_reads_the_root_column() {
         &pks,
         &id_types(),
         &ByteColumns::new(),
-        &RootKey::Unique,
+        constructor(&RootKey::Unique),
     )
     .unwrap();
     assert!(
@@ -756,7 +764,7 @@ fn a_key_carried_as_text_is_cast_from_text() {
         &HashMap::new(),
         &col_types,
         &ByteColumns::new(),
-        &RootKey::Unique,
+        constructor(&RootKey::Unique),
     )
     .unwrap();
     assert!(
@@ -1305,7 +1313,7 @@ fn bytes_sql(fields: Vec<Field>, pks: &HashMap<String, ColumnName>, bytes: &Byte
         pks,
         &id_types(),
         bytes,
-        &RootKey::Unique,
+        constructor(&RootKey::Unique),
     )
     .unwrap();
     let object = |sql: &str| {
@@ -1488,7 +1496,7 @@ fn a_shared_key_picks_the_row_its_tie_break_orders_first() {
         &HashMap::new(),
         &id_types(),
         &ByteColumns::new(),
-        &RootKey::Shared(by_primary_key),
+        constructor(&RootKey::Shared(by_primary_key)),
     )
     .unwrap();
     assert!(
@@ -1543,7 +1551,7 @@ fn a_batch_paired_by_key_selects_each_rows_key_and_no_join() {
         &HashMap::new(),
         &id_types(),
         &ByteColumns::new(),
-        (&RootKey::Unique, "pg_catalog.int8", "int8"),
+        (constructor(&RootKey::Unique), "pg_catalog.int8", "int8"),
     )
     .unwrap();
     assert_eq!(
@@ -1572,7 +1580,7 @@ fn keys_of_several_kinds_keep_their_positions() {
         &HashMap::new(),
         &id_types(),
         &ByteColumns::new(),
-        &RootKey::Unique,
+        constructor(&RootKey::Unique),
     )
     .unwrap();
     assert!(
@@ -1632,7 +1640,7 @@ fn a_tie_break_with_nothing_to_order_by_renders_no_order() {
         &HashMap::new(),
         &id_types(),
         &ByteColumns::new(),
-        &RootKey::Shared(any_row),
+        constructor(&RootKey::Shared(any_row)),
     )
     .unwrap();
     assert!(
