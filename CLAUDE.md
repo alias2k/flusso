@@ -1104,9 +1104,11 @@ loop rescanning the materialized documents per key — `integration`'s
 beside the document; `document/matching.rs`'s `match_rows` pairs by position alone (no Rust cast or
 equality: Postgres's input/output forms are open-ended), an unanswered position is a tombstone, and a
 row matched by several positions answers each under its own id. A batch whose keys pair by value
-(`matching::pairs_by_key`: a deterministic collation, a key type whose `=` is identity —
-`bool`/`int2/4/8`/`uuid`/`bytea`/`date`/`time`/`timestamp(tz)`/`text`/`varchar`/`name`, never
-`numeric`, floats, `citext`, `char(n)` — and every key already of the kind the column reads back as)
+(`matching::pairs_by_key`: `ColumnMeta::equal_is_identical`, the one definition of a key whose `=`
+is identity, and a key type whose cast keeps a requested key as it is —
+`bool`/`int2/4/8`/`uuid`/`bytea`/`date`/`time`/`timestamp(tz)`/`text`/`varchar`, never `numeric`,
+floats, `citext`, `char(n)` (pads) or `name` (cuts to 63 bytes) — and every key already of the kind
+the column reads back as)
 runs the inner level alone, selecting `value::key_select` (`query::documents_by_key_query`, main's own
 query, no join, which costs a light document about a quarter of its build) and pairs in
 `match_by_key`; everything else, a key read before a type change included, pairs by position. Where the declared key isn't the root's whole catalog primary key
@@ -1119,7 +1121,7 @@ only warns; `the_builders_sessions_run_without_jit`, `partitions`'
 pool's users to set it on the role. The result
 columns are a `bigint` and the document whatever the key's type; a key Postgres refuses to cast fails
 the whole statement, as on main. Guard: `source-postgres`'s `key_matching` (a generated differential,
-2,034 pairs: 113 requested keys of every kind and edge form against tables of 18 key types holding
+2,204 pairs: 116 requested keys of every kind and edge form, keys past 63 bytes included, against tables of 19 key types holding
 every stored spelling they accept, `build` vs `build_many` alone and beside every stored row, on
 Postgres 16 with a non-UTC database zone). A query Postgres refuses as a schema mismatch (`42883`/`42804`/`42703`/`42P01`), a
 document query or a reverse lookup, names the index and `flusso check` (`query_failed`); it is a real

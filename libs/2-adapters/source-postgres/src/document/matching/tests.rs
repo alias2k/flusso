@@ -187,5 +187,9 @@ fn only_keys_of_the_columns_own_kind_on_an_identity_type_pair_by_value() {
         !pairs_by_key("bpchar", true, &text),
         "trailing blanks compare equal"
     );
+    assert!(
+        !pairs_by_key("name", true, &text),
+        "a cast cuts a requested text"
+    );
     assert!(!pairs_by_key("citext", true, &text));
 }

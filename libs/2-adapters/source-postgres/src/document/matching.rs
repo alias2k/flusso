@@ -55,13 +55,21 @@ pub(super) fn match_rows(
 mod tests;
 
 /// Whether the rows of a batch over a key column of base type `base_name`
-/// pair with `keys` by value. True only where Postgres's `=` on the column is
-/// identity on the values flusso reads back (`deterministic` collation; no
-/// `numeric`, float, `citext` or `char(n)`, whose equal values can differ)
-/// and every key is already of the kind the column reads back as: a key read
-/// before a type change, or under another kind, pairs by position, where
-/// Postgres compares it.
-pub(super) fn pairs_by_key(base_name: &str, deterministic: bool, keys: &[GenericValue]) -> bool {
+/// pair with `keys` by value. Two conditions:
+///
+/// - `equal_is_identical`: Postgres's `=` on the column is identity on the
+///   values flusso reads back (`ColumnMeta::equal_is_identical`, the one
+///   definition: no `numeric`, float, `citext` or nondeterministic collation).
+/// - Every key is already of the kind the column reads back as, and its cast
+///   to the column's type keeps it as it is. A `char(n)` pads a requested
+///   text and a `name` cuts it to 63 bytes, so Postgres finds a row the text
+///   doesn't equal: those, a key read before a type change, or a key of
+///   another kind pair by position, where Postgres compares.
+pub(super) fn pairs_by_key(
+    base_name: &str,
+    equal_is_identical: bool,
+    keys: &[GenericValue],
+) -> bool {
     let reads_back_as: fn(&GenericValue) -> bool = match base_name {
         "bool" => |key| matches!(key, GenericValue::Bool(_)),
         "int2" => |key| matches!(key, GenericValue::SmallInt(_)),
@@ -73,10 +81,10 @@ pub(super) fn pairs_by_key(base_name: &str, deterministic: bool, keys: &[Generic
         "time" => |key| matches!(key, GenericValue::Time(_)),
         "timestamp" => |key| matches!(key, GenericValue::Timestamp(_)),
         "timestamptz" => |key| matches!(key, GenericValue::TimestampTz(_)),
-        "text" | "varchar" | "name" => |key| matches!(key, GenericValue::String(_)),
+        "text" | "varchar" => |key| matches!(key, GenericValue::String(_)),
         _ => return false,
     };
-    deterministic && keys.iter().all(reads_back_as)
+    equal_is_identical && keys.iter().all(reads_back_as)
 }
 
 /// A batch's rows by key, as [`match_by_key`] takes them: each row's outcome

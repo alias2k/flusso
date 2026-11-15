@@ -1316,8 +1316,11 @@ impl DocumentBuilder for PgDocumentBuilder {
             for chunk in keyed.chunks(BUILD_CHUNK) {
                 let keys: Vec<kernel::GenericValue> =
                     chunk.iter().map(|(value, _)| (*value).clone()).collect();
-                let by_key =
-                    matching::pairs_by_key(&key_meta.base_name, key_meta.deterministic, &keys);
+                let by_key = matching::pairs_by_key(
+                    &key_meta.base_name,
+                    key_meta.equal_is_identical(),
+                    &keys,
+                );
                 let (sql, params) = if by_key {
                     query::documents_by_key_query(
                         schema,
