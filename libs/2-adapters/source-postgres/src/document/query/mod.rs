@@ -83,41 +83,56 @@ pub(super) enum RootKey {
 ///   that tie there build the same document.
 /// - [`whole_row`](Self::whole_row): the whole row's text, only where the
 ///   columns read are unknown (a raw filter).
+///
+/// When there is nothing to order by (the document reads no root column but
+/// the key, which every competing row shares), any row answers: no term is
+/// rendered, so no caller can write an empty `ORDER BY`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct TieBreak(String);
+pub(super) struct TieBreak(Option<String>);
 
 impl TieBreak {
     pub(super) fn primary_key(columns: &[ColumnName]) -> Self {
-        Self(
-            columns
-                .iter()
-                .map(|column| qcol(ROOT, column))
-                .collect::<Vec<_>>()
-                .join(", "),
-        )
+        Self::of(columns.iter().map(|column| qcol(ROOT, column)))
     }
 
     pub(super) fn read_columns<'a>(columns: impl IntoIterator<Item = &'a ColumnName>) -> Self {
         let mut columns: Vec<&ColumnName> = columns.into_iter().collect();
         columns.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
-        Self(
+        Self::of(
             columns
                 .into_iter()
-                .map(|column| format!("{}::text", qcol(ROOT, column)))
-                .collect::<Vec<_>>()
-                .join(", "),
+                .map(|column| format!("{}::text", qcol(ROOT, column))),
         )
     }
 
     pub(super) fn whole_row() -> Self {
-        Self(format!("ROW({}.*)::text", qident(ROOT)))
+        Self(Some(format!("ROW({}.*)::text", qident(ROOT))))
+    }
+
+    /// The terms in order; none (the document reads no root column but the
+    /// key) means every row sharing a key builds the same document, so any
+    /// one answers and nothing is ordered.
+    fn of(terms: impl Iterator<Item = String>) -> Self {
+        let terms: Vec<String> = terms.collect();
+        Self((!terms.is_empty()).then(|| terms.join(", ")))
+    }
+
+    /// `ORDER BY` terms after the key, each led by a comma; empty for any row.
+    fn after_key(&self) -> String {
+        self.0
+            .as_ref()
+            .map_or_else(String::new, |terms| format!(", {terms}"))
     }
 }
 
 /// A single build's query (from [`document_query`]) reading the row a shared
-/// key picks: the one `tie_break` orders first.
+/// key picks: the one `tie_break` orders first, or as it is when any row
+/// answers.
 pub(super) fn first_row(query: SqlString, tie_break: &TieBreak) -> SqlString {
-    SqlString::new(format!("{} ORDER BY {} LIMIT 1", query.0, tie_break.0))
+    match &tie_break.0 {
+        Some(terms) => SqlString::new(format!("{} ORDER BY {terms} LIMIT 1", query.0)),
+        None => query,
+    }
 }
 
 /// The columns a document reads whose base type is `bytea` or `bytea[]`, by
@@ -488,8 +503,8 @@ fn batched(
         ),
         (RootKey::Shared(tie_break), _) => format!(
             "SELECT DISTINCT ON ({root_pk}) {key_out}, {object} AS \"document\" \
-             FROM {table} AS \"{ROOT}\" WHERE {predicate} ORDER BY {root_pk}, {}",
-            tie_break.0
+             FROM {table} AS \"{ROOT}\" WHERE {predicate} ORDER BY {root_pk}{}",
+            tie_break.after_key()
         ),
     };
     if by_key.is_some() {

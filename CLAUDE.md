@@ -1120,7 +1120,8 @@ by position (`integration`'s `a_batch_by_key_with_a_stale_type_cache_still_finds
 (`query::RootKey::Shared`: keyless, composite, a partitioned root keyed with its partition column, a
 view) a key several rows share builds the row its `query::TieBreak` orders first, in both builds
 (`DISTINCT ON` / `first_row`): the table's primary-key columns when it has one, else the text of the
-root columns the document reads (`source::root_columns`; rows equal there build the same document),
+root columns the document reads (`source::root_columns`, the declared key left out; rows equal there
+build the same document, and with none any row answers, `TieBreak(None)`, no term rendered),
 else, under a raw filter, `ROW(root.*)::text`, so the choice reads no column the document doesn't
 (`a_key_several_rows_share_builds_the_same_row_both_ways`,
 `choosing_a_shared_keys_row_reads_no_column_the_document_does_not_read`: a view column that raises). The
