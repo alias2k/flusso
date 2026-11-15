@@ -72,6 +72,8 @@ A key that moved between `timestamp` and `timestamptz` while flusso ran is compa
 
 A `bytea` nested inside another value is different: a field of a composite type, an array of composites, a range, or a multi-dimensional `bytea[]` read by a field that isn't `binary`. So is a column changed to `bytea` while flusso runs, until its table's next change or a restart. Postgres renders it by the session's `bytea_output`. flusso sets `bytea_output = hex` on each connection it opens, and a transaction-mode pool may not keep it. If a document reads such a value, set it on the database or role too: `ALTER ROLE flusso SET bytea_output = 'hex'`.
 
+flusso's SQL connections also set `jit = off`. Its queries are short index lookups, and a JIT compilation costs more than the lookup it compiles: a batch over a partitioned root, or over a document with several `has_many`, passes the default `jit_above_cost` at a few hundred keys. A transaction-mode pool may not keep the setting; set it on the role there: `ALTER ROLE flusso SET jit = off`. A server that refuses it keeps its own setting, and flusso logs a warning and runs.
+
 ## Capture
 
 flusso consumes a logical replication **slot** and subscribes to a **publication**. Both names are the `slot` and `publication` keys above; the `--slot` and `--publication` flags of [`run`](cli.md#run) override them.

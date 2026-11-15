@@ -60,6 +60,12 @@ pub(crate) async fn snapshot(
     // (its snapshot transaction) for the duration.
     let pool = PgPoolOptions::new()
         .max_connections(2)
+        .after_connect(|connection, _| {
+            Box::pin(async move {
+                crate::document::without_jit(connection).await;
+                Ok(())
+            })
+        })
         .connect(connection_url)
         .await
         .map_err(|e| SourceError::Connection(e.to_string()))?;

@@ -411,6 +411,7 @@ impl PgDocumentBuilder {
             .after_connect(|connection, _| {
                 Box::pin(async move {
                     sqlx::Executor::execute(&mut *connection, "SET bytea_output = 'hex'").await?;
+                    without_jit(connection).await;
                     Ok(())
                 })
             })
@@ -1357,6 +1358,23 @@ impl DocumentBuilder for PgDocumentBuilder {
         // The schema is self-describing, so the mapping is projected from it
         // without touching the database.
         Ok(self.spec.index_mappings())
+    }
+}
+
+/// Turn JIT compilation off for a session the source opened. flusso's
+/// queries are short index lookups and key reads: compiling one costs more
+/// than running it, and a batch over a partitioned root or a wide document can
+/// pass `jit_above_cost`. `jit` is user-settable, so this is expected to hold;
+/// where it is refused (a server without the parameter), the session keeps the
+/// server's setting and the refusal is a warning, never a failed connection.
+/// Behind a transaction-mode pooler the setting may not stay with the session,
+/// so the manual recommends `ALTER ROLE … SET jit = off` there.
+pub(crate) async fn without_jit(connection: &mut sqlx::PgConnection) {
+    if let Err(error) = sqlx::Executor::execute(&mut *connection, "SET jit = off").await {
+        tracing::warn!(
+            error = %error,
+            "could not turn JIT compilation off for this session; it keeps the server's setting"
+        );
     }
 }
 

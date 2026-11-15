@@ -1104,7 +1104,11 @@ open-ended), an unanswered position is a tombstone, and a row matched by several
 each under its own id. Where the declared key isn't the root's whole catalog primary key
 (`query::RootKey::Shared`: keyless, composite, a partitioned root keyed with its partition column, a
 view) a key several rows share builds the row whose `ROW(root.*)::text` sorts first, in both builds
-(`DISTINCT ON` / `first_row_by_text`; `a_key_several_rows_share_builds_the_same_row_both_ways`). The result
+(`DISTINCT ON` / `first_row_by_text`; `a_key_several_rows_share_builds_the_same_row_both_ways`). The
+builder's and the backfill's pools set `jit = off` after connect (`document::without_jit`, a refusal
+only warns; `the_builders_sessions_run_without_jit`, `partitions`'
+`a_batched_build_on_a_partitioned_root_is_not_jit_compiled`); the manual tells a transaction-mode
+pool's users to set it on the role. The result
 columns are a `bigint` and the document whatever the key's type; a key Postgres refuses to cast fails
 the whole statement, as on main. Guard: `source-postgres`'s `key_matching` (a generated differential,
 2,034 pairs: 113 requested keys of every kind and edge form against tables of 18 key types holding

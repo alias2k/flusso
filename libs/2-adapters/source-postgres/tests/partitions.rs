@@ -7,7 +7,7 @@
 //! `prepare` sets `REPLICA IDENTITY FULL` across the child's partition tree, so
 //! a deleted child row still reaches its old parent through the pre-image.
 //! Backfill reads the partitions through the parent.
-//! A batched build over a hash-partitioned root is planned without a JIT
+//! A batched build over a hash-partitioned root runs without a JIT
 //! compilation (issue #335).
 //! A partition whose identity index leaves out the primary key (issue #224) is
 //! set to `FULL` alone, or, unmanaged, reported: its delete arrives under a
@@ -646,12 +646,11 @@ fn index_name(name: &str) -> IndexName {
 }
 
 /// The batched build over a hash-partitioned root is never JIT-compiled
-/// (issue #335). Each requested key probes the root through a lateral
-/// subquery, which Postgres prunes to one partition at run time but plans over
-/// every partition. Unless the subquery says it returns at most one row, the
-/// planner counts one row per partition per key and costs every relation
-/// subquery that many times. From about 130 keys that passes `jit_above_cost`,
-/// and every execution compiles before it runs: 5–18× slower than the lookup.
+/// (issue #335). Over 16 partitions its estimate passes `jit_above_cost` at a
+/// few hundred keys, as main's own batched query does: the root's index is
+/// planned once per partition, and every relation subquery with it. A JIT
+/// compilation then costs more than the lookup it compiles, on every
+/// execution. The builder's sessions run with `jit = off`.
 ///
 /// `auto_explain` logs the executed statement's `EXPLAIN (ANALYZE, FORMAT
 /// JSON)`, which has a `JIT` entry when it was compiled.
