@@ -1158,10 +1158,14 @@ wrapped as `fn __flusso(root) { … }` so `this` can be bound — columns on lin
 `ScriptedBuilder` decorates any `DocumentBuilder`: per object level, scripts run against `this` (a
 fresh copy per call) and `root` (read-only, shared), all before any output is written, so no script
 sees another's output; then outputs are written and `emit: false` fields stripped. A failure becomes
-`Document::Failed` (see the engine invariant). A declared `decimal` enters Rhai as the `Decimal` it
-holds exactly, else as `main` read it through `f64` (a string past the range), a `decimal` result is
-written exactly (`BigDecimal`), and a decimal's `to_float()` is the sandbox's own, parsed from its text
-(`value.rs`; guard: `tests/decimal_from_main.rs`, 330 inputs recorded from `main`). Sandbox: strict variables, failing on a missing
+`Document::Failed` (see the engine invariant). A declared `decimal` enters Rhai as the nearest
+`Decimal` (rounded past 28 fractional digits); exponent text and a zero read as `main` read them
+through `f64`; past the range it is a string of the exact text (`value.rs`'s `declared_decimal`,
+`#[cold]`: it slows `to_dynamic` otherwise). A `decimal` result is written exactly (`BigDecimal`, a
+zero unsigned), a string returned to it fails with `main`'s message, and a decimal's `to_float()` is
+the sandbox's own, parsed from its text, placed in the standard package's module (`sandbox.rs`; a
+second module or the global namespace slows every call). Guard: `tests/decimal_from_main.rs`, 330
+inputs recorded from `main`, plus doubles known independently. Sandbox: strict variables, failing on a missing
 property, no `eval`, fixed limits (`sandbox.rs`). The CLI wraps the Postgres builder in
 `backends.rs`, compiles scripts beside `adapters::validate` in `build`/`check`/`run`
 (`compile_scripts`), records `flusso.script.failures{index,field}` and a rate-limited `error!` log
