@@ -132,7 +132,9 @@ fn sql_string(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
 }
 
-/// The cast a bound key takes: `::<bound>::<sql_type>`, where `bound` is the
+/// The cast a bound key takes: `::<bound>::<key_type>`, where `key_type` is
+/// the column's base type with no modifier (`PgDocumentBuilder::key_type`:
+/// a cast to a size truncates or rounds a key) and `bound` is the
 /// type the value is sent as ([`bound_type`]), `text` for a key carried as
 /// text (a value its type's parser can't represent, like `infinity`), so the
 /// database parses it as it rendered it.
@@ -143,8 +145,8 @@ fn sql_string(text: &str) -> String {
 /// before and after its column changed type) would be sent in the wrong
 /// binary format. Postgres casts from the bound type either way, so the
 /// spelling changes nothing else. `None` for a value that can't be bound.
-pub(super) fn key_cast(value: &GenericValue, sql_type: &str) -> Option<String> {
-    bound_type(value).map(|bound| format!("::{bound}::{sql_type}"))
+pub(super) fn key_cast(value: &GenericValue, key_type: &str) -> Option<String> {
+    bound_type(value).map(|bound| format!("::{bound}::{key_type}"))
 }
 
 /// The SQL type a value is bound as; `None` for one that can't be bound.

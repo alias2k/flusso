@@ -136,8 +136,8 @@ impl ColumnTypes {
     }
 
     /// Forget `schema.table`'s cached columns when one of them has another
-    /// type in `columns` (each name with its type OID, as a `Relation` lists
-    /// them). A table whose types are unchanged keeps its entries, so a
+    /// type or size in `columns` (each name with its type OID and modifier,
+    /// as a `Relation` lists them). A table whose types are unchanged keeps its entries, so a
     /// stream's first `Relation` costs no lookup. A cached column `columns`
     /// leaves out is no evidence: pgoutput omits stored generated columns
     /// and columns outside a publication's column list from every `Relation`.
@@ -145,17 +145,17 @@ impl ColumnTypes {
         &self,
         schema: &str,
         table: &str,
-        columns: impl Iterator<Item = (&'a str, u32)> + Clone,
+        columns: impl Iterator<Item = (&'a str, u32, i32)> + Clone,
     ) {
         let changed = self
             .lock()
             .get(schema)
             .and_then(|tables| tables.get(table))
             .is_some_and(|cached| {
-                columns.clone().any(|(name, type_oid)| {
+                columns.clone().any(|(name, type_oid, type_mod)| {
                     cached
                         .get(name)
-                        .is_some_and(|meta| meta.type_oid != type_oid)
+                        .is_some_and(|meta| meta.type_oid != type_oid || meta.type_mod != type_mod)
                 })
             });
         if changed {
@@ -174,6 +174,8 @@ impl ColumnTypes {
             Arc::new(ColumnMeta {
                 sql_type: "integer".to_owned(),
                 type_oid,
+                type_mod: -1,
+                key_type: "pg_catalog.int4".to_owned(),
                 base_type: None,
                 base_name: "int4".to_owned(),
                 element_name: None,
@@ -215,6 +217,13 @@ struct ColumnMeta {
     /// `pg_attribute.atttypid`: the type OID a `Relation` message names the
     /// column by.
     type_oid: u32,
+    /// `pg_attribute.atttypmod`: the size a `Relation` message names beside
+    /// the type (`varchar(5)`, `numeric(10,2)`); `-1` for none.
+    type_mod: i32,
+    /// The type a key read from this column is cast to: the base type
+    /// through every domain, schema-qualified, never with a modifier (see
+    /// [`key_type`](PgDocumentBuilder::key_type)).
+    key_type: String,
     /// A domain's type resolved through every domain; `None` for no domain.
     base_type: Option<String>,
     /// The `pg_type.typname` of the type, through every domain.
@@ -444,7 +453,7 @@ impl PgDocumentBuilder {
             key = value::key_select(
                 &format!("\"{pk_column}\""),
                 "key",
-                &pk_meta.sql_type,
+                &pk_meta.key_type,
                 &pk_meta.base_name,
             ),
             pk = pk_column,
@@ -555,6 +564,26 @@ impl PgDocumentBuilder {
             .clone())
     }
 
+    /// The type a key read from a column is cast to (`$n::<bound>::<type>`,
+    /// `expr::<type>`): the column's base type, schema-qualified, with no
+    /// modifier. An explicit cast to a size truncates or rounds without an
+    /// error (`'k12345678'::varchar(5)` is `k1234`, `1.2345::numeric(10,2)`
+    /// is `1.23`), so a key cast to a size its column no longer has would
+    /// match no row; `=` needs none. The qualified `typname` also keeps
+    /// `bpchar` apart from `character`, which as a cast means `char(1)`.
+    pub(super) async fn key_type(
+        &self,
+        schema: &DatabaseSchema,
+        table: &TableName,
+        column: &ColumnName,
+    ) -> Result<String> {
+        Ok(self
+            .column_meta(schema, table, column)
+            .await?
+            .key_type
+            .clone())
+    }
+
     /// The Postgres catalog's view of a column — its cast-ready SQL type and
     /// whether it admits null — cached. An unknown column (or table) is an
     /// error: a field or filter naming one that does not exist is a
@@ -585,8 +614,8 @@ impl PgDocumentBuilder {
         // `to_jsonb` because Postgres before 12 has no such column (and only
         // deterministic collations).
         let sql = "SELECT format_type(a.atttypid, a.atttypmod) AS sql_type, \
-                          a.atttypid::int8 AS type_oid, \
-                          b.base_type, b.base_name, el.element_name, \
+                          a.atttypid::int8 AS type_oid, a.atttypmod AS type_mod, \
+                          b.base_type, b.base_name, b.key_type, el.element_name, \
                           coalesce((SELECT (to_jsonb(c) ->> 'collisdeterministic')::boolean \
                                     FROM pg_collation c WHERE c.oid = a.attcollation), \
                                    true) AS deterministic, \
@@ -598,8 +627,12 @@ impl PgDocumentBuilder {
                                SELECT t.typbasetype, t.typtypmod \
                                FROM pg_type t JOIN d ON t.oid = d.oid WHERE t.typtype = 'd' \
                           ) SELECT format_type(d.oid, d.typmod) AS base_type, \
-                                   t.typname::text AS base_name, t.oid AS base_oid \
-                            FROM d JOIN pg_type t ON t.oid = d.oid WHERE t.typtype <> 'd' \
+                                   t.typname::text AS base_name, t.oid AS base_oid, \
+                                   quote_ident(n.nspname) || '.' || quote_ident(t.typname) \
+                                     AS key_type \
+                            FROM d JOIN pg_type t ON t.oid = d.oid \
+                            JOIN pg_namespace n ON n.oid = t.typnamespace \
+                            WHERE t.typtype <> 'd' \
                         ) b \
                    LEFT JOIN LATERAL ( \
                           WITH RECURSIVE e(oid) AS ( \
@@ -632,6 +665,8 @@ impl PgDocumentBuilder {
                     deterministic: row.try_get("deterministic").map_err(query_err)?,
                     sql_type,
                     type_oid: u32::try_from(type_oid).unwrap_or_default(),
+                    type_mod: row.try_get("type_mod").map_err(query_err)?,
+                    key_type: row.try_get("key_type").map_err(query_err)?,
                     nullable: !not_null,
                 }
             }
@@ -783,10 +818,11 @@ impl PgDocumentBuilder {
         Ok(bytes)
     }
 
-    /// Ensure `types` carries the catalog SQL type of each root-table key column,
-    /// so the keyed lookup can cast every `$n` to it. The keys come back from
-    /// Postgres as values (a `uuid` as a string, say); without the cast the
-    /// re-bound `$n` is `text` and `uuid = text` has no operator.
+    /// Set in `types` the [`key_type`](Self::key_type) of each root-table key
+    /// column, so the keyed lookup can cast every `$n` to it. The keys come
+    /// back from Postgres as values (a `uuid` as a string, say); without the
+    /// cast the re-bound `$n` is `text` and `uuid = text` has no operator. It
+    /// replaces a filter's entry for the column, which may carry a size.
     async fn add_key_column_types(
         &self,
         schema: &IndexSchema,
@@ -794,14 +830,10 @@ impl PgDocumentBuilder {
         types: &mut HashMap<(String, String), String>,
     ) -> Result<()> {
         for column in columns {
-            let key = (schema.table.to_string(), column.to_string());
-            if types.contains_key(&key) {
-                continue;
-            }
-            let sql_type = self
-                .column_type(&schema.db_schema, &schema.table, column)
+            let key_type = self
+                .key_type(&schema.db_schema, &schema.table, column)
                 .await?;
-            types.insert(key, sql_type);
+            types.insert((schema.table.to_string(), column.to_string()), key_type);
         }
         Ok(())
     }

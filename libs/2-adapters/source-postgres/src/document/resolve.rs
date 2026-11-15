@@ -219,7 +219,7 @@ impl PgDocumentBuilder {
         let (sql, params) = query::reverse_query(
             schema,
             parent_table,
-            (parent_pk, &base.sql_type, &base.base_name),
+            (parent_pk, &base.key_type, &base.base_name),
             &key,
             &col_types,
         )?;
@@ -248,7 +248,7 @@ impl PgDocumentBuilder {
         let (sql, params) = query::reverse_query(
             schema,
             child,
-            (foreign_key, &base.sql_type, &base.base_name),
+            (foreign_key, &base.key_type, &base.base_name),
             &child_key.0,
             &col_types,
         )?;
@@ -279,7 +279,7 @@ impl PgDocumentBuilder {
         let (sql, params) = query::reverse_query(
             schema,
             junction,
-            (left_key, &base.sql_type, &base.base_name),
+            (left_key, &base.key_type, &base.base_name),
             &key,
             &col_types,
         )?;
@@ -308,7 +308,7 @@ impl PgDocumentBuilder {
         let (sql, params) = query::reverse_query(
             schema,
             junction,
-            (left_key, &base.sql_type, &base.base_name),
+            (left_key, &base.key_type, &base.base_name),
             &junction_key.0,
             &col_types,
         )?;
@@ -335,10 +335,7 @@ impl PgDocumentBuilder {
                 continue;
             }
             let (from_table, from_column) = source(column);
-            types.insert(
-                entry,
-                self.column_type(db, &from_table, &from_column).await?,
-            );
+            types.insert(entry, self.key_type(db, &from_table, &from_column).await?);
         }
         Ok(types)
     }
@@ -467,7 +464,7 @@ impl PgDocumentBuilder {
             return Ok(Vec::new());
         }
         let sql_type = self
-            .column_type(&schema.db_schema, link_table, link_column)
+            .key_type(&schema.db_schema, link_table, link_column)
             .await?;
         let base = self
             .column_meta(&schema.db_schema, &schema.table, pk)
@@ -475,7 +472,7 @@ impl PgDocumentBuilder {
         let (sql, params) = query::root_keys_query(
             &schema.db_schema,
             &schema.table,
-            (pk, &base.sql_type, &base.base_name),
+            (pk, &base.key_type, &base.base_name),
             links,
             &sql_type,
         )?;

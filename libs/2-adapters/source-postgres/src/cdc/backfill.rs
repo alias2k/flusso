@@ -112,8 +112,9 @@ async fn resolve_tables(pool: &PgPool, tables: &[SnapshotTable]) -> Result<Vec<B
     Ok(out)
 }
 
-/// `column`'s type on `qualified`: its `format_type`, and the
-/// `pg_type.typname` of its type through every domain.
+/// `column`'s type on `qualified`, through every domain: the key type it is
+/// cast to (schema-qualified `typname`, no modifier, as the document
+/// builder's), and its `pg_type.typname`.
 async fn key_type(pool: &PgPool, qualified: &str, column: &str) -> Result<(String, String)> {
     sqlx::query_as(
         "WITH RECURSIVE d(oid) AS ( \
@@ -121,9 +122,10 @@ async fn key_type(pool: &PgPool, qualified: &str, column: &str) -> Result<(Strin
            WHERE a.attrelid = $1::regclass AND a.attname = $2 \
          UNION ALL \
            SELECT t.typbasetype FROM pg_type t JOIN d ON t.oid = d.oid WHERE t.typtype = 'd' \
-         ) SELECT format_type(a.atttypid, a.atttypmod), t.typname::text \
-           FROM d JOIN pg_type t ON t.oid = d.oid, pg_attribute a \
-           WHERE t.typtype <> 'd' AND a.attrelid = $1::regclass AND a.attname = $2",
+         ) SELECT quote_ident(n.nspname) || '.' || quote_ident(t.typname), t.typname::text \
+           FROM d JOIN pg_type t ON t.oid = d.oid \
+           JOIN pg_namespace n ON n.oid = t.typnamespace \
+           WHERE t.typtype <> 'd'",
     )
     .bind(qualified)
     .bind(column)

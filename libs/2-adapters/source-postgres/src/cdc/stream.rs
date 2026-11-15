@@ -343,10 +343,9 @@ fn handle_xlog(state: &mut DecodeState, data: &[u8]) -> std::result::Result<(), 
                 column_types.forget_changed(
                     relation.namespace.as_ref(),
                     relation.table.as_ref(),
-                    relation
-                        .columns
-                        .iter()
-                        .map(|column| (column.name.as_ref(), column.type_oid)),
+                    relation.columns.iter().map(|column| {
+                        (column.name.as_ref(), column.type_oid, column.type_modifier)
+                    }),
                 );
             }
             state.unkeyed.push(relation.oid);

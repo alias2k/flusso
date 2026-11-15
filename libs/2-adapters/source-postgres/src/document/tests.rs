@@ -86,6 +86,8 @@ fn seed_integer_columns(builder: &PgDocumentBuilder, columns: &[(&str, &str)]) {
             Arc::new(ColumnMeta {
                 sql_type: "integer".to_owned(),
                 type_oid: 23,
+                type_mod: -1,
+                key_type: "pg_catalog.int4".to_owned(),
                 base_type: None,
                 base_name: "int4".to_owned(),
                 element_name: None,
@@ -436,6 +438,8 @@ fn equal_keys_render_alike_except_for_numbers_and_loose_text() {
     let meta = |base_name: &str, deterministic: bool| ColumnMeta {
         sql_type: base_name.to_owned(),
         type_oid: 0,
+        type_mod: -1,
+        key_type: base_name.to_owned(),
         base_type: None,
         base_name: base_name.to_owned(),
         element_name: None,
@@ -528,6 +532,17 @@ async fn resolving_a_change_searches_no_field_tree() {
     assert_eq!(PATH_SEARCHES.with(Cell::get), 0);
 }
 
+/// The key type the catalog lookup reads for a column of `sql_type`: its
+/// base `typname`, qualified, with no size.
+fn catalog_key_type(sql_type: &str) -> &str {
+    match sql_type {
+        "character varying(5)" => r#"pg_catalog."varchar""#,
+        "numeric(10,2)" => "pg_catalog.numeric",
+        "character(5)" => "pg_catalog.bpchar",
+        other => other,
+    }
+}
+
 fn cache_type(builder: &PgDocumentBuilder, table: &str, column: &str, sql_type: &str, oid: u32) {
     builder.col_type_cache.insert(
         "public",
@@ -536,6 +551,8 @@ fn cache_type(builder: &PgDocumentBuilder, table: &str, column: &str, sql_type: 
         Arc::new(ColumnMeta {
             sql_type: sql_type.to_owned(),
             type_oid: oid,
+            type_mod: -1,
+            key_type: catalog_key_type(sql_type).to_owned(),
             base_type: None,
             base_name: sql_type.to_owned(),
             element_name: None,
@@ -572,7 +589,7 @@ async fn a_changed_column_type_reaches_the_kept_root_link_answer() {
 
     builder
         .col_type_cache
-        .forget_changed("public", "user_tags", [("user_id", 25)].into_iter());
+        .forget_changed("public", "user_tags", [("user_id", 25, -1)].into_iter());
     cache_type(&builder, "user_tags", "user_id", "text", 25);
     assert_eq!(
         ask().await,
