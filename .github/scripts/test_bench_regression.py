@@ -107,8 +107,12 @@ class Gh:
 
 
 def run(script: pathlib.Path, texts: dict[str, str], *args: str, gh_issues: list[int] | None = None,
-        missing: bool = False, env: dict | None = None) -> tuple[subprocess.CompletedProcess, list[list[str]]]:
-    """Run `script` over the two files as `bench.yml` does; with `gh_issues`, under `--issue` and a fake `gh`."""
+        missing: bool = False, env: dict | None = None, power: bool = False) -> tuple[subprocess.CompletedProcess, list[list[str]]]:
+    """Run `script` over the two files as `bench.yml` does; with `gh_issues`, under `--issue` and a fake `gh`.
+
+    Unless `power` is asked for, this script runs with `--skip-detection-power`: the measurement changes no
+    flag, and skipping it keeps the suite fast. `bench.yml` never passes it.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         tmp = pathlib.Path(tmp)
         paths = []
@@ -124,6 +128,8 @@ def run(script: pathlib.Path, texts: dict[str, str], *args: str, gh_issues: list
             gh = Gh(tmp, gh_issues)
             env["PATH"] = gh.path
             args = (*args, "--issue")
+        if script == SCRIPT and not power:
+            args = ("--skip-detection-power", *args)
         done = subprocess.run([sys.executable, str(script), "25", "--rss-threshold", "20", *args, *paths],
                               capture_output=True, text=True, env=env)
         return done, gh.recorded() if gh else []
@@ -149,15 +155,48 @@ def power_order(out: str) -> list[str]:
     return [m[0] for m in POWER_LINE.findall(out)]
 
 
-class MainsRuleIsUnchanged(unittest.TestCase):
-    """The detection rule is main's, exactly: the same (series, run) pairs are flagged."""
+def load_script(path: pathlib.Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
-    def assert_same(self, texts: dict[str, str], label: str) -> None:
-        mine, _ = run(SCRIPT, texts)
-        frozen, _ = run(FROZEN_MAIN, texts)
-        self.assertEqual(frozen.returncode, 0, frozen.stderr)
-        self.assertEqual(mine.returncode, 0, mine.stderr)
-        self.assertEqual(flagged(mine.stdout), flagged(frozen.stdout), label)
+
+def flagged_in_process(module, texts: dict[str, str], read) -> set[str]:
+    """What a script's `analyse` flags over the two files, each read with `read(module, path)`."""
+    found = set()
+    with tempfile.TemporaryDirectory() as tmp:
+        for key, text in texts.items():
+            path = pathlib.Path(tmp) / f"{key}.js"
+            path.write_text(text, encoding="utf-8")
+            found |= {f["series"] for f in module.analyse(read(module, str(path)), 25, 20, 5, 3.0)}
+    return found
+
+
+class MainsRuleIsUnchanged(unittest.TestCase):
+    """The detection rule is main's, exactly: the same (series, run) pairs are flagged.
+
+    The replays call each script's `analyse` in-process (this script reads through its `clean`); one case
+    runs both scripts end to end as `bench.yml` does.
+    """
+
+    MINE = load_script(SCRIPT, "bench_regression")
+    MAIN = load_script(FROZEN_MAIN, "frozen_main_bench_regression")
+
+    def assert_same(self, texts: dict[str, str], label: str) -> int:
+        mine = flagged_in_process(self.MINE, texts, lambda m, p: m.clean(m.load(p)))
+        main = flagged_in_process(self.MAIN, texts, lambda m, p: m.load(p))
+        self.assertEqual(mine, main, label)
+        return len(main)
+
+    def test_the_scripts_end_to_end_flag_the_same(self):
+        for upto in (40, 68, NEWEST):
+            mine, _ = run(SCRIPT, data_files(upto))
+            frozen, _ = run(FROZEN_MAIN, data_files(upto))
+            with self.subTest(run=upto):
+                self.assertEqual(frozen.returncode, 0, frozen.stderr)
+                self.assertEqual(mine.returncode, 0, mine.stderr)
+                self.assertEqual(flagged(mine.stdout), flagged(frozen.stdout))
 
     def test_the_frozen_copy_is_mains_file(self):
         lines = FROZEN_MAIN.read_text(encoding="utf-8").splitlines(keepends=True)
@@ -165,9 +204,11 @@ class MainsRuleIsUnchanged(unittest.TestCase):
         self.assertEqual(hashlib.sha256("".join(lines[:1] + lines[3:]).encode()).hexdigest(), recorded)
 
     def test_every_prefix_of_the_real_history_flags_what_main_flags(self):
+        flags = 0
         for upto in range(3, NEWEST + 1):
             with self.subTest(run=upto):
-                self.assert_same(data_files(upto), f"run {upto}")
+                flags += self.assert_same(data_files(upto), f"run {upto}")
+        self.assertGreater(flags, 30)
 
     def test_injected_steps_and_an_image_change_flag_what_main_flags(self):
         cases = {
@@ -297,7 +338,7 @@ class DetectionPower(unittest.TestCase):
     """How large a lasting step the rule catches on each series, measured, in the summary; a count in the issue."""
 
     def test_every_series_gets_its_measured_step_weakest_first(self):
-        done, _ = run(SCRIPT, data_files(NEWEST))
+        done, _ = run(SCRIPT, data_files(NEWEST), power=True)
         table = power(done.stdout)
         self.assertEqual(len(table), sum(len(s["series"]) for s in HISTORY["suites"].values()))
         self.assertFalse(table["reference/ci/visible_latency_p99_ms"][1])
@@ -308,9 +349,32 @@ class DetectionPower(unittest.TestCase):
         weakness = [(0, 0) if not table[n][1] else (1, -table[n][0] / table[n][2]) for n in power_order(done.stdout)]
         self.assertEqual(weakness, sorted(weakness))
 
+    def test_the_summary_header_gives_the_count_and_the_median(self):
+        done, _ = run(SCRIPT, data_files(NEWEST), power=True)
+        self.assertRegex(done.stdout, r"detection power, weakest first: on \d+ of 51 series a lasting step of 1\.5 times "
+                                      r"the threshold is caught within two runs 9 times out of 10; the median series "
+                                      r"needs about \+\d+%")
+
+    def test_series_no_longer_recorded_or_too_short_are_left_out_and_counted(self):
+        def thin(key, points):
+            if key == "smaller":
+                for point in points[-50:]:
+                    point["benches"] = [b for b in point["benches"] if b["name"] != "components/build/1"]
+                for point in points[:-10]:
+                    point["benches"] = [b for b in point["benches"] if b["name"] != "inprocess/render/wide"]
+            return points
+
+        done, _ = run(SCRIPT, data_files(NEWEST, mutate=thin), power=True)
+        table = power(done.stdout)
+        self.assertNotIn("components/build/1", table)
+        self.assertNotIn("inprocess/render/wide", table)
+        self.assertEqual(len(table), 49)
+        self.assertRegex(done.stdout, r"left out: 1 series with too few runs to measure \(fewer than \d+\), "
+                                      r"1 series not recorded in the last 50 runs")
+
     def test_the_listed_step_is_caught_within_two_runs_and_half_of_it_at_most_half_the_time(self):
         # The script measures on the last 20 runs: a step from each run `c` there, judged at `c + 1`.
-        table = power(run(SCRIPT, data_files(NEWEST))[0].stdout)
+        table = power(run(SCRIPT, data_files(NEWEST), power=True)[0].stdout)
         cuts = range(NEWEST - 20, NEWEST)
         for name in ("components/build/1", "reference/ci/flush_p50_ms"):
             step, reliable, _ = table[name]
@@ -325,12 +389,16 @@ class DetectionPower(unittest.TestCase):
     def test_the_issue_gets_two_sentences_and_a_link_to_the_run(self):
         github = {"GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": "alias2k/flusso", "GITHUB_RUN_ID": "42"}
         for env, link in ((github, "https://github.com/alias2k/flusso/actions/runs/42"), ({}, None)):
-            _, calls = run(SCRIPT, data_files(NEWEST), gh_issues=[328], env=env)
+            done, calls = run(SCRIPT, data_files(NEWEST), gh_issues=[328], env=env, power=True)
             body = calls[-1][calls[-1].index("--body") + 1]
+            table = power(done.stdout)
+            at_one_and_a_half = sum(1 for step, reliable, limit in table.values() if reliable and step <= 1.5 * limit + 0.5)
             with self.subTest(linked=bool(link)):
                 paragraph = body[body.index("Detection power"):].split("\n\n")[0]
                 self.assertLess(body.index("| suite |"), body.index("Detection power"))
-                self.assertIn("0 of 51 series", paragraph)
+                self.assertIn(f"on {at_one_and_a_half} of 51 series the rule catches a lasting step of 1.5 times its "
+                              "threshold within two runs 9 times out of 10", paragraph)
+                self.assertGreater(at_one_and_a_half, 0)
                 self.assertRegex(paragraph, r"median series needs a lasting step of about \+\d+%")
                 self.assertLessEqual(paragraph.count(". "), 1)
                 self.assertNotIn("`reference/ci/visible_latency_p99_ms`", body)
@@ -377,6 +445,7 @@ class RunnerFacts(unittest.TestCase):
             "bigger": [{"name": "reference/ci/b", "unit": "docs/s", "value": 2.0, "extra": json.dumps({"images": IMAGES})}],
         })
         self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("stamped 2 of 2 files", done.stdout)
         small, big = json.loads(written["smaller"]), json.loads(written["bigger"])
         self.assertEqual([p["name"] for p in small], ["inprocess/a", "inprocess/b", "inprocess/c"])
         for point in small + big:
@@ -444,6 +513,7 @@ class RunnerFacts(unittest.TestCase):
                 folder.chmod(0o755)
             self.assertEqual(done.returncode, 0, done.stderr)
             self.assertIn("warning:", done.stderr)
+            self.assertIn("stamped 0 of 1 files", done.stdout)
             self.assertEqual(path.read_text(), original)
 
     def test_a_cpuinfo_without_a_model_name_falls_back(self):
