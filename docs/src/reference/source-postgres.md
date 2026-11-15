@@ -222,7 +222,7 @@ A link column (`foreign_key`, `belongs_to` `column`, a junction key, a `via` hop
 
 ### Unsupported key types
 
-Any other type (`inet`, an enum, `money`, `json`, `jsonb`, a range, …) reads back as no key, so no document would ever be written: `flusso check` reports it as `unsupported_key_type` under `primary_key`, and [`run` refuses to start](cli.md#validation-at-start). A relation table keyed by such a type still works as a leaf (a `belongs_to` target, a `has_many` child, a `many_to_many` far table); a change two levels below it can't be traced through it.
+Any other type (`inet`, an enum, `money`, `json`, `jsonb`, a range, …) reads back as no key, so the backfill would index no row and no change on a related table would reach a document: `flusso check` reports it as `unsupported_key_type` under `primary_key`, and [`run` refuses to start](cli.md#validation-at-start). A relation table keyed by such a type still works as a leaf (a `belongs_to` target, a `has_many` child, a `many_to_many` far table); a change two levels below it can't be traced through it.
 
 ## Updates that change nothing a document reads
 

@@ -791,7 +791,7 @@ build matches the table's key on the declared column and writes only tombstones 
 `a_root_primary_key_other_than_the_tables_writes_no_document`; and of a type `Catalog::reads_key`
 accepts, `UnsupportedKeyType` otherwise (issue #295: Postgres answers from the base type through
 domains against `document::value::KEY_TYPES`, the types `decode_key` reads — not `json`/`jsonb`;
-any other key reads back null, so every build is a tombstone — `config_coverage`'s
+any other key reads back null, so the backfill indexes no row and no related change reaches a document — `config_coverage`'s
 `a_root_key_the_builder_cannot_read_back_is_refused`); on a root without a single-column
 key a missing declared column is `UnknownColumn` only when a relation reads it, else
 `RootPrimaryKey`; anchored at the key name,
