@@ -15,7 +15,8 @@ wants it, keeping what was there):
 Nothing reads these yet: they are recorded so a later regression rule can tell
 runner kinds apart (issue #317). This script never fails the benchmark job: a
 calibration that can't run (a full or read-only disk, too little memory) is left
-out, a file it can't read or write is left as it was, a CPU model it can't read
+out, a file it can't read or write is left as it was (each file is written to a
+temporary file beside it, then renamed over it), a CPU model it can't read
 falls back to what `platform` knows, each with a `warning:` line, and it exits 0.
 """
 import hashlib
@@ -104,10 +105,17 @@ def stamp_file(path: pathlib.Path, runner: dict) -> None:
         warn(f"{path}: not a list of data points; left as it was")
         return
     text = json.dumps([stamp(p, runner) for p in points], indent=2) + "\n"
+    temp = None
     try:
-        path.write_text(text, encoding="utf-8")
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.",
+                                         delete=False) as handle:
+            temp = pathlib.Path(handle.name)
+            handle.write(text)
+        os.replace(temp, path)
     except OSError as error:
         warn(f"{path}: cannot write ({error}); left as it was")
+        if temp is not None:
+            temp.unlink(missing_ok=True)
 
 
 def main() -> int:
