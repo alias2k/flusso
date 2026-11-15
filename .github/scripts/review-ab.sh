@@ -139,7 +139,6 @@ done
 build_env() {
   env | grep -E '^(RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_RUSTFLAGS|CARGO_PROFILE_[A-Z0-9_]+)=' | sort || true
   echo "bench-in-process.sh $(sha256sum <"$scripts/bench-in-process.sh" | cut -d' ' -f1)"
-  echo "benches ${selected[*]}"
 }
 toolchain() { (cd "$1" && rustc -vV) 2>/dev/null || echo none; }
 
@@ -207,9 +206,15 @@ else
 fi
 echo "building the head in $head_tree"
 build "$head_tree" "$head_target" "$out/build-head.log"
-python3 "$scripts/bench-provenance.py" "$base_target" "$head_target" review review
+# This run's benches only: a reused base build may hold more than was asked for.
+for target in "$base_target" "$head_target"; do
+  awk -F'\t' -v want=" ${selected[*]} " 'index(want, " " $1 " ")' \
+    "$target/bench-executables/review.tsv" >"$target/bench-executables/review-run.tsv"
+done
+python3 "$scripts/bench-provenance.py" "$base_target" "$head_target" review-run review-run
 aa=
-if cmp -s <(cut -f1,3 "$base_target/bench-executables/review.tsv") <(cut -f1,3 "$head_target/bench-executables/review.tsv"); then
+if cmp -s <(cut -f1,3 "$base_target/bench-executables/review-run.tsv") \
+  <(cut -f1,3 "$head_target/bench-executables/review-run.tsv"); then
   aa="The base and head bench binaries are byte-identical: every difference below is noise."
   echo "$aa"
 fi
@@ -252,7 +257,7 @@ if [[ " ${selected[*]} " == *" pipeline "* ]]; then
 fi
 
 executable() { # executable <target dir> <bench>
-  awk -F'\t' -v b="$2" '$1 == b { print $2 }' "$1/bench-executables/review.tsv"
+  awk -F'\t' -v b="$2" '$1 == b { print $2 }' "$1/bench-executables/review-run.tsv"
 }
 
 database=0

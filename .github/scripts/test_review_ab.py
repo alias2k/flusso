@@ -439,6 +439,17 @@ class Script(unittest.TestCase):
         self.review(self.with_cases, "--bench", "cases")
         self.assertEqual(sorted(self.log_lines("build ")), ["build base cases", "build head cases"])
 
+    def test_a_narrower_bench_selection_reuses_the_warm_build(self) -> None:
+        self.assertEqual(self.review(self.with_cases, "--bench", "cases,postgres").returncode, 0)
+        result = self.review(self.with_cases, "--bench", "cases")
+        self.assertIn("warm base build is current", result.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_wider_bench_selection_rebuilds_the_base(self) -> None:
+        self.assertEqual(self.review(self.with_cases, "--bench", "cases").returncode, 0)
+        result = self.review(self.with_cases, "--bench", "cases,postgres")
+        self.assertIn("bench not built: postgres", result.stdout)
+
     def test_criterion_runs_quietly_without_plots(self) -> None:
         self.review(self.with_cases, "--bench", "cases")
         line = self.log_lines("run ")[0]

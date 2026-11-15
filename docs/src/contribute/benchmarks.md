@@ -100,7 +100,15 @@ The control spread is how far one binary's own runs differ, the larger of the tw
 
 ### How far to trust it
 
-@RATES@
+Measured on a shared development machine at a load average of 3 to 15 (another build running), Postgres 16, 3 rounds:
+
+- **Identical code** (byte-identical bench binaries), all 36 cases, run twice. Both runs exit 0 with no case slower. One case was flagged once (`hit_ratio/0`, +13.0% against a 6.2% spread) and cleared on its re-run (+7.8%). That's 1 flag and 0 false slowdowns in 72 comparisons.
+- **A 3 ms sleep added to every `build_many` call**, the 22 `cases`:
+  - **slower** on 4: `batch/1`, `batch/10`, `batch/100` and `hit_ratio/0`, true changes of +180% to +2100%;
+  - **flagged, cleared on re-run** on 2: `key/uuid` and `key/varchar`. The true change was +31% to +34%; the re-run measured +25%, under thresholds of 37% to 38%;
+  - **noise** on 16. On the 4 to 11 ms cases the true change is +27% to +73%, and the measured change stayed under twice their spreads of 14% to 83% (`root/wide_unread` measured +15.6% for a true +29.5%). On `batch/10000` and the ~150 ms composite-key and keyless roots it's +2% to +4%, under the 5% limit.
+
+So the table catches a change larger than about twice that case's control spread, which on a busy machine is a large move: here, +28% to +170% on the 4 to 11 ms cases. The spread is in every row, so a reader can tell what a `noise` could still hide. A quiet machine narrows it.
 
 > **Tip:** a quiet machine matters more than more samples. Another build beside it shows up as a wide control spread, and the table then calls small changes noise, which is the honest answer.
 
