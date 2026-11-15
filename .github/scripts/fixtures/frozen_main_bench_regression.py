@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# FROZEN COPY of .github/scripts/bench-regression.py as on origin/main at 2f95fe84, before PR #331.
+# FROZEN COPY of .github/scripts/bench-regression.py at origin/main 2f95fe8400938081a1150a27a6737efd300dbc83, sha256 2e248db254af3595bde69da75e9b55cd4583c289625a869fdaa67185e43f6f01 (the file without these two lines).
 # Used only by test_bench_regression.py to prove the detection rule is unchanged. Never edit it.
 """Call regressions from the benchmark history the way the glossary defines them.
 
