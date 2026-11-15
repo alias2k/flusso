@@ -97,3 +97,49 @@ fn a_big_decimal_key_matches_the_row_holding_its_text() {
         ["upsert", "delete"]
     );
 }
+
+/// A key decoded as one kind meets a row read back as another after its
+/// column changed type: the row serves it when Postgres's `=` after the
+/// single build's cast (`$n::<bound>::<column type>`) holds.
+#[test]
+fn a_key_of_another_kind_is_the_row_its_cast_equals() {
+    let day = chrono::NaiveDate::from_ymd_opt(2020, 1, 2).unwrap();
+    let ten = day.and_hms_opt(10, 0, 0).unwrap();
+    let cases: [(GenericValue, GenericValue, &str); 9] = [
+        (GenericValue::Int(1), decimal("1.00"), "upsert"),
+        (decimal("1.00"), GenericValue::Int(1), "upsert"),
+        (decimal("1.5"), GenericValue::Int(2), "upsert"),
+        (GenericValue::Double(1.5), GenericValue::Int(2), "upsert"),
+        (
+            GenericValue::String("1.5".into()),
+            decimal("1.50"),
+            "upsert",
+        ),
+        (
+            GenericValue::Timestamp(ten),
+            GenericValue::TimestampTz(ten.and_utc()),
+            "upsert",
+        ),
+        (
+            GenericValue::TimestampTz(ten.and_utc()),
+            GenericValue::Timestamp(ten),
+            "upsert",
+        ),
+        (
+            GenericValue::Timestamp(ten),
+            GenericValue::Date(day),
+            "upsert",
+        ),
+        (GenericValue::Int(1), decimal("1.50"), "delete"),
+    ];
+    for (requested, row, expected) in cases {
+        assert_eq!(
+            outcomes(
+                vec![(row.clone(), body("a"))],
+                std::slice::from_ref(&requested)
+            ),
+            [expected],
+            "{requested:?} against a row keyed {row:?}"
+        );
+    }
+}

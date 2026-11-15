@@ -472,6 +472,235 @@ async fn a_numeric_key_read_before_its_scale_changed_keeps_its_document() {
     engine.abort();
 }
 
+/// A root key whose column changes kind, `int` → `numeric(10,2)` → `int`,
+/// inside a migration that updates the row on both sides of the `ALTER`:
+/// the batch holds the row keyed both ways (`Int(1)` and `Decimal(1.00)`),
+/// and each is built, as a single-document build of it would be. None is a
+/// tombstone for a row that exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_key_changing_between_integer_and_numeric_keeps_every_document() {
+    let (_postgres, url, port) = start().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE kinds (id int PRIMARY KEY, name text)",
+        "CREATE PUBLICATION flusso FOR ALL TABLES",
+        "INSERT INTO kinds VALUES (1, 'a1')",
+    ] {
+        execute(&pool, statement).await;
+    }
+    create_slot(&pool).await;
+    let mut running = Running::start(&url, port, &url, "kinds").await;
+    running.reaches("1", "a1").await;
+
+    execute(
+        &pool,
+        "BEGIN; UPDATE kinds SET name = 'a2' WHERE id = 1; \
+         ALTER TABLE kinds ALTER COLUMN id TYPE numeric(10, 2); \
+         UPDATE kinds SET name = 'a3' WHERE id = 1; COMMIT",
+    )
+    .await;
+    running.reaches("1.00", "a3").await;
+    running.reaches("1", "a3").await;
+    execute(
+        &pool,
+        "BEGIN; UPDATE kinds SET name = 'a4' WHERE id = 1; \
+         ALTER TABLE kinds ALTER COLUMN id TYPE int; \
+         UPDATE kinds SET name = 'a5' WHERE id = 1; COMMIT",
+    )
+    .await;
+    running.reaches("1", "a5").await;
+    running.reaches("1.00", "a5").await;
+    running.finish();
+}
+
+/// The same for a key changing between `timestamp` and `timestamptz`, which
+/// the builder's session (`TimeZone` UTC) converts at UTC.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_key_changing_between_timestamp_and_timestamptz_keeps_every_document() {
+    let (_postgres, url, port) = start().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE stamps (id timestamp PRIMARY KEY, name text)",
+        "CREATE PUBLICATION flusso FOR ALL TABLES",
+        "INSERT INTO stamps VALUES ('2020-01-02 10:00:00', 'a1')",
+    ] {
+        execute(&pool, statement).await;
+    }
+    create_slot(&pool).await;
+    let naive = "2020-01-02 10:00:00";
+    let zoned = "2020-01-02T10:00:00+00:00";
+    let mut running = Running::start(&url, port, &url, "stamps").await;
+    running.reaches(naive, "a1").await;
+
+    execute(
+        &pool,
+        "BEGIN; UPDATE stamps SET name = 'a2'; \
+         ALTER TABLE stamps ALTER COLUMN id TYPE timestamptz; \
+         UPDATE stamps SET name = 'a3'; COMMIT",
+    )
+    .await;
+    running.reaches(zoned, "a3").await;
+    running.reaches(naive, "a3").await;
+    execute(
+        &pool,
+        "BEGIN; UPDATE stamps SET name = 'a4'; \
+         ALTER TABLE stamps ALTER COLUMN id TYPE timestamp; \
+         UPDATE stamps SET name = 'a5'; COMMIT",
+    )
+    .await;
+    running.reaches(naive, "a5").await;
+    running.reaches(zoned, "a5").await;
+    running.finish();
+}
+
+/// A key whose column is a domain over a type in a schema the builder's role
+/// may not use (`app.dcit` over `ext.citext`, no USAGE on `ext`) is cast to
+/// the domain, as before issue #335's fix, instead of to its base type: the
+/// root key and a link of that type both index, backfill and live.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_key_of_a_domain_over_a_type_the_role_may_not_use_still_indexes() {
+    let (_postgres, url, port) = start().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE SCHEMA ext",
+        "CREATE EXTENSION citext SCHEMA ext",
+        "CREATE SCHEMA app",
+        "CREATE DOMAIN app.dcit AS ext.citext",
+        "CREATE TABLE owners (id app.dcit PRIMARY KEY, name text)",
+        "CREATE TABLE pets (id int PRIMARY KEY, owner_id app.dcit, name text)",
+        "CREATE PUBLICATION flusso FOR ALL TABLES",
+        "INSERT INTO owners VALUES ('ada', 'Ada')",
+        "INSERT INTO pets VALUES (1, 'ada', 'rex')",
+        "CREATE ROLE reader LOGIN PASSWORD 'reader'",
+        "GRANT USAGE ON SCHEMA app TO reader",
+        "GRANT SELECT ON owners, pets TO reader",
+    ] {
+        execute(&pool, statement).await;
+    }
+    create_slot(&pool).await;
+    let reader = url.replace("postgres:postgres@", "reader:reader@");
+    let spec = Arc::new(SourceSpec::new(BTreeMap::from([(
+        index_name("owners"),
+        owners_with_pets(),
+    )])));
+    let documents = PgDocumentBuilder::connect(&reader, spec).await.unwrap();
+    let mut running = Running::with(documents, &url, port).await;
+    let owner = |name: &str, pets: &[&str]| {
+        json!({
+            "name": name,
+            "pets": pets.iter().map(|pet| json!({ "name": pet })).collect::<Vec<_>>(),
+        })
+    };
+    document_reaches(
+        &mut running.engine,
+        &running.recorded,
+        "ada",
+        &owner("Ada", &["rex"]),
+    )
+    .await;
+
+    execute(&pool, "INSERT INTO pets VALUES (2, 'ada', 'fido')").await;
+    document_reaches(
+        &mut running.engine,
+        &running.recorded,
+        "ada",
+        &owner("Ada", &["rex", "fido"]),
+    )
+    .await;
+    execute(&pool, "UPDATE owners SET name = 'Ada L' WHERE id = 'ada'").await;
+    document_reaches(
+        &mut running.engine,
+        &running.recorded,
+        "ada",
+        &owner("Ada L", &["rex", "fido"]),
+    )
+    .await;
+    running.finish();
+}
+
+/// `owners` with its `pets`, linked by `owner_id`.
+fn owners_with_pets() -> IndexSchema {
+    let mut schema = named("owners");
+    schema.fields.push(relation(
+        "pets",
+        Relation::Join(join(
+            "pets",
+            JoinKind::HasMany {
+                foreign_key: column("owner_id"),
+            },
+            vec![value_field("name", "name", FlussoType::Keyword)],
+        )),
+    ));
+    schema
+}
+
+/// The engine running one deployment, recording what its sink receives.
+struct Running {
+    engine: tokio::task::JoinHandle<engine::Result<()>>,
+    recorded: Arc<Mutex<Vec<(String, Value)>>>,
+    restarts: Arc<AtomicUsize>,
+    failures: Arc<Mutex<Vec<String>>>,
+}
+
+impl Running {
+    /// Index `table` as `{ name }`, read over `builder_url`, captured over
+    /// `capture_url`.
+    async fn start(builder_url: &str, port: u16, capture_url: &str, table_name: &str) -> Self {
+        let spec = Arc::new(SourceSpec::new(BTreeMap::from([(
+            index_name(table_name),
+            named(table_name),
+        )])));
+        let documents = PgDocumentBuilder::connect(builder_url, spec).await.unwrap();
+        Self::with(documents, capture_url, port).await
+    }
+
+    async fn with(documents: PgDocumentBuilder, capture_url: &str, port: u16) -> Self {
+        let capture = WalChangeCapture::new(replication(port), capture_url.to_owned())
+            .with_column_types(documents.column_types());
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let restarts = Arc::new(AtomicUsize::new(0));
+        let failures = Arc::new(Mutex::new(Vec::new()));
+        let engine = tokio::spawn(supervise(
+            Arc::new(capture),
+            Arc::new(documents),
+            Arc::new(DocumentSink(Arc::clone(&recorded))),
+            Arc::clone(&restarts),
+            Arc::clone(&failures),
+        ));
+        Self {
+            engine,
+            recorded,
+            restarts,
+            failures,
+        }
+    }
+
+    async fn reaches(&mut self, id: &str, name: &str) {
+        document_reaches(
+            &mut self.engine,
+            &self.recorded,
+            id,
+            &json!({ "name": name }),
+        )
+        .await;
+    }
+
+    /// Assert no tombstone was sent and the engine never restarted, then stop.
+    fn finish(self) {
+        assert_eq!(tombstones(&self.recorded), Vec::<String>::new());
+        assert_eq!(
+            self.restarts.load(Ordering::SeqCst),
+            0,
+            "{:?}",
+            self.failures.lock().unwrap()
+        );
+        self.engine.abort();
+    }
+}
+
 /// `table` indexed as `{ name }`, keyed by `id`.
 fn named(table_name: &str) -> IndexSchema {
     IndexSchema {
