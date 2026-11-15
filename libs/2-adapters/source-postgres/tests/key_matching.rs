@@ -6,9 +6,15 @@
 //! A generated differential: every requested key (each `GenericValue` kind,
 //! with the edge values Postgres's input and output functions treat
 //! specially) against a table of each key type holding every stored text it
-//! accepts. For each pair, `build_many` alone and in a batch that also asks
-//! for every stored row (the row's other spellings) must give what `build`
-//! gives: the same upsert, tombstone or error, and the same document body.
+//! accepts. For each pair, `build_many` alone, in a batch that also asks for
+//! every stored row (the row's other spellings), and in a batch of
+//! [`PARAMETERS`] keys of the requested kind (the others of that kind a single
+//! build accepts, then the key again) must give what `build` gives: the
+//! same upsert, tombstone or error, and the same document body. The batches
+//! reach both ways a batch sends its keys: a batch under sixteen keys is
+//! written as an array constructor, one of [`PARAMETERS`] passes them as
+//! array parameters, and a hash-partitioned twin of every table takes the
+//! constructor at any size.
 //! The database's own `TimeZone` is not UTC, so a `timestamp` ↔
 //! `timestamptz` cast shows the builder's session zone.
 //!
@@ -60,6 +66,10 @@ const KEY_TYPES: &[&str] = &[
     "bytea",
     "name",
 ];
+
+/// A batch this large on an unpartitioned root passes its keys as array
+/// parameters (`query::KeyForm`).
+const PARAMETERS: usize = 17;
 
 /// Past `name`'s 63 bytes: a cast to `name` cuts it.
 const LONG: &str = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqr";
@@ -282,14 +292,27 @@ async fn the_batched_build_serves_the_ids_a_single_build_serves() {
 
     let mut schemas = BTreeMap::new();
     let mut stored_keys = BTreeMap::new();
-    for (n, key_type) in KEY_TYPES.iter().enumerate() {
-        let table = format!("k{n}");
-        execute(
-            &pool,
-            &format!("CREATE TABLE {table} (id {key_type} PRIMARY KEY, name text)"),
-        )
-        .await
-        .unwrap();
+    for (table, key_type) in tables() {
+        let partitioned = table.starts_with('p');
+        let create = format!("CREATE TABLE {table} (id {key_type} PRIMARY KEY, name text)");
+        if partitioned {
+            execute(&pool, &format!("{create} PARTITION BY HASH (id)"))
+                .await
+                .unwrap();
+            for remainder in 0..4 {
+                execute(
+                    &pool,
+                    &format!(
+                        "CREATE TABLE {table}_{remainder} PARTITION OF {table} \
+                         FOR VALUES WITH (MODULUS 4, REMAINDER {remainder})"
+                    ),
+                )
+                .await
+                .unwrap();
+            }
+        } else {
+            execute(&pool, &create).await.unwrap();
+        }
         for text in STORED {
             let quoted = text.replace('\'', "''");
             let _ = execute(
@@ -315,16 +338,22 @@ async fn the_batched_build_serves_the_ids_a_single_build_serves() {
 
     let mut disagreements = Vec::new();
     let mut pairs = 0;
-    for (n, key_type) in KEY_TYPES.iter().enumerate() {
-        let table = format!("k{n}");
+    let requested = requested();
+    for (table, key_type) in tables() {
         let others: Vec<DocumentId> = stored_keys[&table]
             .iter()
             .map(|text| id(&table, GenericValue::String(text.clone())))
             .collect();
-        for key in requested() {
+        let mut singles = Vec::with_capacity(requested.len());
+        for key in &requested {
+            let id = id(&table, key.clone());
+            singles.push(outcome(builder.build(&id).await, &id));
+        }
+        for (key, single) in requested.iter().zip(&singles) {
+            let key = key.clone();
+            let single = single.clone();
             pairs += 1;
             let id = id(&table, key.clone());
-            let single = outcome(builder.build(&id).await, &id);
             let alone = outcome(
                 builder
                     .build_many(std::slice::from_ref(&id))
@@ -341,22 +370,57 @@ async fn the_batched_build_serves_the_ids_a_single_build_serves() {
                     .map(|mut documents| documents.remove(0)),
                 &id,
             );
-            if single != alone || single != mixed {
+            let mut same_kind = vec![id.clone()];
+            same_kind.extend(
+                requested
+                    .iter()
+                    .zip(&singles)
+                    .filter(|(other, built)| {
+                        **other != key
+                            && *built != "error"
+                            && std::mem::discriminant(*other) == std::mem::discriminant(&key)
+                    })
+                    .map(|(other, _)| self::id(&table, other.clone())),
+            );
+            while same_kind.len() < PARAMETERS {
+                same_kind.push(id.clone());
+            }
+            let wide = match builder.build_many(&same_kind).await {
+                Ok(documents) => documents
+                    .into_iter()
+                    .zip(&same_kind)
+                    .filter(|(_, requested)| **requested == id)
+                    .map(|(document, _)| outcome(Ok(document), &id))
+                    .find(|got| *got != single)
+                    .unwrap_or_else(|| single.clone()),
+                Err(error) => outcome(Err(error), &id),
+            };
+            if single != alone || single != mixed || single != wide {
                 disagreements.push(format!(
-                    "{key:?} ({}) against a {key_type} key: build {single}, alone {alone}, \
-                     beside every stored row {mixed}",
-                    bound_type(&key)
+                    "{key:?} ({}) against a {key_type} key in {table}: build {single}, \
+                     alone {alone}, beside every stored row {mixed}, among {} keys of \
+                     its kind {wide}",
+                    bound_type(&key),
+                    same_kind.len()
                 ));
             }
         }
     }
-    assert!(pairs >= 2000, "{pairs} pairs");
+    assert!(pairs >= 4000, "{pairs} pairs");
     assert!(
         disagreements.is_empty(),
         "{} of {pairs} pairs disagree:\n{}",
         disagreements.len(),
         disagreements.join("\n")
     );
+}
+
+/// Every key type's table, `k<n>`, and its hash-partitioned twin, `p<n>`.
+fn tables() -> impl Iterator<Item = (String, &'static str)> {
+    KEY_TYPES
+        .iter()
+        .enumerate()
+        .flat_map(|(n, key_type)| [(format!("k{n}"), *key_type), (format!("p{n}"), *key_type)])
 }
 
 /// What a build gives one id: the upsert's body, a tombstone, a failure or
