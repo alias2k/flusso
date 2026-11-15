@@ -56,6 +56,7 @@ import sys
 
 ISSUE_TITLE = "Performance regression on main"
 POWER_CUTS = 20
+POWER_RECENT = 50
 POWER_GRID = (1, 1.2, 1.5, 2, 3, 4, 6, 8)
 
 
@@ -170,50 +171,66 @@ def analyse(data: dict, threshold: float, rss_threshold: float, window: int, spr
     return findings
 
 
+def caught_reliably(suite: str, tool: str, history: list[tuple[dict, dict]], cuts: range, step: float,
+                    limit: float, window: int, spread: float) -> bool:
+    """Whether a lasting step of `step`% is caught within two runs at 9 of 10 of `cuts`, by running the rule."""
+    factor = 1 + step / 100 if tool == "customSmallerIsBetter" else 1 - step / 100
+    caught = 0
+    for cut in cuts:
+        # The rule reads only the newest two points and the `window` before each, so that slice decides alone.
+        start = max(0, cut - window)
+        points = [{"tool": tool, "commit": commit,
+                   "benches": [{**bench, "value": bench["value"] * factor} if i >= cut else bench]}
+                  for i, (bench, commit) in enumerate(history[start:cut + 2], start)]
+        caught += bool(analyse({"entries": {suite: points}}, limit, limit, window, spread))
+    return caught >= 0.9 * len(cuts)
+
+
 def reliable_step(suite: str, tool: str, history: list[tuple[dict, dict]], limit: float, window: int,
-                  spread: float) -> tuple[float, bool] | None:
+                  spread: float) -> dict | None:
     """The smallest step in `POWER_GRID` the rule catches within two runs 9 times out of 10, by running it.
 
-    `history` is the series' `(bench, commit)` points in time order. Returns the step (worse by, in %) and
-    whether it reached 9 out of 10; when no size did, the largest size tried. None with too little history.
+    `history` is the series' `(bench, commit)` points in time order. Returns the step (worse by, in %), whether
+    it reached 9 out of 10 (when no size did, the step is the largest size tried), and whether 1.5 times the
+    threshold did. None with too little history.
     """
-    smaller = tool == "customSmallerIsBetter"
     cuts = range(max(window, len(history) - 1 - POWER_CUTS), len(history) - 1)
     if len(cuts) < POWER_CUTS // 2:
         return None
-    steps = [limit * m for m in POWER_GRID if smaller or limit * m < 100]
+    steps = [limit * m for m in POWER_GRID if tool == "customSmallerIsBetter" or limit * m < 100]
+    at_one_and_a_half = caught_reliably(suite, tool, history, cuts, limit * 1.5, limit, window, spread)
     for step in steps:
-        factor = 1 + step / 100 if smaller else 1 - step / 100
-        caught = 0
-        for cut in cuts:
-            # The rule reads only the newest two points and the `window` before each, so that slice decides alone.
-            start = max(0, cut - window)
-            points = [{"tool": tool, "commit": commit,
-                       "benches": [{**bench, "value": bench["value"] * factor} if i >= cut else bench]}
-                      for i, (bench, commit) in enumerate(history[start:cut + 2], start)]
-            caught += bool(analyse({"entries": {suite: points}}, limit, limit, window, spread))
-        if caught >= 0.9 * len(cuts):
-            return step, True
-    return steps[-1], False
+        if caught_reliably(suite, tool, history, cuts, step, limit, window, spread):
+            return {"step": step, "reliable": True, "at_one_and_a_half": at_one_and_a_half}
+    return {"step": steps[-1], "reliable": False, "at_one_and_a_half": at_one_and_a_half}
 
 
-def detection_power(data: dict, threshold: float, rss_threshold: float, window: int, spread: float) -> list[dict]:
-    """Every series with enough history, with the step the rule catches reliably on it."""
-    table = []
+def detection_power(data: dict, threshold: float, rss_threshold: float, window: int,
+                    spread: float) -> tuple[list[dict], int, int]:
+    """Every series the rule still judges and with enough history, with its step; and how many were too
+    short to measure or not recorded in the last `POWER_RECENT` runs (the rule no longer judges those)."""
+    table, short, gone = [], 0, 0
     for suite, points in data.get("entries", {}).items():
         if not points:
             continue
         tool = points[-1].get("tool")
+        recent = {bench["name"] for point in points[-POWER_RECENT:] for bench in point.get("benches", [])}
         series: dict[str, list[tuple[dict, dict]]] = {}
         for point in points:
             for bench in point.get("benches", []):
                 series.setdefault(bench["name"], []).append((bench, point.get("commit", {})))
         for name, history in series.items():
+            if name not in recent:
+                gone += 1
+                continue
             limit = rss_threshold if name.endswith("peak_rss_mib") else threshold
             found = reliable_step(suite, tool, history, limit, window, spread)
-            if found:
-                table.append({"suite": suite, "series": name, "limit": limit, "step": round(found[0]), "reliable": found[1]})
-    return table
+            if found is None:
+                short += 1
+                continue
+            table.append({"suite": suite, "series": name, "limit": limit, "step": round(found["step"]),
+                          "reliable": found["reliable"], "at_one_and_a_half": found["at_one_and_a_half"]})
+    return table, short, gone
 
 
 def weakest_first(table: list[dict]) -> list[dict]:
@@ -226,15 +243,21 @@ def power_text(n: dict) -> str:
     return f"threshold {n['limit']:g}%, not reliably caught up to +{n['step']}%"
 
 
-def power_summary(table: list[dict]) -> str:
-    """Two sentences for the issue: how many series are caught at their threshold, the median step, the run."""
-    at_threshold = sum(1 for n in table if n["reliable"] and n["step"] <= n["limit"])
+def power_figures(table: list[dict]) -> tuple[int, str]:
+    """How many series catch 1.5 times their threshold reliably, and the step the median series needs."""
+    at_one_and_a_half = sum(1 for n in table if n["at_one_and_a_half"])
     middle = sorted(table, key=lambda n: (not n["reliable"], n["step"]))[(len(table) - 1) // 2]
     needs = f"about +{middle['step']}%" if middle["reliable"] else f"more than +{middle['step']}%"
+    return at_one_and_a_half, needs
+
+
+def power_summary(table: list[dict]) -> str:
+    """Two sentences for the issue: the 1.5-times count, the median step, the run whose summary has the table."""
+    count, needs = power_figures(table)
     server, repo, run_id = (os.environ.get(k) for k in ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID"))
     where = f"[this run]({server}/{repo}/actions/runs/{run_id})" if server and repo and run_id else "the run that wrote this"
-    return (f"Detection power: the rule catches a lasting step of its threshold within two runs 9 times out of 10 on "
-            f"{at_threshold} of {len(table)} series today, and the median series needs a lasting step of {needs} "
+    return (f"Detection power: on {count} of {len(table)} series the rule catches a lasting step of 1.5 times its "
+            f"threshold within two runs 9 times out of 10, and the median series needs a lasting step of {needs} "
             f"to be caught that reliably. The table for every series is in the summary of {where}.")
 
 
@@ -275,6 +298,8 @@ def main() -> int:
     parser.add_argument("--window", type=int, default=5)
     parser.add_argument("--spread", type=float, default=3.0)
     parser.add_argument("--issue", action="store_true")
+    parser.add_argument("--skip-detection-power", action="store_true",
+                        help="leave out the detection-power report (for tests; it changes no verdict)")
     args = parser.parse_args()
     rss = args.rss_threshold if args.rss_threshold is not None else args.threshold
     datas = []
@@ -288,7 +313,12 @@ def main() -> int:
     findings = []
     for data in datas:
         findings += analyse(data, args.threshold, rss, args.window, args.spread)
-    power = weakest_first([n for data in datas for n in detection_power(data, args.threshold, rss, args.window, args.spread)])
+    power, short, gone = [], 0, 0
+    if not args.skip_detection_power:
+        for data in datas:
+            table, too_short, not_recorded = detection_power(data, args.threshold, rss, args.window, args.spread)
+            power, short, gone = power + table, short + too_short, gone + not_recorded
+        power = weakest_first(power)
     if findings:
         print(f"{len(findings)} regression(s):")
         for f in findings:
@@ -296,10 +326,16 @@ def main() -> int:
     else:
         print("no regression: no series is over its threshold on two consecutive runs")
     if power:
-        print(f"detection power, weakest first (the smallest lasting step caught within two runs 9 times out of 10, "
-              f"measured by injecting steps at each of the last {POWER_CUTS} runs):")
+        count, needs = power_figures(power)
+        print(f"detection power, weakest first: on {count} of {len(power)} series a lasting step of 1.5 times the threshold "
+              f"is caught within two runs 9 times out of 10; the median series needs {needs} (each series: the smallest "
+              f"lasting step caught within two runs 9 times out of 10, measured by injecting steps at each of its last "
+              f"{POWER_CUTS} runs)")
         for n in power:
             print(f"    {n['suite']} {n['series']}: {power_text(n)}")
+    if short or gone:
+        print(f"left out: {short} series with too few runs to measure (fewer than {args.window + POWER_CUTS // 2 + 1}), "
+              f"{gone} series not recorded in the last {POWER_RECENT} runs")
     if args.issue:
         upsert_issue(findings, power)
     return 0

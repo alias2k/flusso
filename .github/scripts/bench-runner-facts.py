@@ -95,15 +95,16 @@ def stamp(point, runner: dict):
     return {**point, "extra": json.dumps(extra, sort_keys=True)}
 
 
-def stamp_file(path: pathlib.Path, runner: dict) -> None:
+def stamp_file(path: pathlib.Path, runner: dict) -> bool:
+    """Stamp every point in `path`; False, with a warning, when the file is left as it was."""
     try:
         points = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         warn(f"{path}: cannot read ({error}); left as it was")
-        return
+        return False
     if not isinstance(points, list):
         warn(f"{path}: not a list of data points; left as it was")
-        return
+        return False
     text = json.dumps([stamp(p, runner) for p in points], indent=2) + "\n"
     temp = None
     try:
@@ -116,6 +117,8 @@ def stamp_file(path: pathlib.Path, runner: dict) -> None:
         warn(f"{path}: cannot write ({error}); left as it was")
         if temp is not None:
             temp.unlink(missing_ok=True)
+        return False
+    return True
 
 
 def main() -> int:
@@ -124,9 +127,10 @@ def main() -> int:
         return 0
     try:
         runner = {"cpu": cpu_model(), "cores": os.cpu_count() or 0, "calibration": calibrate()}
-        for name in sys.argv[1:]:
-            stamp_file(pathlib.Path(name), runner)
-        print(f"stamped with {runner['cpu']} ({runner['cores']} cores), calibration {runner['calibration']}")
+        files = sys.argv[1:]
+        stamped = sum(stamp_file(pathlib.Path(name), runner) for name in files)
+        print(f"stamped {stamped} of {len(files)} files with {runner['cpu']} ({runner['cores']} cores), "
+              f"calibration {runner['calibration']}")
     except Exception as error:  # noqa: BLE001 - recording runner facts must never fail the benchmark job
         warn(f"runner facts not recorded ({type(error).__name__}: {error})")
     return 0

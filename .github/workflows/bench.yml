@@ -218,9 +218,12 @@ jobs:
           git fetch --quiet origin benchmarks
           git show origin/benchmarks:smaller/data.js > /tmp/smaller.js
           git show origin/benchmarks:bigger/data.js > /tmp/bigger.js
+          status=0
           python3 .github/scripts/bench-regression.py 25 --rss-threshold 20 --issue /tmp/smaller.js /tmp/bigger.js \
-            | tee /tmp/regression.txt
+            > /tmp/regression.txt 2>&1 || status=$?
+          cat /tmp/regression.txt
           { echo '### Regression check'; echo '```'; cat /tmp/regression.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
 
       # The storage action pushed with the workflow token, and GitHub does not
       # start workflows from such pushes — so the `benchmarks` push trigger in
