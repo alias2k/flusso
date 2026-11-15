@@ -60,6 +60,7 @@
 //! Multi-hop reverse resolution issues one query per hop.
 
 mod fields;
+mod matching;
 mod query;
 mod reads;
 mod resolve;
@@ -1203,55 +1204,18 @@ impl DocumentBuilder for PgDocumentBuilder {
                     .await
                     .map_err(|error| self.failed_query(index_name, schema, error))?;
 
-                // Map each returned root key to its assembled body, by the
-                // key as the sink's `_id` renders it: a row is matched to every
-                // requested id that names the same document, also one whose
-                // key was decoded as another type before its column changed
-                // (an `int4` and an `int8` of one row in one batch).
-                let mut bodies: HashMap<
-                    String,
-                    std::result::Result<kernel::GenericValue, source::document::BuildFailure>,
-                > = HashMap::with_capacity(rows.len());
+                let mut found = Vec::with_capacity(rows.len());
                 for row in &rows {
                     let key = value::decode_key(row, query::DOC_KEY);
                     if matches!(key, kernel::GenericValue::Null) {
                         continue;
                     }
-                    bodies.insert(
-                        source::document::key_part(&key),
+                    found.push((
+                        key,
                         value::read_document(row, &schema.fields, self.plan(index_name)?)?,
-                    );
+                    ));
                 }
-
-                // Every requested id yields an outcome: a body present in the
-                // result is an upsert; an absent key means the root is gone or
-                // soft-deleted (both fold into the query's WHERE) → a tombstone.
-                let mut built: HashMap<String, usize> = HashMap::with_capacity(chunk.len());
-                for (value, id) in chunk {
-                    let id = (*id).clone();
-                    let key = source::document::key_part(value);
-                    let document = match bodies.remove_entry(&key) {
-                        Some((key, outcome)) => {
-                            built.insert(key, out.len());
-                            match outcome {
-                                Ok(body) => Document::Upsert { id, body },
-                                Err(failure) => Document::Failed { id, failure },
-                            }
-                        }
-                        None => match built.get(&key).and_then(|&at| out.get(at)) {
-                            Some(Document::Upsert { body, .. }) => Document::Upsert {
-                                id,
-                                body: body.clone(),
-                            },
-                            Some(Document::Failed { failure, .. }) => Document::Failed {
-                                id,
-                                failure: failure.clone(),
-                            },
-                            Some(Document::Delete { .. }) | None => Document::Delete { id },
-                        },
-                    };
-                    out.push(document);
-                }
+                matching::match_rows(found, chunk, &mut out);
             }
         }
         Ok(out)
