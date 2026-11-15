@@ -109,7 +109,7 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   failing the job. Tests: `python3 -m unittest discover -s .github/scripts -p
   'test_*.py'` (CI's `scripts` job) over the real history in `.github/scripts/fixtures/`, with a frozen
   copy of the rule that every change must flag identically to. `just load` is the soak script — not a benchmark.
-- The `#[ignore]`d e2e tests live in `source-postgres`'s `integration`,
+- The `#[ignore]`d e2e tests live in `source-postgres`'s `integration`, `key_matching`,
   `config_coverage`, `publication`, `introspection`, `tls`, `wal_idle`, `continuity`, and `partitions` binaries
   (`tls` boots a hostssl-only PG 16 with a committed throwaway self-signed cert and
   proves the replication stream + SQL pool honor `sslmode`; `wal_idle`: the slot keeps
@@ -1085,16 +1085,25 @@ retried. **A key is never cast to a size**: the key type is `ColumnMeta.key_type
 (`PgDocumentBuilder::key_type`), the base type's schema-qualified `typname` with no modifier
 (`pg_catalog.bpchar`, never `character`, which means `char(1)`), because an explicit cast to
 `varchar(5)`/`numeric(10,2)` truncates or rounds without an error and matches no row; plans keep their
-index scans. A key decoded before and after its column changed type is one document: `build_many`
-(`document/matching.rs`'s `match_rows`) serves a requested id from the row whose key renders its `_id`
-(`source::document::key_part`; `Int(1)`/`BigInt(1)`), else from one equal by value (a `numeric` `1.5`
-against a row now `1.50`), under the requested id, as `build` does; only an id neither finds is a
-tombstone. A query Postgres refuses as a schema mismatch (`42883`/`42804`/`42703`/`42P01`), a
+index scans. When the role has no USAGE on the base type's schema (a domain `app.dcit` over
+`ext.citext`) it is the declared type's `typname` instead, as before (a cast to a domain checks its
+constraints); `has_schema_privilege` is read by the same catalog query and cached with the type, and
+the backfill's key lookup follows the same rule. `text_value::is_key_type` takes an extension type
+named with its schema (`ext.citext`, as sqlx names one off the search path). **The batched build
+serves exactly the ids a single `build` serves**: `build_many` (`document/matching.rs`'s `match_rows`)
+looks a requested id up by its decoded key (one hash lookup, no allocation) and, on a miss, casts it
+into each other key kind among the rows as `$n::<bound>::<key type>` does in Postgres
+(`matching::cast`: integers/`numeric`/floats as numbers with Postgres's rounding, `boolean` ↔
+`integer`, `date`/`time`/`timestamp`/`timestamptz` at the session's UTC, text by its output, text
+parsed by the row type's reader; anything else only within its own kind), under the requested id;
+only an id no row serves is a tombstone. Guard: `source-postgres`'s `key_matching` (every castable
+pair of 15 key types, `build` vs `build_many` on Postgres 16 with a non-UTC database zone). A query Postgres refuses as a schema mismatch (`42883`/`42804`/`42703`/`42P01`), a
 document query or a reverse lookup, names the index and `flusso check` (`query_failed`); it is a real
 mismatch, which validation reports, not a stale cache. Guard: the `engine` `type_change` e2e (root key,
 links, junction and `via` keys, a recreated table, a migration in one transaction, a concurrent reader
 on several pooled connections, resizes of `varchar`/`char`/`numeric` keys, a `numeric` key read before
-its scale changed; no restart, no tombstone), `matching::tests`, `document::tests`'
+its scale changed, keys moving between `int`/`numeric` and `timestamp`/`timestamptz` inside one
+migration, a domain over a type in a schema the role may not use; no restart, no tombstone), `matching::tests`, `document::tests`'
 `no_key_cast_carries_a_type_modifier`, `stream::tests`'
 `a_relation_message_with_another_type_modifier_forgets_its_tables_column_types`. No query per build. The cache is nested by schema, table and
 column, looked up by borrowed names, and hands out `Arc<ColumnMeta>`, so a hit allocates nothing; each
