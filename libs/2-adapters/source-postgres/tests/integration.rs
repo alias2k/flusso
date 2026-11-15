@@ -24,6 +24,7 @@ use source::{RowImage, RowKey, SourceSpec};
 use source_postgres::PgDocumentBuilder;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers_modules::postgres::Postgres;
+use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1043,4 +1044,297 @@ fields:
         batched.is_err(),
         "a name no table has fails the batched build too, got {batched:?}"
     );
+}
+
+fn schema_from(yaml: &str) -> IndexSchema {
+    IndexSchema::try_from(SchemaYaml::try_parse(yaml).unwrap()).unwrap()
+}
+
+fn int_ids(index: &str, keys: impl IntoIterator<Item = i32>) -> Vec<DocumentId> {
+    keys.into_iter()
+        .map(|key| DocumentId {
+            index: index_name(index),
+            key: RowKey(vec![(column("id"), GenericValue::Int(key))]),
+        })
+        .collect()
+}
+
+/// `build_many` over `ids` gives, id by id, what `build` gives.
+async fn assert_both_builds_agree(
+    builder: &PgDocumentBuilder,
+    ids: &[DocumentId],
+) -> Vec<Document> {
+    let batched = builder.build_many(ids).await.unwrap();
+    let mut single = Vec::new();
+    for id in ids {
+        single.push(builder.build(id).await.unwrap());
+    }
+    assert_eq!(format!("{batched:?}"), format!("{single:?}"));
+    single
+}
+
+/// A schema over `table` whose raw filters, on the root, a `has_many` and a
+/// `count`, are `root_filter`, `notes_filter` and `count_filter`.
+fn scoped_schema(table: &str, root_filter: &str, notes_filter: &str, count_filter: &str) -> String {
+    format!(
+        "
+version: 1
+table: {table}
+primary_key: id
+filters:
+  - {{ raw: '{root_filter}' }}
+fields:
+  - integer: id
+    required: true
+  - has_many: notes
+    table: notes
+    foreign_key: item_id
+    primary_key: id
+    filters:
+      - {{ raw: '{notes_filter}' }}
+    order_by:
+      - {{ column: id, direction: asc }}
+    fields:
+      - integer: rank
+        required: true
+  - count: lowNotes
+    table: notes
+    foreign_key: item_id
+    filters:
+      - {{ raw: '{count_filter}' }}
+"
+    )
+}
+
+/// A raw filter's unqualified name resolves to the root row's column in a
+/// batched build, whatever the batched query names its own relations and
+/// columns (issue #335). The names are read off the batched statement itself:
+/// a first root builds once and `pg_stat_statements` gives the statement, then
+/// a second root carries a column named after every quoted identifier in it.
+/// Raw filters on the root, a `has_many` and a `count` name all of them
+/// unqualified, and `build_many` must give what `build` gives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_raw_filter_names_the_root_rows_columns_whatever_the_batched_query_names() {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .with_cmd([
+            "postgres",
+            "-c",
+            "shared_preload_libraries=pg_stat_statements",
+        ])
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE EXTENSION pg_stat_statements",
+        "CREATE TABLE plain (id int PRIMARY KEY)",
+        "CREATE TABLE notes (id int PRIMARY KEY, item_id int NOT NULL, rank int NOT NULL)",
+        "INSERT INTO plain VALUES (1), (2)",
+        "INSERT INTO notes SELECT g, g % 6 + 1, g % 5 FROM generate_series(1, 60) g",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+
+    let spec = SourceSpec::new(BTreeMap::from([(
+        index_name("plain"),
+        schema_from(&scoped_schema("plain", "true", "true", "true")),
+    )]));
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec))
+        .await
+        .unwrap();
+    builder.build_many(&int_ids("plain", [1, 2])).await.unwrap();
+    let statements: Vec<(String,)> = sqlx::query_as(
+        "SELECT query FROM pg_stat_statements WHERE query LIKE '%\"plain\"%' \
+         AND query NOT LIKE '%pg_stat_statements%'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let mut names: Vec<String> = statements
+        .iter()
+        .flat_map(|(text,)| text.split('"').skip(1).step_by(2).map(str::to_owned))
+        .filter(|name| name != "id")
+        .collect();
+    names.sort();
+    names.dedup();
+    assert!(names.len() > 5, "the batched statement's names: {names:?}");
+
+    let columns: Vec<String> = names
+        .iter()
+        .map(|name| format!("\"{name}\" int NOT NULL"))
+        .collect();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE TABLE items (id int PRIMARY KEY, {})",
+        columns.join(", ")
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    for row in 1..=6 {
+        let values: Vec<String> = (0..names.len())
+            .map(|position| ((row * 7 + position * 3) % 11).to_string())
+            .collect();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "INSERT INTO items VALUES ({row}, {})",
+            values.join(", ")
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let sum = names
+        .iter()
+        .map(|name| format!("\"{name}\""))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    let schema = scoped_schema(
+        "items",
+        &format!("({sum}) % 3 <> 0"),
+        &format!("rank <= ({sum}) % 5"),
+        &format!("rank > ({sum}) % 5"),
+    );
+    let spec = SourceSpec::new(BTreeMap::from([(
+        index_name("items"),
+        schema_from(&schema),
+    )]));
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec))
+        .await
+        .unwrap();
+    let built = assert_both_builds_agree(&builder, &int_ids("items", 1..=6)).await;
+    let upserts = built
+        .iter()
+        .filter(|document| matches!(document, Document::Upsert { .. }))
+        .count();
+    assert!(
+        (1..6).contains(&upserts),
+        "the root filter keeps some rows and drops others: {built:?}"
+    );
+}
+
+/// The builder's own sessions run with `jit = off` (issue #335): flusso's
+/// document queries are short lookups that a JIT compilation only slows. A
+/// root raw filter reads the setting on the session that builds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn the_builders_sessions_run_without_jit() {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE plain (id int PRIMARY KEY)",
+        "CREATE TABLE notes (id int PRIMARY KEY, item_id int NOT NULL, rank int NOT NULL)",
+        "INSERT INTO plain VALUES (1), (2)",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let (default,): (String,) = sqlx::query_as("SHOW jit").fetch_one(&pool).await.unwrap();
+    assert_eq!(default, "on", "the server's own default");
+
+    let jit_off = "current_setting(''jit'') = ''off''";
+    let spec = SourceSpec::new(BTreeMap::from([(
+        index_name("plain"),
+        schema_from(&scoped_schema("plain", jit_off, "true", "true")),
+    )]));
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec))
+        .await
+        .unwrap();
+    let built = assert_both_builds_agree(&builder, &int_ids("plain", [1, 2])).await;
+    assert!(
+        built
+            .iter()
+            .all(|document| matches!(document, Document::Upsert { .. })),
+        "every build ran with jit off: {built:?}"
+    );
+}
+
+/// Where the declared key is not unique (a root without a primary key, one
+/// whose key is composite, a partitioned root keyed with its partition
+/// column), the batched and the single build pick the same row for a key: the
+/// one whose row text sorts first, alone or beside other keys, in any order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_key_several_rows_share_builds_the_same_row_both_ways() {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE keyless (id int, name text)",
+        "CREATE TABLE composite (id int, sub int, name text, PRIMARY KEY (id, sub))",
+        "CREATE TABLE ranged (id int, created date, name text, PRIMARY KEY (id, created)) \
+         PARTITION BY RANGE (created)",
+        "CREATE TABLE ranged_old PARTITION OF ranged FOR VALUES FROM ('2000-01-01') TO ('2020-01-01')",
+        "CREATE TABLE ranged_new PARTITION OF ranged FOR VALUES FROM ('2020-01-01') TO ('2040-01-01')",
+        "INSERT INTO keyless VALUES (1, 'b'), (1, 'a'), (2, 'c'), (3, 'e'), (3, 'd'), (3, 'f')",
+        "INSERT INTO composite VALUES (1, 2, 'b'), (1, 1, 'a'), (2, 1, 'c'), (3, 3, 'e'), \
+         (3, 2, 'd'), (3, 1, 'f')",
+        "INSERT INTO ranged VALUES (1, '2030-01-01', 'b'), (1, '2010-01-01', 'a'), \
+         (2, '2010-01-01', 'c'), (3, '2030-06-01', 'e'), (3, '2010-06-01', 'd')",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let schema = |table: &str| {
+        schema_from(&format!(
+            "
+version: 1
+table: {table}
+primary_key: id
+fields:
+  - integer: id
+    required: true
+  - keyword: name
+    required: false
+"
+        ))
+    };
+    let spec = SourceSpec::new(BTreeMap::from([
+        (index_name("keyless"), schema("keyless")),
+        (index_name("composite"), schema("composite")),
+        (index_name("ranged"), schema("ranged")),
+    ]));
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec))
+        .await
+        .unwrap();
+
+    for (index, expected) in [
+        ("keyless", ["a", "c", "d"]),
+        ("composite", ["a", "c", "f"]),
+        ("ranged", ["a", "c", "d"]),
+    ] {
+        let forward = assert_both_builds_agree(&builder, &int_ids(index, [1, 2, 3, 4])).await;
+        let backward = assert_both_builds_agree(&builder, &int_ids(index, [4, 3, 3, 2, 1])).await;
+        for key in 1..=3 {
+            assert_both_builds_agree(&builder, &int_ids(index, [key])).await;
+        }
+        let names: Vec<String> = forward
+            .iter()
+            .filter_map(|document| match document {
+                Document::Upsert {
+                    body: GenericValue::Map(fields),
+                    ..
+                } => match &fields["name"] {
+                    GenericValue::String(name) => Some(name.clone()),
+                    other => Some(format!("{other:?}")),
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, expected, "{index}: the row whose text sorts first");
+        assert!(matches!(forward[3], Document::Delete { .. }));
+        assert_eq!(format!("{:?}", backward[4]), format!("{:?}", forward[0]));
+    }
 }

@@ -666,6 +666,14 @@ async fn a_batched_build_on_a_partitioned_root_is_not_jit_compiled() {
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    let (jit_available,): (bool,) = sqlx::query_as("SELECT pg_jit_available()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        jit_available,
+        "the image compiles with JIT, or the test proves nothing"
+    );
     for statement in [
         "CREATE TABLE accounts (id int PRIMARY KEY, name text, status text NOT NULL, \
          deleted boolean NOT NULL DEFAULT false) PARTITION BY HASH (id)",
