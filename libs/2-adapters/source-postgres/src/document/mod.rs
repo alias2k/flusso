@@ -719,13 +719,11 @@ impl PgDocumentBuilder {
                 .fetch_primary_key(&schema.db_schema, &schema.table)
                 .await?
                 .into(),
-            partitioned: sqlx::query_scalar(
-                "SELECT c.relkind = 'p' FROM pg_class c WHERE c.oid = $1::regclass",
+            partitioned: is_partitioned(
+                &self.pool,
+                &format!("{}.{}", schema.db_schema, schema.table),
             )
-            .bind(format!("{}.{}", schema.db_schema, schema.table))
-            .fetch_one(&self.pool)
-            .await
-            .map_err(query_err)?,
+            .await?,
         };
         self.root_key_cache
             .lock()
@@ -1633,6 +1631,16 @@ pub(crate) async fn primary_key_column_names(
         names.push(row.try_get::<String, _>("name").map_err(query_err)?);
     }
     Ok(names)
+}
+
+/// Whether `qualified` (`schema.table`, quoted as the caller needs) names a
+/// partitioned table.
+pub(crate) async fn is_partitioned(pool: &PgPool, qualified: &str) -> Result<bool> {
+    sqlx::query_scalar("SELECT relkind = 'p' FROM pg_class WHERE oid = $1::regclass")
+        .bind(qualified)
+        .fetch_one(pool)
+        .await
+        .map_err(query_err)
 }
 
 /// The type of an array column's elements, as a transform probe casts to:

@@ -223,7 +223,7 @@ async fn key_relations(
             super::quote_ident(relation.namespace.as_ref()),
             super::quote_ident(relation.table.as_ref())
         );
-        relation.partitioned = Some(is_partitioned(catalog, &qualified).await?);
+        relation.partitioned = Some(crate::document::is_partitioned(catalog, &qualified).await?);
         retype_domains(catalog, &mut relation.columns).await?;
         relation.primary_key = crate::document::primary_key_column_names(catalog, qualified)
             .await?
@@ -278,15 +278,6 @@ async fn retype_domains(catalog: &PgPool, columns: &mut [pgoutput::Column]) -> R
         }
     }
     Ok(())
-}
-
-/// Whether `qualified` names a partitioned table.
-async fn is_partitioned(catalog: &PgPool, qualified: &str) -> Result<bool> {
-    sqlx::query_scalar::<_, bool>("SELECT relkind = 'p' FROM pg_class WHERE oid = $1::regclass")
-        .bind(qualified)
-        .fetch_one(catalog)
-        .await
-        .map_err(|e| SourceError::Query(e.to_string()))
 }
 
 /// Fold one replication event into the state, possibly queueing changes.
