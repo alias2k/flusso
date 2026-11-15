@@ -741,22 +741,7 @@ fields:
     let built = builder.build_many(&ids).await.unwrap();
     assert_eq!(built.len(), ids.len());
 
-    let log = String::from_utf8(container.stderr_to_vec().await.unwrap()).unwrap();
-    let plans: Vec<serde_json::Value> = log
-        .split("plan:\n")
-        .skip(1)
-        .filter_map(|entry| {
-            serde_json::Deserializer::from_str(entry)
-                .into_iter::<serde_json::Value>()
-                .next()
-                .and_then(Result::ok)
-        })
-        .filter(|plan| {
-            plan["Query Text"]
-                .as_str()
-                .is_some_and(|text| text.contains("= ANY(ARRAY["))
-        })
-        .collect();
+    let plans = logged_plans(&container, 1, |text| text.contains("= ANY(ARRAY[")).await;
     let [plan] = plans.as_slice() else {
         panic!("expected the one batched statement's plan, got {plans:#?}");
     };
@@ -774,6 +759,8 @@ fields:
 /// one array parameter a generic plan scanned every partition. Here the
 /// builder's sessions are forced to generic plans and `auto_explain` logs
 /// each executed plan: every batch's must report the partitions it left out.
+/// A batch of 24 keys (three distinct, so most partitions hold none) is past
+/// the size that sends keys as array parameters on an unpartitioned root.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn a_batch_is_pruned_to_its_keys_partitions_under_a_generic_plan() {
@@ -822,44 +809,38 @@ async fn a_batch_is_pruned_to_its_keys_partitions_under_a_generic_plan() {
     let builder = PgDocumentBuilder::connect(&url, Arc::new(spec))
         .await
         .unwrap();
+    let small = [3, 5, 8];
+    let large: Vec<i32> = small.iter().copied().cycle().take(24).collect();
+    let mut batches = 0;
     for index in ["ranged", "hashed"] {
-        let by_key: Vec<DocumentId> = [3, 5, 8]
-            .into_iter()
-            .map(|key| DocumentId {
-                index: index_name(index),
-                key: RowKey(vec![(column("id"), GenericValue::Int(key))]),
-            })
-            .collect();
-        let by_position: Vec<DocumentId> = [3, 5, 8]
-            .into_iter()
-            .map(|key| DocumentId {
-                index: index_name(index),
-                key: RowKey(vec![(column("id"), GenericValue::BigInt(key))]),
-            })
-            .collect();
-        for _ in 0..3 {
-            builder.build_many(&by_key).await.unwrap();
-            builder.build_many(&by_position).await.unwrap();
+        for keys in [&small[..], &large[..]] {
+            let by_key: Vec<DocumentId> = keys
+                .iter()
+                .map(|key| DocumentId {
+                    index: index_name(index),
+                    key: RowKey(vec![(column("id"), GenericValue::Int(*key))]),
+                })
+                .collect();
+            let by_position: Vec<DocumentId> = keys
+                .iter()
+                .map(|key| DocumentId {
+                    index: index_name(index),
+                    key: RowKey(vec![(column("id"), GenericValue::BigInt(i64::from(*key)))]),
+                })
+                .collect();
+            for _ in 0..3 {
+                builder.build_many(&by_key).await.unwrap();
+                builder.build_many(&by_position).await.unwrap();
+                batches += 2;
+            }
         }
     }
 
-    let log = String::from_utf8(container.stderr_to_vec().await.unwrap()).unwrap();
-    let plans: Vec<serde_json::Value> = log
-        .split("plan:\n")
-        .skip(1)
-        .filter_map(|entry| {
-            serde_json::Deserializer::from_str(entry)
-                .into_iter::<serde_json::Value>()
-                .next()
-                .and_then(Result::ok)
-        })
-        .filter(|plan| {
-            plan["Query Text"]
-                .as_str()
-                .is_some_and(|text| text.contains("ANY") && text.contains("json_build_object"))
-        })
-        .collect();
-    assert_eq!(plans.len(), 12, "every batch's plan: {plans:#?}");
+    let plans = logged_plans(&container, batches, |text| {
+        text.contains("ANY") && text.contains("json_build_object")
+    })
+    .await;
+    assert_eq!(plans.len(), batches, "every batch's plan: {plans:#?}");
     fn removed(plan: &serde_json::Value) -> i64 {
         plan["Subplans Removed"].as_i64().unwrap_or(0)
             + plan["Plans"]
@@ -875,5 +856,34 @@ async fn a_batch_is_pruned_to_its_keys_partitions_under_a_generic_plan() {
             "no partition pruned: {:#}",
             plan["Plan"]
         );
+    }
+}
+
+/// The executed plans `auto_explain` wrote to the server's log for statements
+/// whose text `matches`, read until `expected` are there: the server writes an
+/// entry after the statement's result has reached the client.
+async fn logged_plans(
+    container: &testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
+    expected: usize,
+    matches: impl Fn(&str) -> bool,
+) -> Vec<serde_json::Value> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let log = String::from_utf8(container.stderr_to_vec().await.unwrap()).unwrap();
+        let plans: Vec<serde_json::Value> = log
+            .split("plan:\n")
+            .skip(1)
+            .filter_map(|entry| {
+                serde_json::Deserializer::from_str(entry)
+                    .into_iter::<serde_json::Value>()
+                    .next()
+                    .and_then(Result::ok)
+            })
+            .filter(|plan| plan["Query Text"].as_str().is_some_and(&matches))
+            .collect();
+        if plans.len() >= expected || std::time::Instant::now() >= deadline {
+            return plans;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
