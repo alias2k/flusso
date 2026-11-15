@@ -1096,7 +1096,7 @@ build serves exactly the ids a single `build` serves, by construction**: `query:
 reads the root rows as main did, one level in (`SELECT root.pk AS flusso_key, <document> FROM root
 WHERE root.pk = ANY($n::<bound>[]::<key type>[]) … OFFSET 0`, the keys passed as one array parameter
 per kind (`query::key_list`, `Builder::key_array`, bound by `bind_array`; several kinds are unnested
-beside a `bigint[]` of their positions), so the statement's text never grows with the batch; the root the
+beside a `bigint[]` of their positions), so the statement's text never grows with the batch; the root is the
 only relation in scope there,
 so a raw filter's unqualified name resolves as in a single build — `integration`'s
 `a_raw_filter_names_the_root_rows_columns_whatever_the_batched_query_names`, which reads the names off
@@ -1125,7 +1125,8 @@ else, under a raw filter, `ROW(root.*)::text`, so the choice reads no column the
 (`a_key_several_rows_share_builds_the_same_row_both_ways`,
 `choosing_a_shared_keys_row_reads_no_column_the_document_does_not_read`: a view column that raises). The
 builder's and the backfill's pools set `jit = off` after connect (`document::without_jit`, a refusal
-only warns; `the_builders_sessions_run_without_jit`, `partitions`'
+only warns: `a_server_that_refuses_the_jit_setting_still_connects`, Postgres 10; the lag pool doesn't;
+`the_builders_sessions_run_without_jit`, `partitions`'
 `a_batched_build_on_a_partitioned_root_is_not_jit_compiled`); the manual tells a transaction-mode
 pool's users to set it on the role. The result
 columns are a `bigint` and the document whatever the key's type; a key Postgres refuses to cast fails
