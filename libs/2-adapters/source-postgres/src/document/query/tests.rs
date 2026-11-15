@@ -101,7 +101,7 @@ fn columns_only() {
 
 #[test]
 fn keyed_predicate_casts_a_uuid_primary_key() {
-    // Both the single-key and batched (`IN`) forms cast to the column's type.
+    // Both the single-key and batched (`= ANY`) forms cast to the column's type.
     let schema = index(Some("id"), None, vec![col_field("id", "id")]);
     let col_types = types(&[("users", "id", "uuid")]);
     let key = GenericValue::Uuid("3f2a1b9c-0000-0000-0000-000000000000".parse().unwrap());
@@ -129,12 +129,13 @@ fn keyed_predicate_casts_a_uuid_primary_key() {
         &HashMap::new(),
         &col_types,
         &ByteColumns::new(),
+        RootKey::Unique,
     )
     .unwrap();
     assert!(
         batched
             .as_str()
-            .ends_with(r#"FROM unnest(ARRAY[$1::uuid::uuid]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") CROSS JOIN LATERAL (SELECT * FROM "public"."users" AS "root" WHERE "root"."id" = "flusso_requested"."flusso_key" LIMIT 1) AS "root""#),
+            .contains(r#"WHERE "root"."id" = ANY(ARRAY[$1::uuid::uuid]) OFFSET 0) AS "flusso_built" JOIN unnest(ARRAY[$1::uuid::uuid]) WITH ORDINALITY"#),
         "{}",
         batched.as_str()
     );
@@ -177,11 +178,12 @@ fn root_filters_fold_into_both_query_forms() {
         &HashMap::new(),
         &col_types,
         &ByteColumns::new(),
+        RootKey::Unique,
     )
     .unwrap();
     assert!(
         sql.as_str().ends_with(
-            r#"FROM unnest(ARRAY[$1::int4::bigint]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") CROSS JOIN LATERAL (SELECT * FROM "public"."users" AS "root" WHERE "root"."id" = "flusso_requested"."flusso_key" AND ("root"."status" = $2::text) LIMIT 1) AS "root""#
+            r#"WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint]) AND ("root"."status" = $2::text) OFFSET 0) AS "flusso_built" JOIN unnest(ARRAY[$1::int4::bigint]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key""#
         ),
         "{}",
         sql.as_str()
@@ -546,6 +548,7 @@ fn keys_bound_as_different_types_are_different_statements() {
             &HashMap::new(),
             &id_types(),
             &ByteColumns::new(),
+            RootKey::Unique,
         )
         .unwrap();
         let (reverse, _) = reverse_query(
@@ -579,11 +582,12 @@ fn documents_query_pairs_each_key_with_its_position() {
         &HashMap::new(),
         &id_types(),
         &ByteColumns::new(),
+        RootKey::Unique,
     )
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT "flusso_requested"."flusso_position" AS "doc_position", json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM unnest(ARRAY[$1::int4::bigint, $2::int4::bigint]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") CROSS JOIN LATERAL (SELECT * FROM "public"."users" AS "root" WHERE "root"."id" = "flusso_requested"."flusso_key" LIMIT 1) AS "root""#
+        r#"SELECT "flusso_requested"."flusso_position" AS "doc_position", "flusso_built"."document" FROM (SELECT "root"."id" AS "flusso_key", json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint, $2::int4::bigint]) OFFSET 0) AS "flusso_built" JOIN unnest(ARRAY[$1::int4::bigint, $2::int4::bigint]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key""#
     );
     assert_eq!(params, vec![GenericValue::Int(7), GenericValue::Int(9)]);
 }
@@ -605,10 +609,11 @@ fn documents_query_folds_soft_delete_into_the_root_lookup() {
         &HashMap::new(),
         &id_types(),
         &ByteColumns::new(),
+        RootKey::Unique,
     )
     .unwrap();
     assert!(sql.as_str().contains(
-        r#"WHERE "root"."id" = "flusso_requested"."flusso_key" AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END)) LIMIT 1) AS "root""#
+        r#"WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint]) AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END)) OFFSET 0) AS "flusso_built""#
     ));
 }
 
@@ -652,11 +657,12 @@ fn soft_delete_field_inside_a_relation_reads_the_root_column() {
         &pks,
         &id_types(),
         &ByteColumns::new(),
+        RootKey::Unique,
     )
     .unwrap();
     assert!(
         sql.as_str().ends_with(
-            r#"WHERE "root"."id" = "flusso_requested"."flusso_key" AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END)) LIMIT 1) AS "root""#
+            r#"WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint]) AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END)) OFFSET 0) AS "flusso_built" JOIN unnest(ARRAY[$1::int4::bigint]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key""#
         ),
         "{}",
         sql.as_str()
@@ -743,11 +749,12 @@ fn a_key_carried_as_text_is_cast_from_text() {
         &HashMap::new(),
         &col_types,
         &ByteColumns::new(),
+        RootKey::Unique,
     )
     .unwrap();
     assert!(
         batched.as_str().contains(
-            r#"FROM unnest(ARRAY[$1::text::date]) WITH ORDINALITY AS "flusso_requested""#
+            r#"= ANY(ARRAY[$1::text::date]) OFFSET 0) AS "flusso_built" JOIN unnest(ARRAY[$1::text::date]) WITH ORDINALITY"#
         ),
         "{}",
         batched.as_str()
@@ -1291,6 +1298,7 @@ fn bytes_sql(fields: Vec<Field>, pks: &HashMap<String, ColumnName>, bytes: &Byte
         pks,
         &id_types(),
         bytes,
+        RootKey::Unique,
     )
     .unwrap();
     let object = |sql: &str| {
@@ -1444,5 +1452,39 @@ fn a_big_decimal_key_binds_as_text() {
     assert_eq!(
         sql::key_cast(&decimal, "pg_catalog.numeric").as_deref(),
         Some("::numeric::pg_catalog.numeric")
+    );
+}
+
+/// A key several root rows share builds the row whose text sorts first, in
+/// a batched build (`DISTINCT ON`) as in a single one (`ORDER BY … LIMIT 1`).
+#[test]
+fn a_shared_key_picks_the_row_whose_text_sorts_first() {
+    let schema = index(Some("id"), None, vec![col_field("id", "id")]);
+    let (single, _) = document_query(
+        &schema,
+        &[(c("id"), GenericValue::Int(7))],
+        &HashMap::new(),
+        &id_types(),
+        &ByteColumns::new(),
+    )
+    .unwrap();
+    assert!(
+        first_row_by_text(single).as_str().ends_with(
+            r#"WHERE "root"."id" = $1::int4::bigint ORDER BY ROW("root".*)::text LIMIT 1"#
+        )
+    );
+    let (batched, _) = documents_query(
+        &schema,
+        &c("id"),
+        &[GenericValue::Int(7)],
+        &HashMap::new(),
+        &id_types(),
+        &ByteColumns::new(),
+        RootKey::Shared,
+    )
+    .unwrap();
+    assert_eq!(
+        batched.as_str(),
+        r#"SELECT "flusso_requested"."flusso_position" AS "doc_position", "flusso_built"."document" FROM (SELECT DISTINCT ON ("root"."id") "root"."id" AS "flusso_key", json_build_object('id', "root"."id") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint]) ORDER BY "root"."id", ROW("root".*)::text) AS "flusso_built" JOIN unnest(ARRAY[$1::int4::bigint]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key""#
     );
 }

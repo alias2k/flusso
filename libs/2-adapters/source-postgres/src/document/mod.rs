@@ -281,6 +281,8 @@ pub struct PgDocumentBuilder {
     plans: Arc<HashMap<IndexName, value::DocumentPlan>>,
     /// Cache of each `(schema, table)`'s single-column primary key.
     pk_cache: Arc<Mutex<HashMap<(String, String), ColumnName>>>,
+    /// Cache of each root table's primary key columns, any number of them.
+    root_key_cache: Arc<Mutex<RootKeys>>,
     /// Cache of each `(schema, table, column)`'s SQL type, used to cast filter
     /// operands to the column's real type rather than comparing as text.
     col_type_cache: ColumnTypes,
@@ -296,6 +298,9 @@ pub struct PgDocumentBuilder {
     /// a null part.
     keyless_warned: Arc<Mutex<HashSet<TableName>>>,
 }
+
+/// Each `(schema, table)`'s primary key columns, any number of them.
+type RootKeys = HashMap<(String, String), Arc<[ColumnName]>>;
 
 /// A builder whose pool never connects, for the `resolve` bench.
 #[cfg(feature = "bench")]
@@ -321,6 +326,7 @@ impl PgDocumentBuilder {
             ),
             spec,
             pk_cache: Arc::new(Mutex::new(HashMap::new())),
+            root_key_cache: Arc::new(Mutex::new(HashMap::new())),
             col_type_cache: ColumnTypes::default(),
             comparison_cache: Arc::new(Mutex::new(HashMap::new())),
             privilege_probe_refused: Arc::new(AtomicBool::new(false)),
@@ -515,6 +521,41 @@ impl PgDocumentBuilder {
             .unwrap_or_else(PoisonError::into_inner)
             .insert(cache_key, column.clone());
         Ok(column)
+    }
+
+    /// Whether `key_columns` are the root table's whole primary key, so a key
+    /// matches at most one row (cached).
+    async fn root_key(
+        &self,
+        schema: &kernel::IndexSchema,
+        key_columns: &[&ColumnName],
+    ) -> Result<query::RootKey> {
+        let cache_key = (schema.db_schema.to_string(), schema.table.to_string());
+        let cached = self
+            .root_key_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&cache_key)
+            .cloned();
+        let primary_key = match cached {
+            Some(columns) => columns,
+            None => {
+                let columns: Arc<[ColumnName]> = self
+                    .fetch_primary_key(&schema.db_schema, &schema.table)
+                    .await?
+                    .into();
+                self.root_key_cache
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(cache_key, Arc::clone(&columns));
+                columns
+            }
+        };
+        Ok(if primary_key.iter().eq(key_columns.iter().copied()) {
+            query::RootKey::Unique
+        } else {
+            query::RootKey::Shared
+        })
     }
 
     async fn fetch_primary_key(
@@ -1193,7 +1234,10 @@ impl DocumentBuilder for PgDocumentBuilder {
         self.add_key_column_types(schema, &key_columns, &mut col_types)
             .await?;
         let bytes = self.byte_columns(schema, &pks).await?;
-        let (sql, params) = query::document_query(schema, &id.key.0, &pks, &col_types, &bytes)?;
+        let (mut sql, params) = query::document_query(schema, &id.key.0, &pks, &col_types, &bytes)?;
+        if self.root_key(schema, &key_columns).await? == query::RootKey::Shared {
+            sql = query::first_row_by_text(sql);
+        }
 
         let mut statement = sqlx::query(sql);
         for param in &params {
@@ -1262,12 +1306,14 @@ impl DocumentBuilder for PgDocumentBuilder {
             self.add_key_column_types(schema, &[&pk_column], &mut col_types)
                 .await?;
             let bytes = self.byte_columns(schema, &pks).await?;
+            let root_key = self.root_key(schema, &[&pk_column]).await?;
 
             for chunk in keyed.chunks(BUILD_CHUNK) {
                 let keys: Vec<kernel::GenericValue> =
                     chunk.iter().map(|(value, _)| (*value).clone()).collect();
-                let (sql, params) =
-                    query::documents_query(schema, &pk_column, &keys, &pks, &col_types, &bytes)?;
+                let (sql, params) = query::documents_query(
+                    schema, &pk_column, &keys, &pks, &col_types, &bytes, root_key,
+                )?;
 
                 let mut statement = sqlx::query(sql);
                 for param in &params {

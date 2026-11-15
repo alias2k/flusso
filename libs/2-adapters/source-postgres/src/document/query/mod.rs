@@ -45,13 +45,35 @@ const ROOT: &str = "root";
 /// position (a `bigint`) of the requested key the row matched.
 pub(super) const DOC_POSITION: &str = "doc_position";
 
-/// The alias of the batched build's list of requested keys, and its two
-/// columns: the key and its position. A raw filter's unqualified name that its
-/// own table lacks resolves outward through the root row to this list, so the
-/// names are ones no user table is expected to carry.
+/// The batched build's names one level out from the root: the built rows,
+/// the numbered list of requested keys, and the key and position columns. The
+/// document and its raw filters are built a level in, where the root table is
+/// the only relation in scope, so no name here can meet one of the user's.
+const BUILT: &str = "flusso_built";
 const KEYS: &str = "flusso_requested";
 const KEY: &str = "flusso_key";
 const POSITION: &str = "flusso_position";
+
+/// Which root row answers a key, when several share it.
+const FIRST_BY_TEXT: &str = "ROW(\"root\".*)::text";
+
+/// Whether the declared root key is the root table's whole primary key, so a
+/// key matches at most one row. A root without one (no primary key, a
+/// composite one, a partitioned table keyed with its partition column, a
+/// view) still starts, with a warning; a key several of its rows share builds
+/// the row whose text ([`FIRST_BY_TEXT`]) sorts first, in a batched and a
+/// single build alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RootKey {
+    Unique,
+    Shared,
+}
+
+/// A single build's query (from [`document_query`]) reading the row a shared
+/// key picks: the one whose text sorts first.
+pub(super) fn first_row_by_text(query: SqlString) -> SqlString {
+    SqlString::new(format!("{} ORDER BY {FIRST_BY_TEXT} LIMIT 1", query.0))
+}
 
 /// The columns a document reads whose base type is `bytea` or `bytea[]`, by
 /// `(table, column)`. The document query renders them as hex text itself, so
@@ -197,27 +219,24 @@ pub(super) fn document_query(
 /// key it matched; a key no root row matches simply doesn't come back, which
 /// the caller reads as a tombstone.
 ///
-/// The keys are an array of `$n::<bound>::<key type>`, unnested `WITH
-/// ORDINALITY` for their positions, and each position looks its root row up
-/// through a `LATERAL` subquery, `root.pk = flusso_requested.flusso_key`: the very comparison
-/// [`document_query`] makes for one key, so Postgres decides which row answers
-/// which key in both, with no Rust mirror of its casts. The subquery's
-/// `LIMIT 1` does two things:
+/// Two levels:
 ///
-/// - it keeps the subquery a nested loop of primary-key index probes at any
-///   batch size (as a plain join the planner may turn a large list into a hash
-///   join over a scan of the root);
-/// - it tells the planner a probe returns at most one row, which the primary
-///   key already guarantees. Over a partitioned root the probe is planned
-///   across every partition and pruned to one at run time; without the limit
-///   the planner counts a row per partition per key, costs every relation
-///   subquery that many times and passes `jit_above_cost` from about 130 keys
-///   on 16 partitions, compiling each execution.
+/// - **Inside**, the root rows are read as [`document_query`] reads one:
+///   `root.pk = ANY(ARRAY[$n::<bound>::<key type>, …])` with soft delete and
+///   root filters, one scan of the primary key index, rows in key order. The
+///   document is built here, where the root table is the only relation in
+///   scope, so a raw filter's unqualified name resolves as in a single build.
+/// - **One level out**, the same keys, unnested `WITH ORDINALITY` for their
+///   positions, are joined to the built rows on the same `=`. Postgres decides
+///   which row answers which key, with no Rust mirror of its casts, and a row
+///   answering several positions (the same key read as `int4` and as `int8`)
+///   comes back once per position. The join is over at most a batch of rows
+///   on each side; the root is scanned once.
 ///
-/// A row matched by several positions comes back once per position. The
-/// document is assembled exactly as in [`document_query`]. A key Postgres
-/// refuses to cast fails the statement, so the whole batch, as a single build
-/// of it fails.
+/// [`RootKey::Shared`]: the inner level keeps one row per key, the one whose
+/// text sorts first, as [`first_row_by_text`] does for a single build. A key
+/// Postgres refuses to cast fails the statement, so the whole batch, as a
+/// single build of it fails.
 pub(super) fn documents_query(
     schema: &IndexSchema,
     pk_column: &ColumnName,
@@ -225,6 +244,7 @@ pub(super) fn documents_query(
     pks: &HashMap<String, ColumnName>,
     col_types: &HashMap<(String, String), String>,
     bytes: &ByteColumns,
+    root_key: RootKey,
 ) -> Result<(SqlString, Vec<GenericValue>)> {
     let mut builder = Builder {
         db: &schema.db_schema,
@@ -248,7 +268,9 @@ pub(super) fn documents_query(
     for key in keys {
         values.push(builder.key_placeholder(key.clone(), &schema.table, pk_column)?);
     }
-    let mut predicate = format!("{} = \"{KEYS}\".\"{KEY}\"", qcol(ROOT, pk_column));
+    let values = values.join(", ");
+    let root_pk = qcol(ROOT, pk_column);
+    let mut predicate = format!("{root_pk} = ANY(ARRAY[{values}])");
     if let Some(soft_delete) = builder.soft_delete_predicate(schema)? {
         predicate = format!("{predicate} AND NOT ({soft_delete})");
     }
@@ -257,13 +279,24 @@ pub(super) fn documents_query(
     let root_filters = builder.filters(schema.filters.as_deref(), ROOT, &schema.table)?;
     predicate.push_str(&root_filters);
 
+    let table = qtable(&schema.db_schema, &schema.table);
+    let built = match root_key {
+        // `OFFSET 0` keeps the level a scan of its own: pulled up into the
+        // join, the planner may probe the root once per requested key.
+        RootKey::Unique => format!(
+            "SELECT {root_pk} AS \"{KEY}\", {object} AS \"document\" \
+             FROM {table} AS \"{ROOT}\" WHERE {predicate} OFFSET 0"
+        ),
+        RootKey::Shared => format!(
+            "SELECT DISTINCT ON ({root_pk}) {root_pk} AS \"{KEY}\", {object} AS \"document\" \
+             FROM {table} AS \"{ROOT}\" WHERE {predicate} ORDER BY {root_pk}, {FIRST_BY_TEXT}"
+        ),
+    };
     let sql = format!(
-        "SELECT \"{KEYS}\".\"{POSITION}\" AS \"{DOC_POSITION}\", {object} AS \"document\" \
-         FROM unnest(ARRAY[{values}]) WITH ORDINALITY AS \"{KEYS}\"(\"{KEY}\", \"{POSITION}\") \
-         CROSS JOIN LATERAL (SELECT * FROM {table} AS \"{ROOT}\" WHERE {predicate} LIMIT 1) \
-         AS \"{ROOT}\"",
-        values = values.join(", "),
-        table = qtable(&schema.db_schema, &schema.table),
+        "SELECT \"{KEYS}\".\"{POSITION}\" AS \"{DOC_POSITION}\", \"{BUILT}\".\"document\" \
+         FROM ({built}) AS \"{BUILT}\" \
+         JOIN unnest(ARRAY[{values}]) WITH ORDINALITY AS \"{KEYS}\"(\"{KEY}\", \"{POSITION}\") \
+         ON \"{BUILT}\".\"{KEY}\" = \"{KEYS}\".\"{KEY}\""
     );
     Ok((SqlString::new(sql), builder.params))
 }

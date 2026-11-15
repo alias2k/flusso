@@ -1093,17 +1093,18 @@ gets the lookup once more without the probe, every key cast to its declared type
 (`COLUMN_META_SQL_UNPROBED`, remembered per builder). `text_value::is_key_type` parses the type's
 `regtype` name as quoted identifiers (`ext.citext`, `"a.b".citext`; not `"a.citext"`). **The batched
 build serves exactly the ids a single `build` serves, by construction**: `query::documents_query`
-unnests the keys `WITH ORDINALITY` (`unnest(ARRAY[$n::<bound>::<key type>, …])`) and looks each one's
-root row up through `CROSS JOIN LATERAL (SELECT * FROM root WHERE root.pk = flusso_requested.flusso_key …
-LIMIT 1)`, the comparison `document_query` makes, selecting the position (`doc_position`) beside the
-document (the list's names are ones no table carries: a raw filter's unqualified name resolves outward
-through the root row to them — `integration`'s `a_raw_filter_reads_the_root_rows_columns_in_a_batched_build`);
-`document/matching.rs`'s `match_rows` pairs by position alone (no Rust cast or equality: Postgres's
-input/output forms are open-ended), an unanswered position is a tombstone, and a row matched by several
-positions answers each under its own id. The `LIMIT 1` keeps a nested loop of primary-key probes at
-any batch size (as a plain join, a large list became a hash join over a scan of the root) and tells the
-planner a probe returns one row: over a partitioned root it otherwise counted one per partition and
-JIT-compiled the statement (`partitions`' `a_batched_build_on_a_partitioned_root_is_not_jit_compiled`); the result
+reads the root rows as main did, one level in (`SELECT root.pk AS flusso_key, <document> FROM root
+WHERE root.pk = ANY(ARRAY[$n::<bound>::<key type>, …]) … OFFSET 0`, the only relation in scope there,
+so a raw filter's unqualified name resolves as in a single build — `integration`'s
+`a_raw_filter_names_the_root_rows_columns_whatever_the_batched_query_names`, which reads the names off
+the statement itself), and one level out joins it to the same keys unnested `WITH ORDINALITY` on the
+same `=`, selecting the position (`doc_position`) beside the document; `document/matching.rs`'s
+`match_rows` pairs by position alone (no Rust cast or equality: Postgres's input/output forms are
+open-ended), an unanswered position is a tombstone, and a row matched by several positions answers
+each under its own id. Where the declared key isn't the root's whole catalog primary key
+(`query::RootKey::Shared`: keyless, composite, a partitioned root keyed with its partition column, a
+view) a key several rows share builds the row whose `ROW(root.*)::text` sorts first, in both builds
+(`DISTINCT ON` / `first_row_by_text`; `a_key_several_rows_share_builds_the_same_row_both_ways`). The result
 columns are a `bigint` and the document whatever the key's type; a key Postgres refuses to cast fails
 the whole statement, as on main. Guard: `source-postgres`'s `key_matching` (a generated differential,
 2,034 pairs: 113 requested keys of every kind and edge form against tables of 18 key types holding
