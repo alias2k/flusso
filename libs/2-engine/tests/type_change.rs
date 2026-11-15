@@ -555,10 +555,11 @@ async fn a_key_changing_between_timestamp_and_timestamptz_keeps_every_document()
     running.finish();
 }
 
-/// A key whose column is a domain over a type in a schema the builder's role
-/// may not use (`app.dcit` over `ext.citext`, no USAGE on `ext`) is cast to
-/// the domain, as before issue #335's fix, instead of to its base type: the
-/// root key and a link of that type both index, backfill and live.
+/// A key whose column is a domain over a type in a schema the role may not
+/// use (`app.dcit` over `ext.citext`, no USAGE on `ext`) is cast to the
+/// domain, as before issue #335's fix, instead of to its base type: the root
+/// key and a link of that type both index, backfill and live, with the
+/// builder, the capture and the backfill all running as that role.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn a_key_of_a_domain_over_a_type_the_role_may_not_use_still_indexes() {
@@ -574,7 +575,7 @@ async fn a_key_of_a_domain_over_a_type_the_role_may_not_use_still_indexes() {
         "CREATE PUBLICATION flusso FOR ALL TABLES",
         "INSERT INTO owners VALUES ('ada', 'Ada')",
         "INSERT INTO pets VALUES (1, 'ada', 'rex')",
-        "CREATE ROLE reader LOGIN PASSWORD 'reader'",
+        "CREATE ROLE reader LOGIN REPLICATION PASSWORD 'reader'",
         "GRANT USAGE ON SCHEMA app TO reader",
         "GRANT SELECT ON owners, pets TO reader",
     ] {
@@ -587,7 +588,7 @@ async fn a_key_of_a_domain_over_a_type_the_role_may_not_use_still_indexes() {
         owners_with_pets(),
     )])));
     let documents = PgDocumentBuilder::connect(&reader, spec).await.unwrap();
-    let mut running = Running::with(documents, &url, port).await;
+    let mut running = Running::over(documents, &reader, replication_as(port, "reader")).await;
     let owner = |name: &str, pets: &[&str]| {
         json!({
             "name": name,
@@ -618,6 +619,70 @@ async fn a_key_of_a_domain_over_a_type_the_role_may_not_use_still_indexes() {
         &owner("Ada L", &["rex", "fido"]),
     )
     .await;
+    running.finish();
+}
+
+/// A role that may not run `has_schema_privilege` (EXECUTE revoked from
+/// PUBLIC) still reads the type of every key, as it did before the probe
+/// was added: the builder, capture and backfill index, with no restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_role_that_may_not_probe_schema_privileges_still_indexes() {
+    let (_postgres, url, port) = start().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "REVOKE EXECUTE ON FUNCTION has_schema_privilege(oid, text) FROM PUBLIC",
+        "CREATE TABLE plain (id varchar(10) PRIMARY KEY, name text)",
+        "CREATE PUBLICATION flusso FOR ALL TABLES",
+        "INSERT INTO plain VALUES ('k1', 'a1')",
+        "CREATE ROLE reader LOGIN REPLICATION PASSWORD 'reader'",
+        "GRANT SELECT ON plain TO reader",
+    ] {
+        execute(&pool, statement).await;
+    }
+    create_slot(&pool).await;
+    let reader = url.replace("postgres:postgres@", "reader:reader@");
+    let spec = Arc::new(SourceSpec::new(BTreeMap::from([(
+        index_name("plain"),
+        named("plain"),
+    )])));
+    let documents = PgDocumentBuilder::connect(&reader, spec).await.unwrap();
+    let mut running = Running::over(documents, &reader, replication_as(port, "reader")).await;
+    running.reaches("k1", "a1").await;
+    execute(&pool, "INSERT INTO plain VALUES ('k2', 'a2')").await;
+    running.reaches("k2", "a2").await;
+    running.finish();
+}
+
+/// A text key whose column becomes `timestamptz` from offset-less values
+/// (`USING id::timestamptz`) inside a migration: the change read before
+/// carries the text `2020-01-02 10:00:00`, which Postgres reads at the
+/// session's zone, and is built under it; none is a tombstone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_text_key_becoming_timestamptz_keeps_every_document() {
+    let (_postgres, url, port) = start().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE moments (id text PRIMARY KEY, name text)",
+        "CREATE PUBLICATION flusso FOR ALL TABLES",
+        "INSERT INTO moments VALUES ('2020-01-02 10:00:00', 'a1')",
+    ] {
+        execute(&pool, statement).await;
+    }
+    create_slot(&pool).await;
+    let text = "2020-01-02 10:00:00";
+    let mut running = Running::start(&url, port, &url, "moments").await;
+    running.reaches(text, "a1").await;
+    execute(
+        &pool,
+        "BEGIN; UPDATE moments SET name = 'a2'; \
+         ALTER TABLE moments ALTER COLUMN id TYPE timestamptz USING id::timestamptz; \
+         UPDATE moments SET name = 'a3'; COMMIT",
+    )
+    .await;
+    running.reaches("2020-01-02T10:00:00+00:00", "a3").await;
+    running.reaches(text, "a3").await;
     running.finish();
 }
 
@@ -658,7 +723,16 @@ impl Running {
     }
 
     async fn with(documents: PgDocumentBuilder, capture_url: &str, port: u16) -> Self {
-        let capture = WalChangeCapture::new(replication(port), capture_url.to_owned())
+        Self::over(documents, capture_url, replication(port)).await
+    }
+
+    /// Capture over `capture_url` and the replication session `replication`.
+    async fn over(
+        documents: PgDocumentBuilder,
+        capture_url: &str,
+        replication: ReplicationConfig,
+    ) -> Self {
+        let capture = WalChangeCapture::new(replication, capture_url.to_owned())
             .with_column_types(documents.column_types());
         let recorded = Arc::new(Mutex::new(Vec::new()));
         let restarts = Arc::new(AtomicUsize::new(0));
@@ -1040,15 +1114,12 @@ async fn execute(pool: &sqlx::PgPool, sql: &str) {
 }
 
 fn replication(port: u16) -> ReplicationConfig {
-    ReplicationConfig::new(
-        "127.0.0.1",
-        "postgres",
-        "postgres",
-        "postgres",
-        "flusso",
-        "flusso",
-    )
-    .with_port(port)
+    replication_as(port, "postgres")
+}
+
+/// The replication session of `role`, whose password is its name.
+fn replication_as(port: u16, role: &str) -> ReplicationConfig {
+    ReplicationConfig::new("127.0.0.1", role, role, "postgres", "flusso", "flusso").with_port(port)
 }
 
 /// Run the deployment the way the daemon supervises it: restart it after an

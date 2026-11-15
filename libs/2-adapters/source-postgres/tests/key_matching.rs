@@ -1,11 +1,16 @@
-//! The batched build serves exactly the ids a single-document build would
-//! (issue #335): for a key decoded as one kind (as a change read before an
-//! `ALTER … TYPE`) and a row stored as another, `build` and `build_many`
-//! agree on upsert, tombstone or error, and on the `_id`.
+//! The batched build serves exactly the ids a single-document build serves
+//! (issue #335), for any key against any stored row: a key decoded as one
+//! kind (a change read before an `ALTER … TYPE`) against a row stored as
+//! another, and every spelling Postgres reads or writes.
 //!
-//! Every pair of key kinds Postgres casts between is driven over a real
-//! database whose own `TimeZone` is not UTC, so a `timestamp` ↔
-//! `timestamptz` cast shows which zone the builder's session uses.
+//! A generated differential: every requested key (each `GenericValue` kind,
+//! with the edge values Postgres's input and output functions treat
+//! specially) against a table of each key type holding every stored text it
+//! accepts. For each pair, `build_many` alone and in a batch that also asks
+//! for every stored row (the row's other spellings) must give what `build`
+//! gives: the same upsert, tombstone or error, and the same document body.
+//! The database's own `TimeZone` is not UTC, so a `timestamp` ↔
+//! `timestamptz` cast shows the builder's session zone.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -19,7 +24,7 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{NaiveDate, NaiveTime, TimeZone, Utc};
 use kernel::{
     Column, ColumnName, DatabaseSchema, Field, FieldName, FieldSource, FlussoType, GenericValue,
     IndexName, IndexSchema, TableName,
@@ -33,82 +38,199 @@ use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
-/// Each key column type, with the texts stored in its table.
-const KINDS: &[(&str, &[&str])] = &[
-    ("int2", &["1", "2"]),
-    ("int4", &["1", "2", "100000"]),
-    ("int8", &["1", "2", "100000", "5000000000"]),
-    ("numeric", &["1", "1.5", "2", "100000"]),
-    ("numeric(10,2)", &["1", "1.5", "2"]),
-    ("float8", &["1", "1.5", "0.1", "2"]),
-    ("real", &["1", "1.5", "0.1", "2"]),
-    (
-        "text",
-        &[
-            "1",
-            "1.5",
-            "1.50",
-            "abc",
-            "2020-01-02",
-            "2020-01-02 10:00:00",
-            UUID,
-            "true",
-            "10:00:00",
-        ],
-    ),
-    ("varchar(20)", &["1", "1.5", "abc", "2020-01-02"]),
-    ("date", &["2020-01-02", "2020-01-03"]),
-    ("timestamp", &["2020-01-02 00:00:00", "2020-01-02 10:00:00"]),
-    (
-        "timestamptz",
-        &["2020-01-02 00:00:00+00", "2020-01-02 10:00:00+00"],
-    ),
-    ("uuid", &[UUID]),
-    ("bool", &["true"]),
-    ("time", &["10:00:00"]),
+/// The key column types, one table each.
+const KEY_TYPES: &[&str] = &[
+    "int2",
+    "int4",
+    "int8",
+    "numeric",
+    "numeric(10,2)",
+    "real",
+    "float8",
+    "bool",
+    "text",
+    "varchar(20)",
+    "char(5)",
+    "citext",
+    "date",
+    "time",
+    "timestamp",
+    "timestamptz",
+    "uuid",
+    "bytea",
 ];
 
 const UUID: &str = "0b7f2d4e-1c2a-4d5e-8f90-1a2b3c4d5e6f";
 
-/// Keys as the WAL decoder hands them over, one or more per kind.
+/// Texts inserted into every table; each keeps those its key type accepts.
+const STORED: &[&str] = &[
+    "0",
+    "1",
+    "-1",
+    "2",
+    "01",
+    "1.5",
+    "1.50",
+    "2.5",
+    "-0",
+    "1e+20",
+    "100000000000000000000",
+    "1e-05",
+    "0.00001",
+    "Infinity",
+    "-Infinity",
+    "NaN",
+    "100000",
+    "3000000000",
+    "123456789012345678901234567890.5",
+    "true",
+    "false",
+    "abc",
+    "ABC",
+    "a",
+    "2020-01-02",
+    "2020-01-03",
+    "2020-01-02 00:00:00",
+    "2020-01-02 10:00:00",
+    "2020-01-02 10:00:00.5",
+    "2020-01-02 10:00:00+00",
+    "0044-03-15 BC",
+    "infinity",
+    "10:00:00",
+    "10:00:00.5",
+    "24:00:00",
+    UUID,
+    "\\x0102",
+];
+
+/// Keys as the WAL decoder hands them over, every kind, with edge values.
 fn requested() -> Vec<GenericValue> {
-    let decimal = |text: &str| GenericValue::Decimal(Decimal::from_str(text).unwrap());
+    use GenericValue as V;
+    let decimal = |text: &str| V::Decimal(Decimal::from_str(text).unwrap());
     let day = NaiveDate::from_ymd_opt(2020, 1, 2).unwrap();
-    let at = |hour: u32| -> NaiveDateTime { day.and_hms_opt(hour, 0, 0).unwrap() };
-    vec![
-        GenericValue::SmallInt(1),
-        GenericValue::SmallInt(2),
-        GenericValue::Int(1),
-        GenericValue::Int(2),
-        GenericValue::Int(100000),
-        GenericValue::BigInt(1),
-        GenericValue::BigInt(5_000_000_000),
+    let time =
+        |h: u32, m: u32, s: u32, micro: u32| NaiveTime::from_hms_micro_opt(h, m, s, micro).unwrap();
+    let at = |t: NaiveTime| day.and_time(t);
+    let mut keys = vec![
+        V::SmallInt(0),
+        V::SmallInt(1),
+        V::SmallInt(-1),
+        V::SmallInt(2),
+        V::SmallInt(i16::MAX),
+        V::Int(0),
+        V::Int(1),
+        V::Int(-1),
+        V::Int(2),
+        V::Int(100000),
+        V::Int(i32::MAX),
+        V::BigInt(1),
+        V::BigInt(3_000_000_000),
+        V::BigInt(9_210_000_000_000_000_000),
+        V::BigInt(i64::MAX),
+        decimal("0"),
         decimal("1"),
         decimal("1.00"),
         decimal("1.5"),
         decimal("1.50"),
         decimal("2.5"),
-        GenericValue::Double(1.0),
-        GenericValue::Double(1.5),
-        GenericValue::Double(0.1),
-        GenericValue::Float(1.5),
-        GenericValue::Float(0.1),
-        GenericValue::String("1".into()),
-        GenericValue::String("1.5".into()),
-        GenericValue::String("abc".into()),
-        GenericValue::String("2020-01-02".into()),
-        GenericValue::Date(day),
-        GenericValue::Timestamp(at(0)),
-        GenericValue::Timestamp(at(10)),
-        GenericValue::TimestampTz(Utc.from_utc_datetime(&at(0))),
-        GenericValue::TimestampTz(Utc.from_utc_datetime(&at(10))),
-        GenericValue::Uuid(uuid::Uuid::parse_str(UUID).unwrap()),
-        GenericValue::String(UUID.into()),
-        GenericValue::Bool(true),
-        GenericValue::String("true".into()),
-        GenericValue::Time(chrono::NaiveTime::from_hms_opt(10, 0, 0).unwrap()),
-        GenericValue::String("10:00:00".into()),
-    ]
+        decimal("-1.5"),
+        decimal("0.5"),
+        decimal("1.234567"),
+        decimal("99999999.99"),
+        decimal("100000000000000000000"),
+        decimal("0.00001"),
+        V::Double(0.0),
+        V::Double(-0.0),
+        V::Double(1.0),
+        V::Double(1.5),
+        V::Double(2.5),
+        V::Double(0.5),
+        V::Double(0.1),
+        V::Double(1e15),
+        V::Double(1e20),
+        V::Double(1e-5),
+        V::Double(9.21e18),
+        V::Double(f64::INFINITY),
+        V::Double(f64::NEG_INFINITY),
+        V::Double(f64::NAN),
+        V::Float(1.5),
+        V::Float(0.1),
+        V::Float(-0.0),
+        V::Float(f32::INFINITY),
+        V::Bool(true),
+        V::Bool(false),
+        V::Date(day),
+        V::Date(NaiveDate::from_ymd_opt(-43, 3, 15).unwrap()),
+        V::Time(time(10, 0, 0, 0)),
+        V::Time(time(10, 0, 0, 500_000)),
+        V::Timestamp(at(time(0, 0, 0, 0))),
+        V::Timestamp(at(time(10, 0, 0, 0))),
+        V::Timestamp(at(time(10, 0, 0, 500_000))),
+        V::TimestampTz(Utc.from_utc_datetime(&at(time(0, 0, 0, 0)))),
+        V::TimestampTz(Utc.from_utc_datetime(&at(time(10, 0, 0, 0)))),
+        V::Uuid(uuid::Uuid::parse_str(UUID).unwrap()),
+        V::Bytes(vec![1, 2]),
+        V::Bytes(b"abc".to_vec()),
+    ];
+    for text in [
+        "0",
+        "1",
+        " 1",
+        "1 ",
+        "+1",
+        "01",
+        "-1",
+        "2",
+        "1_000",
+        "1e3",
+        "1.5",
+        "1.50",
+        "2.5",
+        "-0",
+        "1e+20",
+        "100000000000000000000",
+        "1e-05",
+        "infinity",
+        "Infinity",
+        "-Infinity",
+        "NaN",
+        "3000000000",
+        "123456789012345678901234567890.5",
+        "t",
+        "tru",
+        "true",
+        "TRUE",
+        "yes",
+        "on",
+        "off",
+        "abc",
+        "ABC",
+        "a",
+        "a    ",
+        "2020-01-02",
+        "2020-01-02 10:00:00",
+        "2020-01-02 10:00:00+00",
+        "2020-01-02T10:00:00Z",
+        "2020-01-02 10:00:00.5",
+        "2020-01-02 10:00:00.500",
+        "epoch",
+        "Jan 2 2020",
+        "20200102",
+        "0044-03-15 BC",
+        "10:00",
+        "10:00:00",
+        "10:00:00.5",
+        "10:00:00.500",
+        "24:00:00",
+        UUID,
+        "0B7F2D4E-1C2A-4D5E-8F90-1A2B3C4D5E6F",
+        "{0b7f2d4e-1c2a-4d5e-8f90-1a2b3c4d5e6f}",
+        "0b7f2d4e1c2a4d5e8f901a2b3c4d5e6f",
+        "\\x0102",
+    ] {
+        keys.push(V::String(text.into()));
+    }
+    keys
 }
 
 /// The SQL type a key is bound as: `sql::bound_type`.
@@ -118,15 +240,16 @@ fn bound_type(value: &GenericValue) -> &'static str {
         GenericValue::Int(_) => "int4",
         GenericValue::BigInt(_) => "int8",
         GenericValue::Decimal(_) => "numeric",
-        GenericValue::Double(_) => "float8",
         GenericValue::Float(_) => "float4",
-        GenericValue::Uuid(_) => "uuid",
+        GenericValue::Double(_) => "float8",
         GenericValue::Bool(_) => "bool",
-        GenericValue::Time(_) => "time",
         GenericValue::String(_) => "text",
+        GenericValue::Uuid(_) => "uuid",
         GenericValue::Date(_) => "date",
+        GenericValue::Time(_) => "time",
         GenericValue::Timestamp(_) => "timestamp",
         GenericValue::TimestampTz(_) => "timestamptz",
+        GenericValue::Bytes(_) => "bytea",
         other => panic!("no requested key of {other:?}"),
     }
 }
@@ -142,26 +265,40 @@ async fn the_batched_build_serves_the_ids_a_single_build_serves() {
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
-    sqlx::raw_sql("ALTER DATABASE postgres SET timezone = 'Asia/Tokyo'")
-        .execute(&pool)
-        .await
-        .unwrap();
+    for statement in [
+        "ALTER DATABASE postgres SET timezone = 'Asia/Tokyo'",
+        "CREATE EXTENSION citext",
+    ] {
+        execute(&pool, statement).await.unwrap();
+    }
 
     let mut schemas = BTreeMap::new();
-    for (n, (kind, stored)) in KINDS.iter().enumerate() {
+    let mut stored_keys = BTreeMap::new();
+    for (n, key_type) in KEY_TYPES.iter().enumerate() {
         let table = format!("k{n}");
         execute(
             &pool,
-            &format!("CREATE TABLE {table} (id {kind} PRIMARY KEY, name text)"),
+            &format!("CREATE TABLE {table} (id {key_type} PRIMARY KEY, name text)"),
         )
-        .await;
-        for text in *stored {
-            execute(
+        .await
+        .unwrap();
+        for text in STORED {
+            let quoted = text.replace('\'', "''");
+            let _ = execute(
                 &pool,
-                &format!("INSERT INTO {table} VALUES ('{text}', '{text}') ON CONFLICT DO NOTHING"),
+                &format!(
+                    "INSERT INTO {table} VALUES ('{quoted}', '{quoted}') ON CONFLICT DO NOTHING"
+                ),
             )
             .await;
         }
+        let keys: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT format('%s', id) FROM {table}"
+        )))
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        stored_keys.insert(table.clone(), keys);
         schemas.insert(index_name(&table), schema(&table));
     }
     let builder = PgDocumentBuilder::connect(&url, Arc::new(SourceSpec::new(schemas)))
@@ -169,68 +306,80 @@ async fn the_batched_build_serves_the_ids_a_single_build_serves() {
         .unwrap();
 
     let mut disagreements = Vec::new();
-    let mut compared = 0;
-    for (n, (kind, _)) in KINDS.iter().enumerate() {
+    let mut pairs = 0;
+    for (n, key_type) in KEY_TYPES.iter().enumerate() {
         let table = format!("k{n}");
+        let others: Vec<DocumentId> = stored_keys[&table]
+            .iter()
+            .map(|text| id(&table, GenericValue::String(text.clone())))
+            .collect();
         for key in requested() {
-            let cast = format!("SELECT NULL::{}::{kind}", bound_type(&key));
-            if sqlx::raw_sql(sqlx::AssertSqlSafe(cast))
-                .execute(&pool)
-                .await
-                .is_err()
-            {
-                continue;
-            }
-            let id = DocumentId {
-                index: index_name(&table),
-                key: RowKey(vec![(column("id"), key.clone())]),
-            };
+            pairs += 1;
+            let id = id(&table, key.clone());
             let single = outcome(builder.build(&id).await, &id);
-            let batched = outcome(
+            let alone = outcome(
                 builder
                     .build_many(std::slice::from_ref(&id))
                     .await
                     .map(|mut documents| documents.remove(0)),
                 &id,
             );
-            compared += 1;
-            if single != batched {
+            let mut batch = vec![id.clone()];
+            batch.extend(others.iter().cloned());
+            let mixed = outcome(
+                builder
+                    .build_many(&batch)
+                    .await
+                    .map(|mut documents| documents.remove(0)),
+                &id,
+            );
+            if single != alone || single != mixed {
                 disagreements.push(format!(
-                    "{key:?} against a {kind} key: build {single}, build_many {batched}"
+                    "{key:?} ({}) against a {key_type} key: build {single}, alone {alone}, \
+                     beside every stored row {mixed}",
+                    bound_type(&key)
                 ));
             }
         }
     }
-    assert!(compared > 150, "compared {compared} pairs");
+    assert!(pairs >= 2000, "{pairs} pairs");
     assert!(
         disagreements.is_empty(),
-        "{} of {compared} pairs disagree:\n{}",
+        "{} of {pairs} pairs disagree:\n{}",
         disagreements.len(),
         disagreements.join("\n")
     );
 }
 
-/// `upsert`, `delete` or `error`; an upsert must be under the requested id.
-fn outcome(document: source::Result<Document>, id: &DocumentId) -> &'static str {
+/// What a build gives one id: the upsert's body, a tombstone, a failure or
+/// an error. An upsert or tombstone must be under the requested id.
+fn outcome(document: source::Result<Document>, id: &DocumentId) -> String {
     match document {
-        Ok(Document::Upsert { id: built, .. }) => {
+        Ok(Document::Upsert { id: built, body }) => {
             assert_eq!(&built, id);
-            "upsert"
+            format!("upsert {}", sink::to_json(&body))
         }
         Ok(Document::Delete { id: built }) => {
             assert_eq!(&built, id);
-            "delete"
+            "delete".to_owned()
         }
-        Ok(Document::Failed { .. }) => "failed",
-        Err(_) => "error",
+        Ok(Document::Failed { .. }) => "failed".to_owned(),
+        Err(_) => "error".to_owned(),
     }
 }
 
-async fn execute(pool: &sqlx::PgPool, sql: &str) {
+fn id(table: &str, key: GenericValue) -> DocumentId {
+    DocumentId {
+        index: index_name(table),
+        key: RowKey(vec![(column("id"), key)]),
+    }
+}
+
+async fn execute(pool: &sqlx::PgPool, sql: &str) -> Result<(), sqlx::Error> {
     sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_owned()))
         .execute(pool)
         .await
-        .unwrap();
+        .map(|_| ())
 }
 
 fn schema(table: &str) -> IndexSchema {
