@@ -212,6 +212,68 @@ async fn a_filter_value_that_does_not_fit_its_column_is_compared_as_written() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+/// A role that may not run `has_schema_privilege` casts to the declared type
+/// where it can't tell the base type's schema is usable. A domain over a
+/// built-in sized type still compares as written: its base type is in
+/// `pg_catalog`, which every role may use.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_role_that_may_not_probe_schema_privileges_compares_a_domain_filter_as_written() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "REVOKE EXECUTE ON FUNCTION has_schema_privilege(oid, text) FROM PUBLIC",
+        "CREATE DOMAIN short_text AS varchar(5)",
+        "CREATE DOMAIN money2 AS numeric(10,2)",
+        "CREATE TABLE domains (id int PRIMARY KEY, dv short_text, dn money2)",
+        "INSERT INTO domains VALUES (1, 'archi', 1.01)",
+        "CREATE ROLE reader LOGIN PASSWORD 'reader'",
+        "GRANT SELECT ON domains TO reader",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let cases = [
+        ("{ column: dv, op: eq, value: 'archived' }", false),
+        ("{ column: dv, op: neq, value: 'archived' }", true),
+        ("{ column: dn, op: eq, value: '1.005' }", false),
+        ("{ column: dn, op: eq, value: '1.01' }", true),
+    ];
+    let indexes = cases
+        .iter()
+        .enumerate()
+        .map(|(n, (filter, _))| {
+            let yaml = format!(
+                "
+version: 1
+table: domains
+primary_key: id
+filters:
+  - {filter}
+fields:
+  - {{ integer: id, required: true }}
+"
+            );
+            (index_name(&format!("domain_{n}")), schema(&yaml))
+        })
+        .collect();
+    let reader = url.replace("postgres:postgres@", "reader:reader@");
+    let builder = PgDocumentBuilder::connect(&reader, Arc::new(SourceSpec::new(indexes)))
+        .await
+        .unwrap();
+    let mut wrong = Vec::new();
+    for (n, (filter, matches)) in cases.iter().enumerate() {
+        for body in built(&builder, &format!("domain_{n}")).await {
+            match body {
+                Ok(body) if body.is_some() == *matches => {}
+                other => wrong.push(format!("`{filter}`: got {other:?}, matches {matches}")),
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 /// What a single build and a batched build give document 1 of `index`: its
 /// body, `None` for a tombstone, or why it failed.
 async fn built(

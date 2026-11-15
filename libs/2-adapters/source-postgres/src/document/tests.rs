@@ -803,10 +803,15 @@ async fn no_filter_operand_cast_carries_a_type_modifier() {
         })
         .collect();
     assert_eq!(casts.len(), params.len(), "{sql}");
-    for cast in casts {
-        assert!(
-            cast.starts_with("pg_catalog."),
-            "an operand is cast to a size: {cast}"
-        );
-    }
+    let unsized_operands = casts
+        .iter()
+        .filter(|cast| {
+            cast.starts_with(r#"pg_catalog."varchar""#) || cast.starts_with("pg_catalog.numeric")
+        })
+        .count();
+    assert_eq!(
+        unsized_operands,
+        params.len() - 1,
+        "every operand but the key is cast to its unsized type: {sql}"
+    );
 }
