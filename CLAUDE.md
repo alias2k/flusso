@@ -1068,21 +1068,35 @@ from the schema, never from the query's untyped literal, and projected as an `in
 `a_database_set_to_escape_bytea_output_still_builds_the_bytes`, the `engine` `bytea_output` e2e. **The
 column-type cache follows the table** (`document/mod.rs`'s `ColumnTypes`, `PgDocumentBuilder::column_types`):
 the CLI hands it to `WalChangeCapture::with_column_types`, and the stream drops a table's entries on a
-`Relation` message (Postgres sends one after a definition change) naming another type OID than a cached
+`Relation` message (Postgres sends one after a definition change) naming another type OID or modifier than a cached
 column's (`ColumnTypes::forget_changed`; unchanged types keep them, so a stream start costs no lookup), and a failed document query
-(`failed_query`) or reverse lookup (`failed_resolve`) drops those of every table its index reads, so a
-type change never loops the ingest engine on a stale cast or `encode`. **Statement texts carry every
-type a prepared statement depends on** (issue #335): sqlx caches one statement per text on each pooled
-connection, with the parameter types of its first use, and Postgres refuses one whose result type
-changed. So a bound key is spelled `$n::<bound>::<column type>` (`sql::key_cast`, as `root_keys_query`
-does), and a selected key's typed column is cast to its cached `format_type` (`value::key_select`); no
-statement cache is cleared and nothing is retried. A key decoded before and after its column changed
-type (`Int(1)`, `BigInt(1)`) is one document: `build_many` matches rows to ids by the rendered `_id`
-(`source::document::key_part`), never by variant. A query Postgres refuses as a schema mismatch
-(`42883`/`42804`/`42703`/`42P01`) names the index and `flusso check`; it is a real mismatch, which
-validation reports, not a stale cache. Guard: the `engine` `type_change` e2e (root key, links, junction
-and `via` keys, `numeric` precision, a recreated table, a migration in one transaction, a concurrent
-reader on several pooled connections; no restart, no tombstone). No query per build. The cache is nested by schema, table and
+(`failed_query`) or reverse lookup (`failed_lookup`) drops those of every table its index reads, so a
+type change never loops the ingest engine on a stale cast or `encode`. A reverse lookup keeps its
+query error typed (`resolve::LookupError`, the `sqlx::Error` boxed) up to `resolve_change` /
+`read_root_links`, whose loops hold the index, so `resolve`'s happy path is main's and no argument is
+threaded through the hops (its no-query paths are `just bench`'s `resolve_no_io`). The cache entry
+compares `(type OID, typmod)` with the `Relation` message's, so a resize (`varchar(5)` →
+`varchar(10)`) refreshes it. **Statement texts carry every type a prepared statement depends on**
+(issue #335): sqlx caches one statement per text on each pooled connection, with the parameter types of
+its first use, and Postgres refuses one whose result type changed. So a bound key is spelled
+`$n::<bound>::<key type>` (`sql::key_cast`, as `root_keys_query` does), and a selected key's typed
+column is cast to the key type (`value::key_select`); no statement cache is cleared and nothing is
+retried. **A key is never cast to a size**: the key type is `ColumnMeta.key_type`
+(`PgDocumentBuilder::key_type`), the base type's schema-qualified `typname` with no modifier
+(`pg_catalog.bpchar`, never `character`, which means `char(1)`), because an explicit cast to
+`varchar(5)`/`numeric(10,2)` truncates or rounds without an error and matches no row; plans keep their
+index scans. A key decoded before and after its column changed type is one document: `build_many`
+(`document/matching.rs`'s `match_rows`) serves a requested id from the row whose key renders its `_id`
+(`source::document::key_part`; `Int(1)`/`BigInt(1)`), else from one equal by value (a `numeric` `1.5`
+against a row now `1.50`), under the requested id, as `build` does; only an id neither finds is a
+tombstone. A query Postgres refuses as a schema mismatch (`42883`/`42804`/`42703`/`42P01`), a
+document query or a reverse lookup, names the index and `flusso check` (`query_failed`); it is a real
+mismatch, which validation reports, not a stale cache. Guard: the `engine` `type_change` e2e (root key,
+links, junction and `via` keys, a recreated table, a migration in one transaction, a concurrent reader
+on several pooled connections, resizes of `varchar`/`char`/`numeric` keys, a `numeric` key read before
+its scale changed; no restart, no tombstone), `matching::tests`, `document::tests`'
+`no_key_cast_carries_a_type_modifier`, `stream::tests`'
+`a_relation_message_with_another_type_modifier_forgets_its_tables_column_types`. No query per build. The cache is nested by schema, table and
 column, looked up by borrowed names, and hands out `Arc<ColumnMeta>`, so a hit allocates nothing; each
 `forget_table` bumps its generation, which answers derived from it (the per-path root-link decision)
 check. Guards: `stream::tests`'
