@@ -3,7 +3,7 @@
 #
 #   review-ab.sh [<base>] [--pg 14,16,18] [--bench postgres,cases,pipeline]
 #                [--filter <criterion filter>] [--limit <percent>] [--rounds <n>]
-#                [--own-benches]
+#                [--own-benches] [--bench-cpus LIST --server-cpus LIST | --no-pin]
 #   review-ab.sh --clean
 #
 # <base> defaults to origin/main, as last fetched: the command never fetches.
@@ -28,15 +28,21 @@
 # 4. One named Postgres container per version, plus one OpenSearch for
 #    `pipeline`. Each bench run gets a fresh database (REVIEW_AB_PG_URL) and an
 #    emptied cluster (REVIEW_AB_OS_URL). A trap removes these containers.
-# 5. Per version, per bench, --rounds (default 3) rounds of base then head:
+# 5. CPU pinning: the bench process runs under `taskset -c` on one set of
+#    cores, the containers get `--cpuset-cpus` on a disjoint set (default: core
+#    0 left alone, the next 2·k split in two, k = min(4, (nproc − 1) / 2); flags
+#    or REVIEW_AB_BENCH_CPUS / REVIEW_AB_SERVER_CPUS override, --no-pin or
+#    REVIEW_AB_PIN=0 turn it off). Off, and said so, without `taskset` or with
+#    fewer than 5 cores.
+# 6. Per version, per bench, --rounds (default 3) rounds of base then head:
 #    base, head, base, head, … Criterion baselines `base-<r>` / `head-<r>`.
-# 6. bench-compare.py --repeats flags a case past the limit (default 5%) and
+# 7. bench-compare.py --repeats flags a case past the limit (default 5%) and
 #    twice the control spread; each flagged case is re-run alone (`--exact`,
 #    base then head) and judged by the PR gate's confirm rule. Exits 1 only on
 #    a confirmed case. Results: `<head target>/review-ab/<timestamp>/`.
 set -euo pipefail
 
-usage="usage: review-ab.sh [<base>] [--pg 16] [--bench postgres,cases,pipeline] [--filter <f>] [--limit 5] [--rounds 3] [--own-benches] | --clean"
+usage="usage: review-ab.sh [<base>] [--pg 16] [--bench postgres,cases,pipeline] [--filter <f>] [--limit 5] [--rounds 3] [--own-benches] [--bench-cpus LIST --server-cpus LIST | --no-pin] | --clean"
 base=origin/main
 pg_versions=16
 benches=postgres,cases,pipeline
@@ -46,6 +52,9 @@ rounds=3
 own_benches=0
 clean=0
 keep=5
+bench_cpus=${REVIEW_AB_BENCH_CPUS:-}
+server_cpus=${REVIEW_AB_SERVER_CPUS:-}
+pin=${REVIEW_AB_PIN:-1}
 positional=0
 while [ $# -gt 0 ]; do
   case $1 in
@@ -55,6 +64,9 @@ while [ $# -gt 0 ]; do
     --limit) limit=${2:?$usage}; shift 2 ;;
     --rounds) rounds=${2:?$usage}; shift 2 ;;
     --own-benches) own_benches=1; shift ;;
+    --bench-cpus) bench_cpus=${2:?$usage}; shift 2 ;;
+    --server-cpus) server_cpus=${2:?$usage}; shift 2 ;;
+    --no-pin) pin=0; shift ;;
     --clean) clean=1; shift ;;
     -h | --help) echo "$usage"; exit 0 ;;
     -*) echo "$usage" >&2; exit 2 ;;
@@ -167,6 +179,19 @@ build() { # build <tree> <target dir> <log>
 echo "review-ab: base $base = ${base_sha:0:12}, committed $base_date (not fetched: \`git fetch\` first for the latest)"
 echo "vs the working tree; Postgres $pg_versions; benches ${selected[*]}; $rounds rounds"
 
+cpu_args=(--nproc "$(nproc)" --taskset "$(command -v taskset >/dev/null && echo 1 || echo 0)")
+[ "$pin" != 0 ] || cpu_args+=(--off)
+[ -z "$bench_cpus" ] || cpu_args+=(--bench "$bench_cpus")
+[ -z "$server_cpus" ] || cpu_args+=(--servers "$server_cpus")
+cpu_plan=$(python3 "$scripts/review-ab-housekeeping.py" cpus "${cpu_args[@]}")
+{ read -r bench_cpus; read -r server_cpus; read -r cpu_message; } <<<"$cpu_plan"
+echo "$cpu_message"
+bench_pin=() server_pin=()
+if [ -n "$bench_cpus" ]; then
+  bench_pin=(taskset -c "$bench_cpus")
+  server_pin=(--cpuset-cpus "$server_cpus")
+fi
+
 names=$(docker ps -a --filter name=flusso-review- --format '{{.Names}}' || true)
 for name in $(printf '%s\n' "$names" | python3 "$scripts/review-ab-housekeeping.py" stale); do
   echo "removing $name, left by a run that no longer exists"
@@ -232,7 +257,8 @@ host_port() { docker port "$1" "$2" | head -1 | sed 's/.*://'; }
 
 start_postgres() { # start_postgres <name> <version>
   containers+=("$1")
-  docker run -d --name "$1" -e POSTGRES_PASSWORD=postgres -p 127.0.0.1::5432 "postgres:$2-alpine" >/dev/null
+  docker run -d --name "$1" "${server_pin[@]}" -e POSTGRES_PASSWORD=postgres -p 127.0.0.1::5432 \
+    "postgres:$2-alpine" >/dev/null
   local deadline=$((SECONDS + 120))
   until docker exec "$1" pg_isready -U postgres -h 127.0.0.1 -q 2>/dev/null; do
     ((SECONDS < deadline)) || { echo "error: Postgres $2 did not start" >&2; return 1; }
@@ -244,7 +270,7 @@ os_url=
 if [[ " ${selected[*]} " == *" pipeline "* ]]; then
   os=flusso-review-$$-os
   containers+=("$os")
-  docker run -d --name "$os" -p 127.0.0.1::9200 \
+  docker run -d --name "$os" "${server_pin[@]}" -p 127.0.0.1::9200 \
     -e discovery.type=single-node -e DISABLE_SECURITY_PLUGIN=true -e DISABLE_INSTALL_DEMO_CONFIG=true \
     -e action.destructive_requires_name=false -e OPENSEARCH_JAVA_OPTS="-Xms512m -Xmx512m" \
     opensearchproject/opensearch:2 >/dev/null
@@ -287,7 +313,7 @@ run_side() { # run_side <side> <bench> <baseline> [<exact id>]
   (cd "$tree/${package_dir[$2]}" &&
     REVIEW_AB_PG_URL=postgres://postgres:postgres@127.0.0.1:$port/r$database REVIEW_AB_OS_URL=$os_url \
       CRITERION_HOME=$out/pg$version/$2 \
-      "$exe" --bench --quiet --noplot --plotting-backend plotters --save-baseline "$3" "${selector[@]}" 2>&1 >/dev/null |
+      "${bench_pin[@]}" "$exe" --bench --quiet --noplot --plotting-backend plotters --save-baseline "$3" "${selector[@]}" 2>&1 >/dev/null |
       sed -E '/^(Gnuplot not found|Benchmarking |Warning: Unable to complete )/d' >&2)
   docker exec "$container" psql -U postgres -qc "DROP DATABASE r$database" >/dev/null
 }

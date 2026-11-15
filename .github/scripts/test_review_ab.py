@@ -176,6 +176,22 @@ class RepeatsTable(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout)
 
+    def test_one_slow_run_per_side_does_not_widen_the_spread(self) -> None:
+        # With 3+ runs, each side's slowest is dropped before the spread is taken.
+        self.case("key/int", [1_000_000, 1_020_000, 1_500_000], [1_005_000, 1_010_000, 1_900_000])
+        result = self.compare(repeats=3)
+        self.assertEqual(self.row(result.stdout, "key/int")[4], "2.0%")
+
+    def test_with_two_runs_nothing_is_dropped(self) -> None:
+        self.case("key/int", [1_000_000, 1_500_000], [1_000_000, 1_000_000])
+        result = self.compare(repeats=2)
+        self.assertEqual(self.row(result.stdout, "key/int")[4], "50.0%")
+
+    def test_the_slowest_run_is_still_shown(self) -> None:
+        self.case("key/int", [1_000_000, 1_020_000, 1_500_000], [1_000_000, 1_000_000, 1_000_000])
+        result = self.compare(repeats=3)
+        self.assertEqual(self.row(result.stdout, "key/int")[1], "1.000 ms … 1.500 ms")
+
     def test_a_burst_on_one_head_run_is_not_a_slowdown(self) -> None:
         # The A/A run that motivated repeats: one head window hit by a build next door.
         self.case("key/citext", [9_000_000, 9_100_000], [16_100_000, 9_050_000])
@@ -301,6 +317,46 @@ class Housekeeping(unittest.TestCase):
             )
 
 
+class Cpus(unittest.TestCase):
+    def cpus(self, *args: object) -> subprocess.CompletedProcess:
+        return run(HOUSEKEEPING, "cpus", *args)
+
+    def test_defaults_leave_core_0_and_split_the_rest_into_two_disjoint_sets(self) -> None:
+        self.assertEqual(self.cpus("--nproc", 24, "--taskset", 1).stdout.split("\n")[:2], ["1-4", "5-8"])
+
+    def test_a_smaller_machine_gets_smaller_sets(self) -> None:
+        self.assertEqual(self.cpus("--nproc", 8, "--taskset", 1).stdout.split("\n")[:2], ["1-3", "4-6"])
+
+    def test_too_few_cores_turns_pinning_off(self) -> None:
+        result = self.cpus("--nproc", 4, "--taskset", 1)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.split("\n")[:2], ["", ""])
+        self.assertIn("4 cores", result.stdout)
+
+    def test_no_taskset_turns_pinning_off(self) -> None:
+        result = self.cpus("--nproc", 24, "--taskset", 0)
+        self.assertEqual(result.stdout.split("\n")[:2], ["", ""])
+        self.assertIn("taskset", result.stdout)
+
+    def test_off_on_request(self) -> None:
+        result = self.cpus("--nproc", 24, "--taskset", 1, "--off")
+        self.assertEqual(result.stdout.split("\n")[:2], ["", ""])
+
+    def test_overrides_are_used_as_given(self) -> None:
+        result = self.cpus("--nproc", 24, "--taskset", 1, "--bench", "2,3", "--servers", "10-13")
+        self.assertEqual(result.stdout.split("\n")[:2], ["2,3", "10-13"])
+
+    def test_overlapping_sets_are_refused(self) -> None:
+        result = self.cpus("--nproc", 24, "--taskset", 1, "--bench", "1-4", "--servers", "4-6")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("overlap", result.stderr)
+
+    def test_a_core_the_machine_does_not_have_is_refused(self) -> None:
+        result = self.cpus("--nproc", 8, "--taskset", 1, "--bench", "1-2", "--servers", "7-9")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("9", result.stderr)
+
+
 FAKE_CARGO = r"""#!/usr/bin/env python3
 import json, os, pathlib, shutil, sys
 args = sys.argv[1:]
@@ -357,6 +413,16 @@ esac
 exit 0
 """
 
+FAKE_NPROC = """#!/usr/bin/env bash
+echo "$FAKE_NPROC"
+"""
+
+FAKE_TASKSET = """#!/usr/bin/env bash
+echo "taskset $1 $2" >>"$FAKE_LOG"
+shift 2
+exec "$@"
+"""
+
 WITH_URL = "// reads REVIEW_AB_PG_URL\n"
 
 
@@ -373,7 +439,7 @@ class Script(unittest.TestCase):
         self.log.write_text("")
         bin_dir = self.dir / "bin"
         bin_dir.mkdir()
-        for name, body in (("cargo", FAKE_CARGO), ("docker", FAKE_DOCKER)):
+        for name, body in (("cargo", FAKE_CARGO), ("docker", FAKE_DOCKER), ("nproc", FAKE_NPROC), ("taskset", FAKE_TASKSET)):
             (bin_dir / name).write_text(body)
             (bin_dir / name).chmod(0o755)
         (self.dir / "bench.py").write_text(FAKE_BENCH)
@@ -387,6 +453,7 @@ class Script(unittest.TestCase):
             "FAKE_BENCH": str(self.dir / "bench.py"),
             "FAKE_CASES": "key/int key/uuid",
             "FAKE_CONTAINERS": "",
+            "FAKE_NPROC": "2",
         }
         self.repo.mkdir()
         self.git("init", "-q", "-b", "main")
@@ -449,6 +516,37 @@ class Script(unittest.TestCase):
         self.assertEqual(self.review(self.with_cases, "--bench", "cases").returncode, 0)
         result = self.review(self.with_cases, "--bench", "cases,postgres")
         self.assertIn("bench not built: postgres", result.stdout)
+
+    def test_the_benches_and_the_servers_run_on_disjoint_cores(self) -> None:
+        result = self.review(self.with_cases, "--bench", "cases", FAKE_NPROC="24")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("CPU pinning: benches on cores 1-4, Postgres and OpenSearch on 5-8", result.stdout)
+        self.assertEqual(set(self.log_lines("taskset")), {"taskset -c 1-4"})
+        self.assertEqual(len(self.log_lines("taskset")), len(self.log_lines("run ")))
+        runs = [line for line in self.log_lines("docker run")]
+        self.assertTrue(runs and all("--cpuset-cpus 5-8" in line for line in runs), runs)
+
+    def test_cores_can_be_chosen_by_env(self) -> None:
+        result = self.review(
+            self.with_cases, "--bench", "cases", FAKE_NPROC="24", REVIEW_AB_BENCH_CPUS="2-3", REVIEW_AB_SERVER_CPUS="6-7"
+        )
+        self.assertIn("benches on cores 2-3, Postgres and OpenSearch on 6-7", result.stdout)
+        self.assertEqual(set(self.log_lines("taskset")), {"taskset -c 2-3"})
+
+    def test_cores_can_be_chosen_by_flag_and_pinning_turned_off(self) -> None:
+        result = self.review(self.with_cases, "--bench", "cases", "--bench-cpus", "2", "--server-cpus", "3", FAKE_NPROC="24")
+        self.assertIn("benches on cores 2, Postgres and OpenSearch on 3", result.stdout)
+        self.log.write_text("")
+        result = self.review(self.with_cases, "--bench", "cases", "--no-pin", FAKE_NPROC="24")
+        self.assertIn("CPU pinning off", result.stdout)
+        self.assertEqual(self.log_lines("taskset"), [])
+
+    def test_a_small_machine_runs_unpinned_and_says_so(self) -> None:
+        result = self.review(self.with_cases, "--bench", "cases", FAKE_NPROC="2")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("CPU pinning off", result.stdout)
+        self.assertEqual(self.log_lines("taskset"), [])
+        self.assertFalse(any("--cpuset-cpus" in line for line in self.log_lines("docker run")))
 
     def test_criterion_runs_quietly_without_plots(self) -> None:
         self.review(self.with_cases, "--bench", "cases")

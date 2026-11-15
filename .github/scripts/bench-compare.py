@@ -28,7 +28,9 @@ listed but not gated. Exits 1 when any bench's candidate median is more than
                     `<candidate>-1`…: a side's value is its fastest median
                     (noise only adds time), and the "control spread" is how
                     far the same binary's runs differ, (max − min) / min,
-                    the larger of the two sides. A change counts only when
+                    the larger of the two sides; with 3+ runs each side's
+                    slowest is left out of it, so one bad run doesn't widen
+                    it. A change counts only when
                     it is past both the limit and twice that spread
                     (`flagged` / `faster`, else `noise`). With --breaches,
                     writes `<bench target>\t<id>` per flagged case (the
@@ -92,7 +94,9 @@ def repeated(bench_dir: pathlib.Path, side: str, n: int) -> list[float]:
 
 
 def spread(values: list[float]) -> float | None:
-    return (max(values) - min(values)) / min(values) * 100 if len(values) > 1 and min(values) else None
+    """(max − min) / min in percent; with 3+ runs, over all but the slowest, so one bad run doesn't widen it."""
+    kept = sorted(values)[:-1] if len(values) > 2 else values
+    return (max(kept) - min(kept)) / min(kept) * 100 if len(kept) > 1 and min(kept) else None
 
 
 def span(values: list[float]) -> str:
@@ -151,7 +155,10 @@ def review(
     if len(lines) == 2:
         print(f"::error::nothing to compare: no bench has both `{base}-*` and `{cand}-*` under {root}")
         return 2
-    print(f"{n} runs per side; change = fastest vs fastest; control spread = how far one binary's own runs differ.")
+    print(
+        f"{n} runs per side; change = fastest vs fastest; control spread = how far one binary's own runs differ"
+        + (", each side's slowest left out." if n > 2 else ".")
+    )
     print()
     print("\n".join(lines))
     if one_sided:
