@@ -31,7 +31,8 @@ const MAX_PAIRS_PER_OBJECT: usize = 50;
 pub(super) struct Builder<'a> {
     pub(super) db: &'a DatabaseSchema,
     pub(super) pks: &'a HashMap<String, ColumnName>,
-    /// `(table, column)` → SQL type, for casting filter operands.
+    /// `(table, column)` → the unsized type a filter operand or key is cast
+    /// to.
     pub(super) col_types: &'a HashMap<(String, String), String>,
     pub(super) bytes: &'a ByteColumns,
     pub(super) params: Vec<GenericValue>,
@@ -471,9 +472,10 @@ impl Builder<'_> {
     /// keys/foreign keys that drive document lookup — goes through here, so a
     /// non-`text` column compares against its own type (`uuid = uuid`,
     /// `date = date`) instead of degrading to `text` and tripping
-    /// `operator does not exist: uuid = text`. The type is the catalog's
-    /// `format_type` name, resolved before query building (see
-    /// [`PgDocumentBuilder::column_type`](crate::document::PgDocumentBuilder::column_type)).
+    /// `operator does not exist: uuid = text`. The type carries no size (see
+    /// [`PgDocumentBuilder::key_type`](crate::document::PgDocumentBuilder::key_type)),
+    /// so the cast never changes the value: one past the column's size
+    /// compares as written and matches no row it does not equal.
     /// A missing type is an internal error, not a silent bare bind: that is what
     /// keeps the cast mandatory.
     pub(super) fn typed_placeholder(
