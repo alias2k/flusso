@@ -84,12 +84,20 @@ def spread(values: list[float]) -> float | None:
     return (max(values) - min(values)) / min(values) * 100 if len(values) > 1 and min(values) else None
 
 
+def span(values: list[float]) -> str:
+    low, high = min(values), max(values)
+    return fmt(low) if low == high else f"{fmt(low)} … {fmt(high)}"
+
+
 def review(root: pathlib.Path, base: str, cand: str, n: int, limit: float) -> int:
     """The A/B table over repeated runs of each side."""
     bench_dirs = sorted(
         {p.parent.parent for i in range(1, n + 1) for side in (base, cand) for p in root.rglob(f"{side}-{i}/estimates.json")}
     )
-    lines = ["| case | base | head | change | control spread | verdict |", "| --- | ---: | ---: | ---: | ---: | --- |"]
+    lines = [
+        "| case | base (fastest … slowest) | head (fastest … slowest) | change | control spread | verdict |",
+        "| --- | ---: | ---: | ---: | ---: | --- |",
+    ]
     one_sided, slower = [], 0
     for bench_dir in bench_dirs:
         b_runs, c_runs = repeated(bench_dir, base, n), repeated(bench_dir, cand, n)
@@ -110,11 +118,11 @@ def review(root: pathlib.Path, base: str, cand: str, n: int, limit: float) -> in
         else:
             verdict = "noise"
         shown = f"{noise:.1f}%" if noise is not None else "—"
-        lines.append(f"| `{rid}` | {fmt(b)} | {fmt(c)} | {ch:+.1f}% | {shown} | {verdict} |")
+        lines.append(f"| `{rid}` | {span(b_runs)} | {span(c_runs)} | {ch:+.1f}% | {shown} | {verdict} |")
     if len(lines) == 2:
         print(f"::error::nothing to compare: no bench has both `{base}-*` and `{cand}-*` under {root}")
         return 2
-    print(f"Fastest of {n} runs per side; control spread = how far one binary's own runs differ.")
+    print(f"{n} runs per side; change = fastest vs fastest; control spread = how far one binary's own runs differ.")
     print()
     print("\n".join(lines))
     if one_sided:

@@ -85,12 +85,12 @@ What it does:
 6. **Prints one table per version**, from `bench-compare.py --repeats`:
 
 ```text
-| case | base | head | change | control spread | verdict |
+| case | base (fastest … slowest) | head (fastest … slowest) | change | control spread | verdict |
 | --- | ---: | ---: | ---: | ---: | --- |
-| `key/uuid` | 1.234 ms | 1.501 ms | +21.6% | 1.8% | slower ⚠️ |
+| `key/uuid` | 1.234 ms … 1.256 ms | 1.501 ms … 1.522 ms | +21.6% | 1.8% | slower ⚠️ |
 ```
 
-Each side's value is its fastest run: noise only ever adds time. The control spread is how far one binary's own runs differ, the larger of the two sides: the noise of this machine right now. A change counts when it's past `--limit` **and** past twice the spread (`slower` or `faster`); otherwise it's `noise`.
+The change compares each side's fastest run: noise only ever adds time. The control spread is how far one binary's own runs differ, the larger of the two sides: the noise of this machine right now. A change counts when it's past `--limit` **and** past twice the spread (`slower` or `faster`); otherwise it's `noise`.
 
 One run per side isn't enough. With base, head, base again on a busy machine, an A/A run (identical code on both sides) called 5 of 35 cases slower, up to +79%: a burst that lands only on the head's window looks like a regression, and the base's two runs never see it. The command exits 1 when a case counts as slower. The Criterion output stays under `target/review-ab/<timestamp>/`.
 
@@ -105,7 +105,7 @@ One run per side isn't enough. With base, head, base again on a busy machine, an
 | `batch` | 1, 10, 100, 1000, 10000 ids of a plain `int` root |
 | `hit_ratio` | 0, 50, 100% of 1000 ids exist |
 | `key` | `int`, `uuid`, `varchar`, `numeric`, `float8`, `char`, `citext` |
-| `root` | plain, hash- and range-partitioned, composite key, keyless (`REPLICA IDENTITY FULL`), a wide row with a large unread column |
+| `root` | plain, hash- and range-partitioned on the key, composite key, keyless (`REPLICA IDENTITY FULL`), a wide row with a large unread column, the same with a composite key, a table never analysed |
 
 Every root has a `has_many` child keyed by its key type. `cases` runs only from `just bench-components` and `just review-ab`: the `main` history doesn't record it.
 

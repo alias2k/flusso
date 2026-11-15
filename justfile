@@ -225,8 +225,9 @@ bench-components:
 # (postgres, cases, pipeline): base, head, then base again as a control, on the
 # Postgres versions asked for. Reuses a warm base build in ~/.cache/flusso/review-ab.
 # E.g. `just review-ab`, `just review-ab main --pg 14,16,18 --bench cases --filter key/`.
+[positional-arguments]
 review-ab base="origin/main" *args:
-    .github/scripts/review-ab.sh {{base}} {{args}}
+    .github/scripts/review-ab.sh "$@"
 
 # A scenario on the real binary: `just bench-scenario [reference|complex] [ci|default]`.
 # Starts its own Postgres + OpenSearch containers (or uses BENCH_PG_URL /

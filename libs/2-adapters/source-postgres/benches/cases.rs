@@ -12,7 +12,7 @@
 //! | `batch` | 1, 10, 100, 1000, 10000 ids of a plain `int` root |
 //! | `hit_ratio` | 0, 50, 100 % of 1000 ids exist |
 //! | `key` | `int`, `uuid`, `varchar`, `numeric`, `float8`, `char(n)`, `citext` |
-//! | `root` | plain, hash- and range-partitioned, composite key, keyless (`REPLICA IDENTITY FULL`), a wide row with a large unread column |
+//! | `root` | plain, hash- and range-partitioned, composite key, keyless (`REPLICA IDENTITY FULL`), a wide row with a large unread column, the same with a composite key, a never-analysed table |
 //!
 //! Every root has a `has_many` child keyed by the root's key type, two rows
 //! per root. Before measuring, each case is built once and checked: a case
@@ -177,6 +177,18 @@ fn roots() -> Vec<Root> {
             "INSERT INTO s_wide (id, name, payload)
              SELECT g, 'name ' || g, (SELECT string_agg(md5(g::text || i::text), '') FROM generate_series(1, 600) i)
              FROM generate_series(1, $1) g"),
+        Root {
+            wal_key: &["tenant", "id"],
+            ..root("s_wide_composite", "int", KeyType::Int,
+                &["CREATE TABLE s_wide_composite (tenant int, id int, name text, payload text, PRIMARY KEY (tenant, id))"],
+                "INSERT INTO s_wide_composite (tenant, id, name, payload)
+                 SELECT g % 7, g, 'name ' || g, (SELECT string_agg(md5(g::text || i::text), '') FROM generate_series(1, 600) i)
+                 FROM generate_series(1, $1) g")
+        },
+        // Never analysed: the planner has no statistics for it.
+        root("s_unanalysed", "int", KeyType::Int,
+            &["CREATE TABLE s_unanalysed (id int PRIMARY KEY, name text) WITH (autovacuum_enabled = false)"],
+            "INSERT INTO s_unanalysed (id, name) SELECT g, 'name ' || g FROM generate_series(1, $1) g"),
     ]
 }
 
@@ -189,6 +201,8 @@ fn shape_case(table: &str) -> Option<&'static str> {
         "s_composite" => "composite_key",
         "s_keyless" => "keyless",
         "s_wide" => "wide_unread",
+        "s_wide_composite" => "wide_composite_key",
+        "s_unanalysed" => "never_analysed",
         _ => return None,
     })
 }
@@ -262,7 +276,19 @@ async fn seed(pool: &sqlx::PgPool, roots: &[Root]) {
             sqlx::query(AssertSqlSafe(sql)).execute(pool).await.unwrap();
         }
     }
-    sqlx::query("VACUUM ANALYZE").execute(pool).await.unwrap();
+    for root in roots {
+        let vacuum = if root.table == "s_unanalysed" {
+            "VACUUM"
+        } else {
+            "VACUUM ANALYZE"
+        };
+        for table in [root.table.to_owned(), format!("{}_items", root.table)] {
+            sqlx::query(AssertSqlSafe(format!("{vacuum} {table}")))
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+    }
 }
 
 /// Every root's change keys, in key order, as the WAL decoder would read them.

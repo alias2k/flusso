@@ -139,8 +139,11 @@ class RepeatsTable(unittest.TestCase):
     def test_each_side_is_its_fastest_run_and_the_spread_its_own_runs(self) -> None:
         self.case("key/int", [1_000_000, 1_020_000], [1_010_000, 1_015_000])
         result = self.compare()
-        self.assertIn("| case | base | head | change | control spread | verdict |", result.stdout)
-        self.assertEqual(self.row(result.stdout, "key/int"), ["`key/int`", "1.000 ms", "1.010 ms", "+1.0%", "2.0%", "noise"])
+        self.assertIn("| case | base (fastest … slowest) | head (fastest … slowest) | change | control spread | verdict |", result.stdout)
+        self.assertEqual(
+            self.row(result.stdout, "key/int"),
+            ["`key/int`", "1.000 ms … 1.020 ms", "1.010 ms … 1.015 ms", "+1.0%", "2.0%", "noise"],
+        )
         self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_a_burst_on_one_head_run_is_not_a_slowdown(self) -> None:

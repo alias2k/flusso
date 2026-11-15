@@ -127,6 +127,10 @@ fi
 echo "building the head in $head_tree"
 build "$head_tree" "$head_target"
 python3 "$scripts/bench-provenance.py" "$base_target" "$head_target" review review
+if cmp -s <(cut -f1,3 "$base_target/bench-executables/review.tsv") <(cut -f1,3 "$head_target/bench-executables/review.tsv"); then
+  aa="The base and head bench binaries are byte-identical: every difference below is noise."
+  echo "$aa"
+fi
 
 containers=()
 cleanup() {
@@ -225,6 +229,10 @@ for version in "${reports[@]}"; do
   echo "## Postgres $version: ${base} (${base_sha:0:12}) vs the working tree"
   echo
   python3 "$scripts/bench-compare.py" "$out/pg$version" base head "$limit" --repeats "$rounds" || failed=1
+  if [ -n "${aa:-}" ]; then
+    echo
+    echo "$aa"
+  fi
 done
 echo
 echo "Criterion output: $out"
