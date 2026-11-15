@@ -769,14 +769,14 @@ const DOCS: &[&str] = &[
     r#"{"id":"3","kw":"z","n":3,"kwa":["z"],"ob":{"k":"z","n":3},"ne":[{"k":"z","n":3}],"mp":{"x":"z"},"mpn":{"y":3},"js":"z","jsa":["z"],"gp":{"lat":-1.0,"lon":1.0},"dt":"2024-01-04","ts":"2024-01-02T03:04:05.123456","cm":[1,"x"],"co":{"a":1},"ev":"a","cu":"10.0.0.1","ids":[3],"ex":true,"ct":1,"sh":-1,"it":-1,"fl":-1.0,"db":-1.0,"dc":-1.25,"uu":"6f1c3b2a-9d4e-4c1a-8b7f-2e5d6c7a8b90","kns":"z","hu":[{"k":"z"}],"mm":[{"k":"z"}]}"#,
     r#"{"id":"4","kw":"bb","n":4,"kwa":["a"],"ob":{"k":"a","n":4},"ne":[{"k":"a","n":4}],"mp":{"x":"a"},"mpn":{"x":4},"js":[1],"jsa":[{"a":1}],"gp":{"lat":2.0,"lon":3.0},"kwo":"b","nn":4,"kwao":[],"ho":{"k":"b","n":4},"mpo":{},"jso":[],"dt":"2024-01-05","ts":"03:04:05.123456","cm":[1,"x"],"co":{"a":1},"ev":"b","cu":"10.0.0.2","ids":[4],"ex":true,"ct":1,"av":4.0,"bo":false,"sh":4,"it":4,"fl":4.0,"db":4.0,"dc":4,"bi":"","uu":"6f1c3b2a-9d4e-4c1a-8b7f-2e5d6c7a8b90","kns":"bb","hu":[{"k":"a"}],"bt":{"k":"b"},"mm":[{"k":"a"}]}"#,
     r#"{"id":"5","kw":"a","n":5,"kwa":["a"],"ob":{"k":"a","n":5},"ne":[{"k":"a","n":5}],"mp":{"x":null,"y":"a"},"mpn":{"x":null},"js":{},"jsa":[],"gp":{"lat":1.0,"lon":1.0},"kwo":"a","nn":5,"kwao":["a"],"ho":{"k":"a","n":5},"mpo":{"x":null},"jso":{},"dt":"2024-01-06","ts":"2024-01-06T00:00:00+00:00","cm":[1,"x"],"co":{"a":1},"ev":"a","cu":"10.0.0.3","ids":[5],"ex":true,"ct":1,"av":5.0,"bo":true,"sh":5,"it":5,"fl":5.0,"db":5.0,"dc":5,"bi":"AQI=","uu":"6f1c3b2a-9d4e-4c1a-8b7f-2e5d6c7a8b90","kns":"a","hu":[{"k":"a"}],"bt":{"k":"a"},"mm":[{"k":"a"}]}"#,
-    r#"{"id":"6","kw":"a","n":9007199254740993,"kwa":["a",1],"ob":{"k":"a","n":1},"ne":[{"k":"a","n":1},{"k":"b","n":2}],"mp":{"x":1},"mpn":{"x":1,"y":2},"js":{"any":[1]},"jsa":[1,"x"],"gp":{"lat":1.5,"lon":2.5},"kwo":"a","nn":1,"kwao":["a","b"],"ho":{"k":"a","n":1},"mpo":{"x":"a","y":"b"},"jso":{"a":1},"dt":"2024-01-02","ts":"2024-01-02T03:04:05.123456+00:00","cm":[1,"x"],"co":{"a":1},"ev":"c","cu":"192.168.0.1","ids":[9223372036854775807],"ex":true,"ct":9007199254740993,"av":1e+300,"bo":true,"sh":32767,"it":2147483647,"fl":3.4028235e+38,"db":1e+300,"dc":"1000000000000000000000000000000","bi":"AQI=","uu":"6f1c3b2a-9d4e-4c1a-8b7f-2e5d6c7a8b90","kns":"a","hu":[{"k":"a"}],"bt":{"k":"a"},"mm":[{"k":"a"},{"k":"b"}]}"#,
+    r#"{"id":"6","kw":"a","n":9007199254740993,"kwa":["a",1],"ob":{"k":"a","n":1},"ne":[{"k":"a","n":1},{"k":"b","n":2}],"mp":{"x":1},"mpn":{"x":1,"y":2},"js":{"any":[1]},"jsa":[1,"x"],"gp":{"lat":1.5,"lon":2.5},"kwo":"a","nn":1,"kwao":["a","b"],"ho":{"k":"a","n":1},"mpo":{"x":"a","y":"b"},"jso":{"a":1},"dt":"2024-01-02","ts":"2024-01-02T03:04:05.123456+00:00","cm":[1,"x"],"co":{"a":1},"ev":"c","cu":"192.168.0.1","ids":[9223372036854775807],"ex":true,"ct":9007199254740993,"av":1e+300,"bo":true,"sh":32767,"it":2147483647,"fl":3.4028235e+38,"db":1e+300,"dc":1000000000000000000000000000000,"bi":"AQI=","uu":"6f1c3b2a-9d4e-4c1a-8b7f-2e5d6c7a8b90","kns":"a","hu":[{"k":"a"}],"bt":{"k":"a"},"mm":[{"k":"a"},{"k":"b"}]}"#,
 ];
 
 /// The document whose only difference is a `null` under a map key.
 const NULL_DOC: usize = 4;
 
 /// The document of extremes: numbers at the edge of each kind, a `decimal`
-/// past `Decimal`'s range (written as a string, #327), a value outside the
+/// past `Decimal`'s range (a number with every digit, #327), a value outside the
 /// enum's `variants:`, and `jsonb` columns holding values of another type (an
 /// integer in a keyword map and in a keyword array).
 const EXTREME_DOC: usize = 5;
@@ -910,14 +910,13 @@ const TRUSTED: &[Trust] = &[
     },
     Trust {
         rule: "decimal",
-        manual: "**A number past `Decimal`'s range (±7.9 × 10^28) at a `double` or `decimal` field.**",
-        // A `decimal` value past the range is written as a string (#327),
-        // which only `serde_json::Value` reads; a number past it fails a
-        // `Decimal`.
+        manual: "**A number past `Decimal`'s range (±7.9 × 10^28, or more than 28 fractional digits) at a `double` or `decimal` field.**",
+        // Every value is written as a JSON number (#327), which `f64` reads
+        // and a `Decimal` fails on past its range.
         applies: |case, doc, error| {
             doc == EXTREME_DOC
-                && (case.kind == "dc"
-                    || (case.shape.decimal && error.starts_with("invalid value: floating point")))
+                && case.shape.decimal
+                && error.starts_with("invalid value: floating point")
         },
     },
     Trust {

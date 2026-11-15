@@ -31,8 +31,9 @@
 //! Validation Failed: 1: id [aaa…] is too long, must be no longer than 512 bytes but was: 513;
 //! ```
 
-use serde_json::{Value, json};
-use sink::{RejectedDocument, Result, SinkError};
+use kernel::GenericValue;
+use serde_json::Value;
+use sink::{Json, RejectedDocument, Result, SinkError};
 
 /// A buffered write destined for OpenSearch.
 #[derive(Debug)]
@@ -40,7 +41,8 @@ pub(crate) enum BulkAction {
     Index {
         index: String,
         id: String,
-        doc: Value,
+        /// The `_source` line: the document as [`render_document`] wrote it.
+        doc: String,
         /// `index` is an alias that must exist; never auto-create it.
         require_alias: bool,
     },
@@ -62,6 +64,12 @@ impl BulkAction {
             BulkAction::Index { id, .. } | BulkAction::Delete { id, .. } => id,
         }
     }
+}
+
+/// A document as the JSON `_source` line of a bulk index action: every
+/// number as a JSON number, a decimal with its exact digits ([`sink::Json`]).
+pub(crate) fn render_document(document: &GenericValue) -> Result<String> {
+    serde_json::to_string(&Json(document)).map_err(|e| SinkError::Serialize(e.to_string()))
 }
 
 /// The longest `_id` OpenSearch accepts, in UTF-8 bytes.
@@ -116,7 +124,6 @@ pub(crate) fn build_bulk_body(actions: &[BulkAction]) -> Result<String> {
 /// single place the bulk wire format is produced; the crate-private `build_bulk_body`
 /// and the byte-aware chunking in `flush` both go through it.
 pub(crate) fn bulk_action_fragment(action: &BulkAction) -> Result<String> {
-    let mut fragment = String::new();
     match action {
         BulkAction::Index {
             index,
@@ -124,28 +131,39 @@ pub(crate) fn bulk_action_fragment(action: &BulkAction) -> Result<String> {
             doc,
             require_alias,
         } => {
-            let meta = if *require_alias {
-                json!({ "index": { "_index": index, "_id": id, "require_alias": true } })
-            } else {
-                json!({ "index": { "_index": index, "_id": id } })
-            };
-            let meta =
-                serde_json::to_string(&meta).map_err(|e| SinkError::Serialize(e.to_string()))?;
-            let source =
-                serde_json::to_string(doc).map_err(|e| SinkError::Serialize(e.to_string()))?;
-            fragment.push_str(&meta);
+            let mut fragment = action_line("index", index, id, *require_alias, doc.len() + 1)?;
+            fragment.push_str(doc);
             fragment.push('\n');
-            fragment.push_str(&source);
-            fragment.push('\n');
+            Ok(fragment)
         }
-        BulkAction::Delete { index, id } => {
-            let meta = serde_json::to_string(&json!({ "delete": { "_index": index, "_id": id } }))
-                .map_err(|e| SinkError::Serialize(e.to_string()))?;
-            fragment.push_str(&meta);
-            fragment.push('\n');
-        }
+        BulkAction::Delete { index, id } => action_line("delete", index, id, false, 0),
     }
-    Ok(fragment)
+}
+
+/// The action's metadata line, `{"<op>":{"_index":…,"_id":…}}` and a newline,
+/// with room for `extra` more bytes. Written directly: no value tree.
+fn action_line(
+    op: &str,
+    index: &str,
+    id: &str,
+    require_alias: bool,
+    extra: usize,
+) -> Result<String> {
+    let quoted =
+        |text: &str| serde_json::to_string(text).map_err(|e| SinkError::Serialize(e.to_string()));
+    let (index, id) = (quoted(index)?, quoted(id)?);
+    let mut line = String::with_capacity(48 + op.len() + index.len() + id.len() + extra);
+    line.push_str("{\"");
+    line.push_str(op);
+    line.push_str("\":{\"_index\":");
+    line.push_str(&index);
+    line.push_str(",\"_id\":");
+    line.push_str(&id);
+    if require_alias {
+        line.push_str(",\"require_alias\":true");
+    }
+    line.push_str("}}\n");
+    Ok(line)
 }
 
 /// Group action `sizes` (serialized NDJSON byte lengths, in order) into bulk

@@ -226,7 +226,9 @@ pub fn constant_mapping_type(value: &GenericValue) -> MappingType {
         GenericValue::Int(_) => MappingType::Integer,
         GenericValue::BigInt(_) => MappingType::Long,
         GenericValue::Float(_) => MappingType::Float,
-        GenericValue::Double(_) | GenericValue::Decimal(_) => MappingType::Double,
+        GenericValue::Double(_) | GenericValue::Decimal(_) | GenericValue::BigDecimal(_) => {
+            MappingType::Double
+        }
         GenericValue::Date(_)
         | GenericValue::Time(_)
         | GenericValue::Timestamp(_)

@@ -269,3 +269,100 @@ fn root_cannot_be_changed_for_the_next_script() {
         Err(failure) => assert_eq!(failure.field, "a", "only the writing script fails"),
     }
 }
+
+fn big(text: &str) -> GenericValue {
+    GenericValue::BigDecimal(kernel::BigDecimal::parse(text).unwrap())
+}
+
+const DECIMAL_FROM_SCRIPTS: &str = "  \
+  - decimal: x\n    required: false\n  \
+  - decimal: same\n    required: false\n    script: 'this.x'\n  \
+  - decimal: twice\n    required: false\n    script: 'this.x * 2'\n  \
+  - double: float\n    required: false\n    script: 'this.x.to_float() + 1.0'\n  \
+  - keyword: kind\n    required: false\n    script: 'type_of(this.x)'\n";
+
+/// A `decimal` script field is a declared decimal: its result is written with
+/// every digit `Decimal` holds, never through `f64` (issue #327's review).
+#[test]
+fn a_decimal_script_field_keeps_every_digit_of_its_result() {
+    let scripts = Scripts::compile(&spec(DECIMAL_FROM_SCRIPTS)).unwrap();
+    for (x, same, twice) in [
+        (
+            "1234567890.123456789",
+            "1234567890.123456789",
+            "2469135780.246913578",
+        ),
+        ("12.50", "12.50", "25.00"),
+        ("7", "7", "14"),
+    ] {
+        let mut body = doc(&[("x", big(x))]);
+        scripts.apply(&products(), &mut body).unwrap();
+        assert_eq!(get(&body, "same"), Some(&big(same)), "{x}");
+        assert_eq!(get(&body, "twice"), Some(&big(twice)), "{x}");
+        assert_eq!(get(&body, "kind"), Some(&text("decimal")), "{x}");
+    }
+}
+
+/// A declared decimal inside `Decimal`'s magnitude reaches a script as a
+/// decimal however small, rounded to what `Decimal` holds, as before issue
+/// #327: `1.5e-30` (a `float8` read under `decimal`) is a decimal 0 and its
+/// arithmetic works.
+#[test]
+fn a_tiny_decimal_written_with_an_exponent_reaches_a_script_as_a_decimal() {
+    let scripts = Scripts::compile(&spec(DECIMAL_FROM_SCRIPTS)).unwrap();
+    for x in ["1.5e-30", "5e-324", "-2.5E-29"] {
+        let mut body = doc(&[("x", big(x))]);
+        scripts.apply(&products(), &mut body).unwrap();
+        assert_eq!(get(&body, "kind"), Some(&text("decimal")), "{x}");
+        assert_eq!(get(&body, "float"), Some(&GenericValue::Double(1.0)), "{x}");
+    }
+}
+
+/// A string returned to a `decimal` script field fails the document with
+/// `main`'s message, whatever it holds (issue #327's third review): a value
+/// past `Decimal`'s range reaches a script as a string, so `+` concatenates
+/// it into a number ten times too large.
+#[test]
+fn a_string_returned_to_a_decimal_field_fails_the_document() {
+    for source in [
+        r#"this.x + parse_decimal("0.10")"#,
+        "this.v.to_string()",
+        r#""12.5""#,
+        r#""abc""#,
+    ] {
+        let fields = format!(
+            "  - decimal: x\n    required: false\n  \
+               - decimal: v\n    required: false\n  \
+               - decimal: out\n    required: false\n    script: '{source}'\n"
+        );
+        let scripts = Scripts::compile(&spec(&fields)).unwrap();
+        let mut body = doc(&[
+            ("x", big("79228162514264337593543950336")),
+            ("v", big("12.5")),
+        ]);
+        let failure = scripts.apply(&products(), &mut body).unwrap_err();
+        assert_eq!(failure.field, "out", "{source}");
+        assert_eq!(
+            failure.message, "returned a string, expected a decimal (or an integer)",
+            "{source}"
+        );
+    }
+}
+
+/// A zero result of a `decimal` script field, a scalar or array element, is
+/// written without a sign: a tiny negative value reaches the script as `-0`.
+#[test]
+fn a_zero_decimal_script_result_has_no_sign() {
+    let fields = "  - decimal: x\n    required: false\n  \
+                    - decimal: same\n    required: false\n    script: 'this.x'\n  \
+                    - decimal: both\n    required: false\n    array: true\n    \
+                      script: '[this.x, this.x * 2]'\n";
+    let scripts = Scripts::compile(&spec(fields)).unwrap();
+    let mut body = doc(&[("x", big("-2.5E-29"))]);
+    scripts.apply(&products(), &mut body).unwrap();
+    assert_eq!(get(&body, "same"), Some(&big("0")));
+    assert_eq!(
+        get(&body, "both"),
+        Some(&GenericValue::Array(vec![big("0"), big("0")]))
+    );
+}

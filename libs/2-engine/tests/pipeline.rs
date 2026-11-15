@@ -96,9 +96,9 @@ use std::time::{Duration, Instant};
 
 use engine::{EngineError, FailurePolicies, FailurePolicy, IngestEngine, SinkControl, SinkEngine};
 use kernel::{
-    Column, ColumnName, DatabaseSchema, Field, FieldName, FieldSource, Filter, FlussoType,
-    GenericValue, IndexName, IndexSchema, Join, JoinKind, NullCheckFilter, NullOp, Relation,
-    Secret, SinkName, SoftDelete, SoftDeleteColumn, TableName,
+    Aggregate, AggregateKey, AggregateOp, Column, ColumnName, DatabaseSchema, Field, FieldName,
+    FieldSource, Filter, FlussoType, GenericValue, IndexName, IndexSchema, Join, JoinKind,
+    NullCheckFilter, NullOp, Relation, Secret, SinkName, SoftDelete, SoftDeleteColumn, TableName,
 };
 use sink::Sink;
 use sink_opensearch::OpensearchSink;
@@ -1730,6 +1730,306 @@ async fn an_id_past_512_bytes_is_decided_by_on_error() {
     live.shutdown();
 }
 
+const PAST: &str = "1000000000000000000000000000000";
+const FRACTION: &str = "0.123456789012345678901234567890";
+
+/// The `numeric` fields [`a_numeric_keeps_every_digit_as_a_json_number`] reads:
+/// `dc` and the array `dcs` as `decimal`, `db` as `double`, and the `sum` and
+/// `max` of the `parts` rows' `v` as `decimal`.
+fn amounts_schema() -> IndexSchema {
+    let aggregate = |name: &str, op: AggregateOp| Field {
+        field: field(name),
+        options: Default::default(),
+        emit: true,
+        source: FieldSource::Relation(Relation::Aggregate(Aggregate {
+            table: table("parts"),
+            op,
+            key: AggregateKey::Direct(column("amount_id")),
+            value_type: Some(FlussoType::Decimal),
+            filters: None,
+            distinct: false,
+            via: Vec::new(),
+            on: Vec::new(),
+        })),
+    };
+    let mut schema = simple_schema("amounts", None);
+    schema.fields.extend([
+        typed_field("dc", FlussoType::Decimal, false),
+        typed_field("db", FlussoType::Double, false),
+        typed_field("dcs", FlussoType::Decimal, true),
+        typed_field("dj", FlussoType::Decimal, false),
+        decimal_map("md"),
+        aggregate("total", AggregateOp::Sum(column("v").into())),
+        aggregate("most", AggregateOp::Max(column("v").into())),
+    ]);
+    schema
+}
+
+/// A `map` field `name` with `values: decimal`, as the schema conversion
+/// builds it (the mapping takes runtime keys).
+fn decimal_map(name: &str) -> Field {
+    let mut map = typed_field(
+        name,
+        FlussoType::Map {
+            values: Box::new(FlussoType::Decimal),
+        },
+        false,
+    );
+    map.options
+        .insert("dynamic".to_owned(), GenericValue::Bool(true));
+    map
+}
+
+/// A `numeric` under a `decimal` field is written as a JSON number holding
+/// every digit Postgres wrote, past `rust_decimal`'s range (±7.9e28, 28
+/// fractional digits) too: a scalar, an array element and a `sum`/`max`, on
+/// backfill and on a live change (issue #327), and so does each value of a
+/// `map` with `values: decimal`. A number written with an exponent keeps it
+/// (`1e2` over a `json` column), which the `double` mapping takes. Under a
+/// `double` field it is the nearest `f64`, also a number. The assertions read `_source`'s raw JSON
+/// text, since parsing it would round every number through `f64`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_numeric_keeps_every_digit_as_a_json_number() {
+    let pg = start_postgres().await;
+    let os = start_opensearch().await;
+    for ddl in [
+        "CREATE TABLE amounts (id int PRIMARY KEY, name text, dc numeric, db numeric, \
+         dcs numeric[], dj json, md jsonb)",
+        "CREATE TABLE parts (id int PRIMARY KEY, amount_id int REFERENCES amounts(id), v numeric)",
+    ] {
+        create_table(&pg.pool, ddl).await;
+    }
+    for sql in [
+        format!(
+            "INSERT INTO amounts VALUES \
+             (1, 'past', 1e30, 1e30, ARRAY[1e30, {FRACTION}]::numeric[]), \
+             (2, 'fraction', {FRACTION}, {FRACTION}, NULL), \
+             (3, 'scale', 12.50, 12.50, NULL)"
+        ),
+        format!("INSERT INTO parts VALUES (1, 1, 1e30), (2, 1, {FRACTION})"),
+        r#"UPDATE amounts SET dj = '1e2', md = '{"x": 1234567890.123456789, "y": 12.50}' WHERE id = 3"#
+            .to_owned(),
+    ] {
+        exec(&pg.pool, &sql).await;
+    }
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("amounts"), amounts_schema())]));
+    let live = start_pipeline(&pg, &os, spec, &["amounts", "parts"]).await;
+    live.await_seeded(1).await;
+
+    let sum = format!("{PAST}.123456789012345678901234567890");
+    let dcs = format!("[{PAST},{FRACTION}]");
+    live.assert_raw_eventually(
+        "amounts",
+        "1",
+        &[
+            ("dc", PAST),
+            ("db", "1e+30"),
+            ("dcs", &dcs),
+            ("total", &sum),
+            ("most", PAST),
+        ],
+        "on backfill",
+    )
+    .await;
+    live.assert_raw_eventually(
+        "amounts",
+        "2",
+        &[("dc", FRACTION), ("db", "0.12345678901234568")],
+        "on backfill",
+    )
+    .await;
+    live.assert_raw_eventually(
+        "amounts",
+        "3",
+        &[
+            ("dc", "12.50"),
+            ("db", "12.5"),
+            ("dj", "1e2"),
+            ("md", r#"{"x":1234567890.123456789,"y":12.50}"#),
+        ],
+        "on backfill",
+    )
+    .await;
+
+    let negative = format!("-{PAST}.5");
+    let tiny = "0.000000000000000000000000000001234";
+    for sql in [
+        format!(
+            "INSERT INTO amounts VALUES (4, 'live', {negative}, {negative}, \
+             ARRAY[{negative}, {tiny}]::numeric[])"
+        ),
+        format!("UPDATE amounts SET dc = {tiny}, db = {tiny}, dj = '-1.5E+3' WHERE id = 2"),
+        format!("INSERT INTO parts VALUES (3, 1, {PAST})"),
+    ] {
+        exec(&pg.pool, &sql).await;
+    }
+    let dcs = format!("[{negative},{tiny}]");
+    live.assert_raw_eventually(
+        "amounts",
+        "4",
+        &[("dc", &negative), ("db", "-1e+30"), ("dcs", &dcs)],
+        "after a live insert",
+    )
+    .await;
+    live.assert_raw_eventually(
+        "amounts",
+        "2",
+        &[("dc", tiny), ("db", "1.234e-30"), ("dj", "-1.5E+3")],
+        "after a live update",
+    )
+    .await;
+    let sum = format!("2{}.123456789012345678901234567890", &PAST[1..]);
+    live.assert_raw_eventually(
+        "amounts",
+        "1",
+        &[("total", &sum), ("most", PAST)],
+        "after a live child insert",
+    )
+    .await;
+    live.shutdown();
+}
+
+/// `NaN`, `Infinity` and `-Infinity` have no JSON number: Postgres writes them
+/// as strings, which reach the sink as written, and the sink's `on_error`
+/// decides (issue #327's review pins what `main` did). A `double` the index maps
+/// refuses the string, an item-level rejection: under `skip` it is quarantined
+/// while the rest of its transaction lands, the batch is acked and the engine
+/// keeps going; under `stop` the sink engine stops on it, the rest landed. One
+/// that never reaches the index is kept: `ignore_malformed`, an unindexed join,
+/// and the discarded value of a field sharing its name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_non_finite_number_reaches_the_sink_as_postgres_wrote_it() {
+    let pg = start_postgres().await;
+    let os = start_opensearch().await;
+    for ddl in [
+        "CREATE TABLE odd_skip (id int PRIMARY KEY, name text, db float8, lax float8, \
+         twin_a float8, twin_b text)",
+        "CREATE TABLE odd_kids (id int PRIMARY KEY, odd_id int REFERENCES odd_skip(id), v float8)",
+        "CREATE TABLE odd_stop (id int PRIMARY KEY, name text, db float8)",
+    ] {
+        create_table(&pg.pool, ddl).await;
+    }
+    exec(
+        &pg.pool,
+        "CREATE PUBLICATION flusso FOR TABLE odd_skip, odd_kids, odd_stop",
+    )
+    .await;
+    exec(
+        &pg.pool,
+        "SELECT pg_create_logical_replication_slot('flusso', 'pgoutput')",
+    )
+    .await;
+    let mut skip = simple_schema("odd_skip", None);
+    let mut lax = typed_field("lax", FlussoType::Double, false);
+    lax.options
+        .insert("ignore_malformed".to_owned(), GenericValue::Bool(true));
+    let mut twin_first = column_field("twin", "twin_a");
+    let mut twin_last = column_field("twin", "twin_b");
+    if let (FieldSource::Column(first), FieldSource::Column(last)) =
+        (&mut twin_first.source, &mut twin_last.source)
+    {
+        first.ty = FlussoType::Double;
+        last.ty = FlussoType::Keyword;
+    }
+    let mut kids = join_field(
+        "kids",
+        "odd_kids",
+        JoinKind::HasMany {
+            foreign_key: column("odd_id"),
+        },
+        vec![typed_field("v", FlussoType::Double, false)],
+    );
+    if let FieldSource::Relation(Relation::Join(join)) = &mut kids.source {
+        join.indexed = false;
+    }
+    skip.fields.extend([
+        typed_field("db", FlussoType::Double, false),
+        lax,
+        twin_first,
+        twin_last,
+        kids,
+    ]);
+    let mut stop = simple_schema("odd_stop", None);
+    stop.fields
+        .push(typed_field("db", FlussoType::Double, false));
+    let spec = SourceSpec::new(BTreeMap::from([
+        (index_name("odd_skip"), skip),
+        (index_name("odd_stop"), stop),
+    ]));
+    let policies =
+        FailurePolicies::new(FailurePolicy::Skip).with_override("odd_stop", FailurePolicy::Stop);
+    let live = spawn_pipeline_with(&pg, &os, spec, policies).await;
+    live.await_seeded(2).await;
+
+    exec(
+        &pg.pool,
+        "INSERT INTO odd_skip VALUES (1, 'nan', 'NaN', 1, 1, 'x'), \
+         (2, 'kept', 1, 'NaN', 'Infinity', 'twin'), (3, 'inf', '-Infinity', 1, 1, 'x')",
+    )
+    .await;
+    exec(&pg.pool, "INSERT INTO odd_kids VALUES (1, 2, 'Infinity')").await;
+    let skipped_at = current_lsn(&pg.pool).await;
+    live.assert_raw_eventually(
+        "odd_skip",
+        "2",
+        &[
+            ("name", r#""kept""#),
+            ("lax", r#""NaN""#),
+            ("twin", r#""twin""#),
+            ("kids", r#"[{"v":"Infinity"}]"#),
+        ],
+        "skip: the fields that never reach the index keep the string",
+    )
+    .await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !slot_confirmed_past(&pg.pool, &skipped_at).await {
+        live.fail_if_stopped();
+        assert!(Instant::now() < deadline, "skip: the batch was never acked");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    for id in ["1", "3"] {
+        assert_eq!(
+            live.fetch_source("odd_skip", id).await,
+            None,
+            "skip: the sink rejected document {id} and it was quarantined",
+        );
+    }
+    exec(
+        &pg.pool,
+        "INSERT INTO odd_skip VALUES (5, 'after', 2, 2, 2, 'x')",
+    )
+    .await;
+    live.assert_eventually("odd_skip", "5", Some("after"))
+        .await
+        .unwrap_or_else(|got| panic!("skip: the engine did not keep going, saw {got}"));
+
+    exec(
+        &pg.pool,
+        "INSERT INTO odd_stop VALUES (1, 'nan', 'NaN'), (2, 'kept', 1.5)",
+    )
+    .await;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let outcome = loop {
+        if let Some(outcome) = live.outcome.lock().unwrap().take() {
+            break outcome;
+        }
+        assert!(Instant::now() < deadline, "stop: the engine never stopped");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    };
+    assert!(
+        matches!(&outcome, Err(EngineError::DocumentsRejected(1, reason)) if reason.contains("NaN")),
+        "stop: the sink engine stops on the one rejection, got {outcome:?}"
+    );
+    assert_eq!(
+        live.fetch_name("odd_stop", "2").await.as_deref(),
+        Some("kept"),
+        "stop: the rest of the batch still landed",
+    );
+    live.shutdown();
+}
+
 // ───────────────────────────────── harness ───────────────────────────────────
 
 /// A running Postgres with logical replication and a connection pool.
@@ -1891,6 +2191,68 @@ impl Pipeline {
             return None;
         }
         body.get("_source").cloned()
+    }
+
+    /// Realtime `GET {index}/_doc/{id}`'s `_source` as the raw JSON text of
+    /// each top-level field, `None` if absent. Raw, so a number keeps the digits
+    /// the sink wrote.
+    async fn fetch_raw_fields(&self, index: &str, id: &str) -> Option<BTreeMap<String, String>> {
+        type Raw = BTreeMap<String, Box<serde_json::value::RawValue>>;
+        let resp = self
+            .http
+            .get(format!("{}/{index}/_doc/{id}", self.os_url))
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let body: Raw = serde_json::from_str(&resp.text().await.ok()?).ok()?;
+        if body.get("found").map(|found| found.get()) != Some("true") {
+            return None;
+        }
+        let source: Raw = serde_json::from_str(body.get("_source")?.get()).ok()?;
+        Some(
+            source
+                .into_iter()
+                .map(|(key, raw)| (key, raw.get().to_owned()))
+                .collect(),
+        )
+    }
+
+    /// Poll `{index}/_doc/{id}` until each `(field, raw)` in `expected` is the
+    /// raw JSON text of that field in `_source`; panics with the last
+    /// observation at the deadline.
+    async fn assert_raw_eventually(
+        &self,
+        index: &str,
+        id: &str,
+        expected: &[(&str, &str)],
+        when: &str,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            self.fail_if_stopped();
+            let observed = self.fetch_raw_fields(index, id).await;
+            let got: Option<Vec<(&str, Option<&str>)>> = observed.as_ref().map(|fields| {
+                expected
+                    .iter()
+                    .map(|(name, _)| (*name, fields.get(*name).map(String::as_str)))
+                    .collect()
+            });
+            let want: Vec<(&str, Option<&str>)> = expected
+                .iter()
+                .map(|(name, raw)| (*name, Some(*raw)))
+                .collect();
+            if got.as_deref() == Some(want.as_slice()) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "[{index}/{id}] {when}: want {want:?}, saw {got:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
     }
 
     /// Realtime `GET {index}/_doc/{id}` (reads the translog — no refresh wait).

@@ -10,6 +10,7 @@
 //! | `SmallInt` / `Int` / `BigInt` | `i64` |
 //! | `Float` / `Double` | `f64` |
 //! | `Decimal` | `Decimal` |
+//! | `BigDecimal` (a declared `decimal`) | `Decimal`: the nearest to its text (about 28 significant digits, at most 28 after the point), or as read through `f64` when written with an exponent or zero; a string of its digits past `Decimal`'s range |
 //! | `String`, `Uuid` | string |
 //! | `Date` / `Time` / `Timestamp` / `TimestampTz` | RFC 3339 string |
 //! | `Bytes` | blob |
@@ -17,7 +18,8 @@
 //!
 //! **Out** ([`from_dynamic`]): a script's result is checked against the field's declared type,
 //! strictly. The only widening allowed: an integer is accepted for a `float`/`double`/`decimal`
-//! field.
+//! field. A `decimal` result is a [`BigDecimal`](GenericValue::BigDecimal) of its exact text,
+//! written with every digit.
 //!
 //! ```
 //! use kernel::{FlussoType, GenericValue};
@@ -30,9 +32,12 @@
 //! assert_eq!(from_dynamic(rhai, &out), Ok(GenericValue::BigInt(5)));
 //! ```
 
+use std::str::FromStr;
+
 use chrono::{DateTime, NaiveDate, NaiveDateTime, SecondsFormat};
 use kernel::{FlussoType, GenericValue};
 use rhai::{Array, Dynamic, Map};
+use rust_decimal::Decimal;
 
 /// Convert a document value into a Rhai value.
 pub fn to_dynamic(value: &GenericValue) -> Dynamic {
@@ -45,6 +50,7 @@ pub fn to_dynamic(value: &GenericValue) -> Dynamic {
         GenericValue::Float(f) => Dynamic::from_float(f64::from(*f)),
         GenericValue::Double(f) => Dynamic::from_float(*f),
         GenericValue::Decimal(d) => Dynamic::from_decimal(*d),
+        GenericValue::BigDecimal(d) => declared_decimal(d),
         GenericValue::String(s) => Dynamic::from(s.clone()),
         GenericValue::Uuid(u) => Dynamic::from(u.to_string()),
         GenericValue::Date(d) => Dynamic::from(d.format("%Y-%m-%d").to_string()),
@@ -148,9 +154,9 @@ fn leaf(value: Dynamic, out: &Output<'_>) -> Result<GenericValue, String> {
         FlussoType::Double => number(&value, mismatch).map(GenericValue::Double),
         FlussoType::Decimal => {
             if let Ok(d) = value.as_decimal() {
-                Ok(GenericValue::Decimal(d))
+                Ok(exact(&d))
             } else {
-                integer(&value, mismatch).map(|i| GenericValue::Decimal(i.into()))
+                integer(&value, mismatch).map(|i| exact(&Decimal::from(i)))
             }
         }
         FlussoType::Date => {
@@ -176,6 +182,98 @@ fn leaf(value: Dynamic, out: &Output<'_>) -> Result<GenericValue, String> {
             "a script cannot return {}; the schema should have rejected it",
             expected(out.ty)
         )),
+    }
+}
+
+/// A declared decimal in Rhai. Written without an exponent, it is the nearest
+/// `Decimal` (about 28 significant digits, at most 28 after the point; a next
+/// digit of 5 or more rounds away from zero). Written with an exponent, or
+/// zero, it reads as `main` read it before issue #327,
+/// through `f64`, so a tiny value is the same zero. Past ±7.9e28 it is a string
+/// of its exact digits.
+// Cold and out of line: without it `to_dynamic` slows on documents with no
+// declared decimal at all (measured: 2.6 µs vs 4.0 µs for 23 fields).
+#[cold]
+#[inline(never)]
+fn declared_decimal(value: &kernel::BigDecimal) -> Dynamic {
+    let text = value.as_str();
+    let plain = !text.bytes().any(|b| b | 0x20 == b'e');
+    if plain
+        && let Ok(d) = Decimal::from_str(text)
+        && !d.is_zero()
+    {
+        return Dynamic::from_decimal(d);
+    }
+    as_read_through_f64(text).map_or_else(|| Dynamic::from(text.to_owned()), Dynamic::from_decimal)
+}
+
+/// `text`, a JSON number, as the `Decimal` a `serde_json` number read gave:
+/// its text when `Decimal` takes it, else its `f64`; `None` past either.
+fn as_read_through_f64(text: &str) -> Option<Decimal> {
+    let number: serde_json::Number = serde_json::from_str(text).ok()?;
+    Decimal::from_str(&number.to_string())
+        .ok()
+        .or_else(|| number.as_f64().and_then(|f| Decimal::try_from(f).ok()))
+}
+
+/// A `decimal` script field's result, written with every digit it holds; a
+/// zero without a sign.
+fn exact(value: &Decimal) -> GenericValue {
+    let value = &if value.is_zero() { value.abs() } else { *value };
+    let mut text = DecimalText::default();
+    let written = std::fmt::Write::write_fmt(&mut text, format_args!("{value}")).is_ok();
+    written
+        .then(|| kernel::BigDecimal::parse(text.as_str()))
+        .flatten()
+        .map_or(GenericValue::Decimal(*value), GenericValue::BigDecimal)
+}
+
+/// A decimal's `to_float()` in a script: the `f64` nearest its exact value,
+/// parsed from its text (`Decimal::to_f64` can land one unit in the last place
+/// off for a long value); `0.0` for a zero of either sign.
+pub(crate) fn decimal_to_float(value: Decimal) -> f64 {
+    if value.is_zero() {
+        return 0.0;
+    }
+    let mut text = DecimalText::default();
+    match std::fmt::Write::write_fmt(&mut text, format_args!("{value}")) {
+        Ok(()) => text.as_str().parse().unwrap_or(f64::NAN),
+        Err(_) => value.to_string().parse().unwrap_or(f64::NAN),
+    }
+}
+
+/// A `Decimal`'s text on the stack: a sign, 29 digits, a point and up to 28
+/// leading fractional zeros fit.
+struct DecimalText {
+    bytes: [u8; 64],
+    len: usize,
+}
+
+impl Default for DecimalText {
+    fn default() -> Self {
+        Self {
+            bytes: [0; 64],
+            len: 0,
+        }
+    }
+}
+
+impl DecimalText {
+    fn as_str(&self) -> &str {
+        self.bytes
+            .get(..self.len)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .unwrap_or_default()
+    }
+}
+
+impl std::fmt::Write for DecimalText {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        let end = self.len + s.len();
+        let slot = self.bytes.get_mut(self.len..end).ok_or(std::fmt::Error)?;
+        slot.copy_from_slice(s.as_bytes());
+        self.len = end;
+        Ok(())
     }
 }
 

@@ -1,6 +1,8 @@
 use super::*;
 use std::collections::BTreeMap;
 
+use rust_decimal::Decimal;
+
 #[test]
 fn maps_to_plain_json() {
     let value = GenericValue::Map(BTreeMap::from([
@@ -31,15 +33,45 @@ fn decimal_becomes_a_number() {
     assert_eq!(to_json(&value), serde_json::json!(12.34));
 }
 
-/// The largest `Decimal` is written as the nearest `f64`, which rounds it up
-/// past `Decimal::MAX`: an `f64` reads it back, a `Decimal` doesn't. What the
-/// query manual's `decimal` trusted rule states below the range (issue #306).
+/// What a document holds: the compact JSON [`Json`] writes.
+fn written(value: &GenericValue) -> String {
+    serde_json::to_string(&Json(value)).unwrap()
+}
+
+/// A decimal past `Decimal`'s range is a JSON number with every digit, inside
+/// an object or an array too; `f64` reads it, `Decimal` can't (issue #327).
 #[test]
-fn the_largest_decimal_is_written_as_a_double_past_its_range() {
-    let written = to_json(&GenericValue::Decimal(Decimal::MAX));
-    assert_eq!(written, serde_json::json!(7.922_816_251_426_434e28));
-    assert!(serde_json::from_value::<f64>(written.clone()).is_ok());
-    assert!(serde_json::from_value::<Decimal>(written).is_err());
+fn a_big_decimal_is_written_as_a_number_with_every_digit() {
+    let big = |text: &str| GenericValue::BigDecimal(kernel::BigDecimal::parse(text).unwrap());
+    let value = GenericValue::Map(BTreeMap::from([
+        ("past".to_owned(), big("1000000000000000000000000000000")),
+        (
+            "list".to_owned(),
+            GenericValue::Array(vec![big("-0.123456789012345678901234567890")]),
+        ),
+    ]));
+    let json = written(&value);
+    assert_eq!(
+        json,
+        r#"{"list":[-0.123456789012345678901234567890],"past":1000000000000000000000000000000}"#
+    );
+    let pretty = serde_json::to_string_pretty(&Json(&value)).unwrap();
+    assert!(
+        pretty.contains("\"past\": 1000000000000000000000000000000"),
+        "{pretty}"
+    );
+    let past = written(&big("1000000000000000000000000000000"));
+    assert_eq!(serde_json::from_str::<f64>(&past).unwrap(), 1e30);
+    assert!(serde_json::from_str::<Decimal>(&past).is_err());
+}
+
+/// A non-finite float is written as `null`.
+#[test]
+fn a_non_finite_float_is_written_as_null() {
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(written(&GenericValue::Double(value)), "null");
+    }
+    assert_eq!(written(&GenericValue::Float(f32::NAN)), "null");
 }
 
 /// A map value that is null is written as `null` under its key, not dropped:
@@ -120,4 +152,33 @@ fn the_other_temporals_keep_their_written_form() {
         )),
         "2024-01-02T03:04:05.123456+00:00"
     );
+}
+
+/// [`to_json`] is total: a decimal past `f64`'s range is its exact text as a
+/// string in the value tree, and the rest of the tree is kept.
+#[test]
+fn to_json_keeps_a_decimal_past_the_double_range_as_its_text() {
+    let past = GenericValue::BigDecimal(kernel::BigDecimal::parse("1e400").unwrap());
+    let value = GenericValue::Map(BTreeMap::from([
+        ("a".to_owned(), GenericValue::Int(1)),
+        ("b".to_owned(), past),
+    ]));
+    assert_eq!(to_json(&value), serde_json::json!({ "a": 1, "b": "1e400" }));
+}
+
+/// Every value but a declared decimal is written as before (issue #327's
+/// review): a `Decimal` the reader made from an untyped float is the nearest
+/// `f64`, `100.0` and not `100`, through [`Json`] and [`to_json`] alike.
+#[test]
+fn a_decimal_is_written_as_the_nearest_double_as_before() {
+    for (decimal, json) in [
+        (Decimal::new(1000, 1), "100.0"),
+        (Decimal::new(5, 0), "5.0"),
+        (Decimal::new(1250, 2), "12.5"),
+        (Decimal::MAX, "7.922816251426434e+28"),
+    ] {
+        let value = GenericValue::Decimal(decimal);
+        assert_eq!(written(&value), json, "{decimal}");
+        assert_eq!(to_json(&value).to_string(), json, "{decimal}");
+    }
 }

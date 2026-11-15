@@ -40,7 +40,207 @@ fn a_decimal_round_trips_exactly() {
         to_dynamic(&GenericValue::Decimal(price)),
         &out(&FlussoType::Decimal),
     );
-    assert_eq!(back, Ok(GenericValue::Decimal(price)));
+    assert_eq!(
+        back,
+        Ok(GenericValue::BigDecimal(
+            kernel::BigDecimal::parse("19.99").unwrap()
+        ))
+    );
+}
+
+fn negative_zero(scale: u32) -> Decimal {
+    let mut zero = Decimal::new(0, scale);
+    zero.set_sign_negative(true);
+    zero
+}
+
+fn big(text: &str) -> GenericValue {
+    GenericValue::BigDecimal(kernel::BigDecimal::parse(text).unwrap())
+}
+
+/// A declared `decimal` reaches a script as a decimal wherever `Decimal` can
+/// hold its magnitude (rounded to what `Decimal` holds, an exponent read),
+/// as before issue #327; only a magnitude past `Decimal`'s range is a string of
+/// its digits.
+#[test]
+fn a_declared_decimal_crosses_as_a_decimal_unless_past_the_range() {
+    for (text, want) in [
+        ("1.000000000000000000000000000000", Decimal::ONE),
+        ("12.50", Decimal::new(1250, 2)),
+        ("1e2", Decimal::new(100, 0)),
+        ("-1.5E+3", Decimal::new(-1500, 0)),
+    ] {
+        let rhai = to_dynamic(&big(text));
+        assert_eq!(rhai.as_decimal(), Ok(want), "{text}");
+    }
+    assert_eq!(
+        to_dynamic(&big("1000000000000000000000000000000"))
+            .into_string()
+            .unwrap(),
+        "1000000000000000000000000000000"
+    );
+}
+
+/// A declared decimal with more than 28 fractional digits and no exponent
+/// reaches a script as the nearest `Decimal`, 28 fractional digits, like its
+/// neighbour with 28; only an exponent or a zero takes `main`'s `f64` path.
+#[test]
+fn a_decimal_past_28_fractional_digits_crosses_as_the_nearest_decimal() {
+    for (text, want) in [
+        (
+            "1.123456789012345678901234567891",
+            "1.1234567890123456789012345679",
+        ),
+        (
+            "3.141592653589793238462643383279",
+            "3.1415926535897932384626433833",
+        ),
+        (
+            "1.000000000000000000000000000000",
+            "1.0000000000000000000000000000",
+        ),
+        (
+            "-0.123456789012345678901234567890",
+            "-0.1234567890123456789012345679",
+        ),
+    ] {
+        let rhai = to_dynamic(&big(text));
+        assert_eq!(
+            rhai.as_decimal().map(|d| d.to_string()),
+            Ok(want.to_owned()),
+            "{text}"
+        );
+    }
+}
+
+/// A zero `decimal` result is written without a sign: `-0` reaches a script
+/// from a tiny negative value, and `main` wrote such a zero as `0.0`.
+#[test]
+fn a_zero_decimal_result_is_written_without_a_sign() {
+    let out = out(&FlussoType::Decimal);
+    for (zero, want) in [(negative_zero(0), "0"), (negative_zero(3), "0.000")] {
+        assert_eq!(
+            from_dynamic(Dynamic::from_decimal(zero), &out),
+            Ok(big(want)),
+            "{zero}"
+        );
+    }
+}
+
+/// A `decimal` script field refuses any string, as on `main`, a string
+/// holding a decimal number included: a value past `Decimal`'s range reaches a
+/// script as a string, and arithmetic on it concatenates.
+#[test]
+fn a_decimal_field_refuses_a_string() {
+    let out = out(&FlussoType::Decimal);
+    for text in ["1000000000000000000000000000000", "12.5", "abc", "NaN"] {
+        assert_eq!(
+            from_dynamic(Dynamic::from(text.to_owned()), &out),
+            Err("returned a string, expected a decimal (or an integer)".to_owned()),
+            "{text}"
+        );
+    }
+}
+
+fn number_text() -> impl proptest::strategy::Strategy<Value = (String, bool, String)> {
+    use proptest::prelude::*;
+    let digits = "[0-9]{0,40}".prop_map(|d: String| d.trim_start_matches('0').to_owned());
+    (
+        any::<bool>(),
+        digits,
+        "[0-9]{0,30}",
+        prop_oneof![Just(String::new()), "[eE][+-]?[0-9]{1,26}"],
+    )
+        .prop_map(|(negative, whole, fraction, exponent)| {
+            let whole = if whole.is_empty() {
+                "0".to_owned()
+            } else {
+                whole
+            };
+            let mut text = String::new();
+            if negative {
+                text.push('-');
+            }
+            text.push_str(&whole);
+            if !fraction.is_empty() {
+                text.push('.');
+                text.push_str(&fraction);
+            }
+            let all_zero = whole.chars().chain(fraction.chars()).all(|c| c == '0');
+            (format!("{text}{exponent}"), all_zero, exponent)
+        })
+}
+
+/// The power of ten of `text`'s first significant digit, from its digits and
+/// exponent alone; `None` for an exponent too long to matter (its sign then
+/// decides).
+fn order_of(text: &str, exponent: &str) -> Result<i128, bool> {
+    let mantissa = text.trim_start_matches('-');
+    let mantissa = mantissa.split(['e', 'E']).next().unwrap();
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let first = whole
+        .trim_start_matches('0')
+        .len()
+        .checked_sub(1)
+        .map(|n| n as i128)
+        .unwrap_or_else(|| {
+            -((fraction.len() - fraction.trim_start_matches('0').len()) as i128) - 1
+        });
+    let exponent = exponent.trim_start_matches(['e', 'E']);
+    if exponent.is_empty() {
+        return Ok(first);
+    }
+    let negative = exponent.starts_with('-');
+    let digits = exponent
+        .trim_start_matches(['+', '-'])
+        .trim_start_matches('0');
+    if digits.len() > 20 {
+        return Err(negative);
+    }
+    let value: i128 = if digits.is_empty() {
+        0
+    } else {
+        digits.parse().unwrap()
+    };
+    Ok(first + if negative { -value } else { value })
+}
+
+proptest::proptest! {
+    /// Any number a declared decimal can hold reaches a script without a panic:
+    /// zero when its digits are zero or its magnitude is below what `Decimal`
+    /// holds, a decimal in between, and a string only past ±7.9e28, as a
+    /// reference that works from the digits and exponent alone says (a band at
+    /// each edge, where rounding decides, takes either side).
+    #[test]
+    fn a_declared_decimal_crosses_as_zero_a_decimal_or_a_string(
+        (text, all_zero, exponent) in number_text()
+    ) {
+        let value = to_dynamic(&GenericValue::BigDecimal(
+            kernel::BigDecimal::parse(&text).unwrap(),
+        ));
+        let seen = match value.as_decimal() {
+            Ok(d) if d.is_zero() => "zero",
+            Ok(_) => "decimal",
+            Err(_) => {
+                proptest::prop_assert!(value.is_string(), "{text}: {value:?}");
+                "string"
+            }
+        };
+        let want: &[&str] = if all_zero {
+            &["zero"]
+        } else {
+            match order_of(&text, &exponent) {
+                Err(true) => &["zero"],
+                Err(false) => &["string"],
+                Ok(order) if order >= 29 => &["string"],
+                Ok(28) => &["decimal", "string"],
+                Ok(order) if order >= -28 => &["decimal"],
+                Ok(-29) => &["zero", "decimal"],
+                Ok(_) => &["zero"],
+            }
+        };
+        proptest::prop_assert!(want.contains(&seen), "{text}: {seen}, want one of {want:?}");
+    }
 }
 
 #[test]

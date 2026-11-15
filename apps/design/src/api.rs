@@ -22,6 +22,7 @@ use kernel::common::{IndexName, SchemaPath};
 use kernel::{IndexSchema, ParseFrom};
 use script::{Printer, ScriptContext, Scripts};
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use source::document::BuildFailure;
 use source::{
     Diagnostic, JunctionCandidate, RelationalCatalog, SchemaIntrospection, Severity, SourceSpec,
@@ -3189,8 +3190,9 @@ pub struct SampleResponse {
     /// The sample document, or `None` when none could be produced (see `note`).
     /// When `synthetic` is true it's example data derived from the schema types,
     /// not a real row.
+    /// Written as the sink writes it, a `decimal` with every digit.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub document: Option<serde_json::Value>,
+    pub document: Option<Box<RawValue>>,
     /// Whether `document` is synthesized from the schema (the root table had no
     /// rows) rather than built from a real row.
     pub synthetic: bool,
@@ -3217,7 +3219,7 @@ enum SampleOutcome {
     /// A real document built from a live row, finished by the scripts unless
     /// one failed on it.
     Document {
-        document: serde_json::Value,
+        document: Box<RawValue>,
         failure: Option<ScriptErrorDto>,
         printed: Vec<String>,
     },
@@ -3259,7 +3261,7 @@ pub async fn sample(request: SampleRequest) -> SampleResponse {
             ..Default::default()
         },
         Ok(SampleOutcome::Synthetic(document)) => SampleResponse {
-            document: Some(document),
+            document: serde_json::value::to_raw_value(&document).ok(),
             synthetic: true,
             db_reachable: true,
             note: Some(
@@ -3340,6 +3342,14 @@ async fn sample_inner(request: SampleRequest) -> Result<SampleOutcome> {
     )))
 }
 
+/// `document` as the sink writes it: [`sink::Json`], every digit of a
+/// `decimal` kept, which a [`serde_json::Value`] would round.
+fn as_written(document: &kernel::GenericValue) -> Box<RawValue> {
+    serde_json::value::to_raw_value(&sink::Json(document))
+        .or_else(|_| serde_json::value::to_raw_value(&sink::to_json(document)))
+        .unwrap_or_default()
+}
+
 /// Finish a sampled row with its index's scripts, keeping what they printed.
 fn run_sample_scripts(
     index: &IndexName,
@@ -3365,7 +3375,7 @@ fn run_sample_scripts(
     };
     let document = if failure.is_some() { &built } else { &finished };
     SampleOutcome::Document {
-        document: sink::to_json(document),
+        document: as_written(document),
         failure,
         printed: printed.lock().map(|l| l.clone()).unwrap_or_default(),
     }

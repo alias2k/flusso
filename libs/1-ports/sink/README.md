@@ -8,7 +8,8 @@ The sink port for `flusso`: where built documents land.
 | --- | --- |
 | [`Sink`] | The trait every destination implements: `ensure_index`, `apply`, `flush`, and the seed hooks (`is_seeded`, `mark_seeded`, `reindex`) |
 | [`SinkOptions`] | The universal `[sinks.<name>]` keys every sink engine honors (`backfill`) |
-| [`to_json`] | Renders a [`GenericValue`](kernel::GenericValue) as natural JSON (numbers as numbers, maps as objects) |
+| [`Json`] | Renders a [`GenericValue`](kernel::GenericValue) as natural JSON with `serde_json` (numbers as numbers, a decimal with every digit, maps as objects) |
+| [`to_json`] | The same rendering as a `serde_json::Value` tree, which holds numbers as `f64` |
 | [`FlushReport`] / [`RejectedDocument`] | A flush's outcome, including any documents the destination applied-but-rejected |
 | [`Visibility`] | When a flush's documents become *searchable*, as opposed to fetchable by id: at once, within a duration, or with a later flush |
 | [`SinkError`] / [`Result`] | The shared error type |
@@ -17,4 +18,4 @@ A sink consumes [`Envelope`](kernel::Envelope)s — the index, the operation, th
 
 A sink only *reports* visibility. It is never asked to refresh because a reader is waiting; the sink engine turns the reports into the position a `searchable` fence waits on.
 
-[`to_json`] is the OpenSearch-flavored translation most sinks need at their boundary; a sink converts the canonical [`GenericValue`](kernel::GenericValue) into its own representation there. An *emitting* sink (stdout, later NATS) forwards the envelope as-is instead.
+[`Json`] is the OpenSearch-flavored translation most sinks need at their boundary; a sink converts the canonical [`GenericValue`](kernel::GenericValue) into its own representation there. An *emitting* sink (stdout, later NATS) forwards the envelope with its document rendered the same way.

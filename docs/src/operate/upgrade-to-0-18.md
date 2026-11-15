@@ -1,6 +1,6 @@
 # Upgrade to 0.18
 
-0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index. It also writes a `timestamp` column in ISO 8601, which changes stored documents and can break a tuned `format`: see [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601).
+0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index. It also writes a `timestamp` column in ISO 8601, which changes stored documents and can break a tuned `format`: see [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601). A `decimal` field is written with every digit: see [A decimal is written with every digit](#a-decimal-is-written-with-every-digit).
 
 ## When to use this
 
@@ -69,8 +69,30 @@ Without either, no index is rebuilt. A `constant` holding a number, a boolean, o
 
    A `stdout` sink consumer sees the new form from the first run.
 
+## A decimal is written with every digit
+
+**Breaking.** A `decimal` value was rounded to the nearest `f64` on its way to the document, and one past `rust_decimal`'s range (±7.9 × 10^28, or more than 28 fractional digits) was written as a JSON string. 0.18 writes the number as Postgres wrote it into the document, every digit, wherever a `decimal` is declared: a column, an array element, a `sum`/`min`/`max`, an `ids` key, a `map` value, a script field (see [numbers](../reference/field-types.md#numbers)). No content hash moves and nothing is rebuilt. Every other number, a `json` field's included, is written as before.
+
+| Value under `decimal` | 0.17 `_source` | 0.18 `_source` |
+| --- | --- | --- |
+| `5` | `5.0` | `5` |
+| `5.00`, `1.10` | `5.0`, `1.1` | `5.00`, `1.10` |
+| `1234567890.123456789`, a `bigint`-sized value | rounded to 17 digits | every digit |
+| `1e30` | `"1000000000000000000000000000000"` | `1000000000000000000000000000000` |
+| `"2.5"`, a text value in a `map` with `values: decimal` | `"2.5"` | `2.5` |
+| a `float8` column: `1e-07`, `9.007199254740992e+15`, `1e+308` | `1e-7`, `9007199254740992.0`, a string of 309 digits | as Postgres wrote it |
+| `1e2` in a `json` column | `100.0` | `1e2` |
+
+A level of more than 50 fields is built as `jsonb`, which writes a number without an exponent (`0.0000001`, `100`).
+
+1. **Indexed values.** OpenSearch now parses the exact text, where 0.17 parsed a rounded one. For some long values the indexed `double` moves by one unit in the last place (`357273734.880428249` was indexed as `357273734.8804282` and is now `357273734.88042825`), so a `term` query for a previously stored double can miss, and range, sort and histogram edges next to those values shift. A number literal longer than 1000 characters (a `numeric` like `1e-1200`, which 0.17 indexed as `0.0`) and a value of `1e309` or more are item-level rejections the index's [`on_error`](../reference/index-and-on-error.md#on_error) decides; under `stop` the sink engine stops. In 0.17, `1e309` or more failed the whole batch's document query.
+2. **`_source` filtering.** `_source_includes`/`_source_excludes` make OpenSearch render the numbers again (`12.50` comes back `12.5`): the exact text is only in the unfiltered `_source`.
+3. **Consumers.** An `f64` or `rust_decimal::Decimal` (default serde features, which read a number through `f64`) reads the nearest `f64` of the exact text. 0.17's `_source` held a value already rounded once, so some long values now read one unit in the last place differently (`357273734.880428249` read as `357273734.8804282` in 0.17 and `357273734.88042825` in 0.18). A `serde_json::Value` changes shape: `5.0` becomes the integer `5`, and a past-range string becomes a number. A field read as `String` because it could hold the string form now fails on that document: read it as `f64` or `serde_json::Value` (see [What the derive trusts](../query/document-structs.md#what-the-derive-trusts)). A `rust_decimal::Decimal` still can't hold a value past its range.
+4. **Scripts.** A declared decimal reaches a script as the nearest `Decimal` (about 28 significant digits, at most 28 after the point; a next digit of 5 or more rounds away from zero), where it held about 17 (see [Values in and out](../reference/scripts.md#values-in-and-out)): `to_string` keeps trailing zeros (a `keyword` script field built from `1.10` was `1.1`), and comparisons use every digit. A value from about 79228162514264333195497439232 up to `Decimal::MAX` is a decimal where it was a string (`f64` rounded it to 2^96, past the range): a script returning it to a `keyword` field now fails its type check, and `+ 1` can overflow and fail the document. A value past the range is still a string, now of the exact text Postgres wrote (`"79228162514264337593543950336"`, `"1e+30"` for a `float8` read under `decimal`) where it held the `f64`'s digits (`"79228162514264340000000000000"`, `"1000000000000000000000000000000"`): `len()`, `+` and `parse_decimal` see the new text. A decimal's `to_float()` is the `f64` nearest its exact value. A `decimal` script field's result is written with every digit, a zero without a sign, and it still refuses a string.
+5. **Stored documents.** Each document takes the new form at its row's next write. Run [`flusso reindex <index>`](../reference/cli.md#reindex) on each index with a `decimal` field to rewrite every one now, with no restart.
+
 ## Related
 
-- [Field types](../reference/field-types.md) for what a `binary` field, a `constant`, and a `timestamp` index.
+- [Field types](../reference/field-types.md) for what a `binary` field, a `constant`, a `timestamp` and a [`decimal`](../reference/field-types.md#numbers) index.
 - [Reindex without downtime](reindex.md) for rebuilding an index on demand.
 - [Sink: OpenSearch](../reference/sink-opensearch.md#index-naming) for hash aliases and generations.

@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://alias2k.github.io/flusso/schemas/v0.3/index.schema.yml
 #
 # Worked example: aggregates (the op is the type key) + a custom scaled_float
-# for exact money (decimal -> double is lossy).
+# for exact money (a decimal is indexed as a double).
 version: 1
 table: users
 primary_key: id

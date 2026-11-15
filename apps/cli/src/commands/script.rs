@@ -219,7 +219,7 @@ fn from_json(json: serde_json::Value) -> GenericValue {
 }
 
 fn pretty(value: &GenericValue) -> anyhow::Result<String> {
-    Ok(serde_json::to_string_pretty(&sink::to_json(value))?)
+    Ok(serde_json::to_string_pretty(&sink::Json(value))?)
 }
 
 /// The value at a dotted path with `[n]` array positions.
@@ -343,6 +343,14 @@ mod tests {
             "{shown}"
         );
         assert_eq!(error.to_string(), "the document failed to build");
+    }
+
+    /// A `decimal` is shown with every digit it will be written with.
+    #[test]
+    fn a_decimal_is_shown_with_every_digit() {
+        let exact = kernel::BigDecimal::parse("1234567890.123456789").unwrap();
+        let shown = pretty(&map(vec![("same", GenericValue::BigDecimal(exact))])).unwrap();
+        assert!(shown.contains("\"same\": 1234567890.123456789"), "{shown}");
     }
 
     #[test]

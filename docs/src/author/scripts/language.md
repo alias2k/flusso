@@ -29,13 +29,13 @@ Every document value arrives as a Rhai value; the full mapping is in [Values in 
 | --- | --- | --- |
 | an integer column | `i64` | `type_of(x) == "i64"` |
 | `float`, `double` | `f64` | `"f64"` |
-| `decimal` | `decimal`, exact | `"decimal"` |
+| `decimal` | `decimal` (rounded to what `Decimal` holds: about 28 significant digits, at most 28 after the point); a string past ±7.9 × 10^28 | `"decimal"`, or `"string"` |
 | text, `uuid`, `date`, `timestamp` | string | `"string"` |
 | a group, a to-one join, a `map` | object map | `"map"` |
 | a to-many join, an `ids` aggregate | array | `"array"` |
 | null | `()` | `x == ()` |
 
-`type_of(this.price)` is the quickest way to find out what arrived; `print` it (see [Test and debug a script](debugging.md)).
+A `decimal` script field refuses a string, so a value past the range belongs in a `keyword` field. `type_of(this.price)` is the quickest way to find out what arrived; `print` it (see [Test and debug a script](debugging.md)).
 
 ## Strings
 

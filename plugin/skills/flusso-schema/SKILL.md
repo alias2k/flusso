@@ -96,7 +96,7 @@ If you use any join or aggregate, you **must** set `primary_key` — reverse res
 | Other | `boolean` `uuid` `binary` `json` |
 | None of the above | `custom` (declare `postgres:` + `opensearch:`) |
 
-`decimal` → OpenSearch `double` is **lossy**; when exactness matters use a `custom` `scaled_float` (see `examples/aggregate.schema.yml`). A bare column with no type defaults to `keyword`.
+`decimal` keeps every digit in `_source` but is **indexed** as an OpenSearch `double`; when exact search, sort or aggregation matters use a `custom` `scaled_float` (see `examples/aggregate.schema.yml`). A bare column with no type defaults to `keyword`.
 
 Scalar/`geo` siblings: `required`, `column` (source column, defaults to the document key), `transforms` (`lowercase`, `trim`), `default`, `options` (extra OpenSearch mapping props). `subfields: false` (only `text`/`keyword`/`uuid`) maps that field without the sink's auto subfields — owned meaning: the [Field types reference](https://alias2k.github.io/flusso/main/reference/field-types.html#subfields).
 

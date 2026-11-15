@@ -458,7 +458,7 @@ them can't silently disarm the guarantee.
 | `boolean` | `bool` | `Bool` |
 | `short` / `integer` / `long` | `i16` / `i32` / `i64` | `Number` |
 | `float` / `double` | `f32` / `f64` | `Number` |
-| `decimal` | `Decimal` (feature) or `f64` *(lossy storage)* | `Number` |
+| `decimal` | `Decimal` (feature) or `f64` *(`_source` keeps every digit; indexed as `double`)* | `Number` |
 | `date` | `time::Date` / `chrono` (feature) | `Date` |
 | `timestamp` | `time::OffsetDateTime` / `chrono` | `Date` |
 | `binary` | `String` (base64) | `Binary` |

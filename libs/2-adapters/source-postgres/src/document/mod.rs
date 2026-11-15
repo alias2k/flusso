@@ -267,6 +267,8 @@ pub struct PgDocumentBuilder {
     spec: Arc<SourceSpec>,
     /// The columns each index reads, per part, derived from `spec` once.
     reads: Arc<ReadColumns>,
+    /// How each index's document is read, derived from `spec` once.
+    plans: Arc<HashMap<IndexName, value::DocumentPlan>>,
     /// Cache of each `(schema, table)`'s single-column primary key.
     pk_cache: Arc<Mutex<HashMap<(String, String), ColumnName>>>,
     /// Cache of each `(schema, table, column)`'s SQL type, used to cast filter
@@ -299,6 +301,11 @@ impl PgDocumentBuilder {
         Self {
             pool,
             reads: Arc::new(ReadColumns::new(&spec)),
+            plans: Arc::new(
+                spec.indexes()
+                    .map(|(name, schema)| (name.clone(), value::DocumentPlan::new(&schema.fields)))
+                    .collect(),
+            ),
             spec,
             pk_cache: Arc::new(Mutex::new(HashMap::new())),
             col_type_cache: ColumnTypes::default(),
@@ -306,6 +313,13 @@ impl PgDocumentBuilder {
             unread_warned: Arc::new(RwLock::new(HashSet::new())),
             keyless_warned: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    /// How `index`'s document is read.
+    fn plan(&self, index: &IndexName) -> Result<&value::DocumentPlan> {
+        self.plans
+            .get(index)
+            .ok_or_else(|| SourceError::Query(format!("unknown index `{index}`")))
     }
 
     /// Warn, once per table, that a change arrived for a table no index reads —
@@ -1057,9 +1071,8 @@ impl DocumentBuilder for PgDocumentBuilder {
         // query's WHERE) → the document should not exist.
         match row {
             None => Ok(Document::Delete { id: id.clone() }),
-            Some(row) => {
-                let document: serde_json::Value = row.try_get("document").map_err(query_err)?;
-                Ok(match value::coerce_document(document, &schema.fields) {
+            Some(row) => Ok(
+                match value::read_document(&row, &schema.fields, self.plan(&id.index)?)? {
                     Ok(body) => Document::Upsert {
                         id: id.clone(),
                         body,
@@ -1068,8 +1081,8 @@ impl DocumentBuilder for PgDocumentBuilder {
                         id: id.clone(),
                         failure,
                     },
-                })
-            }
+                },
+            ),
         }
     }
 
@@ -1142,8 +1155,10 @@ impl DocumentBuilder for PgDocumentBuilder {
                 > = HashMap::with_capacity(rows.len());
                 for row in &rows {
                     let key = value::decode_key(row, query::DOC_KEY);
-                    let document: serde_json::Value = row.try_get("document").map_err(query_err)?;
-                    bodies.insert(key, value::coerce_document(document, &schema.fields));
+                    bodies.insert(
+                        key,
+                        value::read_document(row, &schema.fields, self.plan(index_name)?)?,
+                    );
                 }
 
                 // Every requested id yields an outcome: a body present in the

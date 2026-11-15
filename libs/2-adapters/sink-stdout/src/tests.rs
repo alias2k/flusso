@@ -2,8 +2,8 @@ use super::*;
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use kernel::{ENVELOPE_VERSION, GenericValue, IndexName, Position, SinkName};
-use serde_json::json;
+use kernel::{ENVELOPE_VERSION, IndexName, Position, SinkName};
+use serde_json::Value;
 
 fn index() -> IndexName {
     IndexName::try_new("users").unwrap()
@@ -32,7 +32,9 @@ fn ts() -> DateTime<Utc> {
 fn upsert_is_compact_ndjson_with_provenance_and_meta() {
     let envelope = Envelope::upsert(index(), "42", document(), Some(Position(1)), ts());
     let sink = audit();
-    let line = sink.render(&sink.wire_envelope(&envelope)).unwrap();
+    let line = sink
+        .render(&sink.wire_envelope(&envelope).unwrap())
+        .unwrap();
     assert!(!line.contains('\n'));
 
     let value: Value = serde_json::from_str(&line).unwrap();
@@ -50,8 +52,8 @@ fn upsert_is_compact_ndjson_with_provenance_and_meta() {
 
     let back: Envelope<Value> = serde_json::from_str(&line).unwrap();
     assert_eq!(
-        back,
-        sink.wire_envelope(&envelope),
+        serde_json::to_value(&back).unwrap(),
+        serde_json::to_value(sink.wire_envelope(&envelope).unwrap()).unwrap(),
         "a consumer reads the same type back"
     );
 }
@@ -60,7 +62,9 @@ fn upsert_is_compact_ndjson_with_provenance_and_meta() {
 fn delete_carries_provenance_but_no_document_or_meta() {
     let envelope = Envelope::delete(index(), "7", Some(Position(7)), ts());
     let sink = audit();
-    let line = sink.render(&sink.wire_envelope(&envelope)).unwrap();
+    let line = sink
+        .render(&sink.wire_envelope(&envelope).unwrap())
+        .unwrap();
     let value: Value = serde_json::from_str(&line).unwrap();
     assert_eq!(value["op"], "delete");
     assert_eq!(value["id"], "7");
@@ -73,23 +77,53 @@ fn delete_carries_provenance_but_no_document_or_meta() {
 #[test]
 fn snapshot_rows_carry_no_seq() {
     let envelope = Envelope::upsert(index(), "1", document(), None, ts());
-    let value = serde_json::to_value(audit().wire_envelope(&envelope)).unwrap();
+    let value = serde_json::to_value(audit().wire_envelope(&envelope).unwrap()).unwrap();
     assert!(value.get("seq").is_none());
 }
 
 #[test]
 fn document_meta_reports_null_fields_for_non_objects() {
-    let meta = document_meta(&json!("scalar"));
+    let meta = document_meta(&GenericValue::String("scalar".to_owned())).unwrap();
     assert_eq!(meta.fields, None);
     // `"scalar"` is 8 bytes once serialized (with quotes).
     assert_eq!(meta.bytes, 8);
+}
+
+/// A decimal past `Decimal`'s range is written as a JSON number with every
+/// digit, compact and pretty (issue #327).
+#[test]
+fn a_big_decimal_is_written_as_a_number_with_every_digit() {
+    let big = kernel::BigDecimal::parse("1000000000000000000000000000000.5").unwrap();
+    let document = GenericValue::Map(BTreeMap::from([(
+        "amount".to_owned(),
+        GenericValue::BigDecimal(big),
+    )]));
+    let envelope = Envelope::upsert(index(), "1", document, None, ts());
+    for pretty in [false, true] {
+        let sink = StdoutSink::new(SinkName::try_new("audit").unwrap(), pretty);
+        let line = sink
+            .render(&sink.wire_envelope(&envelope).unwrap())
+            .unwrap();
+        assert!(
+            line.contains("1000000000000000000000000000000.5")
+                && !line.contains("\"1000000000000000000000000000000.5\""),
+            "{line}"
+        );
+    }
+    let meta = document_meta(envelope.document.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        meta.bytes,
+        r#"{"amount":1000000000000000000000000000000.5}"#.len()
+    );
 }
 
 #[test]
 fn pretty_is_multiline() {
     let envelope = Envelope::delete(index(), "7", Some(Position(1)), ts());
     let sink = StdoutSink::new(SinkName::try_new("audit").unwrap(), true);
-    let line = sink.render(&sink.wire_envelope(&envelope)).unwrap();
+    let line = sink
+        .render(&sink.wire_envelope(&envelope).unwrap())
+        .unwrap();
     assert!(line.contains('\n'));
     assert!(line.contains("\"op\": \"delete\""));
 }

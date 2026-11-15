@@ -1,8 +1,9 @@
 use super::*;
+use serde_json::json;
 
 #[test]
 fn bulk_body_index_produces_two_ndjson_lines() {
-    let doc = json!({ "email": "ada@x.io" });
+    let doc = json!({ "email": "ada@x.io" }).to_string();
     let actions = vec![BulkAction::Index {
         index: "users".to_owned(),
         id: "42".to_owned(),
@@ -42,7 +43,7 @@ fn bulk_body_mixed_operations_are_ordered() {
         BulkAction::Index {
             index: "users".to_owned(),
             id: "1".to_owned(),
-            doc: json!({ "name": "alice" }),
+            doc: json!({ "name": "alice" }).to_string(),
             require_alias: false,
         },
         BulkAction::Delete {
@@ -118,7 +119,7 @@ fn bulk_rejected_maps_position_to_the_originating_action() {
         BulkAction::Index {
             index: "users_ab12".to_owned(),
             id: "2".to_owned(),
-            doc: json!({}),
+            doc: json!({}).to_string(),
             require_alias: false,
         },
     ];
@@ -191,7 +192,7 @@ fn an_alias_targeted_index_action_requires_the_alias() {
     let actions = vec![BulkAction::Index {
         index: "users_ab12".to_owned(),
         id: "1".to_owned(),
-        doc: json!({}),
+        doc: json!({}).to_string(),
         require_alias: true,
     }];
     let body = build_bulk_body(&actions).unwrap();
@@ -207,7 +208,7 @@ fn a_generation_targeted_index_action_omits_require_alias() {
     let actions = vec![BulkAction::Index {
         index: "users_ab12_2".to_owned(),
         id: "1".to_owned(),
-        doc: json!({}),
+        doc: json!({}).to_string(),
         require_alias: false,
     }];
     let body = build_bulk_body(&actions).unwrap();
@@ -220,7 +221,7 @@ fn a_missing_alias_fails_the_whole_flush() {
     let actions = [BulkAction::Index {
         index: "users_ab12".to_owned(),
         id: "1".to_owned(),
-        doc: json!({}),
+        doc: json!({}).to_string(),
         require_alias: true,
     }];
     let resp = json!({
@@ -254,7 +255,7 @@ fn index_action(id: &str) -> BulkAction {
     BulkAction::Index {
         index: "users_1".to_owned(),
         id: id.to_owned(),
-        doc: json!({}),
+        doc: json!({}).to_string(),
         require_alias: false,
     }
 }
@@ -294,4 +295,41 @@ fn an_empty_id_is_refused_on_both_ops_and_a_long_delete_id_is_not() {
     assert!(refused_id(&delete_action("")).unwrap().contains("empty"));
     assert_eq!(refused_id(&delete_action(&"a".repeat(513))), None);
     assert_eq!(refused_id(&index_action("42")), None);
+}
+
+/// The action lines are byte for byte what the bulk body always held: the
+/// metadata as `serde_json` renders a `json!` object, keys in that order, every
+/// string escaped as JSON escapes it.
+#[test]
+fn action_lines_are_written_as_before() {
+    for (index, id) in [
+        ("users", "42"),
+        ("odd \"index\"", "a\"b\\c\n\u{1}é\u{2028}"),
+        ("", ""),
+    ] {
+        let delete = bulk_action_fragment(&BulkAction::Delete {
+            index: index.to_owned(),
+            id: id.to_owned(),
+        })
+        .unwrap();
+        let want =
+            serde_json::to_string(&json!({ "delete": { "_index": index, "_id": id } })).unwrap();
+        assert_eq!(delete, format!("{want}\n"));
+        for require_alias in [false, true] {
+            let fragment = bulk_action_fragment(&BulkAction::Index {
+                index: index.to_owned(),
+                id: id.to_owned(),
+                doc: r#"{"a":1}"#.to_owned(),
+                require_alias,
+            })
+            .unwrap();
+            let meta = if require_alias {
+                json!({ "index": { "_index": index, "_id": id, "require_alias": true } })
+            } else {
+                json!({ "index": { "_index": index, "_id": id } })
+            };
+            let meta = serde_json::to_string(&meta).unwrap();
+            assert_eq!(fragment, format!("{meta}\n{{\"a\":1}}\n"));
+        }
+    }
 }

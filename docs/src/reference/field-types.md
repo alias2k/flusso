@@ -15,7 +15,7 @@ Every scalar field's type key bridges a Postgres column type and an OpenSearch m
 | `long` | `bigint` | `long` | |
 | `float` | `real` | `float` | |
 | `double` | `double precision` | `double` | |
-| `decimal` | `numeric`, `money` | `double` | Lossy in storage. Use a `custom` `scaled_float` when exactness matters. |
+| `decimal` | `numeric`, `money` | `double` | `_source` keeps every digit; search, sort and aggregations are `double`. Use a `custom` `scaled_float` when exact search matters. See [numbers](#numbers). |
 | `date` | `date` | `date` | Written as `2024-01-02`. See [dates and times](#dates-and-times). |
 | `timestamp` | `timestamp`, `timestamptz`, `time` | `date` | Written as ISO 8601, stored to the millisecond. A `time` column's values are refused by OpenSearch. See [dates and times](#dates-and-times). |
 | `binary` | `bytea` | `binary` | The column's bytes, as standard base64 with no line breaks: at the root, as [`array: true`](#array) over `bytea[]`, inside joins, and in an `ids`, `min` or `max` aggregate, whatever the server's `bytea_output`, behind a connection pooler too ([the exceptions](source-postgres.md#behind-pgbouncer)). A domain over `bytea`, and an array of one, read the same way. Under a name another field at the same level shares, a `binary` field declared last is read as Postgres hex text instead: see [One name per level](identifiers.md#one-name-per-level). A `bytea` primary key still gives the document `_id` as Postgres hex text (`\x0102`), not base64. Before 0.18 the Postgres hex text (`\x0102…`) was indexed instead; see [Upgrade to 0.18](../operate/upgrade-to-0-18.md). |
@@ -139,6 +139,12 @@ The same form is written wherever the value goes: a `min`/`max` with `value_type
   ```
 
 - **Values outside the format.** A BC date, `infinity` and `-infinity`, and a year past 9999 reach the document as Postgres renders them (`0044-03-15 BC`, `infinity`), which the `date` mapping refuses, so that one document is rejected and `on_error` decides.
+
+## numbers
+
+- **A `decimal` keeps every digit Postgres stores.** The JSON number is the text Postgres wrote: `12.50` stays `12.50`, `1234567890.123456789` keeps all 19 digits, and a value past `rust_decimal`'s range (±7.9 × 10^28, or more than 28 fractional digits) is a number too, `1000000000000000000000000000000`. The same goes for a `decimal` [array](#array) element, a `sum`/`min`/`max` with `value_type: decimal`, an `ids` of `decimal` keys, and each value of a [`map`](objects-and-maps.md) with `values: decimal`. A number written with an exponent keeps it (a `json` column holding `1e2` gives `1e2`, a `float8` column `1e-07`), except in an object level of more than 50 fields, which the query builds as `jsonb`, and `jsonb` writes a number without one (`100`, `0.0000001`). A string holding a decimal number (`"12.50"`) is written as that number. A script field declared `decimal` is written with every digit of its result. `_source` filtering (`_source_includes`) makes OpenSearch render the number again, so only the unfiltered `_source` holds the exact text. OpenSearch indexes the field as `double`, so a query, a sort and an aggregation see the nearest `double`; only `_source` is exact. What a Rust consumer reads it into: [What the derive trusts](../query/document-structs.md#what-the-derive-trusts).
+- **Every other number goes through `f64`.** `float` and `double` are the nearest float (`1e30` is written `1e+30`). A number under a field with no number type (a `keyword` or `text` over a `numeric` column, a `json` field, a `map` of another kind, a `custom` field) keeps the form it always had: about 17 significant digits, a fraction kept (`5.0` stays `5.0`), and a magnitude past ±7.9 × 10^28 written as a string of its digits.
+- **`NaN`, `Infinity` and `-Infinity`** have no JSON number, so Postgres writes them as strings and they reach the sink so. A number field OpenSearch indexes refuses the string: an item-level rejection the index's [`on_error`](index-and-on-error.md#on_error) decides. With `ignore_malformed`, in an [unindexed](joins.md#indexed) join or an input-only field the document is kept.
 
 ## custom
 
