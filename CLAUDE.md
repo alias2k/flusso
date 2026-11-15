@@ -1094,8 +1094,10 @@ gets the lookup once more without the probe, every key cast to its declared type
 `regtype` name as quoted identifiers (`ext.citext`, `"a.b".citext`; not `"a.citext"`). **The batched
 build serves exactly the ids a single `build` serves, by construction**: `query::documents_query`
 unnests the keys `WITH ORDINALITY` (`unnest(ARRAY[$n::<bound>::<key type>, …])`) and looks each one's
-root row up through `CROSS JOIN LATERAL (SELECT * FROM root WHERE root.pk = requested.k … LIMIT 1)`,
-the comparison `document_query` makes, selecting the position (`doc_position`) beside the document;
+root row up through `CROSS JOIN LATERAL (SELECT * FROM root WHERE root.pk = flusso_requested.flusso_key …
+LIMIT 1)`, the comparison `document_query` makes, selecting the position (`doc_position`) beside the
+document (the list's names are ones no table carries: a raw filter's unqualified name resolves outward
+through the root row to them — `integration`'s `a_raw_filter_reads_the_root_rows_columns_in_a_batched_build`);
 `document/matching.rs`'s `match_rows` pairs by position alone (no Rust cast or equality: Postgres's
 input/output forms are open-ended), an unanswered position is a tombstone, and a row matched by several
 positions answers each under its own id. The `LIMIT 1` keeps a nested loop of primary-key probes at

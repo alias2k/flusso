@@ -45,8 +45,13 @@ const ROOT: &str = "root";
 /// position (a `bigint`) of the requested key the row matched.
 pub(super) const DOC_POSITION: &str = "doc_position";
 
-/// The alias of the batched build's list of requested keys.
-const KEYS: &str = "requested";
+/// The alias of the batched build's list of requested keys, and its two
+/// columns: the key and its position. A raw filter's unqualified name that its
+/// own table lacks resolves outward through the root row to this list, so the
+/// names are ones no user table is expected to carry.
+const KEYS: &str = "flusso_requested";
+const KEY: &str = "flusso_key";
+const POSITION: &str = "flusso_position";
 
 /// The columns a document reads whose base type is `bytea` or `bytea[]`, by
 /// `(table, column)`. The document query renders them as hex text itself, so
@@ -194,7 +199,7 @@ pub(super) fn document_query(
 ///
 /// The keys are an array of `$n::<bound>::<key type>`, unnested `WITH
 /// ORDINALITY` for their positions, and each position looks its root row up
-/// through a `LATERAL` subquery, `root.pk = requested.k`: the very comparison
+/// through a `LATERAL` subquery, `root.pk = flusso_requested.flusso_key`: the very comparison
 /// [`document_query`] makes for one key, so Postgres decides which row answers
 /// which key in both, with no Rust mirror of its casts. The subquery's
 /// `LIMIT 1` does two things:
@@ -243,7 +248,7 @@ pub(super) fn documents_query(
     for key in keys {
         values.push(builder.key_placeholder(key.clone(), &schema.table, pk_column)?);
     }
-    let mut predicate = format!("{} = \"{KEYS}\".\"k\"", qcol(ROOT, pk_column));
+    let mut predicate = format!("{} = \"{KEYS}\".\"{KEY}\"", qcol(ROOT, pk_column));
     if let Some(soft_delete) = builder.soft_delete_predicate(schema)? {
         predicate = format!("{predicate} AND NOT ({soft_delete})");
     }
@@ -253,8 +258,8 @@ pub(super) fn documents_query(
     predicate.push_str(&root_filters);
 
     let sql = format!(
-        "SELECT \"{KEYS}\".\"n\" AS \"{DOC_POSITION}\", {object} AS \"document\" \
-         FROM unnest(ARRAY[{values}]) WITH ORDINALITY AS \"{KEYS}\"(\"k\", \"n\") \
+        "SELECT \"{KEYS}\".\"{POSITION}\" AS \"{DOC_POSITION}\", {object} AS \"document\" \
+         FROM unnest(ARRAY[{values}]) WITH ORDINALITY AS \"{KEYS}\"(\"{KEY}\", \"{POSITION}\") \
          CROSS JOIN LATERAL (SELECT * FROM {table} AS \"{ROOT}\" WHERE {predicate} LIMIT 1) \
          AS \"{ROOT}\"",
         values = values.join(", "),

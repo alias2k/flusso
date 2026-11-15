@@ -134,7 +134,7 @@ fn keyed_predicate_casts_a_uuid_primary_key() {
     assert!(
         batched
             .as_str()
-            .ends_with(r#"FROM unnest(ARRAY[$1::uuid::uuid]) WITH ORDINALITY AS "requested"("k", "n") CROSS JOIN LATERAL (SELECT * FROM "public"."users" AS "root" WHERE "root"."id" = "requested"."k" LIMIT 1) AS "root""#),
+            .ends_with(r#"FROM unnest(ARRAY[$1::uuid::uuid]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") CROSS JOIN LATERAL (SELECT * FROM "public"."users" AS "root" WHERE "root"."id" = "flusso_requested"."flusso_key" LIMIT 1) AS "root""#),
         "{}",
         batched.as_str()
     );
@@ -181,7 +181,7 @@ fn root_filters_fold_into_both_query_forms() {
     .unwrap();
     assert!(
         sql.as_str().ends_with(
-            r#"FROM unnest(ARRAY[$1::int4::bigint]) WITH ORDINALITY AS "requested"("k", "n") CROSS JOIN LATERAL (SELECT * FROM "public"."users" AS "root" WHERE "root"."id" = "requested"."k" AND ("root"."status" = $2::text) LIMIT 1) AS "root""#
+            r#"FROM unnest(ARRAY[$1::int4::bigint]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") CROSS JOIN LATERAL (SELECT * FROM "public"."users" AS "root" WHERE "root"."id" = "flusso_requested"."flusso_key" AND ("root"."status" = $2::text) LIMIT 1) AS "root""#
         ),
         "{}",
         sql.as_str()
@@ -583,7 +583,7 @@ fn documents_query_pairs_each_key_with_its_position() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT "requested"."n" AS "doc_position", json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM unnest(ARRAY[$1::int4::bigint, $2::int4::bigint]) WITH ORDINALITY AS "requested"("k", "n") CROSS JOIN LATERAL (SELECT * FROM "public"."users" AS "root" WHERE "root"."id" = "requested"."k" LIMIT 1) AS "root""#
+        r#"SELECT "flusso_requested"."flusso_position" AS "doc_position", json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM unnest(ARRAY[$1::int4::bigint, $2::int4::bigint]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") CROSS JOIN LATERAL (SELECT * FROM "public"."users" AS "root" WHERE "root"."id" = "flusso_requested"."flusso_key" LIMIT 1) AS "root""#
     );
     assert_eq!(params, vec![GenericValue::Int(7), GenericValue::Int(9)]);
 }
@@ -608,7 +608,7 @@ fn documents_query_folds_soft_delete_into_the_root_lookup() {
     )
     .unwrap();
     assert!(sql.as_str().contains(
-        r#"WHERE "root"."id" = "requested"."k" AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END)) LIMIT 1) AS "root""#
+        r#"WHERE "root"."id" = "flusso_requested"."flusso_key" AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END)) LIMIT 1) AS "root""#
     ));
 }
 
@@ -656,7 +656,7 @@ fn soft_delete_field_inside_a_relation_reads_the_root_column() {
     .unwrap();
     assert!(
         sql.as_str().ends_with(
-            r#"WHERE "root"."id" = "requested"."k" AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END)) LIMIT 1) AS "root""#
+            r#"WHERE "root"."id" = "flusso_requested"."flusso_key" AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END)) LIMIT 1) AS "root""#
         ),
         "{}",
         sql.as_str()
@@ -746,9 +746,9 @@ fn a_key_carried_as_text_is_cast_from_text() {
     )
     .unwrap();
     assert!(
-        batched
-            .as_str()
-            .contains(r#"FROM unnest(ARRAY[$1::text::date]) WITH ORDINALITY AS "requested""#),
+        batched.as_str().contains(
+            r#"FROM unnest(ARRAY[$1::text::date]) WITH ORDINALITY AS "flusso_requested""#
+        ),
         "{}",
         batched.as_str()
     );
