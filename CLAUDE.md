@@ -77,17 +77,24 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   benches** (`postgres`, `opensearch`, `engine`'s `pipeline` — attribution only; its backfill group
   is gone; plus `source-postgres`'s `cases`, `build_many` over batch sizes, hit ratios, key types and
   root shapes, run only by `just bench-components` and `just review-ab`, never by `bench.yml`, so the
-  history has no `cases` series). `postgres`, `cases` and `pipeline` read `BENCH_PG_URL`/`BENCH_OS_URL`
-  and start testcontainers only without them. **`just review-ab [base]`** (`review-ab.sh`, issue #340)
-  is the reviewer's A/B: the base in a warm tree checked out with a private index (no `git worktree`)
-  under `~/.cache/flusso/review-ab` with its own target dir, the head's bench sources laid over it
-  (`--own-benches` opts out), reused without cargo when `review-ab-stamp.py check` says it is current
-  (commit, toolchain, overlaid files, executables' sha256); `bench-in-process.sh` builds both sides with
-  `BENCH_SET=docker BENCH_BUILD_ONLY=1`; named `flusso-review-<pid>-*` containers (`--pg 14,16,18`, an
-  OpenSearch for `pipeline`) removed by a trap; per version, per bench, `--rounds` (2) in ABBA order
-  (`base-<r>`/`head-<r>` baselines); `bench-compare.py --repeats` prints case/base/head/change/control
-  spread (each side's fastest run; spread = how far one binary's own runs differ), a change counts past
-  the limit and twice the spread (one control run per side let an A/A run flag 5 of 35 cases). Tests: `test_review_ab.py`. (3) **In-process benches**, no Docker, the PR gate: `engine`'s `engine` (both engines
+  history has no `cases` series). `postgres`, `cases` and `pipeline` read `REVIEW_AB_PG_URL`/`REVIEW_AB_OS_URL`,
+  which only `review-ab` sets (so `flusso-bench`'s `BENCH_PG_URL` never reaches them), and start
+  testcontainers without them. **`just review-ab [base]`** (`review-ab.sh`, issue #340) is the
+  reviewer's A/B: an exclusive `flock` on `~/.cache/flusso/review-ab/lock` for the whole run (a second run
+  fails at once); containers of a killed run removed (`review-ab-housekeeping.py stale`); the base in a warm
+  tree checked out with a private index (no `git worktree`), reset to the base commit before each build,
+  with its own target dir; the head's bench sources laid over it (`--own-benches` opts out and refuses a
+  base whose benches predate `REVIEW_AB_PG_URL`); reused without cargo when `review-ab-stamp.py check`
+  says it is current (commit, toolchain, `RUSTFLAGS`/`CARGO_PROFILE_*` + `bench-in-process.sh`'s hash,
+  overlaid files, the executables' sha256, the benches asked for); `bench-in-process.sh` builds only those
+  (`BENCH_SET=docker BENCH_ONLY=… BENCH_BUILD_ONLY=1`); named `flusso-review-<pid>-*` containers
+  (`--pg 14,16,18`, an OpenSearch for `pipeline`) removed by a trap; per version, per bench, `--rounds` (3)
+  of base then head (`base-<r>`/`head-<r>`); `bench-compare.py --repeats --breaches` flags a case past the
+  limit and twice the control spread (one binary's own runs, (max − min) / min), each flagged case is
+  re-run alone (`--exact`, base then head) and `--confirm` decides with the gate's rule (`confirmed()`,
+  shared with `bench-gate.sh`'s path); exit 1 only on a confirmed case. Never fetches. Keeps the last 5
+  `target/review-ab/<timestamp>` dirs; `--clean` deletes the cache. Tests: `test_review_ab.py` (the script
+  end to end over fake `cargo`/`docker`/bench executables in a throwaway repo). (3) **In-process benches**, no Docker, the PR gate: `engine`'s `engine` (both engines
   over the channel stream with mocks), `source-postgres`'s `pgoutput` (the decoder over the recorded
   `benches/fixtures/pgoutput.bin`; `tests/record_pgoutput.rs`, an `#[ignore]`d Docker test in the
   nextest `docker` group, re-records it), `source-postgres`'s `resolve` (`PgDocumentBuilder::resolve`

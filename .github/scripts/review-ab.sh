@@ -283,7 +283,7 @@ run_side() { # run_side <side> <bench> <baseline> [<exact id>]
     REVIEW_AB_PG_URL=postgres://postgres:postgres@127.0.0.1:$port/r$database REVIEW_AB_OS_URL=$os_url \
       CRITERION_HOME=$out/pg$version/$2 \
       "$exe" --bench --quiet --noplot --plotting-backend plotters --save-baseline "$3" "${selector[@]}" 2>&1 >/dev/null |
-      sed -E '/^(Gnuplot not found|Benchmarking )/d' >&2)
+      sed -E '/^(Gnuplot not found|Benchmarking |Warning: Unable to complete )/d' >&2)
   docker exec "$container" psql -U postgres -qc "DROP DATABASE r$database" >/dev/null
 }
 
