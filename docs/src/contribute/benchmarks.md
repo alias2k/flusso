@@ -75,18 +75,30 @@ When a regression is found the script opens one issue, "Performance regression o
 
 Around that rule, without changing what it flags:
 
-- **Too noisy to watch.** For each series, the script measures how large a lasting step the rule catches reliably:
-  - it injects a step into the series' history at each of its last 20 runs, for steps of 1.2, 1.5, 2, 3, 4, 6 and 8 times its threshold;
-  - it runs the rule on the step's second run;
-  - the figure is the smallest step caught 9 times out of 10 ("a lasting step of about +150% is caught within two runs 9 times out of 10"), or the largest step tried when none reached that.
-
-  Every series whose figure is above its threshold is printed in the `scenarios` job summary and listed in the issue under the findings. Silence on one of them is not a sign it's fine. On the history as of November 2026 every series is listed: the quietest (the `complex` scenario's p50 latency and peak RSS) need +38–40%, most need +75–200%, and the p99 latencies, `complex/ci/cpu_seconds` and the four throughput series aren't caught 9 times out of 10 even at the largest step tried.
 - **Malformed entries.** Inside a readable data file, these are skipped with a `warning:` line instead of crashing the check:
   - a value that isn't a number (`true`/`false` still reads as 1/0, as before);
   - a bench without a name or that isn't an object;
   - a point that isn't an object, or whose `benches` isn't a list;
   - `"commit": null`, which is read as an unknown commit.
 - **Unreadable history.** A data file that is missing, truncated or not a JSON object fails the step with an `error:` line before `gh` is called, and so does one whose `entries` isn't an object or holds a suite that isn't a list. The issue is never closed on a history that couldn't be read.
+
+### Detection power
+
+How large a lasting step does the rule actually catch? For each series the script measures it:
+
+1. It injects a lasting step into the series' history at each of its last 20 runs, at 1, 1.2, 1.5, 2, 3, 4, 6 and 8 times its threshold.
+2. It runs the rule on the step's second run.
+3. The series' detection power is the smallest step caught there 9 times out of 10, or "not reliably caught" up to the largest step tried.
+
+The full table, weakest series first, goes to the `scenarios` job summary. The issue gets two sentences under the findings: how many series the rule catches reliably at their threshold, the median step it needs, and a link to the run whose summary has the table.
+
+On the current history the rule catches a lasting step of its threshold reliably on none of the 51 series, and the median series needs about +150%:
+
+- the quietest (the `complex` scenario's p50 latency and peak RSS) need +38–40%;
+- most series need +75–200%;
+- the two p99 latencies, `complex/ci/cpu_seconds` and the four throughput series aren't caught 9 times out of 10 even at the largest step tried (+200%, or a 75% drop).
+
+A silent series isn't one that's fine.
 
 ### Runner facts
 
@@ -100,7 +112,7 @@ The rule misfires in three known ways ([#317](https://github.com/alias2k/flusso/
 - **A series alternating between two levels.** When a five-point window holds mostly one kind of machine, its median and spread sit on that level, and a point from the other kind looks like a move.
 - **A lasting step absorbed by the median.** After a real step, the window's median reaches the new level within a few runs, so a regression flagged late, or whose issue was closed, isn't seen again.
 
-Telling these apart needs to know which machine ran each point, which the history before runner facts doesn't record. The rule will be revisited once about 40 `main` runs carry them.
+Telling these apart needs to know which machine ran each point, which the history before runner facts doesn't record. The rule will be revisited once about 40 `main` runs carry them. Until then #317 stays open: the detection power above shows the rule catches a lasting step of its threshold on no series, so it's a coarse alarm for large steps, not a check at 25%.
 
 The script's tests replay it over a snapshot of the real history (`.github/scripts/fixtures/`) next to a frozen copy of the rule as it stands, and CI's `scripts` job runs them:
 

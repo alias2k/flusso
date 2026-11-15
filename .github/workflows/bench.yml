@@ -208,7 +208,7 @@ jobs:
 
       # Two consecutive main points past 25% (20% for RSS), and past the series'
       # own swing, against the rolling median of the previous five → one issue, kept current, self-closing.
-      # The verdict and the series too noisy to watch go to the job summary; an
+      # The verdict and each series' detection power go to the job summary; an
       # unreadable history fails this step and leaves the issue alone.
       - name: Regression check
         env:
