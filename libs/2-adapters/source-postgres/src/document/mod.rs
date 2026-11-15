@@ -203,8 +203,9 @@ impl ColumnTypes {
 }
 
 /// Most keys per batched `build_many` query. Bounds the SQL length and the
-/// prepared-statement cache churn from the `IN (…)` list growing with key
-/// count; larger id sets are split across several round-trips.
+/// prepared-statement cache churn from the key array growing with key count
+/// (one statement text per array length); larger id sets are split across
+/// several round-trips.
 const BUILD_CHUNK: usize = 512;
 
 /// What the Postgres catalog says about a column: its cast-ready SQL type and
@@ -1236,9 +1237,9 @@ impl DocumentBuilder for PgDocumentBuilder {
                 .schema(index_name)
                 .ok_or_else(|| SourceError::Query(format!("unknown index `{index_name}`")))?;
 
-            // The batched query keys the root with `IN (…)` on a single column,
-            // so it needs both a declared single-column primary key and ids that
-            // carry exactly that one key column. Pair each id with its lone key
+            // The batched query probes the root by one key column per requested
+            // key, so it needs both a declared single-column primary key and ids
+            // that carry exactly that one key column. Pair each id with its lone key
             // value; if any id is composite (or the index has no `primary_key`),
             // fall back to per-document assembly for this group — correct, just
             // not batched.
