@@ -107,7 +107,7 @@ class Gh:
 
 
 def run(script: pathlib.Path, texts: dict[str, str], *args: str, gh_issues: list[int] | None = None,
-        missing: bool = False) -> tuple[subprocess.CompletedProcess, list[list[str]]]:
+        missing: bool = False, env: dict | None = None) -> tuple[subprocess.CompletedProcess, list[list[str]]]:
     """Run `script` over the two files as `bench.yml` does; with `gh_issues`, under `--issue` and a fake `gh`."""
     with tempfile.TemporaryDirectory() as tmp:
         tmp = pathlib.Path(tmp)
@@ -118,7 +118,7 @@ def run(script: pathlib.Path, texts: dict[str, str], *args: str, gh_issues: list
             paths.append(str(path))
         if missing:
             paths.append(str(tmp / "absent.js"))
-        env = dict(os.environ)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GITHUB_")} | (env or {})
         gh = None
         if gh_issues is not None:
             gh = Gh(tmp, gh_issues)
@@ -133,11 +133,20 @@ def flagged(out: str) -> set[str]:
     return set(re.findall(r"^  flusso \(\w+ is better\) (\S+): ", out, re.M))
 
 
-def noisy(out: str) -> dict[str, tuple[int, bool, int]]:
-    """Each listed series: the step, whether it is caught 9 times out of 10 (else fewer), the threshold."""
-    return {name: (int(step), reliable == "9 times out of 10", int(limit)) for name, step, reliable, limit in re.findall(
-        r"^    flusso \(\w+ is better\) (\S+): a lasting step of (?:about )?\+(\d+)% is caught within two runs "
-        r"(9 times out of 10|fewer than 9 times out of 10) \(threshold (\d+)%\)", out, re.M)}
+POWER_LINE = re.compile(
+    r"^    flusso \(\w+ is better\) (\S+): threshold (\d+)%, "
+    r"(?:a lasting step of about \+(\d+)% is caught within two runs 9 times out of 10|not reliably caught up to \+(\d+)%)$",
+    re.M)
+
+
+def power(out: str) -> dict[str, tuple[int, bool, int]]:
+    """The detection-power table: each series' step, whether it is caught 9 times out of 10, its threshold."""
+    return {name: (int(caught or tried), bool(caught), int(limit))
+            for name, limit, caught, tried in POWER_LINE.findall(out)}
+
+
+def power_order(out: str) -> list[str]:
+    return [m[0] for m in POWER_LINE.findall(out)]
 
 
 class MainsRuleIsUnchanged(unittest.TestCase):
@@ -284,25 +293,27 @@ class StampedHistory(unittest.TestCase):
                 self.assertEqual(stamped_runs, plain_runs)
 
 
-class TooNoisyToWatch(unittest.TestCase):
-    """Each series whose own spread hides a step of its threshold is named, with the step it needs."""
+class DetectionPower(unittest.TestCase):
+    """How large a lasting step the rule catches on each series, measured, in the summary; a count in the issue."""
 
-    def test_the_noisy_series_are_listed_with_the_step_they_need(self):
+    def test_every_series_gets_its_measured_step_weakest_first(self):
         done, _ = run(SCRIPT, data_files(NEWEST))
-        listed = noisy(done.stdout)
-        self.assertFalse(listed["reference/ci/visible_latency_p99_ms"][1])
-        self.assertTrue(listed["complex/ci/visible_latency_p50_ms"][1])
-        for name, (step, _, limit) in listed.items():
+        table = power(done.stdout)
+        self.assertEqual(len(table), sum(len(s["series"]) for s in HISTORY["suites"].values()))
+        self.assertFalse(table["reference/ci/visible_latency_p99_ms"][1])
+        self.assertTrue(table["complex/ci/visible_latency_p50_ms"][1])
+        for name, (step, _, limit) in table.items():
             with self.subTest(series=name):
                 self.assertGreater(step, limit)
+        weakness = [(0, 0) if not table[n][1] else (1, -table[n][0] / table[n][2]) for n in power_order(done.stdout)]
+        self.assertEqual(weakness, sorted(weakness))
 
     def test_the_listed_step_is_caught_within_two_runs_and_half_of_it_at_most_half_the_time(self):
         # The script measures on the last 20 runs: a step from each run `c` there, judged at `c + 1`.
-        done, _ = run(SCRIPT, data_files(NEWEST))
-        listed = noisy(done.stdout)
+        table = power(run(SCRIPT, data_files(NEWEST))[0].stdout)
         cuts = range(NEWEST - 20, NEWEST)
         for name in ("components/build/1", "reference/ci/flush_p50_ms"):
-            step, reliable, _ = listed[name]
+            step, reliable, _ = table[name]
             self.assertTrue(reliable, name)
             for size, check in ((step, lambda n: self.assertGreaterEqual(n, 18)),
                                 (step / 2, lambda n: self.assertLessEqual(n, 10))):
@@ -311,11 +322,22 @@ class TooNoisyToWatch(unittest.TestCase):
                 with self.subTest(series=name, step=size):
                     check(caught)
 
-    def test_the_list_goes_into_the_issue_under_the_findings(self):
-        _, calls = run(SCRIPT, data_files(NEWEST), gh_issues=[328])
-        body = calls[-1][calls[-1].index("--body") + 1]
-        self.assertLess(body.index("| suite |"), body.index("Too noisy to watch"))
-        self.assertIn("`reference/ci/visible_latency_p99_ms`", body[body.index("Too noisy to watch"):])
+    def test_the_issue_gets_two_sentences_and_a_link_to_the_run(self):
+        github = {"GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": "alias2k/flusso", "GITHUB_RUN_ID": "42"}
+        for env, link in ((github, "https://github.com/alias2k/flusso/actions/runs/42"), ({}, None)):
+            _, calls = run(SCRIPT, data_files(NEWEST), gh_issues=[328], env=env)
+            body = calls[-1][calls[-1].index("--body") + 1]
+            with self.subTest(linked=bool(link)):
+                paragraph = body[body.index("Detection power"):].split("\n\n")[0]
+                self.assertLess(body.index("| suite |"), body.index("Detection power"))
+                self.assertIn("0 of 51 series", paragraph)
+                self.assertRegex(paragraph, r"median series needs a lasting step of about \+\d+%")
+                self.assertLessEqual(paragraph.count(". "), 1)
+                self.assertNotIn("`reference/ci/visible_latency_p99_ms`", body)
+                if link:
+                    self.assertIn(link, paragraph)
+                else:
+                    self.assertIn("summary of the run", paragraph)
 
 
 def load_facts():
