@@ -1098,10 +1098,18 @@ WHERE root.pk = ANY(ARRAY[$n::<bound>::<key type>, …]) … OFFSET 0`, the only
 so a raw filter's unqualified name resolves as in a single build — `integration`'s
 `a_raw_filter_names_the_root_rows_columns_whatever_the_batched_query_names`, which reads the names off
 the statement itself), and one level out joins it to the same keys unnested `WITH ORDINALITY` on the
-same `=`, selecting the position (`doc_position`) beside the document; `document/matching.rs`'s
-`match_rows` pairs by position alone (no Rust cast or equality: Postgres's input/output forms are
-open-ended), an unanswered position is a tombstone, and a row matched by several positions answers
-each under its own id. Where the declared key isn't the root's whole catalog primary key
+same `=`, a `FULL JOIN` (Postgres runs it only as a hash or merge join: an inner join planned a nested
+loop rescanning the materialized documents per key — `integration`'s
+`a_batched_build_pairs_positions_without_a_nested_loop`), selecting the position (`doc_position`)
+beside the document; `document/matching.rs`'s `match_rows` pairs by position alone (no Rust cast or
+equality: Postgres's input/output forms are open-ended), an unanswered position is a tombstone, and a
+row matched by several positions answers each under its own id. A batch whose keys pair by value
+(`matching::pairs_by_key`: a deterministic collation, a key type whose `=` is identity —
+`bool`/`int2/4/8`/`uuid`/`bytea`/`date`/`time`/`timestamp(tz)`/`text`/`varchar`/`name`, never
+`numeric`, floats, `citext`, `char(n)` — and every key already of the kind the column reads back as)
+runs the inner level alone, selecting `value::key_select` (`query::documents_by_key_query`, main's own
+query, no join, which costs a light document about a quarter of its build) and pairs in
+`match_by_key`; everything else, a key read before a type change included, pairs by position. Where the declared key isn't the root's whole catalog primary key
 (`query::RootKey::Shared`: keyless, composite, a partitioned root keyed with its partition column, a
 view) a key several rows share builds the row whose `ROW(root.*)::text` sorts first, in both builds
 (`DISTINCT ON` / `first_row_by_text`; `a_key_several_rows_share_builds_the_same_row_both_ways`). The

@@ -45,6 +45,10 @@ const ROOT: &str = "root";
 /// position (a `bigint`) of the requested key the row matched.
 pub(super) const DOC_POSITION: &str = "doc_position";
 
+/// The column a batched build paired by key selects beside each document:
+/// the row's key, as [`key_select`](super::value::key_select) renders it.
+pub(super) const DOC_KEY: &str = "doc_key";
+
 /// The batched build's names one level out from the root: the built rows,
 /// the rows paired with positions, the numbered list of requested keys, and
 /// its columns. The document and its raw filters are built a level in, where
@@ -247,6 +251,10 @@ pub(super) fn document_query(
 /// text sorts first, as [`first_row_by_text`] does for a single build. A key
 /// Postgres refuses to cast fails the statement, so the whole batch, as a
 /// single build of it fails.
+///
+/// The pairing costs a light document about a quarter of its build, so a
+/// batch whose keys pair by value (`matching::pairs_by_key`) runs the inner
+/// level alone instead: [`documents_by_key_query`].
 pub(super) fn documents_query(
     schema: &IndexSchema,
     pk_column: &ColumnName,
@@ -255,6 +263,57 @@ pub(super) fn documents_query(
     col_types: &HashMap<(String, String), String>,
     bytes: &ByteColumns,
     root_key: RootKey,
+) -> Result<(SqlString, Vec<GenericValue>)> {
+    batched(
+        schema,
+        pk_column,
+        keys,
+        (pks, col_types, bytes),
+        root_key,
+        None,
+    )
+}
+
+/// The batched build of [`documents_query`] when every requested key pairs
+/// with its row by value: the key's `=` is identity (`key_type`'s base
+/// `base_name`, a deterministic collation) and every key is of the kind the
+/// column reads back as. Main's own query: the inner level alone, selecting
+/// the row's key under [`DOC_KEY`] beside its document, with no join.
+pub(super) fn documents_by_key_query(
+    schema: &IndexSchema,
+    pk_column: &ColumnName,
+    keys: &[GenericValue],
+    pks: &HashMap<String, ColumnName>,
+    col_types: &HashMap<(String, String), String>,
+    bytes: &ByteColumns,
+    (root_key, key_type, base_name): (RootKey, &str, &str),
+) -> Result<(SqlString, Vec<GenericValue>)> {
+    batched(
+        schema,
+        pk_column,
+        keys,
+        (pks, col_types, bytes),
+        root_key,
+        Some((key_type, base_name)),
+    )
+}
+
+/// What the catalog says that a document query needs: relation keys, column
+/// types, and the columns read as bytes.
+type Catalog<'a> = (
+    &'a HashMap<String, ColumnName>,
+    &'a HashMap<(String, String), String>,
+    &'a ByteColumns,
+);
+
+/// [`documents_query`] (`by_key` `None`) or [`documents_by_key_query`].
+fn batched(
+    schema: &IndexSchema,
+    pk_column: &ColumnName,
+    keys: &[GenericValue],
+    (pks, col_types, bytes): Catalog<'_>,
+    root_key: RootKey,
+    by_key: Option<(&str, &str)>,
 ) -> Result<(SqlString, Vec<GenericValue>)> {
     let mut builder = Builder {
         db: &schema.db_schema,
@@ -290,18 +349,30 @@ pub(super) fn documents_query(
     predicate.push_str(&root_filters);
 
     let table = qtable(&schema.db_schema, &schema.table);
-    let built = match root_key {
+    let key_out = match by_key {
+        Some((key_type, base_name)) => {
+            super::value::key_select(&root_pk, DOC_KEY, key_type, base_name)
+        }
+        None => format!("{root_pk} AS \"{KEY}\""),
+    };
+    let built = match (root_key, by_key) {
+        (RootKey::Unique, Some(_)) => format!(
+            "SELECT {key_out}, {object} AS \"document\" FROM {table} AS \"{ROOT}\" WHERE {predicate}"
+        ),
         // `OFFSET 0` keeps the level a scan of its own: pulled up into the
         // join, the planner may probe the root once per requested key.
-        RootKey::Unique => format!(
-            "SELECT {root_pk} AS \"{KEY}\", {object} AS \"document\" \
+        (RootKey::Unique, None) => format!(
+            "SELECT {key_out}, {object} AS \"document\" \
              FROM {table} AS \"{ROOT}\" WHERE {predicate} OFFSET 0"
         ),
-        RootKey::Shared => format!(
-            "SELECT DISTINCT ON ({root_pk}) {root_pk} AS \"{KEY}\", {object} AS \"document\" \
+        (RootKey::Shared, _) => format!(
+            "SELECT DISTINCT ON ({root_pk}) {key_out}, {object} AS \"document\" \
              FROM {table} AS \"{ROOT}\" WHERE {predicate} ORDER BY {root_pk}, {FIRST_BY_TEXT}"
         ),
     };
+    if by_key.is_some() {
+        return Ok((SqlString::new(built), builder.params));
+    }
     let paired = format!(
         "SELECT \"{KEYS}\".\"{POSITION}\" AS \"{DOC_POSITION}\", \"{BUILT}\".\"document\" \
          FROM ({built}) AS \"{BUILT}\" \

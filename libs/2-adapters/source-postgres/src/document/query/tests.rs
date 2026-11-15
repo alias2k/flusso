@@ -1488,3 +1488,24 @@ fn a_shared_key_picks_the_row_whose_text_sorts_first() {
         r#"SELECT "doc_position", "document" FROM (SELECT "flusso_requested"."flusso_position" AS "doc_position", "flusso_built"."document" FROM (SELECT DISTINCT ON ("root"."id") "root"."id" AS "flusso_key", json_build_object('id', "root"."id") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint]) ORDER BY "root"."id", ROW("root".*)::text) AS "flusso_built" FULL JOIN unnest(ARRAY[$1::int4::bigint]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key" OFFSET 0) AS "flusso_paired" WHERE "flusso_paired"."document" IS NOT NULL"#
     );
 }
+
+/// A batch whose keys pair by value is main's own query: the root rows with
+/// each row's key beside its document, no join.
+#[test]
+fn a_batch_paired_by_key_selects_each_rows_key_and_no_join() {
+    let schema = index(Some("id"), None, vec![col_field("id", "id")]);
+    let (sql, _) = documents_by_key_query(
+        &schema,
+        &c("id"),
+        &[GenericValue::Int(7), GenericValue::Int(9)],
+        &HashMap::new(),
+        &id_types(),
+        &ByteColumns::new(),
+        (RootKey::Unique, "pg_catalog.int8", "int8"),
+    )
+    .unwrap();
+    assert_eq!(
+        sql.as_str(),
+        r#"SELECT format('%s', "root"."id") AS "doc_key", "root"."id"::pg_catalog.int8 AS "doc_key:typed", json_build_object('id', "root"."id") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint, $2::int4::bigint])"#
+    );
+}

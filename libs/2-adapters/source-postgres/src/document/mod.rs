@@ -1309,12 +1309,30 @@ impl DocumentBuilder for PgDocumentBuilder {
             let bytes = self.byte_columns(schema, &pks).await?;
             let root_key = self.root_key(schema, &[&pk_column]).await?;
 
+            let key_meta = self
+                .column_meta(&schema.db_schema, &schema.table, &pk_column)
+                .await?;
+
             for chunk in keyed.chunks(BUILD_CHUNK) {
                 let keys: Vec<kernel::GenericValue> =
                     chunk.iter().map(|(value, _)| (*value).clone()).collect();
-                let (sql, params) = query::documents_query(
-                    schema, &pk_column, &keys, &pks, &col_types, &bytes, root_key,
-                )?;
+                let by_key =
+                    matching::pairs_by_key(&key_meta.base_name, key_meta.deterministic, &keys);
+                let (sql, params) = if by_key {
+                    query::documents_by_key_query(
+                        schema,
+                        &pk_column,
+                        &keys,
+                        &pks,
+                        &col_types,
+                        &bytes,
+                        (root_key, &key_meta.key_type, &key_meta.base_name),
+                    )?
+                } else {
+                    query::documents_query(
+                        schema, &pk_column, &keys, &pks, &col_types, &bytes, root_key,
+                    )?
+                };
 
                 let mut statement = sqlx::query(sql);
                 for param in &params {
@@ -1325,6 +1343,18 @@ impl DocumentBuilder for PgDocumentBuilder {
                     .await
                     .map_err(|error| self.failed_query(index_name, schema, error))?;
 
+                let plan = self.plan(index_name)?;
+                if by_key {
+                    let mut found = matching::ByKey::with_capacity(rows.len());
+                    for row in &rows {
+                        found.insert(
+                            value::decode_key(row, query::DOC_KEY),
+                            Ok(value::read_document(row, &schema.fields, plan)?),
+                        );
+                    }
+                    matching::match_by_key(found, chunk, &mut out);
+                    continue;
+                }
                 let mut found = Vec::with_capacity(rows.len());
                 for row in &rows {
                     // A built row the join paired with no position (never
@@ -1334,10 +1364,7 @@ impl DocumentBuilder for PgDocumentBuilder {
                     let Some(position) = position else {
                         continue;
                     };
-                    found.push((
-                        position,
-                        value::read_document(row, &schema.fields, self.plan(index_name)?)?,
-                    ));
+                    found.push((position, value::read_document(row, &schema.fields, plan)?));
                 }
                 matching::match_rows(found, chunk, &mut out);
             }

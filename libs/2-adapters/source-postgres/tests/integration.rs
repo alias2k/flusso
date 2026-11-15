@@ -1059,6 +1059,17 @@ fn int_ids(index: &str, keys: impl IntoIterator<Item = i32>) -> Vec<DocumentId> 
         .collect()
 }
 
+/// Ids keyed by `bigint`s, as a change read before an `int` key's type
+/// change carries them: a batch of them pairs rows by position.
+fn bigint_ids(index: &str, keys: impl IntoIterator<Item = i64>) -> Vec<DocumentId> {
+    keys.into_iter()
+        .map(|key| DocumentId {
+            index: index_name(index),
+            key: RowKey(vec![(column("id"), GenericValue::BigInt(key))]),
+        })
+        .collect()
+}
+
 /// `build_many` over `ids` gives, id by id, what `build` gives.
 async fn assert_both_builds_agree(
     builder: &PgDocumentBuilder,
@@ -1108,11 +1119,13 @@ fields:
 
 /// A raw filter's unqualified name resolves to the root row's column in a
 /// batched build, whatever the batched query names its own relations and
-/// columns (issue #335). The names are read off the batched statement itself:
-/// a first root builds once and `pg_stat_statements` gives the statement, then
-/// a second root carries a column named after every quoted identifier in it.
-/// Raw filters on the root, a `has_many` and a `count` name all of them
-/// unqualified, and `build_many` must give what `build` gives.
+/// columns (issue #335). The names are read off the batched statements
+/// themselves, one pairing rows by key and one by position (`bigint` ids for
+/// an `int` key): a first root builds once each way and `pg_stat_statements`
+/// gives the statements, then a second root carries a column named after
+/// every quoted identifier in them. Raw filters on the root, a `has_many` and
+/// a `count` name all of them unqualified, and `build_many` must give what
+/// `build` gives, both ways.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn a_raw_filter_names_the_root_rows_columns_whatever_the_batched_query_names() {
@@ -1147,6 +1160,10 @@ async fn a_raw_filter_names_the_root_rows_columns_whatever_the_batched_query_nam
         .await
         .unwrap();
     builder.build_many(&int_ids("plain", [1, 2])).await.unwrap();
+    builder
+        .build_many(&bigint_ids("plain", [1, 2]))
+        .await
+        .unwrap();
     let statements: Vec<(String,)> = sqlx::query_as(
         "SELECT query FROM pg_stat_statements WHERE query LIKE '%\"plain\"%' \
          AND query NOT LIKE '%pg_stat_statements%'",
@@ -1205,6 +1222,7 @@ async fn a_raw_filter_names_the_root_rows_columns_whatever_the_batched_query_nam
     let builder = PgDocumentBuilder::connect(&url, Arc::new(spec))
         .await
         .unwrap();
+    assert_both_builds_agree(&builder, &bigint_ids("items", 1..=6)).await;
     let built = assert_both_builds_agree(&builder, &int_ids("items", 1..=6)).await;
     let upserts = built
         .iter()
@@ -1343,8 +1361,9 @@ fields:
 /// a nested loop (issue #335). The planner sizes a document at a few bytes,
 /// so as an inner join it would loop over the requested keys, rescanning the
 /// materialized batch of built documents for each: wide documents spill and
-/// are read back once per key. `auto_explain` logs the executed statement's
-/// plan.
+/// are read back once per key. The keys are `bigint`s for an `int` key, as a
+/// change read before a type change carries them, so the batch pairs by
+/// position. `auto_explain` logs the executed statement's plan.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn a_batched_build_pairs_positions_without_a_nested_loop() {
@@ -1376,12 +1395,20 @@ async fn a_batched_build_pairs_positions_without_a_nested_loop() {
     let builder = PgDocumentBuilder::connect(&url, Arc::new(spec))
         .await
         .unwrap();
-    for keys in [16, 256] {
-        let built = builder
-            .build_many(&int_ids("plain", (0..keys).map(|n| n * 7 + 1)))
-            .await
-            .unwrap();
-        assert_eq!(built.len(), usize::try_from(keys).unwrap());
+    for keys in [16_i64, 256] {
+        let ids: Vec<DocumentId> = (0..keys)
+            .map(|n| DocumentId {
+                index: index_name("plain"),
+                key: RowKey(vec![(column("id"), GenericValue::BigInt(n * 7 + 1))]),
+            })
+            .collect();
+        let built = builder.build_many(&ids).await.unwrap();
+        assert_eq!(built.len(), ids.len());
+        assert!(
+            built
+                .iter()
+                .all(|document| matches!(document, Document::Upsert { .. }))
+        );
     }
 
     let log = String::from_utf8(container.stderr_to_vec().await.unwrap()).unwrap();
