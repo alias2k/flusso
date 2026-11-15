@@ -1714,3 +1714,64 @@ async fn a_small_batch_reuses_its_plan() {
         );
     }
 }
+
+/// A batch over a key column changed from `text` to `name`, the cache still
+/// stale, succeeds on its first try (issue #335). The statement prepared under
+/// `text` now compares under `name`'s collation, and Postgres refuses to run
+/// a cached plan whose result type changed; the batch forgets its types and
+/// runs again once, as it does for a row the stale type can't read back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_batch_survives_its_key_column_changing_from_text_to_name() {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE named (id text PRIMARY KEY, label text)",
+        "INSERT INTO named VALUES ('a', 'first'), ('b', 'second')",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let spec = SourceSpec::new(BTreeMap::from([(
+        index_name("named"),
+        schema_from(
+            "version: 1\ntable: named\nprimary_key: id\nfields:\n  - keyword: label\n    required: false\n",
+        ),
+    )]));
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec))
+        .await
+        .unwrap();
+    let ids = |keys: &[&str]| -> Vec<DocumentId> {
+        keys.iter()
+            .map(|key| DocumentId {
+                index: index_name("named"),
+                key: RowKey(vec![(
+                    column("id"),
+                    GenericValue::String((*key).to_owned()),
+                )]),
+            })
+            .collect()
+    };
+    for _ in 0..10 {
+        builder.build_many(&ids(&["a", "b"])).await.unwrap();
+        builder.build(&ids(&["a"])[0]).await.unwrap();
+    }
+    sqlx::query("ALTER TABLE named ALTER COLUMN id TYPE name")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The same number of keys as before, so the same statement text, which
+    // the pooled connection has prepared under `text`.
+    let built = builder.build_many(&ids(&["b", "c"])).await;
+    let built = built.unwrap_or_else(|error| panic!("the batch failed: {error}"));
+    let kinds: Vec<bool> = built
+        .iter()
+        .map(|document| matches!(document, Document::Upsert { .. }))
+        .collect();
+    assert_eq!(kinds, [true, false]);
+}
