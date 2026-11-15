@@ -4,44 +4,48 @@
 #   review-ab.sh [<base>] [--pg 14,16,18] [--bench postgres,cases,pipeline]
 #                [--filter <criterion filter>] [--limit <percent>] [--rounds <n>]
 #                [--own-benches]
+#   review-ab.sh --clean
 #
-# <base> defaults to origin/main. Run from the head tree (the working tree,
-# uncommitted changes included). docs/src/contribute/benchmarks.md has the
-# reader's guide; the steps:
+# <base> defaults to origin/main, as last fetched: the command never fetches.
+# Run from the head tree (the working tree, uncommitted changes included).
+# docs/src/contribute/benchmarks.md is the reader's guide; the steps:
 #
-# 1. The base is checked out into a warm tree, `$FLUSSO_REVIEW_HOME/tree`
-#    (default ~/.cache/flusso/review-ab), with a private index: no git
-#    worktree is registered, and only the files that differ from the last base
-#    are rewritten, so cargo rebuilds only what changed. It builds into its own
-#    target dir, `$FLUSSO_REVIEW_HOME/target`, seeded once from the head's
-#    `release` dir (the bench profile's) with a reflink copy. The head builds
-#    into its own `$CARGO_TARGET_DIR` (or ./target). One shared dir would let cargo run one tree's binary for the
-#    other; bench-provenance.py checks it did not.
-# 2. The head's bench sources are laid over the base (same harness, each side's
-#    own code), unless --own-benches. review-ab-stamp.py decides whether the
-#    warm build is current (base commit, toolchain, overlaid files, the
-#    executables themselves); a current build is reused without calling cargo.
-# 3. One named Postgres container per version, plus one OpenSearch when
-#    `pipeline` runs. Each bench run gets a fresh database (BENCH_PG_URL) and an
-#    emptied cluster (BENCH_OS_URL). A trap removes exactly these containers.
-# 4. Per version, per bench, --rounds (default 2) rounds in ABBA order: base,
-#    head, then head, base, so a drift over the run lands on both sides. Saved
-#    as Criterion baselines `base-<r>` / `head-<r>` in one CRITERION_HOME per
-#    version under `<head target>/review-ab/<timestamp>/`.
-# 5. bench-compare.py --repeats prints one table per version: each side's
-#    fastest run, and the control spread (how far one binary's own runs
-#    differ). Exits 1 when a case is slower past the limit (default 5%) and
-#    twice the control spread.
+# 1. One run at a time: an exclusive flock on `$FLUSSO_REVIEW_HOME/lock`
+#    (default ~/.cache/flusso/review-ab) for the whole run, since the warm tree,
+#    its target dir and the stamp are shared. A second run fails at once.
+#    Containers a killed run left (`flusso-review-<pid>-*`, pid gone) are
+#    removed, and old result dirs pruned to the last 5.
+# 2. The base is checked out into the warm tree with a private index (no git
+#    worktree is registered; only files that differ are rewritten, so cargo
+#    rebuilds only what changed), reset to the base commit before each build,
+#    and built into its own target dir. The head builds into its own
+#    `$CARGO_TARGET_DIR` (or ./target). bench-provenance.py checks each side
+#    ran its own build. Only the benches asked for are built.
+# 3. The head's bench sources are laid over the base (same harness, each side's
+#    own code), unless --own-benches, which refuses a base whose benches would
+#    ignore the server this script starts. review-ab-stamp.py decides whether
+#    the warm build is current; a current build is reused without cargo.
+# 4. One named Postgres container per version, plus one OpenSearch for
+#    `pipeline`. Each bench run gets a fresh database (REVIEW_AB_PG_URL) and an
+#    emptied cluster (REVIEW_AB_OS_URL). A trap removes these containers.
+# 5. Per version, per bench, --rounds (default 3) rounds of base then head:
+#    base, head, base, head, … Criterion baselines `base-<r>` / `head-<r>`.
+# 6. bench-compare.py --repeats flags a case past the limit (default 5%) and
+#    twice the control spread; each flagged case is re-run alone (`--exact`,
+#    base then head) and judged by the PR gate's confirm rule. Exits 1 only on
+#    a confirmed case. Results: `<head target>/review-ab/<timestamp>/`.
 set -euo pipefail
 
-usage="usage: review-ab.sh [<base>] [--pg 16] [--bench postgres,cases,pipeline] [--filter <f>] [--limit 5] [--rounds 2] [--own-benches]"
+usage="usage: review-ab.sh [<base>] [--pg 16] [--bench postgres,cases,pipeline] [--filter <f>] [--limit 5] [--rounds 3] [--own-benches] | --clean"
 base=origin/main
 pg_versions=16
 benches=postgres,cases,pipeline
 filter=
 limit=5
-rounds=2
+rounds=3
 own_benches=0
+clean=0
+keep=5
 positional=0
 while [ $# -gt 0 ]; do
   case $1 in
@@ -51,6 +55,7 @@ while [ $# -gt 0 ]; do
     --limit) limit=${2:?$usage}; shift 2 ;;
     --rounds) rounds=${2:?$usage}; shift 2 ;;
     --own-benches) own_benches=1; shift ;;
+    --clean) clean=1; shift ;;
     -h | --help) echo "$usage"; exit 0 ;;
     -*) echo "$usage" >&2; exit 2 ;;
     *)
@@ -62,51 +67,118 @@ done
 scripts=$(cd "$(dirname "$0")" && pwd)
 head_tree=$(git rev-parse --show-toplevel)
 git_dir=$(realpath "$(git rev-parse --git-common-dir)")
-base_sha=$(git rev-parse --verify "$base^{commit}")
 home=$(realpath -m "${FLUSSO_REVIEW_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/flusso/review-ab}")
 base_tree=$home/tree
 base_target=$home/target
 head_target=$(realpath -m "${CARGO_TARGET_DIR:-$head_tree/target}")
+results=$head_target/review-ab
 stamp=$home/stamp.json
+
+mkdir -p "$home"
+exec 9>"$home/lock"
+if ! flock -n 9; then
+  echo "error: another review-ab run holds $home/lock; wait for it to finish" >&2
+  exit 1
+fi
+
+if [ "$clean" -eq 1 ]; then
+  du -sh "$home" "$results" 2>/dev/null || true
+  rm -rf "$home" "$results"
+  echo "removed the warm base tree, its build and the review results"
+  exit 0
+fi
+
+base_sha=$(git rev-parse --verify "$base^{commit}")
+base_date=$(git log -1 --format=%cd --date=format:'%Y-%m-%d %H:%M' "$base_sha")
 run_id=$(date +%Y%m%d-%H%M%S)
-out=$head_target/review-ab/$run_id
+out=$results/$run_id
+
+declare -A bench_file=(
+  [postgres]=libs/2-adapters/source-postgres/benches/postgres.rs
+  [cases]=libs/2-adapters/source-postgres/benches/cases.rs
+  [pipeline]=libs/2-engine/benches/pipeline.rs
+)
+declare -A package_dir=(
+  [postgres]=libs/2-adapters/source-postgres
+  [cases]=libs/2-adapters/source-postgres
+  [pipeline]=libs/2-engine
+)
+selected=()
+for bench in ${benches//,/ }; do
+  [ -n "${bench_file[$bench]:-}" ] || { echo "error: unknown bench \`$bench\`" >&2; exit 2; }
+  selected+=("$bench")
+done
+
+in_base() { git cat-file -e "$base_sha:$1" 2>/dev/null; }
 
 overlay=()
 if [ "$own_benches" -eq 0 ]; then
-  overlay=(
-    libs/2-adapters/source-postgres/benches/postgres.rs
-    libs/2-adapters/source-postgres/benches/cases.rs
-    libs/2-engine/benches/pipeline.rs
-  )
+  overlay=("${bench_file[postgres]}" "${bench_file[cases]}" "${bench_file[pipeline]}")
 fi
-stamp_files=()
-for rel in "${overlay[@]}"; do
-  stamp_files+=(--file "$rel")
+
+# A base bench that predates REVIEW_AB_PG_URL would start its own testcontainer
+# (Postgres 11) instead of the server --pg names: the two sides would not be
+# measured on the same Postgres.
+need=()
+for bench in "${selected[@]}"; do
+  file=${bench_file[$bench]}
+  if [ "$own_benches" -eq 1 ]; then
+    in_base "$file" || continue
+    if ! git cat-file -p "$base_sha:$file" | grep -q REVIEW_AB_PG_URL; then
+      echo "error: the base's \`$bench\` bench predates REVIEW_AB_PG_URL: with --own-benches it would run on its own testcontainer (Postgres 11), not on --pg $pg_versions; drop --own-benches" >&2
+      exit 2
+    fi
+  fi
+  need+=(--need "$bench")
 done
 
+stamp_args=(--commit "$base_sha" --target "$base_target" --root "$head_tree")
+for rel in "${overlay[@]}"; do
+  stamp_args+=(--file "$rel")
+done
+build_env() {
+  env | grep -E '^(RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_RUSTFLAGS|CARGO_PROFILE_[A-Z0-9_]+)=' | sort || true
+  echo "bench-in-process.sh $(sha256sum <"$scripts/bench-in-process.sh" | cut -d' ' -f1)"
+  echo "benches ${selected[*]}"
+}
 toolchain() { (cd "$1" && rustc -vV) 2>/dev/null || echo none; }
 
-# Check the base out into the warm tree and lay the head's bench sources over it.
+# Reset the warm tree to the base commit (an earlier overlay's files included)
+# and lay the head's bench sources over it.
 checkout_base() {
   mkdir -p "$base_tree"
   GIT_INDEX_FILE=$home/index git --git-dir="$git_dir" --work-tree="$base_tree" read-tree --reset -u "$base_sha"
-  local manifest=$base_tree/libs/2-adapters/source-postgres/Cargo.toml
+  for bench in postgres cases pipeline; do
+    in_base "${bench_file[$bench]}" || rm -f "$base_tree/${bench_file[$bench]}"
+  done
   for rel in "${overlay[@]}"; do
     cp "$head_tree/$rel" "$base_tree/$rel"
   done
+  local manifest=$base_tree/libs/2-adapters/source-postgres/Cargo.toml
   if [ "${#overlay[@]}" -gt 0 ] && ! grep -q '^name = "cases"' "$manifest"; then
     printf '\n[[bench]]\nname = "cases"\nharness = false\n' >>"$manifest"
   fi
 }
 
-build() { # build <tree> <target dir>
-  (cd "$1" && CARGO_TARGET_DIR=$2 BENCH_SET=docker BENCH_BUILD_ONLY=1 "$scripts/bench-in-process.sh" review >/dev/null)
+build() { # build <tree> <target dir> <log>
+  (cd "$1" && CARGO_TARGET_DIR=$2 BENCH_SET=docker BENCH_ONLY=$benches BENCH_BUILD_ONLY=1 \
+    "$scripts/bench-in-process.sh" review 2>&1 >/dev/null | tee "$3" >&2)
 }
 
-echo "review-ab: base $base (${base_sha:0:12}) vs the working tree; Postgres $pg_versions; benches $benches"
+echo "review-ab: base $base = ${base_sha:0:12}, committed $base_date (not fetched: \`git fetch\` first for the latest)"
+echo "vs the working tree; Postgres $pg_versions; benches ${selected[*]}; $rounds rounds"
+
+names=$(docker ps -a --filter name=flusso-review- --format '{{.Names}}' || true)
+for name in $(printf '%s\n' "$names" | python3 "$scripts/review-ab-housekeeping.py" stale); do
+  echo "removing $name, left by a run that no longer exists"
+  docker rm -f "$name" >/dev/null || true
+done
+python3 "$scripts/review-ab-housekeeping.py" prune "$results" $((keep - 1))
+mkdir -p "$out"
+
 status=0
-verdict=$(python3 "$scripts/review-ab-stamp.py" check "$stamp" --commit "$base_sha" \
-  --toolchain "$(toolchain "$base_tree")" --target "$base_target" --root "$head_tree" "${stamp_files[@]}") || status=$?
+verdict=$(python3 "$scripts/review-ab-stamp.py" check "$stamp" "${stamp_args[@]}" "${need[@]}" \
+  --toolchain "$(toolchain "$base_tree")" --build-env "$(build_env)") || status=$?
 if [ "$status" -eq 0 ]; then
   echo "warm base build is current; not rebuilding"
 else
@@ -116,17 +188,27 @@ else
     mkdir -p "$base_target"
     cp -a --reflink=auto "$head_target/release" "$base_target/release"
   fi
-  if ! build "$base_tree" "$base_target"; then
-    echo "error: the base does not build with the head's bench sources; try --own-benches" >&2
+  status=0
+  build "$base_tree" "$base_target" "$out/build-base.log" || status=$?
+  if [ "$status" -eq 78 ]; then
+    echo "error: the base has none of the benches asked for (${selected[*]})" >&2
+    exit 1
+  elif [ "$status" -ne 0 ]; then
+    if [ "${#overlay[@]}" -gt 0 ] && grep -q '(bench "' "$out/build-base.log"; then
+      echo "error: the base does not build with the head's bench sources; try --own-benches" >&2
+    else
+      echo "error: the base does not build (see above)" >&2
+    fi
     exit 1
   fi
-  python3 "$scripts/review-ab-stamp.py" write "$stamp" --commit "$base_sha" \
-    --toolchain "$(toolchain "$base_tree")" --target "$base_target" \
-    --executables "$base_target/bench-executables/review.tsv" --root "$head_tree" "${stamp_files[@]}"
+  python3 "$scripts/review-ab-stamp.py" write "$stamp" "${stamp_args[@]}" \
+    --toolchain "$(toolchain "$base_tree")" --build-env "$(build_env)" \
+    --executables "$base_target/bench-executables/review.tsv"
 fi
 echo "building the head in $head_tree"
-build "$head_tree" "$head_target"
+build "$head_tree" "$head_target" "$out/build-head.log"
 python3 "$scripts/bench-provenance.py" "$base_target" "$head_target" review review
+aa=
 if cmp -s <(cut -f1,3 "$base_target/bench-executables/review.tsv") <(cut -f1,3 "$head_target/bench-executables/review.tsv"); then
   aa="The base and head bench binaries are byte-identical: every difference below is noise."
   echo "$aa"
@@ -143,19 +225,18 @@ trap 'exit 130' INT TERM
 
 host_port() { docker port "$1" "$2" | head -1 | sed 's/.*://'; }
 
-start_postgres() { # start_postgres <version> → prints the container name
-  local name=flusso-review-$$-pg$1
-  containers+=("$name")
-  docker run -d --name "$name" -e POSTGRES_PASSWORD=postgres -p 127.0.0.1::5432 "postgres:$1-alpine" >/dev/null
+start_postgres() { # start_postgres <name> <version>
+  containers+=("$1")
+  docker run -d --name "$1" -e POSTGRES_PASSWORD=postgres -p 127.0.0.1::5432 "postgres:$2-alpine" >/dev/null
   local deadline=$((SECONDS + 120))
-  until docker exec "$name" pg_isready -U postgres -h 127.0.0.1 -q 2>/dev/null; do
-    ((SECONDS < deadline)) || { echo "error: Postgres $1 did not start" >&2; return 1; }
+  until docker exec "$1" pg_isready -U postgres -h 127.0.0.1 -q 2>/dev/null; do
+    ((SECONDS < deadline)) || { echo "error: Postgres $2 did not start" >&2; return 1; }
     sleep 0.5
   done
 }
 
 os_url=
-if [[ ",$benches," == *,pipeline,* ]]; then
+if [[ " ${selected[*]} " == *" pipeline "* ]]; then
   os=flusso-review-$$-os
   containers+=("$os")
   docker run -d --name "$os" -p 127.0.0.1::9200 \
@@ -170,69 +251,82 @@ if [[ ",$benches," == *,pipeline,* ]]; then
   done
 fi
 
-package_dir() {
-  case $1 in
-    postgres | cases) echo libs/2-adapters/source-postgres ;;
-    pipeline) echo libs/2-engine ;;
-  esac
-}
 executable() { # executable <target dir> <bench>
   awk -F'\t' -v b="$2" '$1 == b { print $2 }' "$1/bench-executables/review.tsv"
 }
 
 database=0
-run_side() { # run_side <container> <port> <tree> <target dir> <bench> <baseline> <criterion home>
-  local exe
-  exe=$(executable "$4" "$5")
+run_side() { # run_side <side> <bench> <baseline> [<exact id>]
+  local tree=$head_tree target=$head_target exe selector=()
+  if [ "$1" = base ]; then
+    tree=$base_tree target=$base_target
+  fi
+  exe=$(executable "$target" "$2")
   if [ -z "$exe" ]; then
-    echo "no \`$5\` bench in $3; skipped"
+    echo "no \`$2\` bench on the $1 side; skipped"
     return
   fi
+  if [ -n "${4:-}" ]; then
+    selector=(--exact "$4")
+  elif [ -n "$filter" ]; then
+    selector=("$filter")
+  fi
   database=$((database + 1))
-  docker exec "$1" psql -U postgres -qc "CREATE DATABASE r$database" >/dev/null
+  docker exec "$container" psql -U postgres -qc "CREATE DATABASE r$database" >/dev/null
   if [ -n "$os_url" ]; then
     curl -sf -X DELETE "$os_url/_all" >/dev/null
   fi
-  echo "── $5 · $6 · $(basename "$7")"
-  (cd "$3/$(package_dir "$5")" &&
-    BENCH_PG_URL=postgres://postgres:postgres@127.0.0.1:$2/r$database BENCH_OS_URL=$os_url CRITERION_HOME=$7 \
-      "$exe" --bench --noplot --save-baseline "$6" ${filter:+"$filter"} >/dev/null)
-  docker exec "$1" psql -U postgres -qc "DROP DATABASE r$database" >/dev/null
+  echo "── $2 · $3${4:+ · $4} · pg$version"
+  (cd "$tree/${package_dir[$2]}" &&
+    REVIEW_AB_PG_URL=postgres://postgres:postgres@127.0.0.1:$port/r$database REVIEW_AB_OS_URL=$os_url \
+      CRITERION_HOME=$out/pg$version/$2 \
+      "$exe" --bench --quiet --noplot --plotting-backend plotters --save-baseline "$3" "${selector[@]}" >/dev/null)
+  docker exec "$container" psql -U postgres -qc "DROP DATABASE r$database" >/dev/null
 }
 
 failed=0
-reports=()
 for version in ${pg_versions//,/ }; do
-  start_postgres "$version"
   container=flusso-review-$$-pg$version
+  start_postgres "$container" "$version"
   port=$(host_port "$container" 5432)
-  home_v=$out/pg$version
-  for bench in ${benches//,/ }; do
+  for bench in "${selected[@]}"; do
     for ((round = 1; round <= rounds; round++)); do
-      base_run=(run_side "$container" "$port" "$base_tree" "$base_target" "$bench" "base-$round" "$home_v")
-      head_run=(run_side "$container" "$port" "$head_tree" "$head_target" "$bench" "head-$round" "$home_v")
-      if ((round % 2)); then
-        "${base_run[@]}"
-        "${head_run[@]}"
-      else
-        "${head_run[@]}"
-        "${base_run[@]}"
-      fi
+      run_side base "$bench" "base-$round"
+      run_side head "$bench" "head-$round"
     done
   done
+  flagged=$out/pg$version/flagged.tsv
+  status=0
+  python3 "$scripts/bench-compare.py" "$out/pg$version" base head "$limit" --repeats "$rounds" \
+    --breaches "$flagged" >/dev/null || status=$?
+  [ "$status" -le 1 ] || { echo "error: nothing measured on both sides for Postgres $version" >&2; exit 1; }
+  if [ -s "$flagged" ]; then
+    echo "re-running $(wc -l <"$flagged") flagged case(s) alone, base then head"
+  fi
+  while IFS=$'\t' read -r bench id <&3; do
+    run_side base "$bench" base-confirm "$id"
+    run_side head "$bench" head-confirm "$id"
+  done 3<"$flagged"
+  {
+    echo
+    echo "## Postgres $version: $base (${base_sha:0:12}) vs the working tree"
+    echo
+    python3 "$scripts/bench-compare.py" "$out/pg$version" base head "$limit" --repeats "$rounds" \
+      --confirm base-confirm head-confirm || echo "status $?"
+    if [ -n "$aa" ]; then
+      echo
+      echo "$aa"
+    fi
+  } >"$out/pg$version/table.md"
   docker rm -f "$container" >/dev/null
-  reports+=("$version")
 done
 
-for version in "${reports[@]}"; do
-  echo
-  echo "## Postgres $version: ${base} (${base_sha:0:12}) vs the working tree"
-  echo
-  python3 "$scripts/bench-compare.py" "$out/pg$version" base head "$limit" --repeats "$rounds" || failed=1
-  if [ -n "${aa:-}" ]; then
-    echo
-    echo "$aa"
+for version in ${pg_versions//,/ }; do
+  table=$out/pg$version/table.md
+  if grep -q '^status ' "$table"; then
+    failed=1
   fi
+  grep -v '^status ' "$table"
 done
 echo
 echo "Criterion output: $out"

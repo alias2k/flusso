@@ -27,7 +27,8 @@
 # - BENCH_SET=docker picks the Docker-backed benches (postgres, cases,
 #   pipeline) instead of the five in-process ones;
 # - BENCH_BUILD_ONLY=1 builds and records the executables without running
-#   them, so the caller can run base and head interleaved.
+#   them, so the caller can run base and head interleaved;
+# - BENCH_ONLY=<target,…> builds only those bench targets of the set.
 #
 # The pgoutput, resolve and render benches sit behind each crate's `bench`
 # feature, which exposes the crate-private decoder / an offline document
@@ -51,6 +52,9 @@ ran=0
 bench() {
   local file=$1 package=$2 target=$3
   shift 3
+  if [ -n "${BENCH_ONLY:-}" ] && [[ ",$BENCH_ONLY," != *",$target,"* ]]; then
+    return
+  fi
   if [ ! -f "$file" ]; then
     echo "skipping \`$target\`: $file is not in this tree"
     return

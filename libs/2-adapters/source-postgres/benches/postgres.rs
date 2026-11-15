@@ -12,8 +12,10 @@
 //! - `resolve`: mapping a changed row back to the documents it affects — both
 //!   the trivial root-table case and the reverse lookup from a related table.
 //!
-//! Requires Docker, or a Postgres named by `BENCH_PG_URL` (an empty database
-//! this bench may create tables in; `just review-ab` passes one per run). Run with:
+//! Requires Docker. `just review-ab` instead hands it a fresh database it
+//! created for this run through `REVIEW_AB_PG_URL`, a variable only that
+//! command sets (so `BENCH_PG_URL`, which `flusso-bench` reads, never reaches
+//! this bench). Run with:
 //!
 //! ```text
 //! cargo bench -p flusso-source-postgres --bench postgres
@@ -64,9 +66,12 @@ async fn setup() -> (
     PgDocumentBuilder,
     sqlx::PgPool,
 ) {
-    let (container, url) = match std::env::var("BENCH_PG_URL") {
-        Ok(url) => (None, url),
-        Err(_) => {
+    let (container, url) = match std::env::var("REVIEW_AB_PG_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    {
+        Some(url) => (None, url),
+        None => {
             let container = Postgres::default().start().await.unwrap();
             let port = container.get_host_port_ipv4(5432).await.unwrap();
             let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");

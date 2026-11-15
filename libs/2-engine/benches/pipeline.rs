@@ -46,9 +46,10 @@
 //! Backfill is deliberately *not* measured here: the `flusso-bench` scenarios
 //! measure it on the real binary.
 //!
-//! Requires Docker, or `BENCH_PG_URL` (an empty Postgres database) and
-//! `BENCH_OS_URL` (an OpenSearch with no `users` index) to run against
-//! existing servers; `just review-ab` passes both. Run with:
+//! Requires Docker. `just review-ab` instead hands it a fresh database and an
+//! emptied OpenSearch it started for this run, through `REVIEW_AB_PG_URL` and
+//! `REVIEW_AB_OS_URL`: variables only that command sets (so `BENCH_PG_URL` /
+//! `BENCH_OS_URL`, which `flusso-bench` reads, never reach this bench). Run with:
 //!
 //! ```text
 //! cargo bench -p flusso-engine --bench pipeline
@@ -358,9 +359,12 @@ async fn seed(pool: &sqlx::PgPool) {
 /// Bring up both services, seed Postgres, and create the OpenSearch index from
 /// the builder's own resolved mapping (the real `ensure_index` path).
 async fn setup() -> Services {
-    let (postgres, url) = match std::env::var("BENCH_PG_URL") {
-        Ok(url) => (None, url),
-        Err(_) => {
+    let (postgres, url) = match std::env::var("REVIEW_AB_PG_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    {
+        Some(url) => (None, url),
+        None => {
             let postgres = Postgres::default().start().await.unwrap();
             let pg_port = postgres.get_host_port_ipv4(5432).await.unwrap();
             let url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres");
@@ -376,9 +380,12 @@ async fn setup() -> Services {
         .unwrap();
     let documents: Arc<dyn DocumentBuilder> = Arc::new(builder);
 
-    let (opensearch, os_url) = match std::env::var("BENCH_OS_URL") {
-        Ok(url) => (None, url),
-        Err(_) => {
+    let (opensearch, os_url) = match std::env::var("REVIEW_AB_OS_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    {
+        Some(url) => (None, url),
+        None => {
             let (container, url) = start_opensearch().await;
             (Some(container), url)
         }

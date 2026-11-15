@@ -222,8 +222,10 @@ bench-components:
     cargo bench -p flusso-engine --bench pipeline
 
 # Compare the working tree with a base on the Docker-backed component benches
-# (postgres, cases, pipeline): base, head, then base again as a control, on the
-# Postgres versions asked for. Reuses a warm base build in ~/.cache/flusso/review-ab.
+# (postgres, cases, pipeline): base and head alternate, 3 rounds each, on the
+# Postgres versions asked for; a flagged case is re-run alone before it counts.
+# Reuses a warm base build in ~/.cache/flusso/review-ab (`--clean` removes it).
+# Never fetches: the base is origin/main as last fetched.
 # E.g. `just review-ab`, `just review-ab main --pg 14,16,18 --bench cases --filter key/`.
 [positional-arguments]
 review-ab base="origin/main" *args:

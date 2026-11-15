@@ -12,7 +12,7 @@
 //! | `batch` | 1, 10, 100, 1000, 10000 ids of a plain `int` root |
 //! | `hit_ratio` | 0, 50, 100 % of 1000 ids exist |
 //! | `key` | `int`, `uuid`, `varchar`, `numeric`, `float8`, `char(n)`, `citext` |
-//! | `root` | plain, hash- and range-partitioned, composite key, keyless (`REPLICA IDENTITY FULL`), a wide row with a large unread column, the same with a composite key, a never-analysed table |
+//! | `root` | hash- and range-partitioned on the key, composite key, keyless, wide unread column, wide with a composite key, never analysed (see [`Shape`]); the plain root is `batch/1000` |
 //!
 //! Every root has a `has_many` child keyed by the root's key type, two rows
 //! per root. Before measuring, each case is built once and checked: a case
@@ -20,8 +20,9 @@
 //! with a message, so an A/B comparison lists it on one side only.
 //!
 //! Not part of the PR gate nor the `main` history: `just bench-components` and
-//! `just review-ab` run it. Requires Docker, or `BENCH_PG_URL` (an empty
-//! database; the bench creates `citext`). Run with:
+//! `just review-ab` run it. Requires Docker; `just review-ab` instead hands it a
+//! fresh database through `REVIEW_AB_PG_URL`, a variable only that command sets
+//! (the bench creates `citext` in it). Run with:
 //!
 //! ```text
 //! cargo bench -p flusso-source-postgres --bench cases
@@ -86,138 +87,206 @@ impl KeyType {
     }
 }
 
-/// One root table: its DDL, how a row's key is spelled from `g`, and the key
-/// columns the WAL carries for it.
+/// How a root table is laid out.
+#[derive(Clone, Copy, PartialEq)]
+enum Shape {
+    Plain,
+    HashPartitioned,
+    RangePartitioned,
+    /// `PRIMARY KEY (tenant, id)`. The index declares `primary_key: id`, which
+    /// is not the table's key: `run` warns (`RootPrimaryKey`) and starts. That
+    /// warned-but-running shape is what is under test.
+    Composite,
+    /// No primary key, `REPLICA IDENTITY FULL`, so a change's key is every
+    /// column. The index declares `primary_key: id`: `run` warns and starts,
+    /// and that is the shape under test.
+    Keyless,
+    /// A ~19 KiB incompressible `payload` per row, TOASTed, that the document
+    /// never reads.
+    Wide,
+    /// [`Shape::Wide`] with [`Shape::Composite`]'s key.
+    WideComposite,
+    /// Autovacuum off on the root and its child and never vacuumed or
+    /// analysed: the planner has no statistics for either.
+    NeverAnalysed,
+}
+
+/// One root table and the case it stands for.
 struct Root {
     table: &'static str,
-    /// `CREATE TABLE …` plus any partitions or identity change.
-    ddl: &'static [&'static str],
-    /// Column list and `SELECT` over `generate_series(1, $1) g` that seeds it.
-    insert: &'static str,
+    /// `key/<case>` or `root/<case>`; `None` for the `plain` root the `batch`
+    /// and `hit_ratio` groups use.
+    case: Option<(&'static str, &'static str)>,
     sql_type: &'static str,
     key_type: KeyType,
-    /// Columns of the key a change carries: the primary key, or every column
-    /// of a table without one.
-    wal_key: &'static [&'static str],
+    /// The `id` of row `g` of `generate_series(1, $1) g`.
+    key_expr: &'static str,
+    shape: Shape,
     rows: i32,
 }
 
-const fn root(
-    table: &'static str,
-    sql_type: &'static str,
-    key_type: KeyType,
-    ddl: &'static [&'static str],
-    insert: &'static str,
-) -> Root {
-    Root {
-        table,
-        ddl,
-        insert,
-        sql_type,
-        key_type,
-        wal_key: &["id"],
-        rows: ROWS,
+const PAYLOAD: &str =
+    "(SELECT string_agg(md5(g::text || i::text), '') FROM generate_series(1, 600) i)";
+
+impl Root {
+    const fn new(table: &'static str, case: (&'static str, &'static str), shape: Shape) -> Self {
+        Self {
+            table,
+            case: Some(case),
+            sql_type: "int",
+            key_type: KeyType::Int,
+            key_expr: "g",
+            shape,
+            rows: ROWS,
+        }
+    }
+
+    const fn keyed(
+        table: &'static str,
+        case: &'static str,
+        sql_type: &'static str,
+        key_type: KeyType,
+        key_expr: &'static str,
+    ) -> Self {
+        Self {
+            sql_type,
+            key_type,
+            key_expr,
+            ..Self::new(table, ("key", case), Shape::Plain)
+        }
+    }
+
+    fn composite(&self) -> bool {
+        matches!(self.shape, Shape::Composite | Shape::WideComposite)
+    }
+
+    fn wide(&self) -> bool {
+        matches!(self.shape, Shape::Wide | Shape::WideComposite)
+    }
+
+    /// The columns of the key a change carries: the primary key, or every
+    /// column of a table without one.
+    fn wal_key(&self) -> &'static [&'static str] {
+        match self.shape {
+            Shape::Composite | Shape::WideComposite => &["tenant", "id"],
+            Shape::Keyless => &["id", "name"],
+            _ => &["id"],
+        }
+    }
+
+    /// `WITH (…)` storage options for the root and its child.
+    fn options(&self) -> &'static str {
+        if self.shape == Shape::NeverAnalysed {
+            " WITH (autovacuum_enabled = false)"
+        } else {
+            ""
+        }
+    }
+
+    fn ddl(&self) -> Vec<String> {
+        let (t, ty) = (self.table, self.sql_type);
+        let tenant = if self.composite() { "tenant int, " } else { "" };
+        let payload = if self.wide() { ", payload text" } else { "" };
+        let key = match self.shape {
+            Shape::Keyless => String::new(),
+            _ if self.composite() => ", PRIMARY KEY (tenant, id)".to_owned(),
+            _ => ", PRIMARY KEY (id)".to_owned(),
+        };
+        let partition = match self.shape {
+            Shape::HashPartitioned => " PARTITION BY HASH (id)",
+            Shape::RangePartitioned => " PARTITION BY RANGE (id)",
+            _ => "",
+        };
+        let mut ddl = vec![format!(
+            "CREATE TABLE {t} ({tenant}id {ty} NOT NULL, name text NOT NULL{payload}{key})\
+             {partition}{}",
+            self.options()
+        )];
+        for n in 0..4 {
+            match self.shape {
+                Shape::HashPartitioned => ddl.push(format!(
+                    "CREATE TABLE {t}_{n} PARTITION OF {t} \
+                     FOR VALUES WITH (MODULUS 4, REMAINDER {n})"
+                )),
+                Shape::RangePartitioned => {
+                    let bound = |n: i32| match n {
+                        0 => "MINVALUE".to_owned(),
+                        4 => "MAXVALUE".to_owned(),
+                        n => (n * ROWS / 4 + 1).to_string(),
+                    };
+                    ddl.push(format!(
+                        "CREATE TABLE {t}_{n} PARTITION OF {t} FOR VALUES FROM ({}) TO ({})",
+                        bound(n),
+                        bound(n + 1)
+                    ));
+                }
+                _ => {}
+            }
+        }
+        if self.shape == Shape::Keyless {
+            ddl.push(format!("ALTER TABLE {t} REPLICA IDENTITY FULL"));
+        }
+        ddl
+    }
+
+    fn insert(&self) -> String {
+        let (tenant, tenant_value) = if self.composite() {
+            ("tenant, ", "g % 7, ")
+        } else {
+            ("", "")
+        };
+        let (payload, payload_value) = if self.wide() {
+            (", payload", format!(", {PAYLOAD}"))
+        } else {
+            ("", String::new())
+        };
+        format!(
+            "INSERT INTO {} ({tenant}id, name{payload}) \
+             SELECT {tenant_value}{}, 'name ' || g{payload_value} FROM generate_series(1, $1) g",
+            self.table, self.key_expr
+        )
     }
 }
 
 fn roots() -> Vec<Root> {
+    use KeyType::{Float8, Int, Numeric, Text, Uuid};
     vec![
         Root {
+            case: None,
             rows: PLAIN_ROWS,
-            ..root("plain", "int", KeyType::Int, &["CREATE TABLE plain (id int PRIMARY KEY, name text)"],
-                "INSERT INTO plain (id, name) SELECT g, 'name ' || g FROM generate_series(1, $1) g")
+            ..Root::new("plain", ("", ""), Shape::Plain)
         },
-        root("k_int", "int", KeyType::Int, &["CREATE TABLE k_int (id int PRIMARY KEY, name text)"],
-            "INSERT INTO k_int (id, name) SELECT g, 'name ' || g FROM generate_series(1, $1) g"),
-        root("k_uuid", "uuid", KeyType::Uuid, &["CREATE TABLE k_uuid (id uuid PRIMARY KEY, name text)"],
-            "INSERT INTO k_uuid (id, name) SELECT md5(g::text)::uuid, 'name ' || g FROM generate_series(1, $1) g"),
-        root("k_varchar", "varchar(40)", KeyType::Text, &["CREATE TABLE k_varchar (id varchar(40) PRIMARY KEY, name text)"],
-            "INSERT INTO k_varchar (id, name) SELECT 'key-' || g, 'name ' || g FROM generate_series(1, $1) g"),
-        root("k_numeric", "numeric(12,2)", KeyType::Numeric, &["CREATE TABLE k_numeric (id numeric(12,2) PRIMARY KEY, name text)"],
-            "INSERT INTO k_numeric (id, name) SELECT g + 0.25, 'name ' || g FROM generate_series(1, $1) g"),
-        root("k_float8", "float8", KeyType::Float8, &["CREATE TABLE k_float8 (id float8 PRIMARY KEY, name text)"],
-            "INSERT INTO k_float8 (id, name) SELECT g + 0.5, 'name ' || g FROM generate_series(1, $1) g"),
-        root("k_char", "char(12)", KeyType::Text, &["CREATE TABLE k_char (id char(12) PRIMARY KEY, name text)"],
-            "INSERT INTO k_char (id, name) SELECT lpad(g::text, 12, 'k'), 'name ' || g FROM generate_series(1, $1) g"),
-        root("k_citext", "citext", KeyType::Text, &["CREATE TABLE k_citext (id citext PRIMARY KEY, name text)"],
-            "INSERT INTO k_citext (id, name) SELECT 'Key-' || g, 'name ' || g FROM generate_series(1, $1) g"),
-        root("s_hash", "int", KeyType::Int, &[
-                "CREATE TABLE s_hash (id int PRIMARY KEY, name text) PARTITION BY HASH (id)",
-                "CREATE TABLE s_hash_0 PARTITION OF s_hash FOR VALUES WITH (MODULUS 4, REMAINDER 0)",
-                "CREATE TABLE s_hash_1 PARTITION OF s_hash FOR VALUES WITH (MODULUS 4, REMAINDER 1)",
-                "CREATE TABLE s_hash_2 PARTITION OF s_hash FOR VALUES WITH (MODULUS 4, REMAINDER 2)",
-                "CREATE TABLE s_hash_3 PARTITION OF s_hash FOR VALUES WITH (MODULUS 4, REMAINDER 3)",
-            ],
-            "INSERT INTO s_hash (id, name) SELECT g, 'name ' || g FROM generate_series(1, $1) g"),
-        root("s_range", "int", KeyType::Int, &[
-                "CREATE TABLE s_range (id int PRIMARY KEY, name text) PARTITION BY RANGE (id)",
-                "CREATE TABLE s_range_0 PARTITION OF s_range FOR VALUES FROM (MINVALUE) TO (251)",
-                "CREATE TABLE s_range_1 PARTITION OF s_range FOR VALUES FROM (251) TO (501)",
-                "CREATE TABLE s_range_2 PARTITION OF s_range FOR VALUES FROM (501) TO (751)",
-                "CREATE TABLE s_range_3 PARTITION OF s_range FOR VALUES FROM (751) TO (MAXVALUE)",
-            ],
-            "INSERT INTO s_range (id, name) SELECT g, 'name ' || g FROM generate_series(1, $1) g"),
-        Root {
-            wal_key: &["tenant", "id"],
-            ..root("s_composite", "int", KeyType::Int,
-                &["CREATE TABLE s_composite (tenant int, id int, name text, PRIMARY KEY (tenant, id))"],
-                "INSERT INTO s_composite (tenant, id, name) SELECT g % 7, g, 'name ' || g FROM generate_series(1, $1) g")
-        },
-        Root {
-            wal_key: &["id", "name"],
-            ..root("s_keyless", "int", KeyType::Int, &[
-                    "CREATE TABLE s_keyless (id int NOT NULL, name text NOT NULL)",
-                    "ALTER TABLE s_keyless REPLICA IDENTITY FULL",
-                ],
-                "INSERT INTO s_keyless (id, name) SELECT g, 'name ' || g FROM generate_series(1, $1) g")
-        },
-        // About 19 KiB of incompressible text per row, so it is TOASTed: the
-        // document never reads it.
-        root("s_wide", "int", KeyType::Int, &["CREATE TABLE s_wide (id int PRIMARY KEY, name text, payload text)"],
-            "INSERT INTO s_wide (id, name, payload)
-             SELECT g, 'name ' || g, (SELECT string_agg(md5(g::text || i::text), '') FROM generate_series(1, 600) i)
-             FROM generate_series(1, $1) g"),
-        Root {
-            wal_key: &["tenant", "id"],
-            ..root("s_wide_composite", "int", KeyType::Int,
-                &["CREATE TABLE s_wide_composite (tenant int, id int, name text, payload text, PRIMARY KEY (tenant, id))"],
-                "INSERT INTO s_wide_composite (tenant, id, name, payload)
-                 SELECT g % 7, g, 'name ' || g, (SELECT string_agg(md5(g::text || i::text), '') FROM generate_series(1, 600) i)
-                 FROM generate_series(1, $1) g")
-        },
-        // Never analysed: the planner has no statistics for it.
-        root("s_unanalysed", "int", KeyType::Int,
-            &["CREATE TABLE s_unanalysed (id int PRIMARY KEY, name text) WITH (autovacuum_enabled = false)"],
-            "INSERT INTO s_unanalysed (id, name) SELECT g, 'name ' || g FROM generate_series(1, $1) g"),
+        Root::keyed("k_int", "int", "int", Int, "g"),
+        Root::keyed("k_uuid", "uuid", "uuid", Uuid, "md5(g::text)::uuid"),
+        Root::keyed("k_varchar", "varchar", "varchar(40)", Text, "'key-' || g"),
+        Root::keyed("k_numeric", "numeric", "numeric(12,2)", Numeric, "g + 0.25"),
+        Root::keyed("k_float8", "float8", "float8", Float8, "g + 0.5"),
+        Root::keyed("k_char", "char", "char(12)", Text, "lpad(g::text, 12, 'k')"),
+        Root::keyed("k_citext", "citext", "citext", Text, "'Key-' || g"),
+        Root::new(
+            "s_hash",
+            ("root", "hash_partitioned"),
+            Shape::HashPartitioned,
+        ),
+        Root::new(
+            "s_range",
+            ("root", "range_partitioned"),
+            Shape::RangePartitioned,
+        ),
+        Root::new("s_composite", ("root", "composite_key"), Shape::Composite),
+        Root::new("s_keyless", ("root", "keyless"), Shape::Keyless),
+        Root::new("s_wide", ("root", "wide_unread"), Shape::Wide),
+        Root::new(
+            "s_wide_composite",
+            ("root", "wide_composite_key"),
+            Shape::WideComposite,
+        ),
+        Root::new(
+            "s_unanalysed",
+            ("root", "never_analysed"),
+            Shape::NeverAnalysed,
+        ),
     ]
-}
-
-/// The group and name of the `root` case each table stands for.
-fn shape_case(table: &str) -> Option<&'static str> {
-    Some(match table {
-        "plain" => "plain",
-        "s_hash" => "hash_partitioned",
-        "s_range" => "range_partitioned",
-        "s_composite" => "composite_key",
-        "s_keyless" => "keyless",
-        "s_wide" => "wide_unread",
-        "s_wide_composite" => "wide_composite_key",
-        "s_unanalysed" => "never_analysed",
-        _ => return None,
-    })
-}
-
-fn key_case(table: &str) -> Option<&'static str> {
-    Some(match table {
-        "k_int" => "int",
-        "k_uuid" => "uuid",
-        "k_varchar" => "varchar",
-        "k_numeric" => "numeric",
-        "k_float8" => "float8",
-        "k_char" => "char",
-        "k_citext" => "citext",
-        _ => return None,
-    })
 }
 
 fn runtime() -> Runtime {
@@ -229,7 +298,10 @@ fn runtime() -> Runtime {
 }
 
 async fn connect() -> (Option<ContainerAsync<Postgres>>, String) {
-    if let Ok(url) = std::env::var("BENCH_PG_URL") {
+    if let Some(url) = std::env::var("REVIEW_AB_PG_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    {
         return (None, url);
     }
     let container = Postgres::default()
@@ -250,43 +322,36 @@ async fn seed(pool: &sqlx::PgPool, roots: &[Root]) {
         .await
         .unwrap();
     for root in roots {
-        for ddl in root.ddl {
-            sqlx::query(AssertSqlSafe(*ddl))
-                .execute(pool)
-                .await
-                .unwrap();
+        for ddl in root.ddl() {
+            sqlx::query(AssertSqlSafe(ddl)).execute(pool).await.unwrap();
         }
-        sqlx::query(AssertSqlSafe(root.insert))
+        sqlx::query(AssertSqlSafe(root.insert()))
             .bind(root.rows)
             .execute(pool)
             .await
             .unwrap();
-        let items = format!("{}_items", root.table);
+        let (table, items, options) = (root.table, format!("{}_items", root.table), root.options());
         for sql in [
             format!(
-                "CREATE TABLE {items} (id serial PRIMARY KEY, parent {} NOT NULL, label text)",
+                "CREATE TABLE {items} (id serial PRIMARY KEY, parent {} NOT NULL, label text)\
+                 {options}",
                 root.sql_type
             ),
             format!("CREATE INDEX ON {items} (parent)"),
             format!(
-                "INSERT INTO {items} (parent, label) SELECT id, 'item ' || n FROM {}, generate_series(1, 2) n",
-                root.table
+                "INSERT INTO {items} (parent, label) \
+                 SELECT id, 'item ' || n FROM {table}, generate_series(1, 2) n"
             ),
         ] {
             sqlx::query(AssertSqlSafe(sql)).execute(pool).await.unwrap();
         }
-    }
-    for root in roots {
-        let vacuum = if root.table == "s_unanalysed" {
-            "VACUUM"
-        } else {
-            "VACUUM ANALYZE"
-        };
-        for table in [root.table.to_owned(), format!("{}_items", root.table)] {
-            sqlx::query(AssertSqlSafe(format!("{vacuum} {table}")))
-                .execute(pool)
-                .await
-                .unwrap();
+        if root.shape != Shape::NeverAnalysed {
+            for table in [table, &items] {
+                sqlx::query(AssertSqlSafe(format!("VACUUM ANALYZE {table}")))
+                    .execute(pool)
+                    .await
+                    .unwrap();
+            }
         }
     }
 }
@@ -294,7 +359,7 @@ async fn seed(pool: &sqlx::PgPool, roots: &[Root]) {
 /// Every root's change keys, in key order, as the WAL decoder would read them.
 async fn wal_keys(pool: &sqlx::PgPool, root: &Root) -> Vec<RowKey> {
     let columns = root
-        .wal_key
+        .wal_key()
         .iter()
         .map(|c| format!("{c}::text"))
         .collect::<Vec<_>>()
@@ -307,17 +372,15 @@ async fn wal_keys(pool: &sqlx::PgPool, root: &Root) -> Vec<RowKey> {
     rows.iter()
         .map(|row| {
             RowKey(
-                root.wal_key
+                root.wal_key()
                     .iter()
                     .enumerate()
                     .map(|(i, name)| {
                         let text: String = row.get(i);
-                        let ty = if *name == "id" {
-                            root.key_type
-                        } else if *name == "name" {
-                            KeyType::Text
-                        } else {
-                            KeyType::Int
+                        let ty = match *name {
+                            "id" => root.key_type,
+                            "name" => KeyType::Text,
+                            _ => KeyType::Int,
                         };
                         (column(name), ty.value(&text))
                     })
@@ -405,7 +468,7 @@ async fn setup() -> (
         keys.insert(root.table, wal_keys(&pool, root).await);
     }
     let mut planned: Vec<(Case, usize)> = Vec::new();
-    let plain = &keys["plain"];
+    let plain = keys.get("plain").unwrap();
     for &n in BATCHES {
         if let Some(ids) = resolve(&builder, "plain", plain.get(..n).unwrap()).await {
             planned.push((
@@ -434,23 +497,19 @@ async fn setup() -> (
         }
     }
     for root in &roots {
-        let names = [
-            ("key", key_case(root.table)),
-            ("root", shape_case(root.table)),
-        ];
-        for (group, name) in names {
-            let Some(name) = name else { continue };
-            let wanted = keys[root.table].get(..ROWS as usize).unwrap();
-            if let Some(ids) = resolve(&builder, root.table, wanted).await {
-                planned.push((
-                    Case {
-                        group,
-                        name: name.to_owned(),
-                        ids,
-                    },
-                    wanted.len(),
-                ));
-            }
+        let Some((group, name)) = root.case else {
+            continue;
+        };
+        let wanted = keys.get(root.table).unwrap().get(..ROWS as usize).unwrap();
+        if let Some(ids) = resolve(&builder, root.table, wanted).await {
+            planned.push((
+                Case {
+                    group,
+                    name: name.to_owned(),
+                    ids,
+                },
+                wanted.len(),
+            ));
         }
     }
     let mut cases = Vec::with_capacity(planned.len());

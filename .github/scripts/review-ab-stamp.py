@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """Record a warm base build, and tell whether it is still current.
 
-    review-ab-stamp.py write <stamp> --commit SHA --toolchain TEXT --target DIR
-                             --executables TSV [--root DIR --file REL ...]
-    review-ab-stamp.py check <stamp> --commit SHA --toolchain TEXT --target DIR
-                             [--root DIR --file REL ...]
+    review-ab-stamp.py write <stamp> --commit SHA --toolchain TEXT --build-env TEXT
+                             --target DIR --executables TSV [--root DIR --file REL ...]
+    review-ab-stamp.py check <stamp> --commit SHA --toolchain TEXT --build-env TEXT
+                             --target DIR [--need BENCH ...] [--root DIR --file REL ...]
 
 `write` stores, as JSON: the base commit, the toolchain (`rustc -vV`), the
-sha256 of each bench file laid over the base (`--file`, relative to `--root`,
+build settings (`RUSTFLAGS`, `CARGO_PROFILE_*`, the build script's sha256: any
+text the caller passes), the sha256 of each bench file laid over the base (`--file`, relative to `--root`,
 the head tree), and the bench executables bench-in-process.sh recorded in TSV
 (`<bench>\t<path>\t<sha256>` lines).
 
-`check` exits 0 and prints `current` when the stamp matches all of these and
-every recorded executable still exists inside `--target` with its sha256.
+`check` exits 0 and prints `current` when the stamp matches all of these,
+every bench named by `--need` was built, and every recorded executable still
+exists inside `--target` with its sha256.
 Otherwise it exits 1 and prints the first reason the build is stale.
 """
 import argparse
@@ -43,12 +45,22 @@ def executables(tsv: pathlib.Path) -> dict[str, list[str]]:
     return out
 
 
-def stale_reason(stamp: dict, commit: str, toolchain: str, target: pathlib.Path, files: dict[str, str]) -> str | None:
+def stale_reason(
+    stamp: dict,
+    commit: str,
+    toolchain: str,
+    build_env: str,
+    target: pathlib.Path,
+    files: dict[str, str],
+    need: list[str],
+) -> str | None:
     """Why the stamped build no longer stands for this base, or None when it does."""
     if stamp.get("commit") != commit:
         return f"base moved {str(stamp.get('commit'))[:12]} → {commit[:12]}"
     if stamp.get("toolchain") != toolchain:
         return "toolchain changed"
+    if stamp.get("build_env") != build_env:
+        return "build settings changed"
     recorded = stamp.get("files", {})
     for rel in sorted(set(recorded) | set(files)):
         if recorded.get(rel) != files.get(rel):
@@ -56,6 +68,9 @@ def stale_reason(stamp: dict, commit: str, toolchain: str, target: pathlib.Path,
     exes = stamp.get("executables") or {}
     if not exes:
         return "no executable recorded"
+    for name in need:
+        if name not in exes:
+            return f"bench not built: {name}"
     target = target.resolve()
     for name, (exe, digest) in sorted(exes.items()):
         path = pathlib.Path(exe).resolve()
@@ -74,6 +89,8 @@ def main() -> int:
     parser.add_argument("stamp", type=pathlib.Path)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--toolchain", required=True)
+    parser.add_argument("--build-env", required=True)
+    parser.add_argument("--need", action="append", default=[])
     parser.add_argument("--target", type=pathlib.Path, required=True)
     parser.add_argument("--executables", type=pathlib.Path)
     parser.add_argument("--root", type=pathlib.Path)
@@ -87,6 +104,7 @@ def main() -> int:
         stamp = {
             "commit": args.commit,
             "toolchain": args.toolchain,
+            "build_env": args.build_env,
             "files": files,
             "executables": executables(args.executables),
         }
@@ -99,7 +117,7 @@ def main() -> int:
     except (OSError, ValueError):
         print("no warm build recorded")
         return 1
-    reason = stale_reason(stamp, args.commit, args.toolchain, args.target, files)
+    reason = stale_reason(stamp, args.commit, args.toolchain, args.build_env, args.target, files, args.need)
     print(reason or "current")
     return 1 if reason else 0
 
