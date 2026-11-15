@@ -18,7 +18,8 @@
 //! assert!(engine.compile("let x = undefined_name;").is_err());
 //! ```
 
-use rhai::Engine;
+use rhai::packages::{Package, StandardPackage};
+use rhai::{Engine, Module};
 
 /// Operations one script call may run.
 pub const MAX_OPERATIONS: u64 = 1_000_000;
@@ -31,9 +32,25 @@ pub const MAX_STRING_SIZE: usize = 1 << 20;
 /// The most elements an array (or entries a map) may hold.
 pub const MAX_COLLECTION_SIZE: usize = 100_000;
 
+/// How many strings the engine interns, as `Engine::new` sets it.
+const STRINGS_INTERNED: usize = 256;
+
+/// Rhai's standard package with a decimal's `to_float` replaced by flusso's,
+/// in the one module `Engine::new` would register: a second module, or a
+/// function in the global namespace, slows every call (`scripted/flat` ~2.5%).
+fn standard_library() -> Module {
+    let mut library = (*StandardPackage::new().as_shared_module()).clone();
+    library.set_native_fn("to_float", |value: rust_decimal::Decimal| {
+        Ok(crate::value::decimal_to_float(value))
+    });
+    library
+}
+
 /// A fresh sandboxed engine.
 pub fn engine() -> Engine {
-    let mut engine = Engine::new();
+    let mut engine = Engine::new_raw();
+    engine.set_max_strings_interned(STRINGS_INTERNED);
+    engine.register_global_module(standard_library().into());
     engine
         .disable_symbol("eval")
         .set_strict_variables(true)
@@ -44,7 +61,6 @@ pub fn engine() -> Engine {
         .set_max_string_size(MAX_STRING_SIZE)
         .set_max_array_size(MAX_COLLECTION_SIZE)
         .set_max_map_size(MAX_COLLECTION_SIZE);
-    engine.register_fn("to_float", crate::value::decimal_to_float);
     engine.on_print(|_| {});
     engine.on_debug(|_, _, _| {});
     engine
