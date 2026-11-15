@@ -75,13 +75,22 @@ When a regression is found the script opens one issue, "Performance regression o
 
 Around that rule, without changing what it flags:
 
-- **Too noisy to watch.** A series that swings a lot from run to run needs a lasting step larger than its threshold before the rule catches it. For each series the script works out that smallest step: three times the window's median absolute deviation over its median, taken as the median over the series' last 20 windows. It prints every series that needs more than its threshold, in the `scenarios` job summary and in the issue under the findings. Silence on one of them is not a sign it's fine.
-- **Malformed entries.** A value that isn't a number, a bench without a name, a point that isn't an object, or `"commit": null` inside a readable data file is skipped with a `warning:` line instead of crashing the check. A point without a commit reads as an unknown commit.
-- **Unreadable history.** A missing, truncated or non-object data file fails the step with an `error:` line, before `gh` is called. The issue is never closed on a history that couldn't be read.
+- **Too noisy to watch.** For each series, the script measures how large a lasting step the rule catches reliably:
+  - it injects a step into the series' history at each of its last 20 runs, for steps of 1.2, 1.5, 2, 3, 4, 6 and 8 times its threshold;
+  - it runs the rule on the step's second run;
+  - the figure is the smallest step caught 9 times out of 10 ("a lasting step of about +150% is caught within two runs 9 times out of 10"), or the largest step tried when none reached that.
+
+  Every series whose figure is above its threshold is printed in the `scenarios` job summary and listed in the issue under the findings. Silence on one of them is not a sign it's fine. On the history as of November 2026 every series is listed: the quietest (the `complex` scenario's p50 latency and peak RSS) need +38–40%, most need +75–200%, and the p99 latencies, `complex/ci/cpu_seconds` and the four throughput series aren't caught 9 times out of 10 even at the largest step tried.
+- **Malformed entries.** Inside a readable data file, these are skipped with a `warning:` line instead of crashing the check:
+  - a value that isn't a number (`true`/`false` still reads as 1/0, as before);
+  - a bench without a name or that isn't an object;
+  - a point that isn't an object, or whose `benches` isn't a list;
+  - `"commit": null`, which is read as an unknown commit.
+- **Unreadable history.** A data file that is missing, truncated or not a JSON object fails the step with an `error:` line before `gh` is called, and so does one whose `entries` isn't an object or holds a suite that isn't a list. The issue is never closed on a history that couldn't be read.
 
 ### Runner facts
 
-Every data point records the machine it ran on, in its `extra`: the CPU model, the core count, and three calibrations of fixed work that runs no flusso code (a SHA-256 pass over 64 MiB, a 256 MiB memory copy, a synced 64 MiB disk write). `.github/scripts/bench-runner-facts.py` stamps them in the `scenarios` job. A calibration that can't run is left out with a warning, and the script never fails the job. Nothing reads these facts yet; they're for the rule's next version.
+Every data point records the machine it ran on, in its `extra`: the CPU model, the core count, and three calibrations of fixed work that runs no flusso code (a SHA-256 pass over 64 MiB, a 256 MiB memory copy, a synced 64 MiB disk write). `.github/scripts/bench-runner-facts.py` stamps them in the `scenarios` job, writing each file through a temporary file and a rename. It never fails the job: a calibration that can't run (a full or read-only disk, too little memory) is left out, and a file it can't read or write is left as it was, each with a warning. Nothing reads these facts yet; they're for the rule's next version. A point's image is read from `extra.images` only, so a point carrying runner facts and no image keeps the same window as before.
 
 ### Known limits
 

@@ -98,10 +98,13 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   calls a regression only on two consecutive points past 25% (20% RSS) and past three times the
   window's median absolute deviation (a noisy series needs a larger move, issue #317), image-tag change restarts
   the window, one self-maintained issue. Around the rule (PR #331, flagging nothing differently): it lists
-  the series too noisy to watch (smallest catchable step past the threshold) in the job summary and the
-  issue, skips malformed entries with a warning, and exits 1 before `gh` on an unreadable data file;
-  `bench-runner-facts.py` stamps every point with the runner (CPU model, cores, no-flusso calibrations),
-  read by nothing yet, never failing the job. Tests: `python3 -m unittest discover -s .github/scripts -p
+  the series too noisy to watch (the smallest lasting step the rule catches within two runs 9 times out
+  of 10, measured by injecting steps at each of the last 20 runs and running the rule, when above the
+  threshold) in the job summary and the issue, skips malformed entries with a warning, and exits 1 before
+  `gh` on an unreadable or structurally wrong data file; an `extra` without `images` reads as no image, so
+  runner facts never restart a window; `bench-runner-facts.py` stamps every point with the runner (CPU
+  model, cores, no-flusso calibrations; written via temp file + rename), read by nothing yet, never
+  failing the job. Tests: `python3 -m unittest discover -s .github/scripts -p
   'test_*.py'` (CI's `scripts` job) over the real history in `.github/scripts/fixtures/`, with a frozen
   copy of the rule that every change must flag identically to. `just load` is the soak script — not a benchmark.
 - The `#[ignore]`d e2e tests live in `source-postgres`'s `integration`,
