@@ -73,6 +73,57 @@ pub(super) enum RootKey {
     Shared(TieBreak),
 }
 
+/// How a batch writes its keys, decided per chunk from facts known when the
+/// statement is built ([`KeyForm::for_batch`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum KeyForm {
+    /// Placeholders in an array constructor, padded to a power of two
+    /// ([`key_constructor`]). Postgres sees every key: it knows the batch's
+    /// length, so a generic plan of a small batch is cached, and it prunes
+    /// a root partitioned by its key under a generic plan too.
+    Constructor,
+    /// One array parameter per kind ([`key_arrays`]): a short statement
+    /// bound in one go, which costs a large batch less than placeholders do.
+    /// Postgres takes such an array for ten elements and can't prune
+    /// partitions by it at run time.
+    Parameters,
+}
+
+/// Below this many keys a batch writes them as a constructor: Postgres takes
+/// an array parameter for ten elements, so a smaller batch would look cheaper
+/// planned afresh every call.
+const SMALL_BATCH: usize = 16;
+
+impl KeyForm {
+    /// A constructor for a partitioned root (its run-time pruning reads keys
+    /// one by one) and for fewer than [`SMALL_BATCH`] keys; parameters
+    /// otherwise.
+    pub(super) fn for_batch(partitioned: bool, keys: usize) -> Self {
+        if partitioned || keys < SMALL_BATCH {
+            Self::Constructor
+        } else {
+            Self::Parameters
+        }
+    }
+}
+
+/// What a batched statement is built for: whether its root key is unique,
+/// and how it writes its keys.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Shape<'a> {
+    pub(super) root_key: &'a RootKey,
+    pub(super) form: KeyForm,
+}
+
+impl<'a> From<&'a RootKey> for Shape<'a> {
+    fn from(root_key: &'a RootKey) -> Self {
+        Self {
+            root_key,
+            form: KeyForm::Constructor,
+        }
+    }
+}
+
 /// How the rows sharing a key are ordered to pick the one that builds: an
 /// `ORDER BY` list over the root row. It reads no column the document
 /// doesn't read, so a wide column the document leaves alone is never fetched:
@@ -207,7 +258,7 @@ pub(super) fn bind_param<'q>(query: PgQuery<'q>, value: &GenericValue) -> Result
     })
 }
 
-/// Bind an array of scalars of one kind (a batch's keys, [`key_list`]) as
+/// Bind an array of scalars of one kind (a batch's keys, [`key_arrays`]) as
 /// the array of the type [`sql::bound_type`] names for them.
 fn bind_array<'q>(query: PgQuery<'q>, items: &[GenericValue]) -> Result<PgQuery<'q>> {
     fn all<T>(items: &[GenericValue], take: impl Fn(&GenericValue) -> Option<T>) -> Result<Vec<T>> {
@@ -396,21 +447,21 @@ pub(super) fn document_query(
 /// The pairing costs a light document about a quarter of its build, so a
 /// batch whose keys pair by value (`matching::pairs_by_key`) runs the inner
 /// level alone instead: [`documents_by_key_query`].
-pub(super) fn documents_query(
+pub(super) fn documents_query<'a>(
     schema: &IndexSchema,
     pk_column: &ColumnName,
     keys: &[GenericValue],
     pks: &HashMap<String, ColumnName>,
     col_types: &HashMap<(String, String), String>,
     bytes: &ByteColumns,
-    root_key: &RootKey,
+    shape: impl Into<Shape<'a>>,
 ) -> Result<(SqlString, Vec<GenericValue>)> {
     batched(
         schema,
         pk_column,
         keys,
         (pks, col_types, bytes),
-        root_key,
+        shape.into(),
         None,
     )
 }
@@ -420,21 +471,21 @@ pub(super) fn documents_query(
 /// `base_name`, a deterministic collation) and every key is of the kind the
 /// column reads back as. Main's own query: the inner level alone, selecting
 /// the row's key under [`DOC_KEY`] beside its document, with no join.
-pub(super) fn documents_by_key_query(
+pub(super) fn documents_by_key_query<'a>(
     schema: &IndexSchema,
     pk_column: &ColumnName,
     keys: &[GenericValue],
     pks: &HashMap<String, ColumnName>,
     col_types: &HashMap<(String, String), String>,
     bytes: &ByteColumns,
-    (root_key, key_type, base_name): (&RootKey, &str, &str),
+    (shape, key_type, base_name): (impl Into<Shape<'a>>, &str, &str),
 ) -> Result<(SqlString, Vec<GenericValue>)> {
     batched(
         schema,
         pk_column,
         keys,
         (pks, col_types, bytes),
-        root_key,
+        shape.into(),
         Some((key_type, base_name)),
     )
 }
@@ -453,7 +504,7 @@ fn batched(
     pk_column: &ColumnName,
     keys: &[GenericValue],
     (pks, col_types, bytes): Catalog<'_>,
-    root_key: &RootKey,
+    Shape { root_key, form }: Shape<'_>,
     by_key: Option<(&str, &str)>,
 ) -> Result<(SqlString, Vec<GenericValue>)> {
     let mut builder = Builder {
@@ -474,13 +525,15 @@ fn batched(
         schema.primary_key.as_ref(),
     )?;
 
-    let requested = key_list(
-        &mut builder,
-        keys,
-        &schema.table,
-        pk_column,
-        by_key.is_none(),
-    )?;
+    let with_positions = by_key.is_none();
+    let requested = match form {
+        KeyForm::Constructor => {
+            key_constructor(&mut builder, keys, &schema.table, pk_column, with_positions)?
+        }
+        KeyForm::Parameters => {
+            key_arrays(&mut builder, keys, &schema.table, pk_column, with_positions)?
+        }
+    };
     let root_pk = qcol(ROOT, pk_column);
     let mut predicate = format!("{root_pk} = ANY({})", requested.any);
     if let Some(soft_delete) = builder.soft_delete_predicate(schema)? {
@@ -556,7 +609,7 @@ struct KeyList {
 /// reads. The position form unnests the same constructor beside one `bigint[]`
 /// parameter of the position each key was requested at, `0` for a pad, and
 /// drops the pads before the join.
-fn key_list(
+fn key_constructor(
     builder: &mut Builder<'_>,
     keys: &[GenericValue],
     table: &TableName,
@@ -606,6 +659,57 @@ fn key_list(
              WHERE \"{NUMBERED}\".\"{POSITION}\" > 0)"
         )),
         any: array,
+    })
+}
+
+/// The keys as one array parameter per type they are bound as, each cast
+/// element by element to the key column's type ([`Builder::key_array`]), in a
+/// fixed order of those types: one statement text per kind, however many keys.
+/// Keys of one kind keep their order, so `unnest … WITH ORDINALITY` numbers
+/// them; keys of several kinds are unnested beside a `bigint[]` of their
+/// positions, one `unnest` per kind.
+fn key_arrays(
+    builder: &mut Builder<'_>,
+    keys: &[GenericValue],
+    table: &TableName,
+    column: &ColumnName,
+    with_positions: bool,
+) -> Result<KeyList> {
+    let mut kinds: Vec<(&'static str, Vec<GenericValue>, Vec<i64>)> = Vec::new();
+    for (at, key) in keys.iter().enumerate() {
+        let bound = sql::bound_type(key)
+            .ok_or_else(|| SourceError::Query("cannot bind null, array, or map as a key".into()))?;
+        let position = i64::try_from(at + 1)
+            .map_err(|_| SourceError::Query("too many keys in one batch".into()))?;
+        match kinds.iter_mut().find(|(kind, _, _)| *kind == bound) {
+            Some((_, values, positions)) => {
+                values.push(key.clone());
+                positions.push(position);
+            }
+            None => kinds.push((bound, vec![key.clone()], vec![position])),
+        }
+    }
+    kinds.sort_by_key(|(kind, _, _)| *kind);
+    if let [(bound, values, _)] = kinds.as_mut_slice() {
+        let array = builder.key_array(std::mem::take(values), bound, table, column)?;
+        return Ok(KeyList {
+            rows: with_positions.then(|| format!("unnest({array}) WITH ORDINALITY")),
+            any: array,
+        });
+    }
+    let mut arrays = Vec::with_capacity(kinds.len());
+    let mut unnests = Vec::with_capacity(kinds.len());
+    for (bound, values, positions) in kinds {
+        let array = builder.key_array(values, bound, table, column)?;
+        if with_positions {
+            let positions = builder.positions(positions);
+            unnests.push(format!("SELECT * FROM unnest({array}, {positions})"));
+        }
+        arrays.push(array);
+    }
+    Ok(KeyList {
+        any: arrays.join(" || "),
+        rows: with_positions.then(|| format!("({})", unnests.join(" UNION ALL "))),
     })
 }
 

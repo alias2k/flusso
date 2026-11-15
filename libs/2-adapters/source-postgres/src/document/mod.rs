@@ -261,6 +261,7 @@ struct BatchCatalog {
     bytes: query::ByteColumns,
     root_key: query::RootKey,
     key: Arc<ColumnMeta>,
+    partitioned: bool,
 }
 
 impl BatchCatalog {
@@ -342,7 +343,7 @@ pub struct PgDocumentBuilder {
     plans: Arc<HashMap<IndexName, value::DocumentPlan>>,
     /// Cache of each `(schema, table)`'s single-column primary key.
     pk_cache: Arc<Mutex<HashMap<(String, String), ColumnName>>>,
-    /// Cache of each root table's primary key columns, any number of them.
+    /// Cache of each root table's primary key and whether it is partitioned.
     root_key_cache: Arc<Mutex<RootKeys>>,
     /// Cache of each `(schema, table, column)`'s SQL type, used to cast filter
     /// operands to the column's real type rather than comparing as text.
@@ -360,8 +361,18 @@ pub struct PgDocumentBuilder {
     keyless_warned: Arc<Mutex<HashSet<TableName>>>,
 }
 
-/// Each `(schema, table)`'s primary key columns, any number of them.
-type RootKeys = HashMap<(String, String), Arc<[ColumnName]>>;
+/// Each root `(schema, table)`'s catalog facts.
+type RootKeys = HashMap<(String, String), RootTable>;
+
+/// What the catalog says of a root table that shapes its batched build.
+#[derive(Debug, Clone)]
+struct RootTable {
+    /// Its primary key columns, any number of them.
+    primary_key: Arc<[ColumnName]>,
+    /// Whether it is partitioned, so a batch writes its keys where run-time
+    /// pruning reads them ([`query::KeyForm`]).
+    partitioned: bool,
+}
 
 /// A builder whose pool never connects, for the `resolve` bench.
 #[cfg(feature = "bench")]
@@ -566,12 +577,14 @@ impl PgDocumentBuilder {
         let key = self
             .column_meta(&schema.db_schema, &schema.table, pk_column)
             .await?;
+        let partitioned = self.root_table(schema).await?.partitioned;
         Ok(BatchCatalog {
             pks,
             col_types,
             bytes,
             root_key,
             key,
+            partitioned,
         })
     }
 
@@ -599,7 +612,12 @@ impl PgDocumentBuilder {
             bytes,
             root_key,
             key,
+            partitioned,
         } = catalog;
+        let shape = query::Shape {
+            root_key,
+            form: query::KeyForm::for_batch(*partitioned, chunk.len()),
+        };
         let (sql, params) = if by_key {
             query::documents_by_key_query(
                 schema,
@@ -608,10 +626,10 @@ impl PgDocumentBuilder {
                 pks,
                 col_types,
                 bytes,
-                (root_key, &key.key_type, &key.base_name),
+                (shape, &key.key_type, &key.base_name),
             )?
         } else {
-            query::documents_query(schema, pk_column, &keys, pks, col_types, bytes, root_key)?
+            query::documents_query(schema, pk_column, &keys, pks, col_types, bytes, shape)?
         };
 
         let mut statement = sqlx::query(sql);
@@ -684,6 +702,38 @@ impl PgDocumentBuilder {
         Ok(column)
     }
 
+    /// What the catalog says of the root table: its primary key columns, any
+    /// number of them, and whether it is partitioned (cached).
+    async fn root_table(&self, schema: &kernel::IndexSchema) -> Result<RootTable> {
+        let cache_key = (schema.db_schema.to_string(), schema.table.to_string());
+        if let Some(root) = self
+            .root_key_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&cache_key)
+        {
+            return Ok(root.clone());
+        }
+        let root = RootTable {
+            primary_key: self
+                .fetch_primary_key(&schema.db_schema, &schema.table)
+                .await?
+                .into(),
+            partitioned: sqlx::query_scalar(
+                "SELECT c.relkind = 'p' FROM pg_class c WHERE c.oid = $1::regclass",
+            )
+            .bind(format!("{}.{}", schema.db_schema, schema.table))
+            .fetch_one(&self.pool)
+            .await
+            .map_err(query_err)?,
+        };
+        self.root_key_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(cache_key, root.clone());
+        Ok(root)
+    }
+
     /// Whether `key_columns` are the root table's whole primary key, so a key
     /// matches at most one row (the primary key is cached), and if not how
     /// the rows sharing a key are ordered ([`query::TieBreak`]).
@@ -692,27 +742,7 @@ impl PgDocumentBuilder {
         schema: &kernel::IndexSchema,
         key_columns: &[&ColumnName],
     ) -> Result<query::RootKey> {
-        let cache_key = (schema.db_schema.to_string(), schema.table.to_string());
-        let cached = self
-            .root_key_cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&cache_key)
-            .cloned();
-        let primary_key = match cached {
-            Some(columns) => columns,
-            None => {
-                let columns: Arc<[ColumnName]> = self
-                    .fetch_primary_key(&schema.db_schema, &schema.table)
-                    .await?
-                    .into();
-                self.root_key_cache
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(cache_key, Arc::clone(&columns));
-                columns
-            }
-        };
+        let primary_key = self.root_table(schema).await?.primary_key;
         if primary_key.iter().eq(key_columns.iter().copied()) {
             return Ok(query::RootKey::Unique);
         }

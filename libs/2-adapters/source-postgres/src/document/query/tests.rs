@@ -1643,3 +1643,89 @@ fn a_tie_break_with_nothing_to_order_by_renders_no_order() {
         batched.as_str()
     );
 }
+
+/// A partitioned root and a batch of fewer than sixteen keys write their keys
+/// as a constructor; any other batch as array parameters.
+#[test]
+fn a_batch_writes_its_keys_in_the_form_its_root_and_size_need() {
+    assert_eq!(KeyForm::for_batch(false, 1), KeyForm::Constructor);
+    assert_eq!(KeyForm::for_batch(false, 15), KeyForm::Constructor);
+    assert_eq!(KeyForm::for_batch(false, 16), KeyForm::Parameters);
+    assert_eq!(KeyForm::for_batch(false, 512), KeyForm::Parameters);
+    assert_eq!(KeyForm::for_batch(true, 512), KeyForm::Constructor);
+}
+
+/// As array parameters, one kind of keys is one parameter that both the
+/// `= ANY` and the `unnest` read; several kinds are one each, unnested beside
+/// their positions.
+#[test]
+fn a_large_batch_passes_its_keys_as_one_array_per_kind() {
+    let schema = index(Some("id"), None, vec![col_field("id", "id")]);
+    let unique = RootKey::Unique;
+    let parameters = Shape {
+        root_key: &unique,
+        form: KeyForm::Parameters,
+    };
+    let (sql, params) = documents_query(
+        &schema,
+        &c("id"),
+        &[GenericValue::Int(7), GenericValue::Int(9)],
+        &HashMap::new(),
+        &id_types(),
+        &ByteColumns::new(),
+        parameters,
+    )
+    .unwrap();
+    assert!(
+        sql.as_str().contains(
+            r#"WHERE "root"."id" = ANY($1::int4[]::bigint[]) OFFSET 0) AS "flusso_built" FULL JOIN unnest($1::int4[]::bigint[]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position")"#
+        ),
+        "{}",
+        sql.as_str()
+    );
+    assert_eq!(
+        params,
+        vec![GenericValue::Array(vec![
+            GenericValue::Int(7),
+            GenericValue::Int(9)
+        ])]
+    );
+    let (sql, params) = documents_query(
+        &schema,
+        &c("id"),
+        &[
+            GenericValue::Int(7),
+            GenericValue::BigInt(9),
+            GenericValue::Int(8),
+        ],
+        &HashMap::new(),
+        &id_types(),
+        &ByteColumns::new(),
+        parameters,
+    )
+    .unwrap();
+    assert!(
+        sql.as_str().contains(
+            r#"ANY($1::int4[]::bigint[] || $3::int8[]::bigint[]) OFFSET 0) AS "flusso_built" FULL JOIN (SELECT * FROM unnest($1::int4[]::bigint[], $2::int8[]) UNION ALL SELECT * FROM unnest($3::int8[]::bigint[], $4::int8[]))"#
+        ),
+        "{}",
+        sql.as_str()
+    );
+    assert_eq!(params.len(), 4);
+    let (sql, params) = documents_by_key_query(
+        &schema,
+        &c("id"),
+        &[GenericValue::Int(7), GenericValue::Int(9)],
+        &HashMap::new(),
+        &id_types(),
+        &ByteColumns::new(),
+        (parameters, "pg_catalog.int8", "int8"),
+    )
+    .unwrap();
+    assert!(
+        sql.as_str().ends_with(r#"= ANY($1::int4[]::bigint[])"#),
+        "{}",
+        sql.as_str()
+    );
+    assert_eq!(params.len(), 1);
+}
