@@ -220,9 +220,8 @@ struct ColumnMeta {
     /// `pg_attribute.atttypmod`: the size a `Relation` message names beside
     /// the type (`varchar(5)`, `numeric(10,2)`); `-1` for none.
     type_mod: i32,
-    /// The type a key read from this column is cast to: the base type
-    /// through every domain, schema-qualified, never with a modifier (see
-    /// [`key_type`](PgDocumentBuilder::key_type)).
+    /// The type a key read from this column is cast to, schema-qualified and
+    /// never with a modifier (see [`key_type`](PgDocumentBuilder::key_type)).
     key_type: String,
     /// A domain's type resolved through every domain; `None` for no domain.
     base_type: Option<String>,
@@ -571,6 +570,16 @@ impl PgDocumentBuilder {
     /// is `1.23`), so a key cast to a size its column no longer has would
     /// match no row; `=` needs none. The qualified `typname` also keeps
     /// `bpchar` apart from `character`, which as a cast means `char(1)`.
+    ///
+    /// It is the base type, through every domain, when the role may use the
+    /// base type's schema. When it may not (a domain `app.dcit` over
+    /// `ext.citext`, no USAGE on `ext`), a cast to the base type would fail
+    /// every query, so the key is cast to the column's declared type
+    /// instead, as before the base type was used. That gives up one thing: a
+    /// cast to a domain checks the domain's constraints, so a key that breaks
+    /// them fails the query instead of matching nothing. The privilege is
+    /// read by the same catalog query as the type, cached and refreshed with
+    /// it.
     pub(super) async fn key_type(
         &self,
         schema: &DatabaseSchema,
@@ -615,7 +624,12 @@ impl PgDocumentBuilder {
         // deterministic collations).
         let sql = "SELECT format_type(a.atttypid, a.atttypmod) AS sql_type, \
                           a.atttypid::int8 AS type_oid, a.atttypmod AS type_mod, \
-                          b.base_type, b.base_name, b.key_type, el.element_name, \
+                          b.base_type, b.base_name, el.element_name, \
+                          CASE WHEN b.base_usable THEN b.base_key ELSE ( \
+                            SELECT quote_ident(dn.nspname) || '.' || quote_ident(dt.typname) \
+                            FROM pg_type dt JOIN pg_namespace dn ON dn.oid = dt.typnamespace \
+                            WHERE dt.oid = a.atttypid \
+                          ) END AS key_type, \
                           coalesce((SELECT (to_jsonb(c) ->> 'collisdeterministic')::boolean \
                                     FROM pg_collation c WHERE c.oid = a.attcollation), \
                                    true) AS deterministic, \
@@ -629,7 +643,8 @@ impl PgDocumentBuilder {
                           ) SELECT format_type(d.oid, d.typmod) AS base_type, \
                                    t.typname::text AS base_name, t.oid AS base_oid, \
                                    quote_ident(n.nspname) || '.' || quote_ident(t.typname) \
-                                     AS key_type \
+                                     AS base_key, \
+                                   has_schema_privilege(n.oid, 'USAGE') AS base_usable \
                             FROM d JOIN pg_type t ON t.oid = d.oid \
                             JOIN pg_namespace n ON n.oid = t.typnamespace \
                             WHERE t.typtype <> 'd' \

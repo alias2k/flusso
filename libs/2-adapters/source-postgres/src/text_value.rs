@@ -94,9 +94,14 @@ pub(crate) fn is_decoded(type_oid: u32) -> bool {
 /// Whether a key of the type named by `type_oid` (`type_name` for an
 /// extension type, whose OID varies) reads back as a key. Every other type
 /// reads as null, and `validate_indexes` refuses it as a root key
-/// (`document::value::KEY_TYPES` lists the same types by name).
+/// (`document::value::KEY_TYPES` lists the same types by name). An
+/// extension type is named with its schema when that schema is not on the
+/// search path (`ext.citext`).
 pub(crate) fn is_key_type(type_oid: u32, type_name: &str) -> bool {
-    (is_decoded(type_oid) && type_oid != 26) || TEXT.contains(&type_oid) || type_name == "citext"
+    let unqualified = type_name.rsplit('.').next().unwrap_or(type_name);
+    (is_decoded(type_oid) && type_oid != 26)
+        || TEXT.contains(&type_oid)
+        || unqualified.trim_matches('"') == "citext"
 }
 
 /// Interpret a Postgres text value by its type OID, as rendered under

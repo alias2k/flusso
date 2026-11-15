@@ -86,6 +86,8 @@ fn a_key_type_is_a_decoded_or_text_type() {
         assert!(is_key_type(oid, ""), "{oid}");
     }
     assert!(is_key_type(91_234, "citext"));
+    assert!(is_key_type(91_234, "ext.citext"));
+    assert!(is_key_type(91_234, r#""Ext"."citext""#));
     for (oid, name) in [
         (26, "oid"),
         (3802, "jsonb"),

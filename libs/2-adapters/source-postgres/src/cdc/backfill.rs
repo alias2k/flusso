@@ -113,8 +113,9 @@ async fn resolve_tables(pool: &PgPool, tables: &[SnapshotTable]) -> Result<Vec<B
 }
 
 /// `column`'s type on `qualified`, through every domain: the key type it is
-/// cast to (schema-qualified `typname`, no modifier, as the document
-/// builder's), and its `pg_type.typname`.
+/// cast to (as the document builder's `key_type`: the base type's
+/// schema-qualified `typname` with no modifier, or the declared type's when
+/// the role may not use the base type's schema), and its `pg_type.typname`.
 async fn key_type(pool: &PgPool, qualified: &str, column: &str) -> Result<(String, String)> {
     sqlx::query_as(
         "WITH RECURSIVE d(oid) AS ( \
@@ -122,7 +123,16 @@ async fn key_type(pool: &PgPool, qualified: &str, column: &str) -> Result<(Strin
            WHERE a.attrelid = $1::regclass AND a.attname = $2 \
          UNION ALL \
            SELECT t.typbasetype FROM pg_type t JOIN d ON t.oid = d.oid WHERE t.typtype = 'd' \
-         ) SELECT quote_ident(n.nspname) || '.' || quote_ident(t.typname), t.typname::text \
+         ) SELECT CASE WHEN has_schema_privilege(n.oid, 'USAGE') \
+                    THEN quote_ident(n.nspname) || '.' || quote_ident(t.typname) \
+                    ELSE ( \
+                      SELECT quote_ident(dn.nspname) || '.' || quote_ident(dt.typname) \
+                      FROM pg_attribute a \
+                      JOIN pg_type dt ON dt.oid = a.atttypid \
+                      JOIN pg_namespace dn ON dn.oid = dt.typnamespace \
+                      WHERE a.attrelid = $1::regclass AND a.attname = $2 \
+                    ) END, \
+                  t.typname::text \
            FROM d JOIN pg_type t ON t.oid = d.oid \
            JOIN pg_namespace n ON n.oid = t.typnamespace \
            WHERE t.typtype <> 'd'",
