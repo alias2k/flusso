@@ -12,7 +12,8 @@
 //! - `resolve`: mapping a changed row back to the documents it affects — both
 //!   the trivial root-table case and the reverse lookup from a related table.
 //!
-//! Requires Docker. Run with:
+//! Requires Docker, or a Postgres named by `BENCH_PG_URL` (an empty database
+//! this bench may create tables in; `just review-ab` passes one per run). Run with:
 //!
 //! ```text
 //! cargo bench -p flusso-source-postgres --bench postgres
@@ -59,13 +60,19 @@ fn runtime() -> Runtime {
 /// connected, ready-to-query [`PgDocumentBuilder`], and a raw pool (used by the
 /// round-trip baseline).
 async fn setup() -> (
-    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
+    Option<testcontainers_modules::testcontainers::ContainerAsync<Postgres>>,
     PgDocumentBuilder,
     sqlx::PgPool,
 ) {
-    let container = Postgres::default().start().await.unwrap();
-    let port = container.get_host_port_ipv4(5432).await.unwrap();
-    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let (container, url) = match std::env::var("BENCH_PG_URL") {
+        Ok(url) => (None, url),
+        Err(_) => {
+            let container = Postgres::default().start().await.unwrap();
+            let port = container.get_host_port_ipv4(5432).await.unwrap();
+            let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+            (Some(container), url)
+        }
+    };
 
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
     for statement in [
