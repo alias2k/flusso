@@ -1465,7 +1465,7 @@ async fn a_batched_build_pairs_positions_without_a_nested_loop() {
         .filter(|plan| {
             plan["Query Text"]
                 .as_str()
-                .is_some_and(|text| text.contains("ORDINALITY"))
+                .is_some_and(|text| text.contains("unnest("))
         })
         .collect();
     assert_eq!(plans.len(), 2, "one plan per batch: {plans:#?}");

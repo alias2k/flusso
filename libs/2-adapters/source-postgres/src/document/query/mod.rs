@@ -56,6 +56,7 @@ pub(super) const DOC_KEY: &str = "doc_key";
 /// of the user's.
 const BUILT: &str = "flusso_built";
 const PAIRED: &str = "flusso_paired";
+const NUMBERED: &str = "flusso_numbered";
 const KEYS: &str = "flusso_requested";
 const KEY: &str = "flusso_key";
 const POSITION: &str = "flusso_position";
@@ -473,7 +474,13 @@ fn batched(
         schema.primary_key.as_ref(),
     )?;
 
-    let requested = key_list(&mut builder, keys, &schema.table, pk_column)?;
+    let requested = key_list(
+        &mut builder,
+        keys,
+        &schema.table,
+        pk_column,
+        by_key.is_none(),
+    )?;
     let root_pk = qcol(ROOT, pk_column);
     let mut predicate = format!("{root_pk} = ANY({})", requested.any);
     if let Some(soft_delete) = builder.soft_delete_predicate(schema)? {
@@ -515,7 +522,9 @@ fn batched(
          FROM ({built}) AS \"{BUILT}\" \
          FULL JOIN {rows} AS \"{KEYS}\"(\"{KEY}\", \"{POSITION}\") \
          ON \"{BUILT}\".\"{KEY}\" = \"{KEYS}\".\"{KEY}\" OFFSET 0",
-        rows = requested.rows,
+        rows = requested
+            .rows
+            .ok_or_else(|| SourceError::Query("internal: positions not built".into()))?,
     );
     let sql = format!(
         "SELECT \"{DOC_POSITION}\", \"document\" FROM ({paired}) AS \"{PAIRED}\" \
@@ -529,57 +538,74 @@ fn batched(
 #[derive(Debug)]
 struct KeyList {
     any: String,
-    rows: String,
+    rows: Option<String>,
 }
 
-/// The keys as one array parameter per type they are bound as, each cast
-/// element by element to the key column's type ([`Builder::key_array`]), in
-/// a fixed order of those types. The statement text so depends on the kinds
-/// of keys, never on how many there are, and names every type it binds.
+/// The keys as an array constructor of placeholders, each cast from the type
+/// it is bound as to the key column's type (`$n::<bound>::<key type>`), so
+/// Postgres sees the list element by element: it knows how many keys a batch
+/// holds, so a generic plan costs what a custom one does and is cached, and it
+/// prunes the partitions of a root partitioned by its key under either plan.
 ///
-/// Keys of one kind (the usual batch) keep their order, so `unnest … WITH
-/// ORDINALITY` numbers them. Keys of several kinds are unnested beside a
-/// `bigint[]` of their positions, one `unnest` per kind, so each keeps the
-/// position it was requested at.
+/// The keys are grouped by the type they are bound as, in a fixed order of
+/// those types, and each group is padded to the next power of two by
+/// repeating its last key. A statement's text so depends on the kinds of keys
+/// and on at most ten sizes per kind, never on the exact count, and every
+/// placeholder keeps its type from one batch to the next (a prepared statement
+/// keeps the types of its first use). A repeated key changes nothing an `= ANY`
+/// reads. The position form unnests the same constructor beside one `bigint[]`
+/// parameter of the position each key was requested at, `0` for a pad, and
+/// drops the pads before the join.
 fn key_list(
     builder: &mut Builder<'_>,
     keys: &[GenericValue],
     table: &TableName,
     column: &ColumnName,
+    with_positions: bool,
 ) -> Result<KeyList> {
-    let mut kinds: Vec<(&'static str, Vec<GenericValue>, Vec<i64>)> = Vec::new();
+    let mut kinds: Vec<(&'static str, Vec<(GenericValue, i64)>)> = Vec::new();
     for (at, key) in keys.iter().enumerate() {
         let bound = sql::bound_type(key)
             .ok_or_else(|| SourceError::Query("cannot bind null, array, or map as a key".into()))?;
         let position = i64::try_from(at + 1)
             .map_err(|_| SourceError::Query("too many keys in one batch".into()))?;
-        match kinds.iter_mut().find(|(kind, _, _)| *kind == bound) {
-            Some((_, values, positions)) => {
-                values.push(key.clone());
-                positions.push(position);
-            }
-            None => kinds.push((bound, vec![key.clone()], vec![position])),
+        match kinds.iter_mut().find(|(kind, _)| *kind == bound) {
+            Some((_, group)) => group.push((key.clone(), position)),
+            None => kinds.push((bound, vec![(key.clone(), position)])),
         }
     }
-    kinds.sort_by_key(|(kind, _, _)| *kind);
-    if let [(bound, values, _)] = kinds.as_mut_slice() {
-        let array = builder.key_array(std::mem::take(values), bound, table, column)?;
+    kinds.sort_by_key(|(kind, _)| *kind);
+    let mut placeholders = Vec::new();
+    let mut positions = Vec::new();
+    for (_, group) in kinds {
+        let padded = group.len().next_power_of_two();
+        let last = group.last().map(|(key, _)| key.clone());
+        let pads = std::iter::repeat_with(|| last.clone()).take(padded - group.len());
+        for (key, position) in group
+            .into_iter()
+            .map(|(key, position)| (Some(key), position))
+            .chain(pads.map(|key| (key, 0)))
+        {
+            let key =
+                key.ok_or_else(|| SourceError::Query("internal: an empty key group".into()))?;
+            placeholders.push(builder.key_placeholder(key, table, column)?);
+            positions.push(position);
+        }
+    }
+    let array = format!("ARRAY[{}]", placeholders.join(", "));
+    if !with_positions {
         return Ok(KeyList {
-            rows: format!("unnest({array}) WITH ORDINALITY"),
             any: array,
+            rows: None,
         });
     }
-    let mut arrays = Vec::with_capacity(kinds.len());
-    let mut unnests = Vec::with_capacity(kinds.len());
-    for (bound, values, positions) in kinds {
-        let array = builder.key_array(values, bound, table, column)?;
-        let positions = builder.positions(positions);
-        unnests.push(format!("SELECT * FROM unnest({array}, {positions})"));
-        arrays.push(array);
-    }
+    let positions = builder.positions(positions);
     Ok(KeyList {
-        any: arrays.join(" || "),
-        rows: format!("({})", unnests.join(" UNION ALL ")),
+        rows: Some(format!(
+            "(SELECT * FROM unnest({array}, {positions}) AS \"{NUMBERED}\"(\"{KEY}\", \"{POSITION}\") \
+             WHERE \"{NUMBERED}\".\"{POSITION}\" > 0)"
+        )),
+        any: array,
     })
 }
 

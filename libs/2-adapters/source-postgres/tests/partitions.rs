@@ -754,7 +754,7 @@ fields:
         .filter(|plan| {
             plan["Query Text"]
                 .as_str()
-                .is_some_and(|text| text.contains("= ANY($"))
+                .is_some_and(|text| text.contains("= ANY(ARRAY["))
         })
         .collect();
     let [plan] = plans.as_slice() else {

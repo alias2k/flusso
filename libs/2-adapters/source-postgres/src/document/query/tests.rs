@@ -135,7 +135,7 @@ fn keyed_predicate_casts_a_uuid_primary_key() {
     assert!(
         batched
             .as_str()
-            .contains(r#"WHERE "root"."id" = ANY($1::uuid[]::uuid[]) OFFSET 0) AS "flusso_built" FULL JOIN unnest($1::uuid[]::uuid[]) WITH ORDINALITY"#),
+            .contains(r#"WHERE "root"."id" = ANY(ARRAY[$1::uuid::uuid]) OFFSET 0) AS "flusso_built" FULL JOIN (SELECT * FROM unnest(ARRAY[$1::uuid::uuid]"#),
         "{}",
         batched.as_str()
     );
@@ -183,7 +183,7 @@ fn root_filters_fold_into_both_query_forms() {
     .unwrap();
     assert!(
         sql.as_str().contains(
-            r#"WHERE "root"."id" = ANY($1::int4[]::bigint[]) AND ("root"."status" = $2::text) OFFSET 0) AS "flusso_built" FULL JOIN unnest($1::int4[]::bigint[]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key" OFFSET 0"#
+            r#"WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint]) AND ("root"."status" = $3::text) OFFSET 0) AS "flusso_built" FULL JOIN (SELECT * FROM unnest(ARRAY[$1::int4::bigint], $2::int8[]) AS "flusso_numbered"("flusso_key", "flusso_position") WHERE "flusso_numbered"."flusso_position" > 0) AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key" OFFSET 0"#
         ),
         "{}",
         sql.as_str()
@@ -587,14 +587,15 @@ fn documents_query_pairs_each_key_with_its_position() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT "doc_position", "document" FROM (SELECT "flusso_requested"."flusso_position" AS "doc_position", "flusso_built"."document" FROM (SELECT "root"."id" AS "flusso_key", json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = ANY($1::int4[]::bigint[]) OFFSET 0) AS "flusso_built" FULL JOIN unnest($1::int4[]::bigint[]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key" OFFSET 0) AS "flusso_paired" WHERE "flusso_paired"."document" IS NOT NULL"#
+        r#"SELECT "doc_position", "document" FROM (SELECT "flusso_requested"."flusso_position" AS "doc_position", "flusso_built"."document" FROM (SELECT "root"."id" AS "flusso_key", json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint, $2::int4::bigint]) OFFSET 0) AS "flusso_built" FULL JOIN (SELECT * FROM unnest(ARRAY[$1::int4::bigint, $2::int4::bigint], $3::int8[]) AS "flusso_numbered"("flusso_key", "flusso_position") WHERE "flusso_numbered"."flusso_position" > 0) AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key" OFFSET 0) AS "flusso_paired" WHERE "flusso_paired"."document" IS NOT NULL"#
     );
     assert_eq!(
         params,
-        vec![GenericValue::Array(vec![
+        vec![
             GenericValue::Int(7),
-            GenericValue::Int(9)
-        ])]
+            GenericValue::Int(9),
+            GenericValue::Array(vec![GenericValue::BigInt(1), GenericValue::BigInt(2)]),
+        ]
     );
 }
 
@@ -619,7 +620,7 @@ fn documents_query_folds_soft_delete_into_the_root_lookup() {
     )
     .unwrap();
     assert!(sql.as_str().contains(
-        r#"WHERE "root"."id" = ANY($1::int4[]::bigint[]) AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END)) OFFSET 0) AS "flusso_built""#
+        r#"WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint]) AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END)) OFFSET 0) AS "flusso_built""#
     ));
 }
 
@@ -668,7 +669,7 @@ fn soft_delete_field_inside_a_relation_reads_the_root_column() {
     .unwrap();
     assert!(
         sql.as_str().contains(
-            r#"WHERE "root"."id" = ANY($1::int4[]::bigint[]) AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END)) OFFSET 0) AS "flusso_built" FULL JOIN unnest($1::int4[]::bigint[]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key" OFFSET 0"#
+            r#"WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint]) AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END)) OFFSET 0) AS "flusso_built" FULL JOIN (SELECT * FROM unnest(ARRAY[$1::int4::bigint], $2::int8[]) AS "flusso_numbered"("flusso_key", "flusso_position") WHERE "flusso_numbered"."flusso_position" > 0) AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key" OFFSET 0"#
         ),
         "{}",
         sql.as_str()
@@ -760,7 +761,7 @@ fn a_key_carried_as_text_is_cast_from_text() {
     .unwrap();
     assert!(
         batched.as_str().contains(
-            r#"= ANY($1::text[]::date[]) OFFSET 0) AS "flusso_built" FULL JOIN unnest($1::text[]::date[]) WITH ORDINALITY"#
+            r#"= ANY(ARRAY[$1::text::date]) OFFSET 0) AS "flusso_built" FULL JOIN (SELECT * FROM unnest(ARRAY[$1::text::date]"#
         ),
         "{}",
         batched.as_str()
@@ -1492,7 +1493,7 @@ fn a_shared_key_picks_the_row_its_tie_break_orders_first() {
     .unwrap();
     assert!(
         batched.as_str().contains(
-            r#"(SELECT DISTINCT ON ("root"."id") "root"."id" AS "flusso_key", json_build_object('id', "root"."id") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = ANY($1::int4[]::bigint[]) ORDER BY "root"."id", "root"."id", "root"."sub") AS "flusso_built""#
+            r#"(SELECT DISTINCT ON ("root"."id") "root"."id" AS "flusso_key", json_build_object('id', "root"."id") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint]) ORDER BY "root"."id", "root"."id", "root"."sub") AS "flusso_built""#
         ),
         "{}",
         batched.as_str()
@@ -1547,13 +1548,15 @@ fn a_batch_paired_by_key_selects_each_rows_key_and_no_join() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT format('%s', "root"."id") AS "doc_key", "root"."id"::pg_catalog.int8 AS "doc_key:typed", json_build_object('id', "root"."id") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = ANY($1::int4[]::bigint[])"#
+        r#"SELECT format('%s', "root"."id") AS "doc_key", "root"."id"::pg_catalog.int8 AS "doc_key:typed", json_build_object('id', "root"."id") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint, $2::int4::bigint])"#
     );
 }
 
-/// Keys of several kinds travel as one array per kind, each beside the
-/// positions its keys were requested at, so the batch still pairs every row
-/// with its own position; the statement's text depends on the kinds only.
+/// Keys are grouped by the type they are bound as and each group is padded to
+/// a power of two by repeating its last key; the positions array carries
+/// where each key was requested, `0` for a pad, so every row still pairs
+/// with its own position and the statement's text depends only on the kinds
+/// and the padded sizes.
 #[test]
 fn keys_of_several_kinds_keep_their_positions() {
     let schema = index(Some("id"), None, vec![col_field("id", "id")]);
@@ -1564,6 +1567,7 @@ fn keys_of_several_kinds_keep_their_positions() {
             GenericValue::Int(7),
             GenericValue::BigInt(9),
             GenericValue::Int(8),
+            GenericValue::Int(6),
         ],
         &HashMap::new(),
         &id_types(),
@@ -1573,7 +1577,7 @@ fn keys_of_several_kinds_keep_their_positions() {
     .unwrap();
     assert!(
         sql.as_str().contains(
-            r#"WHERE "root"."id" = ANY($1::int4[]::bigint[] || $3::int8[]::bigint[]) OFFSET 0) AS "flusso_built" FULL JOIN (SELECT * FROM unnest($1::int4[]::bigint[], $2::int8[]) UNION ALL SELECT * FROM unnest($3::int8[]::bigint[], $4::int8[])) AS "flusso_requested"("flusso_key", "flusso_position")"#
+            r#"WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint, $2::int4::bigint, $3::int4::bigint, $4::int4::bigint, $5::int8::bigint]) OFFSET 0) AS "flusso_built" FULL JOIN (SELECT * FROM unnest(ARRAY[$1::int4::bigint, $2::int4::bigint, $3::int4::bigint, $4::int4::bigint, $5::int8::bigint], $6::int8[]) AS "flusso_numbered"("flusso_key", "flusso_position") WHERE "flusso_numbered"."flusso_position" > 0)"#
         ),
         "{}",
         sql.as_str()
@@ -1581,11 +1585,19 @@ fn keys_of_several_kinds_keep_their_positions() {
     assert_eq!(
         params,
         vec![
-            GenericValue::Array(vec![GenericValue::Int(7), GenericValue::Int(8)]),
-            GenericValue::Array(vec![GenericValue::BigInt(1), GenericValue::BigInt(3)]),
-            GenericValue::Array(vec![GenericValue::BigInt(9)]),
-            GenericValue::Array(vec![GenericValue::BigInt(2)]),
-        ]
+            GenericValue::Int(7),
+            GenericValue::Int(8),
+            GenericValue::Int(6),
+            GenericValue::Int(6),
+            GenericValue::BigInt(9),
+            GenericValue::Array(
+                [1, 3, 4, 0, 2]
+                    .into_iter()
+                    .map(GenericValue::BigInt)
+                    .collect()
+            ),
+        ],
+        "three int4 keys padded to four by repeating the last, the pad at position 0"
     );
 }
 

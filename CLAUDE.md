@@ -1094,10 +1094,13 @@ gets the lookup once more without the probe, every key cast to its declared type
 `regtype` name as quoted identifiers (`ext.citext`, `"a.b".citext`; not `"a.citext"`). **The batched
 build serves exactly the ids a single `build` serves, by construction**: `query::documents_query`
 reads the root rows as main did, one level in (`SELECT root.pk AS flusso_key, <document> FROM root
-WHERE root.pk = ANY($n::<bound>[]::<key type>[]) … OFFSET 0`, the keys passed as one array parameter
-per kind (`query::key_list`, `Builder::key_array`, bound by `bind_array`; several kinds are unnested
-beside a `bigint[]` of their positions), so the statement's text never grows with the batch; the root is the
-only relation in scope there,
+WHERE root.pk = ANY(ARRAY[$n::<bound>::<key type>, …]) … OFFSET 0`: `query::key_list` groups the keys
+by bound type and pads each group to a power of two by repeating its last key, so Postgres sees the list
+element by element (a generic plan knows its length and is cached for a batch of one —
+`a_small_batch_reuses_its_plan`; run-time pruning on a root partitioned by its key —
+`a_batch_is_pruned_to_its_keys_partitions_under_a_generic_plan`; a bare array parameter lost both) while a
+kind has at most ten statement texts; the position form unnests the same constructor beside a `bigint[]`
+of positions, `0` for a pad, dropped before the join), the root the only relation in scope there,
 so a raw filter's unqualified name resolves as in a single build — `integration`'s
 `a_raw_filter_names_the_root_rows_columns_whatever_the_batched_query_names`, which reads the names off
 the statement itself), and one level out joins it to the same keys unnested `WITH ORDINALITY` on the
