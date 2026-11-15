@@ -2,7 +2,8 @@
 # Compare the working tree with a base on the Docker-backed component benches.
 #
 #   review-ab.sh [<base>] [--pg 14,16,18] [--bench postgres,cases,pipeline]
-#                [--filter <criterion filter>] [--limit <percent>] [--own-benches]
+#                [--filter <criterion filter>] [--limit <percent>] [--rounds <n>]
+#                [--own-benches]
 #
 # <base> defaults to origin/main. Run from the head tree (the working tree,
 # uncommitted changes included). docs/src/contribute/benchmarks.md has the
@@ -23,19 +24,23 @@
 # 3. One named Postgres container per version, plus one OpenSearch when
 #    `pipeline` runs. Each bench run gets a fresh database (BENCH_PG_URL) and an
 #    emptied cluster (BENCH_OS_URL). A trap removes exactly these containers.
-# 4. Per version, per bench: base, head, then base again (the control), saved
-#    as Criterion baselines `base`, `head`, `control` in one CRITERION_HOME per
+# 4. Per version, per bench, --rounds (default 2) rounds in ABBA order: base,
+#    head, then head, base, so a drift over the run lands on both sides. Saved
+#    as Criterion baselines `base-<r>` / `head-<r>` in one CRITERION_HOME per
 #    version under `<head target>/review-ab/<timestamp>/`.
-# 5. bench-compare.py --control prints one table per version. Exits 1 when a
-#    case is slower past the limit (default 5%) and twice the control spread.
+# 5. bench-compare.py --repeats prints one table per version: each side's
+#    fastest run, and the control spread (how far one binary's own runs
+#    differ). Exits 1 when a case is slower past the limit (default 5%) and
+#    twice the control spread.
 set -euo pipefail
 
-usage="usage: review-ab.sh [<base>] [--pg 16] [--bench postgres,cases,pipeline] [--filter <f>] [--limit 5] [--own-benches]"
+usage="usage: review-ab.sh [<base>] [--pg 16] [--bench postgres,cases,pipeline] [--filter <f>] [--limit 5] [--rounds 2] [--own-benches]"
 base=origin/main
 pg_versions=16
 benches=postgres,cases,pipeline
 filter=
 limit=5
+rounds=2
 own_benches=0
 positional=0
 while [ $# -gt 0 ]; do
@@ -44,6 +49,7 @@ while [ $# -gt 0 ]; do
     --bench) benches=${2:?$usage}; shift 2 ;;
     --filter) filter=${2:?$usage}; shift 2 ;;
     --limit) limit=${2:?$usage}; shift 2 ;;
+    --rounds) rounds=${2:?$usage}; shift 2 ;;
     --own-benches) own_benches=1; shift ;;
     -h | --help) echo "$usage"; exit 0 ;;
     -*) echo "$usage" >&2; exit 2 ;;
@@ -198,9 +204,17 @@ for version in ${pg_versions//,/ }; do
   port=$(host_port "$container" 5432)
   home_v=$out/pg$version
   for bench in ${benches//,/ }; do
-    run_side "$container" "$port" "$base_tree" "$base_target" "$bench" base "$home_v"
-    run_side "$container" "$port" "$head_tree" "$head_target" "$bench" head "$home_v"
-    run_side "$container" "$port" "$base_tree" "$base_target" "$bench" control "$home_v"
+    for ((round = 1; round <= rounds; round++)); do
+      base_run=(run_side "$container" "$port" "$base_tree" "$base_target" "$bench" "base-$round" "$home_v")
+      head_run=(run_side "$container" "$port" "$head_tree" "$head_target" "$bench" "head-$round" "$home_v")
+      if ((round % 2)); then
+        "${base_run[@]}"
+        "${head_run[@]}"
+      else
+        "${head_run[@]}"
+        "${base_run[@]}"
+      fi
+    done
   done
   docker rm -f "$container" >/dev/null
   reports+=("$version")
@@ -210,7 +224,7 @@ for version in "${reports[@]}"; do
   echo
   echo "## Postgres $version: ${base} (${base_sha:0:12}) vs the working tree"
   echo
-  python3 "$scripts/bench-compare.py" "$out/pg$version" base head "$limit" --control control || failed=1
+  python3 "$scripts/bench-compare.py" "$out/pg$version" base head "$limit" --repeats "$rounds" || failed=1
 done
 echo
 echo "Criterion output: $out"

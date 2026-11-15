@@ -3,7 +3,7 @@
 
     bench-compare.py <criterion-dir> <baseline> <candidate> <max-slowdown-percent>
                      [--breaches <file>] [--confirm <re-baseline> <re-candidate>]
-                     [--allow-empty] [--control <control-baseline>]
+                     [--allow-empty] [--repeats <n>]
 
 For every bench with both `<baseline>/estimates.json` and
 `<candidate>/estimates.json`, compares medians; a bench on one side only is
@@ -23,14 +23,16 @@ listed but not gated. Exits 1 when any bench's candidate median is more than
                     it, that is an error, exit 2: a side that measured nothing
                     must not pass the gate.
 
---control C         the review table (review-ab.sh): `<control-baseline>` is
-                    the base measured again after the candidate. Adds a
-                    "control spread" column (|C − baseline| as a percent of
-                    the baseline) and a verdict: a change counts only when it
-                    is past both the limit and twice the control spread
+--repeats N         the review table (review-ab.sh). Each side ran N times,
+                    saved as `<baseline>-1`…`<baseline>-N` and
+                    `<candidate>-1`…: a side's value is its fastest median
+                    (noise only adds time), and the "control spread" is how
+                    far the same binary's runs differ, (max − min) / min,
+                    the larger of the two sides. A change counts only when
+                    it is past both the limit and twice that spread
                     (`slower` / `faster`, else `noise`). Exits 1 when any
-                    bench is counted slower. A bench with no control run is
-                    judged on the limit alone.
+                    bench is counted slower; 2 when nothing was measured on
+                    both sides.
 
 With `GITHUB_STEP_SUMMARY` set, the final report (no breach, or the --confirm
 run) is appended there as Markdown too.
@@ -74,23 +76,45 @@ def pair(bench_dir: pathlib.Path, base: str, cand: str):
     return None
 
 
-def review(rows, one_sided, base: str, cand: str, control: str, limit: float) -> int:
-    """The A/B table with a control run of the base against itself."""
+def repeated(bench_dir: pathlib.Path, side: str, n: int) -> list[float]:
+    return [median(p) for i in range(1, n + 1) if (p := bench_dir / f"{side}-{i}" / "estimates.json").is_file()]
+
+
+def spread(values: list[float]) -> float | None:
+    return (max(values) - min(values)) / min(values) * 100 if len(values) > 1 and min(values) else None
+
+
+def review(root: pathlib.Path, base: str, cand: str, n: int, limit: float) -> int:
+    """The A/B table over repeated runs of each side."""
+    bench_dirs = sorted(
+        {p.parent.parent for i in range(1, n + 1) for side in (base, cand) for p in root.rglob(f"{side}-{i}/estimates.json")}
+    )
     lines = ["| case | base | head | change | control spread | verdict |", "| --- | ---: | ---: | ---: | ---: | --- |"]
-    slower = 0
-    for rid, bench_dir, b, c, ch in rows:
-        again = pair(bench_dir, base, control)
-        spread = abs(change(*again)) if again else None
-        floor = max(limit, 2 * spread) if spread is not None else limit
+    one_sided, slower = [], 0
+    for bench_dir in bench_dirs:
+        b_runs, c_runs = repeated(bench_dir, base, n), repeated(bench_dir, cand, n)
+        side = f"{base}-1" if b_runs else f"{cand}-1"
+        rid = bench_id(root, bench_dir, side)
+        if not b_runs or not c_runs:
+            one_sided.append((rid, base if b_runs else cand))
+            continue
+        b, c = min(b_runs), min(c_runs)
+        ch = change(b, c)
+        spreads = [x for x in (spread(b_runs), spread(c_runs)) if x is not None]
+        noise = max(spreads) if spreads else None
+        floor = max(limit, 2 * noise) if noise is not None else limit
         if ch > floor:
             verdict, slower = "slower ⚠️", slower + 1
         elif ch < -floor:
             verdict = "faster"
         else:
             verdict = "noise"
-        shown = f"{spread:.1f}%" if spread is not None else "—"
+        shown = f"{noise:.1f}%" if noise is not None else "—"
         lines.append(f"| `{rid}` | {fmt(b)} | {fmt(c)} | {ch:+.1f}% | {shown} | {verdict} |")
-    print(f"`{base}` = base, `{cand}` = head, `{control}` = base again after head.")
+    if len(lines) == 2:
+        print(f"::error::nothing to compare: no bench has both `{base}-*` and `{cand}-*` under {root}")
+        return 2
+    print(f"Fastest of {n} runs per side; control spread = how far one binary's own runs differ.")
     print()
     print("\n".join(lines))
     if one_sided:
@@ -114,9 +138,11 @@ def main() -> int:
     parser.add_argument("--breaches", type=pathlib.Path)
     parser.add_argument("--confirm", nargs=2, metavar=("RE_BASE", "RE_CAND"))
     parser.add_argument("--allow-empty", action="store_true")
-    parser.add_argument("--control")
+    parser.add_argument("--repeats", type=int)
     args = parser.parse_args()
     root, base, cand, limit = args.root, args.base, args.cand, args.limit
+    if args.repeats is not None:
+        return review(root, base, cand, args.repeats, limit)
 
     bench_dirs = sorted(
         {p.parent.parent for side in (base, cand) for p in root.rglob(f"{side}/estimates.json")}
@@ -136,9 +162,6 @@ def main() -> int:
             return 0
         print(f"::error::nothing to compare: no bench has both `{base}` and `{cand}` under {root}")
         return 2
-
-    if args.control is not None:
-        return review(rows, one_sided, base, cand, args.control, limit)
 
     breached = [r for r in rows if r[4] > limit]
     lines = [f"| bench | {base} | {cand} | change |", "| --- | ---: | ---: | ---: |"]

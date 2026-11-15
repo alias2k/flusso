@@ -3,7 +3,7 @@
     python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 
 `review-ab-stamp.py` decides whether the warm base build can be reused; `bench-compare.py
---control` prints the table `review-ab.sh` shows. Both run as subprocesses, exactly as the shell
+--repeats` prints the table `review-ab.sh` shows. Both run as subprocesses, exactly as the shell
 script calls them, over files written to a temporary directory.
 """
 import hashlib
@@ -118,66 +118,78 @@ def save(root: pathlib.Path, bench: str, baseline: str, median_ns: float) -> Non
     (out / "benchmark.json").write_text(json.dumps({"full_id": bench}))
 
 
-class ControlTable(unittest.TestCase):
+class RepeatsTable(unittest.TestCase):
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = pathlib.Path(tmp.name)
 
-    def case(self, bench: str, base: float, head: float, control: float | None) -> None:
-        save(self.root, bench, "base", base)
-        save(self.root, bench, "head", head)
-        if control is not None:
-            save(self.root, bench, "control", control)
+    def case(self, bench: str, base: list[float], head: list[float]) -> None:
+        for side, runs in (("base", base), ("head", head)):
+            for i, value in enumerate(runs, start=1):
+                save(self.root, bench, f"{side}-{i}", value)
 
-    def compare(self, limit: str = "5") -> subprocess.CompletedProcess:
-        return run(COMPARE, self.root, "base", "head", limit, "--control", "control")
+    def compare(self, repeats: int = 2, limit: str = "5") -> subprocess.CompletedProcess:
+        return run(COMPARE, self.root, "base", "head", limit, "--repeats", repeats)
 
     def row(self, out: str, bench: str) -> list[str]:
         line = next(line for line in out.splitlines() if line.startswith(f"| `{bench}`"))
         return [cell.strip() for cell in line.strip("|").split("|")]
 
-    def test_the_table_has_the_control_spread_column(self) -> None:
-        self.case("key/int", 1_000_000, 1_010_000, 1_020_000)
+    def test_each_side_is_its_fastest_run_and_the_spread_its_own_runs(self) -> None:
+        self.case("key/int", [1_000_000, 1_020_000], [1_010_000, 1_015_000])
         result = self.compare()
         self.assertIn("| case | base | head | change | control spread | verdict |", result.stdout)
         self.assertEqual(self.row(result.stdout, "key/int"), ["`key/int`", "1.000 ms", "1.010 ms", "+1.0%", "2.0%", "noise"])
         self.assertEqual(result.returncode, 0, result.stdout)
 
-    def test_a_slowdown_past_the_limit_and_the_noise_is_counted(self) -> None:
-        self.case("key/uuid", 1_000_000, 1_300_000, 1_010_000)
+    def test_a_burst_on_one_head_run_is_not_a_slowdown(self) -> None:
+        # The A/A run that motivated repeats: one head window hit by a build next door.
+        self.case("key/citext", [9_000_000, 9_100_000], [16_100_000, 9_050_000])
+        result = self.compare()
+        self.assertEqual(self.row(result.stdout, "key/citext")[3], "+0.6%")
+        self.assertEqual(self.row(result.stdout, "key/citext")[5], "noise")
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_a_slowdown_on_every_head_run_is_counted(self) -> None:
+        self.case("key/uuid", [1_000_000, 1_010_000], [1_300_000, 1_310_000])
         result = self.compare()
         self.assertEqual(self.row(result.stdout, "key/uuid")[5], "slower ⚠️")
         self.assertEqual(result.returncode, 1, result.stdout)
 
     def test_a_speedup_is_counted_and_passes(self) -> None:
-        self.case("batch/1000", 2_000_000, 1_000_000, 2_000_000)
+        self.case("batch/1000", [2_000_000, 2_000_000], [1_000_000, 1_000_000])
         result = self.compare()
         self.assertEqual(self.row(result.stdout, "batch/1000")[5], "faster")
         self.assertEqual(result.returncode, 0, result.stdout)
 
-    def test_a_change_inside_twice_the_control_spread_is_noise(self) -> None:
-        # +12% is past the 5% limit, but the control alone moved 8%: twice that is 16%.
-        self.case("root/keyless", 1_000_000, 1_120_000, 920_000)
+    def test_a_change_inside_twice_the_spread_is_noise(self) -> None:
+        # +12% is past the 5% limit, but the head's own runs differ by 8%: twice that is 16%.
+        self.case("root/keyless", [1_000_000, 1_000_000], [1_120_000, 1_209_600])
         result = self.compare()
         self.assertEqual(self.row(result.stdout, "root/keyless")[3:], ["+12.0%", "8.0%", "noise"])
         self.assertEqual(result.returncode, 0, result.stdout)
 
-    def test_a_case_without_a_control_run_is_judged_on_the_limit(self) -> None:
-        self.case("hit_ratio/0", 1_000_000, 1_100_000, None)
-        result = self.compare()
+    def test_a_single_run_is_judged_on_the_limit(self) -> None:
+        self.case("hit_ratio/0", [1_000_000], [1_100_000])
+        result = self.compare(repeats=1)
         self.assertEqual(self.row(result.stdout, "hit_ratio/0")[4:], ["—", "slower ⚠️"])
         self.assertEqual(result.returncode, 1, result.stdout)
 
     def test_a_case_on_one_side_only_is_listed_not_compared(self) -> None:
-        self.case("key/int", 1_000_000, 1_000_000, 1_000_000)
-        save(self.root, "key/citext", "head", 1_000_000)
+        self.case("key/int", [1_000_000, 1_000_000], [1_000_000, 1_000_000])
+        save(self.root, "key/citext", "head-1", 1_000_000)
         result = self.compare()
         self.assertIn("`key/citext` (only `head`)", result.stdout)
         self.assertEqual(result.returncode, 0, result.stdout)
 
-    def test_without_control_the_gate_table_is_unchanged(self) -> None:
-        self.case("live_drain/sinks1/64", 1_000_000, 1_200_000, None)
+    def test_nothing_on_both_sides_is_an_error(self) -> None:
+        save(self.root, "key/citext", "head-1", 1_000_000)
+        self.assertEqual(self.compare().returncode, 2)
+
+    def test_without_repeats_the_gate_table_is_unchanged(self) -> None:
+        save(self.root, "live_drain/sinks1/64", "base", 1_000_000)
+        save(self.root, "live_drain/sinks1/64", "head", 1_200_000)
         result = run(COMPARE, self.root, "base", "head", "10")
         self.assertIn("| bench | base | head | change |", result.stdout)
         self.assertIn("| `live_drain/sinks1/64` | 1.000 ms | 1.200 ms | +20.0% ⚠️ |", result.stdout)
