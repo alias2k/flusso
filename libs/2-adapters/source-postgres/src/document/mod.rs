@@ -1633,8 +1633,8 @@ pub(crate) async fn primary_key_column_names(
     Ok(names)
 }
 
-/// Whether `qualified` (`schema.table`, quoted as the caller needs) names a
-/// partitioned table.
+/// Whether `qualified` (`schema.table`, in the form each caller already holds:
+/// the stream quotes it, the builder does not) names a partitioned table.
 pub(crate) async fn is_partitioned(pool: &PgPool, qualified: &str) -> Result<bool> {
     sqlx::query_scalar("SELECT relkind = 'p' FROM pg_class WHERE oid = $1::regclass")
         .bind(qualified)
