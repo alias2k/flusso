@@ -75,6 +75,8 @@ just review-ab --clean                              # delete the warm base build
 | `--limit` | `5` | the smallest change, in percent, that counts |
 | `--rounds` | `3` | runs per side |
 | `--own-benches` | off | run each side's own bench sources instead of the head's on both |
+| `--bench-cpus`, `--server-cpus` | from `nproc` | core lists (`taskset -c` syntax) for the bench process and the containers; also `REVIEW_AB_BENCH_CPUS`, `REVIEW_AB_SERVER_CPUS` |
+| `--no-pin` | | run unpinned; also `REVIEW_AB_PIN=0` |
 | `--clean` | | remove `~/.cache/flusso/review-ab` and `target/review-ab`, then exit |
 
 The first line names the base commit and its commit date. The command doesn't fetch, so `origin/main` is whatever was last fetched: run `git fetch` first when the latest `main` matters.
@@ -86,9 +88,10 @@ What it does:
 3. **Reuses that build when it's current.** `review-ab-stamp.py` records the base commit, the toolchain, `RUSTFLAGS` and `CARGO_PROFILE_*`, `bench-in-process.sh`'s hash, the bench files laid over the base, and each bench executable's sha256. When all of them match, cargo isn't called for the base at all; otherwise the output says why it rebuilds.
 4. **Runs the same harness on both sides.** The head's `postgres.rs`, `cases.rs` and `pipeline.rs` are copied over the base, so a base that predates a case is still measured. When a build fails in a bench target, the error suggests `--own-benches`. That flag refuses a base whose benches predate `REVIEW_AB_PG_URL`: they would run on their own testcontainer, Postgres 11, while the head ran on `--pg`.
 5. **Starts named containers.** One `flusso-review-<pid>-pg<v>` per version, plus `flusso-review-<pid>-os` for `pipeline`. Each bench run gets a fresh database and an emptied cluster through `REVIEW_AB_PG_URL` / `REVIEW_AB_OS_URL`, variables only this command sets. A trap removes exactly these containers, on success, failure or Ctrl-C.
-6. **Alternates.** Per version, per bench: base, head, base, head, base, head (`--rounds 3`). The order doesn't cancel a drift; the spread check below catches it.
-7. **Re-runs what it flags.** A case is flagged when the head's fastest run is slower than the base's by more than `--limit` and more than twice the control spread. Each flagged case then runs again on its own (Criterion's `--exact`), base then head, and the PR gate's rule decides: it's **slower** when the re-run, or the mean of both passes, is past its threshold, and **flagged, cleared on re-run** otherwise.
-8. **Prints one table per version**, from `bench-compare.py --repeats … --confirm …`:
+6. **Pins CPUs.** The bench process runs under `taskset -c` on one set of cores and the containers get `--cpuset-cpus` on a disjoint one, so the server and the client stop trading cores with each other and with the rest of the machine. By default core 0 is left alone and the next 2·k cores are split in two, with k = min(4, (nproc − 1) / 2): 1-4 and 5-8 on a 24-core machine. The output's third line names the cores. Without `taskset`, or with fewer than 5 cores, it runs unpinned and says so. Other processes can still run on those cores; pinning narrows the noise, it doesn't reserve the cores.
+7. **Alternates.** Per version, per bench: base, head, base, head, base, head (`--rounds 3`). The order doesn't cancel a drift; the spread check below catches it.
+8. **Re-runs what it flags.** A case is flagged when the head's fastest run is slower than the base's by more than `--limit` and more than twice the control spread. Each flagged case then runs again on its own (Criterion's `--exact`), base then head, and the PR gate's rule decides: it's **slower** when the re-run, or the mean of both passes, is past its threshold, and **flagged, cleared on re-run** otherwise.
+9. **Prints one table per version**, from `bench-compare.py --repeats … --confirm …`:
 
 ```text
 | case | base (fastest … slowest) | head (fastest … slowest) | change | control spread | verdict |
@@ -96,19 +99,28 @@ What it does:
 | `key/uuid` | 1.234 ms … 1.256 ms | 1.501 ms … 1.522 ms | +21.6% | 1.8% | slower ⚠️ (re-run +20.9%) |
 ```
 
-The control spread is how far one binary's own runs differ, the larger of the two sides: the noise of this machine right now. The command exits 1 only on a case that is **slower**, that is, confirmed by its re-run. When both sides' bench binaries are byte-identical, the output says so: every difference in the table is noise.
+The control spread is how far one binary's own runs differ, (max − min) / min, the larger of the two sides: the noise of this machine right now. With 3 or more rounds each side's slowest run is left out of it, so one run hit by a burst doesn't widen it; that run still shows in the base and head columns. A `faster` isn't re-run, so on a busy machine treat one as a hint, not a result. The command exits 1 only on a case that is **slower**, that is, confirmed by its re-run. When both sides' bench binaries are byte-identical, the output says so: every difference in the table is noise.
 
 ### How far to trust it
 
-Measured on a shared development machine at a load average of 3 to 15 (another build running), Postgres 16, 3 rounds:
+Measured on a shared development machine with another agent building and testing beside it, Postgres 16, 3 rounds, CPUs pinned:
 
-- **Identical code** (byte-identical bench binaries), all 36 cases, run twice. Both runs exit 0 with no case slower. One case was flagged once (`hit_ratio/0`, +13.0% against a 6.2% spread) and cleared on its re-run (+7.8%). That's 1 flag and 0 false slowdowns in 72 comparisons.
-- **A 3 ms sleep added to every `build_many` call**, the 22 `cases`:
-  - **slower** on 4: `batch/1`, `batch/10`, `batch/100` and `hit_ratio/0`, true changes of +180% to +2100%;
-  - **flagged, cleared on re-run** on 2: `key/uuid` and `key/varchar`. The true change was +31% to +34%; the re-run measured +25%, under thresholds of 37% to 38%;
-  - **noise** on 16. On the 4 to 11 ms cases the true change is +27% to +73%, and the measured change stayed under twice their spreads of 14% to 83% (`root/wide_unread` measured +15.6% for a true +29.5%). On `batch/10000` and the ~150 ms composite-key and keyless roots it's +2% to +4%, under the 5% limit.
+- **Identical code**, the 22 `cases` (load average 2.4 to 14.7): exit 0. Two cases flagged, `key/float8` at +7.9% and `root/wide_composite_key` at +17.3%, and both cleared on re-run. One case, `batch/10`, read `faster` at −20.7%: `faster` isn't re-run.
+- **Identical code, all 36 cases, before pinning** (two runs, load 2.9 to 14.6): exit 0 both times, one flag, cleared.
+- **A 3 ms sleep added to every `build_many` call**, the 22 `cases` (load 2.6 to 11.9): **slower** on 18, each confirmed by its re-run. That's every case where 3 ms is more than the 5% limit; the true change ranged from +22% (`key/citext`, 13 ms) to +2500% (`batch/1`). The 4 left as `noise` are `batch/10000` and the ~150 ms composite-key, keyless and wide composite-key roots, where 3 ms is +2% to +3%.
+- The same slowed run before pinning and before dropping the slowest run caught 4 of those 18. On the 4 to 11 ms cases the spread fell from 14%–61% to 1.7%–9.6%.
 
-So the table catches a change larger than about twice that case's control spread, which on a busy machine is a large move: here, +28% to +170% on the 4 to 11 ms cases. The spread is in every row, so a reader can tell what a `noise` could still hide. A quiet machine narrows it.
+The smallest slowdown tested and caught on the 4 to 11 ms cases is +28% (`root/hash_partitioned`). Their spreads put the floor at 5% to 19%, depending on the case, but nothing below +28% was tested there. A change smaller than the 5% limit is never reported, and on a case whose spread is wide, the floor is twice that spread: read it in the row.
+
+### When a case you care about reads `noise`
+
+`noise` means "not past max(limit, 2 × spread)", not "unchanged". To look closer:
+
+1. Run that case alone, with more rounds: `just review-ab main --bench cases --filter '^key/uuid$' --rounds 7`. One case takes a minute or two a round, and more rounds narrow the spread, since each side's slowest is left out.
+2. Read the row's spread. If it's still wide, the machine is the problem: wait for other builds to finish, or move the run to a quieter machine. `--bench-cpus` / `--server-cpus` can steer it away from busy cores.
+3. Lower `--limit` only for a case whose spread is well under it, and say so in the review.
+
+What it can't see on a busy machine: a change smaller than the 5% limit; a change on a case whose spread is wide that run; and anything outside the benches, such as planner choices on other data sizes or another Postgres version than the ones asked for (`--pg`).
 
 > **Tip:** a quiet machine matters more than more samples. Another build beside it shows up as a wide control spread, and the table then calls small changes noise, which is the honest answer.
 

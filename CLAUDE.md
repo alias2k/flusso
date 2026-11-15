@@ -88,9 +88,13 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   says it is current (commit, toolchain, `RUSTFLAGS`/`CARGO_PROFILE_*` + `bench-in-process.sh`'s hash,
   overlaid files, the executables' sha256, the benches asked for); `bench-in-process.sh` builds only those
   (`BENCH_SET=docker BENCH_ONLY=… BENCH_BUILD_ONLY=1`); named `flusso-review-<pid>-*` containers
-  (`--pg 14,16,18`, an OpenSearch for `pipeline`) removed by a trap; per version, per bench, `--rounds` (3)
-  of base then head (`base-<r>`/`head-<r>`); `bench-compare.py --repeats --breaches` flags a case past the
-  limit and twice the control spread (one binary's own runs, (max − min) / min), each flagged case is
+  (`--pg 14,16,18`, an OpenSearch for `pipeline`) removed by a trap; CPU pinning (`review-ab-housekeeping.py cpus`: the bench
+  under `taskset -c`, the containers `--cpuset-cpus` on a disjoint set, default core 0 left alone and the
+  next 2·k split, k = min(4, (nproc − 1) / 2); `--bench-cpus`/`--server-cpus`/`--no-pin` or
+  `REVIEW_AB_*_CPUS`/`REVIEW_AB_PIN=0`; off, and said so, without `taskset` or under 5 cores); per version,
+  per bench, `--rounds` (3) of base then head (`base-<r>`/`head-<r>`); `bench-compare.py --repeats
+  --breaches` flags a case past the limit and twice the control spread (one binary's own runs,
+  (max − min) / min, each side's slowest left out with 3+ runs), each flagged case is
   re-run alone (`--exact`, base then head) and `--confirm` decides with the gate's rule (`confirmed()`,
   shared with `bench-gate.sh`'s path); exit 1 only on a confirmed case. Never fetches. Keeps the last 5
   `target/review-ab/<timestamp>` dirs; `--clean` deletes the cache. Tests: `test_review_ab.py` (the script
