@@ -68,7 +68,7 @@ use resolve::RootLinks;
 pub(crate) mod value;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use async_trait::async_trait;
@@ -286,6 +286,9 @@ pub struct PgDocumentBuilder {
     /// Whether each `(link type, key type)` pair compares, probed once: the
     /// verdict, or the reason the database gave for not answering.
     comparison_cache: Arc<Mutex<ComparisonCache>>,
+    /// Whether the role was refused `has_schema_privilege`, so the catalog
+    /// lookup no longer probes with it.
+    privilege_probe_refused: Arc<AtomicBool>,
     /// Tables a change arrived for that no index reads, already warned about.
     unread_warned: Arc<RwLock<HashSet<TableName>>>,
     /// Root tables without a primary key already warned about for a key with
@@ -319,6 +322,7 @@ impl PgDocumentBuilder {
             pk_cache: Arc::new(Mutex::new(HashMap::new())),
             col_type_cache: ColumnTypes::default(),
             comparison_cache: Arc::new(Mutex::new(HashMap::new())),
+            privilege_probe_refused: Arc::new(AtomicBool::new(false)),
             unread_warned: Arc::new(RwLock::new(HashSet::new())),
             keyless_warned: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -611,62 +615,27 @@ impl PgDocumentBuilder {
         {
             return Ok(meta);
         }
-        // `format_type` yields a canonical, re-parseable type name, so it can be
-        // dropped straight into a `$n::<type>` cast. `attnotnull` is the column's
-        // NOT NULL constraint — the nullability mapping resolution needs, read
-        // from the same catalog row as the type. `base_type` follows a domain
-        // through `typbasetype` to the first type that is no domain, and
-        // `base_name` names that type. For an array, `element_name` names its
-        // element type the same way (`typelem`, then every domain), so an
-        // array of a domain over `bytea` reads as one of `bytea`.
-        // `collisdeterministic` is read through
-        // `to_jsonb` because Postgres before 12 has no such column (and only
-        // deterministic collations).
-        let sql = "SELECT format_type(a.atttypid, a.atttypmod) AS sql_type, \
-                          a.atttypid::int8 AS type_oid, a.atttypmod AS type_mod, \
-                          b.base_type, b.base_name, el.element_name, \
-                          CASE WHEN b.base_usable THEN b.base_key ELSE ( \
-                            SELECT quote_ident(dn.nspname) || '.' || quote_ident(dt.typname) \
-                            FROM pg_type dt JOIN pg_namespace dn ON dn.oid = dt.typnamespace \
-                            WHERE dt.oid = a.atttypid \
-                          ) END AS key_type, \
-                          coalesce((SELECT (to_jsonb(c) ->> 'collisdeterministic')::boolean \
-                                    FROM pg_collation c WHERE c.oid = a.attcollation), \
-                                   true) AS deterministic, \
-                          a.attnotnull AS not_null \
-                   FROM pg_attribute a, LATERAL ( \
-                          WITH RECURSIVE d(oid, typmod) AS ( \
-                               SELECT a.atttypid, a.atttypmod \
-                             UNION ALL \
-                               SELECT t.typbasetype, t.typtypmod \
-                               FROM pg_type t JOIN d ON t.oid = d.oid WHERE t.typtype = 'd' \
-                          ) SELECT format_type(d.oid, d.typmod) AS base_type, \
-                                   t.typname::text AS base_name, t.oid AS base_oid, \
-                                   quote_ident(n.nspname) || '.' || quote_ident(t.typname) \
-                                     AS base_key, \
-                                   has_schema_privilege(n.oid, 'USAGE') AS base_usable \
-                            FROM d JOIN pg_type t ON t.oid = d.oid \
-                            JOIN pg_namespace n ON n.oid = t.typnamespace \
-                            WHERE t.typtype <> 'd' \
-                        ) b \
-                   LEFT JOIN LATERAL ( \
-                          WITH RECURSIVE e(oid) AS ( \
-                               SELECT a.typelem FROM pg_type a \
-                               WHERE a.oid = b.base_oid AND a.typelem <> 0 AND a.typlen = -1 \
-                             UNION ALL \
-                               SELECT t.typbasetype FROM pg_type t JOIN e ON t.oid = e.oid \
-                               WHERE t.typtype = 'd' \
-                          ) SELECT t.typname::text AS element_name \
-                            FROM e JOIN pg_type t ON t.oid = e.oid WHERE t.typtype <> 'd' \
-                        ) el ON true \
-                   WHERE a.attrelid = to_regclass($1) AND a.attname = $2 \
-                     AND a.attnum > 0 AND NOT a.attisdropped";
-        let row = sqlx::query(sql)
-            .bind(format!("{schema}.{table}"))
-            .bind(column.as_ref().to_owned())
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(query_err)?;
+        let probe = !self.privilege_probe_refused.load(Ordering::Relaxed);
+        let fetch = |sql: &'static str| {
+            sqlx::query(sql)
+                .bind(format!("{schema}.{table}"))
+                .bind(column.as_ref().to_owned())
+                .fetch_optional(&self.pool)
+        };
+        let row = match fetch(if probe {
+            COLUMN_META_SQL
+        } else {
+            COLUMN_META_SQL_UNPROBED
+        })
+        .await
+        {
+            Err(error) if probe && refused_for_privilege(&error) => {
+                self.privilege_probe_refused.store(true, Ordering::Relaxed);
+                fetch(COLUMN_META_SQL_UNPROBED).await
+            }
+            other => other,
+        }
+        .map_err(query_err)?;
         let meta = Arc::new(match row {
             Some(row) => {
                 let sql_type: String = row.try_get("sql_type").map_err(query_err)?;
@@ -1109,6 +1078,81 @@ const DATATYPE_MISMATCH: &str = "42804";
 const UNDEFINED_COLUMN: &str = "42703";
 /// SQLSTATE `42P01`: no such table.
 const UNDEFINED_TABLE: &str = "42P01";
+/// SQLSTATE `42501`: the role lacks a privilege.
+const INSUFFICIENT_PRIVILEGE: &str = "42501";
+
+/// Whether Postgres refused `error` for a privilege the role lacks.
+pub(crate) fn refused_for_privilege(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .is_some_and(|error| error.code().as_deref() == Some(INSUFFICIENT_PRIVILEGE))
+}
+
+/// The catalog lookup behind the column-type cache, with `$usable` saying
+/// whether the role may use the base type's schema. `format_type` yields a
+/// canonical, re-parseable type name, so it can be dropped straight into a
+/// `$n::<type>` cast. `attnotnull` is the column's NOT NULL constraint.
+/// `base_type` follows a domain through `typbasetype` to the first type that
+/// is no domain, and `base_name` names that type. For an array,
+/// `element_name` names its element type the same way (`typelem`, then every
+/// domain), so an array of a domain over `bytea` reads as one of `bytea`.
+/// `collisdeterministic` is read through `to_jsonb` because Postgres before
+/// 12 has no such column (and only deterministic collations).
+macro_rules! column_meta_sql {
+    ($usable:literal) => {
+        concat!(
+            "SELECT format_type(a.atttypid, a.atttypmod) AS sql_type, \
+                    a.atttypid::int8 AS type_oid, a.atttypmod AS type_mod, \
+                    b.base_type, b.base_name, el.element_name, \
+                    CASE WHEN b.base_usable THEN b.base_key ELSE ( \
+                      SELECT quote_ident(dn.nspname) || '.' || quote_ident(dt.typname) \
+                      FROM pg_type dt JOIN pg_namespace dn ON dn.oid = dt.typnamespace \
+                      WHERE dt.oid = a.atttypid \
+                    ) END AS key_type, \
+                    coalesce((SELECT (to_jsonb(c) ->> 'collisdeterministic')::boolean \
+                              FROM pg_collation c WHERE c.oid = a.attcollation), \
+                             true) AS deterministic, \
+                    a.attnotnull AS not_null \
+             FROM pg_attribute a, LATERAL ( \
+                    WITH RECURSIVE d(oid, typmod) AS ( \
+                         SELECT a.atttypid, a.atttypmod \
+                       UNION ALL \
+                         SELECT t.typbasetype, t.typtypmod \
+                         FROM pg_type t JOIN d ON t.oid = d.oid WHERE t.typtype = 'd' \
+                    ) SELECT format_type(d.oid, d.typmod) AS base_type, \
+                             t.typname::text AS base_name, t.oid AS base_oid, \
+                             quote_ident(n.nspname) || '.' || quote_ident(t.typname) \
+                               AS base_key, ",
+            $usable,
+            " AS base_usable \
+                      FROM d JOIN pg_type t ON t.oid = d.oid \
+                      JOIN pg_namespace n ON n.oid = t.typnamespace \
+                      WHERE t.typtype <> 'd' \
+                  ) b \
+             LEFT JOIN LATERAL ( \
+                    WITH RECURSIVE e(oid) AS ( \
+                         SELECT a.typelem FROM pg_type a \
+                         WHERE a.oid = b.base_oid AND a.typelem <> 0 AND a.typlen = -1 \
+                       UNION ALL \
+                         SELECT t.typbasetype FROM pg_type t JOIN e ON t.oid = e.oid \
+                         WHERE t.typtype = 'd' \
+                    ) SELECT t.typname::text AS element_name \
+                      FROM e JOIN pg_type t ON t.oid = e.oid WHERE t.typtype <> 'd' \
+                  ) el ON true \
+             WHERE a.attrelid = to_regclass($1) AND a.attname = $2 \
+               AND a.attnum > 0 AND NOT a.attisdropped"
+        )
+    };
+}
+
+/// [`column_meta_sql`] probing the base type's schema with
+/// `has_schema_privilege`.
+const COLUMN_META_SQL: &str = column_meta_sql!("has_schema_privilege(n.oid, 'USAGE')");
+
+/// [`column_meta_sql`] for a role that may not run `has_schema_privilege`
+/// (EXECUTE revoked): every key is cast to its declared type, as the cast
+/// before the base type was used could be.
+const COLUMN_META_SQL_UNPROBED: &str = column_meta_sql!("false");
 
 #[async_trait]
 impl DocumentBuilder for PgDocumentBuilder {
