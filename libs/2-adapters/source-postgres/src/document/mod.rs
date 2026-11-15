@@ -272,6 +272,46 @@ impl BatchCatalog {
     }
 }
 
+/// One chunk of a batched build: the index, its schema and root key column,
+/// and the keys with the ids they were requested under.
+#[derive(Debug)]
+struct Chunk<'a> {
+    index_name: &'a IndexName,
+    schema: &'a IndexSchema,
+    pk_column: &'a ColumnName,
+    keys: &'a [(&'a kernel::GenericValue, &'a DocumentId)],
+}
+
+/// How a chunk showed the cached key type stale.
+#[derive(Debug, Clone, Copy)]
+enum Stale {
+    /// A row equals no requested key once read back.
+    RowUnclaimed,
+    /// Postgres refused the prepared statement: its result type changed
+    /// under it (a key column's type or collation changed).
+    ResultType,
+}
+
+impl Stale {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::RowUnclaimed => "a row equals no requested key once read back",
+            Self::ResultType => "the prepared statement's result type changed",
+        }
+    }
+}
+
+/// Whether Postgres refused a prepared statement because its result type
+/// changed under it (`0A000`, "cached plan must not change result type").
+fn changed_result_type(error: &sqlx::Error) -> bool {
+    error.as_database_error().is_some_and(|error| {
+        error.code().as_deref() == Some(FEATURE_NOT_SUPPORTED)
+            && error
+                .message()
+                .contains("cached plan must not change result type")
+    })
+}
+
 /// One root row's document as [`PgDocumentBuilder::document_by_id`] and
 /// [`PgDocumentBuilder::sample_document`] build it: the body, or why it could
 /// not be finished.
@@ -536,20 +576,21 @@ impl PgDocumentBuilder {
     }
 
     /// Build one chunk of a batch onto `out`. `by_key`: pair rows by their
-    /// key's value ([`query::documents_by_key_query`]); `Ok(false)` when a
-    /// row was left unclaimed, with `out` partly written, so the caller can
-    /// undo it and rerun the chunk by position.
-    #[allow(clippy::too_many_arguments)]
+    /// key's value ([`query::documents_by_key_query`]). `Some` when the cached
+    /// key type proved stale, with `out` maybe partly written, so the caller
+    /// can undo it and rerun the chunk by position.
     async fn build_chunk(
         &self,
-        index_name: &IndexName,
-        schema: &kernel::IndexSchema,
-        pk_column: &ColumnName,
-        chunk: &[(&kernel::GenericValue, &DocumentId)],
+        Chunk {
+            index_name,
+            schema,
+            pk_column,
+            keys: chunk,
+        }: &Chunk<'_>,
         catalog: &BatchCatalog,
         by_key: bool,
         out: &mut Vec<Document>,
-    ) -> Result<bool> {
+    ) -> Result<Option<Stale>> {
         let keys: Vec<kernel::GenericValue> =
             chunk.iter().map(|(value, _)| (*value).clone()).collect();
         let BatchCatalog {
@@ -577,10 +618,11 @@ impl PgDocumentBuilder {
         for param in &params {
             statement = query::bind_param(statement, param)?;
         }
-        let rows = statement
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|error| self.failed_query(index_name, schema, error))?;
+        let rows = match statement.fetch_all(&self.pool).await {
+            Ok(rows) => rows,
+            Err(error) if changed_result_type(&error) => return Ok(Some(Stale::ResultType)),
+            Err(error) => return Err(self.failed_query(index_name, schema, error)),
+        };
 
         let plan = self.plan(index_name)?;
         if by_key {
@@ -591,7 +633,7 @@ impl PgDocumentBuilder {
                     Ok(value::read_document(row, &schema.fields, plan)?),
                 );
             }
-            return Ok(matching::match_by_key(found, chunk, out));
+            return Ok((!matching::match_by_key(found, chunk, out)).then_some(Stale::RowUnclaimed));
         }
         let mut found = Vec::with_capacity(rows.len());
         for row in &rows {
@@ -604,7 +646,7 @@ impl PgDocumentBuilder {
             found.push((position, value::read_document(row, &schema.fields, plan)?));
         }
         matching::match_rows(found, chunk, out);
-        Ok(true)
+        Ok(None)
     }
 
     /// The single-column primary key of a table, from the Postgres catalog
@@ -1255,6 +1297,9 @@ const UNDEFINED_COLUMN: &str = "42703";
 const UNDEFINED_TABLE: &str = "42P01";
 /// SQLSTATE `42501`: the role lacks a privilege.
 const INSUFFICIENT_PRIVILEGE: &str = "42501";
+/// `feature_not_supported`, which a cached plan whose result type changed
+/// raises.
+const FEATURE_NOT_SUPPORTED: &str = "0A000";
 
 /// Whether Postgres refused `error` for a privilege the role lacks.
 pub(crate) fn refused_for_privilege(error: &sqlx::Error) -> bool {
@@ -1435,28 +1480,37 @@ impl DocumentBuilder for PgDocumentBuilder {
             };
 
             let mut catalog = self.batch_catalog(schema, &pk_column).await?;
-            for chunk in keyed.chunks(BUILD_CHUNK) {
+            for keys in keyed.chunks(BUILD_CHUNK) {
                 let start = out.len();
-                let by_key = catalog.pairs_by_key(chunk);
-                if self
-                    .build_chunk(
-                        index_name, schema, &pk_column, chunk, &catalog, by_key, &mut out,
-                    )
-                    .await?
-                {
+                let by_key = catalog.pairs_by_key(keys);
+                let chunk = Chunk {
+                    index_name,
+                    schema,
+                    pk_column: &pk_column,
+                    keys,
+                };
+                let Some(stale) = self.build_chunk(&chunk, &catalog, by_key, &mut out).await?
+                else {
                     continue;
-                }
-                // A row the batch found by `=` equals no requested key once
-                // read back: the cached key type is stale (the change
-                // stream's `Relation` message is still to come). Read the
-                // types afresh and let Postgres pair the chunk by position.
+                };
+                // The cached key type is stale (the change stream's
+                // `Relation` message is still to come). Read the types afresh
+                // and let Postgres pair the chunk by position, once.
+                tracing::debug!(
+                    index = %index_name,
+                    reason = stale.reason(),
+                    "rerunning a batch by position with the column types read again",
+                );
                 out.truncate(start);
                 self.forget_tables_of(schema);
                 catalog = self.batch_catalog(schema, &pk_column).await?;
-                self.build_chunk(
-                    index_name, schema, &pk_column, chunk, &catalog, false, &mut out,
-                )
-                .await?;
+                if let Some(stale) = self.build_chunk(&chunk, &catalog, false, &mut out).await? {
+                    return Err(SourceError::Query(format!(
+                        "index `{index_name}`: a batch failed again after its column types \
+                         were read afresh: {}",
+                        stale.reason()
+                    )));
+                }
             }
         }
         Ok(out)

@@ -1119,7 +1119,10 @@ runs the inner level alone, selecting `value::key_select` (`query::documents_by_
 query, no join, which costs a light document about a quarter of its build) and pairs in
 `match_by_key`, which reports a row no requested key equals: the cached key type is stale (its
 `Relation` message is still to come), so `build_many` forgets the index's types and reruns that chunk
-by position (`integration`'s `a_batch_by_key_with_a_stale_type_cache_still_finds_its_rows`); everything else, a key read before a type change included, pairs by position. Where the declared key isn't the root's whole catalog primary key
+by position, as it does when Postgres refuses the prepared by-key statement because its result type
+changed (`0A000`, `text` → `name` changes the selected key's collation; `Stale::ResultType`), logging
+the rerun at `debug` (`integration`'s `a_batch_by_key_with_a_stale_type_cache_still_finds_its_rows`,
+`a_batch_survives_its_key_column_changing_from_text_to_name`); everything else, a key read before a type change included, pairs by position. Where the declared key isn't the root's whole catalog primary key
 (`query::RootKey::Shared`: keyless, composite, a partitioned root keyed with its partition column, a
 view) a key several rows share builds the row its `query::TieBreak` orders first, in both builds
 (`DISTINCT ON` / `first_row`): the table's primary-key columns when it has one, else the text of the
