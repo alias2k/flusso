@@ -18,8 +18,8 @@
 //! - `zero`, `exponent`: the kind and `${x}` as on `main`. A value that rounds
 //!   to zero, or is written with an exponent, reads as `main` read it.
 //! - `long`, `exact`: the kind as on `main`, and `${x}` is the nearest
-//!   `Decimal` to the input: every digit up to 28 fractional ones, where `main`
-//!   kept about 17.
+//!   `Decimal` to the input: about 28 significant digits, at most 28 after
+//!   the point, where `main` kept about 17.
 //! - `past`: the kind (a string). Its text is the exact digits, where `main`'s
 //!   went through `f64`.
 //! - `max`: nothing. A value `Decimal` holds exactly but `f64` rounds past its

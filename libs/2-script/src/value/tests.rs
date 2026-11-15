@@ -59,7 +59,7 @@ fn big(text: &str) -> GenericValue {
 }
 
 /// A declared `decimal` reaches a script as a decimal wherever `Decimal` can
-/// hold its magnitude (rounded past 28 fractional digits, an exponent read),
+/// hold its magnitude (rounded to what `Decimal` holds, an exponent read),
 /// as before issue #327; only a magnitude past `Decimal`'s range is a string of
 /// its digits.
 #[test]

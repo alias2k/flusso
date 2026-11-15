@@ -10,7 +10,7 @@
 //! | `SmallInt` / `Int` / `BigInt` | `i64` |
 //! | `Float` / `Double` | `f64` |
 //! | `Decimal` | `Decimal` |
-//! | `BigDecimal` (a declared `decimal`) | `Decimal`: the nearest to its text (rounded past 28 fractional digits), or as read through `f64` when written with an exponent or zero; a string of its digits past `Decimal`'s range |
+//! | `BigDecimal` (a declared `decimal`) | `Decimal`: the nearest to its text (about 28 significant digits, at most 28 after the point), or as read through `f64` when written with an exponent or zero; a string of its digits past `Decimal`'s range |
 //! | `String`, `Uuid` | string |
 //! | `Date` / `Time` / `Timestamp` / `TimestampTz` | RFC 3339 string |
 //! | `Bytes` | blob |
@@ -186,8 +186,9 @@ fn leaf(value: Dynamic, out: &Output<'_>) -> Result<GenericValue, String> {
 }
 
 /// A declared decimal in Rhai. Written without an exponent, it is the nearest
-/// `Decimal` (every digit up to 28 fractional ones, rounded past them). Written
-/// with an exponent, or zero, it reads as `main` read it before issue #327,
+/// `Decimal` (about 28 significant digits, at most 28 after the point; a next
+/// digit of 5 or more rounds away from zero). Written with an exponent, or
+/// zero, it reads as `main` read it before issue #327,
 /// through `f64`, so a tiny value is the same zero. Past ±7.9e28 it is a string
 /// of its exact digits.
 // Cold and out of line: without it `to_dynamic` slows on documents with no

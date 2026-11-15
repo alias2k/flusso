@@ -1159,7 +1159,7 @@ wrapped as `fn __flusso(root) { … }` so `this` can be bound — columns on lin
 fresh copy per call) and `root` (read-only, shared), all before any output is written, so no script
 sees another's output; then outputs are written and `emit: false` fields stripped. A failure becomes
 `Document::Failed` (see the engine invariant). A declared `decimal` enters Rhai as the nearest
-`Decimal` (rounded past 28 fractional digits); exponent text and a zero read as `main` read them
+`Decimal` (about 28 significant digits, at most 28 after the point); exponent text and a zero read as `main` read them
 through `f64`; past the range it is a string of the exact text (`value.rs`'s `declared_decimal`,
 `#[cold]`: it slows `to_dynamic` otherwise). A `decimal` result is written exactly (`BigDecimal`, a
 zero unsigned), a string returned to it fails with `main`'s message, and a decimal's `to_float()` is

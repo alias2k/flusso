@@ -65,7 +65,7 @@ A document value enters Rhai as:
 | --- | --- |
 | integers | `i64` |
 | `float`, `double` | `f64` |
-| `decimal` | `Decimal`, the nearest to the value: every digit up to 28 fractional ones, rounded past them. A value written with an exponent (a `float8` read under `decimal`: `1e-07`) reads through `f64`, as before 0.18. A zero is a plain zero (`0` or `0.0`; a scale like `0.000` isn't kept). Past ±7.9 × 10^28 a string of the exact text Postgres wrote (`"1e+30"`), and so is a value near the top of the range written with an exponent |
+| `decimal` | `Decimal`, the nearest to the value. `Decimal` holds about 28 significant digits in all and at most 28 after the point, so `12345678901234567890.123456789012` arrives as `12345678901234567890.123456789`; a next digit of 5 or more rounds away from zero. A value written with an exponent (a `float8` read under `decimal`: `1e-07`) reads through `f64`, as before 0.18. A zero is a plain zero (`0` or `0.0`; a scale like `0.000` isn't kept). Past ±7.9 × 10^28 a string of the exact text Postgres wrote (`"1e+30"`), and so is a value near the top of the range written with an exponent |
 | text, `uuid` | string |
 | `date`, `timestamp` | RFC 3339 string (`2024-05-01`, `2024-05-01T12:00:00Z`) |
 | `binary` | blob |
