@@ -1650,9 +1650,19 @@ async fn a_server_that_refuses_the_jit_setting_still_connects() {
 /// which it takes for ten elements) a batch of fewer keys always looked
 /// cheaper planned afresh, so the live trickle (a lone change commits a batch
 /// of one) planned every call. `pg_stat_statements` counts plans and calls.
+///
+/// The counts are summed over the builder's connections, each of which plans
+/// a statement up to five times before trying a generic plan (and once more
+/// after an invalidation, such as an autovacuum `ANALYZE`). So each
+/// statement runs [`CALLS`] times, far more than its pool's
+/// [`POOL_CONNECTIONS`] can plan while warming up.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn a_small_batch_reuses_its_plan() {
+    /// sqlx's default pool size, which the builder keeps.
+    const POOL_CONNECTIONS: i64 = 10;
+    const WARM_UP_PLANS: i64 = 7;
+    const CALLS: i32 = 200;
     let container = Postgres::default()
         .with_tag("16-alpine")
         .with_cmd([
@@ -1687,8 +1697,8 @@ async fn a_small_batch_reuses_its_plan() {
         .await
         .unwrap();
     for size in [1, 4, 8] {
-        for call in 0..20 {
-            let first = call * size + 1;
+        for call in 0..CALLS {
+            let first = (call * size) % 900 + 1;
             builder
                 .build_many(&int_ids("plain", first..first + size))
                 .await
@@ -1701,18 +1711,23 @@ async fn a_small_batch_reuses_its_plan() {
     }
     let counts: Vec<(i64, i64, String)> = sqlx::query_as(
         "SELECT plans, calls, query FROM pg_stat_statements \
-         WHERE query LIKE '%\"plain\"%' AND query LIKE '%ANY%' AND calls >= 10",
+         WHERE query LIKE '%\"plain\"%' AND query LIKE '%ANY%'",
     )
     .fetch_all(&pool)
     .await
     .unwrap();
-    assert!(!counts.is_empty());
     for (plans, calls, query) in &counts {
         assert!(
-            plans * 2 < *calls,
+            *plans <= POOL_CONNECTIONS * WARM_UP_PLANS,
             "planned {plans} times in {calls} calls: {query}"
         );
+        assert_eq!(*calls, i64::from(CALLS), "{query}");
     }
+    assert_eq!(
+        counts.len(),
+        6,
+        "one statement per size and kind: {counts:?}"
+    );
 }
 
 /// A batch over a key column changed from `text` to `name`, the cache still
