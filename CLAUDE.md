@@ -1142,7 +1142,7 @@ only warns: `a_server_that_refuses_the_jit_setting_still_connects`, Postgres 10;
 pool's users to set it on the role. The result
 columns are a `bigint` and the document whatever the key's type; a key Postgres refuses to cast fails
 the whole statement, as on main. Guard: `source-postgres`'s `key_matching` (a generated differential,
-4,408 pairs: 116 requested keys of every kind and edge form, keys past 63 bytes included, against tables of 19 key types holding
+4,560 pairs: 120 requested keys of every kind and edge form, keys past 63 bytes included, against tables of 19 key types holding
 every stored spelling they accept, `build` vs `build_many` alone, beside every stored row and among 17 keys of
 the requested kind (so both `KeyForm`s), each table also as a hash-partitioned twin, on Postgres 16 with a
 non-UTC database zone). A query Postgres refuses as a schema mismatch (`42883`/`42804`/`42703`/`42P01`), a

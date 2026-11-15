@@ -76,6 +76,10 @@ const LONG: &str = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefgh
 
 const UUID: &str = "0b7f2d4e-1c2a-4d5e-8f90-1a2b3c4d5e6f";
 
+/// Two more `uuid` rows, so keys of a batch name different rows there too.
+const UUID_2: &str = "1c8e3f5a-2d3b-4e6f-9a01-2b3c4d5e6f70";
+const UUID_3: &str = "2d9f4a6b-3e4c-4f70-8b12-3c4d5e6f7081";
+
 /// Texts inserted into every table; each keeps those its key type accepts.
 const STORED: &[&str] = &[
     "0",
@@ -114,6 +118,8 @@ const STORED: &[&str] = &[
     "10:00:00.5",
     "24:00:00",
     UUID,
+    UUID_2,
+    UUID_3,
     "\\x0102",
     LONG,
 ];
@@ -184,6 +190,8 @@ fn requested() -> Vec<GenericValue> {
         V::TimestampTz(Utc.from_utc_datetime(&at(time(0, 0, 0, 0)))),
         V::TimestampTz(Utc.from_utc_datetime(&at(time(10, 0, 0, 0)))),
         V::Uuid(uuid::Uuid::parse_str(UUID).unwrap()),
+        V::Uuid(uuid::Uuid::parse_str(UUID_2).unwrap()),
+        V::Uuid(uuid::Uuid::parse_str(UUID_3).unwrap()),
         V::Bytes(vec![1, 2]),
         V::Bytes(b"abc".to_vec()),
     ];
@@ -238,6 +246,8 @@ fn requested() -> Vec<GenericValue> {
         "10:00:00.500",
         "24:00:00",
         UUID,
+        UUID_2,
+        UUID_3,
         "0B7F2D4E-1C2A-4D5E-8F90-1A2B3C4D5E6F",
         "{0b7f2d4e-1c2a-4d5e-8f90-1a2b3c4d5e6f}",
         "0b7f2d4e1c2a4d5e8f901a2b3c4d5e6f",
