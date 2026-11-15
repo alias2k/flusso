@@ -129,7 +129,7 @@ fn keyed_predicate_casts_a_uuid_primary_key() {
         &HashMap::new(),
         &col_types,
         &ByteColumns::new(),
-        RootKey::Unique,
+        &RootKey::Unique,
     )
     .unwrap();
     assert!(
@@ -178,7 +178,7 @@ fn root_filters_fold_into_both_query_forms() {
         &HashMap::new(),
         &col_types,
         &ByteColumns::new(),
-        RootKey::Unique,
+        &RootKey::Unique,
     )
     .unwrap();
     assert!(
@@ -548,7 +548,7 @@ fn keys_bound_as_different_types_are_different_statements() {
             &HashMap::new(),
             &id_types(),
             &ByteColumns::new(),
-            RootKey::Unique,
+            &RootKey::Unique,
         )
         .unwrap();
         let (reverse, _) = reverse_query(
@@ -582,7 +582,7 @@ fn documents_query_pairs_each_key_with_its_position() {
         &HashMap::new(),
         &id_types(),
         &ByteColumns::new(),
-        RootKey::Unique,
+        &RootKey::Unique,
     )
     .unwrap();
     assert_eq!(
@@ -609,7 +609,7 @@ fn documents_query_folds_soft_delete_into_the_root_lookup() {
         &HashMap::new(),
         &id_types(),
         &ByteColumns::new(),
-        RootKey::Unique,
+        &RootKey::Unique,
     )
     .unwrap();
     assert!(sql.as_str().contains(
@@ -657,7 +657,7 @@ fn soft_delete_field_inside_a_relation_reads_the_root_column() {
         &pks,
         &id_types(),
         &ByteColumns::new(),
-        RootKey::Unique,
+        &RootKey::Unique,
     )
     .unwrap();
     assert!(
@@ -749,7 +749,7 @@ fn a_key_carried_as_text_is_cast_from_text() {
         &HashMap::new(),
         &col_types,
         &ByteColumns::new(),
-        RootKey::Unique,
+        &RootKey::Unique,
     )
     .unwrap();
     assert!(
@@ -1298,7 +1298,7 @@ fn bytes_sql(fields: Vec<Field>, pks: &HashMap<String, ColumnName>, bytes: &Byte
         pks,
         &id_types(),
         bytes,
-        RootKey::Unique,
+        &RootKey::Unique,
     )
     .unwrap();
     let object = |sql: &str| {
@@ -1455,11 +1455,47 @@ fn a_big_decimal_key_binds_as_text() {
     );
 }
 
-/// A key several root rows share builds the row whose text sorts first, in
-/// a batched build (`DISTINCT ON`) as in a single one (`ORDER BY … LIMIT 1`).
+/// A key several root rows share builds the row its tie-break orders first,
+/// in a batched build (`DISTINCT ON`) as in a single one (`ORDER BY …
+/// LIMIT 1`): the table's primary key, else the text of the columns the
+/// document reads, else (a raw filter) the whole row's text.
 #[test]
-fn a_shared_key_picks_the_row_whose_text_sorts_first() {
+fn a_shared_key_picks_the_row_its_tie_break_orders_first() {
     let schema = index(Some("id"), None, vec![col_field("id", "id")]);
+    let by_primary_key = TieBreak::primary_key(&[c("id"), c("sub")]);
+    let (single, _) = document_query(
+        &schema,
+        &[(c("id"), GenericValue::Int(7))],
+        &HashMap::new(),
+        &id_types(),
+        &ByteColumns::new(),
+    )
+    .unwrap();
+    assert!(first_row(single, &by_primary_key).as_str().ends_with(
+        r#"WHERE "root"."id" = $1::int4::bigint ORDER BY "root"."id", "root"."sub" LIMIT 1"#
+    ));
+    let (batched, _) = documents_query(
+        &schema,
+        &c("id"),
+        &[GenericValue::Int(7)],
+        &HashMap::new(),
+        &id_types(),
+        &ByteColumns::new(),
+        &RootKey::Shared(by_primary_key),
+    )
+    .unwrap();
+    assert!(
+        batched.as_str().contains(
+            r#"(SELECT DISTINCT ON ("root"."id") "root"."id" AS "flusso_key", json_build_object('id', "root"."id") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint]) ORDER BY "root"."id", "root"."id", "root"."sub") AS "flusso_built""#
+        ),
+        "{}",
+        batched.as_str()
+    );
+    assert_eq!(
+        TieBreak::read_columns(&[c("v"), c("id")]),
+        TieBreak::read_columns(&[c("id"), c("v")]),
+        "the order of the columns read is fixed"
+    );
     let (single, _) = document_query(
         &schema,
         &[(c("id"), GenericValue::Int(7))],
@@ -1469,23 +1505,22 @@ fn a_shared_key_picks_the_row_whose_text_sorts_first() {
     )
     .unwrap();
     assert!(
-        first_row_by_text(single).as_str().ends_with(
-            r#"WHERE "root"."id" = $1::int4::bigint ORDER BY ROW("root".*)::text LIMIT 1"#
-        )
+        first_row(single, &TieBreak::read_columns(&[c("v"), c("id")]))
+            .as_str()
+            .ends_with(r#"ORDER BY "root"."id"::text, "root"."v"::text LIMIT 1"#)
     );
-    let (batched, _) = documents_query(
+    let (single, _) = document_query(
         &schema,
-        &c("id"),
-        &[GenericValue::Int(7)],
+        &[(c("id"), GenericValue::Int(7))],
         &HashMap::new(),
         &id_types(),
         &ByteColumns::new(),
-        RootKey::Shared,
     )
     .unwrap();
-    assert_eq!(
-        batched.as_str(),
-        r#"SELECT "doc_position", "document" FROM (SELECT "flusso_requested"."flusso_position" AS "doc_position", "flusso_built"."document" FROM (SELECT DISTINCT ON ("root"."id") "root"."id" AS "flusso_key", json_build_object('id', "root"."id") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint]) ORDER BY "root"."id", ROW("root".*)::text) AS "flusso_built" FULL JOIN unnest(ARRAY[$1::int4::bigint]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key" OFFSET 0) AS "flusso_paired" WHERE "flusso_paired"."document" IS NOT NULL"#
+    assert!(
+        first_row(single, &TieBreak::whole_row())
+            .as_str()
+            .ends_with(r#"ORDER BY ROW("root".*)::text LIMIT 1"#)
     );
 }
 
@@ -1501,7 +1536,7 @@ fn a_batch_paired_by_key_selects_each_rows_key_and_no_join() {
         &HashMap::new(),
         &id_types(),
         &ByteColumns::new(),
-        (RootKey::Unique, "pg_catalog.int8", "int8"),
+        (&RootKey::Unique, "pg_catalog.int8", "int8"),
     )
     .unwrap();
     assert_eq!(

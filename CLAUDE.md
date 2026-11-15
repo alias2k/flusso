@@ -1115,8 +1115,12 @@ query, no join, which costs a light document about a quarter of its build) and p
 `Relation` message is still to come), so `build_many` forgets the index's types and reruns that chunk
 by position (`integration`'s `a_batch_by_key_with_a_stale_type_cache_still_finds_its_rows`); everything else, a key read before a type change included, pairs by position. Where the declared key isn't the root's whole catalog primary key
 (`query::RootKey::Shared`: keyless, composite, a partitioned root keyed with its partition column, a
-view) a key several rows share builds the row whose `ROW(root.*)::text` sorts first, in both builds
-(`DISTINCT ON` / `first_row_by_text`; `a_key_several_rows_share_builds_the_same_row_both_ways`). The
+view) a key several rows share builds the row its `query::TieBreak` orders first, in both builds
+(`DISTINCT ON` / `first_row`): the table's primary-key columns when it has one, else the text of the
+root columns the document reads (`source::root_columns`; rows equal there build the same document),
+else, under a raw filter, `ROW(root.*)::text`, so the choice reads no column the document doesn't
+(`a_key_several_rows_share_builds_the_same_row_both_ways`,
+`choosing_a_shared_keys_row_reads_no_column_the_document_does_not_read`: a view column that raises). The
 builder's and the backfill's pools set `jit = off` after connect (`document::without_jit`, a refusal
 only warns; `the_builders_sessions_run_without_jit`, `partitions`'
 `a_batched_build_on_a_partitioned_root_is_not_jit_compiled`); the manual tells a transaction-mode

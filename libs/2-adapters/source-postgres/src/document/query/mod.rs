@@ -60,25 +60,64 @@ const KEYS: &str = "flusso_requested";
 const KEY: &str = "flusso_key";
 const POSITION: &str = "flusso_position";
 
-/// Which root row answers a key, when several share it.
-const FIRST_BY_TEXT: &str = "ROW(\"root\".*)::text";
-
 /// Whether the declared root key is the root table's whole primary key, so a
 /// key matches at most one row. A root without one (no primary key, a
 /// composite one, a partitioned table keyed with its partition column, a
 /// view) still starts, with a warning; a key several of its rows share builds
-/// the row whose text ([`FIRST_BY_TEXT`]) sorts first, in a batched and a
-/// single build alike.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// the row its [`TieBreak`] orders first, in a batched and a single build
+/// alike.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum RootKey {
     Unique,
-    Shared,
+    Shared(TieBreak),
+}
+
+/// How the rows sharing a key are ordered to pick the one that builds: an
+/// `ORDER BY` list over the root row. It reads no column the document
+/// doesn't read, so a wide column the document leaves alone is never fetched:
+///
+/// - [`primary_key`](Self::primary_key): the table's own primary key, which is
+///   unique, so the order is total.
+/// - [`read_columns`](Self::read_columns), for a root without one (a keyless
+///   table, a view): the text of every root column the document reads. Rows
+///   that tie there build the same document.
+/// - [`whole_row`](Self::whole_row): the whole row's text, only where the
+///   columns read are unknown (a raw filter).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TieBreak(String);
+
+impl TieBreak {
+    pub(super) fn primary_key(columns: &[ColumnName]) -> Self {
+        Self(
+            columns
+                .iter()
+                .map(|column| qcol(ROOT, column))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    }
+
+    pub(super) fn read_columns<'a>(columns: impl IntoIterator<Item = &'a ColumnName>) -> Self {
+        let mut columns: Vec<&ColumnName> = columns.into_iter().collect();
+        columns.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
+        Self(
+            columns
+                .into_iter()
+                .map(|column| format!("{}::text", qcol(ROOT, column)))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    }
+
+    pub(super) fn whole_row() -> Self {
+        Self(format!("ROW({}.*)::text", qident(ROOT)))
+    }
 }
 
 /// A single build's query (from [`document_query`]) reading the row a shared
-/// key picks: the one whose text sorts first.
-pub(super) fn first_row_by_text(query: SqlString) -> SqlString {
-    SqlString::new(format!("{} ORDER BY {FIRST_BY_TEXT} LIMIT 1", query.0))
+/// key picks: the one `tie_break` orders first.
+pub(super) fn first_row(query: SqlString, tie_break: &TieBreak) -> SqlString {
+    SqlString::new(format!("{} ORDER BY {} LIMIT 1", query.0, tie_break.0))
 }
 
 /// The columns a document reads whose base type is `bytea` or `bytea[]`, by
@@ -247,8 +286,8 @@ pub(super) fn document_query(
 /// `OFFSET 0` keeps the planner from reading the `IS NOT NULL` back into the
 /// join, which would make it a `LEFT JOIN` again.
 ///
-/// [`RootKey::Shared`]: the inner level keeps one row per key, the one whose
-/// text sorts first, as [`first_row_by_text`] does for a single build. A key
+/// [`RootKey::Shared`]: the inner level keeps one row per key, the one its
+/// [`TieBreak`] orders first, as [`first_row`] does for a single build. A key
 /// Postgres refuses to cast fails the statement, so the whole batch, as a
 /// single build of it fails.
 ///
@@ -262,7 +301,7 @@ pub(super) fn documents_query(
     pks: &HashMap<String, ColumnName>,
     col_types: &HashMap<(String, String), String>,
     bytes: &ByteColumns,
-    root_key: RootKey,
+    root_key: &RootKey,
 ) -> Result<(SqlString, Vec<GenericValue>)> {
     batched(
         schema,
@@ -286,7 +325,7 @@ pub(super) fn documents_by_key_query(
     pks: &HashMap<String, ColumnName>,
     col_types: &HashMap<(String, String), String>,
     bytes: &ByteColumns,
-    (root_key, key_type, base_name): (RootKey, &str, &str),
+    (root_key, key_type, base_name): (&RootKey, &str, &str),
 ) -> Result<(SqlString, Vec<GenericValue>)> {
     batched(
         schema,
@@ -312,7 +351,7 @@ fn batched(
     pk_column: &ColumnName,
     keys: &[GenericValue],
     (pks, col_types, bytes): Catalog<'_>,
-    root_key: RootKey,
+    root_key: &RootKey,
     by_key: Option<(&str, &str)>,
 ) -> Result<(SqlString, Vec<GenericValue>)> {
     let mut builder = Builder {
@@ -365,9 +404,10 @@ fn batched(
             "SELECT {key_out}, {object} AS \"document\" \
              FROM {table} AS \"{ROOT}\" WHERE {predicate} OFFSET 0"
         ),
-        (RootKey::Shared, _) => format!(
+        (RootKey::Shared(tie_break), _) => format!(
             "SELECT DISTINCT ON ({root_pk}) {key_out}, {object} AS \"document\" \
-             FROM {table} AS \"{ROOT}\" WHERE {predicate} ORDER BY {root_pk}, {FIRST_BY_TEXT}"
+             FROM {table} AS \"{ROOT}\" WHERE {predicate} ORDER BY {root_pk}, {}",
+            tie_break.0
         ),
     };
     if by_key.is_some() {

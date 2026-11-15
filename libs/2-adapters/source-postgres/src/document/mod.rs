@@ -567,10 +567,10 @@ impl PgDocumentBuilder {
                 pks,
                 col_types,
                 bytes,
-                (*root_key, &key.key_type, &key.base_name),
+                (root_key, &key.key_type, &key.base_name),
             )?
         } else {
-            query::documents_query(schema, pk_column, &keys, pks, col_types, bytes, *root_key)?
+            query::documents_query(schema, pk_column, &keys, pks, col_types, bytes, root_key)?
         };
 
         let mut statement = sqlx::query(sql);
@@ -643,7 +643,8 @@ impl PgDocumentBuilder {
     }
 
     /// Whether `key_columns` are the root table's whole primary key, so a key
-    /// matches at most one row (cached).
+    /// matches at most one row (the primary key is cached), and if not how
+    /// the rows sharing a key are ordered ([`query::TieBreak`]).
     async fn root_key(
         &self,
         schema: &kernel::IndexSchema,
@@ -670,11 +671,24 @@ impl PgDocumentBuilder {
                 columns
             }
         };
-        Ok(if primary_key.iter().eq(key_columns.iter().copied()) {
-            query::RootKey::Unique
+        if primary_key.iter().eq(key_columns.iter().copied()) {
+            return Ok(query::RootKey::Unique);
+        }
+        Ok(query::RootKey::Shared(if primary_key.is_empty() {
+            match source::root_columns(schema) {
+                // The rows competing for a key all share the declared key's
+                // value, so it orders nothing; and it may name no column (a
+                // keyless root keyed by its whole row starts with a warning).
+                source::ColumnUse::Columns(columns) => query::TieBreak::read_columns(
+                    columns
+                        .iter()
+                        .filter(|column| Some(*column) != schema.primary_key.as_ref()),
+                ),
+                source::ColumnUse::All => query::TieBreak::whole_row(),
+            }
         } else {
-            query::RootKey::Shared
-        })
+            query::TieBreak::primary_key(&primary_key)
+        }))
     }
 
     async fn fetch_primary_key(
@@ -1354,8 +1368,8 @@ impl DocumentBuilder for PgDocumentBuilder {
             .await?;
         let bytes = self.byte_columns(schema, &pks).await?;
         let (mut sql, params) = query::document_query(schema, &id.key.0, &pks, &col_types, &bytes)?;
-        if self.root_key(schema, &key_columns).await? == query::RootKey::Shared {
-            sql = query::first_row_by_text(sql);
+        if let query::RootKey::Shared(tie_break) = self.root_key(schema, &key_columns).await? {
+            sql = query::first_row(sql, &tie_break);
         }
 
         let mut statement = sqlx::query(sql);
