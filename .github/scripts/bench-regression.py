@@ -25,28 +25,35 @@ regresses.
 Around that rule, and without changing what it flags:
 
 - **Too noisy to watch.** For each series, the smallest lasting step the rule
-  can catch: the threshold, or `--spread` times the window's median absolute
-  deviation over its median when that is larger (the median of the series'
-  last `NOISE_WINDOWS` windows). Series that need more than their threshold are
-  printed, and listed in the issue under the findings.
+  catches within two runs 9 times out of 10, measured: a step of each size in
+  `NOISE_GRID` (times the threshold) is injected into the series' history at
+  each of its last `NOISE_CUTS` runs, and the rule itself is run on the step's
+  second run. Every series whose step is above its threshold is printed and
+  listed in the issue under the findings.
 - **Malformed entries** inside a readable file (a value that is not a number, a
-  bench without a name, a point that is not an object, `"commit": null`) are
-  skipped with a `warning:` line; a point's missing commit reads as unknown.
-- **An unreadable data file** (missing, truncated, not a JSON object) fails
-  the run with an `error:` line and exit 1, before `gh` is called.
+  bench without a name or not an object, a point that is not an object, a
+  point whose `benches` is not a list, `"commit": null`) are skipped with a
+  `warning:` line; a point's missing commit reads as unknown. A `true`/`false`
+  value is read as main reads it (1/0).
+- **An unreadable data file** (missing, truncated, not a JSON object, `entries`
+  not an object, a suite that is not a list) fails the run with an `error:`
+  line and exit 1, before `gh` is called.
+- **A point's image** is read from its `extra.images`; an `extra` without
+  `images` (a point carrying only runner facts) reads as no image, like a point
+  without `extra`, so recording runner facts never restarts a series' window.
 
 Otherwise the exit code is 0 — a regression is a signal, not a broken job.
 """
 import argparse
 import json
-import math
 import re
 import statistics
 import subprocess
 import sys
 
 ISSUE_TITLE = "Performance regression on main"
-NOISE_WINDOWS = 20
+NOISE_CUTS = 20
+NOISE_GRID = (1.2, 1.5, 2, 3, 4, 6, 8)
 
 
 def warn(message: str) -> None:
@@ -63,20 +70,18 @@ def load(path: str) -> dict:
 
 
 def is_number(value) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return isinstance(value, (int, float))
 
 
 def clean(data: dict) -> dict:
     """The data with every malformed entry left out, each with a warning."""
     entries = data.get("entries", {})
     if not isinstance(entries, dict):
-        warn("`entries` is not an object, skipped")
-        return {"entries": {}}
+        raise ValueError("`entries` is not an object")
     suites = {}
     for suite, points in entries.items():
         if not isinstance(points, list):
-            warn(f"{suite}: its points are not a list, skipped")
-            continue
+            raise ValueError(f"suite {suite!r} is not a list of points")
         kept = []
         for point in points:
             if not isinstance(point, dict):
@@ -89,7 +94,10 @@ def clean(data: dict) -> dict:
             cid = str(commit.get("id", ""))[:12]
             benches = []
             raw = point.get("benches", [])
-            for bench in raw if isinstance(raw, list) else []:
+            if not isinstance(raw, list):
+                warn(f"{suite} at {cid or 'an unknown commit'}: `benches` is not a list ({raw!r}), skipped")
+                raw = []
+            for bench in raw:
                 if not isinstance(bench, dict) or not isinstance(bench.get("name"), str) or not is_number(bench.get("value")):
                     name = bench.get("name") if isinstance(bench, dict) else bench
                     value = bench.get("value") if isinstance(bench, dict) else None
@@ -104,7 +112,10 @@ def clean(data: dict) -> dict:
 def images(bench: dict) -> str:
     extra = bench.get("extra") or ""
     try:
-        return json.dumps(json.loads(extra).get("images"), sort_keys=True)
+        found = json.loads(extra)
+        if "images" not in found:
+            return ""
+        return json.dumps(found.get("images"), sort_keys=True)
     except (ValueError, AttributeError, TypeError):
         return ""
 
@@ -156,33 +167,61 @@ def analyse(data: dict, threshold: float, rss_threshold: float, window: int, spr
     return findings
 
 
+def reliable_step(suite: str, tool: str, history: list[tuple[dict, dict]], limit: float, window: int,
+                  spread: float) -> tuple[float, bool] | None:
+    """The smallest step in `NOISE_GRID` the rule catches within two runs 9 times out of 10, by running it.
+
+    `history` is the series' `(bench, commit)` points in time order. Returns the step (worse by, in %) and
+    whether it reached 9 out of 10; when no size did, the largest size tried. None with too little history.
+    """
+    smaller = tool == "customSmallerIsBetter"
+    cuts = range(max(window, len(history) - 1 - NOISE_CUTS), len(history) - 1)
+    if len(cuts) < NOISE_CUTS // 2:
+        return None
+    steps = [limit * m for m in NOISE_GRID if smaller or limit * m < 100]
+    for step in steps:
+        factor = 1 + step / 100 if smaller else 1 - step / 100
+        caught = 0
+        for cut in cuts:
+            # The rule reads only the newest two points and the `window` before each, so that slice decides alone.
+            start = max(0, cut - window)
+            points = [{"tool": tool, "commit": commit,
+                       "benches": [{**bench, "value": bench["value"] * factor} if i >= cut else bench]}
+                      for i, (bench, commit) in enumerate(history[start:cut + 2], start)]
+            caught += bool(analyse({"entries": {suite: points}}, limit, limit, window, spread))
+        if caught >= 0.9 * len(cuts):
+            return step, True
+    return steps[-1], False
+
+
 def too_noisy(data: dict, threshold: float, rss_threshold: float, window: int, spread: float) -> list[dict]:
-    """Series whose own spread hides a lasting step of their threshold, with the smallest step the rule catches."""
+    """Series whose reliably caught step is above their threshold, with that step."""
     noisy = []
     for suite, points in data.get("entries", {}).items():
-        series: dict[str, list[tuple[float, str]]] = {}
+        if not points:
+            continue
+        tool = points[-1].get("tool")
+        series: dict[str, list[tuple[dict, dict]]] = {}
         for point in points:
             for bench in point.get("benches", []):
-                series.setdefault(bench["name"], []).append((bench["value"], images(bench)))
+                series.setdefault(bench["name"], []).append((bench, point.get("commit", {})))
         for name, history in series.items():
             limit = rss_threshold if name.endswith("peak_rss_mib") else threshold
-            needed = []
-            for i in range(window, len(history)):
-                prior = [v for v, im in history[i - window:i] if im == history[i][1]]
-                if len(prior) < 2:
-                    continue
-                base = statistics.median(prior)
-                if base:
-                    swing = statistics.median(abs(v - base) for v in prior)
-                    needed.append(spread * swing / abs(base) * 100)
-            if needed and statistics.median(needed[-NOISE_WINDOWS:]) > limit:
-                noisy.append({"suite": suite, "series": name, "limit": limit,
-                              "needs_percent": math.ceil(statistics.median(needed[-NOISE_WINDOWS:]))})
+            found = reliable_step(suite, tool, history, limit, window, spread)
+            if found and found[0] > limit:
+                noisy.append({"suite": suite, "series": name, "limit": limit, "step": round(found[0]), "reliable": found[1]})
     return noisy
 
 
+def noisy_text(n: dict) -> str:
+    if n["reliable"]:
+        return f"a lasting step of about +{n['step']}% is caught within two runs 9 times out of 10"
+    return f"a lasting step of +{n['step']}% is caught within two runs fewer than 9 times out of 10"
+
+
 def noisy_lines(noisy: list[dict]) -> list[str]:
-    return [f"| {n['suite']} | `{n['series']}` | +{n['needs_percent']}% | {n['limit']:g}% |" for n in noisy]
+    return [f"| {n['suite']} | `{n['series']}` | {('+' if n['reliable'] else 'more than +')}{n['step']}% | {n['limit']:g}% |"
+            for n in noisy]
 
 
 def upsert_issue(findings: list[dict], noisy: list[dict]) -> None:
@@ -205,9 +244,11 @@ def upsert_issue(findings: list[dict], noisy: list[dict]) -> None:
         commit = f"[`{f['commit']}`]({f['url']})" if f["url"] else f["commit"]
         lines.append(f"| {f['suite']} | `{f['series']}` | {f['worse_by_percent']:+.1f}% | {f['baseline']:.3g} | {f['value']:.3g} | {commit} |")
     if noisy:
-        lines += ["", "Too noisy to watch: these series swing so much from run to run that a lasting step must be at least "
-                  "this large before the rule can catch it, so their silence is not a sign they are fine.", "",
-                  "| suite | series | smallest lasting step caught | threshold |", "| --- | --- | ---: | ---: |",
+        lines += ["", f"Too noisy to watch: on these series the rule catches a lasting step within two runs 9 times out of 10 "
+                  f"only once it is at least this large, measured by injecting steps into each series' last {NOISE_CUTS} runs. "
+                  "Their silence is not a sign they are fine.", "",
+                  "| suite | series | lasting step caught within two runs 9 times out of 10 | threshold |",
+                  "| --- | --- | ---: | ---: |",
                   *noisy_lines(noisy)]
     lines += ["", "History: https://alias2k.github.io/flusso/bench/", "", "This issue is maintained by `.github/scripts/bench-regression.py`; it closes itself once the series recover."]
     body = "\n".join(lines)
@@ -246,9 +287,9 @@ def main() -> int:
     else:
         print("no regression: no series is over its threshold on two consecutive runs")
     if noisy:
-        print("too noisy to watch (the smallest lasting step the rule can catch on each):")
+        print(f"too noisy to watch (steps injected at each of the last {NOISE_CUTS} runs, the rule run on the second):")
         for n in noisy:
-            print(f"    {n['suite']} {n['series']}: needs a lasting step of +{n['needs_percent']}% (threshold {n['limit']:g}%)")
+            print(f"    {n['suite']} {n['series']}: {noisy_text(n)} (threshold {n['limit']:g}%)")
     if args.issue:
         upsert_issue(findings, noisy)
     return 0
