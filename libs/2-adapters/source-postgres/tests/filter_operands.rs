@@ -11,8 +11,9 @@
 //!
 //! - every sized type (`varchar(n)`, `numeric(p,s)`, `char(n)`, `bit(n)`,
 //!   `varbit(n)`, `time(p)`, `timestamp(p)`, `timestamptz(p)`, `interval(p)`,
-//!   `interval year`, a domain over `varchar(n)` and one over `numeric(p,s)`)
-//!   under every operator that takes a value, as a root filter;
+//!   `interval year`, a domain over `varchar(n)` and one over `numeric(p,s)`,
+//!   and a domain whose `CHECK` refuses the value) under every operator that
+//!   takes a value, as a root filter;
 //! - a `varchar(n)` and a `numeric(p,s)` value in every place a filter sits:
 //!   the root, a soft-delete `when`, a `has_many`, a `belongs_to`, a
 //!   `many_to_many` target and its junction, an aggregate, an aggregate's
@@ -108,6 +109,9 @@ const ROOT_CASES: &[(&str, bool)] = &[
     ("{ column: dv, op: eq, value: 'archived' }", false),
     ("{ column: dv, op: neq, value: 'archived' }", true),
     ("{ column: dn, op: eq, value: '1.005' }", false),
+    // a domain whose CHECK refuses the value
+    ("{ column: dp, op: eq, value: '-1' }", false),
+    ("{ column: dp, op: neq, value: '-1' }", true),
 ];
 
 /// `(filter, matches)` for the related rows, every one holding `archi` and
@@ -131,12 +135,13 @@ async fn a_filter_value_that_does_not_fit_its_column_is_compared_as_written() {
     for statement in [
         "CREATE DOMAIN short_text AS varchar(5)",
         "CREATE DOMAIN money2 AS numeric(10,2)",
+        "CREATE DOMAIN positive AS int CHECK (VALUE > 0)",
         "CREATE TABLE sized (id int PRIMARY KEY, s varchar(5), n numeric(10,2), c char(5), \
          cp char(5), b bit(5), vb varbit(3), t time(0), ts timestamp(0), tz timestamptz(0), \
-         iv interval(0), iy interval year, dv short_text, dn money2)",
+         iv interval(0), iy interval year, dv short_text, dn money2, dp positive)",
         "INSERT INTO sized VALUES (1, 'archi', 1.01, 'abcde', 'ab', B'10100', B'101', \
          '12:00:01', '2020-01-01 12:00:01', '2020-01-01 12:00:01+00', '1 second', '1 year', \
-         'archi', 1.01)",
+         'archi', 1.01, 5)",
         "CREATE TABLE teams (id int PRIMARY KEY, s varchar(5), n numeric(10,2))",
         "CREATE TABLE owners (id int PRIMARY KEY, team_id int, deleted boolean, \
          s varchar(5), n numeric(10,2))",
