@@ -58,7 +58,7 @@ A brief contains (keep it short):
 - restore `libs/2-adapters/source-postgres/benches/fixtures/pgoutput.bin` if a test run re-recorded it;
 - out-of-scope findings are listed in the report, not fixed, and the agent creates no GitHub issues;
 - **don't cheat**: never weaken a test or drop a performance-motivated design to make a check pass;
-- **long runs in the foreground**: wait for every build and test run with a blocking call and a long timeout; never end the turn while one runs;
+- **long runs in the foreground**: start every build, test, benchmark and check as a blocking call with a long timeout, never as a background command; never end the turn while one runs (nothing wakes an agent when it finishes). Say this to reviewers too;
 - match CI's order from `CLAUDE.md` before reporting, pipe output through `tail`/`grep`, then **stop at "PR opened"**: report the PR URL and head SHA, don't wait for CI.
 
 Resume an agent only for tiny fixes. For a real follow-up round, start a fresh agent with a short handoff (PR, branch, what is left, files).
@@ -73,10 +73,17 @@ Resume an agent only for tiny fixes. For a real follow-up round, start a fresh a
    A PR that touches only docs, CI or other mechanical files needs the issue reviewer alone.
 2. Give a reviewer the code, the issue and the paths, never the author's conclusions or your own. Bound it: say what blocks a merge and what is a note.
 3. **Every re-check is a new reviewer.** After fixes, start fresh reviewers with the earlier findings and the objections to them; never send the re-check to the reviewer that made the findings or to the author.
-4. Read the diff yourself. Small findings you fix and push. The rest go back to the PR's agent, or to a new agent on the same branch when the first one is gone.
-5. Merge when the four required checks pass (`clippy + tests`, `fuzz (pgoutput decoder)`, `designer SPA (build + no drift)`, `manual (build + links)`) and the benchmark job did not fail. The ruleset also asks for an approving review; use `--admin` only when the owner has allowed it for the round.
-6. Clean up: `git worktree remove --force <worktree>`, delete the local branch (the remote one deletes itself on merge), and refresh the warm `target/` when the main checkout is on `main`.
-7. Update the tracking issue's `## Plan` (edit a local copy, then `gh issue edit N --body-file`) when an agent starts and when a PR merges.
+4. **A re-check reviews the delta.** Give it the diff since the last reviewed commit, the earlier findings and the objections, and tell it to verify the fixes and what they could have broken, nothing else. Full depth is for round one and for the last round before merge.
+5. **Reviewers run tooling, they don't rebuild it.** Setup is where review time goes, so it lives in the repo:
+   - one committed command builds `origin/main` and the branch in **separate target dirs**, starts the Postgres versions that matter, runs the Docker-backed benches on both and prints one comparison. Until the repo has it, building it is the first small PR, not something each reviewer hand-writes;
+   - a warm build of `main` that reviewers copy with `cp -r --reflink=auto` for the baseline, refreshed after each merge;
+   - when a reviewer finds a gap with a generator or script of its own (a key type, a key length, a Postgres version), the fix adds that case to the committed differential or test, so the next reviewer only runs the suite;
+   - the committed tooling is a floor, not a fence: a reviewer that needs a check the tooling can't run says so in its report (what it needed, what it did by hand instead), still does the check by hand this round, and the missing tool is then built and committed, in the same PR when small, otherwise as the next tooling PR. Never tell a reviewer to use only what exists;
+   - push before review when you can, and have reviewers read CI's result for the suites CI runs instead of running them again.
+6. Read the diff yourself. Small findings you fix and push. The rest go back to the PR's agent, or to a new agent on the same branch when the first one is gone.
+7. Merge when the four required checks pass (`clippy + tests`, `fuzz (pgoutput decoder)`, `designer SPA (build + no drift)`, `manual (build + links)`) and the benchmark job did not fail. The ruleset also asks for an approving review; use `--admin` only when the owner has allowed it for the round.
+8. Clean up: `git worktree remove --force <worktree>`, delete the local branch (the remote one deletes itself on merge), and refresh the warm `target/` when the main checkout is on `main`.
+9. Update the tracking issue's `## Plan` (edit a local copy, then `gh issue edit N --body-file`) when an agent starts and when a PR merges.
 
 A test that fails only in CI is a bug until shown otherwise: find the cause before retrying. The e2e suites are retried by nextest; an intermittent failure elsewhere usually means two tests share state (an index name pattern, an environment variable).
 
