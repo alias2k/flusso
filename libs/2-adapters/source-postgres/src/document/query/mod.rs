@@ -46,10 +46,12 @@ const ROOT: &str = "root";
 pub(super) const DOC_POSITION: &str = "doc_position";
 
 /// The batched build's names one level out from the root: the built rows,
-/// the numbered list of requested keys, and the key and position columns. The
-/// document and its raw filters are built a level in, where the root table is
-/// the only relation in scope, so no name here can meet one of the user's.
+/// the rows paired with positions, the numbered list of requested keys, and
+/// its columns. The document and its raw filters are built a level in, where
+/// the root table is the only relation in scope, so no name here can meet one
+/// of the user's.
 const BUILT: &str = "flusso_built";
+const PAIRED: &str = "flusso_paired";
 const KEYS: &str = "flusso_requested";
 const KEY: &str = "flusso_key";
 const POSITION: &str = "flusso_position";
@@ -227,11 +229,19 @@ pub(super) fn document_query(
 ///   document is built here, where the root table is the only relation in
 ///   scope, so a raw filter's unqualified name resolves as in a single build.
 /// - **One level out**, the same keys, unnested `WITH ORDINALITY` for their
-///   positions, are joined to the built rows on the same `=`. Postgres decides
-///   which row answers which key, with no Rust mirror of its casts, and a row
-///   answering several positions (the same key read as `int4` and as `int8`)
-///   comes back once per position. The join is over at most a batch of rows
-///   on each side; the root is scanned once.
+///   positions, are joined to the built rows on the same `=`. Postgres
+///   decides which row answers which key, with no Rust mirror of its casts,
+///   and a row answering several positions (the same key read as `int4` and
+///   as `int8`) comes back once per position. The root is scanned once.
+///
+/// The join is a `FULL JOIN`, which Postgres runs only as a hash or merge
+/// join. As an inner or left join the planner may pick a nested loop: over a
+/// materialized batch of wide documents rescanned per requested key (it sizes
+/// a document at a few bytes, so the loop looks free while it spills to disk
+/// and reads the batch back per key), or over the key list rebuilt per row.
+/// A requested key no row answers is dropped one level further out, whose
+/// `OFFSET 0` keeps the planner from reading the `IS NOT NULL` back into the
+/// join, which would make it a `LEFT JOIN` again.
 ///
 /// [`RootKey::Shared`]: the inner level keeps one row per key, the one whose
 /// text sorts first, as [`first_row_by_text`] does for a single build. A key
@@ -292,11 +302,15 @@ pub(super) fn documents_query(
              FROM {table} AS \"{ROOT}\" WHERE {predicate} ORDER BY {root_pk}, {FIRST_BY_TEXT}"
         ),
     };
-    let sql = format!(
+    let paired = format!(
         "SELECT \"{KEYS}\".\"{POSITION}\" AS \"{DOC_POSITION}\", \"{BUILT}\".\"document\" \
          FROM ({built}) AS \"{BUILT}\" \
-         JOIN unnest(ARRAY[{values}]) WITH ORDINALITY AS \"{KEYS}\"(\"{KEY}\", \"{POSITION}\") \
-         ON \"{BUILT}\".\"{KEY}\" = \"{KEYS}\".\"{KEY}\""
+         FULL JOIN unnest(ARRAY[{values}]) WITH ORDINALITY AS \"{KEYS}\"(\"{KEY}\", \"{POSITION}\") \
+         ON \"{BUILT}\".\"{KEY}\" = \"{KEYS}\".\"{KEY}\" OFFSET 0"
+    );
+    let sql = format!(
+        "SELECT \"{DOC_POSITION}\", \"document\" FROM ({paired}) AS \"{PAIRED}\" \
+         WHERE \"{PAIRED}\".\"document\" IS NOT NULL"
     );
     Ok((SqlString::new(sql), builder.params))
 }

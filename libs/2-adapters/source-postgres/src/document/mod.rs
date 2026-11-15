@@ -1327,7 +1327,13 @@ impl DocumentBuilder for PgDocumentBuilder {
 
                 let mut found = Vec::with_capacity(rows.len());
                 for row in &rows {
-                    let position: i64 = row.try_get(query::DOC_POSITION).map_err(query_err)?;
+                    // A built row the join paired with no position (never
+                    // expected: it was read by the same keys) answers nothing.
+                    let position: Option<i64> =
+                        row.try_get(query::DOC_POSITION).map_err(query_err)?;
+                    let Some(position) = position else {
+                        continue;
+                    };
                     found.push((
                         position,
                         value::read_document(row, &schema.fields, self.plan(index_name)?)?,

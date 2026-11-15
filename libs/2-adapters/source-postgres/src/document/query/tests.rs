@@ -135,7 +135,7 @@ fn keyed_predicate_casts_a_uuid_primary_key() {
     assert!(
         batched
             .as_str()
-            .contains(r#"WHERE "root"."id" = ANY(ARRAY[$1::uuid::uuid]) OFFSET 0) AS "flusso_built" JOIN unnest(ARRAY[$1::uuid::uuid]) WITH ORDINALITY"#),
+            .contains(r#"WHERE "root"."id" = ANY(ARRAY[$1::uuid::uuid]) OFFSET 0) AS "flusso_built" FULL JOIN unnest(ARRAY[$1::uuid::uuid]) WITH ORDINALITY"#),
         "{}",
         batched.as_str()
     );
@@ -182,8 +182,8 @@ fn root_filters_fold_into_both_query_forms() {
     )
     .unwrap();
     assert!(
-        sql.as_str().ends_with(
-            r#"WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint]) AND ("root"."status" = $2::text) OFFSET 0) AS "flusso_built" JOIN unnest(ARRAY[$1::int4::bigint]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key""#
+        sql.as_str().contains(
+            r#"WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint]) AND ("root"."status" = $2::text) OFFSET 0) AS "flusso_built" FULL JOIN unnest(ARRAY[$1::int4::bigint]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key" OFFSET 0"#
         ),
         "{}",
         sql.as_str()
@@ -587,7 +587,7 @@ fn documents_query_pairs_each_key_with_its_position() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT "flusso_requested"."flusso_position" AS "doc_position", "flusso_built"."document" FROM (SELECT "root"."id" AS "flusso_key", json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint, $2::int4::bigint]) OFFSET 0) AS "flusso_built" JOIN unnest(ARRAY[$1::int4::bigint, $2::int4::bigint]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key""#
+        r#"SELECT "doc_position", "document" FROM (SELECT "flusso_requested"."flusso_position" AS "doc_position", "flusso_built"."document" FROM (SELECT "root"."id" AS "flusso_key", json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint, $2::int4::bigint]) OFFSET 0) AS "flusso_built" FULL JOIN unnest(ARRAY[$1::int4::bigint, $2::int4::bigint]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key" OFFSET 0) AS "flusso_paired" WHERE "flusso_paired"."document" IS NOT NULL"#
     );
     assert_eq!(params, vec![GenericValue::Int(7), GenericValue::Int(9)]);
 }
@@ -661,8 +661,8 @@ fn soft_delete_field_inside_a_relation_reads_the_root_column() {
     )
     .unwrap();
     assert!(
-        sql.as_str().ends_with(
-            r#"WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint]) AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END)) OFFSET 0) AS "flusso_built" JOIN unnest(ARRAY[$1::int4::bigint]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key""#
+        sql.as_str().contains(
+            r#"WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint]) AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END)) OFFSET 0) AS "flusso_built" FULL JOIN unnest(ARRAY[$1::int4::bigint]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key" OFFSET 0"#
         ),
         "{}",
         sql.as_str()
@@ -754,7 +754,7 @@ fn a_key_carried_as_text_is_cast_from_text() {
     .unwrap();
     assert!(
         batched.as_str().contains(
-            r#"= ANY(ARRAY[$1::text::date]) OFFSET 0) AS "flusso_built" JOIN unnest(ARRAY[$1::text::date]) WITH ORDINALITY"#
+            r#"= ANY(ARRAY[$1::text::date]) OFFSET 0) AS "flusso_built" FULL JOIN unnest(ARRAY[$1::text::date]) WITH ORDINALITY"#
         ),
         "{}",
         batched.as_str()
@@ -1485,6 +1485,6 @@ fn a_shared_key_picks_the_row_whose_text_sorts_first() {
     .unwrap();
     assert_eq!(
         batched.as_str(),
-        r#"SELECT "flusso_requested"."flusso_position" AS "doc_position", "flusso_built"."document" FROM (SELECT DISTINCT ON ("root"."id") "root"."id" AS "flusso_key", json_build_object('id', "root"."id") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint]) ORDER BY "root"."id", ROW("root".*)::text) AS "flusso_built" JOIN unnest(ARRAY[$1::int4::bigint]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key""#
+        r#"SELECT "doc_position", "document" FROM (SELECT "flusso_requested"."flusso_position" AS "doc_position", "flusso_built"."document" FROM (SELECT DISTINCT ON ("root"."id") "root"."id" AS "flusso_key", json_build_object('id', "root"."id") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint]) ORDER BY "root"."id", ROW("root".*)::text) AS "flusso_built" FULL JOIN unnest(ARRAY[$1::int4::bigint]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key" OFFSET 0) AS "flusso_paired" WHERE "flusso_paired"."document" IS NOT NULL"#
     );
 }
