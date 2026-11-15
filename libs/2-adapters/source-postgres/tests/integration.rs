@@ -1338,3 +1338,85 @@ fields:
         assert_eq!(format!("{:?}", backward[4]), format!("{:?}", forward[0]));
     }
 }
+
+/// The batched build pairs rows with positions in a hash or merge join, never
+/// a nested loop (issue #335). The planner sizes a document at a few bytes,
+/// so as an inner join it would loop over the requested keys, rescanning the
+/// materialized batch of built documents for each: wide documents spill and
+/// are read back once per key. `auto_explain` logs the executed statement's
+/// plan.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_batched_build_pairs_positions_without_a_nested_loop() {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE plain (id int PRIMARY KEY)",
+        "CREATE TABLE notes (id int PRIMARY KEY, item_id int NOT NULL, rank int NOT NULL)",
+        "CREATE INDEX ON notes (item_id)",
+        "INSERT INTO plain SELECT g FROM generate_series(1, 2000) g",
+        "INSERT INTO notes SELECT g, g % 2000 + 1, g % 5 FROM generate_series(1, 100000) g",
+        "ANALYZE",
+        "ALTER DATABASE postgres SET session_preload_libraries = 'auto_explain'",
+        "ALTER DATABASE postgres SET auto_explain.log_min_duration = 0",
+        "ALTER DATABASE postgres SET auto_explain.log_format = 'json'",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let spec = SourceSpec::new(BTreeMap::from([(
+        index_name("plain"),
+        schema_from(&scoped_schema("plain", "true", "true", "true")),
+    )]));
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec))
+        .await
+        .unwrap();
+    for keys in [16, 256] {
+        let built = builder
+            .build_many(&int_ids("plain", (0..keys).map(|n| n * 7 + 1)))
+            .await
+            .unwrap();
+        assert_eq!(built.len(), usize::try_from(keys).unwrap());
+    }
+
+    let log = String::from_utf8(container.stderr_to_vec().await.unwrap()).unwrap();
+    let plans: Vec<serde_json::Value> = log
+        .split("plan:\n")
+        .skip(1)
+        .filter_map(|entry| {
+            serde_json::Deserializer::from_str(entry)
+                .into_iter::<serde_json::Value>()
+                .next()
+                .and_then(Result::ok)
+        })
+        .filter(|plan| {
+            plan["Query Text"]
+                .as_str()
+                .is_some_and(|text| text.contains("ORDINALITY"))
+        })
+        .collect();
+    assert_eq!(plans.len(), 2, "one plan per batch: {plans:#?}");
+    fn nodes<'a>(plan: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+        out.extend(plan["Node Type"].as_str());
+        for child in plan["Plans"].as_array().into_iter().flatten() {
+            nodes(child, out);
+        }
+    }
+    for plan in &plans {
+        let mut found = Vec::new();
+        nodes(&plan["Plan"], &mut found);
+        let joins: Vec<&&str> = found
+            .iter()
+            .filter(|node| ["Nested Loop", "Hash Join", "Merge Join"].contains(node))
+            .collect();
+        assert!(
+            joins.iter().all(|join| **join != "Nested Loop") && !joins.is_empty(),
+            "the pairing join is a hash or merge join: {found:?}"
+        );
+    }
+}
