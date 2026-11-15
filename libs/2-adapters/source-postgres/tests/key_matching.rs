@@ -41,6 +41,7 @@ const KINDS: &[(&str, &[&str])] = &[
     ("numeric", &["1", "1.5", "2", "100000"]),
     ("numeric(10,2)", &["1", "1.5", "2"]),
     ("float8", &["1", "1.5", "0.1", "2"]),
+    ("real", &["1", "1.5", "0.1", "2"]),
     (
         "text",
         &[
@@ -50,6 +51,9 @@ const KINDS: &[(&str, &[&str])] = &[
             "abc",
             "2020-01-02",
             "2020-01-02 10:00:00",
+            UUID,
+            "true",
+            "10:00:00",
         ],
     ),
     ("varchar(20)", &["1", "1.5", "abc", "2020-01-02"]),
@@ -59,7 +63,12 @@ const KINDS: &[(&str, &[&str])] = &[
         "timestamptz",
         &["2020-01-02 00:00:00+00", "2020-01-02 10:00:00+00"],
     ),
+    ("uuid", &[UUID]),
+    ("bool", &["true"]),
+    ("time", &["10:00:00"]),
 ];
+
+const UUID: &str = "0b7f2d4e-1c2a-4d5e-8f90-1a2b3c4d5e6f";
 
 /// Keys as the WAL decoder hands them over, one or more per kind.
 fn requested() -> Vec<GenericValue> {
@@ -82,6 +91,8 @@ fn requested() -> Vec<GenericValue> {
         GenericValue::Double(1.0),
         GenericValue::Double(1.5),
         GenericValue::Double(0.1),
+        GenericValue::Float(1.5),
+        GenericValue::Float(0.1),
         GenericValue::String("1".into()),
         GenericValue::String("1.5".into()),
         GenericValue::String("abc".into()),
@@ -91,6 +102,12 @@ fn requested() -> Vec<GenericValue> {
         GenericValue::Timestamp(at(10)),
         GenericValue::TimestampTz(Utc.from_utc_datetime(&at(0))),
         GenericValue::TimestampTz(Utc.from_utc_datetime(&at(10))),
+        GenericValue::Uuid(uuid::Uuid::parse_str(UUID).unwrap()),
+        GenericValue::String(UUID.into()),
+        GenericValue::Bool(true),
+        GenericValue::String("true".into()),
+        GenericValue::Time(chrono::NaiveTime::from_hms_opt(10, 0, 0).unwrap()),
+        GenericValue::String("10:00:00".into()),
     ]
 }
 
@@ -102,6 +119,10 @@ fn bound_type(value: &GenericValue) -> &'static str {
         GenericValue::BigInt(_) => "int8",
         GenericValue::Decimal(_) => "numeric",
         GenericValue::Double(_) => "float8",
+        GenericValue::Float(_) => "float4",
+        GenericValue::Uuid(_) => "uuid",
+        GenericValue::Bool(_) => "bool",
+        GenericValue::Time(_) => "time",
         GenericValue::String(_) => "text",
         GenericValue::Date(_) => "date",
         GenericValue::Timestamp(_) => "timestamp",
