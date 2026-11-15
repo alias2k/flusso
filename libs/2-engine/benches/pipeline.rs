@@ -108,7 +108,7 @@ const BURST: usize = USER_COUNT;
 /// the `change` bench to drive a multi-hop reverse resolution. Its id follows
 /// the seeding scheme below: `order_id * 100 + item_index`, where the first
 /// order of user 1 is `1 * 1000 + 0`.
-const CHANGED_ITEM_ID: i64 = 1000 * 100;
+const CHANGED_ITEM_ID: i32 = 1000 * 100;
 
 /// Wraps the real [`OpensearchSink`] but never reads or records seeding, so
 /// the burst deployments (which skip backfill) touch no `flusso_meta` state.
@@ -152,10 +152,10 @@ impl ChangeCapture for BurstCapture {
     }
 
     async fn live(&self) -> SourceResult<BoxStream<'static, SourceResult<LiveChange>>> {
-        let changes: Vec<SourceResult<LiveChange>> = (1..=self.count as i64)
+        let changes: Vec<SourceResult<LiveChange>> = (1..=i32::try_from(self.count).unwrap())
             .map(|id| {
                 Ok((
-                    Position(id as u64),
+                    Position(u64::from(id.unsigned_abs())),
                     ChangeEvent::Upsert {
                         table: table("users"),
                         key: row_key(id),
@@ -430,12 +430,33 @@ async fn propagate(services: &Services, table: &TableName, key: &RowKey) {
     }
 }
 
+/// Every change of the burst builds its user's document: a key of another
+/// type than the column's would measure tombstones instead.
+async fn assert_the_burst_builds(services: &Services) {
+    let mut ids = Vec::with_capacity(BURST);
+    for id in 1..=i32::try_from(BURST).unwrap() {
+        let resolved = services
+            .documents
+            .resolve(&table("users"), &row_key(id), None, None)
+            .await
+            .unwrap();
+        ids.extend(resolved);
+    }
+    let built = services.documents.build_many(&ids).await.unwrap();
+    let upserts = built
+        .iter()
+        .filter(|document| matches!(document, Document::Upsert { .. }))
+        .count();
+    assert_eq!(upserts, BURST, "every burst change builds its document");
+}
+
 fn bench(c: &mut Criterion) {
     let rt = runtime();
     // Keep the runtime entered for the whole scope so the containers' async
     // teardown (testcontainers drops them via the reactor) has one to run on.
     let _guard = rt.enter();
     let services = rt.block_on(setup());
+    rt.block_on(assert_the_burst_builds(&services));
 
     let mut group = c.benchmark_group("baseline");
     group.measurement_time(Duration::from_secs(10));
@@ -767,8 +788,9 @@ fn order_by(col: &str, direction: Direction) -> OrderBy {
     }
 }
 
-fn row_key(id: i64) -> RowKey {
-    RowKey(vec![(column("id"), GenericValue::BigInt(id))])
+/// A key as the WAL decoder reads one from these tables' `int` columns.
+fn row_key(id: i32) -> RowKey {
+    RowKey(vec![(column("id"), GenericValue::Int(id))])
 }
 fn field(name: &str) -> FieldName {
     FieldName::try_new(name).unwrap()
