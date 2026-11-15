@@ -276,11 +276,14 @@ run_side() { # run_side <side> <bench> <baseline> [<exact id>]
   if [ -n "$os_url" ]; then
     curl -sf -X DELETE "$os_url/_all" >/dev/null
   fi
+  # Criterion prints its gnuplot probe and progress to stderr even with
+  # --quiet; the bench's own messages (a skipped case) stay.
   echo "── $2 · $3${4:+ · $4} · pg$version"
   (cd "$tree/${package_dir[$2]}" &&
     REVIEW_AB_PG_URL=postgres://postgres:postgres@127.0.0.1:$port/r$database REVIEW_AB_OS_URL=$os_url \
       CRITERION_HOME=$out/pg$version/$2 \
-      "$exe" --bench --quiet --noplot --plotting-backend plotters --save-baseline "$3" "${selector[@]}" >/dev/null)
+      "$exe" --bench --quiet --noplot --plotting-backend plotters --save-baseline "$3" "${selector[@]}" 2>&1 >/dev/null |
+      sed -E '/^(Gnuplot not found|Benchmarking )/d' >&2)
   docker exec "$container" psql -U postgres -qc "DROP DATABASE r$database" >/dev/null
 }
 

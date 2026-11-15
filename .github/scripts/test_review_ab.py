@@ -333,6 +333,9 @@ baseline = args[args.index("--save-baseline") + 1]
 exact = args[args.index("--exact") + 1] if "--exact" in args else None
 with open(os.environ["FAKE_LOG"], "a") as log:
     log.write(f"run {side} {target} {baseline} {exact or '-'} {' '.join(args)}\n")
+print("Gnuplot not found, using plotters backend", file=sys.stderr)
+print("Benchmarking key/int: Warming up for 1.0000 s", file=sys.stderr)
+print("skipping `root/x`: a message the reviewer needs", file=sys.stderr)
 times = json.loads(os.environ.get("FAKE_TIMES", "{}"))
 ids = [i for i in os.environ["FAKE_CASES"].split() if exact in (None, i)]
 home = pathlib.Path(os.environ["CRITERION_HOME"])
@@ -440,6 +443,12 @@ class Script(unittest.TestCase):
         line = self.log_lines("run ")[0]
         for flag in ("--quiet", "--noplot", "--plotting-backend plotters"):
             self.assertIn(flag, line)
+
+    def test_criterion_progress_is_dropped_and_bench_messages_kept(self) -> None:
+        result = self.review(self.with_cases, "--bench", "cases")
+        self.assertNotIn("Gnuplot not found", result.stderr)
+        self.assertNotIn("Benchmarking key/int", result.stderr)
+        self.assertIn("a message the reviewer needs", result.stderr)
 
     def test_a_flagged_case_is_re_run_alone_and_judged_on_the_re_run(self) -> None:
         times = {"head": {
