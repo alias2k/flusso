@@ -217,8 +217,19 @@ bench-compare base cand:
 # the full pipeline) — attribution, a few minutes each.
 bench-components:
     cargo bench -p flusso-source-postgres --bench postgres
+    cargo bench -p flusso-source-postgres --bench cases
     cargo bench -p flusso-sink-opensearch --bench opensearch
     cargo bench -p flusso-engine --bench pipeline
+
+# Compare the working tree with a base on the Docker-backed component benches
+# (postgres, cases, pipeline): base and head alternate, 3 rounds each, on the
+# Postgres versions asked for; a flagged case is re-run alone before it counts.
+# Reuses a warm base build in ~/.cache/flusso/review-ab (`--clean` removes it).
+# Never fetches: the base is origin/main as last fetched.
+# E.g. `just review-ab`, `just review-ab main --pg 14,16,18 --bench cases --filter key/`.
+[positional-arguments]
+review-ab base="origin/main" *args:
+    .github/scripts/review-ab.sh "$@"
 
 # A scenario on the real binary: `just bench-scenario [reference|complex] [ci|default]`.
 # Starts its own Postgres + OpenSearch containers (or uses BENCH_PG_URL /

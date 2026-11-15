@@ -22,6 +22,14 @@
 # script runs nothing and exits 78, so a caller can tell "this tree has no
 # in-process benches" apart from a failure.
 #
+# Three knobs for review-ab.sh (all unset in the PR gate):
+#
+# - BENCH_SET=docker picks the Docker-backed benches (postgres, cases,
+#   pipeline) instead of the five in-process ones;
+# - BENCH_BUILD_ONLY=1 builds and records the executables without running
+#   them, so the caller can run base and head interleaved;
+# - BENCH_ONLY=<target,…> builds only those bench targets of the set.
+#
 # The pgoutput, resolve and render benches sit behind each crate's `bench`
 # feature, which exposes the crate-private decoder / an offline document
 # builder / the renderer to them.
@@ -44,6 +52,9 @@ ran=0
 bench() {
   local file=$1 package=$2 target=$3
   shift 3
+  if [ -n "${BENCH_ONLY:-}" ] && [[ ",$BENCH_ONLY," != *",$target,"* ]]; then
+    return
+  fi
   if [ ! -f "$file" ]; then
     echo "skipping \`$target\`: $file is not in this tree"
     return
@@ -58,15 +69,23 @@ bench() {
     return 1
   fi
   printf '%s\t%s\t%s\n' "$target" "$exe" "$(sha256sum "$exe" | cut -d' ' -f1)" >>"$record"
-  (cd "$dir" && "$exe" "${args[@]}")
+  if [ "${BENCH_BUILD_ONLY:-}" != 1 ]; then
+    (cd "$dir" && "$exe" "${args[@]}")
+  fi
   ran=$((ran + 1))
 }
 
-bench libs/2-engine/benches/engine.rs flusso-engine engine
-bench libs/2-adapters/source-postgres/benches/pgoutput.rs flusso-source-postgres pgoutput --features bench
-bench libs/2-adapters/source-postgres/benches/resolve.rs flusso-source-postgres resolve --features bench
-bench libs/2-adapters/sink-opensearch/benches/render.rs flusso-sink-opensearch render --features bench
-bench libs/2-script/benches/scripted.rs flusso-script scripted
+if [ "${BENCH_SET:-in-process}" = docker ]; then
+  bench libs/2-adapters/source-postgres/benches/postgres.rs flusso-source-postgres postgres
+  bench libs/2-adapters/source-postgres/benches/cases.rs flusso-source-postgres cases
+  bench libs/2-engine/benches/pipeline.rs flusso-engine pipeline
+else
+  bench libs/2-engine/benches/engine.rs flusso-engine engine
+  bench libs/2-adapters/source-postgres/benches/pgoutput.rs flusso-source-postgres pgoutput --features bench
+  bench libs/2-adapters/source-postgres/benches/resolve.rs flusso-source-postgres resolve --features bench
+  bench libs/2-adapters/sink-opensearch/benches/render.rs flusso-sink-opensearch render --features bench
+  bench libs/2-script/benches/scripted.rs flusso-script scripted
+fi
 
 if [ "$ran" -eq 0 ]; then
   echo "no in-process bench exists in this tree"

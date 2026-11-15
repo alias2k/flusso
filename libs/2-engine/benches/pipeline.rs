@@ -46,7 +46,10 @@
 //! Backfill is deliberately *not* measured here: the `flusso-bench` scenarios
 //! measure it on the real binary.
 //!
-//! Requires Docker. Run with:
+//! Requires Docker. `just review-ab` instead hands it a fresh database and an
+//! emptied OpenSearch it started for this run, through `REVIEW_AB_PG_URL` and
+//! `REVIEW_AB_OS_URL`: variables only that command sets (so `BENCH_PG_URL` /
+//! `BENCH_OS_URL`, which `flusso-bench` reads, never reach this bench). Run with:
 //!
 //! ```text
 //! cargo bench -p flusso-engine --bench pipeline
@@ -213,8 +216,8 @@ async fn run_deployment(
 
 /// Everything held alive for the benchmark's duration.
 struct Services {
-    _postgres: ContainerAsync<Postgres>,
-    _opensearch: ContainerAsync<GenericImage>,
+    _postgres: Option<ContainerAsync<Postgres>>,
+    _opensearch: Option<ContainerAsync<GenericImage>>,
     documents: Arc<dyn DocumentBuilder>,
     sink: Arc<dyn Sink>,
     /// Raw pool to the same Postgres, for the round-trip baseline.
@@ -356,9 +359,18 @@ async fn seed(pool: &sqlx::PgPool) {
 /// Bring up both services, seed Postgres, and create the OpenSearch index from
 /// the builder's own resolved mapping (the real `ensure_index` path).
 async fn setup() -> Services {
-    let postgres = Postgres::default().start().await.unwrap();
-    let pg_port = postgres.get_host_port_ipv4(5432).await.unwrap();
-    let url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres");
+    let (postgres, url) = match std::env::var("REVIEW_AB_PG_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    {
+        Some(url) => (None, url),
+        None => {
+            let postgres = Postgres::default().start().await.unwrap();
+            let pg_port = postgres.get_host_port_ipv4(5432).await.unwrap();
+            let url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres");
+            (Some(postgres), url)
+        }
+    };
 
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
     seed(&pool).await;
@@ -368,7 +380,16 @@ async fn setup() -> Services {
         .unwrap();
     let documents: Arc<dyn DocumentBuilder> = Arc::new(builder);
 
-    let (opensearch, os_url) = start_opensearch().await;
+    let (opensearch, os_url) = match std::env::var("REVIEW_AB_OS_URL")
+        .ok()
+        .filter(|url| !url.is_empty())
+    {
+        Some(url) => (None, url),
+        None => {
+            let (container, url) = start_opensearch().await;
+            (Some(container), url)
+        }
+    };
     let os_config = sink_opensearch::OpensearchConfig {
         url: Secret::Value(os_url.clone()),
         username: None,

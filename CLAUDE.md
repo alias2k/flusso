@@ -53,7 +53,8 @@ cargo nextest run -E 'test(name_substr)'   # a single test by name
 cargo test --doc                           # doctests — nextest does NOT run these
 cargo clippy --workspace                   # lint (NOT --all-targets; see below)
 just bench                                 # in-process benches (engine loop, pgoutput decode, resolve, sink render, script fields); no Docker
-just bench-components                      # Docker-backed Criterion benches (postgres, opensearch, engine pipeline)
+just bench-components                      # Docker-backed Criterion benches (postgres, cases, opensearch, engine pipeline)
+just review-ab origin/main                 # A/B the working tree vs a base on the Docker-backed benches (warm base build)
 just bench-scenario reference ci           # a scenario on the real binary (dev/bench); see docs/src/contribute/benchmarks.md
 cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-adapters/source-postgres)
 ```
@@ -74,7 +75,33 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   the dev root tables), drain throughput of a burst, backfill throughput, peak RSS + CPU (sampled
   with `ps`), plus flush p50/p99 from `/metrics` for attribution. (2) **Docker-backed component
   benches** (`postgres`, `opensearch`, `engine`'s `pipeline` — attribution only; its backfill group
-  is gone). (3) **In-process benches**, no Docker, the PR gate: `engine`'s `engine` (both engines
+  is gone; plus `source-postgres`'s `cases`, `build_many` over batch sizes, hit ratios, key types and
+  root shapes, run only by `just bench-components` and `just review-ab`, never by `bench.yml`, so the
+  history has no `cases` series). `postgres`, `cases` and `pipeline` read `REVIEW_AB_PG_URL`/`REVIEW_AB_OS_URL`,
+  which only `review-ab` sets (so `flusso-bench`'s `BENCH_PG_URL` never reaches them), and start
+  testcontainers without them. **`just review-ab [base]`** (`review-ab.sh`, issue #340) is the
+  reviewer's A/B: an exclusive `flock` on `~/.cache/flusso/review-ab/lock` for the whole run (a second run
+  fails at once); containers of a killed run removed (`review-ab-housekeeping.py stale`: labelled `flusso.review-ab.owner` with this host and pid namespace,
+  pid gone; `review-ab-housekeeping.py cache-state`: the cache must be new, empty, carry `.flusso-review-ab`, or be
+  a pre-marker cache whose `stamp.json` has exactly a stamp's keys with nothing foreign beside it; anything else is
+  refused and left untouched); the base in a warm
+  tree checked out with a private index (no `git worktree`), reset to the base commit before each build,
+  with its own target dir; the head's bench sources laid over it (`--own-benches` opts out and refuses a
+  base whose benches predate `REVIEW_AB_PG_URL`); reused without cargo when `review-ab-stamp.py check`
+  says it is current (commit, toolchain, `RUSTFLAGS`/`CARGO_PROFILE_*` + `bench-in-process.sh`'s hash + `CARGO_TARGET_<TRIPLE>_{RUSTFLAGS,LINKER}` + cargo config files,
+  overlaid files, the executables' sha256, the benches asked for); `bench-in-process.sh` builds only those
+  (`BENCH_SET=docker BENCH_ONLY=… BENCH_BUILD_ONLY=1`); named `flusso-review-<pid>-*` containers
+  (`--pg 14,16,18`, an OpenSearch for `pipeline`) removed by a trap; CPU pinning (`review-ab-housekeeping.py cpus`: the bench
+  under `taskset -c`, the containers `--cpuset-cpus` on a disjoint set, default core 0 left alone and the
+  next 2·k split, k = min(4, (nproc − 1) / 2); `--bench-cpus`/`--server-cpus`/`--no-pin` or
+  `REVIEW_AB_*_CPUS`/`REVIEW_AB_PIN=0`; off, and said so, without `taskset` or under 5 cores); per version,
+  per bench, `--rounds` (3) of base then head (`base-<r>`/`head-<r>`); `bench-compare.py --repeats
+  --breaches` flags a case past the limit and twice the control spread (the gap between
+  each side's two fastest runs, which narrows with more rounds, pinned by `SpreadSimulation`), each
+  flagged case is re-run alone (`--exact`, base then head) and `--confirm` decides with the gate's rule (`confirmed()`,
+  shared with `bench-gate.sh`'s path); exit 1 only on a confirmed case. Never fetches. Keeps the last 5
+  `target/review-ab/<timestamp>` dirs; `--clean` deletes the cache, `--clean-results` the results. Tests: `test_review_ab.py` (the script
+  end to end over fake `cargo`/`docker`/bench executables in a throwaway repo). (3) **In-process benches**, no Docker, the PR gate: `engine`'s `engine` (both engines
   over the channel stream with mocks), `source-postgres`'s `pgoutput` (the decoder over the recorded
   `benches/fixtures/pgoutput.bin`; `tests/record_pgoutput.rs`, an `#[ignore]`d Docker test in the
   nextest `docker` group, re-records it), `source-postgres`'s `resolve` (`PgDocumentBuilder::resolve`
@@ -1651,7 +1678,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | Query client (`flusso-query`) | `sdk/query/src/` (`cursor.rs`: page cursors; `walk.rs`: streaming a walk; `fence.rs`: fenced reads; `position.rs`: reading the source position) |
 | `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]` proc-macros | `sdk/query-derive/src/` — `lib.rs` (entry points + `Attrs`), `doc.rs` (field parsing/validation + the recursive handle tree + `embed_checks`), `fragment.rs` (the location-free shape check), `spec.rs` (baking a level into `&[FieldSpec]`), `resolve.rs` (finding `flusso.toml`); the const-check vocabulary is `sdk/query/src/check.rs`. Plus the `flusso-query-derive` memory note |
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |
-| Benchmarks: scenario harness, in-process + Docker benches, CI gate + history | `dev/bench/` (`flusso-bench`: `src/main.rs` phases, `scenario.rs` mixes, `scale.rs` presets, `flusso.rs` child process, `scenarios/`), `libs/2-engine/benches/{engine,pipeline}.rs`, `libs/2-adapters/source-postgres/benches/{pgoutput,resolve,postgres}.rs` + `tests/record_pgoutput.rs`, `libs/2-adapters/sink-opensearch/benches/{render,opensearch}.rs`, `.github/workflows/bench.yml`, `.github/scripts/bench-*.{py,sh}`, `docs/src/contribute/benchmarks.md`, ADR 0006 |
+| Benchmarks: scenario harness, in-process + Docker benches, CI gate + history | `dev/bench/` (`flusso-bench`: `src/main.rs` phases, `scenario.rs` mixes, `scale.rs` presets, `flusso.rs` child process, `scenarios/`), `libs/2-engine/benches/{engine,pipeline}.rs`, `libs/2-adapters/source-postgres/benches/{pgoutput,resolve,postgres,cases}.rs` + `tests/record_pgoutput.rs`, `libs/2-adapters/sink-opensearch/benches/{render,opensearch}.rs`, `.github/workflows/bench.yml`, `.github/scripts/bench-*.{py,sh}`, `.github/scripts/review-ab*.{sh,py}` (`just review-ab`), `docs/src/contribute/benchmarks.md`, ADR 0006 |
 | Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore`; user-facing shipping recipes in `docs/src/deploy/docker.md` |
 | Kubernetes deploy (Helm chart) | `deploy/helm/flusso/` — `Chart.yaml`, `values.yaml`, `templates/`, `README.md` |
 | Agent-facing docs (the Claude plugin + internal commands) | `plugin/` — `ARCHITECTURE.md` is the contract (one corpus/three consumers, who owns which meaning, the self-containment rule), `skills/*/SKILL.md` the knowledge corpus (`flusso-query` discloses `migration.md`/`options.md`/`maps.md`), `commands/` thin workflow entries, `agents/flusso-expert.md`, `hooks/`; `.claude/commands/{implement,new-issue}.md` the internal spine; `.claude/skills/coordinator/SKILL.md` how a round of issues is driven through agents (order of work, the two independent reviews, merge and issue rules). Guarded by `apps/cli/tests/agent_docs_paths.rs` |

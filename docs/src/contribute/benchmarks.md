@@ -9,7 +9,7 @@ The vocabulary (benchmark, component bench, scenario, headline metric, baseline,
 | Layer | What runs | Needs | Where | Job |
 | --- | --- | --- | --- | --- |
 | Scenarios | the shipped `flusso` binary as a child process, a seeded store, a seeded change writer | Docker | `dev/bench` (`flusso-bench`) | `main` pushes |
-| Component benches, Docker-backed | Criterion over a live Postgres / OpenSearch: document build and resolve, bulk indexing, the full pipeline's change and burst paths | Docker | `benches/` in `source-postgres`, `sink-opensearch`, `engine` | `main` pushes |
+| Component benches, Docker-backed | Criterion over a live Postgres / OpenSearch: document build and resolve, bulk indexing, the full pipeline's change and burst paths; the review cases (`cases`) | Docker | `benches/` in `source-postgres`, `sink-opensearch`, `engine` | `main` pushes; `cases` only locally |
 | Component benches, in-process | Criterion with no I/O: the two engines over the channel stream with mocks, pgoutput decode over a recorded fixture, resolving the changes that need no query (root table, unread table, update of unread columns, a path walked from the key) over a builder whose pool never connects, sink rendering, script fields over built documents | nothing | `benches/engine.rs`, `benches/pgoutput.rs`, `benches/resolve.rs`, `benches/render.rs`, `benches/scripted.rs` | every PR, A/B |
 
 The scenario numbers are what gets watched. The component benches exist so that when a headline metric moves, the stage that moved is already on record for the same commit.
@@ -46,6 +46,7 @@ just bench                         # in-process benches, no Docker, ~2 minutes
 just bench main                    # same, saved as Criterion baseline `main`
 just bench-compare main pr         # fail past 10% slower (CI's first pass; CI then re-measures a breach)
 just bench-components              # the Docker-backed component benches
+just review-ab origin/main         # A/B the working tree against a base on those benches (see below)
 just bench-scenario reference ci   # a scenario; also `complex`, and `default` scale
 just load                          # the soak tool: watch it, it produces no comparable number
 ```
@@ -53,6 +54,99 @@ just load                          # the soak tool: watch it, it produces no com
 `bench-scenario` starts its own containers, builds a release `flusso` without the designer (or takes `FLUSSO_BIN`), and writes `target/bench/<scenario>-<scale>/{smaller,bigger,summary}.json`. `BENCH_PG_URL` and `BENCH_OS_URL` point it at an existing pair instead; the Postgres must have `wal_level = logical` and both must be empty.
 
 To compare a branch by hand: run `just bench main` on `main`, `just bench pr` on the branch, then `just bench-compare main pr`. Criterion keeps both under `target/criterion`.
+
+## Comparing a branch with its base
+
+`just review-ab` measures the working tree against a base on the Docker-backed benches. Each side runs several times so the noise is measured too, and a case only counts as slower once a re-run confirms it. It's for reviewing a change to the source, the engine or the sink, where the in-process gate can't see the database.
+
+```sh
+just review-ab                                      # base origin/main, Postgres 16, every bench
+just review-ab main --pg 14,16,18                   # one table per Postgres version
+just review-ab main --bench cases --filter '^key/'  # one bench, a Criterion filter
+just review-ab --clean                              # delete the warm base build (results stay)
+just review-ab --clean-results                      # delete target/review-ab, the results
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `<base>` | `origin/main` | any commit-ish, as your clone has it: the command never fetches |
+| `--pg` | `16` | Postgres versions, comma-separated (`postgres:<v>-alpine`) |
+| `--bench` | `postgres,cases,pipeline` | bench targets; only these are built; `pipeline` also starts an OpenSearch |
+| `--filter` | none | a Criterion filter (a regex over the case id) |
+| `--limit` | `5` | the smallest change, in percent, that counts |
+| `--rounds` | `3` | runs per side; 2 is weaker (a 3.45% first-pass flag rate per case under bursts), more narrows the spread |
+| `--own-benches` | off | run each side's own bench sources instead of the head's on both |
+| `--bench-cpus`, `--server-cpus` | from `nproc` | core lists (`taskset -c` syntax) for the bench process and the containers; also `REVIEW_AB_BENCH_CPUS`, `REVIEW_AB_SERVER_CPUS` |
+| `--no-pin` | | run unpinned; also `REVIEW_AB_PIN=0` |
+| `--clean` | | remove the cache, `~/.cache/flusso/review-ab`, and nothing else (results stay), then exit |
+| `--clean-results` | | remove `target/review-ab`, every earlier run's tables and Criterion output, then exit |
+
+The first line names the base commit and its commit date. The command doesn't fetch, so `origin/main` is whatever was last fetched: run `git fetch` first when the latest `main` matters.
+
+What it does:
+
+1. **Runs one at a time.** It takes an exclusive lock on `~/.cache/flusso/review-ab/lock` for the whole run; a second run fails at once. Containers a killed run left behind (`flusso-review-<pid>-*` whose process is gone) are removed first.
+2. **Builds the base in a warm tree.** `~/.cache/flusso/review-ab/tree` (or `$FLUSSO_REVIEW_HOME`, which must be new, empty, or an existing review-ab cache; anything else is refused and left untouched) is the base checked out with a private git index: no worktree is registered, and only the files that changed since the last base are rewritten. Before each build it's reset to the base commit. It has its own target dir beside it, seeded once from the head's `release` dir with `cp -a --reflink=auto`: shared blocks on a filesystem with reflinks (btrfs, XFS), a full copy of about 2 GB on one without. One shared target dir would let cargo run one tree's binary for the other; `bench-provenance.py` checks each side ran its own.
+3. **Reuses that build when it's current.** `review-ab-stamp.py` records the base commit, the toolchain, `RUSTFLAGS` and `CARGO_PROFILE_*`, `bench-in-process.sh`'s hash, the bench files laid over the base, and each bench executable's sha256. When all of them match, cargo isn't called for the base at all; otherwise the output says why it rebuilds.
+4. **Runs the same harness on both sides.** The head's `postgres.rs`, `cases.rs` and `pipeline.rs` are copied over the base, so a base that predates a case is still measured. When a build fails in a bench target, the error suggests `--own-benches`. That flag refuses a base whose benches predate `REVIEW_AB_PG_URL`: they would run on their own testcontainer, Postgres 11, while the head ran on `--pg`.
+5. **Starts named containers.** One `flusso-review-<pid>-pg<v>` per version, plus `flusso-review-<pid>-os` for `pipeline`. Each bench run gets a fresh database and an emptied cluster through `REVIEW_AB_PG_URL` / `REVIEW_AB_OS_URL`, variables only this command sets. A trap removes exactly these containers, on success, failure or Ctrl-C.
+6. **Pins CPUs.** The bench process runs under `taskset -c` on one set of cores and the containers get `--cpuset-cpus` on a disjoint one, so the server and the client stop trading cores with each other and with the rest of the machine. By default core 0 is left alone and the next 2·k cores are split in two, with k = min(4, (nproc − 1) / 2): 1-4 and 5-8 on a 24-core machine. The output's third line names the cores. Without `taskset`, or with fewer than 5 cores, it runs unpinned and says so. Other processes can still run on those cores; pinning narrows the noise, it doesn't reserve the cores.
+7. **Alternates.** Per version, per bench: base, head, base, head, base, head (`--rounds 3`). The order doesn't cancel a drift; the spread check below catches it.
+8. **Re-runs what it flags.** A case is flagged when the head's fastest run is slower than the base's by more than `--limit` and more than twice the control spread. Each flagged case then runs again on its own (Criterion's `--exact`), base then head, and the PR gate's rule decides: it's **slower** when the re-run, or the mean of both passes, is past its threshold, and **flagged, cleared on re-run** otherwise.
+9. **Prints one table per version**, from `bench-compare.py --repeats … --confirm …`:
+
+```text
+| case | base (fastest … slowest) | head (fastest … slowest) | change | control spread | verdict |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `key/uuid` | 1.234 ms … 1.256 ms | 1.501 ms … 1.522 ms | +21.6% | 1.8% | slower ⚠️ (re-run +20.9%) |
+```
+
+The control spread is the gap between one binary's two fastest runs, as a share of the fastest, the larger of the two sides: the noise of the fastest run, which is what the change compares. With 3 rounds that's the range of all runs but the slowest, so one run hit by a burst doesn't widen it; that run still shows in the base and head columns. More rounds narrow it: the two fastest of more runs sit closer together, and one bad run more doesn't move them. A range over all runs would widen instead. A `faster` isn't re-run, so on a busy machine treat one as a hint, not a result. The command exits 1 only on a case that is **slower**, that is, confirmed by its re-run. When both sides' bench binaries are byte-identical, the output says so: every difference in the table is noise.
+
+### How far to trust it
+
+Measured on a shared development machine with another agent building and testing beside it, Postgres 16, 3 rounds, CPUs pinned:
+
+- **Identical code**, the 22 `cases` (load average 2.4 to 14.7): exit 0. Two cases flagged, `key/float8` at +7.9% and `root/wide_composite_key` at +17.3%, and both cleared on re-run. One case, `batch/10`, read `faster` at −20.7%: `faster` isn't re-run.
+- **Identical code, all 36 cases, before pinning** (two runs, load 2.9 to 14.6): exit 0 both times, one flag, cleared.
+- **A 3 ms sleep added to every `build_many` call**, the 22 `cases` (load 2.6 to 11.9): **slower** on 18, each confirmed by its re-run. That's every case where 3 ms is more than the 5% limit; the true change ranged from +22% (`key/citext`, 13 ms) to +2500% (`batch/1`). The 4 left as `noise` are `batch/10000` and the ~150 ms composite-key, keyless and wide composite-key roots, where 3 ms is +2% to +3%.
+- The same slowed run before pinning, with the spread taken over all runs, caught 4 of those 18. On the 4 to 11 ms cases the spread fell from 14%–61% to 1.7%–9.6%.
+
+The smallest slowdown tested and caught on the 4 to 11 ms cases is +28% (`root/hash_partitioned`). Their spreads put the floor at 5% to 19%, depending on the case, but nothing below +28% was tested there. A change smaller than the 5% limit is never reported, and on a case whose spread is wide, the floor is twice that spread: read it in the row.
+
+### When a case you care about reads `noise`
+
+`noise` means "not past max(limit, 2 × spread)", not "unchanged". To look closer:
+
+1. Run that case alone, with more rounds: `just review-ab main --bench cases --filter '^key/uuid$' --rounds 7`. One case takes a minute or two a round. What more rounds buy, simulated on identical code with the noise models of `SpreadSimulation` in `test_review_ab.py` (20,000 trials; the test pins the property with fewer): with 3% Gaussian noise the median spread goes from 3.4% at 3 rounds to 2.7% at 5 and 2.4% at 7. When 30% of runs are hit by a burst of 20–100%, it goes from 6.5% to 3.4% and 2.8%. The first-pass false-flag rate is under 3% **per case**. Over the ~37 cases of a full run, that means about half of all runs on identical code flag at least one case before the re-run, which is what the re-run is for. After it, 0.3% per case survive with Gaussian noise. Under the burst model it's 1.3%, mostly through the gate's mean rule, which confirms a large first pass even when the re-run is clean. The four identical-code runs measured here confirmed none. `--rounds 2` is weaker: under bursts its first-pass rate is 3.5% per case and its median spread 45%.
+2. Read the row's spread. If it's still wide, the machine is the problem: wait for other builds to finish, or move the run to a quieter machine. `--bench-cpus` / `--server-cpus` can steer it away from busy cores.
+3. Lower `--limit` only for a case whose spread is well under it, and say so in the review.
+
+What it can't see on a busy machine: a change smaller than the 5% limit; a change on a case whose spread is wide that run; and anything outside the benches, such as planner choices on other data sizes or another Postgres version than the ones asked for (`--pg`).
+
+> **Tip:** a quiet machine matters more than more samples. Another build beside it shows up as a wide control spread, and the table then calls small changes noise, which is the honest answer.
+
+### Disk
+
+| Path | Size | Holds |
+| --- | --- | --- |
+| `~/.cache/flusso/review-ab/` | about 2 GB | the warm base tree, its target dir, the stamp, the lock |
+| `target/review-ab/<timestamp>/` | a few MB each | Criterion output and the tables; the last 5 are kept |
+
+`just review-ab --clean` deletes the cache, `--clean-results` the results; each prints what it removes, with its size, first. `--clean` removes a directory only when it is a review-ab cache: one carrying `.flusso-review-ab`, or a cache from before that marker whose `stamp.json` is a real stamp with nothing foreign beside it. On an empty or new directory it says "nothing to clean". The cache is rebuilt by the next run.
+
+### The review cases
+
+`cases` (in `source-postgres`) is `build_many` over the ids a reviewer of a source change keeps asking about. Keys are read back as the WAL decoder reads them, and each case is checked before it's measured: one that doesn't build the expected number of documents is skipped with a message, so it shows as measured on one side only.
+
+| Group | Cases |
+| --- | --- |
+| `batch` | 1, 10, 100, 1000, 10000 ids of a plain `int` root |
+| `hit_ratio` | 0, 50, 100% of 1000 ids exist |
+| `key` | `int`, `uuid`, `varchar`, `numeric`, `float8`, `char`, `citext` |
+| `root` | hash- and range-partitioned on the key, composite key, keyless (`REPLICA IDENTITY FULL`), a wide row with a large unread column, the same with a composite key, a root and child never analysed (autovacuum off, never vacuumed) |
+
+Every root has a `has_many` child keyed by its key type. Read the key types and the root shapes against `key/int`, the plain `int` root of 1,000 rows, not against `batch/1000`, which reads 1,000 rows of the 10,000-row `plain` table. `batch/1` is bimodal: on byte-identical binaries it read +29.4% against a 28.6% spread, so it can't show a small change, only a large one such as a round trip added per call. The composite-key and keyless roots declare `primary_key: id`, which isn't the table's key; `flusso run` warns about it and starts, and that warned-but-running shape is what they measure. `cases` runs only from `just bench-components` and `just review-ab`: the `main` history doesn't record it.
 
 ## What CI does
 

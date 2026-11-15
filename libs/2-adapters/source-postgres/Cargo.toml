@@ -66,6 +66,13 @@ proptest.workspace = true
 name = "postgres"
 harness = false
 
+# Component bench: `build_many` over the review cases (batch sizes, hit ratios,
+# key types, root shapes) against a live Postgres. Run by `just bench-components`
+# and `just review-ab`, not by the PR gate nor the `main` history.
+[[bench]]
+name = "cases"
+harness = false
+
 # In-process component bench: the pgoutput decoder over a recorded WAL fixture
 # (`benches/fixtures/pgoutput.bin`, re-recorded by `tests/record_pgoutput.rs`).
 # No Docker; this is a PR-gating bench. Needs `--features bench`.
