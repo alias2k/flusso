@@ -245,6 +245,10 @@ _Avoid_: reference (taken by the scenario name), golden, snapshot
 A headline metric crossing its threshold against the baseline on two consecutive runs of main. One bad run is noise until the next confirms it.
 _Avoid_: slowdown, degradation, alert (that is the notification, not the fact)
 
+**Runner facts**:
+What a benchmark data point records about the machine that ran it: CPU model, core count, and calibrations of fixed work that runs no flusso code. Recorded so a regression can be told apart from a slower machine; not read yet.
+_Avoid_: environment, host info
+
 **Soak**:
 An interactive load tool watched by a person. It answers "does it keep up right now", produces no comparable number, and is not a benchmark.
 _Avoid_: bench, load benchmark, stress test

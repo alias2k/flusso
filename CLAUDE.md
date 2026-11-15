@@ -97,7 +97,18 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   `/bench/`), then `bench-regression.py` compares each point to the median of the previous five and
   calls a regression only on two consecutive points past 25% (20% RSS) and past three times the
   window's median absolute deviation (a noisy series needs a larger move, issue #317), image-tag change restarts
-  the window, one self-maintained issue. `just load` is the soak script — not a benchmark.
+  the window, one self-maintained issue. Around the rule (PR #331, flagging nothing differently): it prints
+  each series' **detection power** (the smallest lasting step the rule catches within two runs 9 times out
+  of 10, measured by injecting steps at each of the last 20 runs and running the rule; weakest first; series
+  absent from the last 50 runs or too short left out and counted) to the job summary, puts only the count of
+  series caught at 1.5× their threshold and the median step in the issue (`--skip-detection-power`, tests
+  only, leaves it out), skips malformed entries with a warning, and exits 1 before
+  `gh` on an unreadable or structurally wrong data file; an `extra` without `images` reads as no image, so
+  runner facts never restart a window; `bench-runner-facts.py` stamps every point with the runner (CPU
+  model, cores, no-flusso calibrations; written via temp file + rename), read by nothing yet, never
+  failing the job. Tests: `python3 -m unittest discover -s .github/scripts -p
+  'test_*.py'` (CI's `scripts` job) over the real history in `.github/scripts/fixtures/`, with a frozen
+  copy of the rule that every change must flag identically to. `just load` is the soak script — not a benchmark.
 - The `#[ignore]`d e2e tests live in `source-postgres`'s `integration`,
   `config_coverage`, `publication`, `introspection`, `tls`, `wal_idle`, `continuity`, and `partitions` binaries
   (`tls` boots a hostssl-only PG 16 with a committed throwaway self-signed cert and
@@ -269,7 +280,9 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   --include-fragments --root-dir docs/book 'docs/book/**/*.html'`), and runs
   `.github/scripts/check-manual-links.sh`. A separate `fuzz` job runs a 60-second
   `pgoutput_decode` smoke fuzz on nightly (see below); the `query.rs` proptests need no special
-  handling — they're ordinary tests caught by the nextest step. Outside `ci.yml`, `audit.yml`'s
+  handling — they're ordinary tests caught by the nextest step. A `scripts` job runs the stdlib unit
+  tests under `.github/scripts` (`python3 -m unittest discover -s .github/scripts -p 'test_*.py'`).
+  Outside `ci.yml`, `audit.yml`'s
   `advisories (cargo deny)` job runs `cargo deny check advisories --all-features` weekly and on
   changes to a `Cargo.toml`/`Cargo.lock` — advisory only, never a required check — and
   `.github/dependabot.yml` opens grouped weekly `chore(deps)` PRs (cargo, npm, actions; skips
