@@ -1447,3 +1447,63 @@ async fn a_batched_build_pairs_positions_without_a_nested_loop() {
         );
     }
 }
+
+/// A batch pairing rows by key with a stale column-type cache still builds
+/// what a single build does (issue #335). The cache learns of a type change
+/// from the change stream's `Relation` message; until that arrives the key
+/// is read back cast to the old type. `int4` → `numeric(10,2)` reads a row's
+/// key back as `2.00`, which equals no `int4` key in Rust, so every row went
+/// unclaimed and its id was written as a Delete while the row was live.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_batch_by_key_with_a_stale_type_cache_still_finds_its_rows() {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE drift (id int PRIMARY KEY, name text)",
+        "INSERT INTO drift VALUES (1, 'a'), (2, 'b'), (3, 'c')",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let schema = schema_from(
+        "
+version: 1
+table: drift
+primary_key: id
+fields:
+  - keyword: name
+    required: false
+",
+    );
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("drift"), schema)]));
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec))
+        .await
+        .unwrap();
+    let before = assert_both_builds_agree(&builder, &int_ids("drift", [1, 2, 3])).await;
+    assert!(
+        before
+            .iter()
+            .all(|document| matches!(document, Document::Upsert { .. }))
+    );
+
+    sqlx::query("ALTER TABLE drift ALTER COLUMN id TYPE numeric(10,2)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let after = assert_both_builds_agree(&builder, &int_ids("drift", [2, 3, 4])).await;
+    let kinds: Vec<&str> = after
+        .iter()
+        .map(|document| match document {
+            Document::Upsert { .. } => "upsert",
+            Document::Delete { .. } => "delete",
+            Document::Failed { .. } => "failed",
+        })
+        .collect();
+    assert_eq!(kinds, ["upsert", "upsert", "delete"]);
+}
