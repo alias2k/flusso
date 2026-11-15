@@ -1507,3 +1507,67 @@ fields:
         .collect();
     assert_eq!(kinds, ["upsert", "upsert", "delete"]);
 }
+
+/// Choosing the row a shared key builds reads no column the document does not
+/// read (issue #335). A root whose declared key is not its whole primary key
+/// orders a key's rows to pick one; ordering by the whole row's text read
+/// every column, a megabyte one the document never reads included (64 keys:
+/// 0.3 ms on main, 350 ms). Here the view's `big` raises when it is read: both
+/// builds must still agree and build the row the read columns order first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn choosing_a_shared_keys_row_reads_no_column_the_document_does_not_read() {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE wide (k int, d int, v text, PRIMARY KEY (k, d))",
+        "INSERT INTO wide VALUES (1, 2, 'b'), (1, 1, 'a'), (2, 1, 'c')",
+        "CREATE FUNCTION boom() RETURNS text LANGUAGE plpgsql STABLE AS \
+         $$ BEGIN RAISE EXCEPTION 'read a column the document does not read'; END $$",
+        "CREATE VIEW wide_view AS SELECT k, d, v, boom() AS big FROM wide",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let schema = |table: &str| {
+        schema_from(&format!(
+            "
+version: 1
+table: {table}
+primary_key: k
+fields:
+  - keyword: v
+    required: false
+"
+        ))
+    };
+    let spec = SourceSpec::new(BTreeMap::from([(
+        index_name("wide_view"),
+        schema("wide_view"),
+    )]));
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec))
+        .await
+        .unwrap();
+    for keys in [vec![1, 2, 3], vec![2, 1, 1]] {
+        let ids: Vec<DocumentId> = keys
+            .iter()
+            .map(|key| DocumentId {
+                index: index_name("wide_view"),
+                key: RowKey(vec![(column("k"), GenericValue::Int(*key))]),
+            })
+            .collect();
+        let built = assert_both_builds_agree(&builder, &ids).await;
+        let first = built
+            .iter()
+            .zip(&keys)
+            .find(|(_, key)| **key == 1)
+            .map(|(document, _)| format!("{document:?}"))
+            .unwrap();
+        assert!(first.contains(r#"String("a")"#), "{first}");
+    }
+}
