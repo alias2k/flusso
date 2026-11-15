@@ -29,9 +29,12 @@ Around that rule, and without changing what it flags:
   `POWER_GRID` (times the threshold) is injected into the series' history at
   each of its last `POWER_CUTS` runs, and the rule itself is run on the step's
   second run. The full table, weakest series first, is printed (the job
-  summary); the issue gets two sentences under the findings: how many series
-  are caught reliably at their threshold, the median step needed, and a link to
-  the run (from `GITHUB_SERVER_URL`, `GITHUB_REPOSITORY`, `GITHUB_RUN_ID`).
+  summary), with how many series were left out (too few runs, or none in the
+  last `POWER_RECENT`); the issue gets two sentences under the findings: on how
+  many series a step of 1.5 times the threshold is caught reliably, the median
+  step needed, and a link to the run (from `GITHUB_SERVER_URL`,
+  `GITHUB_REPOSITORY`, `GITHUB_RUN_ID`). `--skip-detection-power` leaves the
+  report out (for tests; it changes no verdict).
 - **Malformed entries** inside a readable file (a value that is not a number, a
   bench without a name or not an object, a point that is not an object, a
   point whose `benches` is not a list, `"commit": null`) are skipped with a
