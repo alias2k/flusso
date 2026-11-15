@@ -41,8 +41,12 @@ type PgQuery<'q> = sqlx::query::Query<'q, Postgres, PgArguments>;
 
 const ROOT: &str = "root";
 
-/// The alias the batched build selects each row's root key under.
-pub(super) const DOC_KEY: &str = "doc_key";
+/// The column the batched build selects, beside each document, the
+/// 1-based position of the requested key the row matched under.
+pub(super) const DOC_POSITION: &str = "doc_position";
+
+/// The alias of the batched build's list of requested keys.
+const KEYS: &str = "requested";
 
 /// The columns a document reads whose base type is `bytea` or `bytea[]`, by
 /// `(table, column)`. The document query renders them as hex text itself, so
@@ -182,23 +186,24 @@ pub(super) fn document_query(
     Ok((SqlString::new(sql), builder.params))
 }
 
-/// Build a single query that assembles every document whose root key is in
-/// `keys`, for an index with a single-column root key (`pk_column`). Selects
-/// the root key (under [`DOC_KEY`]) beside the assembled document, so the
-/// caller can match each row back to its id; a key with no matching row
-/// simply doesn't come back, which the caller reads as a tombstone.
+/// Build a single query that assembles every document whose root key is one
+/// of `keys`, for an index with a single-column root key (`pk_column`). Each
+/// row carries, under [`DOC_POSITION`], the 1-based position in `keys` of the
+/// key it matched; a key no root row matches simply doesn't come back, which
+/// the caller reads as a tombstone.
 ///
-/// The document is assembled exactly as in [`document_query`] — same nested
-/// `json_build_object` / `json_agg` — differing only in selecting the key and
-/// matching the root with `IN (…)` instead of a single equality. The key is
-/// selected with [`key_select`](super::value::key_select), so it parses into
-/// the same typed [`GenericValue`] variant the requested keys carry — a `uuid`
-/// key comes back as a `Uuid`, not a string — and the key-to-body match is
-/// exact.
+/// The keys are a `VALUES` list of `($n::<bound>::<key type>, <position>)`,
+/// and each position looks its root row up through a `LATERAL` subquery,
+/// `root.pk = v.k`: the very comparison [`document_query`] makes for one key,
+/// so Postgres decides which row answers which key in both, with no Rust
+/// mirror of its casts. The subquery's `OFFSET 0` keeps it a nested loop of
+/// primary-key index probes at any batch size (as a join the planner turns a
+/// large list into a hash join over a scan of the root). A row matched by
+/// several positions comes back once per position. The document is assembled
+/// exactly as in [`document_query`].
 pub(super) fn documents_query(
     schema: &IndexSchema,
     pk_column: &ColumnName,
-    pk_base: &str,
     keys: &[GenericValue],
     pks: &HashMap<String, ColumnName>,
     col_types: &HashMap<(String, String), String>,
@@ -222,11 +227,12 @@ pub(super) fn documents_query(
         schema.primary_key.as_ref(),
     )?;
 
-    let mut placeholders = Vec::with_capacity(keys.len());
-    for key in keys {
-        placeholders.push(builder.key_placeholder(key.clone(), &schema.table, pk_column)?);
+    let mut values = Vec::with_capacity(keys.len());
+    for (position, key) in keys.iter().enumerate() {
+        let placeholder = builder.key_placeholder(key.clone(), &schema.table, pk_column)?;
+        values.push(format!("({placeholder}, {})", position + 1));
     }
-    let mut predicate = format!("{} IN ({})", qcol(ROOT, pk_column), placeholders.join(", "),);
+    let mut predicate = format!("{} = \"{KEYS}\".\"k\"", qcol(ROOT, pk_column));
     if let Some(soft_delete) = builder.soft_delete_predicate(schema)? {
         predicate = format!("{predicate} AND NOT ({soft_delete})");
     }
@@ -235,19 +241,13 @@ pub(super) fn documents_query(
     let root_filters = builder.filters(schema.filters.as_deref(), ROOT, &schema.table)?;
     predicate.push_str(&root_filters);
 
-    let pk_type = col_types
-        .get(&(schema.table.to_string(), pk_column.to_string()))
-        .ok_or_else(|| {
-            SourceError::Query(format!(
-                "internal: missing type for `{}.{pk_column}`",
-                schema.table
-            ))
-        })?;
     let sql = format!(
-        "SELECT {key}, {object} AS \"document\" \
-         FROM {} AS \"{ROOT}\" WHERE {predicate}",
-        qtable(&schema.db_schema, &schema.table),
-        key = super::value::key_select(&qcol(ROOT, pk_column), DOC_KEY, pk_type, pk_base),
+        "SELECT \"{KEYS}\".\"n\" AS \"{DOC_POSITION}\", {object} AS \"document\" \
+         FROM (VALUES {values}) AS \"{KEYS}\"(\"k\", \"n\") \
+         CROSS JOIN LATERAL (SELECT * FROM {table} AS \"{ROOT}\" WHERE {predicate} OFFSET 0) \
+         AS \"{ROOT}\"",
+        values = values.join(", "),
+        table = qtable(&schema.db_schema, &schema.table),
     );
     Ok((SqlString::new(sql), builder.params))
 }

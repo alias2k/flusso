@@ -420,7 +420,7 @@ proptest! {
     fn documents_query_is_structurally_valid(schema in index_schema()) {
         let pk = ColumnName::try_new("id").unwrap();
         let keys = [GenericValue::Int(1), GenericValue::Int(2)];
-        let result = documents_query(&schema, &pk, "int8", &keys, &pk_map(), &col_type_map(), &ByteColumns::new());
+        let result = documents_query(&schema, &pk, &keys, &pk_map(), &col_type_map(), &ByteColumns::new());
         prop_assert!(result.is_ok(), "builder errored: {:?}", result.err());
         let (sql, params) = result.unwrap();
         assert_valid(sql.as_str(), params.len())?;

@@ -125,7 +125,6 @@ fn keyed_predicate_casts_a_uuid_primary_key() {
     let (batched, _) = documents_query(
         &schema,
         &c("id"),
-        "uuid",
         &[key],
         &HashMap::new(),
         &col_types,
@@ -135,7 +134,7 @@ fn keyed_predicate_casts_a_uuid_primary_key() {
     assert!(
         batched
             .as_str()
-            .ends_with(r#"WHERE "root"."id" IN ($1::uuid::uuid)"#),
+            .ends_with(r#"FROM (VALUES ($1::uuid::uuid, 1)) AS "requested"("k", "n") CROSS JOIN LATERAL (SELECT * FROM "public"."users" AS "root" WHERE "root"."id" = "requested"."k" OFFSET 0) AS "root""#),
         "{}",
         batched.as_str()
     );
@@ -174,7 +173,6 @@ fn root_filters_fold_into_both_query_forms() {
     let (sql, _) = documents_query(
         &schema,
         &c("id"),
-        "int8",
         &[GenericValue::Int(7)],
         &HashMap::new(),
         &col_types,
@@ -183,7 +181,7 @@ fn root_filters_fold_into_both_query_forms() {
     .unwrap();
     assert!(
         sql.as_str().ends_with(
-            r#"WHERE "root"."id" IN ($1::int4::bigint) AND ("root"."status" = $2::text)"#
+            r#"FROM (VALUES ($1::int4::bigint, 1)) AS "requested"("k", "n") CROSS JOIN LATERAL (SELECT * FROM "public"."users" AS "root" WHERE "root"."id" = "requested"."k" AND ("root"."status" = $2::text) OFFSET 0) AS "root""#
         ),
         "{}",
         sql.as_str()
@@ -544,7 +542,6 @@ fn keys_bound_as_different_types_are_different_statements() {
         let (batched, _) = documents_query(
             &schema,
             &c("id"),
-            "int8",
             &[key.clone()],
             &HashMap::new(),
             &id_types(),
@@ -569,7 +566,7 @@ fn keys_bound_as_different_types_are_different_statements() {
 }
 
 #[test]
-fn documents_query_keys_with_in_and_selects_the_key() {
+fn documents_query_pairs_each_key_with_its_position() {
     let schema = index(
         Some("id"),
         None,
@@ -578,7 +575,6 @@ fn documents_query_keys_with_in_and_selects_the_key() {
     let (sql, params) = documents_query(
         &schema,
         &c("id"),
-        "int8",
         &[GenericValue::Int(7), GenericValue::Int(9)],
         &HashMap::new(),
         &id_types(),
@@ -587,13 +583,13 @@ fn documents_query_keys_with_in_and_selects_the_key() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT format('%s', "root"."id") AS "doc_key", "root"."id"::bigint AS "doc_key:typed", json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" IN ($1::int4::bigint, $2::int4::bigint)"#
+        r#"SELECT "requested"."n" AS "doc_position", json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM (VALUES ($1::int4::bigint, 1), ($2::int4::bigint, 2)) AS "requested"("k", "n") CROSS JOIN LATERAL (SELECT * FROM "public"."users" AS "root" WHERE "root"."id" = "requested"."k" OFFSET 0) AS "root""#
     );
     assert_eq!(params, vec![GenericValue::Int(7), GenericValue::Int(9)]);
 }
 
 #[test]
-fn documents_query_folds_soft_delete_into_where() {
+fn documents_query_folds_soft_delete_into_the_root_lookup() {
     let schema = index(
         Some("id"),
         Some(SoftDelete::Column(SoftDeleteColumn {
@@ -605,7 +601,6 @@ fn documents_query_folds_soft_delete_into_where() {
     let (sql, _) = documents_query(
         &schema,
         &c("id"),
-        "int8",
         &[GenericValue::Int(1)],
         &HashMap::new(),
         &id_types(),
@@ -613,7 +608,7 @@ fn documents_query_folds_soft_delete_into_where() {
     )
     .unwrap();
     assert!(sql.as_str().contains(
-        r#"WHERE "root"."id" IN ($1::int4::bigint) AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END))"#
+        r#"WHERE "root"."id" = "requested"."k" AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END)) OFFSET 0) AS "root""#
     ));
 }
 
@@ -653,7 +648,6 @@ fn soft_delete_field_inside_a_relation_reads_the_root_column() {
     let (sql, _) = documents_query(
         &schema,
         &c("id"),
-        "int8",
         &[GenericValue::Int(1)],
         &pks,
         &id_types(),
@@ -662,7 +656,7 @@ fn soft_delete_field_inside_a_relation_reads_the_root_column() {
     .unwrap();
     assert!(
         sql.as_str().ends_with(
-            r#"WHERE "root"."id" IN ($1::int4::bigint) AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END))"#
+            r#"WHERE "root"."id" = "requested"."k" AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END)) OFFSET 0) AS "root""#
         ),
         "{}",
         sql.as_str()
@@ -745,7 +739,6 @@ fn a_key_carried_as_text_is_cast_from_text() {
     let (batched, _) = documents_query(
         &schema,
         &c("id"),
-        "int8",
         &[key.clone()],
         &HashMap::new(),
         &col_types,
@@ -755,7 +748,7 @@ fn a_key_carried_as_text_is_cast_from_text() {
     assert!(
         batched
             .as_str()
-            .ends_with(r#"WHERE "root"."id" IN ($1::text::date)"#),
+            .contains(r#"FROM (VALUES ($1::text::date, 1)) AS "requested""#),
         "{}",
         batched.as_str()
     );
@@ -1294,7 +1287,6 @@ fn bytes_sql(fields: Vec<Field>, pks: &HashMap<String, ColumnName>, bytes: &Byte
     let (batched, _) = documents_query(
         &schema,
         &c("id"),
-        "int8",
         &[GenericValue::Int(7)],
         pks,
         &id_types(),

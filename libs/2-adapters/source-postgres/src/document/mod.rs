@@ -1216,18 +1216,13 @@ impl DocumentBuilder for PgDocumentBuilder {
             let mut col_types = self.filter_column_types(schema).await?;
             self.add_key_column_types(schema, &[&pk_column], &mut col_types)
                 .await?;
-            let pk_meta = self
-                .column_meta(&schema.db_schema, &schema.table, &pk_column)
-                .await?;
-            let pk_base = &pk_meta.base_name;
             let bytes = self.byte_columns(schema, &pks).await?;
 
             for chunk in keyed.chunks(BUILD_CHUNK) {
                 let keys: Vec<kernel::GenericValue> =
                     chunk.iter().map(|(value, _)| (*value).clone()).collect();
-                let (sql, params) = query::documents_query(
-                    schema, &pk_column, pk_base, &keys, &pks, &col_types, &bytes,
-                )?;
+                let (sql, params) =
+                    query::documents_query(schema, &pk_column, &keys, &pks, &col_types, &bytes)?;
 
                 let mut statement = sqlx::query(sql);
                 for param in &params {
@@ -1240,12 +1235,9 @@ impl DocumentBuilder for PgDocumentBuilder {
 
                 let mut found = Vec::with_capacity(rows.len());
                 for row in &rows {
-                    let key = value::decode_key(row, query::DOC_KEY);
-                    if matches!(key, kernel::GenericValue::Null) {
-                        continue;
-                    }
+                    let position: i32 = row.try_get(query::DOC_POSITION).map_err(query_err)?;
                     found.push((
-                        key,
+                        position,
                         value::read_document(row, &schema.fields, self.plan(index_name)?)?,
                     ));
                 }

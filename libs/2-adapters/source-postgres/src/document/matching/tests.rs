@@ -1,5 +1,4 @@
 use kernel::{ColumnName, IndexName};
-use rust_decimal::Decimal;
 use source::RowKey;
 
 use super::*;
@@ -15,131 +14,86 @@ fn body(name: &str) -> Outcome {
     Ok(GenericValue::String(name.to_owned()))
 }
 
-fn decimal(text: &str) -> GenericValue {
-    GenericValue::Decimal(text.parse::<Decimal>().unwrap())
-}
-
-/// Match `requested` against `rows` and say, per id, whether it got a body.
-fn outcomes(rows: Vec<(GenericValue, Outcome)>, requested: &[GenericValue]) -> Vec<&'static str> {
-    let ids: Vec<DocumentId> = requested.iter().cloned().map(id).collect();
-    let keyed: Vec<(&GenericValue, &DocumentId)> = requested.iter().zip(&ids).collect();
+/// Pair `rows` (position, body) with `n` requested ids and say, per id, what
+/// it got, checking each document carries its own requested id.
+fn outcomes(rows: Vec<(i32, Outcome)>, n: i32) -> Vec<String> {
+    let values: Vec<GenericValue> = (0..n).map(GenericValue::Int).collect();
+    let ids: Vec<DocumentId> = values.iter().cloned().map(id).collect();
+    let keyed: Vec<(&GenericValue, &DocumentId)> = values.iter().zip(&ids).collect();
     let mut out = Vec::new();
     match_rows(rows, &keyed, &mut out);
+    assert_eq!(out.len(), ids.len());
     out.iter()
         .zip(&ids)
         .map(|(document, id)| match document {
-            Document::Upsert { id: built, .. } => {
+            Document::Upsert { id: built, body } => {
                 assert_eq!(built, id);
-                "upsert"
+                format!("upsert {body:?}")
             }
-            Document::Failed { .. } => "failed",
-            Document::Delete { .. } => "delete",
+            Document::Failed { id: built, .. } => {
+                assert_eq!(built, id);
+                "failed".to_owned()
+            }
+            Document::Delete { id: built } => {
+                assert_eq!(built, id);
+                "delete".to_owned()
+            }
         })
         .collect()
 }
 
-/// A `numeric` key equal to the row's but spelled with another scale is the
-/// same row: a change read before `numeric` became `numeric(10,2)` carries
-/// `1.5` where the row now reads `1.50`. It is built, never a tombstone.
+/// Each row answers the id at its reported position, in any order; an id no
+/// row answers is a tombstone.
 #[test]
-fn a_numeric_key_of_another_scale_is_the_row_it_equals() {
-    let requested = [decimal("1.50"), decimal("1.5"), decimal("1.500")];
+fn a_row_answers_the_id_at_its_position_and_the_rest_are_tombstones() {
     assert_eq!(
-        outcomes(vec![(decimal("1.5"), body("a"))], &requested),
-        ["upsert", "upsert", "upsert"]
+        outcomes(vec![(3, body("c")), (1, body("a"))], 4),
+        [
+            r#"upsert String("a")"#,
+            "delete",
+            r#"upsert String("c")"#,
+            "delete"
+        ]
     );
+}
+
+/// One row matched by two positions (the same key read as `int4` and as
+/// `int8`) comes back once per position, and each id is built.
+#[test]
+fn a_row_matched_by_several_positions_answers_each() {
     assert_eq!(
-        outcomes(vec![(decimal("1.50"), body("a"))], &requested),
-        ["upsert", "upsert", "upsert"]
+        outcomes(vec![(1, body("a")), (2, body("a"))], 2),
+        [r#"upsert String("a")"#, r#"upsert String("a")"#]
     );
 }
 
 #[test]
-fn integer_keys_of_every_width_are_one_row() {
-    let requested = [
-        GenericValue::Int(1),
-        GenericValue::BigInt(1),
-        GenericValue::SmallInt(1),
-    ];
+fn a_failed_row_fails_the_id_at_its_position() {
+    let failure = BuildFailure {
+        field: "tags".to_owned(),
+        message: "an object in an array column".to_owned(),
+        position: None,
+    };
     assert_eq!(
-        outcomes(vec![(GenericValue::BigInt(1), body("a"))], &requested),
-        ["upsert", "upsert", "upsert"]
+        outcomes(vec![(2, Err(failure)), (1, body("a"))], 2),
+        [r#"upsert String("a")"#, "failed"]
     );
 }
 
+/// A position outside the request, or a second row at one position, is
+/// ignored: the first row reported for a position answers it.
 #[test]
-fn a_repeated_id_is_built_each_time() {
-    let requested = [GenericValue::Int(1), GenericValue::Int(1)];
+fn a_position_outside_the_request_or_answered_twice_changes_nothing() {
     assert_eq!(
-        outcomes(vec![(GenericValue::Int(1), body("a"))], &requested),
-        ["upsert", "upsert"]
-    );
-}
-
-#[test]
-fn an_id_no_row_equals_is_a_tombstone() {
-    let requested = [GenericValue::Int(1), decimal("2.5"), decimal("1.5")];
-    assert_eq!(
-        outcomes(vec![(decimal("1.50"), body("a"))], &requested),
-        ["delete", "delete", "upsert"]
-    );
-}
-
-/// A `BigDecimal` (a `decimal` past `Decimal`'s range) renders as its exact
-/// text, so the row holding that text serves the id and another number's
-/// does not.
-#[test]
-fn a_big_decimal_key_matches_the_row_holding_its_text() {
-    let big = |text: &str| GenericValue::BigDecimal(kernel::BigDecimal::parse(text).unwrap());
-    let requested = [big("1e30"), big("2e30")];
-    assert_eq!(
-        outcomes(vec![(big("1e30"), body("a"))], &requested),
-        ["upsert", "delete"]
-    );
-}
-
-/// A key decoded as one kind meets a row read back as another after its
-/// column changed type: the row serves it when Postgres's `=` after the
-/// single build's cast (`$n::<bound>::<column type>`) holds.
-#[test]
-fn a_key_of_another_kind_is_the_row_its_cast_equals() {
-    let day = chrono::NaiveDate::from_ymd_opt(2020, 1, 2).unwrap();
-    let ten = day.and_hms_opt(10, 0, 0).unwrap();
-    let cases: [(GenericValue, GenericValue, &str); 9] = [
-        (GenericValue::Int(1), decimal("1.00"), "upsert"),
-        (decimal("1.00"), GenericValue::Int(1), "upsert"),
-        (decimal("1.5"), GenericValue::Int(2), "upsert"),
-        (GenericValue::Double(1.5), GenericValue::Int(2), "upsert"),
-        (
-            GenericValue::String("1.5".into()),
-            decimal("1.50"),
-            "upsert",
+        outcomes(
+            vec![
+                (0, body("x")),
+                (3, body("y")),
+                (1, body("a")),
+                (1, body("b"))
+            ],
+            2
         ),
-        (
-            GenericValue::Timestamp(ten),
-            GenericValue::TimestampTz(ten.and_utc()),
-            "upsert",
-        ),
-        (
-            GenericValue::TimestampTz(ten.and_utc()),
-            GenericValue::Timestamp(ten),
-            "upsert",
-        ),
-        (
-            GenericValue::Timestamp(ten),
-            GenericValue::Date(day),
-            "upsert",
-        ),
-        (GenericValue::Int(1), decimal("1.50"), "delete"),
-    ];
-    for (requested, row, expected) in cases {
-        assert_eq!(
-            outcomes(
-                vec![(row.clone(), body("a"))],
-                std::slice::from_ref(&requested)
-            ),
-            [expected],
-            "{requested:?} against a row keyed {row:?}"
-        );
-    }
+        [r#"upsert String("a")"#, "delete"]
+    );
 }

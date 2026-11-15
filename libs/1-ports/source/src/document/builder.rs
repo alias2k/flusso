@@ -26,10 +26,7 @@ impl DocumentId {
     }
 }
 
-/// One key part as [`DocumentId::rendered`] writes it: two values that render
-/// alike name the same document, whatever their variant (an `int4` and an
-/// `int8` key of one row, read before and after its column changed type).
-pub fn key_part(value: &GenericValue) -> String {
+fn key_part(value: &GenericValue) -> String {
     match value {
         GenericValue::Bool(b) => b.to_string(),
         GenericValue::SmallInt(i) => i.to_string(),
