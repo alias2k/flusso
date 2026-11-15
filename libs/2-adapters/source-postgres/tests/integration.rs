@@ -13,10 +13,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use config::yaml::SchemaYaml;
 use kernel::{
     Aggregate, AggregateKey, AggregateOp, Column, ColumnName, DatabaseSchema, Field, FieldName,
-    FieldSource, FlussoType, GenericValue, IndexName, IndexSchema, Join, JoinKind, Relation,
-    SoftDelete, SoftDeleteColumn, TableName, Through,
+    FieldSource, FlussoType, GenericValue, IndexName, IndexSchema, Join, JoinKind, ParseFrom,
+    Relation, SoftDelete, SoftDeleteColumn, TableName, Through,
 };
 use source::document::{Document, DocumentBuilder, DocumentId};
 use source::{RowImage, RowKey, SourceSpec};
@@ -935,4 +936,111 @@ fn table(name: &str) -> TableName {
 }
 fn index_name(name: &str) -> IndexName {
     IndexName::try_new(name).unwrap()
+}
+
+/// The batched build names its own columns so no table's can meet them
+/// (issue #335). A raw filter on a relation is pasted into a subquery
+/// correlated with the root row, so an unqualified name it doesn't find on the
+/// relation's table resolves outward: to the root row's column, as in a single
+/// build, never to the batched query's numbering. A root table carrying every
+/// name the batched query uses builds alike both ways, and a name no table has
+/// fails both ways.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_raw_filter_reads_the_root_rows_columns_in_a_batched_build() {
+    let container = Postgres::default().start().await.unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE items (id int PRIMARY KEY, k int NOT NULL, n int NOT NULL, \
+         document text, doc_position int, root text, requested text)",
+        "CREATE TABLE plain (id int PRIMARY KEY)",
+        "CREATE TABLE notes (id int PRIMARY KEY, item_id int NOT NULL, rank int NOT NULL)",
+        "INSERT INTO items VALUES (1, 7, 1, 'a', 70, 'r', 'q'), (2, 8, 2, 'b', 80, 's', 't'), \
+         (3, 9, 0, 'c', 90, 'u', 'v')",
+        "INSERT INTO plain VALUES (1), (2), (3)",
+        "INSERT INTO notes SELECT g, g % 3 + 1, g % 4 FROM generate_series(1, 24) g",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+
+    let schema = |table: &str| {
+        let yaml = format!(
+            "
+version: 1
+table: {table}
+primary_key: id
+fields:
+  - integer: id
+    required: true
+  - has_many: notes
+    table: notes
+    foreign_key: item_id
+    primary_key: id
+    filters:
+      - {{ raw: \"rank <= n AND k IS NOT NULL\" }}
+    order_by:
+      - {{ column: id, direction: asc }}
+    fields:
+      - integer: rank
+        required: true
+"
+        );
+        IndexSchema::try_from(SchemaYaml::try_parse(yaml.as_str()).unwrap()).unwrap()
+    };
+    let spec = SourceSpec::new(BTreeMap::from([
+        (index_name("items"), schema("items")),
+        (index_name("plain"), schema("plain")),
+    ]));
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec))
+        .await
+        .unwrap();
+
+    let ids = |name: &str| -> Vec<DocumentId> {
+        (1..=3)
+            .map(|id| DocumentId {
+                index: index_name(name),
+                key: RowKey(vec![(column("id"), GenericValue::Int(id))]),
+            })
+            .collect()
+    };
+
+    let items = ids("items");
+    let batched = builder.build_many(&items).await.unwrap();
+    let mut single = Vec::new();
+    for id in &items {
+        single.push(builder.build(id).await.unwrap());
+    }
+    assert_eq!(format!("{batched:?}"), format!("{single:?}"));
+    let ranks: Vec<usize> = single
+        .iter()
+        .map(|document| match document {
+            Document::Upsert { body, .. } => match body {
+                GenericValue::Map(fields) => match &fields["notes"] {
+                    GenericValue::Array(notes) => notes.len(),
+                    other => panic!("notes is not an array: {other:?}"),
+                },
+                other => panic!("not an object: {other:?}"),
+            },
+            other => panic!("not built: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        ranks,
+        [4, 6, 2],
+        "each root row's own `n` filters its notes"
+    );
+
+    let plain = ids("plain");
+    let error = builder.build(&plain[0]).await.unwrap_err();
+    assert!(
+        error.to_string().contains("\"n\" does not exist"),
+        "{error}"
+    );
+    let batched = builder.build_many(&plain).await;
+    assert!(
+        batched.is_err(),
+        "a name no table has fails the batched build too, got {batched:?}"
+    );
 }
