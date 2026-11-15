@@ -1094,12 +1094,14 @@ gets the lookup once more without the probe, every key cast to its declared type
 `regtype` name as quoted identifiers (`ext.citext`, `"a.b".citext`; not `"a.citext"`). **The batched
 build serves exactly the ids a single `build` serves, by construction**: `query::documents_query`
 unnests the keys `WITH ORDINALITY` (`unnest(ARRAY[$n::<bound>::<key type>, …])`) and looks each one's
-root row up through `CROSS JOIN LATERAL (SELECT * FROM root WHERE root.pk = requested.k … OFFSET 0)`,
+root row up through `CROSS JOIN LATERAL (SELECT * FROM root WHERE root.pk = requested.k … LIMIT 1)`,
 the comparison `document_query` makes, selecting the position (`doc_position`) beside the document;
 `document/matching.rs`'s `match_rows` pairs by position alone (no Rust cast or equality: Postgres's
 input/output forms are open-ended), an unanswered position is a tombstone, and a row matched by several
-positions answers each under its own id. The `OFFSET 0` keeps a nested loop of primary-key probes at
-any batch size (as a plain join, a large list became a hash join over a scan of the root); the result
+positions answers each under its own id. The `LIMIT 1` keeps a nested loop of primary-key probes at
+any batch size (as a plain join, a large list became a hash join over a scan of the root) and tells the
+planner a probe returns one row: over a partitioned root it otherwise counted one per partition and
+JIT-compiled the statement (`partitions`' `a_batched_build_on_a_partitioned_root_is_not_jit_compiled`); the result
 columns are a `bigint` and the document whatever the key's type; a key Postgres refuses to cast fails
 the whole statement, as on main. Guard: `source-postgres`'s `key_matching` (a generated differential,
 2,034 pairs: 113 requested keys of every kind and edge form against tables of 18 key types holding

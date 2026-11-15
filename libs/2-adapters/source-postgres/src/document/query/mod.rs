@@ -197,12 +197,22 @@ pub(super) fn document_query(
 /// through a `LATERAL` subquery, `root.pk = requested.k`: the very comparison
 /// [`document_query`] makes for one key, so Postgres decides which row answers
 /// which key in both, with no Rust mirror of its casts. The subquery's
-/// `OFFSET 0` keeps it a nested loop of primary-key index probes at any batch
-/// size (as a plain join the planner may turn a large list into a hash join
-/// over a scan of the root). A row matched by several positions comes back
-/// once per position. The document is assembled exactly as in
-/// [`document_query`]. A key Postgres refuses to cast fails the statement,
-/// so the whole batch, as a single build of it fails.
+/// `LIMIT 1` does two things:
+///
+/// - it keeps the subquery a nested loop of primary-key index probes at any
+///   batch size (as a plain join the planner may turn a large list into a hash
+///   join over a scan of the root);
+/// - it tells the planner a probe returns at most one row, which the primary
+///   key already guarantees. Over a partitioned root the probe is planned
+///   across every partition and pruned to one at run time; without the limit
+///   the planner counts a row per partition per key, costs every relation
+///   subquery that many times and passes `jit_above_cost` from about 130 keys
+///   on 16 partitions, compiling each execution.
+///
+/// A row matched by several positions comes back once per position. The
+/// document is assembled exactly as in [`document_query`]. A key Postgres
+/// refuses to cast fails the statement, so the whole batch, as a single build
+/// of it fails.
 pub(super) fn documents_query(
     schema: &IndexSchema,
     pk_column: &ColumnName,
@@ -245,7 +255,7 @@ pub(super) fn documents_query(
     let sql = format!(
         "SELECT \"{KEYS}\".\"n\" AS \"{DOC_POSITION}\", {object} AS \"document\" \
          FROM unnest(ARRAY[{values}]) WITH ORDINALITY AS \"{KEYS}\"(\"k\", \"n\") \
-         CROSS JOIN LATERAL (SELECT * FROM {table} AS \"{ROOT}\" WHERE {predicate} OFFSET 0) \
+         CROSS JOIN LATERAL (SELECT * FROM {table} AS \"{ROOT}\" WHERE {predicate} LIMIT 1) \
          AS \"{ROOT}\"",
         values = values.join(", "),
         table = qtable(&schema.db_schema, &schema.table),
