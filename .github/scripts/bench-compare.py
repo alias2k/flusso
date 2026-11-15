@@ -28,9 +28,8 @@ listed but not gated. Exits 1 when any bench's candidate median is more than
                     `<candidate>-1`…: a side's value is its fastest median
                     (noise only adds time), and the "control spread" is how
                     far the same binary's runs differ, (max − min) / min,
-                    the larger of the two sides; with 3+ runs each side's
-                    slowest is left out of it, so one bad run doesn't widen
-                    it. A change counts only when
+                    the larger of the two sides, taken over each side's two
+                    fastest runs (see `spread`): more runs narrow it. A change counts only when
                     it is past both the limit and twice that spread
                     (`flagged` / `faster`, else `noise`). With --breaches,
                     writes `<bench target>\t<id>` per flagged case (the
@@ -94,9 +93,17 @@ def repeated(bench_dir: pathlib.Path, side: str, n: int) -> list[float]:
 
 
 def spread(values: list[float]) -> float | None:
-    """(max − min) / min in percent; with 3+ runs, over all but the slowest, so one bad run doesn't widen it."""
-    kept = sorted(values)[:-1] if len(values) > 2 else values
-    return (max(kept) - min(kept)) / min(kept) * 100 if len(kept) > 1 and min(kept) else None
+    """The gap between the two fastest runs, in percent of the fastest.
+
+    The table compares each side's fastest run, so this is the noise of that
+    statistic: with more runs the two fastest draw closer, where a range over
+    all runs (or all but the slowest) would widen. With 3 runs it is the range
+    of all but the slowest; with 2 it is their range.
+    """
+    if len(values) < 2:
+        return None
+    first, second = sorted(values)[:2]
+    return (second - first) / first * 100 if first else None
 
 
 def span(values: list[float]) -> str:
@@ -156,8 +163,8 @@ def review(
         print(f"::error::nothing to compare: no bench has both `{base}-*` and `{cand}-*` under {root}")
         return 2
     print(
-        f"{n} runs per side; change = fastest vs fastest; control spread = how far one binary's own runs differ"
-        + (", each side's slowest left out." if n > 2 else ".")
+        f"{n} runs per side; change = fastest vs fastest; "
+        "control spread = the gap between one binary's two fastest runs."
     )
     print()
     print("\n".join(lines))

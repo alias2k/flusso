@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Housekeeping for review-ab.sh: containers a killed run left, old result dirs, CPU pinning.
 
-    review-ab-housekeeping.py stale  < names     # prints the stale container names
+    review-ab-housekeeping.py stale --owner OWNER < listing   # prints the stale container names
     review-ab-housekeeping.py prune <dir> <keep>
     review-ab-housekeeping.py cpus --nproc N --taskset 0|1 [--bench LIST] [--servers LIST] [--off]
 
-`stale` reads container names, one per line, and prints those named exactly
-`flusso-review-<pid>-<suffix>` whose `<pid>` is no longer a running process: a
-run killed with SIGKILL never reached its trap. Any other name is never
-printed, whatever it looks like.
+`stale` reads `<name>\t<owner label>` lines and prints the containers a run
+killed with SIGKILL left: named exactly `flusso-review-<pid>-<suffix>`, labelled
+with this `OWNER` (host name and pid namespace, `flusso.review-ab.owner`), and
+whose `<pid>` is no longer running. A pid only means something in its own
+namespace, so a container another namespace started (a devcontainer sharing the
+Docker socket) or one without the label is never printed.
 
 `cpus` prints three lines: the cores the bench process runs on (a `taskset
 -c` list), the cores the Postgres and OpenSearch containers get
@@ -43,11 +45,12 @@ def alive(pid: int) -> bool:
     return True
 
 
-def stale(names: list[str]) -> list[str]:
+def stale(lines: list[str], owner: str) -> list[str]:
     out = []
-    for name in names:
+    for line in lines:
+        name, _, label = line.partition("\t")
         match = CONTAINER.fullmatch(name.strip())
-        if match and not alive(int(match.group(1))):
+        if match and label.strip() == owner and not alive(int(match.group(1))):
             out.append(match.group(0))
     return out
 
@@ -108,8 +111,8 @@ def cpus(argv: list[str]) -> int:
 def main() -> int:
     if sys.argv[1:2] == ["cpus"]:
         return cpus(sys.argv[2:])
-    if sys.argv[1:2] == ["stale"]:
-        print("\n".join(stale(sys.stdin.read().splitlines())))
+    if sys.argv[1:3] == ["stale", "--owner"] and len(sys.argv) == 4:
+        print("\n".join(stale(sys.stdin.read().splitlines(), sys.argv[3])))
         return 0
     if sys.argv[1:2] == ["prune"] and len(sys.argv) == 4:
         root = pathlib.Path(sys.argv[2])

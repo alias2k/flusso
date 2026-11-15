@@ -81,11 +81,12 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   which only `review-ab` sets (so `flusso-bench`'s `BENCH_PG_URL` never reaches them), and start
   testcontainers without them. **`just review-ab [base]`** (`review-ab.sh`, issue #340) is the
   reviewer's A/B: an exclusive `flock` on `~/.cache/flusso/review-ab/lock` for the whole run (a second run
-  fails at once); containers of a killed run removed (`review-ab-housekeeping.py stale`); the base in a warm
+  fails at once); containers of a killed run removed (`review-ab-housekeeping.py stale`: labelled `flusso.review-ab.owner` with this host and pid namespace,
+  pid gone; the cache must carry `.flusso-review-ab` or a `stamp.json`, so `--clean` deletes nothing else); the base in a warm
   tree checked out with a private index (no `git worktree`), reset to the base commit before each build,
   with its own target dir; the head's bench sources laid over it (`--own-benches` opts out and refuses a
   base whose benches predate `REVIEW_AB_PG_URL`); reused without cargo when `review-ab-stamp.py check`
-  says it is current (commit, toolchain, `RUSTFLAGS`/`CARGO_PROFILE_*` + `bench-in-process.sh`'s hash,
+  says it is current (commit, toolchain, `RUSTFLAGS`/`CARGO_PROFILE_*` + `bench-in-process.sh`'s hash + cargo config files,
   overlaid files, the executables' sha256, the benches asked for); `bench-in-process.sh` builds only those
   (`BENCH_SET=docker BENCH_ONLY=… BENCH_BUILD_ONLY=1`); named `flusso-review-<pid>-*` containers
   (`--pg 14,16,18`, an OpenSearch for `pipeline`) removed by a trap; CPU pinning (`review-ab-housekeeping.py cpus`: the bench
@@ -93,9 +94,9 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   next 2·k split, k = min(4, (nproc − 1) / 2); `--bench-cpus`/`--server-cpus`/`--no-pin` or
   `REVIEW_AB_*_CPUS`/`REVIEW_AB_PIN=0`; off, and said so, without `taskset` or under 5 cores); per version,
   per bench, `--rounds` (3) of base then head (`base-<r>`/`head-<r>`); `bench-compare.py --repeats
-  --breaches` flags a case past the limit and twice the control spread (one binary's own runs,
-  (max − min) / min, each side's slowest left out with 3+ runs), each flagged case is
-  re-run alone (`--exact`, base then head) and `--confirm` decides with the gate's rule (`confirmed()`,
+  --breaches` flags a case past the limit and twice the control spread (the gap between
+  each side's two fastest runs, which narrows with more rounds, pinned by `SpreadSimulation`), each
+  flagged case is re-run alone (`--exact`, base then head) and `--confirm` decides with the gate's rule (`confirmed()`,
   shared with `bench-gate.sh`'s path); exit 1 only on a confirmed case. Never fetches. Keeps the last 5
   `target/review-ab/<timestamp>` dirs; `--clean` deletes the cache. Tests: `test_review_ab.py` (the script
   end to end over fake `cargo`/`docker`/bench executables in a throwaway repo). (3) **In-process benches**, no Docker, the PR gate: `engine`'s `engine` (both engines

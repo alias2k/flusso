@@ -12,7 +12,7 @@
 //! | `batch` | 1, 10, 100, 1000, 10000 ids of a plain `int` root |
 //! | `hit_ratio` | 0, 50, 100 % of 1000 ids exist |
 //! | `key` | `int`, `uuid`, `varchar`, `numeric`, `float8`, `char(n)`, `citext` |
-//! | `root` | hash- and range-partitioned on the key, composite key, keyless, wide unread column, wide with a composite key, never analysed (see [`Shape`]); the plain root is `batch/1000` |
+//! | `root` | hash- and range-partitioned on the key, composite key, keyless, wide unread column, wide with a composite key, never analysed (see [`Shape`]), and `plain_baseline`, a plain 1,000-row root to read them against |
 //!
 //! Every root has a `has_many` child keyed by the root's key type, two rows
 //! per root. Before measuring, each case is built once and checked: a case
@@ -263,6 +263,9 @@ fn roots() -> Vec<Root> {
         Root::keyed("k_float8", "float8", "float8", Float8, "g + 0.5"),
         Root::keyed("k_char", "char", "char(12)", Text, "lpad(g::text, 12, 'k')"),
         Root::keyed("k_citext", "citext", "citext", Text, "'Key-' || g"),
+        // The baseline for the other root shapes: the same 1,000 rows and
+        // child, where `batch/1000` reads 1,000 of the 10,000-row `plain` table.
+        Root::new("s_plain", ("root", "plain_baseline"), Shape::Plain),
         Root::new(
             "s_hash",
             ("root", "hash_partitioned"),

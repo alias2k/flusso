@@ -13,8 +13,10 @@
 # 1. One run at a time: an exclusive flock on `$FLUSSO_REVIEW_HOME/lock`
 #    (default ~/.cache/flusso/review-ab) for the whole run, since the warm tree,
 #    its target dir and the stamp are shared. A second run fails at once.
-#    Containers a killed run left (`flusso-review-<pid>-*`, pid gone) are
-#    removed, and old result dirs pruned to the last 5.
+#    The cache must carry its marker (`.flusso-review-ab`), or be new or empty:
+#    no other directory is written to or deleted. Containers a killed run left
+#    (`flusso-review-<pid>-*`, labelled with this host and pid namespace, pid
+#    gone) are removed, and old result dirs pruned to the last 5.
 # 2. The base is checked out into the warm tree with a private index (no git
 #    worktree is registered; only files that differ are rewritten, so cargo
 #    rebuilds only what changed), reset to the base commit before each build,
@@ -86,7 +88,31 @@ head_target=$(realpath -m "${CARGO_TARGET_DIR:-$head_tree/target}")
 results=$head_target/review-ab
 stamp=$home/stamp.json
 
-mkdir -p "$home"
+# The cache is ours only if it carries the marker (or is new or empty, or a
+# cache from before the marker, recognised by its stamp.json): a
+# FLUSSO_REVIEW_HOME pointing anywhere else is never written to or deleted.
+marker=$home/.flusso-review-ab
+if [ ! -e "$home" ] || [ -z "$(ls -A "$home" 2>/dev/null)" ]; then
+  if [ "$clean" -eq 0 ]; then
+    mkdir -p "$home"
+    : >"$marker"
+  fi
+elif [ ! -f "$marker" ] && [ -f "$home/stamp.json" ]; then
+  : >"$marker"
+elif [ ! -f "$marker" ]; then
+  echo "error: $home is not a review-ab cache (no $(basename "$marker")); set FLUSSO_REVIEW_HOME to an empty or new directory" >&2
+  exit 2
+fi
+if [ "$clean" -eq 1 ] && { [ "$home" = / ] || [ "$home" = "$(realpath -m "$HOME")" ]; }; then
+  echo "error: refusing to delete $home" >&2
+  exit 2
+fi
+
+if [ "$clean" -eq 1 ] && [ ! -e "$home" ]; then
+  rm -rf "$results"
+  echo "nothing to remove at $home; removed $results"
+  exit 0
+fi
 exec 9>"$home/lock"
 if ! flock -n 9; then
   echo "error: another review-ab run holds $home/lock; wait for it to finish" >&2
@@ -94,9 +120,10 @@ if ! flock -n 9; then
 fi
 
 if [ "$clean" -eq 1 ]; then
-  du -sh "$home" "$results" 2>/dev/null || true
+  for path in "$home" "$results"; do
+    [ -e "$path" ] && echo "removing $path ($(du -sh "$path" 2>/dev/null | cut -f1))"
+  done
   rm -rf "$home" "$results"
-  echo "removed the warm base tree, its build and the review results"
   exit 0
 fi
 
@@ -151,6 +178,19 @@ done
 build_env() {
   env | grep -E '^(RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_RUSTFLAGS|CARGO_PROFILE_[A-Z0-9_]+)=' | sort || true
   echo "bench-in-process.sh $(sha256sum <"$scripts/bench-in-process.sh" | cut -d' ' -f1)"
+  # Cargo's own configuration: $CARGO_HOME's, then every .cargo/ from the base
+  # tree up to /. An absent file contributes nothing.
+  local dir=$base_tree config
+  for config in "${CARGO_HOME:-$HOME/.cargo}"/config{,.toml}; do
+    [ ! -f "$config" ] || echo "$config $(sha256sum <"$config" | cut -d' ' -f1)"
+  done
+  while :; do
+    for config in "$dir"/.cargo/config{,.toml}; do
+      [ ! -f "$config" ] || echo "$config $(sha256sum <"$config" | cut -d' ' -f1)"
+    done
+    [ "$dir" != / ] || break
+    dir=$(dirname "$dir")
+  done
 }
 toolchain() { (cd "$1" && rustc -vV) 2>/dev/null || echo none; }
 
@@ -192,8 +232,10 @@ if [ -n "$bench_cpus" ]; then
   server_pin=(--cpuset-cpus "$server_cpus")
 fi
 
-names=$(docker ps -a --filter name=flusso-review- --format '{{.Names}}' || true)
-for name in $(printf '%s\n' "$names" | python3 "$scripts/review-ab-housekeeping.py" stale); do
+owner="$(uname -n) $(readlink /proc/self/ns/pid 2>/dev/null || echo unknown)"
+listing=$(docker ps -a --filter name=flusso-review- \
+  --format '{{.Names}}\t{{.Label "flusso.review-ab.owner"}}' || true)
+for name in $(printf '%s\n' "$listing" | python3 "$scripts/review-ab-housekeeping.py" stale --owner "$owner"); do
   echo "removing $name, left by a run that no longer exists"
   docker rm -f "$name" >/dev/null || true
 done
@@ -257,7 +299,7 @@ host_port() { docker port "$1" "$2" | head -1 | sed 's/.*://'; }
 
 start_postgres() { # start_postgres <name> <version>
   containers+=("$1")
-  docker run -d --name "$1" "${server_pin[@]}" -e POSTGRES_PASSWORD=postgres -p 127.0.0.1::5432 \
+  docker run -d --name "$1" --label "flusso.review-ab.owner=$owner" "${server_pin[@]}" -e POSTGRES_PASSWORD=postgres -p 127.0.0.1::5432 \
     "postgres:$2-alpine" >/dev/null
   local deadline=$((SECONDS + 120))
   until docker exec "$1" pg_isready -U postgres -h 127.0.0.1 -q 2>/dev/null; do
@@ -270,7 +312,7 @@ os_url=
 if [[ " ${selected[*]} " == *" pipeline "* ]]; then
   os=flusso-review-$$-os
   containers+=("$os")
-  docker run -d --name "$os" "${server_pin[@]}" -p 127.0.0.1::9200 \
+  docker run -d --name "$os" --label "flusso.review-ab.owner=$owner" "${server_pin[@]}" -p 127.0.0.1::9200 \
     -e discovery.type=single-node -e DISABLE_SECURITY_PLUGIN=true -e DISABLE_INSTALL_DEMO_CONFIG=true \
     -e action.destructive_requires_name=false -e OPENSEARCH_JAVA_OPTS="-Xms512m -Xmx512m" \
     opensearchproject/opensearch:2 >/dev/null

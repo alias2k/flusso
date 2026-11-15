@@ -22,7 +22,7 @@
 # script runs nothing and exits 78, so a caller can tell "this tree has no
 # in-process benches" apart from a failure.
 #
-# Two knobs for review-ab.sh (both unset in the PR gate):
+# Three knobs for review-ab.sh (all unset in the PR gate):
 #
 # - BENCH_SET=docker picks the Docker-backed benches (postgres, cases,
 #   pipeline) instead of the five in-process ones;

@@ -8,10 +8,13 @@ script calls them, over files written to a temporary directory.
 """
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
+import random
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -287,20 +290,84 @@ class RepeatsTable(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
 
 
+def load_compare():
+    spec = importlib.util.spec_from_file_location("bench_compare", COMPARE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class SpreadSimulation(unittest.TestCase):
+    """The control spread on identical code: more rounds must not raise it, and false flags stay rare.
+
+    Each trial draws `n` run medians per side from the same distribution (identical code): Gaussian
+    noise of 3%, or the same with bursts (30% of runs slowed by 20% to 100%, a build next door).
+    The flag is review-ab's first pass: head's fastest past max(5%, 2 × spread), before any re-run.
+    """
+
+    TRIALS = 4000
+    compare = load_compare()
+
+    @staticmethod
+    def runs(rng: random.Random, n: int, bursty: bool) -> list[float]:
+        out = []
+        for _ in range(n):
+            value = 1 + rng.gauss(0, 0.03)
+            if bursty and rng.random() < 0.3:
+                value *= 1 + rng.uniform(0.2, 1.0)
+            out.append(value)
+        return out
+
+    def measure(self, n: int, bursty: bool) -> tuple[float, float]:
+        rng = random.Random(340 + n + bursty)
+        spreads, flags = [], 0
+        for _ in range(self.TRIALS):
+            base, head = self.runs(rng, n, bursty), self.runs(rng, n, bursty)
+            spread = max(self.compare.spread(base), self.compare.spread(head))
+            spreads.append(spread)
+            flags += self.compare.change(min(base), min(head)) > max(5, 2 * spread)
+        return statistics.median(spreads), flags / self.TRIALS
+
+    def check(self, bursty: bool) -> None:
+        at = {n: self.measure(n, bursty) for n in (3, 5, 7)}
+        for n in (5, 7):
+            self.assertLessEqual(at[n][0], at[3][0], f"median spread at {n} rounds vs 3: {at}")
+        for n, (_, rate) in at.items():
+            self.assertLess(rate, 0.04, f"first-pass false flags at {n} rounds: {at}")
+
+    def test_gaussian_noise(self) -> None:
+        self.check(bursty=False)
+
+    def test_bursty_noise(self) -> None:
+        self.check(bursty=True)
+
+    def test_three_rounds_keep_the_measured_rule(self) -> None:
+        # Two fastest of three = the slowest left out: the proof runs were measured with this.
+        self.assertAlmostEqual(self.compare.spread([1.0, 1.02, 1.5]), 2.0)
+        self.assertAlmostEqual(self.compare.spread([1.0, 1.5]), 50.0)
+
+
 class Housekeeping(unittest.TestCase):
-    def test_only_review_containers_of_dead_runs_are_stale(self) -> None:
+    def test_only_this_namespaces_containers_of_dead_runs_are_stale(self) -> None:
         dead = subprocess.Popen(["true"])
         dead.wait()
-        names = [
-            f"flusso-review-{dead.pid}-pg16",
-            f"flusso-review-{dead.pid}-os",
-            f"flusso-review-{os.getpid()}-pg16",
-            "flusso-review-dev-pg16",
-            "postgres",
-            f"my-flusso-review-{dead.pid}-pg16",
+        here, elsewhere = "box pid:[4026531836]", "devcontainer pid:[4026532999]"
+        lines = [
+            f"flusso-review-{dead.pid}-pg16\t{here}",
+            f"flusso-review-{dead.pid}-os\t{here}",
+            f"flusso-review-{dead.pid}-pg14\t{elsewhere}",
+            f"flusso-review-{dead.pid}-pg18\t",
+            f"flusso-review-{os.getpid()}-pg16\t{here}",
+            f"flusso-review-dev-pg16\t{here}",
+            f"postgres\t{here}",
+            f"my-flusso-review-{dead.pid}-pg16\t{here}",
         ]
         result = subprocess.run(
-            [sys.executable, HOUSEKEEPING, "stale"], input="\n".join(names), capture_output=True, text=True, check=True
+            [sys.executable, HOUSEKEEPING, "stale", "--owner", here],
+            input="\n".join(lines),
+            capture_output=True,
+            text=True,
+            check=True,
         )
         self.assertEqual(result.stdout.split(), [f"flusso-review-{dead.pid}-pg16", f"flusso-review-{dead.pid}-os"])
 
@@ -408,7 +475,7 @@ FAKE_DOCKER = r"""#!/usr/bin/env bash
 echo "docker $*" >>"$FAKE_LOG"
 case $1 in
   port) echo 127.0.0.1:55432 ;;
-  ps) printf '%s\n' $FAKE_CONTAINERS ;;
+  ps) printf '%b\n' "$FAKE_CONTAINERS" ;;
 esac
 exit 0
 """
@@ -548,6 +615,30 @@ class Script(unittest.TestCase):
         self.assertEqual(self.log_lines("taskset"), [])
         self.assertFalse(any("--cpuset-cpus" in line for line in self.log_lines("docker run")))
 
+    def test_a_user_cargo_config_change_rebuilds_the_base(self) -> None:
+        user = self.dir / "user"
+        user.mkdir()
+        self.assertEqual(self.review(self.with_cases, "--bench", "cases", HOME=str(user)).returncode, 0)
+        (user / ".cargo").mkdir()
+        (user / ".cargo" / "config.toml").write_text("[build]\nrustflags = ['-Ctarget-cpu=native']\n")
+        result = self.review(self.with_cases, "--bench", "cases", HOME=str(user))
+        self.assertIn("build settings changed", result.stdout)
+
+    def test_a_cargo_config_in_a_parent_of_the_base_tree_rebuilds_the_base(self) -> None:
+        self.assertEqual(self.review(self.with_cases, "--bench", "cases").returncode, 0)
+        (self.dir / ".cargo").mkdir()
+        (self.dir / ".cargo" / "config.toml").write_text("[profile.bench]\ndebug = true\n")
+        result = self.review(self.with_cases, "--bench", "cases")
+        self.assertIn("build settings changed", result.stdout)
+
+    def test_a_cargo_home_config_change_rebuilds_the_base(self) -> None:
+        cargo_home = self.dir / "cargo-home"
+        cargo_home.mkdir()
+        self.assertEqual(self.review(self.with_cases, "--bench", "cases", CARGO_HOME=str(cargo_home)).returncode, 0)
+        (cargo_home / "config.toml").write_text("[build]\njobs = 1\n")
+        result = self.review(self.with_cases, "--bench", "cases", CARGO_HOME=str(cargo_home))
+        self.assertIn("build settings changed", result.stdout)
+
     def test_criterion_runs_quietly_without_plots(self) -> None:
         self.review(self.with_cases, "--bench", "cases")
         line = self.log_lines("run ")[0]
@@ -589,6 +680,7 @@ class Script(unittest.TestCase):
 
     def test_a_second_run_fails_at_once_while_the_first_holds_the_lock(self) -> None:
         self.home.mkdir(parents=True)
+        (self.home / ".flusso-review-ab").write_text("")
         with open(self.home / "lock", "w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             start = time.monotonic()
@@ -628,20 +720,73 @@ class Script(unittest.TestCase):
         self.assertIn("predates", result.stderr)
         self.assertEqual(self.log_lines("run "), [])
 
+    def owner(self) -> str:
+        ns = os.readlink("/proc/self/ns/pid")
+        return f"{os.uname().nodename} {ns}"
+
     def test_containers_of_a_killed_run_are_removed_and_nothing_else(self) -> None:
         dead = subprocess.Popen(["true"])
         dead.wait()
-        others = f"flusso-review-{dead.pid}-pg16 postgres flusso-review-{os.getpid()}-os"
-        self.review(self.with_cases, "--bench", "cases", FAKE_CONTAINERS=others)
-        removed = [line for line in self.log_lines("docker rm") if f"-{dead.pid}-" in line or "postgres " in line + " "]
+        mine, other = self.owner(), "elsewhere pid:[1]"
+        listing = "\\n".join([
+            f"flusso-review-{dead.pid}-pg16\\t{mine}",
+            f"flusso-review-{dead.pid}-pg14\\t{other}",
+            f"postgres\\t{mine}",
+            f"flusso-review-{os.getpid()}-os\\t{mine}",
+        ])
+        self.review(self.with_cases, "--bench", "cases", FAKE_CONTAINERS=listing)
+        listed = (f"-{dead.pid}-", "postgres", f"-{os.getpid()}-")
+        removed = [line for line in self.log_lines("docker rm") if any(name in line for name in listed)]
         self.assertEqual(removed, [f"docker rm -f flusso-review-{dead.pid}-pg16"])
-        self.assertFalse(any(f"flusso-review-{os.getpid()}-os" in line for line in self.log_lines("docker rm")))
+
+    def test_containers_are_labelled_with_their_owner(self) -> None:
+        self.review(self.with_cases, "--bench", "cases")
+        runs = self.log_lines("docker run")
+        self.assertTrue(runs and all(f"--label flusso.review-ab.owner={self.owner()}" in line for line in runs), runs)
 
     def test_the_base_commit_and_its_date_are_printed(self) -> None:
         result = self.review(self.with_cases, "--bench", "cases")
         self.assertIn(self.with_cases[:12], result.stdout)
         self.assertRegex(result.stdout, r"committed \d{4}-\d{2}-\d{2}")
         self.assertIn("not fetched", result.stdout)
+
+    def test_clean_refuses_a_directory_this_tool_did_not_create(self) -> None:
+        other = self.dir / "not-a-cache"
+        other.mkdir()
+        (other / "precious").write_text("keep me")
+        result = self.review("--clean", FLUSSO_REVIEW_HOME=str(other))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue((other / "precious").is_file())
+        self.assertFalse((other / "lock").exists())
+        self.assertIn("not a review-ab cache", result.stderr)
+
+    def test_a_run_refuses_a_directory_this_tool_did_not_create(self) -> None:
+        other = self.dir / "not-a-cache"
+        other.mkdir()
+        (other / "precious").write_text("keep me")
+        result = self.review(self.with_cases, "--bench", "cases", FLUSSO_REVIEW_HOME=str(other))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(sorted(p.name for p in other.iterdir()), ["precious"])
+
+    def test_clean_refuses_the_home_directory_even_with_the_marker(self) -> None:
+        home = self.dir / "user"
+        home.mkdir()
+        (home / ".flusso-review-ab").write_text("")
+        result = self.review("--clean", FLUSSO_REVIEW_HOME=str(home), HOME=str(home))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(home.is_dir())
+
+    def test_a_cache_from_before_the_marker_is_recognised_by_its_stamp(self) -> None:
+        self.home.mkdir(parents=True)
+        (self.home / "stamp.json").write_text("{}")
+        result = self.review(self.with_cases, "--bench", "cases")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.home / ".flusso-review-ab").is_file())
+
+    def test_clean_names_what_it_removes(self) -> None:
+        self.review(self.with_cases, "--bench", "cases")
+        result = self.review("--clean")
+        self.assertIn(f"removing {self.home}", result.stdout)
 
     def test_clean_removes_the_cache_and_the_results(self) -> None:
         self.review(self.with_cases, "--bench", "cases")

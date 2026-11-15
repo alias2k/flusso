@@ -84,7 +84,7 @@ The first line names the base commit and its commit date. The command doesn't fe
 What it does:
 
 1. **Runs one at a time.** It takes an exclusive lock on `~/.cache/flusso/review-ab/lock` for the whole run; a second run fails at once. Containers a killed run left behind (`flusso-review-<pid>-*` whose process is gone) are removed first.
-2. **Builds the base in a warm tree.** `~/.cache/flusso/review-ab/tree` (or `$FLUSSO_REVIEW_HOME`) is the base checked out with a private git index: no worktree is registered, and only the files that changed since the last base are rewritten. Before each build it's reset to the base commit. It has its own target dir beside it, seeded once from the head's `release` dir with a reflink copy. One shared target dir would let cargo run one tree's binary for the other; `bench-provenance.py` checks each side ran its own.
+2. **Builds the base in a warm tree.** `~/.cache/flusso/review-ab/tree` (or `$FLUSSO_REVIEW_HOME`) is the base checked out with a private git index: no worktree is registered, and only the files that changed since the last base are rewritten. Before each build it's reset to the base commit. It has its own target dir beside it, seeded once from the head's `release` dir with `cp -a --reflink=auto`: shared blocks on a filesystem with reflinks (btrfs, XFS), a full copy of about 2 GB on one without. One shared target dir would let cargo run one tree's binary for the other; `bench-provenance.py` checks each side ran its own.
 3. **Reuses that build when it's current.** `review-ab-stamp.py` records the base commit, the toolchain, `RUSTFLAGS` and `CARGO_PROFILE_*`, `bench-in-process.sh`'s hash, the bench files laid over the base, and each bench executable's sha256. When all of them match, cargo isn't called for the base at all; otherwise the output says why it rebuilds.
 4. **Runs the same harness on both sides.** The head's `postgres.rs`, `cases.rs` and `pipeline.rs` are copied over the base, so a base that predates a case is still measured. When a build fails in a bench target, the error suggests `--own-benches`. That flag refuses a base whose benches predate `REVIEW_AB_PG_URL`: they would run on their own testcontainer, Postgres 11, while the head ran on `--pg`.
 5. **Starts named containers.** One `flusso-review-<pid>-pg<v>` per version, plus `flusso-review-<pid>-os` for `pipeline`. Each bench run gets a fresh database and an emptied cluster through `REVIEW_AB_PG_URL` / `REVIEW_AB_OS_URL`, variables only this command sets. A trap removes exactly these containers, on success, failure or Ctrl-C.
@@ -99,16 +99,16 @@ What it does:
 | `key/uuid` | 1.234 ms … 1.256 ms | 1.501 ms … 1.522 ms | +21.6% | 1.8% | slower ⚠️ (re-run +20.9%) |
 ```
 
-The control spread is how far one binary's own runs differ, (max − min) / min, the larger of the two sides: the noise of this machine right now. With 3 or more rounds each side's slowest run is left out of it, so one run hit by a burst doesn't widen it; that run still shows in the base and head columns. A `faster` isn't re-run, so on a busy machine treat one as a hint, not a result. The command exits 1 only on a case that is **slower**, that is, confirmed by its re-run. When both sides' bench binaries are byte-identical, the output says so: every difference in the table is noise.
+The control spread is the gap between one binary's two fastest runs, as a share of the fastest, the larger of the two sides: the noise of the fastest run, which is what the change compares. With 3 rounds that's the range of all runs but the slowest, so one run hit by a burst doesn't widen it; that run still shows in the base and head columns. More rounds narrow it: the two fastest of more runs sit closer together, and one bad run more doesn't move them. A range over all runs would widen instead. A `faster` isn't re-run, so on a busy machine treat one as a hint, not a result. The command exits 1 only on a case that is **slower**, that is, confirmed by its re-run. When both sides' bench binaries are byte-identical, the output says so: every difference in the table is noise.
 
 ### How far to trust it
 
 Measured on a shared development machine with another agent building and testing beside it, Postgres 16, 3 rounds, CPUs pinned:
 
-- **Identical code**, the 22 `cases` (load average 2.4 to 14.7): exit 0. Two cases flagged, `key/float8` at +7.9% and `root/wide_composite_key` at +17.3%, and both cleared on re-run. One case, `batch/10`, read `faster` at −20.7%: `faster` isn't re-run.
+- **Identical code**, the 22 `cases` (before `root/plain_baseline` was added; load average 2.4 to 14.7): exit 0. Two cases flagged, `key/float8` at +7.9% and `root/wide_composite_key` at +17.3%, and both cleared on re-run. One case, `batch/10`, read `faster` at −20.7%: `faster` isn't re-run.
 - **Identical code, all 36 cases, before pinning** (two runs, load 2.9 to 14.6): exit 0 both times, one flag, cleared.
 - **A 3 ms sleep added to every `build_many` call**, the 22 `cases` (load 2.6 to 11.9): **slower** on 18, each confirmed by its re-run. That's every case where 3 ms is more than the 5% limit; the true change ranged from +22% (`key/citext`, 13 ms) to +2500% (`batch/1`). The 4 left as `noise` are `batch/10000` and the ~150 ms composite-key, keyless and wide composite-key roots, where 3 ms is +2% to +3%.
-- The same slowed run before pinning and before dropping the slowest run caught 4 of those 18. On the 4 to 11 ms cases the spread fell from 14%–61% to 1.7%–9.6%.
+- The same slowed run before pinning, with the spread taken over all runs, caught 4 of those 18. On the 4 to 11 ms cases the spread fell from 14%–61% to 1.7%–9.6%.
 
 The smallest slowdown tested and caught on the 4 to 11 ms cases is +28% (`root/hash_partitioned`). Their spreads put the floor at 5% to 19%, depending on the case, but nothing below +28% was tested there. A change smaller than the 5% limit is never reported, and on a case whose spread is wide, the floor is twice that spread: read it in the row.
 
@@ -116,7 +116,7 @@ The smallest slowdown tested and caught on the 4 to 11 ms cases is +28% (`root/h
 
 `noise` means "not past max(limit, 2 × spread)", not "unchanged". To look closer:
 
-1. Run that case alone, with more rounds: `just review-ab main --bench cases --filter '^key/uuid$' --rounds 7`. One case takes a minute or two a round, and more rounds narrow the spread, since each side's slowest is left out.
+1. Run that case alone, with more rounds: `just review-ab main --bench cases --filter '^key/uuid$' --rounds 7`. One case takes a minute or two a round. What more rounds buy, simulated on identical code with the noise models of `SpreadSimulation` in `test_review_ab.py` (20,000 trials; the test pins the property with fewer): with 3% Gaussian noise the median spread goes from 3.4% at 3 rounds to 2.7% at 5 and 2.4% at 7. When 30% of runs are hit by a burst of 20–100%, it goes from 6.5% to 3.4% and 2.8%. The first-pass false-flag rate stays under 3% in every case.
 2. Read the row's spread. If it's still wide, the machine is the problem: wait for other builds to finish, or move the run to a quieter machine. `--bench-cpus` / `--server-cpus` can steer it away from busy cores.
 3. Lower `--limit` only for a case whose spread is well under it, and say so in the review.
 
@@ -142,9 +142,9 @@ What it can't see on a busy machine: a change smaller than the 5% limit; a chang
 | `batch` | 1, 10, 100, 1000, 10000 ids of a plain `int` root |
 | `hit_ratio` | 0, 50, 100% of 1000 ids exist |
 | `key` | `int`, `uuid`, `varchar`, `numeric`, `float8`, `char`, `citext` |
-| `root` | hash- and range-partitioned on the key, composite key, keyless (`REPLICA IDENTITY FULL`), a wide row with a large unread column, the same with a composite key, a root and child never analysed (autovacuum off, never vacuumed) |
+| `root` | `plain_baseline` (1,000 rows), hash- and range-partitioned on the key, composite key, keyless (`REPLICA IDENTITY FULL`), a wide row with a large unread column, the same with a composite key, a root and child never analysed (autovacuum off, never vacuumed) |
 
-Every root has a `has_many` child keyed by its key type. The plain root is `batch/1000`. The composite-key and keyless roots declare `primary_key: id`, which isn't the table's key; `flusso run` warns about it and starts, and that warned-but-running shape is what they measure. `cases` runs only from `just bench-components` and `just review-ab`: the `main` history doesn't record it.
+Every root has a `has_many` child keyed by its key type. Read the root shapes against `root/plain_baseline`, a plain 1,000-row root, not against `batch/1000`, which reads 1,000 rows of the 10,000-row `plain` table. `batch/1` is bimodal: on byte-identical binaries it read +29.4% against a 28.6% spread, so it can't show a small change, only a large one such as a round trip added per call. The composite-key and keyless roots declare `primary_key: id`, which isn't the table's key; `flusso run` warns about it and starts, and that warned-but-running shape is what they measure. `cases` runs only from `just bench-components` and `just review-ab`: the `main` history doesn't record it.
 
 ## What CI does
 
