@@ -3,7 +3,7 @@
 
     bench-compare.py <criterion-dir> <baseline> <candidate> <max-slowdown-percent>
                      [--breaches <file>] [--confirm <re-baseline> <re-candidate>]
-                     [--allow-empty]
+                     [--allow-empty] [--control <control-baseline>]
 
 For every bench with both `<baseline>/estimates.json` and
 `<candidate>/estimates.json`, compares medians; a bench on one side only is
@@ -22,6 +22,15 @@ listed but not gated. Exits 1 when any bench's candidate median is more than
                     (a PR base that has no in-process benches yet). Without
                     it, that is an error, exit 2: a side that measured nothing
                     must not pass the gate.
+
+--control C         the review table (review-ab.sh): `<control-baseline>` is
+                    the base measured again after the candidate. Adds a
+                    "control spread" column (|C − baseline| as a percent of
+                    the baseline) and a verdict: a change counts only when it
+                    is past both the limit and twice the control spread
+                    (`slower` / `faster`, else `noise`). Exits 1 when any
+                    bench is counted slower. A bench with no control run is
+                    judged on the limit alone.
 
 With `GITHUB_STEP_SUMMARY` set, the final report (no breach, or the --confirm
 run) is appended there as Markdown too.
@@ -65,6 +74,37 @@ def pair(bench_dir: pathlib.Path, base: str, cand: str):
     return None
 
 
+def review(rows, one_sided, base: str, cand: str, control: str, limit: float) -> int:
+    """The A/B table with a control run of the base against itself."""
+    lines = ["| case | base | head | change | control spread | verdict |", "| --- | ---: | ---: | ---: | ---: | --- |"]
+    slower = 0
+    for rid, bench_dir, b, c, ch in rows:
+        again = pair(bench_dir, base, control)
+        spread = abs(change(*again)) if again else None
+        floor = max(limit, 2 * spread) if spread is not None else limit
+        if ch > floor:
+            verdict, slower = "slower ⚠️", slower + 1
+        elif ch < -floor:
+            verdict = "faster"
+        else:
+            verdict = "noise"
+        shown = f"{spread:.1f}%" if spread is not None else "—"
+        lines.append(f"| `{rid}` | {fmt(b)} | {fmt(c)} | {ch:+.1f}% | {shown} | {verdict} |")
+    print(f"`{base}` = base, `{cand}` = head, `{control}` = base again after head.")
+    print()
+    print("\n".join(lines))
+    if one_sided:
+        print()
+        print("Not compared (measured on one side only): " + ", ".join(f"`{i}` (only `{s}`)" for i, s in one_sided) + ".")
+    print()
+    print(
+        f"**{slower} case(s) slower** past {limit:.0f}% and twice the control spread."
+        if slower
+        else f"No case slower past {limit:.0f}% and twice the control spread."
+    )
+    return 1 if slower else 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(usage=__doc__)
     parser.add_argument("root", type=pathlib.Path)
@@ -74,6 +114,7 @@ def main() -> int:
     parser.add_argument("--breaches", type=pathlib.Path)
     parser.add_argument("--confirm", nargs=2, metavar=("RE_BASE", "RE_CAND"))
     parser.add_argument("--allow-empty", action="store_true")
+    parser.add_argument("--control")
     args = parser.parse_args()
     root, base, cand, limit = args.root, args.base, args.cand, args.limit
 
@@ -95,6 +136,9 @@ def main() -> int:
             return 0
         print(f"::error::nothing to compare: no bench has both `{base}` and `{cand}` under {root}")
         return 2
+
+    if args.control is not None:
+        return review(rows, one_sided, base, cand, args.control, limit)
 
     breached = [r for r in rows if r[4] > limit]
     lines = [f"| bench | {base} | {cand} | change |", "| --- | ---: | ---: | ---: |"]
