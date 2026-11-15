@@ -7,6 +7,8 @@
 //! `prepare` sets `REPLICA IDENTITY FULL` across the child's partition tree, so
 //! a deleted child row still reaches its old parent through the pre-image.
 //! Backfill reads the partitions through the parent.
+//! A batched build over a hash-partitioned root is planned without a JIT
+//! compilation (issue #335).
 //! A partition whose identity index leaves out the primary key (issue #224) is
 //! set to `FULL` alone, or, unmanaged, reported: its delete arrives under a
 //! null key that addresses no document, while a child's old row still rebuilds
@@ -24,10 +26,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use config::yaml::SchemaYaml;
 use futures::StreamExt;
 use kernel::{
     Column, ColumnName, DatabaseSchema, Field, FieldName, FieldSource, FlussoType, GenericValue,
-    IndexName, IndexSchema, Join, JoinKind, Relation, TableName,
+    IndexName, IndexSchema, Join, JoinKind, ParseFrom, Relation, TableName,
 };
 use source::cdc::{ChangeCapture, ChangeEvent};
 use source::document::{DocumentBuilder, DocumentId};
@@ -640,4 +643,120 @@ fn table(name: &str) -> TableName {
 }
 fn index_name(name: &str) -> IndexName {
     IndexName::try_new(name).unwrap()
+}
+
+/// The batched build over a hash-partitioned root is never JIT-compiled
+/// (issue #335). Each requested key probes the root through a lateral
+/// subquery, which Postgres prunes to one partition at run time but plans over
+/// every partition. Unless the subquery says it returns at most one row, the
+/// planner counts one row per partition per key and costs every relation
+/// subquery that many times. From about 130 keys that passes `jit_above_cost`,
+/// and every execution compiles before it runs: 5–18× slower than the lookup.
+///
+/// `auto_explain` logs the executed statement's `EXPLAIN (ANALYZE, FORMAT
+/// JSON)`, which has a `JIT` entry when it was compiled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_batched_build_on_a_partitioned_root_is_not_jit_compiled() {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE accounts (id int PRIMARY KEY, name text, status text NOT NULL, \
+         deleted boolean NOT NULL DEFAULT false) PARTITION BY HASH (id)",
+        "DO $$ BEGIN FOR i IN 0..15 LOOP EXECUTE format('CREATE TABLE accounts_%s \
+         PARTITION OF accounts FOR VALUES WITH (MODULUS 16, REMAINDER %s)', i, i); \
+         END LOOP; END $$",
+        "CREATE TABLE orders (id int PRIMARY KEY, account_id int NOT NULL, label text)",
+        "CREATE TABLE notes (id int PRIMARY KEY, account_id int NOT NULL, body text)",
+        "CREATE INDEX ON orders (account_id)",
+        "CREATE INDEX ON notes (account_id)",
+        "INSERT INTO accounts SELECT g, 'account ' || g, \
+         CASE WHEN g % 10 = 0 THEN 'archived' ELSE 'active' END, g % 17 = 0 \
+         FROM generate_series(1, 200000) g",
+        "INSERT INTO orders SELECT g, g % 200000 + 1, 'order ' || g \
+         FROM generate_series(1, 400000) g",
+        "INSERT INTO notes SELECT g, g % 200000 + 1, 'note ' || g \
+         FROM generate_series(1, 400000) g",
+        "ANALYZE",
+        // Every connection opened from here on, the builder's, logs the plan
+        // of each statement it runs.
+        "ALTER DATABASE postgres SET session_preload_libraries = 'auto_explain'",
+        "ALTER DATABASE postgres SET auto_explain.log_min_duration = 0",
+        "ALTER DATABASE postgres SET auto_explain.log_analyze = on",
+        "ALTER DATABASE postgres SET auto_explain.log_format = 'json'",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+
+    let yaml = "
+version: 1
+table: accounts
+primary_key: id
+soft_delete:
+  column: deleted
+filters:
+  - { column: status, op: eq, value: active }
+fields:
+  - keyword: name
+    required: false
+  - has_many: orders
+    table: orders
+    foreign_key: account_id
+    primary_key: id
+    fields:
+      - keyword: label
+        required: false
+  - has_many: notes
+    table: notes
+    foreign_key: account_id
+    primary_key: id
+    fields:
+      - text: body
+        required: false
+";
+    let schema = IndexSchema::try_from(SchemaYaml::try_parse(yaml).unwrap()).unwrap();
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("accounts"), schema)]));
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec))
+        .await
+        .unwrap();
+    let ids: Vec<DocumentId> = (0..256)
+        .map(|n| DocumentId {
+            index: index_name("accounts"),
+            key: RowKey(vec![(column("id"), GenericValue::Int(n * 781 + 1))]),
+        })
+        .collect();
+    let built = builder.build_many(&ids).await.unwrap();
+    assert_eq!(built.len(), ids.len());
+
+    let log = String::from_utf8(container.stderr_to_vec().await.unwrap()).unwrap();
+    let plans: Vec<serde_json::Value> = log
+        .split("plan:\n")
+        .skip(1)
+        .filter_map(|entry| {
+            serde_json::Deserializer::from_str(entry)
+                .into_iter::<serde_json::Value>()
+                .next()
+                .and_then(Result::ok)
+        })
+        .filter(|plan| {
+            plan["Query Text"]
+                .as_str()
+                .is_some_and(|text| text.contains("ORDINALITY"))
+        })
+        .collect();
+    let [plan] = plans.as_slice() else {
+        panic!("expected the one batched statement's plan, got {plans:#?}");
+    };
+    assert!(
+        plan.get("JIT").is_none(),
+        "the batched build was JIT-compiled (estimated cost {}): {:#}",
+        plan["Plan"]["Total Cost"],
+        plan["JIT"],
+    );
 }
