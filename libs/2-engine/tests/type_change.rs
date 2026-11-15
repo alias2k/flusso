@@ -686,6 +686,81 @@ async fn a_text_key_becoming_timestamptz_keeps_every_document() {
     running.finish();
 }
 
+/// A root key and the link naming it change from `text` to `name` in one
+/// migration, after the reverse lookups and the batch already ran under
+/// `text` on every pooled connection (issue #335): a change to a pet still
+/// rebuilds the owner it names, before and after a re-parent, and the owner
+/// it left; no tombstone, no restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_key_and_its_link_becoming_name_keep_resolving() {
+    let (_postgres, url, port) = start().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE owners (id text PRIMARY KEY, name text)",
+        "CREATE TABLE pets (id int PRIMARY KEY, owner_id text, name text)",
+        "ALTER TABLE pets REPLICA IDENTITY FULL",
+        "CREATE PUBLICATION flusso FOR ALL TABLES",
+        "INSERT INTO owners VALUES ('ada', 'Ada'), ('bob', 'Bob')",
+        "INSERT INTO pets VALUES (1, 'ada', 'rex')",
+    ] {
+        execute(&pool, statement).await;
+    }
+    create_slot(&pool).await;
+    let spec = Arc::new(SourceSpec::new(BTreeMap::from([(
+        index_name("owners"),
+        owners_with_pets(),
+    )])));
+    let documents = PgDocumentBuilder::connect(&url, spec).await.unwrap();
+    let mut running = Running::with(documents, &url, port).await;
+    let owner = |name: &str, pets: &[&str]| {
+        json!({
+            "name": name,
+            "pets": pets.iter().map(|pet| json!({ "name": pet })).collect::<Vec<_>>(),
+        })
+    };
+    let mut reaches = async |id: &str, expected: Value| {
+        document_reaches(&mut running.engine, &running.recorded, id, &expected).await;
+    };
+    reaches("ada", owner("Ada", &["rex"])).await;
+    for round in 0..12 {
+        execute(
+            &pool,
+            &format!(
+                "INSERT INTO pets VALUES ({}, 'bob', 'p{round}')",
+                100 + round
+            ),
+        )
+        .await;
+        execute(
+            &pool,
+            &format!("DELETE FROM pets WHERE id = {}", 100 + round),
+        )
+        .await;
+        execute(
+            &pool,
+            &format!("UPDATE pets SET name = 'rex{round}' WHERE id = 1"),
+        )
+        .await;
+        reaches("ada", owner("Ada", &[&format!("rex{round}")])).await;
+    }
+
+    execute(
+        &pool,
+        "BEGIN; ALTER TABLE owners ALTER COLUMN id TYPE name; \
+         ALTER TABLE pets ALTER COLUMN owner_id TYPE name; COMMIT",
+    )
+    .await;
+    execute(&pool, "INSERT INTO pets VALUES (2, 'ada', 'fido')").await;
+    reaches("ada", owner("Ada", &["rex11", "fido"])).await;
+    execute(&pool, "UPDATE pets SET owner_id = 'bob' WHERE id = 2").await;
+    reaches("bob", owner("Bob", &["fido"])).await;
+    reaches("ada", owner("Ada", &["rex11"])).await;
+    execute(&pool, "UPDATE owners SET name = 'Bob B' WHERE id = 'bob'").await;
+    reaches("bob", owner("Bob B", &["fido"])).await;
+    running.finish();
+}
+
 /// `owners` with its `pets`, linked by `owner_id`.
 fn owners_with_pets() -> IndexSchema {
     let mut schema = named("owners");
