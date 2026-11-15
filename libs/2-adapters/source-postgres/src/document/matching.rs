@@ -93,20 +93,21 @@ pub(super) fn match_rows(
 /// `value` as the single-document query compares it with a key of `like`'s
 /// kind: what `$n::<bound>::<key type>` makes of it in Postgres, the session
 /// in UTC (sqlx sends `TimeZone=UTC` at startup). `None` when that cast fails
-/// in Postgres (out of range, text it doesn't parse) or isn't mirrored here.
+/// in Postgres (out of range, text it doesn't parse) or has no counterpart
+/// here, which then matches only within its own kind.
 ///
-/// - Integers of every width and `numeric` compare as numbers: `numeric` →
-///   integer rounds half away from zero, `float8` → integer half to even,
-///   `float8` → `numeric` keeps 15 significant digits, a width the value
-///   overflows fails.
-/// - `date`, `timestamp` and `timestamptz` convert at UTC; a timestamp cast
-///   to `date` drops its time.
+/// - Integers, `numeric`, `real` and `double precision` compare as numbers:
+///   to an integer `numeric` rounds half away from zero and a float half to
+///   even, a width the value overflows fails; to `numeric` a float keeps its
+///   type's significant digits (15, or 6 for `real`); between floats and to a
+///   float the nearest value is taken. `boolean` and `integer` cast both ways
+///   (`1` is true).
+/// - `date`, `timestamp`, `timestamptz` and `time` convert at UTC; a
+///   timestamp cast to `date` or `time` keeps that part.
 /// - A row key of text compares with the value's text output.
 /// - Text is parsed as the row key's type reads its own output
-///   (`text_value::typed_value`); a `timestamp`/`timestamptz` also takes a
-///   bare date.
-/// - Any other pair (`real`, `uuid`, `bool`, `time`, `bytea`, a mismatch)
-///   matches only within its own kind.
+///   (`text_value::typed_value`; `boolean` as Postgres's words); a
+///   `timestamp`/`timestamptz` also takes a bare date.
 pub(super) fn cast(value: &GenericValue, like: &GenericValue) -> Option<GenericValue> {
     use GenericValue as V;
     if let V::String(text) = value
@@ -116,19 +117,38 @@ pub(super) fn cast(value: &GenericValue, like: &GenericValue) -> Option<GenericV
     }
     Some(match like {
         V::SmallInt(_) => V::SmallInt(i16::try_from(integer(value)?).ok()?),
-        V::Int(_) => V::Int(i32::try_from(integer(value)?).ok()?),
+        V::Int(_) => V::Int(match value {
+            V::Bool(flag) => i32::from(*flag),
+            other => i32::try_from(integer(other)?).ok()?,
+        }),
         V::BigInt(_) => V::BigInt(integer(value)?),
         V::Decimal(_) => V::Decimal(match value {
             V::Double(double) => Decimal::from_scientific(&format!("{double:.14e}")).ok()?,
+            V::Float(float) => Decimal::from_scientific(&format!("{float:.5e}")).ok()?,
             other => Decimal::from(integer_exact(other)?),
         }),
         V::Double(_) => V::Double(match value {
             V::Decimal(decimal) => decimal.to_string().parse().ok()?,
+            V::Float(float) => f64::from(*float),
             other => integer_exact(other)? as f64,
         }),
+        V::Float(_) => V::Float(match value {
+            V::Decimal(decimal) => decimal.to_string().parse().ok()?,
+            V::Double(double) => *double as f32,
+            other => integer_exact(other)? as f32,
+        }),
+        V::Bool(_) => match value {
+            V::Int(n) => V::Bool(*n != 0),
+            _ => return None,
+        },
         V::Date(_) => V::Date(match value {
             V::Timestamp(at) => at.date(),
             V::TimestampTz(at) => at.naive_utc().date(),
+            _ => return None,
+        }),
+        V::Time(_) => V::Time(match value {
+            V::Timestamp(at) => at.time(),
+            V::TimestampTz(at) => at.naive_utc().time(),
             _ => return None,
         }),
         V::Timestamp(_) => V::Timestamp(match value {
@@ -142,10 +162,16 @@ pub(super) fn cast(value: &GenericValue, like: &GenericValue) -> Option<GenericV
             _ => return None,
         }),
         V::String(_) => V::String(match value {
-            V::SmallInt(_) | V::Int(_) | V::BigInt(_) | V::Decimal(_) | V::Date(_) => {
-                source::document::key_part(value)
-            }
+            V::SmallInt(_)
+            | V::Int(_)
+            | V::BigInt(_)
+            | V::Decimal(_)
+            | V::Date(_)
+            | V::Time(_)
+            | V::Uuid(_)
+            | V::Bool(_) => source::document::key_part(value),
             V::Double(double) => double.to_string(),
+            V::Float(float) => float.to_string(),
             V::Timestamp(at) => at.format("%Y-%m-%d %H:%M:%S%.f").to_string(),
             V::TimestampTz(at) => at.format("%Y-%m-%d %H:%M:%S%.f+00").to_string(),
             _ => return None,
@@ -154,16 +180,17 @@ pub(super) fn cast(value: &GenericValue, like: &GenericValue) -> Option<GenericV
     })
 }
 
-/// An integer or `numeric`, rounded to an integer as Postgres casts one.
+/// An integer, `numeric` or float, rounded to an integer as Postgres casts
+/// one.
 fn integer(value: &GenericValue) -> Option<i64> {
+    let float =
+        |rounded: f64| (rounded.is_finite() && rounded.abs() < 9.2e18).then_some(rounded as i64);
     match value {
         GenericValue::Decimal(decimal) => decimal
             .round_dp_with_strategy(0, RoundingStrategy::MidpointAwayFromZero)
             .to_i64(),
-        GenericValue::Double(double) => {
-            let rounded = double.round_ties_even();
-            (rounded.is_finite() && rounded.abs() < 9.2e18).then_some(rounded as i64)
-        }
+        GenericValue::Double(double) => float(double.round_ties_even()),
+        GenericValue::Float(single) => float(f64::from(single.round_ties_even())),
         other => integer_exact(other),
     }
 }
@@ -181,12 +208,16 @@ fn integer_exact(value: &GenericValue) -> Option<i64> {
 /// `text` as a key of `like`'s kind reads it.
 fn parse(text: &str, like: &GenericValue) -> Option<GenericValue> {
     let oid = match like {
+        GenericValue::Bool(_) => return boolean(text).map(GenericValue::Bool),
         GenericValue::SmallInt(_) => 21,
         GenericValue::Int(_) => 23,
         GenericValue::BigInt(_) => 20,
         GenericValue::Decimal(_) => 1700,
+        GenericValue::Float(_) => 700,
         GenericValue::Double(_) => 701,
+        GenericValue::Uuid(_) => 2950,
         GenericValue::Date(_) => 1082,
+        GenericValue::Time(_) => 1083,
         GenericValue::Timestamp(_) => 1114,
         GenericValue::TimestampTz(_) => 1184,
         _ => return None,
@@ -197,6 +228,15 @@ fn parse(text: &str, like: &GenericValue) -> Option<GenericValue> {
     }
     match crate::text_value::typed_value(text, 1082) {
         day @ GenericValue::Date(_) => cast(&day, like),
+        _ => None,
+    }
+}
+
+/// `text` as `boolean` reads it: Postgres's words, any case, trimmed.
+fn boolean(text: &str) -> Option<bool> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "t" | "true" | "y" | "yes" | "on" | "1" => Some(true),
+        "f" | "false" | "n" | "no" | "off" | "0" => Some(false),
         _ => None,
     }
 }
