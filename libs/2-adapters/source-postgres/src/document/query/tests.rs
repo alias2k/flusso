@@ -134,7 +134,7 @@ fn keyed_predicate_casts_a_uuid_primary_key() {
     assert!(
         batched
             .as_str()
-            .ends_with(r#"FROM (VALUES ($1::uuid::uuid, 1)) AS "requested"("k", "n") CROSS JOIN LATERAL (SELECT * FROM "public"."users" AS "root" WHERE "root"."id" = "requested"."k" OFFSET 0) AS "root""#),
+            .ends_with(r#"FROM unnest(ARRAY[$1::uuid::uuid]) WITH ORDINALITY AS "requested"("k", "n") CROSS JOIN LATERAL (SELECT * FROM "public"."users" AS "root" WHERE "root"."id" = "requested"."k" OFFSET 0) AS "root""#),
         "{}",
         batched.as_str()
     );
@@ -181,7 +181,7 @@ fn root_filters_fold_into_both_query_forms() {
     .unwrap();
     assert!(
         sql.as_str().ends_with(
-            r#"FROM (VALUES ($1::int4::bigint, 1)) AS "requested"("k", "n") CROSS JOIN LATERAL (SELECT * FROM "public"."users" AS "root" WHERE "root"."id" = "requested"."k" AND ("root"."status" = $2::text) OFFSET 0) AS "root""#
+            r#"FROM unnest(ARRAY[$1::int4::bigint]) WITH ORDINALITY AS "requested"("k", "n") CROSS JOIN LATERAL (SELECT * FROM "public"."users" AS "root" WHERE "root"."id" = "requested"."k" AND ("root"."status" = $2::text) OFFSET 0) AS "root""#
         ),
         "{}",
         sql.as_str()
@@ -583,7 +583,7 @@ fn documents_query_pairs_each_key_with_its_position() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT "requested"."n" AS "doc_position", json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM (VALUES ($1::int4::bigint, 1), ($2::int4::bigint, 2)) AS "requested"("k", "n") CROSS JOIN LATERAL (SELECT * FROM "public"."users" AS "root" WHERE "root"."id" = "requested"."k" OFFSET 0) AS "root""#
+        r#"SELECT "requested"."n" AS "doc_position", json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM unnest(ARRAY[$1::int4::bigint, $2::int4::bigint]) WITH ORDINALITY AS "requested"("k", "n") CROSS JOIN LATERAL (SELECT * FROM "public"."users" AS "root" WHERE "root"."id" = "requested"."k" OFFSET 0) AS "root""#
     );
     assert_eq!(params, vec![GenericValue::Int(7), GenericValue::Int(9)]);
 }
@@ -748,7 +748,7 @@ fn a_key_carried_as_text_is_cast_from_text() {
     assert!(
         batched
             .as_str()
-            .contains(r#"FROM (VALUES ($1::text::date, 1)) AS "requested""#),
+            .contains(r#"FROM unnest(ARRAY[$1::text::date]) WITH ORDINALITY AS "requested""#),
         "{}",
         batched.as_str()
     );

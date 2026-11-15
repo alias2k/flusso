@@ -17,7 +17,7 @@ pub(super) type Outcome = Result<GenericValue, BuildFailure>;
 /// Push one document per requested id onto `out`, in `requested`'s order:
 /// the row reported at its 1-based position, or a tombstone when none was.
 pub(super) fn match_rows(
-    rows: Vec<(i32, Outcome)>,
+    rows: Vec<(i64, Outcome)>,
     requested: &[(&GenericValue, &DocumentId)],
     out: &mut Vec<Document>,
 ) {

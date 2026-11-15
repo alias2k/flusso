@@ -41,8 +41,8 @@ type PgQuery<'q> = sqlx::query::Query<'q, Postgres, PgArguments>;
 
 const ROOT: &str = "root";
 
-/// The column the batched build selects, beside each document, the
-/// 1-based position of the requested key the row matched under.
+/// The column the batched build selects, beside each document, the 1-based
+/// position (a `bigint`) of the requested key the row matched.
 pub(super) const DOC_POSITION: &str = "doc_position";
 
 /// The alias of the batched build's list of requested keys.
@@ -192,15 +192,17 @@ pub(super) fn document_query(
 /// key it matched; a key no root row matches simply doesn't come back, which
 /// the caller reads as a tombstone.
 ///
-/// The keys are a `VALUES` list of `($n::<bound>::<key type>, <position>)`,
-/// and each position looks its root row up through a `LATERAL` subquery,
-/// `root.pk = v.k`: the very comparison [`document_query`] makes for one key,
-/// so Postgres decides which row answers which key in both, with no Rust
-/// mirror of its casts. The subquery's `OFFSET 0` keeps it a nested loop of
-/// primary-key index probes at any batch size (as a join the planner turns a
-/// large list into a hash join over a scan of the root). A row matched by
-/// several positions comes back once per position. The document is assembled
-/// exactly as in [`document_query`].
+/// The keys are an array of `$n::<bound>::<key type>`, unnested `WITH
+/// ORDINALITY` for their positions, and each position looks its root row up
+/// through a `LATERAL` subquery, `root.pk = requested.k`: the very comparison
+/// [`document_query`] makes for one key, so Postgres decides which row answers
+/// which key in both, with no Rust mirror of its casts. The subquery's
+/// `OFFSET 0` keeps it a nested loop of primary-key index probes at any batch
+/// size (as a plain join the planner may turn a large list into a hash join
+/// over a scan of the root). A row matched by several positions comes back
+/// once per position. The document is assembled exactly as in
+/// [`document_query`]. A key Postgres refuses to cast fails the statement,
+/// so the whole batch, as a single build of it fails.
 pub(super) fn documents_query(
     schema: &IndexSchema,
     pk_column: &ColumnName,
@@ -228,9 +230,8 @@ pub(super) fn documents_query(
     )?;
 
     let mut values = Vec::with_capacity(keys.len());
-    for (position, key) in keys.iter().enumerate() {
-        let placeholder = builder.key_placeholder(key.clone(), &schema.table, pk_column)?;
-        values.push(format!("({placeholder}, {})", position + 1));
+    for key in keys {
+        values.push(builder.key_placeholder(key.clone(), &schema.table, pk_column)?);
     }
     let mut predicate = format!("{} = \"{KEYS}\".\"k\"", qcol(ROOT, pk_column));
     if let Some(soft_delete) = builder.soft_delete_predicate(schema)? {
@@ -243,7 +244,7 @@ pub(super) fn documents_query(
 
     let sql = format!(
         "SELECT \"{KEYS}\".\"n\" AS \"{DOC_POSITION}\", {object} AS \"document\" \
-         FROM (VALUES {values}) AS \"{KEYS}\"(\"k\", \"n\") \
+         FROM unnest(ARRAY[{values}]) WITH ORDINALITY AS \"{KEYS}\"(\"k\", \"n\") \
          CROSS JOIN LATERAL (SELECT * FROM {table} AS \"{ROOT}\" WHERE {predicate} OFFSET 0) \
          AS \"{ROOT}\"",
         values = values.join(", "),

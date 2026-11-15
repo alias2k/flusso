@@ -16,7 +16,7 @@ fn body(name: &str) -> Outcome {
 
 /// Pair `rows` (position, body) with `n` requested ids and say, per id, what
 /// it got, checking each document carries its own requested id.
-fn outcomes(rows: Vec<(i32, Outcome)>, n: i32) -> Vec<String> {
+fn outcomes(rows: Vec<(i64, Outcome)>, n: i32) -> Vec<String> {
     let values: Vec<GenericValue> = (0..n).map(GenericValue::Int).collect();
     let ids: Vec<DocumentId> = values.iter().cloned().map(id).collect();
     let keyed: Vec<(&GenericValue, &DocumentId)> = values.iter().zip(&ids).collect();
