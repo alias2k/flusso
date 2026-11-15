@@ -58,7 +58,11 @@ const KEY_TYPES: &[&str] = &[
     "timestamptz",
     "uuid",
     "bytea",
+    "name",
 ];
+
+/// Past `name`'s 63 bytes: a cast to `name` cuts it.
+const LONG: &str = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqr";
 
 const UUID: &str = "0b7f2d4e-1c2a-4d5e-8f90-1a2b3c4d5e6f";
 
@@ -101,6 +105,7 @@ const STORED: &[&str] = &[
     "24:00:00",
     UUID,
     "\\x0102",
+    LONG,
 ];
 
 /// Keys as the WAL decoder hands them over, every kind, with edge values.
@@ -227,6 +232,9 @@ fn requested() -> Vec<GenericValue> {
         "{0b7f2d4e-1c2a-4d5e-8f90-1a2b3c4d5e6f}",
         "0b7f2d4e1c2a4d5e8f901a2b3c4d5e6f",
         "\\x0102",
+        LONG,
+        &LONG[..64],
+        &LONG[..63],
     ] {
         keys.push(V::String(text.into()));
     }
