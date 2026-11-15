@@ -97,7 +97,13 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   `/bench/`), then `bench-regression.py` compares each point to the median of the previous five and
   calls a regression only on two consecutive points past 25% (20% RSS) and past three times the
   window's median absolute deviation (a noisy series needs a larger move, issue #317), image-tag change restarts
-  the window, one self-maintained issue. `just load` is the soak script — not a benchmark.
+  the window, one self-maintained issue. Around the rule (PR #331, flagging nothing differently): it lists
+  the series too noisy to watch (smallest catchable step past the threshold) in the job summary and the
+  issue, skips malformed entries with a warning, and exits 1 before `gh` on an unreadable data file;
+  `bench-runner-facts.py` stamps every point with the runner (CPU model, cores, no-flusso calibrations),
+  read by nothing yet, never failing the job. Tests: `python3 -m unittest discover -s .github/scripts -p
+  'test_*.py'` (CI's `scripts` job) over the real history in `.github/scripts/fixtures/`, with a frozen
+  copy of the rule that every change must flag identically to. `just load` is the soak script — not a benchmark.
 - The `#[ignore]`d e2e tests live in `source-postgres`'s `integration`,
   `config_coverage`, `publication`, `introspection`, `tls`, `wal_idle`, `continuity`, and `partitions` binaries
   (`tls` boots a hostssl-only PG 16 with a committed throwaway self-signed cert and
@@ -269,7 +275,9 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   --include-fragments --root-dir docs/book 'docs/book/**/*.html'`), and runs
   `.github/scripts/check-manual-links.sh`. A separate `fuzz` job runs a 60-second
   `pgoutput_decode` smoke fuzz on nightly (see below); the `query.rs` proptests need no special
-  handling — they're ordinary tests caught by the nextest step. Outside `ci.yml`, `audit.yml`'s
+  handling — they're ordinary tests caught by the nextest step. A `scripts` job runs the stdlib unit
+  tests under `.github/scripts` (`python3 -m unittest discover -s .github/scripts -p 'test_*.py'`).
+  Outside `ci.yml`, `audit.yml`'s
   `advisories (cargo deny)` job runs `cargo deny check advisories --all-features` weekly and on
   changes to a `Cargo.toml`/`Cargo.lock` — advisory only, never a required check — and
   `.github/dependabot.yml` opens grouped weekly `chore(deps)` PRs (cargo, npm, actions; skips

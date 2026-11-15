@@ -73,6 +73,32 @@ The storage action's own alerting is off. `.github/scripts/bench-regression.py` 
 
 When a regression is found the script opens one issue, "Performance regression on main", keeps it current on later runs, and closes it when every series is back within its threshold.
 
+Around that rule, without changing what it flags:
+
+- **Too noisy to watch.** A series that swings a lot from run to run needs a lasting step larger than its threshold before the rule catches it. For each series the script works out that smallest step: three times the window's median absolute deviation over its median, taken as the median over the series' last 20 windows. It prints every series that needs more than its threshold, in the `scenarios` job summary and in the issue under the findings. Silence on one of them is not a sign it's fine.
+- **Malformed entries.** A value that isn't a number, a bench without a name, a point that isn't an object, or `"commit": null` inside a readable data file is skipped with a `warning:` line instead of crashing the check. A point without a commit reads as an unknown commit.
+- **Unreadable history.** A missing, truncated or non-object data file fails the step with an `error:` line, before `gh` is called. The issue is never closed on a history that couldn't be read.
+
+### Runner facts
+
+Every data point records the machine it ran on, in its `extra`: the CPU model, the core count, and three calibrations of fixed work that runs no flusso code (a SHA-256 pass over 64 MiB, a 256 MiB memory copy, a synced 64 MiB disk write). `.github/scripts/bench-runner-facts.py` stamps them in the `scenarios` job. A calibration that can't run is left out with a warning, and the script never fails the job. Nothing reads these facts yet; they're for the rule's next version.
+
+### Known limits
+
+The rule misfires in three known ways ([#317](https://github.com/alias2k/flusso/issues/317)):
+
+- **A slow runner moves a whole run.** GitHub runs `main` on a few kinds of machine. On a slower one nearly every series crosses its threshold together, which isn't a regression of any of them.
+- **A series alternating between two levels.** When a five-point window holds mostly one kind of machine, its median and spread sit on that level, and a point from the other kind looks like a move.
+- **A lasting step absorbed by the median.** After a real step, the window's median reaches the new level within a few runs, so a regression flagged late, or whose issue was closed, isn't seen again.
+
+Telling these apart needs to know which machine ran each point, which the history before runner facts doesn't record. The rule will be revisited once about 40 `main` runs carry them.
+
+The script's tests replay it over a snapshot of the real history (`.github/scripts/fixtures/`) next to a frozen copy of the rule as it stands, and CI's `scripts` job runs them:
+
+```sh
+python3 -m unittest discover -s .github/scripts -p 'test_*.py'
+```
+
 ## Re-recording the pgoutput fixture
 
 The decode bench reads `libs/2-adapters/source-postgres/benches/fixtures/pgoutput.bin`: the raw `XLogData` payloads a Postgres 16 sent for a fixed set of inserts, updates, deletes, and a truncate across tables keyed by `int`, `bigint`, `uuid`, and a composite key. Re-record it only when the decoder's input needs to change:
