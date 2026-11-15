@@ -185,6 +185,34 @@ fn a_relation_message_with_other_types_forgets_its_tables_column_types() {
     assert!(column_types.caches("public", "parent"));
 }
 
+/// `child` announced with its `id` of type `type_oid` and modifier `typmod`.
+fn child_relation_typed(type_oid: u32, typmod: i32) -> Vec<u8> {
+    let mut m = vec![b'R'];
+    m.extend_from_slice(&16385u32.to_be_bytes());
+    m.extend_from_slice(b"public\0child\0");
+    m.push(b'd');
+    m.extend_from_slice(&1i16.to_be_bytes());
+    m.push(1);
+    m.extend_from_slice(b"id\0");
+    m.extend_from_slice(&type_oid.to_be_bytes());
+    m.extend_from_slice(&typmod.to_be_bytes());
+    m
+}
+
+/// A resize keeps the type and changes its modifier (`varchar(5)` →
+/// `varchar(10)`): the cached entry, which names the old size, goes.
+#[test]
+fn a_relation_message_with_another_type_modifier_forgets_its_tables_column_types() {
+    let (mut decode, _ack) = state();
+    let column_types = crate::ColumnTypes::default();
+    column_types.cache("public", "child", "id", 1043);
+    decode.column_types = Some(column_types.clone());
+
+    handle_xlog(&mut decode, &child_relation_typed(1043, 14)).unwrap();
+
+    assert!(!column_types.caches("public", "child"));
+}
+
 /// A `Relation` naming the cached types keeps them: a stream's first one
 /// costs no lookup.
 #[test]

@@ -238,6 +238,11 @@ async fn every_change_lands_across_column_type_changes_without_a_restart() {
     engine.abort();
 }
 
+/// Not a stale statement: this passes on the code before issue #335 too. It
+/// pins what a real mismatch does: every build fails with Postgres's
+/// message, which names the index and `flusso check`; the engine's
+/// supervised retries fail the same way; validation reports it; and once
+/// the column is changed back the next retry builds, with no restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn a_link_changed_to_a_type_its_key_cannot_equal_fails_until_changed_back() {
@@ -289,6 +294,10 @@ async fn a_link_changed_to_a_type_its_key_cannot_equal_fails_until_changed_back(
     }
     for failure in failures.lock().unwrap().iter() {
         assert!(no_equality(failure), "{failure}");
+        assert!(
+            failure.contains("no longer matches index `users`; `flusso check` names the field"),
+            "{failure}"
+        );
     }
     let fresh = PgDocumentBuilder::connect(&url, Arc::clone(&spec))
         .await
@@ -318,6 +327,174 @@ async fn a_link_changed_to_a_type_its_key_cannot_equal_fails_until_changed_back(
     execute(&pool, "INSERT INTO posts VALUES (3, 1, 'p3')").await;
     document_reaches(&mut engine, &recorded, "1", &posts(&["p1", "p2", "p3"])).await;
     engine.abort();
+}
+
+/// A key column resized under a running engine (issue #335): a row keyed by
+/// a value only the new size holds is built, never written as a tombstone.
+/// An explicit cast to the old size (`varchar(5)`, `numeric(10,2)`,
+/// `char(5)`) truncates or rounds without an error, so a key cast that way
+/// matches no row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_resized_key_column_keeps_every_document() {
+    let (_postgres, url, port) = start().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE vkeys (id varchar(5) PRIMARY KEY, name text)",
+        "CREATE TABLE nkeys (id numeric(10, 2) PRIMARY KEY, name text)",
+        "CREATE TABLE ckeys (id char(5) PRIMARY KEY, name text)",
+        "CREATE PUBLICATION flusso FOR ALL TABLES",
+        "INSERT INTO vkeys VALUES ('v', 'v1')",
+        "INSERT INTO nkeys VALUES (1.5, 'n1')",
+        "INSERT INTO ckeys VALUES ('c', 'c1')",
+    ] {
+        execute(&pool, statement).await;
+    }
+    create_slot(&pool).await;
+    let spec = Arc::new(SourceSpec::new(BTreeMap::from(
+        ["vkeys", "nkeys", "ckeys"].map(|name| (index_name(name), named(name))),
+    )));
+    let documents = PgDocumentBuilder::connect(&url, Arc::clone(&spec))
+        .await
+        .unwrap();
+    let capture = WalChangeCapture::new(replication(port), url.clone())
+        .with_column_types(documents.column_types());
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let restarts = Arc::new(AtomicUsize::new(0));
+    let failures = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = tokio::spawn(supervise(
+        Arc::new(capture),
+        Arc::new(documents),
+        Arc::new(DocumentSink(Arc::clone(&recorded))),
+        Arc::clone(&restarts),
+        Arc::clone(&failures),
+    ));
+    let name = |name: &str| json!({ "name": name });
+    for (id, value) in [("v", "v1"), ("1.50", "n1"), ("c    ", "c1")] {
+        document_reaches(&mut engine, &recorded, id, &name(value)).await;
+    }
+
+    for (alter, insert, id, value) in [
+        (
+            "ALTER TABLE vkeys ALTER COLUMN id TYPE varchar(10)",
+            "INSERT INTO vkeys VALUES ('k12345678', 'v2')",
+            "k12345678",
+            "v2",
+        ),
+        (
+            "ALTER TABLE vkeys ALTER COLUMN id TYPE varchar(9)",
+            "INSERT INTO vkeys VALUES ('k23456789', 'v3')",
+            "k23456789",
+            "v3",
+        ),
+        (
+            "ALTER TABLE nkeys ALTER COLUMN id TYPE numeric(12, 4)",
+            "INSERT INTO nkeys VALUES (1.2345, 'n2')",
+            "1.2345",
+            "n2",
+        ),
+        (
+            "ALTER TABLE ckeys ALTER COLUMN id TYPE char(10)",
+            "INSERT INTO ckeys VALUES ('abcdefgh', 'c2')",
+            "abcdefgh  ",
+            "c2",
+        ),
+    ] {
+        execute(&pool, alter).await;
+        execute(&pool, insert).await;
+        document_reaches(&mut engine, &recorded, id, &name(value)).await;
+    }
+
+    assert_eq!(tombstones(&recorded), Vec::<String>::new());
+    assert_eq!(
+        restarts.load(Ordering::SeqCst),
+        0,
+        "{:?}",
+        failures.lock().unwrap()
+    );
+    engine.abort();
+}
+
+/// A change on a `numeric` key read before the column took a scale
+/// (`numeric` → `numeric(10,2)`) carries `1.5` where the row now reads
+/// `1.50`. The two are equal, so the change is built, under the `_id` it
+/// carries (`1.5`), as a single-document build of it would be, and never
+/// written as a tombstone for a row that exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_numeric_key_read_before_its_scale_changed_keeps_its_document() {
+    let (_postgres, url, port) = start().await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE nums (id numeric PRIMARY KEY, name text)",
+        "CREATE PUBLICATION flusso FOR ALL TABLES",
+        "INSERT INTO nums VALUES (1.5, 'a')",
+    ] {
+        execute(&pool, statement).await;
+    }
+    create_slot(&pool).await;
+    execute(&pool, "UPDATE nums SET name = 'b' WHERE id = 1.5").await;
+    execute(
+        &pool,
+        "ALTER TABLE nums ALTER COLUMN id TYPE numeric(10, 2)",
+    )
+    .await;
+
+    let spec = Arc::new(SourceSpec::new(BTreeMap::from([(
+        index_name("nums"),
+        named("nums"),
+    )])));
+    let documents = PgDocumentBuilder::connect(&url, Arc::clone(&spec))
+        .await
+        .unwrap();
+    let single = documents
+        .document_by_id(&index_name("nums"), "1.5")
+        .await
+        .unwrap();
+    assert!(
+        matches!(single, Some(Ok(_))),
+        "a single build finds the row: {single:?}"
+    );
+    let capture = WalChangeCapture::new(replication(port), url.clone())
+        .with_column_types(documents.column_types());
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let restarts = Arc::new(AtomicUsize::new(0));
+    let failures = Arc::new(Mutex::new(Vec::new()));
+    let mut engine = tokio::spawn(supervise(
+        Arc::new(capture),
+        Arc::new(documents),
+        Arc::new(DocumentSink(Arc::clone(&recorded))),
+        Arc::clone(&restarts),
+        Arc::clone(&failures),
+    ));
+    document_reaches(&mut engine, &recorded, "1.5", &json!({ "name": "b" })).await;
+    assert_eq!(tombstones(&recorded), Vec::<String>::new());
+    engine.abort();
+}
+
+/// `table` indexed as `{ name }`, keyed by `id`.
+fn named(table_name: &str) -> IndexSchema {
+    IndexSchema {
+        version: 1,
+        table: table(table_name),
+        db_schema: DatabaseSchema::try_new("public").unwrap(),
+        primary_key: Some(column("id")),
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields: vec![value_field("name", "name", FlussoType::Keyword)],
+    }
+}
+
+/// The ids a tombstone was recorded for.
+fn tombstones(recorded: &Arc<Mutex<Vec<(String, Value)>>>) -> Vec<String> {
+    recorded
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, document)| document.is_null())
+        .map(|(id, _)| id.clone())
+        .collect()
 }
 
 /// Whether `error` is Postgres finding no `=` between `text` and `integer`.

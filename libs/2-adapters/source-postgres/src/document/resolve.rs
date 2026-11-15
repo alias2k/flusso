@@ -321,7 +321,7 @@ impl PgDocumentBuilder {
     /// the two columns (a `char(n)` link against a `text` key compares as
     /// `text`, padding trimmed). A value read from the column it is compared
     /// with is cast to that column's own type.
-    async fn cast_types(
+    pub(super) async fn cast_types(
         &self,
         db: &DatabaseSchema,
         table: &TableName,

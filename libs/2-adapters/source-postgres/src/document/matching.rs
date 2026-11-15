@@ -55,3 +55,7 @@ pub(super) fn match_rows(
         out.push(document);
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests;

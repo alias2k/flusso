@@ -585,6 +585,40 @@ async fn a_changed_column_type_reaches_the_kept_root_link_answer() {
     assert_eq!(ask().await, None, "back to integer after a failed query");
 }
 
+/// A key is cast to its column's type without the modifier: an explicit
+/// cast to `varchar(5)`, `numeric(10,2)` or `char(5)` truncates or rounds
+/// without an error, so a key read after the column was resized would match
+/// no row (issue #335).
+#[tokio::test]
+async fn no_key_cast_carries_a_type_modifier() {
+    let builder = builder();
+    let schema = builder
+        .spec
+        .schema(&IndexName::try_new("users").unwrap())
+        .unwrap()
+        .clone();
+    for sized in ["character varying(5)", "numeric(10,2)", "character(5)"] {
+        cache_type(&builder, "users", "id", sized, 1043);
+        let mut keyed = HashMap::new();
+        builder
+            .add_key_column_types(&schema, &[&column("id")], &mut keyed)
+            .await
+            .unwrap();
+        let reverse = builder
+            .cast_types(
+                &schema.db_schema,
+                &users(),
+                &[(column("id"), GenericValue::Int(1))],
+                |column| (users(), column.clone()),
+            )
+            .await
+            .unwrap();
+        for cast in keyed.values().chain(reverse.values()) {
+            assert!(!cast.contains('('), "{sized} is cast as {cast}");
+        }
+    }
+}
+
 /// A reverse lookup that fails drops the cached types of every table its
 /// index reads, as a failed document query does: one written from a type
 /// that changed would fail the same way on every retry otherwise.
