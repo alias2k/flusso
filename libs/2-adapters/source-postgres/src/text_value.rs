@@ -94,9 +94,56 @@ pub(crate) fn is_decoded(type_oid: u32) -> bool {
 /// Whether a key of the type named by `type_oid` (`type_name` for an
 /// extension type, whose OID varies) reads back as a key. Every other type
 /// reads as null, and `validate_indexes` refuses it as a root key
-/// (`document::value::KEY_TYPES` lists the same types by name).
+/// (`document::value::KEY_TYPES` lists the same types by name). The name is
+/// the type's `regtype` text, as sqlx gives it: schema-qualified when the
+/// schema is off the search path (`ext.citext`), each part double-quoted when
+/// it needs to be, so `citext` is matched as the last identifier.
 pub(crate) fn is_key_type(type_oid: u32, type_name: &str) -> bool {
-    (is_decoded(type_oid) && type_oid != 26) || TEXT.contains(&type_oid) || type_name == "citext"
+    (is_decoded(type_oid) && type_oid != 26)
+        || TEXT.contains(&type_oid)
+        || identifiers(type_name)
+            .is_some_and(|parts| parts.last().is_some_and(|last| last == "citext"))
+}
+
+/// The identifiers of a qualified name as Postgres writes it (`a."b.c"`:
+/// `a`, `b.c`), a quoted one with its `""` read as `"`; `None` for text that
+/// is no such name.
+fn identifiers(name: &str) -> Option<Vec<String>> {
+    let mut parts = Vec::new();
+    let mut chars = name.chars().peekable();
+    loop {
+        let mut part = String::new();
+        if chars.peek() == Some(&'"') {
+            chars.next();
+            loop {
+                match chars.next()? {
+                    '"' if chars.peek() == Some(&'"') => {
+                        chars.next();
+                        part.push('"');
+                    }
+                    '"' => break,
+                    other => part.push(other),
+                }
+            }
+        } else {
+            while let Some(&next) = chars.peek() {
+                if next == '.' || next == '"' {
+                    break;
+                }
+                part.push(next);
+                chars.next();
+            }
+        }
+        if part.is_empty() {
+            return None;
+        }
+        parts.push(part);
+        match chars.next() {
+            None => return Some(parts),
+            Some('.') => {}
+            Some(_) => return None,
+        }
+    }
 }
 
 /// Interpret a Postgres text value by its type OID, as rendered under

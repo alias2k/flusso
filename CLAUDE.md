@@ -109,7 +109,7 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   failing the job. Tests: `python3 -m unittest discover -s .github/scripts -p
   'test_*.py'` (CI's `scripts` job) over the real history in `.github/scripts/fixtures/`, with a frozen
   copy of the rule that every change must flag identically to. `just load` is the soak script — not a benchmark.
-- The `#[ignore]`d e2e tests live in `source-postgres`'s `integration`,
+- The `#[ignore]`d e2e tests live in `source-postgres`'s `integration`, `key_matching`,
   `config_coverage`, `publication`, `introspection`, `tls`, `wal_idle`, `continuity`, and `partitions` binaries
   (`tls` boots a hostssl-only PG 16 with a committed throwaway self-signed cert and
   proves the replication stream + SQL pool honor `sslmode`; `wal_idle`: the slot keeps
@@ -791,7 +791,7 @@ build matches the table's key on the declared column and writes only tombstones 
 `a_root_primary_key_other_than_the_tables_writes_no_document`; and of a type `Catalog::reads_key`
 accepts, `UnsupportedKeyType` otherwise (issue #295: Postgres answers from the base type through
 domains against `document::value::KEY_TYPES`, the types `decode_key` reads — not `json`/`jsonb`;
-any other key reads back null, so every build is a tombstone — `config_coverage`'s
+any other key reads back null, so the backfill indexes no row and no related change reaches a document — `config_coverage`'s
 `a_root_key_the_builder_cannot_read_back_is_refused`); on a root without a single-column
 key a missing declared column is `UnknownColumn` only when a relation reads it, else
 `RootPrimaryKey`; anchored at the key name,
@@ -1068,10 +1068,94 @@ from the schema, never from the query's untyped literal, and projected as an `in
 `a_database_set_to_escape_bytea_output_still_builds_the_bytes`, the `engine` `bytea_output` e2e. **The
 column-type cache follows the table** (`document/mod.rs`'s `ColumnTypes`, `PgDocumentBuilder::column_types`):
 the CLI hands it to `WalChangeCapture::with_column_types`, and the stream drops a table's entries on a
-`Relation` message (Postgres sends one after a definition change) naming another type OID than a cached
+`Relation` message (Postgres sends one after a definition change) naming another type OID or modifier than a cached
 column's (`ColumnTypes::forget_changed`; unchanged types keep them, so a stream start costs no lookup), and a failed document query
-(`failed_query`) drops those of every table its index reads, so a type change never loops the ingest
-engine on a stale cast or `encode`. No query per build. The cache is nested by schema, table and
+(`failed_query`) or reverse lookup (`failed_lookup`) drops those of every table its index reads, so a
+type change never loops the ingest engine on a stale cast or `encode`. A reverse lookup keeps its
+query error typed (`resolve::LookupError`, the `sqlx::Error` boxed) up to `resolve_change` /
+`read_root_links`, whose loops hold the index, so `resolve`'s happy path is main's and no argument is
+threaded through the hops (its no-query paths are `just bench`'s `resolve_no_io`). The cache entry
+compares `(type OID, typmod)` with the `Relation` message's, so a resize (`varchar(5)` →
+`varchar(10)`) refreshes it. **Statement texts carry every type a prepared statement depends on**
+(issue #335): sqlx caches one statement per text on each pooled connection, with the parameter types of
+its first use, and Postgres refuses one whose result type changed. So a bound key is spelled
+`$n::<bound>::<key type>` (`sql::key_cast`, as `root_keys_query` does), and a selected key's typed
+column is cast to the key type (`value::key_select`); no statement cache is cleared and nothing is
+retried. **A key is never cast to a size**: the key type is `ColumnMeta.key_type`
+(`PgDocumentBuilder::key_type`), the base type's schema-qualified `typname` with no modifier
+(`pg_catalog.bpchar`, never `character`, which means `char(1)`), because an explicit cast to
+`varchar(5)`/`numeric(10,2)` truncates or rounds without an error and matches no row; plans keep their
+index scans. When the role has no USAGE on the base type's schema (a domain `app.dcit` over
+`ext.citext`) it is the declared type's `typname` instead, as before (a cast to a domain checks its
+constraints); `has_schema_privilege` is read by the same catalog query and cached with the type, the
+backfill's key lookup follows the same rule, and a role refused `has_schema_privilege` itself (42501)
+gets the lookup once more without the probe, every key cast to its declared type
+(`COLUMN_META_SQL_UNPROBED`, remembered per builder). `text_value::is_key_type` parses the type's
+`regtype` name as quoted identifiers (`ext.citext`, `"a.b".citext`; not `"a.citext"`). **The batched
+build serves exactly the ids a single `build` serves, by construction**: `query::documents_query`
+reads the root rows as main did, one level in (`SELECT root.pk AS flusso_key, <document> FROM root
+WHERE root.pk = ANY(<keys>) … OFFSET 0`, the keys written in the `query::KeyForm` decided per chunk
+(`KeyForm::for_batch`): a partitioned root or fewer than 16 keys get `key_constructor`, an
+`ARRAY[$n::<bound>::<key type>, …]` grouped by bound type, each group padded to a power of two by
+repeating its last key (Postgres sees every key: a generic plan knows the length and is cached for a
+batch of one — `a_small_batch_reuses_its_plan` — and run-time pruning works on a root partitioned by
+its key — `a_batch_is_pruned_to_its_keys_partitions_under_a_generic_plan`; the position form unnests it
+beside a `bigint[]` of positions, `0` for a pad, dropped before the join); any other batch gets
+`key_arrays`, one `$n::<bound>[]::<key type>[]` parameter per kind (bound by `bind_array`), which
+binds and plans a large batch cheaper but which Postgres sizes at ten elements and can't prune by; at
+most six statement texts per kind over all batch sizes on an unpartitioned root, ten on a partitioned one,
+whose every size up to the 512-key chunk is a padded constructor), the root the only relation in scope there,
+so a raw filter's unqualified name resolves as in a single build — `integration`'s
+`a_raw_filter_names_the_root_rows_columns_whatever_the_batched_query_names`, which reads the names off
+the statement itself), and one level out joins it to the same keys unnested `WITH ORDINALITY` on the
+same `=`, a `FULL JOIN` (Postgres runs it only as a hash or merge join: an inner join planned a nested
+loop rescanning the materialized documents per key — `integration`'s
+`a_batched_build_pairs_positions_without_a_nested_loop`), selecting the position (`doc_position`)
+beside the document; `document/matching.rs`'s `match_rows` pairs by position alone (no Rust cast or
+equality: Postgres's input/output forms are open-ended), an unanswered position is a tombstone, and a
+row matched by several positions answers each under its own id. A batch whose keys pair by value
+(`matching::pairs_by_key`: `ColumnMeta::equal_is_identical`, the one definition of a key whose `=`
+is identity, and a key type whose cast keeps a requested key as it is —
+`bool`/`int2/4/8`/`uuid`/`bytea`/`date`/`time`/`timestamp(tz)`/`text`/`varchar`, never `numeric`,
+floats, `citext`, `char(n)` (pads) or `name` (cuts to 63 bytes) — and every key already of the kind
+the column reads back as)
+runs the inner level alone, selecting `value::key_select` (`query::documents_by_key_query`, main's own
+query, no join, which costs a light document about a quarter of its build) and pairs in
+`match_by_key`, which reports a row no requested key equals: the cached key type is stale (its
+`Relation` message is still to come), so `build_many` forgets the index's types and reruns that chunk
+by position, as it does when Postgres refuses the prepared by-key statement because its result type
+changed (`0A000`, `text` → `name` changes the selected key's collation; `Stale::ResultType`), logging
+the rerun at `debug` (`integration`'s `a_batch_by_key_with_a_stale_type_cache_still_finds_its_rows`,
+`a_batch_survives_its_key_column_changing_from_text_to_name`); everything else, a key read before a type change included, pairs by position. Where the declared key isn't the root's whole catalog primary key
+(`query::RootKey::Shared`: keyless, composite, a partitioned root keyed with its partition column, a
+view) a key several rows share builds the row its `query::TieBreak` orders first, in both builds
+(`DISTINCT ON` / `first_row`): the table's primary-key columns when it has one, else the text of the
+root columns the document reads (`source::root_columns`, the declared key left out; rows equal there
+build the same document, and with none any row answers, `TieBreak(None)`, no term rendered),
+else, under a raw filter, `ROW(root.*)::text`, so the choice reads no column the document doesn't
+(`a_key_several_rows_share_builds_the_same_row_both_ways`,
+`choosing_a_shared_keys_row_reads_no_column_the_document_does_not_read`: a view column that raises). The
+builder's and the backfill's pools set `jit = off` after connect (`document::without_jit`, a refusal
+only warns: `a_server_that_refuses_the_jit_setting_still_connects`, Postgres 10; the lag pool doesn't;
+`the_builders_sessions_run_without_jit`, `partitions`'
+`a_batched_build_on_a_partitioned_root_is_not_jit_compiled`); the manual tells a transaction-mode
+pool's users to set it on the role. The result
+columns are a `bigint` and the document whatever the key's type; a key Postgres refuses to cast fails
+the whole statement, as on main. Guard: `source-postgres`'s `key_matching` (a generated differential,
+4,560 pairs: 120 requested keys of every kind and edge form, keys past 63 bytes included, against tables of 19 key types holding
+every stored spelling they accept, `build` vs `build_many` alone, beside every stored row and among 17 keys of
+the requested kind (so both `KeyForm`s), each table also as a hash-partitioned twin, on Postgres 16 with a
+non-UTC database zone). A query Postgres refuses as a schema mismatch (`42883`/`42804`/`42703`/`42P01`), a
+document query or a reverse lookup, names the index and `flusso check` (`query_failed`); it is a real
+mismatch, which validation reports, not a stale cache. Guard: the `engine` `type_change` e2e (root key,
+links, junction and `via` keys, a recreated table, a migration in one transaction, a concurrent reader
+on several pooled connections, resizes of `varchar`/`char`/`numeric` keys, a `numeric` key read before
+its scale changed, keys moving between `int`/`numeric` and `timestamp`/`timestamptz` inside one
+migration, a text key becoming `timestamptz` from offset-less values, a domain over a type in a schema
+the role may not use (builder, capture and backfill as that role), a role refused `has_schema_privilege`;
+no restart, no tombstone), `matching::tests`, `document::tests`'
+`no_key_cast_carries_a_type_modifier`, `stream::tests`'
+`a_relation_message_with_another_type_modifier_forgets_its_tables_column_types`. No query per build. The cache is nested by schema, table and
 column, looked up by borrowed names, and hands out `Arc<ColumnMeta>`, so a hit allocates nothing; each
 `forget_table` bumps its generation, which answers derived from it (the per-path root-link decision)
 check. Guards: `stream::tests`'

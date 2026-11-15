@@ -68,7 +68,11 @@ flusso connects through PgBouncer in session and in transaction mode alike, the 
 
 No key depends on a setting a pooled connection could drop. Nor does a `bytea` column a document reads as a value: queries render it in a form no session setting changes. That covers any field type, a domain over `bytea`, [`array: true`](field-types.md#array) over `bytea[]`, over an array of such a domain or over a domain of either, joins, and `ids`, `min` and `max` aggregates.
 
+A key that moved between `timestamp` and `timestamptz` while flusso ran is compared at UTC, the `TimeZone` flusso's SQL connections set at startup. A pooler that doesn't keep that setting on the server connection, or a function a [raw filter](filters-and-soft-delete.md) calls that changes the session's zone, breaks it: a change read before such an `ALTER` may then miss its row.
+
 A `bytea` nested inside another value is different: a field of a composite type, an array of composites, a range, or a multi-dimensional `bytea[]` read by a field that isn't `binary`. So is a column changed to `bytea` while flusso runs, until its table's next change or a restart. Postgres renders it by the session's `bytea_output`. flusso sets `bytea_output = hex` on each connection it opens, and a transaction-mode pool may not keep it. If a document reads such a value, set it on the database or role too: `ALTER ROLE flusso SET bytea_output = 'hex'`.
+
+The connections that build documents and read the backfill also set `jit = off`; the one that reads the slot's lag doesn't. A batch over a partitioned root, or over a document with several `has_many`, passes the default `jit_above_cost` at a few hundred keys, and then compiles before it runs. Measured, turning it off made documents with several `has_many` 11 to 27% faster and one aggregate-heavy document about 3% slower. A transaction-mode pool may not keep the setting; set it on the role there: `ALTER ROLE flusso SET jit = off`. A server that refuses it, such as Postgres 10, which has no `jit`, keeps its own setting, and flusso logs a warning and runs.
 
 ## Capture
 
@@ -86,7 +90,14 @@ flusso consumes a logical replication **slot** and subscribes to a **publication
 
   A slow or stalled sink still holds the slot back: the confirmed position is the slowest sink's.
 - **The replication connection is named `flusso`.** It shows as `application_name = 'flusso'` in `pg_stat_replication` and `pg_stat_activity`, so its walsender is easy to tell from other consumers'. The SQL connections keep whatever `application_name` the `connection_url` sets; that parameter doesn't rename the replication connection.
-- **A column type change is followed without a restart.** After an `ALTER TABLE … ALTER COLUMN … TYPE` on a table an index reads, the next change on that table is built with the column's new type. A document query that fails anyway (its table changed before flusso read that change) reads the types afresh, and the ingest engine's restart builds it.
+- **A column type change is followed without a restart.** This covers `ALTER TABLE … ALTER COLUMN … TYPE` on any column an index reads (a field, the root key, a link, a junction key, a `via` hop's key) and a related table dropped and recreated with other column types. Every change, from before and after the `ALTER`, lands as the right document, also when they share one transaction, whatever the key's type before and after: Postgres matches a change read under the old type to its row with the same `=` a single document's query uses.
+  - The next change on the table is built with the column's new types. A query that runs into a type flusso hasn't read yet reads every type of its index afresh, and the ingest engine's restart retries it.
+  - **A resize is a type change too**: `varchar(5)` → `varchar(10)`, `char(5)` → `char(10)`, `numeric(10,2)` → `numeric(12,4)`. A key is compared with its column's type without the size, so a key only the new size holds still finds its row.
+  - **Revoking USAGE on the schema of a key's type** while flusso runs costs one restart: the next query is refused, the types are read again, and the key is cast to the column's declared type from then on.
+  - **Built documents aren't rebuilt.** An `ALTER … TYPE` sends no change for the rows it touches, even when it rewrites their stored values, so each document keeps the values it was built with until its row changes. To rebuild them all at once, [reindex](../operate/reindex.md).
+  - **A root key whose text changes moves its documents.** A document's `_id` is the root key as text, so a change like `numeric` → `numeric(10,2)` (`1.5` becomes `1.50`) gives each row a new document, `1.50`, on its next change. A change flusso read before the `ALTER` still carries `1.5` and still updates the document `1.5`: it finds its row, since `1.5 = 1.50`. The old documents stay; [reindex](../operate/reindex.md) to drop them.
+  - **A related table recreated with its primary key on another column** is followed only after a restart.
+  - **A type the schema can't work with fails every build of its index** until the schema or the column is changed back: a link Postgres can't compare with its key (a `text` link to an `integer` key), a transform the new type doesn't take, a dropped column. The error names the index and points at `flusso check`, which reports the field ([`link_type_mismatch`](cli.md#what-the-database-check-verifies) for the link), and `run` refuses to start on it. Meanwhile the ingest engine restarts with backoff and its retries fail the same way. Once the database matches again, the next retry builds the change, with no restart.
 - **Backfill** snapshots the root tables of unseeded indexes before live capture. `--skip-backfill` skips it. A partitioned root is read through the parent, every partition included.
 
 ## Server requirements
@@ -162,7 +173,7 @@ A table without a primary key is keyed by its replica identity's columns. Under 
 | --- | --- |
 | `many_to_many` junction, aggregate `through` junction | Yes. The parent comes from the row's own `left_key`, so an insert, an update (a null `note` included), a re-parent (both parents), and a delete each rebuild the right documents. A row whose `left_key` is null links no parent. |
 | `has_one` / `has_many` target, direct aggregate, `via` table, `belongs_to` target, `many_to_many` far table | No. Every document build needs the table's primary key and fails with `has no primary key`, at backfill or at the first change that reaches the index. `flusso check` reports it as `relation_primary_key`; see [Validation at start](cli.md#validation-at-start) for `run`. |
-| Index root | No. Backfill skips the table with a warning, live documents are keyed by the whole row, so an update moves a document to a new id, and a row with a null column addresses no document (warned once per table). A composite primary key is skipped by the backfill too. `flusso check` reports both as `root_primary_key`; see [Validation at start](cli.md#validation-at-start) for `run`. |
+| Index root | No. Backfill skips the table with a warning, live documents are keyed by the whole row, so an update moves a document to a new id, and a row with a null column addresses no document (warned once per table). A composite primary key is skipped by the backfill too. A `primary_key` that several rows share (no primary key, a composite one, a view) builds, for each value, the same document in a batch and alone: from the first row by the table's primary key when it has one, else the first by the text of the columns the document reads (rows equal there build the same document; when it reads none but the key, any row does), else, with a [raw filter](filters-and-soft-delete.md), the first by the whole row's text. Choosing never reads a column the document doesn't, except under that raw filter. `flusso check` reports both as `root_primary_key`; see [Validation at start](cli.md#validation-at-start) for `run`. |
 
 The fix in each case is the same: give the table a primary key.
 
@@ -213,7 +224,7 @@ A link column (`foreign_key`, `belongs_to` `column`, a junction key, a `via` hop
 
 ### Unsupported key types
 
-Any other type (`inet`, an enum, `money`, `json`, `jsonb`, a range, …) reads back as no key, so no document would ever be written: `flusso check` reports it as `unsupported_key_type` under `primary_key`, and [`run` refuses to start](cli.md#validation-at-start). A relation table keyed by such a type still works as a leaf (a `belongs_to` target, a `has_many` child, a `many_to_many` far table); a change two levels below it can't be traced through it.
+Any other type (`inet`, an enum, `money`, `json`, `jsonb`, a range, …) reads back as no key, so the backfill would index no row and no change on a related table would reach a document: `flusso check` reports it as `unsupported_key_type` under `primary_key`, and [`run` refuses to start](cli.md#validation-at-start). A relation table keyed by such a type still works as a leaf (a `belongs_to` target, a `has_many` child, a `many_to_many` far table); a change two levels below it can't be traced through it.
 
 ## Updates that change nothing a document reads
 

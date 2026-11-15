@@ -10,6 +10,14 @@ use kernel::{
 
 use super::*;
 
+/// A batch written as an array constructor, as one under sixteen keys is.
+fn constructor(root_key: &RootKey) -> Shape<'_> {
+    Shape {
+        root_key,
+        form: KeyForm::Constructor,
+    }
+}
+
 fn db() -> DatabaseSchema {
     DatabaseSchema::try_new("public").unwrap()
 }
@@ -94,14 +102,14 @@ fn columns_only() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::bigint"#
+        r#"SELECT json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::int4::bigint"#
     );
     assert_eq!(params, vec![GenericValue::Int(7)]);
 }
 
 #[test]
 fn keyed_predicate_casts_a_uuid_primary_key() {
-    // Both the single-key and batched (`IN`) forms cast to the column's type.
+    // Both the single-key and batched (`= ANY`) forms cast to the column's type.
     let schema = index(Some("id"), None, vec![col_field("id", "id")]);
     let col_types = types(&[("users", "id", "uuid")]);
     let key = GenericValue::Uuid("3f2a1b9c-0000-0000-0000-000000000000".parse().unwrap());
@@ -115,7 +123,9 @@ fn keyed_predicate_casts_a_uuid_primary_key() {
     )
     .unwrap();
     assert!(
-        single.as_str().ends_with(r#"WHERE "root"."id" = $1::uuid"#),
+        single
+            .as_str()
+            .ends_with(r#"WHERE "root"."id" = $1::uuid::uuid"#),
         "{}",
         single.as_str()
     );
@@ -123,17 +133,17 @@ fn keyed_predicate_casts_a_uuid_primary_key() {
     let (batched, _) = documents_query(
         &schema,
         &c("id"),
-        "uuid",
         &[key],
         &HashMap::new(),
         &col_types,
         &ByteColumns::new(),
+        constructor(&RootKey::Unique),
     )
     .unwrap();
     assert!(
         batched
             .as_str()
-            .ends_with(r#"WHERE "root"."id" IN ($1::uuid)"#),
+            .contains(r#"WHERE "root"."id" = ANY(ARRAY[$1::uuid::uuid]) OFFSET 0) AS "flusso_built" FULL JOIN (SELECT * FROM unnest(ARRAY[$1::uuid::uuid]"#),
         "{}",
         batched.as_str()
     );
@@ -159,7 +169,7 @@ fn root_filters_fold_into_both_query_forms() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT json_build_object('id', "root"."id") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::bigint AND ("root"."status" = $2::text)"#
+        r#"SELECT json_build_object('id', "root"."id") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::int4::bigint AND ("root"."status" = $2::text)"#
     );
     assert_eq!(
         params,
@@ -172,16 +182,17 @@ fn root_filters_fold_into_both_query_forms() {
     let (sql, _) = documents_query(
         &schema,
         &c("id"),
-        "int8",
         &[GenericValue::Int(7)],
         &HashMap::new(),
         &col_types,
         &ByteColumns::new(),
+        constructor(&RootKey::Unique),
     )
     .unwrap();
     assert!(
-        sql.as_str()
-            .ends_with(r#"WHERE "root"."id" IN ($1::bigint) AND ("root"."status" = $2::text)"#),
+        sql.as_str().contains(
+            r#"WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint]) AND ("root"."status" = $3::text) OFFSET 0) AS "flusso_built" FULL JOIN (SELECT * FROM unnest(ARRAY[$1::int4::bigint], $2::int8[]) AS "flusso_numbered"("flusso_key", "flusso_position") WHERE "flusso_numbered"."flusso_position" > 0) AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key" OFFSET 0"#
+        ),
         "{}",
         sql.as_str()
     );
@@ -224,7 +235,7 @@ fn has_many_with_order_and_limit() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT json_build_object('orders', (SELECT coalesce(json_agg(json_build_object('id', "rel1"."id", 'total', "rel1"."total") ORDER BY "rel1"."created_at" DESC), '[]'::json) FROM (SELECT "rel2".* FROM "public"."orders" AS "rel2" WHERE "rel2"."user_id" = "root"."id" ORDER BY "rel2"."created_at" DESC LIMIT 5) AS "rel1")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::bigint"#
+        r#"SELECT json_build_object('orders', (SELECT coalesce(json_agg(json_build_object('id', "rel1"."id", 'total', "rel1"."total") ORDER BY "rel1"."created_at" DESC), '[]'::json) FROM (SELECT "rel2".* FROM "public"."orders" AS "rel2" WHERE "rel2"."user_id" = "root"."id" ORDER BY "rel2"."created_at" DESC LIMIT 5) AS "rel1")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::int4::bigint"#
     );
 }
 
@@ -264,7 +275,7 @@ fn belongs_to_correlates_on_the_parent_column() {
     // column — the reverse of a has_one — and needs no parent primary key.
     assert_eq!(
         sql.as_str(),
-        r#"SELECT json_build_object('org', (SELECT json_build_object('name', "rel1"."name") FROM "public"."orgs" AS "rel1" WHERE "rel1"."id" = "root"."org_id" LIMIT 1)) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::bigint"#
+        r#"SELECT json_build_object('org', (SELECT json_build_object('name', "rel1"."name") FROM "public"."orgs" AS "rel1" WHERE "rel1"."id" = "root"."org_id" LIMIT 1)) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::int4::bigint"#
     );
 }
 
@@ -296,7 +307,7 @@ fn aggregate_count() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT json_build_object('order_count', (SELECT count(*) FROM "public"."orders" AS "rel1" WHERE "rel1"."user_id" = "root"."id")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::bigint"#
+        r#"SELECT json_build_object('order_count', (SELECT count(*) FROM "public"."orders" AS "rel1" WHERE "rel1"."user_id" = "root"."id")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::int4::bigint"#
     );
 }
 
@@ -332,7 +343,7 @@ fn aggregate_ids_direct_collects_the_related_pk() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT json_build_object('order_ids', (SELECT coalesce(json_agg("rel1"."id"), '[]'::json) FROM "public"."orders" AS "rel1" WHERE "rel1"."user_id" = "root"."id")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::bigint"#
+        r#"SELECT json_build_object('order_ids', (SELECT coalesce(json_agg("rel1"."id"), '[]'::json) FROM "public"."orders" AS "rel1" WHERE "rel1"."user_id" = "root"."id")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::int4::bigint"#
     );
 }
 
@@ -386,7 +397,7 @@ fn through_aggregate_sql(
 
 fn wrap(aggregate: &str) -> String {
     format!(
-        r#"SELECT json_build_object('agg', {aggregate}) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::bigint"#
+        r#"SELECT json_build_object('agg', {aggregate}) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::int4::bigint"#
     )
 }
 
@@ -519,12 +530,54 @@ fn soft_delete_folds_into_where() {
     )
     .unwrap();
     assert!(sql.as_str().contains(
-        r#"WHERE "root"."id" = $1::bigint AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END))"#
+        r#"WHERE "root"."id" = $1::int4::bigint AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END))"#
     ));
 }
 
+/// A key decoded before its column changed type (`int4`) and one decoded
+/// after (`int8`) are two statements (issue #335): sqlx prepares a text once
+/// per connection with the parameter types of its first use.
 #[test]
-fn documents_query_keys_with_in_and_selects_the_key() {
+fn keys_bound_as_different_types_are_different_statements() {
+    let schema = index(Some("id"), None, vec![col_field("id", "id")]);
+    let text = |key: GenericValue| {
+        let (single, _) = document_query(
+            &schema,
+            &[(c("id"), key.clone())],
+            &HashMap::new(),
+            &id_types(),
+            &ByteColumns::new(),
+        )
+        .unwrap();
+        let (batched, _) = documents_query(
+            &schema,
+            &c("id"),
+            &[key.clone()],
+            &HashMap::new(),
+            &id_types(),
+            &ByteColumns::new(),
+            constructor(&RootKey::Unique),
+        )
+        .unwrap();
+        let (reverse, _) = reverse_query(
+            &db(),
+            &t("orders"),
+            (&c("user_id"), "bigint", "int8"),
+            &[(c("id"), key)],
+            &types(&[("orders", "id", "bigint")]),
+        )
+        .unwrap();
+        [single, batched, reverse].map(|sql| sql.as_str().to_owned())
+    };
+    let int = text(GenericValue::Int(7));
+    let bigint = text(GenericValue::BigInt(7));
+    for (int, bigint) in int.iter().zip(&bigint) {
+        assert_ne!(int, bigint);
+    }
+}
+
+#[test]
+fn documents_query_pairs_each_key_with_its_position() {
     let schema = index(
         Some("id"),
         None,
@@ -533,22 +586,29 @@ fn documents_query_keys_with_in_and_selects_the_key() {
     let (sql, params) = documents_query(
         &schema,
         &c("id"),
-        "int8",
         &[GenericValue::Int(7), GenericValue::Int(9)],
         &HashMap::new(),
         &id_types(),
         &ByteColumns::new(),
+        constructor(&RootKey::Unique),
     )
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT format('%s', "root"."id") AS "doc_key", "root"."id" AS "doc_key:typed", json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" IN ($1::bigint, $2::bigint)"#
+        r#"SELECT "doc_position", "document" FROM (SELECT "flusso_requested"."flusso_position" AS "doc_position", "flusso_built"."document" FROM (SELECT "root"."id" AS "flusso_key", json_build_object('id', "root"."id", 'email', "root"."email") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint, $2::int4::bigint]) OFFSET 0) AS "flusso_built" FULL JOIN (SELECT * FROM unnest(ARRAY[$1::int4::bigint, $2::int4::bigint], $3::int8[]) AS "flusso_numbered"("flusso_key", "flusso_position") WHERE "flusso_numbered"."flusso_position" > 0) AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key" OFFSET 0) AS "flusso_paired" WHERE "flusso_paired"."document" IS NOT NULL"#
     );
-    assert_eq!(params, vec![GenericValue::Int(7), GenericValue::Int(9)]);
+    assert_eq!(
+        params,
+        vec![
+            GenericValue::Int(7),
+            GenericValue::Int(9),
+            GenericValue::Array(vec![GenericValue::BigInt(1), GenericValue::BigInt(2)]),
+        ]
+    );
 }
 
 #[test]
-fn documents_query_folds_soft_delete_into_where() {
+fn documents_query_folds_soft_delete_into_the_root_lookup() {
     let schema = index(
         Some("id"),
         Some(SoftDelete::Column(SoftDeleteColumn {
@@ -560,15 +620,15 @@ fn documents_query_folds_soft_delete_into_where() {
     let (sql, _) = documents_query(
         &schema,
         &c("id"),
-        "int8",
         &[GenericValue::Int(1)],
         &HashMap::new(),
         &id_types(),
         &ByteColumns::new(),
+        constructor(&RootKey::Unique),
     )
     .unwrap();
     assert!(sql.as_str().contains(
-        r#"WHERE "root"."id" IN ($1::bigint) AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END))"#
+        r#"WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint]) AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END)) OFFSET 0) AS "flusso_built""#
     ));
 }
 
@@ -608,16 +668,16 @@ fn soft_delete_field_inside_a_relation_reads_the_root_column() {
     let (sql, _) = documents_query(
         &schema,
         &c("id"),
-        "int8",
         &[GenericValue::Int(1)],
         &pks,
         &id_types(),
         &ByteColumns::new(),
+        constructor(&RootKey::Unique),
     )
     .unwrap();
     assert!(
-        sql.as_str().ends_with(
-            r#"WHERE "root"."id" IN ($1::bigint) AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END))"#
+        sql.as_str().contains(
+            r#"WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint]) AND NOT ((CASE WHEN "root"."deleted_at" IS NULL THEN false WHEN pg_typeof("root"."deleted_at") = 'boolean'::regtype THEN "root"."deleted_at"::text::boolean ELSE true END)) OFFSET 0) AS "flusso_built" FULL JOIN (SELECT * FROM unnest(ARRAY[$1::int4::bigint], $2::int8[]) AS "flusso_numbered"("flusso_key", "flusso_position") WHERE "flusso_numbered"."flusso_position" > 0) AS "flusso_requested"("flusso_key", "flusso_position") ON "flusso_built"."flusso_key" = "flusso_requested"."flusso_key" OFFSET 0"#
         ),
         "{}",
         sql.as_str()
@@ -700,25 +760,24 @@ fn a_key_carried_as_text_is_cast_from_text() {
     let (batched, _) = documents_query(
         &schema,
         &c("id"),
-        "int8",
         &[key.clone()],
         &HashMap::new(),
         &col_types,
         &ByteColumns::new(),
+        constructor(&RootKey::Unique),
     )
     .unwrap();
     assert!(
-        batched
-            .as_str()
-            .ends_with(r#"WHERE "root"."id" IN ($1::text::date)"#),
+        batched.as_str().contains(
+            r#"= ANY(ARRAY[$1::text::date]) OFFSET 0) AS "flusso_built" FULL JOIN (SELECT * FROM unnest(ARRAY[$1::text::date]"#
+        ),
         "{}",
         batched.as_str()
     );
     let (reverse, _) = reverse_query(
         &db(),
         &t("users"),
-        &c("id"),
-        "date",
+        (&c("id"), "date", "date"),
         &[(c("id"), key)],
         &col_types,
     )
@@ -735,15 +794,14 @@ fn reverse_query_selects_foreign_key() {
     let (sql, params) = reverse_query(
         &db(),
         &t("orders"),
-        &c("user_id"),
-        "int8",
+        (&c("user_id"), "bigint", "int8"),
         &[(c("id"), GenericValue::Int(9))],
         &types(&[("orders", "id", "bigint")]),
     )
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT format('%s', "user_id") AS "user_id", "user_id" AS "user_id:typed" FROM "public"."orders" WHERE "id" = $1::bigint"#
+        r#"SELECT format('%s', "user_id") AS "user_id", "user_id"::bigint AS "user_id:typed" FROM "public"."orders" WHERE "id" = $1::int4::bigint"#
     );
     assert_eq!(params, vec![GenericValue::Int(9)]);
 }
@@ -829,7 +887,7 @@ fn an_aggregate_via_one_hop_matches_the_hop_s_rows_of_the_parent() {
         wrap(
             r#"(EXISTS (SELECT 1 FROM "public"."tasks" AS "rel2" WHERE "rel2"."project_id" IN (SELECT "rel1"."id" FROM "public"."projects" AS "rel1" WHERE "rel1"."user_id" = "root"."id" AND ("rel1"."archived" = $1::boolean)) AND ("rel2"."status" = $2::text)))"#
         )
-        .replace("\"root\".\"id\" = $1::bigint", "\"root\".\"id\" = $3::bigint"),
+        .replace("\"root\".\"id\" = $1::int4::bigint", "\"root\".\"id\" = $3::int4::bigint"),
     );
 }
 
@@ -993,7 +1051,7 @@ fn on_pairs_join_every_join_kind_to_its_parent_row_at_any_depth() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT json_build_object('orders', (SELECT coalesce(json_agg(json_build_object('shop', (SELECT json_build_object('name', "rel2"."name") FROM "public"."shops" AS "rel2" WHERE "rel2"."id" = "rel1"."shop_id" AND "rel2"."region_code" = "rel1"."region" LIMIT 1), 'invoice', (SELECT json_build_object('number', "rel3"."number") FROM "public"."invoices" AS "rel3" WHERE "rel3"."order_id" = "rel1"."id" AND "rel3"."tenant_id" = "rel1"."tenant_id" LIMIT 1))), '[]'::json) FROM (SELECT "rel4".* FROM "public"."orders" AS "rel4" WHERE "rel4"."user_id" = "root"."id" AND "rel4"."tenant_id" = "root"."tenant_id" AND "rel4"."region" = "root"."region") AS "rel1")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::bigint"#
+        r#"SELECT json_build_object('orders', (SELECT coalesce(json_agg(json_build_object('shop', (SELECT json_build_object('name', "rel2"."name") FROM "public"."shops" AS "rel2" WHERE "rel2"."id" = "rel1"."shop_id" AND "rel2"."region_code" = "rel1"."region" LIMIT 1), 'invoice', (SELECT json_build_object('number', "rel3"."number") FROM "public"."invoices" AS "rel3" WHERE "rel3"."order_id" = "rel1"."id" AND "rel3"."tenant_id" = "rel1"."tenant_id" LIMIT 1))), '[]'::json) FROM (SELECT "rel4".* FROM "public"."orders" AS "rel4" WHERE "rel4"."user_id" = "root"."id" AND "rel4"."tenant_id" = "root"."tenant_id" AND "rel4"."region" = "root"."region") AS "rel1")) AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::int4::bigint"#
     );
 }
 
@@ -1171,7 +1229,7 @@ fn an_array_column_without_transforms_reads_the_column_and_leaves_its_default_to
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT json_build_object('id', "root"."id", 'tags', "root"."tags") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::bigint"#
+        r#"SELECT json_build_object('id', "root"."id", 'tags', "root"."tags") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = $1::int4::bigint"#
     );
 }
 
@@ -1216,8 +1274,7 @@ fn root_keys_query_casts_each_link_from_its_bound_type() {
     let (sql, params) = root_keys_query(
         &db(),
         &t("users"),
-        &c("id"),
-        "numeric",
+        (&c("id"), "numeric", "numeric"),
         &[
             GenericValue::Decimal("1.500".parse().unwrap()),
             GenericValue::String("NaN".to_owned()),
@@ -1227,7 +1284,7 @@ fn root_keys_query_casts_each_link_from_its_bound_type() {
     .unwrap();
     assert_eq!(
         sql.as_str(),
-        r#"SELECT format('%s', "id") AS "id", "id" AS "id:typed" FROM "public"."users" WHERE "id" IN ($1::numeric::numeric, $2::text::numeric)"#
+        r#"SELECT format('%s', "id") AS "id", "id"::numeric AS "id:typed" FROM "public"."users" WHERE "id" IN ($1::numeric::numeric, $2::text::numeric)"#
     );
     assert_eq!(params.len(), 2);
 }
@@ -1252,11 +1309,11 @@ fn bytes_sql(fields: Vec<Field>, pks: &HashMap<String, ColumnName>, bytes: &Byte
     let (batched, _) = documents_query(
         &schema,
         &c("id"),
-        "int8",
         &[GenericValue::Int(7)],
         pks,
         &id_types(),
         bytes,
+        constructor(&RootKey::Unique),
     )
     .unwrap();
     let object = |sql: &str| {
@@ -1392,4 +1449,291 @@ fn a_bytea_inside_a_join_and_an_aggregate_renders_as_hex_text() {
     ] {
         assert!(sql.contains(&expected), "{expected}\n{sql}");
     }
+}
+
+/// A `decimal` past `Decimal`'s range is a `BigDecimal`: it is bound as its
+/// text and cast from `text`, like any key carried as text, so its statement
+/// is not shared with a `numeric`-bound one.
+#[test]
+fn a_big_decimal_key_binds_as_text() {
+    let big = GenericValue::BigDecimal(
+        kernel::BigDecimal::parse("100000000000000000000000000000.5").unwrap(),
+    );
+    assert_eq!(
+        sql::key_cast(&big, "pg_catalog.numeric").as_deref(),
+        Some("::text::pg_catalog.numeric")
+    );
+    let decimal = GenericValue::Decimal("1.5".parse().unwrap());
+    assert_eq!(
+        sql::key_cast(&decimal, "pg_catalog.numeric").as_deref(),
+        Some("::numeric::pg_catalog.numeric")
+    );
+}
+
+/// A key several root rows share builds the row its tie-break orders first,
+/// in a batched build (`DISTINCT ON`) as in a single one (`ORDER BY …
+/// LIMIT 1`): the table's primary key, else the text of the columns the
+/// document reads, else (a raw filter) the whole row's text.
+#[test]
+fn a_shared_key_picks_the_row_its_tie_break_orders_first() {
+    let schema = index(Some("id"), None, vec![col_field("id", "id")]);
+    let by_primary_key = TieBreak::primary_key(&[c("id"), c("sub")]);
+    let (single, _) = document_query(
+        &schema,
+        &[(c("id"), GenericValue::Int(7))],
+        &HashMap::new(),
+        &id_types(),
+        &ByteColumns::new(),
+    )
+    .unwrap();
+    assert!(first_row(single, &by_primary_key).as_str().ends_with(
+        r#"WHERE "root"."id" = $1::int4::bigint ORDER BY "root"."id", "root"."sub" LIMIT 1"#
+    ));
+    let (batched, _) = documents_query(
+        &schema,
+        &c("id"),
+        &[GenericValue::Int(7)],
+        &HashMap::new(),
+        &id_types(),
+        &ByteColumns::new(),
+        constructor(&RootKey::Shared(by_primary_key)),
+    )
+    .unwrap();
+    assert!(
+        batched.as_str().contains(
+            r#"(SELECT DISTINCT ON ("root"."id") "root"."id" AS "flusso_key", json_build_object('id', "root"."id") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint]) ORDER BY "root"."id", "root"."id", "root"."sub") AS "flusso_built""#
+        ),
+        "{}",
+        batched.as_str()
+    );
+    assert_eq!(
+        TieBreak::read_columns(&[c("v"), c("id")]),
+        TieBreak::read_columns(&[c("id"), c("v")]),
+        "the order of the columns read is fixed"
+    );
+    let (single, _) = document_query(
+        &schema,
+        &[(c("id"), GenericValue::Int(7))],
+        &HashMap::new(),
+        &id_types(),
+        &ByteColumns::new(),
+    )
+    .unwrap();
+    assert!(
+        first_row(single, &TieBreak::read_columns(&[c("v"), c("id")]))
+            .as_str()
+            .ends_with(r#"ORDER BY "root"."id"::text, "root"."v"::text LIMIT 1"#)
+    );
+    let (single, _) = document_query(
+        &schema,
+        &[(c("id"), GenericValue::Int(7))],
+        &HashMap::new(),
+        &id_types(),
+        &ByteColumns::new(),
+    )
+    .unwrap();
+    assert!(
+        first_row(single, &TieBreak::whole_row())
+            .as_str()
+            .ends_with(r#"ORDER BY ROW("root".*)::text LIMIT 1"#)
+    );
+}
+
+/// A batch whose keys pair by value is main's own query: the root rows with
+/// each row's key beside its document, no join.
+#[test]
+fn a_batch_paired_by_key_selects_each_rows_key_and_no_join() {
+    let schema = index(Some("id"), None, vec![col_field("id", "id")]);
+    let (sql, _) = documents_by_key_query(
+        &schema,
+        &c("id"),
+        &[GenericValue::Int(7), GenericValue::Int(9)],
+        &HashMap::new(),
+        &id_types(),
+        &ByteColumns::new(),
+        (constructor(&RootKey::Unique), "pg_catalog.int8", "int8"),
+    )
+    .unwrap();
+    assert_eq!(
+        sql.as_str(),
+        r#"SELECT format('%s', "root"."id") AS "doc_key", "root"."id"::pg_catalog.int8 AS "doc_key:typed", json_build_object('id', "root"."id") AS "document" FROM "public"."users" AS "root" WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint, $2::int4::bigint])"#
+    );
+}
+
+/// Keys are grouped by the type they are bound as and each group is padded to
+/// a power of two by repeating its last key; the positions array carries
+/// where each key was requested, `0` for a pad, so every row still pairs
+/// with its own position and the statement's text depends only on the kinds
+/// and the padded sizes.
+#[test]
+fn keys_of_several_kinds_keep_their_positions() {
+    let schema = index(Some("id"), None, vec![col_field("id", "id")]);
+    let (sql, params) = documents_query(
+        &schema,
+        &c("id"),
+        &[
+            GenericValue::Int(7),
+            GenericValue::BigInt(9),
+            GenericValue::Int(8),
+            GenericValue::Int(6),
+        ],
+        &HashMap::new(),
+        &id_types(),
+        &ByteColumns::new(),
+        constructor(&RootKey::Unique),
+    )
+    .unwrap();
+    assert!(
+        sql.as_str().contains(
+            r#"WHERE "root"."id" = ANY(ARRAY[$1::int4::bigint, $2::int4::bigint, $3::int4::bigint, $4::int4::bigint, $5::int8::bigint]) OFFSET 0) AS "flusso_built" FULL JOIN (SELECT * FROM unnest(ARRAY[$1::int4::bigint, $2::int4::bigint, $3::int4::bigint, $4::int4::bigint, $5::int8::bigint], $6::int8[]) AS "flusso_numbered"("flusso_key", "flusso_position") WHERE "flusso_numbered"."flusso_position" > 0)"#
+        ),
+        "{}",
+        sql.as_str()
+    );
+    assert_eq!(
+        params,
+        vec![
+            GenericValue::Int(7),
+            GenericValue::Int(8),
+            GenericValue::Int(6),
+            GenericValue::Int(6),
+            GenericValue::BigInt(9),
+            GenericValue::Array(
+                [1, 3, 4, 0, 2]
+                    .into_iter()
+                    .map(GenericValue::BigInt)
+                    .collect()
+            ),
+        ],
+        "three int4 keys padded to four by repeating the last, the pad at position 0"
+    );
+}
+
+/// With no column to order by (the document reads nothing on the root but
+/// its key) every row sharing a key builds the same document: a single
+/// build takes any, and a batch orders by its key alone. No `ORDER BY` is
+/// left without a term.
+#[test]
+fn a_tie_break_with_nothing_to_order_by_renders_no_order() {
+    let schema = index(Some("id"), None, vec![col_field("id", "id")]);
+    let any_row = TieBreak::read_columns(&[]);
+    let (single, _) = document_query(
+        &schema,
+        &[(c("id"), GenericValue::Int(7))],
+        &HashMap::new(),
+        &id_types(),
+        &ByteColumns::new(),
+    )
+    .unwrap();
+    let single = first_row(single, &any_row);
+    assert!(
+        single
+            .as_str()
+            .ends_with(r#"WHERE "root"."id" = $1::int4::bigint"#),
+        "{}",
+        single.as_str()
+    );
+    let (batched, _) = documents_query(
+        &schema,
+        &c("id"),
+        &[GenericValue::Int(7)],
+        &HashMap::new(),
+        &id_types(),
+        &ByteColumns::new(),
+        constructor(&RootKey::Shared(any_row)),
+    )
+    .unwrap();
+    assert!(
+        batched
+            .as_str()
+            .contains(r#"ORDER BY "root"."id") AS "flusso_built""#),
+        "{}",
+        batched.as_str()
+    );
+}
+
+/// A partitioned root and a batch of fewer than sixteen keys write their keys
+/// as a constructor; any other batch as array parameters.
+#[test]
+fn a_batch_writes_its_keys_in_the_form_its_root_and_size_need() {
+    assert_eq!(KeyForm::for_batch(false, 1), KeyForm::Constructor);
+    assert_eq!(KeyForm::for_batch(false, 15), KeyForm::Constructor);
+    assert_eq!(KeyForm::for_batch(false, 16), KeyForm::Parameters);
+    assert_eq!(KeyForm::for_batch(false, 512), KeyForm::Parameters);
+    assert_eq!(KeyForm::for_batch(true, 512), KeyForm::Constructor);
+}
+
+/// As array parameters, one kind of keys is one parameter that both the
+/// `= ANY` and the `unnest` read; several kinds are one each, unnested beside
+/// their positions.
+#[test]
+fn a_large_batch_passes_its_keys_as_one_array_per_kind() {
+    let schema = index(Some("id"), None, vec![col_field("id", "id")]);
+    let unique = RootKey::Unique;
+    let parameters = Shape {
+        root_key: &unique,
+        form: KeyForm::Parameters,
+    };
+    let (sql, params) = documents_query(
+        &schema,
+        &c("id"),
+        &[GenericValue::Int(7), GenericValue::Int(9)],
+        &HashMap::new(),
+        &id_types(),
+        &ByteColumns::new(),
+        parameters,
+    )
+    .unwrap();
+    assert!(
+        sql.as_str().contains(
+            r#"WHERE "root"."id" = ANY($1::int4[]::bigint[]) OFFSET 0) AS "flusso_built" FULL JOIN unnest($1::int4[]::bigint[]) WITH ORDINALITY AS "flusso_requested"("flusso_key", "flusso_position")"#
+        ),
+        "{}",
+        sql.as_str()
+    );
+    assert_eq!(
+        params,
+        vec![GenericValue::Array(vec![
+            GenericValue::Int(7),
+            GenericValue::Int(9)
+        ])]
+    );
+    let (sql, params) = documents_query(
+        &schema,
+        &c("id"),
+        &[
+            GenericValue::Int(7),
+            GenericValue::BigInt(9),
+            GenericValue::Int(8),
+        ],
+        &HashMap::new(),
+        &id_types(),
+        &ByteColumns::new(),
+        parameters,
+    )
+    .unwrap();
+    assert!(
+        sql.as_str().contains(
+            r#"ANY($1::int4[]::bigint[] || $3::int8[]::bigint[]) OFFSET 0) AS "flusso_built" FULL JOIN (SELECT * FROM unnest($1::int4[]::bigint[], $2::int8[]) UNION ALL SELECT * FROM unnest($3::int8[]::bigint[], $4::int8[]))"#
+        ),
+        "{}",
+        sql.as_str()
+    );
+    assert_eq!(params.len(), 4);
+    let (sql, params) = documents_by_key_query(
+        &schema,
+        &c("id"),
+        &[GenericValue::Int(7), GenericValue::Int(9)],
+        &HashMap::new(),
+        &id_types(),
+        &ByteColumns::new(),
+        (parameters, "pg_catalog.int8", "int8"),
+    )
+    .unwrap();
+    assert!(
+        sql.as_str().ends_with(r#"= ANY($1::int4[]::bigint[])"#),
+        "{}",
+        sql.as_str()
+    );
+    assert_eq!(params.len(), 1);
 }

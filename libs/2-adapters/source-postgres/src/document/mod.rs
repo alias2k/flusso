@@ -60,6 +60,7 @@
 //! Multi-hop reverse resolution issues one query per hop.
 
 mod fields;
+mod matching;
 mod query;
 mod reads;
 mod resolve;
@@ -67,7 +68,7 @@ use resolve::RootLinks;
 pub(crate) mod value;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use async_trait::async_trait;
@@ -135,8 +136,8 @@ impl ColumnTypes {
     }
 
     /// Forget `schema.table`'s cached columns when one of them has another
-    /// type in `columns` (each name with its type OID, as a `Relation` lists
-    /// them). A table whose types are unchanged keeps its entries, so a
+    /// type or size in `columns` (each name with its type OID and modifier,
+    /// as a `Relation` lists them). A table whose types are unchanged keeps its entries, so a
     /// stream's first `Relation` costs no lookup. A cached column `columns`
     /// leaves out is no evidence: pgoutput omits stored generated columns
     /// and columns outside a publication's column list from every `Relation`.
@@ -144,17 +145,17 @@ impl ColumnTypes {
         &self,
         schema: &str,
         table: &str,
-        columns: impl Iterator<Item = (&'a str, u32)> + Clone,
+        columns: impl Iterator<Item = (&'a str, u32, i32)> + Clone,
     ) {
         let changed = self
             .lock()
             .get(schema)
             .and_then(|tables| tables.get(table))
             .is_some_and(|cached| {
-                columns.clone().any(|(name, type_oid)| {
+                columns.clone().any(|(name, type_oid, type_mod)| {
                     cached
                         .get(name)
-                        .is_some_and(|meta| meta.type_oid != type_oid)
+                        .is_some_and(|meta| meta.type_oid != type_oid || meta.type_mod != type_mod)
                 })
             });
         if changed {
@@ -173,6 +174,8 @@ impl ColumnTypes {
             Arc::new(ColumnMeta {
                 sql_type: "integer".to_owned(),
                 type_oid,
+                type_mod: -1,
+                key_type: "pg_catalog.int4".to_owned(),
                 base_type: None,
                 base_name: "int4".to_owned(),
                 element_name: None,
@@ -199,9 +202,10 @@ impl ColumnTypes {
     }
 }
 
-/// Most keys per batched `build_many` query. Bounds the SQL length and the
-/// prepared-statement cache churn from the `IN (…)` list growing with key
-/// count; larger id sets are split across several round-trips.
+/// Most keys per batched `build_many` query. The keys travel as one array
+/// parameter per kind, so the statement's text no longer grows with them;
+/// this bounds what one round-trip builds and holds. Larger id sets are split
+/// across several.
 const BUILD_CHUNK: usize = 512;
 
 /// What the Postgres catalog says about a column: its cast-ready SQL type and
@@ -214,6 +218,12 @@ struct ColumnMeta {
     /// `pg_attribute.atttypid`: the type OID a `Relation` message names the
     /// column by.
     type_oid: u32,
+    /// `pg_attribute.atttypmod`: the size a `Relation` message names beside
+    /// the type (`varchar(5)`, `numeric(10,2)`); `-1` for none.
+    type_mod: i32,
+    /// The type a key read from this column is cast to, schema-qualified and
+    /// never with a modifier (see [`key_type`](PgDocumentBuilder::key_type)).
+    key_type: String,
     /// A domain's type resolved through every domain; `None` for no domain.
     base_type: Option<String>,
     /// The `pg_type.typname` of the type, through every domain.
@@ -239,6 +249,68 @@ impl ColumnMeta {
                 "numeric" | "float4" | "float8" | "citext"
             )
     }
+}
+
+/// What a batched build reads from the catalog: relation keys, column types,
+/// the columns read as bytes, whether the root key is unique, and the root
+/// key column itself.
+#[derive(Debug)]
+struct BatchCatalog {
+    pks: HashMap<String, ColumnName>,
+    col_types: HashMap<(String, String), String>,
+    bytes: query::ByteColumns,
+    root_key: query::RootKey,
+    key: Arc<ColumnMeta>,
+    partitioned: bool,
+}
+
+impl BatchCatalog {
+    /// Whether `chunk`'s keys pair with their rows by value
+    /// ([`matching::pairs_by_key`]).
+    fn pairs_by_key(&self, chunk: &[(&kernel::GenericValue, &DocumentId)]) -> bool {
+        self.key.equal_is_identical()
+            && matching::pairs_by_key(&self.key.base_name, chunk.iter().map(|(key, _)| *key))
+    }
+}
+
+/// One chunk of a batched build: the index, its schema and root key column,
+/// and the keys with the ids they were requested under.
+#[derive(Debug)]
+struct Chunk<'a> {
+    index_name: &'a IndexName,
+    schema: &'a IndexSchema,
+    pk_column: &'a ColumnName,
+    keys: &'a [(&'a kernel::GenericValue, &'a DocumentId)],
+}
+
+/// How a chunk showed the cached key type stale.
+#[derive(Debug, Clone, Copy)]
+enum Stale {
+    /// A row equals no requested key once read back.
+    RowUnclaimed,
+    /// Postgres refused the prepared statement: its result type changed
+    /// under it (a key column's type or collation changed).
+    ResultType,
+}
+
+impl Stale {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::RowUnclaimed => "a row equals no requested key once read back",
+            Self::ResultType => "the prepared statement's result type changed",
+        }
+    }
+}
+
+/// Whether Postgres refused a prepared statement because its result type
+/// changed under it (`0A000`, "cached plan must not change result type").
+fn changed_result_type(error: &sqlx::Error) -> bool {
+    error.as_database_error().is_some_and(|error| {
+        error.code().as_deref() == Some(FEATURE_NOT_SUPPORTED)
+            && error
+                .message()
+                .contains("cached plan must not change result type")
+    })
 }
 
 /// One root row's document as [`PgDocumentBuilder::document_by_id`] and
@@ -271,17 +343,35 @@ pub struct PgDocumentBuilder {
     plans: Arc<HashMap<IndexName, value::DocumentPlan>>,
     /// Cache of each `(schema, table)`'s single-column primary key.
     pk_cache: Arc<Mutex<HashMap<(String, String), ColumnName>>>,
+    /// Cache of each root table's primary key and whether it is partitioned.
+    root_key_cache: Arc<Mutex<RootKeys>>,
     /// Cache of each `(schema, table, column)`'s SQL type, used to cast filter
     /// operands to the column's real type rather than comparing as text.
     col_type_cache: ColumnTypes,
     /// Whether each `(link type, key type)` pair compares, probed once: the
     /// verdict, or the reason the database gave for not answering.
     comparison_cache: Arc<Mutex<ComparisonCache>>,
+    /// Whether the role was refused `has_schema_privilege`, so the catalog
+    /// lookup no longer probes with it.
+    privilege_probe_refused: Arc<AtomicBool>,
     /// Tables a change arrived for that no index reads, already warned about.
     unread_warned: Arc<RwLock<HashSet<TableName>>>,
     /// Root tables without a primary key already warned about for a key with
     /// a null part.
     keyless_warned: Arc<Mutex<HashSet<TableName>>>,
+}
+
+/// Each root `(schema, table)`'s catalog facts.
+type RootKeys = HashMap<(String, String), RootTable>;
+
+/// What the catalog says of a root table that shapes its batched build.
+#[derive(Debug, Clone)]
+struct RootTable {
+    /// Its primary key columns, any number of them.
+    primary_key: Arc<[ColumnName]>,
+    /// Whether it is partitioned, so a batch writes its keys where run-time
+    /// pruning reads them ([`query::KeyForm`]).
+    partitioned: bool,
 }
 
 /// A builder whose pool never connects, for the `resolve` bench.
@@ -308,8 +398,10 @@ impl PgDocumentBuilder {
             ),
             spec,
             pk_cache: Arc::new(Mutex::new(HashMap::new())),
+            root_key_cache: Arc::new(Mutex::new(HashMap::new())),
             col_type_cache: ColumnTypes::default(),
             comparison_cache: Arc::new(Mutex::new(HashMap::new())),
+            privilege_probe_refused: Arc::new(AtomicBool::new(false)),
             unread_warned: Arc::new(RwLock::new(HashSet::new())),
             keyless_warned: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -391,6 +483,7 @@ impl PgDocumentBuilder {
             .after_connect(|connection, _| {
                 Box::pin(async move {
                     sqlx::Executor::execute(&mut *connection, "SET bytea_output = 'hex'").await?;
+                    without_jit(connection).await;
                     Ok(())
                 })
             })
@@ -440,7 +533,12 @@ impl PgDocumentBuilder {
             .await?;
         let sql = format!(
             "SELECT {key} FROM \"{db_schema}\".\"{table}\" WHERE \"{pk}\" IS NOT NULL LIMIT 1",
-            key = value::key_select(&format!("\"{pk_column}\""), "key", &pk_meta.base_name),
+            key = value::key_select(
+                &format!("\"{pk_column}\""),
+                "key",
+                &pk_meta.key_type,
+                &pk_meta.base_name,
+            ),
             pk = pk_column,
             db_schema = schema.db_schema,
             table = schema.table,
@@ -461,6 +559,112 @@ impl PgDocumentBuilder {
             key: RowKey(vec![(pk_column, key_value)]),
         };
         Ok(built(self.build(&id).await?))
+    }
+
+    /// What a batched build of `schema` needs from the catalog, read once per
+    /// [`build_many`](DocumentBuilder::build_many) call (cached).
+    async fn batch_catalog(
+        &self,
+        schema: &kernel::IndexSchema,
+        pk_column: &ColumnName,
+    ) -> Result<BatchCatalog> {
+        let pks = self.relation_pks(schema).await?;
+        let mut col_types = self.filter_column_types(schema).await?;
+        self.add_key_column_types(schema, &[pk_column], &mut col_types)
+            .await?;
+        let bytes = self.byte_columns(schema, &pks).await?;
+        let root_key = self.root_key(schema, &[pk_column]).await?;
+        let key = self
+            .column_meta(&schema.db_schema, &schema.table, pk_column)
+            .await?;
+        let partitioned = self.root_table(schema).await?.partitioned;
+        Ok(BatchCatalog {
+            pks,
+            col_types,
+            bytes,
+            root_key,
+            key,
+            partitioned,
+        })
+    }
+
+    /// Build one chunk of a batch onto `out`. `by_key`: pair rows by their
+    /// key's value ([`query::documents_by_key_query`]). `Some` when the cached
+    /// key type proved stale, with `out` maybe partly written, so the caller
+    /// can undo it and rerun the chunk by position.
+    async fn build_chunk(
+        &self,
+        Chunk {
+            index_name,
+            schema,
+            pk_column,
+            keys: chunk,
+        }: &Chunk<'_>,
+        catalog: &BatchCatalog,
+        by_key: bool,
+        out: &mut Vec<Document>,
+    ) -> Result<Option<Stale>> {
+        let keys: Vec<kernel::GenericValue> =
+            chunk.iter().map(|(value, _)| (*value).clone()).collect();
+        let BatchCatalog {
+            pks,
+            col_types,
+            bytes,
+            root_key,
+            key,
+            partitioned,
+        } = catalog;
+        let shape = query::Shape {
+            root_key,
+            form: query::KeyForm::for_batch(*partitioned, chunk.len()),
+        };
+        let (sql, params) = if by_key {
+            query::documents_by_key_query(
+                schema,
+                pk_column,
+                &keys,
+                pks,
+                col_types,
+                bytes,
+                (shape, &key.key_type, &key.base_name),
+            )?
+        } else {
+            query::documents_query(schema, pk_column, &keys, pks, col_types, bytes, shape)?
+        };
+
+        let mut statement = sqlx::query(sql);
+        for param in &params {
+            statement = query::bind_param(statement, param)?;
+        }
+        let rows = match statement.fetch_all(&self.pool).await {
+            Ok(rows) => rows,
+            Err(error) if changed_result_type(&error) => return Ok(Some(Stale::ResultType)),
+            Err(error) => return Err(self.failed_query(index_name, schema, error)),
+        };
+
+        let plan = self.plan(index_name)?;
+        if by_key {
+            let mut found = matching::ByKey::with_capacity(rows.len());
+            for row in &rows {
+                found.insert(
+                    value::decode_key(row, query::DOC_KEY),
+                    Ok(value::read_document(row, &schema.fields, plan)?),
+                );
+            }
+            return Ok((!matching::match_by_key(found, chunk, out)).then_some(Stale::RowUnclaimed));
+        }
+        let mut found = Vec::with_capacity(rows.len());
+        for row in &rows {
+            // A built row the join paired with no position (never expected:
+            // it was read by the same keys) answers nothing.
+            let position: Option<i64> = row.try_get(query::DOC_POSITION).map_err(query_err)?;
+            let Some(position) = position else {
+                continue;
+            };
+            found.push((position, value::read_document(row, &schema.fields, plan)?));
+        }
+        matching::match_rows(found, chunk, out);
+        Ok(None)
     }
 
     /// The single-column primary key of a table, from the Postgres catalog
@@ -496,6 +700,65 @@ impl PgDocumentBuilder {
             .unwrap_or_else(PoisonError::into_inner)
             .insert(cache_key, column.clone());
         Ok(column)
+    }
+
+    /// What the catalog says of the root table: its primary key columns, any
+    /// number of them, and whether it is partitioned (cached).
+    async fn root_table(&self, schema: &kernel::IndexSchema) -> Result<RootTable> {
+        let cache_key = (schema.db_schema.to_string(), schema.table.to_string());
+        if let Some(root) = self
+            .root_key_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&cache_key)
+        {
+            return Ok(root.clone());
+        }
+        let root = RootTable {
+            primary_key: self
+                .fetch_primary_key(&schema.db_schema, &schema.table)
+                .await?
+                .into(),
+            partitioned: is_partitioned(
+                &self.pool,
+                &format!("{}.{}", schema.db_schema, schema.table),
+            )
+            .await?,
+        };
+        self.root_key_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(cache_key, root.clone());
+        Ok(root)
+    }
+
+    /// Whether `key_columns` are the root table's whole primary key, so a key
+    /// matches at most one row (the primary key is cached), and if not how
+    /// the rows sharing a key are ordered ([`query::TieBreak`]).
+    async fn root_key(
+        &self,
+        schema: &kernel::IndexSchema,
+        key_columns: &[&ColumnName],
+    ) -> Result<query::RootKey> {
+        let primary_key = self.root_table(schema).await?.primary_key;
+        if primary_key.iter().eq(key_columns.iter().copied()) {
+            return Ok(query::RootKey::Unique);
+        }
+        Ok(query::RootKey::Shared(if primary_key.is_empty() {
+            match source::root_columns(schema) {
+                // The rows competing for a key all share the declared key's
+                // value, so it orders nothing; and it may name no column (a
+                // keyless root keyed by its whole row starts with a warning).
+                source::ColumnUse::Columns(columns) => query::TieBreak::read_columns(
+                    columns
+                        .iter()
+                        .filter(|column| Some(*column) != schema.primary_key.as_ref()),
+                ),
+                source::ColumnUse::All => query::TieBreak::whole_row(),
+            }
+        } else {
+            query::TieBreak::primary_key(&primary_key)
+        }))
     }
 
     async fn fetch_primary_key(
@@ -549,6 +812,36 @@ impl PgDocumentBuilder {
             .clone())
     }
 
+    /// The type a key read from a column is cast to (`$n::<bound>::<type>`,
+    /// `expr::<type>`): the column's base type, schema-qualified, with no
+    /// modifier. An explicit cast to a size truncates or rounds without an
+    /// error (`'k12345678'::varchar(5)` is `k1234`, `1.2345::numeric(10,2)`
+    /// is `1.23`), so a key cast to a size its column no longer has would
+    /// match no row; `=` needs none. The qualified `typname` also keeps
+    /// `bpchar` apart from `character`, which as a cast means `char(1)`.
+    ///
+    /// It is the base type, through every domain, when the role may use the
+    /// base type's schema. When it may not (a domain `app.dcit` over
+    /// `ext.citext`, no USAGE on `ext`), a cast to the base type would fail
+    /// every query, so the key is cast to the column's declared type
+    /// instead, as before the base type was used. That gives up one thing: a
+    /// cast to a domain checks the domain's constraints, so a key that breaks
+    /// them fails the query instead of matching nothing. The privilege is
+    /// read by the same catalog query as the type, cached and refreshed with
+    /// it.
+    pub(super) async fn key_type(
+        &self,
+        schema: &DatabaseSchema,
+        table: &TableName,
+        column: &ColumnName,
+    ) -> Result<String> {
+        Ok(self
+            .column_meta(schema, table, column)
+            .await?
+            .key_type
+            .clone())
+    }
+
     /// The Postgres catalog's view of a column — its cast-ready SQL type and
     /// whether it admits null — cached. An unknown column (or table) is an
     /// error: a field or filter naming one that does not exist is a
@@ -567,52 +860,27 @@ impl PgDocumentBuilder {
         {
             return Ok(meta);
         }
-        // `format_type` yields a canonical, re-parseable type name, so it can be
-        // dropped straight into a `$n::<type>` cast. `attnotnull` is the column's
-        // NOT NULL constraint — the nullability mapping resolution needs, read
-        // from the same catalog row as the type. `base_type` follows a domain
-        // through `typbasetype` to the first type that is no domain, and
-        // `base_name` names that type. For an array, `element_name` names its
-        // element type the same way (`typelem`, then every domain), so an
-        // array of a domain over `bytea` reads as one of `bytea`.
-        // `collisdeterministic` is read through
-        // `to_jsonb` because Postgres before 12 has no such column (and only
-        // deterministic collations).
-        let sql = "SELECT format_type(a.atttypid, a.atttypmod) AS sql_type, \
-                          a.atttypid::int8 AS type_oid, \
-                          b.base_type, b.base_name, el.element_name, \
-                          coalesce((SELECT (to_jsonb(c) ->> 'collisdeterministic')::boolean \
-                                    FROM pg_collation c WHERE c.oid = a.attcollation), \
-                                   true) AS deterministic, \
-                          a.attnotnull AS not_null \
-                   FROM pg_attribute a, LATERAL ( \
-                          WITH RECURSIVE d(oid, typmod) AS ( \
-                               SELECT a.atttypid, a.atttypmod \
-                             UNION ALL \
-                               SELECT t.typbasetype, t.typtypmod \
-                               FROM pg_type t JOIN d ON t.oid = d.oid WHERE t.typtype = 'd' \
-                          ) SELECT format_type(d.oid, d.typmod) AS base_type, \
-                                   t.typname::text AS base_name, t.oid AS base_oid \
-                            FROM d JOIN pg_type t ON t.oid = d.oid WHERE t.typtype <> 'd' \
-                        ) b \
-                   LEFT JOIN LATERAL ( \
-                          WITH RECURSIVE e(oid) AS ( \
-                               SELECT a.typelem FROM pg_type a \
-                               WHERE a.oid = b.base_oid AND a.typelem <> 0 AND a.typlen = -1 \
-                             UNION ALL \
-                               SELECT t.typbasetype FROM pg_type t JOIN e ON t.oid = e.oid \
-                               WHERE t.typtype = 'd' \
-                          ) SELECT t.typname::text AS element_name \
-                            FROM e JOIN pg_type t ON t.oid = e.oid WHERE t.typtype <> 'd' \
-                        ) el ON true \
-                   WHERE a.attrelid = to_regclass($1) AND a.attname = $2 \
-                     AND a.attnum > 0 AND NOT a.attisdropped";
-        let row = sqlx::query(sql)
-            .bind(format!("{schema}.{table}"))
-            .bind(column.as_ref().to_owned())
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(query_err)?;
+        let probe = !self.privilege_probe_refused.load(Ordering::Relaxed);
+        let fetch = |sql: &'static str| {
+            sqlx::query(sql)
+                .bind(format!("{schema}.{table}"))
+                .bind(column.as_ref().to_owned())
+                .fetch_optional(&self.pool)
+        };
+        let row = match fetch(if probe {
+            COLUMN_META_SQL
+        } else {
+            COLUMN_META_SQL_UNPROBED
+        })
+        .await
+        {
+            Err(error) if probe && refused_for_privilege(&error) => {
+                self.privilege_probe_refused.store(true, Ordering::Relaxed);
+                fetch(COLUMN_META_SQL_UNPROBED).await
+            }
+            other => other,
+        }
+        .map_err(query_err)?;
         let meta = Arc::new(match row {
             Some(row) => {
                 let sql_type: String = row.try_get("sql_type").map_err(query_err)?;
@@ -626,6 +894,8 @@ impl PgDocumentBuilder {
                     deterministic: row.try_get("deterministic").map_err(query_err)?,
                     sql_type,
                     type_oid: u32::try_from(type_oid).unwrap_or_default(),
+                    type_mod: row.try_get("type_mod").map_err(query_err)?,
+                    key_type: row.try_get("key_type").map_err(query_err)?,
                     nullable: !not_null,
                 }
             }
@@ -700,17 +970,49 @@ impl PgDocumentBuilder {
         self.col_type_cache.clone()
     }
 
-    /// A document query of `schema` failed: forget the column types of every
+    /// A document query of `index` failed: forget the column types of every
     /// table it reads, since a type that changed under the cache fails it the
-    /// same way on every retry otherwise, then report the error.
-    fn failed_query(&self, schema: &IndexSchema, error: sqlx::Error) -> SourceError {
+    /// same way on every retry otherwise, then report the error
+    /// ([`query_failed`]).
+    #[cold]
+    #[inline(never)]
+    fn failed_query(
+        &self,
+        index: &IndexName,
+        schema: &IndexSchema,
+        error: sqlx::Error,
+    ) -> SourceError {
+        self.forget_tables_of(schema);
+        query_failed(index, error)
+    }
+
+    /// A reverse lookup for `index` failed. A query error forgets the column
+    /// types of every table the index reads, as a failed document query does,
+    /// and is reported the same way ([`query_failed`]).
+    #[cold]
+    #[inline(never)]
+    fn failed_lookup(
+        &self,
+        index: &IndexName,
+        schema: &IndexSchema,
+        error: resolve::LookupError,
+    ) -> SourceError {
+        match error {
+            resolve::LookupError::Source(error) => error,
+            resolve::LookupError::Query(error) => {
+                self.forget_tables_of(schema);
+                query_failed(index, *error)
+            }
+        }
+    }
+
+    fn forget_tables_of(&self, schema: &IndexSchema) {
         let mut tables = vec![schema.table.clone()];
         fields::collect_tables(&schema.fields, &mut tables);
         for table in tables {
             self.col_type_cache
                 .forget_table(schema.db_schema.as_ref(), table.as_ref());
         }
-        query_err(error)
     }
 
     /// The columns `schema`'s documents read as values whose base type is
@@ -738,10 +1040,11 @@ impl PgDocumentBuilder {
         Ok(bytes)
     }
 
-    /// Ensure `types` carries the catalog SQL type of each root-table key column,
-    /// so the keyed lookup can cast every `$n` to it. The keys come back from
-    /// Postgres as values (a `uuid` as a string, say); without the cast the
-    /// re-bound `$n` is `text` and `uuid = text` has no operator.
+    /// Set in `types` the [`key_type`](Self::key_type) of each root-table key
+    /// column, so the keyed lookup can cast every `$n` to it. The keys come
+    /// back from Postgres as values (a `uuid` as a string, say); without the
+    /// cast the re-bound `$n` is `text` and `uuid = text` has no operator. It
+    /// replaces a filter's entry for the column, which may carry a size.
     async fn add_key_column_types(
         &self,
         schema: &IndexSchema,
@@ -749,14 +1052,10 @@ impl PgDocumentBuilder {
         types: &mut HashMap<(String, String), String>,
     ) -> Result<()> {
         for column in columns {
-            let key = (schema.table.to_string(), column.to_string());
-            if types.contains_key(&key) {
-                continue;
-            }
-            let sql_type = self
-                .column_type(&schema.db_schema, &schema.table, column)
+            let key_type = self
+                .key_type(&schema.db_schema, &schema.table, column)
                 .await?;
-            types.insert(key, sql_type);
+            types.insert((schema.table.to_string(), column.to_string()), key_type);
         }
         Ok(())
     }
@@ -834,9 +1133,10 @@ impl PgDocumentBuilder {
                 let steps = path.address.steps(&schema.fields).ok_or_else(|| {
                     SourceError::Query("internal: a path's address is not in its index".into())
                 })?;
-                let found = self
-                    .resolve_path(schema, table, key, before, &steps)
-                    .await?;
+                let found = match self.resolve_path(schema, table, key, before, &steps).await {
+                    Ok(found) => found,
+                    Err(error) => return Err(self.failed_lookup(name, schema, error)),
+                };
                 if let Some(link) = self
                     .reads_root_from_a_link(schema, pk_column, path, &steps)
                     .await?
@@ -1017,6 +1317,90 @@ impl PgDocumentBuilder {
 const UNDEFINED_FUNCTION: &str = "42883";
 /// SQLSTATE `42725`: several functions could take it.
 const AMBIGUOUS_FUNCTION: &str = "42725";
+/// SQLSTATE `42804`: an expression is of another type than its place takes.
+const DATATYPE_MISMATCH: &str = "42804";
+/// SQLSTATE `42703`: no such column.
+const UNDEFINED_COLUMN: &str = "42703";
+/// SQLSTATE `42P01`: no such table.
+const UNDEFINED_TABLE: &str = "42P01";
+/// SQLSTATE `42501`: the role lacks a privilege.
+const INSUFFICIENT_PRIVILEGE: &str = "42501";
+/// `feature_not_supported`, which a cached plan whose result type changed
+/// raises.
+const FEATURE_NOT_SUPPORTED: &str = "0A000";
+
+/// Whether Postgres refused `error` for a privilege the role lacks.
+pub(crate) fn refused_for_privilege(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .is_some_and(|error| error.code().as_deref() == Some(INSUFFICIENT_PRIVILEGE))
+}
+
+/// The catalog lookup behind the column-type cache, with `$usable` saying
+/// whether the role may use the base type's schema. `format_type` yields a
+/// canonical, re-parseable type name, so it can be dropped straight into a
+/// `$n::<type>` cast. `attnotnull` is the column's NOT NULL constraint.
+/// `base_type` follows a domain through `typbasetype` to the first type that
+/// is no domain, and `base_name` names that type. For an array,
+/// `element_name` names its element type the same way (`typelem`, then every
+/// domain), so an array of a domain over `bytea` reads as one of `bytea`.
+/// `collisdeterministic` is read through `to_jsonb` because Postgres before
+/// 12 has no such column (and only deterministic collations).
+macro_rules! column_meta_sql {
+    ($usable:literal) => {
+        concat!(
+            "SELECT format_type(a.atttypid, a.atttypmod) AS sql_type, \
+                    a.atttypid::int8 AS type_oid, a.atttypmod AS type_mod, \
+                    b.base_type, b.base_name, el.element_name, \
+                    CASE WHEN b.base_usable THEN b.base_key ELSE ( \
+                      SELECT quote_ident(dn.nspname) || '.' || quote_ident(dt.typname) \
+                      FROM pg_type dt JOIN pg_namespace dn ON dn.oid = dt.typnamespace \
+                      WHERE dt.oid = a.atttypid \
+                    ) END AS key_type, \
+                    coalesce((SELECT (to_jsonb(c) ->> 'collisdeterministic')::boolean \
+                              FROM pg_collation c WHERE c.oid = a.attcollation), \
+                             true) AS deterministic, \
+                    a.attnotnull AS not_null \
+             FROM pg_attribute a, LATERAL ( \
+                    WITH RECURSIVE d(oid, typmod) AS ( \
+                         SELECT a.atttypid, a.atttypmod \
+                       UNION ALL \
+                         SELECT t.typbasetype, t.typtypmod \
+                         FROM pg_type t JOIN d ON t.oid = d.oid WHERE t.typtype = 'd' \
+                    ) SELECT format_type(d.oid, d.typmod) AS base_type, \
+                             t.typname::text AS base_name, t.oid AS base_oid, \
+                             quote_ident(n.nspname) || '.' || quote_ident(t.typname) \
+                               AS base_key, ",
+            $usable,
+            " AS base_usable \
+                      FROM d JOIN pg_type t ON t.oid = d.oid \
+                      JOIN pg_namespace n ON n.oid = t.typnamespace \
+                      WHERE t.typtype <> 'd' \
+                  ) b \
+             LEFT JOIN LATERAL ( \
+                    WITH RECURSIVE e(oid) AS ( \
+                         SELECT a.typelem FROM pg_type a \
+                         WHERE a.oid = b.base_oid AND a.typelem <> 0 AND a.typlen = -1 \
+                       UNION ALL \
+                         SELECT t.typbasetype FROM pg_type t JOIN e ON t.oid = e.oid \
+                         WHERE t.typtype = 'd' \
+                    ) SELECT t.typname::text AS element_name \
+                      FROM e JOIN pg_type t ON t.oid = e.oid WHERE t.typtype <> 'd' \
+                  ) el ON true \
+             WHERE a.attrelid = to_regclass($1) AND a.attname = $2 \
+               AND a.attnum > 0 AND NOT a.attisdropped"
+        )
+    };
+}
+
+/// [`column_meta_sql`] probing the base type's schema with
+/// `has_schema_privilege`.
+const COLUMN_META_SQL: &str = column_meta_sql!("has_schema_privilege(n.oid, 'USAGE')");
+
+/// [`column_meta_sql`] for a role that may not run `has_schema_privilege`
+/// (EXECUTE revoked): every key is cast to its declared type, as the cast
+/// before the base type was used could be.
+const COLUMN_META_SQL_UNPROBED: &str = column_meta_sql!("false");
 
 #[async_trait]
 impl DocumentBuilder for PgDocumentBuilder {
@@ -1056,7 +1440,10 @@ impl DocumentBuilder for PgDocumentBuilder {
         self.add_key_column_types(schema, &key_columns, &mut col_types)
             .await?;
         let bytes = self.byte_columns(schema, &pks).await?;
-        let (sql, params) = query::document_query(schema, &id.key.0, &pks, &col_types, &bytes)?;
+        let (mut sql, params) = query::document_query(schema, &id.key.0, &pks, &col_types, &bytes)?;
+        if let query::RootKey::Shared(tie_break) = self.root_key(schema, &key_columns).await? {
+            sql = query::first_row(sql, &tie_break);
+        }
 
         let mut statement = sqlx::query(sql);
         for param in &params {
@@ -1065,7 +1452,7 @@ impl DocumentBuilder for PgDocumentBuilder {
         let row = statement
             .fetch_optional(&self.pool)
             .await
-            .map_err(|error| self.failed_query(schema, error))?;
+            .map_err(|error| self.failed_query(&id.index, schema, error))?;
 
         // No row means the root is absent or soft-deleted (both folded into the
         // query's WHERE) → the document should not exist.
@@ -1100,9 +1487,9 @@ impl DocumentBuilder for PgDocumentBuilder {
                 .schema(index_name)
                 .ok_or_else(|| SourceError::Query(format!("unknown index `{index_name}`")))?;
 
-            // The batched query keys the root with `IN (…)` on a single column,
-            // so it needs both a declared single-column primary key and ids that
-            // carry exactly that one key column. Pair each id with its lone key
+            // The batched query probes the root by one key column per requested
+            // key, so it needs both a declared single-column primary key and ids
+            // that carry exactly that one key column. Pair each id with its lone key
             // value; if any id is composite (or the index has no `primary_key`),
             // fall back to per-document assembly for this group — correct, just
             // not batched.
@@ -1120,63 +1507,37 @@ impl DocumentBuilder for PgDocumentBuilder {
                 continue;
             };
 
-            let pks = self.relation_pks(schema).await?;
-            let mut col_types = self.filter_column_types(schema).await?;
-            self.add_key_column_types(schema, &[&pk_column], &mut col_types)
-                .await?;
-            let pk_meta = self
-                .column_meta(&schema.db_schema, &schema.table, &pk_column)
-                .await?;
-            let pk_base = &pk_meta.base_name;
-            let bytes = self.byte_columns(schema, &pks).await?;
-
-            for chunk in keyed.chunks(BUILD_CHUNK) {
-                let keys: Vec<kernel::GenericValue> =
-                    chunk.iter().map(|(value, _)| (*value).clone()).collect();
-                let (sql, params) = query::documents_query(
-                    schema, &pk_column, pk_base, &keys, &pks, &col_types, &bytes,
-                )?;
-
-                let mut statement = sqlx::query(sql);
-                for param in &params {
-                    statement = query::bind_param(statement, param)?;
-                }
-                let rows = statement
-                    .fetch_all(&self.pool)
-                    .await
-                    .map_err(|error| self.failed_query(schema, error))?;
-
-                // Map each returned root key to its assembled body. `doc_key` is
-                // parsed as live-change keys are, so it matches the ids' key
-                // values exactly.
-                let mut bodies: HashMap<
-                    kernel::GenericValue,
-                    std::result::Result<kernel::GenericValue, source::document::BuildFailure>,
-                > = HashMap::with_capacity(rows.len());
-                for row in &rows {
-                    let key = value::decode_key(row, query::DOC_KEY);
-                    bodies.insert(
-                        key,
-                        value::read_document(row, &schema.fields, self.plan(index_name)?)?,
-                    );
-                }
-
-                // Every requested id yields an outcome: a body present in the
-                // result is an upsert; an absent key means the root is gone or
-                // soft-deleted (both fold into the query's WHERE) → a tombstone.
-                for (value, id) in chunk {
-                    let document = match bodies.remove(*value) {
-                        Some(Ok(body)) => Document::Upsert {
-                            id: (*id).clone(),
-                            body,
-                        },
-                        Some(Err(failure)) => Document::Failed {
-                            id: (*id).clone(),
-                            failure,
-                        },
-                        None => Document::Delete { id: (*id).clone() },
-                    };
-                    out.push(document);
+            let mut catalog = self.batch_catalog(schema, &pk_column).await?;
+            for keys in keyed.chunks(BUILD_CHUNK) {
+                let start = out.len();
+                let by_key = catalog.pairs_by_key(keys);
+                let chunk = Chunk {
+                    index_name,
+                    schema,
+                    pk_column: &pk_column,
+                    keys,
+                };
+                let Some(stale) = self.build_chunk(&chunk, &catalog, by_key, &mut out).await?
+                else {
+                    continue;
+                };
+                // The cached key type is stale (the change stream's
+                // `Relation` message is still to come). Read the types afresh
+                // and let Postgres pair the chunk by position, once.
+                tracing::debug!(
+                    index = %index_name,
+                    reason = stale.reason(),
+                    "rerunning a batch by position with the column types read again",
+                );
+                out.truncate(start);
+                self.forget_tables_of(schema);
+                catalog = self.batch_catalog(schema, &pk_column).await?;
+                if let Some(stale) = self.build_chunk(&chunk, &catalog, false, &mut out).await? {
+                    return Err(SourceError::Query(format!(
+                        "index `{index_name}`: a batch failed again after its column types \
+                         were read afresh: {}",
+                        stale.reason()
+                    )));
                 }
             }
         }
@@ -1205,8 +1566,45 @@ impl DocumentBuilder for PgDocumentBuilder {
     }
 }
 
+/// Turn JIT compilation off for a session the source opened. flusso's
+/// queries are short index lookups and key reads: compiling one costs more
+/// than running it, and a batch over a partitioned root or a wide document can
+/// pass `jit_above_cost`. `jit` is user-settable, so this is expected to hold;
+/// where it is refused (a server without the parameter), the session keeps the
+/// server's setting and the refusal is a warning, never a failed connection.
+/// Behind a transaction-mode pooler the setting may not stay with the session,
+/// so the manual recommends `ALTER ROLE … SET jit = off` there.
+pub(crate) async fn without_jit(connection: &mut sqlx::PgConnection) {
+    if let Err(error) = sqlx::Executor::execute(&mut *connection, "SET jit = off").await {
+        tracing::warn!(
+            error = %error,
+            "could not turn JIT compilation off for this session; it keeps the server's setting"
+        );
+    }
+}
+
 pub(super) fn query_err(error: sqlx::Error) -> SourceError {
     SourceError::Query(error.to_string())
+}
+
+/// A query `index` runs failed. One Postgres raises when the database no
+/// longer has what the schema reads (a column, a table, an `=` between a link
+/// and its key) names the index and points at `flusso check`: no retry fixes
+/// it, a schema or database change does.
+pub(super) fn query_failed(index: &IndexName, error: sqlx::Error) -> SourceError {
+    let mismatch = error.as_database_error().is_some_and(|error| {
+        matches!(
+            error.code().as_deref(),
+            Some(UNDEFINED_FUNCTION | DATATYPE_MISMATCH | UNDEFINED_COLUMN | UNDEFINED_TABLE)
+        )
+    });
+    if mismatch {
+        return SourceError::Query(format!(
+            "{error}: the database no longer matches index `{index}`; `flusso check` names \
+             the field"
+        ));
+    }
+    query_err(error)
 }
 
 /// Primary-key column names of a table, in index order. `$1` binds the
@@ -1233,6 +1631,16 @@ pub(crate) async fn primary_key_column_names(
         names.push(row.try_get::<String, _>("name").map_err(query_err)?);
     }
     Ok(names)
+}
+
+/// Whether `qualified` (`schema.table`, in the form each caller already holds:
+/// the stream quotes it, the builder does not) names a partitioned table.
+pub(crate) async fn is_partitioned(pool: &PgPool, qualified: &str) -> Result<bool> {
+    sqlx::query_scalar("SELECT relkind = 'p' FROM pg_class WHERE oid = $1::regclass")
+        .bind(qualified)
+        .fetch_one(pool)
+        .await
+        .map_err(query_err)
 }
 
 /// The type of an array column's elements, as a transform probe casts to:

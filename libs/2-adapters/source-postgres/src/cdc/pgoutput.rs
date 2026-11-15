@@ -103,6 +103,9 @@ pub(crate) struct Column {
     pub(crate) is_key: bool,
     /// The column's Postgres type OID, used to type its (text-encoded) value.
     pub(crate) type_oid: u32,
+    /// `atttypmod`: the type's size (`varchar(5)`, `numeric(10,2)`), `-1`
+    /// for none.
+    pub(crate) type_modifier: i32,
 }
 
 /// A row's column values, in `Relation` column order.
@@ -281,7 +284,7 @@ fn decode_relation(cur: &mut Cursor<'_>) -> Result<Decoded, SourceError> {
         let flags = cur.u8()?;
         let colname = cur.cstring()?;
         let type_oid = cur.u32()?;
-        let _type_modifier = cur.u32()?;
+        let type_modifier = cur.u32()?.cast_signed();
         let name = ColumnName::try_new(colname.clone()).map_err(|e| {
             SourceError::Decode(format!(
                 "pgoutput relation: invalid column {colname:?}: {e}"
@@ -291,6 +294,7 @@ fn decode_relation(cur: &mut Cursor<'_>) -> Result<Decoded, SourceError> {
             name,
             is_key: (flags & 1) != 0,
             type_oid,
+            type_modifier,
         });
     }
     Ok(Decoded::Relation(Relation {

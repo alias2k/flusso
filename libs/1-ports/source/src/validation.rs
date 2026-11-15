@@ -957,7 +957,8 @@ impl Checker<'_> {
                         DiagnosticKind::UnsupportedKeyType,
                         format!(
                             "`primary_key` `{declared}` is `{}`, a type that can't be read back \
-                             as a document key: no document would ever be written",
+                             as a document key: the backfill would index no row, and no change \
+                             on a related table would reach a document",
                             info.sql_type
                         ),
                     );
@@ -3734,7 +3735,8 @@ mod tests {
                 "@primary_key",
                 DiagnosticKind::UnsupportedKeyType,
                 "`primary_key` `id` is `integer`, a type that can't be read back as a document \
-                 key: no document would ever be written"
+                 key: the backfill would index no row, and no change on a related table would \
+                 reach a document"
             )]),
         );
     }

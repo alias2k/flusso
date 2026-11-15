@@ -35,7 +35,7 @@ use source::{Result, RowImage, RowKey, SourceError};
 
 use super::fields::Step;
 use super::reads::PathReads;
-use super::{PgDocumentBuilder, query, query_err, value};
+use super::{PgDocumentBuilder, query, value};
 
 impl PgDocumentBuilder {
     /// Resolve one path (root → … → changed table) back to root key values, by
@@ -51,7 +51,7 @@ impl PgDocumentBuilder {
         change_key: &RowKey,
         before: Option<&RowImage>,
         path: &[Step<'_>],
-    ) -> Result<Vec<GenericValue>> {
+    ) -> LookupResult<Vec<GenericValue>> {
         let mut current_keys = vec![change_key.clone()];
         let mut current_table = changed_table.clone();
         let mut origin: Option<(TableName, ColumnName)> = None;
@@ -141,7 +141,7 @@ impl PgDocumentBuilder {
         parent: (&TableName, &ColumnName),
         key: &RowKey,
         origin: Origin<'_>,
-    ) -> Result<Vec<GenericValue>> {
+    ) -> LookupResult<Vec<GenericValue>> {
         if let Some(link) = link_on_row(step, current_table)
             && let Some((_, value)) = key.0.iter().find(|(column, _)| column == link)
         {
@@ -170,9 +170,9 @@ impl PgDocumentBuilder {
             }
             RelationKey::Local(column) => {
                 let Step::Relation(relation) = step else {
-                    return Err(SourceError::Query(
-                        "internal: a `via` hop is never local".into(),
-                    ));
+                    return Err(
+                        SourceError::Query("internal: a `via` hop is never local".into()).into(),
+                    );
                 };
                 let target = (current_table, origin);
                 self.reverse_local(schema, relation, parent, column, key, target)
@@ -205,7 +205,7 @@ impl PgDocumentBuilder {
         column: &ColumnName,
         target_key: &RowKey,
         (target_table, origin): (&TableName, Origin<'_>),
-    ) -> Result<Vec<GenericValue>> {
+    ) -> LookupResult<Vec<GenericValue>> {
         let (target_column, value) = local_target_value(relation, target_key)?;
         let key = [(column.clone(), value.clone())];
         let col_types = self
@@ -219,8 +219,7 @@ impl PgDocumentBuilder {
         let (sql, params) = query::reverse_query(
             schema,
             parent_table,
-            parent_pk,
-            &base.base_name,
+            (parent_pk, &base.key_type, &base.base_name),
             &key,
             &col_types,
         )?;
@@ -237,7 +236,7 @@ impl PgDocumentBuilder {
         foreign_key: &ColumnName,
         child_key: &RowKey,
         origin: Origin<'_>,
-    ) -> Result<Vec<GenericValue>> {
+    ) -> LookupResult<Vec<GenericValue>> {
         let col_types = self
             .cast_types(schema, child, &child_key.0, |column| {
                 origin
@@ -249,8 +248,7 @@ impl PgDocumentBuilder {
         let (sql, params) = query::reverse_query(
             schema,
             child,
-            foreign_key,
-            &base.base_name,
+            (foreign_key, &base.key_type, &base.base_name),
             &child_key.0,
             &col_types,
         )?;
@@ -267,7 +265,7 @@ impl PgDocumentBuilder {
         right_key: &ColumnName,
         far_key: &RowKey,
         (far_table, origin): (&TableName, Origin<'_>),
-    ) -> Result<Vec<GenericValue>> {
+    ) -> LookupResult<Vec<GenericValue>> {
         let (far_column, far_pk) = single_far_key(far_key)?;
         let key = [(right_key.clone(), far_pk.clone())];
         let col_types = self
@@ -281,8 +279,7 @@ impl PgDocumentBuilder {
         let (sql, params) = query::reverse_query(
             schema,
             junction,
-            left_key,
-            &base.base_name,
+            (left_key, &base.key_type, &base.base_name),
             &key,
             &col_types,
         )?;
@@ -299,7 +296,7 @@ impl PgDocumentBuilder {
         left_key: &ColumnName,
         junction_key: &RowKey,
         origin: Origin<'_>,
-    ) -> Result<Vec<GenericValue>> {
+    ) -> LookupResult<Vec<GenericValue>> {
         let col_types = self
             .cast_types(schema, junction, &junction_key.0, |column| {
                 origin
@@ -311,8 +308,7 @@ impl PgDocumentBuilder {
         let (sql, params) = query::reverse_query(
             schema,
             junction,
-            left_key,
-            &base.base_name,
+            (left_key, &base.key_type, &base.base_name),
             &junction_key.0,
             &col_types,
         )?;
@@ -325,7 +321,7 @@ impl PgDocumentBuilder {
     /// the two columns (a `char(n)` link against a `text` key compares as
     /// `text`, padding trimmed). A value read from the column it is compared
     /// with is cast to that column's own type.
-    async fn cast_types(
+    pub(super) async fn cast_types(
         &self,
         db: &DatabaseSchema,
         table: &TableName,
@@ -339,10 +335,7 @@ impl PgDocumentBuilder {
                 continue;
             }
             let (from_table, from_column) = source(column);
-            types.insert(
-                entry,
-                self.column_type(db, &from_table, &from_column).await?,
-            );
+            types.insert(entry, self.key_type(db, &from_table, &from_column).await?);
         }
         Ok(types)
     }
@@ -354,12 +347,15 @@ impl PgDocumentBuilder {
         sql: query::SqlString,
         params: Vec<GenericValue>,
         result_column: &str,
-    ) -> Result<Vec<GenericValue>> {
+    ) -> LookupResult<Vec<GenericValue>> {
         let mut query = sqlx::query(sql);
         for param in &params {
             query = query::bind_param(query, param)?;
         }
-        let rows = query.fetch_all(&self.pool).await.map_err(query_err)?;
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| LookupError::Query(Box::new(error)))?;
 
         let mut seen = HashSet::new();
         let mut roots = Vec::new();
@@ -410,7 +406,11 @@ impl PgDocumentBuilder {
             let Some(pk) = schema.primary_key.as_ref() else {
                 continue;
             };
-            for root in self.root_keys(schema, pk, &link, &links).await? {
+            let roots = match self.root_keys(schema, pk, &link, &links).await {
+                Ok(roots) => roots,
+                Err(error) => return Err(self.failed_lookup(&index, schema, error)),
+            };
+            for root in roots {
                 ids.push(DocumentId {
                     index: index.clone(),
                     key: RowKey(vec![(pk.clone(), root)]),
@@ -466,12 +466,12 @@ impl PgDocumentBuilder {
         pk: &ColumnName,
         (link_table, link_column): &Link,
         links: &[GenericValue],
-    ) -> Result<Vec<GenericValue>> {
+    ) -> LookupResult<Vec<GenericValue>> {
         if links.is_empty() {
             return Ok(Vec::new());
         }
         let sql_type = self
-            .column_type(&schema.db_schema, link_table, link_column)
+            .key_type(&schema.db_schema, link_table, link_column)
             .await?;
         let base = self
             .column_meta(&schema.db_schema, &schema.table, pk)
@@ -479,14 +479,31 @@ impl PgDocumentBuilder {
         let (sql, params) = query::root_keys_query(
             &schema.db_schema,
             &schema.table,
-            pk,
-            &base.base_name,
+            (pk, &base.key_type, &base.base_name),
             links,
             &sql_type,
         )?;
         self.run_reverse(sql, params, pk.as_ref()).await
     }
 }
+
+/// Why a reverse lookup failed: the source's own error, or the query's,
+/// kept typed so the caller can name the index and forget its cached types
+/// (see `PgDocumentBuilder::failed_lookup`) on its error path alone.
+#[derive(Debug)]
+pub(super) enum LookupError {
+    Source(SourceError),
+    /// Boxed, so a lookup's `Result` is no larger than a `SourceError` one.
+    Query(Box<sqlx::Error>),
+}
+
+impl From<SourceError> for LookupError {
+    fn from(error: SourceError) -> Self {
+        Self::Source(error)
+    }
+}
+
+pub(super) type LookupResult<T> = std::result::Result<T, LookupError>;
 
 /// The column a hop's key values were read from, when not the key's own:
 /// the previous hop's link column.

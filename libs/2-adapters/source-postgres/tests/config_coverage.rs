@@ -1873,9 +1873,11 @@ async fn a_time_of_day_under_a_date_mapping_is_reported() {
 }
 
 /// A root keyed by a type the document builder can't read back is refused at
-/// `primary_key` (issue #295): every key reads back as null, so even a row
-/// that exists builds as a tombstone. Every type it reads, through a domain
-/// too, passes.
+/// `primary_key` (issue #295): every key read back (the backfill's, a reverse
+/// lookup's) is null, so the backfill indexes no row and a related row's
+/// change reaches no document. A key a change carries itself still builds,
+/// alike in both build paths (issue #335). Every type it reads, through a
+/// domain too, passes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn a_root_key_the_builder_cannot_read_back_is_refused() {
@@ -1937,16 +1939,23 @@ async fn a_root_key_the_builder_cannot_read_back_is_refused() {
                 "unsupported_key_type",
                 format!(
                     "`primary_key` `id` is `{sql_type}`, a type that can't be read back as a \
-                     document key: no document would ever be written"
+                     document key: the backfill would index no row, and no change on a related \
+                     table would reach a document"
                 ),
             )],
             "{sql_type}"
         );
         let key = value.trim_matches('\'');
-        let build = documents.build_many(&[doc_keyed(key)]).await.unwrap();
+        let single = documents.build(&doc_keyed(key)).await.unwrap();
+        let batched = documents.build_many(&[doc_keyed(key)]).await.unwrap();
         assert!(
-            matches!(build.as_slice(), [Document::Delete { .. }]),
-            "an existing `{sql_type}` row builds as a tombstone: {build:?}"
+            matches!(
+                (&single, batched.as_slice()),
+                (Document::Upsert { body: one, .. }, [Document::Upsert { body: many, .. }])
+                    if one == many
+            ),
+            "an existing `{sql_type}` row is built alike by both build paths: {single:?}, \
+             {batched:?}"
         );
     }
 }

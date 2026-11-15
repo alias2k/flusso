@@ -41,8 +41,142 @@ type PgQuery<'q> = sqlx::query::Query<'q, Postgres, PgArguments>;
 
 const ROOT: &str = "root";
 
-/// The alias the batched build selects each row's root key under.
+/// The column the batched build selects, beside each document, the 1-based
+/// position (a `bigint`) of the requested key the row matched.
+pub(super) const DOC_POSITION: &str = "doc_position";
+
+/// The column a batched build paired by key selects beside each document:
+/// the row's key, as [`key_select`](super::value::key_select) renders it.
 pub(super) const DOC_KEY: &str = "doc_key";
+
+/// The batched build's names one level out from the root: the built rows,
+/// the rows paired with positions, the numbered list of requested keys, and
+/// its columns. The document and its raw filters are built a level in, where
+/// the root table is the only relation in scope, so no name here can meet one
+/// of the user's.
+const BUILT: &str = "flusso_built";
+const PAIRED: &str = "flusso_paired";
+const NUMBERED: &str = "flusso_numbered";
+const KEYS: &str = "flusso_requested";
+const KEY: &str = "flusso_key";
+const POSITION: &str = "flusso_position";
+
+/// Whether the declared root key is the root table's whole primary key, so a
+/// key matches at most one row. A root without one (no primary key, a
+/// composite one, a partitioned table keyed with its partition column, a
+/// view) still starts, with a warning; a key several of its rows share builds
+/// the row its [`TieBreak`] orders first, in a batched and a single build
+/// alike.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum RootKey {
+    Unique,
+    Shared(TieBreak),
+}
+
+/// How a batch writes its keys, decided per chunk from facts known when the
+/// statement is built ([`KeyForm::for_batch`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum KeyForm {
+    /// Placeholders in an array constructor, padded to a power of two
+    /// ([`key_constructor`]). Postgres sees every key: it knows the batch's
+    /// length, so a generic plan of a small batch is cached, and it prunes
+    /// a root partitioned by its key under a generic plan too.
+    Constructor,
+    /// One array parameter per kind ([`key_arrays`]): a short statement
+    /// bound in one go, which costs a large batch less than placeholders do.
+    /// Postgres takes such an array for ten elements and can't prune
+    /// partitions by it at run time.
+    Parameters,
+}
+
+/// Below this many keys a batch writes them as a constructor: Postgres takes
+/// an array parameter for ten elements, so a smaller batch would look cheaper
+/// planned afresh every call.
+const SMALL_BATCH: usize = 16;
+
+impl KeyForm {
+    /// A constructor for a partitioned root (its run-time pruning reads keys
+    /// one by one) and for fewer than [`SMALL_BATCH`] keys; parameters
+    /// otherwise.
+    pub(super) fn for_batch(partitioned: bool, keys: usize) -> Self {
+        if partitioned || keys < SMALL_BATCH {
+            Self::Constructor
+        } else {
+            Self::Parameters
+        }
+    }
+}
+
+/// What a batched statement is built for: whether its root key is unique,
+/// and how it writes its keys.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Shape<'a> {
+    pub(super) root_key: &'a RootKey,
+    pub(super) form: KeyForm,
+}
+
+/// How the rows sharing a key are ordered to pick the one that builds: an
+/// `ORDER BY` list over the root row. It reads no column the document
+/// doesn't read, so a wide column the document leaves alone is never fetched:
+///
+/// - [`primary_key`](Self::primary_key): the table's own primary key, which is
+///   unique, so the order is total.
+/// - [`read_columns`](Self::read_columns), for a root without one (a keyless
+///   table, a view): the text of every root column the document reads. Rows
+///   that tie there build the same document.
+/// - [`whole_row`](Self::whole_row): the whole row's text, only where the
+///   columns read are unknown (a raw filter).
+///
+/// When there is nothing to order by (the document reads no root column but
+/// the key, which every competing row shares), any row answers: no term is
+/// rendered, so no caller can write an empty `ORDER BY`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TieBreak(Option<String>);
+
+impl TieBreak {
+    pub(super) fn primary_key(columns: &[ColumnName]) -> Self {
+        Self::of(columns.iter().map(|column| qcol(ROOT, column)))
+    }
+
+    pub(super) fn read_columns<'a>(columns: impl IntoIterator<Item = &'a ColumnName>) -> Self {
+        let mut columns: Vec<&ColumnName> = columns.into_iter().collect();
+        columns.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
+        Self::of(
+            columns
+                .into_iter()
+                .map(|column| format!("{}::text", qcol(ROOT, column))),
+        )
+    }
+
+    pub(super) fn whole_row() -> Self {
+        Self(Some(format!("ROW({}.*)::text", qident(ROOT))))
+    }
+
+    /// The terms in order; none (the document reads no root column but the
+    /// key) means every row sharing a key builds the same document, so any
+    /// one answers and nothing is ordered.
+    fn of(terms: impl Iterator<Item = String>) -> Self {
+        let terms: Vec<String> = terms.collect();
+        Self((!terms.is_empty()).then(|| terms.join(", ")))
+    }
+
+    /// `ORDER BY` terms after the key, each led by a comma; empty for any row.
+    fn after_key(&self) -> String {
+        self.0
+            .as_ref()
+            .map_or_else(String::new, |terms| format!(", {terms}"))
+    }
+}
+
+/// A single build's query (from [`document_query`]) reading the row a shared
+/// key picks: the one `tie_break` orders first, or as it is when any row
+/// answers.
+pub(super) fn first_row(query: SqlString, tie_break: &TieBreak) -> SqlString {
+    match &tie_break.0 {
+        Some(terms) => SqlString::new(format!("{} ORDER BY {terms} LIMIT 1", query.0)),
+        None => query,
+    }
+}
 
 /// The columns a document reads whose base type is `bytea` or `bytea[]`, by
 /// `(table, column)`. The document query renders them as hex text itself, so
@@ -106,9 +240,95 @@ pub(super) fn bind_param<'q>(query: PgQuery<'q>, value: &GenericValue) -> Result
         GenericValue::Timestamp(ts) => query.bind(*ts),
         GenericValue::TimestampTz(ts) => query.bind(*ts),
         GenericValue::Bytes(bytes) => query.bind(bytes.clone()),
-        GenericValue::Null | GenericValue::Array(_) | GenericValue::Map(_) => {
+        GenericValue::Array(items) => bind_array(query, items)?,
+        GenericValue::Null | GenericValue::Map(_) => {
             return Err(SourceError::Query(
-                "cannot bind null, array, or map as a parameter".into(),
+                "cannot bind null or map as a parameter".into(),
+            ));
+        }
+    })
+}
+
+/// Bind an array of scalars of one kind (a batch's keys, [`key_arrays`]) as
+/// the array of the type [`sql::bound_type`] names for them.
+fn bind_array<'q>(query: PgQuery<'q>, items: &[GenericValue]) -> Result<PgQuery<'q>> {
+    fn all<T>(items: &[GenericValue], take: impl Fn(&GenericValue) -> Option<T>) -> Result<Vec<T>> {
+        items
+            .iter()
+            .map(|item| {
+                take(item).ok_or_else(|| {
+                    SourceError::Query("internal: an array parameter mixes kinds".into())
+                })
+            })
+            .collect()
+    }
+    use GenericValue as V;
+    Ok(match items.first() {
+        None => {
+            return Err(SourceError::Query(
+                "internal: an empty array parameter".into(),
+            ));
+        }
+        Some(V::Bool(_)) => query.bind(all(items, |v| match v {
+            V::Bool(b) => Some(*b),
+            _ => None,
+        })?),
+        Some(V::SmallInt(_)) => query.bind(all(items, |v| match v {
+            V::SmallInt(i) => Some(*i),
+            _ => None,
+        })?),
+        Some(V::Int(_)) => query.bind(all(items, |v| match v {
+            V::Int(i) => Some(*i),
+            _ => None,
+        })?),
+        Some(V::BigInt(_)) => query.bind(all(items, |v| match v {
+            V::BigInt(i) => Some(*i),
+            _ => None,
+        })?),
+        Some(V::Float(_)) => query.bind(all(items, |v| match v {
+            V::Float(f) => Some(*f),
+            _ => None,
+        })?),
+        Some(V::Double(_)) => query.bind(all(items, |v| match v {
+            V::Double(f) => Some(*f),
+            _ => None,
+        })?),
+        Some(V::Decimal(_)) => query.bind(all(items, |v| match v {
+            V::Decimal(d) => Some(*d),
+            _ => None,
+        })?),
+        Some(V::String(_) | V::BigDecimal(_)) => query.bind(all(items, |v| match v {
+            V::String(s) => Some(s.clone()),
+            V::BigDecimal(d) => Some(d.as_str().to_owned()),
+            _ => None,
+        })?),
+        Some(V::Uuid(_)) => query.bind(all(items, |v| match v {
+            V::Uuid(u) => Some(*u),
+            _ => None,
+        })?),
+        Some(V::Date(_)) => query.bind(all(items, |v| match v {
+            V::Date(d) => Some(*d),
+            _ => None,
+        })?),
+        Some(V::Time(_)) => query.bind(all(items, |v| match v {
+            V::Time(t) => Some(*t),
+            _ => None,
+        })?),
+        Some(V::Timestamp(_)) => query.bind(all(items, |v| match v {
+            V::Timestamp(t) => Some(*t),
+            _ => None,
+        })?),
+        Some(V::TimestampTz(_)) => query.bind(all(items, |v| match v {
+            V::TimestampTz(t) => Some(*t),
+            _ => None,
+        })?),
+        Some(V::Bytes(_)) => query.bind(all(items, |v| match v {
+            V::Bytes(b) => Some(b.clone()),
+            _ => None,
+        })?),
+        Some(V::Null | V::Array(_) | V::Map(_)) => {
+            return Err(SourceError::Query(
+                "cannot bind null, array, or map in an array parameter".into(),
             ));
         }
     })
@@ -182,27 +402,101 @@ pub(super) fn document_query(
     Ok((SqlString::new(sql), builder.params))
 }
 
-/// Build a single query that assembles every document whose root key is in
-/// `keys`, for an index with a single-column root key (`pk_column`). Selects
-/// the root key (under [`DOC_KEY`]) beside the assembled document, so the
-/// caller can match each row back to its id; a key with no matching row
-/// simply doesn't come back, which the caller reads as a tombstone.
+/// Build a single query that assembles every document whose root key is one
+/// of `keys`, for an index with a single-column root key (`pk_column`). Each
+/// row carries, under [`DOC_POSITION`], the 1-based position in `keys` of the
+/// key it matched; a key no root row matches simply doesn't come back, which
+/// the caller reads as a tombstone.
 ///
-/// The document is assembled exactly as in [`document_query`] — same nested
-/// `json_build_object` / `json_agg` — differing only in selecting the key and
-/// matching the root with `IN (…)` instead of a single equality. The key is
-/// selected with [`key_select`](super::value::key_select), so it parses into
-/// the same typed [`GenericValue`] variant the requested keys carry — a `uuid`
-/// key comes back as a `Uuid`, not a string — and the key-to-body match is
-/// exact.
+/// Two levels:
+///
+/// - **Inside**, the root rows are read as [`document_query`] reads one:
+///   `root.pk = ANY(ARRAY[$n::<bound>::<key type>, …])` with soft delete and
+///   root filters, one scan of the primary key index, rows in key order. The
+///   document is built here, where the root table is the only relation in
+///   scope, so a raw filter's unqualified name resolves as in a single build.
+/// - **One level out**, the same keys, unnested `WITH ORDINALITY` for their
+///   positions, are joined to the built rows on the same `=`. Postgres
+///   decides which row answers which key, with no Rust mirror of its casts,
+///   and a row answering several positions (the same key read as `int4` and
+///   as `int8`) comes back once per position. The root is scanned once.
+///
+/// The join is a `FULL JOIN`, which Postgres runs only as a hash or merge
+/// join. As an inner or left join the planner may pick a nested loop: over a
+/// materialized batch of wide documents rescanned per requested key (it sizes
+/// a document at a few bytes, so the loop looks free while it spills to disk
+/// and reads the batch back per key), or over the key list rebuilt per row.
+/// A requested key no row answers is dropped one level further out, whose
+/// `OFFSET 0` keeps the planner from reading the `IS NOT NULL` back into the
+/// join, which would make it a `LEFT JOIN` again.
+///
+/// [`RootKey::Shared`]: the inner level keeps one row per key, the one its
+/// [`TieBreak`] orders first, as [`first_row`] does for a single build. A key
+/// Postgres refuses to cast fails the statement, so the whole batch, as a
+/// single build of it fails.
+///
+/// The pairing costs a light document about a quarter of its build, so a
+/// batch whose keys pair by value (`matching::pairs_by_key`) runs the inner
+/// level alone instead: [`documents_by_key_query`].
 pub(super) fn documents_query(
     schema: &IndexSchema,
     pk_column: &ColumnName,
-    pk_base: &str,
     keys: &[GenericValue],
     pks: &HashMap<String, ColumnName>,
     col_types: &HashMap<(String, String), String>,
     bytes: &ByteColumns,
+    shape: Shape<'_>,
+) -> Result<(SqlString, Vec<GenericValue>)> {
+    batched(
+        schema,
+        pk_column,
+        keys,
+        (pks, col_types, bytes),
+        shape,
+        None,
+    )
+}
+
+/// The batched build of [`documents_query`] when every requested key pairs
+/// with its row by value: the key's `=` is identity (`key_type`'s base
+/// `base_name`, a deterministic collation) and every key is of the kind the
+/// column reads back as. Main's own query: the inner level alone, selecting
+/// the row's key under [`DOC_KEY`] beside its document, with no join.
+pub(super) fn documents_by_key_query(
+    schema: &IndexSchema,
+    pk_column: &ColumnName,
+    keys: &[GenericValue],
+    pks: &HashMap<String, ColumnName>,
+    col_types: &HashMap<(String, String), String>,
+    bytes: &ByteColumns,
+    (shape, key_type, base_name): (Shape<'_>, &str, &str),
+) -> Result<(SqlString, Vec<GenericValue>)> {
+    batched(
+        schema,
+        pk_column,
+        keys,
+        (pks, col_types, bytes),
+        shape,
+        Some((key_type, base_name)),
+    )
+}
+
+/// What the catalog says that a document query needs: relation keys, column
+/// types, and the columns read as bytes.
+type Catalog<'a> = (
+    &'a HashMap<String, ColumnName>,
+    &'a HashMap<(String, String), String>,
+    &'a ByteColumns,
+);
+
+/// [`documents_query`] (`by_key` `None`) or [`documents_by_key_query`].
+fn batched(
+    schema: &IndexSchema,
+    pk_column: &ColumnName,
+    keys: &[GenericValue],
+    (pks, col_types, bytes): Catalog<'_>,
+    Shape { root_key, form }: Shape<'_>,
+    by_key: Option<(&str, &str)>,
 ) -> Result<(SqlString, Vec<GenericValue>)> {
     let mut builder = Builder {
         db: &schema.db_schema,
@@ -222,11 +516,17 @@ pub(super) fn documents_query(
         schema.primary_key.as_ref(),
     )?;
 
-    let mut placeholders = Vec::with_capacity(keys.len());
-    for key in keys {
-        placeholders.push(builder.key_placeholder(key.clone(), &schema.table, pk_column)?);
-    }
-    let mut predicate = format!("{} IN ({})", qcol(ROOT, pk_column), placeholders.join(", "),);
+    let with_positions = by_key.is_none();
+    let requested = match form {
+        KeyForm::Constructor => {
+            key_constructor(&mut builder, keys, &schema.table, pk_column, with_positions)?
+        }
+        KeyForm::Parameters => {
+            key_arrays(&mut builder, keys, &schema.table, pk_column, with_positions)?
+        }
+    };
+    let root_pk = qcol(ROOT, pk_column);
+    let mut predicate = format!("{root_pk} = ANY({})", requested.any);
     if let Some(soft_delete) = builder.soft_delete_predicate(schema)? {
         predicate = format!("{predicate} AND NOT ({soft_delete})");
     }
@@ -235,13 +535,173 @@ pub(super) fn documents_query(
     let root_filters = builder.filters(schema.filters.as_deref(), ROOT, &schema.table)?;
     predicate.push_str(&root_filters);
 
+    let table = qtable(&schema.db_schema, &schema.table);
+    let key_out = match by_key {
+        Some((key_type, base_name)) => {
+            super::value::key_select(&root_pk, DOC_KEY, key_type, base_name)
+        }
+        None => format!("{root_pk} AS \"{KEY}\""),
+    };
+    let built = match (root_key, by_key) {
+        (RootKey::Unique, Some(_)) => format!(
+            "SELECT {key_out}, {object} AS \"document\" FROM {table} AS \"{ROOT}\" WHERE {predicate}"
+        ),
+        // `OFFSET 0` keeps the level a scan of its own: pulled up into the
+        // join, the planner may probe the root once per requested key.
+        (RootKey::Unique, None) => format!(
+            "SELECT {key_out}, {object} AS \"document\" \
+             FROM {table} AS \"{ROOT}\" WHERE {predicate} OFFSET 0"
+        ),
+        (RootKey::Shared(tie_break), _) => format!(
+            "SELECT DISTINCT ON ({root_pk}) {key_out}, {object} AS \"document\" \
+             FROM {table} AS \"{ROOT}\" WHERE {predicate} ORDER BY {root_pk}{}",
+            tie_break.after_key()
+        ),
+    };
+    if by_key.is_some() {
+        return Ok((SqlString::new(built), builder.params));
+    }
+    let paired = format!(
+        "SELECT \"{KEYS}\".\"{POSITION}\" AS \"{DOC_POSITION}\", \"{BUILT}\".\"document\" \
+         FROM ({built}) AS \"{BUILT}\" \
+         FULL JOIN {rows} AS \"{KEYS}\"(\"{KEY}\", \"{POSITION}\") \
+         ON \"{BUILT}\".\"{KEY}\" = \"{KEYS}\".\"{KEY}\" OFFSET 0",
+        rows = requested
+            .rows
+            .ok_or_else(|| SourceError::Query("internal: positions not built".into()))?,
+    );
     let sql = format!(
-        "SELECT {key}, {object} AS \"document\" \
-         FROM {} AS \"{ROOT}\" WHERE {predicate}",
-        qtable(&schema.db_schema, &schema.table),
-        key = super::value::key_select(&qcol(ROOT, pk_column), DOC_KEY, pk_base),
+        "SELECT \"{DOC_POSITION}\", \"document\" FROM ({paired}) AS \"{PAIRED}\" \
+         WHERE \"{PAIRED}\".\"document\" IS NOT NULL"
     );
     Ok((SqlString::new(sql), builder.params))
+}
+
+/// A batch's requested keys as SQL: `any`, the array `= ANY(…)` reads, and
+/// `rows`, a `FROM` item of `(key, position)`.
+#[derive(Debug)]
+struct KeyList {
+    any: String,
+    rows: Option<String>,
+}
+
+/// The keys as an array constructor of placeholders, each cast from the type
+/// it is bound as to the key column's type (`$n::<bound>::<key type>`), so
+/// Postgres sees the list element by element: it knows how many keys a batch
+/// holds, so a generic plan costs what a custom one does and is cached, and it
+/// prunes the partitions of a root partitioned by its key under either plan.
+///
+/// The keys are grouped by the type they are bound as, in a fixed order of
+/// those types, and each group is padded to the next power of two by
+/// repeating its last key. A statement's text so depends on the kinds of keys
+/// and on at most ten sizes per kind, never on the exact count, and every
+/// placeholder keeps its type from one batch to the next (a prepared statement
+/// keeps the types of its first use). A repeated key changes nothing an `= ANY`
+/// reads. The position form unnests the same constructor beside one `bigint[]`
+/// parameter of the position each key was requested at, `0` for a pad, and
+/// drops the pads before the join.
+fn key_constructor(
+    builder: &mut Builder<'_>,
+    keys: &[GenericValue],
+    table: &TableName,
+    column: &ColumnName,
+    with_positions: bool,
+) -> Result<KeyList> {
+    let mut kinds: Vec<(&'static str, Vec<(GenericValue, i64)>)> = Vec::new();
+    for (at, key) in keys.iter().enumerate() {
+        let bound = sql::bound_type(key)
+            .ok_or_else(|| SourceError::Query("cannot bind null, array, or map as a key".into()))?;
+        let position = i64::try_from(at + 1)
+            .map_err(|_| SourceError::Query("too many keys in one batch".into()))?;
+        match kinds.iter_mut().find(|(kind, _)| *kind == bound) {
+            Some((_, group)) => group.push((key.clone(), position)),
+            None => kinds.push((bound, vec![(key.clone(), position)])),
+        }
+    }
+    kinds.sort_by_key(|(kind, _)| *kind);
+    let mut placeholders = Vec::new();
+    let mut positions = Vec::new();
+    for (_, group) in kinds {
+        let padded = group.len().next_power_of_two();
+        let last = group.last().map(|(key, _)| key.clone());
+        let pads = std::iter::repeat_with(|| last.clone()).take(padded - group.len());
+        for (key, position) in group
+            .into_iter()
+            .map(|(key, position)| (Some(key), position))
+            .chain(pads.map(|key| (key, 0)))
+        {
+            let key =
+                key.ok_or_else(|| SourceError::Query("internal: an empty key group".into()))?;
+            placeholders.push(builder.key_placeholder(key, table, column)?);
+            positions.push(position);
+        }
+    }
+    let array = format!("ARRAY[{}]", placeholders.join(", "));
+    if !with_positions {
+        return Ok(KeyList {
+            any: array,
+            rows: None,
+        });
+    }
+    let positions = builder.positions(positions);
+    Ok(KeyList {
+        rows: Some(format!(
+            "(SELECT * FROM unnest({array}, {positions}) AS \"{NUMBERED}\"(\"{KEY}\", \"{POSITION}\") \
+             WHERE \"{NUMBERED}\".\"{POSITION}\" > 0)"
+        )),
+        any: array,
+    })
+}
+
+/// The keys as one array parameter per type they are bound as, each cast
+/// element by element to the key column's type ([`Builder::key_array`]), in a
+/// fixed order of those types: one statement text per kind, however many keys.
+/// Keys of one kind keep their order, so `unnest … WITH ORDINALITY` numbers
+/// them; keys of several kinds are unnested beside a `bigint[]` of their
+/// positions, one `unnest` per kind.
+fn key_arrays(
+    builder: &mut Builder<'_>,
+    keys: &[GenericValue],
+    table: &TableName,
+    column: &ColumnName,
+    with_positions: bool,
+) -> Result<KeyList> {
+    let mut kinds: Vec<(&'static str, Vec<GenericValue>, Vec<i64>)> = Vec::new();
+    for (at, key) in keys.iter().enumerate() {
+        let bound = sql::bound_type(key)
+            .ok_or_else(|| SourceError::Query("cannot bind null, array, or map as a key".into()))?;
+        let position = i64::try_from(at + 1)
+            .map_err(|_| SourceError::Query("too many keys in one batch".into()))?;
+        match kinds.iter_mut().find(|(kind, _, _)| *kind == bound) {
+            Some((_, values, positions)) => {
+                values.push(key.clone());
+                positions.push(position);
+            }
+            None => kinds.push((bound, vec![key.clone()], vec![position])),
+        }
+    }
+    kinds.sort_by_key(|(kind, _, _)| *kind);
+    if let [(bound, values, _)] = kinds.as_mut_slice() {
+        let array = builder.key_array(std::mem::take(values), bound, table, column)?;
+        return Ok(KeyList {
+            rows: with_positions.then(|| format!("unnest({array}) WITH ORDINALITY")),
+            any: array,
+        });
+    }
+    let mut arrays = Vec::with_capacity(kinds.len());
+    let mut unnests = Vec::with_capacity(kinds.len());
+    for (bound, values, positions) in kinds {
+        let array = builder.key_array(values, bound, table, column)?;
+        if with_positions {
+            let positions = builder.positions(positions);
+            unnests.push(format!("SELECT * FROM unnest({array}, {positions})"));
+        }
+        arrays.push(array);
+    }
+    Ok(KeyList {
+        any: arrays.join(" || "),
+        rows: with_positions.then(|| format!("({})", unnests.join(" UNION ALL "))),
+    })
 }
 
 /// Build the query that reads back the root rows whose key equals one of
@@ -255,8 +715,7 @@ pub(super) fn documents_query(
 pub(super) fn root_keys_query(
     db: &DatabaseSchema,
     table: &TableName,
-    pk: &ColumnName,
-    pk_base: &str,
+    (pk, pk_type, pk_base): (&ColumnName, &str, &str),
     links: &[GenericValue],
     sql_type: &str,
 ) -> Result<(SqlString, Vec<GenericValue>)> {
@@ -269,7 +728,7 @@ pub(super) fn root_keys_query(
     let column = qident(pk.as_ref());
     let sql = format!(
         "SELECT {} FROM {} WHERE {column} IN ({})",
-        super::value::key_select(&column, pk.as_ref(), pk_base),
+        super::value::key_select(&column, pk.as_ref(), pk_type, pk_base),
         qtable(db, table),
         placeholders.join(", "),
     );
@@ -284,18 +743,16 @@ pub(super) fn root_keys_query(
 pub(super) fn reverse_query(
     db: &DatabaseSchema,
     table: &TableName,
-    select_column: &ColumnName,
-    select_base: &str,
+    (select_column, select_type, select_base): (&ColumnName, &str, &str),
     key: &[(ColumnName, GenericValue)],
     col_types: &HashMap<(String, String), String>,
 ) -> Result<(SqlString, Vec<GenericValue>)> {
     let mut params = Vec::new();
     let mut conditions = Vec::new();
     for (column, value) in key {
+        let unbindable = || SourceError::Query("cannot bind null, array, or map as a key".into());
         if !value.is_bindable_scalar() {
-            return Err(SourceError::Query(
-                "cannot bind null, array, or map as a key".into(),
-            ));
+            return Err(unbindable());
         }
         let sql_type = col_types
             .get(&(table.to_string(), column.to_string()))
@@ -307,7 +764,7 @@ pub(super) fn reverse_query(
             "{} = ${}{}",
             qident(column.as_ref()),
             params.len(),
-            sql::key_cast(value, sql_type),
+            sql::key_cast(value, sql_type).ok_or_else(unbindable)?,
         ));
     }
     if conditions.is_empty() {
@@ -318,6 +775,7 @@ pub(super) fn reverse_query(
         super::value::key_select(
             &qident(select_column.as_ref()),
             select_column.as_ref(),
+            select_type,
             select_base,
         ),
         qtable(db, table),

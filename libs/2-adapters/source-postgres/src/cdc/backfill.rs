@@ -60,6 +60,12 @@ pub(crate) async fn snapshot(
     // (its snapshot transaction) for the duration.
     let pool = PgPoolOptions::new()
         .max_connections(2)
+        .after_connect(|connection, _| {
+            Box::pin(async move {
+                crate::document::without_jit(connection).await;
+                Ok(())
+            })
+        })
         .connect(connection_url)
         .await
         .map_err(|e| SourceError::Connection(e.to_string()))?;
@@ -100,10 +106,10 @@ async fn resolve_tables(pool: &PgPool, tables: &[SnapshotTable]) -> Result<Vec<B
             continue; // reason already logged
         };
         let qualified = format!("{}.{}", quote_ident(schema), quote_ident(name));
-        let pk_base = base_name(pool, &qualified, pk.as_ref()).await?;
+        let (pk_type, pk_base) = key_type(pool, &qualified, pk.as_ref()).await?;
         out.push(BackfillTable {
             qualified,
-            key_select: value::key_select(&quote_ident(pk.as_ref()), KEY, &pk_base),
+            key_select: value::key_select(&quote_ident(pk.as_ref()), KEY, &pk_type, &pk_base),
             table: table.table.clone(),
             pk,
             cursor: format!("flusso_backfill_{n}"),
@@ -112,23 +118,59 @@ async fn resolve_tables(pool: &PgPool, tables: &[SnapshotTable]) -> Result<Vec<B
     Ok(out)
 }
 
-/// The `pg_type.typname` of `column`'s type on `qualified`, through every
-/// domain.
-async fn base_name(pool: &PgPool, qualified: &str, column: &str) -> Result<String> {
-    sqlx::query_scalar(
-        "WITH RECURSIVE d(oid) AS ( \
-           SELECT a.atttypid FROM pg_attribute a \
-           WHERE a.attrelid = $1::regclass AND a.attname = $2 \
-         UNION ALL \
-           SELECT t.typbasetype FROM pg_type t JOIN d ON t.oid = d.oid WHERE t.typtype = 'd' \
-         ) SELECT t.typname::text FROM d JOIN pg_type t ON t.oid = d.oid WHERE t.typtype <> 'd'",
-    )
-    .bind(qualified)
-    .bind(column)
-    .fetch_one(pool)
-    .await
+/// `column`'s type on `qualified`, through every domain: the key type it is
+/// cast to (as the document builder's `key_type`: the base type's
+/// schema-qualified `typname` with no modifier, or the declared type's when
+/// the role may not use the base type's schema, or may not run
+/// `has_schema_privilege` to ask), and its `pg_type.typname`.
+async fn key_type(pool: &PgPool, qualified: &str, column: &str) -> Result<(String, String)> {
+    let fetch = |sql: &'static str| {
+        sqlx::query_as(sql)
+            .bind(qualified)
+            .bind(column)
+            .fetch_one(pool)
+    };
+    match fetch(KEY_TYPE_SQL).await {
+        Err(error) if crate::document::refused_for_privilege(&error) => {
+            fetch(KEY_TYPE_SQL_UNPROBED).await
+        }
+        other => other,
+    }
     .map_err(query_err)
 }
+
+/// [`key_type`]'s lookup, with `$usable` saying whether the role may use the
+/// base type's schema.
+macro_rules! key_type_sql {
+    ($usable:literal) => {
+        concat!(
+            "WITH RECURSIVE d(oid) AS ( \
+               SELECT a.atttypid FROM pg_attribute a \
+               WHERE a.attrelid = $1::regclass AND a.attname = $2 \
+             UNION ALL \
+               SELECT t.typbasetype FROM pg_type t JOIN d ON t.oid = d.oid WHERE t.typtype = 'd' \
+             ) SELECT CASE WHEN ",
+            $usable,
+            " THEN quote_ident(n.nspname) || '.' || quote_ident(t.typname) \
+                        ELSE ( \
+                          SELECT quote_ident(dn.nspname) || '.' || quote_ident(dt.typname) \
+                          FROM pg_attribute a \
+                          JOIN pg_type dt ON dt.oid = a.atttypid \
+                          JOIN pg_namespace dn ON dn.oid = dt.typnamespace \
+                          WHERE a.attrelid = $1::regclass AND a.attname = $2 \
+                        ) END, \
+                      t.typname::text \
+               FROM d JOIN pg_type t ON t.oid = d.oid \
+               JOIN pg_namespace n ON n.oid = t.typnamespace \
+               WHERE t.typtype <> 'd'"
+        )
+    };
+}
+
+const KEY_TYPE_SQL: &str = key_type_sql!("has_schema_privilege(n.oid, 'USAGE')");
+
+/// [`key_type_sql`] for a role that may not run `has_schema_privilege`.
+const KEY_TYPE_SQL_UNPROBED: &str = key_type_sql!("false");
 
 /// The single-column primary key of a table from the catalog, or `None` (with a
 /// warning) if it has no primary key or a composite one.

@@ -417,13 +417,28 @@ proptest! {
     }
 
     #[test]
-    fn documents_query_is_structurally_valid(schema in index_schema()) {
+    fn documents_query_is_structurally_valid(
+        schema in index_schema(),
+        form in prop_oneof![Just(KeyForm::Constructor), Just(KeyForm::Parameters)],
+        keys in prop::collection::vec(
+            prop_oneof![
+                any::<i32>().prop_map(GenericValue::Int),
+                any::<i64>().prop_map(GenericValue::BigInt),
+            ],
+            1..20,
+        ),
+    ) {
         let pk = ColumnName::try_new("id").unwrap();
-        let keys = [GenericValue::Int(1), GenericValue::Int(2)];
-        let result = documents_query(&schema, &pk, "int8", &keys, &pk_map(), &col_type_map(), &ByteColumns::new());
+        let shape = Shape { root_key: &RootKey::Unique, form };
+        let result = documents_query(&schema, &pk, &keys, &pk_map(), &col_type_map(), &ByteColumns::new(), shape);
         prop_assert!(result.is_ok(), "builder errored: {:?}", result.err());
         let (sql, params) = result.unwrap();
         assert_valid(sql.as_str(), params.len())?;
+        prop_assert_eq!(
+            sql.as_str().contains("= ANY(ARRAY["),
+            form == KeyForm::Constructor,
+            "{:?} keys written in another form: {}", form, sql.as_str()
+        );
     }
 
     #[test]
@@ -434,7 +449,13 @@ proptest! {
     ) {
         let key = [(key_column, GenericValue::Int(5))];
         let (sql, params) =
-            reverse_query(&db_schema(), &table, &select_column, "int8", &key, &col_type_map()).unwrap();
+            reverse_query(
+                &db_schema(),
+                &table,
+                (&select_column, "bigint", "int8"),
+                &key,
+                &col_type_map(),
+            ).unwrap();
         assert_valid(sql.as_str(), params.len())?;
     }
 }

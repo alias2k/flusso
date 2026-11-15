@@ -29,9 +29,17 @@ use uuid::Uuid;
 /// [`key_text`](crate::text_value::key_text), beside the value itself, which
 /// is never decoded (a query's row description names its type, a domain by
 /// its base type).
-pub(crate) fn key_select(expr: &str, alias: &str, base_name: &str) -> String {
+///
+/// The value is cast to `key_type`, the column's base type with no modifier
+/// (`PgDocumentBuilder::key_type`), so the statement's result types follow
+/// from its text alone. Postgres refuses to run a prepared statement whose
+/// result type changed under it ("cached plan must not change result type"),
+/// and sqlx keeps one per text on each pooled connection: without the cast, a
+/// key column that changed type (`int` → `bigint`) would fail every lookup
+/// on every connection that ran it before, with the same text after.
+pub(crate) fn key_select(expr: &str, alias: &str, key_type: &str, base_name: &str) -> String {
     format!(
-        "{} AS \"{alias}\", {expr} AS \"{alias}{TYPED}\"",
+        "{} AS \"{alias}\", {expr}::{key_type} AS \"{alias}{TYPED}\"",
         crate::text_value::key_text(expr, base_name)
     )
 }

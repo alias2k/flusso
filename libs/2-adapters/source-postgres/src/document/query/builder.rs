@@ -493,6 +493,38 @@ impl Builder<'_> {
         Ok(format!("{placeholder}::{sql_type}"))
     }
 
+    /// The keys of one kind as one array parameter, cast element by element
+    /// from the type they are bound as (`bound`, [`sql::bound_type`]) to the
+    /// key column's type: `$n::<bound>[]::<key type>[]`, the cast
+    /// [`key_placeholder`](Self::key_placeholder) gives one key.
+    ///
+    /// [`sql::bound_type`]: super::sql::bound_type
+    pub(super) fn key_array(
+        &mut self,
+        keys: Vec<GenericValue>,
+        bound: &str,
+        table: &TableName,
+        column: &ColumnName,
+    ) -> Result<String> {
+        let key_type = self
+            .col_types
+            .get(&(table.to_string(), column.to_string()))
+            .ok_or_else(|| {
+                SourceError::Query(format!("internal: missing type for `{table}.{column}`"))
+            })?
+            .clone();
+        self.params.push(GenericValue::Array(keys));
+        Ok(format!("${}::{bound}[]::{key_type}[]", self.params.len()))
+    }
+
+    /// Positions as one `bigint[]` parameter.
+    pub(super) fn positions(&mut self, positions: Vec<i64>) -> String {
+        self.params.push(GenericValue::Array(
+            positions.into_iter().map(GenericValue::BigInt).collect(),
+        ));
+        format!("${}::int8[]", self.params.len())
+    }
+
     /// [`typed_placeholder`](Self::typed_placeholder) for a key, whose value
     /// is typed, or the text a type's value stays when it can't be (see
     /// [`key_cast`](super::sql::key_cast)).
@@ -509,7 +541,9 @@ impl Builder<'_> {
                 SourceError::Query(format!("internal: missing type for `{table}.{column}`"))
             })?
             .clone();
-        let cast = super::sql::key_cast(&value, &sql_type);
+        let cast = super::sql::key_cast(&value, &sql_type).ok_or_else(|| {
+            SourceError::Query("cannot bind null, array, or map as a parameter".into())
+        })?;
         let placeholder = self.placeholder(value)?;
         Ok(format!("{placeholder}{cast}"))
     }
