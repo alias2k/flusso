@@ -642,6 +642,7 @@ async fn no_key_cast_carries_a_type_modifier() {
 #[tokio::test]
 async fn a_failed_resolve_forgets_the_column_types_of_its_index() {
     let builder = builder_with(vec![event_count()]);
+    cache_type(&builder, "events", "id", "integer", 23);
     let events = TableName::try_new("events").unwrap();
     let change = RowKey(vec![(column("id"), GenericValue::Int(1))]);
     assert!(builder.col_type_cache.caches("public", "events"));

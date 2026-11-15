@@ -743,11 +743,10 @@ impl PgDocumentBuilder {
 
     /// A document query of `index` failed: forget the column types of every
     /// table it reads, since a type that changed under the cache fails it the
-    /// same way on every retry otherwise, then report the error. One Postgres
-    /// raises when the database no longer has what the schema reads (a
-    /// column, a table, an `=` between a link and its key) names the index
-    /// and points at `flusso check`: no retry fixes it, a schema or database
-    /// change does.
+    /// same way on every retry otherwise, then report the error
+    /// ([`query_failed`]).
+    #[cold]
+    #[inline(never)]
     fn failed_query(
         &self,
         index: &IndexName,
@@ -755,33 +754,27 @@ impl PgDocumentBuilder {
         error: sqlx::Error,
     ) -> SourceError {
         self.forget_tables_of(schema);
-        let mismatch = error.as_database_error().is_some_and(|error| {
-            matches!(
-                error.code().as_deref(),
-                Some(UNDEFINED_FUNCTION | DATATYPE_MISMATCH | UNDEFINED_COLUMN | UNDEFINED_TABLE)
-            )
-        });
-        if mismatch {
-            return SourceError::Query(format!(
-                "{error}: the database no longer matches index `{index}`; `flusso check` names \
-                 the field"
-            ));
-        }
-        query_err(error)
+        query_failed(index, error)
     }
 
-    /// Resolving a change on `table` failed: forget the column types of every
-    /// table an index reading `table` reads, as [`failed_query`](Self::failed_query)
-    /// does, since its reverse lookups are written from them too.
+    /// A reverse lookup for `index` failed. A query error forgets the column
+    /// types of every table the index reads, as a failed document query does,
+    /// and is reported the same way ([`query_failed`]).
     #[cold]
     #[inline(never)]
-    fn failed_resolve(&self, table: &TableName, error: SourceError) -> SourceError {
-        for (name, schema) in self.spec.indexes() {
-            if schema.table == *table || !self.reads.paths(name, table).is_empty() {
+    fn failed_lookup(
+        &self,
+        index: &IndexName,
+        schema: &IndexSchema,
+        error: resolve::LookupError,
+    ) -> SourceError {
+        match error {
+            resolve::LookupError::Source(error) => error,
+            resolve::LookupError::Query(error) => {
                 self.forget_tables_of(schema);
+                query_failed(index, *error)
             }
         }
-        error
     }
 
     fn forget_tables_of(&self, schema: &IndexSchema) {
@@ -911,9 +904,10 @@ impl PgDocumentBuilder {
                 let steps = path.address.steps(&schema.fields).ok_or_else(|| {
                     SourceError::Query("internal: a path's address is not in its index".into())
                 })?;
-                let found = self
-                    .resolve_path(schema, table, key, before, &steps)
-                    .await?;
+                let found = match self.resolve_path(schema, table, key, before, &steps).await {
+                    Ok(found) => found,
+                    Err(error) => return Err(self.failed_lookup(name, schema, error)),
+                };
                 if let Some(link) = self
                     .reads_root_from_a_link(schema, pk_column, path, &steps)
                     .await?
@@ -1111,20 +1105,13 @@ impl DocumentBuilder for PgDocumentBuilder {
         after: Option<&RowImage>,
     ) -> Result<Vec<DocumentId>> {
         let mut links = RootLinks::default();
-        let ids = match self
+        let ids = self
             .resolve_change(table, key, before, after, &mut links)
-            .await
-        {
-            Ok(ids) => ids,
-            Err(error) => return Err(self.failed_resolve(table, error)),
-        };
+            .await?;
         if links.is_empty() {
             return Ok(ids);
         }
-        match self.with_root_keys(ids, links).await {
-            Ok(ids) => Ok(ids),
-            Err(error) => Err(self.failed_resolve(table, error)),
-        }
+        self.with_root_keys(ids, links).await
     }
 
     #[tracing::instrument(
@@ -1277,6 +1264,26 @@ impl DocumentBuilder for PgDocumentBuilder {
 
 pub(super) fn query_err(error: sqlx::Error) -> SourceError {
     SourceError::Query(error.to_string())
+}
+
+/// A query `index` runs failed. One Postgres raises when the database no
+/// longer has what the schema reads (a column, a table, an `=` between a link
+/// and its key) names the index and points at `flusso check`: no retry fixes
+/// it, a schema or database change does.
+pub(super) fn query_failed(index: &IndexName, error: sqlx::Error) -> SourceError {
+    let mismatch = error.as_database_error().is_some_and(|error| {
+        matches!(
+            error.code().as_deref(),
+            Some(UNDEFINED_FUNCTION | DATATYPE_MISMATCH | UNDEFINED_COLUMN | UNDEFINED_TABLE)
+        )
+    });
+    if mismatch {
+        return SourceError::Query(format!(
+            "{error}: the database no longer matches index `{index}`; `flusso check` names \
+             the field"
+        ));
+    }
+    query_err(error)
 }
 
 /// Primary-key column names of a table, in index order. `$1` binds the
