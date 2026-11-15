@@ -1643,3 +1643,74 @@ async fn a_server_that_refuses_the_jit_setting_still_connects() {
     let builder = PgDocumentBuilder::connect(&url, Arc::new(spec)).await;
     assert!(builder.is_ok(), "{:?}", builder.err());
 }
+
+/// A batch's plan is cached however few keys it holds (issue #335). Postgres
+/// plans a prepared statement afresh until a generic plan looks no costlier
+/// than the custom ones; for a key list it can't size (an array parameter,
+/// which it takes for ten elements) a batch of fewer keys always looked
+/// cheaper planned afresh, so the live trickle (a lone change commits a batch
+/// of one) planned every call. `pg_stat_statements` counts plans and calls.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_small_batch_reuses_its_plan() {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .with_cmd([
+            "postgres",
+            "-c",
+            "shared_preload_libraries=pg_stat_statements",
+            "-c",
+            "pg_stat_statements.track_planning=on",
+        ])
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE EXTENSION pg_stat_statements",
+        "CREATE TABLE plain (id int PRIMARY KEY)",
+        "CREATE TABLE notes (id int PRIMARY KEY, item_id int NOT NULL, rank int NOT NULL)",
+        "CREATE INDEX ON notes (item_id)",
+        "INSERT INTO plain SELECT g FROM generate_series(1, 1000) g",
+        "INSERT INTO notes SELECT g, g % 1000 + 1, g % 5 FROM generate_series(1, 10000) g",
+        "ANALYZE",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let spec = SourceSpec::new(BTreeMap::from([(
+        index_name("plain"),
+        schema_from(&scoped_schema("plain", "true", "true", "true")),
+    )]));
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec))
+        .await
+        .unwrap();
+    for size in [1, 4, 8] {
+        for call in 0..20 {
+            let first = call * size + 1;
+            builder
+                .build_many(&int_ids("plain", first..first + size))
+                .await
+                .unwrap();
+            builder
+                .build_many(&bigint_ids("plain", (first..first + size).map(i64::from)))
+                .await
+                .unwrap();
+        }
+    }
+    let counts: Vec<(i64, i64, String)> = sqlx::query_as(
+        "SELECT plans, calls, query FROM pg_stat_statements \
+         WHERE query LIKE '%\"plain\"%' AND query LIKE '%ANY%' AND calls >= 10",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(!counts.is_empty());
+    for (plans, calls, query) in &counts {
+        assert!(
+            plans * 2 < *calls,
+            "planned {plans} times in {calls} calls: {query}"
+        );
+    }
+}

@@ -767,3 +767,113 @@ fields:
         plan["JIT"],
     );
 }
+
+/// A batch over a root partitioned by its key is pruned to the partitions its
+/// keys live in, under a generic plan too (issue #335). Postgres prunes at
+/// run time for a key list it can see element by element; with the keys as
+/// one array parameter a generic plan scanned every partition. Here the
+/// builder's sessions are forced to generic plans and `auto_explain` logs
+/// each executed plan: every batch's must report the partitions it left out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_batch_is_pruned_to_its_keys_partitions_under_a_generic_plan() {
+    let container = Postgres::default()
+        .with_tag("16-alpine")
+        .start()
+        .await
+        .unwrap();
+    let port = container.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE TABLE ranged (id int PRIMARY KEY, name text) PARTITION BY RANGE (id)",
+        "DO $$ BEGIN FOR i IN 0..9 LOOP EXECUTE format('CREATE TABLE ranged_%s PARTITION OF \
+         ranged FOR VALUES FROM (%s) TO (%s)', i, i * 1000, (i + 1) * 1000); END LOOP; END $$",
+        "CREATE TABLE hashed (id int PRIMARY KEY, name text) PARTITION BY HASH (id)",
+        "DO $$ BEGIN FOR i IN 0..7 LOOP EXECUTE format('CREATE TABLE hashed_%s PARTITION OF \
+         hashed FOR VALUES WITH (MODULUS 8, REMAINDER %s)', i, i); END LOOP; END $$",
+        "INSERT INTO ranged SELECT g, 'n' || g FROM generate_series(0, 9999) g",
+        "INSERT INTO hashed SELECT g, 'n' || g FROM generate_series(0, 9999) g",
+        "ANALYZE",
+        "ALTER DATABASE postgres SET plan_cache_mode = force_generic_plan",
+        "ALTER DATABASE postgres SET session_preload_libraries = 'auto_explain'",
+        "ALTER DATABASE postgres SET auto_explain.log_min_duration = 0",
+        "ALTER DATABASE postgres SET auto_explain.log_analyze = on",
+        "ALTER DATABASE postgres SET auto_explain.log_format = 'json'",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+    }
+    let schema = |table: &str| {
+        IndexSchema::try_from(
+            SchemaYaml::try_parse(
+                format!(
+                    "version: 1\ntable: {table}\nprimary_key: id\nfields:\n  - keyword: name\n    required: false\n"
+                )
+                .as_str(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let spec = SourceSpec::new(BTreeMap::from([
+        (index_name("ranged"), schema("ranged")),
+        (index_name("hashed"), schema("hashed")),
+    ]));
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec))
+        .await
+        .unwrap();
+    for index in ["ranged", "hashed"] {
+        let by_key: Vec<DocumentId> = [3, 5, 8]
+            .into_iter()
+            .map(|key| DocumentId {
+                index: index_name(index),
+                key: RowKey(vec![(column("id"), GenericValue::Int(key))]),
+            })
+            .collect();
+        let by_position: Vec<DocumentId> = [3, 5, 8]
+            .into_iter()
+            .map(|key| DocumentId {
+                index: index_name(index),
+                key: RowKey(vec![(column("id"), GenericValue::BigInt(key))]),
+            })
+            .collect();
+        for _ in 0..3 {
+            builder.build_many(&by_key).await.unwrap();
+            builder.build_many(&by_position).await.unwrap();
+        }
+    }
+
+    let log = String::from_utf8(container.stderr_to_vec().await.unwrap()).unwrap();
+    let plans: Vec<serde_json::Value> = log
+        .split("plan:\n")
+        .skip(1)
+        .filter_map(|entry| {
+            serde_json::Deserializer::from_str(entry)
+                .into_iter::<serde_json::Value>()
+                .next()
+                .and_then(Result::ok)
+        })
+        .filter(|plan| {
+            plan["Query Text"]
+                .as_str()
+                .is_some_and(|text| text.contains("ANY") && text.contains("json_build_object"))
+        })
+        .collect();
+    assert_eq!(plans.len(), 12, "every batch's plan: {plans:#?}");
+    fn removed(plan: &serde_json::Value) -> i64 {
+        plan["Subplans Removed"].as_i64().unwrap_or(0)
+            + plan["Plans"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(removed)
+                .sum::<i64>()
+    }
+    for plan in &plans {
+        assert!(
+            removed(&plan["Plan"]) > 0,
+            "no partition pruned: {:#}",
+            plan["Plan"]
+        );
+    }
+}
