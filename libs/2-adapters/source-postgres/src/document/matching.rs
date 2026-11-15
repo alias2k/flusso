@@ -55,20 +55,19 @@ pub(super) fn match_rows(
 mod tests;
 
 /// Whether the rows of a batch over a key column of base type `base_name`
-/// pair with `keys` by value. Two conditions:
+/// pair with `keys` by value, given the column's `=` is identity on the
+/// values flusso reads back (`ColumnMeta::equal_is_identical`, the one
+/// definition, which the caller checks first: no `numeric`, float, `citext`
+/// or nondeterministic collation):
 ///
-/// - `equal_is_identical`: Postgres's `=` on the column is identity on the
-///   values flusso reads back (`ColumnMeta::equal_is_identical`, the one
-///   definition: no `numeric`, float, `citext` or nondeterministic collation).
 /// - Every key is already of the kind the column reads back as, and its cast
 ///   to the column's type keeps it as it is. A `char(n)` pads a requested
 ///   text and a `name` cuts it to 63 bytes, so Postgres finds a row the text
 ///   doesn't equal: those, a key read before a type change, or a key of
 ///   another kind pair by position, where Postgres compares.
-pub(super) fn pairs_by_key(
+pub(super) fn pairs_by_key<'a>(
     base_name: &str,
-    equal_is_identical: bool,
-    keys: &[GenericValue],
+    mut keys: impl Iterator<Item = &'a GenericValue>,
 ) -> bool {
     let reads_back_as: fn(&GenericValue) -> bool = match base_name {
         "bool" => |key| matches!(key, GenericValue::Bool(_)),
@@ -84,7 +83,7 @@ pub(super) fn pairs_by_key(
         "text" | "varchar" => |key| matches!(key, GenericValue::String(_)),
         _ => return false,
     };
-    equal_is_identical && keys.iter().all(reads_back_as)
+    keys.all(reads_back_as)
 }
 
 /// A batch's rows by key, as [`match_by_key`] takes them: each row's outcome
@@ -94,18 +93,29 @@ pub(super) type ByKey = HashMap<GenericValue, std::result::Result<Outcome, usize
 /// Push one document per requested id onto `out`, in `requested`'s order:
 /// the row whose key equals the id's key, or a tombstone when none does. A
 /// key requested twice gets the same document twice.
+///
+/// `false` when a row equals no requested key. Every row was found by `=`
+/// against one of them, so its key read back differently: the type it was
+/// read back as is stale, and the tombstones written are not to be trusted.
 pub(super) fn match_by_key(
     mut rows: ByKey,
     requested: &[(&GenericValue, &DocumentId)],
     out: &mut Vec<Document>,
-) {
+) -> bool {
+    let mut claimed = 0;
     for (key, id) in requested {
         let id = (*id).clone();
         let document = match rows.get_mut(*key) {
             None => Document::Delete { id },
             Some(answer) => match std::mem::replace(answer, Err(out.len())) {
-                Ok(Ok(body)) => Document::Upsert { id, body },
-                Ok(Err(failure)) => Document::Failed { id, failure },
+                Ok(Ok(body)) => {
+                    claimed += 1;
+                    Document::Upsert { id, body }
+                }
+                Ok(Err(failure)) => {
+                    claimed += 1;
+                    Document::Failed { id, failure }
+                }
                 Err(earlier) => {
                     *answer = Err(earlier);
                     match out.get(earlier) {
@@ -124,4 +134,5 @@ pub(super) fn match_by_key(
         };
         out.push(document);
     }
+    claimed == rows.len()
 }

@@ -251,6 +251,27 @@ impl ColumnMeta {
     }
 }
 
+/// What a batched build reads from the catalog: relation keys, column types,
+/// the columns read as bytes, whether the root key is unique, and the root
+/// key column itself.
+#[derive(Debug)]
+struct BatchCatalog {
+    pks: HashMap<String, ColumnName>,
+    col_types: HashMap<(String, String), String>,
+    bytes: query::ByteColumns,
+    root_key: query::RootKey,
+    key: Arc<ColumnMeta>,
+}
+
+impl BatchCatalog {
+    /// Whether `chunk`'s keys pair with their rows by value
+    /// ([`matching::pairs_by_key`]).
+    fn pairs_by_key(&self, chunk: &[(&kernel::GenericValue, &DocumentId)]) -> bool {
+        self.key.equal_is_identical()
+            && matching::pairs_by_key(&self.key.base_name, chunk.iter().map(|(key, _)| *key))
+    }
+}
+
 /// One root row's document as [`PgDocumentBuilder::document_by_id`] and
 /// [`PgDocumentBuilder::sample_document`] build it: the body, or why it could
 /// not be finished.
@@ -487,6 +508,103 @@ impl PgDocumentBuilder {
             key: RowKey(vec![(pk_column, key_value)]),
         };
         Ok(built(self.build(&id).await?))
+    }
+
+    /// What a batched build of `schema` needs from the catalog, read once per
+    /// [`build_many`](DocumentBuilder::build_many) call (cached).
+    async fn batch_catalog(
+        &self,
+        schema: &kernel::IndexSchema,
+        pk_column: &ColumnName,
+    ) -> Result<BatchCatalog> {
+        let pks = self.relation_pks(schema).await?;
+        let mut col_types = self.filter_column_types(schema).await?;
+        self.add_key_column_types(schema, &[pk_column], &mut col_types)
+            .await?;
+        let bytes = self.byte_columns(schema, &pks).await?;
+        let root_key = self.root_key(schema, &[pk_column]).await?;
+        let key = self
+            .column_meta(&schema.db_schema, &schema.table, pk_column)
+            .await?;
+        Ok(BatchCatalog {
+            pks,
+            col_types,
+            bytes,
+            root_key,
+            key,
+        })
+    }
+
+    /// Build one chunk of a batch onto `out`. `by_key`: pair rows by their
+    /// key's value ([`query::documents_by_key_query`]); `Ok(false)` when a
+    /// row was left unclaimed, with `out` partly written, so the caller can
+    /// undo it and rerun the chunk by position.
+    #[allow(clippy::too_many_arguments)]
+    async fn build_chunk(
+        &self,
+        index_name: &IndexName,
+        schema: &kernel::IndexSchema,
+        pk_column: &ColumnName,
+        chunk: &[(&kernel::GenericValue, &DocumentId)],
+        catalog: &BatchCatalog,
+        by_key: bool,
+        out: &mut Vec<Document>,
+    ) -> Result<bool> {
+        let keys: Vec<kernel::GenericValue> =
+            chunk.iter().map(|(value, _)| (*value).clone()).collect();
+        let BatchCatalog {
+            pks,
+            col_types,
+            bytes,
+            root_key,
+            key,
+        } = catalog;
+        let (sql, params) = if by_key {
+            query::documents_by_key_query(
+                schema,
+                pk_column,
+                &keys,
+                pks,
+                col_types,
+                bytes,
+                (*root_key, &key.key_type, &key.base_name),
+            )?
+        } else {
+            query::documents_query(schema, pk_column, &keys, pks, col_types, bytes, *root_key)?
+        };
+
+        let mut statement = sqlx::query(sql);
+        for param in &params {
+            statement = query::bind_param(statement, param)?;
+        }
+        let rows = statement
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| self.failed_query(index_name, schema, error))?;
+
+        let plan = self.plan(index_name)?;
+        if by_key {
+            let mut found = matching::ByKey::with_capacity(rows.len());
+            for row in &rows {
+                found.insert(
+                    value::decode_key(row, query::DOC_KEY),
+                    Ok(value::read_document(row, &schema.fields, plan)?),
+                );
+            }
+            return Ok(matching::match_by_key(found, chunk, out));
+        }
+        let mut found = Vec::with_capacity(rows.len());
+        for row in &rows {
+            // A built row the join paired with no position (never expected:
+            // it was read by the same keys) answers nothing.
+            let position: Option<i64> = row.try_get(query::DOC_POSITION).map_err(query_err)?;
+            let Some(position) = position else {
+                continue;
+            };
+            found.push((position, value::read_document(row, &schema.fields, plan)?));
+        }
+        matching::match_rows(found, chunk, out);
+        Ok(true)
     }
 
     /// The single-column primary key of a table, from the Postgres catalog
@@ -1302,74 +1420,29 @@ impl DocumentBuilder for PgDocumentBuilder {
                 continue;
             };
 
-            let pks = self.relation_pks(schema).await?;
-            let mut col_types = self.filter_column_types(schema).await?;
-            self.add_key_column_types(schema, &[&pk_column], &mut col_types)
-                .await?;
-            let bytes = self.byte_columns(schema, &pks).await?;
-            let root_key = self.root_key(schema, &[&pk_column]).await?;
-
-            let key_meta = self
-                .column_meta(&schema.db_schema, &schema.table, &pk_column)
-                .await?;
-
+            let mut catalog = self.batch_catalog(schema, &pk_column).await?;
             for chunk in keyed.chunks(BUILD_CHUNK) {
-                let keys: Vec<kernel::GenericValue> =
-                    chunk.iter().map(|(value, _)| (*value).clone()).collect();
-                let by_key = matching::pairs_by_key(
-                    &key_meta.base_name,
-                    key_meta.equal_is_identical(),
-                    &keys,
-                );
-                let (sql, params) = if by_key {
-                    query::documents_by_key_query(
-                        schema,
-                        &pk_column,
-                        &keys,
-                        &pks,
-                        &col_types,
-                        &bytes,
-                        (root_key, &key_meta.key_type, &key_meta.base_name),
-                    )?
-                } else {
-                    query::documents_query(
-                        schema, &pk_column, &keys, &pks, &col_types, &bytes, root_key,
-                    )?
-                };
-
-                let mut statement = sqlx::query(sql);
-                for param in &params {
-                    statement = query::bind_param(statement, param)?;
-                }
-                let rows = statement
-                    .fetch_all(&self.pool)
-                    .await
-                    .map_err(|error| self.failed_query(index_name, schema, error))?;
-
-                let plan = self.plan(index_name)?;
-                if by_key {
-                    let mut found = matching::ByKey::with_capacity(rows.len());
-                    for row in &rows {
-                        found.insert(
-                            value::decode_key(row, query::DOC_KEY),
-                            Ok(value::read_document(row, &schema.fields, plan)?),
-                        );
-                    }
-                    matching::match_by_key(found, chunk, &mut out);
+                let start = out.len();
+                let by_key = catalog.pairs_by_key(chunk);
+                if self
+                    .build_chunk(
+                        index_name, schema, &pk_column, chunk, &catalog, by_key, &mut out,
+                    )
+                    .await?
+                {
                     continue;
                 }
-                let mut found = Vec::with_capacity(rows.len());
-                for row in &rows {
-                    // A built row the join paired with no position (never
-                    // expected: it was read by the same keys) answers nothing.
-                    let position: Option<i64> =
-                        row.try_get(query::DOC_POSITION).map_err(query_err)?;
-                    let Some(position) = position else {
-                        continue;
-                    };
-                    found.push((position, value::read_document(row, &schema.fields, plan)?));
-                }
-                matching::match_rows(found, chunk, &mut out);
+                // A row the batch found by `=` equals no requested key once
+                // read back: the cached key type is stale (the change
+                // stream's `Relation` message is still to come). Read the
+                // types afresh and let Postgres pair the chunk by position.
+                out.truncate(start);
+                self.forget_tables_of(schema);
+                catalog = self.batch_catalog(schema, &pk_column).await?;
+                self.build_chunk(
+                    index_name, schema, &pk_column, chunk, &catalog, false, &mut out,
+                )
+                .await?;
             }
         }
         Ok(out)

@@ -109,7 +109,7 @@ fn by_key(rows: Vec<(GenericValue, Outcome)>, keys: &[i32]) -> Vec<String> {
         .into_iter()
         .map(|(key, outcome)| (key, Ok(outcome)))
         .collect();
-    match_by_key(rows, &keyed, &mut out);
+    assert!(match_by_key(rows, &keyed, &mut out), "every row claimed");
     assert_eq!(out.len(), ids.len());
     out.iter()
         .zip(&ids)
@@ -157,39 +157,45 @@ fn a_row_answers_each_id_its_key_names() {
     );
 }
 
-/// Only keys of the kind their column reads back as, over a type whose `=`
-/// is identity, pair by value.
+/// Only keys of the kind their column reads back as, whose cast keeps them
+/// as they are, pair by value (the caller has checked the column's `=` is
+/// identity).
 #[test]
-fn only_keys_of_the_columns_own_kind_on_an_identity_type_pair_by_value() {
+fn only_keys_of_the_columns_own_kind_kept_by_its_cast_pair_by_value() {
     let ints = [GenericValue::Int(1), GenericValue::Int(2)];
-    assert!(pairs_by_key("int4", true, &ints));
+    assert!(pairs_by_key("int4", ints.iter()));
     assert!(
-        !pairs_by_key("int8", true, &ints),
+        !pairs_by_key("int8", ints.iter()),
         "read before a type change"
     );
-    assert!(!pairs_by_key(
-        "int4",
-        true,
-        &[GenericValue::Int(1), GenericValue::BigInt(2)]
-    ));
-    assert!(!pairs_by_key(
-        "numeric",
-        true,
-        &[GenericValue::String("1.5".to_owned())]
-    ));
+    let mixed = [GenericValue::Int(1), GenericValue::BigInt(2)];
+    assert!(!pairs_by_key("int4", mixed.iter()));
     let text = [GenericValue::String("ab".to_owned())];
-    assert!(pairs_by_key("text", true, &text));
+    assert!(pairs_by_key("text", text.iter()));
+    assert!(pairs_by_key("varchar", text.iter()));
     assert!(
-        !pairs_by_key("text", false, &text),
-        "a nondeterministic collation"
+        !pairs_by_key("bpchar", text.iter()),
+        "a cast pads a requested text"
     );
     assert!(
-        !pairs_by_key("bpchar", true, &text),
-        "trailing blanks compare equal"
-    );
-    assert!(
-        !pairs_by_key("name", true, &text),
+        !pairs_by_key("name", text.iter()),
         "a cast cuts a requested text"
     );
-    assert!(!pairs_by_key("citext", true, &text));
+    assert!(!pairs_by_key("numeric", text.iter()));
+    assert!(!pairs_by_key("citext", text.iter()));
+}
+
+/// A row whose key equals no requested key is reported, so the caller can
+/// rerun the chunk by position.
+#[test]
+fn a_row_no_requested_key_equals_is_reported() {
+    let values = [GenericValue::Int(2)];
+    let ids: Vec<DocumentId> = values.iter().cloned().map(id).collect();
+    let keyed: Vec<(&GenericValue, &DocumentId)> = values.iter().zip(&ids).collect();
+    let rows: ByKey = [(GenericValue::String("2.00".to_owned()), body("b"))]
+        .into_iter()
+        .map(|(key, outcome)| (key, Ok(outcome)))
+        .collect();
+    let mut out = Vec::new();
+    assert!(!match_by_key(rows, &keyed, &mut out));
 }
