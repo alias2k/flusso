@@ -18,6 +18,7 @@ fn state() -> (DecodeState, Arc<Positions>) {
         open_xid: 0,
         pending: VecDeque::new(),
         readable: HashSet::new(),
+        unchecked: HashSet::new(),
         read_tables: Some(HashSet::new()),
         ack: Arc::clone(&ack),
         done: false,
@@ -880,6 +881,8 @@ fn holding_stream(
         visibility: snapshots,
         decode,
         read_ahead,
+        fetch: None,
+        next_fetch: Instant::now(),
         hold: None,
         hold_clock,
     })

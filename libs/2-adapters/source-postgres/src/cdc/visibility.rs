@@ -189,7 +189,7 @@ pub(crate) struct Stall {
 }
 
 /// Where the stream reads visibility from: the server, or a test double.
-pub(crate) trait Visibility: Send + Sync + 'static {
+pub(crate) trait Visibility: Clone + Send + Sync + 'static {
     /// A new snapshot.
     fn snapshot(&self) -> impl Future<Output = Result<Snapshot>> + Send;
 
@@ -236,6 +236,8 @@ impl Visibility for PgVisibility {
         .fetch_one(&self.pool)
         .await
         .map_err(query)?;
+        // The setting decides it for any role. The walsender's row is a
+        // cross-check: without `pg_read_all_stats` its `sync_state` is NULL.
         let refusal = (names_standby(&names, &self.application_name)
             || sync_state.as_deref().is_some_and(|state| state != "async"))
         .then(|| standby_refusal(&self.application_name, &names));

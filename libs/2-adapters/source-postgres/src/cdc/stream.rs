@@ -120,8 +120,24 @@ struct State<C, V> {
     visibility: V,
     decode: DecodeState,
     read_ahead: usize,
+    /// The snapshot read in flight, on its own task: it runs while the engine
+    /// builds and publishes, so a burst's transactions are checked without the
+    /// stream ever making the engine wait for a round trip it could overlap.
+    fetch: Option<Fetch>,
+    /// When the next snapshot may be read: now, unless the oldest transaction
+    /// was just found still invisible, then on the poll schedule.
+    next_fetch: Instant,
     hold: Option<Hold>,
     hold_clock: HoldClock,
+}
+
+/// A snapshot read on its own task, aborted with the stream.
+struct Fetch(tokio::task::JoinHandle<Result<super::visibility::Snapshot>>);
+
+impl Drop for Fetch {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// The oldest transaction in `pending`, found not visible yet.
@@ -130,7 +146,6 @@ struct Hold {
     xid: u32,
     since: Instant,
     delay: Duration,
-    next_poll: Instant,
     warn_at: Instant,
 }
 
@@ -170,6 +185,9 @@ struct DecodeState {
     /// The xids in `pending` that may be read back: visible to a snapshot, or
     /// touching no table an index reads. Dropped once emitted.
     readable: HashSet<u32>,
+    /// The xids in `pending` no snapshot has shown visible yet: what the next
+    /// snapshot read is checked against.
+    unchecked: HashSet<u32>,
     /// See [`Settings::read_tables`].
     read_tables: Option<HashSet<TableName>>,
     ack: Arc<Positions>,
@@ -206,12 +224,17 @@ impl DecodeState {
             .filter(|xid| !self.readable.contains(xid))
     }
 
-    /// Mark readable every transaction in `pending` that `snapshot` sees.
+    /// Mark readable every unchecked transaction `snapshot` sees.
     fn seen_by(&mut self, snapshot: &super::visibility::Snapshot) {
-        for change in &self.pending {
-            if !self.readable.contains(&change.xid) && snapshot.sees(change.xid) {
-                self.readable.insert(change.xid);
-            }
+        let seen: Vec<u32> = self
+            .unchecked
+            .iter()
+            .copied()
+            .filter(|xid| snapshot.sees(*xid))
+            .collect();
+        for xid in seen {
+            self.unchecked.remove(&xid);
+            self.readable.insert(xid);
         }
     }
 }
@@ -250,12 +273,15 @@ pub(crate) fn build<C: Replication, V: Visibility>(
             open_xid: 0,
             pending: VecDeque::new(),
             readable: HashSet::new(),
+            unchecked: HashSet::new(),
             read_tables: settings.read_tables,
             ack,
             done: false,
             column_types,
         },
         read_ahead: settings.read_ahead.max(1),
+        fetch: None,
+        next_fetch: Instant::now(),
         hold: None,
         hold_clock: settings.hold_clock,
     };
@@ -275,6 +301,9 @@ fn into_stream<C: Replication, V: Visibility>(
                 .client
                 .update_applied_lsn(Lsn::from_u64(state.decode.ack.confirmed_lsn()));
 
+            if let Err(e) = state.collect() {
+                return Some((Err(e), state));
+            }
             if let Some(change) = state.decode.next_change() {
                 if state
                     .hold
@@ -282,8 +311,10 @@ fn into_stream<C: Replication, V: Visibility>(
                 {
                     state.end_hold();
                 }
+                state.prefetch();
                 return Some((Ok(change), state));
             }
+            state.prefetch();
 
             let Some(xid) = state.decode.held() else {
                 state.end_hold();
@@ -311,31 +342,39 @@ fn into_stream<C: Replication, V: Visibility>(
                 continue;
             };
 
-            if state.poll_due(xid) {
-                let checked = match state.read_ready().await {
-                    Ok(()) => state.check(xid).await,
-                    Err(e) => Err(e),
-                };
-                if let Err(e) = checked {
-                    state.decode.done = true;
-                    return Some((Err(e), state));
-                }
-                continue;
+            if let Err(e) = state.holding(xid).await {
+                state.decode.done = true;
+                return Some((Err(e), state));
             }
-
             // Held: confirmations keep flowing, the stream reads on up to its
-            // bound, and the next check waits for its time.
-            let next_poll = state.hold.map_or_else(Instant::now, |hold| hold.next_poll);
+            // bound, and the snapshot read in flight, or the next one's time,
+            // turns the loop.
             let room = !state.decode.done && state.decode.pending.len() < state.read_ahead;
+            let fetching = state.fetch.is_some();
+            let fetch = state.fetch.as_mut();
             tokio::select! {
                 biased;
                 () = state.decode.ack.confirmed_moved() => {}
+                joined = async {
+                    match fetch {
+                        Some(Fetch(handle)) => Some((&mut *handle).await),
+                        None => None,
+                    }
+                }, if fetching => {
+                    state.fetch = None;
+                    if let Some(joined) = joined
+                        && let Err(e) = state.apply(joined)
+                    {
+                        state.decode.done = true;
+                        return Some((Err(e), state));
+                    }
+                }
                 received = state.client.recv(), if room => {
                     if let Err(e) = state.receive(received).await {
                         return Some((Err(e), state));
                     }
                 }
-                () = tokio::time::sleep_until(next_poll) => {}
+                () = tokio::time::sleep_until(state.next_fetch), if !fetching => {}
             }
         }
     }))
@@ -364,59 +403,74 @@ impl<C: Replication, V: Visibility> State<C, V> {
         handled
     }
 
-    /// Take in every event the client already holds, up to the read-ahead
-    /// bound, so one check covers every transaction read so far.
-    async fn read_ready(&mut self) -> std::result::Result<(), SourceError> {
-        while !self.decode.done && self.decode.pending.len() < self.read_ahead {
-            let Some(received) = self.client.recv().now_or_never() else {
-                return Ok(());
-            };
-            self.receive(received).await?;
+    /// Start reading a snapshot when a transaction awaits a check, none is in
+    /// flight, and the poll schedule allows.
+    fn prefetch(&mut self) {
+        if self.fetch.is_none()
+            && !self.decode.unchecked.is_empty()
+            && Instant::now() >= self.next_fetch
+        {
+            let visibility = self.visibility.clone();
+            self.fetch = Some(Fetch(tokio::spawn(
+                async move { visibility.snapshot().await },
+            )));
+        }
+    }
+
+    /// Take a finished snapshot read, if any, and [`apply`](Self::apply) it.
+    fn collect(&mut self) -> std::result::Result<(), SourceError> {
+        let Some(Fetch(handle)) = self.fetch.as_mut() else {
+            return Ok(());
+        };
+        let Some(joined) = handle.now_or_never() else {
+            return Ok(());
+        };
+        self.fetch = None;
+        self.apply(joined)
+    }
+
+    /// Mark what a finished snapshot read sees. While the oldest transaction
+    /// stays invisible, the next read waits on the poll schedule; otherwise
+    /// it may start at once.
+    fn apply(
+        &mut self,
+        joined: std::result::Result<Result<super::visibility::Snapshot>, tokio::task::JoinError>,
+    ) -> std::result::Result<(), SourceError> {
+        let snapshot =
+            joined.map_err(|e| SourceError::Query(format!("reading a snapshot: {e}")))??;
+        self.decode.seen_by(&snapshot);
+        let now = Instant::now();
+        self.next_fetch = now;
+        if let Some(hold) = self.hold.as_mut()
+            && self.decode.held() == Some(hold.xid)
+        {
+            hold.delay = poll_delay(now - hold.since, hold.delay);
+            self.next_fetch = now + hold.delay;
         }
         Ok(())
     }
 
-    /// Whether the held front transaction `xid` is due a check: a new one is
-    /// checked at once, a waiting one on its schedule.
-    fn poll_due(&self, xid: u32) -> bool {
-        self.hold
-            .is_none_or(|hold| hold.xid != xid || Instant::now() >= hold.next_poll)
-    }
-
-    /// Read a snapshot, mark what it sees readable, and, while `xid` is still
-    /// not visible, schedule the next check and report a long wait.
-    async fn check(&mut self, xid: u32) -> std::result::Result<(), SourceError> {
-        let snapshot = self.visibility.snapshot().await?;
-        self.decode.seen_by(&snapshot);
-        if self.decode.held() != Some(xid) {
-            return Ok(());
-        }
+    /// The front transaction `xid` is held: start timing a new hold, and past
+    /// [`STALL_WARNING`] report it.
+    async fn holding(&mut self, xid: u32) -> std::result::Result<(), SourceError> {
         let now = Instant::now();
         let hold = match self.hold {
-            Some(hold) if hold.xid == xid => {
-                let delay = poll_delay(now - hold.since, hold.delay);
-                Hold {
-                    delay,
-                    next_poll: now + delay,
-                    ..hold
-                }
-            }
+            Some(hold) if hold.xid == xid => hold,
             _ => {
-                let delay = poll_delay(Duration::ZERO, Duration::ZERO);
                 *self
                     .hold_clock
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner) = Some(now);
-                Hold {
+                let hold = Hold {
                     xid,
                     since: now,
-                    delay,
-                    next_poll: now + delay,
+                    delay: Duration::ZERO,
                     warn_at: now + STALL_WARNING,
-                }
+                };
+                self.hold = Some(hold);
+                hold
             }
         };
-        self.hold = Some(hold);
         if now >= hold.warn_at {
             self.report_stall(hold).await?;
         }
@@ -578,7 +632,9 @@ fn handle(
                         .iter()
                         .any(|change| read.contains(change.table()))
                 });
-                if !read {
+                if read {
+                    state.unchecked.insert(xid);
+                } else {
                     state.readable.insert(xid);
                 }
                 for event in state.open_txn.drain(..) {
