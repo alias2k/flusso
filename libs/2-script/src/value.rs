@@ -238,20 +238,6 @@ fn exact(value: &Decimal) -> GenericValue {
         .map_or(GenericValue::Decimal(*value), GenericValue::BigDecimal)
 }
 
-/// A decimal's `to_float()` in a script: the `f64` nearest its exact value,
-/// parsed from its text (`Decimal::to_f64` can land one unit in the last place
-/// off for a long value); `0.0` for a zero of either sign.
-pub(crate) fn decimal_to_float(value: Decimal) -> f64 {
-    if value.is_zero() {
-        return 0.0;
-    }
-    let mut text = DecimalText::default();
-    match std::fmt::Write::write_fmt(&mut text, format_args!("{value}")) {
-        Ok(()) => text.as_str().parse().unwrap_or(f64::NAN),
-        Err(_) => value.to_string().parse().unwrap_or(f64::NAN),
-    }
-}
-
 /// A `Decimal`'s text on the stack: a sign, 29 digits, a point and up to 28
 /// leading fractional zeros fit.
 struct DecimalText {

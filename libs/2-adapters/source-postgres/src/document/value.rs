@@ -241,6 +241,13 @@ pub(crate) fn coerce_document(
     }
 }
 
+/// Read each document for `fields`; `None` for one that failed.
+#[cfg(feature = "bench")]
+pub(crate) fn bench_reader(fields: Vec<Field>) -> impl Fn(&[u8]) -> Option<GenericValue> {
+    let plan = DocumentPlan::new(&fields);
+    move |json| coerce_document(json, &fields, &plan).ok()
+}
+
 /// The document a query row holds in its `document` column, read by
 /// [`coerce_document`]: the inner `Err` is a document that failed, the outer
 /// one a row that holds no readable document.
@@ -499,9 +506,15 @@ impl<'de> DeserializeSeed<'de> for FieldSeed<'_> {
             failures,
         } = self;
         match source {
-            FieldSource::Column(column) if column.array && column.ty == FlussoType::Decimal => {
+            FieldSource::Column(column)
+                if column.array && matches!(column.ty, FlussoType::Decimal | FlussoType::Float) =>
+            {
+                let element: fn(&str, &At<'_>) -> Result<GenericValue, String> = match column.ty {
+                    FlussoType::Decimal => decimal,
+                    _ => single,
+                };
                 let raw = <&RawValue>::deserialize(deserializer)?;
-                let read = decimal_array(raw.get(), column, &at).map_err(D::Error::custom)?;
+                let read = raw_array(raw.get(), column, &at, element).map_err(D::Error::custom)?;
                 Ok(failed_as_null(read, &at, failures))
             }
             FieldSource::Column(column) if column.array => {
@@ -609,6 +622,10 @@ fn scalar<'de, D: Deserializer<'de>>(
         FlussoType::Decimal => {
             let raw = <&RawValue>::deserialize(deserializer)?;
             decimal(raw.get(), at).map_err(D::Error::custom)
+        }
+        FlussoType::Float => {
+            let raw = <&RawValue>::deserialize(deserializer)?;
+            single(raw.get(), at).map_err(D::Error::custom)
         }
         FlussoType::Map { values } if **values == FlussoType::Decimal => {
             deserializer.deserialize_any(DecimalMap { at: *at })
@@ -869,13 +886,14 @@ fn coerce_array(
     Ok(coerce_elements(items, &column.ty))
 }
 
-/// A `decimal` array column's value, as [`coerce_array`] reads any other, each
-/// element from the exact number text Postgres wrote. The outer `Err` is a
-/// value nested past the depth limit.
-fn decimal_array(
+/// A `decimal` or `float` array column's value, as [`coerce_array`] reads any
+/// other, each element read by `element` from the exact number text Postgres
+/// wrote. The outer `Err` is a value nested past the depth limit.
+fn raw_array(
     raw: &str,
     column: &Column,
     at: &At<'_>,
+    element: fn(&str, &At<'_>) -> Result<GenericValue, String>,
 ) -> Result<Result<GenericValue, BuildFailure>, String> {
     let (items, wrapped): (Vec<&str>, bool) = match raw.as_bytes().first() {
         Some(b'n') => return Ok(Ok(default_list(column))),
@@ -907,7 +925,7 @@ fn decimal_array(
         .iter()
         .enumerate()
         .filter(|(_, item)| **item != "null")
-        .map(|(index, item)| decimal(item, &At::Index(at, index)))
+        .map(|(index, item)| element(item, &At::Index(at, index)))
         .collect::<Result<_, _>>()
         .map(|items| Ok(GenericValue::Array(items)))
 }
@@ -987,6 +1005,27 @@ fn decimal(raw: &str, at: &At<'_>) -> Result<GenericValue, String> {
             })
         }
         _ => untyped_raw(raw, at),
+    }
+}
+
+/// A declared `float` from `raw`, the JSON text Postgres wrote: a number is the
+/// `f32` nearest its text. Read through a correctly rounded `f64` first, a few
+/// `float4` values round twice, to the wrong `f32` (`7.038531e-26`, issue #366). A number past
+/// `f64`'s range fails the read, and any other value reads as it did before.
+/// `Err` is a value nested past the depth limit, or out of range.
+fn single(raw: &str, at: &At<'_>) -> Result<GenericValue, String> {
+    match raw.as_bytes().first() {
+        Some(b'-' | b'0'..=b'9') => match raw.parse::<f64>() {
+            Ok(wide) if wide.is_infinite() => Err(format!("number out of range: {raw}")),
+            _ => raw
+                .parse::<f32>()
+                .map(GenericValue::Float)
+                .map_err(|error| error.to_string()),
+        },
+        Some(b'{' | b'[') => untyped_raw(raw, at),
+        _ => serde_json::from_str(raw)
+            .map(|json| coerce_scalar(json, &FlussoType::Float))
+            .map_err(|error| error.to_string()),
     }
 }
 
@@ -1139,13 +1178,12 @@ fn coerce_decimal(json: serde_json::Value) -> GenericValue {
     parsed.map_or_else(|| json_to_generic(json), GenericValue::Decimal)
 }
 
-/// Floats have no dedicated [`GenericValue`]; keep precision as a decimal where
-/// possible, otherwise fall back to the text form.
+/// A number with no declared type: the [`Decimal`](GenericValue::Decimal)
+/// holding exactly its shortest digits, or the [`Double`](GenericValue::Double)
+/// itself when no `Decimal` holds them (past ±7.9e28, more than 28 fractional
+/// digits). Either way the sink writes the very `f64` (issue #366).
 fn float(v: f64) -> GenericValue {
-    match Decimal::try_from(v) {
-        Ok(d) => GenericValue::Decimal(d),
-        Err(_) => GenericValue::String(v.to_string()),
-    }
+    kernel::f64_to_decimal(v).map_or(GenericValue::Double(v), GenericValue::Decimal)
 }
 
 #[cfg(test)]

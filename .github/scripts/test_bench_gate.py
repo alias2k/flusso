@@ -32,6 +32,7 @@ BENCHES = [
     ("libs/2-engine/benches/engine.rs", "libs/2-engine", "engine"),
     ("libs/2-adapters/source-postgres/benches/pgoutput.rs", "libs/2-adapters/source-postgres", "pgoutput"),
     ("libs/2-adapters/source-postgres/benches/resolve.rs", "libs/2-adapters/source-postgres", "resolve"),
+    ("libs/2-adapters/source-postgres/benches/documents.rs", "libs/2-adapters/source-postgres", "documents"),
     ("libs/2-adapters/sink-opensearch/benches/render.rs", "libs/2-adapters/sink-opensearch", "render"),
     ("libs/2-script/benches/scripted.rs", "libs/2-script", "scripted"),
 ]
@@ -45,6 +46,7 @@ IDS = {
     "engine": ["live_drain/sinks1/64", "live_drain/sinks2/64"],
     "pgoutput": ["pgoutput/decode"],
     "resolve": ["resolve/unread_update"],
+    "documents": ["documents/doubles"],
     "render": ["render/bulk"],
     "scripted": ["scripted/flat"],
 }
@@ -217,7 +219,7 @@ class Gate(unittest.TestCase):
         self.assertEqual(self.row(result.stdout, "scripted/flat")[3], "identical binaries, not compared")
 
     def test_differing_binaries_are_gated_as_before(self) -> None:
-        self.env["FAKE_DIFFER"] = "engine,pgoutput,resolve,render,scripted"
+        self.env["FAKE_DIFFER"] = "engine,pgoutput,resolve,documents,render,scripted"
         self.times({"live_drain/sinks2/64": {"pr": 1_128_000, "pr-confirm": 1_081_000}})
         self.both()
         result = self.gate()
@@ -350,7 +352,7 @@ class Gate(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 78, result.stdout + result.stderr)
         self.bench("pr", "pr", BENCH_SKIP_SAME_AS=str(self.base_target / "bench-executables" / "base.identity.tsv"))
-        self.assertEqual(len(self.runs("pr")), 5)
+        self.assertEqual(len(self.runs("pr")), len(BENCHES))
         result = self.gate(BENCH_BASE_EMPTY="1")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(

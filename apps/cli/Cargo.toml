@@ -43,7 +43,9 @@ sink-opensearch.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 clap.workspace = true
-serde_json.workspace = true
+# `float_roundtrip`: `flusso script run --input` reads a number as the value
+# it names (issue #366), not only because `source-postgres` turns it on.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time"] }

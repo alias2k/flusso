@@ -52,7 +52,7 @@ cargo nextest run --run-ignored all        # + Postgres e2e (needs a running Doc
 cargo nextest run -E 'test(name_substr)'   # a single test by name
 cargo test --doc                           # doctests — nextest does NOT run these
 cargo clippy --workspace                   # lint (NOT --all-targets; see below)
-just bench                                 # in-process benches (engine loop, pgoutput decode, resolve, sink render, script fields); no Docker
+just bench                                 # in-process benches (engine loop, pgoutput decode, resolve, document reader, sink render, script fields); no Docker
 just bench-components                      # Docker-backed Criterion benches (postgres, cases, opensearch, engine pipeline)
 just review-ab origin/main                 # A/B the working tree vs a base on the Docker-backed benches (warm base build)
 just review-digest                         # same documents as the base? one digest per index (review-ab --digest)
@@ -134,8 +134,9 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   for the changes that need no query — root table, unread table, update of unread columns, a path walked
   from the key — over
   `bench_offline_builder`, a pool that never connects; its group is `resolve_no_io`, apart from the
-  Docker `postgres` bench's `resolve`; issue #332), `sink-opensearch`'s `render`, `script`'s `scripted` (public
-  API, no feature; `bench-in-process.sh` skips a bench a PR base predates). `pgoutput`, `resolve` and `render` sit behind each
+  Docker `postgres` bench's `resolve`; issue #332), `source-postgres`'s `documents` (`coerce_document` + the sink
+  render over float-heavy documents via `bench_document_reader`, issue #366), `sink-opensearch`'s `render`, `script`'s `scripted` (public
+  API, no feature; `bench-in-process.sh` skips a bench a PR base predates). `pgoutput`, `resolve`, `documents` and `render` sit behind each
   crate's `bench` cargo feature (like `fuzzing`), so CI's `cargo check --all-targets` passes
   `--features flusso-source-postgres/bench,flusso-sink-opensearch/bench`. `.github/workflows/bench.yml`:
   on a PR, `in-process` builds the in-process benches on the base (its own worktree **and its own
@@ -1874,6 +1875,16 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
   `f64`'s range as its text) — core picks no wire format. serde_json's
   `arbitrary_precision` stays off: it is global, allocates per number, and breaks numbers under
   serde's buffered (`flatten`/`untagged`) deserialization.
+- **Numbers are read and written exactly (issue #366).** serde_json's default float parser is not
+  correctly rounded (about one `float8` in three read one ulp off), so `float_roundtrip` is on where
+  flusso reads numbers it keeps: `source-postgres`, the CLI (`script run --input`) and `flusso-query`
+  (`_source`, cursor sort values; unifies into the consumer's build, a deliberate choice). A declared
+  `float` reads its raw text as `f32` (`value.rs`'s `single`), since a correct `f64` then `as f32` rounds
+  twice (`7.038531e-26`). `f64` ↔ `Decimal` goes through `kernel::f64_to_decimal`/`decimal_to_f64`
+  (shortest text / correctly rounded, with an exact `m / 10^s` fast path), never `Decimal::try_from(f64)`
+  or `to_f64`, which are lossy. Guards: `value::tests`' `a_double_is_read_as_the_value_postgres_wrote`,
+  `a_float_is_read_as_the_single_postgres_wrote`, `every_float_postgres_writes_is_read_as_itself`,
+  `kernel::common::float` proptests, `pipeline`'s `a_float8_is_indexed_as_the_double_postgres_holds`.
 - Sources/sinks are `#[async_trait]` trait objects; mock them in tests as the engine tests do.
 - **Every `reqwest` client flusso builds pins its trust roots.** reqwest 0.13 verifies against the
   OS trust store by default; the OpenSearch sink, `flusso-query` and the CLI's admin client each

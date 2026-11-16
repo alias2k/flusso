@@ -36,7 +36,11 @@ diesel-async = ["dep:diesel", "dep:diesel-async"]
 
 [dependencies]
 serde = { workspace = true }
-serde_json = { workspace = true }
+# `float_roundtrip`: a `double` in `_source`, and a sort value a page cursor
+# sends back, is read as the value flusso wrote, not one unit in the last place
+# off (issue #366). Cargo features unify, so this turns it on for the
+# consumer's whole build: correctly rounded parsing, at a cost measured in #366.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 thiserror = { workspace = true }
 base64 = { workspace = true }
 url = { workspace = true }

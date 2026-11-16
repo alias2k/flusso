@@ -7,7 +7,11 @@
 //! running this module there, with only `render` swapped for those calls, under
 //! `FLUSSO_BLESS=1`: at 26a81616, then again at 987ce77e when the `jsonb`
 //! layout, nested levels and schema-YAML cases were added (the earlier lines
-//! came out byte-identical). Re-bless only
+//! came out byte-identical). Re-blessed for issue #366: a number with no declared
+//! type is now written as the `f64` its text names, where `main` wrote it
+//! rounded to about 15 digits (`1234567890.123457`), as `0.0` past 28
+//! fractional digits, and as a string of rounded digits past ±7.9e28; nothing
+//! else moved. Re-bless only
 //! after a deliberate change to what the sink receives, and say so in the PR.
 //!
 //! A case is one schema level and one document text; its line is `name`, a tab,

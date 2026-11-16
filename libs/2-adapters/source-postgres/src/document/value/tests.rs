@@ -744,3 +744,156 @@ fn a_namesake_reads_the_last_value_through_the_first_declaration() {
     let map = body_text(r#"{"c": "5", "c": "x"}"#, &fields);
     assert_eq!(map.get("c"), Some(&GenericValue::BigInt(5)));
 }
+
+/// Texts Postgres writes that `serde_json`'s default float parser reads one
+/// unit in the last place off (issue #366), each beside the `f64` it names: a
+/// `float8` as `json` writes it (its shortest round-trip text, PG 12 on), the
+/// same as `jsonb` writes it (a `numeric`, never an exponent), and an `avg`
+/// (a `numeric` with 16 or more fractional digits).
+const MISREAD: &[(&str, f64)] = &[
+    ("906404.2095968979", 906_404.209_596_897_9),
+    ("-476228.37297113653", -476_228.372_971_136_53),
+    ("15048.112203257973", 15_048.112_203_257_973),
+    ("6.676040344723838e+276", 6.676_040_344_723_838e276),
+    ("1.856588120474891e-133", 1.856_588_120_474_891e-133),
+    ("0.00023707983636504738", 0.000_237_079_836_365_047_38),
+    ("4251.1509216589861751", 4_251.150_921_658_987),
+    ("271455.3055555555555555", 271_455.305_555_555_56),
+];
+
+/// The value `value` reaches the sink as: the `f64` its written JSON number
+/// names, read correctly rounded.
+fn indexed(value: &GenericValue) -> f64 {
+    serde_json::to_string(&sink::Json(value))
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+fn assert_same_double(got: f64, want: f64, what: &str) {
+    assert_eq!(
+        got.to_bits(),
+        want.to_bits(),
+        "{what}: {got:e} for {want:e}"
+    );
+}
+
+/// A number Postgres wrote reaches the sink as the very `f64` it names, under a
+/// `double` column, a `double` array, an `avg`, a `double` `sum`, and with no
+/// declared type (a `json` column), where it reads as an exact `Decimal`
+/// (issue #366).
+#[test]
+fn a_double_is_read_as_the_value_postgres_wrote() {
+    let fields = vec![
+        column_field("ratio", FlussoType::Double),
+        array_field("ratios", FlussoType::Double, None),
+        aggregate_field(
+            "mean",
+            AggregateOp::Avg(ColumnName::try_new("v").unwrap().into()),
+            None,
+        ),
+        aggregate_field(
+            "total",
+            AggregateOp::Sum(ColumnName::try_new("v").unwrap().into()),
+            Some(FlussoType::Double),
+        ),
+        column_field("raw", FlussoType::Json),
+    ];
+    for &(text, want) in MISREAD {
+        let doc = format!(
+            r#"{{"ratio": {text}, "ratios": [{text}], "mean": {text}, "total": {text}, "raw": {{"n": {text}}}}}"#
+        );
+        let map = body_text(&doc, &fields);
+        assert_eq!(map["ratio"], GenericValue::Double(want), "{text}");
+        assert_eq!(
+            map["ratios"],
+            GenericValue::Array(vec![GenericValue::Double(want)]),
+            "{text}"
+        );
+        assert_eq!(map["mean"], GenericValue::Double(want), "{text}");
+        assert_eq!(map["total"], GenericValue::Double(want), "{text}");
+        for name in ["ratio", "mean"] {
+            assert_same_double(indexed(&map[name]), want, &format!("{name} {text}"));
+        }
+        let GenericValue::Map(raw) = &map["raw"] else {
+            panic!("raw: {map:?}");
+        };
+        assert_same_double(indexed(&raw["n"]), want, &format!("raw {text}"));
+    }
+}
+
+/// A `float4` is read as the `f32` its text names, not through `f64`: the
+/// `f64` nearest `7.038531e-26` lies halfway between two `f32`s and rounds
+/// to the wrong one (issue #366). The same under a `float` array and a `float`
+/// `sum`.
+#[test]
+fn a_float_is_read_as_the_single_postgres_wrote() {
+    let fields = vec![
+        column_field("ratio", FlussoType::Float),
+        array_field("ratios", FlussoType::Float, None),
+        aggregate_field(
+            "total",
+            AggregateOp::Sum(ColumnName::try_new("v").unwrap().into()),
+            Some(FlussoType::Float),
+        ),
+    ];
+    let text = "7.038531e-26";
+    let want: f32 = 7.038_531e-26;
+    assert_ne!(text.parse::<f64>().unwrap() as f32, want);
+    let doc = format!(r#"{{"ratio": {text}, "ratios": [{text}, null], "total": {text}}}"#);
+    let map = body_text(&doc, &fields);
+    assert_eq!(map["ratio"], GenericValue::Float(want));
+    assert_eq!(
+        map["ratios"],
+        GenericValue::Array(vec![GenericValue::Float(want)])
+    );
+    assert_eq!(map["total"], GenericValue::Float(want));
+}
+
+/// `text` as Postgres's `float8out` writes `value` (PG 12 on): its shortest
+/// round-trip digits, with an exponent below 1e-4 and from 1e15.
+fn float8_text(value: f64) -> String {
+    let scientific = format!("{value:e}");
+    let (mantissa, exponent) = scientific.split_once('e').unwrap();
+    let exponent: i32 = exponent.parse().unwrap();
+    if (-4..15).contains(&exponent) {
+        value.to_string()
+    } else {
+        let sign = if exponent < 0 { '-' } else { '+' };
+        format!("{mantissa}e{sign}{:02}", exponent.abs())
+    }
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(4096))]
+
+    /// Any finite `float8`, as `json` (`float8out`) and as `jsonb` (plain
+    /// digits) write it, is read and indexed as itself under a `double` field
+    /// and with no declared type; any finite `float4` under a `float` field
+    /// (issue #366).
+    #[test]
+    fn every_float_postgres_writes_is_read_as_itself(
+        bits in proptest::prelude::any::<u64>(),
+        single in proptest::prelude::any::<u32>(),
+    ) {
+        let value = f64::from_bits(bits);
+        let single = f32::from_bits(single);
+        proptest::prop_assume!(value.is_finite() && single.is_finite());
+        let fields = vec![
+            column_field("ratio", FlussoType::Double),
+            column_field("plain", FlussoType::Double),
+            column_field("raw", FlussoType::Json),
+            column_field("single", FlussoType::Float),
+        ];
+        let doc = format!(
+            r#"{{"ratio": {}, "plain": {value}, "raw": {}, "single": {single:e}}}"#,
+            float8_text(value),
+            float8_text(value),
+        );
+        let map = body_text(&doc, &fields);
+        for name in ["ratio", "plain", "raw"] {
+            proptest::prop_assert_eq!(indexed(&map[name]).to_bits(), value.to_bits(), "{} {}", name, doc);
+        }
+        proptest::prop_assert_eq!(&map["single"], &GenericValue::Float(single));
+    }
+}

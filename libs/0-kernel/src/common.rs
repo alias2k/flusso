@@ -1,6 +1,7 @@
 mod big_decimal;
 mod column_name;
 mod field_name;
+mod float;
 mod generic_value;
 mod http_url;
 mod index_name;
@@ -13,6 +14,7 @@ mod table_name;
 pub use big_decimal::*;
 pub use column_name::*;
 pub use field_name::*;
+pub use float::*;
 pub use generic_value::*;
 pub use http_url::*;
 pub use index_name::*;

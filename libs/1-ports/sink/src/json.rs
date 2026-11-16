@@ -32,7 +32,6 @@
 //! ```
 
 use kernel::GenericValue;
-use rust_decimal::prelude::ToPrimitive;
 use serde::ser::{Error as _, Serialize, Serializer};
 use serde_json::value::RawValue;
 use serde_json::{Number, Value};
@@ -53,10 +52,7 @@ impl Serialize for Json<'_> {
             GenericValue::BigInt(i) => serializer.serialize_i64(*i),
             GenericValue::Float(f) => float(f64::from(*f), serializer),
             GenericValue::Double(f) => float(*f, serializer),
-            GenericValue::Decimal(d) => match d.to_f64().filter(|f| f.is_finite()) {
-                Some(f) => serializer.serialize_f64(f),
-                None => serializer.collect_str(d),
-            },
+            GenericValue::Decimal(d) => float(kernel::decimal_to_f64(*d), serializer),
             GenericValue::BigDecimal(d) => number(d.as_str(), serializer),
             GenericValue::String(s) => serializer.serialize_str(s),
             GenericValue::Uuid(u) => serializer.collect_str(u),
@@ -90,10 +86,7 @@ pub fn to_json(value: &GenericValue) -> Value {
         GenericValue::BigInt(i) => Value::Number((*i).into()),
         GenericValue::Float(f) => float_to_json((*f).into()),
         GenericValue::Double(f) => float_to_json(*f),
-        GenericValue::Decimal(d) => match d.to_f64().and_then(Number::from_f64) {
-            Some(number) => Value::Number(number),
-            None => Value::String(d.to_string()),
-        },
+        GenericValue::Decimal(d) => float_to_json(kernel::decimal_to_f64(*d)),
         GenericValue::BigDecimal(d) => match Number::from_f64(d.to_f64()) {
             Some(number) => Value::Number(number),
             None => Value::String(d.as_str().to_owned()),
