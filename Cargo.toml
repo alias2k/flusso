@@ -179,8 +179,10 @@ tracing-opentelemetry = { version = "0.34.*" }
 prometheus = { version = "0.14.*" }
 # Script fields. `sync`: one engine shared across tasks; `decimal`: a `decimal`
 # field round-trips exactly; `no_time`/`no_module`: no clock, no imports, so a
-# script is a pure function of the document.
-rhai = { version = "1.27", default-features = false, features = ["std", "sync", "decimal", "no_time", "no_module"] }
+# script is a pure function of the document. Rhai's default features (`std` +
+# `ahash/runtime-rng`) stay on: without `runtime-rng`, `ahash` bakes a random
+# seed into every compile and no two builds have the same bytes (issue #355).
+rhai = { version = "1.27", features = ["sync", "decimal", "no_time", "no_module"] }
 
 kernel = { path = "libs/0-kernel", version = "0.17", package = "flusso-kernel" }
 kernel-derive = { path = "libs/0-kernel/derive", version = "0.17", package = "flusso-kernel-derive" }
