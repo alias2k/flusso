@@ -145,7 +145,7 @@ A comparison with a string, a number or another kind fails rather than answering
 
 **Breaking.** 0.17 could read a change before its transaction was visible to other sessions and index the state before the commit; nothing rebuilt it. On a quiet primary that was rare; behind a synchronous standby it happened to most changes. 0.18 holds a change until its commit is visible (see [Behind a synchronous standby](../reference/source-postgres.md#behind-a-synchronous-standby)). What changes for a running deployment:
 
-- **A commit that never becomes visible stalls indexing** instead of being indexed stale: a synchronous standby that is down holds every later change too. `/status` shows `visibility_wait_seconds`, the `flusso.source.visibility_wait` gauge rises, and a warning names the waiting sessions after 5 seconds.
+- **A commit that never becomes visible stalls indexing** instead of being indexed stale: a synchronous standby that is down holds every later change too. `/status` shows `visibility_wait_seconds`, the `flusso.replication.visibility_wait` gauge rises, and a warning names the waiting sessions after 5 seconds.
 - **flusso refuses a server whose `synchronous_standby_names` lists it** (`flusso`, or `*`), and a standby (`pg_is_in_recovery()`). Both used to start: the first could hang every commit on the server, the second read from where visibility isn't decided. Take flusso's name out of the setting, or point the connection URL at the primary.
 - **Documents indexed stale by 0.17 stay stale** until their rows change. Behind a synchronous standby, run [`flusso reindex <index>`](../reference/cli.md#reindex) on every index once 0.18 is live.
 

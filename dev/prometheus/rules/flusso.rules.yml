@@ -28,3 +28,22 @@ groups:
       #     ETA. Raise this above your deployment's steady idle lag.
       - record: flusso:backlog_drain_eta_seconds
         expr: (flusso_replication_slot_lag_bytes > 4194304) / (- flusso:slot_lag_bytes_rate5m > 0)
+
+  # A committed transaction flusso holds because it isn't visible yet: every
+  # later change waits behind it. Behind a synchronous standby the wait is a
+  # round trip; past 30 s the standby isn't answering (see the source-postgres
+  # reference, "Behind a synchronous standby"). flusso also logs a warning after
+  # 5 s naming the sessions waiting on synchronous replication.
+  - name: flusso_alerts
+    rules:
+      - alert: FlussoVisibilityWait
+        expr: flusso_replication_visibility_wait_seconds > 30
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "flusso has held a commit that isn't visible for {{ $value | humanizeDuration }}"
+          description: >-
+            Postgres keeps a commit invisible while it waits for a synchronous
+            standby. Nothing after it is indexed until it is visible: bring the
+            standby back, or take it out of synchronous_standby_names and reload.

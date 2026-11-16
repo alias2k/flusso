@@ -29,16 +29,17 @@ flusso is running and you want to know whether it's keeping up, what it's done, 
 
    The series and their meanings are in [Metrics](../reference/metrics.md).
 
-4. **Add the drain-ETA recording rules.** Copy `dev/prometheus/rules/flusso.rules.yml` from the repository. It derives the net drain rate and a time-to-clear estimate from slot lag alone.
+4. **Add the rules.** Copy `dev/prometheus/rules/flusso.rules.yml` from the repository. It derives the net drain rate and a time-to-clear estimate from slot lag alone, and alerts on a long visibility wait (`FlussoVisibilityWait`).
 
-5. **Import the dashboard.** `dev/grafana/provisioning/dashboards/flusso.json` shows change throughput, in-flight backlog, slot lag with its trend, flush duration p95, documents built, errors, and the drain ETA. In the dev stack it's provisioned at `localhost:3000`.
+5. **Import the dashboard.** `dev/grafana/provisioning/dashboards/flusso.json` shows change throughput, in-flight backlog, slot lag with its trend, flush duration p95, documents built, errors, the drain ETA, and the visibility wait. In the dev stack it's provisioned at `localhost:3000`.
 
-6. **Alert on the two that matter.**
+6. **Alert on the three that matter.**
 
    | Alert | Expression | Why |
    | --- | --- | --- |
    | data being dropped | `increase(flusso_documents_quarantined_total[10m]) > 0` | a document was rejected and skipped under `on_error = "skip"` |
    | falling behind | `flusso:slot_lag_bytes_rate5m > 0 for 15m` | the backlog is growing, not draining |
+   | held by a commit | `flusso_replication_visibility_wait_seconds > 30 for 1m` | a commit isn't visible yet, so nothing after it is indexed; usually a synchronous standby not answering (see [Behind a synchronous standby](../reference/source-postgres.md#behind-a-synchronous-standby)) |
 
    Add `flusso_errors_total` increasing, and `up == 0` on the scrape target.
 

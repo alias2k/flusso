@@ -663,7 +663,7 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   refuses a server in recovery or one naming flusso, before `prepare` writes, in every `live` (on
   the SQL pool and on the gated replication session) and in the CLI's `Backends::source`, so `run`
   exits. `ChangeCapture::readable_wait` → `Status::with_source` → `/status`
-  `visibility_wait_seconds` and the `flusso.source.visibility_wait` gauge (read live). One held
+  `visibility_wait_seconds` and the `flusso.replication.visibility_wait` gauge (read live). One held
   transaction stalls the whole stream; no opt-out. Guards: `engine`'s `visibility` e2e (every
   scenario holds commits on a standby that never answers: nothing written during an 8 s hold, the
   document within 1 s of the release; root/child/re-parent/delete/count, a later commit released
