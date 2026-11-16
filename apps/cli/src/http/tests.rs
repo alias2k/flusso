@@ -13,10 +13,27 @@ use super::*;
 
 /// A source that has read through `at` with nothing outstanding, so every sink
 /// stands there for both levels.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct SteadySource {
     at: AtomicU64,
     closed: AtomicBool,
+    listeners: std::sync::Mutex<Vec<source::cdc::AdvanceListener>>,
+}
+
+impl std::fmt::Debug for SteadySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SteadySource").finish_non_exhaustive()
+    }
+}
+
+impl SteadySource {
+    /// Read on through `at`, waking whoever waits on the fence.
+    fn advance(&self, at: u64) {
+        self.at.store(at, Ordering::SeqCst);
+        for listener in self.listeners.lock().unwrap().iter() {
+            listener();
+        }
+    }
 }
 
 #[async_trait]
@@ -52,6 +69,10 @@ impl ChangeCapture for SteadySource {
         (!self.closed.load(Ordering::SeqCst))
             .then(|| SourcePosition(self.at.load(Ordering::SeqCst)))
     }
+
+    fn on_advance(&self, listener: source::cdc::AdvanceListener) {
+        self.listeners.lock().unwrap().push(listener);
+    }
 }
 
 /// Serve the public router over a source standing at `at`; returns its base
@@ -61,9 +82,9 @@ async fn serve_public(at: u64) -> (String, Arc<SteadySource>) {
     (base, source)
 }
 
-/// [`serve_public`], plus the sender that tells the surface flusso is stopping.
-async fn serve_stoppable(at: u64) -> (String, Arc<SteadySource>, watch::Sender<bool>) {
-    let (stopping, stopping_rx) = watch::channel(false);
+/// [`serve_public`], plus the handle that ends a stop's drain.
+async fn serve_stoppable(at: u64) -> (String, Arc<SteadySource>, Waits) {
+    let waits = Waits::default();
     let source = Arc::new(SteadySource::default());
     source.at.store(at, Ordering::SeqCst);
     let primary = SinkName::try_new("primary").unwrap();
@@ -71,12 +92,12 @@ async fn serve_stoppable(at: u64) -> (String, Arc<SteadySource>, watch::Sender<b
         status: Arc::new(Status::new([], [primary.clone()], Instant::now())),
         registry: None,
         fence: Fence::new(Arc::clone(&source) as Arc<dyn ChangeCapture>, [primary]),
-        stopping: stopping_rx,
+        waits: waits.clone(),
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, public_router(state)).await });
-    (base, source, stopping)
+    (base, source, waits)
 }
 
 async fn get_wait(base: &str, query: &str) -> (u16, serde_json::Value) {
@@ -149,21 +170,67 @@ async fn a_source_that_is_not_live_yet_answers_503() {
     assert!(body["error"].is_string());
 }
 
+/// A `/wait` answered with its status, `Retry-After` and body.
+async fn get_wait_full(base: &str, query: &str) -> (u16, Option<String>, serde_json::Value) {
+    let response = reqwest::get(format!("{base}/wait?{query}")).await.unwrap();
+    let status = response.status().as_u16();
+    let retry = response
+        .headers()
+        .get("retry-after")
+        .map(|value| value.to_str().unwrap().to_owned());
+    (status, retry, response.json().await.unwrap())
+}
+
 #[tokio::test]
-async fn an_open_wait_answers_503_once_flusso_starts_to_stop() {
-    let (base, _source, stopping) = serve_stoppable(10).await;
+async fn a_wait_open_when_the_stop_begins_is_answered_200_if_reached_during_the_drain() {
+    let (base, source, _waits) = serve_stoppable(10).await;
     let waiting =
-        tokio::spawn(async move { get_wait(&base, "position=999&timeout_ms=60000").await });
+        tokio::spawn(async move { get_wait(&base, "position=20&timeout_ms=60000").await });
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    stopping.send(true).unwrap();
+    source.advance(20);
     let (status, body) = tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
+        .await
+        .expect("the wait is answered once reached")
+        .unwrap();
+
+    assert_eq!(status, 200, "{body}");
+}
+
+#[tokio::test]
+async fn an_open_wait_is_answered_503_stopping_with_retry_after_once_the_drain_ends() {
+    let (base, _source, waits) = serve_stoppable(10).await;
+    let waiting =
+        tokio::spawn(async move { get_wait_full(&base, "position=999&timeout_ms=60000").await });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    waits.end();
+    let (status, retry, body) = tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
         .await
         .expect("the wait is answered at once")
         .unwrap();
 
     assert_eq!(status, 503);
-    assert_eq!(body["error"], "flusso is shutting down");
+    assert_eq!(retry.as_deref(), Some("1"));
+    assert_eq!(body["reason"], "stopping", "{body}");
+}
+
+#[tokio::test]
+async fn a_wait_after_the_drain_is_refused_and_one_before_the_source_is_live_says_starting() {
+    let (base, source, waits) = serve_stoppable(10).await;
+    source.closed.store(true, Ordering::SeqCst);
+    let (status, retry, body) = get_wait_full(&base, "position=1").await;
+    assert_eq!((status, retry.as_deref()), (503, Some("1")));
+    assert_eq!(body["reason"], "starting", "{body}");
+
+    source.closed.store(false, Ordering::SeqCst);
+    waits.end();
+    let (status, retry, body) = get_wait_full(&base, "position=1").await;
+    assert_eq!((status, retry.as_deref()), (503, Some("1")));
+    assert_eq!(
+        body["reason"], "stopping",
+        "even a reached position: this process no longer answers: {body}"
+    );
 }
 
 #[tokio::test]

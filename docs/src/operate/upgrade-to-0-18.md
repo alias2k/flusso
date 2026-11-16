@@ -1,6 +1,7 @@
 # Upgrade to 0.18
 
 0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index. It also writes a `timestamp` column in ISO 8601, which changes stored documents and can break a tuned `format`: see [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601). A `decimal` field is written with every digit: see [A decimal is written with every digit](#a-decimal-is-written-with-every-digit). A `double` is indexed as the exact value Postgres holds: see [A float or double is indexed as Postgres holds it](#a-float-or-double-is-indexed-as-postgres-holds-it). A filter value that doesn't fit its column no longer matches by being cut to fit: see [A filter value is compared as written](#a-filter-value-is-compared-as-written). A script reads a date as a date, not a string: see [A date reaches a script as a date](#a-date-reaches-a-script-as-a-date). A change is indexed only once its transaction is visible: see [A change waits until its commit is visible](#a-change-waits-until-its-commit-is-visible). A fenced read in `flusso-query` waits through a restart of flusso, with a 20 s default timeout: see [A fenced read waits through a restart](#a-fenced-read-waits-through-a-restart). A stop drains and has a deadline and new exit codes: see [A stop drains, then exits](#a-stop-drains-then-exits).
+0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index. It also writes a `timestamp` column in ISO 8601, which changes stored documents and can break a tuned `format`: see [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601). A `decimal` field is written with every digit: see [A decimal is written with every digit](#a-decimal-is-written-with-every-digit). A `double` is indexed as the exact value Postgres holds: see [A float or double is indexed as Postgres holds it](#a-float-or-double-is-indexed-as-postgres-holds-it). A filter value that doesn't fit its column no longer matches by being cut to fit: see [A filter value is compared as written](#a-filter-value-is-compared-as-written). A script reads a date as a date, not a string: see [A date reaches a script as a date](#a-date-reaches-a-script-as-a-date). A change is indexed only once its transaction is visible: see [A change waits until its commit is visible](#a-change-waits-until-its-commit-is-visible). A stop drains in-flight changes before it exits, under a deadline, with new exit codes: see [A stop drains, then exits](#a-stop-drains-then-exits).
 
 ## When to use this
 
@@ -191,12 +192,16 @@ A comparison with a string, a number or another kind fails rather than answering
 - **Remove a retry loop around fenced reads**, if one was written for deploys: it now multiplies the timeout.
 
 ## A stop is bounded
+## A stop drains, then exits
 
-0.17 could wait forever after `SIGTERM`: a client that went silent mid-request held the HTTP surfaces open, an open `/wait` held them up to 60 s, and further signals were ignored, so only `SIGKILL` ended it. 0.18 bounds the stop (see [Stopping](../reference/cli.md#stopping)). What changes for a script or supervisor that reads the exit status:
+0.17 dropped everything on `SIGTERM`, and could then wait forever: a client that went silent mid-request held the HTTP surfaces open and every further signal was ignored, so only `SIGKILL` ended it. A process whose task runner died kept running unnoticed. 0.18 drains instead (see [Stopping](../reference/cli.md#stopping)):
 
-- **A stop that runs past `--shutdown-timeout-secs`** (5 s by default) exits `1` and logs what it gave up on.
-- **A second signal** exits at once, `130` after `SIGINT` and `143` after `SIGTERM`.
-- **`SIGHUP` is a clean stop**, exit `0`. 0.17 died of it, without flushing telemetry.
+- **A stop lands what is in flight and confirms it**, then exits `0`. The next start reads nothing already indexed again. It takes up to `--shutdown-timeout-secs` (30 s); past it flusso exits `1`, naming the step and the sinks it gave up on.
+- **Give the supervisor more than that.** Docker's default 10 s and moon's 2 s kill the drain; Kubernetes' 30 s ties it. The Helm chart now sets `terminationGracePeriodSeconds: 45`. Settings for each are in [Run under a task runner or supervisor](../deploy/compile-and-run.md#run-under-a-task-runner-or-supervisor).
+- **Under moon or another task runner, add `--exit-with-parent`** (or `FLUSSO_EXIT_WITH_PARENT=true`). Without it a flusso whose runner died keeps running and holds the slot and port 9464, as in 0.17: it is opt-in, because a `flusso run &` meant to outlive its shell must keep doing so.
+- **A second signal** a second or more after the first exits at once, `130` after `SIGINT`, `143` after `SIGTERM`. The same signal twice within a second is one stop.
+- **`SIGHUP` is a stop**, not a crash: 0.17 died of it without flushing anything.
+- **`/status` has a `stopping` phase** and a `pid`; `/readyz` is `503` while stopping; a `/wait` `503` now carries `Retry-After` and a `reason` (`starting` or `stopping`).
 
 ## Related
 

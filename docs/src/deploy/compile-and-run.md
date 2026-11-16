@@ -32,7 +32,7 @@ You have a validated config and want to run it, locally or in a deployment. The 
 
 4. **Restart without a backfill.** Once seeded, a restart skips the backfill on its own because the sink remembers. `--skip-backfill` forces that even when the sink disagrees; it exists for recovery, not routine use.
 
-5. **Stop.** `SIGTERM`, `SIGINT` or `SIGHUP` drops the pipeline, closes the HTTP surfaces and flushes telemetry, within 5 seconds by default; a second signal exits at once. Changes that weren't confirmed are read again on the next start: that's the at-least-once guarantee doing its job. Signals, deadline and exit codes are in [Stopping](../reference/cli.md#stopping).
+5. **Stop.** `SIGTERM`, `SIGINT` or `SIGHUP` drains: nothing new is read, what is in flight lands on every sink and is confirmed to Postgres, then flusso exits `0`, within 30 seconds by default. A second signal exits at once; whatever wasn't confirmed is read again on the next start. The sequence, deadline and exit codes are in [Stopping](../reference/cli.md#stopping).
 
 ## Options and variations
 
@@ -44,17 +44,44 @@ You have a validated config and want to run it, locally or in a deployment. The 
 
 ## Run under a task runner or supervisor
 
-One flusso per replication slot: a second one on the same addresses fails at start, and on other addresses waits for the slot. So whatever starts flusso must also stop it.
+One flusso per replication slot: a second one on the same addresses fails at start, and on other addresses waits for the slot. So whatever starts flusso must also stop it, and give the [drain](../reference/cli.md#stopping) its 30 seconds before killing it.
 
-- **systemd, Docker, Kubernetes** send `SIGTERM` and wait before `SIGKILL`: 90 s, 10 s, 30 s by default (the Helm chart keeps Kubernetes' default). All are longer than the 5 s [stop deadline](../reference/cli.md#stopping), so flusso exits on its own. Shorten a grace period below it only together with `--shutdown-timeout-secs`.
-- **A task runner on a dev machine** (moon, `just`, a `Procfile` runner) starts flusso as a child and may die without stopping it: killed, crashed, or taken down with the terminal around a laptop's sleep. Its flusso then keeps running, holding port 9464 and the slot, and the next start reports `another flusso (pid <pid>) is already running there`. Add `--exit-with-parent` to the task's command, or set `FLUSSO_EXIT_WITH_PARENT=true`, and flusso stops when its parent goes:
+| Supervisor | Waits after `SIGTERM` by default | Set |
+| --- | --- | --- |
+| Kubernetes | 30 s | `terminationGracePeriodSeconds` above the deadline. The Helm chart sets 45 (`terminationGracePeriodSeconds`) and refuses a value at or below `run.shutdownTimeoutSecs`. |
+| Docker / compose | 10 s | `docker stop -t 35`, or `stop_grace_period: 35s` on the service. |
+| systemd | 90 s | Nothing; `TimeoutStopSec` already exceeds it. |
+| moon | 2 s | `killProcessThreshold`, see below. |
 
-  ```sh
-  flusso run --exit-with-parent
-  ```
+### Under moon or another task runner
 
-  It follows its direct parent. Keep `flusso run` the task's only command, so the runner's shell hands over to flusso; in a wrapper script, start it with `exec flusso run …`. A shell that stays around in between survives a runner that is killed, and flusso would follow the shell.
-- **A flusso left over** from before: `/status` on its public address names its `pid`; `kill <pid>` stops it, and `kill` again stops it at once.
+A task runner on a dev machine starts flusso as its child and can die without stopping it: killed, crashed, or taken down with its terminal around a laptop's sleep. flusso then keeps running, holding port 9464 and the slot, and the next start reports `another flusso (pid <pid>) is already running there`. Two settings fix that:
+
+- **`--exit-with-parent`** (or `FLUSSO_EXIT_WITH_PARENT=true`; `1` is refused): flusso stops, draining as usual, when the process that started it is gone.
+- **The runner's kill delay above the deadline**, so a stop the runner asks for isn't cut short.
+
+For moon, in the project's `moon.yml`:
+
+```yaml
+tasks:
+  flusso:
+    command: 'flusso run --exit-with-parent'
+    options:
+      persistent: true
+```
+
+and in `.moon/workspace.yml` (or `MOON_PIPELINE_KILL_PROCESS_THRESHOLD=35000` in the environment):
+
+```yaml
+pipeline:
+  killProcessThreshold: 35000
+```
+
+moon runs the command as its own child, so flusso follows moon itself. In general flusso follows its **direct** parent: keep `flusso run` the task's only command, and in a wrapper script start it with `exec flusso run …`. A shell that stays in between survives a runner that is killed, and flusso would follow the shell. Ctrl-C reaching flusso twice (from the terminal and forwarded by the runner) is one stop, not two.
+
+### A flusso left over
+
+`/status` on its public address names its `pid`. `kill <pid>` stops it gracefully; a second `kill` a second or more later stops it at once.
 
 ## Related
 

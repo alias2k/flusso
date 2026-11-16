@@ -79,12 +79,17 @@ struct AppState {
     validate: ConfigValidator,
 }
 
-/// Bind `options.address` and serve the designer until the listener closes.
+/// Bind `options.address` and serve the designer until `shutdown` resolves
+/// and the open connections are done. Process signals are the caller's: it
+/// decides when to stop and how long the connections may take.
 ///
 /// A save a killed designer left half done is settled first, before the
 /// project is read; what it did is logged and shown on every page load until
 /// the user dismisses it.
-pub async fn serve(options: DesignOptions) -> Result<()> {
+pub async fn serve(
+    options: DesignOptions,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
     let config_path = options.config_path.clone();
     if let Err(e) = blocking(move || {
         api::prune_save_records();
@@ -116,34 +121,9 @@ pub async fn serve(options: DesignOptions) -> Result<()> {
     }
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown)
         .await?;
     Ok(())
-}
-
-/// Resolve when the process is asked to stop (Ctrl-C, or SIGTERM on Unix), so
-/// the server shuts down cleanly instead of being hard-killed.
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
-    #[cfg(unix)]
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut s) => {
-                s.recv().await;
-            }
-            Err(_) => std::future::pending::<()>().await,
-        }
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {}
-        _ = terminate => {}
-    }
-    tracing::info!("flusso designer shutting down");
 }
 
 fn router(state: AppState) -> Router {

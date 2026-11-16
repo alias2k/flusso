@@ -12,7 +12,12 @@
 //! ```
 
 #![cfg(unix)]
-#![allow(clippy::unwrap_used, clippy::expect_used, unused_crate_dependencies)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::print_stderr,
+    unused_crate_dependencies
+)]
 
 mod common;
 
@@ -20,16 +25,18 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-/// The exit a `flusso run` must reach after its stop, past which the test
-/// calls it stuck: the default deadline plus room for a slow runner.
-const DEFAULT_DEADLINE: Duration = Duration::from_secs(5);
+/// How long closing the HTTP surfaces may take of a stop, and room for a slow
+/// runner on top.
+const SIDE_STEP: Duration = Duration::from_secs(5);
 const MARGIN: Duration = Duration::from_secs(5);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
-async fn a_half_open_http_request_does_not_hold_the_stop_past_the_deadline() {
+async fn a_half_open_http_request_is_left_after_its_bound_and_the_stop_still_exits_cleanly() {
     let (_postgres, url) = common::start_postgres(TABLE).await;
     let dir = project(&url, "half_open");
     let mut flusso = Flusso::start(&dir, &[]);
@@ -37,32 +44,35 @@ async fn a_half_open_http_request_does_not_hold_the_stop_past_the_deadline() {
     let _client = half_open_request(flusso.public);
     let started = Instant::now();
     flusso.signal("TERM");
-    let status = flusso.exit_within(DEFAULT_DEADLINE + MARGIN);
+    let status = flusso.exit_within(SIDE_STEP + MARGIN);
 
     assert!(
-        started.elapsed() >= DEFAULT_DEADLINE - Duration::from_millis(500),
-        "it waited for the request up to the deadline: {:?}",
+        started.elapsed() >= SIDE_STEP - Duration::from_millis(500),
+        "it waited for the request up to its bound: {:?}",
         started.elapsed()
     );
-    assert_eq!(status.code(), Some(1), "{}", flusso.stderr());
     let stderr = flusso.stderr();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the data path stopped cleanly: {stderr}"
+    );
     assert!(
-        stderr.contains("shutdown deadline of 5s passed")
-            && stderr.contains("closing the HTTP surfaces"),
+        stderr.contains("an HTTP connection did not close in time"),
         "the log says what it gave up on: {stderr}"
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
-async fn a_second_signal_stops_at_once() {
+async fn a_second_signal_past_the_repeat_window_stops_at_once() {
     let (_postgres, url) = common::start_postgres(TABLE).await;
     let dir = project(&url, "second");
-    let mut flusso = Flusso::start(&dir, &["--shutdown-timeout-secs", "120"]);
+    let mut flusso = Flusso::start(&dir, &[]);
 
     let _client = half_open_request(flusso.public);
     flusso.signal("TERM");
-    std::thread::sleep(Duration::from_secs(1));
+    std::thread::sleep(Duration::from_secs(2));
     assert!(flusso.running(), "the first signal waits on the request");
     flusso.signal("INT");
     let status = flusso.exit_within(Duration::from_secs(3));
@@ -82,7 +92,31 @@ async fn a_second_signal_stops_at_once() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
-async fn an_open_wait_is_answered_and_does_not_delay_the_stop() {
+async fn the_same_signal_twice_within_the_window_is_one_stop() {
+    let (_postgres, url) = common::start_postgres(TABLE).await;
+    let dir = project(&url, "twice");
+    let mut flusso = Flusso::start(&dir, &[]);
+
+    flusso.signal("TERM");
+    std::thread::sleep(Duration::from_millis(20));
+    flusso.signal("TERM");
+    let status = flusso.exit_within(Duration::from_secs(10));
+
+    let stderr = flusso.stderr();
+    assert_eq!(status.code(), Some(0), "the full stop ran: {stderr}");
+    assert!(
+        stderr.contains("the same stop request again") && !stderr.contains("second signal"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("ingest engine stopped: stop requested"),
+        "the drain ran: {stderr}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_wait_open_at_the_end_of_the_drain_is_told_flusso_is_stopping() {
     let (_postgres, url) = common::start_postgres(TABLE).await;
     let dir = project(&url, "wait");
     let mut flusso = Flusso::start(&dir, &[]);
@@ -102,18 +136,20 @@ async fn an_open_wait_is_answered_and_does_not_delay_the_stop() {
     std::thread::sleep(Duration::from_millis(500));
     let started = Instant::now();
     flusso.signal("TERM");
-    let status = flusso.exit_within(Duration::from_secs(4));
+    let status = flusso.exit_within(Duration::from_secs(10));
 
     assert!(
-        started.elapsed() < Duration::from_secs(3),
-        "{:?}",
+        started.elapsed() < Duration::from_secs(5),
+        "an open wait does not hold the stop: {:?}",
         started.elapsed()
     );
     assert_eq!(status.code(), Some(0), "{}", flusso.stderr());
     let answer = waiter.join().unwrap();
     assert!(
-        answer.starts_with("HTTP/1.1 503") && answer.contains("shutting down"),
-        "the waiter is told flusso is stopping: {answer}"
+        answer.starts_with("HTTP/1.1 503")
+            && answer.to_ascii_lowercase().contains("retry-after: 1")
+            && answer.contains("\"reason\":\"stopping\""),
+        "the waiter is told to ask again: {answer}"
     );
 }
 
@@ -221,6 +257,286 @@ async fn a_second_start_names_the_flusso_that_holds_its_place() {
         named.contains("application_name \"flusso\"") && named.contains("pg_terminate_backend"),
         "the slot error names the holder and the way out: {named}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn under_steady_writes_a_stop_lands_and_confirms_everything_it_read_and_a_restart_rewrites_none_of_it()
+ {
+    let (_postgres, url) = common::start_postgres(TABLE).await;
+    let (_opensearch, os_url) = common::start_opensearch().await;
+    let dir = project_opensearch(&url, &os_url, "steady");
+    let mut flusso = Flusso::start(&dir, &[]);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .unwrap();
+
+    let writing = Arc::new(AtomicBool::new(true));
+    let writer = tokio::spawn(write_steadily(pool.clone(), Arc::clone(&writing)));
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let started = Instant::now();
+    flusso.signal("TERM");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    writing.store(false, Ordering::SeqCst);
+    let written = writer.await.unwrap();
+    let status = flusso.exit_within(Duration::from_secs(30));
+    let stopped_in = started.elapsed();
+    eprintln!("graceful stop under steady writes took {stopped_in:?}");
+
+    assert_eq!(status.code(), Some(0), "{}", flusso.stderr());
+    let confirmed = confirmed_flush(&pool, "s_steady").await;
+    let indexed = documents(&os_url, "t").await;
+    let read: Vec<i32> = written
+        .iter()
+        .filter(|(_, lsn)| *lsn <= confirmed)
+        .map(|(id, _)| *id)
+        .collect();
+    let missing: Vec<&i32> = read
+        .iter()
+        .filter(|id| !indexed.contains_key(*id))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "every row committed at or before the confirmed position {confirmed:X} is indexed; \
+         missing {missing:?}"
+    );
+    assert!(!read.is_empty(), "flusso indexed rows before the stop");
+    assert!(
+        written.iter().any(|(_, lsn)| *lsn > confirmed),
+        "rows written after flusso stopped reading are beyond the confirmed position"
+    );
+    assert!(
+        indexed
+            .keys()
+            .all(|id| written.iter().any(|(w, _)| w == id)),
+        "nothing indexed that was not written"
+    );
+
+    let mut restarted = Flusso::start(&dir, &[]);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let after = loop {
+        let after = documents(&os_url, "t").await;
+        if after.len() == written.len() {
+            break after;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the restart never indexed the rest"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    restarted.signal("TERM");
+    restarted.exit_within(Duration::from_secs(30));
+    let rewritten: Vec<&i32> = indexed
+        .iter()
+        .filter(|(id, version)| after.get(*id) != Some(*version))
+        .map(|(id, _)| id)
+        .collect();
+    assert!(
+        rewritten.is_empty(),
+        "the restart redelivered nothing already indexed; rewritten {rewritten:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_stop_with_opensearch_paused_gives_up_at_the_deadline_naming_the_sink_and_a_restart_converges()
+ {
+    let (_postgres, url) = common::start_postgres(TABLE).await;
+    let (opensearch, os_url) = common::start_opensearch().await;
+    let dir = project_opensearch(&url, &os_url, "paused");
+    let mut flusso = Flusso::start(&dir, &["--shutdown-timeout-secs", "5"]);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect(&url)
+        .await
+        .unwrap();
+    insert(&pool, 1..=10).await;
+    wait_for_count(&os_url, 10).await;
+
+    docker(&["pause", opensearch.id()]);
+    insert(&pool, 11..=20).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let started = Instant::now();
+    flusso.signal("TERM");
+    let status = flusso.exit_within(Duration::from_secs(15));
+    let stopped_in = started.elapsed();
+    docker(&["unpause", opensearch.id()]);
+
+    let stderr = flusso.stderr();
+    assert_eq!(status.code(), Some(1), "{stderr}");
+    assert!(
+        stopped_in >= Duration::from_secs(4) && stopped_in < Duration::from_secs(10),
+        "{stopped_in:?}"
+    );
+    assert!(
+        stderr.contains("shutdown deadline of 5s passed while draining the pipeline")
+            && stderr.contains("primary: "),
+        "the log names the step and the sink: {stderr}"
+    );
+
+    let mut restarted = Flusso::start(&dir, &[]);
+    wait_for_count(&os_url, 20).await;
+    restarted.signal("TERM");
+    assert_eq!(
+        restarted.exit_within(Duration::from_secs(30)).code(),
+        Some(0)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_position_reached_before_a_graceful_stop_is_answered_by_the_next_process() {
+    let (_postgres, url) = common::start_postgres(TABLE).await;
+    let (_opensearch, os_url) = common::start_opensearch().await;
+    let dir = project_opensearch(&url, &os_url, "fence");
+    let mut flusso = Flusso::start(&dir, &[]);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect(&url)
+        .await
+        .unwrap();
+    insert(&pool, 1..=1).await;
+    let position: String = sqlx::query_scalar("SELECT pg_current_wal_lsn()::text")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(wait(flusso.public, &position, "searchable").await, 200);
+    flusso.signal("TERM");
+    assert_eq!(flusso.exit_within(Duration::from_secs(30)).code(), Some(0));
+
+    let mut next = Flusso::start(&dir, &[]);
+    for level in ["applied", "searchable"] {
+        assert_eq!(
+            wait(next.public, &position, level).await,
+            200,
+            "the next process answers {position} at {level}: {}",
+            next.stderr()
+        );
+    }
+    assert!(documents(&os_url, "t").await.contains_key(&1));
+    next.signal("TERM");
+    next.exit_within(Duration::from_secs(30));
+}
+
+/// Insert one row per transaction until `writing` turns false; each id with
+/// the WAL position read right after its commit (at or past its commit's end).
+async fn write_steadily(pool: sqlx::PgPool, writing: Arc<AtomicBool>) -> Vec<(i32, u64)> {
+    let mut written = Vec::new();
+    let mut id = 0;
+    while writing.load(Ordering::SeqCst) {
+        id += 1;
+        sqlx::query("INSERT INTO t VALUES ($1, 'x')")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let lsn: String = sqlx::query_scalar("SELECT pg_current_wal_lsn()::text")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        written.push((id, lsn_value(&lsn)));
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    written
+}
+
+async fn insert(pool: &sqlx::PgPool, ids: std::ops::RangeInclusive<i32>) {
+    for id in ids {
+        sqlx::query("INSERT INTO t VALUES ($1, 'x')")
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+}
+
+fn lsn_value(text: &str) -> u64 {
+    let (high, low) = text.split_once('/').unwrap();
+    (u64::from_str_radix(high, 16).unwrap() << 32) | u64::from_str_radix(low, 16).unwrap()
+}
+
+async fn confirmed_flush(pool: &sqlx::PgPool, slot: &str) -> u64 {
+    let lsn: String = sqlx::query_scalar(
+        "SELECT confirmed_flush_lsn::text FROM pg_replication_slots WHERE slot_name = $1",
+    )
+    .bind(slot)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    lsn_value(&lsn)
+}
+
+/// Every document of `index` by its `id`, with its `_version`.
+async fn documents(os_url: &str, index: &str) -> std::collections::BTreeMap<i32, u64> {
+    let http = reqwest::Client::new();
+    http.post(format!("{os_url}/{index}/_refresh"))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = http
+        .get(format!("{os_url}/{index}/_search?size=10000&version=true"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    body["hits"]["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| {
+            (
+                i32::try_from(hit["_source"]["id"].as_i64().unwrap()).unwrap(),
+                hit["_version"].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+async fn wait_for_count(os_url: &str, count: usize) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while documents(os_url, "t").await.len() != count {
+        assert!(Instant::now() < deadline, "never reached {count} documents");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// `/wait` on `position` at `level`; the status code.
+async fn wait(public: SocketAddr, position: &str, level: &str) -> u16 {
+    reqwest::Client::new()
+        .get(format!("http://{public}/wait"))
+        .query(&[
+            ("position", position),
+            ("until", level),
+            ("timeout_ms", "30000"),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+fn docker(args: &[&str]) {
+    let done = Command::new("docker").args(args).status().unwrap();
+    assert!(done.success(), "docker {args:?}");
+}
+
+/// A project of one index over `t`, writing to OpenSearch at `os_url`.
+fn project_opensearch(url: &str, os_url: &str, name: &str) -> PathBuf {
+    let dir = project(url, name);
+    std::fs::write(
+        dir.join("flusso.toml"),
+        format!(
+            "[source]\ntype = \"postgres\"\nconnection_url = \"{url}\"\nslot = \"s_{name}\"\n\
+             publication = \"p_{name}\"\n\n[sinks.primary]\ntype = \"opensearch\"\nurl = \"{os_url}\"\n\
+             number_of_replicas = 0\n\n[[index]]\nname = \"t\"\nschema = \"t.schema.yml\"\nenabled = true\n"
+        ),
+    )
+    .unwrap();
+    dir
 }
 
 const TABLE: &str = "CREATE TABLE t (id int PRIMARY KEY, name text)";

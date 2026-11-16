@@ -26,7 +26,7 @@ use anyhow::Context;
 use clap::Args;
 use config::Config;
 use daemon::{Daemon, DaemonOptions};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::oneshot;
 
 use crate::DEFAULT_LOCK;
 use crate::adapters;
@@ -249,7 +249,7 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let _in_flight_gauge = metrics::register_in_flight_gauge(Arc::clone(&status));
     let _visibility_wait_gauge = metrics::register_visibility_wait_gauge(Arc::clone(&status));
 
-    let (stopping, stopping_rx) = watch::channel(false);
+    let waits = http::Waits::default();
     let (public_shutdown, public_rx) = oneshot::channel::<()>();
     let (private_shutdown, private_rx) = oneshot::channel::<()>();
     let public = tokio::spawn(http::serve(
@@ -259,7 +259,7 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
             status: Arc::clone(&status),
             registry,
             fence,
-            stopping: stopping_rx,
+            waits: waits.clone(),
         }),
         public_rx,
     ));
@@ -277,55 +277,95 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     ));
 
     let mut signals = Signals::install()?;
-    let result = running
-        .run(async {
-            match shutdown::requested(&mut signals, parent).await {
-                Cause::Signal(signal) => {
-                    tracing::info!(signal = signal.name(), "stopping");
-                }
+    let (stop, stop_rx) = oneshot::channel::<()>();
+    let run = running.run(async {
+        let _ = stop_rx.await;
+    });
+    tokio::pin!(run);
+    let ended = tokio::select! {
+        result = &mut run => Some(result),
+        cause = shutdown::requested(&mut signals, parent) => {
+            match cause {
+                Cause::Signal(signal) => tracing::info!(
+                    signal = signal.name(),
+                    "stopping: landing what is in flight, then closing"
+                ),
                 Cause::ParentExited { parent } => tracing::warn!(
                     parent,
                     "the parent process {parent} exited; stopping (--exit-with-parent)"
                 ),
             }
-        })
-        .await;
-
-    let timeout = Duration::from_secs(args.shutdown_timeout_secs);
-    let progress = Progress::default();
-    let drain = async {
-        progress.set("closing the HTTP surfaces");
-        let _ = stopping.send(true);
-        let _ = public_shutdown.send(());
-        let _ = private_shutdown.send(());
-        for (task, surface) in [(public, "public"), (private, "private")] {
-            if let Err(error) = task.await {
-                tracing::warn!(%error, surface, "HTTP server task did not shut down cleanly");
-            }
-        }
-        progress.set("flushing telemetry");
-        let flushed = tokio::task::spawn_blocking(move || {
-            metrics.shutdown();
-            if let Some(provider) = tracer_provider
-                && let Err(error) = provider.shutdown()
-            {
-                tracing::warn!(%error, "failed to flush OTLP tracer on shutdown");
-            }
-        })
-        .await;
-        if let Err(error) = flushed {
-            tracing::warn!(%error, "flushing telemetry failed");
+            None
         }
     };
-    match shutdown::within(timeout, &progress, signals.next(), drain).await {
-        Drained::Done(()) => result,
+
+    let timeout = Duration::from_secs(args.shutdown_timeout_secs);
+    let began = tokio::time::Instant::now();
+    let deadline = began + timeout;
+    let progress = Progress::default();
+    let stopping = async {
+        let result = match ended {
+            Some(result) => result,
+            None => {
+                progress.set(shutdown::DRAINING);
+                let _ = stop.send(());
+                run.await
+            }
+        };
+        progress.set("closing the HTTP surfaces");
+        waits.end();
+        let _ = public_shutdown.send(());
+        let _ = private_shutdown.send(());
+        let closed = shutdown::side_step(deadline, async {
+            for (task, surface) in [(public, "public"), (private, "private")] {
+                if let Err(error) = task.await {
+                    tracing::warn!(%error, surface, "HTTP server task did not shut down cleanly");
+                }
+            }
+        })
+        .await;
+        if !closed {
+            tracing::warn!("an HTTP connection did not close in time; leaving it");
+        }
+        progress.set("flushing telemetry");
+        let flushed = shutdown::side_step(deadline, async {
+            let flushed = tokio::task::spawn_blocking(move || {
+                metrics.shutdown();
+                if let Some(provider) = tracer_provider
+                    && let Err(error) = provider.shutdown()
+                {
+                    tracing::warn!(%error, "failed to flush OTLP tracer on shutdown");
+                }
+            })
+            .await;
+            if let Err(error) = flushed {
+                tracing::warn!(%error, "flushing telemetry failed");
+            }
+        })
+        .await;
+        if !flushed {
+            tracing::warn!("telemetry did not flush in time; the last spans and metrics are lost");
+        }
+        result
+    };
+    let interrupt = shutdown::second_signal(&mut signals, began);
+    match shutdown::within(timeout, &progress, interrupt, stopping).await {
+        Drained::Done(result) => result,
         Drained::TimedOut { step } => {
+            let unfinished = shutdown::unfinished_sinks(&status.snapshot());
             tracing::error!(
                 step,
-                "shutdown deadline of {}s passed while {step}; exiting without it \
-                 (unacked changes are redelivered on the next start)",
-                timeout.as_secs()
+                unfinished = %unfinished,
+                "shutdown deadline of {}s passed while {step}{}; exiting without it \
+                 (whatever was not acknowledged is read again on the next start)",
+                timeout.as_secs(),
+                if step == shutdown::DRAINING && !unfinished.is_empty() {
+                    format!(" ({unfinished})")
+                } else {
+                    String::new()
+                },
             );
+            waits.end_before_exit().await;
             std::process::exit(1);
         }
         Drained::Forced(signal) => {
@@ -333,6 +373,7 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
                 signal = signal.name(),
                 "second signal; exiting at once without finishing the stop"
             );
+            waits.end_before_exit().await;
             std::process::exit(signal.exit_code());
         }
     }

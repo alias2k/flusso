@@ -15,6 +15,7 @@ use clap::Args;
 use design::{ConfigValidator, DesignOptions};
 
 use crate::DEFAULT_CONFIG;
+use crate::shutdown::{self, Drained, Progress, Signals};
 
 #[derive(Debug, Args)]
 pub(crate) struct DesignArgs {
@@ -36,15 +37,39 @@ pub(crate) async fn execute(args: DesignArgs) -> anyhow::Result<()> {
     // Install the same stderr logging the daemon uses, so the designer's
     // "listening at <url>" line (and any warnings) actually reach the terminal.
     let _tracing = crate::telemetry::init_tracing();
-    design::serve(DesignOptions {
-        config_path: args.config,
-        address: args.address,
-        open_browser: !args.no_open,
-        adapters: crate::adapters::descriptions().to_vec(),
-        validate: ConfigValidator::new(crate::adapters::validate_draft),
-    })
-    .await
-    .context("running the designer")
+    let mut signals = Signals::install()?;
+    let (stop, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let serve = design::serve(
+        DesignOptions {
+            config_path: args.config,
+            address: args.address,
+            open_browser: !args.no_open,
+            adapters: crate::adapters::descriptions().to_vec(),
+            validate: ConfigValidator::new(crate::adapters::validate_draft),
+        },
+        async {
+            let _ = stop_rx.await;
+        },
+    );
+    tokio::pin!(serve);
+    tokio::select! {
+        served = &mut serve => return served.context("running the designer"),
+        signal = signals.next() => tracing::info!(signal = signal.name(), "flusso designer shutting down"),
+    }
+    let _ = stop.send(());
+    let began = tokio::time::Instant::now();
+    let interrupt = shutdown::second_signal(&mut signals, began);
+    match shutdown::within(shutdown::SIDE_STEP, &Progress::default(), interrupt, serve).await {
+        Drained::Done(served) => served.context("running the designer"),
+        Drained::TimedOut { .. } => {
+            tracing::warn!("an open connection did not close in time; leaving it");
+            Ok(())
+        }
+        Drained::Forced(signal) => {
+            tracing::warn!(signal = signal.name(), "second signal; exiting at once");
+            std::process::exit(signal.exit_code());
+        }
+    }
 }
 
 #[cfg(test)]

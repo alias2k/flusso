@@ -1,30 +1,46 @@
 //! How `flusso run` stops: the signals it honours, the parent it may follow,
-//! and the deadline on what it does after (issue #371).
+//! and the deadline on the stop (issue #371).
 //!
 //! - **What stops it.** `SIGINT`, `SIGTERM` and `SIGHUP` ([`Signals`]), and,
 //!   with `--exit-with-parent`, the parent process exiting ([`parent_exited`]).
 //!   [`requested`] resolves on the first of them.
-//! - **What a stop does.** The daemon drops the deployment at once: an unacked
-//!   batch is redelivered on the next start (at-least-once), so nothing waits
-//!   on the source or the sinks. What is left (closing the HTTP surfaces,
-//!   flushing telemetry) runs under [`within`]: it gets a deadline, and a
-//!   second signal ends it at once. Either way the caller exits the process,
-//!   whatever is still blocked.
+//! - **What a stop does.** A graceful drain, owned by the daemon: nothing new
+//!   is read, the batch in flight is published, every sink flushes and
+//!   acknowledges its lane, the final position is confirmed to the source and
+//!   the replication stream closed. Then the HTTP surfaces close and telemetry
+//!   is flushed. The whole of it runs under [`within`]: a deadline, and a
+//!   second signal that ends it at once. At-least-once delivery makes giving
+//!   up safe: whatever was not acknowledged is read again on the next start.
 //!
 //! ```text
-//! first signal ─▶ daemon dropped ─▶ HTTP surfaces closed ─▶ telemetry flushed ─▶ exit 0
-//!                 └──────────── at most --shutdown-timeout-secs ────────────┘
-//!                         deadline passed ─▶ log the step ─▶ exit 1
-//!                         second signal   ─▶ exit 128 + n, at once
+//! first signal ─▶ drain the pipeline ─▶ close HTTP ─▶ flush telemetry ─▶ exit 0
+//!                 └──────────── at most --shutdown-timeout-secs ─────┘
+//!                     deadline passed ─▶ log the step and the sinks ─▶ exit 1
+//!                     second signal   ─▶ exit 128 + n, at once
 //! ```
 
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-/// How long a stop may take when `--shutdown-timeout-secs` isn't given:
-/// under Docker's 10 s and Kubernetes' 30 s grace periods.
-pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 5;
+/// How long a stop may take when `--shutdown-timeout-secs` isn't given. A
+/// supervisor's grace period must be longer (the Helm chart sets 45 s).
+pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+/// The step of a stop that lands what is in flight.
+pub(crate) const DRAINING: &str = "draining the pipeline";
+
+/// A stop signal this soon after the stop began is the same request, not a
+/// second one: Ctrl-C or a closed terminal reaches flusso directly (the
+/// kernel signals the whole foreground process group) and again through a
+/// task runner that forwards it, milliseconds apart. A person pressing
+/// Ctrl-C again to force the exit takes longer than this.
+pub(crate) const REPEAT_WINDOW: Duration = Duration::from_secs(1);
+
+/// The most closing the HTTP surfaces, or flushing telemetry, may take of
+/// what is left of the deadline. Neither is the data path: giving up on one
+/// is logged and the stop still ends with exit 0.
+pub(crate) const SIDE_STEP: Duration = Duration::from_secs(5);
 
 /// How often `--exit-with-parent` checks the parent process.
 const PARENT_POLL: Duration = Duration::from_millis(500);
@@ -207,6 +223,38 @@ pub(crate) enum Drained<T> {
     Forced(StopSignal),
 }
 
+/// The next stop signal that is a second request: one arriving within
+/// [`REPEAT_WINDOW`] of `began` is the first one again and is ignored.
+pub(crate) async fn second_signal(
+    signals: &mut Signals,
+    began: tokio::time::Instant,
+) -> StopSignal {
+    loop {
+        let signal = signals.next().await;
+        if began.elapsed() >= REPEAT_WINDOW {
+            return signal;
+        }
+        tracing::info!(
+            signal = signal.name(),
+            "the same stop request again (a forwarded copy); still stopping"
+        );
+    }
+}
+
+/// Run `step`, giving up after [`SIDE_STEP`] or just before `deadline`,
+/// whichever is sooner; `false` when it was given up on. Ending before the
+/// deadline keeps a side step from turning a finished drain into exit 1.
+pub(crate) async fn side_step(
+    deadline: tokio::time::Instant,
+    step: impl Future<Output = ()>,
+) -> bool {
+    let before_deadline = deadline
+        .checked_sub(Duration::from_millis(100))
+        .unwrap_or(deadline);
+    let until = before_deadline.min(tokio::time::Instant::now() + SIDE_STEP);
+    tokio::time::timeout_at(until, step).await.is_ok()
+}
+
 /// Run `drain` for at most `timeout`, or until `interrupt` (the next signal)
 /// resolves, whichever comes first.
 pub(crate) async fn within<T>(
@@ -220,6 +268,26 @@ pub(crate) async fn within<T>(
         () = tokio::time::sleep(timeout) => Drained::TimedOut { step: progress.current() },
         signal = interrupt => Drained::Forced(signal),
     }
+}
+
+/// The sinks a drain cut short was still waiting on, for the log line:
+/// `primary: 120 changes in flight, failed`. Empty when every sink is done.
+pub(crate) fn unfinished_sinks(status: &daemon::StatusSnapshot) -> String {
+    status
+        .sinks
+        .iter()
+        .filter_map(|(name, sink)| {
+            let failed = sink.phase == daemon::SinkPhase::Failed;
+            (sink.changes_in_flight > 0 || failed).then(|| {
+                let mut said = format!("{name}: {} changes in flight", sink.changes_in_flight);
+                if failed {
+                    said.push_str(", failed");
+                }
+                said
+            })
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 #[cfg(test)]
