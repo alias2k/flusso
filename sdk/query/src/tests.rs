@@ -3797,6 +3797,8 @@ mod fence_pacing {
             let at = start.elapsed();
             if let Ok(mut asks) = recorded.lock() {
                 asks.push((at, ask));
+                // On paused time a loop that never sleeps never ends: fail, don't hang.
+                assert!(asks.len() <= 1_000, "the fence is spinning");
             }
             let attempt = answer(at);
             async move { Ok(attempt) }
@@ -3810,6 +3812,20 @@ mod fence_pacing {
             asks.iter().map(|(_, ask)| *ask).collect(),
             elapsed,
         )
+    }
+
+    /// Jitter never costs the last retry that fits: with `Retry-After: 1` and
+    /// 1.3 s in all, the second ask is made whatever the seed draws.
+    #[tokio::test(start_paused = true)]
+    async fn jitter_never_drops_a_retry_that_fits() {
+        for seed in 0..64 {
+            let (_, at, _, elapsed) = fence(Duration::from_millis(1300), Some(seed), |_| {
+                unavailable(Some(SECOND))
+            })
+            .await;
+            assert!(at.len() >= 2, "seed {seed}: asked once only, at {at:?}");
+            assert!(elapsed <= Duration::from_millis(1300), "seed {seed}");
+        }
     }
 
     #[tokio::test(start_paused = true)]

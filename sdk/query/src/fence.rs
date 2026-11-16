@@ -196,7 +196,8 @@ impl Client {
     }
 
     /// The whole budget of one fence (default 20 s), counted once across
-    /// every request it makes; the fence returns by it. Within it a fence
+    /// every request it makes; the fence returns by it, or by 10 ms when it
+    /// is shorter than that. Within it a fence
     /// rides out a restart of flusso, and asks again past the daemon's 60 s
     /// cap on a single wait. Past it the read fails with
     /// [`Error::FenceTimeout`] or [`Error::FenceUnavailable`]. Size it above a
@@ -346,7 +347,12 @@ where
                 (failure, retry_after)
             }
         };
-        let pause = jittered(backoff.max(hint.unwrap_or_default()), &mut jitter);
+        let base = backoff.max(hint.unwrap_or_default());
+        let mut pause = jittered(base, &mut jitter);
+        if pause + MIN_LEFT >= left && base + MIN_LEFT < left {
+            // The spread must not cost the last retry that fits.
+            pause = base;
+        }
         tracing::debug!(attempts, error = %failure, ?pause, "fence not passed; asking again");
         if pause + MIN_LEFT >= left {
             tokio::time::sleep(left).await;
@@ -444,8 +450,9 @@ fn transport_failure(error: &reqwest::Error) -> Result<Attempt> {
     })
 }
 
-/// Whether `error` is a certificate this client refuses, or a server that
-/// demanded one and got none. Typed, not by message.
+/// Whether `error` is a certificate this client refuses. Typed, not by
+/// message. A server that demands a client certificate answers with an alert,
+/// which is not matched here: that fence is retried and ends `Unreachable`.
 fn is_certificate_error(error: &reqwest::Error) -> bool {
     let mut source = std::error::Error::source(error);
     while let Some(cause) = source {

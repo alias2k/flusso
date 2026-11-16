@@ -121,7 +121,7 @@ flusso runs as one process, so a deploy leaves a gap: the old process stops, the
 | --- | --- |
 | a refused, reset or dropped connection, `503`, `502`, `504`, `429` | flusso is unavailable: pause, ask again |
 | `408` | flusso's own wait ended before the client's (it caps one at sixty seconds): ask again with what's left |
-| `400`, `404`, a refused certificate, a redirect loop | fail at once |
+| `400`, `404`, any other status, a refused certificate, a redirect loop | fail at once |
 
 A pause is the backoff (100 ms doubling to 2 s) or the `Retry-After` flusso sent, whichever is longer, plus up to half again at random, so clients that lost flusso together don't all return in the same instant. A `Retry-After` that reaches past the timeout fails the fence at once. A `408` that comes back sooner than asked (a proxy, say) is paced the same way. Dropping the read's future stops the retries.
 
