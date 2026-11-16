@@ -6,34 +6,29 @@ name: postgres-matrix
 #
 #   plan    The legs: `flusso-test-postgres -- matrix`, the tested tags other
 #           than the default (TESTED_TAGS in dev/test-postgres, their one home).
-#   leg     Every crate that starts Postgres (`rdeps(flusso-test-postgres)`)
-#           under the `ci` profile, with FLUSSO_TEST_PG_TAG set. Its summary
-#           names the tests that started a pinned image instead.
+#   leg     The test suites of every crate that starts Postgres
+#           (`rdeps(flusso-test-postgres)`) under the `ci` profile, with
+#           FLUSSO_TEST_PG_TAG set. Its summary names the tests that started a
+#           pinned image instead.
 #   report  Nightly only: one issue, opened or updated on a failure and
 #           closed by a passing nightly (.github/scripts/postgres-matrix.py).
 #
-# Not a required check. A leg takes about as long as `clippy + tests`, so a PR
-# runs it only with the `ci: postgres-matrix` label, reporting through its
-# checks alone.
+# Not a required check, and no `pull_request` trigger: a leg takes about as
+# long as `clippy + tests`. For a PR, dispatch it on the PR's branch
+# (`gh workflow run postgres-matrix.yml --ref <branch>`); its checks attach to
+# the head commit, so they show on the PR.
 
 on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
-  pull_request:
-    types: [opened, synchronize, reopened, labeled]
 
-# One nightly at a time (queued, never cancelled); a newer push to a labelled
-# PR supersedes its run. An event that runs nothing here (an unlabelled PR,
-# another label added) gets a group of its own, so it can't cancel a leg.
+# One nightly at a time (a nightly waits for the one before it); a newer
+# dispatch on a ref replaces an older one. Split by event, so a dispatch on
+# `main` never cancels a nightly.
 concurrency:
-  group: >-
-    ${{ (github.event_name != 'pull_request'
-          || (contains(github.event.pull_request.labels.*.name, 'ci: postgres-matrix')
-              && (github.event.action != 'labeled' || github.event.label.name == 'ci: postgres-matrix')))
-        && format('postgres-matrix-{0}', github.event.pull_request.number || github.ref)
-        || format('postgres-matrix-idle-{0}', github.run_id) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: postgres-matrix-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
 
 permissions:
   contents: read
@@ -44,17 +39,17 @@ env:
 jobs:
   plan:
     name: plan (tested majors)
-    if: >-
-      github.event_name != 'pull_request'
-      || (contains(github.event.pull_request.labels.*.name, 'ci: postgres-matrix')
-          && (github.event.action != 'labeled' || github.event.label.name == 'ci: postgres-matrix'))
     runs-on: ubuntu-latest
     outputs:
       tags: ${{ steps.tags.outputs.tags }}
     steps:
       - uses: actions/checkout@v7
 
+      # Restores the legs' cache (it holds this crate's build); saves nothing.
       - uses: ./.github/actions/rust-test-setup
+        with:
+          shared-key: postgres-matrix
+          save-if: "false"
 
       - name: Read the tested tags
         id: tags
@@ -78,8 +73,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # The same toolchain, nextest and cache steps as `clippy + tests`.
+      # The same toolchain, nextest and cache steps as `clippy + tests`. One
+      # cache for every leg (the build doesn't depend on the tag), saved by
+      # the first leg only: legs saving under one key would race, a key per
+      # leg would double the space.
       - uses: ./.github/actions/rust-test-setup
+        with:
+          shared-key: postgres-matrix
+          save-if: ${{ matrix.tag == fromJSON(needs.plan.outputs.tags)[0] }}
 
       # The `ci` profile of `clippy + tests`: retries, test groups, JUnit.
       - name: Test (every crate that starts Postgres)
@@ -107,16 +108,17 @@ jobs:
     name: report (nightly issue)
     needs: [plan, leg]
     # Only once the legs are known: with no plan an empty set would read as
-    # every leg passing and close the issue.
+    # every leg passing and close the issue. A failed plan writes no issue;
+    # the failed run shows in the Actions tab.
     if: ${{ !cancelled() && github.event_name == 'schedule' && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: read
       issues: write
     steps:
       - uses: actions/checkout@v7
 
+      # This run's own artifacts: no `actions: read` needed.
       - name: Download the legs' results
         uses: actions/download-artifact@v8
         with:

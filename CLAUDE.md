@@ -328,8 +328,9 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   `pgoutput_decode` smoke fuzz on nightly (see below); a separate workflow, `postgres-matrix.yml`
   (issue #348, **not** a required check), runs `-E 'rdeps(flusso-test-postgres)'` under the `ci`
   profile once per tested major other than the default (`TESTED_TAGS` in `dev/test-postgres`, their
-  one home; `cargo run -q -p flusso-test-postgres -- matrix` prints the legs), nightly, on
-  `workflow_dispatch`, and on a PR labelled `ci: postgres-matrix`; it shares its setup with
+  one home; `cargo run -q -p flusso-test-postgres -- matrix` prints the legs), nightly and on
+  `workflow_dispatch` only, no `pull_request` trigger: for a PR, `gh workflow run
+  postgres-matrix.yml --ref <branch>` (its checks attach to the head commit); it shares its setup with
   `clippy + tests` through `.github/actions/rust-test-setup`, and a failing nightly maintains one issue
   via `.github/scripts/postgres-matrix.py` (unit-tested in the `scripts` job); the `query.rs` proptests need no special
   handling — they're ordinary tests caught by the nextest step. A `scripts` job runs the stdlib unit

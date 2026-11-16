@@ -9,6 +9,16 @@ inputs:
     description: Extra rustup components (e.g. `clippy`).
     required: false
     default: ""
+  shared-key:
+    description: >-
+      rust-cache's `shared-key`: one cache for several jobs. Empty keeps
+      rust-cache's per-job key.
+    required: false
+    default: ""
+  save-if:
+    description: rust-cache's `save-if`, as a string (`"true"` saves).
+    required: false
+    default: "true"
 
 runs:
   using: composite
@@ -23,3 +33,6 @@ runs:
 
     - name: Cache build artifacts
       uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ inputs.shared-key }}
+        save-if: ${{ inputs.save-if }}

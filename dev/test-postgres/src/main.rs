@@ -7,22 +7,29 @@
 //! array (`["14-alpine","18-alpine"]`): the legs of the `postgres-matrix` workflow.
 
 use std::io::Write;
+use std::process::ExitCode;
 
 use testcontainers_modules as _;
 
-fn main() -> std::io::Result<()> {
-    let mut out = std::io::stdout();
-    match std::env::args().nth(1).as_deref() {
-        None => writeln!(out, "{}", test_postgres::image_name()),
+fn main() -> ExitCode {
+    let line = match std::env::args().nth(1).as_deref() {
+        None => test_postgres::image_name(),
         Some("matrix") => {
             let tags: Vec<String> = test_postgres::matrix_tags()
                 .map(|tag| format!("\"{tag}\""))
                 .collect();
-            writeln!(out, "[{}]", tags.join(","))
+            format!("[{}]", tags.join(","))
         }
-        Some(other) => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("unknown argument `{other}`; expected none or `matrix`"),
-        )),
+        Some(other) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "flusso-test-postgres: unknown argument `{other}`; expected none or `matrix`"
+            );
+            return ExitCode::from(2);
+        }
+    };
+    match writeln!(std::io::stdout(), "{line}") {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(_) => ExitCode::FAILURE,
     }
 }
