@@ -4,8 +4,8 @@
     postgres-matrix.py summary JUNIT --tag 18-alpine --outcome failure --out result.json
     postgres-matrix.py issue RESULTS_DIR --tags '["14-alpine","18-alpine"]' --run-url URL [--dry-run]
 
-`summary` reads one leg's nextest JUnit (the `ci` profile, which stores passing tests' output):
-prints the leg's Markdown summary (counts, failing tests, tests that started a pinned image instead
+`summary` reads one leg's nextest JUnit (the `ci` profile, which also stores passing tests' output
+for the binaries with a `test_postgres::pinned` test, from which the pinned starts are read): prints the leg's Markdown summary (counts, failing tests, tests that started a pinned image instead
 of the leg's) and writes the leg's result as JSON. A missing or unreadable report is a failed leg
 (it broke before or while the tests ran).
 
@@ -13,8 +13,8 @@ of the leg's) and writes the leg's result as JSON. A missing or unreadable repor
 `--tags` with no result counts as failed. Any failed leg opens or updates one issue (fixed title,
 label `area: ci-release`, opened by the workflow's bot) listing each failing version and its tests,
 with a link to the run; every leg passing closes it. It acts on one issue only, the newest it opened:
-a human's issue with the same title is left alone. `--dry-run` prints the `gh` calls instead of making them. Only the
-nightly run calls this; a labelled PR reports through its check alone.
+a human's issue with the same title is left alone. `--dry-run` prints the `gh` calls instead of making
+them. Only the nightly run calls this; a dispatched run reports through its checks alone.
 """
 import argparse
 import json

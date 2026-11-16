@@ -330,8 +330,8 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   profile once per tested major other than the default (`TESTED_TAGS` in `dev/test-postgres`, their
   one home; `cargo run -q -p flusso-test-postgres -- matrix` prints the legs), nightly and on
   `workflow_dispatch` only, no `pull_request` trigger: for a PR, `gh workflow run
-  postgres-matrix.yml --ref <branch>` (its checks attach to the head commit, not to the PR's checks
-  list); it shares its setup with
+  postgres-matrix.yml --ref <branch>` (its checks attach to the head commit's checks page and the
+  Actions tab, not to the PR's checks list); it shares its setup with
   `clippy + tests` through `.github/actions/rust-test-setup`, and a failing nightly maintains one issue
   via `.github/scripts/postgres-matrix.py` (unit-tested in the `scripts` job); the `query.rs` proptests need no special
   handling — they're ordinary tests caught by the nextest step. A `scripts` job runs the stdlib unit

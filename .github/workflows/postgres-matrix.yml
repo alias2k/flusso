@@ -16,7 +16,7 @@ name: postgres-matrix
 # Not a required check, and no `pull_request` trigger: a leg takes about as
 # long as `clippy + tests`. For a PR, dispatch it on the PR's branch
 # (`gh workflow run postgres-matrix.yml --ref <branch>`); its checks attach to
-# the head commit (its status, the Actions tab), not to the PR's checks list.
+# the head commit (its checks page, the Actions tab), not to the PR's checks list.
 
 on:
   schedule:
