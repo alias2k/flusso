@@ -315,7 +315,8 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   `cargo check --workspace --all-targets --features flusso-source-postgres/bench,flusso-sink-opensearch/bench`
   (compiles benches + examples, which clippy and nextest skip — clippy omits `--all-targets`,
   nextest only builds test targets; the features unlock the three feature-gated in-process bench targets) → `cargo check -p
-  flusso-cli --no-default-features` (the server-only image build) → `cargo nextest run
+  flusso-cli --no-default-features` (the server-only image build) → `.github/scripts/check-ahash-seed.py`
+  (`cargo tree --offline`: `ahash` keeps `runtime-rng` beside `compile-time-rng`, issue #355) → `cargo nextest run
   --profile ci --run-ignored all` → `cargo test --doc` → `RUSTDOCFLAGS="-D warnings" cargo doc
   --workspace --no-deps --document-private-items` (broken/ambiguous/redundant intra-doc links fail
   the build). Match these before assuming green. One scope note: on PRs confined to the query
@@ -1308,7 +1309,7 @@ The YAML entity is `Field { kind: FieldKind, emit }` (`emit` is lifted off the m
 deserializes). The projection maps a script as its declared leaf (`array` → `ResolvedField.array`) and
 **drops `emit: false` fields from the mapping** — the Postgres builder still fetches them (it walks
 `IndexSchema.fields`), and renders a script field as a `NULL` placeholder. The `script` crate
-(`libs/2-script`, layer 2: kernel + source port only; Rhai with `sync`/`decimal`/`no_time`/`no_module`, default features on: their `ahash/runtime-rng` keeps the build reproducible, issue #355; `.github/scripts/check-reproducible-build.sh` checks it)
+(`libs/2-script`, layer 2: kernel + source port only; Rhai with `sync`/`decimal`/`no_time`/`no_module`, default features on: their `ahash/runtime-rng` keeps the build reproducible, issue #355; CI's `check-ahash-seed.py` guards the features, `check-reproducible-build.sh` the bytes, by hand)
 compiles every script once (`Scripts::compile`, all errors with line/column/excerpt; the source is
 wrapped as `fn __flusso(root) { … }` so `this` can be bound — columns on line 1 are shifted back) and
 `ScriptedBuilder` decorates any `DocumentBuilder`: per object level, scripts run against `this` (a
