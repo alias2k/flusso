@@ -259,6 +259,11 @@ async fn run(
         .await
         .context("settling before the burst")?;
     let baseline = child.captured().await?;
+    let flushes_before = report::histogram_count(
+        &child.metrics().await?,
+        "flusso_flush_duration_seconds",
+        "primary",
+    );
     let burst = writer::burst(
         &pool,
         Arc::clone(scenario),
@@ -287,6 +292,10 @@ async fn run(
 
     // ── attribution + resources ──────────────────────────────────────────────
     let metrics = child.metrics().await?;
+    let burst_flushes =
+        report::histogram_count(&metrics, "flusso_flush_duration_seconds", "primary")
+            .zip(flushes_before)
+            .map(|(after, before)| after - before);
     let flush_p50 =
         report::histogram_quantile(&metrics, "flusso_flush_duration_seconds", "primary", 0.5);
     let flush_p99 =
@@ -310,6 +319,7 @@ async fn run(
             "burst_statements": burst.statements,
             "burst_write_seconds": write_seconds,
             "drain_seconds": drain_seconds,
+            "burst_flushes": burst_flushes,
             "total_seconds": run_started.elapsed().as_secs_f64(),
         }),
         smaller: Vec::new(),

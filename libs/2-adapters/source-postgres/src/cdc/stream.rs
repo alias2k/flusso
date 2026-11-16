@@ -37,7 +37,6 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use futures::FutureExt as _;
 use futures::stream::{self, BoxStream};
 use kernel::{ColumnName, Position, TableName};
 use pgwire_replication::{Lsn, PgWireError, ReplicationClient, ReplicationEvent};
@@ -120,23 +119,81 @@ struct State<C, V> {
     visibility: V,
     decode: DecodeState,
     read_ahead: usize,
-    /// The snapshot read in flight, on its own task: it runs while the engine
-    /// builds and publishes, so a burst's transactions are checked without the
-    /// stream ever making the engine wait for a round trip it could overlap.
-    fetch: Option<Fetch>,
-    /// When the next snapshot may be read: now, unless the oldest transaction
-    /// was just found still invisible, then on the poll schedule.
-    next_fetch: Instant,
+    /// Snapshot reads, shared with the task that makes them.
+    refresh: Arc<Refresh>,
+    /// The task reading snapshots while a transaction awaits a check.
+    refresher: Option<Refresher>,
     hold: Option<Hold>,
     hold_clock: HoldClock,
 }
 
-/// A snapshot read on its own task, aborted with the stream.
-struct Fetch(tokio::task::JoinHandle<Result<super::visibility::Snapshot>>);
+/// Snapshot reads made on their own task, so they run while the engine builds
+/// and publishes. The task keeps reading while the stream wants it (some
+/// transaction awaits a check) and stops once it doesn't, so a burst finds a
+/// recent snapshot whenever the engine comes back, and a lone change costs one
+/// read.
+#[derive(Debug)]
+struct Refresh {
+    /// The newest read, not taken by the stream yet.
+    latest: Mutex<Option<Result<super::visibility::Snapshot>>>,
+    /// Woken by every read.
+    arrived: tokio::sync::Notify,
+    /// Whether the stream wants another read.
+    wanted: std::sync::atomic::AtomicBool,
+    /// The pause between two reads, in microseconds: the poll schedule.
+    spacing: std::sync::atomic::AtomicU64,
+}
 
-impl Drop for Fetch {
+impl Default for Refresh {
+    fn default() -> Self {
+        Self {
+            latest: Mutex::default(),
+            arrived: tokio::sync::Notify::new(),
+            wanted: std::sync::atomic::AtomicBool::new(false),
+            spacing: std::sync::atomic::AtomicU64::new(FIRST_SPACING_MICROS),
+        }
+    }
+}
+
+/// The pause between reads while no transaction has waited long.
+const FIRST_SPACING_MICROS: u64 = 500;
+
+/// How old the stream's newest snapshot may be and still be checked against
+/// on a commit's arrival. Bounded so an xid is never widened against a
+/// snapshot from 2^31 transactions ago.
+const SNAPSHOT_REUSE: Duration = Duration::from_secs(1);
+
+/// The refreshing task, aborted with the stream.
+struct Refresher(tokio::task::JoinHandle<()>);
+
+impl Drop for Refresher {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+/// Read snapshots into `refresh` until the stream stops wanting them or a
+/// read fails.
+async fn refresh<V: Visibility>(visibility: V, refresh: Arc<Refresh>) {
+    use std::sync::atomic::Ordering;
+    loop {
+        let read = visibility.snapshot().await;
+        let failed = read.is_err();
+        *refresh
+            .latest
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(read);
+        refresh.arrived.notify_one();
+        if failed {
+            return;
+        }
+        tokio::time::sleep(Duration::from_micros(
+            refresh.spacing.load(Ordering::Relaxed),
+        ))
+        .await;
+        if !refresh.wanted.load(Ordering::Relaxed) {
+            return;
+        }
     }
 }
 
@@ -188,6 +245,9 @@ struct DecodeState {
     /// The xids in `pending` no snapshot has shown visible yet: what the next
     /// snapshot read is checked against.
     unchecked: HashSet<u32>,
+    /// The newest snapshot the stream read, and when: a commit it already
+    /// shows visible needs no read of its own.
+    last_snapshot: Option<(Instant, super::visibility::Snapshot)>,
     /// See [`Settings::read_tables`].
     read_tables: Option<HashSet<TableName>>,
     ack: Arc<Positions>,
@@ -222,6 +282,20 @@ impl DecodeState {
             .front()
             .map(|front| front.xid)
             .filter(|xid| !self.readable.contains(xid))
+    }
+
+    /// Mark readable every unchecked transaction `snapshot` sees, and keep it
+    /// for the commits that arrive next.
+    fn take_snapshot(&mut self, snapshot: super::visibility::Snapshot) {
+        self.seen_by(&snapshot);
+        self.last_snapshot = Some((Instant::now(), snapshot));
+    }
+
+    /// Whether the newest snapshot, if recent, already shows `xid` visible.
+    fn seen(&self, xid: u32) -> bool {
+        self.last_snapshot
+            .as_ref()
+            .is_some_and(|(taken, snapshot)| taken.elapsed() < SNAPSHOT_REUSE && snapshot.sees(xid))
     }
 
     /// Mark readable every unchecked transaction `snapshot` sees.
@@ -274,14 +348,15 @@ pub(crate) fn build<C: Replication, V: Visibility>(
             pending: VecDeque::new(),
             readable: HashSet::new(),
             unchecked: HashSet::new(),
+            last_snapshot: None,
             read_tables: settings.read_tables,
             ack,
             done: false,
             column_types,
         },
         read_ahead: settings.read_ahead.max(1),
-        fetch: None,
-        next_fetch: Instant::now(),
+        refresh: Arc::default(),
+        refresher: None,
         hold: None,
         hold_clock: settings.hold_clock,
     };
@@ -301,7 +376,8 @@ fn into_stream<C: Replication, V: Visibility>(
                 .client
                 .update_applied_lsn(Lsn::from_u64(state.decode.ack.confirmed_lsn()));
 
-            if let Err(e) = state.collect() {
+            if let Err(e) = state.take_latest() {
+                state.decode.done = true;
                 return Some((Err(e), state));
             }
             if let Some(change) = state.decode.next_change() {
@@ -311,10 +387,10 @@ fn into_stream<C: Replication, V: Visibility>(
                 {
                     state.end_hold();
                 }
-                state.prefetch();
+                state.want_snapshots();
                 return Some((Ok(change), state));
             }
-            state.prefetch();
+            state.want_snapshots();
 
             let Some(xid) = state.decode.held() else {
                 state.end_hold();
@@ -347,34 +423,18 @@ fn into_stream<C: Replication, V: Visibility>(
                 return Some((Err(e), state));
             }
             // Held: confirmations keep flowing, the stream reads on up to its
-            // bound, and the snapshot read in flight, or the next one's time,
-            // turns the loop.
+            // bound, and the next snapshot read turns the loop.
             let room = !state.decode.done && state.decode.pending.len() < state.read_ahead;
-            let fetching = state.fetch.is_some();
-            let fetch = state.fetch.as_mut();
+            let refresh = Arc::clone(&state.refresh);
             tokio::select! {
                 biased;
                 () = state.decode.ack.confirmed_moved() => {}
-                joined = async {
-                    match fetch {
-                        Some(Fetch(handle)) => Some((&mut *handle).await),
-                        None => None,
-                    }
-                }, if fetching => {
-                    state.fetch = None;
-                    if let Some(joined) = joined
-                        && let Err(e) = state.apply(joined)
-                    {
-                        state.decode.done = true;
-                        return Some((Err(e), state));
-                    }
-                }
+                () = refresh.arrived.notified() => {}
                 received = state.client.recv(), if room => {
                     if let Err(e) = state.receive(received).await {
                         return Some((Err(e), state));
                     }
                 }
-                () = tokio::time::sleep_until(state.next_fetch), if !fetching => {}
             }
         }
     }))
@@ -403,50 +463,51 @@ impl<C: Replication, V: Visibility> State<C, V> {
         handled
     }
 
-    /// Start reading a snapshot when a transaction awaits a check, none is in
-    /// flight, and the poll schedule allows.
-    fn prefetch(&mut self) {
-        if self.fetch.is_none()
-            && !self.decode.unchecked.is_empty()
-            && Instant::now() >= self.next_fetch
+    /// Keep the refreshing task reading while a transaction awaits a check,
+    /// starting it when it isn't running; let it stop otherwise.
+    fn want_snapshots(&mut self) {
+        use std::sync::atomic::Ordering;
+        let wanted = !self.decode.unchecked.is_empty();
+        self.refresh.wanted.store(wanted, Ordering::Relaxed);
+        if wanted
+            && self
+                .refresher
+                .as_ref()
+                .is_none_or(|refresher| refresher.0.is_finished())
         {
-            let visibility = self.visibility.clone();
-            self.fetch = Some(Fetch(tokio::spawn(
-                async move { visibility.snapshot().await },
-            )));
+            self.refresher = Some(Refresher(tokio::spawn(refresh(
+                self.visibility.clone(),
+                Arc::clone(&self.refresh),
+            ))));
         }
     }
 
-    /// Take a finished snapshot read, if any, and [`apply`](Self::apply) it.
-    fn collect(&mut self) -> std::result::Result<(), SourceError> {
-        let Some(Fetch(handle)) = self.fetch.as_mut() else {
+    /// Take the newest snapshot read, if one arrived, and mark what it sees.
+    /// While the oldest transaction stays invisible, reads follow the poll
+    /// schedule; otherwise they come as fast as the first.
+    fn take_latest(&mut self) -> std::result::Result<(), SourceError> {
+        use std::sync::atomic::Ordering;
+        let latest = self
+            .refresh
+            .latest
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let Some(read) = latest else {
             return Ok(());
         };
-        let Some(joined) = handle.now_or_never() else {
-            return Ok(());
+        self.decode.take_snapshot(read?);
+        let spacing = match self.hold.as_mut() {
+            Some(hold) if self.decode.held() == Some(hold.xid) => {
+                hold.delay = poll_delay(hold.since.elapsed(), hold.delay);
+                hold.delay
+            }
+            _ => Duration::from_micros(FIRST_SPACING_MICROS),
         };
-        self.fetch = None;
-        self.apply(joined)
-    }
-
-    /// Mark what a finished snapshot read sees. While the oldest transaction
-    /// stays invisible, the next read waits on the poll schedule; otherwise
-    /// it may start at once.
-    fn apply(
-        &mut self,
-        joined: std::result::Result<Result<super::visibility::Snapshot>, tokio::task::JoinError>,
-    ) -> std::result::Result<(), SourceError> {
-        let snapshot =
-            joined.map_err(|e| SourceError::Query(format!("reading a snapshot: {e}")))??;
-        self.decode.seen_by(&snapshot);
-        let now = Instant::now();
-        self.next_fetch = now;
-        if let Some(hold) = self.hold.as_mut()
-            && self.decode.held() == Some(hold.xid)
-        {
-            hold.delay = poll_delay(now - hold.since, hold.delay);
-            self.next_fetch = now + hold.delay;
-        }
+        self.refresh.spacing.store(
+            u64::try_from(spacing.as_micros()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
         Ok(())
     }
 
@@ -632,7 +693,7 @@ fn handle(
                         .iter()
                         .any(|change| read.contains(change.table()))
                 });
-                if read {
+                if read && !state.seen(xid) {
                     state.unchecked.insert(xid);
                 } else {
                     state.readable.insert(xid);

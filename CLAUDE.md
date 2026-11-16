@@ -645,9 +645,11 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   order; the front one is emitted only once its xid is `readable`. A snapshot read
   (`pg_current_snapshot()::text`, judged in Rust by `cdc/visibility.rs`'s `Snapshot::sees`, the
   32-bit xid **widened by its signed distance to `xmax`**, which is last-finished + 1, not the next
-  xid) runs on **its own task** whenever an xid is `unchecked`, one at a time, so it overlaps the
-  engine's build and one read covers every transaction received; inline it made the stream
-  not-ready and shrank `drain_ready`'s batches. While the front is held the loop `select!`s
+  xid) runs on **its own task** (`refresh`, one read at a time) for as long as an xid is
+  `unchecked`, so reads overlap the engine's build; the stream keeps the newest snapshot (≤ 1 s,
+  `SNAPSHOT_REUSE`) and checks each commit against it on arrival. A read per check, inline or one
+  task each, made the stream not-ready and halved `drain_ready`'s batches (256 flushes for a
+  burst main did in 117). While the front is held the loop `select!`s
   `confirmed_moved` (confirmations keep reaching the client, #205), `recv` up to the read-ahead
   bound (`with_read_ahead`, the CLI passes `max_changes × 16`) and the poll schedule
   (`poll_delay`: 0.5 ms for 20 ms, tokio rounds it to 1 ms, then doubling to 50 ms). A transaction

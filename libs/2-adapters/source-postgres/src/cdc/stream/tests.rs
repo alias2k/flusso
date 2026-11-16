@@ -19,6 +19,7 @@ fn state() -> (DecodeState, Arc<Positions>) {
         pending: VecDeque::new(),
         readable: HashSet::new(),
         unchecked: HashSet::new(),
+        last_snapshot: None,
         read_tables: Some(HashSet::new()),
         ack: Arc::clone(&ack),
         done: false,
@@ -881,8 +882,8 @@ fn holding_stream(
         visibility: snapshots,
         decode,
         read_ahead,
-        fetch: None,
-        next_fetch: Instant::now(),
+        refresh: Arc::default(),
+        refresher: None,
         hold: None,
         hold_clock,
     })
@@ -1052,4 +1053,32 @@ async fn a_hold_on_a_server_waiting_for_flusso_stops_the_stream() {
         .unwrap();
     let error = item.unwrap_err().to_string();
     assert!(error.contains("synchronous_standby_names"), "{error}");
+}
+
+/// A commit the newest snapshot already shows visible is emitted with no read
+/// of its own; one it doesn't show waits for the next read.
+#[tokio::test(start_paused = true)]
+async fn a_commit_a_recent_snapshot_shows_visible_needs_no_read() {
+    let (mut decode, _ack) = holding_state();
+    decode.take_snapshot(Snapshots::seeing(&[7]).snapshot_now());
+    transaction(&mut decode, 7, 100);
+    assert!(decode.unchecked.is_empty());
+    assert!(
+        decode.next_change().is_some(),
+        "seen by the newest snapshot"
+    );
+    transaction(&mut decode, 8, 200);
+    assert!(decode.next_change().is_none(), "not seen: it waits");
+}
+
+/// A snapshot older than [`SNAPSHOT_REUSE`] is never checked against: an xid
+/// is widened against a recent `xmax` only.
+#[tokio::test(start_paused = true)]
+async fn an_old_snapshot_is_not_reused() {
+    let (mut decode, _ack) = holding_state();
+    decode.take_snapshot(Snapshots::seeing(&[7]).snapshot_now());
+    tokio::time::advance(SNAPSHOT_REUSE + Duration::from_millis(1)).await;
+    transaction(&mut decode, 7, 100);
+    assert!(decode.next_change().is_none(), "checked by a new read");
+    assert!(decode.unchecked.contains(&7));
 }

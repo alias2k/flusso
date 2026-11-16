@@ -120,7 +120,7 @@ flusso consumes a logical replication **slot** and subscribes to a **publication
 
 With `synchronous_standby_names` set and `synchronous_commit` at `remote_write` or above, a commit waits for a standby **after** it is in the WAL and **before** other sessions see it. flusso receives the change in that window and holds it until the commit is visible: a document built earlier would hold the state before the commit, and nothing would build it again.
 
-- **What it costs.** A change is indexed a few milliseconds after its commit returns to the writer: flusso checks every 0.5 ms (about 1 ms in practice) for the first 20 ms of a wait, then backs off to 50 ms. Behind an emulated 2 ms standby, the visible latency p50 rose from about 29 ms to about 77 ms on a loaded test machine.
+- **What it costs.** A change is indexed within about a millisecond of becoming visible: flusso checks every 0.5 ms (about 1 ms in practice) for the first 20 ms of a wait, then backs off to 50 ms. In the benchmark harness's `sync-standby` scenario (an emulated 2 ms standby) the visible latency p50 stayed at about 29 ms, the same as without a standby, and p99 was 82–88 ms against 57–80 ms.
 - **One transaction holds back all the others.** Changes are indexed in commit order, so a commit that stays invisible stalls every later one, from every session, until it is visible. What makes a commit wait that long:
   - a synchronous standby that is down or slow, with `synchronous_commit = on` (or `remote_write`, `remote_apply`);
   - `remote_apply` and a standby with `recovery_min_apply_delay`: every commit waits the delay;
