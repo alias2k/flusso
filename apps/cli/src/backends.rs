@@ -89,6 +89,28 @@ impl Backends for FlussoBackends {
     }
 }
 
+/// What `flusso run` would say about the source server: `Ok(None)` when it
+/// accepts it, `Ok(Some(refusal))` when it would refuse to start, `Err` when
+/// the server can't be asked.
+pub(crate) async fn source_server_problem(config: &Config) -> anyhow::Result<Option<String>> {
+    let postgres = adapters::source_config(config)?;
+    let connection_url = resolve_connection_url(&postgres)?;
+    let tls = postgres.tls();
+    let replication =
+        replication_config(&connection_url, &tls, &postgres.slot, &postgres.publication)
+            .context("building the replication connection config")?;
+    let sql_url = sql_connection_url(&connection_url, &tls)
+        .context("applying the source TLS settings to the connection URL")?;
+    match WalChangeCapture::new(replication, sql_url)
+        .check_server()
+        .await
+    {
+        Ok(()) => Ok(None),
+        Err(source::SourceError::Setup(refusal)) => Ok(Some(refusal)),
+        Err(error) => Err(error).context("checking the source server"),
+    }
+}
+
 /// A source capture used only for its read-only provisioning surface
 /// (`flusso check`): the slot name is irrelevant there.
 pub(crate) fn build_provisioning(

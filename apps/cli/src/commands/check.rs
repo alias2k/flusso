@@ -113,6 +113,12 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
         (Some(coverage), Some(pre_image))
     };
     let manage = postgres.manage_publication;
+    let server = if args.offline {
+        None
+    } else {
+        Some(crate::backends::source_server_problem(&config).await?)
+    };
+    let refused = server.as_ref().and_then(Option::as_deref);
 
     let has_errors = diagnostics
         .iter()
@@ -136,6 +142,10 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                         "message": d.message,
                     }))
                     .collect::<Vec<_>>(),
+                "server": server.as_ref().map(|problem| serde_json::json!({
+                    "ok": problem.is_none(),
+                    "problem": problem,
+                })),
                 "coverage": coverage.as_ref().map(|c| serde_json::json!({
                     "satisfied": c.satisfied,
                     "manageable": c.manageable,
@@ -186,6 +196,7 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                 )?;
             } else {
                 print::diagnostics(&mut out, pen, &diagnostics)?;
+                print::server(&mut out, pen, refused)?;
                 if let Some(coverage) = &coverage {
                     print::coverage(&mut out, pen, coverage, manage)?;
                 }
@@ -193,15 +204,26 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
                     print::pre_image(&mut out, pen, pre_image, postgres.manage_replica_identity)?;
                 }
                 writeln!(out)?;
+                if refused.is_some() {
+                    print::warning(
+                        &mut out,
+                        pen,
+                        "failed",
+                        "flusso run would refuse this server",
+                    )?;
+                }
                 if has_errors {
                     print::warning(&mut out, pen, "failed", "schema disagrees with database")?;
-                } else {
+                } else if refused.is_none() {
                     print::success(&mut out, pen, "check passed")?;
                 }
             }
         }
     }
 
+    if let Some(refusal) = refused {
+        anyhow::bail!("flusso run would refuse the source server: {refusal}");
+    }
     ensure!(
         !has_errors,
         if args.offline {
