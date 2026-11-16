@@ -15,10 +15,11 @@ for `flusso-cli` as installed and as the server image builds it
 so CI runs it after the build checks. `$CARGO` names the cargo to run (default `cargo`).
 
 Colour and charset are forced (CI sets `CARGO_TERM_COLOR=always`, which would hide every
-line from the parser), and a tree with no feature read is an error, never a pass.
+line from the parser). A build passes only when `ahash` was found with `runtime-rng`: a
+tree with no feature read, or with no `ahash` at all, is an error, never a pass.
 
-Exits 0 when every build is fine (or links no `ahash`), 1 when one has the seed baked in,
-2 when cargo fails or its output can't be read.
+Exits 0 when every build has `runtime-rng`, 1 when one lacks it, 2 when cargo fails, its
+output can't be read, or `ahash` is gone.
 """
 import os
 import re
@@ -40,16 +41,23 @@ def features_in(tree: str) -> set[str]:
 
 
 def problem(features: set[str]) -> str | None:
-    """Why these `ahash` features make the build non-reproducible, or `None`."""
-    if "compile-time-rng" in features and "runtime-rng" not in features:
+    """Why these `ahash` features are refused, or `None` when the seed is drawn per process."""
+    fix = (
+        "Fix: keep Rhai's default features (no `default-features = false` on `rhai` in "
+        "the root Cargo.toml), or enable `ahash/runtime-rng` another way; "
+        "see docs/src/contribute/benchmarks.md."
+    )
+    if "runtime-rng" in features:
+        return None
+    if "compile-time-rng" in features:
         return (
             "ahash has `compile-time-rng` without `runtime-rng`: every build bakes in a new "
-            "random seed, so no two builds have the same bytes (issue #355). "
-            "Fix: keep Rhai's default features (no `default-features = false` on `rhai` in "
-            "the root Cargo.toml), or enable `ahash/runtime-rng` another way; "
-            "see docs/src/contribute/benchmarks.md."
+            f"random seed, so no two builds have the same bytes (issue #355). {fix}"
         )
-    return None
+    return (
+        "ahash has no `runtime-rng`: its keys are fixed and public, the same in every "
+        f"process (issue #355). {fix}"
+    )
 
 
 def tree(cargo: str, args: list[str]) -> subprocess.CompletedProcess:
@@ -67,10 +75,14 @@ def main() -> int:
     for name, args in BUILDS:
         result = tree(cargo, args)
         if result.returncode != 0:
-            if NO_AHASH in result.stderr:
-                print(f"{name}: links no ahash")
-                continue
             sys.stderr.write(result.stderr)
+            if NO_AHASH in result.stderr:
+                print(
+                    f"{name}: found no ahash. Rhai hashes with something else now: check how "
+                    "it is seeded and update this guard (.github/scripts/check-ahash-seed.py)",
+                    file=sys.stderr,
+                )
+                return 2
             print(f"{name}: cargo tree failed", file=sys.stderr)
             return 2
         features = features_in(result.stdout)

@@ -48,6 +48,12 @@ case "$what" in
     ;;
 esac
 
+# A relative CARGO_TARGET_DIR means the caller's directory, as it does to cargo.
+if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+  CARGO_TARGET_DIR=$(realpath -m "$CARGO_TARGET_DIR")
+  export CARGO_TARGET_DIR
+fi
+
 cd "$(dirname "$0")"
 cd "$(git rev-parse --show-toplevel)"
 
