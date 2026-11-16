@@ -1308,7 +1308,7 @@ The YAML entity is `Field { kind: FieldKind, emit }` (`emit` is lifted off the m
 deserializes). The projection maps a script as its declared leaf (`array` → `ResolvedField.array`) and
 **drops `emit: false` fields from the mapping** — the Postgres builder still fetches them (it walks
 `IndexSchema.fields`), and renders a script field as a `NULL` placeholder. The `script` crate
-(`libs/2-script`, layer 2: kernel + source port only; Rhai with `sync`/`decimal`/`no_time`/`no_module`)
+(`libs/2-script`, layer 2: kernel + source port only; Rhai with `sync`/`decimal`/`no_time`/`no_module`, default features on: their `ahash/runtime-rng` keeps the build reproducible, issue #355; `.github/scripts/check-reproducible-build.sh` checks it)
 compiles every script once (`Scripts::compile`, all errors with line/column/excerpt; the source is
 wrapped as `fn __flusso(root) { … }` so `this` can be bound — columns on line 1 are shifted back) and
 `ScriptedBuilder` decorates any `DocumentBuilder`: per object level, scripts run against `this` (a
