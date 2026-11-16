@@ -258,7 +258,7 @@ class Gate(unittest.TestCase):
         self.assertEqual(self.runs(), [])
         result = self.gate()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("No bench compared: every bench's binary and run-time inputs are identical on both sides.", result.stdout)
+        self.assertIn("No bench compared: every bench present on both sides has identical binaries and run-time inputs.", result.stdout)
         self.assertEqual(self.row(result.stdout, "scripted/flat")[1:], ["—", "—", "identical binaries, not compared"])
 
     def test_only_the_benches_that_differ_run(self) -> None:
@@ -274,6 +274,69 @@ class Gate(unittest.TestCase):
         self.env["FAKE_LIST_FAIL"] = "engine"
         self.workflow()
         self.assertEqual(self.runs(), ["base engine base -", "pr engine pr -"])
+
+    def test_a_bench_added_on_the_pr_side_only_passes_and_is_reported_one_sided(self) -> None:
+        # How `scripted` arrived: a new crate, every other bench identical.
+        (self.base_tree / "libs/2-script/benches/scripted.rs").unlink()
+        self.workflow()
+        self.assertEqual(self.runs(), ["pr scripted pr -"])
+        result = self.gate()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Not compared (measured on one side only): `scripted/flat` (only `pr`).", result.stdout)
+        self.assertIn("No bench compared: every bench present on both sides has identical binaries and run-time inputs.", result.stdout)
+        self.assertIn("`scripted/flat` (only `pr`)", self.summary.read_text())
+
+    def test_a_bench_removed_on_the_pr_side_fails_provenance_as_before(self) -> None:
+        (self.pr_tree / "libs/2-script/benches/scripted.rs").unlink()
+        self.workflow()
+        result = self.gate()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("::error::bench provenance: the PR side did not run scripted, which the base did", result.stdout)
+        self.assertNotIn("First pass", result.stdout)
+
+    def test_a_bench_added_beside_a_real_regression_still_fails(self) -> None:
+        (self.base_tree / "libs/2-script/benches/scripted.rs").unlink()
+        self.env["FAKE_DIFFER"] = "render"
+        self.times({"render/bulk": {"pr": 1_300_000, "pr-confirm": 1_300_000}})
+        self.workflow()
+        result = self.gate()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.row(result.stdout, "render/bulk")[-1], "**confirmed** by the re-run ⚠️")
+        self.assertIn("`scripted/flat` (only `pr`)", result.stdout)
+
+    def test_a_differing_bench_measured_on_one_side_only_is_an_error(self) -> None:
+        # The engine binary changes between the build step and the run step: the base skipped it
+        # as identical, the PR's rebuild differs and runs. Its ids have no base median to judge.
+        self.env["FAKE_DIFFER"] = "render"
+        self.bench("base", "base", BENCH_BUILD_ONLY="1")
+        self.bench("pr", "pr", BENCH_BUILD_ONLY="1")
+        self.bench("base", "base", BENCH_SKIP_SAME_AS=str(self.pr_target / "bench-executables" / "pr.identity.tsv"))
+        self.bench(
+            "pr",
+            "pr",
+            BENCH_SKIP_SAME_AS=str(self.base_target / "bench-executables" / "base.identity.tsv"),
+            FAKE_DIFFER="render,engine",
+        )
+        self.assertIn("pr engine pr -", self.runs())
+        self.assertNotIn("base engine base -", self.runs())
+        result = self.gate()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("::error::", result.stdout)
+        self.assertIn("`live_drain/sinks2/64`", result.stdout.split("::error::", 1)[1])
+
+    def test_a_symlink_in_a_declared_directory_is_part_of_the_identity(self) -> None:
+        fixtures = "libs/2-engine/benches/fixtures"
+        self.declare(f"engine\t{fixtures}")
+        for tree, target in ((self.base_tree, "a.bin"), (self.pr_tree, "b.bin")):
+            (tree / fixtures).mkdir(parents=True)
+            for name in ("a.bin", "b.bin"):
+                (tree / fixtures / name).write_text(name)
+            (tree / fixtures / "current").symlink_to(target)
+        self.times({"live_drain/sinks2/64": {"pr": 1_300_000, "pr-confirm": 1_300_000}})
+        self.both()
+        result = self.gate()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.row(result.stdout, "live_drain/sinks2/64")[-1], "**confirmed** by the re-run ⚠️")
 
     def test_a_base_with_no_in_process_bench_still_warns_and_passes(self) -> None:
         for file, _, _ in BENCHES:
@@ -294,6 +357,42 @@ class Gate(unittest.TestCase):
             result.stdout,
             f"::warning::nothing to compare: no bench has both `base` and `pr` under {self.criterion}\n",
         )
+
+
+class EveryIdentical(unittest.TestCase):
+    """bench_identity.every_identical, as review-ab.sh asks it."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = pathlib.Path(tmp.name)
+        sys.path.insert(0, str(HERE))
+        import bench_identity
+
+        self.module = bench_identity
+
+    def record(self, side: str, rows: dict) -> pathlib.Path:
+        target = self.dir / side
+        (target / "bench-executables").mkdir(parents=True)
+        (target / "bench-executables" / "run.identity.tsv").write_text("".join(f"{b}\t{i}\n" for b, i in rows.items()))
+        return target
+
+    def every(self, base: dict, pr: dict) -> bool:
+        return self.module.every_identical(self.record("base", base), self.record("pr", pr), "run", "run")
+
+    def test_the_same_benches_with_the_same_identities_are_identical(self) -> None:
+        self.assertTrue(self.every({"cases": "x", "postgres": "y"}, {"cases": "x", "postgres": "y"}))
+
+    def test_one_differing_bench_is_not(self) -> None:
+        self.assertFalse(self.every({"cases": "x"}, {"cases": "z"}))
+
+    def test_a_bench_on_one_side_only_is_not(self) -> None:
+        self.assertFalse(self.every({"cases": "x"}, {"cases": "x", "postgres": "y"}))
+
+    def test_nothing_recorded_is_not_identical(self) -> None:
+        # An empty selection proves nothing about any binary: no "every difference is noise" claim.
+        self.assertFalse(self.every({}, {}))
+        self.assertIn("nothing recorded", self.module.every_identical.__doc__)
 
 
 # Patterns that read something at run time: a file, a directory, an environment variable or the
@@ -404,7 +503,8 @@ class Golden(unittest.TestCase):
                     record = target / "bench-executables"
                     record.mkdir(parents=True)
                     (record / f"{side}.identity.tsv").write_text(f"a\t{side}-identity\n")
-                    (record / f"{side}.ids.tsv").write_text("".join(f"a\t{i}\n" for i in first))
+                    listed = [i for i, (b, _) in first.items() if side == "pr" or b is not None]
+                    (record / f"{side}.ids.tsv").write_text("".join(f"a\t{i}\n" for i in listed))
                 args += ["--identities", str(dir / "base-target"), str(dir / "pr-target")]
             result = subprocess.run(
                 [sys.executable, HERE / "bench-compare.py", root, "base", "pr", "10", *args],
