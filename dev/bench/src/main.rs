@@ -15,6 +15,10 @@
 //!    accepts; time until every sink has nothing in flight. Reports
 //!    `drain_changes_per_s`.
 //!
+//! The `sync-standby` scenario runs `reference` with phases 3 and 4 committing
+//! behind an emulated synchronous standby (see `standby.rs`), so every change
+//! reaches flusso before it is visible and is held until it is.
+//!
 //! Throughout, the child's peak resident set and CPU time are sampled
 //! (`peak_rss_mib`, `cpu_seconds`), and the flush-duration histogram from
 //! `/metrics` gives the attribution figures (`flush_p50_ms`, `flush_p99_ms`).
@@ -33,6 +37,7 @@ mod report;
 mod scale;
 mod scenario;
 mod services;
+mod standby;
 mod writer;
 
 use std::path::{Path, PathBuf};
@@ -210,6 +215,14 @@ async fn run(
 
     // ── 3. latency ───────────────────────────────────────────────────────────
     *phase = "latency".to_owned();
+    let (_standby, pool) = if scenario.name == ScenarioName::SyncStandby {
+        let (standby, writers) =
+            standby::start(&pool, &services.pg_url, (scale.writers + 4) as u32).await?;
+        tracing::info!(round_trip = ?standby::ROUND_TRIP, "emulating a synchronous standby");
+        (Some(standby), writers)
+    } else {
+        (None, pool)
+    };
     let ids = Arc::new(scenario.id_counters(scale));
     let probe_cap = Duration::from_secs(60).min(remaining("latency")?);
     let latencies = writer::probed_trickle(
