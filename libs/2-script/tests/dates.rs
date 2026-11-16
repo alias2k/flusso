@@ -1378,62 +1378,200 @@ fn parse_timestamp_reads_postgres_text_offsets() {
     }
 }
 
-/// Each replacement the upgrade page gives, run on a zoned (`timestamptz`) and a plain
-/// (`timestamp`) value where it applies.
+/// The "Write instead" cells of the upgrade page's table of script changes, read from the page
+/// itself: every complete snippet in them (no `…`, not a bare `.method()`), with each row's
+/// snippets as written.
+fn upgrade_replacements() -> Vec<(String, Vec<String>)> {
+    let page = include_str!("../../../docs/src/operate/upgrade-to-0-18.md");
+    let section = page
+        .split("## A date reaches a script as a date")
+        .nth(1)
+        .unwrap();
+    let section = section.split("\n## ").next().unwrap();
+    let mut rows = Vec::new();
+    for line in section.lines().filter(|l| l.starts_with("| ")) {
+        let cells = split_cells(line);
+        if cells.len() != 3 || cells[0] == "0.17 script" || cells[0].starts_with("---") {
+            continue;
+        }
+        let snippets = code_spans(&cells[2])
+            .into_iter()
+            .filter(|s| !s.contains('…') && !s.starts_with('.'))
+            .collect();
+        rows.push((cells[0].clone(), snippets));
+    }
+    rows
+}
+
+/// A markdown table row's cells, `\|` read as a pipe inside a cell.
+fn split_cells(line: &str) -> Vec<String> {
+    let mut cells = vec![String::new()];
+    let mut chars = line.trim().trim_start_matches('|').chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.peek() == Some(&'|') => {
+                cells.last_mut().unwrap().push('|');
+                chars.next();
+            }
+            '|' => cells.push(String::new()),
+            other => cells.last_mut().unwrap().push(other),
+        }
+    }
+    cells.pop();
+    cells.into_iter().map(|c| c.trim().to_owned()).collect()
+}
+
+/// The single-backtick code spans of a cell.
+fn code_spans(cell: &str) -> Vec<String> {
+    cell.split('`')
+        .enumerate()
+        .filter(|(i, part)| i % 2 == 1 && !part.is_empty())
+        .map(|(_, part)| part.to_owned())
+        .collect()
+}
+
+/// Every replacement on the upgrade page runs, on a `timestamptz` and on a `timestamp`
+/// `createdAt`: the page is read, not copied, so a replacement edited there is what runs here.
 #[test]
 fn every_replacement_on_the_upgrade_page_runs() {
-    for ts in ["this.at", "this.local"] {
-        assert!(boolean(&format!("{ts}.date() >= date(2024, 1, 1)")), "{ts}");
-        assert_eq!(int(&format!("{ts}.year")), 2024, "{ts}");
-        assert_eq!(
-            text(&format!("{ts}.to_string().sub_string(0, 4)")),
-            "2024",
-            "{ts}"
+    let rows = upgrade_replacements();
+    assert!(rows.len() >= 12, "the table was not found: {rows:?}");
+    let mut ran = 0;
+    for (old, snippets) in &rows {
+        assert!(
+            !snippets.is_empty() || old.contains("unchanged") || old.contains("${"),
+            "row `{old}` has no runnable replacement"
         );
-        assert_eq!(text(&format!("type_of({ts})")), "timestamp");
-        assert_eq!(
-            int(&format!("let m = #{{}}; m[{ts}.to_string()] = 1; m.len()")),
-            1
-        );
-        assert_eq!(
-            text(&format!(
-                "switch {ts}.date().to_string() {{ \"2024-03-31\" => \"a\", \"2024-05-01\" => \"b\", _ => \"none\" }}"
-            )),
-            if ts == "this.at" { "a" } else { "b" }
-        );
+        for snippet in snippets {
+            for created in [
+                GenericValue::TimestampTz(utc(2024, 5, 1, 10, 0, 0)),
+                GenericValue::Timestamp(naive(2024, 5, 1, 10, 0, 0)),
+            ] {
+                let body = format!("let m = #{{}};\nlet r = {{ {snippet} }};\ntype_of(r)");
+                let yaml = format!(
+                    "  \
+  - timestamp: createdAt\n    required: true\n  \
+  - date: day\n    required: true\n  \
+  - date: days\n    required: true\n    array: true\n  \
+  - map: due\n    values: date\n    required: true\n  \
+  - keyword: out\n    required: false\n    script: |\n      {}\n",
+                    body.replace('\n', "\n      ")
+                );
+                let scripts = compile(&yaml);
+                let mut doc = GenericValue::Map(BTreeMap::from([
+                    ("createdAt".to_owned(), created.clone()),
+                    ("day".to_owned(), GenericValue::Date(date(2024, 5, 1))),
+                    (
+                        "days".to_owned(),
+                        GenericValue::Array(vec![
+                            GenericValue::Date(date(2024, 5, 2)),
+                            GenericValue::Date(date(2024, 5, 1)),
+                        ]),
+                    ),
+                    (
+                        "due".to_owned(),
+                        GenericValue::Map(BTreeMap::from([(
+                            "en".to_owned(),
+                            GenericValue::String("2024-06-10".to_owned()),
+                        )])),
+                    ),
+                    ("out".to_owned(), GenericValue::Null),
+                ]));
+                if let Err(failure) = scripts.apply(&index(), &mut doc) {
+                    panic!("`{snippet}` (row `{old}`) fails on {created:?}: {failure}");
+                }
+                ran += 1;
+            }
+        }
     }
-    assert!(boolean(
-        r#"this.at > parse_timestamp("2024-01-01T00:00:00Z")"#
-    ));
-    assert!(boolean(
-        r#"this.local > parse_timestamp("2024-01-01T00:00:00")"#
-    ));
-    assert!(boolean("this.start == date(2024, 1, 31)"));
-    assert!(boolean(r#"this.start == parse_date("2024-01-31")"#));
-    assert_eq!(text("this.start.to_string()"), "2024-01-31");
-    assert_eq!(text("type_of(this.start)"), "date");
+    assert!(ran >= 30, "only {ran} replacements ran");
+}
+
+/// The upgrade table's row for containers: each of these fails, though it looks for no date.
+#[test]
+fn searching_a_container_that_mixes_dates_with_other_kinds_fails() {
+    for script in [
+        "[1, this.start].contains(this.start)",
+        "[this.start, 1].contains(1)",
+        "[this.start] == [1]",
+        r#"#{a: this.start} == #{a: "2024-01-01"}"#,
+    ] {
+        assert_contains(&fails("boolean", script), "can't be compared");
+    }
+}
+
+// ── the edges of the calendar (review of #365, round two) ─────────────────────
+
+#[test]
+fn a_named_zone_reaches_as_far_as_a_fixed_offset() {
+    for (zone, hour) in [("Europe/Rome", 1), ("+01:00", 1)] {
+        let edge = format!(r#"parse_timestamp("9999-12-31T23:59:59Z").in_zone("{zone}")"#);
+        assert_eq!(int(&format!("{edge}.year")), 10000, "{zone}");
+        assert_eq!(int(&format!("{edge}.hour")), 0, "{zone}");
+        let start = format!(r#"parse_timestamp("9999-12-31T00:00:00Z").in_zone("{zone}")"#);
+        assert_eq!(int(&format!("{start}.hour")), hour, "{zone}");
+        assert_eq!(int(&format!("{start}.add_hours(48).day")), 2, "{zone}");
+        assert_eq!(int(&format!("{start}.add_days(400).year")), 10001, "{zone}");
+        assert_eq!(int(&format!("{start}.end_of_year().year")), 9999, "{zone}");
+        assert_eq!(int(&format!("{start}.start_of_month().day")), 1, "{zone}");
+        assert_eq!(
+            int(&format!(r#"timestamp(10000, 7, 1, 0, 0, 0).at_zone("{zone}").in_zone("UTC").hour"#)),
+            23,
+            "{zone}: the last offset holds past the database"
+        );
+        assert_eq!(
+            int(&format!(r#"timestamp(9999, 12, 31, 23, 0, 0).at_zone("{zone}").add_hours(2).year"#)),
+            10000,
+            "{zone}"
+        );
+        for year in [-9999, -50000] {
+            let far = year;
+            let past = format!(r#"timestamp({year}, 6, 15, 12, 0, 0).at_zone("UTC").in_zone("{zone}")"#);
+            assert!(run("long", &format!("{past}.year")).is_ok(), "{zone} {far}");
+            assert!(run("keyword", &format!("{past}.to_string()")).is_ok(), "{zone} {far}");
+            assert!(run("keyword", &format!("{past}.start_of_year().to_string()")).is_ok(), "{zone} {far}");
+            assert!(run("keyword", &format!("{past}.add_hours(-48).to_string()")).is_ok(), "{zone} {far}");
+            assert!(
+                run("keyword", &format!(r#"timestamp(-9999, 1, 1, 0, 0, 0).at_zone("{zone}").to_string()"#)).is_ok(),
+                "{zone}"
+            );
+        }
+    }
     assert_eq!(
-        text("let a = [this.end, this.start]; a.sort(); a.to_string()"),
-        r#"["2024-01-31", "2024-03-01"]"#
+        text(r#"parse_timestamp("9999-12-31T00:00:00Z").in_zone("Europe/Rome").format("%Z")"#),
+        "CET"
     );
+    assert!(
+        run(
+            "keyword",
+            r#"timestamp(-9999, 1, 1, 0, 0, 0).at_zone("UTC").in_zone("Europe/Rome").format("%Z %z")"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn a_leap_second_reads_in_a_named_zone() {
+    let leap = r#"parse_timestamp("2016-12-31T23:59:60Z")"#;
+    assert_eq!(int(&format!(r#"{leap}.in_zone("Europe/Rome").hour"#)), 0);
+    assert_eq!(int(&format!(r#"{leap}.in_zone("Europe/Rome").day"#)), 1);
+    assert_eq!(int(&format!(r#"{leap}.in_zone("+01:00").hour"#)), 0);
     assert_eq!(
-        text(
-            "let a = [this.end, this.start]; a.sort(|x, y| if x < y { -1 } else if x > y { 1 } else { 0 }); a[0].to_string()"
-        ),
-        "2024-01-31"
+        int(r#"timestamp(2016, 12, 31, 23, 59, 59).add_seconds(1).at_zone("Europe/Rome").hour"#),
+        0
     );
-    assert_eq!(text("max(this.start, this.end).to_string()"), "2024-03-01");
-    assert_eq!(text("#{d: this.start}.to_json()"), r#"{"d":"2024-01-31"}"#);
-    assert_eq!(
-        text("[this.start].map(|d| d.to_string()).contains(\"2024-01-31\").to_string()"),
-        "true"
-    );
-    assert_contains(
-        &fails("boolean", r#"[this.start, "x"].contains("x")"#),
-        "can't be compared",
-    );
-    assert_eq!(text("this.none?.to_string() ?? \"none\""), "none");
-    assert_contains(&fails("long", "(this.none - this.start).days"), "?.");
+}
+
+#[test]
+fn a_duration_compared_with_null_gets_the_null_hint() {
+    let message = fails("boolean", "(this.end - this.start) < ()");
+    assert_contains(&message, "null");
+}
+
+#[test]
+fn a_users_own_error_text_is_left_as_written() {
+    let failure = run("keyword", r#"throw "my script::dates::Date thing""#).unwrap_err();
+    assert_contains(&failure.message, "my script::dates::Date thing");
 }
 
 #[test]
