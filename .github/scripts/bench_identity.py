@@ -14,8 +14,9 @@ bench-in-process.sh records, per bench target, beside its executables record:
 A Criterion id is skipped only when its bench target has the same identity on both sides, and no
 target whose identity differs (or is unrecorded) lists the same id. An id no target lists is never
 skipped: what cannot be traced to an executable is compared. That covers a bench whose `--list`
-failed, on one side or both: its ids are in no record, so the mapping knows nothing about them and
-they are compared like any id.
+failed on both sides: its ids are in no record, so they are compared like any id. When it failed on
+one side only, the other side's record still lists the ids: they are skipped when the two identities
+match (same executable, same inputs) and compared when they differ.
 
 A bench target present on one side only (one a PR adds) is no reason to fail: its ids are reported
 as measured on one side only, as they always were. One the PR removes fails bench-provenance.py,

@@ -140,7 +140,7 @@ bench() {
         listed=1
       fi
     fi
-    [ "$listed" -eq 1 ] || echo "::warning::\`$target\` listed no benchmark; its results are compared whatever its bytes"
+    [ "$listed" -eq 1 ] || echo "::warning::\`$target\` listed no benchmark; its results are compared unless the other side lists them under identical bytes"
   fi
   ran=$((ran + 1))
   if [ -n "${BENCH_SKIP_SAME_AS:-}" ] && [ "$listed" -eq 1 ] && [ -f "$BENCH_SKIP_SAME_AS" ] &&
