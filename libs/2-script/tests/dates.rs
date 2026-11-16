@@ -117,7 +117,14 @@ fn boolean(script: &str) -> bool {
 fn fails(ty: &str, script: &str) -> String {
     match run(ty, script) {
         Ok(value) => panic!("`{script}` should fail, gave {value:?}"),
-        Err(failure) => failure.message,
+        Err(failure) => {
+            assert!(
+                !failure.message.contains("script::"),
+                "`{script}` leaks a Rust type name: {}",
+                failure.message
+            );
+            failure.message
+        }
     }
 }
 
@@ -201,7 +208,7 @@ fn debug_names_the_zone() {
     scripts.apply(&index(), &mut doc).unwrap();
     assert_eq!(
         printed.lock().unwrap().as_slice(),
-        ["2024-03-31T01:30:00+01:00[Europe/Rome]"]
+        [r#""2024-03-31T01:30:00+01:00[Europe/Rome]""#]
     );
 }
 
@@ -509,14 +516,22 @@ fn a_difference_across_a_daylight_saving_change_is_elapsed_time() {
 }
 
 #[test]
-fn whole_months_and_years_never_pass_the_end() {
-    assert_eq!(int("date(2024, 1, 31).months_until(date(2024, 2, 29))"), 1);
-    assert_eq!(int("date(2024, 1, 31).months_until(date(2024, 2, 28))"), 0);
+fn a_month_counts_once_the_end_reaches_the_starts_day_of_month() {
+    assert_eq!(int("date(2024, 1, 31).months_until(date(2024, 2, 29))"), 0);
+    assert_eq!(int("date(2024, 1, 31).months_until(date(2024, 3, 1))"), 1);
+    assert_eq!(int("date(2023, 1, 31).months_until(date(2023, 2, 28))"), 0);
+    assert_eq!(int("date(2023, 2, 28).months_until(date(2023, 1, 31))"), 0);
     assert_eq!(int("date(2024, 1, 15).months_until(date(2024, 3, 14))"), 1);
     assert_eq!(int("date(2024, 1, 15).months_until(date(2024, 3, 15))"), 2);
     assert_eq!(int("date(2024, 3, 31).months_until(date(2024, 2, 29))"), -1);
     assert_eq!(int("date(2024, 3, 15).months_until(date(2024, 1, 16))"), -1);
-    assert_eq!(int("date(2024, 2, 29).years_until(date(2025, 2, 28))"), 1);
+    assert_eq!(int("date(2024, 3, 15).months_until(date(2024, 1, 15))"), -2);
+    assert_eq!(
+        int("date(2000, 2, 29).years_until(date(2001, 2, 28))"),
+        0,
+        "a 29 February birthday is a year old on 1 March"
+    );
+    assert_eq!(int("date(2000, 2, 29).years_until(date(2001, 3, 1))"), 1);
     assert_eq!(int("date(2000, 6, 1).years_until(date(2024, 5, 31))"), 23);
     assert_eq!(int("date(2024, 5, 31).years_until(date(2000, 6, 1))"), -23);
     assert_eq!(
@@ -524,6 +539,36 @@ fn whole_months_and_years_never_pass_the_end() {
         0,
         "a timestamp counts the time too"
     );
+    assert_eq!(
+        int("timestamp(2024, 1, 1, 12, 0, 0).months_until(timestamp(2024, 2, 1, 12, 0, 0))"),
+        1
+    );
+}
+
+/// `months_until` agrees with Postgres's `age()` (years × 12 + months) on every pair Postgres 16
+/// answered in `fixtures/months_from_postgres.tsv`: random dates, month ends, timestamps.
+#[test]
+fn whole_months_agree_with_postgres_age() {
+    let fixture = include_str!("fixtures/months_from_postgres.tsv");
+    let mut cases = 0;
+    for line in fixture.lines() {
+        let [kind, start, end, months] = line.split('\t').collect::<Vec<_>>()[..] else {
+            panic!("bad fixture line `{line}`");
+        };
+        let parse = if kind == "date" {
+            "parse_date"
+        } else {
+            "parse_timestamp"
+        };
+        let script = format!(r#"{parse}("{start}").months_until({parse}("{end}"))"#);
+        assert_eq!(
+            int(&script),
+            months.parse::<i64>().unwrap(),
+            "{start} → {end}"
+        );
+        cases += 1;
+    }
+    assert_eq!(cases, 408);
 }
 
 #[test]
@@ -805,6 +850,31 @@ fn a_date_result_is_written_as_the_declared_type() {
         ok("timestamp", "this.start.at_time(time(9, 0, 0))"),
         GenericValue::Timestamp(naive(2024, 1, 31, 9, 0, 0))
     );
+    assert_eq!(
+        ok("timestamp", "this.start"),
+        GenericValue::Date(date(2024, 1, 31)),
+        "a date is written as a date column under a timestamp field is"
+    );
+}
+
+/// A `date` column declared `timestamp` builds a date; a script that hands it back unchanged
+/// writes what the column path writes.
+#[test]
+fn a_date_column_under_a_timestamp_field_passes_through_a_script() {
+    let scripts = compile(
+        "  \
+  - timestamp: day\n    required: true\n    emit: false\n  \
+  - timestamp: copy\n    required: true\n    script: this.day\n",
+    );
+    let mut doc = GenericValue::Map(BTreeMap::from([
+        ("day".to_owned(), GenericValue::Date(date(2024, 5, 1))),
+        ("copy".to_owned(), GenericValue::Null),
+    ]));
+    scripts.apply(&index(), &mut doc).unwrap();
+    let GenericValue::Map(map) = doc else {
+        unreachable!()
+    };
+    assert_eq!(map["copy"], GenericValue::Date(date(2024, 5, 1)));
 }
 
 #[test]
@@ -812,9 +882,6 @@ fn a_mismatched_date_result_is_refused_with_what_to_do() {
     let message = fails("date", "this.local");
     assert_contains(&message, "returned a timestamp, expected a date");
     assert_contains(&message, ".date()");
-    let message = fails("timestamp", "this.start");
-    assert_contains(&message, "returned a date, expected a timestamp");
-    assert_contains(&message, "at_time");
     let message = fails("date", r#""2024-05-01""#);
     assert_contains(&message, "returned a string, expected a date");
     assert_contains(&message, "parse_date");
@@ -1081,6 +1148,307 @@ fn a_date_no_script_touches_passes_through_unchanged() {
     assert_eq!(doc, GenericValue::Map(want));
 }
 
+// ── no silent answers (review of #365) ────────────────────────────────────────
+
+/// One value of each kind a script can compare a date value with, by name.
+const OPERANDS: [(&str, &str); 15] = [
+    ("date", "this.start"),
+    ("time", "this.clock"),
+    ("zoned", "this.at"),
+    ("plain", "this.local"),
+    ("duration", "(this.end - this.start)"),
+    ("string", r#""2024-01-31""#),
+    ("int", "30"),
+    ("float", "30.0"),
+    ("decimal", r#"parse_decimal("30")"#),
+    ("bool", "true"),
+    ("char", "'a'"),
+    ("unit", "()"),
+    ("array", "[1]"),
+    ("map", "#{a: 1}"),
+    ("blob", "blob(1)"),
+];
+
+const DATE_KINDS: [&str; 5] = ["date", "time", "zoned", "plain", "duration"];
+
+/// What comparing two operands must do: answer, or fail with a message.
+fn comparison_answers(a: &str, b: &str, op: &str) -> bool {
+    let both_dates = DATE_KINDS.contains(&a) && DATE_KINDS.contains(&b);
+    if both_dates {
+        return a == b;
+    }
+    (a == "unit" || b == "unit") && (op == "==" || op == "!=")
+}
+
+#[test]
+fn every_comparison_with_a_date_value_answers_by_a_rule_or_fails() {
+    for (a, left) in OPERANDS {
+        for (b, right) in OPERANDS {
+            if !DATE_KINDS.contains(&a) && !DATE_KINDS.contains(&b) {
+                continue;
+            }
+            for op in ["==", "!=", "<", "<=", ">", ">="] {
+                let script = format!("{left} {op} {right}");
+                if comparison_answers(a, b, op) {
+                    assert!(run("boolean", &script).is_ok(), "`{script}` should answer");
+                } else {
+                    let message = fails("boolean", &script);
+                    assert_contains(&message, "can't be compared");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_duration_compared_with_a_number_says_to_read_a_unit() {
+    let message = fails("boolean", "(this.end - this.start) > 30");
+    assert_contains(&message, "a duration and a number can't be compared");
+    assert_contains(&message, ".days");
+    assert_contains(&fails("boolean", "30 == (this.end - this.start)"), ".days");
+    assert!(boolean("(this.end - this.start).days > 29"));
+}
+
+#[test]
+fn a_null_date_is_still_tested_with_equality() {
+    assert!(boolean("this.none == ()"));
+    assert!(boolean("this.start != ()"));
+    assert_contains(&fails("boolean", "this.start < ()"), "can't be compared");
+}
+
+#[test]
+fn to_json_writes_dates_as_the_text_scripts_read() {
+    let json = text(
+        "#{d: this.start, t: this.at, l: this.local, c: this.clock, n: [this.end, 1], s: \"x\"}.to_json()",
+    );
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "d": "2024-01-31",
+            "t": "2024-03-31T00:30:00Z",
+            "l": "2024-05-01T10:00:00",
+            "c": "10:15:30.250",
+            "n": ["2024-03-01", 1],
+            "s": "x",
+        })
+    );
+    let whole: serde_json::Value = serde_json::from_str(&text("this.to_json()")).unwrap();
+    assert_eq!(whole["start"], "2024-01-31");
+    assert_eq!(whole["none"], serde_json::Value::Null);
+    let duration: serde_json::Value =
+        serde_json::from_str(&text("#{d: this.end - this.start}.to_json()")).unwrap();
+    assert_eq!(duration["d"], "P30D");
+    assert_eq!(
+        text("#{a: 1, b: [1.5, \"x\"]}.to_json()"),
+        r#"{"a":1,"b":[1.5,"x"]}"#
+    );
+}
+
+#[test]
+fn a_container_of_dates_prints_each_one_quoted_as_strings_were() {
+    assert_eq!(
+        text("`${[this.start, this.end]}`"),
+        r#"["2024-01-31", "2024-03-01"]"#
+    );
+    assert_eq!(
+        text("[this.start, this.end].to_string()"),
+        r#"["2024-01-31", "2024-03-01"]"#
+    );
+    assert_eq!(
+        text("#{d: this.start}.to_string()"),
+        r#"#{"d": "2024-01-31"}"#
+    );
+    assert_eq!(text("this.start.to_debug()"), r#""2024-01-31""#);
+    assert_eq!(text("`${this.start}`"), "2024-01-31");
+    assert_eq!(text("this.start.to_string()"), "2024-01-31");
+}
+
+#[test]
+fn a_switch_on_a_date_takes_the_default_arm() {
+    assert_eq!(
+        text("switch this.start { \"2024-01-31\" => \"matched\", _ => \"default\" }"),
+        "default",
+        "documented: a switch can't match a date; use if"
+    );
+    assert_eq!(
+        text("switch this.start.to_string() { \"2024-01-31\" => \"matched\", _ => \"default\" }"),
+        "matched"
+    );
+}
+
+#[test]
+fn an_array_of_one_kind_sorts_and_two_values_have_a_min_and_max() {
+    assert_eq!(
+        text("let a = [this.end, this.start, date(2024, 2, 1)]; a.sort(); a.to_string()"),
+        r#"["2024-01-31", "2024-02-01", "2024-03-01"]"#
+    );
+    assert_eq!(
+        text("let a = [this.start, this.end]; a.sort_desc(); a.to_string()"),
+        r#"["2024-03-01", "2024-01-31"]"#
+    );
+    assert_eq!(
+        text(
+            r#"let a = [this.at, this.at.add_hours(-1).in_zone("Asia/Tokyo")]; a.sort(); a[0].zone"#
+        ),
+        "Asia/Tokyo"
+    );
+    assert_eq!(
+        text("let a = [time(9, 0, 0), this.clock, time(1, 0, 0)]; a.sort(); a.to_string()"),
+        r#"["01:00:00", "09:00:00", "10:15:30.250"]"#
+    );
+    assert_eq!(
+        text("let a = [3, 1, 2]; a.sort(); a.to_string()"),
+        "[1, 2, 3]"
+    );
+    assert_eq!(
+        text(r#"let a = ["b", "a"]; a.sort(); a.to_string()"#),
+        r#"["a", "b"]"#
+    );
+    assert_contains(
+        &fails(
+            "keyword",
+            "let a = [this.start, this.local]; a.sort(); a.to_string()",
+        ),
+        "cannot be sorted",
+    );
+    assert_contains(
+        &fails(
+            "keyword",
+            "let a = [this.at, this.local]; a.sort(); a.to_string()",
+        ),
+        "zone",
+    );
+    assert_eq!(text("max(this.start, this.end).to_string()"), "2024-03-01");
+    assert_eq!(text("min(this.start, this.end).to_string()"), "2024-01-31");
+    assert_eq!(
+        text("min(this.clock, time(1, 0, 0)).to_string()"),
+        "01:00:00"
+    );
+    assert_eq!(int("max(this.at, this.at.add_hours(1)).hour"), 1);
+    assert_contains(
+        &fails("keyword", "max(this.start, this.local)"),
+        "can't be compared",
+    );
+}
+
+#[test]
+fn a_map_is_indexed_by_a_dates_text() {
+    assert_eq!(
+        int("let m = #{}; m[this.start.to_string()] = 1; m[\"2024-01-31\"]"),
+        1
+    );
+    let message = fails("long", "let m = #{}; m[this.start] = 1; 1");
+    assert_contains(&message, "date");
+}
+
+#[test]
+fn messages_name_the_operation_and_the_kind() {
+    assert_contains(&fails("long", "(this.at - this.local).hours"), "subtracted");
+    let message = fails("keyword", "this.clock.add_seconds(9223372036854775807)");
+    assert!(!message.contains("date out of range"), "{message}");
+    assert_contains(&message, "out of range");
+}
+
+#[test]
+fn zone_names_are_read_regardless_of_case() {
+    assert_eq!(text(r#"this.at.in_zone("utc").zone"#), "UTC");
+    assert_eq!(
+        text(r#"this.at.in_zone("europe/rome").zone"#),
+        "Europe/Rome"
+    );
+    assert_eq!(
+        text(r#"this.at.in_zone("AMERICA/NEW_YORK").zone"#),
+        "America/New_York"
+    );
+}
+
+#[test]
+fn parse_timestamp_reads_postgres_text_offsets() {
+    for text_form in [
+        "2024-05-01 10:00:00+02",
+        "2024-05-01 10:00:00+0200",
+        "2024-05-01T10:00:00+0200",
+        "2024-05-01 10:00:00.5+02:00",
+    ] {
+        let script = format!(r#"parse_timestamp("{text_form}").in_zone("UTC").hour"#);
+        assert_eq!(int(&script), 8, "{text_form}");
+        let zone = format!(r#"parse_timestamp("{text_form}").zone"#);
+        assert_eq!(text(&zone), "+02:00", "{text_form}");
+    }
+}
+
+/// Each replacement the upgrade page gives, run on a zoned (`timestamptz`) and a plain
+/// (`timestamp`) value where it applies.
+#[test]
+fn every_replacement_on_the_upgrade_page_runs() {
+    for ts in ["this.at", "this.local"] {
+        assert!(boolean(&format!("{ts}.date() >= date(2024, 1, 1)")), "{ts}");
+        assert_eq!(int(&format!("{ts}.year")), 2024, "{ts}");
+        assert_eq!(
+            text(&format!("{ts}.to_string().sub_string(0, 4)")),
+            "2024",
+            "{ts}"
+        );
+        assert_eq!(text(&format!("type_of({ts})")), "timestamp");
+        assert_eq!(
+            int(&format!("let m = #{{}}; m[{ts}.to_string()] = 1; m.len()")),
+            1
+        );
+        assert_eq!(
+            text(&format!(
+                "switch {ts}.date().to_string() {{ \"2024-03-31\" => \"a\", \"2024-05-01\" => \"b\", _ => \"none\" }}"
+            )),
+            if ts == "this.at" { "a" } else { "b" }
+        );
+    }
+    assert!(boolean(
+        r#"this.at > parse_timestamp("2024-01-01T00:00:00Z")"#
+    ));
+    assert!(boolean(
+        r#"this.local > parse_timestamp("2024-01-01T00:00:00")"#
+    ));
+    assert!(boolean("this.start == date(2024, 1, 31)"));
+    assert!(boolean(r#"this.start == parse_date("2024-01-31")"#));
+    assert_eq!(text("this.start.to_string()"), "2024-01-31");
+    assert_eq!(text("type_of(this.start)"), "date");
+    assert_eq!(
+        text("let a = [this.end, this.start]; a.sort(); a.to_string()"),
+        r#"["2024-01-31", "2024-03-01"]"#
+    );
+    assert_eq!(
+        text(
+            "let a = [this.end, this.start]; a.sort(|x, y| if x < y { -1 } else if x > y { 1 } else { 0 }); a[0].to_string()"
+        ),
+        "2024-01-31"
+    );
+    assert_eq!(text("max(this.start, this.end).to_string()"), "2024-03-01");
+    assert_eq!(text("#{d: this.start}.to_json()"), r#"{"d":"2024-01-31"}"#);
+    assert_eq!(
+        text("[this.start].map(|d| d.to_string()).contains(\"2024-01-31\").to_string()"),
+        "true"
+    );
+    assert_contains(
+        &fails("boolean", r#"[this.start, "x"].contains("x")"#),
+        "can't be compared",
+    );
+    assert_eq!(text("this.none?.to_string() ?? \"none\""), "none");
+    assert_contains(&fails("long", "(this.none - this.start).days"), "?.");
+}
+
+#[test]
+fn adding_months_from_the_anchor_keeps_month_ends() {
+    assert_eq!(
+        text("let d = date(2024, 1, 31); for i in 0..3 { d = d.add_months(1); } d.to_string()"),
+        "2024-04-29",
+        "stepping drifts"
+    );
+    assert_eq!(
+        text("date(2024, 1, 31).add_months(3).to_string()"),
+        "2024-04-30"
+    );
+}
+
 // ── properties ────────────────────────────────────────────────────────────────
 
 mod properties {
@@ -1098,7 +1466,10 @@ mod properties {
   - long: n\n    required: true\n  \
   - date: roundTrip\n    required: true\n    script: this.a.add_days(this.n).add_days(-this.n)\n  \
   - long: dayDiff\n    required: true\n    script: (this.a.add_days(this.n) - this.a).days\n  \
-  - long: monthDiff\n    required: true\n    script: this.a.months_until(this.a.add_months(this.n))\n  \
+  - date: b\n    required: true\n  \
+  - long: monthsForward\n    required: true\n    script: this.a.months_until(this.b)\n  \
+  - long: monthsBack\n    required: true\n    script: this.b.months_until(this.a)\n  \
+  - boolean: notPast\n    required: true\n    script: |\n      let n = this.a.months_until(this.b);\n      let moved = this.a.add_months(n);\n      if n >= 0 { moved <= this.b } else { moved >= this.b }\n  \
   - timestamp: hourTrip\n    required: true\n    script: this.t.in_zone(\"America/New_York\").add_hours(this.n).add_hours(-this.n)\n  \
   - long: seconds\n    required: true\n    script: (this.u.in_zone(\"Europe/Rome\") - this.t).seconds\n",
         )
@@ -1116,8 +1487,9 @@ mod properties {
         #![proptest_config(ProptestConfig::with_cases(256))]
 
         #[test]
-        fn arithmetic_inverts_and_differences_match_chrono(
+        fn arithmetic_inverts_and_whole_months_are_symmetric(
             a in day(),
+            b in day(),
             t in instant(),
             u in instant(),
             n in -2_000i64..2_000,
@@ -1125,6 +1497,7 @@ mod properties {
             let scripts = scripts();
             let mut doc = GenericValue::Map(BTreeMap::from([
                 ("a".to_owned(), GenericValue::Date(a)),
+                ("b".to_owned(), GenericValue::Date(b)),
                 ("t".to_owned(), GenericValue::TimestampTz(t)),
                 ("u".to_owned(), GenericValue::TimestampTz(u)),
                 ("n".to_owned(), GenericValue::BigInt(n)),
@@ -1133,7 +1506,9 @@ mod properties {
             let GenericValue::Map(map) = doc else { unreachable!() };
             prop_assert_eq!(&map["roundTrip"], &GenericValue::Date(a));
             prop_assert_eq!(&map["dayDiff"], &GenericValue::BigInt(n));
-            prop_assert_eq!(&map["monthDiff"], &GenericValue::BigInt(n));
+            let GenericValue::BigInt(forward) = map["monthsForward"] else { unreachable!() };
+            prop_assert_eq!(&map["monthsBack"], &GenericValue::BigInt(-forward), "sign symmetry");
+            prop_assert_eq!(&map["notPast"], &GenericValue::Bool(true));
             prop_assert_eq!(&map["hourTrip"], &GenericValue::TimestampTz(t));
             prop_assert_eq!(&map["seconds"], &GenericValue::BigInt((u - t).num_seconds()));
         }
