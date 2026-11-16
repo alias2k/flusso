@@ -120,8 +120,9 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   other base failure fails. A bench **identical on both sides** (issue #346; `bench_identity.py` is the
   one home: same executable sha256 and same run-time inputs declared in `.github/scripts/bench-inputs.tsv`,
   hashed into `<baseline>.identity.tsv`; ids tied to their executable by `--list` in `<baseline>.ids.tsv`)
-  is not run (`BENCH_SKIP_SAME_AS`) and gets no verdict ("identical binaries, not compared"); all
-  identical passes; an id no executable lists is compared; `test_bench_gate.py` scans the bench sources
+  is not run (`BENCH_SKIP_SAME_AS`) and gets no verdict ("identical binaries, not compared"); every
+  target present on both sides identical passes (a target one side adds is listed one-sided); an id no
+  executable lists is compared; one both list under a differing target but one side measured is exit 2; `test_bench_gate.py` scans the bench sources
   for undeclared run-time reads and pins the differing-binary output to `fixtures/gate-golden/`
   (`origin/main`'s, before #346). `bench-gate.sh`
   re-measures each bench past 10% slower (`bench-compare.py`) on its own, base then PR (`--exact`), and

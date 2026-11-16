@@ -37,7 +37,8 @@
 # - BENCH_SET=docker picks the Docker-backed benches (postgres, cases,
 #   pipeline) instead of the five in-process ones;
 # - BENCH_BUILD_ONLY=1 builds and records the executables without running
-#   them, so the caller can run base and head interleaved;
+#   their benchmarks, so the caller can run base and head interleaved (an
+#   in-process executable still runs once, with `--list`, to record its ids);
 # - BENCH_ONLY=<target,…> builds only those bench targets of the set.
 #
 # And one for the PR gate: BENCH_SKIP_SAME_AS=<the other side's identity.tsv>
@@ -67,9 +68,13 @@ mkdir -p "$(dirname "$record")"
 : >"$ids"
 
 # digest <file or directory>: a sha256 of its content, `missing` when absent.
+# A directory's symlinks count by where they point.
 digest() {
   if [ -d "$1" ]; then
-    (cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0r sha256sum) | sha256sum | cut -d' ' -f1
+    (cd "$1" && {
+      find . -type f -print0 | LC_ALL=C sort -z | xargs -0r sha256sum
+      find . -type l -printf '%p -> %l\n' | LC_ALL=C sort
+    }) | sha256sum | cut -d' ' -f1
   elif [ -f "$1" ]; then
     sha256sum "$1" | cut -d' ' -f1
   else

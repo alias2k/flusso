@@ -148,9 +148,11 @@ jobs:
 
       # Stdlib only, no Docker: the benchmark scripts over a snapshot of
       # the real `main` history, review-ab's stamp and table
-      # (test_review_ab.py), and the guard that every test and bench starts
-      # Postgres through dev/test-postgres (test_check_postgres_image.py,
-      # issue #342), each picked up by the `test_*.py` pattern.
+      # (test_review_ab.py), the PR bench gate over fake cargo and Criterion
+      # runs (test_bench_gate.py), and the guard that every test and bench
+      # starts Postgres through dev/test-postgres
+      # (test_check_postgres_image.py, issue #342), each picked up by the
+      # `test_*.py` pattern.
       - name: Test the CI scripts
         run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
 

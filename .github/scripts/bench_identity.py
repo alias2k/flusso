@@ -13,7 +13,13 @@ bench-in-process.sh records, per bench target, beside its executables record:
 
 A Criterion id is skipped only when its bench target has the same identity on both sides, and no
 target whose identity differs (or is unrecorded) lists the same id. An id no target lists is never
-skipped: what cannot be traced to an executable is compared.
+skipped: what cannot be traced to an executable is compared. That covers a bench whose `--list`
+failed, on one side or both: its ids are in no record, so the mapping knows nothing about them and
+they are compared like any id.
+
+A bench target present on one side only (one a PR adds) is no reason to fail: its ids are reported
+as measured on one side only, as they always were. One the PR removes fails bench-provenance.py,
+before any comparison.
 
 `every` exits 0 when both sides recorded the same bench targets, all with the same identity, else 1.
 """
@@ -42,10 +48,17 @@ def listed(target: pathlib.Path, baseline: str) -> dict[str, set[str]]:
 
 @dataclass(frozen=True)
 class Same:
-    """What the two sides share: the Criterion ids to skip, and whether every bench target is identical."""
+    """What the two sides share.
+
+    - `ids`: the Criterion ids to skip (identical on both sides).
+    - `every`: every bench target present on both sides is identical and listed its ids.
+    - `must_compare`: ids both sides' executables list under a target whose identity differs:
+      measured on one side only, they are an error, not a one-sided row.
+    """
 
     ids: frozenset[str]
     every: bool
+    must_compare: frozenset[str]
 
 
 def compare(base_target: pathlib.Path, pr_target: pathlib.Path, base: str, pr: str) -> Same:
@@ -56,12 +69,20 @@ def compare(base_target: pathlib.Path, pr_target: pathlib.Path, base: str, pr: s
     for ids in (base_ids, pr_ids):
         for bench, cases in ids.items():
             (skip if bench in same else keep).update(cases)
-    every = bool(base_ident) and base_ident.keys() == pr_ident.keys() == same
-    every_listed = every and all(base_ids.get(b) or pr_ids.get(b) for b in same)
-    return Same(frozenset(skip - keep), every_listed)
+    both = base_ident.keys() & pr_ident.keys()
+    every = bool(both) and both == same and all(base_ids.get(b) or pr_ids.get(b) for b in same)
+    must_compare = set()
+    for bench in both - same:
+        must_compare |= base_ids.get(bench, set()) & pr_ids.get(bench, set())
+    return Same(frozenset(skip - keep), every, frozenset(must_compare))
 
 
 def every_identical(base_target: pathlib.Path, pr_target: pathlib.Path, base: str, pr: str) -> bool:
+    """Both sides recorded the same bench targets, each with the same identity.
+
+    False when nothing recorded on either side: an empty selection proves nothing about any binary,
+    so a caller never claims "every difference is noise" for it.
+    """
     base_ident, pr_ident = identities(base_target, base), identities(pr_target, pr)
     return bool(base_ident) and base_ident == pr_ident
 

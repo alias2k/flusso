@@ -26,8 +26,11 @@ listed but not gated. Exits 1 when any bench's candidate median is more than
                     is identical on both sides (bench_identity.py: the same
                     executable and declared run-time inputs) gets no verdict,
                     shown as `identical binaries, not compared`, measured or
-                    not. With every bench target identical and nothing
-                    compared, the gate passes.
+                    not. With every bench target present on both sides
+                    identical and nothing compared, the gate passes (a
+                    target on one side only is listed as one-sided). A
+                    bench both sides list under a differing target but
+                    only one side measured is an error, exit 2.
 
 --repeats N         the review table (review-ab.sh). Each side ran N times,
                     saved as `<baseline>-1`…`<baseline>-N` and
@@ -191,6 +194,10 @@ def review(
     return 1 if slower else 0
 
 
+def one_sided_line(one_sided: list[tuple[str, str]]) -> str:
+    return "Not compared (measured on one side only): " + ", ".join(f"`{i}` (only `{s}`)" for i, s in one_sided) + "."
+
+
 def identical_rows(skipped: dict[str, tuple[float | None, float | None]]) -> list[str]:
     """Table rows for benches identical on both sides: their medians when measured, no verdict."""
     def shown(ns: float | None) -> str:
@@ -232,10 +239,21 @@ def main() -> int:
             continue
         b, c = measured
         rows.append((bench_id(root, bench_dir, cand), bench_dir, b, c, change(b, c)))
+    unjudged = sorted(i for i, _ in one_sided if same and i in same.must_compare)
+    if unjudged:
+        print(
+            "::error::measured on one side only, though both sides' executables list it and their bytes differ: "
+            + ", ".join(f"`{i}`" for i in unjudged)
+            + ". No median to judge it against; re-run the job."
+        )
+        return 2
     if not rows and skipped and same.every:
         lines = [f"| bench | {base} | {cand} | change |", "| --- | ---: | ---: | ---: |", *identical_rows(skipped)]
+        report = ["### First pass", "", *lines, ""]
+        if one_sided:
+            report += [one_sided_line(one_sided), ""]
         text = "\n".join(
-            ["### First pass", "", *lines, "", "No bench compared: every bench's binary and run-time inputs are identical on both sides."]
+            [*report, "No bench compared: every bench present on both sides has identical binaries and run-time inputs."]
         )
         print(text)
         summary = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -258,7 +276,7 @@ def main() -> int:
     lines += identical_rows(skipped)
     report = ["### First pass", "", *lines, ""]
     if one_sided:
-        report.append("Not compared (measured on one side only): " + ", ".join(f"`{i}` (only `{s}`)" for i, s in one_sided) + ".")
+        report.append(one_sided_line(one_sided))
         report.append("")
 
     if args.breaches is not None:
