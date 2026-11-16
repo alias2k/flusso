@@ -146,8 +146,8 @@ struct State<C, V> {
 /// task not yet waiting.
 #[derive(Debug)]
 struct Refresh {
-    /// The newest read, not taken by the stream yet.
-    latest: Mutex<Option<Result<super::visibility::Snapshot>>>,
+    /// The newest read and when it was asked for, not taken by the stream yet.
+    latest: Mutex<Option<(Instant, Result<super::visibility::Snapshot>)>>,
     /// Woken by every read.
     arrived: tokio::sync::Notify,
     /// Woken by the stream when it starts wanting reads.
@@ -208,6 +208,7 @@ async fn refresh<V: Visibility>(visibility: V, refresh: Arc<Refresh>) {
         while !refresh.wanted.load(Ordering::SeqCst) {
             refresh.wake.notified().await;
         }
+        let asked = Instant::now();
         let read = tokio::time::timeout(READ_TIMEOUT, visibility.snapshot())
             .await
             .unwrap_or_else(|_| {
@@ -222,7 +223,7 @@ async fn refresh<V: Visibility>(visibility: V, refresh: Arc<Refresh>) {
                 *refresh
                     .latest
                     .lock()
-                    .unwrap_or_else(PoisonError::into_inner) = Some(Ok(snapshot));
+                    .unwrap_or_else(PoisonError::into_inner) = Some((asked, Ok(snapshot)));
                 refresh.arrived.notify_one();
                 Duration::from_micros(refresh.spacing.load(Ordering::Relaxed))
             }
@@ -232,7 +233,7 @@ async fn refresh<V: Visibility>(visibility: V, refresh: Arc<Refresh>) {
                     *refresh
                         .latest
                         .lock()
-                        .unwrap_or_else(PoisonError::into_inner) = Some(Err(error));
+                        .unwrap_or_else(PoisonError::into_inner) = Some((asked, Err(error)));
                     refresh.arrived.notify_one();
                     return;
                 }
@@ -337,10 +338,12 @@ impl DecodeState {
     }
 
     /// Mark readable every unchecked transaction `snapshot` sees, and keep it
-    /// for the commits that arrive next.
-    fn take_snapshot(&mut self, snapshot: super::visibility::Snapshot) {
+    /// for the commits that arrive next. `read_at` is when the read was asked
+    /// for, not when the stream got round to taking it: a read can wait a long
+    /// time for a stream nobody pulls, and reuse is bounded by its real age.
+    fn take_snapshot(&mut self, snapshot: super::visibility::Snapshot, read_at: Instant) {
         self.seen_by(&snapshot);
-        self.last_snapshot = Some((Instant::now(), snapshot));
+        self.last_snapshot = Some((read_at, snapshot));
     }
 
     /// Whether the newest snapshot, if recent, already shows `xid` visible.
@@ -563,10 +566,10 @@ impl<C: Replication, V: Visibility> State<C, V> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        let Some(read) = latest else {
+        let Some((read_at, read)) = latest else {
             return Ok(());
         };
-        self.decode.take_snapshot(read?);
+        self.decode.take_snapshot(read?, read_at);
         let spacing = match self.hold.as_mut() {
             Some(hold) if self.decode.held() == Some(hold.xid) => {
                 hold.delay = poll_delay(hold.since.elapsed(), hold.delay);

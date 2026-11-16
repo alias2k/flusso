@@ -1083,7 +1083,7 @@ async fn a_hold_on_a_server_waiting_for_flusso_stops_the_stream() {
 #[tokio::test(start_paused = true)]
 async fn a_commit_a_recent_snapshot_shows_visible_needs_no_read() {
     let (mut decode, _ack) = holding_state();
-    decode.take_snapshot(Snapshots::seeing(&[7]).snapshot_now());
+    decode.take_snapshot(Snapshots::seeing(&[7]).snapshot_now(), Instant::now());
     transaction(&mut decode, 7, 100);
     assert!(decode.unchecked.is_empty());
     assert!(
@@ -1099,8 +1099,21 @@ async fn a_commit_a_recent_snapshot_shows_visible_needs_no_read() {
 #[tokio::test(start_paused = true)]
 async fn an_old_snapshot_is_not_reused() {
     let (mut decode, _ack) = holding_state();
-    decode.take_snapshot(Snapshots::seeing(&[7]).snapshot_now());
+    decode.take_snapshot(Snapshots::seeing(&[7]).snapshot_now(), Instant::now());
     tokio::time::advance(SNAPSHOT_REUSE + Duration::from_millis(1)).await;
+    transaction(&mut decode, 7, 100);
+    assert!(decode.next_change().is_none(), "checked by a new read");
+    assert!(decode.unchecked.contains(&7));
+}
+
+/// A read the stream takes late is as old as the read, not as the taking: a
+/// stream nobody pulls can leave one waiting far past [`SNAPSHOT_REUSE`].
+#[tokio::test(start_paused = true)]
+async fn a_snapshot_taken_late_is_as_old_as_its_read() {
+    let (mut decode, _ack) = holding_state();
+    let read_at = Instant::now();
+    tokio::time::advance(SNAPSHOT_REUSE + Duration::from_millis(1)).await;
+    decode.take_snapshot(Snapshots::seeing(&[7]).snapshot_now(), read_at);
     transaction(&mut decode, 7, 100);
     assert!(decode.next_change().is_none(), "checked by a new read");
     assert!(decode.unchecked.contains(&7));
