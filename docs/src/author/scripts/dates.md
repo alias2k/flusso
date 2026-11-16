@@ -64,28 +64,36 @@ Parts are **properties**. A zoned timestamp's parts are taken in its zone; a pla
 | `without_zone()` | `this.createdAt.in_zone("Europe/Rome").without_zone()` | Rome's wall clock, no zone |
 | `format(pattern)` | `this.day.format("%d %b %Y")` | `"01 May 2024"`; on all four |
 | `abs()` | `(this.start - this.end).abs()` | on a duration |
+| `min(a, b)`, `max(a, b)` | `max(this.shippedOn, this.paidOn)` | the earlier or later; two of one kind |
+| `sort()`, `sort_desc()` | `list.sort()` | an array of one kind, in order; a comparator works too: `list.sort(\|a, b\| if a < b { -1 } else if a > b { 1 } else { 0 })` |
 | `to_string()`, `` `${…}` ``, `"…" + d` | `` `${this.day}` `` | `"2024-05-01"` |
+| `to_json()` on an object | `#{d: this.day}.to_json()` | `{"d":"2024-05-01"}`: each date as its `to_string()` text |
 
-A **pattern** is a [chrono strftime](https://docs.rs/chrono/latest/chrono/format/strftime/index.html) pattern: `%Y-%m-%d`, `%H:%M`, `%A`, `%b`, `%Z` (a zone's abbreviation), `%z` (its offset). A **zone** is an IANA name (`Europe/Rome`, `UTC`) or an offset (`+05:30`).
+A **pattern** is a [chrono strftime](https://docs.rs/chrono/latest/chrono/format/strftime/index.html) pattern: `%Y-%m-%d`, `%H:%M`, `%A`, `%b`, `%Z` (a zone's abbreviation), `%z` (its offset). A **zone** is an IANA name in any case (`Europe/Rome`, `europe/rome`, `UTC`) or an offset (`+05:30`).
 
-`to_string` writes the ISO text: `2024-05-01`, `10:15:30.250`, `2024-05-01T10:00:00` (no zone), `2024-05-01T10:00:00Z`, `2024-05-01T12:00:00+02:00`. A duration writes ISO 8601: `P30D`, `PT1H30M`. `debug(ts)` adds a named zone: `2024-05-01T12:00:00+02:00[Europe/Rome]`.
+Without a pattern, `parse_timestamp` reads RFC 3339 (`2024-05-01T10:00:00+02:00`, `…Z`), Postgres's text form (`2024-05-01 10:00:00+02`, what a `timestamptz` cast to text or kept in a `json` column looks like), a compact offset (`+0200`), and either form without an offset, which gives a timestamp with no zone.
+
+`to_string` writes the ISO text: `2024-05-01`, `10:15:30.250`, `2024-05-01T10:00:00` (no zone), `2024-05-01T10:00:00Z`, `2024-05-01T12:00:00+02:00`. A duration writes ISO 8601: `P30D`, `PT1H30M`. In an array or an object, and through `debug`, each is quoted, as a string was: `["2024-05-01", "2024-05-02"]`; `debug` also names a zone: `"2024-05-01T12:00:00+02:00[Europe/Rome]"`.
 
 ## The rules
 
 - **Month-end.** `add_months` and `add_years` keep the day, clamped to the month's last: 31 Jan + 1 month is 29 Feb (28 in a common year); 29 Feb 2024 + 1 year is 28 Feb 2025.
 - **Leap years** follow the Gregorian calendar: 2000 is one, 1900 and 2100 aren't.
-- **Whole months and years.** `a.months_until(b)` is the most months, toward zero, that `a.add_months(n)` can move without passing `b`; negative when `b` is earlier. So `a.months_until(a.add_months(n))` is always `n`. `years_until` is that divided by 12. A timestamp counts its time of day too.
+- **Step from the anchor.** `add_months` clamps each time, so stepping drifts: 31 Jan stepped one month at a time is 29 Feb, 29 Mar, 29 Apr. Add to the start instead, `start.add_months(i)`, which gives 31 Mar, 30 Apr ([recipe](recipes.md#dates)).
+- **Whole months and years** count as Postgres's `age()` does: `a.months_until(b)` is the months between their calendar months, less one while `b`'s day of month (and time of day) hasn't reached `a`'s; negative when `b` is earlier, and `b.months_until(a)` is always its negation. No clamping: 31 Jan to 29 Feb is `0` months, to 1 Mar `1`. A 29 Feb birthday is a year old on 1 March of a common year, not on 28 February: `date(2000, 2, 29).years_until(date(2001, 2, 28))` is `0`. `years_until` is `months_until` divided by 12, toward zero.
 - **Differences.** Between dates, whole days. Between two zoned timestamps, the time elapsed, whatever their zones. Between two plain ones, the wall-clock difference. A duration truncates toward zero: 34 hours is `.days == 1`, −34 hours `.days == -1`.
 - **Calendar units vs clock units.** On a zoned timestamp, `add_days` to `add_years` and the rounding functions move the wall clock (so a day across a daylight-saving change is 23 or 25 hours); `add_hours`, `add_minutes`, `add_seconds` add elapsed time.
 - **Daylight saving.** A wall clock that doesn't exist (02:30 on a spring-forward night) moves forward by the length of the gap, to 03:30. One that happens twice (02:30 on a fall-back night) is the first. The rule holds wherever a wall clock becomes an instant: `at_zone`, the calendar adds, rounding.
 - **Across a change, a day may be 23 hours.** Two Rome midnights either side of the spring change are 23 hours apart, so `(b - a).days` is `0`. Count calendar days with `(b.date() - a.date()).days`.
 - **Rounding.** `start_of_week` is Monday. On a date, `end_of_*` is the period's last day; on a timestamp, the last nanosecond before the next period starts (`23:59:59.999999999`).
 - **`time` wraps** around midnight like a clock, and `b - a` between two times may be negative.
-- **Comparison** is between two values of one kind. Two zoned timestamps compare as instants: `this.at == this.at.in_zone("Asia/Tokyo")` is `true`. A date against a timestamp, a zoned against a plain timestamp, or a date against a string fails the script with how to convert, rather than answering `false`.
-- **Zones.** `in_zone` needs a zoned timestamp, `at_zone` one without a zone; each fails on the other, naming the one to use. An unknown name fails: `unknown time zone 'Europe/Roma'`. The zone database is built into flusso, so every host gives the same answer; a flusso release can carry a newer one.
-- **Out of range.** A result past about ±262,000 years, or an argument too big for its unit, fails the document with `date out of range`. A constructor with no such day fails with the value: `no such date: 2023-02-29`.
+- **Comparison** is between two values of one kind. Two zoned timestamps compare as instants: `this.at == this.at.in_zone("Asia/Tokyo")` is `true`. Any other pair fails the script with how to convert, rather than answering `false`: a date against a timestamp, a zoned against a plain timestamp, a duration against a number (read a unit: `(b - a).days > 30`), any of them against a string, a number, a bool or a container. The one exception is null: `d == ()` and `d != ()` answer, `d < ()` fails. `in` and `contains` compare with `==`, so `this.day in ["2024-05-01"]` fails too.
+- **`switch` can't match a date.** It matches by value hash, which a date has none of, so every arm is skipped and `_` is taken, silently. Switch on the text, `switch d.to_string() { "2024-05-01" => … }`, or use `if`.
+- **A map key is text.** `m[this.day] = 1` fails (`expecting string`); write `m[this.day.to_string()]`.
+- **Zones.** `in_zone` needs a zoned timestamp, `at_zone` one without a zone; each fails on the other, naming the one to use. An unknown name fails: `unknown time zone 'Europe/Roma'`. The zone database is built into flusso, so every host gives the same answer. A flusso release can carry a newer one; a value already indexed keeps what the old rules gave until its row changes or the index is [rebuilt](../../reference/cli.md#reindex).
+- **Out of range.** A result past about ±262,000 years, or an argument too big for its unit, fails the document with `date out of range` (or `timestamp`, or the amount: `… is out of range for this unit`). A constructor with no such day fails with the value: `no such date: 2023-02-29`.
 - **Patterns.** An unknown specifier fails (`bad format pattern '%Q'`), and so does asking for a part the value lacks (`%H` on a date, `%z` on a timestamp without a zone). Text that doesn't parse fails with the text, the pattern, and why.
-- **Null.** A null date is `()`, and no function takes one: guard with `?.` or `??`, as in `this.endedAt?.year ?? 0`.
+- **Null.** A null date is `()`, and no function takes one: guard with `?.` or `??`, as in `this.endedAt?.year ?? 0`. Subtracting with a null says so: `a date and () can't be subtracted`.
 - **Strings.** No function takes a string where a date goes; parse it first.
 
 ## Returning a date
@@ -95,8 +103,9 @@ A **pattern** is a [chrono strftime](https://docs.rs/chrono/latest/chrono/format
 | `date` | a `date` | the day |
 | `timestamp` | a `timestamp` | without a zone, as it reads; zoned, its UTC instant |
 | `timestamp` | a `time` | the time of day, as a `time` column is |
+| `timestamp` | a `date` | the day, as a `date` column under a `timestamp` field is; OpenSearch reads it as midnight UTC |
 
-Everything else is refused, with what to write instead: a timestamp to a `date` field (`.date()`), a date to a `timestamp` field (`.at_time(time(0, 0, 0))`, since midnight in which zone is the script's choice), a string (`parse_date`, `parse_timestamp`), a date to a text field (`.to_string()` or `.format(…)`).
+So a value read and returned unchanged is always accepted. Everything else is refused, with what to write instead: a timestamp to a `date` field (`.date()`), a string (`parse_date`, `parse_timestamp`), a date to a text field (`.to_string()` or `.format(…)`). To place a date at midnight in a zone, write it: `d.at_time(time(0, 0, 0)).at_zone("Europe/Rome")`.
 
 ## No clock
 

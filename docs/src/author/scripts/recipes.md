@@ -92,10 +92,16 @@ A month later, clamped to the month's end. Gives `2024-02-29`.
 {{#include ../../../../libs/2-script/tests/recipes/recipes.schema.yml:first_renewal}}
 ```
 
-A local deadline as an instant: the end of the last sale day in Rome. Gives `2024-03-01T22:59:59Z`.
+A local deadline as an instant: the end of the last sale day in Rome. Gives `2024-03-01T22:59:59.999999999Z`.
 
 ```yaml
 {{#include ../../../../libs/2-script/tests/recipes/recipes.schema.yml:sale_ends_at}}
+```
+
+A monthly schedule, each date added to the release date rather than to the one before, so a month end stays a month end. Gives `[2024-02-29, 2024-03-31, 2024-04-30]`.
+
+```yaml
+{{#include ../../../../libs/2-script/tests/recipes/recipes.schema.yml:renewals}}
 ```
 
 ## Translations

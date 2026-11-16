@@ -82,7 +82,9 @@ The messages are Rhai's or flusso's own; this is what they mean in a script fiel
 | `Function not found: * (decimal, f64)` | a decimal times a float | use `parse_decimal("1.22")`, or `.to_float()` |
 | `Array index 3 out of bounds` | indexing past the end | check `len()` or `is_empty()` first |
 | `Function not found: sub_string (timestamp, …)` | a string method on a date | use its parts (`.year`), or `.to_string()` first; see [Dates in a script](dates.md) |
-| `a date and a string can't be compared` | a date compared with text | parse the text: `parse_date("2024-01-01")`, or build one: `date(2024, 1, 1)` |
+| `a date and a string can't be compared` | a date compared with text, or `contains`/`in` on an array mixing text and dates | parse the text: `parse_date("2024-01-01")`, or build one: `date(2024, 1, 1)`; for a list, compare text with text: `list.map(\|d\| d.to_string()).contains("2024-01-01")` |
+| `a duration and a number can't be compared: read a unit` | `(b - a) > 30` | `(b - a).days > 30` |
+| `a date and () can't be subtracted` | a null date on either side of `-` | guard it: `(this.end ?? this.start) - this.start`, or `this.end?.year` |
 | `a date and a timestamp can't be compared` | two kinds compared | `ts.date()` against the date, or `d.at_time(…)` |
 | `unknown time zone 'Europe/Roma'` | a zone name that isn't an IANA name or an offset | fix the name (`Europe/Rome`, `UTC`, `+02:00`) |
 | `bad format pattern '%Q'`, `pattern '%H' asks for a part a date doesn't have` | a pattern specifier that doesn't exist, or doesn't fit the value | see [Functions](dates.md#functions) |

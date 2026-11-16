@@ -25,7 +25,7 @@ fn a_duration_writes_iso_8601() {
 
 #[test]
 fn a_zone_is_a_name_or_an_offset() {
-    assert_eq!(Zone::parse("UTC").unwrap(), Zone::Utc);
+    assert!(matches!(Zone::parse("utc").unwrap(), Zone::Utc));
     assert_eq!(
         Zone::parse("Europe/Rome").unwrap().to_string(),
         "Europe/Rome"

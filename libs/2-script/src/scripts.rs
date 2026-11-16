@@ -474,7 +474,7 @@ fn runtime_failure(path: &str, script: &CompiledScript, error: EvalAltResult) ->
     let at = inner.take_position();
     BuildFailure {
         field: path.to_owned(),
-        message: inner.to_string(),
+        message: crate::dates::script_names(inner.to_string()),
         position: position(script.lines.iter().map(String::as_str), at),
     }
 }

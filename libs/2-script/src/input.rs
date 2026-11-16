@@ -110,7 +110,10 @@ pub fn temporal(text: &str, ty: &FlussoType) -> Option<GenericValue> {
     match ty {
         FlussoType::Date => NaiveDate::from_str(text).ok().map(GenericValue::Date),
         FlussoType::Timestamp => {
-            if let Ok(instant) = DateTime::parse_from_rfc3339(text) {
+            if let Some(instant) = DateTime::parse_from_rfc3339(text)
+                .ok()
+                .or_else(|| crate::dates::with_short_offset(text))
+            {
                 return Some(GenericValue::TimestampTz(instant.to_utc()));
             }
             if let Ok(wall) = NaiveDateTime::from_str(text) {

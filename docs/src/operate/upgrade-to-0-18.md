@@ -117,17 +117,25 @@ A filter whose values fit its column (the usual case) compares exactly as before
 
 **Breaking, for scripts that treat a date as text.** A `date`, `time` or `timestamp` value reached a script as a string; 0.18 hands over a typed [date, time or timestamp](../author/scripts/dates.md). No content hash moves and nothing is rebuilt. What changes in a script:
 
+Which columns: every `date`, `time` and `timestamp` field, at any depth, in arrays, `min`/`max`/`ids` aggregates of those types, and the values of a `map` with `values: date` or `values: timestamp` (typed for the script when they parse; the document keeps the text). A `json` field stays text.
+
 | 0.17 script | On 0.18 | Write instead |
 | --- | --- | --- |
-| `this.createdAt.sub_string(0, 4)`, `len()`, `split`, any string method | fails: `Function not found: sub_string (timestamp, …)` | `this.createdAt.year`, or `this.createdAt.to_string()` first |
-| `this.createdAt > "2024-01-01"` | fails: a timestamp and a string can't be compared | `this.createdAt > parse_timestamp("2024-01-01T00:00:00Z")` |
-| `this.day == "2024-05-01"` | fails, as above | `this.day == date(2024, 5, 1)` |
-| `` `${this.day}` ``, `"on " + this.day`, `this.day.to_string()` | unchanged | — |
+| `this.createdAt.sub_string(0, 4)`, `len()`, `split`, any string method | fails: `Function not found: sub_string (timestamp, …)` | `this.createdAt.year`, or `this.createdAt.to_string().sub_string(0, 4)` |
+| `this.createdAt > "2024-01-01"` | fails: a timestamp and a string can't be compared | `this.createdAt.date() >= date(2024, 1, 1)`, on any `timestamp` field. Comparing with a full timestamp needs the same kind: `parse_timestamp("2024-01-01T00:00:00Z")` only for a `timestamptz` column, `parse_timestamp("2024-01-01T00:00:00")` only for a `timestamp` one; the schema doesn't say which, so prefer `.date()` |
+| `this.day == "2024-05-01"`, `this.day in ["2024-05-01"]` | fails: a date and a string can't be compared | `this.day == date(2024, 5, 1)`, or `parse_date("2024-05-01")` |
+| `switch this.day { "2024-05-01" => … }` | **takes the `_` arm silently**: a switch can't match a date | `switch this.day.to_string() { "2024-05-01" => … }` |
+| `m[this.day] = 1` | fails: `expecting string` | `m[this.day.to_string()] = 1` |
+| `this.days.sort()`, `max(a, b)` | unchanged for values of one kind; mixing a date with a timestamp, or a zoned with a plain timestamp, fails | convert first: `ts.date()` |
 | `this.day` returned to a `keyword` field | fails its type check | `this.day.to_string()` |
 | a string returned to a `date` or `timestamp` field | fails its type check | `parse_date(…)` / `parse_timestamp(…)`, or return the date itself |
-| `type_of(this.day) == "string"` | `false` | `type_of(this.day) == "date"` |
+| `type_of(this.day) == "string"` | `false` | `type_of(this.day) == "date"` (or `"timestamp"`, `"time"`) |
+| `` `${this.day}` ``, `"on " + this.day`, `this.day.to_string()`, `` `${[a, b]}` ``, `#{d: this.day}.to_json()` | unchanged: the same text, quoted inside a container | — |
+| a `values: date` map's value through a string method | fails | its parts (`this.due.en.year`), or `.to_string()` first |
 
-A comparison with a string fails rather than answering `false`, so a script that compared dates as text stops its documents (under `on_error = "stop"`) instead of quietly flipping a flag.
+Every replacement here is run by `libs/2-script/tests/dates.rs` (`every_replacement_on_the_upgrade_page_runs`) on a `timestamptz` and a `timestamp` value.
+
+A comparison with a string, a number or another kind fails rather than answering `false`, so a script that compared dates as text stops its documents (under `on_error = "stop"`) instead of quietly flipping a flag. `switch` is the one place that stays silent: search the scripts for `switch` over a date field.
 
 1. **Find them.** `flusso check --offline` compiles scripts but can't see types. Run each index with a script that reads a date through [`flusso script run`](../author/scripts/debugging.md#flusso-script-run) on a real row (or `--input`, which now types dates by the schema).
 2. **Rewrite** them with the table above and the [date functions](../author/scripts/dates.md#functions).

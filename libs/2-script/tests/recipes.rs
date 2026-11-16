@@ -37,6 +37,7 @@ fn product() -> GenericValue {
             "releaseQuarter",
             "firstRenewal",
             "saleEndsAt",
+            "renewals",
             "displayTitle",
             "tagList",
             "tagLine",
@@ -135,13 +136,21 @@ fn every_recipe_in_the_manual_produces_what_it_says() {
     assert_eq!(get(&doc, "createdMonth"), &text("2024-05"));
     assert_eq!(get(&doc, "releaseQuarter"), &text("2024-Q1"));
     assert_eq!(
+        get(&doc, "renewals"),
+        &GenericValue::Array(
+            ["2024-02-29", "2024-03-31", "2024-04-30"]
+                .map(|d| GenericValue::Date(d.parse().unwrap()))
+                .to_vec()
+        )
+    );
+    assert_eq!(
         get(&doc, "firstRenewal"),
         &GenericValue::Date("2024-02-29".parse().unwrap())
     );
     assert_eq!(
         get(&doc, "saleEndsAt"),
         &GenericValue::TimestampTz(
-            chrono::DateTime::parse_from_rfc3339("2024-03-01T22:59:59Z")
+            chrono::DateTime::parse_from_rfc3339("2024-03-01T22:59:59.999999999Z")
                 .unwrap()
                 .to_utc()
         )

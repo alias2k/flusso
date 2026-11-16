@@ -140,8 +140,17 @@ fields:
   # ANCHOR: sale_ends_at
   - timestamp: saleEndsAt
     required: true
-    script: this.saleEndsOn.at_time(time(23, 59, 59)).at_zone("Europe/Rome")
+    script: this.saleEndsOn.at_time(time(0, 0, 0)).at_zone("Europe/Rome").end_of_day()
   # ANCHOR_END: sale_ends_at
+
+  # ANCHOR: renewals
+  - date: renewals
+    required: true
+    array: true
+    script: |
+      let start = this.releasedOn;
+      [1, 2, 3].map(|i| start.add_months(i))   // from the anchor, never step by step
+  # ANCHOR_END: renewals
 
   # ANCHOR: title_fallback
   - text: displayTitle

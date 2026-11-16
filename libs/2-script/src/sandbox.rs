@@ -54,6 +54,11 @@ pub fn engine() -> Engine {
     engine.set_max_strings_interned(STRINGS_INTERNED);
     engine.register_global_module(standard_library().into());
     engine
+        .register_type_with_name::<crate::dates::Date>("date")
+        .register_type_with_name::<crate::dates::Time>("time")
+        .register_type_with_name::<crate::dates::Timestamp>("timestamp")
+        .register_type_with_name::<crate::dates::Duration>("duration");
+    engine
         .disable_symbol("eval")
         .set_strict_variables(true)
         .set_fail_on_invalid_map_property(true)

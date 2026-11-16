@@ -22,7 +22,8 @@
 //! **Out** ([`from_dynamic`]): a script's result is checked against the field's declared type,
 //! strictly. The only widening allowed: an integer is accepted for a `float`/`double`/`decimal`
 //! field. A `date` field takes a `date`; a `timestamp` field a `timestamp` (a zoned one as its
-//! UTC instant) or a `time`. A `decimal` result is a [`BigDecimal`](GenericValue::BigDecimal) of its exact text,
+//! UTC instant), a `time` or a `date` (each written as a column of that type under a
+//! `timestamp` field is). A `decimal` result is a [`BigDecimal`](GenericValue::BigDecimal) of its exact text,
 //! written with every digit.
 //!
 //! ```
@@ -177,11 +178,10 @@ fn leaf(value: Dynamic, out: &Output<'_>) -> Result<GenericValue, String> {
             Ok(t) => Ok(timestamp(t)),
             Err(value) => match value.try_cast_result::<Time>() {
                 Ok(t) => Ok(GenericValue::Time(t.0)),
-                Err(value) if value.is::<Date>() => Err(format!(
-                    "{}: give it a time with .at_time(time(0, 0, 0))",
-                    mismatch()
-                )),
-                Err(value) => Err(with_hint(&value, mismatch(), "parse_timestamp")),
+                Err(value) => match value.try_cast_result::<Date>() {
+                    Ok(d) => Ok(GenericValue::Date(d.0)),
+                    Err(value) => Err(with_hint(&value, mismatch(), "parse_timestamp")),
+                },
             },
         },
         FlussoType::Binary
