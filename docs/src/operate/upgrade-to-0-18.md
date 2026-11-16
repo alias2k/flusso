@@ -1,6 +1,6 @@
 # Upgrade to 0.18
 
-0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index. It also writes a `timestamp` column in ISO 8601, which changes stored documents and can break a tuned `format`: see [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601). A `decimal` field is written with every digit: see [A decimal is written with every digit](#a-decimal-is-written-with-every-digit). A `double` is indexed as the exact value Postgres holds: see [A float or double is indexed as Postgres holds it](#a-float-or-double-is-indexed-as-postgres-holds-it). A filter value that doesn't fit its column no longer matches by being cut to fit: see [A filter value is compared as written](#a-filter-value-is-compared-as-written). A script reads a date as a date, not a string: see [A date reaches a script as a date](#a-date-reaches-a-script-as-a-date). A change is indexed only once its transaction is visible: see [A change waits until its commit is visible](#a-change-waits-until-its-commit-is-visible). A fenced read in `flusso-query` waits through a restart of flusso, with a 30 s default timeout: see [A fenced read waits through a restart](#a-fenced-read-waits-through-a-restart).
+0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index. It also writes a `timestamp` column in ISO 8601, which changes stored documents and can break a tuned `format`: see [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601). A `decimal` field is written with every digit: see [A decimal is written with every digit](#a-decimal-is-written-with-every-digit). A `double` is indexed as the exact value Postgres holds: see [A float or double is indexed as Postgres holds it](#a-float-or-double-is-indexed-as-postgres-holds-it). A filter value that doesn't fit its column no longer matches by being cut to fit: see [A filter value is compared as written](#a-filter-value-is-compared-as-written). A script reads a date as a date, not a string: see [A date reaches a script as a date](#a-date-reaches-a-script-as-a-date). A change is indexed only once its transaction is visible: see [A change waits until its commit is visible](#a-change-waits-until-its-commit-is-visible). A fenced read in `flusso-query` waits through a restart of flusso, with a 20 s default timeout: see [A fenced read waits through a restart](#a-fenced-read-waits-through-a-restart).
 
 ## When to use this
 
@@ -177,9 +177,17 @@ A comparison with a string, a number or another kind fails rather than answering
 
 `flusso-query`'s fenced reads (`client.after(..)`, `wait`, `wait_applied`) no longer fail on the first refused connection or `503`: they retry until `fence_timeout`, so a deploy of flusso is a slow read, not an error (see [While flusso restarts](../query/read-your-writes.md#while-flusso-restarts)). What changes for a consumer:
 
-- **The default `fence_timeout` is 30 s, was 5 s.** A stalled sink now holds a fenced read up to 30 s before `FenceTimeout`. A handler that must answer sooner sets `.fence_timeout(..)` itself.
-- **`Error::FenceUnavailable` means "unavailable until the timeout"**, after retrying, where it meant one failed attempt.
-- **New `Error::FenceNotConfigured`** for a fenced read on a client without `.flusso(url)`, which was a `FenceUnavailable`. A `match` on the error enum needs the new arm.
+- **The default `fence_timeout` is 20 s, was 5 s**, and the fence returns by it. Three cases a caller notices take the whole deadline now:
+
+  | Case | 0.17 | Now |
+  | --- | --- | --- |
+  | a stalled sink | `FenceTimeout` after 5 s | `FenceTimeout` after 20 s |
+  | flusso down | `FenceUnavailable` at once | `FenceUnavailable` after 20 s, retrying |
+  | flusso up but never ready | `FenceUnavailable` at once | `FenceUnavailable` after 20 s, retrying |
+
+  A handler that must answer sooner sets `.fence_timeout(..)`; see [Sizing the timeout](../query/read-your-writes.md#sizing-the-timeout).
+- **`Error::FenceUnavailable` is a struct now**, `{ cause, reason }`: a pattern `FenceUnavailable(reason)` no longer compiles. It means "unavailable until the timeout", after retrying.
+- **A missing `.flusso(url)` is `Error::FenceMisconfigured`**, which was a `FenceUnavailable`. `Error` is `#[non_exhaustive]`, so this is silent: code that matched `FenceUnavailable` to spot the missing address compiles and falls through to its wildcard arm. Match `FenceMisconfigured` for it. A certificate the client refuses and a redirect loop are `FenceMisconfigured` too, at once.
 - **Remove a retry loop around fenced reads**, if one was written for deploys: it now multiplies the timeout.
 
 ## Related

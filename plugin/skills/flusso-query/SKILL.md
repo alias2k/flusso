@@ -406,11 +406,13 @@ let page = User::query().filter(..).send(&fresh).await?;   // waits until search
 - `client.wait(&position).await?` (searchable) and `client.wait_applied(&position).await?` wait
   explicitly, for reads made elsewhere.
 - **A fence never reads stale, and rides out a restart.** One deadline, `.fence_timeout(d)` (default
-  30 s), across every request: a refused connection or a `503` (flusso stopping or starting) is
-  retried with backoff, a `408` past flusso's 60 s cap is asked again. When it runs out:
-  `Error::FenceTimeout { reached }` (flusso was waiting on the position), `Error::FenceUnavailable`
-  (flusso couldn't be asked). `Error::FenceNotConfigured` (no `.flusso(url)`) and
-  `Error::FenceRefused` (bad position, unknown sink) fail at once. Decide per endpoint what a
+  20 s; keep it below the caller's own request timeout), across every request: a refused connection,
+  `503`, `502`, `504` or `429` is retried with jittered backoff honouring `Retry-After`, a `408` past
+  flusso's 60 s cap is asked again. When it runs out: `Error::FenceTimeout { reached }` (flusso was
+  waiting on the position), `Error::FenceUnavailable { cause, reason }` (flusso couldn't be asked;
+  `cause` is an `UnavailableCause`: `Stopping`/`Starting`/`Rebuilding`/`Unreachable`/`Throttled`/
+  `Unusable`). `Error::FenceMisconfigured` (no `.flusso(url)`, refused certificate, redirect loop)
+  and `Error::FenceRefused` (bad position, unknown sink) fail at once. Decide per endpoint what a
   timeout means: usually "saved, not indexed yet", not a 500. Do not wrap a fenced read in a retry
   loop of your own.
 - Concurrent writers need no coordination: each fences on the position it read after its own commit.

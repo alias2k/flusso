@@ -81,11 +81,20 @@ A fence never falls back to a stale read. The read fails, and OpenSearch isn't a
 | Error | Means |
 | --- | --- |
 | `Error::FenceTimeout { reached }` | flusso was waiting on the position when the timeout passed. `reached` is how far the sink got. flusso is behind, or a sink is stalled. |
-| `Error::FenceUnavailable(reason)` | flusso couldn't be asked when the timeout passed: unreachable, starting, or stopping. The fence retried the whole time; `reason` is the last cause. |
-| `Error::FenceNotConfigured` | No `.flusso(url)` on this client. Fails at once. |
+| `Error::FenceUnavailable { cause, reason }` | flusso couldn't be asked when the timeout passed. The fence retried the whole time; `cause` and `reason` are the last answer's. |
+| `Error::FenceMisconfigured(reason)` | The client can't talk to flusso as configured: no `.flusso(url)`, a certificate it refuses, a redirect loop. Fails at once. |
 | `Error::FenceRefused { status, reason }` | flusso rejected the wait: a malformed position, or a sink it doesn't have. Never retried. |
 
-The timeout is thirty seconds unless `.fence_timeout(duration)` says otherwise. It's the whole budget of one fence, counted once across every request it makes.
+`cause` is an `UnavailableCause`, to branch on without parsing text:
+
+| `cause` | The last answer |
+| --- | --- |
+| `Stopping` | flusso is stopping: a deploy or a restart. |
+| `Starting` | flusso isn't following the source yet. A daemon that gives no reason (0.17) means this. |
+| `Rebuilding` | A sink is rebuilding the index; see [the limit below](#while-flusso-restarts). |
+| `Unreachable` | Refused, reset or dropped connection, no answer in time, or a gateway's `502`/`503`/`504`. |
+| `Throttled` | A `429` from something in front of flusso. |
+| `Unusable` | A `503` with a reason this client doesn't know. |
 
 ```rust
 match User::get(&client.after(&position), id).await {
@@ -95,14 +104,30 @@ match User::get(&client.after(&position), id).await {
 }
 ```
 
+## Sizing the timeout
+
+The timeout is twenty seconds unless `.fence_timeout(duration)` says otherwise. It's the whole budget of one fence, counted once across every request it makes, and the fence returns by it. Size it:
+
+- **above a typical restart** of flusso: the old process's [stop](../reference/cli.md#run), plus the new one's start until `/readyz` answers;
+- **below the caller's own request timeout**, and the gateway's in front of it, so the caller hears `FenceTimeout` or `FenceUnavailable` before its upstream gives up.
+
+The worst restart (the full stop deadline plus a slow start) can outlast it. The read then fails with `FenceUnavailable`; it never reads stale. Don't wrap a fenced read in a retry loop of your own: the fence already retries, and a loop multiplies the wait.
+
 ## While flusso restarts
 
 flusso runs as one process, so a deploy leaves a gap: the old process stops, the new one connects to Postgres and starts following the source. A fence made in that gap keeps asking until its timeout:
 
-- a refused or dropped connection, or a `503`: flusso is unavailable; ask again after a pause (100 ms doubling to 2 s, or the `Retry-After` flusso sent);
-- a `408`: flusso's own wait ended before the client's (it caps one at sixty seconds); ask again at once with what's left.
+| Answer | Then |
+| --- | --- |
+| a refused, reset or dropped connection, `503`, `502`, `504`, `429` | flusso is unavailable: pause, ask again |
+| `408` | flusso's own wait ended before the client's (it caps one at sixty seconds): ask again with what's left |
+| `400`, `404`, a refused certificate, a redirect loop | fail at once |
 
-The position is the database's own, so the new process answers the same question the old one was asked. To a caller, a deploy is a slow read, not an error, as long as the timeout covers the gap: the old process's [stop](../reference/cli.md#run), plus the new one's start until `/readyz` answers. A `Retry-After` that reaches past the timeout fails the fence at once. Dropping the read's future stops the retries.
+A pause is the backoff (100 ms doubling to 2 s) or the `Retry-After` flusso sent, whichever is longer, plus up to half again at random, so clients that lost flusso together don't all return in the same instant. A `Retry-After` that reaches past the timeout fails the fence at once. A `408` that comes back sooner than asked (a proxy, say) is paced the same way. Dropping the read's future stops the retries.
+
+After an ordinary restart the new process answers the same question the old one was asked: the position is the database's own. To a caller, a deploy is a slow read, not an error, as long as the timeout covers the gap.
+
+> ⚠️ **Warning** — A fence doesn't vouch for an index a sink is rebuilding: a first backfill, a rebuild after the slot was lost (see [Recover from a dropped slot](../operate/dropped-slot.md)), or a [reindex](../operate/reindex.md). Today the daemon can answer `200` there while the document isn't readable yet ([#379](https://github.com/alias2k/flusso/issues/379)). Once that's fixed it answers `503` with the reason `rebuilding`, which the fence retries like any other unavailable answer.
 
 > ℹ️ **Info** — When flusso is caught up, both levels are reached within one flush of the commit. While a backlog drains, `searchable` trails `applied` by up to the sink's `refresh_interval`, because flusso never refreshes on a reader's behalf.
 

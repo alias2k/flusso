@@ -2,10 +2,12 @@
 //! run` binary over a real Postgres and OpenSearch, read through
 //! `flusso-query`.
 //!
-//! flusso is stopped, a row is committed and its position read, and a fenced
-//! read is issued while nothing listens on flusso's address. flusso starts
-//! again seconds later on the same address; the read returns the committed
-//! document, which only the new process can have indexed.
+//! A row is committed and flusso stopped at once; a second row is committed
+//! while nothing listens on flusso's address. Fenced reads are issued in the
+//! gap: a fetch by id for each row (applied) and a count after the second
+//! (searchable). flusso starts again seconds later on the same address; every
+//! read returns the committed state, which for the second row only the new
+//! process can have indexed.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -22,13 +24,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use flusso_query::{Client, position};
+use flusso_query::{Client, Search, position};
 use serde_json::{Value, json};
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgPool, PgPoolOptions};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
-async fn a_fenced_read_made_while_flusso_restarts_returns_the_committed_row() {
+async fn fenced_reads_made_while_flusso_restarts_return_the_committed_rows() {
     let (_postgres, pg_url) =
         common::start_postgres("CREATE TABLE t (id int PRIMARY KEY, name text NOT NULL)").await;
     let (_opensearch, os_url) = common::start_opensearch().await;
@@ -39,16 +41,9 @@ async fn a_fenced_read_made_while_flusso_restarts_returns_the_committed_row() {
     let mut flusso = start(&dir, public);
     ready(public, &mut flusso, &dir).await;
     let hash = schema_hash(&os_url).await;
+    let before = commit(&pool, 0, "committed before the stop").await;
     stop(&mut flusso);
-
-    sqlx::query("INSERT INTO t VALUES (1, 'committed while flusso was down')")
-        .execute(&pool)
-        .await
-        .unwrap();
-    let position: String = sqlx::query_scalar(position::CURRENT_SQL)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let during = commit(&pool, 1, "committed while flusso was down").await;
 
     let client = Client::connect(&os_url)
         .unwrap()
@@ -57,25 +52,79 @@ async fn a_fenced_read_made_while_flusso_restarts_returns_the_committed_row() {
         .fence_sink("primary")
         .fence_timeout(Duration::from_secs(90));
     let started = Instant::now();
-    let read =
-        tokio::spawn(async move { client.after(position).get_one::<Value>("t", &hash, 1).await });
+    let get = |position: String, id: i32| {
+        let (client, hash) = (client.clone(), hash.clone());
+        tokio::spawn(async move {
+            client
+                .after(position)
+                .get_one::<Value>("t", &hash, id)
+                .await
+        })
+    };
+    let get_before = get(before, 0);
+    let get_during = get(during.clone(), 1);
+    let count_during = {
+        let (client, hash) = (client.clone(), hash.clone());
+        tokio::spawn(async move {
+            Search::<Value>::new("t", &hash)
+                .count(&client.after(during))
+                .await
+        })
+    };
 
     tokio::time::sleep(Duration::from_secs(3)).await;
-    assert!(!read.is_finished(), "the read waits through the gap");
+    assert!(
+        !get_during.is_finished() && !count_during.is_finished(),
+        "both levels wait through the gap"
+    );
     let mut flusso = start(&dir, public);
 
-    let row = tokio::time::timeout(Duration::from_secs(120), read)
-        .await
-        .expect("the read returns once flusso is back")
-        .unwrap();
+    let within = Duration::from_secs(120);
+    let get_before = tokio::time::timeout(within, get_before).await;
+    let get_during = tokio::time::timeout(within, get_during).await;
+    let count_during = tokio::time::timeout(within, count_during).await;
     let elapsed = started.elapsed();
     stop(&mut flusso);
-    let row = row.unwrap_or_else(|error| panic!("{error}: {}", stderr(&dir)));
+    let log = stderr(&dir);
+    let get_before = get_before
+        .expect("returns")
+        .unwrap()
+        .unwrap_or_else(|e| panic!("{e}: {log}"));
+    let get_during = get_during
+        .expect("returns")
+        .unwrap()
+        .unwrap_or_else(|e| panic!("{e}: {log}"));
+    let count_during = count_during
+        .expect("returns")
+        .unwrap()
+        .unwrap_or_else(|e| panic!("{e}: {log}"));
+
     assert_eq!(
-        row,
-        Some(json!({ "id": 1, "name": "committed while flusso was down" }))
+        get_before,
+        Some(json!({ "id": 0, "name": "committed before the stop" })),
+        "applied, a position committed before the stop"
     );
+    assert_eq!(
+        get_during,
+        Some(json!({ "id": 1, "name": "committed while flusso was down" })),
+        "applied, a position committed in the gap"
+    );
+    assert_eq!(count_during, 2, "searchable: a search sees both rows");
     assert!(elapsed >= Duration::from_secs(3), "{elapsed:?}");
+}
+
+/// Insert a row and return the source position read after its commit.
+async fn commit(pool: &PgPool, id: i32, name: &str) -> String {
+    sqlx::query("INSERT INTO t VALUES ($1, $2)")
+        .bind(id)
+        .bind(name)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query_scalar(position::CURRENT_SQL)
+        .fetch_one(pool)
+        .await
+        .unwrap()
 }
 
 /// One index `t` written to the OpenSearch sink `primary`.

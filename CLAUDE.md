@@ -1762,14 +1762,20 @@ called by `get_one` → applied, and by `search_at`/`count_at`/`open_pit`/`searc
 → searchable), so every terminal is covered with no builder change, and a fenced client waits once
 per level (an `AtomicU8` its clones share; only a fence that passed marks it). A new read path must
 call `fence_before`. A fence never falls back to a stale read. It **rides out a restart** (issue
-#377): `fence_timeout` (default 30 s) is one deadline across attempts; each asks `/wait` with what is
-left; a `503` or a transport failure backs off (100 ms doubling to 2 s, or `Retry-After`; one past
-the deadline fails at once) and asks again, a `408` with time left asks again at once (the daemon caps
-one wait at 60 s), `400`/`404` never retry. Out of time, the last answer decides: `FenceTimeout`
-(flusso was waiting) or `FenceUnavailable` (it couldn't be asked); `FenceNotConfigured` and
-`FenceRefused` fail at once. Nothing is spawned, so dropping the read stops it. Guards: the stub
-tests in `tests::fence` and `apps/cli`'s `fence_restart` e2e (the real binary stopped and restarted
-on one address; `flusso-query` is a path-only dev-dependency there).
+#377): `fence_timeout` (default 20 s) is one deadline across attempts and the fence returns by it.
+`fence::run` is the loop, separate from the HTTP `ask`, so its tests run on paused time. Each request
+asks `/wait` for the time left less a margin (`timeout_ms` rounded up, never 0) and may take at most
+the time left, connect included. Unavailable (`503`/`502`/`504`/`429`, transport failure) pauses
+the larger of the backoff (100 ms doubling to 2 s) and `Retry-After`, plus up to half again of
+jitter (one past the deadline fails at once); a `408` with time left is asked again at once only if
+flusso held it about as long as asked, else paced the same. The status decides before the body is
+read. `400`/`404` are `FenceRefused`; a refused certificate (typed `rustls::Error` check, as the
+sink's), a redirect error and a missing `.flusso(url)` are `FenceMisconfigured`, both at once. Out
+of time, the last answer decides: `FenceTimeout` or `FenceUnavailable { cause: UnavailableCause, reason }`.
+Nothing is spawned, so dropping the read stops it. Guards: `tests::fence` (stub daemon, incl. TLS),
+`tests::fence_pacing` (paused time: pacing, deadline, jitter spread over 500 clients), and
+`apps/cli`'s `fence_restart` e2e (the real binary stopped and restarted on one address, both
+levels; `flusso-query` is a path-only dev-dependency there).
 `position::CURRENT_SQL` is the statement; the `diesel`/`diesel-async` features add
 `position::{diesel,diesel_async}::current` (backend types only, no driver). Guarded by
 `tests::fence` (a local TCP stub standing in for both servers).

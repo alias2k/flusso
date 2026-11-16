@@ -100,7 +100,7 @@ let position = flusso_query::position::diesel_async::current(&mut conn).await?;
 let user = User::get(&client.after(&position), id).await?;
 ```
 
-Reads still go straight to OpenSearch; flusso is only asked to wait. A fence rides out a restart of flusso (a deploy), retrying until its `fence_timeout` (30 s by default), and never falls back to a stale read: it fails with `Error::FenceTimeout` when flusso was waiting on the position, `Error::FenceUnavailable` when flusso couldn't be asked. See [reading your own writes](https://alias2k.github.io/flusso/query/read-your-writes.html).
+Reads still go straight to OpenSearch; flusso is only asked to wait. A fence rides out a restart of flusso (a deploy), retrying until its `fence_timeout` (20 s by default), and never falls back to a stale read: it fails with `Error::FenceTimeout` when flusso was waiting on the position, `Error::FenceUnavailable { cause, .. }` when flusso couldn't be asked, `Error::FenceMisconfigured` at once when it can't be asked as configured. See [reading your own writes](https://alias2k.github.io/flusso/query/read-your-writes.html).
 
 ## Learn more
 
