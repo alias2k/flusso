@@ -1,0 +1,11 @@
+# The index `read_time.rs` derives against. No database is touched: the test
+# writes documents straight through the sink.
+
+[source]
+type = "postgres"
+connection_url = "postgres://app@localhost/test"
+
+[[index]]
+name = "contracts"
+schema = "contracts.schema.yml"
+enabled = true

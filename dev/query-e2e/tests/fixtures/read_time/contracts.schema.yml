@@ -1,0 +1,53 @@
+# `notice_starts_at` and `discounted_fee` stand for values a write-time script
+# computes from the row alone: what needs no request-time value is stored.
+version: 1
+table: contracts
+primary_key: id
+
+fields:
+  - keyword: id
+    required: true
+  - text: title
+    required: true
+  - keyword: owner_id
+    required: true
+  - timestamp: signed_at
+    required: false
+  - timestamp: starts_at
+    required: true
+  - timestamp: ends_at
+    required: true
+  - timestamp: notice_starts_at
+    required: true
+  - enum: state
+    required: true
+    variants: [expiring, open, scheduled, draft, suspended, closed, terminated]
+  - boolean: auto_renew
+    required: true
+  - integer: notice_days
+    required: true
+  - double: monthly_fee
+    required: true
+  - double: discounted_fee
+    required: false
+  - timestamp: discount_until
+    required: false
+  - decimal: list_price
+    required: true
+  - float: rating
+    required: false
+  - ids: tags
+    table: contract_tags
+    foreign_key: contract_id
+    element_type: keyword
+  - object: billing
+    fields:
+      - keyword: country
+        required: false
+  - has_many: invoices
+    table: invoices
+    foreign_key: contract_id
+    primary_key: id
+    fields:
+      - keyword: status
+        required: true
