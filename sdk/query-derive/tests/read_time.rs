@@ -206,8 +206,8 @@ fn a_rule_field_filters_and_sorts_on_the_value_documents_show() {
         ] } })
     );
 
-    // The overridden field's `variants:` give the order: active, suspended,
-    // terminated, draft, closed.
+    // The stored enum declares `active, suspended, terminated`; `draft` and
+    // `closed`, which only the rules yield, rank after them.
     let body = Contract::query(&CX).sort(state.asc()).body();
     let weights: Vec<u64> = body["query"]["function_score"]["functions"]
         .as_array()
@@ -286,7 +286,9 @@ fn a_condition_is_a_filter_like_any_query() {
 )]
 struct PlainContract {
     id: String,
-    state: State,
+    /// The stored field, so only what the index stores: `State` also holds
+    /// the values the rules add, which no stored document has.
+    state: String,
 }
 
 #[test]

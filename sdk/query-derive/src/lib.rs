@@ -9,6 +9,7 @@ mod doc;
 mod fragment;
 mod map;
 mod multi;
+mod read_time;
 mod resolve;
 mod serde_attr;
 mod spec;
