@@ -795,40 +795,28 @@ impl PgDocumentBuilder {
         Ok(pks)
     }
 
-    /// The SQL type of a column, as a cast-ready name from the Postgres catalog
-    /// (e.g. `numeric`, `integer`, `timestamp with time zone`). A thin view over
-    /// [`column_meta`](Self::column_meta) for callers that only need the type to
-    /// cast a query operand.
-    pub(super) async fn column_type(
-        &self,
-        schema: &DatabaseSchema,
-        table: &TableName,
-        column: &ColumnName,
-    ) -> Result<String> {
-        Ok(self
-            .column_meta(schema, table, column)
-            .await?
-            .sql_type
-            .clone())
-    }
-
-    /// The type a key read from a column is cast to (`$n::<bound>::<type>`,
-    /// `expr::<type>`): the column's base type, schema-qualified, with no
-    /// modifier. An explicit cast to a size truncates or rounds without an
+    /// The type a value compared with a column is cast to: a key read from
+    /// it (`$n::<bound>::<type>`, `expr::<type>`) and a filter operand
+    /// (`$n::<type>`). It is the column's base type, schema-qualified, with
+    /// no modifier. An explicit cast to a size truncates or rounds without an
     /// error (`'k12345678'::varchar(5)` is `k1234`, `1.2345::numeric(10,2)`
-    /// is `1.23`), so a key cast to a size its column no longer has would
-    /// match no row; `=` needs none. The qualified `typname` also keeps
-    /// `bpchar` apart from `character`, which as a cast means `char(1)`.
+    /// is `1.23`, `'101'::bit(5)` is `10100`, `'12:00:00.6'::time(0)` is
+    /// `12:00:01`), so a key cast to a size its column no longer has would
+    /// match no row, and a filter value past its column's size would match a
+    /// row holding another value; no comparison needs the size. The
+    /// qualified `typname` also keeps `bpchar` apart from `character` and
+    /// `"bit"` apart from `bit`, which as casts mean `char(1)` and `bit(1)`.
     ///
     /// It is the base type, through every domain, when the role may use the
-    /// base type's schema. When it may not (a domain `app.dcit` over
-    /// `ext.citext`, no USAGE on `ext`), a cast to the base type would fail
-    /// every query, so the key is cast to the column's declared type
-    /// instead, as before the base type was used. That gives up one thing: a
-    /// cast to a domain checks the domain's constraints, so a key that breaks
-    /// them fails the query instead of matching nothing. The privilege is
-    /// read by the same catalog query as the type, cached and refreshed with
-    /// it.
+    /// base type's schema (always so for `pg_catalog`, even for a role that
+    /// may not run `has_schema_privilege`). When it may not (a domain
+    /// `app.dcit` over `ext.citext`, no USAGE on `ext`), a cast to the base
+    /// type would fail every query, so the key is cast to the column's
+    /// declared type instead, as before the base type was used. That gives
+    /// up one thing: a cast to a domain checks the domain's constraints, so
+    /// a key that breaks them fails the query instead of matching nothing.
+    /// The privilege is read by the same catalog query as the type, cached
+    /// and refreshed with it.
     pub(super) async fn key_type(
         &self,
         schema: &DatabaseSchema,
@@ -927,10 +915,11 @@ impl PgDocumentBuilder {
             .map_err(query_err)
     }
 
-    /// Resolve the SQL type of every column a value filter compares against,
-    /// keyed by `(table, column)`, so the document query can cast each operand
-    /// to its column's type. Covers relation filters at any depth and the
-    /// root-table columns named by a soft-delete `when`.
+    /// The [`key_type`](Self::key_type) of every column a value filter
+    /// compares against, keyed by `(table, column)`, so the document query
+    /// casts each operand to its column's type and never to its size. Covers
+    /// relation filters at any depth and the root-table columns named by a
+    /// soft-delete `when`.
     async fn filter_column_types(
         &self,
         schema: &IndexSchema,
@@ -957,8 +946,8 @@ impl PgDocumentBuilder {
             if types.contains_key(&key) {
                 continue;
             }
-            let sql_type = self.column_type(&schema.db_schema, table, column).await?;
-            types.insert(key, sql_type);
+            let operand_type = self.key_type(&schema.db_schema, table, column).await?;
+            types.insert(key, operand_type);
         }
         Ok(types)
     }
@@ -1043,8 +1032,7 @@ impl PgDocumentBuilder {
     /// Set in `types` the [`key_type`](Self::key_type) of each root-table key
     /// column, so the keyed lookup can cast every `$n` to it. The keys come
     /// back from Postgres as values (a `uuid` as a string, say); without the
-    /// cast the re-bound `$n` is `text` and `uuid = text` has no operator. It
-    /// replaces a filter's entry for the column, which may carry a size.
+    /// cast the re-bound `$n` is `text` and `uuid = text` has no operator.
     async fn add_key_column_types(
         &self,
         schema: &IndexSchema,
@@ -1398,9 +1386,11 @@ macro_rules! column_meta_sql {
 const COLUMN_META_SQL: &str = column_meta_sql!("has_schema_privilege(n.oid, 'USAGE')");
 
 /// [`column_meta_sql`] for a role that may not run `has_schema_privilege`
-/// (EXECUTE revoked): every key is cast to its declared type, as the cast
-/// before the base type was used could be.
-const COLUMN_META_SQL_UNPROBED: &str = column_meta_sql!("false");
+/// (EXECUTE revoked): a key or operand is cast to its declared type, as the
+/// cast before the base type was used could be, unless the base type is in
+/// `pg_catalog`, which every role may use. A domain over `varchar(5)` keeps
+/// its size in its declared type, and the cast to it would cut the value.
+const COLUMN_META_SQL_UNPROBED: &str = column_meta_sql!("n.nspname = 'pg_catalog'");
 
 #[async_trait]
 impl DocumentBuilder for PgDocumentBuilder {

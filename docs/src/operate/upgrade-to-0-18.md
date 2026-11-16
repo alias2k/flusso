@@ -1,6 +1,6 @@
 # Upgrade to 0.18
 
-0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index. It also writes a `timestamp` column in ISO 8601, which changes stored documents and can break a tuned `format`: see [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601). A `decimal` field is written with every digit: see [A decimal is written with every digit](#a-decimal-is-written-with-every-digit).
+0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index. It also writes a `timestamp` column in ISO 8601, which changes stored documents and can break a tuned `format`: see [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601). A `decimal` field is written with every digit: see [A decimal is written with every digit](#a-decimal-is-written-with-every-digit). A filter value that doesn't fit its column no longer matches by being cut to fit: see [A filter value is compared as written](#a-filter-value-is-compared-as-written).
 
 ## When to use this
 
@@ -90,6 +90,28 @@ A level of more than 50 fields is built as `jsonb`, which writes a number withou
 3. **Consumers.** An `f64` or `rust_decimal::Decimal` (default serde features, which read a number through `f64`) reads the nearest `f64` of the exact text. 0.17's `_source` held a value already rounded once, so some long values now read one unit in the last place differently (`357273734.880428249` read as `357273734.8804282` in 0.17 and `357273734.88042825` in 0.18). A `serde_json::Value` changes shape: `5.0` becomes the integer `5`, and a past-range string becomes a number. A field read as `String` because it could hold the string form now fails on that document: read it as `f64` or `serde_json::Value` (see [What the derive trusts](../query/document-structs.md#what-the-derive-trusts)). A `rust_decimal::Decimal` still can't hold a value past its range.
 4. **Scripts.** A declared decimal reaches a script as the nearest `Decimal` (about 28 significant digits, at most 28 after the point; a next digit of 5 or more rounds away from zero), where it held about 17 (see [Values in and out](../reference/scripts.md#values-in-and-out)): `to_string` keeps trailing zeros (a `keyword` script field built from `1.10` was `1.1`), and comparisons use every digit. A value from about 79228162514264333195497439232 up to `Decimal::MAX` is a decimal where it was a string (`f64` rounded it to 2^96, past the range): a script returning it to a `keyword` field now fails its type check, and `+ 1` can overflow and fail the document. A value past the range is still a string, now of the exact text Postgres wrote (`"79228162514264337593543950336"`, `"1e+30"` for a `float8` read under `decimal`) where it held the `f64`'s digits (`"79228162514264340000000000000"`, `"1000000000000000000000000000000"`): `len()`, `+` and `parse_decimal` see the new text. A decimal's `to_float()` is the `f64` nearest its exact value. A `decimal` script field's result is written with every digit, a zero without a sign, and it still refuses a string.
 5. **Stored documents.** Each document takes the new form at its row's next write. Run [`flusso reindex <index>`](../reference/cli.md#reindex) on each index with a `decimal` field to rewrite every one now, with no restart.
+
+## A filter value is compared as written
+
+**Breaking.** A value filter's `value` was cast to its column's sized type before the comparison, and Postgres cuts or rounds such a cast without an error. 0.18 compares it as written (see [How a value is compared](../reference/filters-and-soft-delete.md#how-a-value-is-compared)), in every place a filter sits: root `filters`, a `soft_delete` `when`, a join, a `through`, a `via` hop, an aggregate. No content hash moves and nothing is rebuilt: the schema is the same, and what it asks for is what 0.18 does.
+
+**Who is affected.** A deployment with a value filter whose `value` doesn't fit its column:
+
+| Column | Example `value` | 0.17 compared | 0.17 effect |
+| --- | --- | --- | --- |
+| `varchar(n)`, `char(n)`, a domain over one | `archived` on `varchar(5)` | `archi` | `eq`/`in`/`like` kept rows holding `archi`; `neq`/`not_in` dropped them |
+| `varchar(n)` | `'archi  '` (trailing spaces past the size) on `varchar(5)` | `archi` | `eq` kept rows holding `archi`; `char(n)` is unaffected, its trailing spaces never count |
+| `numeric(p,s)` | `1.005` on `numeric(10,2)` | `1.01` | `eq` kept `1.01`; `gt` dropped it |
+| `numeric(p,s)` | more integer digits than `p - s` | — | every build of the index failed (`numeric field overflow`) |
+| `bit(n)`, `varbit(n)` | `101` on `bit(5)` | `10100` | `eq` kept `10100` |
+| `time(p)`, `timestamp(p)`, `timestamptz(p)`, `interval(p)`, `interval year` | `09:00:00.6` on `time(0)` | `09:00:01` | `eq` kept `09:00:01` |
+| a domain with a `CHECK` | a value the check refuses | — | every build of the index failed |
+
+A filter whose values fit its column (the usual case) compares exactly as before.
+
+1. **Find them.** Check each value filter against its column's type in Postgres (`\d <table>` in `psql`). A filter on a column without a size (`text`, `numeric`, `timestamptz`) is unaffected.
+2. **Fix the value, if the old match was what was meant.** A filter written as `archived` that relied on matching `archi` now matches nothing; write the value the rows hold.
+3. **Rewrite stored documents.** A document picks up the corrected filter at its row's next write. Run [`flusso reindex <index>`](../reference/cli.md#reindex) on each affected index to rewrite every one now, with no restart: a root filter or `soft_delete` `when` that matched by a cut value tombstones those documents, one that dropped a row by it adds them back, and a join or aggregate filter changes the related rows each document holds.
 
 ## Related
 

@@ -136,7 +136,7 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   failing the job. Tests: `python3 -m unittest discover -s .github/scripts -p
   'test_*.py'` (CI's `scripts` job) over the real history in `.github/scripts/fixtures/`, with a frozen
   copy of the rule that every change must flag identically to. `just load` is the soak script — not a benchmark.
-- The `#[ignore]`d e2e tests live in `source-postgres`'s `integration`, `key_matching`,
+- The `#[ignore]`d e2e tests live in `source-postgres`'s `integration`, `key_matching`, `filter_operands`,
   `config_coverage`, `publication`, `introspection`, `tls`, `wal_idle`, `continuity`, and `partitions` binaries
   (`tls` boots a hostssl-only PG 16 with a committed throwaway self-signed cert and
   proves the replication stream + SQL pool honor `sslmode`; `wal_idle`: the slot keeps
@@ -1108,17 +1108,20 @@ compares `(type OID, typmod)` with the `Relation` message's, so a resize (`varch
 its first use, and Postgres refuses one whose result type changed. So a bound key is spelled
 `$n::<bound>::<key type>` (`sql::key_cast`, as `root_keys_query` does), and a selected key's typed
 column is cast to the key type (`value::key_select`); no statement cache is cleared and nothing is
-retried. **A key is never cast to a size**: the key type is `ColumnMeta.key_type`
+retried. **A key or filter operand is never cast to a size**: the key type is `ColumnMeta.key_type`
 (`PgDocumentBuilder::key_type`), the base type's schema-qualified `typname` with no modifier
-(`pg_catalog.bpchar`, never `character`, which means `char(1)`), because an explicit cast to
-`varchar(5)`/`numeric(10,2)` truncates or rounds without an error and matches no row; plans keep their
-index scans. When the role has no USAGE on the base type's schema (a domain `app.dcit` over
+(`pg_catalog.bpchar`/`pg_catalog."bit"`, never `character`/`bit`, which mean `char(1)`/`bit(1)`),
+because an explicit cast to `varchar(5)`/`numeric(10,2)`/`bit(5)`/`time(0)`/`interval year`/a domain
+over one truncates, pads or rounds without an error: a key would match no row, and a filter value
+(`filter_column_types` takes the same type, issue #338) would match a row holding another value and
+turn `neq`/`not_in` against the row they should keep. Postgres still does the comparison; plans keep
+their index scans. When the role has no USAGE on the base type's schema (a domain `app.dcit` over
 `ext.citext`) it is the declared type's `typname` instead, as before (a cast to a domain checks its
 constraints); `has_schema_privilege` is read by the same catalog query and cached with the type, the
 backfill's key lookup follows the same rule, and a role refused `has_schema_privilege` itself (42501)
-gets the lookup once more without the probe, every key cast to its declared type
-(`COLUMN_META_SQL_UNPROBED`, remembered per builder). `text_value::is_key_type` parses the type's
-`regtype` name as quoted identifiers (`ext.citext`, `"a.b".citext`; not `"a.citext"`). **The batched
+gets the lookup once more without the probe, every key cast to its declared type unless the base
+type is in `pg_catalog`, which every role may use (`COLUMN_META_SQL_UNPROBED`, remembered per
+builder). `text_value::is_key_type` parses the type's `regtype` name as quoted identifiers (`ext.citext`, `"a.b".citext`; not `"a.citext"`). **The batched
 build serves exactly the ids a single `build` serves, by construction**: `query::documents_query`
 reads the root rows as main did, one level in (`SELECT root.pk AS flusso_key, <document> FROM root
 WHERE root.pk = ANY(<keys>) … OFFSET 0`, the keys written in the `query::KeyForm` decided per chunk
@@ -1181,7 +1184,9 @@ its scale changed, keys moving between `int`/`numeric` and `timestamp`/`timestam
 migration, a text key becoming `timestamptz` from offset-less values, a domain over a type in a schema
 the role may not use (builder, capture and backfill as that role), a role refused `has_schema_privilege`;
 no restart, no tombstone), `matching::tests`, `document::tests`'
-`no_key_cast_carries_a_type_modifier`, `stream::tests`'
+`no_key_cast_carries_a_type_modifier` and `no_filter_operand_cast_carries_a_type_modifier`, `source-postgres`'s
+`filter_operands` e2e (every sized type under every value operator, and a `varchar`/`numeric` value in
+every place a filter sits, built single and batched; a role refused `has_schema_privilege`), `stream::tests`'
 `a_relation_message_with_another_type_modifier_forgets_its_tables_column_types`. No query per build. The cache is nested by schema, table and
 column, looked up by borrowed names, and hands out `Arc<ColumnMeta>`, so a hit allocates nothing; each
 `forget_table` bumps its generation, which answers derived from it (the per-path root-link decision)

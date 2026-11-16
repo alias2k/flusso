@@ -122,7 +122,8 @@ async fn resolve_tables(pool: &PgPool, tables: &[SnapshotTable]) -> Result<Vec<B
 /// cast to (as the document builder's `key_type`: the base type's
 /// schema-qualified `typname` with no modifier, or the declared type's when
 /// the role may not use the base type's schema, or may not run
-/// `has_schema_privilege` to ask), and its `pg_type.typname`.
+/// `has_schema_privilege` to ask and the base type is outside `pg_catalog`),
+/// and its `pg_type.typname`.
 async fn key_type(pool: &PgPool, qualified: &str, column: &str) -> Result<(String, String)> {
     let fetch = |sql: &'static str| {
         sqlx::query_as(sql)
@@ -169,8 +170,9 @@ macro_rules! key_type_sql {
 
 const KEY_TYPE_SQL: &str = key_type_sql!("has_schema_privilege(n.oid, 'USAGE')");
 
-/// [`key_type_sql`] for a role that may not run `has_schema_privilege`.
-const KEY_TYPE_SQL_UNPROBED: &str = key_type_sql!("false");
+/// [`key_type_sql`] for a role that may not run `has_schema_privilege`: the
+/// base type when it is in `pg_catalog`, which every role may use.
+const KEY_TYPE_SQL_UNPROBED: &str = key_type_sql!("n.nspname = 'pg_catalog'");
 
 /// The single-column primary key of a table from the catalog, or `None` (with a
 /// warning) if it has no primary key or a composite one.

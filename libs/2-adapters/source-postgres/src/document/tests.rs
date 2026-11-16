@@ -690,3 +690,128 @@ async fn a_change_on_an_unread_table_warns_once_per_table() {
     }
     assert_eq!(warnings.0.load(std::sync::atomic::Ordering::Relaxed), 2);
 }
+
+/// Every value filter, wherever it sits: the root, a soft-delete `when`, a
+/// `has_many`, a `belongs_to`, a junction, a `via` hop and an aggregate.
+fn filtered_everywhere() -> IndexSchema {
+    let yaml = "
+version: 1
+table: users
+primary_key: id
+filters:
+  - { column: status, op: neq, value: archived }
+soft_delete:
+  column: deleted
+  when:
+    - { column: amount, op: gte, value: 1.005 }
+fields:
+  - { integer: id, required: true }
+  - has_many: pets
+    table: pets
+    foreign_key: user_id
+    primary_key: id
+    filters:
+      - { column: status, op: eq, value: archived }
+    fields:
+      - { integer: id, required: true }
+  - belongs_to: team
+    table: teams
+    column: team_id
+    primary_key: id
+    filters:
+      - { column: amount, op: in, value: [1.005, 2] }
+    fields:
+      - { integer: id, required: true }
+  - many_to_many: tags
+    table: tags
+    primary_key: id
+    through:
+      table: user_tags
+      left_key: user_id
+      right_key: tag_id
+      filters:
+        - { column: status, op: not_in, value: [archived] }
+    fields:
+      - { integer: id, required: true }
+  - count: toyCount
+    table: toys
+    foreign_key: pet_id
+    filters:
+      - { column: amount, op: between, value: [1.005, 9] }
+    via:
+      - table: pets
+        foreign_key: user_id
+        filters:
+          - { column: status, op: like, value: archived% }
+";
+    use kernel::ParseFrom;
+    IndexSchema::try_from(config::yaml::SchemaYaml::try_parse(yaml).unwrap()).unwrap()
+}
+
+/// A filter operand is cast to its column's type without the modifier, as a
+/// key is: an explicit cast to `varchar(5)` or `numeric(10,2)` cuts or
+/// rounds the operand without an error, so `eq archived` would compare
+/// against `archi` and `neq` would drop the row it should keep (issue #338).
+#[tokio::test]
+async fn no_filter_operand_cast_carries_a_type_modifier() {
+    let schema = filtered_everywhere();
+    let spec = SourceSpec::new(BTreeMap::from([(
+        IndexName::try_new("users").unwrap(),
+        schema.clone(),
+    )]));
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused@localhost/unused")
+        .unwrap();
+    let builder = PgDocumentBuilder::new(pool, Arc::new(spec));
+    for table in ["users", "pets", "teams", "user_tags", "toys"] {
+        cache_type(&builder, table, "status", "character varying(5)", 1043);
+        cache_type(&builder, table, "amount", "numeric(10,2)", 1700);
+    }
+    cache_type(&builder, "users", "id", "integer", 23);
+    for table in ["pets", "teams", "tags", "toys"] {
+        builder
+            .pk_cache
+            .lock()
+            .unwrap()
+            .insert(("public".to_owned(), table.to_owned()), column("id"));
+    }
+
+    let mut types = builder.filter_column_types(&schema).await.unwrap();
+    assert_eq!(types.len(), 6, "{types:?}");
+    builder
+        .add_key_column_types(&schema, &[&column("id")], &mut types)
+        .await
+        .unwrap();
+    let pks = builder.relation_pks(&schema).await.unwrap();
+    let (sql, params) = query::document_query(
+        &schema,
+        &[(column("id"), GenericValue::Int(1))],
+        &pks,
+        &types,
+        &query::ByteColumns::new(),
+    )
+    .unwrap();
+    let sql = sql.as_str();
+    assert_eq!(params.len(), 10, "{sql}");
+    let casts: Vec<&str> = sql
+        .split('$')
+        .skip(1)
+        .filter_map(|after| {
+            after
+                .trim_start_matches(|c: char| c.is_ascii_digit())
+                .strip_prefix("::")
+        })
+        .collect();
+    assert_eq!(casts.len(), params.len(), "{sql}");
+    let unsized_operands = casts
+        .iter()
+        .filter(|cast| {
+            cast.starts_with(r#"pg_catalog."varchar""#) || cast.starts_with("pg_catalog.numeric")
+        })
+        .count();
+    assert_eq!(
+        unsized_operands,
+        params.len() - 1,
+        "every operand but the key is cast to its unsized type: {sql}"
+    );
+}
