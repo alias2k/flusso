@@ -57,6 +57,13 @@ impl ChangeCapture for SteadySource {
 /// Serve the public router over a source standing at `at`; returns its base
 /// URL and the source.
 async fn serve_public(at: u64) -> (String, Arc<SteadySource>) {
+    let (base, source, _) = serve_stoppable(at).await;
+    (base, source)
+}
+
+/// [`serve_public`], plus the sender that tells the surface flusso is stopping.
+async fn serve_stoppable(at: u64) -> (String, Arc<SteadySource>, watch::Sender<bool>) {
+    let (stopping, stopping_rx) = watch::channel(false);
     let source = Arc::new(SteadySource::default());
     source.at.store(at, Ordering::SeqCst);
     let primary = SinkName::try_new("primary").unwrap();
@@ -64,11 +71,12 @@ async fn serve_public(at: u64) -> (String, Arc<SteadySource>) {
         status: Arc::new(Status::new([], [primary.clone()], Instant::now())),
         registry: None,
         fence: Fence::new(Arc::clone(&source) as Arc<dyn ChangeCapture>, [primary]),
+        stopping: stopping_rx,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, public_router(state)).await });
-    (base, source)
+    (base, source, stopping)
 }
 
 async fn get_wait(base: &str, query: &str) -> (u16, serde_json::Value) {
@@ -139,4 +147,55 @@ async fn a_source_that_is_not_live_yet_answers_503() {
     let (status, body) = get_wait(&base, "position=1").await;
     assert_eq!(status, 503);
     assert!(body["error"].is_string());
+}
+
+#[tokio::test]
+async fn an_open_wait_answers_503_once_flusso_starts_to_stop() {
+    let (base, _source, stopping) = serve_stoppable(10).await;
+    let waiting =
+        tokio::spawn(async move { get_wait(&base, "position=999&timeout_ms=60000").await });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    stopping.send(true).unwrap();
+    let (status, body) = tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
+        .await
+        .expect("the wait is answered at once")
+        .unwrap();
+
+    assert_eq!(status, 503);
+    assert_eq!(body["error"], "flusso is shutting down");
+}
+
+#[tokio::test]
+async fn status_carries_the_pid_of_the_process() {
+    let (base, _source) = serve_public(10).await;
+
+    let body: serde_json::Value = reqwest::get(format!("{base}/status"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(body["pid"], std::process::id());
+    assert!(
+        body.get("phase").is_some(),
+        "the snapshot is still there: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_taken_address_names_the_flusso_holding_it() {
+    let (base, _source) = serve_public(10).await;
+    let address: SocketAddr = base.trim_start_matches("http://").parse().unwrap();
+
+    let error = bind("public", address, Some(address)).await.unwrap_err();
+
+    assert!(
+        error.to_string().contains(&format!(
+            "another flusso (pid {}) is already running there",
+            std::process::id()
+        )),
+        "{error}"
+    );
 }

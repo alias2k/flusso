@@ -1038,12 +1038,24 @@ attached via `with_observer`; metric names/labels/buckets live here because they
 choice), serves **two** HTTP surfaces (`http/mod.rs`): a **public** one (`/healthz` `/readyz`
 `/status` `/metrics` `/wait`, unauthenticated; `/wait` long-polls the daemon's `Fence`, default
 5 s, capped at 60 s: `200` reached, `408` timed out, `400`/`404` refused, `503` before the source
-is live) and a **private** one (`/indexes`, later `/reindex`; HTTP
+is live or once flusso is stopping; `/status` adds the process `pid`) and a **private** one (`/indexes`, later `/reindex`; HTTP
 Basic auth in `http/auth.rs`, default `admin`/`flusso` with a loud startup warning), both reading
-the daemon's `Status`, and owns SIGINT/SIGTERM. It binds **both** listeners up front (a bad
-`--public-address`/`--private-address` fails fast), then `Daemon::with_observer(otel).start()`
+the daemon's `Status`, and owns the process signals. It binds **both** listeners up front (a bad
+`--public-address`/`--private-address` fails fast; a taken one names the flusso there, from its
+`/status` pid), then `Daemon::with_observer(otel).start()`
 → register the `in_flight` observable gauge (read from `Status` at collection) → serve both →
-`run(shutdown_signal())` → drain. With no meter provider installed the global meter is a no-op
+`run(shutdown::requested(..))` → drain. **A stop is bounded (issue #371, `shutdown.rs`).**
+`SIGINT`/`SIGTERM`/`SIGHUP`, or the parent exiting under `--exit-with-parent` (`parent_id()` polled,
+no `unsafe`), stops the daemon, which drops the deployment at once (at-least-once: an unacked batch is
+redelivered); the drain after it (HTTP surfaces, then the telemetry flush on a blocking thread) runs
+under `shutdown::within`: past `--shutdown-timeout-secs` (default 5) it logs the step it gave up on
+and `process::exit(1)`s, a second signal `process::exit(128 + n)`s; an open `/wait` answers `503`
+when the `stopping` watch flips. `main` builds its runtime by hand and `shutdown_timeout`s it (1 s)
+so a stuck blocking task can't hold the exit. Guards: `shutdown::tests` (paused time), the
+`http::tests` `503`/`pid`/taken-address cases, and the `flusso-cli` `shutdown` e2e (real binary: a
+half-open request, a second signal, an open `/wait`, `SIGHUP`, a SIGKILLed parent, a second start
+naming the holder of the address and of the slot, which the Postgres source reports from
+`pg_stat_activity` before opening the stream, `WalChangeCapture::ensure_slot_free`). With no meter provider installed the global meter is a no-op
 and the instruments cost nothing — which is why the daemon tests run with no setup. A view in
 `telemetry/metrics.rs` overrides the flush-duration histogram buckets to seconds (OTel's defaults
 assume milliseconds). The Postgres `ChangeCapture::lag` and slot-check share a small lazily-opened

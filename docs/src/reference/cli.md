@@ -46,6 +46,8 @@ Like `cargo run`, it compiles first. With a `flusso.toml` present (the default p
 | `--index-prefix <prefix>` | `prefix` from config, else none | Prefix every owned index name. |
 | `--batch-max-changes <n>` | `[batch] max_changes`, else `256` | Commit a batch once this many live changes have accumulated. |
 | `--batch-max-delay-ms <ms>` | `[batch] max_delay_ms`, else `50` | The longest a batch stays open while changes keep arriving. |
+| `--shutdown-timeout-secs <n>` | `5` | How long a [stop](#stopping) may take, from the first signal to exit. `0` exits as soon as the deployment is dropped. |
+| `--exit-with-parent` | off | Stop when the process that started flusso exits, as if it had sent `SIGTERM`. See [Stopping](#stopping). |
 
 The adapter flags (`--slot`, `--publication`, `--manage-publication`, `--manage-replica-identity`, `--pretty`, `--queue-capacity`) are laid over the file's port tables before every table is validated against its adapter; an unknown option or type fails here, before anything connects. Both listeners are bound before the pipeline starts, so a bad address fails fast. A lock-write failure is fatal.
 
@@ -74,6 +76,23 @@ Once connected, and before any index is touched, `run` runs the same check as [`
 - **An unreachable database** fails as it always has, as `connecting to Postgres`, before validation runs.
 
 There's no flag to skip it. Run `flusso check` before deploying a changed config to see the same list without stopping anything.
+
+### Stopping
+
+`run` stops on the first of these:
+
+| Stop | What flusso does |
+| --- | --- |
+| `SIGTERM`, `SIGINT` (Ctrl-C), `SIGHUP` | A clean stop, exit `0`. `SIGHUP` (a closed terminal, a task runner passing on its own hang-up) is a stop like the others, not a reload. |
+| The parent process exits, under `--exit-with-parent` | The same clean stop, logged as `the parent process <pid> exited`. Checked twice a second. A parent that is already `init` (PID 1, as in a container) is never followed. |
+| A second signal of the three, during a stop | Exits at once with `128 + n`: `129` (`SIGHUP`), `130` (`SIGINT`), `143` (`SIGTERM`). |
+| `--shutdown-timeout-secs` passes during a stop | Logs `shutdown deadline of <n>s passed while <step>`, naming what it gave up on (`closing the HTTP surfaces`, `flushing telemetry`), and exits `1`. |
+
+A stop drops the pipeline at once: no batch is finished first. A batch that wasn't flushed and acked isn't confirmed to the slot, so the next start reads it again: the at-least-once guarantee makes an abandoned stop safe, and a rebuilt document comes out the same. What a stop then waits on is the HTTP surfaces (an open [`/wait`](http.md#get-waitpositionposition) is answered `503` at once, but a client that went silent mid-request is waited on) and the OTLP exporters' last flush (an unreachable collector costs up to its own timeout). The deadline covers both.
+
+Until the pipeline is started (through [validation at start](#validation-at-start)), a signal ends the process the default way, at once; a parent that exits meanwhile is noticed as soon as it is.
+
+Without `--exit-with-parent`, a flusso whose parent dies keeps running, like any daemon: it holds its addresses and its replication slot, so the next start fails on the address with `another flusso (pid <pid>) is already running there`, or, on other addresses, retries the slot with `replication slot "<slot>" is in use by Postgres backend <pid> (…)`. Under a task runner that can die without stopping its children, pass `--exit-with-parent`; see [Run under a task runner or supervisor](../deploy/compile-and-run.md#run-under-a-task-runner-or-supervisor).
 
 ## check
 

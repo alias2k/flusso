@@ -23,6 +23,7 @@ The live status document as JSON: the deployment, then one block per sink.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
+| `pid` | int | The flusso process's id, to stop it by. |
 | `phase` | `starting` \| `backfilling` \| `live` \| `stopped` | Where the deployment is: `starting` until the ingest engine follows the source and every sink has staged (and again while a failed ingest engine restarts), `backfilling` while any sink still seeds, `stopped` once the source stream ended. |
 | `uptime_seconds` | int | Since the daemon started. A reindex does not restart anything. |
 | `indexes` | map of name to `pending` \| `backfilling` \| `seeded` | Per-index state across sinks: the least advanced sink's state. |
@@ -52,6 +53,7 @@ A source position is in the source's own text form: for Postgres, a WAL LSN such
 
 ```json
 {
+  "pid": 48213,
   "phase": "live",
   "uptime_seconds": 412,
   "indexes": { "orders": "seeded", "products": "seeded", "users": "seeded" },
@@ -102,7 +104,7 @@ Hold the request until a commit is readable: a fence. `position` is what the cli
 | `408` | The timeout passed first. Nothing is wrong with the request; ask again or give up. |
 | `400` | `position` is missing or not a position the source can read, or `until`, `sink`, or `timeout_ms` is malformed. |
 | `404` | `sink` is not a configured sink. |
-| `503` | The source isn't following live changes yet (startup, or the ingest engine is restarting). |
+| `503` | The source isn't following live changes yet (startup, or the ingest engine is restarting), or flusso is [stopping](cli.md#stopping): an open wait is answered at once with `{"error": "flusso is shutting down"}`. |
 
 `200` and `408` share a body; errors carry `{"error": "…"}`.
 

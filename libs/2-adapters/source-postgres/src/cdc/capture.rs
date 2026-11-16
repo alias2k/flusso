@@ -345,6 +345,37 @@ impl WalChangeCapture {
         Ok(Continuity::Resumed)
     }
 
+    /// Refuses to open the stream while another connection reads the slot,
+    /// naming that connection, since Postgres's own refusal names only a
+    /// backend pid. Advisory: a failed lookup lets the stream open and fail
+    /// with Postgres's message.
+    async fn ensure_slot_free(&self) -> Result<()> {
+        let pool = self.admin_pool().await?;
+        let row = sqlx::query(
+            "SELECT s.active_pid, a.application_name, host(a.client_addr) AS client_addr, \
+                    a.client_port, \
+                    to_char(a.backend_start AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') \
+                        AS backend_start \
+             FROM pg_replication_slots s \
+             LEFT JOIN pg_stat_activity a ON a.pid = s.active_pid \
+             WHERE s.slot_name = $1 AND s.active",
+        )
+        .bind(&self.config.slot)
+        .fetch_optional(pool)
+        .await;
+        let Ok(Some(row)) = row else {
+            return Ok(());
+        };
+        let holder = SlotHolder {
+            backend_pid: row.try_get("active_pid").ok(),
+            application_name: row.try_get("application_name").ok(),
+            client_addr: row.try_get("client_addr").ok(),
+            client_port: row.try_get("client_port").ok(),
+            since: row.try_get("backend_start").ok(),
+        };
+        Err(SourceError::Connection(holder.refusal(&self.config.slot)))
+    }
+
     /// Where the stream about to open starts: the configured start LSN, or the
     /// slot's `confirmed_flush_lsn` when resuming from the slot. Everything at
     /// or before it was confirmed by every sink, which is what lets a fence on
@@ -446,6 +477,7 @@ impl ChangeCapture for WalChangeCapture {
         }
         self.ensure_slot().await?;
         self.check_server().await?;
+        self.ensure_slot_free().await?;
 
         let catalog = self.admin_pool().await?.clone();
         let visibility_pool = self.visibility_pool().await?.clone();
@@ -747,6 +779,52 @@ impl CaptureProvisioning for WalChangeCapture {
     }
 }
 
+/// The connection reading a replication slot, as `pg_stat_activity` shows it.
+/// A field is `None` where the role may not see it.
+#[derive(Debug, Default)]
+struct SlotHolder {
+    backend_pid: Option<i32>,
+    application_name: Option<String>,
+    client_addr: Option<String>,
+    client_port: Option<i32>,
+    since: Option<String>,
+}
+
+impl SlotHolder {
+    fn refusal(&self, slot: &str) -> String {
+        let pid = self
+            .backend_pid
+            .map_or_else(|| "?".to_owned(), |pid| pid.to_string());
+        let mut seen = Vec::new();
+        if let Some(name) = self
+            .application_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+        {
+            seen.push(format!("application_name \"{name}\""));
+        }
+        match (&self.client_addr, self.client_port) {
+            (Some(addr), Some(port)) if port > 0 => seen.push(format!("from {addr}:{port}")),
+            (Some(addr), _) => seen.push(format!("from {addr}")),
+            (None, _) => {}
+        }
+        if let Some(since) = &self.since {
+            seen.push(format!("connected since {since} UTC"));
+        }
+        let seen = if seen.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", seen.join(", "))
+        };
+        format!(
+            "replication slot \"{slot}\" is in use by Postgres backend {pid}{seen}: another \
+             flusso, or another consumer, is reading it. Stop that process, or give this run its \
+             own --slot; flusso retries until the slot is free. If the holder is gone for good, \
+             `SELECT pg_terminate_backend({pid})` frees the slot"
+        )
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -754,6 +832,42 @@ mod tests {
 
     fn config() -> ReplicationConfig {
         ReplicationConfig::new("localhost", "app", "pw", "db", "slot", "pub")
+    }
+
+    #[test]
+    fn a_slot_in_use_names_the_connection_reading_it() {
+        let holder = SlotHolder {
+            backend_pid: Some(167),
+            application_name: Some("flusso".to_owned()),
+            client_addr: Some("172.17.0.1".to_owned()),
+            client_port: Some(53422),
+            since: Some("2026-11-16 16:49:50".to_owned()),
+        };
+
+        assert_eq!(
+            holder.refusal("flusso"),
+            "replication slot \"flusso\" is in use by Postgres backend 167 (application_name \
+             \"flusso\", from 172.17.0.1:53422, connected since 2026-11-16 16:49:50 UTC): another \
+             flusso, or another consumer, is reading it. Stop that process, or give this run its \
+             own --slot; flusso retries until the slot is free. If the holder is gone for good, \
+             `SELECT pg_terminate_backend(167)` frees the slot"
+        );
+    }
+
+    #[test]
+    fn a_holder_the_role_cannot_see_is_named_by_its_backend_alone() {
+        let holder = SlotHolder {
+            backend_pid: Some(42),
+            ..SlotHolder::default()
+        };
+
+        assert!(
+            holder
+                .refusal("s")
+                .starts_with("replication slot \"s\" is in use by Postgres backend 42: another"),
+            "{}",
+            holder.refusal("s")
+        );
     }
 
     #[test]

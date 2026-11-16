@@ -73,6 +73,7 @@ Two tests need one version whatever the run's tag, and name it with a `test_post
 | `sink-opensearch` | `document_ids` | OpenSearch | ids OpenSearch refuses before running `_bulk` (over 512 bytes and the like) don't take the rest of the request down |
 | `daemon` | `fence` | both | the real daemon: one unpolled read after a fence sees the commit (applied and searchable), across unwatched WAL, split transactions, concurrent writers and a stalled sibling sink |
 | `flusso-cli` | `duplicate_names` | both | the live matrix behind the `duplicate_field_name` warning: every pair of field kinds sharing a name, built and written for real |
+| `flusso-cli` | `shutdown` | Postgres | the real binary stops within its deadline with a half-open request or an open `/wait`, exits at once on a second signal, stops cleanly on `SIGHUP` and, under `--exit-with-parent`, when its parent is killed; a second start names the flusso holding the address and the slot |
 | `flusso-cli` | `time_columns` | both | a `time`/`timetz` column under a `timestamp` or `date` field: which cases index and which `validate_indexes` reports |
 | `flusso-query-e2e` | `combined_search` | OpenSearch | generation-suffix normalization against a real cluster |
 | `flusso-query-e2e` | `cursor_paging` | OpenSearch | page cursors: a live walk follows a reindex, a pinned walk reads one view, a streamed walk closes its point-in-time |

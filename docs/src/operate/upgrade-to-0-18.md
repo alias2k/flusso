@@ -1,6 +1,6 @@
 # Upgrade to 0.18
 
-0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index. It also writes a `timestamp` column in ISO 8601, which changes stored documents and can break a tuned `format`: see [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601). A `decimal` field is written with every digit: see [A decimal is written with every digit](#a-decimal-is-written-with-every-digit). A `double` is indexed as the exact value Postgres holds: see [A float or double is indexed as Postgres holds it](#a-float-or-double-is-indexed-as-postgres-holds-it). A filter value that doesn't fit its column no longer matches by being cut to fit: see [A filter value is compared as written](#a-filter-value-is-compared-as-written). A script reads a date as a date, not a string: see [A date reaches a script as a date](#a-date-reaches-a-script-as-a-date). A change is indexed only once its transaction is visible: see [A change waits until its commit is visible](#a-change-waits-until-its-commit-is-visible). A fenced read in `flusso-query` waits through a restart of flusso, with a 20 s default timeout: see [A fenced read waits through a restart](#a-fenced-read-waits-through-a-restart).
+0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index. It also writes a `timestamp` column in ISO 8601, which changes stored documents and can break a tuned `format`: see [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601). A `decimal` field is written with every digit: see [A decimal is written with every digit](#a-decimal-is-written-with-every-digit). A `double` is indexed as the exact value Postgres holds: see [A float or double is indexed as Postgres holds it](#a-float-or-double-is-indexed-as-postgres-holds-it). A filter value that doesn't fit its column no longer matches by being cut to fit: see [A filter value is compared as written](#a-filter-value-is-compared-as-written). A script reads a date as a date, not a string: see [A date reaches a script as a date](#a-date-reaches-a-script-as-a-date). A change is indexed only once its transaction is visible: see [A change waits until its commit is visible](#a-change-waits-until-its-commit-is-visible). A fenced read in `flusso-query` waits through a restart of flusso, with a 20 s default timeout: see [A fenced read waits through a restart](#a-fenced-read-waits-through-a-restart). A stop drains and has a deadline and new exit codes: see [A stop drains, then exits](#a-stop-drains-then-exits).
 
 ## When to use this
 
@@ -189,6 +189,14 @@ A comparison with a string, a number or another kind fails rather than answering
 - **`Error::FenceUnavailable` is a struct now**, `{ cause, reason }`: a pattern `FenceUnavailable(reason)` no longer compiles. It means "unavailable until the timeout", after retrying.
 - **A missing `.flusso(url)` is `Error::FenceMisconfigured`**, which was a `FenceUnavailable`. `Error` is `#[non_exhaustive]`, so this is silent: code that matched `FenceUnavailable` to spot the missing address compiles and falls through to its wildcard arm. Match `FenceMisconfigured` for it. A certificate the client refuses and a redirect loop are `FenceMisconfigured` too, at once.
 - **Remove a retry loop around fenced reads**, if one was written for deploys: it now multiplies the timeout.
+
+## A stop is bounded
+
+0.17 could wait forever after `SIGTERM`: a client that went silent mid-request held the HTTP surfaces open, an open `/wait` held them up to 60 s, and further signals were ignored, so only `SIGKILL` ended it. 0.18 bounds the stop (see [Stopping](../reference/cli.md#stopping)). What changes for a script or supervisor that reads the exit status:
+
+- **A stop that runs past `--shutdown-timeout-secs`** (5 s by default) exits `1` and logs what it gave up on.
+- **A second signal** exits at once, `130` after `SIGINT` and `143` after `SIGTERM`.
+- **`SIGHUP` is a clean stop**, exit `0`. 0.17 died of it, without flushing telemetry.
 
 ## Related
 

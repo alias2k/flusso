@@ -32,7 +32,7 @@ You have a validated config and want to run it, locally or in a deployment. The 
 
 4. **Restart without a backfill.** Once seeded, a restart skips the backfill on its own because the sink remembers. `--skip-backfill` forces that even when the sink disagrees; it exists for recovery, not routine use.
 
-5. **Stop.** `SIGINT` or `SIGTERM` drains in-flight batches and flushes telemetry. Unconfirmed changes are redelivered on the next start; that's the at-least-once guarantee doing its job.
+5. **Stop.** `SIGTERM`, `SIGINT` or `SIGHUP` drops the pipeline, closes the HTTP surfaces and flushes telemetry, within 5 seconds by default; a second signal exits at once. Changes that weren't confirmed are read again on the next start: that's the at-least-once guarantee doing its job. Signals, deadline and exit codes are in [Stopping](../reference/cli.md#stopping).
 
 ## Options and variations
 
@@ -42,7 +42,21 @@ You have a validated config and want to run it, locally or in a deployment. The 
 - **Logs** go to stderr; `RUST_LOG` filters them; `FLUSSO_LOG_FORMAT=json` structures them.
 - **Queue depth.** `[stream] capacity` (or `--queue-capacity`) bounds changes buffered between capture and the sink. Capture blocks when it's full; that's back-pressure, not a fault. See [Stream: channel](../reference/stream-channel.md).
 
+## Run under a task runner or supervisor
+
+One flusso per replication slot: a second one on the same addresses fails at start, and on other addresses waits for the slot. So whatever starts flusso must also stop it.
+
+- **systemd, Docker, Kubernetes** send `SIGTERM` and wait before `SIGKILL`: 90 s, 10 s, 30 s by default (the Helm chart keeps Kubernetes' default). All are longer than the 5 s [stop deadline](../reference/cli.md#stopping), so flusso exits on its own. Shorten a grace period below it only together with `--shutdown-timeout-secs`.
+- **A task runner on a dev machine** (moon, `just`, a `Procfile` runner) starts flusso as a child and may die without stopping it: killed, crashed, or taken down with the terminal around a laptop's sleep. Its flusso then keeps running, holding port 9464 and the slot, and the next start reports `another flusso (pid <pid>) is already running there`. Add `--exit-with-parent` to the task's command, or set `FLUSSO_EXIT_WITH_PARENT=true`, and flusso stops when its parent goes:
+
+  ```sh
+  flusso run --exit-with-parent
+  ```
+
+  It follows its direct parent. Keep `flusso run` the task's only command, so the runner's shell hands over to flusso; in a wrapper script, start it with `exec flusso run …`. A shell that stays around in between survives a runner that is killed, and flusso would follow the shell.
+- **A flusso left over** from before: `/status` on its public address names its `pid`; `kill <pid>` stops it, and `kill` again stops it at once.
+
 ## Related
 
 - [Ship with Docker](docker.md) and [Deploy with Helm](helm.md) for the two packaging routes.
-- [CLI](../reference/cli.md#run) for every `run` flag.
+- [CLI](../reference/cli.md#run) for every `run` flag, and [Stopping](../reference/cli.md#stopping) for what a stop does.
