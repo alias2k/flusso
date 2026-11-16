@@ -656,9 +656,15 @@ fn aggregated<'de, D: Deserializer<'de>>(
                 None => Untyped::IN_PLACE.deserialize(deserializer),
             }
         }
-        AggregateOp::Ids { element_type } if *element_type == FlussoType::Decimal => {
+        AggregateOp::Ids { element_type }
+            if matches!(element_type, FlussoType::Decimal | FlussoType::Float) =>
+        {
+            let element: fn(&str, &At<'_>) -> Result<GenericValue, String> = match element_type {
+                FlussoType::Decimal => decimal,
+                _ => single,
+            };
             let raw = <&RawValue>::deserialize(deserializer)?;
-            decimal_ids(raw.get(), at).map_err(D::Error::custom)
+            raw_ids(raw.get(), at, element).map_err(D::Error::custom)
         }
         AggregateOp::Ids { element_type } => {
             Ok(match serde_json::Value::deserialize(deserializer)? {
@@ -930,8 +936,13 @@ fn raw_array(
         .map(|items| Ok(GenericValue::Array(items)))
 }
 
-/// An `ids` aggregate of `decimal` keys, each from its exact number text.
-fn decimal_ids(raw: &str, at: &At<'_>) -> Result<GenericValue, String> {
+/// An `ids` aggregate of `decimal` or `float` keys, each read by `element`
+/// from its exact number text.
+fn raw_ids(
+    raw: &str,
+    at: &At<'_>,
+    element: fn(&str, &At<'_>) -> Result<GenericValue, String>,
+) -> Result<GenericValue, String> {
     if !raw.starts_with('[') {
         return untyped_raw(raw, at);
     }
@@ -939,7 +950,7 @@ fn decimal_ids(raw: &str, at: &At<'_>) -> Result<GenericValue, String> {
         .map_err(|error| error.to_string())?
         .into_iter()
         .enumerate()
-        .map(|(index, item)| decimal(item.get(), &At::Index(at, index)))
+        .map(|(index, item)| element(item.get(), &At::Index(at, index)))
         .collect::<Result<_, _>>()
         .map(GenericValue::Array)
 }

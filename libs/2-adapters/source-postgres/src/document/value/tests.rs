@@ -824,8 +824,8 @@ fn a_double_is_read_as_the_value_postgres_wrote() {
 
 /// A `float4` is read as the `f32` its text names, not through `f64`: the
 /// `f64` nearest `7.038531e-26` lies halfway between two `f32`s and rounds
-/// to the wrong one (issue #366). The same under a `float` array and a `float`
-/// `sum`.
+/// to the wrong one (issue #366). The same under a `float` array, a `float`
+/// `sum` and an `ids` of `float` keys.
 #[test]
 fn a_float_is_read_as_the_single_postgres_wrote() {
     let fields = vec![
@@ -836,11 +836,20 @@ fn a_float_is_read_as_the_single_postgres_wrote() {
             AggregateOp::Sum(ColumnName::try_new("v").unwrap().into()),
             Some(FlussoType::Float),
         ),
+        aggregate_field(
+            "keys",
+            AggregateOp::Ids {
+                element_type: FlussoType::Float,
+            },
+            None,
+        ),
     ];
     let text = "7.038531e-26";
     let want: f32 = 7.038_531e-26;
     assert_ne!(text.parse::<f64>().unwrap() as f32, want);
-    let doc = format!(r#"{{"ratio": {text}, "ratios": [{text}, null], "total": {text}}}"#);
+    let doc = format!(
+        r#"{{"ratio": {text}, "ratios": [{text}, null], "total": {text}, "keys": [{text}]}}"#
+    );
     let map = body_text(&doc, &fields);
     assert_eq!(map["ratio"], GenericValue::Float(want));
     assert_eq!(
@@ -848,6 +857,10 @@ fn a_float_is_read_as_the_single_postgres_wrote() {
         GenericValue::Array(vec![GenericValue::Float(want)])
     );
     assert_eq!(map["total"], GenericValue::Float(want));
+    assert_eq!(
+        map["keys"],
+        GenericValue::Array(vec![GenericValue::Float(want)])
+    );
 }
 
 /// `text` as Postgres's `float8out` writes `value` (PG 12 on): its shortest
