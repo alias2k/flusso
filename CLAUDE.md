@@ -1359,7 +1359,9 @@ every call). A `Timestamp` keeps its wall clock plus the zone's offset there, so
 zone database (jiff's bundled `jiff-tzdb`, used only for zones; chrono does the rest); calendar units and rounding move the wall clock and
 `Zone::resolve` turns it back (gap: forward by its length; overlap: the earlier). Every comparison
 between a date kind and another kind (string, number, bool, char, container, another date kind;
-`()` for ordering only) is registered to **fail** with what to write (`library.rs`'s `mismatches`),
+`()` for ordering only) is registered to **fail** with what to write (`library.rs`'s `mismatches`: one
+function per operator, kind and side on `Dynamic`, which Rhai tries only after the exact signature
+misses; an explicit matrix of ~600 functions slowed `scripted/flat` ~4% on CI),
 since Rhai answers a mismatched comparison with a silent `false`; `switch` can't be hooked (a custom
 type has no hash, so every arm is skipped) and is documented instead. `sort`/`sort_desc` with no
 comparator are replaced by a copy of Rhai's that also sorts one date kind (the standard one refuses a

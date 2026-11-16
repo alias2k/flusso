@@ -17,7 +17,7 @@ use std::any::TypeId;
 use std::cmp::Ordering;
 
 use chrono::TimeDelta;
-use rhai::{Array, Blob, Dynamic, EvalAltResult, ImmutableString, Map, Module, Position};
+use rhai::{Array, Dynamic, EvalAltResult, ImmutableString, Map, Module, Position};
 use rust_decimal::Decimal;
 
 use super::{Date, Duration, Failure, Period, Time, Timestamp, Zone};
@@ -253,49 +253,34 @@ fn comparisons(module: &mut Module) {
     comparable::<Timestamp>(module, |a, b| a.compare(b));
 }
 
-/// The comparison operators between an `A` and a `B`, each failing with `message`.
-fn refused<A: Value, B: Value>(module: &mut Module, message: &str, ops: &[&'static str]) {
-    for &op in ops {
-        let message = message.to_owned();
-        module.set_native_fn(op, move |_: A, _: B| -> Outcome<bool> {
-            Err(message.clone().into())
-        });
-    }
-}
-
-const EVERY_OPERATOR: [&str; 6] = ["==", "!=", "<", "<=", ">", ">="];
-const ORDERING_OPERATORS: [&str; 4] = ["<", "<=", ">", ">="];
-
-/// A date kind's name in a message, and the kind a script compares it with.
-fn kind_name<T: 'static>() -> &'static str {
-    let id = TypeId::of::<T>();
-    if id == TypeId::of::<Date>() {
+/// How a value is named in a message about comparing it.
+fn kind_of(value: &Dynamic) -> &'static str {
+    if value.is::<Date>() {
         "a date"
-    } else if id == TypeId::of::<Time>() {
+    } else if value.is::<Time>() {
         "a time"
-    } else if id == TypeId::of::<Timestamp>() {
+    } else if value.is::<Timestamp>() {
         "a timestamp"
-    } else if id == TypeId::of::<Duration>() {
+    } else if value.is::<Duration>() {
         "a duration"
-    } else if id == TypeId::of::<ImmutableString>() {
+    } else if value.is_string() {
         "a string"
-    } else if id == TypeId::of::<i64>()
-        || id == TypeId::of::<f64>()
-        || id == TypeId::of::<Decimal>()
-    {
+    } else if value.is_int() || value.is_float() || value.is_decimal() {
         "a number"
-    } else if id == TypeId::of::<()>() {
+    } else if value.is_unit() {
         "()"
-    } else if id == TypeId::of::<Array>() {
+    } else if value.is_array() {
         "an array"
-    } else if id == TypeId::of::<Map>() {
+    } else if value.is_map() {
         "an object"
-    } else if id == TypeId::of::<Blob>() {
+    } else if value.is_blob() {
         "a blob"
-    } else if id == TypeId::of::<bool>() {
+    } else if value.is_bool() {
         "a bool"
-    } else {
+    } else if value.is_char() {
         "a char"
+    } else {
+        "a value of another kind"
     }
 }
 
@@ -322,44 +307,44 @@ fn instead(kind: &str, other: &str) -> &'static str {
     }
 }
 
-/// Refuse comparing the date kind `K` with `O`, in both orders; `ops` are the operators refused.
-fn refuse_pair<K: Value, O: Value>(module: &mut Module, ops: &[&'static str]) {
-    let (kind, other) = (kind_name::<K>(), kind_name::<O>());
-    let message = format!(
-        "{kind} and {other} can't be compared: {}",
-        instead(kind, other)
-    );
-    refused::<K, O>(module, &message, ops);
-    refused::<O, K>(module, &message, ops);
+/// The error for comparing `a` with `b`, one of them a date value.
+fn not_comparable(a: &Dynamic, b: &Dynamic) -> Box<EvalAltResult> {
+    let (a, b) = (kind_of(a), kind_of(b));
+    let (kind, other) = if ["a date", "a time", "a timestamp", "a duration"].contains(&a) {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    format!("{a} and {b} can't be compared: {}", instead(kind, other)).into()
 }
 
-/// Every comparison a date kind `K` takes part in that has no rule: with another date kind
-/// (`same_kind_done` stops at the kinds before it), a string, a number, a bool, a char, a
-/// container, and (ordering only) `()`.
-fn refuse_all<K: Value>(module: &mut Module) {
-    refuse_pair::<K, ImmutableString>(module, &EVERY_OPERATOR);
-    refuse_pair::<K, i64>(module, &EVERY_OPERATOR);
-    refuse_pair::<K, f64>(module, &EVERY_OPERATOR);
-    refuse_pair::<K, Decimal>(module, &EVERY_OPERATOR);
-    refuse_pair::<K, bool>(module, &EVERY_OPERATOR);
-    refuse_pair::<K, char>(module, &EVERY_OPERATOR);
-    refuse_pair::<K, Array>(module, &EVERY_OPERATOR);
-    refuse_pair::<K, Map>(module, &EVERY_OPERATOR);
-    refuse_pair::<K, Blob>(module, &EVERY_OPERATOR);
-    refuse_pair::<K, ()>(module, &ORDERING_OPERATORS);
+/// Every comparison between the date kind `K` and a value of any other kind fails with what to
+/// write. One function per operator and side, on `Dynamic`: Rhai tries it only once the exact
+/// signature (`K` with `K`) is missing, and caches what it found. `d == ()` and `d != ()` stay
+/// the null test.
+fn refuse_others<K: Value>(module: &mut Module) {
+    for op in ["==", "!=", "<", "<=", ">", ">="] {
+        let null_answer = match op {
+            "==" => Some(false),
+            "!=" => Some(true),
+            _ => None,
+        };
+        let answer = move |a: Dynamic, b: Dynamic| -> Outcome<bool> {
+            match null_answer {
+                Some(answer) if a.is_unit() || b.is_unit() => Ok(answer),
+                _ => Err(not_comparable(&a, &b)),
+            }
+        };
+        module.set_native_fn(op, move |a: K, b: Dynamic| answer(Dynamic::from(a), b));
+        module.set_native_fn(op, move |a: Dynamic, b: K| answer(a, Dynamic::from(b)));
+    }
 }
 
 fn mismatches(module: &mut Module) {
-    refuse_all::<Date>(module);
-    refuse_all::<Time>(module);
-    refuse_all::<Timestamp>(module);
-    refuse_all::<Duration>(module);
-    refuse_pair::<Date, Time>(module, &EVERY_OPERATOR);
-    refuse_pair::<Date, Timestamp>(module, &EVERY_OPERATOR);
-    refuse_pair::<Date, Duration>(module, &EVERY_OPERATOR);
-    refuse_pair::<Time, Timestamp>(module, &EVERY_OPERATOR);
-    refuse_pair::<Time, Duration>(module, &EVERY_OPERATOR);
-    refuse_pair::<Timestamp, Duration>(module, &EVERY_OPERATOR);
+    refuse_others::<Date>(module);
+    refuse_others::<Time>(module);
+    refuse_others::<Timestamp>(module);
+    refuse_others::<Duration>(module);
 }
 
 /// `min`, `max`, and `sort` / `sort_desc` with no comparator, for arrays of one date kind.
@@ -377,25 +362,20 @@ fn ordering(module: &mut Module) {
     extremes::<Duration>(module, |a, b| Ok(a.cmp(b)));
     extremes::<Timestamp>(module, |a, b| a.compare(b));
 
-    fn mixed<A: Value, B: Value>(module: &mut Module) {
-        let (a, b) = (kind_name::<A>(), kind_name::<B>());
-        let message = format!("{a} and {b} can't be compared: {}", instead(a, b));
+    fn mixed<K: Value>(module: &mut Module) {
         for name in ["min", "max"] {
-            let (one, other) = (message.clone(), message.clone());
-            module.set_native_fn(name, move |_: A, _: B| -> Outcome<Dynamic> {
-                Err(one.clone().into())
+            module.set_native_fn(name, |a: K, b: Dynamic| -> Outcome<Dynamic> {
+                Err(not_comparable(&Dynamic::from(a), &b))
             });
-            module.set_native_fn(name, move |_: B, _: A| -> Outcome<Dynamic> {
-                Err(other.clone().into())
+            module.set_native_fn(name, |a: Dynamic, b: K| -> Outcome<Dynamic> {
+                Err(not_comparable(&a, &Dynamic::from(b)))
             });
         }
     }
-    mixed::<Date, Time>(module);
-    mixed::<Date, Timestamp>(module);
-    mixed::<Date, Duration>(module);
-    mixed::<Time, Timestamp>(module);
-    mixed::<Time, Duration>(module);
-    mixed::<Timestamp, Duration>(module);
+    mixed::<Date>(module);
+    mixed::<Time>(module);
+    mixed::<Timestamp>(module);
+    mixed::<Duration>(module);
 
     module.set_native_fn("sort", |array: &mut Array| sort(array, false));
     module.set_native_fn("sort_desc", |array: &mut Array| sort(array, true));
@@ -492,11 +472,10 @@ fn sort(array: &mut Array, descending: bool) -> Outcome<()> {
 
 /// Arithmetic on a null date fails with how to guard it, not Rhai's bare "function not found".
 fn nulls(module: &mut Module) {
-    fn null_operand<T: Value>(module: &mut Module) {
+    fn null_operand<T: Value>(module: &mut Module, kind: &str) {
         let message = format!(
-            "{} and () can't be subtracted: a null field is (); guard it with ?. or ??, \
-             like (this.end ?? this.start) - this.start",
-            kind_name::<T>()
+            "{kind} and () can't be subtracted: a null field is (); guard it with ?. or ??, \
+             like (this.end ?? this.start) - this.start"
         );
         let other = message.clone();
         module.set_native_fn("-", move |_: T, _: ()| -> Outcome<Duration> {
@@ -506,9 +485,9 @@ fn nulls(module: &mut Module) {
             Err(other.clone().into())
         });
     }
-    null_operand::<Date>(module);
-    null_operand::<Time>(module);
-    null_operand::<Timestamp>(module);
+    null_operand::<Date>(module, "a date");
+    null_operand::<Time>(module, "a time");
+    null_operand::<Timestamp>(module, "a timestamp");
 }
 
 /// A map's `to_json()`, with each date value written as its text (what `to_string()` gives,
