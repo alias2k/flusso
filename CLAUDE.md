@@ -346,7 +346,10 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   (`cargo tree --offline`: `ahash` keeps `runtime-rng` beside `compile-time-rng`, issue #355) → `cargo nextest run
   --profile ci --run-ignored all` → `cargo test --doc` → `RUSTDOCFLAGS="-D warnings" cargo doc
   --workspace --no-deps --document-private-items` (broken/ambiguous/redundant intra-doc links fail
-  the build). Match these before assuming green. One scope note: on PRs confined to the query
+  the build). Match these before assuming green. A `CLI on <os> (check)` job runs `cargo check -p
+  flusso-cli --locked` on `windows-latest` and `macos-latest`, the release targets beside Linux
+  (`dist-workspace.toml`): a cross check from Linux can't build `ring`, and code that compiles only on
+  Unix (`#[cfg(unix)]` the signal and `/proc` items) would otherwise fail only at a release tag. One scope note: on PRs confined to the query
   release train (`sdk/query`, `sdk/query-derive`, `dev/query-e2e`) the nextest step swaps in a
   filterset that skips the Postgres/OpenSearch container suites those paths can't break (the
   query train's own `combined_search`, `cursor_paging`, `map_keys`, `tls` + `array_columns` live e2e still run); pushes to main always run everything.
@@ -741,7 +744,8 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   every lane is acked, confirming the watermark as it moves; then `ChangeCapture::close_live` (Postgres:
   `Positions::request_close` → the stream loop hands `confirmed_lsn` over, `Replication::close` waits until
   a status update carried it, then stops the worker: stopping first would skip the update, the worker
-  checks its stop before a due status) and the engine polls the stream to its end. A stalled sink holds
+  checks its stop before a due status; with nothing confirmed past the stream's start position, which
+  the slot already holds, it stops at once) and the engine polls the stream to its end. A stalled sink holds
   the drain (the watermark is the minimum); the caller's deadline bounds it. After it the supervisor
   waits on `Fence::settled` only while a `/wait` on `searchable` is open, so a stop nobody waits on
   doesn't sit out a `Within(refresh_interval)`. A stop during staging ends before `prepare`; an ingest
@@ -1089,7 +1093,10 @@ shares the signals/second-signal helpers. Guards: `shutdown::tests` (paused time
 `/wait`/`pid`/taken-address cases, and the `flusso-cli` `shutdown` e2e (real binary, OpenSearch group).
 A taken address names the flusso there (its `/status` pid); a busy slot names its holder from
 `pg_stat_activity` before the stream opens (`WalChangeCapture::ensure_slot_free`). The lock is written
-to a temporary file and renamed (`compiled.rs`'s `write_bytes`), so a stop mid-start never truncates it. With no meter provider installed the global meter is a no-op
+to a temporary file beside the file its path resolves to (through a symlink), with that file's
+permissions, and renamed (`compiled.rs`'s `write_bytes`), so a stop mid-start never truncates it; where
+no file can be made beside it (EACCES/EROFS) or the rename can't land (EBUSY/EXDEV) it is written in
+place, as before (`falls_back`; guards: `compiled::tests`). With no meter provider installed the global meter is a no-op
 and the instruments cost nothing — which is why the daemon tests run with no setup. A view in
 `telemetry/metrics.rs` overrides the flush-duration histogram buckets to seconds (OTel's defaults
 assume milliseconds). The Postgres `ChangeCapture::lag` and slot-check share a small lazily-opened

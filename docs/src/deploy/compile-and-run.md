@@ -32,7 +32,7 @@ You have a validated config and want to run it, locally or in a deployment. The 
 
 4. **Restart without a backfill.** Once seeded, a restart skips the backfill on its own because the sink remembers. `--skip-backfill` forces that even when the sink disagrees; it exists for recovery, not routine use.
 
-5. **Stop.** `SIGTERM`, `SIGINT` or `SIGHUP` drains: nothing new is read, what is in flight lands on every sink and is confirmed to Postgres, then flusso exits `0`, within 30 seconds by default. A second signal exits at once; whatever wasn't confirmed is read again on the next start. The sequence, deadline and exit codes are in [Stopping](../reference/cli.md#stopping).
+5. **Stop.** `SIGTERM`, `SIGINT` or `SIGHUP` drains: nothing new is read, what is in flight lands on every sink and is confirmed to Postgres, then flusso exits `0`, within 30 seconds by default. The same sender twice within half a second (Ctrl-C pressed twice), or three signals within a second, exit at once; whatever wasn't confirmed is read again on the next start. The sequence, deadline and exit codes are in [Stopping](../reference/cli.md#stopping).
 
 ## Options and variations
 
@@ -55,7 +55,7 @@ One flusso per replication slot: a second one on the same addresses fails at sta
 
 ### Under moon or another task runner
 
-A task runner on a dev machine starts flusso as its child and can die without stopping it: killed, crashed, or taken down with its terminal around a laptop's sleep. flusso then keeps running, holding port 9464 and the slot, and the next start reports `another flusso (pid <pid>) is already running there`. Two settings fix that:
+A task runner on a dev machine starts flusso as its child and can die without stopping it: killed, crashed, or taken down with its terminal around a laptop's sleep. flusso then keeps running, holding port 9464 and the slot, and the next start reports `another flusso is already serving there; it reports pid <pid>`. Two settings fix that:
 
 - **`--exit-with-parent`** (or `FLUSSO_EXIT_WITH_PARENT=true`; `1` is refused): flusso stops, draining as usual, when the process that started it is gone.
 - **The runner's kill delay above the deadline**, so a stop the runner asks for isn't cut short.

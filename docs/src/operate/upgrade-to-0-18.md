@@ -202,6 +202,7 @@ A comparison with a string, a number or another kind fails rather than answering
 - **Press Ctrl-C twice quickly to exit at once** (`130`; `143` for `SIGTERM`): the same sender twice within 500 ms, or three signals within a second. A single Ctrl-C forwarded by a task runner is one stop; any other repeat logs that the stop is under way.
 - **`SIGHUP` is a stop**, not a crash: 0.17 died of it without flushing anything. A run started under `nohup` still ignores it on Linux; on macOS `SIGHUP` keeps ending the process at once, as in 0.17.
 - **`/status` has a `stopping` phase** and a `pid`; `/readyz` is `503` while stopping; a `/wait` `503` now carries `Retry-After` and a `reason` (`starting` or `stopping`).
+- **Embedding the crates.** `RunningDaemon::run` no longer returns as soon as its `shutdown` future fires: it drains first, with no deadline of its own (bound it in the caller). `daemon::Phase` gains `Stopping` and `ControlError` gains `Stopping`; both are `#[non_exhaustive]` now. `ChangeCapture` gains `close_live` (default: not supported). `flusso_design::serve` takes the shutdown future as a second argument.
 
 ## Related
 

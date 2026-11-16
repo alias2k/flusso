@@ -1210,6 +1210,7 @@ dependencies = [
  "serde_yaml",
  "thiserror 2.0.21",
  "toml",
+ "tracing",
 ]
 
 [[package]]

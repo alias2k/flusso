@@ -148,10 +148,13 @@ pub(crate) struct RunArgs {
     #[arg(long, env = "FLUSSO_BATCH_MAX_DELAY_MS")]
     batch_max_delay_ms: Option<u64>,
 
-    /// How long a stop may take, in seconds, from the first signal to exit:
-    /// closing the HTTP surfaces and flushing telemetry. Past it flusso logs
-    /// what it gave up on and exits with status 1; a second signal exits at
-    /// once. Unacked changes are redelivered on the next start either way.
+    /// How long a stop may take, in seconds, from the first signal to exit.
+    /// A stop drains: nothing new is read, what is in flight lands on every
+    /// sink and is confirmed to Postgres, then the HTTP surfaces close and
+    /// telemetry is flushed. Past the deadline flusso logs the step and the
+    /// sinks it gave up on and exits 1; `0` doesn't drain. The same sender
+    /// signalling twice within 500 ms, or any three signals within 1 s, exit
+    /// at once. Whatever wasn't confirmed is read again on the next start.
     #[arg(long, env = "FLUSSO_SHUTDOWN_TIMEOUT_SECS", default_value_t = shutdown::DEFAULT_TIMEOUT_SECS)]
     shutdown_timeout_secs: u64,
 

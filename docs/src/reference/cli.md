@@ -111,7 +111,7 @@ Until the pipeline is started (through [validation at start](#validation-at-star
 
 Whatever stops flusso must wait longer than the deadline before killing it: Kubernetes' `terminationGracePeriodSeconds` (the Helm chart sets 45), compose's `stop_grace_period` (Docker's default is 10 s: set `35s`), systemd's `TimeoutStopSec` (90 s by default), moon's `killProcessThreshold` (2 s by default). Each pairing is in [Run under a task runner or supervisor](../deploy/compile-and-run.md#run-under-a-task-runner-or-supervisor).
 
-Without `--exit-with-parent`, a flusso whose parent dies keeps running, like any daemon: it holds its addresses and its replication slot, so the next start fails on the address with `another flusso (pid <pid>) is already running there`, or, on other addresses, retries the slot with `replication slot "<slot>" is in use by Postgres backend <pid> (…)`.
+Without `--exit-with-parent`, a flusso whose parent dies keeps running, like any daemon: it holds its addresses and its replication slot, so the next start fails on the address with `another flusso is already serving there; it reports pid <pid>` (followed by the system's `Address already in use`; inside a container that pid is the one in its own namespace), or, on other addresses, retries the slot with `replication slot "<slot>" is in use by Postgres backend <pid> (…)`.
 
 ## check
 
