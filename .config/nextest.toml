@@ -64,8 +64,11 @@ slow-timeout = { period = "300s", terminate-after = 3 }
 retries = 0
 fail-fast = false
 
+# Passing tests' output too: the postgres-matrix summary finds the tests that
+# started a pinned image (`test_postgres::pinned` prints one line) in it.
 [profile.ci.junit]
 path = "junit.xml"
+store-success-output = true
 
 [[profile.ci.overrides]]
 filter = 'package(flusso-source-postgres) & binary(integration) | package(flusso-source-postgres) & binary(key_matching) | package(flusso-source-postgres) & binary(filter_operands) | package(flusso-engine) & binary(wal) | package(flusso-engine) & binary(wal_release) | package(flusso-engine) & binary(bytea_output) | package(flusso-engine) & binary(type_change) | package(flusso-source-postgres) & binary(config_coverage) | package(flusso-source-postgres) & binary(publication) | package(flusso-source-postgres) & binary(introspection) | package(flusso-source-postgres) & binary(tls) | package(flusso-source-postgres) & binary(wal_idle) | package(flusso-source-postgres) & binary(partitions) | package(flusso-source-postgres) & binary(continuity) | package(flusso-source-postgres) & binary(record_pgoutput)'

@@ -3,6 +3,7 @@
 One place names the Postgres image every flusso test and bench starts (issue #342). Unpublished; a dev-dependency only.
 
 - **Default**: `postgres:16-alpine`.
+- **Tested**: `TESTED_TAGS` — `14-alpine`, `16-alpine`, `18-alpine` (the oldest supported major, the default, the newest). The `postgres-matrix` workflow runs one leg per tag other than the default; `cargo run -q -p flusso-test-postgres -- matrix` prints them as a JSON array.
 - **Override**: `FLUSSO_TEST_PG_TAG` names another tag of the official image (`14-alpine`, `18-alpine`) for the whole run, with no code change. Unset or empty means the default.
 - **Exceptions**: a test that needs one version whatever the run's tag names it with a `Pinned` variant, which carries the reason. `pinned()` prints one line to stderr naming the image it starts instead of the run's, and why.
 - **The container type**: `test_postgres::Container`. Only this crate imports `testcontainers_modules::postgres`.

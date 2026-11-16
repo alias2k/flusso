@@ -30,7 +30,7 @@ Match this before assuming green:
 
 On a PR confined to the query train (`sdk/query`, `sdk/query-derive`, `dev/query-e2e`), step 5 skips every integration-test binary of `source-postgres`, `engine` and `sink-opensearch`, which those paths can't break; everything else, the query train's own e2e included, still runs. Pushes to `main` run everything.
 
-A separate job runs a 60-second `pgoutput_decode` fuzz on a pinned nightly; another builds and lints the designer SPA; a `docs` job builds the book and link-checks it. A `bench` workflow gates PRs on the in-process benches and records scenario history on `main`; see [Benchmarks](benchmarks.md). An `audit` workflow checks RustSec advisories weekly and on manifest or lock changes; see [Dependency updates](dependencies.md).
+A separate job runs a 60-second `pgoutput_decode` fuzz on a pinned nightly; another builds and lints the designer SPA; a `docs` job builds the book and link-checks it. A `postgres-matrix` workflow runs the Postgres-backed suites on the other tested majors; see [Other majors](#other-majors). A `bench` workflow gates PRs on the in-process benches and records scenario history on `main`; see [Benchmarks](benchmarks.md). An `audit` workflow checks RustSec advisories weekly and on manifest or lock changes; see [Dependency updates](dependencies.md).
 
 ## Why clippy runs without --all-targets
 
@@ -49,6 +49,22 @@ FLUSSO_TEST_PG_TAG=14-alpine cargo nextest run -p flusso-source-postgres --run-i
 ```
 
 Two tests need one version whatever the run's tag, and name it with a `test_postgres::Pinned` variant that carries the reason (each start prints one line saying which image it took instead of the run's, and why): `bytea_output` runs on Postgres 18 (the first with `min`/`max` over `bytea`), and `integration`'s JIT refusal test on Postgres 10 (no `jit` parameter). The scenario harness (`dev/bench`) and the Docker-backed component benches start the same image; the [`review-ab`](benchmarks.md#comparing-a-branch-with-its-base) command starts its own, from `--pg`.
+
+### Other majors
+
+flusso supports Postgres 14 or newer. CI tests three majors, listed once in `dev/test-postgres` as `TESTED_TAGS` beside the default: the oldest supported (`14-alpine`), the default (`16-alpine`) and the newest (`18-alpine`). Step 5 of the [CI order](#ci-order) runs the default on every PR. The `postgres-matrix` workflow runs the others, one leg each:
+
+- **What a leg runs.** `cargo nextest run --profile ci --workspace --run-ignored all -E 'rdeps(flusso-test-postgres)'` with `FLUSSO_TEST_PG_TAG` set: every crate that starts Postgres, under the same `ci` profile as step 5, set up by the same composite action (`.github/actions/rust-test-setup`). A leg takes about as long as `clippy + tests`.
+- **When.** Nightly, on demand (`workflow_dispatch`), and on a PR that carries the `ci: postgres-matrix` label (adding the label starts it; each push re-runs it). Never a required check.
+- **The summary** of each leg lists its failures, the tests that passed on a retry, and the tests that started a [pinned](#which-postgres) image instead of the leg's (the `ci` profile stores passing tests' output in its JUnit for this).
+- **A failing nightly** opens or updates one issue, *Postgres matrix fails on a supported major* (label `area: ci-release`), naming each failing version and its tests with a link to the run; the next all-green nightly closes it. `.github/scripts/postgres-matrix.py` maintains it, tested by `test_postgres_matrix.py`. A labelled PR reports through its checks only.
+
+15 and 17 aren't tested: the oldest, the default and the newest catch what differs between majors at a fraction of five legs' cost. To test another major, add its tag to `TESTED_TAGS`; the workflow reads its legs from `cargo run -q -p flusso-test-postgres -- matrix`. One leg locally, a package at a time:
+
+```sh
+FLUSSO_TEST_PG_TAG=18-alpine cargo nextest run --profile ci --run-ignored all -p flusso-engine
+git checkout libs/2-adapters/source-postgres/benches/fixtures/pgoutput.bin   # record_pgoutput re-records it
+```
 
 `testcontainers-modules`' `Postgres::default()` alone starts `postgres:11-alpine`, a version flusso doesn't support. `.github/scripts/check-postgres-image.py`, run by CI's `scripts` job through its unit test, fails on any import of `testcontainers_modules::postgres` outside `dev/test-postgres` (nested, glob and renamed imports included; callers name the container type `test_postgres::Container`), on `Postgres::default`, on `with_tag`/`with_name`, and on a `GenericImage` whose arguments mention `postgres` or whose image name isn't a literal. `review-ab.sh` reads its default `--pg` from the same crate's `DEFAULT_TAG`.
 

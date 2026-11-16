@@ -13,6 +13,19 @@ pub const TAG_VAR: &str = "FLUSSO_TEST_PG_TAG";
 /// The tag of the official `postgres` image a run starts when [`TAG_VAR`] is unset.
 pub const DEFAULT_TAG: &str = "16-alpine";
 
+/// The tags CI tests, oldest first: the oldest supported major, [`DEFAULT_TAG`],
+/// and the newest. `ci.yml` runs [`DEFAULT_TAG`] on every PR; the
+/// `postgres-matrix` workflow runs the rest ([`matrix_tags`]).
+pub const TESTED_TAGS: &[&str] = &["14-alpine", DEFAULT_TAG, "18-alpine"];
+
+/// The tested tags other than [`DEFAULT_TAG`]: one `postgres-matrix` leg each.
+pub fn matrix_tags() -> impl Iterator<Item = &'static str> {
+    TESTED_TAGS
+        .iter()
+        .copied()
+        .filter(|tag| *tag != DEFAULT_TAG)
+}
+
 /// A version a test needs whatever the run's tag; each variant says why.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pinned {
@@ -101,6 +114,23 @@ mod tests {
         assert!(note.contains("postgres:18-alpine"), "{note}");
         assert!(note.contains(TAG_VAR), "{note}");
         assert!(note.contains("jit"), "{note}");
+    }
+
+    #[test]
+    fn the_tested_tags_hold_the_default_once_oldest_first() {
+        let majors: Vec<u32> = TESTED_TAGS
+            .iter()
+            .map(|tag| tag.split('-').next().unwrap().parse().unwrap())
+            .collect();
+        assert!(
+            majors.windows(2).all(|pair| pair[0] < pair[1]),
+            "{majors:?}"
+        );
+        assert_eq!(TESTED_TAGS.iter().filter(|t| **t == DEFAULT_TAG).count(), 1);
+        assert_eq!(
+            matrix_tags().collect::<Vec<_>>(),
+            ["14-alpine", "18-alpine"]
+        );
     }
 
     #[test]
