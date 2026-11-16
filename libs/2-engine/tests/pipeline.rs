@@ -72,6 +72,16 @@
 //!   `strict_date_optional_time` or `ignore_malformed` takes it, and an
 //!   `indexed: false` join stores it as written (issue #304).
 //!
+//! - [`a_float8_is_indexed_as_the_double_postgres_holds`] — a `float8` column,
+//!   array element, `avg` and `map` value reach OpenSearch as the exact `f64`
+//!   Postgres holds, and a `real` as its exact `f32` (issue #366: about one
+//!   double in three was read one unit in the last place off).
+//!
+//! - [`an_untyped_number_lands_where_0_17_s_did`] — numbers with no declared
+//!   type under a `dynamic: true` `json` field, from `1e-300` to `1.5e+300`,
+//!   land with no rejection on a fresh index and on one 0.17's form mapped
+//!   (issue #366's review).
+//!
 //! - [`an_id_past_512_bytes_is_decided_by_on_error`] — a text key OpenSearch
 //!   refuses as an `_id` (over 512 bytes) is one rejected document, decided by
 //!   `on_error`: `skip` quarantines it and acks the batch, `stop` stops the sink
@@ -1782,6 +1792,21 @@ fn decimal_map(name: &str) -> Field {
     map
 }
 
+/// A `map` field `name` with `values: double`: its values are read with no
+/// declared type, then mapped as `double`.
+fn double_map(name: &str) -> Field {
+    let mut map = typed_field(
+        name,
+        FlussoType::Map {
+            values: Box::new(FlussoType::Double),
+        },
+        false,
+    );
+    map.options
+        .insert("dynamic".to_owned(), GenericValue::Bool(true));
+    map
+}
+
 /// A `numeric` under a `decimal` field is written as a JSON number holding
 /// every digit Postgres wrote, past `rust_decimal`'s range (±7.9e28, 28
 /// fractional digits) too: a scalar, an array element and a `sum`/`max`, on
@@ -1889,6 +1914,226 @@ async fn a_numeric_keeps_every_digit_as_a_json_number() {
         "after a live child insert",
     )
     .await;
+    live.shutdown();
+}
+
+/// What the sink writes for `value`, a `float8` Postgres holds as `text`: the
+/// JSON number of the `f64` that text names, read correctly rounded.
+fn written(text: &str) -> String {
+    let value: f64 = text.parse().unwrap();
+    serde_json::to_string(&value).unwrap()
+}
+
+/// A `float8` is indexed as the very `f64` Postgres holds (issue #366): a
+/// `double` column, a `double[]` element, an `avg`, and a value of a `map`
+/// with `values: double` (read with no declared type), on backfill and after a
+/// live update; a `real` as its exact `f32` (`7.038531e-26` included), and a
+/// `float` field over a `float8` or `numeric` column as Postgres's own
+/// `::float4` gives it (an exact `f32` midpoint, a `numeric` past 17 digits).
+/// Each value here is one `serde_json`'s default float parser read one
+/// unit in the last place off. The expected text is computed from Postgres's
+/// own `::text` of each value, read by `str::parse`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_float8_is_indexed_as_the_double_postgres_holds() {
+    let pg = start_postgres().await;
+    let os = start_opensearch().await;
+    for ddl in [
+        "CREATE TABLE floats (id int PRIMARY KEY, name text, db float8, dbs float8[], \
+         fl real, dj jsonb, fd float8, fnum numeric)",
+        "CREATE TABLE samples (id int PRIMARY KEY, float_id int REFERENCES floats(id), v numeric)",
+    ] {
+        create_table(&pg.pool, ddl).await;
+    }
+    for sql in [
+        "INSERT INTO floats VALUES (1, 'one', 906404.2095968979, \
+         ARRAY[-476228.37297113653, 6.676040344723838e+276]::float8[], 0.1, \
+         '{\"n\": 15048.112203257973}', 1.000000059604644775390625, \
+         1.000000059604644775390625000001)",
+        "INSERT INTO samples VALUES (1, 1, 4251.1509216589861751)",
+    ] {
+        exec(&pg.pool, sql).await;
+    }
+    let mut schema = simple_schema("floats", None);
+    schema.fields.extend([
+        typed_field("db", FlussoType::Double, false),
+        typed_field("dbs", FlussoType::Double, true),
+        typed_field("fl", FlussoType::Float, false),
+        typed_field("fd", FlussoType::Float, false),
+        typed_field("fnum", FlussoType::Float, false),
+        double_map("dj"),
+        Field {
+            field: field("mean"),
+            options: Default::default(),
+            emit: true,
+            source: FieldSource::Relation(Relation::Aggregate(Aggregate {
+                table: table("samples"),
+                op: AggregateOp::Avg(column("v").into()),
+                key: AggregateKey::Direct(column("float_id")),
+                value_type: None,
+                filters: None,
+                distinct: false,
+                via: Vec::new(),
+                on: Vec::new(),
+            })),
+        },
+    ]);
+    let spec = SourceSpec::new(BTreeMap::from([(index_name("floats"), schema)]));
+    let live = start_pipeline(&pg, &os, spec, &["floats", "samples"]).await;
+    live.await_seeded(1).await;
+
+    let held = async || -> Vec<(&'static str, String)> {
+        let row: (String, String, String, String, String, String) = sqlx::query_as(
+            "SELECT db::text, (dbs[1])::text, (dbs[2])::text, fl::text, \
+             (dj->>'n'), (SELECT avg(v)::text FROM samples WHERE float_id = 1) \
+             FROM floats WHERE id = 1",
+        )
+        .fetch_one(&pg.pool)
+        .await
+        .unwrap();
+        let single: f32 = row.3.parse().unwrap();
+        let cast: (String, String) =
+            sqlx::query_as("SELECT fd::float4::text, fnum::float4::text FROM floats WHERE id = 1")
+                .fetch_one(&pg.pool)
+                .await
+                .unwrap();
+        let float4 = |text: &str| {
+            let single: f32 = text.parse().unwrap();
+            serde_json::to_string(&f64::from(single)).unwrap()
+        };
+        vec![
+            ("fd", float4(&cast.0)),
+            ("fnum", float4(&cast.1)),
+            ("db", written(&row.0)),
+            ("dbs", format!("[{},{}]", written(&row.1), written(&row.2))),
+            ("fl", serde_json::to_string(&f64::from(single)).unwrap()),
+            ("dj", format!("{{\"n\":{}}}", written(&row.4))),
+            ("mean", written(&row.5)),
+        ]
+    };
+    let expect = held().await;
+    let expect: Vec<(&str, &str)> = expect.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    assert_eq!(expect[0], ("fd", "1.0"));
+    assert_eq!(expect[1], ("fnum", "1.0000001192092896"));
+    assert_eq!(expect[2].1, "906404.2095968979");
+    live.assert_raw_eventually("floats", "1", &expect, "on backfill")
+        .await;
+
+    exec(
+        &pg.pool,
+        "UPDATE floats SET db = 1.856588120474891e-133, fl = 7.038531e-26, fd = 0.1, \
+         fnum = 0.1, dj = '{\"n\": 0.00023707983636504738}' WHERE id = 1",
+    )
+    .await;
+    exec(
+        &pg.pool,
+        "INSERT INTO samples VALUES (2, 1, 271455.3055555555555555)",
+    )
+    .await;
+    let expect = held().await;
+    let expect: Vec<(&str, &str)> = expect.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    live.assert_raw_eventually("floats", "1", &expect, "after a live update")
+        .await;
+    live.shutdown();
+}
+
+/// Numbers with no declared type, under a `json` field the user maps
+/// `dynamic: true`, at the magnitudes issue #366's review found: each lands
+/// with no rejection (`on_error` is `stop`, so one would stop the engine), on
+/// a fresh index where flusso maps every key, and on one whose keys a
+/// document in 0.17's form mapped first (a string past ±7.9e28, `0.0` for a
+/// value too small for `rust_decimal`). Past ±7.9e28 the value is still the
+/// string of its digits, as 0.17 wrote it: OpenSearch maps a dynamic
+/// floating-point key as `float`, which refuses `1.5e+300` as a number.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn an_untyped_number_lands_where_0_17_s_did() {
+    let pg = start_postgres().await;
+    let os = start_opensearch().await;
+    for table in ["dyn_fresh", "dyn_old"] {
+        create_table(
+            &pg.pool,
+            &format!("CREATE TABLE {table} (id int PRIMARY KEY, name text, dj jsonb)"),
+        )
+        .await;
+    }
+    let dynamic_json = || {
+        let mut json = typed_field("dj", FlussoType::Json, false);
+        json.options
+            .insert("dynamic".to_owned(), GenericValue::Bool(true));
+        json
+    };
+    let schema = |table: &str| {
+        let mut schema = simple_schema(table, None);
+        schema.fields.push(dynamic_json());
+        schema
+    };
+    let spec = SourceSpec::new(BTreeMap::from([
+        (index_name("dyn_fresh"), schema("dyn_fresh")),
+        (index_name("dyn_old"), schema("dyn_old")),
+    ]));
+    let live = start_pipeline(&pg, &os, spec, &["dyn_fresh", "dyn_old"]).await;
+    live.await_seeded(2).await;
+
+    let old_form = serde_json::json!({
+        "id": "999",
+        "name": "written by 0.17",
+        "dj": {
+            "huge": format!("15{}", "0".repeat(299)),
+            "f32max": "340282360000000000000000000000000000000",
+            "past": "100000000000000000000000000000",
+            "tiny": 0.0,
+            "sub": 0.0,
+            "pi": 0.000_000_000_000_031_415_926_535_9,
+            "plain": 906_404.209_596_898,
+        }
+    });
+    let put = live
+        .http
+        .put(format!("{}/dyn_old/_doc/999?refresh=true", live.os_url))
+        .json(&old_form)
+        .send()
+        .await
+        .unwrap();
+    assert!(put.status().is_success(), "{}", put.text().await.unwrap());
+
+    let values = r#"{"huge": 1.5e300, "f32max": 3.4028236e38, "past": 1e29, "tiny": 1e-300,
+        "sub": 5e-324, "pi": 3.141592653589793e-14, "plain": 906404.2095968979}"#;
+    for table in ["dyn_fresh", "dyn_old"] {
+        exec(
+            &pg.pool,
+            &format!("INSERT INTO {table} VALUES (1, 'one', '{values}')"),
+        )
+        .await;
+    }
+    for index in ["dyn_fresh", "dyn_old"] {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let fields = loop {
+            live.fail_if_stopped();
+            if let Some(fields) = live.fetch_raw_fields(index, "1").await {
+                break fields;
+            }
+            assert!(Instant::now() < deadline, "{index}: no document");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        let written: serde_json::Value = serde_json::from_str(&fields["dj"]).unwrap();
+        for key in ["huge", "f32max", "past"] {
+            assert!(written[key].is_string(), "{index}.{key}: {written}");
+        }
+        for (key, value) in [
+            ("tiny", 1e-300),
+            ("sub", 5e-324),
+            ("pi", 3.141_592_653_589_793e-14),
+            ("plain", 906_404.209_596_897_9),
+        ] {
+            assert_eq!(
+                written[key].as_f64(),
+                Some(value),
+                "{index}.{key}: {written}"
+            );
+        }
+    }
+    live.fail_if_stopped();
     live.shutdown();
 }
 

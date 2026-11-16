@@ -79,6 +79,16 @@ fn scalar(ty: &FlussoType, json: serde_json::Value) -> GenericValue {
         (FlussoType::Date | FlussoType::Timestamp, serde_json::Value::String(text)) => {
             temporal(&text, ty).unwrap_or(GenericValue::String(text))
         }
+        (FlussoType::Double, serde_json::Value::Number(number)) => match number.as_f64() {
+            Some(double) => GenericValue::Double(double),
+            None => untyped(number.into()),
+        },
+        (FlussoType::Float, serde_json::Value::Number(number)) => {
+            match number.to_string().parse::<f32>() {
+                Ok(single) => GenericValue::Float(single),
+                Err(_) => untyped(number.into()),
+            }
+        }
         (FlussoType::Decimal, serde_json::Value::Number(number)) => {
             decimal(&number.to_string()).unwrap_or_else(|| untyped(number.into()))
         }
@@ -128,17 +138,13 @@ pub fn temporal(text: &str, ty: &FlussoType) -> Option<GenericValue> {
     }
 }
 
-/// JSON with no declared type: whole numbers as integers, other numbers as doubles,
-/// everything else as it reads.
+/// JSON with no declared type, as the Postgres builder reads it: a number by
+/// `kernel::untyped_json_number`, everything else as it reads.
 pub fn untyped(json: serde_json::Value) -> GenericValue {
     match json {
         serde_json::Value::Null => GenericValue::Null,
         serde_json::Value::Bool(b) => GenericValue::Bool(b),
-        serde_json::Value::Number(n) => n
-            .as_i64()
-            .map(GenericValue::BigInt)
-            .or_else(|| n.as_f64().map(GenericValue::Double))
-            .unwrap_or(GenericValue::Null),
+        serde_json::Value::Number(n) => kernel::untyped_json_number(&n),
         serde_json::Value::String(s) => GenericValue::String(s),
         serde_json::Value::Array(items) => {
             GenericValue::Array(items.into_iter().map(untyped).collect())

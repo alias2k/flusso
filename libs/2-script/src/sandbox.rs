@@ -42,7 +42,7 @@ const STRINGS_INTERNED: usize = 256;
 fn standard_library() -> Module {
     let mut library = (*StandardPackage::new().as_shared_module()).clone();
     library.set_native_fn("to_float", |value: rust_decimal::Decimal| {
-        Ok(crate::value::decimal_to_float(value))
+        Ok(kernel::decimal_to_f64(value))
     });
     crate::dates::library::register(&mut library);
     library

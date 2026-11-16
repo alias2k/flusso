@@ -52,7 +52,7 @@ cargo nextest run --run-ignored all        # + Postgres e2e (needs a running Doc
 cargo nextest run -E 'test(name_substr)'   # a single test by name
 cargo test --doc                           # doctests — nextest does NOT run these
 cargo clippy --workspace                   # lint (NOT --all-targets; see below)
-just bench                                 # in-process benches (engine loop, pgoutput decode, resolve, sink render, script fields); no Docker
+just bench                                 # in-process benches (engine loop, pgoutput decode, resolve, document reader, sink render, script fields); no Docker
 just bench-components                      # Docker-backed Criterion benches (postgres, cases, opensearch, engine pipeline)
 just review-ab origin/main                 # A/B the working tree vs a base on the Docker-backed benches (warm base build)
 just review-digest                         # same documents as the base? one digest per index (review-ab --digest)
@@ -134,8 +134,9 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   for the changes that need no query — root table, unread table, update of unread columns, a path walked
   from the key — over
   `bench_offline_builder`, a pool that never connects; its group is `resolve_no_io`, apart from the
-  Docker `postgres` bench's `resolve`; issue #332), `sink-opensearch`'s `render`, `script`'s `scripted` (public
-  API, no feature; `bench-in-process.sh` skips a bench a PR base predates). `pgoutput`, `resolve` and `render` sit behind each
+  Docker `postgres` bench's `resolve`; issue #332), `source-postgres`'s `documents` (`coerce_document` + the sink
+  render over float-heavy documents via `bench_document_reader`, issue #366), `sink-opensearch`'s `render`, `script`'s `scripted` (public
+  API, no feature; `bench-in-process.sh` skips a bench a PR base predates). `pgoutput`, `resolve`, `documents` and `render` sit behind each
   crate's `bench` cargo feature (like `fuzzing`), so CI's `cargo check --all-targets` passes
   `--features flusso-source-postgres/bench,flusso-sink-opensearch/bench`. `.github/workflows/bench.yml`:
   on a PR, `in-process` builds the in-process benches on the base (its own worktree **and its own
@@ -1335,8 +1336,8 @@ when `jsonb` sorted the keys of a >50-field document), and is **fallible**
 declared `decimal` reads differently from a `serde_json::Value` walk** (issue #327): a column, array
 element, `sum`/`min`/`max`, `ids` key or `map` value of `decimal` reads its raw number text
 (`&RawValue`) into `GenericValue::BigDecimal` (the exact text, appended last to the enum), never
-through `f64`; every other value, untyped numbers included, reads as `main` did (`json_to_generic`,
-`float`), `NaN`/`Infinity` stay strings, and reading goes on past a failure so a malformed document
+through `f64`; a declared `float` reads its raw text too (`single`), untyped numbers go through
+`kernel::untyped_number` (issue #366), every other value reads as `main` did, `NaN`/`Infinity` stay strings, and reading goes on past a failure so a malformed document
 is `Malformed` wherever it is and the failure reported is the first in declaration order; a raw value
 read again may open no more levels than the document had left (`Untyped.remaining`), and skipped
 values are checked (`Skip`). Guard: `value/differential.rs`, 7605 cases (every field kind but
@@ -1403,8 +1404,8 @@ wrapped as `fn __flusso(root) { … }` so `this` can be bound — columns on lin
 fresh copy per call) and `root` (read-only, shared), all before any output is written, so no script
 sees another's output; then outputs are written and `emit: false` fields stripped. A failure becomes
 `Document::Failed` (see the engine invariant). A declared `decimal` enters Rhai as the nearest
-`Decimal` (about 28 significant digits, at most 28 after the point); exponent text and a zero read as `main` read them
-through `f64`; past the range it is a string of the exact text (`value.rs`'s `declared_decimal`,
+`Decimal` (about 28 significant digits, at most 28 after the point); exponent text as the `Decimal` nearest the `f64`
+it names (`kernel::f64_to_nearest_decimal`, issue #366), a zero unsigned; past the range it is a string of the exact text (`value.rs`'s `declared_decimal`,
 `#[cold]`: it slows `to_dynamic` otherwise). A `decimal` result is written exactly (`BigDecimal`, a
 zero unsigned), a string returned to it fails with `main`'s message, and a decimal's `to_float()` is
 the sandbox's own, parsed from its text, placed in the standard package's module (`sandbox.rs`; a
@@ -1874,6 +1875,28 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
   `f64`'s range as its text) — core picks no wire format. serde_json's
   `arbitrary_precision` stays off: it is global, allocates per number, and breaks numbers under
   serde's buffered (`flatten`/`untagged`) deserialization.
+- **Numbers are read and written exactly (issue #366).** serde_json's default float parser is not
+  correctly rounded (about one `float8` in three read one ulp off), so `float_roundtrip` is on where
+  flusso reads numbers it keeps: `source-postgres`, the CLI (`script run --input`) and `flusso-query`
+  (`_source`, cursor sort values; always on, so it unifies into the consumer's build: a deliberate choice,
+  cost stated in its README). A declared `float` reads its raw text (`value.rs`'s `single`) as Postgres's
+  `::float4` would: up to 9 significant digits or 18+ parsed as `f32` (trailing zeros not counted: `jsonb` pads a large double with them), 10–17 (a `float8`'s shortest text)
+  through the correct `f64` then `as f32` (a correct `f64` then `as f32` on a `float4`'s text rounds twice:
+  `7.038531e-26`); past `f32` it is infinite (written `null`, as 0.17). A number with no declared type is
+  `kernel::untyped_number`, the one rule for the reader and `--input`: the exact `Decimal` of its shortest
+  digits, below 1 with more digits than `Decimal` holds the `BigDecimal` of them (the sink writes them as
+  they are, a script reads the nearest `Decimal`), past ±7.9e28 0.17's string (a number there would be
+  refused by a dynamically mapped `float` key), so a script sees one kind; a whole number past `i64` is the
+  exact `Decimal`. `f64` ↔ `Decimal` goes through `kernel::f64_to_decimal`/`f64_to_nearest_decimal`/
+  `decimal_to_f64` (shortest text / correctly rounded, with an exact `m / 10^s` fast path), never
+  `Decimal::try_from(f64)` or `to_f64`, which are lossy. Guards: `value::tests`'
+  `a_double_is_read_as_the_value_postgres_wrote`, `a_float_is_read_as_the_single_postgres_wrote`,
+  `a_float_reads_as_postgres_casts_to_float4`, `every_float_postgres_writes_is_read_as_itself`, the
+  `kernel::common::float` proptests, `script`'s `tests/untyped_numbers.rs` and
+  `a_decimal_with_an_exponent_keeps_the_doubles_digits`, `flusso-query`'s
+  `a_double_is_read_as_opensearch_wrote_it` (fails without the feature only when the crate is built alone),
+  and `pipeline`'s `a_float8_is_indexed_as_the_double_postgres_holds` and
+  `an_untyped_number_lands_where_0_17_s_did` (a fresh index and one 0.17's form mapped).
 - Sources/sinks are `#[async_trait]` trait objects; mock them in tests as the engine tests do.
 - **Every `reqwest` client flusso builds pins its trust roots.** reqwest 0.13 verifies against the
   OS trust store by default; the OpenSearch sink, `flusso-query` and the CLI's admin client each

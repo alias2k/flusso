@@ -108,15 +108,59 @@ fn input_json_is_typed_by_the_schema_like_the_builder() {
     assert_eq!(doc["extra"], GenericValue::String("2024-05-01".to_owned()));
 }
 
+/// A number with no declared type reads as the Postgres builder reads it
+/// (`kernel::untyped_json_number`): a script sees the same kind from
+/// `--input` as from a build (issue #366).
 #[test]
-fn json_with_no_declared_type_keeps_integers_apart_from_numbers() {
-    let json = serde_json::json!({"n": 3, "x": 1.5, "s": "a"});
+fn json_with_no_declared_type_reads_numbers_as_the_builder_does() {
+    let json: serde_json::Value = serde_json::from_str(
+        r#"{"n": 3, "x": 1.5, "s": "a", "big": 18446744073709551615, "tiny": 3.141592653589793e-14, "huge": 1.5e300}"#,
+    )
+    .unwrap();
+    let doc = document(&[], json);
+    let GenericValue::Map(doc) = doc else {
+        panic!("{doc:?}")
+    };
+    assert_eq!(doc["n"], GenericValue::BigInt(3));
+    assert_eq!(doc["s"], GenericValue::String("a".to_owned()));
+    assert_eq!(doc["x"], GenericValue::Decimal("1.5".parse().unwrap()));
     assert_eq!(
-        document(&[], json),
-        GenericValue::Map(BTreeMap::from([
-            ("n".to_owned(), GenericValue::BigInt(3)),
-            ("s".to_owned(), GenericValue::String("a".to_owned())),
-            ("x".to_owned(), GenericValue::Double(1.5)),
-        ]))
+        doc["big"],
+        GenericValue::Decimal("18446744073709551615".parse().unwrap())
+    );
+    assert_eq!(
+        doc["tiny"],
+        kernel::untyped_number(3.141_592_653_589_793e-14)
+    );
+    assert!(matches!(doc["tiny"], GenericValue::BigDecimal(_)));
+    assert!(matches!(doc["huge"], GenericValue::String(_)));
+}
+
+/// A declared `double` or `float` reads as that float, whole numbers included,
+/// as the builder reads the column: a script multiplying it by a float literal
+/// must run here as it runs in the pipeline.
+#[test]
+fn a_declared_float_reads_as_a_float_not_as_an_untyped_number() {
+    let schema = schema(
+        "  \
+  - double: price\n    required: true\n  \
+  - double: whole\n    required: true\n  \
+  - float: ratio\n    required: true\n  \
+  - double: series\n    required: true\n    array: true\n",
+    );
+    let json = serde_json::json!({
+        "price": 9.5,
+        "whole": 10,
+        "ratio": 0.25,
+        "series": [1, 2.5],
+    });
+    let doc = document(&schema.fields, json);
+    let doc = map(&doc);
+    assert_eq!(doc["price"], GenericValue::Double(9.5));
+    assert_eq!(doc["whole"], GenericValue::Double(10.0));
+    assert_eq!(doc["ratio"], GenericValue::Float(0.25));
+    assert_eq!(
+        doc["series"],
+        GenericValue::Array(vec![GenericValue::Double(1.0), GenericValue::Double(2.5)])
     );
 }

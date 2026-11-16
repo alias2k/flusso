@@ -44,7 +44,9 @@ rust_decimal.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 # `raw_value`: a `decimal` field reads the exact number text Postgres wrote.
-serde_json = { workspace = true, features = ["raw_value"] }
+# `float_roundtrip`: every other number is read correctly rounded; without it
+# about one `float8` in three reads one unit in the last place off (issue #366).
+serde_json = { workspace = true, features = ["raw_value", "float_roundtrip"] }
 
 [dev-dependencies]
 sink.workspace = true
@@ -86,6 +88,14 @@ harness = false
 # No Docker; this is a PR-gating bench. Needs `--features bench`.
 [[bench]]
 name = "pgoutput"
+harness = false
+required-features = ["bench"]
+
+# In-process component bench: the document reader and the sink's render over
+# float-heavy documents (issue #366). No Docker; a PR-gating bench. Needs
+# `--features bench`.
+[[bench]]
+name = "documents"
 harness = false
 required-features = ["bench"]
 

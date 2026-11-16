@@ -15,8 +15,12 @@
 //!   was `Decimal::to_f64` of a value serde_json's default float parser read,
 //!   so a long value could land one unit in the last place off; the test
 //!   counts those rows.
-//! - `zero`, `exponent`: the kind and `${x}` as on `main`. A value that rounds
-//!   to zero, or is written with an exponent, reads as `main` read it.
+//! - `zero`, `exponent`: the kind as on `main`, and `${x}` is the nearest
+//!   `Decimal` to the double the text names (issue #366: `main` went through
+//!   `Decimal::try_from(f64)`, which kept about 15 digits). So `${x}` loses
+//!   `main`'s trailing `.0` (`100.0` is `100`) and the sign of a zero, and a
+//!   value from 5e-29 up rounds to `0.0000000000000000000000000001` where
+//!   `main` gave `0`.
 //! - `long`, `exact`: the kind as on `main`, and `${x}` is the nearest
 //!   `Decimal` to the input: about 28 significant digits, at most 28 after
 //!   the point, where `main` kept about 17.
@@ -130,6 +134,19 @@ fn inputs() -> Vec<(&'static str, String)> {
     out
 }
 
+/// The `Decimal` nearest `double`, worked out from its digits alone: its
+/// shortest text, rounded to 28 fractional places by `Decimal::from_str`.
+fn nearest_decimal(double: f64) -> String {
+    let rounded = <rust_decimal::Decimal as std::str::FromStr>::from_str(&double.to_string())
+        .unwrap()
+        .normalize();
+    if rounded.is_zero() {
+        "0".to_owned()
+    } else {
+        rounded.to_string()
+    }
+}
+
 fn run(scripts: &Scripts, index: &IndexName, x: GenericValue) -> String {
     let mut doc = GenericValue::Map(BTreeMap::from([("x".to_owned(), x)]));
     scripts.apply(index, &mut doc).unwrap();
@@ -175,8 +192,12 @@ fn a_declared_decimal_reaches_a_script_as_main_gave_it() {
         if label != "max" && main[2] != branch[2] {
             problems.push("kind");
         }
-        if matches!(label, "zero" | "exponent") && main[3] != branch[3] {
-            problems.push("text");
+        if matches!(label, "zero" | "exponent") {
+            let double: f64 = input.parse().unwrap();
+            let nearest = nearest_decimal(double);
+            if branch[3] != nearest {
+                problems.push("nearest decimal to the double");
+            }
         }
         if matches!(label, "long" | "exact") {
             let nearest = <rust_decimal::Decimal as std::str::FromStr>::from_str(input)
@@ -231,5 +252,30 @@ fn the_nearest_double_is_known() {
     ] {
         let seen = run(&scripts, &index, declared(text));
         assert_eq!(seen.split('\t').nth(2), Some(nearest), "{text}: {seen}");
+    }
+}
+
+/// A declared decimal written with an exponent is the nearest `Decimal` to the
+/// double its text names, every digit of it: `main`'s `Decimal::try_from(f64)`
+/// kept about 15 (`906404.209596898`), and zeroed `6e-29` (issue #366).
+#[test]
+fn a_decimal_with_an_exponent_keeps_the_doubles_digits() {
+    let schema = IndexSchema::try_from(SchemaYaml::try_parse(SCHEMA).unwrap()).unwrap();
+    let index = IndexName::try_new("products").unwrap();
+    let scripts =
+        Scripts::compile(&SourceSpec::new(BTreeMap::from([(index.clone(), schema)]))).unwrap();
+    for (text, held) in [
+        ("9.064042095968979e5", "906404.2095968979"),
+        ("-4.7622837297113653E+5", "-476228.37297113653"),
+        ("3.141592653589793e-14", "0.0000000000000314159265358979"),
+        ("6e-29", "0.0000000000000000000000000001"),
+    ] {
+        assert_eq!(
+            <rust_decimal::Decimal as std::str::FromStr>::from_str(held).unwrap(),
+            nearest_decimal(text.parse().unwrap()).parse().unwrap(),
+            "{text}"
+        );
+        let seen = run(&scripts, &index, declared(text));
+        assert_eq!(seen.split('\t').nth(1), Some(held), "{text}: {seen}");
     }
 }

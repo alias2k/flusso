@@ -72,6 +72,8 @@ Values are typed by **kind**: numerics widen losslessly (`eq(5)` on a `long`, ne
 | `time`, `chrono` | the date types for `date`/`timestamp` fields |
 | `diesel`, `diesel-async` | `position::diesel::current` / `position::diesel_async::current`: read the position a fenced read waits on |
 
+Always on, not a feature of this crate: `serde_json`'s `float_roundtrip`. A double in `_source`, and a sort value a page cursor carries back, is read as the value flusso wrote; serde_json's default parser reads about one in three random doubles one unit in the last place off. Cargo features unify, so this turns `float_roundtrip` on for your whole build: every float `serde_json` parses there is correctly rounded, at a cost (measured: a float-only array about 30% slower, about 12 ns a float; a typed `_search` decode of 1,000 hits with 14 floats each 7–12% slower; integers and strings unchanged; about 46 KB more code). It is not optional because a cursor resumed from a misread sort value can skip or repeat hits.
+
 ## Paging
 
 Offset paging (`.from(n).size(k)`) re-runs the query each page, so CDC inserts and deletes shift it. For infinite scroll or an export, page by **cursor**: each page resumes after the last hit, so inserts and deletes never shift the walk, with no depth limit and nothing held on the server. `.point_in_time()` pins a walk to one fixed view instead.

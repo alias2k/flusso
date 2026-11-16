@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the five in-process (no Docker) Criterion benches, saving their results
+# Run the six in-process (no Docker) Criterion benches, saving their results
 # under one Criterion baseline name so two runs can be compared side by side.
 #
 #   bench-in-process.sh <baseline-name> [<bench-id>]
@@ -28,7 +28,7 @@
 # Results go to `$CRITERION_HOME` (default: `$CARGO_TARGET_DIR/criterion`).
 #
 # A bench whose source file is missing is skipped: a PR base that predates the
-# script or resolve bench still yields the others. With none of the five present the
+# script, resolve or documents bench still yields the others. With none of the six present the
 # script runs nothing and exits 78, so a caller can tell "this tree has no
 # in-process benches" apart from a failure.
 #
@@ -36,7 +36,7 @@
 #
 # - BENCH_SET=docker picks the Docker-backed benches (postgres, cases,
 #   pipeline, and `review`, review-ab's review-mode harness) instead of the
-#   five in-process ones;
+#   six in-process ones;
 # - BENCH_BUILD_ONLY=1 builds and records the executables without running
 #   their benchmarks, so the caller can run base and head interleaved (an
 #   in-process executable still runs once, with `--list`, to record its ids);
@@ -46,7 +46,7 @@
 # builds and records every bench but runs none whose identity matches the
 # other side's and whose ids were listed (bench.yml builds both sides first).
 #
-# The pgoutput, resolve and render benches sit behind each crate's `bench`
+# The pgoutput, resolve, documents and render benches sit behind each crate's `bench`
 # feature, which exposes the crate-private decoder / an offline document
 # builder / the renderer to them.
 set -euo pipefail
@@ -163,6 +163,7 @@ else
   bench libs/2-engine/benches/engine.rs flusso-engine engine
   bench libs/2-adapters/source-postgres/benches/pgoutput.rs flusso-source-postgres pgoutput --features bench
   bench libs/2-adapters/source-postgres/benches/resolve.rs flusso-source-postgres resolve --features bench
+  bench libs/2-adapters/source-postgres/benches/documents.rs flusso-source-postgres documents --features bench
   bench libs/2-adapters/sink-opensearch/benches/render.rs flusso-sink-opensearch render --features bench
   bench libs/2-script/benches/scripted.rs flusso-script scripted
 fi

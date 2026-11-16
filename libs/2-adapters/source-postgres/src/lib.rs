@@ -49,6 +49,17 @@ pub fn bench_offline_builder(spec: std::sync::Arc<source::SourceSpec>) -> PgDocu
     document::offline_builder(spec)
 }
 
+/// Benchmark entry point for the document reader: reads a document the query
+/// wrote, as JSON text, for `fields`; `None` for one that failed. Used by the
+/// `documents` bench; gated behind the `bench` feature and not part of the
+/// stable API.
+#[cfg(feature = "bench")]
+pub fn bench_document_reader(
+    fields: Vec<kernel::Field>,
+) -> impl Fn(&[u8]) -> Option<kernel::GenericValue> {
+    document::value::bench_reader(fields)
+}
+
 /// Benchmark entry point: cache `schema.table.column` as an `integer` in
 /// `builder`'s column types, so a bench over
 /// [`bench_offline_builder`] reads it with no query. Gated behind the `bench`
