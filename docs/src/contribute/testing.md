@@ -48,9 +48,9 @@ Every test and bench that starts Postgres takes its image from one place, `dev/t
 FLUSSO_TEST_PG_TAG=14-alpine cargo nextest run -p flusso-source-postgres --run-ignored all
 ```
 
-Two tests need one version whatever the run's tag, and name it with a `test_postgres::Pinned` variant that carries the reason: `bytea_output` runs on Postgres 18 (the first with `min`/`max` over `bytea`), and `integration`'s JIT refusal test on Postgres 10 (no `jit` parameter). The scenario harness (`dev/bench`) and the Docker-backed component benches start the same image; the [`review-ab`](benchmarks.md#comparing-a-branch-with-its-base) command starts its own, from `--pg`.
+Two tests need one version whatever the run's tag, and name it with a `test_postgres::Pinned` variant that carries the reason (each start prints one line saying which image it took instead of the run's, and why): `bytea_output` runs on Postgres 18 (the first with `min`/`max` over `bytea`), and `integration`'s JIT refusal test on Postgres 10 (no `jit` parameter). The scenario harness (`dev/bench`) and the Docker-backed component benches start the same image; the [`review-ab`](benchmarks.md#comparing-a-branch-with-its-base) command starts its own, from `--pg`.
 
-`testcontainers-modules`' `Postgres::default()` alone starts `postgres:11-alpine`, a version flusso doesn't support. `.github/scripts/check-postgres-image.py`, run by CI's `scripts` job through its unit test, fails on any `Postgres::default`, `.with_tag(` or `GenericImage::new("postgres"` outside `dev/test-postgres`.
+`testcontainers-modules`' `Postgres::default()` alone starts `postgres:11-alpine`, a version flusso doesn't support. `.github/scripts/check-postgres-image.py`, run by CI's `scripts` job through its unit test, fails on any import of `testcontainers_modules::postgres` outside `dev/test-postgres` (nested, glob and renamed imports included; callers name the container type `test_postgres::Container`), on `Postgres::default`, on `with_tag`/`with_name`, and on a `GenericImage` whose arguments mention `postgres` or whose image name isn't a literal. `review-ab.sh` reads its default `--pg` from the same crate's `DEFAULT_TAG`.
 
 | Crate | Binary | Needs | Proves |
 | --- | --- | --- | --- |

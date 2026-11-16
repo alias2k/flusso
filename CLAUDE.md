@@ -214,14 +214,6 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   source chain (`transport.rs`'s `request_error`).
   New e2e binaries must be added to the filtersets in `.config/nextest.toml` (both profiles) to get
   the docker/opensearch group caps and retries.
-  **Every Postgres start goes through `dev/test-postgres`** (`flusso-test-postgres`, issue #342):
-  `test_postgres::image()` is `postgres:16-alpine`, or the tag `FLUSSO_TEST_PG_TAG` names for the
-  whole run; a test that needs one version names a `test_postgres::Pinned` variant (Postgres 18 for
-  `bytea_output`, 10 for `integration`'s JIT refusal). `testcontainers-modules`' own
-  `Postgres::default()` is `11-alpine`. Guard: `.github/scripts/check-postgres-image.py` (via
-  `test_check_postgres_image.py`, CI's `scripts` job) fails on `Postgres::default`, `.with_tag(` or
-  `GenericImage::new("postgres"` outside that crate. It is a **path-only dev-dependency** of the
-  published crates (`cargo publish` strips it), so it stays outside the layering.
   It is the only test that catches a live change rebuilt as the *wrong* op (e.g. an update
   written as a tombstone because the WAL key decoder and the read-back decoder disagree on
   the `GenericValue` variant). **A key is parsed by one function on both sides** (issue #295,
@@ -291,6 +283,17 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   `flusso schema config` / `flusso schema docs`; a unit test in `apps/cli/src/commands/schema_cmd.rs`
   fails when the committed copies differ. `just schema-gen` refreshes both. The derive's error
   messages are pinned with trybuild in `libs/0-kernel/derive/tests/ui/`.
+- **Every Postgres start goes through `dev/test-postgres`** (`flusso-test-postgres`, issue #342):
+  `test_postgres::image()` for the run's image, `test_postgres::pinned(Pinned::…)` for a test that
+  needs one version (it prints why), `test_postgres::Container` as the type. The version, the
+  `FLUSSO_TEST_PG_TAG` override and the exceptions are owned by `docs/src/contribute/testing.md`
+  ("Which Postgres"); `review-ab.sh` reads its default `--pg` from the crate's `DEFAULT_TAG`.
+  `testcontainers-modules`' own `Postgres::default()` is `11-alpine`. Guard:
+  `.github/scripts/check-postgres-image.py` (via `test_check_postgres_image.py`, CI's `scripts` job)
+  rejects any import of `testcontainers_modules::postgres` outside that crate (nested, glob, renamed),
+  `Postgres::default`, `with_tag`/`with_name`, and a `GenericImage` naming Postgres or a non-literal
+  image. The crate is a **path-only dev-dependency** of the published crates (`cargo publish` strips
+  it), so it stays outside the layering.
 - `apps/cli/tests/agent_docs_paths.rs` asserts every repo path named in `plugin/**`,
   `.claude/commands/**` and `.claude/skills/**` exists — the moved-file guard for those pointer-heavy trees. Ordinary test,
   caught by the nextest step.
@@ -1691,6 +1694,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | Query client (`flusso-query`) | `sdk/query/src/` (`cursor.rs`: page cursors; `walk.rs`: streaming a walk; `fence.rs`: fenced reads; `position.rs`: reading the source position) |
 | `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]` proc-macros | `sdk/query-derive/src/` — `lib.rs` (entry points + `Attrs`), `doc.rs` (field parsing/validation + the recursive handle tree + `embed_checks`), `fragment.rs` (the location-free shape check), `spec.rs` (baking a level into `&[FieldSpec]`), `resolve.rs` (finding `flusso.toml`); the const-check vocabulary is `sdk/query/src/check.rs`. Plus the `flusso-query-derive` memory note |
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |
+| The Postgres image tests and benches start (default tag, `FLUSSO_TEST_PG_TAG`, `Pinned` exceptions, `Container`) + its guard | `dev/test-postgres/` (`flusso-test-postgres`, `publish = false`, path-only dev-dependency), `.github/scripts/check-postgres-image.py` + `test_check_postgres_image.py`, `docs/src/contribute/testing.md` ("Which Postgres") |
 | Benchmarks: scenario harness, in-process + Docker benches, CI gate + history | `dev/bench/` (`flusso-bench`: `src/main.rs` phases, `scenario.rs` mixes, `scale.rs` presets, `flusso.rs` child process, `scenarios/`), `libs/2-engine/benches/{engine,pipeline}.rs`, `libs/2-adapters/source-postgres/benches/{pgoutput,resolve,postgres,cases}.rs` + `tests/record_pgoutput.rs`, `libs/2-adapters/sink-opensearch/benches/{render,opensearch}.rs`, `.github/workflows/bench.yml`, `.github/scripts/bench-*.{py,sh}`, `.github/scripts/review-ab*.{sh,py}` (`just review-ab`), `docs/src/contribute/benchmarks.md`, ADR 0006 |
 | Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore`; user-facing shipping recipes in `docs/src/deploy/docker.md` |
 | Kubernetes deploy (Helm chart) | `deploy/helm/flusso/` — `Chart.yaml`, `values.yaml`, `templates/`, `README.md` |
