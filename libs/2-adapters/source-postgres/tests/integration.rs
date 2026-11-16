@@ -1670,6 +1670,11 @@ async fn a_small_batch_reuses_its_plan() {
     ] {
         sqlx::query(statement).execute(&pool).await.unwrap();
     }
+    let (track_planning,): (String,) = sqlx::query_as("SHOW pg_stat_statements.track_planning")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(track_planning, "on", "without it every plan count reads 0");
     let spec = SourceSpec::new(BTreeMap::from([(
         index_name("plain"),
         schema_from(&scoped_schema("plain", "true", "true", "true")),
