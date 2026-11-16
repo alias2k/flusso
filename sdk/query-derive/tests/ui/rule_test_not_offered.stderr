@@ -1,0 +1,77 @@
+error[E0599]: no method named `prefix` found for struct `RuleKeyword<P>` in the current scope
+  --> tests/ui/rule_test_not_offered.rs:15:28
+   |
+15 |     let _ = doc.owner_id().prefix("u");
+   |                            ^^^^^^ method not found in `RuleKeyword`
+
+error[E0599]: no method named `keyword_lowercase` found for struct `RuleKeyword<P>` in the current scope
+  --> tests/ui/rule_test_not_offered.rs:16:28
+   |
+16 |     let _ = doc.owner_id().keyword_lowercase();
+   |                            ^^^^^^^^^^^^^^^^^ method not found in `RuleKeyword`
+
+error[E0599]: `RuleKeyword` is not an iterator
+  --> tests/ui/rule_test_not_offered.rs:17:25
+   |
+17 |       let _ = doc.state().lt("m");
+   |                           ^^ `RuleKeyword` is not an iterator
+   |
+  ::: $WORKSPACE/sdk/query/src/rules/handles.rs
+   |
+   | /         pub struct $name<$($kind,)? P = Required> {
+   | |             pub(crate) field: Field,
+   | |             marker: PhantomData<fn() -> ($($kind,)? P,)>,
+   | |         }
+   | |_________- doesn't satisfy `RuleKeyword: Iterator`
+   |
+   = note: the following trait bounds were not satisfied:
+           `RuleKeyword: Iterator`
+           which is required by `&mut RuleKeyword: Iterator`
+
+error[E0599]: `RuleBool` is not an iterator
+  --> tests/ui/rule_test_not_offered.rs:18:30
+   |
+18 |       let _ = doc.auto_renew().gt(false);
+   |                                ^^ `RuleBool` is not an iterator
+   |
+  ::: $WORKSPACE/sdk/query/src/rules/handles.rs
+   |
+   | /         pub struct $name<$($kind,)? P = Required> {
+   | |             pub(crate) field: Field,
+   | |             marker: PhantomData<fn() -> ($($kind,)? P,)>,
+   | |         }
+   | |_________- doesn't satisfy `RuleBool: Iterator`
+   |
+   = note: the following trait bounds were not satisfied:
+           `RuleBool: Iterator`
+           which is required by `&mut RuleBool: Iterator`
+
+error[E0277]: `RuleDate` is not a valid value for a `flusso_query::kind::Date` field
+  --> tests/ui/rule_test_not_offered.rs:19:32
+   |
+19 |     let _ = doc.starts_at().lt(doc.ends_at());
+   |                             -- ^^^^^^^^^^^^^ unsupported field type
+   |                             |
+   |                             required by a bound introduced by this call
+   |
+   = help: the trait `FlussoValue<flusso_query::kind::Date>` is not implemented for `RuleDate`
+   = note: use a built-in leaf type, or a type with `#[derive(FlussoValue)]` of the matching kind
+   = help: the following other types implement trait `FlussoValue<K>`:
+             `&Uuid` implements `FlussoValue<flusso_query::kind::Keyword>`
+             `&str` implements `FlussoValue<flusso_query::kind::Date>`
+             `&str` implements `FlussoValue<flusso_query::kind::Keyword>`
+             `&str` implements `FlussoValue<flusso_query::kind::Text>`
+             `Box<str>` implements `FlussoValue<flusso_query::kind::Date>`
+             `Box<str>` implements `FlussoValue<flusso_query::kind::Keyword>`
+             `Box<str>` implements `FlussoValue<flusso_query::kind::Text>`
+             `Cow<'_, str>` implements `FlussoValue<flusso_query::kind::Date>`
+           and $N others
+note: required by a bound in `RuleDate::<P>::lt`
+  --> $WORKSPACE/sdk/query/src/rules/handles.rs
+   |
+   |         pub fn lt(&self, value: impl FlussoValue<$kind>) -> Condition {
+   |                                      ^^^^^^^^^^^^^^^^^^ required by this bound in `RuleDate::<P>::lt`
+...
+   |     ordered!(kind::Date);
+   |     -------------------- in this macro invocation
+   = note: this error originates in the macro `ordered` (in Nightly builds, run with -Z macro-backtrace for more info)

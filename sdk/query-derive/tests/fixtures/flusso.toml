@@ -59,3 +59,13 @@ enabled = true
 name = "boundary"
 schema = "boundary.schema.yml"
 enabled = true
+
+[[index]]
+name = "contracts"
+schema = "contracts.schema.yml"
+enabled = true
+
+[[index]]
+name = "entry_points"
+schema = "entry_points.schema.yml"
+enabled = true

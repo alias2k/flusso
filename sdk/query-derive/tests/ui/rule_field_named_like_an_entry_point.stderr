@@ -1,0 +1,5 @@
+error: the rule field `query` would generate `query(&cx)`, which a root with a context already has — rename the field, and keep its document key with `#[serde(rename = "query")]`
+  --> tests/ui/rule_field_named_like_an_entry_point.rs:16:5
+   |
+16 |     query: bool,
+   |     ^^^^^

@@ -1,0 +1,48 @@
+error[E0271]: expected `phase` to return `Rules<bool>`, but it returns `Rules<String>`
+  --> tests/ui/read_time_function_of_another_type.rs:12:22
+   |
+12 |     #[flusso(rules = phase)]
+   |                      ^^^^^ expected `Rules<bool>`, found `Rules<String>`
+   |
+   = note: expected struct `Rules<bool>`
+              found struct `Rules<std::string::String>`
+note: required by a bound in `ComputationBuilder::<'_, C>::rules`
+  --> $WORKSPACE/sdk/query/src/rules/computation.rs
+   |
+   |     pub fn rules<T, F>(mut self, key: &str, build: F) -> Self
+   |            ----- required by a bound in this associated function
+...
+   |         F: FnOnce(&C) -> Rules<T>,
+   |                          ^^^^^^^^ required by this bound in `ComputationBuilder::<'_, C>::rules`
+
+error[E0271]: expected `days_left` to return `i64`, but it returns `String`
+  --> tests/ui/read_time_function_of_another_type.rs:14:25
+   |
+14 |     #[flusso(computed = days_left)]
+   |                         ^^^^^^^^^ expected `i64`, found `String`
+   |
+note: required by a bound in `ComputationBuilder::<'_, C>::computed`
+  --> $WORKSPACE/sdk/query/src/rules/computation.rs
+   |
+   |     pub fn computed<I, T, F>(mut self, key: &str, compute: F) -> Self
+   |            -------- required by a bound in this associated function
+...
+   |         F: Fn(&I, &C) -> T + Send + Sync + 'static,
+   |                          ^ required by this bound in `ComputationBuilder::<'_, C>::computed`
+
+error[E0308]: mismatched types
+  --> tests/ui/read_time_function_of_another_type.rs:12:22
+   |
+ 8 | #[derive(serde::Deserialize, FlussoRoot)]
+   |                              ---------- arguments to this function are incorrect
+...
+12 |     #[flusso(rules = phase)]
+   |                      ^^^^^ expected `Rules<bool>`, found `Rules<String>`
+   |
+   = note: expected struct `Rules<bool>`
+              found struct `Rules<std::string::String>`
+note: associated function defined here
+  --> $WORKSPACE/sdk/query/src/rules/field.rs
+   |
+   |     pub fn new(rules: Rules<T>, schema_order: &'static [&'static str]) -> Self {
+   |            ^^^

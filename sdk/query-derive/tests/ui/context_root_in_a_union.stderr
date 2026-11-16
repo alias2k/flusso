@@ -1,0 +1,17 @@
+error[E0271]: type mismatch resolving `<Contract as FlussoRoot>::Context == ()`
+  --> tests/ui/context_root_in_a_union.rs:21:14
+   |
+21 |     Contract(Contract),
+   |              ^^^^^^^^ type mismatch resolving `<Contract as FlussoRoot>::Context == ()`
+   |
+note: expected this to be `()`
+  --> tests/ui/context_root_in_a_union.rs:8:41
+   |
+ 8 | #[flusso(index = "contracts", context = Viewing)]
+   |                                         ^^^^^^^
+   = note: required for `Contract` to implement `CombinedSearchVariant`
+note: required by a bound in `<Anything as FlussoMultiDocument>::decode::variant`
+  --> tests/ui/context_root_in_a_union.rs:21:14
+   |
+21 |     Contract(Contract),
+   |              ^^^^^^^^ required by this bound in `variant`

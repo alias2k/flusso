@@ -1,0 +1,44 @@
+error[E0599]: no method named `title` found for struct `Doc` in the current scope
+  --> tests/ui/rule_handle_missing.rs:16:17
+   |
+ 8 | #[derive(serde::Deserialize, FlussoRoot)]
+   |                              ---------- method `title` not found for this struct
+...
+16 |     let _ = doc.title();
+   |                 ^^^^^ method not found in `Doc`
+
+error[E0599]: no method named `rating` found for struct `Doc` in the current scope
+  --> tests/ui/rule_handle_missing.rs:17:17
+   |
+ 8 | #[derive(serde::Deserialize, FlussoRoot)]
+   |                              ---------- method `rating` not found for this struct
+...
+17 |     let _ = doc.rating();
+   |                 ^^^^^^ method not found in `Doc`
+
+error[E0599]: no method named `code` found for struct `Doc` in the current scope
+  --> tests/ui/rule_handle_missing.rs:18:17
+   |
+ 8 | #[derive(serde::Deserialize, FlussoRoot)]
+   |                              ---------- method `code` not found for this struct
+...
+18 |     let _ = doc.code();
+   |                 ^^^^ method not found in `Doc`
+
+error[E0599]: no method named `labels` found for struct `Doc` in the current scope
+  --> tests/ui/rule_handle_missing.rs:19:17
+   |
+ 8 | #[derive(serde::Deserialize, FlussoRoot)]
+   |                              ---------- method `labels` not found for this struct
+...
+19 |     let _ = doc.labels();
+   |                 ^^^^^^ method not found in `Doc`
+
+error[E0599]: no method named `invoices` found for struct `Doc` in the current scope
+  --> tests/ui/rule_handle_missing.rs:20:17
+   |
+ 8 | #[derive(serde::Deserialize, FlussoRoot)]
+   |                              ---------- method `invoices` not found for this struct
+...
+20 |     let _ = doc.invoices();
+   |                 ^^^^^^^^ method not found in `Doc`

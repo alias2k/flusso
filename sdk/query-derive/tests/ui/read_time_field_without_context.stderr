@@ -1,0 +1,11 @@
+error: a `rules` field is decided from request-time values, and this root names no type for them — add `context = YourType` to the struct's `#[flusso(…)]` (the type the function takes by reference)
+  --> tests/ui/read_time_field_without_context.rs:10:22
+   |
+10 |     #[flusso(rules = is_signed)]
+   |                      ^^^^^^^^^
+
+error: a `computed` field is decided from request-time values, and this root names no type for them — add `context = YourType` to the struct's `#[flusso(…)]` (the type the function takes by reference)
+  --> tests/ui/read_time_field_without_context.rs:12:25
+   |
+12 |     #[flusso(computed = shout)]
+   |                         ^^^^^

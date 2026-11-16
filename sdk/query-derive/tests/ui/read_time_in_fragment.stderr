@@ -1,0 +1,11 @@
+error: `rules` decides a field from the root's context, and a fragment has none: it is embedded wherever a root puts it — declare the field on the `FlussoRoot` struct, and remove `rules` here
+  --> tests/ui/read_time_in_fragment.rs:16:22
+   |
+16 |     #[flusso(rules = flag)]
+   |                      ^^^^
+
+error: `computed` decides a field from the root's context, and a fragment has none: it is embedded wherever a root puts it — declare the field on the `FlussoRoot` struct, and remove `computed` here
+  --> tests/ui/read_time_in_fragment.rs:18:25
+   |
+18 |     #[flusso(computed = text)]
+   |                         ^^^^

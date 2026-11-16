@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+  --> tests/ui/plain_query_in_a_rule.rs:16:17
+   |
+16 |     Rules::when(Contract::owner_id().eq("u1"))
+   |     ----------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Condition`, found `TermQuery`
+   |     |
+   |     arguments to this function are incorrect
+   |
+   = note: expected struct `Condition`
+              found struct `TermQuery`
+note: associated function defined here
+  --> $WORKSPACE/sdk/query/src/rules/list.rs
+   |
+   |     pub fn when(condition: Condition) -> When<T> {
+   |            ^^^^
