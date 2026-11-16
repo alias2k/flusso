@@ -1,0 +1,6 @@
+{
+  "exit": 0,
+  "stdout": "### First pass\n\n| bench | base | pr | change |\n| --- | ---: | ---: | ---: |\n| `a/x` | 1.000 ms | 1.000 ms | +0.0% |\n\nNot compared (measured on one side only): `a/new` (only `pr`).\n\nNo bench slower than 10%.\n",
+  "breaches": null,
+  "summary": "## In-process benches: `pr` vs `base`\n\n### First pass\n\n| bench | base | pr | change |\n| --- | ---: | ---: | ---: |\n| `a/x` | 1.000 ms | 1.000 ms | +0.0% |\n\nNot compared (measured on one side only): `a/new` (only `pr`).\n\nNo bench slower than 10%.\n"
+}

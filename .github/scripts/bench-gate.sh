@@ -23,6 +23,12 @@
 # mean of both passes, is confirmed. Re-runs stop once BENCH_CONFIRM_BUDGET_SECS
 # (default 600, checked before each benchmark) is spent; a bench left
 # unmeasured counts as confirmed, so a broken runner still fails.
+#
+# A bench identical on both sides (the same executable and declared run-time
+# inputs, bench_identity.py) gets no verdict: it is listed as "identical
+# binaries, not compared", never re-measured, and cannot fail the gate. When
+# every bench is identical (a PR that changes no benched code), the gate
+# passes with one line saying so.
 set -euo pipefail
 usage="usage: bench-gate.sh <base-tree> <base-target-dir> <max-slowdown-percent>"
 base_tree=$(cd "${1:?$usage}" && pwd)
@@ -45,7 +51,8 @@ breaches=$(mktemp)
 trap 'rm -f "$breaches"' EXIT
 
 status=0
-python3 "$scripts/bench-compare.py" "$CRITERION_HOME" base pr "$limit" --breaches "$breaches" || status=$?
+python3 "$scripts/bench-compare.py" "$CRITERION_HOME" base pr "$limit" --breaches "$breaches" \
+  --identities "$base_target" "$CARGO_TARGET_DIR" || status=$?
 case $status in
   0) exit 0 ;;
   1) ;;
@@ -73,7 +80,8 @@ while IFS= read -r id <&3; do
 done 3<"$breaches"
 
 status=0
-python3 "$scripts/bench-compare.py" "$CRITERION_HOME" base pr "$limit" --confirm base-confirm pr-confirm || status=$?
+python3 "$scripts/bench-compare.py" "$CRITERION_HOME" base pr "$limit" --confirm base-confirm pr-confirm \
+  --identities "$base_target" "$CARGO_TARGET_DIR" || status=$?
 if [ "$status" -eq 0 ] && [ "$provenance" -ne 0 ]; then
   status=1
 fi

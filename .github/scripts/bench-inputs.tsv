@@ -1,0 +1,10 @@
+# Run-time inputs of the in-process benches: what a bench reads when it runs,
+# not what is compiled into it (`include_bytes!`/`include_str!` are part of the
+# executable already). One `<bench target>\t<input>` line each, where <input>
+# is a file or directory relative to the repository root, or `env:NAME`.
+#
+# bench-in-process.sh hashes each into the bench's identity; the PR gate gives
+# no verdict to a bench whose identity is the same on both sides. A bench that
+# gains a run-time read must be declared here, or a changed input under an
+# unchanged binary would be skipped: test_bench_gate.py's RunTimeInputs scans
+# the bench sources for it. Today no in-process bench reads anything at run time.

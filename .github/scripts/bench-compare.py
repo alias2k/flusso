@@ -22,6 +22,15 @@ listed but not gated. Exits 1 when any bench's candidate median is more than
                     (a PR base that has no in-process benches yet). Without
                     it, that is an error, exit 2: a side that measured nothing
                     must not pass the gate.
+--identities B P    the base and PR target dirs: a bench whose bench target
+                    is identical on both sides (bench_identity.py: the same
+                    executable and declared run-time inputs) gets no verdict,
+                    shown as `identical binaries, not compared`, measured or
+                    not. With every bench target present on both sides
+                    identical and nothing compared, the gate passes (a
+                    target on one side only is listed as one-sided). A
+                    bench both sides list under a differing target but
+                    only one side measured is an error, exit 2.
 
 --repeats N         the review table (review-ab.sh). Each side ran N times,
                     saved as `<baseline>-1`…`<baseline>-N` and
@@ -49,6 +58,9 @@ import json
 import os
 import pathlib
 import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import bench_identity  # noqa: E402
 
 
 def median(path: pathlib.Path) -> float:
@@ -182,6 +194,18 @@ def review(
     return 1 if slower else 0
 
 
+def one_sided_line(one_sided: list[tuple[str, str]]) -> str:
+    return "Not compared (measured on one side only): " + ", ".join(f"`{i}` (only `{s}`)" for i, s in one_sided) + "."
+
+
+def identical_rows(skipped: dict[str, tuple[float | None, float | None]]) -> list[str]:
+    """Table rows for benches identical on both sides: their medians when measured, no verdict."""
+    def shown(ns: float | None) -> str:
+        return "—" if ns is None else fmt(ns)
+
+    return [f"| `{i}` | {shown(b)} | {shown(c)} | identical binaries, not compared |" for i, (b, c) in sorted(skipped.items())]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(usage=__doc__)
     parser.add_argument("root", type=pathlib.Path)
@@ -192,6 +216,7 @@ def main() -> int:
     parser.add_argument("--confirm", nargs=2, metavar=("RE_BASE", "RE_CAND"))
     parser.add_argument("--allow-empty", action="store_true")
     parser.add_argument("--repeats", type=int)
+    parser.add_argument("--identities", nargs=2, type=pathlib.Path, metavar=("BASE_TARGET", "PR_TARGET"))
     args = parser.parse_args()
     root, base, cand, limit = args.root, args.base, args.cand, args.limit
     if args.repeats is not None:
@@ -200,15 +225,42 @@ def main() -> int:
     bench_dirs = sorted(
         {p.parent.parent for side in (base, cand) for p in root.rglob(f"{side}/estimates.json")}
     )
+    same = bench_identity.compare(*args.identities, base, cand) if args.identities else None
+    skipped = {i: (None, None) for i in same.ids} if same else {}
     rows, one_sided = [], []
     for bench_dir in bench_dirs:
         measured = pair(bench_dir, base, cand)
+        if same and (rid := bench_id(root, bench_dir, cand if (bench_dir / cand).is_dir() else base)) in same.ids:
+            skipped[rid] = measured or (None, None)
+            continue
         if measured is None:
             side = base if (bench_dir / base / "estimates.json").is_file() else cand
             one_sided.append((bench_id(root, bench_dir, side), side))
             continue
         b, c = measured
         rows.append((bench_id(root, bench_dir, cand), bench_dir, b, c, change(b, c)))
+    unjudged = sorted(i for i, _ in one_sided if same and i in same.must_compare)
+    if unjudged:
+        print(
+            "::error::measured on one side only, though both sides' executables list it and their bytes differ: "
+            + ", ".join(f"`{i}`" for i in unjudged)
+            + ". No median to judge it against; re-run the job."
+        )
+        return 2
+    if not rows and skipped and same.every:
+        lines = [f"| bench | {base} | {cand} | change |", "| --- | ---: | ---: | ---: |", *identical_rows(skipped)]
+        report = ["### First pass", "", *lines, ""]
+        if one_sided:
+            report += [one_sided_line(one_sided), ""]
+        text = "\n".join(
+            [*report, "No bench compared: every bench present on both sides has identical binaries and run-time inputs."]
+        )
+        print(text)
+        summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary:
+            with open(summary, "a", encoding="utf-8") as fh:
+                fh.write(f"## In-process benches: `{cand}` vs `{base}`\n\n{text}\n")
+        return 0
     if not rows:
         if args.allow_empty:
             print(f"::warning::nothing to compare: no bench has both `{base}` and `{cand}` under {root}")
@@ -221,9 +273,10 @@ def main() -> int:
     for rid, _, b, c, ch in rows:
         flag = " ⚠️" if ch > limit else ""
         lines.append(f"| `{rid}` | {fmt(b)} | {fmt(c)} | {ch:+.1f}%{flag} |")
+    lines += identical_rows(skipped)
     report = ["### First pass", "", *lines, ""]
     if one_sided:
-        report.append("Not compared (measured on one side only): " + ", ".join(f"`{i}` (only `{s}`)" for i, s in one_sided) + ".")
+        report.append(one_sided_line(one_sided))
         report.append("")
 
     if args.breaches is not None:

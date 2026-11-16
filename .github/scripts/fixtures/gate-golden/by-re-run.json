@@ -1,0 +1,6 @@
+{
+  "exit": 1,
+  "stdout": "### First pass\n\n| bench | base | pr | change |\n| --- | ---: | ---: | ---: |\n| `a/x` | 1.000 ms | 1.150 ms | +15.0% ⚠️ |\n\n### Re-run of the breaches\n\n| bench | first pass | base-confirm | pr-confirm | re-run | mean | verdict |\n| --- | ---: | ---: | ---: | ---: | ---: | --- |\n| `a/x` | +15.0% | 1.000 ms | 1.200 ms | +20.0% | +17.5% | **confirmed** by the re-run ⚠️ |\n\n**1 bench(es) confirmed slower than 10%** (see the re-run table) — regression.\n",
+  "breaches": null,
+  "summary": "## In-process benches: `pr` vs `base`\n\n### First pass\n\n| bench | base | pr | change |\n| --- | ---: | ---: | ---: |\n| `a/x` | 1.000 ms | 1.150 ms | +15.0% ⚠️ |\n\n### Re-run of the breaches\n\n| bench | first pass | base-confirm | pr-confirm | re-run | mean | verdict |\n| --- | ---: | ---: | ---: | ---: | ---: | --- |\n| `a/x` | +15.0% | 1.000 ms | 1.200 ms | +20.0% | +17.5% | **confirmed** by the re-run ⚠️ |\n\n**1 bench(es) confirmed slower than 10%** (see the re-run table) — regression.\n"
+}
