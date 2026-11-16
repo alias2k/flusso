@@ -906,7 +906,8 @@ proptest::proptest! {
             float8_text(value),
         );
         let map = body_text(&doc, &fields);
-        proptest::prop_assert_eq!(&map["raw"], &kernel::untyped_number(value));
+        let number: serde_json::Number = serde_json::from_str(&float8_text(value)).unwrap();
+        proptest::prop_assert_eq!(&map["raw"], &kernel::untyped_json_number(&number));
         for name in ["ratio", "plain", "raw"] {
             proptest::prop_assert_eq!(indexed(&map[name]).to_bits(), value.to_bits(), "{} {}", name, doc);
         }
@@ -953,4 +954,17 @@ fn significant_digits_start_at_the_first_non_zero_digit() {
     ] {
         assert_eq!(super::significant_digits(text), digits, "{text}");
     }
+}
+
+/// A double whose shortest text is a whole number (`float8out` writes
+/// `-585575545876075`) reads with no declared type as the integer it is, as
+/// on 0.17, and is written as that integer.
+#[test]
+fn an_untyped_whole_number_double_reads_as_an_integer() {
+    let value = f64::from_bits(14_051_411_842_135_585_624);
+    assert_eq!(float8_text(value), "-585575545876075");
+    let fields = vec![column_field("raw", FlussoType::Json)];
+    let map = body_text(r#"{"raw": -585575545876075}"#, &fields);
+    assert_eq!(map["raw"], GenericValue::BigInt(-585_575_545_876_075));
+    assert_same_double(indexed(&map["raw"]), value, "raw");
 }
