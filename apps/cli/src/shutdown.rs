@@ -9,14 +9,15 @@
 //!   acknowledges its lane, the final position is confirmed to the source and
 //!   the replication stream closed. Then the HTTP surfaces close and telemetry
 //!   is flushed. The whole of it runs under [`within`]: a deadline, and a
-//!   second signal that ends it at once. At-least-once delivery makes giving
-//!   up safe: whatever was not acknowledged is read again on the next start.
+//!   forced exit ([`forced`]: the same sender twice within 500 ms, or any
+//!   three signals within 1 s). At-least-once delivery makes giving up safe:
+//!   whatever was not acknowledged is read again on the next start.
 //!
 //! ```text
 //! first signal ─▶ drain the pipeline ─▶ close HTTP ─▶ flush telemetry ─▶ exit 0
 //!                 └──────────── at most --shutdown-timeout-secs ─────┘
 //!                     deadline passed ─▶ log the step and the sinks ─▶ exit 1
-//!                     second signal   ─▶ exit 128 + n, at once
+//!                     forced          ─▶ exit 128 + n, at once
 //! ```
 
 use std::collections::VecDeque;
@@ -97,6 +98,7 @@ impl Drop for Signals {
     }
 }
 
+#[cfg(unix)]
 /// Whether flusso should catch `SIGHUP` as a stop. Not when it started with
 /// `SIGHUP` ignored (`nohup`, `trap '' HUP`): catching it would replace the
 /// ignore, and a run meant to outlive its terminal would stop with it. Linux
@@ -110,6 +112,7 @@ pub(crate) fn catch_hangup() -> bool {
     }
 }
 
+#[cfg(unix)]
 /// Whether a `/proc/<pid>/status` text lists `SIGHUP` (signal 1, the lowest
 /// bit of the hex `SigIgn` mask) as ignored.
 fn hangup_ignored(status: &str) -> bool {
@@ -158,7 +161,32 @@ impl Signals {
                 .context("starting the signal thread")?;
             Ok(Self { received, handle })
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            use anyhow::Context;
+            use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_shutdown};
+
+            let mut interrupt = ctrl_c().context("catching Ctrl-C")?;
+            let mut interrupt_break = ctrl_break().context("catching Ctrl-Break")?;
+            let mut close = ctrl_close().context("catching the console closing")?;
+            let mut shutdown = ctrl_shutdown().context("catching the system shutting down")?;
+            tokio::spawn(async move {
+                loop {
+                    let signal = tokio::select! {
+                        Some(()) = interrupt.recv() => StopSignal::Interrupt,
+                        Some(()) = interrupt_break.recv() => StopSignal::Interrupt,
+                        Some(()) = close.recv() => StopSignal::Hangup,
+                        Some(()) = shutdown.recv() => StopSignal::Terminate,
+                        else => return,
+                    };
+                    if sent.send((signal, None)).is_err() {
+                        return;
+                    }
+                }
+            });
+            Ok(Self { received })
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             tokio::spawn(async move {
                 while tokio::signal::ctrl_c().await.is_ok() {
@@ -338,6 +366,7 @@ pub(crate) async fn side_step(
 pub(crate) type Sender = Option<i64>;
 
 /// The [`Sender`] of a signal the kernel raised.
+#[cfg(unix)]
 pub(crate) const KERNEL: i64 = -1;
 
 /// How close two signals from one sender must be to force the exit: a

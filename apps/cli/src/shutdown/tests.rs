@@ -120,6 +120,7 @@ async fn a_side_step_takes_at_most_its_own_bound() {
     assert_eq!(started.elapsed(), super::SIDE_STEP);
 }
 
+#[cfg(unix)]
 #[test]
 fn hangup_is_left_alone_when_the_process_started_with_it_ignored() {
     let status = |mask: &str| {
@@ -172,7 +173,7 @@ mod repeats {
             .collect()
     }
 
-    const KERNEL: Option<i64> = Some(super::super::KERNEL);
+    const KERNEL: Option<i64> = Some(-1);
     const RUNNER: Option<i64> = Some(4242);
     const UNKNOWN: Option<i64> = None;
     use Verdict::{Forced, Repeat};
