@@ -1336,8 +1336,8 @@ when `jsonb` sorted the keys of a >50-field document), and is **fallible**
 declared `decimal` reads differently from a `serde_json::Value` walk** (issue #327): a column, array
 element, `sum`/`min`/`max`, `ids` key or `map` value of `decimal` reads its raw number text
 (`&RawValue`) into `GenericValue::BigDecimal` (the exact text, appended last to the enum), never
-through `f64`; every other value, untyped numbers included, reads as `main` did (`json_to_generic`,
-`float`), `NaN`/`Infinity` stay strings, and reading goes on past a failure so a malformed document
+through `f64`; a declared `float` reads its raw text too (`single`), untyped numbers go through
+`kernel::untyped_number` (issue #366), every other value reads as `main` did, `NaN`/`Infinity` stay strings, and reading goes on past a failure so a malformed document
 is `Malformed` wherever it is and the failure reported is the first in declaration order; a raw value
 read again may open no more levels than the document had left (`Untyped.remaining`), and skipped
 values are checked (`Skip`). Guard: `value/differential.rs`, 7605 cases (every field kind but
@@ -1404,8 +1404,8 @@ wrapped as `fn __flusso(root) { … }` so `this` can be bound — columns on lin
 fresh copy per call) and `root` (read-only, shared), all before any output is written, so no script
 sees another's output; then outputs are written and `emit: false` fields stripped. A failure becomes
 `Document::Failed` (see the engine invariant). A declared `decimal` enters Rhai as the nearest
-`Decimal` (about 28 significant digits, at most 28 after the point); exponent text and a zero read as `main` read them
-through `f64`; past the range it is a string of the exact text (`value.rs`'s `declared_decimal`,
+`Decimal` (about 28 significant digits, at most 28 after the point); exponent text as the `Decimal` nearest the `f64`
+it names (`kernel::f64_to_nearest_decimal`, issue #366), a zero unsigned; past the range it is a string of the exact text (`value.rs`'s `declared_decimal`,
 `#[cold]`: it slows `to_dynamic` otherwise). A `decimal` result is written exactly (`BigDecimal`, a
 zero unsigned), a string returned to it fails with `main`'s message, and a decimal's `to_float()` is
 the sandbox's own, parsed from its text, placed in the standard package's module (`sandbox.rs`; a
@@ -1878,13 +1878,25 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 - **Numbers are read and written exactly (issue #366).** serde_json's default float parser is not
   correctly rounded (about one `float8` in three read one ulp off), so `float_roundtrip` is on where
   flusso reads numbers it keeps: `source-postgres`, the CLI (`script run --input`) and `flusso-query`
-  (`_source`, cursor sort values; unifies into the consumer's build, a deliberate choice). A declared
-  `float` reads its raw text as `f32` (`value.rs`'s `single`), since a correct `f64` then `as f32` rounds
-  twice (`7.038531e-26`). `f64` ↔ `Decimal` goes through `kernel::f64_to_decimal`/`decimal_to_f64`
-  (shortest text / correctly rounded, with an exact `m / 10^s` fast path), never `Decimal::try_from(f64)`
-  or `to_f64`, which are lossy. Guards: `value::tests`' `a_double_is_read_as_the_value_postgres_wrote`,
-  `a_float_is_read_as_the_single_postgres_wrote`, `every_float_postgres_writes_is_read_as_itself`,
-  `kernel::common::float` proptests, `pipeline`'s `a_float8_is_indexed_as_the_double_postgres_holds`.
+  (`_source`, cursor sort values; always on, so it unifies into the consumer's build: a deliberate choice,
+  cost stated in its README). A declared `float` reads its raw text (`value.rs`'s `single`) as Postgres's
+  `::float4` would: up to 9 significant digits or 18+ parsed as `f32`, 10–17 (a `float8`'s shortest text)
+  through the correct `f64` then `as f32` (a correct `f64` then `as f32` on a `float4`'s text rounds twice:
+  `7.038531e-26`); past `f32` it is infinite (written `null`, as 0.17). A number with no declared type is
+  `kernel::untyped_number`, the one rule for the reader and `--input`: the exact `Decimal` of its shortest
+  digits, below 1 with more digits than `Decimal` holds the `BigDecimal` of them (the sink writes them as
+  they are, a script reads the nearest `Decimal`), past ±7.9e28 0.17's string (a number there would be
+  refused by a dynamically mapped `float` key), so a script sees one kind; a whole number past `i64` is the
+  exact `Decimal`. `f64` ↔ `Decimal` goes through `kernel::f64_to_decimal`/`f64_to_nearest_decimal`/
+  `decimal_to_f64` (shortest text / correctly rounded, with an exact `m / 10^s` fast path), never
+  `Decimal::try_from(f64)` or `to_f64`, which are lossy. Guards: `value::tests`'
+  `a_double_is_read_as_the_value_postgres_wrote`, `a_float_is_read_as_the_single_postgres_wrote`,
+  `a_float_reads_as_postgres_casts_to_float4`, `every_float_postgres_writes_is_read_as_itself`, the
+  `kernel::common::float` proptests, `script`'s `tests/untyped_numbers.rs` and
+  `a_decimal_with_an_exponent_keeps_the_doubles_digits`, `flusso-query`'s
+  `a_double_is_read_as_opensearch_wrote_it` (fails without the feature only when the crate is built alone),
+  and `pipeline`'s `a_float8_is_indexed_as_the_double_postgres_holds` and
+  `an_untyped_number_lands_where_0_17_s_did` (a fresh index and one 0.17's form mapped).
 - Sources/sinks are `#[async_trait]` trait objects; mock them in tests as the engine tests do.
 - **Every `reqwest` client flusso builds pins its trust roots.** reqwest 0.13 verifies against the
   OS trust store by default; the OpenSearch sink, `flusso-query` and the CLI's admin client each

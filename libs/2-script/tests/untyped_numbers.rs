@@ -131,7 +131,11 @@ fn an_untyped_number_is_a_decimal_to_a_script_at_every_magnitude() {
             Some(&GenericValue::Bool(held > Decimal::ZERO)),
             "{value:e}"
         );
-        assert_eq!(doc.get("same"), Some(&GenericValue::Bool(true)), "{value:e}");
+        assert_eq!(
+            doc.get("same"),
+            Some(&GenericValue::Bool(true)),
+            "{value:e}"
+        );
     }
 }
 

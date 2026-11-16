@@ -913,3 +913,44 @@ proptest::proptest! {
         proptest::prop_assert_eq!(&map["single"], &GenericValue::Float(single));
     }
 }
+
+/// A declared `float` is what Postgres's own `::float4` cast gives (issue
+/// #366's review): a `float8`'s shortest text (10 to 17 digits) rounds its
+/// double, so at an exact `f32` midpoint ties go to even as
+/// `1.000000059604644775390625::float8::float4` does; a `numeric` past 17 digits
+/// parses its text, as `numeric::float4` does. Past `f32`'s range it is
+/// infinite (written as `null`, as on 0.17); past `f64`'s the read fails.
+#[test]
+fn a_float_reads_as_postgres_casts_to_float4() {
+    let fields = vec![column_field("ratio", FlussoType::Float)];
+    for (text, want) in [
+        ("1.0000000596046448", 1.0_f32),
+        ("7.038531e-26", 7.038_531e-26),
+        ("1.000000059604644775390625000001", 1.000_000_1),
+        ("1.000000059604644775390624999999", 1.0),
+        ("16777217", 16_777_216.0),
+        ("1e39", f32::INFINITY),
+        ("-1e39", f32::NEG_INFINITY),
+    ] {
+        let map = body_text(&format!(r#"{{"ratio": {text}}}"#), &fields);
+        assert_eq!(map["ratio"], GenericValue::Float(want), "{text}");
+    }
+    match coerce_document(br#"{"ratio": 1e400}"#, &fields, &DocumentPlan::new(&fields)) {
+        Err(DocumentError::Malformed(_)) => {}
+        other => panic!("1e400: {other:?}"),
+    }
+}
+
+#[test]
+fn significant_digits_start_at_the_first_non_zero_digit() {
+    for (text, digits) in [
+        ("0", 0),
+        ("0.000123", 3),
+        ("-1.0000000596046448", 17),
+        ("1.5e-30", 2),
+        ("120", 3),
+        ("1000000000000000000", 19),
+    ] {
+        assert_eq!(super::significant_digits(text), digits, "{text}");
+    }
+}

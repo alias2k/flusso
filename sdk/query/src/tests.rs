@@ -2572,6 +2572,41 @@ mod cursor {
         Ok(())
     }
 
+    /// A double OpenSearch wrote is read as that double (issue #366): in
+    /// `_source`, as a hit's sort value, and from a cursor token's
+    /// `search_after`. `906404.2095968979` is one serde_json's default parser
+    /// reads one unit in the last place off; `float_roundtrip`, which this
+    /// crate turns on, reads it exactly. Built alone (`cargo nextest run -p
+    /// flusso-query`) the test fails without the feature; a workspace build
+    /// also gets it from `source-postgres`.
+    #[test]
+    fn a_double_is_read_as_opensearch_wrote_it() -> Result {
+        #[derive(serde::Deserialize)]
+        struct Priced {
+            price: f64,
+        }
+        let exact = 906_404.209_596_897_9_f64;
+        let text = r#"{"took":1,"timed_out":false,
+            "_shards":{"total":1,"successful":1,"skipped":0,"failed":0},
+            "hits":{"total":{"value":1,"relation":"eq"},"max_score":null,"hits":[
+              {"_index":"x","_id":"1","_score":null,"_source":{"price":906404.2095968979},
+               "sort":[906404.2095968979,"1"]}]}}"#;
+        let response: Value = serde_json::from_str(text)?;
+        let page = SearchResponse::<Priced>::from_value(response.clone())?;
+        let hit = page.hits.first().unwrap();
+        assert_eq!(hit.source.price.to_bits(), exact.to_bits());
+        assert_eq!(
+            hit.sort.first().and_then(Value::as_f64).map(f64::to_bits),
+            Some(exact.to_bits())
+        );
+        let after = next_after(&response, 1).unwrap();
+        assert_eq!(serde_json::to_string(&after)?, r#"[906404.2095968979,"1"]"#);
+
+        let cursor = PageCursor::new(None, vec![json!(exact), json!("1")], 7);
+        assert_eq!(cursor.to_string().parse::<PageCursor>()?, cursor);
+        Ok(())
+    }
+
     #[test]
     fn a_cursor_serializes_as_a_plain_string() -> Result {
         let cursor = PageCursor::new(Some(pin("pit")), vec![json!(1)], 7);

@@ -1016,25 +1016,53 @@ fn decimal(raw: &str, at: &At<'_>) -> Result<GenericValue, String> {
     }
 }
 
-/// A declared `float` from `raw`, the JSON text Postgres wrote: a number is the
-/// `f32` nearest its text. Read through a correctly rounded `f64` first, a few
-/// `float4` values round twice, to the wrong `f32` (`7.038531e-26`, issue #366). A number past
-/// `f64`'s range fails the read, and any other value reads as it did before.
-/// `Err` is a value nested past the depth limit, or out of range.
+/// A declared `float` from `raw`, the JSON text Postgres wrote: a number is
+/// what Postgres's own cast to `float4` gives, read by how many significant
+/// digits the text has (issue #366):
+///
+/// - up to 9, the `f32` nearest the text: a `float4` column's own value (a
+///   correctly rounded `f64` then `as f32` rounds twice: `7.038531e-26`), and
+///   `numeric::float4`, which parses the text;
+/// - 10 to 17, the `f64` the text names, then `as f32`: a `float8` column's
+///   shortest text, and `float8::float4`, which rounds the double;
+/// - 18 or more, the `f32` nearest the text: only a `numeric` writes that many.
+///
+/// A number past `f32`'s range and within `f64`'s is infinite, which the sink
+/// writes as `null`, as 0.17 did (Postgres's cast would refuse it; refusing it
+/// here would fail documents 0.17 indexed). Past `f64`'s range the read fails,
+/// as 0.17's did. Any other value reads as before. `Err` is a value nested past
+/// the depth limit, or out of range.
 fn single(raw: &str, at: &At<'_>) -> Result<GenericValue, String> {
     match raw.as_bytes().first() {
-        Some(b'-' | b'0'..=b'9') => match raw.parse::<f64>() {
-            Ok(wide) if wide.is_infinite() => Err(format!("number out of range: {raw}")),
-            _ => raw
-                .parse::<f32>()
+        Some(b'-' | b'0'..=b'9') => {
+            let wide: f64 = raw.parse().map_err(|error| format!("{error}"))?;
+            if wide.is_infinite() {
+                return Err(format!("number out of range: {raw}"));
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            if (10..=17).contains(&significant_digits(raw)) {
+                return Ok(GenericValue::Float(wide as f32));
+            }
+            raw.parse::<f32>()
                 .map(GenericValue::Float)
-                .map_err(|error| error.to_string()),
-        },
+                .map_err(|error| error.to_string())
+        }
         Some(b'{' | b'[') => untyped_raw(raw, at),
         _ => serde_json::from_str(raw)
             .map(|json| coerce_scalar(json, &FlussoType::Float))
             .map_err(|error| error.to_string()),
     }
+}
+
+/// The significant digits of `number`, a JSON number: those of its mantissa
+/// from the first non-zero one.
+fn significant_digits(number: &str) -> usize {
+    number
+        .bytes()
+        .take_while(|b| b | 0x20 != b'e')
+        .filter(u8::is_ascii_digit)
+        .skip_while(|&b| b == b'0')
+        .count()
 }
 
 /// Coerce each non-null element to `ty`, dropping the nulls.
@@ -1185,8 +1213,6 @@ fn coerce_decimal(json: serde_json::Value) -> GenericValue {
     };
     parsed.map_or_else(|| json_to_generic(json), GenericValue::Decimal)
 }
-
-
 
 #[cfg(test)]
 mod tests;

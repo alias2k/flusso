@@ -30,6 +30,7 @@ Every document value arrives as a Rhai value; the full mapping is in [Values in 
 | an integer column | `i64` | `type_of(x) == "i64"` |
 | `float`, `double` | `f64` | `"f64"` |
 | `decimal` | `decimal` (rounded to what `Decimal` holds: about 28 significant digits, at most 28 after the point); a string past ±7.9 × 10^28 | `"decimal"`, or `"string"` |
+| a number in a `json` field or an untyped `map` | `i64` for a whole number, else `decimal` at every magnitude (a string past ±7.9 × 10^28) | `"decimal"` |
 | text, `uuid` | string | `"string"` |
 | `date`, `timestamp` (and a `time` column) | `date`, `timestamp`, `time`; see [Dates in a script](dates.md) | `"date"`, `"timestamp"`, `"time"` |
 | a group, a to-one join, a `map` | object map | `"map"` |
@@ -65,6 +66,7 @@ sku.to_upper()
 - Integer division truncates: `7 / 2` is `3`. Write `7.0 / 2` for `3.5`.
 - `decimal` stays exact, and **does not mix with floats**: `price * 1.22` fails with `Function not found: * (decimal, f64)`. Use a decimal literal, `price * parse_decimal("1.22")`, or leave exactness behind with `price.to_float() * 1.22`.
 - A decimal does mix with integers: `price + 1`, `price > 20`.
+- A fractional number in a `json` field is a `decimal` too, however small or large, so the same rule holds for it: `this.meta.weight * parse_decimal("2")`, `this.meta.weight.round(2)`. A value with more than 28 digits after the point (`3.141592653589793e-14`) is rounded to 28 places; one too small for that is `0`.
 - Useful: `round(digits)` on a decimal, `round()`/`floor()`/`ceiling()` on a float, `abs()`, `sqrt()`, `min(a, b)`, `max(a, b)`, `parse_int(s)`, `parse_float(s)`.
 
 ## Null and missing

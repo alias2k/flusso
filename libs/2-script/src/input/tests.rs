@@ -128,7 +128,10 @@ fn json_with_no_declared_type_reads_numbers_as_the_builder_does() {
         doc["big"],
         GenericValue::Decimal("18446744073709551615".parse().unwrap())
     );
-    assert_eq!(doc["tiny"], kernel::untyped_number(3.141_592_653_589_793e-14));
+    assert_eq!(
+        doc["tiny"],
+        kernel::untyped_number(3.141_592_653_589_793e-14)
+    );
     assert!(matches!(doc["tiny"], GenericValue::BigDecimal(_)));
     assert!(matches!(doc["huge"], GenericValue::String(_)));
 }
