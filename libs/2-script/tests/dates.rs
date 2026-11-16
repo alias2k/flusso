@@ -1379,7 +1379,7 @@ fn parse_timestamp_reads_postgres_text_offsets() {
 }
 
 /// The "Write instead" cells of the upgrade page's table of script changes, read from the page
-/// itself: every complete snippet in them (no `…`, not a bare `.method()`), with each row's
+/// itself: every complete snippet in them (no `…`, not a bare `.method()` or word), with each row's
 /// snippets as written.
 fn upgrade_replacements() -> Vec<(String, Vec<String>)> {
     let page = include_str!("../../../docs/src/operate/upgrade-to-0-18.md");
@@ -1396,7 +1396,11 @@ fn upgrade_replacements() -> Vec<(String, Vec<String>)> {
         }
         let snippets = code_spans(&cells[2])
             .into_iter()
-            .filter(|s| !s.contains('…') && !s.starts_with('.'))
+            .filter(|s| {
+                !s.contains('…')
+                    && !s.starts_with('.')
+                    && !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
             .collect();
         rows.push((cells[0].clone(), snippets));
     }
@@ -1515,24 +1519,42 @@ fn a_named_zone_reaches_as_far_as_a_fixed_offset() {
         assert_eq!(int(&format!("{start}.end_of_year().year")), 9999, "{zone}");
         assert_eq!(int(&format!("{start}.start_of_month().day")), 1, "{zone}");
         assert_eq!(
-            int(&format!(r#"timestamp(10000, 7, 1, 0, 0, 0).at_zone("{zone}").in_zone("UTC").hour"#)),
+            int(&format!(
+                r#"timestamp(10000, 7, 1, 0, 0, 0).at_zone("{zone}").in_zone("UTC").hour"#
+            )),
             23,
             "{zone}: the last offset holds past the database"
         );
         assert_eq!(
-            int(&format!(r#"timestamp(9999, 12, 31, 23, 0, 0).at_zone("{zone}").add_hours(2).year"#)),
+            int(&format!(
+                r#"timestamp(9999, 12, 31, 23, 0, 0).at_zone("{zone}").add_hours(2).year"#
+            )),
             10000,
             "{zone}"
         );
         for year in [-9999, -50000] {
             let far = year;
-            let past = format!(r#"timestamp({year}, 6, 15, 12, 0, 0).at_zone("UTC").in_zone("{zone}")"#);
+            let past =
+                format!(r#"timestamp({year}, 6, 15, 12, 0, 0).at_zone("UTC").in_zone("{zone}")"#);
             assert!(run("long", &format!("{past}.year")).is_ok(), "{zone} {far}");
-            assert!(run("keyword", &format!("{past}.to_string()")).is_ok(), "{zone} {far}");
-            assert!(run("keyword", &format!("{past}.start_of_year().to_string()")).is_ok(), "{zone} {far}");
-            assert!(run("keyword", &format!("{past}.add_hours(-48).to_string()")).is_ok(), "{zone} {far}");
             assert!(
-                run("keyword", &format!(r#"timestamp(-9999, 1, 1, 0, 0, 0).at_zone("{zone}").to_string()"#)).is_ok(),
+                run("keyword", &format!("{past}.to_string()")).is_ok(),
+                "{zone} {far}"
+            );
+            assert!(
+                run("keyword", &format!("{past}.start_of_year().to_string()")).is_ok(),
+                "{zone} {far}"
+            );
+            assert!(
+                run("keyword", &format!("{past}.add_hours(-48).to_string()")).is_ok(),
+                "{zone} {far}"
+            );
+            assert!(
+                run(
+                    "keyword",
+                    &format!(r#"timestamp(-9999, 1, 1, 0, 0, 0).at_zone("{zone}").to_string()"#)
+                )
+                .is_ok(),
                 "{zone}"
             );
         }

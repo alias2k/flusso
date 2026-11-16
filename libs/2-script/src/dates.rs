@@ -409,14 +409,21 @@ impl fmt::Display for Time {
 
 // ── Zone ─────────────────────────────────────────────────────────────────────
 
-/// A UTC instant as jiff spells it.
-fn jiff_instant(utc: NaiveDateTime) -> Option<jiff::Timestamp> {
+/// The instant jiff is asked about for the UTC instant `utc`. jiff's range ends near ±9999,
+/// chrono's near ±262,000 years: past jiff's edge the instant is clamped to it, where the
+/// database records no more changes, so the offset there holds beyond it, for every year chrono
+/// reaches. A leap second (nanoseconds past a billion) is folded into the second before.
+fn jiff_instant(utc: NaiveDateTime) -> jiff::Timestamp {
     let utc = utc.and_utc();
-    let nanos = i32::try_from(utc.timestamp_subsec_nanos()).ok()?;
-    jiff::Timestamp::new(utc.timestamp(), nanos).ok()
+    let nanos = i32::try_from(utc.timestamp_subsec_nanos().min(999_999_999)).unwrap_or(0);
+    jiff::Timestamp::new(utc.timestamp(), nanos).unwrap_or(if utc.timestamp() < 0 {
+        jiff::Timestamp::MIN
+    } else {
+        jiff::Timestamp::MAX
+    })
 }
 
-/// A wall clock as jiff spells it.
+/// A wall clock as jiff spells it; `None` past jiff's years (±9999), a leap second folded.
 fn jiff_civil(wall: NaiveDateTime) -> Option<jiff::civil::DateTime> {
     let part = |n: u32| i8::try_from(n).ok();
     jiff::civil::DateTime::new(
@@ -426,7 +433,7 @@ fn jiff_civil(wall: NaiveDateTime) -> Option<jiff::civil::DateTime> {
         part(wall.hour())?,
         part(wall.minute())?,
         part(wall.second())?,
-        i32::try_from(wall.nanosecond()).ok()?,
+        i32::try_from(wall.nanosecond().min(999_999_999)).ok()?,
     )
     .ok()
 }
@@ -457,9 +464,7 @@ impl Zone {
         match self {
             Self::Utc => Ok(Utc.fix()),
             Self::Fixed(offset) => Ok(*offset),
-            Self::Named(tz) => {
-                fixed(tz.to_offset(jiff_instant(utc).ok_or_else(timestamp_out_of_range)?))
-            }
+            Self::Named(tz) => fixed(tz.to_offset(jiff_instant(utc))),
         }
     }
 
@@ -490,7 +495,17 @@ impl Zone {
                 }),
             });
         };
-        let civil = jiff_civil(wall).ok_or_else(timestamp_out_of_range)?;
+        let Some(civil) = jiff_civil(wall) else {
+            // Past jiff's years no offset changes, so the wall clock is read at the edge's offset.
+            let offset = self.offset_at(wall)?;
+            return Ok(Timestamp {
+                wall,
+                zone: Some(Zoned {
+                    zone: self.clone(),
+                    offset,
+                }),
+            });
+        };
         let offset = match tz.to_ambiguous_timestamp(civil).offset() {
             AmbiguousOffset::Unambiguous { offset }
             | AmbiguousOffset::Fold { before: offset, .. } => fixed(offset)?,
@@ -512,10 +527,13 @@ impl Zone {
 
     /// The zone's abbreviation at `utc` (`CET`), for a pattern's `%Z`.
     fn abbreviation(&self, utc: NaiveDateTime, offset: FixedOffset) -> String {
-        match (self, jiff_instant(utc)) {
-            (Self::Utc, _) => "UTC".to_owned(),
-            (Self::Named(tz), Some(at)) => tz.to_offset_info(at).abbreviation().to_owned(),
-            _ => offset.to_string(),
+        match self {
+            Self::Utc => "UTC".to_owned(),
+            Self::Named(tz) => tz
+                .to_offset_info(jiff_instant(utc))
+                .abbreviation()
+                .to_owned(),
+            Self::Fixed(_) => offset.to_string(),
         }
     }
 }

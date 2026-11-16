@@ -287,6 +287,7 @@ fn kind_of(value: &Dynamic) -> &'static str {
 /// What to write instead of comparing a date kind `kind` with `other`.
 fn instead(kind: &str, other: &str) -> &'static str {
     match (kind, other) {
+        (_, "()") => "it is null: test it with == (), or give it a value with ??",
         ("a duration", "a number") => "read a unit: (b - a).days > 30",
         ("a duration", "a string") => "read a unit, (b - a).days, or write it with .to_string()",
         ("a duration", _) | (_, "a duration") => {
@@ -302,7 +303,6 @@ fn instead(kind: &str, other: &str) -> &'static str {
         ("a time", "a timestamp") | ("a timestamp", "a time") => {
             "compare the timestamp's time of day, ts.time()"
         }
-        (_, "()") => "it is null: test it with == (), or give it a value with ??",
         _ => "compare values of the same kind",
     }
 }
@@ -384,7 +384,7 @@ fn ordering(module: &mut Module) {
 /// Rhai's `sort` / `sort_desc` with no comparator (same rules, same messages), plus arrays of
 /// one date kind. Replacing it is the only way in: the standard one refuses a custom type.
 fn sort(array: &mut Array, descending: bool) -> Outcome<()> {
-    let Some(first) = array.first() else {
+    let Some(first) = array.first().filter(|_| array.len() > 1) else {
         return Ok(());
     };
     let type_id = first.type_id();

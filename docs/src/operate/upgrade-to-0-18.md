@@ -121,19 +121,20 @@ Which columns: every `date`, `time` and `timestamp` field, at any depth, in arra
 
 | 0.17 script | On 0.18 | Write instead |
 | --- | --- | --- |
-| `this.createdAt.sub_string(0, 4)`, `len()`, `split`, any string method | fails: `Function not found: sub_string (timestamp, …)` | `this.createdAt.year`, or `this.createdAt.to_string().sub_string(0, 4)` |
-| `this.createdAt > "2024-01-01"` | fails: a timestamp and a string can't be compared | `this.createdAt.date() >= date(2024, 1, 1)`, on any `timestamp` field. Comparing with a full timestamp needs the same kind: `parse_timestamp("2024-01-01T00:00:00Z")` only for a `timestamptz` column, `parse_timestamp("2024-01-01T00:00:00")` only for a `timestamp` one; the schema doesn't say which, so prefer `.date()` |
-| `this.day == "2024-05-01"`, `this.day in ["2024-05-01"]` | fails: a date and a string can't be compared | `this.day == date(2024, 5, 1)`, or `parse_date("2024-05-01")` |
-| `switch this.day { "2024-05-01" => … }` | **takes the `_` arm silently**: a switch can't match a date | `switch this.day.to_string() { "2024-05-01" => … }` |
+| `this.createdAt.sub_string(0, 4)`, `len()`, `split`, any string method | fails: `Function not found: sub_string (timestamp, …)` | `this.createdAt.year`, or the text first: `this.createdAt.to_string().sub_string(0, 4)` |
+| `this.createdAt > "2024-01-01"` | fails: a timestamp and a string can't be compared | `this.createdAt.date() >= date(2024, 1, 1)`, on any `timestamp` field. A full timestamp must be of the same kind: a `timestamptz` column compares with `parse_timestamp("2024-01-01T00:00:00Z")`, a `timestamp` one with `parse_timestamp("2024-01-01T00:00:00")`; the schema doesn't say which, so prefer `.date()` |
+| `this.day == "2024-05-01"`, `this.day in ["2024-05-01"]` | fails: a date and a string can't be compared | `this.day == date(2024, 5, 1)`, `this.day == parse_date("2024-05-01")`, `this.day in [date(2024, 5, 1)]` |
+| `switch this.day { "2024-05-01" => … }` | **takes the `_` arm silently**: a switch can't match a date | `switch this.day.to_string() { "2024-05-01" => "may day", _ => "another day" }` |
 | `m[this.day] = 1` | fails: `expecting string` | `m[this.day.to_string()] = 1` |
-| `this.days.sort()`, `max(a, b)` | unchanged for values of one kind; mixing a date with a timestamp, or a zoned with a plain timestamp, fails | convert first: `ts.date()` |
-| `this.day` returned to a `keyword` field | fails its type check | `this.day.to_string()` |
-| a string returned to a `date` or `timestamp` field | fails its type check | `parse_date(…)` / `parse_timestamp(…)`, or return the date itself |
-| `type_of(this.day) == "string"` | `false` | `type_of(this.day) == "date"` (or `"timestamp"`, `"time"`) |
+| `this.days.sort()`, `max(a, b)` | unchanged for values of one kind; mixing a date with a timestamp, or a zoned with a plain timestamp, fails | convert first: `max(this.createdAt.date(), this.day)`; one kind sorts as before: `this.days.sort()` |
+| `[1, this.day].contains(1)`, `[this.day] == [1]`, `#{a: this.day} == #{a: "2024-05-01"}`: a container mixing dates with other kinds, searched or compared | fails: a date and a number can't be compared, even when looking for a non-date | keep one kind in a container, or compare text: `this.days.map(\|d\| d.to_string()).contains("2024-05-01")`, `[1, this.day.to_string()].contains(1)` |
+| `this.day` returned to a `keyword` field | fails its type check | `this.day.to_string()`, or `this.day.format("%d/%m/%Y")` |
+| a string returned to a `date` or `timestamp` field | fails its type check | `parse_date("2024-05-01")`, `parse_timestamp("2024-05-01T00:00:00")`, or return the date itself |
+| `type_of(this.day) == "string"` | `false` | `type_of(this.day) == "date"`, `type_of(this.createdAt) == "timestamp"` (or `"time"`) |
 | `` `${this.day}` ``, `"on " + this.day`, `this.day.to_string()`, `` `${[a, b]}` ``, `#{d: this.day}.to_json()` | unchanged: the same text, quoted inside a container | — |
-| a `values: date` map's value through a string method | fails | its parts (`this.due.en.year`), or `.to_string()` first |
+| a `values: date` map's value through a string method | fails | its parts, `this.due.en.year`, or the text first: `this.due.en.to_string().sub_string(0, 4)` |
 
-Every replacement here is run by `libs/2-script/tests/dates.rs` (`every_replacement_on_the_upgrade_page_runs`) on a `timestamptz` and a `timestamp` value.
+Every replacement in the last column is read from this page and run by `libs/2-script/tests/dates.rs` (`every_replacement_on_the_upgrade_page_runs`), on a `timestamptz` and on a `timestamp` value.
 
 A comparison with a string, a number or another kind fails rather than answering `false`, so a script that compared dates as text stops its documents (under `on_error = "stop"`) instead of quietly flipping a flag. `switch` is the one place that stays silent: search the scripts for `switch` over a date field.
 

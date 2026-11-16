@@ -16,8 +16,23 @@ fn outcome(engine: &rhai::Engine, script: &str) -> String {
 #[test]
 fn sorting_without_a_comparator_matches_rhai_for_every_element_type() {
     let elements = [
-        "1", "2", "-3", "1.5", "0.5", "parse_decimal(\"2.5\")", "parse_decimal(\"1\")", "'b'",
-        "'a'", "\"b\"", "\"a\"", "true", "false", "()", "#{a: 1}", "[1]", "blob(1)",
+        "1",
+        "2",
+        "-3",
+        "1.5",
+        "0.5",
+        "parse_decimal(\"2.5\")",
+        "parse_decimal(\"1\")",
+        "'b'",
+        "'a'",
+        "\"b\"",
+        "\"a\"",
+        "true",
+        "false",
+        "()",
+        "#{a: 1}",
+        "[1]",
+        "blob(1)",
         "Fn(\"f\")",
     ];
     let ours = script::sandbox::engine();

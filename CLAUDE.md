@@ -1356,7 +1356,9 @@ them on the sample (`/api/sample` takes an `id`). **Dates are typed (issue #364)
 over as the custom Rhai types of `dates.rs` (`date`, `time`, `timestamp` with an optional zone,
 `duration`), registered by `dates/library.rs` into the sandbox's one module (a second module slows
 every call). A `Timestamp` keeps its wall clock plus the zone's offset there, so parts never touch the
-zone database (jiff's bundled `jiff-tzdb`, used only for zones; chrono does the rest); calendar units and rounding move the wall clock and
+zone database (jiff's bundled `jiff-tzdb`, used only for zones; chrono does the rest; jiff's range
+ends near ±9999, so an instant past it is clamped to the edge, where the offset holds, and a leap
+second is folded: a named zone reaches every year chrono does, `a_named_zone_reaches_as_far_as_a_fixed_offset`); calendar units and rounding move the wall clock and
 `Zone::resolve` turns it back (gap: forward by its length; overlap: the earlier). Every comparison
 between a date kind and another kind (string, number, bool, char, container, another date kind;
 `()` for ordering only) is registered to **fail** with what to write (`library.rs`'s `mismatches`: one
@@ -1365,9 +1367,12 @@ misses; an explicit matrix of ~600 functions slowed `scripted/flat` ~4% on CI),
 since Rhai answers a mismatched comparison with a silent `false`; `switch` can't be hooked (a custom
 type has no hash, so every arm is skipped) and is documented instead. `sort`/`sort_desc` with no
 comparator are replaced by a copy of Rhai's that also sorts one date kind (the standard one refuses a
-custom type), and a map's `to_json` writes each date as its text. `to_debug` is quoted, so a
+custom type; `tests/sort_parity.rs` runs every other element type through both and must agree, so a
+Rhai bump that changes the original fails there), and a map's `to_json` writes each date as its text. `to_debug` is quoted, so a
 container prints as strings did. Rhai names the found type as Rust spells it in some errors;
-`dates::script_names` renames it in every runtime failure. `months_until` counts as Postgres's `age()`
+`dates::script_names` renames it in every runtime failure but a `throw` (`ErrorRuntime`: the script's
+own text). The upgrade page's table of script changes is read by `every_replacement_on_the_upgrade_page_runs`,
+which runs each "Write instead" snippet: keep every code span in that column complete. `months_until` counts as Postgres's `age()`
 (fixture: `tests/fixtures/months_from_postgres.tsv`, 408 pairs from Postgres 16). No `now()`. A `map` of dates is typed for the script only (`view.rs`, from the schema;
 the document keeps the text), and `flusso script run --input` types its JSON by the schema
 (`input::document`). Guards: `tests/dates.rs` (every function and edge rule, plus proptests).
