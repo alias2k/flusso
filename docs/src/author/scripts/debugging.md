@@ -43,7 +43,7 @@ The input shows exactly what `this` and `root` contain, including the input-only
 flusso script run --index products --input fixtures/mug.json --field label
 ```
 
-The JSON is untyped: whole numbers become integers, other numbers floats, and everything else stays text, so a `decimal` or a `date` arrives as a string. For a script that does decimal arithmetic, test against a real row.
+The JSON is typed by the index schema, as the builder types a row: a string under a `date` or `timestamp` field becomes a date, time or timestamp, a `decimal` (a number or a string) a decimal, and a `map` of dates is typed for the script as in the pipeline. A string that doesn't parse as its field's type stays a string, and a key the schema doesn't declare is untyped: whole numbers become integers, other numbers floats, the rest text.
 
 The exit status is non-zero when a script fails, so `script run --input` works as a test step.
 
@@ -81,8 +81,17 @@ The messages are Rhai's or flusso's own; this is what they mean in a script fiel
 | `Function not found: to_upper (())` | a method on a null | guard with `?.` or `??` |
 | `Function not found: * (decimal, f64)` | a decimal times a float | use `parse_decimal("1.22")`, or `.to_float()` |
 | `Array index 3 out of bounds` | indexing past the end | check `len()` or `is_empty()` first |
+| `Function not found: sub_string (timestamp, …)` | a string method on a date | use its parts (`.year`), or `.to_string()` first; see [Dates in a script](dates.md) |
+| `a date and a string can't be compared` | a date compared with text, or `contains`/`in` on an array mixing text and dates | parse the text: `parse_date("2024-01-01")`, or build one: `date(2024, 1, 1)`; for a list, compare text with text: `list.map(\|d\| d.to_string()).contains("2024-01-01")` |
+| `a duration and a number can't be compared: read a unit` | `(b - a) > 30` | `(b - a).days > 30` |
+| `a date and () can't be subtracted` | a null date on either side of `-` | guard it: `(this.end ?? this.start) - this.start`, or `this.end?.year` |
+| `a date and a timestamp can't be compared` | two kinds compared | `ts.date()` against the date, or `d.at_time(…)` |
+| `unknown time zone 'Europe/Roma'` | a zone name that isn't an IANA name or an offset | fix the name (`Europe/Rome`, `UTC`, `+02:00`) |
+| `bad format pattern '%Q'`, `pattern '%H' asks for a part a date doesn't have` | a pattern specifier that doesn't exist, or doesn't fit the value | see [Functions](dates.md#functions) |
+| `date out of range`, `no such date: 2023-02-29` | a result past the calendar, or a day that doesn't exist | check the arguments |
 | `returned () but the field is required: true` | the script produced null | return a value, or make the field `required: false` |
 | `returned a string, expected an integer` | the result's type differs from the field's | convert (`parse_int`, `.to_int()`), or change the field's type |
+| `returned a timestamp, expected a date: take its day with .date()` | a date field given another kind | do what the message says; see [Returning a date](dates.md#returning-a-date) |
 | `returned "x", which is not a declared variant` | an `enum` result outside `variants` | add the variant, or fix the script |
 | `Too many operations` | a loop that doesn't end, or a lot of work | see the [limits](../../reference/scripts.md#the-sandbox) |
 

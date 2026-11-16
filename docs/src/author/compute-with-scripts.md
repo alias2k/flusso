@@ -75,6 +75,7 @@ A script reads only the document flusso already built, so it can't reach a table
 | Page | For |
 | --- | --- |
 | [The Rhai you need](scripts/language.md) | the language: values, strings (and the in-place methods), decimals, null, arrays and closures, what isn't there |
+| [Dates in a script](scripts/dates.md) | the date, time, timestamp and duration types: parts, arithmetic, rounding, parsing, formatting, time zones, and why there's no clock |
 | [Script recipes](scripts/recipes.md) | tested scripts for labels, slugs, flags, bands, prices, scores, dates, translations, reshaping a list |
 | [Test and debug a script](scripts/debugging.md) | `flusso script run`, `print`, the designer, every error message and its fix |
 | [Run scripts in production](scripts/production.md) | choosing `on_error`, alerts, catching up after a fix, what scripts cost |

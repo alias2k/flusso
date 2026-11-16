@@ -1407,6 +1407,7 @@ dependencies = [
  "flusso-config",
  "flusso-kernel",
  "flusso-source",
+ "jiff",
  "proptest",
  "rhai",
  "rust_decimal",
@@ -2215,6 +2216,7 @@ checksum = "26699905cc795a23e3949585cc7ba3ee8ade090872a27e4316304a777297894a"
 dependencies = [
  "jiff-core",
  "jiff-static",
+ "jiff-tzdb",
  "jiff-tzdb-platform",
  "log",
  "portable-atomic",

@@ -12,13 +12,18 @@
 //! | `Decimal` | `Decimal` |
 //! | `BigDecimal` (a declared `decimal`) | `Decimal`: the nearest to its text (about 28 significant digits, at most 28 after the point), or as read through `f64` when written with an exponent or zero; a string of its digits past `Decimal`'s range |
 //! | `String`, `Uuid` | string |
-//! | `Date` / `Time` / `Timestamp` / `TimestampTz` | RFC 3339 string |
+//! | `Date` | [`date`](crate::dates::Date) |
+//! | `Time` | [`time`](crate::dates::Time) |
+//! | `Timestamp` | [`timestamp`](crate::dates::Timestamp) without a zone |
+//! | `TimestampTz` | [`timestamp`](crate::dates::Timestamp) in UTC |
 //! | `Bytes` | blob |
 //! | `Array` / `Map` | array / object map |
 //!
 //! **Out** ([`from_dynamic`]): a script's result is checked against the field's declared type,
 //! strictly. The only widening allowed: an integer is accepted for a `float`/`double`/`decimal`
-//! field. A `decimal` result is a [`BigDecimal`](GenericValue::BigDecimal) of its exact text,
+//! field. A `date` field takes a `date`; a `timestamp` field a `timestamp` (a zoned one as its
+//! UTC instant), a `time` or a `date` (each written as a column of that type under a
+//! `timestamp` field is). A `decimal` result is a [`BigDecimal`](GenericValue::BigDecimal) of its exact text,
 //! written with every digit.
 //!
 //! ```
@@ -34,10 +39,12 @@
 
 use std::str::FromStr;
 
-use chrono::{DateTime, NaiveDate, NaiveDateTime, SecondsFormat};
+use chrono::{TimeZone, Utc};
 use kernel::{FlussoType, GenericValue};
 use rhai::{Array, Dynamic, Map};
 use rust_decimal::Decimal;
+
+use crate::dates::{Date, Duration, Time, Timestamp};
 
 /// Convert a document value into a Rhai value.
 pub fn to_dynamic(value: &GenericValue) -> Dynamic {
@@ -53,12 +60,10 @@ pub fn to_dynamic(value: &GenericValue) -> Dynamic {
         GenericValue::BigDecimal(d) => declared_decimal(d),
         GenericValue::String(s) => Dynamic::from(s.clone()),
         GenericValue::Uuid(u) => Dynamic::from(u.to_string()),
-        GenericValue::Date(d) => Dynamic::from(d.format("%Y-%m-%d").to_string()),
-        GenericValue::Time(t) => Dynamic::from(t.format("%H:%M:%S%.f").to_string()),
-        GenericValue::Timestamp(t) => Dynamic::from(t.format("%Y-%m-%dT%H:%M:%S%.f").to_string()),
-        GenericValue::TimestampTz(t) => {
-            Dynamic::from(t.to_rfc3339_opts(SecondsFormat::AutoSi, true))
-        }
+        GenericValue::Date(d) => Dynamic::from(Date(*d)),
+        GenericValue::Time(t) => Dynamic::from(Time(*t)),
+        GenericValue::Timestamp(t) => Dynamic::from(Timestamp::plain(*t)),
+        GenericValue::TimestampTz(t) => Dynamic::from(Timestamp::utc(*t)),
         GenericValue::Bytes(b) => Dynamic::from_blob(b.clone()),
         GenericValue::Array(items) => Dynamic::from_array(items.iter().map(to_dynamic).collect()),
         GenericValue::Map(map) => Dynamic::from_map(
@@ -116,7 +121,7 @@ fn leaf(value: Dynamic, out: &Output<'_>) -> Result<GenericValue, String> {
         FlussoType::Text | FlussoType::Identifier | FlussoType::Keyword => value
             .into_string()
             .map(GenericValue::String)
-            .map_err(|_| mismatch()),
+            .map_err(|_| text_hint(found, mismatch())),
         FlussoType::Enum => {
             let variant = value.into_string().map_err(|_| mismatch())?;
             if out.variants.is_empty() || out.variants.contains(&variant) {
@@ -159,21 +164,26 @@ fn leaf(value: Dynamic, out: &Output<'_>) -> Result<GenericValue, String> {
                 integer(&value, mismatch).map(|i| exact(&Decimal::from(i)))
             }
         }
-        FlussoType::Date => {
-            let text = value.into_string().map_err(|_| mismatch())?;
-            NaiveDate::parse_from_str(&text, "%Y-%m-%d")
-                .map(GenericValue::Date)
-                .map_err(|_| format!("returned `{text}`, expected a `YYYY-MM-DD` date"))
-        }
-        FlussoType::Timestamp => {
-            let text = value.into_string().map_err(|_| mismatch())?;
-            timestamp(&text).ok_or_else(|| {
-                format!(
-                    "returned `{text}`, expected an RFC 3339 timestamp \
-                     (`2024-05-01T12:00:00Z`, or without the offset)"
-                )
-            })
-        }
+        FlussoType::Date => value
+            .try_cast_result::<Date>()
+            .map(|d| GenericValue::Date(d.0))
+            .map_err(|value| {
+                if value.is::<Timestamp>() {
+                    format!("{}: take its day with .date()", mismatch())
+                } else {
+                    with_hint(&value, mismatch(), "parse_date")
+                }
+            }),
+        FlussoType::Timestamp => match value.try_cast_result::<Timestamp>() {
+            Ok(t) => Ok(timestamp(t)),
+            Err(value) => match value.try_cast_result::<Time>() {
+                Ok(t) => Ok(GenericValue::Time(t.0)),
+                Err(value) => match value.try_cast_result::<Date>() {
+                    Ok(d) => Ok(GenericValue::Date(d.0)),
+                    Err(value) => Err(with_hint(&value, mismatch(), "parse_timestamp")),
+                },
+            },
+        },
         FlussoType::Binary
         | FlussoType::Json
         | FlussoType::Map { .. }
@@ -289,13 +299,40 @@ fn number(value: &Dynamic, mismatch: impl Fn() -> String) -> Result<f64, String>
         .map_err(|_| mismatch())
 }
 
-fn timestamp(text: &str) -> Option<GenericValue> {
-    if let Ok(t) = DateTime::parse_from_rfc3339(text) {
-        return Some(GenericValue::TimestampTz(t.to_utc()));
+/// A timestamp result: one without a zone as it reads, a zoned one as its UTC instant.
+fn timestamp(value: Timestamp) -> GenericValue {
+    match value.instant() {
+        Some(utc) => GenericValue::TimestampTz(Utc.from_utc_datetime(&utc)),
+        None => GenericValue::Timestamp(value.wall()),
     }
-    NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f")
-        .ok()
-        .map(GenericValue::Timestamp)
+}
+
+/// A string returned where a date was expected: say which parse function reads it.
+fn with_hint(value: &Dynamic, mismatch: String, parse: &str) -> String {
+    if value.is_string() {
+        format!("{mismatch}: parse it with {parse}(…)")
+    } else {
+        mismatch
+    }
+}
+
+/// A date value returned to a text field: say how to write it as text.
+fn text_hint(found: &str, mismatch: String) -> String {
+    if is_date_type(found) {
+        format!("{mismatch}: write it as text with .to_string() or .format(…)")
+    } else {
+        mismatch
+    }
+}
+
+fn is_date_type(type_name: &str) -> bool {
+    [
+        std::any::type_name::<Date>(),
+        std::any::type_name::<Time>(),
+        std::any::type_name::<Timestamp>(),
+        std::any::type_name::<Duration>(),
+    ]
+    .contains(&type_name)
 }
 
 /// The Rhai type a declared type expects, for messages.
@@ -309,8 +346,8 @@ fn expected(ty: &FlussoType) -> &'static str {
         FlussoType::Short | FlussoType::Integer | FlussoType::Long => "an integer",
         FlussoType::Float | FlussoType::Double => "a number",
         FlussoType::Decimal => "a decimal (or an integer)",
-        FlussoType::Date => "a date string",
-        FlussoType::Timestamp => "a timestamp string",
+        FlussoType::Date => "a date",
+        FlussoType::Timestamp => "a timestamp",
         FlussoType::Binary => "a blob",
         FlussoType::Json | FlussoType::Map { .. } => "an object",
         FlussoType::GeoPoint => "a geo point",
@@ -325,6 +362,10 @@ fn article(type_name: &str) -> String {
         "f64" => "float",
         "map" => "object",
         "string" | "&str" | "ImmutableString" => "string",
+        other if other == std::any::type_name::<Date>() => "date",
+        other if other == std::any::type_name::<Time>() => "time",
+        other if other == std::any::type_name::<Timestamp>() => "timestamp",
+        other if other == std::any::type_name::<Duration>() => "duration",
         other => other,
     };
     let a = if name.starts_with(['a', 'e', 'i', 'o', 'u']) {

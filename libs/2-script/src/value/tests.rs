@@ -16,16 +16,11 @@ fn out(ty: &FlussoType) -> Output<'_> {
 }
 
 #[test]
-fn dates_and_uuids_cross_as_strings() {
-    let date = NaiveDate::from_ymd_opt(2024, 5, 1).unwrap();
-    assert_eq!(
-        to_dynamic(&GenericValue::Date(date)).into_string().unwrap(),
-        "2024-05-01"
-    );
-    let back = from_dynamic(
-        Dynamic::from("2024-05-01".to_owned()),
-        &out(&FlussoType::Date),
-    );
+fn dates_cross_typed_and_uuids_as_strings() {
+    let date = chrono::NaiveDate::from_ymd_opt(2024, 5, 1).unwrap();
+    let rhai = to_dynamic(&GenericValue::Date(date));
+    assert!(rhai.is::<Date>());
+    let back = from_dynamic(rhai, &out(&FlussoType::Date));
     assert_eq!(back, Ok(GenericValue::Date(date)));
 
     let id = uuid::Uuid::nil();
@@ -310,15 +305,26 @@ fn an_enum_must_return_a_declared_variant() {
 }
 
 #[test]
-fn a_timestamp_accepts_an_offset_or_none() {
+fn a_timestamp_field_takes_a_timestamp_or_a_time() {
     let ty = FlussoType::Timestamp;
-    assert!(matches!(
-        from_dynamic(Dynamic::from("2024-05-01T12:00:00Z".to_owned()), &out(&ty)),
-        Ok(GenericValue::TimestampTz(_))
-    ));
-    assert!(matches!(
-        from_dynamic(Dynamic::from("2024-05-01T12:00:00".to_owned()), &out(&ty)),
-        Ok(GenericValue::Timestamp(_))
-    ));
-    assert!(from_dynamic(Dynamic::from("yesterday".to_owned()), &out(&ty)).is_err());
+    let wall = chrono::NaiveDate::from_ymd_opt(2024, 5, 1)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap();
+    assert_eq!(
+        from_dynamic(Dynamic::from(Timestamp::plain(wall)), &out(&ty)),
+        Ok(GenericValue::Timestamp(wall))
+    );
+    let instant = Utc.from_utc_datetime(&wall);
+    assert_eq!(
+        from_dynamic(Dynamic::from(Timestamp::utc(instant)), &out(&ty)),
+        Ok(GenericValue::TimestampTz(instant))
+    );
+    assert_eq!(
+        from_dynamic(Dynamic::from(Time(wall.time())), &out(&ty)),
+        Ok(GenericValue::Time(wall.time()))
+    );
+    let err =
+        from_dynamic(Dynamic::from("2024-05-01T12:00:00Z".to_owned()), &out(&ty)).unwrap_err();
+    assert!(err.contains("parse_timestamp"), "{err}");
 }

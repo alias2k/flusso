@@ -40,7 +40,8 @@ use source::SourceSpec;
 use source::document::{BuildFailure, ScriptPosition};
 
 use crate::sandbox;
-use crate::value::{Output, from_dynamic, to_dynamic};
+use crate::value::{Output, from_dynamic};
+use crate::view::View;
 
 /// The wrapper every script is compiled in: a function, so `this` can be bound
 /// to the object at the field's level and `root` passed in. Kept on the
@@ -125,6 +126,8 @@ struct IndexPlan {
 
 #[derive(Default)]
 struct Level {
+    /// How `this` (and, at the root, `root`) is converted for a script.
+    view: View,
     scripts: Vec<CompiledScript>,
     hidden: Vec<String>,
     children: Vec<(String, Level)>,
@@ -255,7 +258,7 @@ impl Scripts {
         // Shared, so each call passes a pointer rather than a deep copy; read-only,
         // so no script can change what the next one reads.
         let root = if plan.reads_root {
-            to_dynamic(body).into_read_only().into_shared()
+            plan.root.view.value(body).into_read_only().into_shared()
         } else {
             Dynamic::UNIT
         };
@@ -282,7 +285,10 @@ fn plan_level(
     reads_root: &mut bool,
     report: &mut dyn FnMut(BuildFailure),
 ) -> Level {
-    let mut level = Level::default();
+    let mut level = Level {
+        view: View::of(fields),
+        ..Level::default()
+    };
     for field in fields {
         let name = field.field.as_ref().to_owned();
         if !field.emit {
@@ -407,11 +413,7 @@ impl Run<'_> {
     ) -> Result<(), BuildFailure> {
         let mut outputs = Vec::with_capacity(level.scripts.len());
         if !level.scripts.is_empty() {
-            let this = Dynamic::from_map(
-                map.iter()
-                    .map(|(key, value)| (key.as_str().into(), to_dynamic(value)))
-                    .collect(),
-            );
+            let this = level.view.object(map);
             for script in &level.scripts {
                 let path = format!("{prefix}{}", script.name);
                 let value = self.eval(script, this.clone(), &path)?;
@@ -472,7 +474,11 @@ fn runtime_failure(path: &str, script: &CompiledScript, error: EvalAltResult) ->
     let at = inner.take_position();
     BuildFailure {
         field: path.to_owned(),
-        message: inner.to_string(),
+        message: match inner {
+            // A thrown string (or a function's own error) is the script's text, kept as written.
+            EvalAltResult::ErrorRuntime(ref thrown, _) if thrown.is_string() => inner.to_string(),
+            _ => crate::dates::script_names(inner.to_string()),
+        },
         position: position(script.lines.iter().map(String::as_str), at),
     }
 }

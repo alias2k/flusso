@@ -8,6 +8,10 @@
 //! - `scripted/flat`: three root-level scripts reading `this`.
 //! - `scripted/nested`: one script per element of a ten-element `has_many`,
 //!   reading `this` and `root`.
+//! - `scripted/dates_unused`: `flat` with a `date`, a `timestamp` and a
+//!   `timestamptz` the scripts never read: what converting them costs.
+//! - `scripted/dates_used`: two scripts that read them, a difference in days
+//!   and an hour in a named zone.
 //!
 //! Run with:
 //!
@@ -59,6 +63,54 @@ fields:
     script: this.price * 1.23
 ";
 
+const DATES_UNUSED: &str = "\
+version: 1
+table: products
+fields:
+  - keyword: first
+    required: true
+  - keyword: last
+    required: true
+    emit: false
+  - double: price
+    required: true
+  - long: stock
+    required: true
+  - date: start
+    required: true
+  - date: end
+    required: true
+  - timestamp: at
+    required: true
+  - keyword: label
+    required: true
+    script: '`${this.first} ${this.last}`'
+  - boolean: onSale
+    required: true
+    script: this.price < 10.0 && this.stock > 0
+  - double: gross
+    required: true
+    script: this.price * 1.23
+";
+
+const DATES_USED: &str = "\
+version: 1
+table: products
+fields:
+  - date: start
+    required: true
+  - date: end
+    required: true
+  - timestamp: at
+    required: true
+  - integer: days
+    required: true
+    script: (this.end - this.start).days
+  - integer: hour
+    required: true
+    script: this.at.in_zone(\"Europe/Rome\").hour
+";
+
 const NESTED: &str = "\
 version: 1
 table: products
@@ -102,6 +154,32 @@ fn flat_doc(i: usize) -> GenericValue {
     ])
 }
 
+fn with_dates(mut doc: GenericValue, i: usize) -> GenericValue {
+    let start = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+    let day = |n: usize| start + chrono::TimeDelta::days(i64::try_from(n % 400).unwrap());
+    if let GenericValue::Map(map) = &mut doc {
+        map.insert("start".to_owned(), GenericValue::Date(day(i)));
+        map.insert("end".to_owned(), GenericValue::Date(day(i + 30)));
+        map.insert(
+            "at".to_owned(),
+            GenericValue::TimestampTz(day(i).and_hms_opt(10, 0, 0).unwrap().and_utc()),
+        );
+    }
+    doc
+}
+
+fn dates_unused_doc(i: usize) -> GenericValue {
+    with_dates(flat_doc(i), i)
+}
+
+fn dates_used_doc(i: usize) -> GenericValue {
+    let doc = map(vec![
+        ("days", GenericValue::Null),
+        ("hour", GenericValue::Null),
+    ]);
+    with_dates(doc, i)
+}
+
 fn nested_doc(_: usize) -> GenericValue {
     let variant = |p: f64| {
         map(vec![
@@ -125,6 +203,8 @@ fn bench(c: &mut Criterion) {
     for (name, yaml, make) in [
         ("flat", FLAT, flat_doc as fn(usize) -> GenericValue),
         ("nested", NESTED, nested_doc),
+        ("dates_unused", DATES_UNUSED, dates_unused_doc),
+        ("dates_used", DATES_USED, dates_used_doc),
     ] {
         let scripts = compile(yaml);
         let docs: Vec<GenericValue> = (0..BATCH).map(make).collect();

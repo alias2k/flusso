@@ -1352,8 +1352,32 @@ property, no `eval`, fixed limits (`sandbox.rs`). The CLI wraps the Postgres bui
 (`compile_scripts`), records `flusso.script.failures{index,field}` and a rate-limited `error!` log
 (`telemetry/script_log.rs`, array positions folded to `[]`); the daemon's `Status` carries
 `script_failures` per index. The designer compiles scripts in `/api/preview` (`script_errors`) and runs
-them on the sample (`/api/sample` takes an `id`). The manual's script guide
-(`docs/src/author/scripts/`) includes its recipes by mdBook anchor from
+them on the sample (`/api/sample` takes an `id`). **Dates are typed (issue #364):** `value::to_dynamic` hands a `Date`/`Time`/`Timestamp`/`TimestampTz`
+over as the custom Rhai types of `dates.rs` (`date`, `time`, `timestamp` with an optional zone,
+`duration`), registered by `dates/library.rs` into the sandbox's one module (a second module slows
+every call). A `Timestamp` keeps its wall clock plus the zone's offset there, so parts never touch the
+zone database (jiff's bundled `jiff-tzdb`, used only for zones; chrono does the rest; jiff's range
+ends near ±9999, so an instant past it is clamped to the edge, where the offset holds, and a leap
+second is folded: a named zone reaches every year chrono does, `a_named_zone_reaches_as_far_as_a_fixed_offset`); calendar units and rounding move the wall clock and
+`Zone::resolve` turns it back (gap: forward by its length; overlap: the earlier). Every comparison
+between a date kind and another kind (string, number, bool, char, container, another date kind;
+`()` for ordering only) is registered to **fail** with what to write (`library.rs`'s `mismatches`: one
+function per operator, kind and side on `Dynamic`, which Rhai tries only after the exact signature
+misses; an explicit matrix of ~600 functions slowed `scripted/flat` ~4% on CI),
+since Rhai answers a mismatched comparison with a silent `false`; `switch` can't be hooked (a custom
+type has no hash, so every arm is skipped) and is documented instead. `sort`/`sort_desc` with no
+comparator are replaced by a copy of Rhai's that also sorts one date kind (the standard one refuses a
+custom type; `tests/sort_parity.rs` runs every other element type through both and must agree, so a
+Rhai bump that changes the original fails there), and a map's `to_json` writes each date as its text. `to_debug` is quoted, so a
+container prints as strings did. Rhai names the found type as Rust spells it in some errors;
+`dates::script_names` renames it in every runtime failure but a `throw` (`ErrorRuntime`: the script's
+own text). The upgrade page's table of script changes is read by `every_replacement_on_the_upgrade_page_runs`,
+which runs each "Write instead" snippet: keep every code span in that column complete. `months_until` counts as Postgres's `age()`
+(fixture: `tests/fixtures/months_from_postgres.tsv`, 408 pairs from Postgres 16). No `now()`. A `map` of dates is typed for the script only (`view.rs`, from the schema;
+the document keeps the text), and `flusso script run --input` types its JSON by the schema
+(`input::document`). Guards: `tests/dates.rs` (every function and edge rule, plus proptests).
+The manual's script guide
+(`docs/src/author/scripts/`, dates in `dates.md`) includes its recipes by mdBook anchor from
 `libs/2-script/tests/recipes/recipes.schema.yml`, which `tests/recipes.rs` runs and asserts: change a
 recipe there, not in the page.
 
@@ -1712,7 +1736,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | --- | --- |
 | The sync loops / batching / ack ordering | `libs/2-engine/src/` — `ingest.rs` (`IngestEngine`: batching, dedup, build once, publish, request coalescing, snapshots, watermark confirm), `sink_engine.rs` (`SinkEngine`: `stage`, recv → apply → flush → ack, failure policies, `SinkControl::Reindex`), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` (drives both engines over a real `ChannelStream`) |
 | Pipeline observability trait (`Observer`, `BuildStats`/`CommitStats`, `EngineId`, `FanOut`) | `libs/2-engine/src/observer.rs` |
-| Script fields (Rhai): compile, run, strip input-only fields, the `DocumentBuilder` decorator, the sandbox, value conversion | `libs/2-script/src/` — `scripts.rs` (`Scripts`: plan + apply), `builder.rs` (`ScriptedBuilder`), `sandbox.rs`, `value.rs`; `benches/scripted.rs`; CLI `commands/script.rs` (`flusso script run`), `telemetry/script_log.rs` |
+| Script fields (Rhai): compile, run, strip input-only fields, the `DocumentBuilder` decorator, the sandbox, value conversion, typed dates | `libs/2-script/src/` — `scripts.rs` (`Scripts`: plan + apply), `builder.rs` (`ScriptedBuilder`), `sandbox.rs`, `value.rs`, `dates.rs` + `dates/library.rs` (the date types + their Rhai registration), `view.rs` (a `map` of dates typed for scripts), `input.rs` (JSON typed by the schema); `benches/scripted.rs`; CLI `commands/script.rs` (`flusso script run`), `telemetry/script_log.rs` |
 | Daemon (domain): supervisor, `DaemonControl`, per-sink `Status`, `StatusObserver`, lag poll, the fence | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `supervise.rs` (stage → spawn → restart with backoff; `DaemonControl::reindex`), `backends.rs` (`Backends` trait + `SourceParts`/`SinkParts` seam), `observer.rs`, `status.rs`, `lag.rs`, `fence.rs` (`Fence`/`FenceRequest`/`FenceOutcome`/`FenceObserver`) |
 | Read-your-writes (fences), end to end | source: `libs/1-ports/source/src/cdc/capture.rs` (`SourcePosition`, `reached`, `on_advance`), `libs/2-adapters/source-postgres/src/cdc/ack.rs` (`Positions`: entries + horizon) and `stream.rs` (who moves the horizon); sink: `libs/1-ports/sink/src/sink.rs` (`Visibility`), `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`settle_visibility`); engine: `libs/2-engine/src/sink_engine.rs` (`report_positions`, the searchable queue); daemon: `libs/3-daemon/src/fence.rs`; CLI: `apps/cli/src/http/mod.rs` (`wait`); client: `sdk/query/src/fence.rs`, `position.rs`; e2e: `libs/3-daemon/tests/fence.rs` |
 | Adapter registry (the one place that names adapters): `type` → config struct, `validate`, descriptions, flag overrides | `apps/cli/src/adapters.rs` |

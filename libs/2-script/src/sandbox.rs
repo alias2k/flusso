@@ -1,7 +1,8 @@
 //! The one Rhai engine every script runs in: the standard library minus anything
 //! that makes a script impure or unbounded.
 //!
-//! - **Pure:** no clock (`no_time`), no imports (`no_module`), no `eval`. A
+//! - **Pure:** no clock (`no_time`, and the [date types](crate::dates) have no
+//!   `now()`), no imports (`no_module`), no `eval`. A
 //!   script is a function of the document, so an at-least-once rebuild produces
 //!   the same value.
 //! - **Strict:** an undefined variable fails at compile time, and reading a
@@ -35,14 +36,15 @@ pub const MAX_COLLECTION_SIZE: usize = 100_000;
 /// How many strings the engine interns, as `Engine::new` sets it.
 const STRINGS_INTERNED: usize = 256;
 
-/// Rhai's standard package with a decimal's `to_float` replaced by flusso's,
-/// in the one module `Engine::new` would register: a second module, or a
+/// Rhai's standard package with a decimal's `to_float` replaced by flusso's and
+/// the [date types](crate::dates) added, in the one module `Engine::new` would register: a second module, or a
 /// function in the global namespace, slows every call (`scripted/flat` ~2.5%).
 fn standard_library() -> Module {
     let mut library = (*StandardPackage::new().as_shared_module()).clone();
     library.set_native_fn("to_float", |value: rust_decimal::Decimal| {
         Ok(crate::value::decimal_to_float(value))
     });
+    crate::dates::library::register(&mut library);
     library
 }
 
@@ -51,6 +53,11 @@ pub fn engine() -> Engine {
     let mut engine = Engine::new_raw();
     engine.set_max_strings_interned(STRINGS_INTERNED);
     engine.register_global_module(standard_library().into());
+    engine
+        .register_type_with_name::<crate::dates::Date>("date")
+        .register_type_with_name::<crate::dates::Time>("time")
+        .register_type_with_name::<crate::dates::Timestamp>("timestamp")
+        .register_type_with_name::<crate::dates::Duration>("duration");
     engine
         .disable_symbol("eval")
         .set_strict_variables(true)

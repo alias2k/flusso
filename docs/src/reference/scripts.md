@@ -67,12 +67,14 @@ A document value enters Rhai as:
 | `float`, `double` | `f64` |
 | `decimal` | `Decimal`, the nearest to the value. `Decimal` holds about 28 significant digits in all and at most 28 after the point, so `12345678901234567890.123456789012` arrives as `12345678901234567890.123456789`; a next digit of 5 or more rounds away from zero. A value written with an exponent (a `float8` read under `decimal`: `1e-07`) reads through `f64`, as before 0.18. A zero is a plain zero (`0` or `0.0`; a scale like `0.000` isn't kept). Past ±7.9 × 10^28 a string of the exact text Postgres wrote (`"1e+30"`), and so is a value near the top of the range written with an exponent |
 | text, `uuid` | string |
-| `date`, `timestamp` | RFC 3339 string (`2024-05-01`, `2024-05-01T12:00:00Z`) |
+| `date` | `date` |
+| `timestamp`: a `timestamp` column, a `timestamptz` column, a `time` column | `timestamp` without a zone, `timestamp` in UTC, `time` ([Dates in a script](../author/scripts/dates.md)) |
+| a `map` with `values: date` or `timestamp` | object map; each value that parses as that type typed, the rest strings |
 | `binary` | blob |
 | object, array | object map, array |
 | null | `()` |
 
-The result is checked against the declared type, strictly. The one widening allowed: an integer for a `float`, `double` or `decimal` field (a `float` result is stored as 32-bit). A `decimal` result is written with every digit it holds. A `date` result must be `YYYY-MM-DD`; a `timestamp` result an RFC 3339 timestamp, with or without the offset. A `uuid` result must parse as a uuid. `()` is null, accepted only when `required: false`; an array holds no nulls.
+The result is checked against the declared type, strictly. The one widening allowed: an integer for a `float`, `double` or `decimal` field (a `float` result is stored as 32-bit). A `decimal` result is written with every digit it holds. A `date` field takes a `date`; a `timestamp` field a `timestamp` (one without a zone as it reads, a zoned one as its UTC instant), a `time` or a `date` (each written as a column of that type under a `timestamp` field is); neither takes a string ([Returning a date](../author/scripts/dates.md#returning-a-date)). A `uuid` result must parse as a uuid. `()` is null, accepted only when `required: false`; an array holds no nulls.
 
 - **A decimal past `Decimal`'s range** reaches a script as a string of the exact text Postgres wrote (`"79228162514264337593543950336"`, `"1e+30"` from a `float8`), so `len()`, `+` (which concatenates) and `parse_decimal` see that text. A `decimal` script field refuses a string (`returned a string, expected a decimal (or an integer)`): return such a value to a `keyword` field. A value from about 79228162514264333195497439232 up to `Decimal::MAX` (79228162514264337593543950335) is a decimal, so `+ 1` can overflow and fail the document.
 - **`to_float()`** of a decimal is the `f64` nearest its exact value.
@@ -81,7 +83,7 @@ The result is checked against the declared type, strictly. The one widening allo
 
 | Rule | Why |
 | --- | --- |
-| No clock, no imports, no `eval` | A rebuild must produce the same value: delivery is at-least-once. |
+| No clock (no `now()`, `today()`), no imports, no `eval` | A rebuild must produce the same value: delivery is at-least-once. See [No clock](../author/scripts/dates.md#no-clock). |
 | An undefined variable fails to compile | A typo is caught by `flusso check --offline`, not in production. |
 | Reading a missing property fails | `this.nmae` is an error, not a silent `()`. Test with `"name" in this`. |
 | 1,000,000 operations, 32 call levels, 64 expression levels | A runaway script fails its document instead of stalling the pipeline. |

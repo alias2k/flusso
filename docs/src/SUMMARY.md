@@ -16,6 +16,7 @@
 - [Keep content without indexing it](author/keep-content-unindexed.md)
 - [Compute a field with a script](author/compute-with-scripts.md)
   - [The Rhai you need](author/scripts/language.md)
+  - [Dates in a script](author/scripts/dates.md)
   - [Script recipes](author/scripts/recipes.md)
   - [Test and debug a script](author/scripts/debugging.md)
   - [Run scripts in production](author/scripts/production.md)

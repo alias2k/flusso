@@ -54,10 +54,54 @@ A popularity score from two aggregates (an `avg` and a `count` over the reviews)
 
 ## Dates
 
-Dates and timestamps arrive as RFC 3339 strings. The year, for a facet. Gives `2024`.
+The sample was created at `2024-05-01T10:00:00Z`, released on `2024-01-31`, and its sale ends on `2024-03-01`. What each function does is in [Dates in a script](dates.md).
+
+The year, for a facet. Gives `2024`.
 
 ```yaml
 {{#include ../../../../libs/2-script/tests/recipes/recipes.schema.yml:created_year}}
+```
+
+Days between two dates. Gives `30` (2024 is a leap year).
+
+```yaml
+{{#include ../../../../libs/2-script/tests/recipes/recipes.schema.yml:days_on_sale}}
+```
+
+The hour on a local clock, for an "ordered in the evening" facet. Gives `12`.
+
+```yaml
+{{#include ../../../../libs/2-script/tests/recipes/recipes.schema.yml:local_hour}}
+```
+
+A month bucket, in the zone the business reports in. Gives `"2024-05"`.
+
+```yaml
+{{#include ../../../../libs/2-script/tests/recipes/recipes.schema.yml:month_bucket}}
+```
+
+A quarter label. Gives `"2024-Q1"`.
+
+```yaml
+{{#include ../../../../libs/2-script/tests/recipes/recipes.schema.yml:quarter_label}}
+```
+
+A month later, clamped to the month's end. Gives `2024-02-29`.
+
+```yaml
+{{#include ../../../../libs/2-script/tests/recipes/recipes.schema.yml:first_renewal}}
+```
+
+A local deadline as an instant: the end of the last sale day in Rome. Gives `2024-03-01T22:59:59.999999999Z`.
+
+```yaml
+{{#include ../../../../libs/2-script/tests/recipes/recipes.schema.yml:sale_ends_at}}
+```
+
+A monthly schedule, each date added to the release date rather than to the one before, so a month end stays a month end. Gives `[2024-02-29, 2024-03-31, 2024-04-30]`.
+
+```yaml
+{{#include ../../../../libs/2-script/tests/recipes/recipes.schema.yml:renewals}}
 ```
 
 ## Translations
