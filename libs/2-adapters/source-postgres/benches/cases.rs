@@ -15,7 +15,7 @@
 //! | `root` | hash- and range-partitioned on the key, composite key, keyless, wide unread column, wide with a composite key, never analysed (see [`Shape`]); read them against `key/int`, the plain 1,000-row root |
 //!
 //! Every root has a `has_many` child keyed by the root's key type, two rows
-//! per root. Before measuring, each case is built once and checked: a case
+//! per root, ordered by `id`. Before measuring, each case is built once and checked: a case
 //! whose build returns another number of documents than its rows is skipped
 //! with a message, so an A/B comparison lists it on one side only.
 //!
@@ -28,22 +28,10 @@
 //! cargo bench -p flusso-source-postgres --bench cases
 //! ```
 //!
-//! ## Review modes
-//!
-//! With `REVIEW_AB_MODE` set, the executable seeds the same roots and runs a
-//! review job instead of Criterion (`just review-digest`, `just review-plans`;
-//! `review-ab.sh --digest` / `--plans` set it). Each writes a TSV to
-//! `REVIEW_AB_OUT` that a script compares across base and head:
-//!
-//! | Mode | Writes, per line |
-//! | --- | --- |
-//! | `digest` | `<index> <form> <id> <op> <body>`: every document `build`, `build_many` (under 16 keys and 16+) and a backfill built, the body as `sink::to_json` with sorted keys |
-//! | `plans` | `<case> <root relations> <partitions> <statements> <calls> <plans> <calls of the second half> <plans of the second half>`, from `pg_stat_statements` |
-//!
-//! `REVIEW_AB_FILTER`, a regex, picks the indexes (`digest`) or the cases
-//! (`plans`). `plans` opens each case with `SELECT 'flusso-review-case
-//! <REVIEW_AB_RUN> <case>'` and closes it with the case `-`, so the case's
-//! plans can be found in the server log.
+//! The `review` bench target includes this file as a module for its fixtures
+//! (`just review-digest`, `just review-plans`), so this file uses no more of
+//! the crate than the Criterion bench needs: `just review-ab` lays it over old
+//! bases too.
 
 #![allow(
     clippy::unwrap_used,
@@ -57,10 +45,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use kernel::{
     Column, ColumnName, DatabaseSchema, Field, FieldName, FieldSource, FlussoType, GenericValue,
-    IndexName, IndexSchema, Join, JoinKind, Relation, TableName,
+    IndexName, IndexSchema, Join, JoinKind, OrderBy, Relation, TableName,
 };
 use source::document::{Document, DocumentBuilder, DocumentId};
 use source::{RowKey, SourceSpec};
@@ -80,7 +68,7 @@ const HIT_PERCENTS: &[usize] = &[0, 50, 100];
 /// How a root key's text becomes a value, as `text_value::typed_value` does it
 /// for the WAL.
 #[derive(Clone, Copy)]
-enum KeyType {
+pub(crate) enum KeyType {
     Int,
     Uuid,
     Numeric,
@@ -89,7 +77,7 @@ enum KeyType {
 }
 
 impl KeyType {
-    fn value(self, text: &str) -> GenericValue {
+    pub(crate) fn value(self, text: &str) -> GenericValue {
         match self {
             Self::Int => GenericValue::Int(text.parse().unwrap()),
             Self::Uuid => GenericValue::Uuid(uuid::Uuid::parse_str(text).unwrap()),
@@ -104,7 +92,7 @@ impl KeyType {
 
 /// How a root table is laid out.
 #[derive(Clone, Copy, PartialEq)]
-enum Shape {
+pub(crate) enum Shape {
     Plain,
     HashPartitioned,
     RangePartitioned,
@@ -127,16 +115,16 @@ enum Shape {
 }
 
 /// One root table and the case it stands for.
-struct Root {
-    table: &'static str,
+pub(crate) struct Root {
+    pub(crate) table: &'static str,
     /// `key/<case>` or `root/<case>`; `None` for the `plain` root the `batch`
     /// and `hit_ratio` groups use.
-    case: Option<(&'static str, &'static str)>,
+    pub(crate) case: Option<(&'static str, &'static str)>,
     sql_type: &'static str,
-    key_type: KeyType,
+    pub(crate) key_type: KeyType,
     /// The `id` of row `g` of `generate_series(1, $1) g`.
     key_expr: &'static str,
-    shape: Shape,
+    pub(crate) shape: Shape,
     rows: i32,
 }
 
@@ -181,7 +169,7 @@ impl Root {
 
     /// The columns of the key a change carries: the primary key, or every
     /// column of a table without one.
-    fn wal_key(&self) -> &'static [&'static str] {
+    pub(crate) fn wal_key(&self) -> &'static [&'static str] {
         match self.shape {
             Shape::Composite | Shape::WideComposite => &["tenant", "id"],
             Shape::Keyless => &["id", "name"],
@@ -263,7 +251,7 @@ impl Root {
     }
 }
 
-fn roots() -> Vec<Root> {
+pub(crate) fn roots() -> Vec<Root> {
     use KeyType::{Float8, Int, Numeric, Text, Uuid};
     vec![
         Root {
@@ -307,7 +295,7 @@ fn roots() -> Vec<Root> {
     ]
 }
 
-fn runtime() -> Runtime {
+pub(crate) fn runtime() -> Runtime {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
@@ -330,7 +318,7 @@ async fn connect() -> (Option<test_postgres::Container>, String) {
     )
 }
 
-async fn seed(pool: &sqlx::PgPool, roots: &[Root]) {
+pub(crate) async fn seed(pool: &sqlx::PgPool, roots: &[Root]) {
     sqlx::query("CREATE EXTENSION IF NOT EXISTS citext")
         .execute(pool)
         .await
@@ -371,7 +359,7 @@ async fn seed(pool: &sqlx::PgPool, roots: &[Root]) {
 }
 
 /// Every root's change keys, in key order, as the WAL decoder would read them.
-async fn wal_keys(pool: &sqlx::PgPool, root: &Root) -> Vec<RowKey> {
+pub(crate) async fn wal_keys(pool: &sqlx::PgPool, root: &Root) -> Vec<RowKey> {
     let columns = root
         .wal_key()
         .iter()
@@ -412,7 +400,7 @@ fn missing_key(n: usize) -> RowKey {
     )])
 }
 
-async fn resolve(
+pub(crate) async fn resolve(
     builder: &PgDocumentBuilder,
     table: &str,
     keys: &[RowKey],
@@ -562,7 +550,7 @@ fn bench(c: &mut Criterion) {
 }
 
 /// One index per root: `id`, `name`, and the `items` it has many of.
-fn spec(roots: &[Root]) -> SourceSpec {
+pub(crate) fn spec(roots: &[Root]) -> SourceSpec {
     let indexes = roots
         .iter()
         .map(|root| {
@@ -578,7 +566,12 @@ fn spec(roots: &[Root]) -> SourceSpec {
                         foreign_key: column("parent"),
                     },
                     filters: None,
-                    order_by: None,
+                    // Ordered, so a plan change can't reorder a document's
+                    // array: `just review-digest` compares the documents.
+                    order_by: Some(vec![OrderBy {
+                        column: column("id"),
+                        direction: None,
+                    }]),
                     limit: None,
                     fields: vec![column_field("id"), column_field("label")],
                     indexed: true,
@@ -623,328 +616,12 @@ fn column_field(name: &str) -> Field {
 fn field(name: &str) -> FieldName {
     FieldName::try_new(name).unwrap()
 }
-fn column(name: &str) -> ColumnName {
+pub(crate) fn column(name: &str) -> ColumnName {
     ColumnName::try_new(name).unwrap()
 }
-fn table(name: &str) -> TableName {
+pub(crate) fn table(name: &str) -> TableName {
     TableName::try_new(name).unwrap()
 }
 
 criterion_group!(benches, bench);
-
-fn main() {
-    match std::env::var("REVIEW_AB_MODE") {
-        Ok(mode) if !mode.is_empty() => review::run(&mode),
-        _ => {
-            benches();
-            Criterion::default().configure_from_args().final_summary();
-        }
-    }
-}
-
-/// The review modes: see the module doc.
-mod review {
-    use std::fmt::Write as _;
-    use std::sync::Arc;
-
-    use futures::StreamExt;
-    use kernel::{DatabaseSchema, GenericValue};
-    use regex::Regex;
-    use source::cdc::ChangeCapture;
-    use source::document::{Document, DocumentBuilder, DocumentId};
-    use source::{RowKey, SnapshotTable};
-    use source_postgres::{PgDocumentBuilder, Tls, WalChangeCapture, replication_config};
-    use sqlx::postgres::PgPoolOptions;
-    use sqlx::{AssertSqlSafe, PgPool, Row};
-
-    use super::{KeyType, Root, Shape, column, roots, runtime, seed, spec, wal_keys};
-
-    /// The batch sizes a plan case runs: under 16 keys (an array
-    /// constructor) and over it (array parameters).
-    const PLAN_BATCHES: &[usize] = &[1, 10, 100];
-    /// Calls per half of a plan case.
-    const PLAN_CALLS: usize = 10;
-    /// The backfill's build batch: the ingest engine's default `max_changes`.
-    const BACKFILL_BATCH: usize = 256;
-
-    struct Settings {
-        url: String,
-        out: String,
-        filter: Regex,
-        run: String,
-    }
-
-    pub(super) fn run(mode: &str) {
-        let var = |name: &str| std::env::var(name).unwrap_or_default();
-        let settings = Settings {
-            url: var("REVIEW_AB_PG_URL"),
-            out: var("REVIEW_AB_OUT"),
-            filter: Regex::new(&var("REVIEW_AB_FILTER")).expect("REVIEW_AB_FILTER is not a regex"),
-            run: var("REVIEW_AB_RUN"),
-        };
-        assert!(
-            !settings.url.is_empty() && !settings.out.is_empty(),
-            "a review mode needs REVIEW_AB_PG_URL and REVIEW_AB_OUT"
-        );
-        let lines = runtime().block_on(async {
-            match mode {
-                "digest" => digest(&settings).await,
-                "plans" => plans(&settings).await,
-                other => panic!("unknown REVIEW_AB_MODE `{other}`: digest or plans"),
-            }
-        });
-        std::fs::write(&settings.out, lines).unwrap();
-    }
-
-    fn case_name(root: &Root) -> String {
-        root.case.map_or_else(
-            || "plain".to_owned(),
-            |(group, name)| format!("{group}/{name}"),
-        )
-    }
-
-    /// A key no row of `root` has, typed as the root's key.
-    fn missing(root: &Root, n: usize) -> GenericValue {
-        let text = match root.key_type {
-            KeyType::Int => format!("{}", 1_000_000 + n),
-            KeyType::Uuid => format!("00000000-0000-0000-0000-{n:012}"),
-            KeyType::Numeric => format!("-{n}.25"),
-            KeyType::Float8 => format!("-{n}.5"),
-            KeyType::Text => format!("missing-{n}"),
-        };
-        root.key_type.value(&text)
-    }
-
-    async fn ids(builder: &PgDocumentBuilder, pool: &PgPool, root: &Root) -> Vec<DocumentId> {
-        let keys = wal_keys(pool, root).await;
-        super::resolve(builder, root.table, &keys)
-            .await
-            .unwrap_or_else(|| panic!("resolving `{}` failed", root.table))
-    }
-
-    fn with_missing(root: &Root, present: &[DocumentId], count: usize) -> Vec<DocumentId> {
-        let index = kernel::IndexName::try_new(root.table).unwrap();
-        let mut ids = present.to_vec();
-        ids.extend((1..=count).map(|n| DocumentId {
-            index: index.clone(),
-            key: RowKey(vec![(column("id"), missing(root, n))]),
-        }));
-        ids
-    }
-
-    async fn digest(settings: &Settings) -> String {
-        let pool = PgPoolOptions::new().connect(&settings.url).await.unwrap();
-        let roots = roots();
-        seed(&pool, &roots).await;
-        let builder = PgDocumentBuilder::connect(&settings.url, Arc::new(spec(&roots)))
-            .await
-            .unwrap();
-        let capture = WalChangeCapture::new(
-            replication_config(&settings.url, &Tls::default(), "unused", "unused").unwrap(),
-            settings.url.clone(),
-        );
-        let mut out = String::new();
-        for root in roots
-            .iter()
-            .filter(|root| settings.filter.is_match(root.table))
-        {
-            let present = ids(&builder, &pool, root).await;
-            let mut forms: Vec<(&str, Vec<Document>)> = Vec::new();
-            let mut single = Vec::new();
-            for id in with_missing(root, present.get(..20).unwrap(), 2) {
-                single.push(builder.build(&id).await.unwrap());
-            }
-            forms.push(("build", single));
-            let small = with_missing(root, present.get(..10).unwrap(), 1);
-            forms.push(("build_many<16", builder.build_many(&small).await.unwrap()));
-            let large = with_missing(root, &present, 5);
-            forms.push(("build_many>=16", builder.build_many(&large).await.unwrap()));
-            forms.push(("backfill", backfill(&builder, &capture, root).await));
-            for (form, documents) in forms {
-                for document in documents {
-                    line(&mut out, root.table, form, &document);
-                }
-            }
-        }
-        out
-    }
-
-    /// The root's documents as a backfill builds them: the snapshot's rows,
-    /// resolved, then built in batches as the ingest engine does.
-    async fn backfill(
-        builder: &PgDocumentBuilder,
-        capture: &WalChangeCapture,
-        root: &Root,
-    ) -> Vec<Document> {
-        let table = SnapshotTable {
-            db_schema: DatabaseSchema::try_new("public").unwrap(),
-            table: super::table(root.table),
-        };
-        let mut rows = capture.snapshot(&[table]).await.unwrap();
-        let mut ids = Vec::new();
-        while let Some(event) = rows.next().await {
-            let event = event.unwrap();
-            let resolved = builder
-                .resolve(event.table(), event.key(), event.before(), event.after())
-                .await
-                .unwrap();
-            ids.extend(
-                resolved
-                    .into_iter()
-                    .filter(|id| id.index.as_ref() == root.table),
-            );
-        }
-        let mut documents = Vec::with_capacity(ids.len());
-        for batch in ids.chunks(BACKFILL_BATCH) {
-            documents.extend(builder.build_many(batch).await.unwrap());
-        }
-        documents
-    }
-
-    fn line(out: &mut String, index: &str, form: &str, document: &Document) {
-        let (id, op, body) = match document {
-            Document::Upsert { id, body } => {
-                let mut text = String::new();
-                canonical(&sink::to_json(body), &mut text);
-                (id, "upsert", text)
-            }
-            Document::Delete { id } => (id, "delete", String::new()),
-            Document::Failed { id, failure } => (id, "failed", format!("{failure:?}")),
-        };
-        let id = id.rendered().replace(['\t', '\n'], " ");
-        let body = body.replace(['\t', '\n'], " ");
-        writeln!(out, "{index}\t{form}\t{id}\t{op}\t{body}").unwrap();
-    }
-
-    /// `value` as JSON with every object's keys sorted, whichever order
-    /// `serde_json` keeps them in.
-    fn canonical(value: &serde_json::Value, out: &mut String) {
-        match value {
-            serde_json::Value::Object(map) => {
-                let mut entries: Vec<_> = map.iter().collect();
-                entries.sort_by(|a, b| a.0.cmp(b.0));
-                out.push('{');
-                for (n, (key, value)) in entries.into_iter().enumerate() {
-                    if n > 0 {
-                        out.push(',');
-                    }
-                    out.push_str(&serde_json::Value::String(key.clone()).to_string());
-                    out.push(':');
-                    canonical(value, out);
-                }
-                out.push('}');
-            }
-            serde_json::Value::Array(items) => {
-                out.push('[');
-                for (n, item) in items.iter().enumerate() {
-                    if n > 0 {
-                        out.push(',');
-                    }
-                    canonical(item, out);
-                }
-                out.push(']');
-            }
-            other => out.push_str(&other.to_string()),
-        }
-    }
-
-    /// The relations a root's rows live in: the table, or its partitions.
-    fn root_relations(root: &Root) -> Vec<String> {
-        match root.shape {
-            Shape::HashPartitioned | Shape::RangePartitioned => {
-                (0..4).map(|n| format!("{}_{n}", root.table)).collect()
-            }
-            _ => vec![root.table.to_owned()],
-        }
-    }
-
-    /// Statements, calls and plans of every statement naming `table` in this
-    /// database, summed: Postgres 18 merges `ARRAY[…]` lists of different
-    /// lengths into one entry, so one entry is not one statement text.
-    async fn statements(pool: &PgPool, table: &str) -> (i64, i64, i64) {
-        let row = sqlx::query(
-            "SELECT count(*)::bigint, coalesce(sum(calls), 0)::bigint, \
-             coalesce(sum(plans), 0)::bigint FROM pg_stat_statements \
-             WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) \
-             AND query LIKE '%' || $1 || '%' AND query NOT LIKE '%pg_stat_statements%' \
-             AND query NOT LIKE '%flusso-review-case%'",
-        )
-        .bind(table)
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        (row.get(0), row.get(1), row.get(2))
-    }
-
-    async fn plans(settings: &Settings) -> String {
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&settings.url)
-            .await
-            .unwrap();
-        let roots = roots();
-        seed(&pool, &roots).await;
-        sqlx::query("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
-            .execute(&pool)
-            .await
-            .unwrap();
-        let spec = Arc::new(spec(&roots));
-        let lookup = PgDocumentBuilder::connect(&settings.url, spec.clone())
-            .await
-            .unwrap();
-        let mut out = String::new();
-        for root in &roots {
-            let all = ids(&lookup, &pool, root).await;
-            for &size in PLAN_BATCHES {
-                let case = format!("{}/{size}", case_name(root));
-                if !settings.filter.is_match(&case) {
-                    continue;
-                }
-                let batch = all.get(..size).unwrap();
-                // One connection: every call reuses the same prepared
-                // statements, as a long-running daemon's pool does.
-                let builder =
-                    PgDocumentBuilder::connect_with_max_connections(&settings.url, spec.clone(), 1)
-                        .await
-                        .unwrap();
-                let marker = format!("SELECT 'flusso-review-case {} {case}'", settings.run);
-                sqlx::query(AssertSqlSafe(marker))
-                    .execute(&pool)
-                    .await
-                    .unwrap();
-                sqlx::query("SELECT pg_stat_statements_reset()")
-                    .execute(&pool)
-                    .await
-                    .unwrap();
-                for _ in 0..PLAN_CALLS {
-                    builder.build_many(batch).await.unwrap();
-                }
-                let first = statements(&pool, root.table).await;
-                for _ in 0..PLAN_CALLS {
-                    builder.build_many(batch).await.unwrap();
-                }
-                let (count, calls, plans) = statements(&pool, root.table).await;
-                // Closes the case: what the server logs next (the next
-                // run's seeding) belongs to no case.
-                let closing = format!("SELECT 'flusso-review-case {} -'", settings.run);
-                sqlx::query(AssertSqlSafe(closing))
-                    .execute(&pool)
-                    .await
-                    .unwrap();
-                writeln!(
-                    out,
-                    "{case}\t{}\t{}\t{count}\t{calls}\t{plans}\t{}\t{}",
-                    root_relations(root).join(","),
-                    match root.shape {
-                        Shape::HashPartitioned | Shape::RangePartitioned => 4,
-                        _ => 0,
-                    },
-                    calls - first.1,
-                    plans - first.2,
-                )
-                .unwrap();
-            }
-        }
-        out
-    }
-}
+criterion_main!(benches);

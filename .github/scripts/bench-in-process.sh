@@ -35,7 +35,8 @@
 # Three knobs for review-ab.sh (all unset in the PR gate):
 #
 # - BENCH_SET=docker picks the Docker-backed benches (postgres, cases,
-#   pipeline) instead of the five in-process ones;
+#   pipeline, and `review`, review-ab's review-mode harness) instead of the
+#   five in-process ones;
 # - BENCH_BUILD_ONLY=1 builds and records the executables without running
 #   their benchmarks, so the caller can run base and head interleaved (an
 #   in-process executable still runs once, with `--list`, to record its ids);
@@ -157,6 +158,7 @@ if [ "${BENCH_SET:-in-process}" = docker ]; then
   bench libs/2-adapters/source-postgres/benches/postgres.rs flusso-source-postgres postgres
   bench libs/2-adapters/source-postgres/benches/cases.rs flusso-source-postgres cases
   bench libs/2-engine/benches/pipeline.rs flusso-engine pipeline
+  bench libs/2-adapters/source-postgres/benches/review.rs flusso-source-postgres review
 else
   bench libs/2-engine/benches/engine.rs flusso-engine engine
   bench libs/2-adapters/source-postgres/benches/pgoutput.rs flusso-source-postgres pgoutput --features bench

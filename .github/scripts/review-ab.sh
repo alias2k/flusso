@@ -47,9 +47,13 @@
 #    base then head) and judged by the PR gate's confirm rule. Exits 1 only on
 #    a confirmed case. Results: `<head target>/review-ab/<timestamp>/`.
 #
-# --digest and --plans swap steps 6-9 for one run of the `cases` executable
-# per side in its review mode (REVIEW_AB_MODE, see benches/cases.rs), built,
-# stamped and checked as above (the bench is `cases`; --own-benches refused):
+# --digest and --plans swap steps 6-9 for one run of the `review` bench
+# target per side (REVIEW_AB_MODE, see benches/review.rs, which includes
+# cases.rs for its roots), built, stamped and checked as above, laid over the
+# base with cases.rs. Only a mode builds it, so the bench comparison never
+# needs a base that has what it uses; a mode refuses a base without one of
+# its `// review-ab requires:` lines, and --bench, --rounds, --limit and
+# --own-benches (exit 2):
 #
 # - --digest: both sides build the `cases` roots' documents (`build`,
 #   `build_many` under 16 keys and 16+, a backfill); review-ab-digest.py
@@ -74,6 +78,7 @@ if [ -z "$pg_versions" ]; then
 fi
 usage="usage: review-ab.sh [--digest | --plans] [<base>] [--pg $pg_versions] [--bench postgres,cases,pipeline] [--filter <f>] [--limit 5] [--rounds 3] [--own-benches] [--bench-cpus LIST --server-cpus LIST | --no-pin] | --clean | --clean-results"
 mode=bench
+bench_only_flags=()
 base=origin/main
 benches=postgres,cases,pipeline
 filter=
@@ -90,10 +95,10 @@ positional=0
 while [ $# -gt 0 ]; do
   case $1 in
     --pg) pg_versions=${2:?$usage}; shift 2 ;;
-    --bench) benches=${2:?$usage}; shift 2 ;;
+    --bench) benches=${2:?$usage}; bench_only_flags+=(--bench); shift 2 ;;
     --filter) filter=${2:?$usage}; shift 2 ;;
-    --limit) limit=${2:?$usage}; shift 2 ;;
-    --rounds) rounds=${2:?$usage}; shift 2 ;;
+    --limit) limit=${2:?$usage}; bench_only_flags+=(--limit); shift 2 ;;
+    --rounds) rounds=${2:?$usage}; bench_only_flags+=(--rounds); shift 2 ;;
     --own-benches) own_benches=1; shift ;;
     --bench-cpus) bench_cpus=${2:?$usage}; shift 2 ;;
     --server-cpus) server_cpus=${2:?$usage}; shift 2 ;;
@@ -115,10 +120,13 @@ setup_exit=1
 if [ "$mode" != bench ]; then
   setup_exit=2
   if [ "$own_benches" -eq 1 ]; then
-    echo "error: --$mode runs the head's \`cases\` harness on both sides; it does not take --own-benches" >&2
+    bench_only_flags+=(--own-benches)
+  fi
+  if [ "${#bench_only_flags[@]}" -gt 0 ]; then
+    echo "error: --$mode runs the head's \`review\` harness once per side, measuring nothing; it does not take ${bench_only_flags[*]}" >&2
     exit 2
   fi
-  benches=cases
+  benches=review
 fi
 
 scripts=$(cd "$(dirname "$0")" && pwd)
@@ -185,7 +193,14 @@ declare -A package_dir=(
   [postgres]=libs/2-adapters/source-postgres
   [cases]=libs/2-adapters/source-postgres
   [pipeline]=libs/2-engine
+  [review]=libs/2-adapters/source-postgres
 )
+# The review modes' harness: a target of its own, so the bench comparison
+# never compiles it (nor needs a base with what it uses).
+review_file=libs/2-adapters/source-postgres/benches/review.rs
+if [ "$mode" != bench ]; then
+  bench_file[review]=$review_file
+fi
 selected=()
 for bench in ${benches//,/ }; do
   [ -n "${bench_file[$bench]:-}" ] || { echo "error: unknown bench \`$bench\`" >&2; exit 2; }
@@ -197,6 +212,17 @@ in_base() { git cat-file -e "$base_sha:$1" 2>/dev/null; }
 overlay=()
 if [ "$own_benches" -eq 0 ]; then
   overlay=("${bench_file[postgres]}" "${bench_file[cases]}" "${bench_file[pipeline]}")
+fi
+if [ "$mode" != bench ]; then
+  overlay+=("$review_file")
+  # Each `// review-ab requires: <text>` line of the harness names what it
+  # needs from the crate's source; a base without it can't build the harness.
+  while IFS= read -r required; do
+    if ! git grep -q -F -e "$required" "$base_sha" -- libs/2-adapters/source-postgres/src 2>/dev/null; then
+      echo "error: --$mode needs \`$required\` in libs/2-adapters/source-postgres/src, which base $base (${base_sha:0:12}) predates; pick a newer base" >&2
+      exit 2
+    fi
+  done < <(sed -n 's|^// review-ab requires: ||p' "$head_tree/$review_file")
 fi
 
 # A base bench that predates REVIEW_AB_PG_URL would start its own testcontainer
@@ -243,8 +269,8 @@ toolchain() { (cd "$1" && rustc -vV) 2>/dev/null || echo none; }
 checkout_base() {
   mkdir -p "$base_tree"
   GIT_INDEX_FILE=$home/index git --git-dir="$git_dir" --work-tree="$base_tree" read-tree --reset -u "$base_sha"
-  for bench in postgres cases pipeline; do
-    in_base "${bench_file[$bench]}" || rm -f "$base_tree/${bench_file[$bench]}"
+  for rel in "${bench_file[postgres]}" "${bench_file[cases]}" "${bench_file[pipeline]}" "$review_file"; do
+    in_base "$rel" || rm -f "$base_tree/$rel"
   done
   for rel in "${overlay[@]}"; do
     cp "$head_tree/$rel" "$base_tree/$rel"
@@ -252,6 +278,9 @@ checkout_base() {
   local manifest=$base_tree/libs/2-adapters/source-postgres/Cargo.toml
   if [ "${#overlay[@]}" -gt 0 ] && ! grep -q '^name = "cases"' "$manifest"; then
     printf '\n[[bench]]\nname = "cases"\nharness = false\n' >>"$manifest"
+  fi
+  if [ "$mode" != bench ] && ! grep -q '^name = "review"' "$manifest"; then
+    printf '\n[[bench]]\nname = "review"\nharness = false\n' >>"$manifest"
   fi
 }
 
@@ -264,7 +293,7 @@ echo "review-ab: base $base = ${base_sha:0:12}, committed $base_date (not fetche
 if [ "$mode" = bench ]; then
   echo "vs the working tree; Postgres $pg_versions; benches ${selected[*]}; $rounds rounds"
 else
-  echo "vs the working tree; Postgres $pg_versions; --$mode with the \`cases\` harness"
+  echo "vs the working tree; Postgres $pg_versions; --$mode with the \`review\` harness"
 fi
 
 cpu_args=(--nproc "$(nproc)" --taskset "$(command -v taskset >/dev/null && echo 1 || echo 0)")
@@ -422,18 +451,18 @@ review() {
   if [ "$1" = base ]; then
     tree=$base_tree target=$base_target
   fi
-  exe=$(executable "$target" cases)
+  exe=$(executable "$target" review)
   database=$((database + 1))
   docker exec "$container" psql -U postgres -qc "CREATE DATABASE r$database" >/dev/null
   if [ -n "${3:-}" ]; then
     docker exec "$container" psql -U postgres -qc "ALTER DATABASE r$database SET plan_cache_mode = $3" >/dev/null
   fi
   echo "── $mode · $1${3:+ · $3} · pg$version"
-  if ! (cd "$tree/${package_dir[cases]}" &&
+  if ! (cd "$tree/${package_dir[review]}" &&
     REVIEW_AB_MODE=$mode REVIEW_AB_PG_URL=postgres://postgres:postgres@127.0.0.1:$port/r$database \
       REVIEW_AB_OUT=$2 REVIEW_AB_FILTER=$filter REVIEW_AB_RUN=$1-${3:-} \
       "${bench_pin[@]}" "$exe" >&2); then
-    echo "error: the $1 side's \`cases\` harness failed in --$mode (see above)" >&2
+    echo "error: the $1 side's \`review\` harness failed in --$mode (see above)" >&2
     exit 2
   fi
   docker exec "$container" psql -U postgres -qc "DROP DATABASE r$database" >/dev/null
