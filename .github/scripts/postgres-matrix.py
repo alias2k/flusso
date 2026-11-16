@@ -11,8 +11,9 @@ of the leg's) and writes the leg's result as JSON. A missing or unreadable repor
 
 `issue` reads every leg's result JSON under RESULTS_DIR (one per artifact, any depth). A leg in
 `--tags` with no result counts as failed. Any failed leg opens or updates one issue (fixed title,
-label `area: ci-release`) listing each failing version and its tests, with a link to the run;
-every leg passing closes it. `--dry-run` prints the `gh` calls instead of making them. Only the
+label `area: ci-release`, opened by the workflow's bot) listing each failing version and its tests,
+with a link to the run; every leg passing closes it. It acts on one issue only, the newest it opened:
+a human's issue with the same title is left alone. `--dry-run` prints the `gh` calls instead of making them. Only the
 nightly run calls this; a labelled PR reports through its check alone.
 """
 import argparse
@@ -25,6 +26,9 @@ import xml.etree.ElementTree as ElementTree
 
 ISSUE_TITLE = "Postgres matrix fails on a supported major"
 ISSUE_LABEL = "area: ci-release"
+# The workflow token's author, as `gh` names it in a filter and in `author.login`.
+BOT_AUTHOR = "app/github-actions"
+BOT_LOGINS = {BOT_AUTHOR, "github-actions[bot]", "github-actions"}
 PINNED = re.compile(r"test-postgres: starting postgres:(\S+) instead of the run's")
 
 
@@ -126,17 +130,36 @@ def gh(args: list[str], dry_run: bool, capture: bool = False) -> str:
     return done.stdout if capture else ""
 
 
+def own_issue(listed: str) -> tuple[int | None, list[int]]:
+    """The newest open issue this script maintains, and any older ones it leaves alone.
+
+    Its issue has the fixed title and was opened by the workflow's bot: a human's issue with the same
+    title is never edited or closed.
+    """
+    numbers = sorted(
+        (issue["number"] for issue in json.loads(listed or "[]")
+         if issue.get("title") == ISSUE_TITLE and (issue.get("author") or {}).get("login") in BOT_LOGINS),
+        reverse=True,
+    )
+    return (numbers[0] if numbers else None), numbers[1:]
+
+
 def maintain_issue(results: list[dict], run_url: str, dry_run: bool) -> None:
-    listed = gh(["issue", "list", "--state", "open", "--search", f'in:title "{ISSUE_TITLE}"', "--json", "number,title"],
+    # `--author app/github-actions` matches only through `--search`; alone, gh's filter drops bot authors.
+    listed = gh(["issue", "list", "--state", "open", "--label", ISSUE_LABEL, "--author", BOT_AUTHOR,
+                 "--search", f'in:title "{ISSUE_TITLE}"', "--json", "number,title,author"],
                 dry_run, capture=True)
-    existing = [i["number"] for i in json.loads(listed or "[]") if i.get("title") == ISSUE_TITLE]
+    existing, older = own_issue(listed)
+    if older:
+        print(f"maintaining #{existing}; also open with its title and author, left alone: "
+              + ", ".join(f"#{n}" for n in older))
     if all(result["ok"] for result in results):
-        for number in existing:
-            gh(["issue", "close", str(number), "--comment", f"Every version passed in [this run]({run_url})."], dry_run)
+        if existing is not None:
+            gh(["issue", "close", str(existing), "--comment", f"Every version passed in [this run]({run_url})."], dry_run)
         return
     body = issue_body(results, run_url)
-    if existing:
-        gh(["issue", "edit", str(existing[0]), "--body", body], dry_run)
+    if existing is not None:
+        gh(["issue", "edit", str(existing), "--body", body], dry_run)
     else:
         gh(["issue", "create", "--title", ISSUE_TITLE, "--label", ISSUE_LABEL, "--body", body], dry_run)
 

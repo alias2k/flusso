@@ -10,6 +10,7 @@ its calls.
 import json
 import os
 import pathlib
+import re
 import stat
 import subprocess
 import sys
@@ -17,6 +18,7 @@ import tempfile
 import unittest
 
 HERE = pathlib.Path(__file__).resolve().parent
+ROOT = HERE.parent.parent
 SCRIPT = HERE / "postgres-matrix.py"
 TITLE = "Postgres matrix fails on a supported major"
 RUN = "https://github.com/alias2k/flusso/actions/runs/1"
@@ -48,13 +50,21 @@ RED = junit(
 )
 
 
-class Gh:
-    """A fake `gh` on `PATH` that records its calls and answers `issue list` with `open_issues`."""
+BOT = "app/github-actions"
 
-    def __init__(self, tmp: pathlib.Path, open_issues: list[int]):
+
+class Gh:
+    """A fake `gh` on `PATH` that records its calls and answers `issue list` with `open_issues`.
+
+    Each open issue is a number (opened by the workflow's bot) or a `(number, author)` pair. Like a
+    search that matched loosely, the answer ignores the call's filters: the script must check them.
+    """
+
+    def __init__(self, tmp: pathlib.Path, open_issues: list):
         self.calls = tmp / "gh-calls.jsonl"
-        listed = json.dumps([{"number": n, "title": TITLE} for n in open_issues]
-                            + [{"number": 999, "title": TITLE + " (not this one)"}])
+        issues = [i if isinstance(i, tuple) else (i, BOT) for i in open_issues]
+        listed = json.dumps([{"number": n, "title": TITLE, "author": {"login": who}} for n, who in issues]
+                            + [{"number": 998, "title": TITLE + " (not this one)", "author": {"login": BOT}}])
         script = tmp / "gh"
         script.write_text(
             f"#!{sys.executable}\nimport json, sys\n"
@@ -86,7 +96,7 @@ def summarize(tmp: pathlib.Path, text: str | None, tag: str, outcome: str) -> tu
     return done.stdout, json.loads(out.read_text(encoding="utf-8"))
 
 
-def maintain(tmp: pathlib.Path, open_issues: list[int], *extra: str,
+def maintain(tmp: pathlib.Path, open_issues: list, *extra: str,
              tags: str = '["14-alpine","18-alpine"]') -> tuple[subprocess.CompletedProcess, list[list[str]]]:
     gh = Gh(tmp, open_issues)
     env = dict(os.environ) | {"PATH": gh.path}
@@ -179,6 +189,50 @@ class Issue(unittest.TestCase):
         self.assertIn("18-alpine: failed", done.stdout)
         self.assertIn("outcome `missing`", calls[-1][-1])
 
+    def test_the_list_asks_for_the_bots_labelled_issues(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp)
+            summarize(tmp, GREEN, "14-alpine", "success")
+            summarize(tmp, GREEN, "18-alpine", "success")
+            _, calls = maintain(tmp, [])
+        listing = calls[0]
+        self.assertEqual(listing[listing.index("--label") + 1], "area: ci-release")
+        self.assertEqual(listing[listing.index("--author") + 1], BOT)
+        self.assertIn("author", listing[listing.index("--json") + 1])
+
+    def test_a_humans_issue_with_the_title_is_left_alone_on_a_failing_night(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp)
+            summarize(tmp, RED, "18-alpine", "failure")
+            summarize(tmp, GREEN, "14-alpine", "success")
+            _, calls = maintain(tmp, [(999, "someone")])
+        self.assertEqual([c[:2] for c in calls], [["issue", "list"], ["issue", "create"]])
+
+    def test_a_humans_issue_with_the_title_is_left_alone_on_a_green_night(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp)
+            summarize(tmp, GREEN, "14-alpine", "success")
+            summarize(tmp, GREEN, "18-alpine", "success")
+            _, calls = maintain(tmp, [(999, "someone")])
+        self.assertEqual([c[:2] for c in calls], [["issue", "list"]])
+
+    def test_of_several_of_its_issues_only_the_newest_is_updated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp)
+            summarize(tmp, RED, "18-alpine", "failure")
+            summarize(tmp, GREEN, "14-alpine", "success")
+            done, calls = maintain(tmp, [41, 57, (60, "someone")])
+        self.assertEqual([c[:3] for c in calls[1:]], [["issue", "edit", "57"]])
+        self.assertIn("#41", done.stdout)
+
+    def test_of_several_of_its_issues_only_the_newest_is_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp)
+            summarize(tmp, GREEN, "14-alpine", "success")
+            summarize(tmp, GREEN, "18-alpine", "success")
+            _, calls = maintain(tmp, [41, 57])
+        self.assertEqual([c[:3] for c in calls[1:]], [["issue", "close", "57"]])
+
     def test_a_dry_run_lists_but_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = pathlib.Path(tmp)
@@ -186,6 +240,26 @@ class Issue(unittest.TestCase):
             done, calls = maintain(tmp, [], "--dry-run")
         self.assertEqual([c[:2] for c in calls], [["issue", "list"]])
         self.assertIn("would run: gh issue create", done.stdout)
+
+
+class PinnedOutput(unittest.TestCase):
+    def test_every_binary_with_a_pinned_start_keeps_its_passing_output(self):
+        """The `ci` profile stores passing output only where a test calls `test_postgres::pinned`."""
+        nextest = (ROOT / ".config" / "nextest.toml").read_text(encoding="utf-8")
+        stored = re.search(r"filter = '([^']*)'\njunit\.store-success-output = true", nextest)
+        self.assertIsNotNone(stored, "no `ci` override stores passing output")
+        pinned = set()
+        for path in ROOT.glob("**/tests/*.rs"):
+            if "target" in path.parts or "test-postgres" in path.parts:
+                continue
+            if "test_postgres::pinned" not in path.read_text(encoding="utf-8"):
+                continue
+            manifest = (path.parent.parent / "Cargo.toml").read_text(encoding="utf-8")
+            package = re.search(r'^name = "([^"]+)"', manifest, re.M).group(1)
+            pinned.add(f"package({package}) & binary({path.stem})")
+        self.assertTrue(pinned, "no test calls test_postgres::pinned")
+        clauses = {clause.strip() for clause in stored.group(1).split("|")}
+        self.assertEqual(pinned - clauses, set(), "add these to the override in .config/nextest.toml")
 
 
 if __name__ == "__main__":
