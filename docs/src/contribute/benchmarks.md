@@ -177,7 +177,7 @@ Every root has a `has_many` child keyed by its key type. Read the key types and 
 
 The storage action's own alerting is off. `.github/scripts/bench-regression.py` reads the history and compares each new point to the **median of the previous five** points of the same series. A point is over when it is worse than that median by more than 25% (20% for peak RSS) and by more than three times the window's own median absolute deviation, so a series that swings from run to run needs a move larger than its swings. A regression is the newest point being over **and** the one before it being over against its own window, two consecutive runs of `main`. One bad run is noise until the next confirms it. A change in the container image tags restarts the window.
 
-When a regression is found the script opens one issue, "Performance regression on main", keeps it current on later runs, and closes it when every series is back within its threshold.
+When a regression is found the script opens one issue, "Performance regression on main", keeps it current on later runs, and closes it when every series is back within its threshold. It only ever touches the newest open issue the workflow's bot opened under that title and its `bug` label: an issue a person files under the same title is left alone.
 
 Around that rule, without changing what it flags:
 

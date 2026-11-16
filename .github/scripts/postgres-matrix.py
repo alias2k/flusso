@@ -24,11 +24,11 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ElementTree
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import bot_issue  # noqa: E402
+
 ISSUE_TITLE = "Postgres matrix fails on a supported major"
 ISSUE_LABEL = "area: ci-release"
-# The workflow token's author, as `gh` names it in a filter and in `author.login`.
-BOT_AUTHOR = "app/github-actions"
-BOT_LOGINS = {BOT_AUTHOR, "github-actions[bot]", "github-actions"}
 PINNED = re.compile(r"test-postgres: starting postgres:(\S+) instead of the run's")
 
 
@@ -130,29 +130,11 @@ def gh(args: list[str], dry_run: bool, capture: bool = False) -> str:
     return done.stdout if capture else ""
 
 
-def own_issue(listed: str) -> tuple[int | None, list[int]]:
-    """The newest open issue this script maintains, and any older ones it leaves alone.
-
-    Its issue has the fixed title and was opened by the workflow's bot: a human's issue with the same
-    title is never edited or closed.
-    """
-    numbers = sorted(
-        (issue["number"] for issue in json.loads(listed or "[]")
-         if issue.get("title") == ISSUE_TITLE and (issue.get("author") or {}).get("login") in BOT_LOGINS),
-        reverse=True,
-    )
-    return (numbers[0] if numbers else None), numbers[1:]
-
-
 def maintain_issue(results: list[dict], run_url: str, dry_run: bool) -> None:
-    # `--author app/github-actions` matches only through `--search`; alone, gh's filter drops bot authors.
-    listed = gh(["issue", "list", "--state", "open", "--label", ISSUE_LABEL, "--author", BOT_AUTHOR,
-                 "--search", f'in:title "{ISSUE_TITLE}"', "--json", "number,title,author"],
-                dry_run, capture=True)
-    existing, older = own_issue(listed)
+    listed = gh(bot_issue.list_args(ISSUE_TITLE, ISSUE_LABEL), dry_run, capture=True)
+    existing, older = bot_issue.own_issue(listed, ISSUE_TITLE)
     if older:
-        print(f"maintaining #{existing}; also open with its title and author, left alone: "
-              + ", ".join(f"#{n}" for n in older))
+        print(bot_issue.left_alone(existing, older))
     if all(result["ok"] for result in results):
         if existing is not None:
             gh(["issue", "close", str(existing), "--comment", f"Every version passed in [this run]({run_url})."], dry_run)

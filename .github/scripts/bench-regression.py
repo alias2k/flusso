@@ -19,8 +19,10 @@ Direction comes from the tool: `customSmallerIsBetter` is worse when higher,
 `customBiggerIsBetter` when lower.
 
 Prints the verdict. With `--issue`, opens (or updates) a single GitHub issue
-titled "Performance regression on main" via `gh`, and closes it when nothing
-regresses.
+titled "Performance regression on main" (label `bug`) via `gh`, and closes it
+when nothing regresses. It acts on one issue only, the newest open one the
+workflow's bot opened with that title and label (`bot_issue.py`): a person's
+issue with the same title is left alone.
 
 Around that rule, and without changing what it flags:
 
@@ -52,12 +54,17 @@ Otherwise the exit code is 0 — a regression is a signal, not a broken job.
 import argparse
 import json
 import os
+import pathlib
 import re
 import statistics
 import subprocess
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import bot_issue  # noqa: E402
+
 ISSUE_TITLE = "Performance regression on main"
+ISSUE_LABEL = "bug"
 POWER_CUTS = 20
 POWER_RECENT = 50
 POWER_GRID = (1, 1.2, 1.5, 2, 3, 4, 6, 8)
@@ -265,14 +272,14 @@ def power_summary(table: list[dict]) -> str:
 
 
 def upsert_issue(findings: list[dict], power: list[dict]) -> None:
-    listed = subprocess.run(
-        ["gh", "issue", "list", "--state", "open", "--search", f'in:title "{ISSUE_TITLE}"', "--json", "number,title"],
-        check=True, capture_output=True, text=True,
-    )
-    existing = [i for i in json.loads(listed.stdout or "[]") if i["title"] == ISSUE_TITLE]
+    listed = subprocess.run(["gh", *bot_issue.list_args(ISSUE_TITLE, ISSUE_LABEL)],
+                            check=True, capture_output=True, text=True)
+    existing, older = bot_issue.own_issue(listed.stdout, ISSUE_TITLE)
+    if older:
+        print(bot_issue.left_alone(existing, older))
     if not findings:
-        for issue in existing:
-            subprocess.run(["gh", "issue", "close", str(issue["number"]), "--comment", "Every series is back within its threshold."], check=True)
+        if existing is not None:
+            subprocess.run(["gh", "issue", "close", str(existing), "--comment", "Every series is back within its threshold."], check=True)
         return
     lines = [
         "Two consecutive runs on `main` crossed the threshold, and the series' own run-to-run swing, against the rolling median of the previous five points.",
@@ -287,10 +294,10 @@ def upsert_issue(findings: list[dict], power: list[dict]) -> None:
         lines += ["", power_summary(power)]
     lines += ["", "History: https://alias2k.github.io/flusso/bench/", "", "This issue is maintained by `.github/scripts/bench-regression.py`; it closes itself once the series recover."]
     body = "\n".join(lines)
-    if existing:
-        subprocess.run(["gh", "issue", "edit", str(existing[0]["number"]), "--body", body], check=True)
+    if existing is not None:
+        subprocess.run(["gh", "issue", "edit", str(existing), "--body", body], check=True)
     else:
-        subprocess.run(["gh", "issue", "create", "--title", ISSUE_TITLE, "--label", "bug", "--body", body], check=True)
+        subprocess.run(["gh", "issue", "create", "--title", ISSUE_TITLE, "--label", ISSUE_LABEL, "--body", body], check=True)
 
 
 def main() -> int:
