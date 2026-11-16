@@ -71,8 +71,10 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   scenario, headline metric, baseline, regression, soak — is `CONTEXT.md`'s Measuring section; the
   chapter is `docs/src/contribute/benchmarks.md`). (1) **Scenarios** (`dev/bench`, `flusso-bench`,
   unpublished) run the real release `flusso` binary as a child process against testcontainers
-  (or `BENCH_PG_URL`/`BENCH_OS_URL`) through `reference` (the dev store, three indexes) and
-  `complex` (the worst-case document) at a `ci` or `default` scale, and report the headline
+  (or `BENCH_PG_URL`/`BENCH_OS_URL`) through `reference` (the dev store, three indexes),
+  `complex` (the worst-case document) and `sync-standby` (`reference` with its writers behind an
+  emulated 2 ms synchronous standby, `dev/bench/src/standby.rs`; by hand only, not in `bench.yml`)
+  at a `ci` or `default` scale, and report the headline
   metrics: visible latency p50/p99 (commit → searchable, via the `updated_at`/`updatedAt` stamp on
   the dev root tables), drain throughput of a burst, backfill throughput, peak RSS + CPU (sampled
   with `ps`), plus flush p50/p99 from `/metrics` for attribution. (2) **Docker-backed component
@@ -177,7 +179,7 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   reports `Fresh` exactly while the slot is missing, `prepare()` creates it — issue #120;
   `partitions`: a range-partitioned root and child stream under the parent's name via
   `publish_via_partition_root`, resolve, and backfill through the parent — issue #143) plus
-  `engine`'s `wal`, `wal_release`, and `pipeline`
+  `engine`'s `wal`, `wal_release`, `visibility`, and `pipeline`
   binaries (`wal_release`, issue #204: with the engines running over recording sinks, the slot's
   `confirmed_flush_lsn` and `restart_lsn` pass the WAL written by changes that produce no document
   — an unread table under `FOR ALL TABLES`, unread-column updates, filtered/soft-deleted/orphaned
@@ -635,6 +637,43 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   (`searchable_trails_applied_until_the_engine_reports_it`,
   `a_stalled_sibling_blocks_an_all_sinks_fence_but_not_one_on_the_healthy_sink`,
   `idle_source_progress_wakes_a_waiter`); the CLI's `http::tests`; and the `fence` live e2e.
+- **A change is emitted only once its transaction is visible (issue #343, ADR 0010).** Postgres
+  flushes a commit record before new snapshots see the transaction, so the walsender can deliver a
+  change every read would still miss. The contract is on the port (`ChangeCapture::live`: a change
+  is yielded only once it can be read back); the engine is unchanged. The Postgres stream
+  (`cdc/stream.rs`) keeps `Begin`'s xid and holds committed transactions in `pending`, in commit
+  order; the front one is emitted only once its xid is `readable`. A snapshot read
+  (`pg_current_snapshot()::text`, judged in Rust by `cdc/visibility.rs`'s `Snapshot::sees`, the
+  32-bit xid **widened by its signed distance to `xmax`**, which is last-finished + 1, not the next
+  xid) runs on **its own task** whenever an xid is `unchecked`, one at a time, so it overlaps the
+  engine's build and one read covers every transaction received; inline it made the stream
+  not-ready and shrank `drain_ready`'s batches. While the front is held the loop `select!`s
+  `confirmed_moved` (confirmations keep reaching the client, #205), `recv` up to the read-ahead
+  bound (`with_read_ahead`, the CLI passes `max_changes × 16`) and the poll schedule
+  (`poll_delay`: 0.5 ms for 20 ms, tokio rounds it to 1 ms, then doubling to 50 ms). A transaction
+  touching no table an index reads (`required_tables`, by name) needs no check. **Fences and
+  confirmation stay honest only because the hold lives in `pending`**: nothing there is registered
+  and the horizon never moves past buffered changes; hold anywhere else and both guards need
+  extending. A hold past 5 s warns (sessions with `wait_event = 'SyncRep'`), every minute after,
+  and stops the stream if the server now names flusso a synchronous standby
+  (`synchronous_standby_names` matched by `names_standby`, case-insensitive, `*`; the walsender's
+  `sync_state` as a cross-check, NULL without `pg_read_all_stats`). `WalChangeCapture::check_server`
+  refuses a server in recovery or one naming flusso, before `prepare` writes, in every `live` (on
+  the SQL pool and on the gated replication session) and in the CLI's `Backends::source`, so `run`
+  exits. `ChangeCapture::readable_wait` → `Status::with_source` → `/status`
+  `visibility_wait_seconds` and the `flusso.source.visibility_wait` gauge (read live). One held
+  transaction stalls the whole stream; no opt-out. Guards: `engine`'s `visibility` e2e (every
+  scenario holds commits on a standby that never answers: nothing written during an 8 s hold, the
+  document within 1 s of the release; root/child/re-parent/delete/count, a later commit released
+  first, the slot not confirmed past a held commit, restart, backfill and a split transaction
+  during a hold, `COMMIT PREPARED`, an unread table not held, the refusal at start and while
+  running); `daemon`'s `fence` `a_fence_never_covers_a_commit_read_before_it_was_visible`;
+  `visibility::tests` (widening at epochs 0 and ≥ 1, the standby-name forms, the schedule) and
+  `postgres_agrees_on_every_widened_xid` (Docker, against `pg_visible_in_snapshot`);
+  `stream::tests`' `a_held_transaction_is_not_emitted_and_nothing_passes_it`,
+  `an_earlier_held_transaction_holds_back_a_later_visible_one`,
+  `a_confirmation_is_handed_over_during_a_hold`, `a_hold_reads_no_further_than_its_bound`,
+  `a_hold_on_a_server_waiting_for_flusso_stops_the_stream`.
 - **Built once; build order is delivery order.** A batch buffers `(Position, ChangeEvent)`s,
   resolves each to `DocumentId`s, dedups, then `build_many` assembles each touched document
   **once** for all sinks. Snapshot rows go through the same path but are published *without* a
@@ -1738,6 +1777,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | Pipeline observability trait (`Observer`, `BuildStats`/`CommitStats`, `EngineId`, `FanOut`) | `libs/2-engine/src/observer.rs` |
 | Script fields (Rhai): compile, run, strip input-only fields, the `DocumentBuilder` decorator, the sandbox, value conversion, typed dates | `libs/2-script/src/` — `scripts.rs` (`Scripts`: plan + apply), `builder.rs` (`ScriptedBuilder`), `sandbox.rs`, `value.rs`, `dates.rs` + `dates/library.rs` (the date types + their Rhai registration), `view.rs` (a `map` of dates typed for scripts), `input.rs` (JSON typed by the schema); `benches/scripted.rs`; CLI `commands/script.rs` (`flusso script run`), `telemetry/script_log.rs` |
 | Daemon (domain): supervisor, `DaemonControl`, per-sink `Status`, `StatusObserver`, lag poll, the fence | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `supervise.rs` (stage → spawn → restart with backoff; `DaemonControl::reindex`), `backends.rs` (`Backends` trait + `SourceParts`/`SinkParts` seam), `observer.rs`, `status.rs`, `lag.rs`, `fence.rs` (`Fence`/`FenceRequest`/`FenceOutcome`/`FenceObserver`) |
+| Read-after-visible (issue #343): holding a change until its transaction is visible, the stall warning, the synchronous-standby refusal | `libs/2-adapters/source-postgres/src/cdc/stream.rs` (the hold in `pending`, the snapshot read on its own task), `cdc/visibility.rs` (`Snapshot`, `widen`, `poll_delay`, `names_standby`, `PgVisibility`), `cdc/capture.rs` (`check_server`, `with_read_ahead`, `readable_wait`); `libs/3-daemon/src/status.rs` (`with_source`); CLI `telemetry/metrics.rs` (`register_visibility_wait_gauge`); e2e `libs/2-engine/tests/visibility.rs`; scenario `dev/bench/src/standby.rs` (`sync-standby`) |
 | Read-your-writes (fences), end to end | source: `libs/1-ports/source/src/cdc/capture.rs` (`SourcePosition`, `reached`, `on_advance`), `libs/2-adapters/source-postgres/src/cdc/ack.rs` (`Positions`: entries + horizon) and `stream.rs` (who moves the horizon); sink: `libs/1-ports/sink/src/sink.rs` (`Visibility`), `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`settle_visibility`); engine: `libs/2-engine/src/sink_engine.rs` (`report_positions`, the searchable queue); daemon: `libs/3-daemon/src/fence.rs`; CLI: `apps/cli/src/http/mod.rs` (`wait`); client: `sdk/query/src/fence.rs`, `position.rs`; e2e: `libs/3-daemon/tests/fence.rs` |
 | Adapter registry (the one place that names adapters): `type` → config struct, `validate`, descriptions, flag overrides | `apps/cli/src/adapters.rs` |
 | Adapter assembly (build the running source/sinks): the `Backends` impl | `apps/cli/src/backends.rs` (`FlussoBackends` — Postgres source + OpenSearch/stdout sinks) |
@@ -1764,7 +1804,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore`; user-facing shipping recipes in `docs/src/deploy/docker.md` |
 | Kubernetes deploy (Helm chart) | `deploy/helm/flusso/` — `Chart.yaml`, `values.yaml`, `templates/`, `README.md` |
 | Agent-facing docs (the Claude plugin + internal commands) | `plugin/` — `ARCHITECTURE.md` is the contract (one corpus/three consumers, who owns which meaning, the self-containment rule), `skills/*/SKILL.md` the knowledge corpus (`flusso-query` discloses `migration.md`/`options.md`/`maps.md`), `commands/` thin workflow entries, `agents/flusso-expert.md`, `hooks/`; `.claude/commands/{implement,new-issue}.md` the internal spine; `.claude/skills/coordinator/SKILL.md` how a round of issues is driven through agents (order of work, the two independent reviews, merge and issue rules). Guarded by `apps/cli/tests/agent_docs_paths.rs` |
-| Domain glossary + architecture decisions | `CONTEXT.md` (the vocabulary: kernel / ports / adapters / engine / daemon, stream / lane / envelope / position / source position / fence, operation vs primitive vs transport) and `docs/adr/` (0001 adapter-owned config, 0004 the rename, 0005 lock format 3, 0006 benchmarks, 0007 reverse resolution reads the pre-image, 0008 page cursors are keyset with an opt-in point-in-time, 0009 a fence waits on the source's own position, per sink, at two observed levels: accepted; 0010 a change is emitted once its transaction is visible: `proposed`, issue #343; 0002/0003 the engine split: `proposed` until phase 2 of #130 lands) |
+| Domain glossary + architecture decisions | `CONTEXT.md` (the vocabulary: kernel / ports / adapters / engine / daemon, stream / lane / envelope / position / source position / fence, operation vs primitive vs transport) and `docs/adr/` (0001 adapter-owned config, 0004 the rename, 0005 lock format 3, 0006 benchmarks, 0007 reverse resolution reads the pre-image, 0008 page cursors are keyset with an opt-in point-in-time, 0009 a fence waits on the source's own position, per sink, at two observed levels: accepted; 0010 a change is emitted once its transaction is visible: accepted, issue #343; 0002/0003 the engine split: `proposed` until phase 2 of #130 lands) |
 
 ## Conventions
 

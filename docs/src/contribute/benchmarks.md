@@ -36,6 +36,7 @@ Every point carries the container image tags and the scale parameters in its `ex
 | --- | --- | --- |
 | `reference` | the dev store (`dev/*.schema.yml`, three indexes), seeded deterministically | 70% root updates across users / products / orders, 20% related-table updates (line items, reviews, addresses, profiles), 10% inserts and deletes including soft-delete toggles |
 | `complex` | one worst-case `users` document: 1:1, 1:N with a nested 1:N, M:N through a junction, seven aggregates, an object, transforms, a default, a constant, soft-delete | 40% line-item updates (the multi-hop resolve), 30% orders, 20% users (the timed change), 10% junction inserts and deletes |
+| `sync-standby` | `reference`'s store, config and scales | `reference`'s, with the latency and drain writers committing behind an emulated 2 ms synchronous standby: every change reaches flusso before it is visible and is held until it is (see [Behind a synchronous standby](../reference/source-postgres.md#behind-a-synchronous-standby)). The standby is a name no server answers to plus a task that cancels each commit's wait after 2 ms, so a real standby's throughput and jitter aren't modelled. Run by hand; CI doesn't record it. |
 
 Two scales, `ci` and `default`; the presets are in `dev/bench/src/scale.rs`. The scale is part of the series name, so a CI point and a local point are never compared. The seed derives every value from the row index, no `random()`, so a scale yields the same dataset every run. The dev root tables carry `updated_at` for this: the writer stamps it and the document exposes it as `updatedAt`.
 
@@ -51,7 +52,7 @@ just bench-components              # the Docker-backed component benches
 just review-ab origin/main         # A/B the working tree against a base on those benches (see below)
 just review-digest                 # same documents as the base? (see below)
 just review-plans                  # same query plans as the base? (see below)
-just bench-scenario reference ci   # a scenario; also `complex`, and `default` scale
+just bench-scenario reference ci   # a scenario; also `complex`, `sync-standby`, and `default` scale
 just load                          # the soak tool: watch it, it produces no comparable number
 ```
 

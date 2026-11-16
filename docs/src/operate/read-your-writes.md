@@ -47,6 +47,7 @@ From Rust, `flusso-query` runs the steps below itself: see [Reading your own wri
 - **Related tables are covered.** A write to a table an index only joins rebuilds the parent documents; the fence passes once those are in.
 - **Several writes, one wait.** Read the position once after the last commit. It covers everything before it.
 - **Watch the positions.** `/status` reports `applied_position` and `searchable_position` per sink, comparable with `pg_current_wal_lsn()`.
+- **Behind a synchronous standby too.** A commit returns to the writer only once it is visible, and flusso indexes it only then, so the position read after it covers the committed state. A fence on a position another session read while a commit still waited on the standby doesn't pass until that commit is visible and indexed. See [Behind a synchronous standby](../reference/source-postgres.md#behind-a-synchronous-standby).
 - **A backfill isn't fenced.** While an index is still seeding, a fence can pass before the snapshot has reached a row. Gate on `/readyz` or the index's state in `/status` for that.
 - **Neither is an index mid-reindex.** During a [reindex](reindex.md), live writes land in the new generation while readers stay on the old one until the swap. A fence passes when the write is in; a read of that index sees it after the swap. The index shows `backfilling` in `/status` meanwhile.
 
