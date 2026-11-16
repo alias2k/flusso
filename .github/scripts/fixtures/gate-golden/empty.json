@@ -1,0 +1,6 @@
+{
+  "exit": 2,
+  "stdout": "::error::nothing to compare: no bench has both `base` and `pr` under <criterion>\n",
+  "breaches": null,
+  "summary": null
+}
