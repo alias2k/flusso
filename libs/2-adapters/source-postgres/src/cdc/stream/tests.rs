@@ -1082,3 +1082,95 @@ async fn an_old_snapshot_is_not_reused() {
     assert!(decode.next_change().is_none(), "checked by a new read");
     assert!(decode.unchecked.contains(&7));
 }
+
+/// A snapshot double that sees every xid committed so far: `committed` is
+/// raised as a test sends each transaction, so a commit newer than the last
+/// read always needs a read of its own.
+#[derive(Clone, Default)]
+struct UpTo {
+    committed: Arc<std::sync::atomic::AtomicU32>,
+}
+
+impl Visibility for UpTo {
+    async fn snapshot(&self) -> Result<super::super::visibility::Snapshot> {
+        let next = u64::from(self.committed.load(std::sync::atomic::Ordering::SeqCst)) + 1;
+        super::super::visibility::Snapshot::parse(&format!("{next}:{next}:"))
+    }
+
+    async fn stall(&self, _xid: u32) -> Result<super::super::visibility::Stall> {
+        Ok(super::super::visibility::Stall::default())
+    }
+}
+
+/// A replication connection fed from a channel.
+struct Fed(tokio::sync::mpsc::UnboundedReceiver<ReplicationEvent>);
+
+impl Replication for Fed {
+    async fn recv(&mut self) -> std::result::Result<Option<ReplicationEvent>, PgWireError> {
+        Ok(self.0.recv().await)
+    }
+
+    fn update_applied_lsn(&self, _lsn: Lsn) {}
+}
+
+fn insert_child(id: u32) -> ReplicationEvent {
+    let mut insert = vec![b'I'];
+    insert.extend_from_slice(&16385u32.to_be_bytes());
+    insert.push(b'N');
+    insert.extend_from_slice(&2i16.to_be_bytes());
+    insert.extend(text(&id.to_string()));
+    insert.extend(text("1"));
+    ReplicationEvent::XLogData {
+        wal_start: Lsn::from_u64(0),
+        wal_end: Lsn::from_u64(0),
+        server_time_micros: 0,
+        data: insert.into(),
+    }
+}
+
+/// Item 1 of the review of #343: the snapshot task must never stop just as a
+/// new commit needs it. Lone commits, each sent 0.7–1.9 ms after the previous
+/// one was emitted (around the task's pause between reads), on a
+/// multi-threaded runtime: every one must be emitted, promptly. The task that
+/// exited after reading `wanted == false` while the stream, seeing it not yet
+/// finished, started none, left about one in a thousand unchecked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_commit_arriving_as_the_snapshot_task_stops_is_still_checked() {
+    use futures::StreamExt;
+    use std::sync::atomic::Ordering;
+
+    let (mut decode, _ack) = holding_state();
+    announce_child(&mut decode, b'f');
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let visibility = UpTo::default();
+    let mut stream = into_stream(State {
+        client: Fed(rx),
+        catalog: sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused@127.0.0.1/unused")
+            .unwrap(),
+        visibility: visibility.clone(),
+        decode,
+        read_ahead: 64,
+        refresh: Arc::default(),
+        refresher: None,
+        hold: None,
+        hold_clock: Arc::default(),
+    });
+    let mut seed = 0x2545_f491_u32;
+    for xid in 1..=4000u32 {
+        visibility.committed.store(xid, Ordering::SeqCst);
+        for event in [begin(xid), insert_child(xid), commit(u64::from(xid) * 100)] {
+            tx.send(event).unwrap();
+        }
+        let emitted = tokio::time::timeout(Duration::from_millis(500), stream.next()).await;
+        assert!(
+            matches!(emitted, Ok(Some(Ok(_)))),
+            "commit {xid} was not emitted within 500 ms: {emitted:?}"
+        );
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        let pause = 700 + seed % 1200;
+        tokio::time::sleep(Duration::from_micros(u64::from(pause))).await;
+    }
+}
