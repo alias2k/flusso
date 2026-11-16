@@ -104,18 +104,27 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   shared with `bench-gate.sh`'s path); exit 1 only on a confirmed case. Never fetches. Keeps the last 5
   `target/review-ab/<timestamp>` dirs; `--clean` deletes the cache, `--clean-results` the results. Tests: `test_review_ab.py` (the script
   end to end over fake `cargo`/`docker`/bench executables in a throwaway repo). Two **modes** (issue #347) swap
-  the measuring step and keep the rest: `cases.rs` has a hand-written `main` that, with `REVIEW_AB_MODE` set,
-  runs a review job on the same roots instead of Criterion (so the build, stamp, overlay and provenance are
-  review-ab's own; `--own-benches` is refused). **`just review-digest`** (`--digest`): each side builds every
+  the measuring step and keep the rest: they run `source-postgres`'s `review` bench target (`benches/review.rs`,
+  not a benchmark), which includes `cases.rs` as a `#[path]` module for its roots, laid over the base with it and
+  built, stamped and provenance-checked like any bench. Only a mode builds or overlays it (`bench-in-process.sh`'s
+  docker set lists it; review-ab passes it in `BENCH_ONLY` only in a mode), so `cases.rs` must use nothing old
+  bases lack and plain `review-ab` keeps building any base it built before (guard: `test_review_modes.py`'s
+  `HarnessSplit`); what `review.rs` needs is one `// review-ab requires: <text>` line each, looked up with
+  `git grep` in the base's `source-postgres/src`, and a base without it is refused by name (from #357 on today).
+  A mode refuses `--bench`, `--rounds`, `--limit`, `--own-benches`. **`just review-digest`** (`--digest`): each side builds every
   root index's documents by `build`, `build_many` under 16 keys and 16+, and a backfill (snapshot → resolve →
   `build_many` by 256), rendered by `sink::to_json` with sorted keys; `review-ab-digest.py` prints a digest per
-  index and side, `same`/`differ` (with the first ids and a diff) and `forms disagree` (two forms built one id
-  differently). **`just review-plans`** (`--plans`): Postgres with `pg_stat_statements` (`track_planning`) and
+  index and side, `same`/`differ` (with the first ids and a diff), `forms disagree` (two forms built one id
+  differently) and `no documents` (an index the harness declared with `#index` and nothing built), plus the
+  harness's `#note`s (no missing ids on a root keyed by more than `id`, no backfill on a root without a
+  single-column key). **`just review-plans`** (`--plans`): Postgres with `pg_stat_statements` (`track_planning`) and
   `auto_explain` (JSON, every statement); per `plan_cache_mode` (`auto`, `force_generic_plan`, set on the fresh
   database) each side runs each root at 1/10/100 keys, 2 × 10 `build_many` calls on one connection, counts
   summed over the root's statements (Postgres 18 merges `ARRAY[…]` lists into one entry), each case opened and
   closed by a `flusso-review-case` marker statement in the server log; `review-ab-plans.py` flags plans per call
-  ≥ 0.5 on head only, a changed root scan, lost pruning (partitions left, `Subplans Removed`). A mode exits 0/1
+  ≥ 0.5 on head only, a changed root scan, lost pruning (partitions left, `Subplans Removed` of the root's own
+  Append), and `no plan` for a case with no logged plan on a side; a log with no plan for a whole side and
+  `plan_cache_mode` exits 2. A mode exits 0/1
   (flagged)/2 (setup). Tests: `test_review_modes.py`. (3) **In-process benches**, no Docker, the PR gate: `engine`'s `engine` (both engines
   over the channel stream with mocks), `source-postgres`'s `pgoutput` (the decoder over the recorded
   `benches/fixtures/pgoutput.bin`; `tests/record_pgoutput.rs`, an `#[ignore]`d Docker test in the
@@ -1727,7 +1736,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]` proc-macros | `sdk/query-derive/src/` — `lib.rs` (entry points + `Attrs`), `doc.rs` (field parsing/validation + the recursive handle tree + `embed_checks`), `fragment.rs` (the location-free shape check), `spec.rs` (baking a level into `&[FieldSpec]`), `resolve.rs` (finding `flusso.toml`); the const-check vocabulary is `sdk/query/src/check.rs`. Plus the `flusso-query-derive` memory note |
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |
 | The Postgres image tests and benches start (default tag, `FLUSSO_TEST_PG_TAG`, `Pinned` exceptions, `Container`) + its guard | `dev/test-postgres/` (`flusso-test-postgres`, `publish = false`, path-only dev-dependency), `.github/scripts/check-postgres-image.py` + `test_check_postgres_image.py`, `docs/src/contribute/testing.md` ("Which Postgres") |
-| Benchmarks: scenario harness, in-process + Docker benches, CI gate + history | `dev/bench/` (`flusso-bench`: `src/main.rs` phases, `scenario.rs` mixes, `scale.rs` presets, `flusso.rs` child process, `scenarios/`), `libs/2-engine/benches/{engine,pipeline}.rs`, `libs/2-adapters/source-postgres/benches/{pgoutput,resolve,postgres,cases}.rs` + `tests/record_pgoutput.rs`, `libs/2-adapters/sink-opensearch/benches/{render,opensearch}.rs`, `.github/workflows/bench.yml`, `.github/scripts/bench-*.{py,sh}`, `.github/scripts/review-ab*.{sh,py}` (`just review-ab`, `review-digest`, `review-plans`; the two review modes' harness is `benches/cases.rs`'s `review` module), `docs/src/contribute/benchmarks.md`, ADR 0006 |
+| Benchmarks: scenario harness, in-process + Docker benches, CI gate + history | `dev/bench/` (`flusso-bench`: `src/main.rs` phases, `scenario.rs` mixes, `scale.rs` presets, `flusso.rs` child process, `scenarios/`), `libs/2-engine/benches/{engine,pipeline}.rs`, `libs/2-adapters/source-postgres/benches/{pgoutput,resolve,postgres,cases,review}.rs` + `tests/record_pgoutput.rs`, `libs/2-adapters/sink-opensearch/benches/{render,opensearch}.rs`, `.github/workflows/bench.yml`, `.github/scripts/bench-*.{py,sh}`, `.github/scripts/review-ab*.{sh,py}` (`just review-ab`, `review-digest`, `review-plans`; the two review modes' harness is `benches/review.rs`, over `cases.rs`'s roots), `docs/src/contribute/benchmarks.md`, ADR 0006 |
 | Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore`; user-facing shipping recipes in `docs/src/deploy/docker.md` |
 | Kubernetes deploy (Helm chart) | `deploy/helm/flusso/` — `Chart.yaml`, `values.yaml`, `templates/`, `README.md` |
 | Agent-facing docs (the Claude plugin + internal commands) | `plugin/` — `ARCHITECTURE.md` is the contract (one corpus/three consumers, who owns which meaning, the self-containment rule), `skills/*/SKILL.md` the knowledge corpus (`flusso-query` discloses `migration.md`/`options.md`/`maps.md`), `commands/` thin workflow entries, `agents/flusso-expert.md`, `hooks/`; `.claude/commands/{implement,new-issue}.md` the internal spine; `.claude/skills/coordinator/SKILL.md` how a round of issues is driven through agents (order of work, the two independent reviews, merge and issue rules). Guarded by `apps/cli/tests/agent_docs_paths.rs` |

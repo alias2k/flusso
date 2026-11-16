@@ -84,7 +84,7 @@ just review-ab --clean-results                      # delete target/review-ab, t
 | `--no-pin` | | run unpinned; also `REVIEW_AB_PIN=0` |
 | `--clean` | | remove the cache, `~/.cache/flusso/review-ab`, and nothing else (results stay), then exit |
 | `--clean-results` | | remove `target/review-ab`, every earlier run's tables and Criterion output, then exit |
-| `--digest`, `--plans` | | instead of the benches, compare the built documents ([`just review-digest`](#same-documents-just-review-digest)) or the query plans ([`just review-plans`](#same-plans-just-review-plans)) |
+| `--digest`, `--plans` | | instead of the benches, compare the built documents ([`just review-digest`](#same-documents-just-review-digest)) or the query plans ([`just review-plans`](#same-plans-just-review-plans)); a mode refuses `--bench`, `--rounds`, `--limit` and `--own-benches` |
 
 The first line names the base commit and its commit date. The command doesn't fetch, so `origin/main` is whatever was last fetched: run `git fetch` first when the latest `main` matters.
 
@@ -163,7 +163,7 @@ just review-digest main --pg 14,18       # one table per version
 just review-digest --filter '^k_'        # only these indexes (a regex over the index name)
 ```
 
-It's `review-ab.sh --digest`: the same lock, warm base build, stamp, provenance check, named containers and CPU pinning as `review-ab`, with the `cases` bench executable run once per side in its review mode instead of Criterion. On a fresh database per side it seeds the [review cases](#the-review-cases)' roots and, per root index, builds:
+It's `review-ab.sh --digest`: the same lock, warm base build, stamp, provenance check, named containers and CPU pinning as `review-ab`, with the `review` bench target run once per side instead of Criterion. That target includes `cases.rs` for its roots and is laid over the base with it; only a review mode builds it, so `just review-ab` itself still builds any base it built before. What the harness needs from the crate is listed in its `// review-ab requires:` lines, and a base that lacks one is refused with its name: the modes need a base from #357 on (`PgDocumentBuilder::connect_with_max_connections`). On a fresh database per side it seeds the [review cases](#the-review-cases)' roots and, per root index, builds:
 
 | Form | What |
 | --- | --- |
@@ -184,10 +184,18 @@ Each document is written as the sink would get it (`sink::to_json`, keys sorted)
 - `same`: both sides wrote byte-identical documents, tombstones included.
 - `differ`: below the table, the first differing ids (with the form that built them) and a diff of one document.
 - `forms disagree`: on one side, two forms built different documents for the same id: `build` against `build_many`, say. It's flagged even when base and head agree, since the two forms must never differ.
+- `no documents`: neither side built a document for an index the harness declared.
 
-The digest covers the forms, not the history: a missing id is a tombstone in each form. The composite-key and keyless roots have no `backfill` rows, since a snapshot skips a table without a single-column primary key, as `flusso run` does. Exit 0 when every index is `same`, 1 on a difference, 2 on a setup error.
+The digest covers the forms, not the history: a missing id is a tombstone in each form. Below the table, a note per index says what the harness left out: the composite-key and keyless roots get no missing ids (a change's key there is more than `id`, so a made-up id can't be keyed) and no `backfill` rows (a snapshot skips a table without a single-column primary key, as `flusso run` does). Exit 0 when every index is `same`, 1 on a difference, 2 on a setup error.
 
-What it can't see: shapes the `cases` schema doesn't have (filters, soft delete, aggregates, `via`, scripts), live changes and their reverse resolution, and anything about time.
+What it can't see: the `cases` schema is two `keyword` columns and one `has_many` child (`id`, `label`, ordered by `id`), so nothing about
+
+- other column types and their decoding (numbers, dates, `json`, arrays, `bytea`, …);
+- `belongs_to`, `has_one`, `many_to_many`, nested relations, `order_by` and `limit` beyond that one child;
+- filters, soft delete, aggregates, `via`, scripts;
+- live changes and their reverse resolution, and anything about time.
+
+And `sink::to_json` renders a `Decimal` value as its nearest `f64`, so a change to a decimal beyond float precision doesn't show in the digest.
 
 ### Same plans: `just review-plans`
 
@@ -215,7 +223,7 @@ A cell reads `base → head` when the sides differ.
 - **root scan**: the first node of the case's last logged plan that scans the root (or one of its partitions), with its index.
 - **partitions**: for a partitioned root, the partitions left in that plan and `Subplans Removed` (pruning at run time, under a generic plan). A custom plan prunes while planning, so it shows fewer partitions and nothing removed.
 
-Flags, head against base: **plans every call** (≥ 0.5 plans per call on head, fewer on base), **root scan changed**, **pruning lost** (more partitions left on head), **one side only**. Planning on every call on both sides is shown, not flagged: under `auto`, the partitioned roots and some 10-key batches do that on `main`. Exit 0 when nothing is flagged, 1 on a flag, 2 on a setup error.
+Flags, head against base: **plans every call** (≥ 0.5 plans per call on head, fewer on base), **root scan changed**, **pruning lost** (more partitions left on head, `Subplans Removed` read from the root's own Append), **no plan** (no logged plan of the case scans its root on a side, so nothing about its scan can be said), **one side only**. A server log with no plan at all for a side and `plan_cache_mode` is a setup error, naming both and the log, not a quiet pass. Planning on every call on both sides is shown, not flagged: under `auto`, the partitioned roots and some 10-key batches do that on `main`. Exit 0 when nothing is flagged, 1 on a flag, 2 on a setup error.
 
 What it can't see: the plan on other data sizes and statistics than the `cases` roots', statements other than the document build (resolution's lookups, the catalog reads, the backfill cursor), and the cost of planning: `review-ab` measures time.
 
