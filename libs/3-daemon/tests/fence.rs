@@ -18,6 +18,8 @@
 //!   stale document.
 //! - **A stalled sibling sink**: a fence on the healthy sink passes, a fence on
 //!   all sinks times out, and passes once the sibling recovers.
+//! - **A commit visible later than its WAL** (issue #343): a fence never
+//!   reports applied for a commit flusso read before it was visible.
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -239,7 +241,371 @@ async fn a_read_after_a_fence_sees_the_commit() {
     deployment.await.unwrap().unwrap();
 }
 
+/// Issue #343: a fence never covers a commit flusso read before it was visible.
+///
+/// A commit is held between its WAL flush and its visibility (a synchronous
+/// standby that never answers). What a client can know, honestly:
+///
+/// - The **committing** session cannot read `pg_current_wal_lsn()` while its
+///   commit waits. ADR 0009's client reads the position after its commit
+///   returns, and by then the transaction is visible. Once that fence reports
+///   `applied`, a read by id must return the committed value.
+/// - **Any other** session can read a position past the commit record while
+///   the commit waits (the record is already flushed). A fence on it must not
+///   report `applied` before the transaction is visible: flusso cannot have
+///   indexed state no snapshot shows yet, so `applied` would be a claim about
+///   the state before the commit. The wait is bounded at three seconds, ample
+///   for a pipeline that reads early to build and apply (milliseconds).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs Docker (starts Postgres and OpenSearch containers)"]
+async fn a_fence_never_covers_a_commit_read_before_it_was_visible() {
+    let (_postgres, pg_port, pg_url) = start_postgres().await;
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&pg_url)
+        .await
+        .unwrap();
+    let (_opensearch, os_url) = start_opensearch().await;
+    exec(&pool, "CREATE TABLE things (id int PRIMARY KEY, name text)").await;
+    exec(&pool, "INSERT INTO things VALUES (1, 'seed')").await;
+    exec(&pool, "CREATE PUBLICATION flusso FOR TABLE things").await;
+
+    let (_gate, gated) = watch::channel(true);
+    let running = Daemon::new(
+        config(),
+        Arc::new(RealBackends {
+            pg_url: pg_url.clone(),
+            pg_port,
+            os_url: os_url.clone(),
+            audit: Arc::new(GatedSink { open: gated }),
+        }),
+    )
+    .start()
+    .await
+    .unwrap();
+    let fence = running.fence();
+    let status = running.status();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let deployment = tokio::spawn(running.run(async {
+        let _ = stopped.await;
+    }));
+    await_live(&status).await;
+    let client = Client {
+        pool: pool.clone(),
+        fence: fence.clone(),
+        http: reqwest::Client::new(),
+        os_url,
+    };
+    let position = client.rename(1, "before").await;
+    client.fence(&position, FenceLevel::Applied, PRIMARY).await;
+
+    let sync = SyncRep::configure(&pool).await;
+    let held = sync
+        .hold("UPDATE things SET name = 'held' WHERE id = 1")
+        .await;
+    sent_to(&pool, "flusso").await;
+    let past_the_commit = client.position().await;
+    let while_held = fence
+        .wait(&FenceRequest {
+            position: past_the_commit.clone(),
+            level: FenceLevel::Applied,
+            sink: PRIMARY.map(|name| SinkName::try_new(name).unwrap()),
+            timeout: Duration::from_secs(3),
+        })
+        .await
+        .unwrap();
+    let read_while_held = client.get(1).await;
+    held.release().await;
+
+    let after_commit = client.position().await;
+    client
+        .fence(&after_commit, FenceLevel::Applied, PRIMARY)
+        .await;
+    let read_after = client.get(1).await;
+
+    assert!(
+        matches!(while_held, FenceOutcome::TimedOut { .. }),
+        "a fence on {past_the_commit}, past a commit not yet visible, answered \
+         {while_held:?} while the index held {read_while_held:?}; after the commit \
+         returned, a fence on {after_commit} then read {read_after:?}"
+    );
+    assert_eq!(
+        read_after.as_deref(),
+        Some("held"),
+        "a read after an applied fence on {after_commit} sees the commit"
+    );
+
+    let _ = stop.send(());
+    deployment.await.unwrap().unwrap();
+}
+
+async fn start_postgres() -> (test_postgres::Container, u16, String) {
+    let postgres = test_postgres::image()
+        .with_cmd([
+            "postgres",
+            "-c",
+            "wal_level=logical",
+            "-c",
+            "max_wal_senders=10",
+            "-c",
+            "max_replication_slots=10",
+        ])
+        .start()
+        .await
+        .unwrap();
+    let port = postgres.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    (postgres, port, url)
+}
+
+async fn start_opensearch() -> (
+    testcontainers_modules::testcontainers::ContainerAsync<GenericImage>,
+    String,
+) {
+    let opensearch = GenericImage::new("opensearchproject/opensearch", "2")
+        .with_exposed_port(9200.tcp())
+        .with_wait_for(WaitFor::http(
+            HttpWaitStrategy::new("/_cluster/health")
+                .with_port(9200.tcp())
+                .with_expected_status_code(200u16)
+                .with_poll_interval(Duration::from_secs(1)),
+        ))
+        .with_env_var("discovery.type", "single-node")
+        .with_env_var("DISABLE_SECURITY_PLUGIN", "true")
+        .with_env_var("DISABLE_INSTALL_DEMO_CONFIG", "true")
+        .with_env_var("OPENSEARCH_JAVA_OPTS", "-Xms512m -Xmx512m")
+        .with_startup_timeout(Duration::from_secs(180))
+        .start()
+        .await
+        .expect("opensearch container should start");
+    let url = format!(
+        "http://127.0.0.1:{}",
+        opensearch.get_host_port_ipv4(9200).await.unwrap()
+    );
+    (opensearch, url)
+}
+
 const PRIMARY: Option<&str> = Some("primary");
+
+/// Commits held between their WAL flush and their visibility (issue #343).
+///
+/// Postgres flushes a commit record, then waits for synchronous standbys, and
+/// only then takes the transaction out of the proc array, which is when new
+/// snapshots see it. A logical walsender decodes up to the flushed WAL, so the
+/// change reaches a replication client while every other session still reads
+/// the state before it. [`configure`](Self::configure) names a synchronous
+/// standby that never answers; a commit made with `synchronous_commit = on`
+/// then stays in that window until [`Held::release`] cancels its wait.
+/// Every other session commits locally and is never held.
+///
+/// The same helper as `flusso-engine`'s `tests/common`; keep the two alike.
+///
+/// It changes server settings with `ALTER SYSTEM`. Each test starts its own
+/// container, so they never reach another test.
+struct SyncRep {
+    pool: sqlx::PgPool,
+}
+
+impl SyncRep {
+    /// Name the standby that never answers.
+    async fn configure(pool: &sqlx::PgPool) -> Self {
+        configure(
+            pool,
+            &[
+                "ALTER SYSTEM SET synchronous_commit = 'local'",
+                "ALTER SYSTEM SET synchronous_standby_names = 'nobody'",
+            ],
+        )
+        .await;
+        standbys_in_force(pool).await;
+        Self { pool: pool.clone() }
+    }
+
+    /// Run `sql` as one transaction and return once its commit is flushed and
+    /// waiting on the standby: in the WAL, not visible.
+    async fn hold(&self, sql: &str) -> Held {
+        self.hold_statement(format!("BEGIN; {sql}; COMMIT;")).await
+    }
+
+    /// Run `statement` as written (a `COMMIT PREPARED`, say) and return once it
+    /// waits on the standby.
+    async fn hold_statement(&self, statement: String) -> Held {
+        let mut connection = self.pool.acquire().await.unwrap().detach();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        eventually("the reloaded standby names", async || {
+            let names: String = sqlx::query_scalar("SHOW synchronous_standby_names")
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+            names == "nobody"
+        })
+        .await;
+        sqlx::raw_sql("SET synchronous_commit = on")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        let commit = tokio::spawn(async move {
+            sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
+                .execute(&mut connection)
+                .await
+                .unwrap();
+        });
+        eventually("the commit waiting on its standby", async || {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                 WHERE pid = $1 AND wait_event = 'SyncRep')",
+            )
+            .bind(pid)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap()
+        })
+        .await;
+        Held {
+            pool: self.pool.clone(),
+            pid,
+            commit,
+        }
+    }
+}
+
+/// One held commit.
+struct Held {
+    pool: sqlx::PgPool,
+    pid: i32,
+    commit: tokio::task::JoinHandle<()>,
+}
+
+impl Held {
+    /// Cancel this commit's standby wait alone: its transaction leaves the proc
+    /// array and becomes visible, and its session returns.
+    async fn release(self) {
+        let cancelled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
+            .bind(self.pid)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap();
+        assert!(cancelled, "the held session {} is gone", self.pid);
+        tokio::time::timeout(std::time::Duration::from_secs(10), self.commit)
+            .await
+            .expect("the held commit returns once its wait is cancelled")
+            .unwrap();
+    }
+}
+
+/// Wait until the replication client named `application_name` was sent every
+/// WAL byte written so far.
+async fn sent_to(pool: &sqlx::PgPool, application_name: &str) {
+    let flushed: String = sqlx::query_scalar("SELECT pg_current_wal_flush_lsn()::text")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    eventually("the WAL sent to the replication client", async || {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_replication \
+             WHERE application_name = $1 AND sent_lsn >= $2::pg_lsn)",
+        )
+        .bind(application_name)
+        .bind(&flushed)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    })
+    .await;
+}
+
+/// Wait until Postgres makes commits wait for synchronous standbys, as
+/// `synchronous_standby_names` now asks.
+///
+/// A session reads the reloaded setting at once, but whether a commit waits
+/// is decided by a shared flag the checkpointer sets when it processes the
+/// reload, later: a commit in between doesn't wait (11 of 30 commits made just
+/// after the reload, measured on Postgres 16). So commit a write to an
+/// unpublished probe table until one is seen waiting, then cancel its wait.
+/// The reload signal also reaches each session a little later, so every write
+/// the helper doesn't mean to hold sets its commit level itself.
+async fn standbys_in_force(pool: &sqlx::PgPool) {
+    // Locally: a session the reload signal hasn't reached yet still has
+    // `synchronous_commit = on`, and its commit would wait forever.
+    sqlx::raw_sql(
+        "BEGIN; SET LOCAL synchronous_commit = local; \
+         CREATE TABLE IF NOT EXISTS flusso_syncrep_probe (x int); COMMIT;",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let mut connection = pool.acquire().await.unwrap().detach();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        sqlx::raw_sql("SET synchronous_commit = on")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        let probe = tokio::spawn(async move {
+            let _ = sqlx::raw_sql("INSERT INTO flusso_syncrep_probe VALUES (1)")
+                .execute(&mut connection)
+                .await;
+        });
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                 WHERE pid = $1 AND wait_event = 'SyncRep')",
+            )
+            .bind(pid)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if waiting {
+                sqlx::query("SELECT pg_cancel_backend($1)")
+                    .bind(pid)
+                    .execute(pool)
+                    .await
+                    .unwrap();
+                let _ = probe.await;
+                return;
+            }
+            if probe.is_finished() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "commits never started waiting for the synchronous standby"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// `ALTER SYSTEM` each statement (one per call: it refuses a transaction
+/// block), then reload the configuration.
+async fn configure(pool: &sqlx::PgPool, statements: &[&str]) {
+    for statement in statements.iter().chain(&["SELECT pg_reload_conf()"]) {
+        sqlx::query(sqlx::AssertSqlSafe(*statement))
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+}
+
+/// Poll `check` until it holds, failing after ten seconds with `what`.
+async fn eventually(what: &str, mut check: impl AsyncFnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !check().await {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
 
 /// How long a fence may take when nothing stands in its way. Generous: the
 /// point is that it is not the timeout, or a keepalive interval away.

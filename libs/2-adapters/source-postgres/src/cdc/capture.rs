@@ -18,6 +18,7 @@ use sqlx::{PgPool, Row};
 use tokio::sync::OnceCell;
 
 use super::ack::{Listeners, Positions};
+use super::visibility::{PgVisibility, refuse_standby};
 use super::{backfill, publication, replica_identity, stream};
 use crate::ColumnTypes;
 
@@ -30,6 +31,10 @@ const STATUS_INTERVAL: Duration = Duration::from_secs(1);
 /// The replication connection's `application_name`, shown in
 /// `pg_stat_replication` and `pg_stat_activity`, unless the caller set one.
 const APPLICATION_NAME: &str = "flusso";
+
+/// How many changes the stream reads ahead while a transaction is held, unless
+/// the caller set it: sixteen of the engine's default batches.
+const READ_AHEAD: usize = 256 * 16;
 
 /// Postgres change capture over logical replication (pgoutput).
 ///
@@ -49,6 +54,11 @@ const APPLICATION_NAME: &str = "flusso";
 /// - [`snapshot`](ChangeCapture::snapshot) reads current rows over an ordinary
 ///   SQL connection for an initial backfill (see the crate-private `backfill`). The engine calls
 ///   it only for tables backing an index the sink reports as unseeded.
+///
+/// A change is yielded only once its transaction is visible to a new snapshot
+/// (issue #343, ADR 0010): the stream holds a committed transaction, and every
+/// one after it, until then. [`readable_wait`](ChangeCapture::readable_wait)
+/// reports how long it has held one.
 ///
 /// # Prerequisites
 ///
@@ -94,6 +104,14 @@ pub struct WalChangeCapture {
     /// Set by [`prepare`](ChangeCapture::prepare) once it has ensured coverage,
     /// taken by the next [`live`](ChangeCapture::live) so it doesn't repeat it.
     coverage_ensured: Arc<AtomicBool>,
+    /// How many changes a stream reads ahead while a transaction is held; set
+    /// via [`with_read_ahead`](Self::with_read_ahead).
+    read_ahead: usize,
+    /// Which transaction the stream holds and since when; outlives a stream.
+    hold_clock: stream::HoldClock,
+    /// The snapshot reads' own connection, opened on first use: a read never
+    /// queues behind a catalog lookup or a lag probe on the admin pool.
+    visibility_pool: Arc<OnceCell<PgPool>>,
     /// The document builder's column types, dropped per table as each
     /// stream reads its `Relation`; set via
     /// [`with_column_types`](Self::with_column_types).
@@ -136,8 +154,87 @@ impl WalChangeCapture {
             positions: Arc::new(Mutex::new(None)),
             listeners: Arc::new(Listeners::default()),
             coverage_ensured: Arc::new(AtomicBool::new(false)),
+            read_ahead: READ_AHEAD,
+            hold_clock: Arc::default(),
+            visibility_pool: Arc::new(OnceCell::new()),
             column_types: None,
         }
+    }
+
+    /// How many changes a stream reads ahead while it holds a transaction that
+    /// is not visible yet: typically sixteen batches (`max_changes × 16`).
+    /// Reading ahead lets one snapshot query cover every transaction read so
+    /// far; the bound keeps a long hold from buffering without limit.
+    pub fn with_read_ahead(mut self, changes: usize) -> Self {
+        self.read_ahead = changes.max(1);
+        self
+    }
+
+    /// Refuse a server flusso cannot read from safely: a standby (the check
+    /// and every read must reach the primary the stream reads, issue #343), or
+    /// one whose `synchronous_standby_names` lists flusso's `application_name`
+    /// (every commit would wait on flusso while flusso waits for the commit to
+    /// become visible). Run before anything writes, and again by every
+    /// [`live`](ChangeCapture::live).
+    pub async fn check_server(&self) -> Result<()> {
+        let (in_recovery, names): (bool, String) = sqlx::query_as(
+            "SELECT pg_is_in_recovery(), current_setting('synchronous_standby_names')",
+        )
+        .fetch_one(self.admin_pool().await?)
+        .await
+        .map_err(|e| SourceError::Query(format!("checking the source server: {e}")))?;
+        self.judge_server(in_recovery, &names)
+    }
+
+    fn judge_server(&self, in_recovery: bool, names: &str) -> Result<()> {
+        let judged = Self::judged(in_recovery, names, self.application_name());
+        if judged.is_err() {
+            stream::clear_hold(&self.hold_clock);
+        }
+        judged
+    }
+
+    fn judged(in_recovery: bool, names: &str, application_name: &str) -> Result<()> {
+        if in_recovery {
+            return Err(SourceError::Setup(
+                "the source is a standby (pg_is_in_recovery() is true): flusso must read the \
+                 primary, where a transaction's visibility is decided. Point the connection URL \
+                 at the primary directly, not through anything that routes reads to replicas"
+                    .to_owned(),
+            ));
+        }
+        if let Some(refusal) = refuse_standby(names, application_name) {
+            return Err(refusal);
+        }
+        Ok(())
+    }
+
+    /// [`check_server`](Self::check_server) on the replication session itself,
+    /// before it starts: the stream must read the same primary the checks do.
+    async fn check_replication_session(&self, client: &mut ReplicationClient) -> Result<()> {
+        let rows = client
+            .simple_query(
+                "SELECT pg_is_in_recovery()::text, current_setting('synchronous_standby_names')",
+            )
+            .await
+            .map_err(|e| {
+                SourceError::Connection(format!("checking the replication session's server: {e}"))
+            })?;
+        let text = |column: usize| {
+            rows.first()
+                .and_then(|row| row.get(column))
+                .and_then(Option::as_ref)
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        };
+        let in_recovery = text(0).as_deref() == Some("true");
+        self.judge_server(in_recovery, &text(1).unwrap_or_default())
+    }
+
+    fn application_name(&self) -> &str {
+        self.config
+            .application_name
+            .as_deref()
+            .unwrap_or(APPLICATION_NAME)
     }
 
     /// Hand over the document builder's column types
@@ -192,6 +289,20 @@ impl WalChangeCapture {
         {
             tracing::warn!(%error, "could not ensure replica identities");
         }
+    }
+
+    /// The snapshot reads' own pool of one connection, its acquire bounded by
+    /// the read timeout.
+    async fn visibility_pool(&self) -> Result<&PgPool> {
+        self.visibility_pool
+            .get_or_try_init(|| async {
+                sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1)
+                    .acquire_timeout(stream::READ_TIMEOUT)
+                    .connect_lazy(&self.connection_url)
+                    .map_err(|e| SourceError::Connection(e.to_string()))
+            })
+            .await
     }
 
     /// The shared admin pool, opened on first call and reused thereafter. Kept
@@ -312,6 +423,7 @@ impl ChangeCapture for WalChangeCapture {
 
     #[tracing::instrument(name = "wal.prepare", skip_all, err)]
     async fn prepare(&self) -> Result<()> {
+        self.check_server().await?;
         // Before the slot: a change logged after the slot exists but before the
         // ALTERs would decode with the old identity, or against the old
         // publication (a missing table, a partition's name), and be lost.
@@ -333,8 +445,10 @@ impl ChangeCapture for WalChangeCapture {
                 .await?;
         }
         self.ensure_slot().await?;
+        self.check_server().await?;
 
         let catalog = self.admin_pool().await?.clone();
+        let visibility_pool = self.visibility_pool().await?.clone();
         let mut client = ReplicationClient::connect_gated(self.config.clone())
             .await
             .map_err(|e| SourceError::Connection(e.to_string()))?;
@@ -346,6 +460,7 @@ impl ChangeCapture for WalChangeCapture {
                 ))
             })?;
         }
+        self.check_replication_session(&mut client).await?;
         client
             .start()
             .await
@@ -365,13 +480,34 @@ impl ChangeCapture for WalChangeCapture {
         *slot = Some(Arc::clone(&positions));
         drop(slot);
         tracing::info!(start_lsn, "opened replication stream");
+        let visibility = PgVisibility {
+            pool: visibility_pool,
+            application_name: self.application_name().to_owned(),
+            slot: self.config.slot.clone(),
+        };
+        let read_tables = (!self.required_tables.is_empty()).then(|| {
+            self.required_tables
+                .iter()
+                .map(|table| table.table.clone())
+                .collect()
+        });
         Ok(stream::build(
             client,
             catalog,
-            self.pre_image_columns.clone(),
+            visibility,
+            stream::Settings {
+                pre_image_links: self.pre_image_columns.clone(),
+                read_tables,
+                read_ahead: self.read_ahead,
+                hold_clock: Arc::clone(&self.hold_clock),
+            },
             positions,
             self.column_types.clone(),
         ))
+    }
+
+    fn readable_wait(&self) -> Option<Duration> {
+        stream::held_for(&self.hold_clock)
     }
 
     fn confirm(&self, position: Position) {
@@ -612,6 +748,7 @@ impl CaptureProvisioning for WalChangeCapture {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -629,6 +766,43 @@ mod tests {
         assert_eq!(
             capture.config.application_name.as_deref(),
             Some("search-sync")
+        );
+    }
+
+    /// Review of #343, item 8: a standby is refused, whatever its standby
+    /// names, and the message points at the primary.
+    #[test]
+    fn a_standby_is_refused() {
+        let refusal = WalChangeCapture::judged(true, "", "flusso").unwrap_err();
+        let text = refusal.to_string();
+        assert!(text.contains("pg_is_in_recovery() is true"), "{text}");
+        assert!(text.contains("at the primary directly"), "{text}");
+        assert!(WalChangeCapture::judged(false, "other", "flusso").is_ok());
+        assert!(WalChangeCapture::judged(false, "", "flusso").is_ok());
+    }
+
+    /// The standby names are matched against the connection's own name.
+    #[test]
+    fn a_server_naming_the_connection_is_refused() {
+        assert!(WalChangeCapture::judged(false, "search-sync", "search-sync").is_err());
+        assert!(WalChangeCapture::judged(false, "flusso", "search-sync").is_ok());
+        assert!(WalChangeCapture::judged(false, "ANY 1 (*)", "search-sync").is_err());
+    }
+
+    /// Item 7: a refused server ends the hold the status reports; it would
+    /// otherwise grow while every restart is refused.
+    #[tokio::test]
+    async fn a_refusal_clears_the_hold_clock() {
+        let capture = WalChangeCapture::new(config(), "postgres://app@localhost/db");
+        *capture.hold_clock.lock().unwrap() = Some((7, tokio::time::Instant::now()));
+        assert!(capture.readable_wait().is_some());
+        assert!(capture.judge_server(false, "flusso").is_err());
+        assert_eq!(capture.readable_wait(), None);
+        *capture.hold_clock.lock().unwrap() = Some((7, tokio::time::Instant::now()));
+        assert!(capture.judge_server(false, "").is_ok());
+        assert!(
+            capture.readable_wait().is_some(),
+            "an accepted server keeps it"
         );
     }
 }

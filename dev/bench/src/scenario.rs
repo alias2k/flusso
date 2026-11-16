@@ -22,6 +22,10 @@ pub(crate) enum ScenarioName {
     Reference,
     /// One worst-case `users` document: every assembly feature at once.
     Complex,
+    /// `reference`, its writers committing behind an emulated synchronous
+    /// standby: every change is in the WAL before it is visible (issue #343).
+    #[serde(rename = "sync-standby")]
+    SyncStandby,
 }
 
 impl ScenarioName {
@@ -29,6 +33,15 @@ impl ScenarioName {
         match self {
             Self::Reference => "reference",
             Self::Complex => "complex",
+            Self::SyncStandby => "sync-standby",
+        }
+    }
+
+    /// The scenario whose store, seed, config and change mix this one runs.
+    pub(crate) fn store(self) -> Self {
+        match self {
+            Self::SyncStandby => Self::Reference,
+            other => other,
         }
     }
 }
@@ -75,9 +88,9 @@ impl Scenario {
     pub(crate) fn new(name: ScenarioName) -> Self {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("scenarios")
-            .join(name.as_str());
+            .join(name.store().as_str());
         match name {
-            ScenarioName::Reference => Self {
+            ScenarioName::Reference | ScenarioName::SyncStandby => Self {
                 name,
                 dir,
                 schema_sql: include_str!("../../postgres/init/01_schema.sql"),
@@ -118,7 +131,9 @@ impl Scenario {
     /// Documents the backfill seeds, across every index.
     pub(crate) fn root_documents(&self, scale: &Scale) -> u64 {
         match self.name {
-            ScenarioName::Reference => (scale.users + scale.products + scale.orders) as u64,
+            ScenarioName::Reference | ScenarioName::SyncStandby => {
+                (scale.users + scale.products + scale.orders) as u64
+            }
             ScenarioName::Complex => scale.users as u64,
         }
     }
@@ -134,7 +149,9 @@ impl Scenario {
     /// The next change in the scenario's mix.
     pub(crate) fn change(&self, rng: &mut StdRng, scale: &Scale, ids: &IdCounters) -> Change {
         match self.name {
-            ScenarioName::Reference => reference_change(rng, scale, ids),
+            ScenarioName::Reference | ScenarioName::SyncStandby => {
+                reference_change(rng, scale, ids)
+            }
             ScenarioName::Complex => complex_change(rng, scale),
         }
     }

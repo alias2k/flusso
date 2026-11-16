@@ -119,6 +119,20 @@ mod erased {
     }
 }
 
+/// Prometheus text exposition → a histogram's sample count for `sink` (the
+/// number of flushes, for the flush-duration histogram).
+pub(crate) fn histogram_count(text: &str, metric: &str, sink: &str) -> Option<f64> {
+    let prefix = format!("{metric}_count{{");
+    text.lines().find_map(|line| {
+        let (labels, value) = line.strip_prefix(&prefix)?.split_once('}')?;
+        labels
+            .split(',')
+            .any(|label| label.trim() == format!("sink=\"{sink}\""))
+            .then(|| value.trim().parse::<f64>().ok())
+            .flatten()
+    })
+}
+
 /// Prometheus text exposition → an estimate of a histogram's quantile, as
 /// `histogram_quantile` computes it (linear interpolation within the bucket).
 pub(crate) fn histogram_quantile(text: &str, metric: &str, sink: &str, q: f64) -> Option<f64> {

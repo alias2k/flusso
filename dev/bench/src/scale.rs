@@ -54,7 +54,7 @@ pub(crate) struct Scale {
 impl Scale {
     pub(crate) fn for_scenario(scenario: ScenarioName, name: ScaleName) -> Self {
         match (scenario, name) {
-            (ScenarioName::Reference, ScaleName::Default) => Self {
+            (ScenarioName::Reference | ScenarioName::SyncStandby, ScaleName::Default) => Self {
                 name,
                 users: 10_000,
                 products: 2_000,
@@ -71,7 +71,7 @@ impl Scale {
                 wall_cap_secs: 1_800,
                 rss_cap_mib: 2_048,
             },
-            (ScenarioName::Reference, ScaleName::Ci) => Self {
+            (ScenarioName::Reference | ScenarioName::SyncStandby, ScaleName::Ci) => Self {
                 name,
                 users: 5_000,
                 products: 1_000,

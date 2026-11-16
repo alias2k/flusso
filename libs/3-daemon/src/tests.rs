@@ -109,6 +109,46 @@ fn observer_drives_status_through_its_lifecycle() {
     assert_eq!(json["sinks"]["primary"]["changes_committed"], 3);
 }
 
+/// A capture holding a change it can't read back yet (issue #343).
+#[derive(Debug)]
+struct Holding(Option<Duration>);
+
+#[async_trait]
+impl ChangeCapture for Holding {
+    async fn continuity(&self) -> source::Result<Continuity> {
+        Ok(Continuity::Resumed)
+    }
+
+    async fn prepare(&self) -> source::Result<()> {
+        Ok(())
+    }
+
+    async fn live(&self) -> source::Result<BoxStream<'static, source::Result<LiveChange>>> {
+        Ok(Box::pin(stream::empty()))
+    }
+
+    fn confirm(&self, _: Position) {}
+
+    fn readable_wait(&self) -> Option<Duration> {
+        self.0
+    }
+}
+
+#[test]
+fn status_reports_how_long_the_source_holds_a_change_it_cannot_read_back() {
+    let status = |waiting: Option<Duration>| {
+        Status::new([users()], [primary()], Instant::now())
+            .with_source(Arc::new(Holding(waiting)))
+            .snapshot()
+    };
+    let held = status(Some(Duration::from_millis(7_500)));
+    assert_eq!(held.visibility_wait_seconds, Some(7.5));
+    let json = serde_json::to_value(&held).unwrap();
+    assert_eq!(json["visibility_wait_seconds"], 7.5);
+    let json = serde_json::to_value(status(None)).unwrap();
+    assert!(json["visibility_wait_seconds"].is_null());
+}
+
 /// A script failure the `skip` policy left out shows on `/status` under its
 /// index, with a count and the last failure; an index without one is absent.
 #[test]

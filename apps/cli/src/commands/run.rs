@@ -230,6 +230,7 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let control = running.control();
     let fence = running.fence();
     let _in_flight_gauge = metrics::register_in_flight_gauge(Arc::clone(&status));
+    let _visibility_wait_gauge = metrics::register_visibility_wait_gauge(Arc::clone(&status));
 
     let (public_shutdown, public_rx) = oneshot::channel::<()>();
     let (private_shutdown, private_rx) = oneshot::channel::<()>();

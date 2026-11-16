@@ -29,6 +29,7 @@ mod pgoutput;
 mod publication;
 mod replica_identity;
 mod stream;
+mod visibility;
 
 pub use capture::WalChangeCapture;
 

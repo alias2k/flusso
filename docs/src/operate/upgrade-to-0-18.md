@@ -1,6 +1,6 @@
 # Upgrade to 0.18
 
-0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index. It also writes a `timestamp` column in ISO 8601, which changes stored documents and can break a tuned `format`: see [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601). A `decimal` field is written with every digit: see [A decimal is written with every digit](#a-decimal-is-written-with-every-digit). A filter value that doesn't fit its column no longer matches by being cut to fit: see [A filter value is compared as written](#a-filter-value-is-compared-as-written). A script reads a date as a date, not a string: see [A date reaches a script as a date](#a-date-reaches-a-script-as-a-date).
+0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index. It also writes a `timestamp` column in ISO 8601, which changes stored documents and can break a tuned `format`: see [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601). A `decimal` field is written with every digit: see [A decimal is written with every digit](#a-decimal-is-written-with-every-digit). A filter value that doesn't fit its column no longer matches by being cut to fit: see [A filter value is compared as written](#a-filter-value-is-compared-as-written). A script reads a date as a date, not a string: see [A date reaches a script as a date](#a-date-reaches-a-script-as-a-date). A change is indexed only once its transaction is visible: see [A change waits until its commit is visible](#a-change-waits-until-its-commit-is-visible).
 
 ## When to use this
 
@@ -141,6 +141,17 @@ A comparison with a string, a number or another kind fails rather than answering
 1. **Find them.** `flusso check --offline` compiles scripts but can't see types. Run each index with a script that reads a date through [`flusso script run`](../author/scripts/debugging.md#flusso-script-run) on a real row (or `--input`, which now types dates by the schema).
 2. **Rewrite** them with the table above and the [date functions](../author/scripts/dates.md#functions).
 3. **Upgrade.** A script edit changes the content hash, so the edited index is rebuilt into a new generation on the first 0.18 run, as for any script edit.
+## A change waits until its commit is visible
+
+**Breaking.** 0.17 could read a change before its transaction was visible to other sessions and index the state before the commit; nothing rebuilt it. On a quiet primary that was rare; behind a synchronous standby it happened to most changes. 0.18 holds a change until its commit is visible (see [Behind a synchronous standby](../reference/source-postgres.md#behind-a-synchronous-standby)). What changes for a running deployment:
+
+- **A commit that never becomes visible stalls indexing** instead of being indexed stale: a synchronous standby that is down holds every later change too. `/status` shows `visibility_wait_seconds`, the `flusso.replication.visibility_wait` gauge rises, and a warning names the waiting sessions after 5 seconds.
+- **flusso refuses a server whose `synchronous_standby_names` takes it in**, by name (`flusso`) or by `*` in any form (`*`, `ANY 1 (*)`, `FIRST 2 (a, *)`), and a standby (`pg_is_in_recovery()`). Both started on 0.17. Under the setting, 0.17 confirmed each commit after indexing it stale, so commits waited on flusso but finished: a deployment that ran that way, slowly, **will not start on 0.18**, because a commit would now wait for flusso while flusso waits for the commit to become visible. `*` is refused even where real standbys could fill the quorum (`ANY 1 (*)` with a physical standby attached), since flusso counts among the candidates. The fix depends on the form:
+  - a name: take `flusso` out of the setting and reload, or give flusso another `application_name`;
+  - `*`: replace it with the names of the synchronous standbys and reload. Renaming flusso doesn't help: `*` matches every name.
+
+  `flusso check` reports the same refusal under *Source server*, so it can be run against the server before the upgrade. For a standby, point the connection URL at the primary.
+- **Documents indexed stale by 0.17 stay stale** until their rows change. Behind a synchronous standby, run [`flusso reindex <index>`](../reference/cli.md#reindex) on every index once 0.18 is live.
 
 ## Related
 

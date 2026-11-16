@@ -15,7 +15,13 @@ fn state() -> (DecodeState, Arc<Positions>) {
         warned: HashSet::new(),
         warned_unkeyed: HashSet::new(),
         open_txn: Vec::new(),
+        open_xid: 0,
         pending: VecDeque::new(),
+        readable: HashSet::new(),
+        unchecked: HashSet::new(),
+        last_emitted: None,
+        last_snapshot: None,
+        read_tables: Some(HashSet::new()),
         ack: Arc::clone(&ack),
         done: false,
         column_types: None,
@@ -66,7 +72,11 @@ fn keepalive_is_ignored_while_a_transaction_is_open() {
 #[test]
 fn keepalive_is_ignored_while_changes_await_emission() {
     let (mut decode, ack) = state();
-    decode.pending.push_back((upsert(), 50));
+    decode.pending.push_back(Pending {
+        event: upsert(),
+        lsn: 50,
+        xid: 1,
+    });
     handle(&mut decode, keepalive(100)).unwrap();
     assert_eq!(ack.confirmed_lsn(), 0);
 }
@@ -107,8 +117,10 @@ fn emitting_the_last_change_of_a_commit_moves_the_horizon() {
 #[test]
 fn a_commit_behind_another_keeps_the_horizon_at_the_emitted_one() {
     let (mut decode, ack) = state();
+    handle(&mut decode, begin(1)).unwrap();
     decode.open_txn.push(upsert());
     handle(&mut decode, commit(100)).unwrap();
+    handle(&mut decode, begin(2)).unwrap();
     decode.open_txn.push(upsert());
     handle(&mut decode, commit(200)).unwrap();
 
@@ -130,7 +142,11 @@ fn empty_commit_advances_the_watermark() {
 #[test]
 fn empty_commit_is_ignored_while_changes_await_emission() {
     let (mut decode, ack) = state();
-    decode.pending.push_back((upsert(), 50));
+    decode.pending.push_back(Pending {
+        event: upsert(),
+        lsn: 50,
+        xid: 1,
+    });
     handle(&mut decode, commit(100)).unwrap();
     assert_eq!(ack.confirmed_lsn(), 0);
 }
@@ -141,7 +157,7 @@ fn non_empty_commit_queues_changes_without_advancing() {
     decode.open_txn.push(upsert());
     handle(&mut decode, commit(100)).unwrap();
     assert_eq!(decode.pending.len(), 1);
-    assert_eq!(decode.pending.front().map(|(_, lsn)| *lsn), Some(100));
+    assert_eq!(decode.pending.front().map(|change| change.lsn), Some(100));
     assert_eq!(
         ack.confirmed_lsn(),
         0,
@@ -548,7 +564,7 @@ fn a_commit_of_only_unaddressable_deletes_is_emitted_at_its_position() {
     handle_xlog(&mut decode, &old_tuple_without_the_key(b'D', b'K', "1")).unwrap();
     handle(&mut decode, commit(100)).unwrap();
     assert_eq!(decode.pending.len(), 1);
-    assert_eq!(decode.pending.front().map(|(_, lsn)| *lsn), Some(100));
+    assert_eq!(decode.pending.front().map(|change| change.lsn), Some(100));
     assert_eq!(ack.confirmed_lsn(), 0, "the engine's confirm moves it");
 }
 
@@ -664,7 +680,19 @@ async fn a_confirmation_reaches_the_client_without_a_replication_event() {
     let catalog = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused@127.0.0.1/unused")
         .unwrap();
-    let mut stream = build(client, catalog, Default::default(), Arc::clone(&ack), None);
+    let mut stream = build(
+        client,
+        catalog,
+        Snapshots::seeing(&[]),
+        Settings {
+            pre_image_links: Default::default(),
+            read_tables: None,
+            read_ahead: 16,
+            hold_clock: Arc::default(),
+        },
+        Arc::clone(&ack),
+        None,
+    );
     let reader = tokio::spawn(async move { stream.next().await.is_some() });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -705,4 +733,624 @@ fn transport_errors_stay_transient_and_framing_errors_are_decode_errors() {
         map_pgwire(PgWireError::Protocol("bad frame".into())),
         SourceError::Decode(_)
     ));
+}
+
+// ── visibility (issue #343) ─────────────────────────────────────────────────
+
+/// A visibility double: the snapshot sees the xids in `visible`; a stall check
+/// refuses when `refuse` is set. Counts its calls.
+#[derive(Clone, Default)]
+struct Snapshots {
+    visible: Arc<std::sync::Mutex<HashSet<u32>>>,
+    refuse: Arc<std::sync::atomic::AtomicBool>,
+    /// Reads never answer.
+    hang: Arc<std::sync::atomic::AtomicBool>,
+    /// This many reads fail before they answer again.
+    failing: Arc<std::sync::atomic::AtomicUsize>,
+    /// Stall inspections never answer.
+    hang_stall: Arc<std::sync::atomic::AtomicBool>,
+    snapshots: Arc<std::sync::atomic::AtomicUsize>,
+    stalls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Snapshots {
+    fn seeing(xids: &[u32]) -> Self {
+        let snapshots = Self::default();
+        snapshots.see(xids);
+        snapshots
+    }
+
+    fn see(&self, xids: &[u32]) {
+        self.visible.lock().unwrap().extend(xids);
+    }
+
+    fn snapshot_now(&self) -> super::super::visibility::Snapshot {
+        let visible = self.visible.lock().unwrap();
+        // Everything below 1000 runs unless listed visible.
+        let running: Vec<String> = (1..1000u64)
+            .filter(|xid| !visible.contains(&u32::try_from(*xid).unwrap()))
+            .map(|xid| xid.to_string())
+            .collect();
+        super::super::visibility::Snapshot::parse(&format!("1:1000:{}", running.join(","))).unwrap()
+    }
+}
+
+impl Visibility for Snapshots {
+    async fn snapshot(&self) -> Result<super::super::visibility::Snapshot> {
+        use std::sync::atomic::Ordering;
+        self.snapshots.fetch_add(1, Ordering::SeqCst);
+        if self.hang.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        if self
+            .failing
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(SourceError::Query("pool timed out".to_owned()));
+        }
+        Ok(self.snapshot_now())
+    }
+
+    async fn stall(&self, _xid: u32) -> Result<super::super::visibility::Stall> {
+        self.stalls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.hang_stall.load(std::sync::atomic::Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        let refusal = self
+            .refuse
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .then(|| super::super::visibility::refuse_standby("flusso", "flusso"))
+            .flatten();
+        Ok(super::super::visibility::Stall {
+            refusal,
+            waiting: vec!["pid 1".to_owned()],
+        })
+    }
+}
+
+fn begin(xid: u32) -> ReplicationEvent {
+    ReplicationEvent::Begin {
+        final_lsn: Lsn::from_u64(0),
+        xid,
+        commit_time_micros: 0,
+    }
+}
+
+/// A transaction `xid` with one change, committed at `lsn`.
+fn transaction(decode: &mut DecodeState, xid: u32, lsn: u64) {
+    handle(decode, begin(xid)).unwrap();
+    decode.open_txn.push(upsert());
+    handle(decode, commit(lsn)).unwrap();
+}
+
+fn holding_state() -> (DecodeState, Arc<Positions>) {
+    let (mut decode, ack) = state();
+    decode.read_tables = None;
+    (decode, ack)
+}
+
+/// R3: a held transaction is not emitted, so not registered, and neither a
+/// keepalive past it nor a filtered commit after it moves the horizon: no
+/// confirmation or fence reaches its commit.
+#[test]
+fn a_held_transaction_is_not_emitted_and_nothing_passes_it() {
+    let (mut decode, ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    assert!(decode.next_change().is_none(), "held");
+    assert_eq!(decode.held(), Some(7));
+
+    handle(&mut decode, keepalive(500)).unwrap();
+    handle(&mut decode, begin(8)).unwrap();
+    handle(&mut decode, commit(300)).unwrap();
+    assert_eq!(ack.confirmed_lsn(), 0, "nothing may be confirmed past it");
+    assert!(ack.reached(None) < 100, "no fence may claim its commit");
+    assert_eq!(ack.next_seq(), 0, "not registered");
+
+    decode.seen_by(&Snapshots::seeing(&[7]).snapshot_now());
+    let (position, _) = decode.next_change().unwrap();
+    assert_eq!(ack.reached(Some(position.0)), 100);
+    assert!(decode.readable.is_empty(), "an emitted xid is forgotten");
+}
+
+/// A later transaction that is visible waits behind an earlier held one, and
+/// both come out in commit order once the earlier one is visible.
+#[test]
+fn an_earlier_held_transaction_holds_back_a_later_visible_one() {
+    let (mut decode, ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    transaction(&mut decode, 8, 200);
+    decode.seen_by(&Snapshots::seeing(&[8]).snapshot_now());
+    assert!(decode.next_change().is_none(), "8 is visible, 7 is not");
+    assert_eq!(ack.next_seq(), 0);
+
+    decode.seen_by(&Snapshots::seeing(&[7, 8]).snapshot_now());
+    let (first, _) = decode.next_change().unwrap();
+    let (second, _) = decode.next_change().unwrap();
+    assert_eq!(ack.reached(Some(first.0)), 199);
+    assert_eq!(ack.reached(Some(second.0)), 200);
+    assert!(decode.readable.is_empty());
+}
+
+/// A transaction that touches no table an index reads is never checked.
+#[test]
+fn a_transaction_on_no_table_an_index_reads_is_not_held() {
+    let (mut decode, _) = state();
+    decode.read_tables = Some(HashSet::from([TableName::try_new("orders").unwrap()]));
+    transaction(&mut decode, 7, 100);
+    assert!(decode.next_change().is_some(), "users is read by no index");
+
+    decode.read_tables = Some(HashSet::from([TableName::try_new("users").unwrap()]));
+    transaction(&mut decode, 8, 200);
+    assert!(decode.next_change().is_none(), "users is read: held");
+}
+
+/// A stream over `decode`, a scripted client and `snapshots`, holding at most
+/// `read_ahead` changes.
+fn holding_stream(
+    decode: DecodeState,
+    client: Script,
+    snapshots: Snapshots,
+    read_ahead: usize,
+    hold_clock: HoldClock,
+) -> BoxStream<'static, Result<LiveChange>> {
+    into_stream(State {
+        client,
+        catalog: sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused@127.0.0.1/unused")
+            .unwrap(),
+        visibility: snapshots,
+        decode,
+        read_ahead,
+        refresh: Arc::default(),
+        refresher: None,
+        hold: None,
+        hold_clock,
+    })
+}
+
+/// A replication connection that sends its queued events, then waits, and
+/// records what it was told was applied.
+struct Script {
+    events: Arc<std::sync::Mutex<VecDeque<ReplicationEvent>>>,
+    applied: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Replication for Script {
+    async fn recv(&mut self) -> std::result::Result<Option<ReplicationEvent>, PgWireError> {
+        let next = self.events.lock().unwrap().pop_front();
+        match next {
+            Some(event) => Ok(Some(event)),
+            None => std::future::pending().await,
+        }
+    }
+
+    fn update_applied_lsn(&self, lsn: Lsn) {
+        self.applied
+            .fetch_max(lsn.as_u64(), std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn script(
+    events: Vec<ReplicationEvent>,
+) -> (
+    Script,
+    Arc<std::sync::Mutex<VecDeque<ReplicationEvent>>>,
+    Arc<std::sync::atomic::AtomicU64>,
+) {
+    let queue = Arc::new(std::sync::Mutex::new(VecDeque::from(events)));
+    let applied = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let client = Script {
+        events: Arc::clone(&queue),
+        applied: Arc::clone(&applied),
+    };
+    (client, queue, applied)
+}
+
+/// R4: an earlier change the sinks flushed is still confirmed to the server
+/// while a later transaction is held, so the slot keeps releasing WAL.
+#[tokio::test]
+async fn a_confirmation_is_handed_over_during_a_hold() {
+    use futures::StreamExt;
+    use std::sync::atomic::Ordering;
+
+    let (mut decode, ack) = holding_state();
+    let earlier = ack.register(50);
+    ack.read_through(50);
+    transaction(&mut decode, 7, 100);
+    let (client, _, applied) = script(Vec::new());
+    let mut stream = holding_stream(decode, client, Snapshots::default(), 16, Arc::default());
+    let reader = tokio::spawn(async move { stream.next().await.is_some() });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(applied.load(Ordering::SeqCst), 0);
+    ack.confirm(earlier);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while applied.load(Ordering::SeqCst) < 50 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the confirmation reached the client during the hold");
+    assert!(!reader.is_finished(), "the held transaction is not emitted");
+    reader.abort();
+}
+
+/// While held, the stream polls on the schedule (0.5 ms for 20 ms, then backing
+/// off to 50 ms; tokio's timer rounds the 0.5 ms up to its 1 ms tick), records
+/// how long it has held, and after five seconds checks the server once.
+#[tokio::test(start_paused = true)]
+async fn a_hold_reads_ahead_to_its_bound_polls_on_schedule_and_reports_a_stall() {
+    use futures::StreamExt;
+    use std::sync::atomic::Ordering;
+
+    let (mut decode, _ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    let mut events = Vec::new();
+    for xid in 8..40 {
+        events.extend([
+            begin(xid),
+            ReplicationEvent::Commit {
+                lsn: Lsn::from_u64(u64::from(xid) * 100),
+                end_lsn: Lsn::from_u64(u64::from(xid) * 100),
+                commit_time_micros: 0,
+            },
+        ]);
+    }
+    let (client, queue, _) = script(events);
+    let snapshots = Snapshots::default();
+    let clock = HoldClock::default();
+    let mut stream = holding_stream(decode, client, snapshots.clone(), 4, Arc::clone(&clock));
+    let reader = tokio::spawn(async move { stream.next().await.map(|item| item.is_ok()) });
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let polls = snapshots.snapshots.load(Ordering::SeqCst);
+    assert!(
+        (40..=70).contains(&polls),
+        "{polls} checks in the first second"
+    );
+    assert!(
+        held_for(&clock).is_some_and(|held| held >= Duration::from_millis(990)),
+        "the hold is recorded"
+    );
+    assert!(
+        queue.lock().unwrap().is_empty(),
+        "empty commits add nothing to pending, so the stream reads them all"
+    );
+    assert_eq!(snapshots.stalls.load(Ordering::SeqCst), 0);
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(
+        snapshots.stalls.load(Ordering::SeqCst),
+        1,
+        "one check at 5 s"
+    );
+    assert!(!reader.is_finished());
+
+    snapshots.see(&[7]);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(reader.await.unwrap(), Some(true), "emitted once visible");
+    assert_eq!(held_for(&clock), None);
+}
+
+/// The read-ahead bound stops reading while the front transaction is held.
+#[tokio::test(start_paused = true)]
+async fn a_hold_reads_no_further_than_its_bound() {
+    use futures::StreamExt;
+
+    let (mut decode, _ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    transaction(&mut decode, 8, 200);
+    let (client, queue, _) = script(vec![keepalive(300), keepalive(400)]);
+    let mut stream = holding_stream(decode, client, Snapshots::default(), 2, Arc::default());
+    let reader = tokio::spawn(async move { stream.next().await.is_some() });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        queue.lock().unwrap().len(),
+        2,
+        "two pending changes fill the bound"
+    );
+    reader.abort();
+}
+
+/// A server that names flusso a synchronous standby while it holds a
+/// transaction: the stall check stops the stream with the refusal.
+#[tokio::test(start_paused = true)]
+async fn a_hold_on_a_server_waiting_for_flusso_stops_the_stream() {
+    use futures::StreamExt;
+
+    let (mut decode, _ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    let (client, _, _) = script(Vec::new());
+    let snapshots = Snapshots::default();
+    snapshots
+        .refuse
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut stream = holding_stream(decode, client, snapshots, 16, Arc::default());
+    let item = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("the stream stops within the stall check")
+        .unwrap();
+    let error = item.unwrap_err().to_string();
+    assert!(error.contains("synchronous_standby_names"), "{error}");
+}
+
+/// A commit the newest snapshot already shows visible is emitted with no read
+/// of its own; one it doesn't show waits for the next read.
+#[tokio::test(start_paused = true)]
+async fn a_commit_a_recent_snapshot_shows_visible_needs_no_read() {
+    let (mut decode, _ack) = holding_state();
+    decode.take_snapshot(Snapshots::seeing(&[7]).snapshot_now(), Instant::now());
+    transaction(&mut decode, 7, 100);
+    assert!(decode.unchecked.is_empty());
+    assert!(
+        decode.next_change().is_some(),
+        "seen by the newest snapshot"
+    );
+    transaction(&mut decode, 8, 200);
+    assert!(decode.next_change().is_none(), "not seen: it waits");
+}
+
+/// A snapshot older than [`SNAPSHOT_REUSE`] is never checked against: an xid
+/// is widened against a recent `xmax` only.
+#[tokio::test(start_paused = true)]
+async fn an_old_snapshot_is_not_reused() {
+    let (mut decode, _ack) = holding_state();
+    decode.take_snapshot(Snapshots::seeing(&[7]).snapshot_now(), Instant::now());
+    tokio::time::advance(SNAPSHOT_REUSE + Duration::from_millis(1)).await;
+    transaction(&mut decode, 7, 100);
+    assert!(decode.next_change().is_none(), "checked by a new read");
+    assert!(decode.unchecked.contains(&7));
+}
+
+/// A read the stream takes late is as old as the read, not as the taking: a
+/// stream nobody pulls can leave one waiting far past [`SNAPSHOT_REUSE`].
+#[tokio::test(start_paused = true)]
+async fn a_snapshot_taken_late_is_as_old_as_its_read() {
+    let (mut decode, _ack) = holding_state();
+    let read_at = Instant::now();
+    tokio::time::advance(SNAPSHOT_REUSE + Duration::from_millis(1)).await;
+    decode.take_snapshot(Snapshots::seeing(&[7]).snapshot_now(), read_at);
+    transaction(&mut decode, 7, 100);
+    assert!(decode.next_change().is_none(), "checked by a new read");
+    assert!(decode.unchecked.contains(&7));
+}
+
+/// A snapshot double that sees every xid committed so far: `committed` is
+/// raised as a test sends each transaction, so a commit newer than the last
+/// read always needs a read of its own.
+#[derive(Clone, Default)]
+struct UpTo {
+    committed: Arc<std::sync::atomic::AtomicU32>,
+}
+
+impl Visibility for UpTo {
+    async fn snapshot(&self) -> Result<super::super::visibility::Snapshot> {
+        let next = u64::from(self.committed.load(std::sync::atomic::Ordering::SeqCst)) + 1;
+        super::super::visibility::Snapshot::parse(&format!("{next}:{next}:"))
+    }
+
+    async fn stall(&self, _xid: u32) -> Result<super::super::visibility::Stall> {
+        Ok(super::super::visibility::Stall::default())
+    }
+}
+
+/// A replication connection fed from a channel.
+struct Fed(tokio::sync::mpsc::UnboundedReceiver<ReplicationEvent>);
+
+impl Replication for Fed {
+    async fn recv(&mut self) -> std::result::Result<Option<ReplicationEvent>, PgWireError> {
+        Ok(self.0.recv().await)
+    }
+
+    fn update_applied_lsn(&self, _lsn: Lsn) {}
+}
+
+fn insert_child(id: u32) -> ReplicationEvent {
+    let mut insert = vec![b'I'];
+    insert.extend_from_slice(&16385u32.to_be_bytes());
+    insert.push(b'N');
+    insert.extend_from_slice(&2i16.to_be_bytes());
+    insert.extend(text(&id.to_string()));
+    insert.extend(text("1"));
+    ReplicationEvent::XLogData {
+        wal_start: Lsn::from_u64(0),
+        wal_end: Lsn::from_u64(0),
+        server_time_micros: 0,
+        data: insert.into(),
+    }
+}
+
+/// Item 1 of the review of #343: the snapshot task must never stop just as a
+/// new commit needs it. Lone commits, each sent 0.7–1.9 ms after the previous
+/// one was emitted (around the task's pause between reads), on a
+/// multi-threaded runtime: every one must be emitted, promptly. The task that
+/// exited after reading `wanted == false` while the stream, seeing it not yet
+/// finished, started none, left about one in a thousand unchecked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_commit_arriving_as_the_snapshot_task_stops_is_still_checked() {
+    use futures::StreamExt;
+    use std::sync::atomic::Ordering;
+
+    let (mut decode, _ack) = holding_state();
+    announce_child(&mut decode, b'f');
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let visibility = UpTo::default();
+    let mut stream = into_stream(State {
+        client: Fed(rx),
+        catalog: sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused@127.0.0.1/unused")
+            .unwrap(),
+        visibility: visibility.clone(),
+        decode,
+        read_ahead: 64,
+        refresh: Arc::default(),
+        refresher: None,
+        hold: None,
+        hold_clock: Arc::default(),
+    });
+    let mut seed = 0x2545_f491_u32;
+    for xid in 1..=4000u32 {
+        visibility.committed.store(xid, Ordering::SeqCst);
+        for event in [begin(xid), insert_child(xid), commit(u64::from(xid) * 100)] {
+            tx.send(event).unwrap();
+        }
+        let emitted = tokio::time::timeout(Duration::from_millis(500), stream.next()).await;
+        assert!(
+            matches!(emitted, Ok(Some(Ok(_)))),
+            "commit {xid} was not emitted within 500 ms: {emitted:?}"
+        );
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        let pause = 700 + seed % 1200;
+        tokio::time::sleep(Duration::from_micros(u64::from(pause))).await;
+    }
+}
+
+/// Item 6: a snapshot read that never answers (a dead connection) ends the
+/// stream with an error once reads have failed for [`READ_FAILURES_FOR`], and
+/// not silently never.
+#[tokio::test(start_paused = true)]
+async fn a_snapshot_read_that_never_answers_ends_the_stream() {
+    use futures::StreamExt;
+
+    let (mut decode, _ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    let (client, _, _) = script(Vec::new());
+    let snapshots = Snapshots::default();
+    snapshots
+        .hang
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut stream = holding_stream(decode, client, snapshots, 16, Arc::default());
+    let early =
+        tokio::time::timeout(READ_FAILURES_FOR - Duration::from_secs(1), stream.next()).await;
+    assert!(early.is_err(), "retried, not ended, within the budget");
+    let item = tokio::time::timeout(Duration::from_secs(30), stream.next())
+        .await
+        .expect("the stream ends once the budget is spent")
+        .unwrap();
+    let error = item.unwrap_err().to_string();
+    assert!(error.contains("took longer than"), "{error}");
+}
+
+/// Item 9: reads that fail for a moment (a pool timeout under load) are
+/// retried, and the transaction is emitted once a read answers.
+#[tokio::test(start_paused = true)]
+async fn a_snapshot_read_failing_for_a_moment_is_retried() {
+    use futures::StreamExt;
+
+    let (mut decode, _ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    let (client, _, _) = script(Vec::new());
+    let snapshots = Snapshots::seeing(&[7]);
+    snapshots
+        .failing
+        .store(3, std::sync::atomic::Ordering::SeqCst);
+    let mut stream = holding_stream(decode, client, snapshots.clone(), 16, Arc::default());
+    let item = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("emitted after the retries")
+        .unwrap();
+    assert!(item.is_ok(), "{item:?}");
+    assert_eq!(
+        snapshots
+            .snapshots
+            .load(std::sync::atomic::Ordering::SeqCst),
+        4
+    );
+}
+
+/// Item 6: a stall inspection that never answers doesn't end or freeze the
+/// stream: the hold goes on, and the transaction is emitted once visible.
+#[tokio::test(start_paused = true)]
+async fn a_stall_inspection_that_never_answers_leaves_the_hold_running() {
+    use futures::StreamExt;
+
+    let (mut decode, _ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    let (client, _, _) = script(Vec::new());
+    let snapshots = Snapshots::default();
+    snapshots
+        .hang_stall
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut stream = holding_stream(decode, client, snapshots.clone(), 16, Arc::default());
+    let reader = tokio::spawn(async move { stream.next().await.map(|item| item.is_ok()) });
+    tokio::time::sleep(STALL_WARNING + READ_TIMEOUT + Duration::from_secs(1)).await;
+    assert!(snapshots.stalls.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+    assert!(!reader.is_finished(), "still holding");
+    snapshots.see(&[7]);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(reader.await.unwrap(), Some(true));
+}
+
+/// Item 7: a stream reopened while the same transaction is still invisible
+/// times it from when it was first found invisible: the wait doesn't start
+/// over at each restart, and the warning comes 5 s after the first hold, not 5
+/// s after the last restart. Emitting it clears the clock.
+#[tokio::test(start_paused = true)]
+async fn a_reopened_stream_times_the_same_transaction_from_its_first_hold() {
+    use futures::StreamExt;
+    use std::sync::atomic::Ordering;
+
+    let clock = HoldClock::default();
+    let snapshots = Snapshots::default();
+    let (mut decode, _ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    let (client, _, _) = script(Vec::new());
+    let mut first = holding_stream(decode, client, snapshots.clone(), 16, Arc::clone(&clock));
+    let reader = tokio::spawn(async move { first.next().await.is_some() });
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    reader.abort();
+    let _ = reader.await;
+    assert!(held_for(&clock).is_some_and(|held| held >= Duration::from_secs(3)));
+
+    let (mut decode, _ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    let (client, _, _) = script(Vec::new());
+    let mut second = holding_stream(decode, client, snapshots.clone(), 16, Arc::clone(&clock));
+    let reader = tokio::spawn(async move { second.next().await.map(|item| item.is_ok()) });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        held_for(&clock).is_some_and(|held| held >= Duration::from_millis(3500)),
+        "carried over: {:?}",
+        held_for(&clock)
+    );
+    assert_eq!(snapshots.stalls.load(Ordering::SeqCst), 0);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        snapshots.stalls.load(Ordering::SeqCst),
+        1,
+        "warned 5 s after the first hold"
+    );
+    snapshots.see(&[7]);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(reader.await.unwrap(), Some(true));
+    assert_eq!(held_for(&clock), None, "cleared once emitted");
+}
+
+/// Item 7: a stall refusal clears the clock, so the status stops reporting a
+/// wait the capture will never resume.
+#[tokio::test(start_paused = true)]
+async fn a_stall_refusal_clears_the_clock() {
+    use futures::StreamExt;
+
+    let (mut decode, _ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    let (client, _, _) = script(Vec::new());
+    let snapshots = Snapshots::default();
+    snapshots
+        .refuse
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let clock = HoldClock::default();
+    let mut stream = holding_stream(decode, client, snapshots, 16, Arc::clone(&clock));
+    let item = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(item.is_err());
+    assert_eq!(held_for(&clock), None);
 }

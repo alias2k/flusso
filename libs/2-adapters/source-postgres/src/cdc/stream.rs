@@ -15,27 +15,82 @@
 //! its primary key, not by the replica-identity columns pgoutput flags (all of
 //! them, under `REPLICA IDENTITY FULL`). See [`pgoutput`].
 //!
+//! A committed transaction is emitted only once it can be read back (issue
+//! #343): Postgres flushes a commit record before new snapshots see the
+//! transaction, so the stream holds it in `pending` until a snapshot includes
+//! its xid ([`super::visibility`]). Holding it there is what keeps it out of
+//! every confirmation and fence: nothing in `pending` is registered, and the
+//! horizon never moves past buffered changes. While the oldest transaction is
+//! held the stream reads on, up to its read-ahead bound, and checks every
+//! transaction read so far with one snapshot query; a transaction that touches
+//! no table an index reads needs no check. Commit order is kept: one held
+//! transaction holds back every later one.
+//!
 //! The loop also hands the confirmed position to the replication client: on
-//! every turn, and the moment a confirmation moves it, without waiting for the
-//! next replication event. The client reports it to the server within its
-//! status interval, so the slot releases WAL seconds after the sinks land it.
+//! every turn, during a hold too, and the moment a confirmation moves it,
+//! without waiting for the next replication event. The client reports it to
+//! the server within its status interval, so the slot releases WAL seconds
+//! after the sinks land it.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use futures::stream::{self, BoxStream};
-use kernel::ColumnName;
-use kernel::Position;
+use kernel::{ColumnName, Position, TableName};
 use pgwire_replication::{Lsn, PgWireError, ReplicationClient, ReplicationEvent};
 use source::cdc::{ChangeEvent, LiveChange};
 use source::{PreImageColumns, QualifiedTable, Result, RowKey, SourceError};
 use sqlx::PgPool;
+use tokio::time::Instant;
 
 use super::ack::Positions;
 use super::pgoutput::{self, Decoded, Relation};
 use super::replica_identity;
+use super::visibility::{Visibility, poll_delay};
 use crate::ColumnTypes;
+
+/// How long a transaction may stay held before the stream warns about it, and
+/// checks whether the server made flusso a synchronous standby.
+const STALL_WARNING: Duration = Duration::from_secs(5);
+
+/// How often the warning repeats while the hold lasts.
+const STALL_REPEAT: Duration = Duration::from_secs(60);
+
+/// Which transaction the stream holds and since when, shared with the capture,
+/// which reports it. It outlives a stream: a reopened stream that holds the
+/// same transaction again goes on from the same instant, so the wait and its
+/// warning count from when the transaction was first found invisible, not
+/// from the last restart. Cleared once that transaction is emitted, and when
+/// the capture refuses the server.
+pub(crate) type HoldClock = Arc<Mutex<Option<(u32, Instant)>>>;
+
+/// How long the hold `clock` records has lasted; `None` when nothing waits.
+pub(crate) fn held_for(clock: &HoldClock) -> Option<Duration> {
+    clock
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .map(|(_, since)| since.elapsed())
+}
+
+/// Forget the hold `clock` records.
+pub(crate) fn clear_hold(clock: &HoldClock) {
+    *clock.lock().unwrap_or_else(PoisonError::into_inner) = None;
+}
+
+/// What the stream needs besides the connections.
+pub(crate) struct Settings {
+    /// Per table, the columns resolution needs from a pre-image.
+    pub(crate) pre_image_links: PreImageColumns,
+    /// The tables an index reads, by name as resolution matches them; a
+    /// transaction touching none needs no visibility check. `None`: every table.
+    pub(crate) read_tables: Option<HashSet<TableName>>,
+    /// How many changes the stream reads ahead while a transaction is held.
+    pub(crate) read_ahead: usize,
+    /// Where the stream records how long it has been holding.
+    pub(crate) hold_clock: HoldClock,
+}
 
 /// What the stream needs from the replication connection: its events, and a
 /// place to report the confirmed position. A seam so tests can stand in for
@@ -66,11 +121,147 @@ impl Replication for ReplicationClient {
 }
 
 /// Everything the unfold loop carries between polls.
-struct State<C> {
+struct State<C, V> {
     client: C,
     /// Catalog connection for the per-relation primary-key lookup.
     catalog: PgPool,
+    visibility: V,
     decode: DecodeState,
+    read_ahead: usize,
+    /// Snapshot reads, shared with the task that makes them.
+    refresh: Arc<Refresh>,
+    /// The task reading snapshots while a transaction awaits a check.
+    refresher: Option<Refresher>,
+    hold: Option<Hold>,
+    hold_clock: HoldClock,
+}
+
+/// Snapshot reads made on their own task, so they run while the engine builds
+/// and publishes. The task lives as long as the stream: it reads while the
+/// stream wants it (some transaction awaits a check) and otherwise sleeps on
+/// `wake`, so a burst finds a recent snapshot whenever the engine comes back,
+/// a lone change costs one read, and an idle stream none. It never exits on
+/// its own, so a commit arriving as it goes idle can't find it gone: the
+/// stream raises `wanted` then wakes it, and `Notify` keeps that wake-up for a
+/// task not yet waiting.
+#[derive(Debug)]
+struct Refresh {
+    /// The newest read and when it was asked for, not taken by the stream yet.
+    latest: Mutex<Option<(Instant, Result<super::visibility::Snapshot>)>>,
+    /// Woken by every read.
+    arrived: tokio::sync::Notify,
+    /// Woken by the stream when it starts wanting reads.
+    wake: tokio::sync::Notify,
+    /// Whether the stream wants another read.
+    wanted: std::sync::atomic::AtomicBool,
+    /// The pause between two reads, in microseconds: the poll schedule.
+    spacing: std::sync::atomic::AtomicU64,
+}
+
+impl Default for Refresh {
+    fn default() -> Self {
+        Self {
+            latest: Mutex::default(),
+            arrived: tokio::sync::Notify::new(),
+            wake: tokio::sync::Notify::new(),
+            wanted: std::sync::atomic::AtomicBool::new(false),
+            spacing: std::sync::atomic::AtomicU64::new(FIRST_SPACING_MICROS),
+        }
+    }
+}
+
+/// The pause between reads while no transaction has waited long.
+const FIRST_SPACING_MICROS: u64 = 500;
+
+/// How old the stream's newest snapshot may be and still be checked against
+/// on a commit's arrival. Bounded so an xid is never widened against a
+/// snapshot from 2^31 transactions ago.
+const SNAPSHOT_REUSE: Duration = Duration::from_secs(1);
+
+/// The refreshing task, aborted with the stream.
+struct Refresher(tokio::task::JoinHandle<()>);
+
+impl Drop for Refresher {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// How long one snapshot read may take before it counts as failed: a read on
+/// a dead connection must not hold the stream silently.
+pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long reads may keep failing before the stream ends with the error: a
+/// connection blip or a pool timeout under load retries, a dead server stops
+/// the stream (the engine's restart then retries the whole stream).
+pub(crate) const READ_FAILURES_FOR: Duration = Duration::from_secs(30);
+
+/// Read snapshots into `refresh` while the stream wants them, for the life of
+/// the stream. A read that fails or times out is retried with backoff; one
+/// still failing after [`READ_FAILURES_FOR`] is handed to the stream, which
+/// ends with it.
+async fn refresh<V: Visibility>(visibility: V, refresh: Arc<Refresh>) {
+    use std::sync::atomic::Ordering;
+    let mut failing_since: Option<Instant> = None;
+    let mut backoff = Duration::from_millis(100);
+    loop {
+        while !refresh.wanted.load(Ordering::SeqCst) {
+            refresh.wake.notified().await;
+        }
+        let asked = Instant::now();
+        let read = tokio::time::timeout(READ_TIMEOUT, visibility.snapshot())
+            .await
+            .unwrap_or_else(|_| {
+                Err(SourceError::Query(format!(
+                    "reading a snapshot took longer than {READ_TIMEOUT:?}"
+                )))
+            });
+        let pause = match read {
+            Ok(snapshot) => {
+                failing_since = None;
+                backoff = Duration::from_millis(100);
+                *refresh
+                    .latest
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some((asked, Ok(snapshot)));
+                refresh.arrived.notify_one();
+                Duration::from_micros(refresh.spacing.load(Ordering::Relaxed))
+            }
+            Err(error) => {
+                let since = *failing_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= READ_FAILURES_FOR {
+                    *refresh
+                        .latest
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner) = Some((asked, Err(error)));
+                    refresh.arrived.notify_one();
+                    return;
+                }
+                tracing::warn!(%error, "reading a snapshot failed; retrying");
+                let pause = backoff;
+                backoff = (backoff * 2).min(Duration::from_secs(2));
+                pause
+            }
+        };
+        tokio::time::sleep(pause).await;
+    }
+}
+
+/// The oldest transaction in `pending`, found not visible yet.
+#[derive(Debug, Clone, Copy)]
+struct Hold {
+    xid: u32,
+    since: Instant,
+    delay: Duration,
+    warn_at: Instant,
+}
+
+/// One change of a committed transaction, waiting to be emitted.
+struct Pending {
+    event: ChangeEvent,
+    /// The commit LSN to acknowledge at.
+    lsn: u64,
+    xid: u32,
 }
 
 /// The buffering/progress state [`handle`] folds replication events into —
@@ -93,8 +284,24 @@ struct DecodeState {
     warned_unkeyed: HashSet<(u32, Unkeyed)>,
     /// Row changes of the currently open transaction, awaiting its `Commit`.
     open_txn: Vec<ChangeEvent>,
-    /// Changes ready to emit, each with the commit LSN to acknowledge at.
-    pending: VecDeque<(ChangeEvent, u64)>,
+    /// The open transaction's xid, from its `Begin`.
+    open_xid: u32,
+    /// Changes of committed transactions, in commit order. Only the front is
+    /// emitted, and only once its transaction is in `readable`.
+    pending: VecDeque<Pending>,
+    /// The xids in `pending` that may be read back: visible to a snapshot, or
+    /// touching no table an index reads. Dropped once emitted.
+    readable: HashSet<u32>,
+    /// The xids in `pending` no snapshot has shown visible yet: what the next
+    /// snapshot read is checked against.
+    unchecked: HashSet<u32>,
+    /// The xid of the last change emitted.
+    last_emitted: Option<u32>,
+    /// The newest snapshot the stream read, and when: a commit it already
+    /// shows visible needs no read of its own.
+    last_snapshot: Option<(Instant, super::visibility::Snapshot)>,
+    /// See [`Settings::read_tables`].
+    read_tables: Option<HashSet<TableName>>,
     ack: Arc<Positions>,
     /// Set once the underlying stream is finished; drains `pending`, then ends.
     done: bool,
@@ -107,13 +314,57 @@ impl DecodeState {
     /// Take the next change ready to emit and register its position. Emitting
     /// the last change of a commit also moves the horizon to that commit: from
     /// here on, everything read through it is registered.
+    /// A held front transaction emits nothing.
     fn next_change(&mut self) -> Option<LiveChange> {
-        let (event, lsn) = self.pending.pop_front()?;
+        if !self.readable.contains(&self.pending.front()?.xid) {
+            return None;
+        }
+        let Pending { event, lsn, xid } = self.pending.pop_front()?;
+        self.last_emitted = Some(xid);
         let seq = self.ack.register(lsn);
-        if self.pending.front().is_none_or(|(_, next)| *next != lsn) {
+        if self.pending.front().is_none_or(|next| next.lsn != lsn) {
             self.ack.read_through(lsn);
+            self.readable.remove(&xid);
         }
         Some((Position(seq), event))
+    }
+
+    /// The xid of the front transaction while it may not be read back yet.
+    fn held(&self) -> Option<u32> {
+        self.pending
+            .front()
+            .map(|front| front.xid)
+            .filter(|xid| !self.readable.contains(xid))
+    }
+
+    /// Mark readable every unchecked transaction `snapshot` sees, and keep it
+    /// for the commits that arrive next. `read_at` is when the read was asked
+    /// for, not when the stream got round to taking it: a read can wait a long
+    /// time for a stream nobody pulls, and reuse is bounded by its real age.
+    fn take_snapshot(&mut self, snapshot: super::visibility::Snapshot, read_at: Instant) {
+        self.seen_by(&snapshot);
+        self.last_snapshot = Some((read_at, snapshot));
+    }
+
+    /// Whether the newest snapshot, if recent, already shows `xid` visible.
+    fn seen(&self, xid: u32) -> bool {
+        self.last_snapshot
+            .as_ref()
+            .is_some_and(|(taken, snapshot)| taken.elapsed() < SNAPSHOT_REUSE && snapshot.sees(xid))
+    }
+
+    /// Mark readable every unchecked transaction `snapshot` sees.
+    fn seen_by(&mut self, snapshot: &super::visibility::Snapshot) {
+        let seen: Vec<u32> = self
+            .unchecked
+            .iter()
+            .copied()
+            .filter(|xid| snapshot.sees(*xid))
+            .collect();
+        for xid in seen {
+            self.unchecked.remove(&xid);
+            self.readable.insert(xid);
+        }
     }
 }
 
@@ -128,31 +379,50 @@ impl DecodeState {
 /// move the bookkeeping's horizon ([`Positions::read_through`]), so the slot
 /// keeps advancing, the server can recycle WAL generated by unrelated traffic,
 /// and a fence on a position past the last watched commit still passes.
-pub(crate) fn build<C: Replication>(
+pub(crate) fn build<C: Replication, V: Visibility>(
     client: C,
     catalog: PgPool,
-    pre_image_links: PreImageColumns,
+    visibility: V,
+    settings: Settings,
     ack: Arc<Positions>,
     column_types: Option<ColumnTypes>,
 ) -> BoxStream<'static, Result<LiveChange>> {
     let state = State {
         client,
         catalog,
+        visibility,
         decode: DecodeState {
             relations: HashMap::new(),
             unkeyed: Vec::new(),
-            pre_image_links,
+            pre_image_links: settings.pre_image_links,
             untraceable: HashMap::new(),
             warned: HashSet::new(),
             warned_unkeyed: HashSet::new(),
             open_txn: Vec::new(),
+            open_xid: 0,
             pending: VecDeque::new(),
+            readable: HashSet::new(),
+            unchecked: HashSet::new(),
+            last_emitted: None,
+            last_snapshot: None,
+            read_tables: settings.read_tables,
             ack,
             done: false,
             column_types,
         },
+        read_ahead: settings.read_ahead.max(1),
+        refresh: Arc::default(),
+        refresher: None,
+        hold: None,
+        hold_clock: settings.hold_clock,
     };
+    into_stream(state)
+}
 
+/// The unfold loop over `state`.
+fn into_stream<C: Replication, V: Visibility>(
+    state: State<C, V>,
+) -> BoxStream<'static, Result<LiveChange>> {
     Box::pin(stream::unfold(state, |mut state| async move {
         loop {
             // Report how far the engine has durably confirmed so the slot can
@@ -162,47 +432,237 @@ pub(crate) fn build<C: Replication>(
                 .client
                 .update_applied_lsn(Lsn::from_u64(state.decode.ack.confirmed_lsn()));
 
+            if let Err(e) = state.take_latest() {
+                state.decode.done = true;
+                return Some((Err(e), state));
+            }
             if let Some(change) = state.decode.next_change() {
+                state.emitted();
+                state.want_snapshots();
                 return Some((Ok(change), state));
             }
+            state.want_snapshots();
 
-            if state.decode.done {
-                return None;
-            }
-
-            // A confirmation moving the resume point turns the loop at once,
-            // so the client hears it now rather than at the next event (a
-            // keepalive can be 30 s away on a quiet stream). Dropping `recv`
-            // loses nothing while the worker runs: it is a channel receive.
-            // The one unsafe moment is after the channel closed, when `recv`
-            // awaits the worker's `JoinHandle`: if a wake-up wins then, the
-            // handle is dropped, and the next turn reports a generic
-            // "replication worker already joined" error instead of the
-            // worker's own outcome. The engine restarts the stream either way.
-            let received = tokio::select! {
-                biased;
-                received = state.client.recv() => received,
-                () = state.decode.ack.confirmed_moved() => continue,
+            let Some(xid) = state.decode.held() else {
+                state.hold = None;
+                if state.decode.done {
+                    return None;
+                }
+                // A confirmation moving the resume point turns the loop at
+                // once, so the client hears it now rather than at the next
+                // event (a keepalive can be 30 s away on a quiet stream).
+                // Dropping `recv` loses nothing while the worker runs: it is a
+                // channel receive. The one unsafe moment is after the channel
+                // closed, when `recv` awaits the worker's `JoinHandle`: if a
+                // wake-up wins then, the handle is dropped, and the next turn
+                // reports a generic "replication worker already joined" error
+                // instead of the worker's own outcome. The engine restarts the
+                // stream either way.
+                let received = tokio::select! {
+                    biased;
+                    received = state.client.recv() => received,
+                    () = state.decode.ack.confirmed_moved() => continue,
+                };
+                if let Err(e) = state.receive(received).await {
+                    return Some((Err(e), state));
+                }
+                continue;
             };
-            match received {
-                Ok(Some(event)) => {
-                    let handled = match handle(&mut state.decode, event) {
-                        Ok(()) => key_relations(&state.catalog, &mut state.decode).await,
-                        Err(e) => Err(e),
-                    };
-                    if let Err(e) = handled {
-                        state.decode.done = true;
+
+            if let Err(e) = state.holding(xid).await {
+                state.decode.done = true;
+                return Some((Err(e), state));
+            }
+            // Held: confirmations keep flowing, the stream reads on up to its
+            // bound, and the next snapshot read turns the loop.
+            let room = !state.decode.done && state.decode.pending.len() < state.read_ahead;
+            let refresh = Arc::clone(&state.refresh);
+            tokio::select! {
+                biased;
+                () = state.decode.ack.confirmed_moved() => {}
+                () = refresh.arrived.notified() => {}
+                received = state.client.recv(), if room => {
+                    if let Err(e) = state.receive(received).await {
                         return Some((Err(e), state));
                     }
-                }
-                Ok(None) => state.decode.done = true,
-                Err(e) => {
-                    state.decode.done = true;
-                    return Some((Err(map_pgwire(e)), state));
                 }
             }
         }
     }))
+}
+
+impl<C: Replication, V: Visibility> State<C, V> {
+    /// Fold one received event in; an error ends the stream.
+    async fn receive(
+        &mut self,
+        received: std::result::Result<Option<ReplicationEvent>, PgWireError>,
+    ) -> std::result::Result<(), SourceError> {
+        let handled = match received {
+            Ok(Some(event)) => match handle(&mut self.decode, event) {
+                Ok(()) => key_relations(&self.catalog, &mut self.decode).await,
+                Err(e) => Err(e),
+            },
+            Ok(None) => {
+                self.decode.done = true;
+                Ok(())
+            }
+            Err(e) => Err(map_pgwire(e)),
+        };
+        if handled.is_err() {
+            self.decode.done = true;
+        }
+        handled
+    }
+
+    /// Have the snapshot task read while a transaction awaits a check, and
+    /// rest otherwise. Started with the first check; it never stops on its
+    /// own, so it is restarted only after a read failure ended it.
+    fn want_snapshots(&mut self) {
+        use std::sync::atomic::Ordering;
+        let wanted = !self.decode.unchecked.is_empty();
+        self.refresh.wanted.store(wanted, Ordering::SeqCst);
+        if !wanted {
+            return;
+        }
+        if self
+            .refresher
+            .as_ref()
+            .is_none_or(|refresher| refresher.0.is_finished())
+        {
+            self.refresher = Some(Refresher(tokio::spawn(refresh(
+                self.visibility.clone(),
+                Arc::clone(&self.refresh),
+            ))));
+        }
+        self.refresh.wake.notify_one();
+    }
+
+    /// A transaction was emitted: once the one the clock times is out, the
+    /// clock is cleared.
+    fn emitted(&mut self) {
+        let Some(xid) = self.decode.last_emitted else {
+            return;
+        };
+        if self.hold.is_some_and(|hold| hold.xid == xid) {
+            self.hold = None;
+        }
+        let mut clock = self
+            .hold_clock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if clock.is_some_and(|(held, _)| held == xid) {
+            *clock = None;
+        }
+    }
+
+    /// Take the newest snapshot read, if one arrived, and mark what it sees.
+    /// While the oldest transaction stays invisible, reads follow the poll
+    /// schedule; otherwise they come as fast as the first.
+    fn take_latest(&mut self) -> std::result::Result<(), SourceError> {
+        use std::sync::atomic::Ordering;
+        let latest = self
+            .refresh
+            .latest
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let Some((read_at, read)) = latest else {
+            return Ok(());
+        };
+        self.decode.take_snapshot(read?, read_at);
+        let spacing = match self.hold.as_mut() {
+            Some(hold) if self.decode.held() == Some(hold.xid) => {
+                hold.delay = poll_delay(hold.since.elapsed(), hold.delay);
+                hold.delay
+            }
+            _ => Duration::from_micros(FIRST_SPACING_MICROS),
+        };
+        self.refresh.spacing.store(
+            u64::try_from(spacing.as_micros()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        Ok(())
+    }
+
+    /// The front transaction `xid` is held: time it from when it was first
+    /// found invisible (by this stream or one before it), and past
+    /// [`STALL_WARNING`] report it.
+    async fn holding(&mut self, xid: u32) -> std::result::Result<(), SourceError> {
+        let hold = match self.hold {
+            Some(hold) if hold.xid == xid => hold,
+            _ => {
+                let since = {
+                    let mut clock = self
+                        .hold_clock
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    match *clock {
+                        Some((held, since)) if held == xid => since,
+                        _ => {
+                            let now = Instant::now();
+                            *clock = Some((xid, now));
+                            now
+                        }
+                    }
+                };
+                let hold = Hold {
+                    xid,
+                    since,
+                    delay: Duration::ZERO,
+                    warn_at: since + STALL_WARNING,
+                };
+                self.hold = Some(hold);
+                hold
+            }
+        };
+        if Instant::now() >= hold.warn_at {
+            self.report_stall(hold).await?;
+        }
+        Ok(())
+    }
+
+    /// A transaction held past [`STALL_WARNING`]: stop if the server now waits
+    /// on flusso as a synchronous standby, else warn and name the sessions
+    /// waiting on synchronous replication.
+    ///
+    /// The inspection is best effort: one that fails or takes longer than
+    /// [`READ_TIMEOUT`] is reported in the warning and tried again with the
+    /// next one, and the hold goes on.
+    async fn report_stall(&mut self, hold: Hold) -> std::result::Result<(), SourceError> {
+        let inspected = tokio::time::timeout(READ_TIMEOUT, self.visibility.stall(hold.xid))
+            .await
+            .unwrap_or_else(|_| {
+                Err(SourceError::Query(format!(
+                    "inspecting the held commit took longer than {READ_TIMEOUT:?}"
+                )))
+            });
+        let waiting = match inspected {
+            Ok(stall) => {
+                if let Some(refusal) = stall.refusal {
+                    clear_hold(&self.hold_clock);
+                    return Err(refusal);
+                }
+                if stall.waiting.is_empty() {
+                    "none this role can see (pg_read_all_stats shows every session)".to_owned()
+                } else {
+                    stall.waiting.join("; ")
+                }
+            }
+            Err(error) => format!("unknown: {error}"),
+        };
+        tracing::warn!(
+            xid = hold.xid,
+            waited_seconds = hold.since.elapsed().as_secs(),
+            sessions_waiting_on_synchronous_replication = %waiting,
+            "a committed transaction is not visible yet: flusso waits for it, and every commit \
+             after it waits too. Postgres keeps a commit invisible while it waits for a \
+             synchronous standby; check the standby and the sessions listed"
+        );
+        if let Some(current) = self.hold.as_mut() {
+            current.warn_at = Instant::now() + STALL_REPEAT;
+        }
+        Ok(())
+    }
 }
 
 /// Look up the catalog primary key of every relation announced since the last
@@ -301,7 +761,10 @@ fn handle(
         // Logical messages are not changes.
         ReplicationEvent::Message { .. } => {}
 
-        ReplicationEvent::Begin { .. } => state.open_txn.clear(),
+        ReplicationEvent::Begin { xid, .. } => {
+            state.open_txn.clear();
+            state.open_xid = xid;
+        }
 
         ReplicationEvent::Commit { end_lsn, .. } => {
             let lsn = end_lsn.as_u64();
@@ -313,8 +776,20 @@ fn handle(
                     state.ack.read_through(lsn);
                 }
             } else {
-                for change in state.open_txn.drain(..) {
-                    state.pending.push_back((change, lsn));
+                let xid = state.open_xid;
+                let read = state.read_tables.as_ref().is_none_or(|read| {
+                    state
+                        .open_txn
+                        .iter()
+                        .any(|change| read.contains(change.table()))
+                });
+                if read && !state.seen(xid) {
+                    state.unchecked.insert(xid);
+                } else {
+                    state.readable.insert(xid);
+                }
+                for event in state.open_txn.drain(..) {
+                    state.pending.push_back(Pending { event, lsn, xid });
                 }
             }
         }

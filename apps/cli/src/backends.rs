@@ -62,12 +62,16 @@ impl Backends for FlussoBackends {
 
         let spec = source_spec(&config);
         let (documents, column_types) = build_documents(&sql_url, &config).await?;
-        let capture: Arc<dyn ChangeCapture> = Arc::new(
-            WalChangeCapture::new(replication, sql_url.clone())
-                .with_publication_management(spec.all_tables(), postgres.manage_publication)
-                .with_pre_image_management(spec.pre_images(), postgres.manage_replica_identity)
-                .with_column_types(column_types),
-        );
+        let capture = WalChangeCapture::new(replication, sql_url.clone())
+            .with_publication_management(spec.all_tables(), postgres.manage_publication)
+            .with_pre_image_management(spec.pre_images(), postgres.manage_replica_identity)
+            .with_read_ahead(daemon::batch_policy(&config).max_changes.saturating_mul(16))
+            .with_column_types(column_types);
+        capture
+            .check_server()
+            .await
+            .context("checking the source server")?;
+        let capture: Arc<dyn ChangeCapture> = Arc::new(capture);
 
         Ok(SourceParts { capture, documents })
     }
@@ -82,6 +86,28 @@ impl Backends for FlussoBackends {
 
     async fn sinks(&self, config: &Config) -> anyhow::Result<Vec<SinkParts>> {
         build_sinks(config)
+    }
+}
+
+/// What `flusso run` would say about the source server: `Ok(None)` when it
+/// accepts it, `Ok(Some(refusal))` when it would refuse to start, `Err` when
+/// the server can't be asked.
+pub(crate) async fn source_server_problem(config: &Config) -> anyhow::Result<Option<String>> {
+    let postgres = adapters::source_config(config)?;
+    let connection_url = resolve_connection_url(&postgres)?;
+    let tls = postgres.tls();
+    let replication =
+        replication_config(&connection_url, &tls, &postgres.slot, &postgres.publication)
+            .context("building the replication connection config")?;
+    let sql_url = sql_connection_url(&connection_url, &tls)
+        .context("applying the source TLS settings to the connection URL")?;
+    match WalChangeCapture::new(replication, sql_url)
+        .check_server()
+        .await
+    {
+        Ok(()) => Ok(None),
+        Err(source::SourceError::Setup(refusal)) => Ok(Some(refusal)),
+        Err(error) => Err(error).context("checking the source server"),
     }
 }
 

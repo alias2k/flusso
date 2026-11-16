@@ -102,6 +102,22 @@ fn section(out: &mut impl Write, pen: Pen, title: &str) -> Result<()> {
     Ok(())
 }
 
+/// Report whether the source server is one `flusso run` accepts: the primary,
+/// and not a server that would make flusso a synchronous standby. `problem` is
+/// the refusal `run` would stop with.
+pub(crate) fn server(out: &mut impl Write, pen: Pen, problem: Option<&str>) -> Result<()> {
+    section(out, pen, "Source server")?;
+    match problem {
+        None => writeln!(
+            out,
+            "  {} the primary, and flusso is not a synchronous standby of it",
+            pen.green("✓"),
+        )?,
+        Some(problem) => writeln!(out, "  {} {problem}", pen.paint("31", "✗"))?,
+    }
+    Ok(())
+}
+
 /// Report whether the source streams every table the indexes read, and — when it
 /// doesn't — whether `flusso run` will fix it automatically or the operator must.
 ///

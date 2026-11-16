@@ -7,12 +7,13 @@
 //! failing sink visible without stopping the others.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use kernel::{IndexName, SinkName};
 use serde::Serialize;
+use source::cdc::ChangeCapture;
 use source::document::BuildFailure;
 
 use crate::fence::{Fence, FencePositions, SinkPositions};
@@ -82,6 +83,8 @@ pub struct Status {
     indexes: Vec<IndexName>,
     /// Where the fence positions come from; `None` reports none.
     fence: Option<Fence>,
+    /// Where the visibility wait comes from; `None` reports none.
+    source: Option<Arc<dyn ChangeCapture>>,
 }
 
 /// The live status of one sink engine.
@@ -159,7 +162,23 @@ impl Status {
                 .collect(),
             indexes,
             fence: None,
+            source: None,
         }
+    }
+
+    /// Read how long the source has held a change it can't read back yet
+    /// ([`ChangeCapture::readable_wait`]) at each snapshot.
+    pub fn with_source(mut self, source: Arc<dyn ChangeCapture>) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    /// How long the source has held a committed change that can't be read back
+    /// yet; `None` while nothing waits. Read live, not sampled.
+    pub fn visibility_wait(&self) -> Option<Duration> {
+        self.source
+            .as_ref()
+            .and_then(|source| source.readable_wait())
     }
 
     /// Report the fence's positions in the snapshot.
@@ -415,6 +434,7 @@ impl Status {
                 .slot_lag_known
                 .load(Ordering::Relaxed)
                 .then(|| self.slot_lag_bytes.load(Ordering::Relaxed)),
+            visibility_wait_seconds: self.visibility_wait().map(|waited| waited.as_secs_f64()),
             applied_position: positions.applied,
             searchable_position: positions.searchable,
             errors: self.errors.load(Ordering::Relaxed),
@@ -447,6 +467,10 @@ pub struct StatusSnapshot {
     pub documents_built: u64,
     /// Bytes the confirmed position trails the source head by; `None` until sampled.
     pub slot_lag_bytes: Option<u64>,
+    /// Seconds the source has held a committed change it can't read back yet
+    /// (a transaction not visible: a synchronous standby that does not
+    /// answer); every later change waits behind it. `None` while nothing waits.
+    pub visibility_wait_seconds: Option<f64>,
     /// The source position every sink has applied, in the source's own text
     /// form: a fetch by id sees every commit at or before it. `None` until the
     /// source follows live changes.
