@@ -92,12 +92,13 @@ the day, `lte` through its end.
 | nullable, or under a to-one join | `Option<T>`; or `T` via `.assume_present()` when the arm tests `.exists()` |
 | array | `Vec<T>` |
 
-**Order** for `asc` / `desc` / `counts`: `.order([..])` on the rules, else the replaced enum's
-`variants:`, else the order the rules name their fixed values. `lt` / `between` on a `RuleField`
-follow the Rust type's `PartialOrd`, so keep an enum's variant order in step.
+**Order** for `asc` / `desc` / `counts`: `.order([..])` on the rules. Without it: the replaced
+enum's `variants:`, then every other fixed value in the order the rules name them. A stored enum
+rarely declares the states the rules add, so **write `.order([..])`** whenever the order matters.
+`lt` / `between` on a `RuleField` follow the Rust type's `PartialOrd`, so keep an enum's variant
+order in step. `eq(None)` on an `Option` rule field selects "no value", fixed or stored.
 
-**A rule sort uses the score.** It replaces text relevance; `Sort::score()` or `min_score` beside it
-is refused; two rule sorts must be adjacent in the sort list.
+What sorting by a rule field costs (it travels in the score) is in `SKILL.md`, `## Sorting`.
 
 ## Computed fields
 
@@ -122,5 +123,4 @@ rule tests; a computed input that does not deserialize.
 
 ## Paging
 
-A cursor is bound to its query, and a rule filter or sort carries the clock. Keep the same context
-for the whole walk (round-trip `now` with the cursor), or the next page is `Error::CursorMismatch`.
+One context for a whole cursor walk: see `SKILL.md`, `## Paging`.

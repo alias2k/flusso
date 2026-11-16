@@ -167,6 +167,7 @@ Everything about ordering, in one place.
 | `Number` `Date` `Bool` `Keyword` | Sorts on the field. |
 | `Text` | Sorts via the case-insensitive `.keyword_lowercase` subfield automatically. Use `.keyword().desc()` for an exact-case sort. |
 | `Enum` with declared `variants` | Sorts by **declared order**, not alphabetically, via a rank prebaked into a `.sort` subfield. No script, nothing extra to write. A stored value outside the list sorts after the declared ones. |
+| a rule field (`Contract::state(&cx)`, see [`read-time.md`](read-time.md)) | Sorts by the rules' value order, carried **in the score**: it replaces text relevance for that search, `Sort::score()` or `min_score` beside it is `Error::ReadTimeField`, and two rule sorts must be adjacent in the sort list. `Sort` options do not apply. |
 | a field inside a `nested` array | Wraps in the right `nested` chain automatically at any depth, from the handle's scope. Mode defaults from direction (`asc→min`, `desc→max`). Never hand-write `.nested(path)`. |
 
 **What does not sort, and what to use instead:**
@@ -357,7 +358,8 @@ page.next                            // Option<PageCursor>: opaque string, None 
 ```
 
 - Rebuild the **same** query for every page; a cursor resumed with other filters or sort is
-  `Error::CursorMismatch`. `PageCursor` is a string in serde, so an HTTP API takes `?cursor=` and
+  `Error::CursorMismatch`. A [rule field](read-time.md) filter or sort carries its context in the
+  query, so keep one context for the whole walk (round-trip `now` with the cursor). `PageCursor` is a string in serde, so an HTTP API takes `?cursor=` and
   returns `next` with no conversion (see `dev/search-api`).
 - The sort is made total for you (`_id`; a `MultiSearch` cursor adds `_index` first; unsorted keeps
   `_score` first). Don't add a `tiebreak` just for paging, and never set `.from()` or

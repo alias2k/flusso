@@ -13,7 +13,7 @@ The test: a function that needs nothing from the request is a write-time field.
 
 ## The context
 
-The request-time values live in one type of your own, the root's **context**. Naming it changes the entry points: they take it.
+The request-time values live in one consumer-defined type, the root's **context**. Naming it changes the entry points: they take it.
 
 ```rust
 #[derive(Clone)]
@@ -35,7 +35,7 @@ let one = Contract::get(&cx, &client, "c1").await?;
 
 A root without `context` is untouched: `Contract::query()`, `Contract::get(&client, id)`. Code generic over roots reaches either through `R::query_in(cx)` / `R::get_in(cx, …)`, where `R::Context` is `()` for a plain root.
 
-> ⚠️ Build the context once per request and pass that one value everywhere. A filter built from one clock on a search built from another describes two different moments, and nothing can catch it.
+> ⚠️ **Warning** — Build the context once per request and pass that one value everywhere. A filter built from one clock on a search built from another describes two different moments, and nothing can catch it.
 
 ## Rule fields
 
@@ -94,11 +94,11 @@ How values compare, on both sides:
 - **Dates** compare at the millisecond. A timestamp written to the second is that instant; a bare date is its whole day, so `lt("2026-12-01")` is "before the 1st" and `lte("2026-12-01")` is "through the 1st".
 - **Decimals** compare as the index holds them: as the nearest `double`.
 
-> 💡 Arithmetic between a field and the clock has no test (`ends_at - now < notice_days`). Move the maths to one side: store `notice_starts_at` at write time and test `notice_starts_at <= now`, or compare `ends_at` with `now + 30 days` computed in the rule function.
+> 💡 **Did you know** — Arithmetic between a field and the clock has no test (`ends_at - now < notice_days`). Move the maths to one side: store `notice_starts_at` at write time and test `notice_starts_at <= now`, or compare `ends_at` with `now + 30 days` computed in the rule function.
 
 ## What a rule can yield
 
-An outcome is a fixed value of the field's type, or a stored field of the matching kind:
+An outcome is a fixed value of the field's type, or a stored field of the matching kind. A fixed value is matched as it serializes: `eq(None)` selects a fixed `None` and a stored field holding nothing alike.
 
 | Stored field is | It yields as |
 | --- | --- |
@@ -112,11 +112,7 @@ A fixed value can be any serializable type, a small struct included. A struct is
 
 ## Order, for sorts and counts
 
-A rule field sorts and counts in the first order that exists:
-
-1. `Rules::…otherwise(..).order([..])`;
-2. the `variants:` of the stored `enum` field it replaces;
-3. the order the rules name their fixed values in.
+A rule field sorts and counts in the order `Rules::…otherwise(..).order([..])` lists. Without it the order is the `variants:` of the stored `enum` field it replaces, followed by every other fixed value in the order the rules name them. A stored enum usually declares only what it stores (`active`, `suspended`), while the rules add states of their own (`draft`, `expiring`), so a rule field with an order that matters spells it out.
 
 Ordered filters (`lt`, `between`, …) follow the Rust type's own `PartialOrd` instead, so keep the two in step for an enum.
 
