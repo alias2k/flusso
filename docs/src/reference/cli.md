@@ -93,7 +93,7 @@ A sender is the process that sent the signal (`siginfo`): the kernel for a termi
 The drain, in order:
 
 1. **Stop taking in work.** The phase turns `stopping`: [`/readyz`](http.md#get-readyz) answers `503`, a new [`/reindex`](http.md#post-reindexindexnamesinkname) is refused with `503`. No further change is read from the replication stream and no new backfill is served.
-2. **Finish the batch in flight.** What was being built is published to every sink, as any commit. A backfill in progress is abandoned at a row boundary, and its batches already queued for a sink are acknowledged without being written: its index stays unseeded, so the next start backfills it again (a backfill writes deterministic ids; what it wrote so far is overwritten). A stop mid-backfill takes a few hundred milliseconds.
+2. **Finish the batch in flight.** What was being built is published to every sink, as any commit. A backfill in progress is abandoned at a row boundary, and its batches already queued for a sink are acknowledged without being written: its index stays unseeded, so the next start backfills it again (a backfill writes deterministic ids; what it wrote so far is overwritten). The abandoned backfill costs the stop nothing; the live changes already read still land, so under write load the stop takes as long as they do.
 3. **Every sink lands its lane**: apply, flush, acknowledge, sink by sink, until nothing is left. A stalled or unreachable sink doesn't slow the others; it is what the deadline is for.
 4. **Confirm and close the stream.** The position every sink acknowledged is confirmed to the slot, flusso waits until Postgres was sent it, then ends replication. The next start resumes there and reads nothing already indexed again.
 5. **Answer the fences.** An open [`/wait`](http.md#get-waitpositionposition) on `searchable` is held while a sink's refresh interval would still answer it within the deadline; then every wait still open is answered `503` "stopping".
@@ -103,8 +103,8 @@ The drain, in order:
 
 | Exit | Means |
 | --- | --- |
-| `0` | Every step of the drain completed: what was read is indexed and confirmed. An HTTP connection left open or telemetry that didn't flush in its 5 s is logged, not counted: neither is the data path. |
-| `1` | The deadline passed during the drain, or the pipeline failed. |
+| `0` | Every step of the drain completed: what was read is indexed and its final position confirmed to Postgres. The one exception is `--shutdown-timeout-secs 0`, which doesn't drain and logs `stopped without draining, as asked`. An HTTP connection left open or telemetry that didn't flush in its 5 s is logged, not counted: neither is the data path. |
+| `1` | The deadline passed during the drain, the final position couldn't be confirmed to Postgres (`the final position was not confirmed to the source`), or the pipeline failed. |
 | `128 + n` | A second stop signal ended the drain. |
 
 Until the pipeline is started (through [validation at start](#validation-at-start)), a signal ends the process the default way, at once; a parent that exits meanwhile is noticed as soon as it is.

@@ -739,17 +739,26 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   nothing more is read and no request served; a snapshot in progress is dropped unacked (the sink
   re-requests it on the next start, a backfill being idempotent), and a sink engine handed the stop
   (`SinkEngine::with_stop`) acks snapshot batches still on its lane unapplied and skips their index's
-  `SnapshotComplete`, so it isn't marked seeded with documents missing; the buffered batch is published as a
+  `SnapshotComplete`, so it isn't marked seeded with documents missing (once skipping empties the lane
+  while a `Deferred` position waits, it flushes once as caught up: the last live flush ran with snapshot
+  batches still queued, guard `a_deferred_sink_still_refreshes_when_skipped_snapshot_batches_follow_the_last_live_one`);
+  the buffered batch is published as a
   normal commit; `engine::drain_lanes` (the same drain `supervise` runs when the stream ends) waits until
   every lane is acked, confirming the watermark as it moves; then `ChangeCapture::close_live` (Postgres:
   `Positions::request_close` → the stream loop hands `confirmed_lsn` over, `Replication::close` waits until
   a status update carried it, then stops the worker: stopping first would skip the update, the worker
   checks its stop before a due status; with nothing confirmed past the stream's start position, which
-  the slot already holds, it stops at once) and the engine polls the stream to its end. A stalled sink holds
+  the slot already holds, it stops at once) and the engine polls the stream to its end. A close that
+  couldn't hand the position over (no status update in 5 s, `Replication::close` → `false`) ends the
+  stream with `the final position was not confirmed to the source`, as does a stream that doesn't end
+  within `CLOSE_WAIT`: the run fails, so the stop exits 1, never 0, with the position unconfirmed
+  (guards: `a_close_whose_final_position_never_reaches_the_server_ends_the_stream_with_an_error`,
+  `a_stop_whose_final_position_never_reaches_the_source_fails_the_run`). A stalled sink holds
   the drain (the watermark is the minimum); the caller's deadline bounds it. After it the supervisor
   waits on `Fence::settled` only while a `/wait` on `searchable` is open, so a stop nobody waits on
   doesn't sit out a `Within(refresh_interval)`. A stop during staging ends before `prepare`; an ingest
-  engine that fails while stopping is not restarted. Guards: `engine` `tests::stop` (mid-build batch
+  engine that fails while stopping is not restarted. Guards: `engine` `tests::stop` (a stop raised mid-burst
+  ends the batch there, `drain_ready`'s check; mid-build batch
   published and flushed by every sink, final confirm before close; nothing read after the stop; an
   abandoned snapshot re-served; queued snapshot batches skipped, their index left unseeded; a stalled
   sink; a stop before the run), `daemon` `tests::stop`

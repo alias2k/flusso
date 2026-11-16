@@ -152,7 +152,8 @@ pub(crate) struct RunArgs {
     /// A stop drains: nothing new is read, what is in flight lands on every
     /// sink and is confirmed to Postgres, then the HTTP surfaces close and
     /// telemetry is flushed. Past the deadline flusso logs the step and the
-    /// sinks it gave up on and exits 1; `0` doesn't drain. The same sender
+    /// sinks it gave up on and exits 1. `0` doesn't drain: it stops at once
+    /// and exits 0, the one exit 0 that confirmed nothing. The same sender
     /// signalling twice within 500 ms, or any three signals within 1 s, exit
     /// at once. Whatever wasn't confirmed is read again on the next start.
     #[arg(long, env = "FLUSSO_SHUTDOWN_TIMEOUT_SECS", default_value_t = shutdown::DEFAULT_TIMEOUT_SECS)]
@@ -310,8 +311,8 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let timeout = Duration::from_secs(args.shutdown_timeout_secs);
     if ended.is_none() && timeout.is_zero() {
         tracing::info!(
-            "--shutdown-timeout-secs 0: not draining; whatever was not acknowledged is read \
-             again on the next start"
+            "stopped without draining, as asked (--shutdown-timeout-secs 0): whatever was not \
+             confirmed is read again on the next start"
         );
         waits.end_before_exit().await;
         return Ok(());
