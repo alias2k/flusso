@@ -124,11 +124,87 @@ pub fn write_if_changed(compiled: &Compiled, path: impl AsRef<Path>) -> Result<b
     Ok(true)
 }
 
+/// Write `bytes` beside `path` and rename them over it, so the lock is
+/// replaced whole: a process stopped mid-write leaves the old lock (and a
+/// stray temporary file), never a truncated one.
 fn write_bytes(bytes: &[u8], path: &Path) -> Result<(), CompileError> {
-    std::fs::write(path, bytes).map_err(|source| CompileError::Write {
+    let failed = |source| CompileError::Write {
         path: path.to_path_buf(),
         source,
-    })
+    };
+    let name = path.file_name().map_or_else(
+        || std::ffi::OsString::from("flusso.lock"),
+        std::ffi::OsStr::to_os_string,
+    );
+    let mut temporary_name = std::ffi::OsString::from(".");
+    temporary_name.push(&name);
+    temporary_name.push(format!(".{}.tmp", std::process::id()));
+    let temporary = path.with_file_name(temporary_name);
+    let written = std::fs::File::create(&temporary).and_then(|mut file| {
+        std::io::Write::write_all(&mut file, bytes)?;
+        file.sync_all()
+    });
+    if let Err(error) = written.and_then(|()| std::fs::rename(&temporary, path)) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(failed(error));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::write_bytes;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("flusso-lock-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_is_replaced_whole_never_rewritten_in_place() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = scratch("replace");
+        let lock = dir.join("flusso.lock");
+        std::fs::write(&lock, b"old").unwrap();
+        let before = std::fs::metadata(&lock).unwrap().ino();
+
+        write_bytes(b"new lock", &lock).unwrap();
+
+        assert_eq!(std::fs::read(&lock).unwrap(), b"new lock");
+        assert_ne!(
+            std::fs::metadata(&lock).unwrap().ino(),
+            before,
+            "a new file took the old one's name: a stop mid-write leaves the old lock whole"
+        );
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("flusso.lock")]);
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_old_lock_and_no_stray_file() {
+        let dir = scratch("failed");
+        let lock = dir.join("flusso.lock");
+        std::fs::create_dir_all(lock.join("occupied")).unwrap();
+
+        assert!(write_bytes(b"new lock", &lock).is_err());
+
+        assert!(
+            lock.join("occupied").is_dir(),
+            "what was there is untouched"
+        );
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("flusso.lock")]);
+    }
 }
 
 /// Decode a [`Compiled`] envelope from its TOML bytes, checking the format
