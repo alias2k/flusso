@@ -20,7 +20,8 @@ scans its root gives:
 - the root scan: the first node scanning a root relation (`Index Scan using
   …`, `Seq Scan`, `Bitmap Heap Scan`); for a partitioned root, the node type;
 - for a partitioned root, the partitions left in the plan and `Subplans
-  Removed` (run-time pruning).
+  Removed` (run-time pruning) of the root's own Append (one whose children
+  scan the root's partitions; a partitioned child's Append doesn't count).
 
 Prints one table per `plan_cache_mode`; a cell reads `base → head` when the
 sides differ. Flags, head against base:
@@ -29,9 +30,14 @@ sides differ. Flags, head against base:
   on head and fewer on base (a plan that is never cached);
 - `root scan changed`;
 - `pruning lost`: more partitions left on head;
-- `one side only`: a case measured on one side.
+- `one side only`: a case measured on one side;
+- `no plan`: no logged plan of the case scans its root on a side, so its scan
+  and pruning can't be compared.
 
-Exit: 0 when nothing is flagged, 1 otherwise, 2 on a usage error or no case.
+Exit: 0 when nothing is flagged, 1 otherwise, 2 on a usage error, no case,
+or a log with no plan at all for a side and `plan_cache_mode` (a missing or
+wrong `server.log`, `auto_explain` not loaded): that is a setup error, not a
+finding.
 """
 import json
 import pathlib
@@ -91,7 +97,12 @@ def scan(plan: dict, relations: set[str], partitioned: bool) -> dict | None:
     kind = first.get("Node Type", "?")
     if not partitioned and "Index Name" in first:
         kind += f" using {first['Index Name']}"
-    removed = sum(n.get("Subplans Removed", 0) for n in every if n.get("Node Type") in ("Append", "Merge Append"))
+    removed = sum(
+        n.get("Subplans Removed", 0)
+        for n in every
+        if n.get("Node Type") in ("Append", "Merge Append")
+        and any(child.get("Relation Name") in relations for child in n.get("Plans", []))
+    )
     return {"scan": kind, "left": len({n["Relation Name"] for n in scans}), "removed": removed}
 
 
@@ -150,6 +161,9 @@ def table(mode: str, base: dict, head: dict, plans: dict) -> tuple[list[str], bo
             flags.append("root scan changed")
         if pb and ph and h["partitions"] and ph["left"] > pb["left"]:
             flags.append("pruning lost")
+        missing = [side for side, found in (("base", pb), ("head", ph)) if found is None]
+        if missing:
+            flags.append(f"no plan on {' and '.join(missing)}")
         flagged = flagged or bool(flags)
         scan_b = pb["scan"] if pb else "?"
         scan_h = ph["scan"] if ph else "?"
@@ -185,6 +199,15 @@ def main() -> int:
     log_path = root / "server.log"
     log = log_path.read_text(errors="replace").splitlines() if log_path.is_file() else []
     plans = plans_by_case(log, tsvs)
+    for run_name, cases in sorted(tsvs.items()):
+        if cases and not any((run_name, case) in plans for case in cases):
+            side, mode = run_name.split("-", 1)
+            where = f"{log_path}" if log else f"{log_path}, which is missing or empty"
+            print(
+                f"error: no auto_explain plan of the {side} side under plan_cache_mode = {mode} in {where}",
+                file=sys.stderr,
+            )
+            return 2
     out, flagged = [], False
     for mode in MODES:
         base, head = tsvs.get(f"base-{mode}"), tsvs.get(f"head-{mode}")

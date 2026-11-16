@@ -16,7 +16,13 @@ side's lines (sha256 of the sorted lines, first 12 hex), and a verdict:
   a diff of one of them;
 - `forms disagree`: on one side, two forms built different documents for the
   same id (`build` against `build_many`, say), even if base and head agree;
-- `one side only`: the index is missing on a side.
+- `one side only`: the index is missing on a side;
+- `no documents`: both sides declared the index (a `#index <index>` line)
+  and neither built a document for it.
+
+`#note <index> <text>` lines (what the harness could not build, such as
+missing ids on a root keyed by more than its `id`) are printed below the
+table, once.
 
 Exit: 0 when every index is `same`, 1 otherwise, 2 on a usage error or an
 unreadable file.
@@ -31,10 +37,17 @@ import sys
 SHOWN = 5
 
 
-def load(path: pathlib.Path) -> dict[str, list[tuple[str, str, str, str]]]:
+def load(path: pathlib.Path, notes: dict[str, set[str]]) -> dict[str, list[tuple[str, str, str, str]]]:
     by_index: dict[str, list[tuple[str, str, str, str]]] = collections.defaultdict(list)
     for number, line in enumerate(path.read_text().splitlines(), 1):
         if not line:
+            continue
+        if line.startswith("#index\t"):
+            by_index[line.split("\t", 1)[1]]
+            continue
+        if line.startswith("#note\t"):
+            _, index, text = (line.split("\t", 2) + [""])[:3]
+            notes.setdefault(index, set()).add(text)
             continue
         parts = line.split("\t")
         if len(parts) != 5:
@@ -95,7 +108,7 @@ def describe(outcome: tuple[str, str] | None) -> str:
     return "nothing" if outcome is None else outcome[0]
 
 
-def compare(base: dict, head: dict) -> tuple[list[str], bool]:
+def compare(base: dict, head: dict, notes: dict[str, set[str]] | None = None) -> tuple[list[str], bool]:
     rows = [
         "| index | documents, base | documents, head | base | head | verdict |",
         "| --- | ---: | ---: | --- | --- | --- |",
@@ -111,7 +124,9 @@ def compare(base: dict, head: dict) -> tuple[list[str], bool]:
             )
             continue
         verdicts = []
-        if digest(b) != digest(h):
+        if not b and not h:
+            verdicts.append("no documents ⚠️")
+        elif digest(b) != digest(h):
             verdicts.append("differ ⚠️")
             details += [""] + explain(index, b, h)
         for side, lines in (("base", b), ("head", h)):
@@ -121,7 +136,12 @@ def compare(base: dict, head: dict) -> tuple[list[str], bool]:
                 shown = ", ".join(f"`{i}`" for i in ids[:SHOWN])
                 details += ["", f"`{index}`, {side}: the forms built {len(ids)} ids differently: {shown}"]
         flagged = flagged or bool(verdicts)
-        rows.append(f"| `{index}` | {len(b)} | {len(h)} | {digest(b)} | {digest(h)} | {', '.join(verdicts) or 'same'} |")
+        rows.append(
+            f"| `{index}` | {len(b)} | {len(h)} | {digest(b) if b else '—'} | {digest(h) if h else '—'} | {', '.join(verdicts) or 'same'} |"
+        )
+    for index in sorted(notes or {}):
+        for text in sorted(notes[index]):
+            details += ["", f"`{index}`: {text}."]
     return rows + details, flagged
 
 
@@ -130,14 +150,15 @@ def main() -> int:
         print(__doc__, file=sys.stderr)
         return 2
     try:
-        base, head = load(pathlib.Path(sys.argv[1])), load(pathlib.Path(sys.argv[2]))
+        notes: dict[str, set[str]] = {}
+        base, head = load(pathlib.Path(sys.argv[1]), notes), load(pathlib.Path(sys.argv[2]), notes)
     except (OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
     if not base and not head:
         print("error: neither side built a document (does --filter match an index?)", file=sys.stderr)
         return 2
-    lines, flagged = compare(base, head)
+    lines, flagged = compare(base, head, notes)
     print("\n".join(lines))
     return 1 if flagged else 0
 
