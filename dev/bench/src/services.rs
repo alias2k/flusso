@@ -12,9 +12,9 @@ use testcontainers_modules::testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::testcontainers::{ContainerAsync, GenericImage, ImageExt};
 
-/// The same images the e2e suites use; recorded in every report so an image
-/// bump is visible as one.
-pub(crate) const POSTGRES_IMAGE: &str = "postgres:16-alpine";
+/// The same OpenSearch image the e2e suites use; recorded in every report, as
+/// the Postgres image (`test_postgres::image_name`) is, so an image bump is
+/// visible as one.
 pub(crate) const OPENSEARCH_IMAGE: &str = "opensearchproject/opensearch:2";
 
 #[derive(Debug)]
@@ -32,9 +32,9 @@ pub(crate) async fn start() -> Result<Services> {
     let (pg_url, pg_image, pg) = match std::env::var("BENCH_PG_URL") {
         Ok(url) => (url, "external".to_owned(), None),
         Err(_) => {
-            tracing::info!(image = POSTGRES_IMAGE, "starting Postgres");
-            let container = Postgres::default()
-                .with_tag("16-alpine")
+            let image = test_postgres::image_name();
+            tracing::info!(%image, "starting Postgres");
+            let container = test_postgres::image()
                 .with_cmd([
                     "postgres",
                     "-c",
@@ -50,7 +50,7 @@ pub(crate) async fn start() -> Result<Services> {
             let port = container.get_host_port_ipv4(5432).await?;
             (
                 format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres"),
-                POSTGRES_IMAGE.to_owned(),
+                image,
                 Some(container),
             )
         }

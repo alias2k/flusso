@@ -40,8 +40,6 @@ use source::document::{Document, DocumentBuilder, DocumentId};
 use source::{RowKey, SourceSpec};
 use source_postgres::PgDocumentBuilder;
 use sqlx::postgres::PgPoolOptions;
-use testcontainers_modules::postgres::Postgres;
-use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
 /// The key column types, one table each.
@@ -285,11 +283,7 @@ fn bound_type(value: &GenericValue) -> &'static str {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn the_batched_build_serves_the_ids_a_single_build_serves() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
-        .start()
-        .await
-        .unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();

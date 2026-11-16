@@ -20,7 +20,6 @@ use source::cdc::ChangeCapture;
 use source_postgres::{ReplicationConfig, WalChangeCapture};
 use sqlx::Row;
 use sqlx::postgres::PgPoolOptions;
-use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
@@ -29,8 +28,7 @@ use testcontainers_modules::testcontainers::runners::AsyncRunner;
 async fn slot_advances_while_watched_tables_are_idle() {
     // A short wal_sender_timeout makes the server send keepalives every ~1s of
     // inactivity, so the idle advance is observable within the test deadline.
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd([
             "postgres",
             "-c",

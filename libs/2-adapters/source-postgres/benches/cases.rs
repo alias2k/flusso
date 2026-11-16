@@ -51,8 +51,8 @@ use source_postgres::PgDocumentBuilder;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{AssertSqlSafe, Row};
 use testcontainers_modules::postgres::Postgres;
+use testcontainers_modules::testcontainers::ContainerAsync;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
-use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt};
 use tokio::runtime::Runtime;
 
 /// Rows in the `plain` root, the largest batch.
@@ -307,11 +307,7 @@ async fn connect() -> (Option<ContainerAsync<Postgres>>, String) {
     {
         return (None, url);
     }
-    let container = Postgres::default()
-        .with_tag("16-alpine")
-        .start()
-        .await
-        .unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     (
         Some(container),

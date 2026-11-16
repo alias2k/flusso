@@ -1,6 +1,7 @@
 //! Real-service component benches for the Postgres document builder, for attribution.
 //!
-//! These run against a genuine Postgres 17 in a container — the same
+//! These run against a genuine Postgres in a container (`postgres:16-alpine`,
+//! or the tag `FLUSSO_TEST_PG_TAG` names: `dev/test-postgres`) — the same
 //! server-side assembly SQL (`json_build_object` + `json_agg` over a join) and
 //! reverse-resolution queries the pipeline issues in production. Nothing is
 //! mocked.
@@ -72,7 +73,7 @@ async fn setup() -> (
     {
         Some(url) => (None, url),
         None => {
-            let container = Postgres::default().start().await.unwrap();
+            let container = test_postgres::image().start().await.unwrap();
             let port = container.get_host_port_ipv4(5432).await.unwrap();
             let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
             (Some(container), url)

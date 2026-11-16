@@ -41,7 +41,6 @@ use source::document::{Document, DocumentBuilder, DocumentId};
 use source::{RowKey, SourceSpec};
 use source_postgres::PgDocumentBuilder;
 use sqlx::postgres::PgPoolOptions;
-use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
 /// `(filter, matches)`: a root filter on the one row of `sized`, and whether
@@ -141,7 +140,7 @@ const PLACED_CASES: &[(&str, bool)] = &[
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn a_filter_value_that_does_not_fit_its_column_is_compared_as_written() {
-    let container = Postgres::default().start().await.unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
@@ -237,7 +236,7 @@ async fn a_filter_value_that_does_not_fit_its_column_is_compared_as_written() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn a_role_that_may_not_probe_schema_privileges_compares_a_domain_filter_as_written() {
-    let container = Postgres::default().start().await.unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();

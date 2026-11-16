@@ -46,8 +46,7 @@ const BOOT: &str = "chown postgres:postgres /tls/server.key \
 async fn ssl_only_postgres() -> ContainerAsync<Postgres> {
     // PG 14+ is required: the replication client requests the pgoutput
     // `messages` option, added in 14 (same as the engine's wal e2e).
-    Postgres::default()
-        .with_tag("16-alpine")
+    test_postgres::image()
         .with_copy_to(
             "/tls/server.crt",
             CopyDataSource::Data(include_bytes!("fixtures/tls/server.crt").to_vec()),

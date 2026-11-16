@@ -138,7 +138,7 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   copy of the rule that every change must flag identically to. `just load` is the soak script — not a benchmark.
 - The `#[ignore]`d e2e tests live in `source-postgres`'s `integration`, `key_matching`, `filter_operands`,
   `config_coverage`, `publication`, `introspection`, `tls`, `wal_idle`, `continuity`, and `partitions` binaries
-  (`tls` boots a hostssl-only PG 16 with a committed throwaway self-signed cert and
+  (`tls` boots a hostssl-only Postgres with a committed throwaway self-signed cert and
   proves the replication stream + SQL pool honor `sslmode`; `wal_idle`: the slot keeps
   advancing from keepalives/filtered commits while watched tables are idle, so unrelated
   writes don't pin WAL retention — issue #111; `continuity`: `continuity()` is read-only and
@@ -214,6 +214,14 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   source chain (`transport.rs`'s `request_error`).
   New e2e binaries must be added to the filtersets in `.config/nextest.toml` (both profiles) to get
   the docker/opensearch group caps and retries.
+  **Every Postgres start goes through `dev/test-postgres`** (`flusso-test-postgres`, issue #342):
+  `test_postgres::image()` is `postgres:16-alpine`, or the tag `FLUSSO_TEST_PG_TAG` names for the
+  whole run; a test that needs one version names a `test_postgres::Pinned` variant (Postgres 18 for
+  `bytea_output`, 10 for `integration`'s JIT refusal). `testcontainers-modules`' own
+  `Postgres::default()` is `11-alpine`. Guard: `.github/scripts/check-postgres-image.py` (via
+  `test_check_postgres_image.py`, CI's `scripts` job) fails on `Postgres::default`, `.with_tag(` or
+  `GenericImage::new("postgres"` outside that crate. It is a **path-only dev-dependency** of the
+  published crates (`cargo publish` strips it), so it stays outside the layering.
   It is the only test that catches a live change rebuilt as the *wrong* op (e.g. an update
   written as a tombstone because the WAL key decoder and the read-back decoder disagree on
   the `GenericValue` variant). **A key is parsed by one function on both sides** (issue #295,
@@ -1745,8 +1753,9 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
   OTLP exporter builds its own client and reads the OS store.
 - **The whole workspace publishes to crates.io** (so `cargo install flusso-cli` works), under a
   `flusso-*` package namespace. Every crate is published **except** `dev/search-api`
-  (`flusso-dev-search-api`), `dev/query-e2e` (`flusso-query-e2e`), and `dev/bench` (`flusso-bench`) —
-  all `publish = false` (a runnable example, a live-e2e guard, and the benchmark harness, not shipping code). The
+  (`flusso-dev-search-api`), `dev/query-e2e` (`flusso-query-e2e`), `dev/bench` (`flusso-bench`), and
+  `dev/test-postgres` (`flusso-test-postgres`) — all `publish = false` (a runnable example, a live-e2e
+  guard, the benchmark harness, and the test Postgres image, not shipping code). The
   catch: a crate's published **package name** (`flusso-engine`, `flusso-kernel`, …) differs
   from the **extern name** code uses (`engine`, `kernel`, `source_postgres`, …). Two mechanisms keep that split
   so the rename needs **no source change**: each lib sets `[lib] name = "<extern>"`, and each

@@ -91,8 +91,7 @@ async fn start_postgres() -> (
     u16,
     String,
 ) {
-    let postgres = Postgres::default()
-        .with_tag("18-alpine")
+    let postgres = test_postgres::pinned(test_postgres::Pinned::ByteaMinMax)
         .with_cmd([
             "postgres",
             "-c",

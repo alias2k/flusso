@@ -738,11 +738,7 @@ struct Os {
 }
 
 async fn start_postgres() -> Pg {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
-        .start()
-        .await
-        .unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();

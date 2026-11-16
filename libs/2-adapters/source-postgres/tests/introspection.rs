@@ -14,13 +14,12 @@ use kernel::FlussoType;
 use source::{SchemaIntrospection, junction_candidates};
 use source_postgres::{ReplicationConfig, WalChangeCapture};
 use sqlx::postgres::PgPoolOptions;
-use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn introspects_tables_columns_keys_and_junctions() {
-    let container = Postgres::default().start().await.unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
 

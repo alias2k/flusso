@@ -22,7 +22,7 @@ Every library crate, its layer, and what it holds. The numeric prefix on each di
 | 2 | script | `script` | [`2-script`](2-script) | Script fields: compiles every Rhai script of a deployment, and `ScriptedBuilder` decorates any source's `DocumentBuilder` so each built document is finished by its scripts (and stripped of input-only fields) before it is published. Depends on the kernel and the source port. |
 | 3 | daemon | `daemon` | [`3-daemon`](3-daemon) | Supervises one deployment from a `Config` through the `Backends` seam: stages every sink engine, runs the engines as independent tasks with restart backoff, exposes per-sink `Status` and the reindex operation. Knows no adapter name. |
 
-The `flusso` binary and the designer live under [`apps/`](https://github.com/alias2k/flusso/tree/main/apps); the consumer-facing query crates under [`sdk/`](https://github.com/alias2k/flusso/tree/main/sdk); the unpublished example, live e2e, and benchmark harness under [`dev/`](https://github.com/alias2k/flusso/tree/main/dev).
+The `flusso` binary and the designer live under [`apps/`](https://github.com/alias2k/flusso/tree/main/apps); the consumer-facing query crates under [`sdk/`](https://github.com/alias2k/flusso/tree/main/sdk); the unpublished example, live e2e, benchmark harness, and test Postgres image under [`dev/`](https://github.com/alias2k/flusso/tree/main/dev).
 
 ## Read next
 

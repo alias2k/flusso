@@ -95,8 +95,7 @@ impl Sink for RecordingSink {
 async fn wal_changes_flow_through_the_engine() {
     // Postgres with logical replication enabled. PG 14+ is required: the
     // replication client requests the pgoutput `messages` option, added in 14.
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd([
             "postgres",
             "-c",
@@ -167,8 +166,7 @@ async fn wal_changes_flow_through_the_engine() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn backfill_seeds_preexisting_rows() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd([
             "postgres",
             "-c",
@@ -231,8 +229,7 @@ async fn backfill_seeds_preexisting_rows() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn an_update_of_unread_columns_rebuilds_nothing() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd([
             "postgres",
             "-c",
@@ -356,8 +353,7 @@ async fn an_update_of_unread_columns_rebuilds_nothing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn managed_replica_identity_skips_unread_columns_on_the_root_and_a_belongs_to_target() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd([
             "postgres",
             "-c",
@@ -467,8 +463,7 @@ async fn managed_replica_identity_skips_unread_columns_on_the_root_and_a_belongs
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn a_kept_identity_index_still_traces_deleted_and_reparented_rows() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd([
             "postgres",
             "-c",
@@ -595,8 +590,7 @@ async fn a_kept_identity_index_still_traces_deleted_and_reparented_rows() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn a_raw_filter_reading_the_root_row_rebuilds_on_that_column() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd([
             "postgres",
             "-c",
@@ -680,8 +674,7 @@ async fn a_raw_filter_reading_the_root_row_rebuilds_on_that_column() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn an_aggregate_via_hops_rebuilds_its_parent_from_every_hop() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd([
             "postgres",
             "-c",
@@ -893,8 +886,7 @@ async fn an_aggregate_via_hops_rebuilds_its_parent_from_every_hop() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn a_self_reaching_via_rebuilds_every_ancestor_it_reaches() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd([
             "postgres",
             "-c",
@@ -1070,8 +1062,7 @@ async fn a_self_reaching_via_rebuilds_every_ancestor_it_reaches() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn a_via_under_a_nested_relation_rebuilds_the_root_from_every_hop() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd([
             "postgres",
             "-c",
@@ -1274,8 +1265,7 @@ async fn a_via_under_a_nested_relation_rebuilds_the_root_from_every_hop() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn on_pairs_rebuild_the_parent_from_either_side() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd([
             "postgres",
             "-c",
@@ -1476,8 +1466,7 @@ async fn on_pairs_rebuild_the_parent_from_either_side() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn an_aggregate_expression_rebuilds_from_each_operand() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd([
             "postgres",
             "-c",
@@ -1646,8 +1635,7 @@ async fn start_logical_postgres() -> (
     u16,
     String,
 ) {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd([
             "postgres",
             "-c",
@@ -3400,8 +3388,7 @@ async fn the_pipeline_runs_through_pgbouncer(pool_mode: &str) {
 /// kids, inserted in one transaction, rebuilt their parent (issue #295): a
 /// `parents` keyed by `sql_type`, the kids linking to it as `link`.
 async fn root_key_lookups_for_a_burst(sql_type: &str, root: &str, link: &str, id: &str) -> i64 {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd([
             "postgres",
             "-c",

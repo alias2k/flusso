@@ -17,15 +17,13 @@ use source::cdc::{ChangeCapture, Continuity};
 use source_postgres::{ReplicationConfig, WalChangeCapture};
 use sqlx::Row;
 use sqlx::postgres::PgPoolOptions;
-use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn continuity_is_read_only_and_prepare_creates_the_slot() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd([
             "postgres",
             "-c",

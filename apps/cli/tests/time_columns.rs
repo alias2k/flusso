@@ -36,7 +36,6 @@ use source::{DiagnosticKind, RowKey, SourceSpec, validate_indexes};
 use source_postgres::PgDocumentBuilder;
 use sqlx::AssertSqlSafe;
 use sqlx::postgres::PgPoolOptions;
-use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::core::wait::HttpWaitStrategy;
 use testcontainers_modules::testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
@@ -197,11 +196,7 @@ fn cases() -> Vec<(&'static str, String, Expect)> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn a_time_column_under_a_date_field_is_reported_only_where_no_document_indexes() {
-    let pg = Postgres::default()
-        .with_tag("16-alpine")
-        .start()
-        .await
-        .unwrap();
+    let pg = test_postgres::image().start().await.unwrap();
     let pg_url = format!(
         "postgres://postgres:postgres@127.0.0.1:{}/postgres",
         pg.get_host_port_ipv4(5432).await.unwrap()

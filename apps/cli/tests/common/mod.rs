@@ -19,8 +19,7 @@ use testcontainers_modules::testcontainers::{ContainerAsync, GenericImage, Image
 /// A Postgres 16 with logical replication, seeded with `setup` (statements
 /// split on `;`), and its URL.
 pub(crate) async fn start_postgres(setup: &str) -> (ContainerAsync<Postgres>, String) {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd(["postgres", "-c", "wal_level=logical"])
         .start()
         .await

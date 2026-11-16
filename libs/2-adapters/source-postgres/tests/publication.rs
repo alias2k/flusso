@@ -29,7 +29,6 @@ use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ContainerAsync;
-use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
 const PUBLICATION: &str = "flusso";
@@ -37,11 +36,7 @@ const PUBLICATION: &str = "flusso";
 /// Postgres 16: flusso's supported range starts at 14, and the publication
 /// option for partitioned tables needs 13.
 async fn postgres() -> ContainerAsync<Postgres> {
-    Postgres::default()
-        .with_tag("16-alpine")
-        .start()
-        .await
-        .unwrap()
+    test_postgres::image().start().await.unwrap()
 }
 
 /// Whether the publication streams partitioned tables under their own name.

@@ -14,6 +14,8 @@ The vocabulary (benchmark, component bench, scenario, headline metric, baseline,
 
 The scenario numbers are what gets watched. The component benches exist so that when a headline metric moves, the stage that moved is already on record for the same commit.
 
+The scenarios and the Docker-backed component benches start the same Postgres image as the e2e suites, `postgres:16-alpine` unless `FLUSSO_TEST_PG_TAG` names another; see [Which Postgres](testing.md#which-postgres).
+
 ## Headline metrics
 
 A scenario reports these under the series `<scenario>/<scale>/…`:
@@ -26,7 +28,7 @@ A scenario reports these under the series `<scenario>/<scale>/…`:
 | `peak_rss_mib`, `cpu_seconds` | MiB, s | smaller | Sampled from the child with `ps` every half second. |
 | `flush_p50_ms`, `flush_p99_ms` | ms | smaller | Attribution, not headline: the sink's flush-duration histogram from `/metrics` at the end of the run. |
 
-Every point carries the container image tags and the scale parameters in its `extra` field.
+Every point carries the container image tags and the scale parameters in its `extra` field. A component bench point carries the Postgres image (`extra.images.postgres`, printed by `cargo run -q -p flusso-test-postgres`), so a tag change restarts its window too.
 
 ## Scenarios and scales
 

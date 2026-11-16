@@ -145,6 +145,12 @@ jobs:
           cargo bench -p flusso-sink-opensearch --bench opensearch -- --save-baseline components
           cargo bench -p flusso-engine --bench pipeline -- --save-baseline components
           python3 .github/scripts/bench-criterion-to-json.py target/criterion components components bench-out/components.json
+          # The Postgres image the benches started (dev/test-postgres), in every
+          # point's `extra.images`: a tag change restarts the regression window
+          # (bench-regression.py) instead of reading as a regression (issue #342).
+          extra=$(jq -cn --arg postgres "$(cargo run -q -p flusso-test-postgres)" '{images: {postgres: $postgres}} | tojson')
+          jq --argjson extra "$extra" 'map(. + {extra: $extra})' bench-out/components.json > bench-out/components.stamped.json
+          mv bench-out/components.stamped.json bench-out/components.json
 
       - name: Scenario `reference` (CI scale)
         env:

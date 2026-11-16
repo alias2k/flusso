@@ -97,7 +97,7 @@ const SEED: &[&str] = &[
 /// Start a Postgres container, seed it, and return the live container (kept
 /// alive by the caller) plus its connection URL.
 async fn start_seeded() -> (ContainerAsync<Postgres>, String) {
-    let container = Postgres::default().start().await.unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();

@@ -18,7 +18,6 @@ use std::time::Duration;
 
 use pgwire_replication::{ReplicationClient, ReplicationConfig, ReplicationEvent};
 use sqlx::postgres::PgPoolOptions;
-use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
@@ -32,8 +31,7 @@ const TRANSACTIONS: usize = 50;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker; rewrites benches/fixtures/pgoutput.bin"]
 async fn record_pgoutput_fixture() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd([
             "postgres",
             "-c",

@@ -2470,8 +2470,7 @@ async fn run_deployment(
 }
 
 async fn start_postgres() -> Pg {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd([
             "postgres",
             "-c",

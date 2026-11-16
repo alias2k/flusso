@@ -3,8 +3,9 @@
 //!
 //! This lives in the `engine` crate because the engine is the one component
 //! that legitimately spans both halves of the pipeline (a source crate has no
-//! business depending on a specific sink). It stands up a Postgres and an
-//! OpenSearch 2 container and exercises the real path. Nothing is mocked. It is
+//! business depending on a specific sink). It stands up a Postgres container
+//! (`postgres:16-alpine`, or the tag `FLUSSO_TEST_PG_TAG` names:
+//! `dev/test-postgres`) and an OpenSearch 2 container and exercises the real path. Nothing is mocked. It is
 //! an attribution bench: the headline numbers come from the `flusso-bench`
 //! scenarios (`dev/bench`), which run the real binary; this one says which
 //! stage moved.
@@ -365,7 +366,7 @@ async fn setup() -> Services {
     {
         Some(url) => (None, url),
         None => {
-            let postgres = Postgres::default().start().await.unwrap();
+            let postgres = test_postgres::image().start().await.unwrap();
             let pg_port = postgres.get_host_port_ipv4(5432).await.unwrap();
             let url = format!("postgres://postgres:postgres@127.0.0.1:{pg_port}/postgres");
             (Some(postgres), url)

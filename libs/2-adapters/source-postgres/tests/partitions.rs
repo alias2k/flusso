@@ -45,8 +45,7 @@ use testcontainers_modules::testcontainers::runners::AsyncRunner;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn changes_on_partitions_resolve_to_the_partitioned_tables_documents() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd(["postgres", "-c", "wal_level=logical"])
         .start()
         .await
@@ -326,8 +325,7 @@ async fn an_unmanaged_partition_without_the_key_is_reported_and_its_null_key_del
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn a_keyless_child_partition_under_a_full_parent_still_rebuilds_the_parent_it_left() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd(["postgres", "-c", "wal_level=logical"])
         .start()
         .await
@@ -459,8 +457,7 @@ async fn keyless_partition_database() -> (
     String,
     u16,
 ) {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd(["postgres", "-c", "wal_level=logical"])
         .start()
         .await
@@ -657,11 +654,7 @@ fn index_name(name: &str) -> IndexName {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn a_batched_build_on_a_partitioned_root_is_not_jit_compiled() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
-        .start()
-        .await
-        .unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
@@ -764,11 +757,7 @@ fields:
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn a_batch_is_pruned_to_its_keys_partitions_under_a_generic_plan() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
-        .start()
-        .await
-        .unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();

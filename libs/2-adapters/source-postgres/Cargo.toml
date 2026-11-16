@@ -57,6 +57,7 @@ uuid.workspace = true
 async-trait.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 testcontainers-modules = { workspace = true, features = ["postgres"] }
+test-postgres.workspace = true
 criterion.workspace = true
 proptest.workspace = true
 
