@@ -1252,6 +1252,7 @@ impl FlussoScope for DecodedUser {
     const PATH: &'static [Segment] = &[];
 }
 impl FlussoRoot for DecodedUser {
+    type Context = ();
     const INDEX: &'static str = "users";
     const SCHEMA_HASH: &'static str = "xxxxxx";
 }
@@ -1260,6 +1261,7 @@ impl FlussoScope for DecodedOrder {
     const PATH: &'static [Segment] = &[];
 }
 impl FlussoRoot for DecodedOrder {
+    type Context = ();
     const INDEX: &'static str = "orders";
     const SCHEMA_HASH: &'static str = "yyyyyy";
 }
@@ -1301,6 +1303,7 @@ impl FlussoScope for NumericDoc {
     const PATH: &'static [Segment] = &[];
 }
 impl FlussoRoot for NumericDoc {
+    type Context = ();
     const INDEX: &'static str = "numbers";
     const SCHEMA_HASH: &'static str = "12345678";
 }

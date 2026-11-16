@@ -41,6 +41,11 @@ pub trait FlussoScope {
 /// sink writes); [`query`](Self::query) and [`get`](Self::get) are provided.
 /// `DeserializeOwned` is required so search hits and fetched documents decode.
 pub trait FlussoRoot: FlussoScope + DeserializeOwned {
+    /// The request-time values this root's read-time fields are decided
+    /// from: the clock, the caller. `()` for a root that has none. See
+    /// [`rules`](crate::rules).
+    type Context;
+
     /// The logical index name this binding queries.
     const INDEX: &'static str;
 
@@ -60,16 +65,46 @@ pub trait FlussoRoot: FlussoScope + DeserializeOwned {
     /// clone it, and hand a [`Client`] to a terminal
     /// ([`send`](Search::send) / [`ids`](Search::ids) / [`count`](Search::count))
     /// when it's time to run.
-    fn query() -> Search<Self> {
-        Search::new(Self::INDEX, Self::SCHEMA_HASH)
+    fn query() -> Search<Self>
+    where
+        Self: FlussoRoot<Context = ()>,
+    {
+        Self::query_in(&())
     }
 
     /// Fetch one document by id; `None` when absent.
     fn get(
         client: &Client,
         id: impl std::fmt::Display,
+    ) -> impl std::future::Future<Output = Result<Option<Self>>>
+    where
+        Self: FlussoRoot<Context = ()>,
+    {
+        Self::get_in(&(), client, id)
+    }
+
+    /// What this root computes on a fetched document, bound to `cx`. Empty
+    /// unless the root declares read-time fields; the derive writes it.
+    #[doc(hidden)]
+    fn computation(_cx: &Self::Context) -> crate::rules::Computation {
+        crate::rules::Computation::none()
+    }
+
+    /// [`query`](Self::query) for a root of any context: `cx` decides the
+    /// read-time fields of every document the search returns. A root with a
+    /// context also gets this as its own `query(&cx)`.
+    fn query_in(cx: &Self::Context) -> Search<Self> {
+        Search::new(Self::INDEX, Self::SCHEMA_HASH).computing(Self::computation(cx))
+    }
+
+    /// [`get`](Self::get) for a root of any context. A root with a context
+    /// also gets this as its own `get(&cx, client, id)`.
+    fn get_in(
+        cx: &Self::Context,
+        client: &Client,
+        id: impl std::fmt::Display,
     ) -> impl std::future::Future<Output = Result<Option<Self>>> {
-        client.get_one::<Self>(Self::INDEX, Self::SCHEMA_HASH, id)
+        client.get_one_with::<Self>(Self::INDEX, Self::SCHEMA_HASH, id, Self::computation(cx))
     }
 }
 
@@ -100,6 +135,8 @@ pub struct Search<T> {
     collapse: Option<Value>,
     post_filter: Option<Value>,
     highlight: Option<Highlight>,
+    /// The read-time fields to write into each hit before it decodes.
+    computation: Option<crate::rules::Computation>,
     _marker: PhantomData<fn() -> T>,
 }
 
@@ -122,8 +159,137 @@ impl<T> Search<T> {
             collapse: None,
             post_filter: None,
             highlight: None,
+            computation: None,
             _marker: PhantomData,
         }
+    }
+
+    fn computing(mut self, computation: crate::rules::Computation) -> Self {
+        self.computation = (!computation.is_empty()).then_some(computation);
+        self
+    }
+
+    /// Write the read-time fields into every hit of a raw `_search` response.
+    pub(crate) fn compute(&self, response: &mut Value) -> Result<()> {
+        match &self.computation {
+            Some(computation) => computation.apply_response(response),
+            None => Ok(()),
+        }
+    }
+
+    /// The rule-field sorts that share the one `_score` key: the first, and
+    /// every one directly after it.
+    fn rank_run(&self) -> Option<std::ops::Range<usize>> {
+        let first = self.sort.iter().position(|sort| sort.rank().is_some())?;
+        let length = self
+            .sort
+            .iter()
+            .skip(first)
+            .take_while(|sort| sort.rank().is_some())
+            .count();
+        Some(first..first + length)
+    }
+
+    /// Why this search's rule-field sorts cannot run as asked, if they cannot.
+    fn rank_refusal(&self, run: &std::ops::Range<usize>) -> Option<&'static str> {
+        let outside_run = |(at, sort): (usize, &Sort)| !run.contains(&at) && sort.rank().is_some();
+        if self.sort.iter().enumerate().any(outside_run) {
+            return Some(
+                "two rule-field sorts are separated by another sort key: they share the score, \
+                 so the second must directly follow the first",
+            );
+        }
+        if self.sort.iter().any(Sort::sorts_on_score) {
+            return Some(
+                "a rule-field sort and a relevance sort are both in this search: the rule \
+                 field's order replaces the score, so there is no relevance left to sort by",
+            );
+        }
+        if self.min_score.is_some() {
+            return Some(
+                "`min_score` is set on a search sorted by a rule field: the rule field's order \
+                 replaces the score, so `min_score` would cut by rank",
+            );
+        }
+        // The score is a 32-bit float, exact for whole numbers up to 2^24.
+        let packed = self
+            .sort
+            .iter()
+            .filter_map(Sort::rank)
+            .try_fold(1_u64, |total, rank| total.checked_mul(rank.top + 1));
+        if packed.is_none_or(|total| total > 1 << 24) {
+            return Some(
+                "the rule-field sorts of this search have more value combinations than one \
+                 score can keep apart; sort by fewer of them",
+            );
+        }
+        None
+    }
+
+    /// A rule-field sort ranks through the score, so its functions wrap the
+    /// query. Several in a row pack into one score, most significant first; a
+    /// later one sorting the other way gets its ranks reversed.
+    fn ranked(&self, query: Value) -> Value {
+        let Some(run) = self.rank_run() else {
+            return query;
+        };
+        if self.rank_refusal(&run).is_some() {
+            return query;
+        }
+        let ranks: Vec<_> = self.sort.iter().filter_map(Sort::rank).collect();
+        let descending = ranks.first().is_some_and(|rank| rank.descending);
+        let mut query = query;
+        for (place, rank) in ranks.iter().enumerate() {
+            let scale: u64 = ranks
+                .iter()
+                .skip(place + 1)
+                .map(|later| later.top + 1)
+                .product();
+            let functions: Vec<Value> = rank
+                .functions
+                .iter()
+                .map(|function| {
+                    let weight = function.get("weight").and_then(Value::as_u64).unwrap_or(0);
+                    let weight = if rank.descending == descending {
+                        weight
+                    } else {
+                        rank.top + 1 - weight
+                    };
+                    serde_json::json!({ "filter": function.get("filter"), "weight": weight * scale })
+                })
+                .collect();
+            query = serde_json::json!({ "function_score": {
+                "query": query,
+                "functions": functions,
+                "score_mode": "first",
+                "boost_mode": if place == 0 { "replace" } else { "sum" },
+            } });
+        }
+        query
+    }
+
+    /// The `sort` array. A run of rule-field sorts is the one `_score` key, in
+    /// the direction of the first; a combination that cannot run is the
+    /// stand-in clause that stops the request before it is sent.
+    fn sort_keys(&self) -> Vec<Value> {
+        let Some(run) = self.rank_run() else {
+            return self.sort.iter().map(Sort::to_value).collect();
+        };
+        if let Some(reason) = self.rank_refusal(&run) {
+            return vec![crate::rules::invalid(reason)];
+        }
+        self.sort
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| !run.contains(at) || *at == run.start)
+            .map(|(_, sort)| match sort.rank() {
+                Some(rank) => {
+                    let order = if rank.descending { "desc" } else { "asc" };
+                    serde_json::json!({ "_score": { "order": order } })
+                }
+                None => sort.to_value(),
+            })
+            .collect()
     }
 
     /// A scoring clause (`bool.must`). Accepts any root-scope [`AsQuery`]; an
@@ -330,7 +496,8 @@ impl<T> Search<T> {
         };
 
         let mut root = Map::new();
-        root.insert("query".to_string(), query);
+        // Outermost, so a projection's `should` cannot add to the rank.
+        root.insert("query".to_string(), self.ranked(query));
         self.insert_page_params(&mut root);
         self.insert_search_level(&mut root, true);
         Value::Object(root)
@@ -340,8 +507,7 @@ impl<T> Search<T> {
     /// Shared by [`body`](Self::body) and [`ids_body`](Self::ids_body).
     fn insert_page_params(&self, root: &mut Map<String, Value>) {
         if !self.sort.is_empty() {
-            let keys = self.sort.iter().map(Sort::to_value).collect();
-            root.insert("sort".to_string(), Value::Array(keys));
+            root.insert("sort".to_string(), Value::Array(self.sort_keys()));
         }
         if let Some(from) = self.from {
             root.insert("from".to_string(), Value::from(from));
@@ -400,7 +566,7 @@ impl<T> Search<T> {
     #[must_use]
     pub fn ids_body(&self) -> Value {
         let mut root = Map::new();
-        root.insert("query".to_string(), self.query_value());
+        root.insert("query".to_string(), self.ranked(self.query_value()));
         self.insert_page_params(&mut root);
         self.insert_search_level(&mut root, false);
         root.insert("_source".to_string(), Value::Bool(false));
@@ -485,6 +651,7 @@ where
         if !paths.is_empty() {
             merge_inner_hits(&mut response, &paths);
         }
+        self.compute(&mut response)?;
         let page = SearchResponse::from_value(response)?;
         let span = tracing::Span::current();
         span.record("total", page.total);
@@ -661,6 +828,7 @@ where
         if !paths.is_empty() {
             merge_inner_hits(&mut response, &paths);
         }
+        self.search.compute(&mut response)?;
         let mut decoded = SearchResponse::from_value(response)?;
         decoded.next = page.next;
         tracing::Span::current().record("total", decoded.total);

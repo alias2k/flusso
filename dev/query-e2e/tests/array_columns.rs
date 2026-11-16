@@ -48,6 +48,7 @@ impl FlussoScope for Order {
     const PATH: &'static [Segment] = &[];
 }
 impl FlussoRoot for Order {
+    type Context = ();
     const INDEX: &'static str = "orders";
     const SCHEMA_HASH: &'static str = "00000276";
 }

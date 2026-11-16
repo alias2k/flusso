@@ -113,10 +113,18 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
         }
     });
 
+    // `CombinedSearchVariant` rather than `FlussoRoot` on the decode itself: a
+    // root with a context decodes without its read-time fields, so it must not
+    // get this far.
     let arms = variants.iter().map(|(variant, ty)| {
         quote_spanned! { ty.span() =>
             if physical_index == <#ty as ::flusso_query::FlussoRoot>::physical_index() {
-                return ::flusso_query::__serde_json::from_value::<#ty>(source)
+                fn variant<T: ::flusso_query::CombinedSearchVariant>(
+                    source: ::flusso_query::__serde_json::Value,
+                ) -> ::flusso_query::__serde_json::Result<T> {
+                    ::flusso_query::__serde_json::from_value::<T>(source)
+                }
+                return variant::<#ty>(source)
                     .map(Self::#variant)
                     .map_err(::flusso_query::Error::from);
             }

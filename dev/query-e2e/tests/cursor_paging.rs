@@ -48,6 +48,7 @@ impl FlussoScope for User {
     const PATH: &'static [Segment] = &[];
 }
 impl FlussoRoot for User {
+    type Context = ();
     const INDEX: &'static str = "users";
     const SCHEMA_HASH: &'static str = "00000001";
 }
@@ -60,6 +61,7 @@ impl FlussoScope for Order {
     const PATH: &'static [Segment] = &[];
 }
 impl FlussoRoot for Order {
+    type Context = ();
     const INDEX: &'static str = "orders";
     const SCHEMA_HASH: &'static str = "00000002";
 }

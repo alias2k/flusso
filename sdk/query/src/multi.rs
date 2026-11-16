@@ -56,12 +56,14 @@ use crate::walk::{Fetched, Walk};
 /// # #[derive(serde::Deserialize)] struct User { email: String }
 /// # impl FlussoScope for User { const PATH: &'static [Segment] = &[]; }
 /// # impl FlussoRoot for User {
+/// #     type Context = ();
 /// #     const INDEX: &'static str = "users";
 /// #     const SCHEMA_HASH: &'static str = "xxxxxx";
 /// # }
 /// # #[derive(serde::Deserialize)] struct Order { status: String }
 /// # impl FlussoScope for Order { const PATH: &'static [Segment] = &[]; }
 /// # impl FlussoRoot for Order {
+/// #     type Context = ();
 /// #     const INDEX: &'static str = "orders";
 /// #     const SCHEMA_HASH: &'static str = "yyyyyy";
 /// # }
@@ -90,6 +92,17 @@ use crate::walk::{Fetched, Walk};
 ///     }
 /// }
 /// ```
+/// A root that can be a variant of a combined search: one without a context.
+///
+/// A combined search decodes each hit straight into its variant and has
+/// nowhere to take a root's [`Context`](crate::FlussoRoot::Context) from, so a
+/// root with read-time fields would come back without them. Such a root is
+/// refused here instead: search its index on its own, or declare a second root
+/// over the same index without `context`.
+pub trait CombinedSearchVariant: crate::FlussoRoot<Context = ()> {}
+
+impl<T: crate::FlussoRoot<Context = ()>> CombinedSearchVariant for T {}
+
 pub trait FlussoMultiDocument: Sized {
     /// The `(logical index, schema hash)` pair of every document type in the
     /// union, in variant order — each is that type's

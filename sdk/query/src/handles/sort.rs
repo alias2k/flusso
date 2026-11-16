@@ -75,9 +75,50 @@ pub struct Sort {
     /// script's `params.missing` (the `missing` body field is ignored on a
     /// `_script` sort) with a direction-correct sentinel for the value kind.
     script_kind: Option<MapSortValueKind>,
+    /// `Some` for a rule field's sort: the `function_score` functions that
+    /// make the score the value's rank. [`Search`](crate::Search) wraps its
+    /// query in them and sorts on `_score`; nothing else can run one.
+    rank: Option<Rank>,
+}
+
+/// A rule field's sort: one `function_score` function per way of reaching a
+/// value, each weighted with the value's 1-based rank.
+#[derive(Debug, Clone)]
+pub(crate) struct Rank {
+    pub(crate) functions: Vec<Value>,
+    /// The highest rank any function gives.
+    pub(crate) top: u64,
+    pub(crate) descending: bool,
 }
 
 impl Sort {
+    /// Sort by a rule field's rank, carried in the score.
+    pub(crate) fn ranked(order: SortOrder, functions: Vec<Value>, top: u64) -> Self {
+        Self {
+            key: "_score".to_string(),
+            body: Map::new(),
+            // Two rule fields both sort on `_score`, so the functions tell
+            // them apart.
+            dedup_id: format!("_rank:{}", Value::Array(functions.clone())),
+            script_kind: None,
+            rank: Some(Rank {
+                functions,
+                top,
+                descending: matches!(order, SortOrder::Desc),
+            }),
+        }
+    }
+
+    /// What a rule field's sort ranks by.
+    pub(crate) fn rank(&self) -> Option<&Rank> {
+        self.rank.as_ref()
+    }
+
+    /// A relevance sort: the `_score` key, and not a rule field's.
+    pub(crate) fn sorts_on_score(&self) -> bool {
+        self.key == "_score" && self.rank.is_none()
+    }
+
     /// A field/order sort: `{ "<field>": { "order": "asc"|"desc" } }`.
     pub(crate) fn new(field: &str, order: SortOrder) -> Self {
         let mut body = Map::new();
@@ -95,6 +136,7 @@ impl Sort {
             key,
             body,
             script_kind: None,
+            rank: None,
         }
     }
 
@@ -147,6 +189,7 @@ impl Sort {
             body,
             dedup_id,
             script_kind: Some(kind),
+            rank: None,
         }
     }
 
@@ -318,6 +361,13 @@ impl Sort {
     }
 
     pub(crate) fn to_value(&self) -> Value {
+        if self.rank.is_some() {
+            return crate::rules::invalid(
+                "a rule field's sort ranks through the query's score, which only a search of \
+                 its own root can arrange; a combined search and a nested projection cannot \
+                 sort by it",
+            );
+        }
         let mut outer = Map::new();
         outer.insert(self.key.clone(), Value::Object(self.body.clone()));
         Value::Object(outer)

@@ -99,6 +99,13 @@ pub enum Error {
         reason: String,
     },
 
+    /// A read-time field cannot be evaluated: a rule compares a date with
+    /// text that is not one, a combination of rule-field sorts cannot run, a
+    /// computed field's input does not read from the document. Raised before
+    /// the request is sent, or while a fetched document is decoded.
+    #[error("read-time field: {0}")]
+    ReadTimeField(String),
+
     /// A response could not be decoded into the expected shape.
     #[error("decoding response: {0}")]
     Decode(#[from] serde_json::Error),

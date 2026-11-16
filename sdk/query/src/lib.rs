@@ -31,6 +31,11 @@
 //!   query across all the union's indexes, one relevance-ranked result list,
 //!   each hit decoded into the variant matching its physical `_index`.
 //! - Typed [`SearchResponse`] / [`Hit`].
+//! - Read-time fields ([`rules`]): a root names the request-time values it
+//!   reads as its [`FlussoRoot::Context`], and declares fields decided when a
+//!   document is read. A rule field ([`rules::Rules`]) gives the value and a
+//!   filter, sort and counts on it with no script; a computed field is any
+//!   Rust function, value only.
 //! - Two ways to page: by offset (`from`/`size`), or by [`PageCursor`] —
 //!   [`Search::cursor`] / [`MultiSearch::cursor`] resume after the last hit's
 //!   sort values (`search_after`), so inserts and deletes
@@ -114,6 +119,7 @@ mod multi;
 mod path;
 pub mod position;
 mod query;
+pub mod rules;
 mod search;
 mod walk;
 
@@ -146,7 +152,7 @@ pub use handles::{
     simple_query_string,
 };
 pub use msearch::MsearchBundle;
-pub use multi::{FlussoMultiDocument, MultiCursorSearch, MultiSearch};
+pub use multi::{CombinedSearchVariant, FlussoMultiDocument, MultiCursorSearch, MultiSearch};
 pub use path::{Segment, SegmentKind, nested_boundaries};
 pub use query::{AsQuery, Query, Root};
 pub use search::{

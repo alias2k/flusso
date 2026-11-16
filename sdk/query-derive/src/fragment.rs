@@ -97,6 +97,9 @@ pub(crate) fn expand(input: DeriveInput) -> TokenStream {
     {
         out.extend(error.to_compile_error());
     }
+    for read_time in fields.iter().filter_map(|field| field.read_time.as_ref()) {
+        out.extend(doc::read_time_in_fragment(read_time).to_compile_error());
+    }
     for renamed in fields.iter().filter_map(|field| field.scope.as_ref()) {
         out.extend(
             syn::Error::new(
