@@ -109,7 +109,7 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   built, stamped and provenance-checked like any bench. Only a mode builds or overlays it (`bench-in-process.sh`'s
   docker set lists it; review-ab passes it in `BENCH_ONLY` only in a mode), so `cases.rs` must use nothing old
   bases lack and plain `review-ab` keeps building any base it built before (guard: `test_review_modes.py`'s
-  `HarnessSplit`); what `review.rs` needs is one `// review-ab requires: <text>` line each, looked up with
+  `HarnessSplit`, a proxy that checks names, not a compile of `cases.rs` against an old base); what `review.rs` needs is one `// review-ab requires: <text>` line each, looked up with
   `git grep` in the base's `source-postgres/src`, and a base without it is refused by name (from #357 on today).
   A mode refuses `--bench`, `--rounds`, `--limit`, `--own-benches`. **`just review-digest`** (`--digest`): each side builds every
   root index's documents by `build`, `build_many` under 16 keys and 16+, and a backfill (snapshot → resolve →

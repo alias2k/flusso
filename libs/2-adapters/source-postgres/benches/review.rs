@@ -130,8 +130,9 @@ async fn ids(builder: &PgDocumentBuilder, pool: &PgPool, root: &Root) -> Vec<Doc
 }
 
 /// Whether a missing id can be written for `root`: only when a change's key
-/// is the root's `id` alone. A composite-key or keyless root's ids carry
-/// every key column, which a made-up id can't fill.
+/// is the root's `id` alone. The harness makes up no value for the other
+/// key columns of a composite-key or keyless root, so their tombstone path
+/// is not compared.
 fn keys_missing_ids(root: &Root) -> bool {
     root.wal_key() == ["id"]
 }
@@ -169,7 +170,7 @@ async fn digest(settings: &Settings) -> String {
         if !keys_missing_ids(root) {
             writeln!(
                 out,
-                "#note\t{}\tno missing ids built: a change's key here is {}, not `id` alone, so a missing id can't be keyed",
+                "#note\t{}\tno missing ids built, so tombstones are not compared here: a change's key is {}, and the harness makes up `id` alone",
                 root.table,
                 root.wal_key().join(", ")
             )

@@ -179,6 +179,8 @@ class Plans(unittest.TestCase):
     def test_a_plan_on_every_call_on_head_only_is_flagged(self) -> None:
         self.case("base", "auto", "key/int/1", index_scan("int"), per_call=(10, 0))
         self.case("head", "auto", "key/int/1", index_scan("int"), per_call=(10, 10))
+        self.case("base", "force_generic_plan", "key/int/1", index_scan("int"))
+        self.case("head", "force_generic_plan", "key/int/1", index_scan("int"))
         result = self.check()
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("| 6 → 16 | 0.00 → 1.00 |", self.row(result, "key/int/1"))
@@ -235,6 +237,8 @@ class Plans(unittest.TestCase):
     def test_a_log_with_no_plan_for_a_side_is_a_setup_error_naming_it(self) -> None:
         self.case("base", "auto", "key/int/1", index_scan("int"))
         self.case("head", "auto", "key/int/1", {"Node Type": "Result"})
+        self.case("base", "force_generic_plan", "key/int/1", index_scan("int"))
+        self.case("head", "force_generic_plan", "key/int/1", index_scan("int"))
         result = self.check()
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertIn("no auto_explain plan of the head side under plan_cache_mode = auto", result.stderr)
@@ -254,6 +258,30 @@ class Plans(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("server.log, which is missing or empty", result.stderr)
 
+    def test_a_malformed_case_line_is_a_setup_error(self) -> None:
+        self.both("key/int/1", index_scan("int"), index_scan("int"))
+        with (self.dir / "plans-head-auto.tsv").open("a") as tsv:
+            tsv.write("key/int/2\tint\n")
+        result = self.check()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("plans-head-auto.tsv:2: expected 8 tab-separated fields", result.stderr)
+
+    def test_a_count_that_is_not_a_number_is_a_setup_error(self) -> None:
+        self.both("key/int/1", index_scan("int"), index_scan("int"))
+        with (self.dir / "plans-head-auto.tsv").open("a") as tsv:
+            tsv.write("key/int/2\tint\t0\t1\t20\tmany\t10\t0\n")
+        result = self.check()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("error:", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_mode_nobody_measured_is_a_setup_error(self) -> None:
+        self.case("base", "auto", "key/int/1", index_scan("int"))
+        self.case("head", "auto", "key/int/1", index_scan("int"))
+        result = self.check()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no case measured under plan_cache_mode = force_generic_plan", result.stderr)
+
     def test_only_the_roots_append_counts_its_removed_subplans(self) -> None:
         plan = partitioned(1, 3)
         plan["Plans"].append({"Node Type": "Append", "Subplans Removed": 5, "Plans": [
@@ -269,6 +297,8 @@ class Plans(unittest.TestCase):
     def test_a_case_on_one_side_only_is_flagged(self) -> None:
         self.case("base", "auto", "key/int/1", index_scan("int"))
         self.case("head", "auto", "key/int/10", index_scan("int"))
+        self.case("base", "force_generic_plan", "key/int/1", index_scan("int"))
+        self.case("head", "force_generic_plan", "key/int/1", index_scan("int"))
         result = self.check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("one side only ⚠️", self.row(result, "key/int/1"))

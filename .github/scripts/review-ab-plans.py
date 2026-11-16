@@ -51,10 +51,13 @@ REPLANS = 0.5
 
 def load_cases(path: pathlib.Path) -> dict[str, dict]:
     cases = {}
-    for line in path.read_text().splitlines():
+    for number, line in enumerate(path.read_text().splitlines(), 1):
         if not line:
             continue
-        case, relations, partitions, statements, calls, plans, calls2, plans2 = line.split("\t")
+        parts = line.split("\t")
+        if len(parts) != 8:
+            raise ValueError(f"{path}:{number}: expected 8 tab-separated fields, got {len(parts)}")
+        case, relations, partitions, statements, calls, plans, calls2, plans2 = parts
         cases[case] = {
             "relations": set(relations.split(",")),
             "partitions": int(partitions),
@@ -188,16 +191,24 @@ def main() -> int:
         return 2
     root = pathlib.Path(sys.argv[1])
     tsvs = {}
-    for mode in MODES:
-        for side in ("base", "head"):
-            path = root / f"plans-{side}-{mode}.tsv"
-            if path.is_file():
-                tsvs[f"{side}-{mode}"] = load_cases(path)
+    log_path = root / "server.log"
+    try:
+        for mode in MODES:
+            for side in ("base", "head"):
+                path = root / f"plans-{side}-{mode}.tsv"
+                if path.is_file():
+                    tsvs[f"{side}-{mode}"] = load_cases(path)
+        log = log_path.read_text(errors="replace").splitlines() if log_path.is_file() else []
+    except (OSError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
     if not any(tsvs.values()):
         print(f"error: no case measured in {root} (does --filter match a case?)", file=sys.stderr)
         return 2
-    log_path = root / "server.log"
-    log = log_path.read_text(errors="replace").splitlines() if log_path.is_file() else []
+    for mode in MODES:
+        if not tsvs.get(f"base-{mode}") and not tsvs.get(f"head-{mode}"):
+            print(f"error: no case measured under plan_cache_mode = {mode} in {root}", file=sys.stderr)
+            return 2
     plans = plans_by_case(log, tsvs)
     for run_name, cases in sorted(tsvs.items()):
         if cases and not any((run_name, case) in plans for case in cases):

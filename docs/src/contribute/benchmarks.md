@@ -186,7 +186,7 @@ Each document is written as the sink would get it (`sink::to_json`, keys sorted)
 - `forms disagree`: on one side, two forms built different documents for the same id: `build` against `build_many`, say. It's flagged even when base and head agree, since the two forms must never differ.
 - `no documents`: neither side built a document for an index the harness declared.
 
-The digest covers the forms, not the history: a missing id is a tombstone in each form. Below the table, a note per index says what the harness left out: the composite-key and keyless roots get no missing ids (a change's key there is more than `id`, so a made-up id can't be keyed) and no `backfill` rows (a snapshot skips a table without a single-column primary key, as `flusso run` does). Exit 0 when every index is `same`, 1 on a difference, 2 on a setup error.
+The digest covers the forms, not the history: a missing id is a tombstone in each form. Below the table, a note per index says what the harness left out: the composite-key and keyless roots get no missing ids (a change's key there is more than `id` and the harness makes up `id` alone, so the tombstone path of those roots is not compared) and no `backfill` rows (a snapshot skips a table without a single-column primary key, as `flusso run` does). Exit 0 when every index is `same`, 1 on a difference, 2 on a setup error.
 
 What it can't see: the `cases` schema is two `keyword` columns and one `has_many` child (`id`, `label`, ordered by `id`), so nothing about
 
