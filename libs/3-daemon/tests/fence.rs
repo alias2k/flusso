@@ -299,8 +299,11 @@ async fn a_fence_never_covers_a_commit_read_before_it_was_visible() {
     let position = client.rename(1, "before").await;
     client.fence(&position, FenceLevel::Applied, PRIMARY).await;
 
-    let held = HeldCommit::hold(&pool, "UPDATE things SET name = 'held' WHERE id = 1").await;
-    held.sent_to("flusso").await;
+    let sync = SyncRep::configure(&pool).await;
+    let held = sync
+        .hold("UPDATE things SET name = 'held' WHERE id = 1")
+        .await;
+    sent_to(&pool, "flusso").await;
     let past_the_commit = client.position().await;
     let while_held = fence
         .wait(&FenceRequest {
@@ -384,30 +387,28 @@ async fn start_opensearch() -> (
 
 const PRIMARY: Option<&str> = Some("primary");
 
-/// One commit held between its WAL flush and its visibility (issue #343).
+/// Commits held between their WAL flush and their visibility (issue #343).
 ///
 /// Postgres flushes a commit record, then waits for synchronous standbys, and
 /// only then takes the transaction out of the proc array, which is when new
 /// snapshots see it. A logical walsender decodes up to the flushed WAL, so the
 /// change reaches a replication client while every other session still reads
-/// the state before it. Naming a standby that does not exist stretches that
-/// window until [`release`](Self::release) cancels the wait.
+/// the state before it. [`configure`](Self::configure) names a synchronous
+/// standby that never answers; a commit made with `synchronous_commit = on`
+/// then stays in that window until [`Held::release`] cancels its wait.
+/// Every other session commits locally and is never held.
 ///
 /// The same helper as `flusso-engine`'s `tests/common`; keep the two alike.
 ///
 /// It changes server settings with `ALTER SYSTEM`. Each test starts its own
-/// container, so they never reach another test; `release` resets them anyway.
-struct HeldCommit {
+/// container, so they never reach another test.
+struct SyncRep {
     pool: sqlx::PgPool,
-    pid: i32,
-    commit: tokio::task::JoinHandle<()>,
 }
 
-impl HeldCommit {
-    /// Run `sql` as one transaction and return once its commit is flushed and
-    /// waiting on the standby: in the WAL, not visible. Every other session
-    /// keeps committing locally.
-    async fn hold(pool: &sqlx::PgPool, sql: &str) -> Self {
+impl SyncRep {
+    /// Name the standby that never answers.
+    async fn configure(pool: &sqlx::PgPool) -> Self {
         configure(
             pool,
             &[
@@ -416,7 +417,19 @@ impl HeldCommit {
             ],
         )
         .await;
-        let mut connection = pool.acquire().await.unwrap().detach();
+        Self { pool: pool.clone() }
+    }
+
+    /// Run `sql` as one transaction and return once its commit is flushed and
+    /// waiting on the standby: in the WAL, not visible.
+    async fn hold(&self, sql: &str) -> Held {
+        self.hold_statement(format!("BEGIN; {sql}; COMMIT;")).await
+    }
+
+    /// Run `statement` as written (a `COMMIT PREPARED`, say) and return once it
+    /// waits on the standby.
+    async fn hold_statement(&self, statement: String) -> Held {
+        let mut connection = self.pool.acquire().await.unwrap().detach();
         let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut connection)
             .await
@@ -433,7 +446,6 @@ impl HeldCommit {
             .execute(&mut connection)
             .await
             .unwrap();
-        let statement = format!("BEGIN; {sql}; COMMIT;");
         let commit = tokio::spawn(async move {
             sqlx::raw_sql(sqlx::AssertSqlSafe(statement))
                 .execute(&mut connection)
@@ -446,44 +458,29 @@ impl HeldCommit {
                  WHERE pid = $1 AND wait_event = 'SyncRep')",
             )
             .bind(pid)
-            .fetch_one(pool)
+            .fetch_one(&self.pool)
             .await
             .unwrap()
         })
         .await;
-        Self {
-            pool: pool.clone(),
+        Held {
+            pool: self.pool.clone(),
             pid,
             commit,
         }
     }
+}
 
-    /// Wait until the replication client named `application_name` was sent
-    /// every WAL byte written so far, the held commit included.
-    async fn sent_to(&self, application_name: &str) {
-        let flushed: String = sqlx::query_scalar("SELECT pg_current_wal_lsn()::text")
-            .fetch_one(&self.pool)
-            .await
-            .unwrap();
-        eventually(
-            "the held commit sent to the replication client",
-            async || {
-                sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS (SELECT 1 FROM pg_stat_replication \
-                 WHERE application_name = $1 AND sent_lsn >= $2::pg_lsn)",
-                )
-                .bind(application_name)
-                .bind(&flushed)
-                .fetch_one(&self.pool)
-                .await
-                .unwrap()
-            },
-        )
-        .await;
-    }
+/// One held commit.
+struct Held {
+    pool: sqlx::PgPool,
+    pid: i32,
+    commit: tokio::task::JoinHandle<()>,
+}
 
-    /// Cancel the standby wait: the transaction leaves the proc array and
-    /// becomes visible, and its session returns. Resets the settings.
+impl Held {
+    /// Cancel this commit's standby wait alone: its transaction leaves the proc
+    /// array and becomes visible, and its session returns.
     async fn release(self) {
         let cancelled: bool = sqlx::query_scalar("SELECT pg_cancel_backend($1)")
             .bind(self.pid)
@@ -495,22 +492,38 @@ impl HeldCommit {
             .await
             .expect("the held commit returns once its wait is cancelled")
             .unwrap();
-        configure(
-            &self.pool,
-            &[
-                "ALTER SYSTEM RESET synchronous_standby_names",
-                "ALTER SYSTEM RESET synchronous_commit",
-            ],
-        )
-        .await;
     }
+}
+
+/// Wait until the replication client named `application_name` was sent every
+/// WAL byte written so far.
+async fn sent_to(pool: &sqlx::PgPool, application_name: &str) {
+    let flushed: String = sqlx::query_scalar("SELECT pg_current_wal_flush_lsn()::text")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    eventually("the WAL sent to the replication client", async || {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_replication \
+             WHERE application_name = $1 AND sent_lsn >= $2::pg_lsn)",
+        )
+        .bind(application_name)
+        .bind(&flushed)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    })
+    .await;
 }
 
 /// `ALTER SYSTEM` each statement (one per call: it refuses a transaction
 /// block), then reload the configuration.
-async fn configure(pool: &sqlx::PgPool, statements: &[&'static str]) {
+async fn configure(pool: &sqlx::PgPool, statements: &[&str]) {
     for statement in statements.iter().chain(&["SELECT pg_reload_conf()"]) {
-        sqlx::query(*statement).execute(pool).await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(*statement))
+            .execute(pool)
+            .await
+            .unwrap();
     }
 }
 
