@@ -60,6 +60,7 @@ pub(crate) type ControlReceivers = BTreeMap<SinkName, mpsc::Receiver<SinkControl
 
 /// Why an operation was refused.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ControlError {
     /// No sink of that name is configured.
     #[error("unknown sink `{0}`")]

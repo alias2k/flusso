@@ -468,9 +468,7 @@ async fn reindex(
         Err(ControlError::UnknownSink(name)) => {
             (StatusCode::NOT_FOUND, format!("unknown sink {name}\n")).into_response()
         }
-        Err(error @ (ControlError::Busy(_) | ControlError::Closed(_) | ControlError::Stopping)) => {
-            (StatusCode::SERVICE_UNAVAILABLE, format!("{error}\n")).into_response()
-        }
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, format!("{error}\n")).into_response(),
     }
 }
 
