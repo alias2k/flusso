@@ -4,6 +4,8 @@
 #   review-ab.sh [<base>] [--pg 14,16,18] [--bench postgres,cases,pipeline]
 #                [--filter <criterion filter>] [--limit <percent>] [--rounds <n>]
 #                [--own-benches] [--bench-cpus LIST --server-cpus LIST | --no-pin]
+#   review-ab.sh --digest [<base>] [--pg …] [--filter <index regex>] [cpu flags]
+#   review-ab.sh --plans  [<base>] [--pg …] [--filter <case regex>]  [cpu flags]
 #   review-ab.sh --clean            # the warm cache (~/.cache/flusso/review-ab)
 #   review-ab.sh --clean-results    # the results under <head target>/review-ab
 #
@@ -44,6 +46,22 @@
 #    twice the control spread; each flagged case is re-run alone (`--exact`,
 #    base then head) and judged by the PR gate's confirm rule. Exits 1 only on
 #    a confirmed case. Results: `<head target>/review-ab/<timestamp>/`.
+#
+# --digest and --plans swap steps 6-9 for one run of the `cases` executable
+# per side in its review mode (REVIEW_AB_MODE, see benches/cases.rs), built,
+# stamped and checked as above (the bench is `cases`; --own-benches refused):
+#
+# - --digest: both sides build the `cases` roots' documents (`build`,
+#   `build_many` under 16 keys and 16+, a backfill); review-ab-digest.py
+#   prints one row per index: a digest per side, same or differ.
+# - --plans: Postgres starts with pg_stat_statements (track_planning) and
+#   auto_explain (JSON, every statement); per plan_cache_mode (auto,
+#   force_generic_plan) each side runs every case 2 x 10 times;
+#   review-ab-plans.py reads the counts and the server log and flags plans
+#   made on every call, a changed root scan and lost partition pruning.
+#
+# A mode exits 0 when nothing is flagged, 1 when something is, 2 on a usage
+# or setup error.
 set -euo pipefail
 
 # The default Postgres is the one the tests and benches start: dev/test-postgres's
@@ -54,7 +72,8 @@ if [ -z "$pg_versions" ]; then
   echo "error: no \`pub const DEFAULT_TAG: &str = \"<major>-alpine\";\` in $test_postgres" >&2
   exit 2
 fi
-usage="usage: review-ab.sh [<base>] [--pg $pg_versions] [--bench postgres,cases,pipeline] [--filter <f>] [--limit 5] [--rounds 3] [--own-benches] [--bench-cpus LIST --server-cpus LIST | --no-pin] | --clean | --clean-results"
+usage="usage: review-ab.sh [--digest | --plans] [<base>] [--pg $pg_versions] [--bench postgres,cases,pipeline] [--filter <f>] [--limit 5] [--rounds 3] [--own-benches] [--bench-cpus LIST --server-cpus LIST | --no-pin] | --clean | --clean-results"
+mode=bench
 base=origin/main
 benches=postgres,cases,pipeline
 filter=
@@ -79,6 +98,8 @@ while [ $# -gt 0 ]; do
     --bench-cpus) bench_cpus=${2:?$usage}; shift 2 ;;
     --server-cpus) server_cpus=${2:?$usage}; shift 2 ;;
     --no-pin) pin=0; shift ;;
+    --digest) mode=digest; shift ;;
+    --plans) mode=plans; shift ;;
     --clean) clean=1; shift ;;
     --clean-results) clean_results=1; shift ;;
     -h | --help) echo "$usage"; exit 0 ;;
@@ -88,6 +109,17 @@ while [ $# -gt 0 ]; do
       base=$1; positional=1; shift ;;
   esac
 done
+
+# A mode reports a setup failure as 2; the bench comparison keeps its 1.
+setup_exit=1
+if [ "$mode" != bench ]; then
+  setup_exit=2
+  if [ "$own_benches" -eq 1 ]; then
+    echo "error: --$mode runs the head's \`cases\` harness on both sides; it does not take --own-benches" >&2
+    exit 2
+  fi
+  benches=cases
+fi
 
 scripts=$(cd "$(dirname "$0")" && pwd)
 head_tree=$(git rev-parse --show-toplevel)
@@ -130,7 +162,7 @@ fi
 exec 9>"$home/lock"
 if ! flock -n 9; then
   echo "error: another review-ab run holds $home/lock; wait for it to finish" >&2
-  exit 1
+  exit "$setup_exit"
 fi
 
 if [ "$clean" -eq 1 ]; then
@@ -229,7 +261,11 @@ build() { # build <tree> <target dir> <log>
 }
 
 echo "review-ab: base $base = ${base_sha:0:12}, committed $base_date (not fetched: \`git fetch\` first for the latest)"
-echo "vs the working tree; Postgres $pg_versions; benches ${selected[*]}; $rounds rounds"
+if [ "$mode" = bench ]; then
+  echo "vs the working tree; Postgres $pg_versions; benches ${selected[*]}; $rounds rounds"
+else
+  echo "vs the working tree; Postgres $pg_versions; --$mode with the \`cases\` harness"
+fi
 
 cpu_args=(--nproc "$(nproc)" --taskset "$(command -v taskset >/dev/null && echo 1 || echo 0)")
 [ "$pin" != 0 ] || cpu_args+=(--off)
@@ -270,21 +306,27 @@ else
   build "$base_tree" "$base_target" "$out/build-base.log" || status=$?
   if [ "$status" -eq 78 ]; then
     echo "error: the base has none of the benches asked for (${selected[*]})" >&2
-    exit 1
+    exit "$setup_exit"
   elif [ "$status" -ne 0 ]; then
     if [ "${#overlay[@]}" -gt 0 ] && grep -q '(bench "' "$out/build-base.log"; then
       echo "error: the base does not build with the head's bench sources; try --own-benches" >&2
     else
       echo "error: the base does not build (see above)" >&2
     fi
-    exit 1
+    exit "$setup_exit"
   fi
   python3 "$scripts/review-ab-stamp.py" write "$stamp" "${stamp_args[@]}" \
     --toolchain "$(toolchain "$base_tree")" --build-env "$(build_env)" \
     --executables "$base_target/bench-executables/review.tsv"
 fi
 echo "building the head in $head_tree"
-build "$head_tree" "$head_target" "$out/build-head.log"
+status=0
+build "$head_tree" "$head_target" "$out/build-head.log" || status=$?
+if [ "$status" -ne 0 ]; then
+  [ "$mode" != bench ] || exit "$status"
+  echo "error: the head does not build (see above)" >&2
+  exit 2
+fi
 # This run's benches only: a reused base build may hold more than was asked for.
 for target in "$base_target" "$head_target"; do
   awk -F'\t' -v want=" ${selected[*]} " 'index(want, " " $1 " ")' \
@@ -310,10 +352,10 @@ trap 'exit 130' INT TERM
 
 host_port() { docker port "$1" "$2" | head -1 | sed 's/.*://'; }
 
-start_postgres() { # start_postgres <name> <version>
+start_postgres() { # start_postgres <name> <version> [<server argument>…]
   containers+=("$1")
   docker run -d --name "$1" --label "flusso.review-ab.owner=$owner" "${server_pin[@]}" -e POSTGRES_PASSWORD=postgres -p 127.0.0.1::5432 \
-    "postgres:$2-alpine" >/dev/null
+    "postgres:$2-alpine" "${@:3}" >/dev/null
   local deadline=$((SECONDS + 120))
   until docker exec "$1" pg_isready -U postgres -h 127.0.0.1 -q 2>/dev/null; do
     ((SECONDS < deadline)) || { echo "error: Postgres $2 did not start" >&2; return 1; }
@@ -372,6 +414,78 @@ run_side() { # run_side <side> <bench> <baseline> [<exact id>]
       sed -E '/^(Gnuplot not found|Benchmarking |Warning: Unable to complete )/d' >&2)
   docker exec "$container" psql -U postgres -qc "DROP DATABASE r$database" >/dev/null
 }
+
+# review <side> <out file> [<plan_cache_mode>]: one run of the `cases`
+# executable in $mode on a fresh database.
+review() {
+  local tree=$head_tree target=$head_target exe
+  if [ "$1" = base ]; then
+    tree=$base_tree target=$base_target
+  fi
+  exe=$(executable "$target" cases)
+  database=$((database + 1))
+  docker exec "$container" psql -U postgres -qc "CREATE DATABASE r$database" >/dev/null
+  if [ -n "${3:-}" ]; then
+    docker exec "$container" psql -U postgres -qc "ALTER DATABASE r$database SET plan_cache_mode = $3" >/dev/null
+  fi
+  echo "── $mode · $1${3:+ · $3} · pg$version"
+  if ! (cd "$tree/${package_dir[cases]}" &&
+    REVIEW_AB_MODE=$mode REVIEW_AB_PG_URL=postgres://postgres:postgres@127.0.0.1:$port/r$database \
+      REVIEW_AB_OUT=$2 REVIEW_AB_FILTER=$filter REVIEW_AB_RUN=$1-${3:-} \
+      "${bench_pin[@]}" "$exe" >&2); then
+    echo "error: the $1 side's \`cases\` harness failed in --$mode (see above)" >&2
+    exit 2
+  fi
+  docker exec "$container" psql -U postgres -qc "DROP DATABASE r$database" >/dev/null
+}
+
+if [ "$mode" != bench ]; then
+  # Anything failing from here on (a container, psql) is a setup error.
+  set -E
+  trap 'exit 2' ERR
+  flagged_any=0
+  for version in ${pg_versions//,/ }; do
+    container=flusso-review-$$-pg$version
+    server_args=()
+    if [ "$mode" = plans ]; then
+      server_args=(-c shared_preload_libraries=pg_stat_statements,auto_explain
+        -c pg_stat_statements.track_planning=on -c auto_explain.log_min_duration=0
+        -c auto_explain.log_format=json)
+    fi
+    start_postgres "$container" "$version" "${server_args[@]}"
+    port=$(host_port "$container" 5432)
+    dir=$out/pg$version
+    mkdir -p "$dir"
+    status=0
+    if [ "$mode" = digest ]; then
+      review base "$dir/digest-base.tsv"
+      review head "$dir/digest-head.tsv"
+      table=$(python3 "$scripts/review-ab-digest.py" "$dir/digest-base.tsv" "$dir/digest-head.tsv") || status=$?
+    else
+      for cache_mode in auto force_generic_plan; do
+        review base "$dir/plans-base-$cache_mode.tsv" "$cache_mode"
+        review head "$dir/plans-head-$cache_mode.tsv" "$cache_mode"
+      done
+      docker logs "$container" >"$dir/server.log" 2>&1
+      table=$(python3 "$scripts/review-ab-plans.py" "$dir") || status=$?
+    fi
+    [ "$status" -le 1 ] || exit 2
+    [ "$status" -eq 0 ] || flagged_any=1
+    {
+      echo
+      echo "## Postgres $version: $base (${base_sha:0:12}) vs the working tree, --$mode"
+      echo
+      echo "$table"
+    } >"$dir/table.md"
+    docker rm -f "$container" >/dev/null
+  done
+  for version in ${pg_versions//,/ }; do
+    cat "$out/pg$version/table.md"
+  done
+  echo
+  echo "Output: $out"
+  exit "$flagged_any"
+fi
 
 failed=0
 for version in ${pg_versions//,/ }; do
