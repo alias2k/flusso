@@ -21,7 +21,7 @@ fields:
     required: true
   - enum: state
     required: true
-    variants: [expiring, open, scheduled, draft, suspended, closed, terminated]
+    variants: [open, suspended, terminated]
   - boolean: auto_renew
     required: true
   - integer: notice_days

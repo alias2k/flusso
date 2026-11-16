@@ -36,9 +36,7 @@ use serde_json::{Value, json};
 use sink::Sink;
 use sink_opensearch::OpensearchSink;
 
-// ---------------------------------------------------------------------------
 // The example: what a consumer writes.
-// ---------------------------------------------------------------------------
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, FlussoValue,
@@ -88,6 +86,9 @@ struct Contract {
     state: ContractState,
     #[flusso(rules = current_fee)]
     fee: f64,
+    /// `None` outside a discount, and whenever the stored fee is missing.
+    #[flusso(rules = discount)]
+    discount: Option<f64>,
     #[flusso(rules = is_mine)]
     is_mine: bool,
     #[flusso(rules = urgency)]
@@ -119,6 +120,7 @@ fn visible_state(cx: &Viewing) -> Rules<ContractState> {
         )
         .then(ContractState::Expiring)
         .otherwise(doc.state())
+        .order(STATE_ORDER)
 }
 
 /// A number picked from two stored fields. `discounted_fee` can be missing, so
@@ -132,6 +134,14 @@ fn current_fee(cx: &Viewing) -> Rules<f64> {
     )
     .then(doc.discounted_fee().assume_present())
     .otherwise(doc.monthly_fee())
+}
+
+/// A fixed "no value" beside a stored field that can hold none.
+fn discount(cx: &Viewing) -> Rules<Option<f64>> {
+    let doc = Contract::doc();
+    Rules::when(doc.discount_until().gt(cx.now))
+        .then(doc.discounted_fee())
+        .otherwise(None)
 }
 
 fn is_mine(cx: &Viewing) -> Rules<bool> {
@@ -202,9 +212,7 @@ fn weekday(at: DateTime<Utc>) -> String {
     at.format("%A %-d %B").to_string()
 }
 
-// ---------------------------------------------------------------------------
 // Data.
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 struct Seed {
@@ -582,9 +590,7 @@ fn edges(now: DateTime<Utc>) -> Vec<Seed> {
     seeds
 }
 
-// ---------------------------------------------------------------------------
 // The oracle: the same rules in plain Rust, at the index's millisecond precision.
-// ---------------------------------------------------------------------------
 
 fn ms(at: DateTime<Utc>) -> i64 {
     at.timestamp_millis()
@@ -631,6 +637,12 @@ fn expected_fee(seed: &Seed, now: DateTime<Utc>) -> f64 {
     }
 }
 
+fn expected_discount(seed: &Seed, now: DateTime<Utc>) -> Option<f64> {
+    seed.discount_until
+        .filter(|until| ms(*until) > ms(now))
+        .and(seed.discounted)
+}
+
 fn expected_urgency(seed: &Seed, now: DateTime<Utc>) -> Urgency {
     let ends = ms(seed.ends);
     if ends < ms(now) {
@@ -668,9 +680,7 @@ fn where_seed(seeds: &[Seed], keep: impl Fn(&Seed) -> bool) -> BTreeSet<String> 
         .collect()
 }
 
-// ---------------------------------------------------------------------------
 // 1. The example, as a consumer uses it.
-// ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs Docker (starts an OpenSearch container)"]
@@ -787,9 +797,7 @@ async fn a_listing_filters_sorts_and_counts_by_the_values_it_shows() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // 2. Value, filter, sort and counts agree with each other and with plain Rust.
-// ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs Docker (starts an OpenSearch container)"]
@@ -837,7 +845,7 @@ async fn rules_agree_with_the_index() {
         for hit in &all.hits {
             let seed = by_id[hit.id.as_str()];
             let got = &hit.source;
-            values += 4;
+            values += 5;
             if got.state != expected_state(seed, now) {
                 wrong.push(format!(
                     "[{name}] {} state {:?}, plain Rust {:?}",
@@ -856,6 +864,9 @@ async fn rules_agree_with_the_index() {
             }
             if got.is_mine != (seed.owner == "anna") {
                 wrong.push(format!("[{name}] {} is_mine {}", hit.id, got.is_mine));
+            }
+            if got.discount != expected_discount(seed, now) {
+                wrong.push(format!("[{name}] {} discount {:?}", hit.id, got.discount));
             }
             if got.urgency != expected_urgency(seed, now) {
                 wrong.push(format!("[{name}] {} urgency {:?}", hit.id, got.urgency));
@@ -935,6 +946,34 @@ async fn rules_agree_with_the_index() {
                 )
                 .await,
                 where_seed(&seeds, |seed| expected_urgency(seed, now) == urgency),
+            );
+        }
+        // "No value" is one thing, fixed or stored, and it has no order.
+        let discount = Contract::discount(&cx);
+        check(
+            "discount == None".to_owned(),
+            ids(&client, Contract::query(&cx).filter(discount.eq(None))).await,
+            where_seed(&seeds, |seed| expected_discount(seed, now).is_none()),
+        );
+        check(
+            "discount != None".to_owned(),
+            ids(&client, Contract::query(&cx).filter(discount.ne(None))).await,
+            where_seed(&seeds, |seed| expected_discount(seed, now).is_some()),
+        );
+        for at in [150.0, 400.0] {
+            check(
+                format!("discount < {at}"),
+                ids(&client, Contract::query(&cx).filter(discount.lt(Some(at)))).await,
+                where_seed(&seeds, |seed| {
+                    expected_discount(seed, now).is_some_and(|discount| discount < at)
+                }),
+            );
+            check(
+                format!("discount >= {at}"),
+                ids(&client, Contract::query(&cx).filter(discount.gte(Some(at)))).await,
+                where_seed(&seeds, |seed| {
+                    expected_discount(seed, now).is_some_and(|discount| discount >= at)
+                }),
             );
         }
         for mine in [true, false] {
@@ -1068,9 +1107,7 @@ async fn rules_agree_with_the_index() {
     assert!(wrong.is_empty(), "{:#?}", &wrong[..wrong.len().min(20)]);
 }
 
-// ---------------------------------------------------------------------------
 // 3. Random conditions: the index and the Rust side decide alike.
-// ---------------------------------------------------------------------------
 
 struct Rng(u64);
 
@@ -1327,9 +1364,7 @@ async fn random_conditions_agree_with_the_index() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // 4. What cannot run is refused, loudly, on the live path.
-// ---------------------------------------------------------------------------
 
 /// The one thing a rule can still get wrong at run time: text that is not a date.
 fn broken(_cx: &Viewing) -> Rules<bool> {
