@@ -282,14 +282,19 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         let _ = stop_rx.await;
     });
     tokio::pin!(run);
+    let mut first_sender = None;
     let ended = tokio::select! {
         result = &mut run => Some(result),
         cause = shutdown::requested(&mut signals, parent) => {
             match cause {
-                Cause::Signal(signal) => tracing::info!(
-                    signal = signal.name(),
-                    "stopping: landing what is in flight, then closing"
-                ),
+                Cause::Signal(signal, sender) => {
+                    first_sender = sender;
+                    tracing::info!(
+                        signal = signal.name(),
+                        "stopping: landing what is in flight, then closing. Send the signal \
+                         twice quickly to exit now"
+                    );
+                }
                 Cause::ParentExited { parent } => tracing::warn!(
                     parent,
                     "the parent process {parent} exited; stopping (--exit-with-parent)"
@@ -300,6 +305,14 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     };
 
     let timeout = Duration::from_secs(args.shutdown_timeout_secs);
+    if ended.is_none() && timeout.is_zero() {
+        tracing::info!(
+            "--shutdown-timeout-secs 0: not draining; whatever was not acknowledged is read \
+             again on the next start"
+        );
+        waits.end_before_exit().await;
+        return Ok(());
+    }
     let began = tokio::time::Instant::now();
     let deadline = began + timeout;
     let progress = Progress::default();
@@ -348,7 +361,25 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         }
         result
     };
-    let interrupt = shutdown::second_signal(&mut signals, began);
+    let mut shown = shutdown::Throttle::default();
+    let interrupt = shutdown::forced(&mut signals, (began, first_sender), |signal| {
+        if !shown.allow(tokio::time::Instant::now()) {
+            return;
+        }
+        let unfinished = shutdown::unfinished_sinks(&status.snapshot());
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        tracing::warn!(
+            signal = signal.name(),
+            "stop already requested: {}{}, {}s left. Send the signal twice quickly to exit now",
+            progress.current(),
+            if unfinished.is_empty() {
+                String::new()
+            } else {
+                format!(" ({unfinished})")
+            },
+            left.as_secs(),
+        );
+    });
     match shutdown::within(timeout, &progress, interrupt, stopping).await {
         Drained::Done(result) => result,
         Drained::TimedOut { step } => {
@@ -369,9 +400,17 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
             std::process::exit(1);
         }
         Drained::Forced(signal) => {
+            let unfinished = shutdown::unfinished_sinks(&status.snapshot());
             tracing::warn!(
                 signal = signal.name(),
-                "second signal; exiting at once without finishing the stop"
+                "forced: exiting at once while {}{}; whatever was not acknowledged is read again \
+                 on the next start",
+                progress.current(),
+                if unfinished.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({unfinished})")
+                },
             );
             waits.end_before_exit().await;
             std::process::exit(signal.exit_code());

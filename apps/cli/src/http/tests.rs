@@ -258,11 +258,29 @@ async fn a_taken_address_names_the_flusso_holding_it() {
 
     let error = bind("public", address, Some(address)).await.unwrap_err();
 
+    let text = format!("{error:#}");
     assert!(
-        error.to_string().contains(&format!(
-            "another flusso (pid {}) is already running there",
+        text.contains(&format!(
+            "another flusso is already serving there; it reports pid {}, a flusso process on this host",
             std::process::id()
         )),
-        "{error}"
+        "{text}"
     );
+    assert!(
+        !text.contains("kill"),
+        "no command to kill anything: {text}"
+    );
+    assert!(
+        error.root_cause().to_string().contains("in use"),
+        "the OS error stays in the chain: {text}"
+    );
+}
+
+#[test]
+fn a_pid_that_is_not_a_flusso_here_is_not_called_one() {
+    assert!(
+        !is_local_flusso(1),
+        "pid 1 here is init, not the flusso a container reports"
+    );
+    assert!(!is_local_flusso(u64::from(u32::MAX)), "no such process");
 }

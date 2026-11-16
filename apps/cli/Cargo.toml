@@ -67,6 +67,10 @@ base64.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls", "query"] }
 webpki-root-certs.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# Who sent a stop signal: the same sender twice quickly forces the exit.
+signal-hook.workspace = true
+
 [dev-dependencies]
 # The live matrix behind the duplicate-name warning (`tests/duplicate_names.rs`):
 # the real builder and sink against Postgres and OpenSearch containers.

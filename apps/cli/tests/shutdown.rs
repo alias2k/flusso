@@ -65,18 +65,49 @@ async fn a_half_open_http_request_is_left_after_its_bound_and_the_stop_still_exi
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
-async fn a_second_signal_past_the_repeat_window_stops_at_once() {
+async fn one_press_under_a_forwarding_runner_two_senders_at_once_drains_every_time() {
     let (_postgres, url) = common::start_postgres(TABLE).await;
-    let dir = project(&url, "second");
+    let dir = project(&url, "forwarded");
+    for (round, gap) in [0, 1, 20, 300].iter().cycle().take(20).enumerate() {
+        let mut flusso = Flusso::start(&dir, &[]);
+        let _client = half_open_request(flusso.public);
+        // The group signalled by one process, the forwarded copy by another.
+        send(flusso.child.id(), "INT");
+        std::thread::sleep(Duration::from_millis(*gap));
+        send(flusso.child.id(), "INT");
+        let status = flusso.exit_within(SIDE_STEP + MARGIN);
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "round {round}, copy {gap} ms late: {}",
+            flusso.stderr()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn the_same_sender_twice_quickly_stops_at_once() {
+    let (_postgres, url) = common::start_postgres(TABLE).await;
+    let dir = project(&url, "same_sender");
     let mut flusso = Flusso::start(&dir, &[]);
 
     let _client = half_open_request(flusso.public);
-    flusso.signal("TERM");
-    std::thread::sleep(Duration::from_secs(2));
-    assert!(flusso.running(), "the first signal waits on the request");
-    flusso.signal("INT");
+    let started = Instant::now();
+    let pid = flusso.child.id();
+    let sent = Command::new("sh")
+        .arg("-c")
+        .arg(format!("kill -INT {pid}; sleep 0.1; kill -INT {pid}"))
+        .status()
+        .unwrap();
+    assert!(sent.success());
     let status = flusso.exit_within(Duration::from_secs(3));
 
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
     assert_eq!(
         status.code(),
         Some(130),
@@ -84,7 +115,7 @@ async fn a_second_signal_past_the_repeat_window_stops_at_once() {
         flusso.stderr()
     );
     assert!(
-        flusso.stderr().contains("second signal"),
+        flusso.stderr().contains("forced: exiting at once"),
         "{}",
         flusso.stderr()
     );
@@ -92,26 +123,69 @@ async fn a_second_signal_past_the_repeat_window_stops_at_once() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
-async fn the_same_signal_twice_within_the_window_is_one_stop() {
+async fn three_quick_signals_from_different_senders_stop_at_once() {
     let (_postgres, url) = common::start_postgres(TABLE).await;
-    let dir = project(&url, "twice");
+    let dir = project(&url, "three");
     let mut flusso = Flusso::start(&dir, &[]);
 
-    flusso.signal("TERM");
-    std::thread::sleep(Duration::from_millis(20));
-    flusso.signal("TERM");
-    let status = flusso.exit_within(Duration::from_secs(10));
+    let _client = half_open_request(flusso.public);
+    for _ in 0..3 {
+        send(flusso.child.id(), "TERM");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let status = flusso.exit_within(Duration::from_secs(3));
 
-    let stderr = flusso.stderr();
-    assert_eq!(status.code(), Some(0), "the full stop ran: {stderr}");
-    assert!(
-        stderr.contains("the same stop request again") && !stderr.contains("second signal"),
-        "{stderr}"
+    assert_eq!(
+        status.code(),
+        Some(143),
+        "128 + SIGTERM: {}",
+        flusso.stderr()
     );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_run_started_with_sighup_ignored_outlives_its_terminal() {
+    let (_postgres, url) = common::start_postgres(TABLE).await;
+    let dir = project(&url, "nohup");
+    let log = dir.join("nohup.log");
+    let mut child = Command::new("sh")
+        .current_dir(&dir)
+        .env("NO_COLOR", "1")
+        .arg("-c")
+        .arg(r#"trap '' HUP; exec "$0" run --config flusso.toml --public-address 127.0.0.1:0 --private-address 127.0.0.1:0"#)
+        .arg(env!("CARGO_BIN_EXE_flusso"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&log).unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .contains("following live changes")
+    {
+        assert!(Instant::now() < deadline, "never went live");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    send(child.id(), "HUP");
+    std::thread::sleep(Duration::from_secs(2));
     assert!(
-        stderr.contains("ingest engine stopped: stop requested"),
-        "the drain ran: {stderr}"
+        child.try_wait().unwrap().is_none(),
+        "the hangup was ignored, as nohup asked"
     );
+    send(child.id(), "TERM");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "SIGTERM still stops it");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(status.code(), Some(0));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -153,6 +227,7 @@ async fn a_wait_open_at_the_end_of_the_drain_is_told_flusso_is_stopping() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn sighup_stops_like_sigterm() {
@@ -232,8 +307,11 @@ async fn a_second_start_names_the_flusso_that_holds_its_place() {
     let text = String::from_utf8_lossy(&same_address.stderr);
     assert!(!same_address.status.success(), "{text}");
     assert!(
-        text.contains(&format!("another flusso (pid {})", first.child.id())),
-        "the address error names the running flusso: {text}"
+        text.contains(&format!(
+            "it reports pid {}, a flusso process on this host",
+            first.child.id()
+        )) && text.contains("Address already in use"),
+        "the address error names the running flusso and keeps the OS error: {text}"
     );
 
     let mut second = Flusso::spawn(&dir, &[]);
@@ -360,11 +438,20 @@ async fn a_stop_with_opensearch_paused_gives_up_at_the_deadline_naming_the_sink_
     tokio::time::sleep(Duration::from_secs(1)).await;
     let started = Instant::now();
     flusso.signal("TERM");
+    std::thread::sleep(Duration::from_millis(1_500));
+    flusso.signal("TERM");
+    std::thread::sleep(Duration::from_millis(1_500));
+    assert!(flusso.running(), "a slow repeat doesn't shorten the drain");
     let status = flusso.exit_within(Duration::from_secs(15));
     let stopped_in = started.elapsed();
     docker(&["unpause", opensearch.id()]);
 
     let stderr = flusso.stderr();
+    assert!(
+        stderr.contains("stop already requested: draining the pipeline (primary: ")
+            && stderr.contains("s left. Send the signal twice quickly to exit now"),
+        "the repeat is answered with where the stop is: {stderr}"
+    );
     assert_eq!(status.code(), Some(1), "{stderr}");
     assert!(
         stopped_in >= Duration::from_secs(4) && stopped_in < Duration::from_secs(10),

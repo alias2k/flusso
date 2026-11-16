@@ -208,7 +208,8 @@ impl Flusso {
         }
     }
 
-    /// SIGTERM, wait up to ten seconds, then kill.
+    /// SIGTERM, wait out flusso's drain (its default deadline, 30 s, plus a
+    /// margin), then kill.
     pub(crate) async fn stop(mut self) -> Result<Resources> {
         self.sampler.abort();
         let _ = Command::new("kill")
@@ -216,18 +217,22 @@ impl Flusso {
             .arg(self.pid.to_string())
             .status()
             .await;
-        match tokio::time::timeout(Duration::from_secs(10), self.child.wait()).await {
+        match tokio::time::timeout(STOP_WAIT, self.child.wait()).await {
             Ok(status) => {
                 tracing::info!(?status, "flusso stopped");
             }
             Err(_) => {
-                tracing::warn!("flusso ignored SIGTERM for 10s; killing it");
+                tracing::warn!(after = ?STOP_WAIT, "flusso did not stop after SIGTERM; killing it");
                 self.child.kill().await?;
             }
         }
         Ok(self.resources())
     }
 }
+
+/// How long [`Flusso::stop`] waits after SIGTERM: flusso's default stop
+/// deadline (30 s) and a margin.
+const STOP_WAIT: Duration = Duration::from_secs(40);
 
 /// Every 500 ms: `ps -o rss= -o cputime= -p PID`, portable across macOS and
 /// Linux. RSS is reported in KiB on both.

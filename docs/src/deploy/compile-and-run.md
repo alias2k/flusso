@@ -77,11 +77,11 @@ pipeline:
   killProcessThreshold: 35000
 ```
 
-moon runs the command as its own child, so flusso follows moon itself. In general flusso follows its **direct** parent: keep `flusso run` the task's only command, and in a wrapper script start it with `exec flusso run …`. A shell that stays in between survives a runner that is killed, and flusso would follow the shell. Ctrl-C reaching flusso twice (from the terminal and forwarded by the runner) is one stop, not two.
+moon runs the command as its own child, so flusso follows moon itself. In general flusso follows its **direct** parent: keep `flusso run` the task's only command, and in a wrapper script start it with `exec flusso run …`. A shell that stays in between survives a runner that is killed, and flusso would follow the shell. One Ctrl-C reaches flusso twice, from the terminal and forwarded by the runner: that is one stop, and it drains. Press it twice quickly to exit at once.
 
 ### A flusso left over
 
-`/status` on its public address names its `pid`. `kill <pid>` stops it gracefully; a second `kill` a second or more later stops it at once.
+`/status` on its public address names the `pid` it reports (inside a container, its own namespace's). `kill <pid>` stops it gracefully; two `kill`s from the same shell within half a second stop it at once.
 
 ## Related
 

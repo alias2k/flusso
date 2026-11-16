@@ -199,8 +199,8 @@ A comparison with a string, a number or another kind fails rather than answering
 - **A stop lands what is in flight and confirms it**, then exits `0`. The next start reads nothing already indexed again. It takes up to `--shutdown-timeout-secs` (30 s); past it flusso exits `1`, naming the step and the sinks it gave up on.
 - **Give the supervisor more than that.** Docker's default 10 s and moon's 2 s kill the drain; Kubernetes' 30 s ties it. The Helm chart now sets `terminationGracePeriodSeconds: 45`. Settings for each are in [Run under a task runner or supervisor](../deploy/compile-and-run.md#run-under-a-task-runner-or-supervisor).
 - **Under moon or another task runner, add `--exit-with-parent`** (or `FLUSSO_EXIT_WITH_PARENT=true`). Without it a flusso whose runner died keeps running and holds the slot and port 9464, as in 0.17: it is opt-in, because a `flusso run &` meant to outlive its shell must keep doing so.
-- **A second signal** a second or more after the first exits at once, `130` after `SIGINT`, `143` after `SIGTERM`. The same signal twice within a second is one stop.
-- **`SIGHUP` is a stop**, not a crash: 0.17 died of it without flushing anything.
+- **Press Ctrl-C twice quickly to exit at once** (`130`; `143` for `SIGTERM`): the same sender twice within 500 ms, or three signals within a second. A single Ctrl-C forwarded by a task runner is one stop; any other repeat logs that the stop is under way.
+- **`SIGHUP` is a stop**, not a crash: 0.17 died of it without flushing anything. A run started under `nohup` still ignores it on Linux; on macOS `SIGHUP` keeps ending the process at once, as in 0.17.
 - **`/status` has a `stopping` phase** and a `pid`; `/readyz` is `503` while stopping; a `/wait` `503` now carries `Retry-After` and a `reason` (`starting` or `stopping`).
 
 ## Related

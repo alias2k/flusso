@@ -1070,10 +1070,14 @@ the daemon's `Status`, and owns the process signals. It binds **both** listeners
 `shutdown.rs`); the daemon owns the drain** (see the engine invariant above). `SIGINT`/`SIGTERM`/`SIGHUP`,
 or the parent exiting under `--exit-with-parent` (`parent_id()` polled, no `unsafe`; opt-in), resolves
 the future handed to `RunningDaemon::run`; the whole stop (drain, then HTTP close, then telemetry flush)
-runs under `shutdown::within` and `--shutdown-timeout-secs` (default 30): past it the log names the step
-and the sinks still holding changes and the process exits 1; a stop signal ≥ `REPEAT_WINDOW` (1 s) after
-the first exits `128 + n` at once, one within it is the same request (a terminal's Ctrl-C reaches flusso
-directly and again via a forwarding task runner). HTTP close and telemetry flush are `side_step`s: at most
+runs under `shutdown::within` (biased to the finished drain) and `--shutdown-timeout-secs` (default 30;
+`0` aborts without draining, exit 0): past it the log names the step and the sinks still holding changes
+and the process exits 1. Signals are read with `signal-hook`'s origin iterator (`extended-siginfo`, on a
+thread; tokio's signals don't give the sender): `shutdown::Repeats` forces `128 + n` on the same sender
+(pid; the kernel and outside-namespace senders are their own) twice within 500 ms, or any three within
+1 s; every other repeat logs `stop already requested …` (`Throttle`, once a second). One Ctrl-C under a
+forwarding runner is two senders, one stop; `SIGHUP` is caught only when it wasn't ignored at start
+(`/proc/self/status` `SigIgn`; not caught where `/proc` is missing). HTTP close and telemetry flush are `side_step`s: at most
 5 s each, ending before the deadline, and giving up on one is logged but still exits 0 (not the data
 path). `/wait` (`http::Waits`) stays open through the drain and answers `503` + `Retry-After` +
 `reason: stopping` once it ends (`starting` before the source is live); `/status` carries `pid` and the

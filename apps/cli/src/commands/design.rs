@@ -52,13 +52,21 @@ pub(crate) async fn execute(args: DesignArgs) -> anyhow::Result<()> {
         },
     );
     tokio::pin!(serve);
-    tokio::select! {
+    let first_sender = tokio::select! {
         served = &mut serve => return served.context("running the designer"),
-        signal = signals.next() => tracing::info!(signal = signal.name(), "flusso designer shutting down"),
-    }
+        (signal, sender) = signals.next() => {
+            tracing::info!(signal = signal.name(), "flusso designer shutting down");
+            sender
+        }
+    };
     let _ = stop.send(());
     let began = tokio::time::Instant::now();
-    let interrupt = shutdown::second_signal(&mut signals, began);
+    let interrupt = shutdown::forced(&mut signals, (began, first_sender), |signal| {
+        tracing::info!(
+            signal = signal.name(),
+            "already shutting down; send the signal twice quickly to exit now"
+        );
+    });
     match shutdown::within(shutdown::SIDE_STEP, &Progress::default(), interrupt, serve).await {
         Drained::Done(served) => served.context("running the designer"),
         Drained::TimedOut { .. } => {
@@ -66,7 +74,7 @@ pub(crate) async fn execute(args: DesignArgs) -> anyhow::Result<()> {
             Ok(())
         }
         Drained::Forced(signal) => {
-            tracing::warn!(signal = signal.name(), "second signal; exiting at once");
+            tracing::warn!(signal = signal.name(), "forced: exiting at once");
             std::process::exit(signal.exit_code());
         }
     }

@@ -149,15 +149,38 @@ pub(crate) async fn bind(
         None => None,
     };
     let flag = format!("--{surface}-address");
-    Err(match holder {
-        Some(pid) => anyhow::anyhow!(
-            "{context}: {error}: another flusso (pid {pid}) is already running there. Stop it \
-             (`kill {pid}`) before starting this one, or give this run its own {flag} and --slot"
+    let explained = match holder {
+        Some(pid) => format!(
+            "{context}: another flusso is already serving there; it reports pid {pid}{}. Stop it \
+             before starting this one, or give this run its own {flag} and --slot",
+            if is_local_flusso(pid) {
+                ", a flusso process on this host"
+            } else {
+                " (from a container that is the pid inside it, not one on this host)"
+            }
         ),
-        None => anyhow::anyhow!(
-            "{context}: {error}: possibly a flusso still running. Stop whatever holds the \
-             address, or pass {flag}"
+        None => format!(
+            "{context}: possibly a flusso still running. Stop whatever holds the address, or \
+             pass {flag}"
         ),
+    };
+    Err(anyhow::Error::new(error).context(explained))
+}
+
+/// Whether a process `pid` runs here and is a flusso: its name, read from
+/// `/proc` or, without one (macOS), from `ps`. Anything unreadable is "no".
+fn is_local_flusso(pid: u64) -> bool {
+    let name = std::fs::read_to_string(format!("/proc/{pid}/comm")).or_else(|_| {
+        std::process::Command::new("ps")
+            .args(["-o", "comm=", "-p", &pid.to_string()])
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+    });
+    name.is_ok_and(|name| {
+        name.trim()
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.starts_with("flusso"))
     })
 }
 

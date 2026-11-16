@@ -19,6 +19,7 @@
 //!                     second signal   ─▶ exit 128 + n, at once
 //! ```
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -29,13 +30,6 @@ pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
 /// The step of a stop that lands what is in flight.
 pub(crate) const DRAINING: &str = "draining the pipeline";
-
-/// A stop signal this soon after the stop began is the same request, not a
-/// second one: Ctrl-C or a closed terminal reaches flusso directly (the
-/// kernel signals the whole foreground process group) and again through a
-/// task runner that forwards it, milliseconds apart. A person pressing
-/// Ctrl-C again to force the exit takes longer than this.
-pub(crate) const REPEAT_WINDOW: Duration = Duration::from_secs(1);
 
 /// The most closing the HTTP surfaces, or flushing telemetry, may take of
 /// what is left of the deadline. Neither is the data path: giving up on one
@@ -75,59 +69,126 @@ impl StopSignal {
 /// Why the run is stopping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Cause {
-    Signal(StopSignal),
+    Signal(StopSignal, Sender),
     /// `--exit-with-parent`: the process that started flusso is gone.
     ParentExited {
         parent: u32,
     },
 }
 
-/// The process's stop signals, caught from [`install`](Signals::install) on.
+/// The process's stop signals, caught from [`install`](Signals::install) on,
+/// each with its [`Sender`].
+///
+/// On Unix they are read with `signal-hook`'s origin-carrying iterator on a
+/// thread of their own (tokio's signals don't say who sent one) and handed
+/// over a channel. The kernel keeps one pending signal of a kind, so two of
+/// a kind sent at the same instant can arrive as one, from either sender.
 #[derive(Debug)]
 pub(crate) struct Signals {
+    received: tokio::sync::mpsc::UnboundedReceiver<(StopSignal, Sender)>,
     #[cfg(unix)]
-    interrupt: tokio::signal::unix::Signal,
-    #[cfg(unix)]
-    terminate: tokio::signal::unix::Signal,
-    #[cfg(unix)]
-    hangup: tokio::signal::unix::Signal,
+    handle: signal_hook::iterator::Handle,
+}
+
+#[cfg(unix)]
+impl Drop for Signals {
+    fn drop(&mut self) {
+        self.handle.close();
+    }
+}
+
+/// Whether flusso should catch `SIGHUP` as a stop. Not when it started with
+/// `SIGHUP` ignored (`nohup`, `trap '' HUP`): catching it would replace the
+/// ignore, and a run meant to outlive its terminal would stop with it. Linux
+/// reports the ignored set in `/proc/self/status` (`SigIgn`); where that
+/// can't be read (macOS has no `/proc`), `SIGHUP` keeps its default action,
+/// which ends the process, as before 0.18, and `nohup` keeps working.
+pub(crate) fn catch_hangup() -> bool {
+    match std::fs::read_to_string("/proc/self/status") {
+        Ok(status) => !hangup_ignored(&status),
+        Err(_) => false,
+    }
+}
+
+/// Whether a `/proc/<pid>/status` text lists `SIGHUP` (signal 1, the lowest
+/// bit of the hex `SigIgn` mask) as ignored.
+fn hangup_ignored(status: &str) -> bool {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("SigIgn:"))
+        .and_then(|mask| u64::from_str_radix(mask.trim(), 16).ok())
+        .is_some_and(|mask| mask & 1 == 1)
 }
 
 impl Signals {
     /// Catch the stop signals. Until this runs, each one ends the process
     /// the default way, at once.
     pub(crate) fn install() -> anyhow::Result<Self> {
+        let (sent, received) = tokio::sync::mpsc::unbounded_channel();
         #[cfg(unix)]
         {
             use anyhow::Context;
-            use tokio::signal::unix::{SignalKind, signal};
-            Ok(Self {
-                interrupt: signal(SignalKind::interrupt()).context("catching SIGINT")?,
-                terminate: signal(SignalKind::terminate()).context("catching SIGTERM")?,
-                hangup: signal(SignalKind::hangup()).context("catching SIGHUP")?,
-            })
+            use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+            use signal_hook::iterator::SignalsInfo;
+            use signal_hook::iterator::exfiltrator::WithOrigin;
+
+            let mut kinds = vec![SIGINT, SIGTERM];
+            if catch_hangup() {
+                kinds.push(SIGHUP);
+            } else {
+                tracing::debug!("SIGHUP is ignored or can't be checked; leaving it alone");
+            }
+            let mut signals =
+                SignalsInfo::<WithOrigin>::new(kinds).context("catching the stop signals")?;
+            let handle = signals.handle();
+            std::thread::Builder::new()
+                .name("flusso-signals".to_owned())
+                .spawn(move || {
+                    for origin in signals.forever() {
+                        let signal = match origin.signal {
+                            SIGHUP => StopSignal::Hangup,
+                            SIGINT => StopSignal::Interrupt,
+                            _ => StopSignal::Terminate,
+                        };
+                        if sent.send((signal, sender_of(&origin))).is_err() {
+                            return;
+                        }
+                    }
+                })
+                .context("starting the signal thread")?;
+            Ok(Self { received, handle })
         }
         #[cfg(not(unix))]
-        Ok(Self {})
+        {
+            tokio::spawn(async move {
+                while tokio::signal::ctrl_c().await.is_ok() {
+                    if sent.send((StopSignal::Interrupt, None)).is_err() {
+                        return;
+                    }
+                }
+            });
+            Ok(Self { received })
+        }
     }
 
-    /// The next stop signal.
-    pub(crate) async fn next(&mut self) -> StopSignal {
-        #[cfg(unix)]
-        {
-            tokio::select! {
-                _ = self.interrupt.recv() => StopSignal::Interrupt,
-                _ = self.terminate.recv() => StopSignal::Terminate,
-                _ = self.hangup.recv() => StopSignal::Hangup,
-            }
+    /// The next stop signal and who sent it.
+    pub(crate) async fn next(&mut self) -> (StopSignal, Sender) {
+        match self.received.recv().await {
+            Some(received) => received,
+            None => std::future::pending().await,
         }
-        #[cfg(not(unix))]
-        {
-            if tokio::signal::ctrl_c().await.is_err() {
-                std::future::pending::<()>().await;
-            }
-            StopSignal::Interrupt
-        }
+    }
+}
+
+/// Who sent a signal (see [`Sender`]). macOS fills in no `si_code`, and
+/// `signal-hook` reports a sender with pid and uid `0` there as none (a
+/// terminal's Ctrl-C): only the three-rapid rule applies to that signal.
+#[cfg(unix)]
+fn sender_of(origin: &signal_hook::low_level::siginfo::Origin) -> Sender {
+    match (origin.process, origin.cause) {
+        (Some(process), _) => Some(i64::from(process.pid)),
+        (None, signal_hook::low_level::siginfo::Cause::Kernel) => Some(KERNEL),
+        (None, _) => None,
     }
 }
 
@@ -141,7 +202,7 @@ pub(crate) async fn requested(signals: &mut Signals, parent: Option<u32>) -> Cau
         }
     };
     tokio::select! {
-        signal = signals.next() => Cause::Signal(signal),
+        (signal, sender) = signals.next() => Cause::Signal(signal, sender),
         parent = exited => Cause::ParentExited { parent },
     }
 }
@@ -223,21 +284,31 @@ pub(crate) enum Drained<T> {
     Forced(StopSignal),
 }
 
-/// The next stop signal that is a second request: one arriving within
-/// [`REPEAT_WINDOW`] of `began` is the first one again and is ignored.
-pub(crate) async fn second_signal(
+/// The stop signal that forces the exit, by [`Repeats`]: `first` is when and
+/// from whom the stop came (no sender: it wasn't a signal). Every other
+/// repeat is handed to `repeated`, to tell the sender the stop goes on.
+pub(crate) async fn forced(
     signals: &mut Signals,
-    began: tokio::time::Instant,
+    first: (tokio::time::Instant, Sender),
+    mut repeated: impl FnMut(StopSignal),
 ) -> StopSignal {
+    let mut repeats = Repeats::new(first.0, first.1);
     loop {
-        let signal = signals.next().await;
-        if began.elapsed() >= REPEAT_WINDOW {
-            return signal;
-        }
-        tracing::info!(
+        let (signal, sender) = signals.next().await;
+        tracing::debug!(
             signal = signal.name(),
-            "the same stop request again (a forwarded copy); still stopping"
+            ?sender,
+            rule = if sender.is_some() {
+                "same sender twice within 500 ms"
+            } else {
+                "three within 1 s"
+            },
+            "stop signal during a stop"
         );
+        match repeats.record(tokio::time::Instant::now(), sender) {
+            Verdict::Forced => return signal,
+            Verdict::Repeat => repeated(signal),
+        }
     }
 }
 
@@ -255,6 +326,105 @@ pub(crate) async fn side_step(
     tokio::time::timeout_at(until, step).await.is_ok()
 }
 
+/// Who sent a stop signal, when the platform says: the sending process's
+/// id, `0` for a sender outside this pid namespace (`docker stop`, a
+/// Kubernetes termination), or [`KERNEL`] for the kernel (a terminal's Ctrl-C
+/// or hang-up). `None` when it can't be known.
+///
+/// The process, not its user: a user signalling a process group that holds
+/// both a forwarding task runner and flusso reaches flusso twice at once,
+/// once from their shell and once from the runner, both as that user. Those
+/// are two senders, one request.
+pub(crate) type Sender = Option<i64>;
+
+/// The [`Sender`] of a signal the kernel raised.
+pub(crate) const KERNEL: i64 = -1;
+
+/// How close two signals from one sender must be to force the exit: a
+/// person pressing Ctrl-C twice. A stop loop re-sending `SIGTERM` every
+/// second is slower and never forces.
+pub(crate) const SAME_SENDER_WINDOW: Duration = Duration::from_millis(500);
+
+/// How many stop signals inside [`BURST_WINDOW`] force the exit, whoever
+/// sent them: the rule where senders are unknown, and the way to force with
+/// `/bin/kill` or `pkill`, a new process each time. One Ctrl-C under a
+/// forwarding task runner is two signals, so it takes three.
+pub(crate) const BURST: usize = 3;
+
+/// The window [`BURST`] signals must fall in.
+pub(crate) const BURST_WINDOW: Duration = Duration::from_secs(1);
+
+/// What a stop signal after the first means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Verdict {
+    /// The same request again: the drain carries on.
+    Repeat,
+    /// Exit now.
+    Forced,
+}
+
+/// The stop signals seen so far, to tell a repeat from a request to force.
+///
+/// The same known sender twice inside [`SAME_SENDER_WINDOW`] forces, and so
+/// do [`BURST`] signals inside [`BURST_WINDOW`] from anyone. Two signals from
+/// different senders are one request (a terminal's Ctrl-C and a task
+/// runner's forwarded copy).
+#[derive(Debug)]
+pub(crate) struct Repeats {
+    seen: VecDeque<(tokio::time::Instant, Sender)>,
+}
+
+impl Repeats {
+    /// After the first stop signal, at `at` from `sender`.
+    pub(crate) fn new(at: tokio::time::Instant, sender: Sender) -> Self {
+        Self {
+            seen: VecDeque::from([(at, sender)]),
+        }
+    }
+
+    /// Another stop signal, at `at` from `sender`.
+    pub(crate) fn record(&mut self, at: tokio::time::Instant, sender: Sender) -> Verdict {
+        while self
+            .seen
+            .front()
+            .is_some_and(|(seen, _)| at.saturating_duration_since(*seen) > BURST_WINDOW)
+        {
+            self.seen.pop_front();
+        }
+        let same_sender = sender.is_some_and(|sender| {
+            self.seen.iter().any(|(seen, from)| {
+                *from == Some(sender) && at.saturating_duration_since(*seen) <= SAME_SENDER_WINDOW
+            })
+        });
+        let forced = same_sender || self.seen.len() + 1 >= BURST;
+        self.seen.push_back((at, sender));
+        if forced {
+            Verdict::Forced
+        } else {
+            Verdict::Repeat
+        }
+    }
+}
+
+/// Lets a message through at most once a second.
+#[derive(Debug, Default)]
+pub(crate) struct Throttle {
+    last: Option<tokio::time::Instant>,
+}
+
+impl Throttle {
+    /// Whether to show the message now.
+    pub(crate) fn allow(&mut self, at: tokio::time::Instant) -> bool {
+        let allowed = self
+            .last
+            .is_none_or(|last| at.saturating_duration_since(last) >= Duration::from_secs(1));
+        if allowed {
+            self.last = Some(at);
+        }
+        allowed
+    }
+}
+
 /// Run `drain` for at most `timeout`, or until `interrupt` (the next signal)
 /// resolves, whichever comes first.
 pub(crate) async fn within<T>(
@@ -264,6 +434,8 @@ pub(crate) async fn within<T>(
     drain: impl Future<Output = T>,
 ) -> Drained<T> {
     tokio::select! {
+        // Finished work wins a tie with the deadline or a signal.
+        biased;
         done = drain => Drained::Done(done),
         () = tokio::time::sleep(timeout) => Drained::TimedOut { step: progress.current() },
         signal = interrupt => Drained::Forced(signal),

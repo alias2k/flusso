@@ -46,7 +46,7 @@ Like `cargo run`, it compiles first. With a `flusso.toml` present (the default p
 | `--index-prefix <prefix>` | `prefix` from config, else none | Prefix every owned index name. |
 | `--batch-max-changes <n>` | `[batch] max_changes`, else `256` | Commit a batch once this many live changes have accumulated. |
 | `--batch-max-delay-ms <ms>` | `[batch] max_delay_ms`, else `50` | The longest a batch stays open while changes keep arriving. |
-| `--shutdown-timeout-secs <n>` | `30` | How long a [stop](#stopping) may take, from the first signal to exit. Past it flusso gives up on what is left and exits `1`. |
+| `--shutdown-timeout-secs <n>` | `30` | How long a [stop](#stopping) may take, from the first signal to exit. Past it flusso gives up on what is left and exits `1`. `0` doesn't drain: it stops reading, abandons what is in flight (read again on the next start) and exits `0`. |
 | `--exit-with-parent` | off | Stop when the process that started flusso exits, as if it had sent `SIGTERM`. As an env var, `FLUSSO_EXIT_WITH_PARENT=true` (like every boolean flag, `1` is refused). See [Stopping](#stopping). |
 
 The adapter flags (`--slot`, `--publication`, `--manage-publication`, `--manage-replica-identity`, `--pretty`, `--queue-capacity`) are laid over the file's port tables before every table is validated against its adapter; an unknown option or type fails here, before anything connects. Both listeners are bound before the pipeline starts, so a bad address fails fast. A lock-write failure is fatal.
@@ -83,10 +83,12 @@ A stop is a graceful drain: flusso lands what it already read, confirms it to Po
 
 | What stops `run` | What flusso does |
 | --- | --- |
-| `SIGTERM`, `SIGINT` (Ctrl-C), `SIGHUP` | The drain below. `SIGHUP` (a closed terminal, a task runner passing on its own hang-up) is a stop, not a reload. |
+| `SIGTERM`, `SIGINT` (Ctrl-C), `SIGHUP` | The drain below. `SIGHUP` (a closed terminal, a task runner passing on its own hang-up) is a stop, not a reload; a run started with it ignored (`nohup`) keeps ignoring it on Linux, and elsewhere `SIGHUP` keeps its default action (the process ends at once, as before 0.18). |
 | The parent process exits, under `--exit-with-parent` | The same drain, logged as `the parent process <pid> exited`. Checked twice a second. A parent that is already `init` (PID 1, as in a container) is never followed. |
-| The same signal again within 1 s of the first | Nothing more: it is the same request. Ctrl-C or a closed terminal reaches flusso directly *and* through a task runner that forwards it, milliseconds apart. |
-| A stop signal 1 s or more after the first | Exits at once with `128 + n`: `129` (`SIGHUP`), `130` (`SIGINT`), `143` (`SIGTERM`). |
+| **The same sender twice within 500 ms**, or **three stop signals within 1 s** from anyone | Exits at once with `128 + n`: `129` (`SIGHUP`), `130` (`SIGINT`), `143` (`SIGTERM`), logging `forced: exiting at once while <step>`. Pressing Ctrl-C twice quickly does it, directly or under a task runner. |
+| Any other repeat | The same request: the drain carries on, and flusso logs `stop already requested: <step> (<sink>: <n> changes in flight), <n>s left. Send the signal twice quickly to exit now` (at most once a second). |
+
+A sender is the process that sent the signal (`siginfo`): the kernel for a terminal's Ctrl-C or hang-up, the task runner for its forwarded copy, `0` for one outside the container (`docker stop`, Kubernetes). One Ctrl-C under a task runner that forwards it is two signals from two senders, so it drains. A stop loop re-sending `SIGTERM` every second never forces. `/bin/kill` and `pkill` are a new sender each time: three of them within a second force. On macOS a terminal's Ctrl-C carries no sender, so there three presses force (two under a task runner).
 
 The drain, in order:
 

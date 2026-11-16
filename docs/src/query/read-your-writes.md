@@ -84,6 +84,7 @@ A fence never falls back to a stale read. The read fails, and OpenSearch isn't a
 | `Error::FenceUnavailable { cause, reason }` | flusso couldn't be asked when the timeout passed. The fence retried the whole time; `cause` and `reason` are the last answer's. |
 | `Error::FenceMisconfigured(reason)` | The client can't talk to flusso as configured: no `.flusso(url)`, a certificate it refuses, a redirect loop. Fails at once. |
 | `Error::FenceRefused { status, reason }` | flusso rejected the wait: a malformed position, or a sink it doesn't have. Never retried. |
+| `Error::FenceUnavailable(reason)` | No `.flusso(url)` configured, flusso unreachable, not following the source yet, or [stopping](../reference/http.md#get-waitpositionposition) (a `503` whose `reason` is `starting` or `stopping`). Not retried. |
 
 `cause` is an `UnavailableCause`, to branch on without parsing text:
 
