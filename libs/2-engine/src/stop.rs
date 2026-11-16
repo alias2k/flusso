@@ -28,12 +28,13 @@
 //! ```
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use kernel::Position;
 use source::cdc::ChangeCapture;
 use stream::Stream;
-use tokio::sync::watch;
+use tokio::sync::Notify;
 
 /// How often [`drain_lanes`] looks at the lanes.
 const DRAIN_POLL: Duration = Duration::from_millis(10);
@@ -49,7 +50,13 @@ const DRAIN_POLL: Duration = Duration::from_millis(10);
 /// ([`ChangeCapture::close_live`]) and returns `Ok`. Nothing bounds the wait:
 /// the caller that asked for the stop owns the deadline.
 #[derive(Debug, Clone)]
-pub struct Stop(Arc<watch::Sender<bool>>);
+pub struct Stop(Arc<Requested>);
+
+#[derive(Debug, Default)]
+struct Requested {
+    flag: AtomicBool,
+    notify: Notify,
+}
 
 impl Default for Stop {
     fn default() -> Self {
@@ -60,24 +67,35 @@ impl Default for Stop {
 impl Stop {
     /// A stop nobody has requested yet.
     pub fn new() -> Self {
-        Self(Arc::new(watch::Sender::new(false)))
+        Self(Arc::default())
     }
 
     /// Request the stop. Idempotent.
     pub fn request(&self) {
-        self.0.send_replace(true);
+        self.0.flag.store(true, Ordering::SeqCst);
+        self.0.notify.notify_waiters();
     }
 
-    /// Whether the stop was requested.
+    /// Whether the stop was requested. One atomic load: cheap enough to ask
+    /// before every item of a stream.
     pub fn is_requested(&self) -> bool {
-        *self.0.borrow()
+        self.0.flag.load(Ordering::SeqCst)
     }
 
     /// Resolves once the stop is requested (at once if it already was).
     pub async fn requested(&self) {
-        let mut seen = self.0.subscribe();
-        // The sender lives in `self`, so the channel never closes under us.
-        let _ = seen.wait_for(|requested| *requested).await;
+        let notified = self.notified();
+        if self.is_requested() {
+            return;
+        }
+        notified.await;
+    }
+
+    /// A future woken by a [`request`](Self::request) made after this call,
+    /// even before it is first polled. Creating one takes no lock, so a
+    /// caller can make one per item and poll it only when it would wait.
+    pub(crate) fn notified(&self) -> tokio::sync::futures::Notified<'_> {
+        self.0.notify.notified()
     }
 }
 

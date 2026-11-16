@@ -211,7 +211,8 @@ impl IngestEngine {
             }
             let deadline = pending.deadline.unwrap_or_else(far_future);
             tokio::select! {
-                () = self.stop.requested() => {}
+                // While the live stream is open, `next_live` watches the stop.
+                () = self.stop.requested(), if live_ended => {}
                 change = next_live(&mut live, &self.stop), if !live_ended => match change {
                     Next::Stopped => {}
                     Next::Change(None) => live_ended = true,
@@ -618,13 +619,25 @@ enum Next {
 }
 
 /// The next live change, unless the stop is requested first: checked before
-/// the stream on every poll, so a stop is never raced by a ready change.
+/// the stream on every poll, so a stop is never raced by a ready change. The
+/// check is an atomic load; the stop's waker is registered only when the
+/// stream would wait, so a busy stream pays nothing more.
 async fn next_live(live: &mut LiveStream, stop: &Stop) -> Next {
-    tokio::select! {
-        biased;
-        () = stop.requested() => Next::Stopped,
-        change = live.next() => Next::Change(change),
-    }
+    let notified = stop.notified();
+    tokio::pin!(notified);
+    std::future::poll_fn(|cx| {
+        if stop.is_requested() {
+            return std::task::Poll::Ready(Next::Stopped);
+        }
+        if let std::task::Poll::Ready(change) = live.poll_next_unpin(cx) {
+            return std::task::Poll::Ready(Next::Change(change));
+        }
+        match notified.as_mut().poll(cx) {
+            std::task::Poll::Ready(()) => std::task::Poll::Ready(Next::Stopped),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    })
+    .await
 }
 
 /// A batch in the making: the deduplicated document ids the buffered changes
