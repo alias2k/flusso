@@ -1,0 +1,27 @@
+ahash v0.8.12
+[2m[35m├──[0m ahash feature "compile-time-rng"
+[2m[35m│[0m   [2m└──[0m rhai v1.27.0
+[2m[35m│[0m   [2m [0m   [2m[35m├──[0m rhai feature "decimal"
+[2m[35m│[0m   [2m [0m   [2m[35m│[0m   [2m└──[0m flusso-script v0.17.0 (/repo/libs/2-script)
+[2m[35m│[0m   [2m [0m   [2m[35m│[0m   [2m [0m   [2m[35m└──[0m flusso-script feature "default"
+[2m[35m│[0m   [2m [0m   [2m[35m│[0m   [2m [0m   [2m[35m [0m   [2m├──[0m flusso-cli v0.17.0 (/repo/apps/cli)
+[2m[35m│[0m   [2m [0m   [2m[35m│[0m   [2m [0m   [2m[35m [0m   [2m│[0m   [2m[35m├──[0m flusso-cli feature "default" (command-line)
+[2m[35m│[0m   [2m [0m   [2m[35m│[0m   [2m [0m   [2m[35m [0m   [2m│[0m   [2m[35m└──[0m flusso-cli feature "design"
+[2m[35m│[0m   [2m [0m   [2m[35m│[0m   [2m [0m   [2m[35m [0m   [2m│[0m   [2m[35m [0m   [2m[35m└──[0m flusso-cli feature "default" (command-line)
+[2m[35m│[0m   [2m [0m   [2m[35m│[0m   [2m [0m   [2m[35m [0m   [2m└──[0m flusso-design v0.17.0 (/repo/apps/design)
+[2m[35m│[0m   [2m [0m   [2m[35m│[0m   [2m [0m   [2m[35m [0m   [2m [0m   [2m[35m└──[0m flusso-design feature "default"
+[2m[35m│[0m   [2m [0m   [2m[35m│[0m   [2m [0m   [2m[35m [0m   [2m [0m   [2m[35m [0m   [2m└──[0m flusso-cli v0.17.0 (/repo/apps/cli) [33m[2m(*)[39m[22m
+[2m[35m│[0m   [2m [0m   [2m[35m├──[0m rhai feature "no_module"
+[2m[35m│[0m   [2m [0m   [2m[35m│[0m   [2m└──[0m flusso-script v0.17.0 (/repo/libs/2-script) [33m[2m(*)[39m[22m
+[2m[35m│[0m   [2m [0m   [2m[35m├──[0m rhai feature "no_time"
+[2m[35m│[0m   [2m [0m   [2m[35m│[0m   [2m└──[0m flusso-script v0.17.0 (/repo/libs/2-script) [33m[2m(*)[39m[22m
+[2m[35m│[0m   [2m [0m   [2m[35m├──[0m rhai feature "rust_decimal"
+[2m[35m│[0m   [2m [0m   [2m[35m│[0m   [2m[35m└──[0m rhai feature "decimal" [33m[2m(*)[39m[22m
+[2m[35m│[0m   [2m [0m   [2m[35m├──[0m rhai feature "std"
+[2m[35m│[0m   [2m [0m   [2m[35m│[0m   [2m└──[0m flusso-script v0.17.0 (/repo/libs/2-script) [33m[2m(*)[39m[22m
+[2m[35m│[0m   [2m [0m   [2m[35m└──[0m rhai feature "sync"
+[2m[35m│[0m   [2m [0m   [2m[35m [0m   [2m└──[0m flusso-script v0.17.0 (/repo/libs/2-script) [33m[2m(*)[39m[22m
+[2m[35m├──[0m ahash feature "const-random"
+[2m[35m│[0m   [2m[35m└──[0m ahash feature "compile-time-rng" [33m[2m(*)[39m[22m
+[2m[35m└──[0m ahash feature "std"
+[2m[35m [0m   [2m[35m└──[0m rhai feature "std" [33m[2m(*)[39m[22m

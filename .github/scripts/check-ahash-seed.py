@@ -14,8 +14,11 @@ for `flusso-cli` as installed and as the server image builds it
 (`--no-default-features`): no build, seconds, but the crates must already be fetched,
 so CI runs it after the build checks. `$CARGO` names the cargo to run (default `cargo`).
 
+Colour and charset are forced (CI sets `CARGO_TERM_COLOR=always`, which would hide every
+line from the parser), and a tree with no feature read is an error, never a pass.
+
 Exits 0 when every build is fine (or links no `ahash`), 1 when one has the seed baked in,
-2 when cargo fails.
+2 when cargo fails or its output can't be read.
 """
 import os
 import re
@@ -51,7 +54,8 @@ def problem(features: set[str]) -> str | None:
 
 def tree(cargo: str, args: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [cargo, "tree", "--offline", "--locked", *args, "-e", "features", "-i", "ahash"],
+        [cargo, "tree", "--offline", "--locked", "--color", "never", "--charset", "utf8",
+         *args, "-e", "features", "-i", "ahash"],
         capture_output=True,
         text=True,
     )
@@ -70,6 +74,10 @@ def main() -> int:
             print(f"{name}: cargo tree failed", file=sys.stderr)
             return 2
         features = features_in(result.stdout)
+        if not features:
+            sys.stderr.write(result.stdout)
+            print(f"{name}: no ahash feature read from cargo tree's output (above)", file=sys.stderr)
+            return 2
         message = problem(features)
         if message:
             print(f"{name}: {message}", file=sys.stderr)

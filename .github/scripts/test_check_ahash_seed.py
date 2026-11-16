@@ -26,6 +26,8 @@ guard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard)
 
 BAD = (FIXTURES / "compile-time-rng.txt").read_text()
+# `main`'s tree as CI printed it: CI sets CARGO_TERM_COLOR=always.
+BAD_COLORED = (FIXTURES / "compile-time-rng-colored.txt").read_text()
 GOOD = (FIXTURES / "runtime-rng.txt").read_text()
 
 
@@ -104,6 +106,7 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(result.calls), 2)
         self.assertTrue(all("--offline" in call and "-i ahash" in call for call in result.calls))
+        self.assertTrue(all("--color never" in call for call in result.calls), "CI forces colour on")
         self.assertTrue(any("--no-default-features" in call for call in result.calls))
 
     def test_main_s_tree_fails(self) -> None:
@@ -115,6 +118,11 @@ class EndToEnd(unittest.TestCase):
         result = self.run_guard(GOOD, server=BAD)
         self.assertEqual(result.returncode, 1)
         self.assertIn("--no-default-features", result.stderr)
+
+    def test_a_tree_it_cannot_read_never_passes(self) -> None:
+        result = self.run_guard(BAD_COLORED)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no ahash feature read", result.stderr)
 
     def test_a_binary_without_ahash_passes(self) -> None:
         missing = "error: package ID specification `ahash` did not match any packages\n"
