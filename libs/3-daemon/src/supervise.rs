@@ -19,12 +19,19 @@
 //! on it: a stalled sink pins WAL until it recovers, and the per-sink lag and
 //! in-flight numbers are the alarm. The ingest engine ending its run cleanly
 //! (the live stream closed) ends the deployment.
+//!
+//! A [`Stop`] ends it gracefully instead: a stop during staging ends the run
+//! before anything is captured; afterwards the ingest engine winds down (no
+//! further read, the buffered batch published, every lane drained and
+//! confirmed, the live stream closed), is not restarted, and the sink engines
+//! are stopped once their lanes are idle. Nothing here bounds that: the
+//! caller who asked for the stop owns the deadline.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use engine::{IngestEngine, SinkControl, SinkEngine};
+use engine::{IngestEngine, SinkControl, SinkEngine, Stop, drain_lanes};
 use futures::future::{self, FutureExt};
 use kernel::{IndexName, SinkName};
 use source::cdc::{ChangeCapture, Continuity};
@@ -33,6 +40,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::DaemonOptions;
+use crate::fence::Fence;
 
 const CONTROL_CAPACITY: usize = 8;
 
@@ -44,6 +52,7 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone)]
 pub struct DaemonControl {
     senders: Arc<BTreeMap<SinkName, mpsc::Sender<SinkControl>>>,
+    stop: Stop,
 }
 
 /// The receiving end of each sink engine's control channel, by sink.
@@ -61,12 +70,15 @@ pub enum ControlError {
     /// The sink's operation queue is full; the engine is busy between batches.
     #[error("too many operations queued for sink `{0}`; retry shortly")]
     Busy(String),
+    /// The deployment is stopping and takes no new work.
+    #[error("the deployment is stopping and takes no new operations")]
+    Stopping,
 }
 
 impl DaemonControl {
     /// One control channel per sink: the handle keeps the senders, the
     /// supervisor hands each receiver to its sink engine.
-    pub(crate) fn new(sinks: &[SinkName]) -> (Self, ControlReceivers) {
+    pub(crate) fn new(sinks: &[SinkName], stop: Stop) -> (Self, ControlReceivers) {
         let mut senders = BTreeMap::new();
         let mut receivers = BTreeMap::new();
         for sink in sinks {
@@ -77,6 +89,7 @@ impl DaemonControl {
         (
             Self {
                 senders: Arc::new(senders),
+                stop,
             },
             receivers,
         )
@@ -92,6 +105,9 @@ impl DaemonControl {
     /// batches and requests its own snapshot; concurrent requests for the same
     /// index coalesce on the ingest side into one pass over the table.
     pub fn reindex(&self, index: IndexName, sink: Option<&SinkName>) -> Result<(), ControlError> {
+        if self.stop.is_requested() {
+            return Err(ControlError::Stopping);
+        }
         let targets: Vec<(&SinkName, &mpsc::Sender<SinkControl>)> = match sink {
             Some(sink) => vec![(
                 sink,
@@ -116,7 +132,9 @@ impl DaemonControl {
 }
 
 /// Stage every sink, then run everything supervised until the ingest engine
-/// ends its run cleanly.
+/// ends its run cleanly: the live stream ended, or `stop` was requested and the
+/// ingest engine wound down.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_all(
     ingest: IngestEngine,
     sink_engines: Vec<SinkEngine>,
@@ -125,17 +143,26 @@ pub(crate) async fn run_all(
     source: &Arc<dyn ChangeCapture>,
     stream: &Arc<dyn Stream>,
     options: &DaemonOptions,
+    stop: &Stop,
+    fence: &Fence,
 ) -> anyhow::Result<()> {
     let max_backoff = options.max_restart_backoff;
 
     // First staging, every sink, retried until it succeeds: the ingest engine
-    // must not create the resume point before every rebuild is staged.
-    future::join_all(
+    // must not create the resume point before every rebuild is staged. A stop
+    // meanwhile ends the run: nothing has been captured yet.
+    let staged = future::join_all(
         sink_engines
             .iter()
             .map(|engine| stage_until_ok(engine, continuity, max_backoff).map(|()| ())),
-    )
-    .await;
+    );
+    tokio::select! {
+        _ = staged => {}
+        () = stop.requested() => {
+            tracing::info!("stop requested while staging; nothing was captured");
+            return Ok(());
+        }
+    }
 
     let mut tasks = JoinSet::new();
     for engine in sink_engines {
@@ -158,12 +185,29 @@ pub(crate) async fn run_all(
         });
     }
 
+    let ingest_stop = stop.clone();
     let mut ingest_task = AbortOnDrop(tokio::spawn(async move {
         let mut backoff = Backoff::new(max_backoff);
         loop {
             match ingest.run().await {
                 Ok(()) => return Ok::<(), anyhow::Error>(()),
-                Err(_) => backoff.wait().await,
+                // A failed engine can't wind down; a restart would read anew.
+                Err(error) if ingest_stop.is_requested() => {
+                    return Err(anyhow::anyhow!(
+                        "the ingest engine failed while stopping: {error}"
+                    ));
+                }
+                Err(_) => {
+                    tokio::select! {
+                        () = backoff.wait() => {}
+                        () = ingest_stop.requested() => {
+                            return Err(anyhow::anyhow!(
+                                "stop requested while the ingest engine was restarting; \
+                                 nothing in flight was published"
+                            ));
+                        }
+                    }
+                }
             }
         }
     }));
@@ -175,19 +219,20 @@ pub(crate) async fn run_all(
                     Ok(result) => result,
                     Err(join) => Err(anyhow::anyhow!("ingest engine task failed: {join}")),
                 };
-                // The source stream ended: let the sinks finish what is already on
-                // their lanes, confirm the final watermark, then stop them.
-                let drained = tokio::time::timeout(DRAIN_TIMEOUT, async {
-                    while !stream.is_idle() {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                    }
-                })
+                // The ingest engine is done: let the sinks finish what is
+                // already on their lanes, confirming as they go, then stop
+                // them. After a stop the engine drained them already.
+                let mut confirmed = None;
+                let drained = tokio::time::timeout(
+                    DRAIN_TIMEOUT,
+                    drain_lanes(&**stream, &**source, &mut confirmed),
+                )
                 .await;
                 if drained.is_err() {
                     tracing::warn!("sinks did not drain their lanes in time; stopping them");
-                }
-                if let Some(watermark) = stream.watermark() {
-                    source.confirm(watermark);
+                } else if stop.is_requested() {
+                    tracing::info!("every sink flushed; waiting for open searchable fences to be answered");
+                    fence.settled().await;
                 }
                 tasks.abort_all();
                 return result;

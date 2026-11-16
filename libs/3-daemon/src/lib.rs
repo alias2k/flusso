@@ -178,6 +178,7 @@ impl Daemon {
         // rebuilds before the ingest engine creates the point.
         let continuity = capture.continuity().await?;
 
+        let stop = engine::Stop::new();
         let ingest = IngestEngine::new(
             Arc::clone(&capture),
             Arc::clone(&documents),
@@ -186,7 +187,8 @@ impl Daemon {
         )
         .with_batch(batch_policy(&config))
         .with_observer(Arc::clone(&observer))
-        .with_failure_policies(failure_policies.clone());
+        .with_failure_policies(failure_policies.clone())
+        .with_stop(stop.clone());
 
         let sink_engines: Vec<SinkEngine> = sinks
             .into_iter()
@@ -204,7 +206,7 @@ impl Daemon {
             })
             .collect();
 
-        let (control, control_receivers) = DaemonControl::new(&sink_names);
+        let (control, control_receivers) = DaemonControl::new(&sink_names, stop.clone());
         Ok(RunningDaemon {
             status,
             fence,
@@ -217,6 +219,7 @@ impl Daemon {
             stream,
             observer,
             options,
+            stop,
         })
     }
 }
@@ -236,6 +239,7 @@ pub struct RunningDaemon {
     stream: Arc<dyn Stream>,
     observer: Arc<dyn Observer>,
     options: DaemonOptions,
+    stop: engine::Stop,
 }
 
 impl RunningDaemon {
@@ -258,15 +262,23 @@ impl RunningDaemon {
     }
 
     /// Supervise every engine until the live stream ends, or `shutdown`
-    /// resolves — typically a signal future the binary owns. A failed engine
-    /// restarts with backoff while the others keep running; a pending batch on
-    /// shutdown is simply redelivered on the next run (at-least-once), so
-    /// dropping the run mid-flight is safe.
+    /// resolves (typically a signal future the binary owns) and the
+    /// deployment has stopped gracefully. A failed engine restarts with
+    /// backoff while the others keep running.
+    ///
+    /// The stop: the phase turns `stopping` (not ready, no new operation);
+    /// the ingest engine reads nothing more, publishes the batch it was
+    /// buffering, waits until every sink flushed and acknowledged its lane,
+    /// hands the final watermark to the source and closes the live stream.
+    /// A snapshot in progress is abandoned; its sink asks again on the next
+    /// start. Nothing here bounds the stop: a stalled sink holds it, so the
+    /// caller owns the deadline, and dropping this future past it is safe
+    /// (at-least-once: whatever was not acknowledged is read again).
     #[tracing::instrument(name = "daemon.run", skip_all)]
     pub async fn run(self, shutdown: impl Future<Output = ()> + Send) -> anyhow::Result<()> {
         let RunningDaemon {
             status,
-            fence: _,
+            fence,
             control: _,
             control_receivers,
             ingest,
@@ -276,6 +288,7 @@ impl RunningDaemon {
             stream,
             observer,
             options,
+            stop,
         } = self;
 
         let _lag = LagGuard(tokio::spawn(lag::poll(
@@ -284,11 +297,25 @@ impl RunningDaemon {
             options.lag_poll_interval,
         )));
 
+        let supervised = supervise::run_all(
+            ingest,
+            sink_engines,
+            control_receivers,
+            continuity,
+            &source,
+            &stream,
+            &options,
+            &stop,
+            &fence,
+        );
+        tokio::pin!(supervised);
         let result = tokio::select! {
-            res = supervise::run_all(ingest, sink_engines, control_receivers, continuity, &source, &stream, &options) => res,
+            res = &mut supervised => res,
             () = shutdown => {
-                tracing::info!("shutdown requested; stopping the deployment");
-                Ok(())
+                tracing::info!("shutdown requested; stopping the deployment gracefully");
+                status.set_phase(Phase::Stopping);
+                stop.request();
+                supervised.await
             }
         };
 

@@ -710,6 +710,79 @@ async fn a_confirmation_reaches_the_client_without_a_replication_event() {
     reader.abort();
 }
 
+/// A replication connection that never sends an event and records, in order,
+/// what it was told was applied and when it was closed.
+struct ClosingClient {
+    log: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Replication for ClosingClient {
+    async fn recv(&mut self) -> std::result::Result<Option<ReplicationEvent>, PgWireError> {
+        std::future::pending().await
+    }
+
+    fn update_applied_lsn(&self, lsn: Lsn) {
+        let mut log = self.log.lock().unwrap();
+        let line = format!("applied {}", lsn.as_u64());
+        if log.last() != Some(&line) {
+            log.push(line);
+        }
+    }
+
+    async fn close(&mut self, lsn: Lsn) {
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("close {}", lsn.as_u64()));
+    }
+}
+
+#[tokio::test]
+async fn a_close_hands_over_the_confirmed_position_then_ends_the_stream_without_a_change() {
+    use futures::StreamExt;
+    use std::time::Duration;
+
+    let ack = Arc::new(Positions::new(0, 0, Default::default()));
+    let seq = ack.register(10);
+    ack.read_through(10);
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let client = ClosingClient {
+        log: Arc::clone(&log),
+    };
+    let catalog = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused@127.0.0.1/unused")
+        .unwrap();
+    let mut stream = build(
+        client,
+        catalog,
+        Snapshots::seeing(&[]),
+        Settings {
+            pre_image_links: Default::default(),
+            read_tables: None,
+            read_ahead: 16,
+            hold_clock: Arc::default(),
+        },
+        Arc::clone(&ack),
+        None,
+    );
+    let reader = tokio::spawn(async move { stream.next().await.is_none() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    ack.confirm(seq);
+    ack.request_close();
+    let ended = tokio::time::timeout(Duration::from_secs(1), reader)
+        .await
+        .expect("a closed stream ends")
+        .unwrap();
+
+    assert!(ended, "the stream ended without yielding a change");
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec!["applied 0", "applied 10", "close 10"],
+        "the final position is handed over, then the connection closed with it"
+    );
+}
+
 #[test]
 fn an_oversized_message_is_a_setup_error_naming_both_sizes() {
     let error = map_pgwire(PgWireError::MessageTooLarge {

@@ -538,6 +538,18 @@ impl ChangeCapture for WalChangeCapture {
         ))
     }
 
+    /// The open stream reports the confirmed position, waits until the
+    /// server was sent it, ends replication (CopyDone) and ends.
+    fn close_live(&self) -> bool {
+        match self.open_positions() {
+            Some(positions) => {
+                positions.request_close();
+                true
+            }
+            None => false,
+        }
+    }
+
     fn readable_wait(&self) -> Option<Duration> {
         stream::held_for(&self.hold_clock)
     }

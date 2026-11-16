@@ -34,6 +34,9 @@ pub enum Phase {
     Backfilling,
     /// Every engine is following its feed.
     Live,
+    /// A stop was requested: nothing new is read, what is in flight lands.
+    /// Not ready.
+    Stopping,
     /// The ingest engine has stopped; the deployment is no longer syncing.
     Stopped,
 }
@@ -191,8 +194,13 @@ impl Status {
         self.sinks.get(sink)
     }
 
+    /// Set the phase. `stopping` gives way only to `stopped`, so an engine
+    /// event during the drain can't make the deployment look ready again.
     pub(crate) fn set_phase(&self, phase: Phase) {
-        *lock(&self.phase) = phase;
+        let mut current = lock(&self.phase);
+        if *current != Phase::Stopping || phase == Phase::Stopped {
+            *current = phase;
+        }
     }
 
     /// The overall phase: `stopped` is final; otherwise `starting` until the
@@ -201,7 +209,7 @@ impl Status {
     /// leaves the phase alone (the deployment keeps running) but is not ready.
     fn recompute_phase(&self) {
         let mut phase = lock(&self.phase);
-        if *phase == Phase::Stopped {
+        if matches!(*phase, Phase::Stopping | Phase::Stopped) {
             return;
         }
         if !self.ingest_live.load(Ordering::Relaxed) {

@@ -39,6 +39,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use source::cdc::AdvanceListener;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tokio::sync::Notify;
 
 /// The listeners a capture was handed through `on_advance`, shared with every
@@ -79,6 +81,7 @@ pub(crate) struct Positions {
     inner: Mutex<Inner>,
     listeners: Arc<Listeners>,
     confirmed_moved: Notify,
+    close: AtomicBool,
 }
 
 #[derive(Debug)]
@@ -147,6 +150,7 @@ impl Positions {
             }),
             listeners,
             confirmed_moved: Notify::new(),
+            close: AtomicBool::new(false),
         }
     }
 
@@ -215,6 +219,17 @@ impl Positions {
         if moved {
             self.confirmed_moved.notify_one();
         }
+    }
+
+    /// Ask the stream to end: report the confirmed position and close, emitting
+    /// nothing more. Wakes it like a confirmation.
+    pub(crate) fn request_close(&self) {
+        self.close.store(true, Ordering::SeqCst);
+        self.confirmed_moved.notify_one();
+    }
+
+    pub(crate) fn close_requested(&self) -> bool {
+        self.close.load(Ordering::SeqCst)
     }
 
     /// Resolves once a [`confirm`](Self::confirm) moved the resume point since

@@ -105,7 +105,18 @@ pub(crate) trait Replication: Send + 'static {
     /// Report everything through `lsn` as applied. Monotonic; the client
     /// sends a raised LSN to the server within its status interval.
     fn update_applied_lsn(&self, lsn: Lsn);
+
+    /// End replication gracefully once `lsn` was reported to the server. The
+    /// default does nothing beyond what `update_applied_lsn` did.
+    fn close(&mut self, lsn: Lsn) -> impl Future<Output = ()> + Send {
+        let _ = lsn;
+        async {}
+    }
 }
+
+/// The longest a closing stream waits for the server to be sent the final
+/// position, and then for the replication worker to end.
+const CLOSE_STEP: Duration = Duration::from_secs(5);
 
 impl Replication for ReplicationClient {
     fn recv(
@@ -117,6 +128,32 @@ impl Replication for ReplicationClient {
 
     fn update_applied_lsn(&self, lsn: Lsn) {
         ReplicationClient::update_applied_lsn(self, lsn);
+    }
+
+    /// Waits until a standby status update carried `lsn` (the worker sends a
+    /// raised position within its status interval), then stops the worker,
+    /// which sends CopyDone. Stopping first would lose the update: the worker
+    /// checks its stop signal before a due status update.
+    async fn close(&mut self, lsn: Lsn) {
+        let metrics = self.metrics();
+        let sent = tokio::time::timeout(CLOSE_STEP, async {
+            while metrics.last_applied_lsn() < lsn {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        if sent.is_err() {
+            tracing::warn!(
+                %lsn,
+                "the final position was not sent to the server in time; the next start may read \
+                 some changes again"
+            );
+        }
+        match tokio::time::timeout(CLOSE_STEP, self.shutdown()).await {
+            Ok(Ok(())) => tracing::info!(%lsn, "replication stream closed"),
+            Ok(Err(error)) => tracing::warn!(%error, "replication stream closed with an error"),
+            Err(_) => tracing::warn!("replication stream did not close in time; dropping it"),
+        }
     }
 }
 
@@ -428,9 +465,12 @@ fn into_stream<C: Replication, V: Visibility>(
             // Report how far the engine has durably confirmed so the slot can
             // advance and the server can recycle WAL. Every turn, so the
             // horizon moving on idle progress is reported too.
-            state
-                .client
-                .update_applied_lsn(Lsn::from_u64(state.decode.ack.confirmed_lsn()));
+            let confirmed = Lsn::from_u64(state.decode.ack.confirmed_lsn());
+            state.client.update_applied_lsn(confirmed);
+            if state.decode.ack.close_requested() {
+                state.client.close(confirmed).await;
+                return None;
+            }
 
             if let Err(e) = state.take_latest() {
                 state.decode.done = true;

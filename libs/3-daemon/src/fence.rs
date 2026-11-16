@@ -35,6 +35,7 @@
 //! ```
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
@@ -158,6 +159,19 @@ struct Inner {
     /// Woken whenever any sink's position or the source's answer may have
     /// moved; every waiter re-checks.
     moved: Notify,
+    /// How many waits on `searchable` are open.
+    searchable_waits: AtomicUsize,
+}
+
+/// Counts one open wait on `searchable`, and wakes [`Fence::settled`] when it
+/// ends.
+struct SearchableWait<'a>(&'a Inner);
+
+impl Drop for SearchableWait<'_> {
+    fn drop(&mut self) {
+        self.0.searchable_waits.fetch_sub(1, Ordering::SeqCst);
+        self.0.moved.notify_waiters();
+    }
 }
 
 /// What one sink has reported, and the furthest source position each level
@@ -187,6 +201,7 @@ impl Fence {
                 .map(|sink| (sink, Mutex::new(Progress::default())))
                 .collect(),
             moved: Notify::new(),
+            searchable_waits: AtomicUsize::new(0),
         });
         // Weak: the source keeps its listeners for life, and must not keep the
         // fence (and through it, itself) alive.
@@ -296,6 +311,10 @@ impl Fence {
             None => self.inner.sinks.keys().collect(),
         };
         let deadline = Instant::now() + request.timeout;
+        let _counted = (request.level == FenceLevel::Searchable).then(|| {
+            self.inner.searchable_waits.fetch_add(1, Ordering::SeqCst);
+            SearchableWait(&self.inner)
+        });
         loop {
             // Registered before the check, so a move between the check and the
             // sleep still wakes this waiter.
@@ -315,6 +334,29 @@ impl Fence {
             if timeout_at(deadline, moved).await.is_err() {
                 return Ok(FenceOutcome::TimedOut { position });
             }
+        }
+    }
+
+    /// Resolves once no open wait on `searchable` could still be answered by
+    /// time alone: none is open, or every sink has reported searchable
+    /// everything it applied. A stop waits on it before ending the sink
+    /// engines, so a searchable waiter is answered on facts, not cut off,
+    /// while a stop nobody waits on doesn't sit out a refresh interval.
+    pub(crate) async fn settled(&self) {
+        loop {
+            let moved = self.inner.moved.notified();
+            tokio::pin!(moved);
+            moved.as_mut().enable();
+            if self.inner.searchable_waits.load(Ordering::SeqCst) == 0
+                || self
+                    .inner
+                    .sinks
+                    .values()
+                    .all(|progress| lock(progress).unsearchable.is_empty())
+            {
+                return;
+            }
+            moved.await;
         }
     }
 

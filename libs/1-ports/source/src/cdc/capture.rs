@@ -127,6 +127,17 @@ pub trait ChangeCapture: std::fmt::Debug + Send + Sync {
     /// the ingest engine calls it after every commit.
     fn confirm(&self, position: Position);
 
+    /// Ask the open live stream to end gracefully: hand the position last
+    /// [`confirm`](Self::confirm)ed to the source, then end the stream
+    /// without yielding another change. The caller polls the stream to its
+    /// end. `false` (the default) means this mechanism can't, and the caller
+    /// drops the stream instead, so the last confirm may not reach the source:
+    /// the next start then reads those changes again, which at-least-once
+    /// delivery allows.
+    fn close_live(&self) -> bool {
+        false
+    }
+
     /// Snapshot the current rows of `tables` as a finite stream of
     /// [`Upsert`](super::ChangeEvent::Upsert) events — the rows to seed an
     /// index with. The stream ends when the snapshot is complete; there is no
