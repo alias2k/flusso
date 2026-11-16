@@ -15,7 +15,7 @@
 //! | `root` | hash- and range-partitioned on the key, composite key, keyless, wide unread column, wide with a composite key, never analysed (see [`Shape`]); read them against `key/int`, the plain 1,000-row root |
 //!
 //! Every root has a `has_many` child keyed by the root's key type, two rows
-//! per root. Before measuring, each case is built once and checked: a case
+//! per root, ordered by `id`. Before measuring, each case is built once and checked: a case
 //! whose build returns another number of documents than its rows is skipped
 //! with a message, so an A/B comparison lists it on one side only.
 //!
@@ -27,6 +27,11 @@
 //! ```text
 //! cargo bench -p flusso-source-postgres --bench cases
 //! ```
+//!
+//! The `review` bench target includes this file as a module for its fixtures
+//! (`just review-digest`, `just review-plans`), so this file uses no more of
+//! the crate than the Criterion bench needs: `just review-ab` lays it over old
+//! bases too.
 
 #![allow(
     clippy::unwrap_used,
@@ -43,7 +48,7 @@ use std::time::Duration;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use kernel::{
     Column, ColumnName, DatabaseSchema, Field, FieldName, FieldSource, FlussoType, GenericValue,
-    IndexName, IndexSchema, Join, JoinKind, Relation, TableName,
+    IndexName, IndexSchema, Join, JoinKind, OrderBy, Relation, TableName,
 };
 use source::document::{Document, DocumentBuilder, DocumentId};
 use source::{RowKey, SourceSpec};
@@ -63,7 +68,7 @@ const HIT_PERCENTS: &[usize] = &[0, 50, 100];
 /// How a root key's text becomes a value, as `text_value::typed_value` does it
 /// for the WAL.
 #[derive(Clone, Copy)]
-enum KeyType {
+pub(crate) enum KeyType {
     Int,
     Uuid,
     Numeric,
@@ -72,7 +77,7 @@ enum KeyType {
 }
 
 impl KeyType {
-    fn value(self, text: &str) -> GenericValue {
+    pub(crate) fn value(self, text: &str) -> GenericValue {
         match self {
             Self::Int => GenericValue::Int(text.parse().unwrap()),
             Self::Uuid => GenericValue::Uuid(uuid::Uuid::parse_str(text).unwrap()),
@@ -87,7 +92,7 @@ impl KeyType {
 
 /// How a root table is laid out.
 #[derive(Clone, Copy, PartialEq)]
-enum Shape {
+pub(crate) enum Shape {
     Plain,
     HashPartitioned,
     RangePartitioned,
@@ -110,16 +115,16 @@ enum Shape {
 }
 
 /// One root table and the case it stands for.
-struct Root {
-    table: &'static str,
+pub(crate) struct Root {
+    pub(crate) table: &'static str,
     /// `key/<case>` or `root/<case>`; `None` for the `plain` root the `batch`
     /// and `hit_ratio` groups use.
-    case: Option<(&'static str, &'static str)>,
+    pub(crate) case: Option<(&'static str, &'static str)>,
     sql_type: &'static str,
-    key_type: KeyType,
+    pub(crate) key_type: KeyType,
     /// The `id` of row `g` of `generate_series(1, $1) g`.
     key_expr: &'static str,
-    shape: Shape,
+    pub(crate) shape: Shape,
     rows: i32,
 }
 
@@ -164,7 +169,7 @@ impl Root {
 
     /// The columns of the key a change carries: the primary key, or every
     /// column of a table without one.
-    fn wal_key(&self) -> &'static [&'static str] {
+    pub(crate) fn wal_key(&self) -> &'static [&'static str] {
         match self.shape {
             Shape::Composite | Shape::WideComposite => &["tenant", "id"],
             Shape::Keyless => &["id", "name"],
@@ -246,7 +251,7 @@ impl Root {
     }
 }
 
-fn roots() -> Vec<Root> {
+pub(crate) fn roots() -> Vec<Root> {
     use KeyType::{Float8, Int, Numeric, Text, Uuid};
     vec![
         Root {
@@ -290,7 +295,7 @@ fn roots() -> Vec<Root> {
     ]
 }
 
-fn runtime() -> Runtime {
+pub(crate) fn runtime() -> Runtime {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
@@ -313,7 +318,7 @@ async fn connect() -> (Option<test_postgres::Container>, String) {
     )
 }
 
-async fn seed(pool: &sqlx::PgPool, roots: &[Root]) {
+pub(crate) async fn seed(pool: &sqlx::PgPool, roots: &[Root]) {
     sqlx::query("CREATE EXTENSION IF NOT EXISTS citext")
         .execute(pool)
         .await
@@ -354,7 +359,7 @@ async fn seed(pool: &sqlx::PgPool, roots: &[Root]) {
 }
 
 /// Every root's change keys, in key order, as the WAL decoder would read them.
-async fn wal_keys(pool: &sqlx::PgPool, root: &Root) -> Vec<RowKey> {
+pub(crate) async fn wal_keys(pool: &sqlx::PgPool, root: &Root) -> Vec<RowKey> {
     let columns = root
         .wal_key()
         .iter()
@@ -395,7 +400,7 @@ fn missing_key(n: usize) -> RowKey {
     )])
 }
 
-async fn resolve(
+pub(crate) async fn resolve(
     builder: &PgDocumentBuilder,
     table: &str,
     keys: &[RowKey],
@@ -545,7 +550,7 @@ fn bench(c: &mut Criterion) {
 }
 
 /// One index per root: `id`, `name`, and the `items` it has many of.
-fn spec(roots: &[Root]) -> SourceSpec {
+pub(crate) fn spec(roots: &[Root]) -> SourceSpec {
     let indexes = roots
         .iter()
         .map(|root| {
@@ -561,7 +566,12 @@ fn spec(roots: &[Root]) -> SourceSpec {
                         foreign_key: column("parent"),
                     },
                     filters: None,
-                    order_by: None,
+                    // Ordered, so a plan change can't reorder a document's
+                    // array: `just review-digest` compares the documents.
+                    order_by: Some(vec![OrderBy {
+                        column: column("id"),
+                        direction: None,
+                    }]),
                     limit: None,
                     fields: vec![column_field("id"), column_field("label")],
                     indexed: true,
@@ -606,10 +616,10 @@ fn column_field(name: &str) -> Field {
 fn field(name: &str) -> FieldName {
     FieldName::try_new(name).unwrap()
 }
-fn column(name: &str) -> ColumnName {
+pub(crate) fn column(name: &str) -> ColumnName {
     ColumnName::try_new(name).unwrap()
 }
-fn table(name: &str) -> TableName {
+pub(crate) fn table(name: &str) -> TableName {
     TableName::try_new(name).unwrap()
 }
 

@@ -49,6 +49,8 @@ just bench main                    # same, saved as Criterion baseline `main`
 just bench-compare main pr         # fail past 10% slower (CI's first pass; CI then re-measures a breach)
 just bench-components              # the Docker-backed component benches
 just review-ab origin/main         # A/B the working tree against a base on those benches (see below)
+just review-digest                 # same documents as the base? (see below)
+just review-plans                  # same query plans as the base? (see below)
 just bench-scenario reference ci   # a scenario; also `complex`, and `default` scale
 just load                          # the soak tool: watch it, it produces no comparable number
 ```
@@ -82,6 +84,7 @@ just review-ab --clean-results                      # delete target/review-ab, t
 | `--no-pin` | | run unpinned; also `REVIEW_AB_PIN=0` |
 | `--clean` | | remove the cache, `~/.cache/flusso/review-ab`, and nothing else (results stay), then exit |
 | `--clean-results` | | remove `target/review-ab`, every earlier run's tables and Criterion output, then exit |
+| `--digest`, `--plans` | | instead of the benches, compare the built documents ([`just review-digest`](#same-documents-just-review-digest)) or the query plans ([`just review-plans`](#same-plans-just-review-plans)); a mode refuses `--bench`, `--rounds`, `--limit` and `--own-benches` |
 
 The first line names the base commit and its commit date. The command doesn't fetch, so `origin/main` is whatever was last fetched: run `git fetch` first when the latest `main` matters.
 
@@ -149,6 +152,80 @@ What it can't see on a busy machine: a change smaller than the 5% limit; a chang
 | `root` | hash- and range-partitioned on the key, composite key, keyless (`REPLICA IDENTITY FULL`), a wide row with a large unread column, the same with a composite key, a root and child never analysed (autovacuum off, never vacuumed) |
 
 Every root has a `has_many` child keyed by its key type. Read the key types and the root shapes against `key/int`, the plain `int` root of 1,000 rows, not against `batch/1000`, which reads 1,000 rows of the 10,000-row `plain` table. `batch/1` is bimodal: on byte-identical binaries it read +29.4% against a 28.6% spread, so it can't show a small change, only a large one such as a round trip added per call. The composite-key and keyless roots declare `primary_key: id`, which isn't the table's key; `flusso run` warns about it and starts, and that warned-but-running shape is what they measure. `cases` runs only from `just bench-components` and `just review-ab`: the `main` history doesn't record it.
+
+### Same documents: `just review-digest`
+
+Run it on any change to how documents are built (the source's queries, value decoding, the key forms): it answers "does the branch build the same documents as its base", which the timing table can't.
+
+```sh
+just review-digest                       # base origin/main, the tests' default Postgres
+just review-digest main --pg 14,18       # one table per version
+just review-digest --filter '^k_'        # only these indexes (a regex over the index name)
+```
+
+It's `review-ab.sh --digest`: the same lock, warm base build, stamp, provenance check, named containers and CPU pinning as `review-ab`, with the `review` bench target run once per side instead of Criterion. That target includes `cases.rs` for its roots and is laid over the base with it; only a review mode builds it, so `just review-ab` itself still builds any base it built before. What the harness needs from the crate is listed in its `// review-ab requires:` lines, and a base that lacks one is refused with its name: the modes need a base from #357 on (`PgDocumentBuilder::connect_with_max_connections`). On a fresh database per side it seeds the [review cases](#the-review-cases)' roots and, per root index, builds:
+
+| Form | What |
+| --- | --- |
+| `build` | 20 present ids and 2 missing ones, one at a time |
+| `build_many<16` | 10 present ids and 1 missing one: the array-constructor key form |
+| `build_many>=16` | every row and 5 missing ids: the array-parameter key form, chunked |
+| `backfill` | the root's snapshot, resolved, then built in batches of 256, as the ingest engine does |
+
+Each document is written as the sink would get it (`sink::to_json`, keys sorted), and the table has one row per index:
+
+```text
+| index | documents, base | documents, head | base | head | verdict |
+| --- | ---: | ---: | --- | --- | --- |
+| `k_int` | 2038 | 2038 | 5961c3bff63b | 5961c3bff63b | same |
+| `k_numeric` | 2038 | 2038 | 8c6ea84e14c8 | 83157eb20e83 | differ ⚠️, forms disagree on head ⚠️ |
+```
+
+- `same`: both sides wrote byte-identical documents, tombstones included.
+- `differ`: below the table, the first differing ids (with the form that built them) and a diff of one document.
+- `forms disagree`: on one side, two forms built different documents for the same id: `build` against `build_many`, say. It's flagged even when base and head agree, since the two forms must never differ.
+- `no documents`: neither side built a document for an index the harness declared.
+
+The digest covers the forms, not the history: a missing id is a tombstone in each form. Below the table, a note per index says what the harness left out: the composite-key and keyless roots get no missing ids (a change's key there is more than `id` and the harness makes up `id` alone, so the tombstone path of those roots is not compared) and no `backfill` rows (a snapshot skips a table without a single-column primary key, as `flusso run` does). Exit 0 when every index is `same`, 1 on a difference, 2 on a setup error.
+
+What it can't see: the `cases` schema is two `keyword` columns and one `has_many` child (`id`, `label`, ordered by `id`), so nothing about
+
+- other column types and their decoding (numbers, dates, `json`, arrays, `bytea`, …);
+- `belongs_to`, `has_one`, `many_to_many`, nested relations, `order_by` and `limit` beyond that one child;
+- filters, soft delete, aggregates, `via`, scripts;
+- live changes and their reverse resolution, and anything about time.
+
+And `sink::to_json` renders a `Decimal` value as its nearest `f64`, so a change to a decimal beyond float precision doesn't show in the digest.
+
+### Same plans: `just review-plans`
+
+Run it on any change to the SQL a document build sends. Two regressions of #336 only showed here: a batch under 10 keys planned again on every call, and partition pruning lost under a generic plan.
+
+```sh
+just review-plans                        # base origin/main, the tests' default Postgres
+just review-plans main --pg 14,16,18     # pg_stat_statements differs across versions
+just review-plans --filter '^root/'      # only these cases (a regex over the case)
+```
+
+It's `review-ab.sh --plans`. Postgres starts with `shared_preload_libraries = pg_stat_statements,auto_explain`, `pg_stat_statements.track_planning = on` and `auto_explain` logging every statement's plan as JSON. Per `plan_cache_mode` (`auto`, `force_generic_plan`, set on each side's fresh database), each side runs every case: each `cases` root at 1, 10 and 100 keys (`plain/1`, `key/uuid/10`, `root/hash_partitioned/100`, …), 20 calls of `build_many` over one connection, as a daemon's pool reuses its prepared statements.
+
+```text
+| case | statements | calls | plans | plans per call | root scan | partitions | flag |
+| --- | ---: | ---: | ---: | ---: | --- | --- | --- |
+| `key/int/1` | 1 | 20 | 6 → 21 | 0.00 → 1.00 | Index Scan using k_int_pkey | — | plans every call ⚠️ |
+| `root/range_partitioned/10` | 1 | 20 | 1 | 0.00 | Seq Scan | 2 of 4, 2 removed → 4 of 4 | pruning lost ⚠️ |
+```
+
+A cell reads `base → head` when the sides differ.
+
+- **statements, calls, plans**: from `pg_stat_statements`, summed over every statement naming the case's root. Summed, because Postgres 18 merges `ARRAY[…]` lists of different lengths into one entry. A composite-key or keyless root makes 10 calls per batch of 10: `build_many` builds those one at a time.
+- **plans per call**: over the second 10 calls, so the first 5 custom plans under `auto` don't count. 0.00 is a cached plan; 1.00 is a plan made on every call.
+- **root scan**: the first node of the case's last logged plan that scans the root (or one of its partitions), with its index.
+- **partitions**: for a partitioned root, the partitions left in that plan and `Subplans Removed` (pruning at run time, under a generic plan). A custom plan prunes while planning, so it shows fewer partitions and nothing removed.
+
+Flags, head against base: **plans every call** (≥ 0.5 plans per call on head, fewer on base), **root scan changed**, **pruning lost** (more partitions left on head, `Subplans Removed` read from the root's own Append), **no plan** (no logged plan of the case scans its root on a side, so nothing about its scan can be said), **one side only**. A server log with no plan at all for a side and `plan_cache_mode` is a setup error, naming both and the log, not a quiet pass. Planning on every call on both sides is shown, not flagged: under `auto`, the partitioned roots and some 10-key batches do that on `main`. Exit 0 when nothing is flagged, 1 on a flag, 2 on a setup error.
+
+What it can't see: the plan on other data sizes and statistics than the `cases` roots', statements other than the document build (resolution's lookups, the catalog reads, the backfill cursor), and the cost of planning: `review-ab` measures time.
 
 ## What CI does
 

@@ -74,6 +74,13 @@ harness = false
 name = "cases"
 harness = false
 
+# Not a benchmark: the review modes of `just review-ab` (`just review-digest`,
+# `just review-plans`) over the `cases` roots, which it includes as a module.
+# Runs only with REVIEW_AB_MODE set.
+[[bench]]
+name = "review"
+harness = false
+
 # In-process component bench: the pgoutput decoder over a recorded WAL fixture
 # (`benches/fixtures/pgoutput.bin`, re-recorded by `tests/record_pgoutput.rs`).
 # No Docker; this is a PR-gating bench. Needs `--features bench`.

@@ -231,6 +231,24 @@ bench-components:
 review-ab base="origin/main" *args:
     .github/scripts/review-ab.sh "$@"
 
+# Same documents? Base and head build the `cases` roots' documents (`build`,
+# `build_many` under 16 keys and 16+, a backfill); one row per index: a digest
+# per side, same or differ, and a diff of a differing document. Exit 1 on a
+# difference. Same warm build, lock and containers as review-ab.
+# E.g. `just review-digest`, `just review-digest main --pg 14,18 --filter '^k_'`.
+[positional-arguments]
+review-digest base="origin/main" *args:
+    .github/scripts/review-ab.sh --digest "$@"
+
+# Same plans? Base and head run the `cases` roots at 1, 10 and 100 keys against
+# a Postgres with pg_stat_statements and auto_explain, under plan_cache_mode
+# auto and force_generic_plan; flags a plan made on every call, a changed root
+# scan, lost partition pruning. Exit 1 on a flag.
+# E.g. `just review-plans`, `just review-plans main --pg 14,16,18 --filter '^root/'`.
+[positional-arguments]
+review-plans base="origin/main" *args:
+    .github/scripts/review-ab.sh --plans "$@"
+
 # A scenario on the real binary: `just bench-scenario [reference|complex] [ci|default]`.
 # Starts its own Postgres + OpenSearch containers (or uses BENCH_PG_URL /
 # BENCH_OS_URL), builds a release flusso, writes target/bench/<scenario>-<scale>/.
