@@ -289,11 +289,12 @@ build "$head_tree" "$head_target" "$out/build-head.log"
 for target in "$base_target" "$head_target"; do
   awk -F'\t' -v want=" ${selected[*]} " 'index(want, " " $1 " ")' \
     "$target/bench-executables/review.tsv" >"$target/bench-executables/review-run.tsv"
+  { [ ! -f "$target/bench-executables/review.identity.tsv" ] || cat "$target/bench-executables/review.identity.tsv"; } |
+    awk -F'\t' -v want=" ${selected[*]} " 'index(want, " " $1 " ")' >"$target/bench-executables/review-run.identity.tsv"
 done
 python3 "$scripts/bench-provenance.py" "$base_target" "$head_target" review-run review-run
 aa=
-if cmp -s <(cut -f1,3 "$base_target/bench-executables/review-run.tsv") \
-  <(cut -f1,3 "$head_target/bench-executables/review-run.tsv"); then
+if python3 "$scripts/bench_identity.py" every "$base_target" "$head_target" review-run review-run; then
   aa="The base and head bench binaries are byte-identical: every difference below is noise."
   echo "$aa"
 fi

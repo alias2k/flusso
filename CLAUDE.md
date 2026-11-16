@@ -112,11 +112,18 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   API, no feature; `bench-in-process.sh` skips a bench a PR base predates). `pgoutput`, `resolve` and `render` sit behind each
   crate's `bench` cargo feature (like `fuzzing`), so CI's `cargo check --all-targets` passes
   `--features flusso-source-postgres/bench,flusso-sink-opensearch/bench`. `.github/workflows/bench.yml`:
-  on a PR, `in-process` runs the in-process benches on the base (its own worktree **and its own
+  on a PR, `in-process` builds the in-process benches on the base (its own worktree **and its own
   target dir**: a shared one makes cargo run the base's binary for the PR, since a workspace member's
-  fingerprint is keyed by its path inside the workspace) then the PR, same runner, both into one
-  `CRITERION_HOME`; `bench-provenance.py` checks each side ran executables from its own target dir; a
-  base with no in-process bench (exit 78) only warns, any other base failure fails. `bench-gate.sh`
+  fingerprint is keyed by its path inside the workspace) and the PR, then runs the base then the PR,
+  same runner, both into one `CRITERION_HOME`; `bench-provenance.py` checks each side's recorded
+  executables come from its own target dir; a base with no in-process bench (exit 78) only warns, any
+  other base failure fails. A bench **identical on both sides** (issue #346; `bench_identity.py` is the
+  one home: same executable sha256 and same run-time inputs declared in `.github/scripts/bench-inputs.tsv`,
+  hashed into `<baseline>.identity.tsv`; ids tied to their executable by `--list` in `<baseline>.ids.tsv`)
+  is not run (`BENCH_SKIP_SAME_AS`) and gets no verdict ("identical binaries, not compared"); all
+  identical passes; an id no executable lists is compared; `test_bench_gate.py` scans the bench sources
+  for undeclared run-time reads and pins the differing-binary output to `fixtures/gate-golden/`
+  (`origin/main`'s, before #346). `bench-gate.sh`
   re-measures each bench past 10% slower (`bench-compare.py`) on its own, base then PR (`--exact`), and
   a breach is confirmed when the re-run or the mean of both passes is past 10%, cleared only when both
   are within it; on a `main` push, `scenarios` runs everything and stores the

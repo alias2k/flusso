@@ -213,7 +213,8 @@ class Gate(unittest.TestCase):
         self.bench("pr", "pr", FLUSSO_BENCH_KNOB="2")
         result = self.gate()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertNotIn("identical binaries", result.stdout)
+        self.assertEqual(self.row(result.stdout, "live_drain/sinks1/64")[3], "+0.0%")
+        self.assertEqual(self.row(result.stdout, "scripted/flat")[3], "identical binaries, not compared")
 
     def test_differing_binaries_are_gated_as_before(self) -> None:
         self.env["FAKE_DIFFER"] = "engine,pgoutput,resolve,render,scripted"

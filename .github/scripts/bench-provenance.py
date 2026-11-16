@@ -12,6 +12,9 @@ Reads the executables bench-in-process.sh recorded in
 - both sides ran the same bench targets (one only the PR has, such as a bench
   added by the PR, is reported, not failed).
 
+"Ran" means recorded: a bench identical on both sides is built and recorded
+but not run (bench-in-process.sh's BENCH_SKIP_SAME_AS), and is checked the same.
+
 With --same-as, the run being checked is a re-measurement: every executable
 must also have the same sha256 as that side's first pass, so a re-run measures
 exactly the binary the first pass did.
