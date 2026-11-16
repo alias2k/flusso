@@ -64,8 +64,10 @@ class Problem(unittest.TestCase):
     def test_a_runtime_seed_beside_it_passes(self) -> None:
         self.assertIsNone(guard.problem(guard.features_in(GOOD)))
 
-    def test_no_seed_feature_at_all_passes(self) -> None:
-        self.assertIsNone(guard.problem({"std"}))
+    def test_no_runtime_seed_is_refused_even_without_the_compile_time_one(self) -> None:
+        message = guard.problem({"std"})
+        self.assertIsNotNone(message)
+        self.assertIn("runtime-rng", message)
 
 
 class EndToEnd(unittest.TestCase):
@@ -124,10 +126,11 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("no ahash feature read", result.stderr)
 
-    def test_a_binary_without_ahash_passes(self) -> None:
+    def test_a_binary_without_ahash_never_passes(self) -> None:
         missing = "error: package ID specification `ahash` did not match any packages\n"
         result = self.run_guard(missing, status=101)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("update this guard", result.stderr)
 
     def test_any_other_cargo_failure_fails_and_shows_cargo_s_error(self) -> None:
         result = self.run_guard("error: failed to load manifest\n", status=101)
