@@ -18,6 +18,7 @@ use sqlx::{PgPool, Row};
 use tokio::sync::OnceCell;
 
 use super::ack::{Listeners, Positions};
+use super::visibility::{PgVisibility, names_standby, standby_refusal};
 use super::{backfill, publication, replica_identity, stream};
 use crate::ColumnTypes;
 
@@ -30,6 +31,10 @@ const STATUS_INTERVAL: Duration = Duration::from_secs(1);
 /// The replication connection's `application_name`, shown in
 /// `pg_stat_replication` and `pg_stat_activity`, unless the caller set one.
 const APPLICATION_NAME: &str = "flusso";
+
+/// How many changes the stream reads ahead while a transaction is held, unless
+/// the caller set it: sixteen of the engine's default batches.
+const READ_AHEAD: usize = 256 * 16;
 
 /// Postgres change capture over logical replication (pgoutput).
 ///
@@ -49,6 +54,11 @@ const APPLICATION_NAME: &str = "flusso";
 /// - [`snapshot`](ChangeCapture::snapshot) reads current rows over an ordinary
 ///   SQL connection for an initial backfill (see the crate-private `backfill`). The engine calls
 ///   it only for tables backing an index the sink reports as unseeded.
+///
+/// A change is yielded only once its transaction is visible to a new snapshot
+/// (issue #343, ADR 0010): the stream holds a committed transaction, and every
+/// one after it, until then. [`readable_wait`](ChangeCapture::readable_wait)
+/// reports how long it has held one.
 ///
 /// # Prerequisites
 ///
@@ -94,6 +104,11 @@ pub struct WalChangeCapture {
     /// Set by [`prepare`](ChangeCapture::prepare) once it has ensured coverage,
     /// taken by the next [`live`](ChangeCapture::live) so it doesn't repeat it.
     coverage_ensured: Arc<AtomicBool>,
+    /// How many changes a stream reads ahead while a transaction is held; set
+    /// via [`with_read_ahead`](Self::with_read_ahead).
+    read_ahead: usize,
+    /// Since when the open stream has held its oldest transaction.
+    hold_clock: stream::HoldClock,
     /// The document builder's column types, dropped per table as each
     /// stream reads its `Relation`; set via
     /// [`with_column_types`](Self::with_column_types).
@@ -136,8 +151,79 @@ impl WalChangeCapture {
             positions: Arc::new(Mutex::new(None)),
             listeners: Arc::new(Listeners::default()),
             coverage_ensured: Arc::new(AtomicBool::new(false)),
+            read_ahead: READ_AHEAD,
+            hold_clock: Arc::default(),
             column_types: None,
         }
+    }
+
+    /// How many changes a stream reads ahead while it holds a transaction that
+    /// is not visible yet: typically sixteen batches (`max_changes × 16`).
+    /// Reading ahead lets one snapshot query cover every transaction read so
+    /// far; the bound keeps a long hold from buffering without limit.
+    pub fn with_read_ahead(mut self, changes: usize) -> Self {
+        self.read_ahead = changes.max(1);
+        self
+    }
+
+    /// Refuse a server flusso cannot read from safely: a standby (the check
+    /// and every read must reach the primary the stream reads, issue #343), or
+    /// one whose `synchronous_standby_names` lists flusso's `application_name`
+    /// (every commit would wait on flusso while flusso waits for the commit to
+    /// become visible). Run before anything writes, and again by every
+    /// [`live`](ChangeCapture::live).
+    pub async fn check_server(&self) -> Result<()> {
+        let (in_recovery, names): (bool, String) = sqlx::query_as(
+            "SELECT pg_is_in_recovery(), current_setting('synchronous_standby_names')",
+        )
+        .fetch_one(self.admin_pool().await?)
+        .await
+        .map_err(|e| SourceError::Query(format!("checking the source server: {e}")))?;
+        self.judge_server(in_recovery, &names)
+    }
+
+    fn judge_server(&self, in_recovery: bool, names: &str) -> Result<()> {
+        if in_recovery {
+            return Err(SourceError::Setup(
+                "the source is a standby (pg_is_in_recovery() is true): flusso must read the \
+                 primary, where a transaction's visibility is decided. Point the connection URL \
+                 at the primary directly, not through anything that routes reads to replicas"
+                    .to_owned(),
+            ));
+        }
+        let application_name = self.application_name();
+        if names_standby(names, application_name) {
+            return Err(standby_refusal(application_name, names));
+        }
+        Ok(())
+    }
+
+    /// [`check_server`](Self::check_server) on the replication session itself,
+    /// before it starts: the stream must read the same primary the checks do.
+    async fn check_replication_session(&self, client: &mut ReplicationClient) -> Result<()> {
+        let rows = client
+            .simple_query(
+                "SELECT pg_is_in_recovery()::text, current_setting('synchronous_standby_names')",
+            )
+            .await
+            .map_err(|e| {
+                SourceError::Connection(format!("checking the replication session's server: {e}"))
+            })?;
+        let text = |column: usize| {
+            rows.first()
+                .and_then(|row| row.get(column))
+                .and_then(Option::as_ref)
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+        };
+        let in_recovery = text(0).as_deref() == Some("true");
+        self.judge_server(in_recovery, &text(1).unwrap_or_default())
+    }
+
+    fn application_name(&self) -> &str {
+        self.config
+            .application_name
+            .as_deref()
+            .unwrap_or(APPLICATION_NAME)
     }
 
     /// Hand over the document builder's column types
@@ -312,6 +398,7 @@ impl ChangeCapture for WalChangeCapture {
 
     #[tracing::instrument(name = "wal.prepare", skip_all, err)]
     async fn prepare(&self) -> Result<()> {
+        self.check_server().await?;
         // Before the slot: a change logged after the slot exists but before the
         // ALTERs would decode with the old identity, or against the old
         // publication (a missing table, a partition's name), and be lost.
@@ -333,6 +420,7 @@ impl ChangeCapture for WalChangeCapture {
                 .await?;
         }
         self.ensure_slot().await?;
+        self.check_server().await?;
 
         let catalog = self.admin_pool().await?.clone();
         let mut client = ReplicationClient::connect_gated(self.config.clone())
@@ -346,6 +434,7 @@ impl ChangeCapture for WalChangeCapture {
                 ))
             })?;
         }
+        self.check_replication_session(&mut client).await?;
         client
             .start()
             .await
@@ -365,13 +454,34 @@ impl ChangeCapture for WalChangeCapture {
         *slot = Some(Arc::clone(&positions));
         drop(slot);
         tracing::info!(start_lsn, "opened replication stream");
+        let visibility = PgVisibility {
+            pool: catalog.clone(),
+            application_name: self.application_name().to_owned(),
+            slot: self.config.slot.clone(),
+        };
+        let read_tables = (!self.required_tables.is_empty()).then(|| {
+            self.required_tables
+                .iter()
+                .map(|table| table.table.clone())
+                .collect()
+        });
         Ok(stream::build(
             client,
             catalog,
-            self.pre_image_columns.clone(),
+            visibility,
+            stream::Settings {
+                pre_image_links: self.pre_image_columns.clone(),
+                read_tables,
+                read_ahead: self.read_ahead,
+                hold_clock: Arc::clone(&self.hold_clock),
+            },
             positions,
             self.column_types.clone(),
         ))
+    }
+
+    fn readable_wait(&self) -> Option<Duration> {
+        stream::held_for(&self.hold_clock)
     }
 
     fn confirm(&self, position: Position) {

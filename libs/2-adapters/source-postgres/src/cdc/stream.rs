@@ -15,27 +15,74 @@
 //! its primary key, not by the replica-identity columns pgoutput flags (all of
 //! them, under `REPLICA IDENTITY FULL`). See [`pgoutput`].
 //!
+//! A committed transaction is emitted only once it can be read back (issue
+//! #343): Postgres flushes a commit record before new snapshots see the
+//! transaction, so the stream holds it in `pending` until a snapshot includes
+//! its xid ([`super::visibility`]). Holding it there is what keeps it out of
+//! every confirmation and fence: nothing in `pending` is registered, and the
+//! horizon never moves past buffered changes. While the oldest transaction is
+//! held the stream reads on, up to its read-ahead bound, and checks every
+//! transaction read so far with one snapshot query; a transaction that touches
+//! no table an index reads needs no check. Commit order is kept: one held
+//! transaction holds back every later one.
+//!
 //! The loop also hands the confirmed position to the replication client: on
-//! every turn, and the moment a confirmation moves it, without waiting for the
-//! next replication event. The client reports it to the server within its
-//! status interval, so the slot releases WAL seconds after the sinks land it.
+//! every turn, during a hold too, and the moment a confirmation moves it,
+//! without waiting for the next replication event. The client reports it to
+//! the server within its status interval, so the slot releases WAL seconds
+//! after the sinks land it.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
+use futures::FutureExt as _;
 use futures::stream::{self, BoxStream};
-use kernel::ColumnName;
-use kernel::Position;
+use kernel::{ColumnName, Position, TableName};
 use pgwire_replication::{Lsn, PgWireError, ReplicationClient, ReplicationEvent};
 use source::cdc::{ChangeEvent, LiveChange};
 use source::{PreImageColumns, QualifiedTable, Result, RowKey, SourceError};
 use sqlx::PgPool;
+use tokio::time::Instant;
 
 use super::ack::Positions;
 use super::pgoutput::{self, Decoded, Relation};
 use super::replica_identity;
+use super::visibility::{Visibility, poll_delay};
 use crate::ColumnTypes;
+
+/// How long a transaction may stay held before the stream warns about it, and
+/// checks whether the server made flusso a synchronous standby.
+const STALL_WARNING: Duration = Duration::from_secs(5);
+
+/// How often the warning repeats while the hold lasts.
+const STALL_REPEAT: Duration = Duration::from_secs(60);
+
+/// Since when the oldest committed transaction has waited to become visible,
+/// shared with the capture, which reports it.
+pub(crate) type HoldClock = Arc<Mutex<Option<Instant>>>;
+
+/// How long the hold `clock` records has lasted; `None` when nothing waits.
+pub(crate) fn held_for(clock: &HoldClock) -> Option<Duration> {
+    clock
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .map(|since| since.elapsed())
+}
+
+/// What the stream needs besides the connections.
+pub(crate) struct Settings {
+    /// Per table, the columns resolution needs from a pre-image.
+    pub(crate) pre_image_links: PreImageColumns,
+    /// The tables an index reads, by name as resolution matches them; a
+    /// transaction touching none needs no visibility check. `None`: every table.
+    pub(crate) read_tables: Option<HashSet<TableName>>,
+    /// How many changes the stream reads ahead while a transaction is held.
+    pub(crate) read_ahead: usize,
+    /// Where the stream records how long it has been holding.
+    pub(crate) hold_clock: HoldClock,
+}
 
 /// What the stream needs from the replication connection: its events, and a
 /// place to report the confirmed position. A seam so tests can stand in for
@@ -66,11 +113,33 @@ impl Replication for ReplicationClient {
 }
 
 /// Everything the unfold loop carries between polls.
-struct State<C> {
+struct State<C, V> {
     client: C,
     /// Catalog connection for the per-relation primary-key lookup.
     catalog: PgPool,
+    visibility: V,
     decode: DecodeState,
+    read_ahead: usize,
+    hold: Option<Hold>,
+    hold_clock: HoldClock,
+}
+
+/// The oldest transaction in `pending`, found not visible yet.
+#[derive(Debug, Clone, Copy)]
+struct Hold {
+    xid: u32,
+    since: Instant,
+    delay: Duration,
+    next_poll: Instant,
+    warn_at: Instant,
+}
+
+/// One change of a committed transaction, waiting to be emitted.
+struct Pending {
+    event: ChangeEvent,
+    /// The commit LSN to acknowledge at.
+    lsn: u64,
+    xid: u32,
 }
 
 /// The buffering/progress state [`handle`] folds replication events into —
@@ -93,8 +162,16 @@ struct DecodeState {
     warned_unkeyed: HashSet<(u32, Unkeyed)>,
     /// Row changes of the currently open transaction, awaiting its `Commit`.
     open_txn: Vec<ChangeEvent>,
-    /// Changes ready to emit, each with the commit LSN to acknowledge at.
-    pending: VecDeque<(ChangeEvent, u64)>,
+    /// The open transaction's xid, from its `Begin`.
+    open_xid: u32,
+    /// Changes of committed transactions, in commit order. Only the front is
+    /// emitted, and only once its transaction is in `readable`.
+    pending: VecDeque<Pending>,
+    /// The xids in `pending` that may be read back: visible to a snapshot, or
+    /// touching no table an index reads. Dropped once emitted.
+    readable: HashSet<u32>,
+    /// See [`Settings::read_tables`].
+    read_tables: Option<HashSet<TableName>>,
     ack: Arc<Positions>,
     /// Set once the underlying stream is finished; drains `pending`, then ends.
     done: bool,
@@ -107,13 +184,35 @@ impl DecodeState {
     /// Take the next change ready to emit and register its position. Emitting
     /// the last change of a commit also moves the horizon to that commit: from
     /// here on, everything read through it is registered.
+    /// A held front transaction emits nothing.
     fn next_change(&mut self) -> Option<LiveChange> {
-        let (event, lsn) = self.pending.pop_front()?;
+        if !self.readable.contains(&self.pending.front()?.xid) {
+            return None;
+        }
+        let Pending { event, lsn, xid } = self.pending.pop_front()?;
         let seq = self.ack.register(lsn);
-        if self.pending.front().is_none_or(|(_, next)| *next != lsn) {
+        if self.pending.front().is_none_or(|next| next.lsn != lsn) {
             self.ack.read_through(lsn);
+            self.readable.remove(&xid);
         }
         Some((Position(seq), event))
+    }
+
+    /// The xid of the front transaction while it may not be read back yet.
+    fn held(&self) -> Option<u32> {
+        self.pending
+            .front()
+            .map(|front| front.xid)
+            .filter(|xid| !self.readable.contains(xid))
+    }
+
+    /// Mark readable every transaction in `pending` that `snapshot` sees.
+    fn seen_by(&mut self, snapshot: &super::visibility::Snapshot) {
+        for change in &self.pending {
+            if !self.readable.contains(&change.xid) && snapshot.sees(change.xid) {
+                self.readable.insert(change.xid);
+            }
+        }
     }
 }
 
@@ -128,31 +227,45 @@ impl DecodeState {
 /// move the bookkeeping's horizon ([`Positions::read_through`]), so the slot
 /// keeps advancing, the server can recycle WAL generated by unrelated traffic,
 /// and a fence on a position past the last watched commit still passes.
-pub(crate) fn build<C: Replication>(
+pub(crate) fn build<C: Replication, V: Visibility>(
     client: C,
     catalog: PgPool,
-    pre_image_links: PreImageColumns,
+    visibility: V,
+    settings: Settings,
     ack: Arc<Positions>,
     column_types: Option<ColumnTypes>,
 ) -> BoxStream<'static, Result<LiveChange>> {
     let state = State {
         client,
         catalog,
+        visibility,
         decode: DecodeState {
             relations: HashMap::new(),
             unkeyed: Vec::new(),
-            pre_image_links,
+            pre_image_links: settings.pre_image_links,
             untraceable: HashMap::new(),
             warned: HashSet::new(),
             warned_unkeyed: HashSet::new(),
             open_txn: Vec::new(),
+            open_xid: 0,
             pending: VecDeque::new(),
+            readable: HashSet::new(),
+            read_tables: settings.read_tables,
             ack,
             done: false,
             column_types,
         },
+        read_ahead: settings.read_ahead.max(1),
+        hold: None,
+        hold_clock: settings.hold_clock,
     };
+    into_stream(state)
+}
 
+/// The unfold loop over `state`.
+fn into_stream<C: Replication, V: Visibility>(
+    state: State<C, V>,
+) -> BoxStream<'static, Result<LiveChange>> {
     Box::pin(stream::unfold(state, |mut state| async move {
         loop {
             // Report how far the engine has durably confirmed so the slot can
@@ -163,46 +276,188 @@ pub(crate) fn build<C: Replication>(
                 .update_applied_lsn(Lsn::from_u64(state.decode.ack.confirmed_lsn()));
 
             if let Some(change) = state.decode.next_change() {
+                if state
+                    .hold
+                    .is_some_and(|hold| state.decode.held() != Some(hold.xid))
+                {
+                    state.end_hold();
+                }
                 return Some((Ok(change), state));
             }
 
-            if state.decode.done {
-                return None;
+            let Some(xid) = state.decode.held() else {
+                state.end_hold();
+                if state.decode.done {
+                    return None;
+                }
+                // A confirmation moving the resume point turns the loop at
+                // once, so the client hears it now rather than at the next
+                // event (a keepalive can be 30 s away on a quiet stream).
+                // Dropping `recv` loses nothing while the worker runs: it is a
+                // channel receive. The one unsafe moment is after the channel
+                // closed, when `recv` awaits the worker's `JoinHandle`: if a
+                // wake-up wins then, the handle is dropped, and the next turn
+                // reports a generic "replication worker already joined" error
+                // instead of the worker's own outcome. The engine restarts the
+                // stream either way.
+                let received = tokio::select! {
+                    biased;
+                    received = state.client.recv() => received,
+                    () = state.decode.ack.confirmed_moved() => continue,
+                };
+                if let Err(e) = state.receive(received).await {
+                    return Some((Err(e), state));
+                }
+                continue;
+            };
+
+            if state.poll_due(xid) {
+                let checked = match state.read_ready().await {
+                    Ok(()) => state.check(xid).await,
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = checked {
+                    state.decode.done = true;
+                    return Some((Err(e), state));
+                }
+                continue;
             }
 
-            // A confirmation moving the resume point turns the loop at once,
-            // so the client hears it now rather than at the next event (a
-            // keepalive can be 30 s away on a quiet stream). Dropping `recv`
-            // loses nothing while the worker runs: it is a channel receive.
-            // The one unsafe moment is after the channel closed, when `recv`
-            // awaits the worker's `JoinHandle`: if a wake-up wins then, the
-            // handle is dropped, and the next turn reports a generic
-            // "replication worker already joined" error instead of the
-            // worker's own outcome. The engine restarts the stream either way.
-            let received = tokio::select! {
+            // Held: confirmations keep flowing, the stream reads on up to its
+            // bound, and the next check waits for its time.
+            let next_poll = state.hold.map_or_else(Instant::now, |hold| hold.next_poll);
+            let room = !state.decode.done && state.decode.pending.len() < state.read_ahead;
+            tokio::select! {
                 biased;
-                received = state.client.recv() => received,
-                () = state.decode.ack.confirmed_moved() => continue,
-            };
-            match received {
-                Ok(Some(event)) => {
-                    let handled = match handle(&mut state.decode, event) {
-                        Ok(()) => key_relations(&state.catalog, &mut state.decode).await,
-                        Err(e) => Err(e),
-                    };
-                    if let Err(e) = handled {
-                        state.decode.done = true;
+                () = state.decode.ack.confirmed_moved() => {}
+                received = state.client.recv(), if room => {
+                    if let Err(e) = state.receive(received).await {
                         return Some((Err(e), state));
                     }
                 }
-                Ok(None) => state.decode.done = true,
-                Err(e) => {
-                    state.decode.done = true;
-                    return Some((Err(map_pgwire(e)), state));
-                }
+                () = tokio::time::sleep_until(next_poll) => {}
             }
         }
     }))
+}
+
+impl<C: Replication, V: Visibility> State<C, V> {
+    /// Fold one received event in; an error ends the stream.
+    async fn receive(
+        &mut self,
+        received: std::result::Result<Option<ReplicationEvent>, PgWireError>,
+    ) -> std::result::Result<(), SourceError> {
+        let handled = match received {
+            Ok(Some(event)) => match handle(&mut self.decode, event) {
+                Ok(()) => key_relations(&self.catalog, &mut self.decode).await,
+                Err(e) => Err(e),
+            },
+            Ok(None) => {
+                self.decode.done = true;
+                Ok(())
+            }
+            Err(e) => Err(map_pgwire(e)),
+        };
+        if handled.is_err() {
+            self.decode.done = true;
+        }
+        handled
+    }
+
+    /// Take in every event the client already holds, up to the read-ahead
+    /// bound, so one check covers every transaction read so far.
+    async fn read_ready(&mut self) -> std::result::Result<(), SourceError> {
+        while !self.decode.done && self.decode.pending.len() < self.read_ahead {
+            let Some(received) = self.client.recv().now_or_never() else {
+                return Ok(());
+            };
+            self.receive(received).await?;
+        }
+        Ok(())
+    }
+
+    /// Whether the held front transaction `xid` is due a check: a new one is
+    /// checked at once, a waiting one on its schedule.
+    fn poll_due(&self, xid: u32) -> bool {
+        self.hold
+            .is_none_or(|hold| hold.xid != xid || Instant::now() >= hold.next_poll)
+    }
+
+    /// Read a snapshot, mark what it sees readable, and, while `xid` is still
+    /// not visible, schedule the next check and report a long wait.
+    async fn check(&mut self, xid: u32) -> std::result::Result<(), SourceError> {
+        let snapshot = self.visibility.snapshot().await?;
+        self.decode.seen_by(&snapshot);
+        if self.decode.held() != Some(xid) {
+            return Ok(());
+        }
+        let now = Instant::now();
+        let hold = match self.hold {
+            Some(hold) if hold.xid == xid => {
+                let delay = poll_delay(now - hold.since, hold.delay);
+                Hold {
+                    delay,
+                    next_poll: now + delay,
+                    ..hold
+                }
+            }
+            _ => {
+                let delay = poll_delay(Duration::ZERO, Duration::ZERO);
+                *self
+                    .hold_clock
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(now);
+                Hold {
+                    xid,
+                    since: now,
+                    delay,
+                    next_poll: now + delay,
+                    warn_at: now + STALL_WARNING,
+                }
+            }
+        };
+        self.hold = Some(hold);
+        if now >= hold.warn_at {
+            self.report_stall(hold).await?;
+        }
+        Ok(())
+    }
+
+    /// A transaction held past [`STALL_WARNING`]: stop if the server now waits
+    /// on flusso as a synchronous standby, else warn and name the sessions
+    /// waiting on synchronous replication.
+    async fn report_stall(&mut self, hold: Hold) -> std::result::Result<(), SourceError> {
+        let stall = self.visibility.stall(hold.xid).await?;
+        if let Some(refusal) = stall.refusal {
+            return Err(refusal);
+        }
+        let waiting = if stall.waiting.is_empty() {
+            "none this role can see (pg_read_all_stats shows every session)".to_owned()
+        } else {
+            stall.waiting.join("; ")
+        };
+        tracing::warn!(
+            xid = hold.xid,
+            waited_seconds = hold.since.elapsed().as_secs(),
+            sessions_waiting_on_synchronous_replication = %waiting,
+            "a committed transaction is not visible yet: flusso waits for it, and every commit \
+             after it waits too. Postgres keeps a commit invisible while it waits for a \
+             synchronous standby; check the standby and the sessions listed"
+        );
+        if let Some(current) = self.hold.as_mut() {
+            current.warn_at = Instant::now() + STALL_REPEAT;
+        }
+        Ok(())
+    }
+
+    fn end_hold(&mut self) {
+        if self.hold.take().is_some() {
+            *self
+                .hold_clock
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = None;
+        }
+    }
 }
 
 /// Look up the catalog primary key of every relation announced since the last
@@ -301,7 +556,10 @@ fn handle(
         // Logical messages are not changes.
         ReplicationEvent::Message { .. } => {}
 
-        ReplicationEvent::Begin { .. } => state.open_txn.clear(),
+        ReplicationEvent::Begin { xid, .. } => {
+            state.open_txn.clear();
+            state.open_xid = xid;
+        }
 
         ReplicationEvent::Commit { end_lsn, .. } => {
             let lsn = end_lsn.as_u64();
@@ -313,8 +571,18 @@ fn handle(
                     state.ack.read_through(lsn);
                 }
             } else {
-                for change in state.open_txn.drain(..) {
-                    state.pending.push_back((change, lsn));
+                let xid = state.open_xid;
+                let read = state.read_tables.as_ref().is_none_or(|read| {
+                    state
+                        .open_txn
+                        .iter()
+                        .any(|change| read.contains(change.table()))
+                });
+                if !read {
+                    state.readable.insert(xid);
+                }
+                for event in state.open_txn.drain(..) {
+                    state.pending.push_back(Pending { event, lsn, xid });
                 }
             }
         }

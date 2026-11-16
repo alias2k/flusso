@@ -15,7 +15,10 @@ fn state() -> (DecodeState, Arc<Positions>) {
         warned: HashSet::new(),
         warned_unkeyed: HashSet::new(),
         open_txn: Vec::new(),
+        open_xid: 0,
         pending: VecDeque::new(),
+        readable: HashSet::new(),
+        read_tables: Some(HashSet::new()),
         ack: Arc::clone(&ack),
         done: false,
         column_types: None,
@@ -66,7 +69,11 @@ fn keepalive_is_ignored_while_a_transaction_is_open() {
 #[test]
 fn keepalive_is_ignored_while_changes_await_emission() {
     let (mut decode, ack) = state();
-    decode.pending.push_back((upsert(), 50));
+    decode.pending.push_back(Pending {
+        event: upsert(),
+        lsn: 50,
+        xid: 1,
+    });
     handle(&mut decode, keepalive(100)).unwrap();
     assert_eq!(ack.confirmed_lsn(), 0);
 }
@@ -107,8 +114,10 @@ fn emitting_the_last_change_of_a_commit_moves_the_horizon() {
 #[test]
 fn a_commit_behind_another_keeps_the_horizon_at_the_emitted_one() {
     let (mut decode, ack) = state();
+    handle(&mut decode, begin(1)).unwrap();
     decode.open_txn.push(upsert());
     handle(&mut decode, commit(100)).unwrap();
+    handle(&mut decode, begin(2)).unwrap();
     decode.open_txn.push(upsert());
     handle(&mut decode, commit(200)).unwrap();
 
@@ -130,7 +139,11 @@ fn empty_commit_advances_the_watermark() {
 #[test]
 fn empty_commit_is_ignored_while_changes_await_emission() {
     let (mut decode, ack) = state();
-    decode.pending.push_back((upsert(), 50));
+    decode.pending.push_back(Pending {
+        event: upsert(),
+        lsn: 50,
+        xid: 1,
+    });
     handle(&mut decode, commit(100)).unwrap();
     assert_eq!(ack.confirmed_lsn(), 0);
 }
@@ -141,7 +154,7 @@ fn non_empty_commit_queues_changes_without_advancing() {
     decode.open_txn.push(upsert());
     handle(&mut decode, commit(100)).unwrap();
     assert_eq!(decode.pending.len(), 1);
-    assert_eq!(decode.pending.front().map(|(_, lsn)| *lsn), Some(100));
+    assert_eq!(decode.pending.front().map(|change| change.lsn), Some(100));
     assert_eq!(
         ack.confirmed_lsn(),
         0,
@@ -548,7 +561,7 @@ fn a_commit_of_only_unaddressable_deletes_is_emitted_at_its_position() {
     handle_xlog(&mut decode, &old_tuple_without_the_key(b'D', b'K', "1")).unwrap();
     handle(&mut decode, commit(100)).unwrap();
     assert_eq!(decode.pending.len(), 1);
-    assert_eq!(decode.pending.front().map(|(_, lsn)| *lsn), Some(100));
+    assert_eq!(decode.pending.front().map(|change| change.lsn), Some(100));
     assert_eq!(ack.confirmed_lsn(), 0, "the engine's confirm moves it");
 }
 
@@ -664,7 +677,19 @@ async fn a_confirmation_reaches_the_client_without_a_replication_event() {
     let catalog = sqlx::postgres::PgPoolOptions::new()
         .connect_lazy("postgres://unused@127.0.0.1/unused")
         .unwrap();
-    let mut stream = build(client, catalog, Default::default(), Arc::clone(&ack), None);
+    let mut stream = build(
+        client,
+        catalog,
+        Snapshots::seeing(&[]),
+        Settings {
+            pre_image_links: Default::default(),
+            read_tables: None,
+            read_ahead: 16,
+            hold_clock: Arc::default(),
+        },
+        Arc::clone(&ack),
+        None,
+    );
     let reader = tokio::spawn(async move { stream.next().await.is_some() });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -705,4 +730,323 @@ fn transport_errors_stay_transient_and_framing_errors_are_decode_errors() {
         map_pgwire(PgWireError::Protocol("bad frame".into())),
         SourceError::Decode(_)
     ));
+}
+
+// ── visibility (issue #343) ─────────────────────────────────────────────────
+
+/// A visibility double: the snapshot sees the xids in `visible`; a stall check
+/// refuses when `refuse` is set. Counts its calls.
+#[derive(Clone, Default)]
+struct Snapshots {
+    visible: Arc<std::sync::Mutex<HashSet<u32>>>,
+    refuse: Arc<std::sync::atomic::AtomicBool>,
+    snapshots: Arc<std::sync::atomic::AtomicUsize>,
+    stalls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Snapshots {
+    fn seeing(xids: &[u32]) -> Self {
+        let snapshots = Self::default();
+        snapshots.see(xids);
+        snapshots
+    }
+
+    fn see(&self, xids: &[u32]) {
+        self.visible.lock().unwrap().extend(xids);
+    }
+
+    fn snapshot_now(&self) -> super::super::visibility::Snapshot {
+        let visible = self.visible.lock().unwrap();
+        // Everything below 1000 runs unless listed visible.
+        let running: Vec<String> = (1..1000u64)
+            .filter(|xid| !visible.contains(&u32::try_from(*xid).unwrap()))
+            .map(|xid| xid.to_string())
+            .collect();
+        super::super::visibility::Snapshot::parse(&format!("1:1000:{}", running.join(","))).unwrap()
+    }
+}
+
+impl Visibility for Snapshots {
+    async fn snapshot(&self) -> Result<super::super::visibility::Snapshot> {
+        self.snapshots
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(self.snapshot_now())
+    }
+
+    async fn stall(&self, _xid: u32) -> Result<super::super::visibility::Stall> {
+        self.stalls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let refusal = self
+            .refuse
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .then(|| super::super::visibility::standby_refusal("flusso", "flusso"));
+        Ok(super::super::visibility::Stall {
+            refusal,
+            waiting: vec!["pid 1".to_owned()],
+        })
+    }
+}
+
+fn begin(xid: u32) -> ReplicationEvent {
+    ReplicationEvent::Begin {
+        final_lsn: Lsn::from_u64(0),
+        xid,
+        commit_time_micros: 0,
+    }
+}
+
+/// A transaction `xid` with one change, committed at `lsn`.
+fn transaction(decode: &mut DecodeState, xid: u32, lsn: u64) {
+    handle(decode, begin(xid)).unwrap();
+    decode.open_txn.push(upsert());
+    handle(decode, commit(lsn)).unwrap();
+}
+
+fn holding_state() -> (DecodeState, Arc<Positions>) {
+    let (mut decode, ack) = state();
+    decode.read_tables = None;
+    (decode, ack)
+}
+
+/// R3: a held transaction is not emitted, so not registered, and neither a
+/// keepalive past it nor a filtered commit after it moves the horizon: no
+/// confirmation or fence reaches its commit.
+#[test]
+fn a_held_transaction_is_not_emitted_and_nothing_passes_it() {
+    let (mut decode, ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    assert!(decode.next_change().is_none(), "held");
+    assert_eq!(decode.held(), Some(7));
+
+    handle(&mut decode, keepalive(500)).unwrap();
+    handle(&mut decode, begin(8)).unwrap();
+    handle(&mut decode, commit(300)).unwrap();
+    assert_eq!(ack.confirmed_lsn(), 0, "nothing may be confirmed past it");
+    assert!(ack.reached(None) < 100, "no fence may claim its commit");
+    assert_eq!(ack.next_seq(), 0, "not registered");
+
+    decode.seen_by(&Snapshots::seeing(&[7]).snapshot_now());
+    let (position, _) = decode.next_change().unwrap();
+    assert_eq!(ack.reached(Some(position.0)), 100);
+    assert!(decode.readable.is_empty(), "an emitted xid is forgotten");
+}
+
+/// A later transaction that is visible waits behind an earlier held one, and
+/// both come out in commit order once the earlier one is visible.
+#[test]
+fn an_earlier_held_transaction_holds_back_a_later_visible_one() {
+    let (mut decode, ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    transaction(&mut decode, 8, 200);
+    decode.seen_by(&Snapshots::seeing(&[8]).snapshot_now());
+    assert!(decode.next_change().is_none(), "8 is visible, 7 is not");
+    assert_eq!(ack.next_seq(), 0);
+
+    decode.seen_by(&Snapshots::seeing(&[7, 8]).snapshot_now());
+    let (first, _) = decode.next_change().unwrap();
+    let (second, _) = decode.next_change().unwrap();
+    assert_eq!(ack.reached(Some(first.0)), 199);
+    assert_eq!(ack.reached(Some(second.0)), 200);
+    assert!(decode.readable.is_empty());
+}
+
+/// A transaction that touches no table an index reads is never checked.
+#[test]
+fn a_transaction_on_no_table_an_index_reads_is_not_held() {
+    let (mut decode, _) = state();
+    decode.read_tables = Some(HashSet::from([TableName::try_new("orders").unwrap()]));
+    transaction(&mut decode, 7, 100);
+    assert!(decode.next_change().is_some(), "users is read by no index");
+
+    decode.read_tables = Some(HashSet::from([TableName::try_new("users").unwrap()]));
+    transaction(&mut decode, 8, 200);
+    assert!(decode.next_change().is_none(), "users is read: held");
+}
+
+/// A stream over `decode`, a scripted client and `snapshots`, holding at most
+/// `read_ahead` changes.
+fn holding_stream(
+    decode: DecodeState,
+    client: Script,
+    snapshots: Snapshots,
+    read_ahead: usize,
+    hold_clock: HoldClock,
+) -> BoxStream<'static, Result<LiveChange>> {
+    into_stream(State {
+        client,
+        catalog: sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused@127.0.0.1/unused")
+            .unwrap(),
+        visibility: snapshots,
+        decode,
+        read_ahead,
+        hold: None,
+        hold_clock,
+    })
+}
+
+/// A replication connection that sends its queued events, then waits, and
+/// records what it was told was applied.
+struct Script {
+    events: Arc<std::sync::Mutex<VecDeque<ReplicationEvent>>>,
+    applied: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Replication for Script {
+    async fn recv(&mut self) -> std::result::Result<Option<ReplicationEvent>, PgWireError> {
+        let next = self.events.lock().unwrap().pop_front();
+        match next {
+            Some(event) => Ok(Some(event)),
+            None => std::future::pending().await,
+        }
+    }
+
+    fn update_applied_lsn(&self, lsn: Lsn) {
+        self.applied
+            .fetch_max(lsn.as_u64(), std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn script(
+    events: Vec<ReplicationEvent>,
+) -> (
+    Script,
+    Arc<std::sync::Mutex<VecDeque<ReplicationEvent>>>,
+    Arc<std::sync::atomic::AtomicU64>,
+) {
+    let queue = Arc::new(std::sync::Mutex::new(VecDeque::from(events)));
+    let applied = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let client = Script {
+        events: Arc::clone(&queue),
+        applied: Arc::clone(&applied),
+    };
+    (client, queue, applied)
+}
+
+/// R4: an earlier change the sinks flushed is still confirmed to the server
+/// while a later transaction is held, so the slot keeps releasing WAL.
+#[tokio::test]
+async fn a_confirmation_is_handed_over_during_a_hold() {
+    use futures::StreamExt;
+    use std::sync::atomic::Ordering;
+
+    let (mut decode, ack) = holding_state();
+    let earlier = ack.register(50);
+    ack.read_through(50);
+    transaction(&mut decode, 7, 100);
+    let (client, _, applied) = script(Vec::new());
+    let mut stream = holding_stream(decode, client, Snapshots::default(), 16, Arc::default());
+    let reader = tokio::spawn(async move { stream.next().await.is_some() });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(applied.load(Ordering::SeqCst), 0);
+    ack.confirm(earlier);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while applied.load(Ordering::SeqCst) < 50 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the confirmation reached the client during the hold");
+    assert!(!reader.is_finished(), "the held transaction is not emitted");
+    reader.abort();
+}
+
+/// While held, the stream polls on the schedule (0.5 ms for 20 ms, then backing
+/// off to 50 ms; tokio's timer rounds the 0.5 ms up to its 1 ms tick), records
+/// how long it has held, and after five seconds checks the server once.
+#[tokio::test(start_paused = true)]
+async fn a_hold_reads_ahead_to_its_bound_polls_on_schedule_and_reports_a_stall() {
+    use futures::StreamExt;
+    use std::sync::atomic::Ordering;
+
+    let (mut decode, _ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    let mut events = Vec::new();
+    for xid in 8..40 {
+        events.extend([
+            begin(xid),
+            ReplicationEvent::Commit {
+                lsn: Lsn::from_u64(u64::from(xid) * 100),
+                end_lsn: Lsn::from_u64(u64::from(xid) * 100),
+                commit_time_micros: 0,
+            },
+        ]);
+    }
+    let (client, queue, _) = script(events);
+    let snapshots = Snapshots::default();
+    let clock = HoldClock::default();
+    let mut stream = holding_stream(decode, client, snapshots.clone(), 4, Arc::clone(&clock));
+    let reader = tokio::spawn(async move { stream.next().await.map(|item| item.is_ok()) });
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let polls = snapshots.snapshots.load(Ordering::SeqCst);
+    assert!(
+        (40..=70).contains(&polls),
+        "{polls} checks in the first second"
+    );
+    assert!(
+        held_for(&clock).is_some_and(|held| held >= Duration::from_millis(990)),
+        "the hold is recorded"
+    );
+    assert!(
+        queue.lock().unwrap().is_empty(),
+        "empty commits add nothing to pending, so the stream reads them all"
+    );
+    assert_eq!(snapshots.stalls.load(Ordering::SeqCst), 0);
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(
+        snapshots.stalls.load(Ordering::SeqCst),
+        1,
+        "one check at 5 s"
+    );
+    assert!(!reader.is_finished());
+
+    snapshots.see(&[7]);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(reader.await.unwrap(), Some(true), "emitted once visible");
+    assert_eq!(held_for(&clock), None);
+}
+
+/// The read-ahead bound stops reading while the front transaction is held.
+#[tokio::test(start_paused = true)]
+async fn a_hold_reads_no_further_than_its_bound() {
+    use futures::StreamExt;
+
+    let (mut decode, _ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    transaction(&mut decode, 8, 200);
+    let (client, queue, _) = script(vec![keepalive(300), keepalive(400)]);
+    let mut stream = holding_stream(decode, client, Snapshots::default(), 2, Arc::default());
+    let reader = tokio::spawn(async move { stream.next().await.is_some() });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        queue.lock().unwrap().len(),
+        2,
+        "two pending changes fill the bound"
+    );
+    reader.abort();
+}
+
+/// A server that names flusso a synchronous standby while it holds a
+/// transaction: the stall check stops the stream with the refusal.
+#[tokio::test(start_paused = true)]
+async fn a_hold_on_a_server_waiting_for_flusso_stops_the_stream() {
+    use futures::StreamExt;
+
+    let (mut decode, _ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    let (client, _, _) = script(Vec::new());
+    let snapshots = Snapshots::default();
+    snapshots
+        .refuse
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut stream = holding_stream(decode, client, snapshots, 16, Arc::default());
+    let item = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("the stream stops within the stall check")
+        .unwrap();
+    let error = item.unwrap_err().to_string();
+    assert!(error.contains("synchronous_standby_names"), "{error}");
 }

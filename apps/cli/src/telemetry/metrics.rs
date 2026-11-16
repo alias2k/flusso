@@ -135,6 +135,28 @@ pub(crate) fn register_in_flight_gauge(status: Arc<Status>) -> ObservableGauge<u
         .build()
 }
 
+/// Register `flusso.source.visibility_wait` as an observable gauge that reads
+/// the daemon's [`Status`] at collection time: seconds the source has held a
+/// committed change it can't read back yet, `0` while nothing waits.
+pub(crate) fn register_visibility_wait_gauge(status: Arc<Status>) -> ObservableGauge<f64> {
+    global::meter("flusso")
+        .f64_observable_gauge("flusso.source.visibility_wait")
+        .with_unit("s")
+        .with_description(
+            "Seconds the source has held a committed transaction that is not visible yet \
+             (every later change waits behind it); 0 while nothing waits",
+        )
+        .with_callback(move |observer| {
+            observer.observe(
+                status
+                    .visibility_wait()
+                    .map_or(0.0, |waited| waited.as_secs_f64()),
+                &[],
+            );
+        })
+        .build()
+}
+
 /// Whether an OTLP endpoint is configured (general or metrics-specific).
 pub(crate) fn otlp_configured() -> bool {
     std::env::var_os("OTEL_EXPORTER_OTLP_ENDPOINT").is_some()

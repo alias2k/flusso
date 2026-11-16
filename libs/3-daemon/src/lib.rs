@@ -65,7 +65,7 @@ impl Default for DaemonOptions {
 
 /// The engine's batch policy: the defaults with whatever `[batch]` set laid
 /// over them.
-fn batch_policy(config: &Config) -> BatchPolicy {
+pub fn batch_policy(config: &Config) -> BatchPolicy {
     let defaults = BatchPolicy::default();
     BatchPolicy {
         max_changes: config
@@ -156,7 +156,8 @@ impl Daemon {
                 sink_names.iter().cloned(),
                 Instant::now(),
             )
-            .with_fence(fence.clone()),
+            .with_fence(fence.clone())
+            .with_source(Arc::clone(&capture)),
         );
         let mut observers: Vec<Arc<dyn Observer>> = vec![
             Arc::new(StatusObserver::new(Arc::clone(&status))),

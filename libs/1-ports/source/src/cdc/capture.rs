@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream};
@@ -111,7 +112,14 @@ pub trait ChangeCapture: std::fmt::Debug + Send + Sync {
     async fn prepare(&self) -> Result<()>;
 
     /// Connect, ensure setup, resume from the last confirmed point, and stream
-    /// live changes with their positions.
+    /// live changes with their positions, in source commit order.
+    ///
+    /// **A change is yielded only once it can be read back**: every read the
+    /// [`DocumentBuilder`](crate::document::DocumentBuilder) makes after
+    /// receiving it sees its transaction committed. A source whose change feed
+    /// can run ahead of what its readers see (Postgres decodes a commit before
+    /// new snapshots include it) holds the change, and every later one, until
+    /// then; [`readable_wait`](Self::readable_wait) reports how long.
     async fn live(&self) -> Result<BoxStream<'static, Result<LiveChange>>>;
 
     /// Every change up to and including `position` is durable downstream; the
@@ -144,6 +152,13 @@ pub trait ChangeCapture: std::fmt::Debug + Send + Sync {
     /// that have no notion of lag (e.g. a finite snapshot-only source).
     async fn lag(&self) -> Result<Option<u64>> {
         Ok(None)
+    }
+
+    /// How long the live stream has been holding a committed change that can't
+    /// be read back yet (see [`live`](Self::live)); `None` while nothing waits.
+    /// Cheap and non-blocking: sampled out of band, like [`lag`](Self::lag).
+    fn readable_wait(&self) -> Option<Duration> {
+        None
     }
 
     /// Parse a position a client read from the source (Postgres: the text of

@@ -62,12 +62,16 @@ impl Backends for FlussoBackends {
 
         let spec = source_spec(&config);
         let (documents, column_types) = build_documents(&sql_url, &config).await?;
-        let capture: Arc<dyn ChangeCapture> = Arc::new(
-            WalChangeCapture::new(replication, sql_url.clone())
-                .with_publication_management(spec.all_tables(), postgres.manage_publication)
-                .with_pre_image_management(spec.pre_images(), postgres.manage_replica_identity)
-                .with_column_types(column_types),
-        );
+        let capture = WalChangeCapture::new(replication, sql_url.clone())
+            .with_publication_management(spec.all_tables(), postgres.manage_publication)
+            .with_pre_image_management(spec.pre_images(), postgres.manage_replica_identity)
+            .with_read_ahead(daemon::batch_policy(&config).max_changes.saturating_mul(16))
+            .with_column_types(column_types);
+        capture
+            .check_server()
+            .await
+            .context("checking the source server")?;
+        let capture: Arc<dyn ChangeCapture> = Arc::new(capture);
 
         Ok(SourceParts { capture, documents })
     }
