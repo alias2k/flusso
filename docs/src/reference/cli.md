@@ -93,7 +93,7 @@ A sender is the process that sent the signal (`siginfo`): the kernel for a termi
 The drain, in order:
 
 1. **Stop taking in work.** The phase turns `stopping`: [`/readyz`](http.md#get-readyz) answers `503`, a new [`/reindex`](http.md#post-reindexindexnamesinkname) is refused with `503`. No further change is read from the replication stream and no new backfill is served.
-2. **Finish the batch in flight.** What was being built is published to every sink, as any commit. A backfill in progress is abandoned at a row boundary: its index stays unseeded and its request unanswered, so the next start backfills it again (a backfill writes deterministic ids; what it wrote so far is overwritten).
+2. **Finish the batch in flight.** What was being built is published to every sink, as any commit. A backfill in progress is abandoned at a row boundary, and its batches already queued for a sink are acknowledged without being written: its index stays unseeded, so the next start backfills it again (a backfill writes deterministic ids; what it wrote so far is overwritten). A stop mid-backfill takes a few hundred milliseconds.
 3. **Every sink lands its lane**: apply, flush, acknowledge, sink by sink, until nothing is left. A stalled or unreachable sink doesn't slow the others; it is what the deadline is for.
 4. **Confirm and close the stream.** The position every sink acknowledged is confirmed to the slot, flusso waits until Postgres was sent it, then ends replication. The next start resumes there and reads nothing already indexed again.
 5. **Answer the fences.** An open [`/wait`](http.md#get-waitpositionposition) on `searchable` is held while a sink's refresh interval would still answer it within the deadline; then every wait still open is answered `503` "stopping".

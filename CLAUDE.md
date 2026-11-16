@@ -734,7 +734,9 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   (`next_live` polls it before the stream, `drain_ready` stops at it), never by aborting a task. Once
   requested: the phase is `stopping` (not ready; `DaemonControl::reindex` → `ControlError::Stopping`);
   nothing more is read and no request served; a snapshot in progress is dropped unacked (the sink
-  re-requests it on the next start, a backfill being idempotent); the buffered batch is published as a
+  re-requests it on the next start, a backfill being idempotent), and a sink engine handed the stop
+  (`SinkEngine::with_stop`) acks snapshot batches still on its lane unapplied and skips their index's
+  `SnapshotComplete`, so it isn't marked seeded with documents missing; the buffered batch is published as a
   normal commit; `engine::drain_lanes` (the same drain `supervise` runs when the stream ends) waits until
   every lane is acked, confirming the watermark as it moves; then `ChangeCapture::close_live` (Postgres:
   `Positions::request_close` → the stream loop hands `confirmed_lsn` over, `Replication::close` waits until
@@ -745,7 +747,8 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   doesn't sit out a `Within(refresh_interval)`. A stop during staging ends before `prepare`; an ingest
   engine that fails while stopping is not restarted. Guards: `engine` `tests::stop` (mid-build batch
   published and flushed by every sink, final confirm before close; nothing read after the stop; an
-  abandoned snapshot re-served; a stalled sink; a stop before the run), `daemon` `tests::stop`
+  abandoned snapshot re-served; queued snapshot batches skipped, their index left unseeded; a stalled
+  sink; a stop before the run), `daemon` `tests::stop`
   (staging, `stopping` + refused reindex, searchable waiter vs none), `source-postgres`'s
   `a_close_hands_over_the_confirmed_position_then_ends_the_stream_without_a_change`, and the
   `flusso-cli` `shutdown` e2e (steady writes: everything at or before `confirmed_flush_lsn` indexed, a
