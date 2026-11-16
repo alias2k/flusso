@@ -46,9 +46,16 @@
 #    a confirmed case. Results: `<head target>/review-ab/<timestamp>/`.
 set -euo pipefail
 
-usage="usage: review-ab.sh [<base>] [--pg 16] [--bench postgres,cases,pipeline] [--filter <f>] [--limit 5] [--rounds 3] [--own-benches] [--bench-cpus LIST --server-cpus LIST | --no-pin] | --clean | --clean-results"
+# The default Postgres is the one the tests and benches start: dev/test-postgres's
+# DEFAULT_TAG (`<major>-alpine`), read from the tree this script sits in.
+test_postgres=$(cd "$(dirname "$0")/../.." && pwd)/dev/test-postgres/src/lib.rs
+pg_versions=$(sed -n 's/^pub const DEFAULT_TAG: &str = "\([0-9][0-9]*\)-alpine";$/\1/p' "$test_postgres" 2>/dev/null || true)
+if [ -z "$pg_versions" ]; then
+  echo "error: no \`pub const DEFAULT_TAG: &str = \"<major>-alpine\";\` in $test_postgres" >&2
+  exit 2
+fi
+usage="usage: review-ab.sh [<base>] [--pg $pg_versions] [--bench postgres,cases,pipeline] [--filter <f>] [--limit 5] [--rounds 3] [--own-benches] [--bench-cpus LIST --server-cpus LIST | --no-pin] | --clean | --clean-results"
 base=origin/main
-pg_versions=16
 benches=postgres,cases,pipeline
 filter=
 limit=5

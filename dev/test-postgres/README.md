@@ -4,7 +4,8 @@ One place names the Postgres image every flusso test and bench starts (issue #34
 
 - **Default**: `postgres:16-alpine`.
 - **Override**: `FLUSSO_TEST_PG_TAG` names another tag of the official image (`14-alpine`, `18-alpine`) for the whole run, with no code change. Unset or empty means the default.
-- **Exceptions**: a test that needs one version whatever the run's tag names it with a `Pinned` variant, which carries the reason.
+- **Exceptions**: a test that needs one version whatever the run's tag names it with a `Pinned` variant, which carries the reason. `pinned()` prints one line to stderr naming the image it starts instead of the run's, and why.
+- **The container type**: `test_postgres::Container`. Only this crate imports `testcontainers_modules::postgres`.
 
 ```rust
 use testcontainers_modules::testcontainers::ImageExt;
@@ -19,7 +20,7 @@ assert_eq!(test_postgres::Pinned::ByteaMinMax.tag(), "18-alpine");
 
 `cargo run -q -p flusso-test-postgres` prints the image the run resolves (`postgres:16-alpine`), which the benchmark job records with the component points so a tag change restarts their regression window.
 
-`testcontainers-modules`' own `Postgres::default()` starts `postgres:11-alpine`, a version flusso does not support. `.github/scripts/check-postgres-image.py` (run by CI's `scripts` job) fails on any `Postgres::default`, `.with_tag(` or `GenericImage::new("postgres"` outside this crate.
+`testcontainers-modules`' own `Postgres::default()` starts `postgres:11-alpine`, a version flusso does not support. `.github/scripts/check-postgres-image.py` (run by CI's `scripts` job) fails on any import of `testcontainers_modules::postgres` outside this crate (nested, glob and renamed imports included), on `Postgres::default`, `with_tag`/`with_name`, and on a `GenericImage` whose arguments mention `postgres` or whose image name isn't a literal.
 
 ## Why a crate of its own
 

@@ -42,7 +42,6 @@ use source::document::{DocumentBuilder, DocumentId};
 use source::{RowKey, SourceSpec};
 use source_postgres::PgDocumentBuilder;
 use sqlx::postgres::PgPoolOptions;
-use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use tokio::runtime::Runtime;
 
@@ -63,7 +62,7 @@ fn runtime() -> Runtime {
 /// connected, ready-to-query [`PgDocumentBuilder`], and a raw pool (used by the
 /// round-trip baseline).
 async fn setup() -> (
-    Option<testcontainers_modules::testcontainers::ContainerAsync<Postgres>>,
+    Option<test_postgres::Container>,
     PgDocumentBuilder,
     sqlx::PgPool,
 ) {

@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 
 use sqlx::AssertSqlSafe;
 use sqlx::postgres::PgPoolOptions;
-use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::core::wait::HttpWaitStrategy;
 use testcontainers_modules::testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
@@ -18,7 +17,7 @@ use testcontainers_modules::testcontainers::{ContainerAsync, GenericImage, Image
 
 /// A Postgres 16 with logical replication, seeded with `setup` (statements
 /// split on `;`), and its URL.
-pub(crate) async fn start_postgres(setup: &str) -> (ContainerAsync<Postgres>, String) {
+pub(crate) async fn start_postgres(setup: &str) -> (test_postgres::Container, String) {
     let container = test_postgres::image()
         .with_cmd(["postgres", "-c", "wal_level=logical"])
         .start()

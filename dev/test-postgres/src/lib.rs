@@ -1,7 +1,11 @@
 #![doc = include_str!("../README.md")]
 
 use testcontainers_modules::postgres::Postgres;
-use testcontainers_modules::testcontainers::{ContainerRequest, ImageExt};
+use testcontainers_modules::testcontainers::{ContainerAsync, ContainerRequest, ImageExt};
+
+/// A started Postgres container; the type callers name, since only this crate
+/// may import `testcontainers_modules::postgres`.
+pub type Container = ContainerAsync<Postgres>;
 
 /// The environment variable that overrides [`DEFAULT_TAG`] for a whole run.
 pub const TAG_VAR: &str = "FLUSSO_TEST_PG_TAG";
@@ -26,6 +30,16 @@ impl Pinned {
             Self::ByteaMinMax => "18-alpine",
         }
     }
+
+    /// Why this test needs its version.
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::NoJitParameter => {
+                "Postgres 10 has no `jit` parameter, which this test needs refused"
+            }
+            Self::ByteaMinMax => "Postgres 18 is the first with `min`/`max` over `bytea`",
+        }
+    }
 }
 
 /// The tag this run starts: [`TAG_VAR`] when set and not empty, else [`DEFAULT_TAG`].
@@ -44,8 +58,22 @@ pub fn image() -> ContainerRequest<Postgres> {
 }
 
 /// The Postgres image of a named exception, whatever the run's tag.
+///
+/// Prints one line to stderr naming the image and why it ignores [`TAG_VAR`],
+/// so a run on another tag says which tests did not follow it.
+// A test's stderr is what the runner shows; tests install no tracing subscriber.
+#[allow(clippy::print_stderr)]
 pub fn pinned(version: Pinned) -> ContainerRequest<Postgres> {
+    eprintln!("{}", pinned_note(version, &tag()));
     Postgres::default().with_tag(version.tag())
+}
+
+fn pinned_note(version: Pinned, run_tag: &str) -> String {
+    format!(
+        "test-postgres: starting postgres:{} instead of the run's postgres:{run_tag} ({TAG_VAR} ignored): {}",
+        version.tag(),
+        version.reason()
+    )
 }
 
 fn resolve(value: Option<String>) -> String {
@@ -64,6 +92,15 @@ mod tests {
         assert_eq!(resolve(None), DEFAULT_TAG);
         assert_eq!(resolve(Some(String::new())), DEFAULT_TAG);
         assert_eq!(resolve(Some("  ".to_owned())), DEFAULT_TAG);
+    }
+
+    #[test]
+    fn a_pinned_start_names_its_image_the_run_and_the_reason() {
+        let note = pinned_note(Pinned::NoJitParameter, "18-alpine");
+        assert!(note.contains("postgres:10-alpine"), "{note}");
+        assert!(note.contains("postgres:18-alpine"), "{note}");
+        assert!(note.contains(TAG_VAR), "{note}");
+        assert!(note.contains("jit"), "{note}");
     }
 
     #[test]

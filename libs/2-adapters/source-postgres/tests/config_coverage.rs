@@ -32,8 +32,6 @@ use source::document::{Document, DocumentBuilder, DocumentId};
 use source::{Anchor, DiagnosticKind, RowKey, SourceSpec, validate_indexes};
 use source_postgres::PgDocumentBuilder;
 use sqlx::postgres::PgPoolOptions;
-use testcontainers_modules::postgres::Postgres;
-use testcontainers_modules::testcontainers::ContainerAsync;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
 // ---------------------------------------------------------------------------
@@ -96,7 +94,7 @@ const SEED: &[&str] = &[
 
 /// Start a Postgres container, seed it, and return the live container (kept
 /// alive by the caller) plus its connection URL.
-async fn start_seeded() -> (ContainerAsync<Postgres>, String) {
+async fn start_seeded() -> (test_postgres::Container, String) {
     let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");

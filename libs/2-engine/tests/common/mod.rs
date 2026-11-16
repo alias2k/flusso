@@ -14,13 +14,12 @@ use kernel::{
     IndexSchema, TableName,
 };
 use source::SourceSpec;
-use testcontainers_modules::postgres::Postgres;
+use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
-use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt};
 
 /// A PG 16 with logical replication, and its connection URL. PG 14+ is
 /// required: the replication client requests the pgoutput `messages` option.
-pub(crate) async fn start_postgres() -> (ContainerAsync<Postgres>, String) {
+pub(crate) async fn start_postgres() -> (test_postgres::Container, String) {
     let container = test_postgres::image()
         .with_cmd([
             "postgres",

@@ -38,7 +38,6 @@ use source::{CaptureProvisioning, RowKey, SnapshotTable, SourceSpec};
 use source_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
-use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
@@ -451,12 +450,7 @@ fn users_spec() -> SourceSpec {
 /// `logs`, range-partitioned on `id` (the primary key), with one partition on
 /// `REPLICA IDENTITY USING INDEX (code)`: legal, since a partition is an
 /// ordinary table and its own unique index need not hold the partition key.
-async fn keyless_partition_database() -> (
-    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
-    PgPool,
-    String,
-    u16,
-) {
+async fn keyless_partition_database() -> (test_postgres::Container, PgPool, String, u16) {
     let container = test_postgres::image()
         .with_cmd(["postgres", "-c", "wal_level=logical"])
         .start()
@@ -852,7 +846,7 @@ async fn a_batch_is_pruned_to_its_keys_partitions_under_a_generic_plan() {
 /// whose text `matches`, read until `expected` are there: the server writes an
 /// entry after the statement's result has reached the client.
 async fn logged_plans(
-    container: &testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
+    container: &test_postgres::Container,
     expected: usize,
     matches: impl Fn(&str) -> bool,
 ) -> Vec<serde_json::Value> {

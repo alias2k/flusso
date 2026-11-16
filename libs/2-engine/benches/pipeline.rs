@@ -86,7 +86,6 @@ use source_postgres::PgDocumentBuilder;
 use sqlx::postgres::PgPoolOptions;
 use stream::Stream;
 use stream_channel::ChannelStream;
-use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::core::wait::HttpWaitStrategy;
 use testcontainers_modules::testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
@@ -217,7 +216,7 @@ async fn run_deployment(
 
 /// Everything held alive for the benchmark's duration.
 struct Services {
-    _postgres: Option<ContainerAsync<Postgres>>,
+    _postgres: Option<test_postgres::Container>,
     _opensearch: Option<ContainerAsync<GenericImage>>,
     documents: Arc<dyn DocumentBuilder>,
     sink: Arc<dyn Sink>,

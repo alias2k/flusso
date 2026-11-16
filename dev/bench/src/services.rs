@@ -6,7 +6,6 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::core::wait::HttpWaitStrategy;
 use testcontainers_modules::testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
@@ -24,7 +23,7 @@ pub(crate) struct Services {
     /// What actually served the run: the image, or `external` for an env URL.
     pub(crate) pg_image: String,
     pub(crate) os_image: String,
-    _pg: Option<ContainerAsync<Postgres>>,
+    _pg: Option<test_postgres::Container>,
     _os: Option<ContainerAsync<GenericImage>>,
 }
 

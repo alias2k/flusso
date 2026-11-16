@@ -46,7 +46,6 @@ use source_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
 use sqlx::postgres::PgPoolOptions;
 use stream::Stream;
 use stream_channel::ChannelStream;
-use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
@@ -1630,11 +1629,7 @@ async fn an_aggregate_expression_rebuilds_from_each_operand() {
     engine.abort();
 }
 
-async fn start_logical_postgres() -> (
-    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
-    u16,
-    String,
-) {
+async fn start_logical_postgres() -> (test_postgres::Container, u16, String) {
     let container = test_postgres::image()
         .with_cmd([
             "postgres",

@@ -50,8 +50,6 @@ use source::{RowKey, SourceSpec};
 use source_postgres::PgDocumentBuilder;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{AssertSqlSafe, Row};
-use testcontainers_modules::postgres::Postgres;
-use testcontainers_modules::testcontainers::ContainerAsync;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use tokio::runtime::Runtime;
 
@@ -300,7 +298,7 @@ fn runtime() -> Runtime {
         .unwrap()
 }
 
-async fn connect() -> (Option<ContainerAsync<Postgres>>, String) {
+async fn connect() -> (Option<test_postgres::Container>, String) {
     if let Some(url) = std::env::var("REVIEW_AB_PG_URL")
         .ok()
         .filter(|url| !url.is_empty())
@@ -450,7 +448,7 @@ async fn builds(builder: &PgDocumentBuilder, case: &Case, hits: usize) -> bool {
 }
 
 async fn setup() -> (
-    Option<ContainerAsync<Postgres>>,
+    Option<test_postgres::Container>,
     PgDocumentBuilder,
     Vec<Case>,
 ) {

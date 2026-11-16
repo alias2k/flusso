@@ -51,7 +51,6 @@ use source::{DuplicateOutcome, NeverIndexed, RowKey, SourceSpec};
 use source_postgres::PgDocumentBuilder;
 use sqlx::AssertSqlSafe;
 use sqlx::postgres::{PgPool, PgPoolOptions};
-use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::core::wait::HttpWaitStrategy;
 use testcontainers_modules::testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
@@ -727,7 +726,7 @@ async fn write(
 }
 
 struct Pg {
-    _container: ContainerAsync<Postgres>,
+    _container: test_postgres::Container,
     pool: PgPool,
     url: String,
 }

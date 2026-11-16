@@ -1162,13 +1162,7 @@ fn relation(name: &str, relation: Relation) -> Field {
     }
 }
 
-async fn start() -> (
-    testcontainers_modules::testcontainers::ContainerAsync<
-        testcontainers_modules::postgres::Postgres,
-    >,
-    String,
-    u16,
-) {
+async fn start() -> (test_postgres::Container, String, u16) {
     let (container, url) = start_postgres().await;
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     (container, url, port)
