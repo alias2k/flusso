@@ -15,7 +15,7 @@ import sys
 import tempfile
 import unittest
 
-from test_review_ab import FAKE_CARGO, FAKE_NPROC, FAKE_TASKSET, WITH_URL
+from test_review_ab import FAKE_BENCH, FAKE_CARGO, FAKE_NPROC, FAKE_TASKSET, WITH_URL
 
 HERE = pathlib.Path(__file__).resolve().parent
 DIGEST = HERE / "review-ab-digest.py"
@@ -92,6 +92,19 @@ class Digest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("| `plain` | 12 | 0 |", result.stdout)
         self.assertIn("one side only ⚠️", result.stdout)
+
+    def test_an_index_declared_on_both_sides_with_no_document_is_shown_and_flagged(self) -> None:
+        both = "#index\tk_int\n" + documents() + "#index\ts_keyless\n"
+        result = self.compare(both, both)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("| `s_keyless` | 0 | 0 | — | — | no documents ⚠️ |", result.stdout)
+        self.assertIn("| `k_int` | 12 | 12 |", result.stdout)
+
+    def test_a_note_is_printed_once_below_the_table(self) -> None:
+        note = "#note\tk_int\tno missing ids built: a change's key here is tenant, id\n"
+        result = self.compare(note + documents(), note + documents())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count("`k_int`: no missing ids built: a change's key here is tenant, id."), 1)
 
     def test_nothing_built_is_an_error(self) -> None:
         result = self.compare("", "")
@@ -210,11 +223,44 @@ class Plans(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("Index Scan using int_pkey", self.row(result, "key/int/1"))
 
-    def test_a_case_with_no_logged_plan_reads_unknown_and_passes(self) -> None:
-        self.both("key/int/1", {"Node Type": "Result"}, {"Node Type": "Result"})
+    def test_a_case_with_no_logged_plan_is_flagged(self) -> None:
+        self.both("key/int/1", index_scan("int"), index_scan("int"))
+        self.both("key/int/10", {"Node Type": "Result"}, index_scan("int"))
         result = self.check()
-        self.assertEqual(result.returncode, 0)
-        self.assertIn("| ? |", self.row(result, "key/int/1"))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("| ? → Index Scan using int_pkey |", self.row(result, "key/int/10"))
+        self.assertIn("no plan on base ⚠️", self.row(result, "key/int/10"))
+        self.assertNotIn("⚠️", self.row(result, "key/int/1"))
+
+    def test_a_log_with_no_plan_for_a_side_is_a_setup_error_naming_it(self) -> None:
+        self.case("base", "auto", "key/int/1", index_scan("int"))
+        self.case("head", "auto", "key/int/1", {"Node Type": "Result"})
+        result = self.check()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("no auto_explain plan of the head side under plan_cache_mode = auto", result.stderr)
+        self.assertIn(str(self.dir / "server.log"), result.stderr)
+
+    def test_an_empty_log_is_a_setup_error(self) -> None:
+        self.both("key/int/1", index_scan("int"), index_scan("int"))
+        self.log = []
+        result = self.check()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("no auto_explain plan of the base side under plan_cache_mode = auto", result.stderr)
+        self.assertIn("which is missing or empty", result.stderr)
+
+    def test_a_missing_log_is_a_setup_error(self) -> None:
+        self.both("key/int/1", index_scan("int"), index_scan("int"))
+        result = run(PLANS, self.dir)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("server.log, which is missing or empty", result.stderr)
+
+    def test_only_the_roots_append_counts_its_removed_subplans(self) -> None:
+        plan = partitioned(1, 3)
+        plan["Plans"].append({"Node Type": "Append", "Subplans Removed": 5, "Plans": [
+            {"Node Type": "Seq Scan", "Relation Name": "s_hash_items_0"},
+        ]})
+        self.both("root/hash/1", plan, plan, partitions=4)
+        self.assertIn("| 1 of 4, 3 removed |", self.row(self.check(), "root/hash/1"))
 
     def test_counts_are_the_harness_sums(self) -> None:
         self.both("key/int/1", index_scan("int"), index_scan("int"), statements=3)
@@ -231,6 +277,26 @@ class Plans(unittest.TestCase):
         result = run(PLANS, self.dir)
         self.assertEqual(result.returncode, 2)
         self.assertIn("no case measured", result.stderr)
+
+
+REVIEW_RS = "libs/2-adapters/source-postgres/benches/review.rs"
+
+class HarnessSplit(unittest.TestCase):
+    """The real sources: the bench comparison's `cases.rs` uses nothing the review harness requires."""
+
+    def test_cases_rs_uses_nothing_the_review_harness_requires(self) -> None:
+        root = HERE.parent.parent
+        harness = (root / REVIEW_RS).read_text()
+        cases = (root / "libs/2-adapters/source-postgres/benches/cases.rs").read_text()
+        required = [line.split(": ", 1)[1] for line in harness.splitlines() if line.startswith("// review-ab requires: ")]
+        self.assertTrue(required, "review.rs names what it requires")
+        for text in required:
+            name = text.split()[-1]
+            self.assertNotIn(name, cases, f"cases.rs uses `{name}`, which old bases lack; keep it in review.rs")
+
+    def test_the_harness_includes_cases_rs_for_its_roots(self) -> None:
+        harness = (HERE.parent.parent / REVIEW_RS).read_text()
+        self.assertIn('#[path = "cases.rs"]', harness)
 
 
 FAKE_HARNESS = r"""#!/usr/bin/env python3
@@ -312,8 +378,15 @@ class Modes(unittest.TestCase):
             path.write_text(WITH_URL)
         (self.repo / "libs/2-adapters/source-postgres/Cargo.toml").write_text("[package]\n")
         self.git("add", "-A")
+        self.git("commit", "-qm", "a base older than what the harness needs")
+        self.old = self.git("rev-parse", "HEAD")
+        source = self.repo / "libs/2-adapters/source-postgres/src/document/mod.rs"
+        source.parent.mkdir(parents=True)
+        source.write_text("pub async fn connect_with_max_connections() {}\n")
+        self.git("add", "-A")
         self.git("commit", "-qm", "base")
         self.base = self.git("rev-parse", "HEAD")
+        (self.repo / REVIEW_RS).write_text("// review-ab requires: fn connect_with_max_connections\n" + WITH_URL)
 
     def git(self, *args: str) -> str:
         return subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True, text=True).stdout.strip()
@@ -326,16 +399,52 @@ class Modes(unittest.TestCase):
     def log_lines(self, prefix: str) -> list[str]:
         return [line for line in self.log.read_text().splitlines() if line.startswith(prefix)]
 
-    def test_digest_runs_the_cases_harness_on_base_then_head_and_passes_on_the_same_documents(self) -> None:
+    def test_digest_runs_the_review_harness_on_base_then_head_and_passes_on_the_same_documents(self) -> None:
         result = self.review("--digest", self.base)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual([line.split()[1:3] for line in self.log_lines("harness")], [["base", "digest"], ["head", "digest"]])
         self.assertIn("| `k_int` | 12 | 12 |", result.stdout)
         self.assertIn("--digest", result.stdout)
 
-    def test_digest_builds_only_the_cases_bench(self) -> None:
-        self.review("--digest", self.base, "--bench", "postgres,pipeline")
+    def test_digest_builds_only_the_review_harness(self) -> None:
+        self.assertEqual(self.review("--digest", self.base).returncode, 0)
+        self.assertEqual(sorted(self.log_lines("build ")), ["build base review", "build head review"])
+        manifest = (self.home / "tree/libs/2-adapters/source-postgres/Cargo.toml").read_text()
+        self.assertIn('name = "review"', manifest)
+        self.assertTrue((self.home / "tree" / REVIEW_RS).is_file())
+
+    def test_bench_mode_neither_builds_nor_lays_the_review_harness_over_the_base(self) -> None:
+        (self.dir / "criterion.py").write_text(FAKE_BENCH)
+        env = {"FAKE_BENCH": str(self.dir / "criterion.py"), "FAKE_CASES": "key/int"}
+        result = self.review(self.old, "--bench", "cases", **env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(sorted(self.log_lines("build ")), ["build base cases", "build head cases"])
+        self.assertFalse((self.home / "tree" / REVIEW_RS).exists())
+        manifest = (self.home / "tree/libs/2-adapters/source-postgres/Cargo.toml").read_text()
+        self.assertNotIn('name = "review"', manifest)
+
+    def test_a_mode_after_bench_mode_lays_the_harness_over_and_bench_mode_after_it_removes_it(self) -> None:
+        (self.dir / "criterion.py").write_text(FAKE_BENCH)
+        env = {"FAKE_BENCH": str(self.dir / "criterion.py"), "FAKE_CASES": "key/int"}
+        self.assertEqual(self.review("--digest", self.base).returncode, 0)
+        self.assertTrue((self.home / "tree" / REVIEW_RS).is_file())
+        self.assertEqual(self.review(self.base, "--bench", "cases", **env).returncode, 0)
+        self.assertFalse((self.home / "tree" / REVIEW_RS).exists())
+
+    def test_a_base_without_what_the_harness_requires_is_refused_naming_it(self) -> None:
+        result = self.review("--digest", self.old)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("needs `fn connect_with_max_connections`", result.stderr)
+        self.assertIn(f"which base {self.old} ({self.old[:12]}) predates", result.stderr)
+        self.assertEqual(self.log_lines("build "), [])
+
+    def test_bench_only_flags_are_refused(self) -> None:
+        for flag in (("--bench", "cases"), ("--rounds", "2"), ("--limit", "3"), ("--own-benches",)):
+            with self.subTest(flag=flag[0]):
+                result = self.review("--plans", self.base, *flag)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(f"it does not take {flag[0]}", result.stderr)
+        self.assertEqual(self.log_lines("build "), [])
 
     def test_digest_exits_1_when_the_documents_differ(self) -> None:
         result = self.review("--digest", self.base, FAKE_DIGEST_HEAD=str(self.dir / "digest-other.tsv"))
@@ -384,7 +493,7 @@ class Modes(unittest.TestCase):
     def test_a_failing_harness_is_a_setup_error(self) -> None:
         result = self.review("--digest", self.base, FAKE_HARNESS_FAIL="head")
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertIn("the head side's `cases` harness failed in --digest", result.stderr)
+        self.assertIn("the head side's `review` harness failed in --digest", result.stderr)
         self.assertTrue(self.log_lines("docker rm -f"), "the container is removed on failure")
 
     def test_a_docker_failure_is_a_setup_error(self) -> None:
@@ -397,12 +506,6 @@ class Modes(unittest.TestCase):
     def test_a_base_that_does_not_build_is_a_setup_error(self) -> None:
         result = self.review("--plans", self.base, FAKE_CARGO_FAIL="base:lib")
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-
-    def test_own_benches_is_refused(self) -> None:
-        result = self.review("--digest", self.base, "--own-benches")
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("does not take --own-benches", result.stderr)
-        self.assertEqual(self.log_lines("build "), [])
 
     def test_a_held_lock_is_a_setup_error(self) -> None:
         import fcntl
