@@ -50,6 +50,12 @@ jobs:
       - name: Check server-only build (no designer)
         run: cargo check -p flusso-cli --no-default-features
 
+      # Here, not in `scripts`: it reads the resolved features with `cargo tree
+      # --offline`, which needs this job's toolchain and fetched crates (under a
+      # second; `scripts` has neither). Its unit test runs in `scripts`.
+      - name: Check the binary keeps a per-process hash seed (issue #355)
+        run: .github/scripts/check-ahash-seed.py
+
       # PRs confined to the query release train (sdk/query, sdk/query-derive,
       # dev/query-e2e — see release-plz.toml) skip the Postgres/OpenSearch e2e
       # suites those paths can't break; everything else, and every push to
@@ -145,9 +151,11 @@ jobs:
       # (test_review_ab.py), the PR bench gate over fake cargo and Criterion
       # runs (test_bench_gate.py), and the guard that every test and bench
       # starts Postgres through dev/test-postgres
-      # (test_check_postgres_image.py, issue #342), and the Postgres matrix's
-      # summary and nightly issue (test_postgres_matrix.py, issue #348), each
-      # picked up by the `test_*.py` pattern.
+      # (test_check_postgres_image.py, issue #342), the Postgres matrix's
+      # summary and nightly issue (test_postgres_matrix.py, issue #348), and
+      # the reproducible-seed guard over recorded `cargo tree` output
+      # (test_check_ahash_seed.py, issue #355; the guard itself runs in
+      # `test`), each picked up by the `test_*.py` pattern.
       - name: Test the CI scripts
         run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
 

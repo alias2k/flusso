@@ -1,0 +1,27 @@
+ahash v0.8.12
+├── ahash feature "compile-time-rng"
+│   └── rhai v1.27.0
+│       ├── rhai feature "decimal"
+│       │   └── flusso-script v0.17.0 (/repo/libs/2-script)
+│       │       └── flusso-script feature "default"
+│       │           ├── flusso-cli v0.17.0 (/repo/apps/cli)
+│       │           │   ├── flusso-cli feature "default" (command-line)
+│       │           │   └── flusso-cli feature "design"
+│       │           │       └── flusso-cli feature "default" (command-line)
+│       │           └── flusso-design v0.17.0 (/repo/apps/design)
+│       │               └── flusso-design feature "default"
+│       │                   └── flusso-cli v0.17.0 (/repo/apps/cli) (*)
+│       ├── rhai feature "no_module"
+│       │   └── flusso-script v0.17.0 (/repo/libs/2-script) (*)
+│       ├── rhai feature "no_time"
+│       │   └── flusso-script v0.17.0 (/repo/libs/2-script) (*)
+│       ├── rhai feature "rust_decimal"
+│       │   └── rhai feature "decimal" (*)
+│       ├── rhai feature "std"
+│       │   └── flusso-script v0.17.0 (/repo/libs/2-script) (*)
+│       └── rhai feature "sync"
+│           └── flusso-script v0.17.0 (/repo/libs/2-script) (*)
+├── ahash feature "const-random"
+│   └── ahash feature "compile-time-rng" (*)
+└── ahash feature "std"
+    └── rhai feature "std" (*)
