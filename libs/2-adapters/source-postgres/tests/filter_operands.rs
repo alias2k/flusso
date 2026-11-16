@@ -61,6 +61,7 @@ const ROOT_CASES: &[(&str, bool)] = &[
         false,
     ),
     ("{ column: s, op: eq, value: 'archi' }", true),
+    ("{ column: s, op: eq, value: 'archi  ' }", false),
     // numeric(10,2) holding 1.01
     ("{ column: n, op: eq, value: '1.005' }", false),
     ("{ column: n, op: neq, value: '1.005' }", true),
@@ -89,9 +90,11 @@ const ROOT_CASES: &[(&str, bool)] = &[
     // varbit(3) holding 101
     ("{ column: vb, op: eq, value: '1010101' }", false),
     ("{ column: vb, op: not_in, value: ['1010101'] }", true),
+    ("{ column: vb, op: eq, value: '101' }", true),
     // time(0) holding 12:00:01
     ("{ column: t, op: eq, value: '12:00:00.6' }", false),
     ("{ column: t, op: lte, value: '12:00:00.6' }", false),
+    ("{ column: t, op: eq, value: '12:00:01' }", true),
     // timestamp(0), timestamptz(0), interval(0): one second past a whole one
     (
         "{ column: ts, op: eq, value: '2020-01-01 12:00:00.6' }",
@@ -102,16 +105,26 @@ const ROOT_CASES: &[(&str, bool)] = &[
         false,
     ),
     ("{ column: iv, op: eq, value: '0.6 seconds' }", false),
+    ("{ column: ts, op: eq, value: '2020-01-01 12:00:01' }", true),
+    (
+        "{ column: tz, op: eq, value: '2020-01-01 12:00:01+00' }",
+        true,
+    ),
+    ("{ column: iv, op: eq, value: '1 second' }", true),
     // interval year holding 1 year
     ("{ column: iy, op: eq, value: '1 year 2 months' }", false),
     ("{ column: iy, op: neq, value: '1 year 2 months' }", true),
+    ("{ column: iy, op: eq, value: '1 year' }", true),
     // domains over varchar(5) and numeric(10,2)
     ("{ column: dv, op: eq, value: 'archived' }", false),
     ("{ column: dv, op: neq, value: 'archived' }", true),
     ("{ column: dn, op: eq, value: '1.005' }", false),
+    ("{ column: dv, op: eq, value: 'archi' }", true),
+    ("{ column: dn, op: eq, value: '1.01' }", true),
     // a domain whose CHECK refuses the value
     ("{ column: dp, op: eq, value: '-1' }", false),
     ("{ column: dp, op: neq, value: '-1' }", true),
+    ("{ column: dp, op: eq, value: '5' }", true),
 ];
 
 /// `(filter, matches)` for the related rows, every one holding `archi` and
