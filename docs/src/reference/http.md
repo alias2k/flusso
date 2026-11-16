@@ -30,7 +30,7 @@ The live status document as JSON: the deployment, then one block per sink.
 | `changes_in_flight` | int | Captured minus committed by the slowest sink. |
 | `documents_built` | int | Documents assembled by the ingest engine (once, however many sinks). |
 | `slot_lag_bytes` | int or null | Null until the first lag sample. |
-| `visibility_wait_seconds` | number or null | How long the source has held a committed transaction that isn't visible yet; every later change waits behind it. Null while nothing waits. See [Behind a synchronous standby](source-postgres.md#behind-a-synchronous-standby). |
+| `visibility_wait_seconds` | number or null | How long the source has held a committed transaction that isn't visible yet; every later change waits behind it. Timed from when that transaction was first found invisible, so an ingest engine restart doesn't reset it. Null while nothing waits, and once the source server is refused. See [Behind a synchronous standby](source-postgres.md#behind-a-synchronous-standby). |
 | `applied_position` | string or null | The source position every sink has applied: a fetch by id sees every commit at or before it. The slowest sink's. Null until the source follows live changes. |
 | `searchable_position` | string or null | The source position every sink can search. The slowest sink's. |
 | `errors` | int | Engine errors, ingest and sink. |

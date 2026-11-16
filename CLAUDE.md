@@ -645,25 +645,36 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   order; the front one is emitted only once its xid is `readable`. A snapshot read
   (`pg_current_snapshot()::text`, judged in Rust by `cdc/visibility.rs`'s `Snapshot::sees`, the
   32-bit xid **widened by its signed distance to `xmax`**, which is last-finished + 1, not the next
-  xid) runs on **its own task** (`refresh`, one read at a time) for as long as an xid is
-  `unchecked`, so reads overlap the engine's build; the stream keeps the newest snapshot (≤ 1 s,
-  `SNAPSHOT_REUSE`) and checks each commit against it on arrival. A read per check, inline or one
+  xid) runs on **its own task** (`refresh`, one read at a time) while an xid is `unchecked`, so
+  reads overlap the engine's build; the task lives as long as the stream and sleeps on
+  `Refresh.wake` otherwise (the stream stores `wanted` then `notify_one`s, and `Notify` keeps the
+  permit), because a task that exited on its own missed a commit arriving as it went idle (item 1
+  of the #343 review; guard `a_commit_arriving_as_the_snapshot_task_stops_is_still_checked`). A
+  read has its own one-connection pool (`visibility_pool`), times out after `READ_TIMEOUT` (5 s)
+  and is retried for `READ_FAILURES_FOR` (30 s) before the stream ends with it. The stream keeps
+  the newest snapshot (≤ 1 s, `SNAPSHOT_REUSE`) and checks each commit against it on arrival, so
+  a lone change costs one read, idle none, a lagging burst a few. A read per check, inline or one
   task each, made the stream not-ready and halved `drain_ready`'s batches (256 flushes for a
-  burst main did in 117). While the front is held the loop `select!`s
+  burst main did in 117); burst batches are cut by `max_delay`, not by the stream. While the front is held the loop `select!`s
   `confirmed_moved` (confirmations keep reaching the client, #205), `recv` up to the read-ahead
   bound (`with_read_ahead`, the CLI passes `max_changes × 16`) and the poll schedule
   (`poll_delay`: 0.5 ms for 20 ms, tokio rounds it to 1 ms, then doubling to 50 ms). A transaction
   touching no table an index reads (`required_tables`, by name) needs no check. **Fences and
   confirmation stay honest only because the hold lives in `pending`**: nothing there is registered
   and the horizon never moves past buffered changes; hold anywhere else and both guards need
-  extending. A hold past 5 s warns (sessions with `wait_event = 'SyncRep'`), every minute after,
-  and stops the stream if the server now names flusso a synchronous standby
-  (`synchronous_standby_names` matched by `names_standby`, case-insensitive, `*`; the walsender's
-  `sync_state` as a cross-check, NULL without `pg_read_all_stats`). `WalChangeCapture::check_server`
-  refuses a server in recovery or one naming flusso, before `prepare` writes, in every `live` (on
-  the SQL pool and on the gated replication session) and in the CLI's `Backends::source`, so `run`
-  exits. `ChangeCapture::readable_wait` → `Status::with_source` → `/status`
-  `visibility_wait_seconds` and the `flusso.replication.visibility_wait` gauge (read live). One held
+  extending. A hold past 5 s warns (sessions with `wait_event = 'SyncRep'`; the inspection is
+  bounded and best effort), every minute after, and stops the stream if the server now takes in
+  flusso as a synchronous standby (`refuse_standby`/`standby_listing`: by name, case-insensitive,
+  or by `*`, each with its own remedy; the walsender's `sync_state` as a cross-check, NULL without
+  `pg_read_all_stats`). `WalChangeCapture::check_server` refuses a server in recovery or one taking
+  in flusso, before `prepare` writes, in every `live` (on the SQL pool and on the gated
+  replication session), in the CLI's `Backends::source`, so `run` exits, and in `flusso check`
+  (`backends::source_server_problem`, printed under *Source server*, `server` in JSON).
+  `ChangeCapture::readable_wait` → `Status::with_source` → `/status` `visibility_wait_seconds` and
+  the `flusso.replication.visibility_wait` gauge (read live; dev dashboard panel and
+  `FlussoVisibilityWait` alert). The `HoldClock` records the xid it times and outlives a stream:
+  a reopened stream holding the same xid goes on from its first hold (the warning too), cleared
+  once that xid is emitted and on a refusal. One held
   transaction stalls the whole stream; no opt-out. Guards: `engine`'s `visibility` e2e (every
   scenario holds commits on a standby that never answers: nothing written during an 8 s hold, the
   document within 1 s of the release; root/child/re-parent/delete/count, a later commit released
@@ -675,7 +686,18 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   `stream::tests`' `a_held_transaction_is_not_emitted_and_nothing_passes_it`,
   `an_earlier_held_transaction_holds_back_a_later_visible_one`,
   `a_confirmation_is_handed_over_during_a_hold`, `a_hold_reads_no_further_than_its_bound`,
-  `a_hold_on_a_server_waiting_for_flusso_stops_the_stream`.
+  `a_hold_on_a_server_waiting_for_flusso_stops_the_stream`, the race test above,
+  `a_snapshot_read_that_never_answers_ends_the_stream`,
+  `a_snapshot_read_failing_for_a_moment_is_retried`,
+  `a_stall_inspection_that_never_answers_leaves_the_hold_running`,
+  `a_reopened_stream_times_the_same_transaction_from_its_first_hold`,
+  `a_stall_refusal_clears_the_clock`; `capture::tests`' `a_standby_is_refused`,
+  `a_refusal_clears_the_hold_clock`; `visibility::tests`'
+  `the_refusal_names_a_remedy_that_works_for_its_form`; `flusso-cli`'s `source_server` e2e (`check`
+  and `run` refuse `ANY 1 (*)` alike). The e2e helper `SyncRep::configure` waits until a probe
+  commit is seen in `SyncRep` (`standbys_in_force`): whether a commit waits is a flag the
+  checkpointer sets on reload, after sessions see the setting, and an unforced probe table
+  creation hung on a session the reload signal hadn't reached.
 - **Built once; build order is delivery order.** A batch buffers `(Position, ChangeEvent)`s,
   resolves each to `DocumentId`s, dedups, then `build_many` assembles each touched document
   **once** for all sinks. Snapshot rows go through the same path but are published *without* a

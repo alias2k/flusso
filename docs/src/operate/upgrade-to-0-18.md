@@ -146,7 +146,11 @@ A comparison with a string, a number or another kind fails rather than answering
 **Breaking.** 0.17 could read a change before its transaction was visible to other sessions and index the state before the commit; nothing rebuilt it. On a quiet primary that was rare; behind a synchronous standby it happened to most changes. 0.18 holds a change until its commit is visible (see [Behind a synchronous standby](../reference/source-postgres.md#behind-a-synchronous-standby)). What changes for a running deployment:
 
 - **A commit that never becomes visible stalls indexing** instead of being indexed stale: a synchronous standby that is down holds every later change too. `/status` shows `visibility_wait_seconds`, the `flusso.replication.visibility_wait` gauge rises, and a warning names the waiting sessions after 5 seconds.
-- **flusso refuses a server whose `synchronous_standby_names` lists it** (`flusso`, or `*`), and a standby (`pg_is_in_recovery()`). Both used to start: the first could hang every commit on the server, the second read from where visibility isn't decided. Take flusso's name out of the setting, or point the connection URL at the primary.
+- **flusso refuses a server whose `synchronous_standby_names` takes it in**, by name (`flusso`) or by `*` in any form (`*`, `ANY 1 (*)`, `FIRST 2 (a, *)`), and a standby (`pg_is_in_recovery()`). Both started on 0.17. Under the setting, 0.17 confirmed each commit after indexing it stale, so commits waited on flusso but finished: a deployment that ran that way, slowly, **will not start on 0.18**, because a commit would now wait for flusso while flusso waits for the commit to become visible. `*` is refused even where real standbys could fill the quorum (`ANY 1 (*)` with a physical standby attached), since flusso counts among the candidates. The fix depends on the form:
+  - a name: take `flusso` out of the setting and reload, or give flusso another `application_name`;
+  - `*`: replace it with the names of the synchronous standbys and reload. Renaming flusso doesn't help: `*` matches every name.
+
+  `flusso check` reports the same refusal under *Source server*, so it can be run against the server before the upgrade. For a standby, point the connection URL at the primary.
 - **Documents indexed stale by 0.17 stay stale** until their rows change. Behind a synchronous standby, run [`flusso reindex <index>`](../reference/cli.md#reindex) on every index once 0.18 is live.
 
 ## Related
