@@ -1880,7 +1880,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
   flusso reads numbers it keeps: `source-postgres`, the CLI (`script run --input`) and `flusso-query`
   (`_source`, cursor sort values; always on, so it unifies into the consumer's build: a deliberate choice,
   cost stated in its README). A declared `float` reads its raw text (`value.rs`'s `single`) as Postgres's
-  `::float4` would: up to 9 significant digits or 18+ parsed as `f32`, 10–17 (a `float8`'s shortest text)
+  `::float4` would: up to 9 significant digits or 18+ parsed as `f32` (trailing zeros not counted: `jsonb` pads a large double with them), 10–17 (a `float8`'s shortest text)
   through the correct `f64` then `as f32` (a correct `f64` then `as f32` on a `float4`'s text rounds twice:
   `7.038531e-26`); past `f32` it is infinite (written `null`, as 0.17). A number with no declared type is
   `kernel::untyped_number`, the one rule for the reader and `--input`: the exact `Decimal` of its shortest

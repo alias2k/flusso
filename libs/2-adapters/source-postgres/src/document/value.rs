@@ -1026,7 +1026,8 @@ fn decimal(raw: &str, at: &At<'_>) -> Result<GenericValue, String> {
 ///   `numeric::float4`, which parses the text;
 /// - 10 to 17, the `f64` the text names, then `as f32`: a `float8` column's
 ///   shortest text, and `float8::float4`, which rounds the double;
-/// - 18 or more, the `f32` nearest the text: only a `numeric` writes that many.
+/// - 18 or more, the `f32` nearest the text: only a `numeric` holds that many
+///   (trailing zeros are not counted, so a `jsonb` double padded with them is not one).
 ///
 /// A number past `f32`'s range and within `f64`'s is infinite, which the sink
 /// writes as `null`, as 0.17 did (Postgres's cast would refuse it; refusing it
@@ -1056,14 +1057,19 @@ fn single(raw: &str, at: &At<'_>) -> Result<GenericValue, String> {
 }
 
 /// The significant digits of `number`, a JSON number: those of its mantissa
-/// from the first non-zero one.
+/// from the first non-zero one to the last. Trailing zeros carry no digit of
+/// the value: `jsonb` pads a large double with them (`41515234697240640000`),
+/// and it is still a double's 16 digits.
 fn significant_digits(number: &str) -> usize {
-    number
+    let (digits, trailing_zeros) = number
         .bytes()
         .take_while(|b| b | 0x20 != b'e')
         .filter(u8::is_ascii_digit)
         .skip_while(|&b| b == b'0')
-        .count()
+        .fold((0_usize, 0_usize), |(digits, zeros), b| {
+            (digits + 1, if b == b'0' { zeros + 1 } else { 0 })
+        });
+    digits - trailing_zeros
 }
 
 /// Coerce each non-null element to `ty`, dropping the nulls.

@@ -930,6 +930,9 @@ fn a_float_reads_as_postgres_casts_to_float4() {
         ("1.000000059604644775390625000001", 1.000_000_1),
         ("1.000000059604644775390624999999", 1.0),
         ("16777217", 16_777_216.0),
+        // `jsonb` writes a large double as plain digits padded with zeros: still a
+        // double's 16 digits, an exact `f32` midpoint that `::float4` ties to even.
+        ("41515234697240640000", 4.151_523_7e19),
         ("1e39", f32::INFINITY),
         ("-1e39", f32::NEG_INFINITY),
     ] {
@@ -943,14 +946,18 @@ fn a_float_reads_as_postgres_casts_to_float4() {
 }
 
 #[test]
-fn significant_digits_start_at_the_first_non_zero_digit() {
+fn significant_digits_run_from_the_first_non_zero_digit_to_the_last() {
     for (text, digits) in [
         ("0", 0),
         ("0.000123", 3),
         ("-1.0000000596046448", 17),
         ("1.5e-30", 2),
-        ("120", 3),
-        ("1000000000000000000", 19),
+        ("120", 2),
+        ("1000000000000000000", 1),
+        ("41515234697240640000", 16),
+        ("1.50", 2),
+        ("0.0", 0),
+        ("100.001", 6),
     ] {
         assert_eq!(super::significant_digits(text), digits, "{text}");
     }

@@ -79,6 +79,16 @@ fn scalar(ty: &FlussoType, json: serde_json::Value) -> GenericValue {
         (FlussoType::Date | FlussoType::Timestamp, serde_json::Value::String(text)) => {
             temporal(&text, ty).unwrap_or(GenericValue::String(text))
         }
+        (FlussoType::Double, serde_json::Value::Number(number)) => match number.as_f64() {
+            Some(double) => GenericValue::Double(double),
+            None => untyped(number.into()),
+        },
+        (FlussoType::Float, serde_json::Value::Number(number)) => {
+            match number.to_string().parse::<f32>() {
+                Ok(single) => GenericValue::Float(single),
+                Err(_) => untyped(number.into()),
+            }
+        }
         (FlussoType::Decimal, serde_json::Value::Number(number)) => {
             decimal(&number.to_string()).unwrap_or_else(|| untyped(number.into()))
         }

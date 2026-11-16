@@ -43,7 +43,7 @@ The input shows exactly what `this` and `root` contain, including the input-only
 flusso script run --index products --input fixtures/mug.json --field label
 ```
 
-The JSON is typed by the index schema, as the builder types a row: a string under a `date` or `timestamp` field becomes a date, time or timestamp, a `decimal` (a number or a string) a decimal, and a `map` of dates is typed for the script as in the pipeline. A string that doesn't parse as its field's type stays a string, and a key the schema doesn't declare is untyped, read as the builder reads it: whole numbers become integers, other numbers decimals, the rest text.
+The JSON is typed by the index schema, as the builder types a row: a string under a `date` or `timestamp` field becomes a date, time or timestamp, a `decimal` (a number or a string) a decimal, a number under a `double` or `float` field that float (`10` is `10.0`), and a `map` of dates is typed for the script as in the pipeline. A string that doesn't parse as its field's type stays a string, and a key the schema doesn't declare is untyped, read as the builder reads it: whole numbers become integers, other numbers decimals, the rest text.
 
 The exit status is non-zero when a script fails, so `script run --input` works as a test step.
 

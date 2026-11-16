@@ -135,3 +135,32 @@ fn json_with_no_declared_type_reads_numbers_as_the_builder_does() {
     assert!(matches!(doc["tiny"], GenericValue::BigDecimal(_)));
     assert!(matches!(doc["huge"], GenericValue::String(_)));
 }
+
+/// A declared `double` or `float` reads as that float, whole numbers included,
+/// as the builder reads the column: a script multiplying it by a float literal
+/// must run here as it runs in the pipeline.
+#[test]
+fn a_declared_float_reads_as_a_float_not_as_an_untyped_number() {
+    let schema = schema(
+        "  \
+  - double: price\n    required: true\n  \
+  - double: whole\n    required: true\n  \
+  - float: ratio\n    required: true\n  \
+  - double: series\n    required: true\n    array: true\n",
+    );
+    let json = serde_json::json!({
+        "price": 9.5,
+        "whole": 10,
+        "ratio": 0.25,
+        "series": [1, 2.5],
+    });
+    let doc = document(&schema.fields, json);
+    let doc = map(&doc);
+    assert_eq!(doc["price"], GenericValue::Double(9.5));
+    assert_eq!(doc["whole"], GenericValue::Double(10.0));
+    assert_eq!(doc["ratio"], GenericValue::Float(0.25));
+    assert_eq!(
+        doc["series"],
+        GenericValue::Array(vec![GenericValue::Double(1.0), GenericValue::Double(2.5)])
+    );
+}
