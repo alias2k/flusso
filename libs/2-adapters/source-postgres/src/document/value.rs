@@ -756,9 +756,10 @@ impl<'de> Visitor<'de> for Skip {
     }
 }
 
-/// A JSON value read without a declared type: a whole number is a
-/// [`BigInt`](GenericValue::BigInt), any other number goes through [`float`],
-/// as [`json_to_generic`] reads it. `remaining` counts the objects and arrays
+/// A JSON value read without a declared type, as [`json_to_generic`] reads
+/// it: a number by [`kernel::untyped_json_number`] (a whole number in `i64` a
+/// [`BigInt`](GenericValue::BigInt), past it the exact
+/// [`Decimal`](GenericValue::Decimal), a fraction [`kernel::untyped_number`]). `remaining` counts the objects and arrays
 /// it may still open before `serde_json`'s depth limit, for a value read again
 /// from its raw text.
 #[derive(Clone, Copy)]
