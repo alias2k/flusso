@@ -31,6 +31,12 @@ fn product() -> GenericValue {
             "stockBand",
             "popularity",
             "createdYear",
+            "daysOnSale",
+            "createdHourInRome",
+            "createdMonth",
+            "releaseQuarter",
+            "firstRenewal",
+            "saleEndsAt",
             "displayTitle",
             "tagList",
             "tagLine",
@@ -65,6 +71,9 @@ fn typed(json: serde_json::Value) -> GenericValue {
                         ("createdAt", serde_json::Value::String(s)) => GenericValue::TimestampTz(
                             chrono::DateTime::parse_from_rfc3339(&s).unwrap().to_utc(),
                         ),
+                        ("releasedOn" | "saleEndsOn", serde_json::Value::String(s)) => {
+                            GenericValue::Date(s.parse().unwrap())
+                        }
                         ("variants", serde_json::Value::Array(items)) => GenericValue::Array(
                             items
                                 .into_iter()
@@ -121,6 +130,22 @@ fn every_recipe_in_the_manual_produces_what_it_says() {
     assert_eq!(get(&doc, "stockBand"), &text("low"));
     assert_eq!(get(&doc, "popularity"), &GenericValue::Double(8.5));
     assert_eq!(get(&doc, "createdYear"), &GenericValue::Int(2024));
+    assert_eq!(get(&doc, "daysOnSale"), &GenericValue::Int(30));
+    assert_eq!(get(&doc, "createdHourInRome"), &GenericValue::Int(12));
+    assert_eq!(get(&doc, "createdMonth"), &text("2024-05"));
+    assert_eq!(get(&doc, "releaseQuarter"), &text("2024-Q1"));
+    assert_eq!(
+        get(&doc, "firstRenewal"),
+        &GenericValue::Date("2024-02-29".parse().unwrap())
+    );
+    assert_eq!(
+        get(&doc, "saleEndsAt"),
+        &GenericValue::TimestampTz(
+            chrono::DateTime::parse_from_rfc3339("2024-03-01T22:59:59Z")
+                .unwrap()
+                .to_utc()
+        )
+    );
     assert_eq!(get(&doc, "displayTitle"), &text("Tazza"));
     assert_eq!(
         get(&doc, "tagList"),

@@ -18,6 +18,12 @@ fields:
   - timestamp: createdAt
     column: created_at
     required: true
+  - date: releasedOn
+    column: released_on
+    required: true
+  - date: saleEndsOn
+    column: sale_ends_on
+    required: true
   - long: reviewCount
     column: review_count
     required: true
@@ -96,8 +102,46 @@ fields:
   # ANCHOR: created_year
   - integer: createdYear
     required: true
-    script: parse_int(this.createdAt.sub_string(0, 4))
+    script: this.createdAt.year
   # ANCHOR_END: created_year
+
+  # ANCHOR: days_on_sale
+  - integer: daysOnSale
+    required: true
+    script: (this.saleEndsOn - this.releasedOn).days
+  # ANCHOR_END: days_on_sale
+
+  # ANCHOR: local_hour
+  - integer: createdHourInRome
+    required: true
+    script: this.createdAt.in_zone("Europe/Rome").hour
+  # ANCHOR_END: local_hour
+
+  # ANCHOR: month_bucket
+  - keyword: createdMonth
+    required: true
+    script: this.createdAt.in_zone("Europe/Rome").format("%Y-%m")
+  # ANCHOR_END: month_bucket
+
+  # ANCHOR: quarter_label
+  - keyword: releaseQuarter
+    required: true
+    script: |
+      let d = this.releasedOn;
+      `${d.year}-Q${d.quarter}`
+  # ANCHOR_END: quarter_label
+
+  # ANCHOR: first_renewal
+  - date: firstRenewal
+    required: true
+    script: this.releasedOn.add_months(1)
+  # ANCHOR_END: first_renewal
+
+  # ANCHOR: sale_ends_at
+  - timestamp: saleEndsAt
+    required: true
+    script: this.saleEndsOn.at_time(time(23, 59, 59)).at_zone("Europe/Rome")
+  # ANCHOR_END: sale_ends_at
 
   # ANCHOR: title_fallback
   - text: displayTitle

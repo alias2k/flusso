@@ -22,6 +22,7 @@ kernel.workspace = true
 source.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
 rhai.workspace = true
 tracing.workspace = true
 uuid.workspace = true

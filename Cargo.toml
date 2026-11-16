@@ -136,6 +136,7 @@ sqlx = { version = "0.9.*", default-features = false, features = [
   "json",
 ] }
 chrono = { version = "0.4.*", default-features = false, features = ["std", "serde"] }
+chrono-tz = { version = "0.10.4", default-features = false, features = ["std"] }
 uuid = { version = "1.*", features = ["serde"] }
 serde_json = { version = "1.*" }
 # Adapter option schemas (`#[derive(AdapterConfig)]` → editor schema, Reference

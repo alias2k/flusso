@@ -1352,8 +1352,18 @@ property, no `eval`, fixed limits (`sandbox.rs`). The CLI wraps the Postgres bui
 (`compile_scripts`), records `flusso.script.failures{index,field}` and a rate-limited `error!` log
 (`telemetry/script_log.rs`, array positions folded to `[]`); the daemon's `Status` carries
 `script_failures` per index. The designer compiles scripts in `/api/preview` (`script_errors`) and runs
-them on the sample (`/api/sample` takes an `id`). The manual's script guide
-(`docs/src/author/scripts/`) includes its recipes by mdBook anchor from
+them on the sample (`/api/sample` takes an `id`). **Dates are typed (issue #364):** `value::to_dynamic` hands a `Date`/`Time`/`Timestamp`/`TimestampTz`
+over as the custom Rhai types of `dates.rs` (`date`, `time`, `timestamp` with an optional zone,
+`duration`), registered by `dates/library.rs` into the sandbox's one module (a second module slows
+every call). A `Timestamp` keeps its wall clock plus the zone's offset there, so parts never touch the
+zone database (`chrono-tz`, bundled); calendar units and rounding move the wall clock and
+`Zone::resolve` turns it back (gap: forward by its length; overlap: the earlier). Comparisons across
+kinds or with a string are registered to **fail**, since Rhai answers a mismatched comparison with a
+silent `false`. No `now()`. A `map` of dates is typed for the script only (`view.rs`, from the schema;
+the document keeps the text), and `flusso script run --input` types its JSON by the schema
+(`input::document`). Guards: `tests/dates.rs` (every function and edge rule, plus proptests).
+The manual's script guide
+(`docs/src/author/scripts/`, dates in `dates.md`) includes its recipes by mdBook anchor from
 `libs/2-script/tests/recipes/recipes.schema.yml`, which `tests/recipes.rs` runs and asserts: change a
 recipe there, not in the page.
 
@@ -1712,7 +1722,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | --- | --- |
 | The sync loops / batching / ack ordering | `libs/2-engine/src/` — `ingest.rs` (`IngestEngine`: batching, dedup, build once, publish, request coalescing, snapshots, watermark confirm), `sink_engine.rs` (`SinkEngine`: `stage`, recv → apply → flush → ack, failure policies, `SinkControl::Reindex`), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` (drives both engines over a real `ChannelStream`) |
 | Pipeline observability trait (`Observer`, `BuildStats`/`CommitStats`, `EngineId`, `FanOut`) | `libs/2-engine/src/observer.rs` |
-| Script fields (Rhai): compile, run, strip input-only fields, the `DocumentBuilder` decorator, the sandbox, value conversion | `libs/2-script/src/` — `scripts.rs` (`Scripts`: plan + apply), `builder.rs` (`ScriptedBuilder`), `sandbox.rs`, `value.rs`; `benches/scripted.rs`; CLI `commands/script.rs` (`flusso script run`), `telemetry/script_log.rs` |
+| Script fields (Rhai): compile, run, strip input-only fields, the `DocumentBuilder` decorator, the sandbox, value conversion, typed dates | `libs/2-script/src/` — `scripts.rs` (`Scripts`: plan + apply), `builder.rs` (`ScriptedBuilder`), `sandbox.rs`, `value.rs`, `dates.rs` + `dates/library.rs` (the date types + their Rhai registration), `view.rs` (a `map` of dates typed for scripts), `input.rs` (JSON typed by the schema); `benches/scripted.rs`; CLI `commands/script.rs` (`flusso script run`), `telemetry/script_log.rs` |
 | Daemon (domain): supervisor, `DaemonControl`, per-sink `Status`, `StatusObserver`, lag poll, the fence | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `supervise.rs` (stage → spawn → restart with backoff; `DaemonControl::reindex`), `backends.rs` (`Backends` trait + `SourceParts`/`SinkParts` seam), `observer.rs`, `status.rs`, `lag.rs`, `fence.rs` (`Fence`/`FenceRequest`/`FenceOutcome`/`FenceObserver`) |
 | Read-your-writes (fences), end to end | source: `libs/1-ports/source/src/cdc/capture.rs` (`SourcePosition`, `reached`, `on_advance`), `libs/2-adapters/source-postgres/src/cdc/ack.rs` (`Positions`: entries + horizon) and `stream.rs` (who moves the horizon); sink: `libs/1-ports/sink/src/sink.rs` (`Visibility`), `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`settle_visibility`); engine: `libs/2-engine/src/sink_engine.rs` (`report_positions`, the searchable queue); daemon: `libs/3-daemon/src/fence.rs`; CLI: `apps/cli/src/http/mod.rs` (`wait`); client: `sdk/query/src/fence.rs`, `position.rs`; e2e: `libs/3-daemon/tests/fence.rs` |
 | Adapter registry (the one place that names adapters): `type` → config struct, `validate`, descriptions, flag overrides | `apps/cli/src/adapters.rs` |

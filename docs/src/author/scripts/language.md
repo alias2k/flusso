@@ -30,7 +30,8 @@ Every document value arrives as a Rhai value; the full mapping is in [Values in 
 | an integer column | `i64` | `type_of(x) == "i64"` |
 | `float`, `double` | `f64` | `"f64"` |
 | `decimal` | `decimal` (rounded to what `Decimal` holds: about 28 significant digits, at most 28 after the point); a string past ±7.9 × 10^28 | `"decimal"`, or `"string"` |
-| text, `uuid`, `date`, `timestamp` | string | `"string"` |
+| text, `uuid` | string | `"string"` |
+| `date`, `timestamp` (and a `time` column) | `date`, `timestamp`, `time`; see [Dates in a script](dates.md) | `"date"`, `"timestamp"`, `"time"` |
 | a group, a to-one join, a `map` | object map | `"map"` |
 | a to-many join, an `ids` aggregate | array | `"array"` |
 | null | `()` | `x == ()` |
@@ -138,13 +139,14 @@ An object map reads with `.name` or `["name"]`; the brackets take a runtime key 
 ## What isn't there
 
 - **The database.** A script reads only the built document; fold what it needs in with a [join](../../reference/joins.md) or an [aggregate](../../reference/aggregates.md), and mark it [`emit: false`](../../reference/scripts.md#emit) if it shouldn't be indexed.
-- **The clock.** `timestamp()` doesn't exist: a script runs again on every rebuild and must give the same answer. Dates are strings; compare them as strings (`this.createdAt > "2024-01-01"`, ISO dates sort correctly) or cut them up (`this.createdAt.sub_string(0, 4)`).
+- **The clock.** There's no `now()` or `today()`: a script runs again on every rebuild and must give the same answer. Compare dates to now in the query; see [No clock](dates.md#no-clock).
 - **Other scripts' output.** Each script sees the document before any script ran; a sibling script field reads as `()`.
 - **Functions of your own.** A script is one expression body; `fn` definitions aren't accepted. Closures work.
 - **Imports and `eval`.**
 
 ## Related
 
+- [Dates in a script](dates.md): parts, arithmetic, zones.
 - [Script recipes](recipes.md): tested scripts for the common jobs.
 - [Test and debug a script](debugging.md).
 - [Script fields](../../reference/scripts.md): every key and rule.

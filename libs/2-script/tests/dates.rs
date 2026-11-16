@@ -122,7 +122,10 @@ fn fails(ty: &str, script: &str) -> String {
 }
 
 fn assert_contains(message: &str, part: &str) {
-    assert!(message.contains(part), "`{message}` should mention `{part}`");
+    assert!(
+        message.contains(part),
+        "`{message}` should mention `{part}`"
+    );
 }
 
 // ── the owner's example ───────────────────────────────────────────────────────
@@ -136,7 +139,10 @@ fn days_active_is_the_difference_in_days() {
   - integer: days_active\n    required: true\n    script: (this.end_date - this.start_date).days\n",
     );
     let mut doc = GenericValue::Map(BTreeMap::from([
-        ("start_date".to_owned(), GenericValue::Date(date(2024, 1, 15))),
+        (
+            "start_date".to_owned(),
+            GenericValue::Date(date(2024, 1, 15)),
+        ),
         ("end_date".to_owned(), GenericValue::Date(date(2024, 3, 15))),
         ("days_active".to_owned(), GenericValue::Null),
     ]));
@@ -184,9 +190,11 @@ fn debug_names_the_zone() {
     let schema = IndexSchema::try_from(SchemaYaml::try_parse(&yaml).unwrap()).unwrap();
     let scripts = Scripts::compile_with_printer(
         &SourceSpec::new(BTreeMap::from([(index(), schema)])),
-        Some(std::sync::Arc::new(move |_: &script::ScriptContext<'_>, line: &str| {
-            sink.lock().unwrap().push(line.to_owned());
-        })),
+        Some(std::sync::Arc::new(
+            move |_: &script::ScriptContext<'_>, line: &str| {
+                sink.lock().unwrap().push(line.to_owned());
+            },
+        )),
     )
     .unwrap();
     let mut doc = GenericValue::Map(inputs());
@@ -277,7 +285,10 @@ fn constructors_build_and_refuse_what_does_not_exist() {
 
 #[test]
 fn parsing_reads_iso_text_and_patterns() {
-    assert_eq!(text(r#"parse_date("2024-05-01").to_string()"#), "2024-05-01");
+    assert_eq!(
+        text(r#"parse_date("2024-05-01").to_string()"#),
+        "2024-05-01"
+    );
     assert_eq!(
         text(r#"parse_date("01/05/2024", "%d/%m/%Y").to_string()"#),
         "2024-05-01"
@@ -289,7 +300,11 @@ fn parsing_reads_iso_text_and_patterns() {
     );
     assert_eq!(int(r#"parse_time("10:00:00.250").millisecond"#), 250);
     let offset = r#"parse_timestamp("2024-05-01T23:00:00+02:00")"#;
-    assert_eq!(int(&format!("{offset}.day")), 1, "parts at the written offset");
+    assert_eq!(
+        int(&format!("{offset}.day")),
+        1,
+        "parts at the written offset"
+    );
     assert_eq!(text(&format!("{offset}.zone")), "+02:00");
     assert_eq!(
         text(&format!("{offset}.to_string()")),
@@ -332,7 +347,10 @@ fn text_that_does_not_parse_fails_with_the_text_and_the_pattern() {
 
 #[test]
 fn format_writes_a_pattern() {
-    assert_eq!(text(r#"date(2024, 5, 1).format("%d %b %Y")"#), "01 May 2024");
+    assert_eq!(
+        text(r#"date(2024, 5, 1).format("%d %b %Y")"#),
+        "01 May 2024"
+    );
     assert_eq!(text(r#"this.start.format("%Y-%m")"#), "2024-01");
     assert_eq!(text(r#"this.clock.format("%H.%M")"#), "10.15");
     assert_eq!(
@@ -358,15 +376,42 @@ fn a_bad_pattern_fails_instead_of_panicking() {
 
 #[test]
 fn adding_calendar_units_clamps_to_the_month_end() {
-    assert_eq!(text("date(2024, 1, 31).add_months(1).to_string()"), "2024-02-29");
-    assert_eq!(text("date(2023, 1, 31).add_months(1).to_string()"), "2023-02-28");
-    assert_eq!(text("date(2024, 3, 31).add_months(-1).to_string()"), "2024-02-29");
-    assert_eq!(text("date(2024, 2, 29).add_years(1).to_string()"), "2025-02-28");
-    assert_eq!(text("date(2024, 2, 29).add_years(4).to_string()"), "2028-02-29");
-    assert_eq!(text("date(2024, 12, 31).add_days(1).to_string()"), "2025-01-01");
-    assert_eq!(text("date(2024, 3, 1).add_days(-1).to_string()"), "2024-02-29");
-    assert_eq!(text("date(2023, 3, 1).add_days(-1).to_string()"), "2023-02-28");
-    assert_eq!(text("date(2024, 1, 1).add_weeks(2).to_string()"), "2024-01-15");
+    assert_eq!(
+        text("date(2024, 1, 31).add_months(1).to_string()"),
+        "2024-02-29"
+    );
+    assert_eq!(
+        text("date(2023, 1, 31).add_months(1).to_string()"),
+        "2023-02-28"
+    );
+    assert_eq!(
+        text("date(2024, 3, 31).add_months(-1).to_string()"),
+        "2024-02-29"
+    );
+    assert_eq!(
+        text("date(2024, 2, 29).add_years(1).to_string()"),
+        "2025-02-28"
+    );
+    assert_eq!(
+        text("date(2024, 2, 29).add_years(4).to_string()"),
+        "2028-02-29"
+    );
+    assert_eq!(
+        text("date(2024, 12, 31).add_days(1).to_string()"),
+        "2025-01-01"
+    );
+    assert_eq!(
+        text("date(2024, 3, 1).add_days(-1).to_string()"),
+        "2024-02-29"
+    );
+    assert_eq!(
+        text("date(2023, 3, 1).add_days(-1).to_string()"),
+        "2023-02-28"
+    );
+    assert_eq!(
+        text("date(2024, 1, 1).add_weeks(2).to_string()"),
+        "2024-01-15"
+    );
     assert_eq!(
         text("this.local.add_months(10).to_string()"),
         "2025-03-01T10:00:00"
@@ -375,8 +420,14 @@ fn adding_calendar_units_clamps_to_the_month_end() {
 
 #[test]
 fn leap_years_follow_the_gregorian_calendar() {
-    assert_eq!(text("date(2000, 2, 28).add_days(1).to_string()"), "2000-02-29");
-    assert_eq!(text("date(1900, 2, 28).add_days(1).to_string()"), "1900-03-01");
+    assert_eq!(
+        text("date(2000, 2, 28).add_days(1).to_string()"),
+        "2000-02-29"
+    );
+    assert_eq!(
+        text("date(1900, 2, 28).add_days(1).to_string()"),
+        "1900-03-01"
+    );
     assert_contains(&fails("keyword", "date(2100, 2, 29)"), "2100-02-29");
 }
 
@@ -394,9 +445,19 @@ fn adding_clock_units() {
         text("this.local.add_seconds(3600 * 24).to_string()"),
         "2024-05-02T10:00:00"
     );
-    assert_eq!(text("time(23, 0, 0).add_hours(2).to_string()"), "01:00:00", "wraps");
-    assert_eq!(text("time(0, 0, 30).add_seconds(-60).to_string()"), "23:59:30");
-    assert_eq!(text("time(1, 0, 0).add_minutes(30).to_string()"), "01:30:00");
+    assert_eq!(
+        text("time(23, 0, 0).add_hours(2).to_string()"),
+        "01:00:00",
+        "wraps"
+    );
+    assert_eq!(
+        text("time(0, 0, 30).add_seconds(-60).to_string()"),
+        "23:59:30"
+    );
+    assert_eq!(
+        text("time(1, 0, 0).add_minutes(30).to_string()"),
+        "01:30:00"
+    );
 }
 
 #[test]
@@ -425,17 +486,26 @@ fn a_difference_is_a_duration_read_in_any_unit() {
 
 #[test]
 fn a_difference_across_a_daylight_saving_change_is_elapsed_time() {
-    let midnight = |day: u32| {
-        format!(r#"timestamp(2024, 3, {day}, 0, 0, 0).at_zone("Europe/Rome")"#)
-    };
-    let (a, b) = (midnight(31), "timestamp(2024, 4, 1, 0, 0, 0).at_zone(\"Europe/Rome\")");
+    let midnight =
+        |day: u32| format!(r#"timestamp(2024, 3, {day}, 0, 0, 0).at_zone("Europe/Rome")"#);
+    let (a, b) = (
+        midnight(31),
+        "timestamp(2024, 4, 1, 0, 0, 0).at_zone(\"Europe/Rome\")",
+    );
     assert_eq!(int(&format!("({b} - {a}).hours")), 23);
     assert_eq!(int(&format!("({b} - {a}).days")), 0);
     assert_eq!(int(&format!("({b}.date() - {a}.date()).days")), 1);
-    assert_eq!(int(&format!("({} - {}).hours", midnight(31), midnight(30))), 24);
+    assert_eq!(
+        int(&format!("({} - {}).hours", midnight(31), midnight(30))),
+        24
+    );
     let utc = r#"parse_timestamp("2024-03-31T12:00:00Z")"#;
     let rome = r#"parse_timestamp("2024-03-31T12:00:00+02:00")"#;
-    assert_eq!(int(&format!("({utc} - {rome}).hours")), 2, "zones may differ");
+    assert_eq!(
+        int(&format!("({utc} - {rome}).hours")),
+        2,
+        "zones may differ"
+    );
 }
 
 #[test]
@@ -535,7 +605,9 @@ fn a_timestamp_rounds_in_its_zone() {
 fn the_start_of_a_day_that_begins_in_a_gap_is_the_first_instant_after_it() {
     // Santiago springs forward at midnight: 2024-09-08 00:00 does not exist.
     assert_eq!(
-        text(r#"parse_timestamp("2024-09-08T12:00:00Z").in_zone("America/Santiago").start_of_day().to_string()"#),
+        text(
+            r#"parse_timestamp("2024-09-08T12:00:00Z").in_zone("America/Santiago").start_of_day().to_string()"#
+        ),
         "2024-09-08T01:00:00-03:00"
     );
 }
@@ -560,8 +632,14 @@ fn in_zone_keeps_the_instant_and_at_zone_keeps_the_wall_clock() {
         text(r#"this.at.in_zone("Europe/Rome").without_zone().to_string()"#),
         "2024-03-31T01:30:00"
     );
-    assert_eq!(text(r#"this.at.in_zone("Europe/Rome").zone"#), "Europe/Rome");
-    assert_eq!(text(r#"this.at.in_zone("Europe/Rome").time().to_string()"#), "01:30:00");
+    assert_eq!(
+        text(r#"this.at.in_zone("Europe/Rome").zone"#),
+        "Europe/Rome"
+    );
+    assert_eq!(
+        text(r#"this.at.in_zone("Europe/Rome").time().to_string()"#),
+        "01:30:00"
+    );
 }
 
 #[test]
@@ -606,9 +684,16 @@ fn values_of_one_kind_compare() {
     assert!(boolean("this.start != this.end"));
     assert!(boolean("time(9, 0, 0) < this.clock"));
     assert!(boolean("this.local == timestamp(2024, 5, 1, 10, 0, 0)"));
-    assert!(boolean(r#"this.at == this.at.in_zone("Asia/Tokyo")"#), "same instant");
-    assert!(boolean(r#"parse_timestamp("2024-05-01T12:00:00+02:00") < parse_timestamp("2024-05-01T11:00:00Z")"#));
-    assert!(boolean("(this.end - this.start) > (date(2024, 1, 2) - date(2024, 1, 1))"));
+    assert!(
+        boolean(r#"this.at == this.at.in_zone("Asia/Tokyo")"#),
+        "same instant"
+    );
+    assert!(boolean(
+        r#"parse_timestamp("2024-05-01T12:00:00+02:00") < parse_timestamp("2024-05-01T11:00:00Z")"#
+    ));
+    assert!(boolean(
+        "(this.end - this.start) > (date(2024, 1, 2) - date(2024, 1, 1))"
+    ));
     assert!(boolean("this.start in [date(2024, 1, 31)]"));
     assert!(!boolean("this.start == ()"));
     assert!(boolean("this.none == ()"));
@@ -646,32 +731,44 @@ fn a_null_date_is_unit_and_no_function_takes_it() {
 
 #[test]
 fn a_string_is_not_a_date() {
+    assert_contains(&fails("keyword", r#""2024-05-01".add_days(1)"#), "add_days");
     assert_contains(
-        &fails("keyword", r#""2024-05-01".add_days(1)"#),
-        "add_days",
+        &fails("keyword", "this.start.sub_string(0, 4)"),
+        "sub_string",
     );
-    assert_contains(&fails("keyword", "this.start.sub_string(0, 4)"), "sub_string");
 }
 
 #[test]
 fn a_result_out_of_range_fails_the_document() {
-    assert_contains(&fails("keyword", "this.start.add_years(300000)"), "out of range");
+    assert_contains(
+        &fails("keyword", "this.start.add_years(300000)"),
+        "out of range",
+    );
     assert_contains(
         &fails("keyword", "this.start.add_days(9223372036854775807)"),
         "out of range",
     );
-    assert_contains(&fails("keyword", "this.start.add_months(4294967296)"), "out of range");
+    assert_contains(
+        &fails("keyword", "this.start.add_months(4294967296)"),
+        "out of range",
+    );
     assert_contains(
         &fails("keyword", "this.local.add_seconds(9223372036854775807)"),
         "out of range",
     );
-    assert_contains(&fails("keyword", "date(2024, 1, 4294967297)"), "no such date");
+    assert_contains(
+        &fails("keyword", "date(2024, 1, 4294967297)"),
+        "no such date",
+    );
 }
 
 #[test]
 fn an_error_carries_its_line_and_column() {
-    let failure = run("keyword", "let d = this.start;\nd.add_days(1);\nd.in_zone(\"x\")")
-        .unwrap_err();
+    let failure = run(
+        "keyword",
+        "let d = this.start;\nd.add_days(1);\nd.in_zone(\"x\")",
+    )
+    .unwrap_err();
     assert_eq!(failure.field, "out");
     let position = failure.position.unwrap();
     assert_eq!(position.line, 3);
@@ -727,7 +824,10 @@ fn a_mismatched_date_result_is_refused_with_what_to_do() {
     );
     assert_contains(&fails("keyword", "this.start"), "to_string");
     assert_contains(&fails("date", "this.clock"), "returned a time");
-    assert_contains(&fails("long", "this.end - this.start"), "returned a duration");
+    assert_contains(
+        &fails("long", "this.end - this.start"),
+        "returned a duration",
+    );
 }
 
 #[test]
@@ -835,12 +935,20 @@ fn dates_inside_a_has_many_and_an_array_column_arrive_typed() {
         GenericValue::Map(m) => m[key].clone(),
         _ => panic!(),
     };
-    assert_eq!(field(&stays[0], "nights"), GenericValue::Int(4), "a leap year");
+    assert_eq!(
+        field(&stays[0], "nights"),
+        GenericValue::Int(4),
+        "a leap year"
+    );
     assert_eq!(field(&stays[1], "nights"), GenericValue::Int(3));
     let GenericValue::Array(visits) = field(&stays[0], "visits") else {
         panic!()
     };
-    assert_eq!(field(&visits[0], "hour"), GenericValue::Int(0), "next day in Rome");
+    assert_eq!(
+        field(&visits[0], "hour"),
+        GenericValue::Int(0),
+        "next day in Rome"
+    );
 }
 
 #[test]
@@ -857,8 +965,14 @@ fn a_date_map_reaches_a_script_typed_and_reaches_the_sink_unchanged() {
     - integer: dueDay\n        required: true\n        script: root.milestones.launch.day + this.due.en.day\n",
     );
     let milestones = GenericValue::Map(BTreeMap::from([
-        ("launch".to_owned(), GenericValue::String("2024-05-01".to_owned())),
-        ("someday".to_owned(), GenericValue::String("soon".to_owned())),
+        (
+            "launch".to_owned(),
+            GenericValue::String("2024-05-01".to_owned()),
+        ),
+        (
+            "someday".to_owned(),
+            GenericValue::String("soon".to_owned()),
+        ),
     ]));
     let seen = GenericValue::Map(BTreeMap::from([(
         "first".to_owned(),
@@ -991,9 +1105,7 @@ mod properties {
     }
 
     fn day() -> impl Strategy<Value = NaiveDate> {
-        (-700_000i32..1_400_000).prop_map(|n| {
-            NaiveDate::from_num_days_from_ce_opt(n).unwrap()
-        })
+        (-700_000i32..1_400_000).prop_map(|n| NaiveDate::from_num_days_from_ce_opt(n).unwrap())
     }
 
     fn instant() -> impl Strategy<Value = DateTime<Utc>> {

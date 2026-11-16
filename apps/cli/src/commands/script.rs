@@ -5,10 +5,10 @@
 //!
 //! The document comes from the live database (`--id`, or the first row when
 //! omitted) through the same builder a run uses, or from a JSON file
-//! (`--input`) with no database at all. `--watch` re-runs it whenever the
+//! (`--input`) with no database at all, typed by the index schema so a script
+//! sees the same values either way. `--watch` re-runs it whenever the
 //! config or a schema next to it changes.
 
-use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -86,9 +86,9 @@ async fn run_once(args: &RunArgs) -> anyhow::Result<()> {
     let index = IndexName::try_new(&args.index)
         .map_err(|e| anyhow!("invalid index name `{}`: {e}", args.index))?;
     let spec = source_spec(&config);
-    if spec.schema(&index).is_none() {
+    let Some(schema) = spec.schema(&index) else {
         bail!("no enabled index `{index}` in {}", args.config.display());
-    }
+    };
     let printed: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
     let sink = Arc::clone(&printed);
     let printer: Printer = Arc::new(move |context: &ScriptContext<'_>, text: &str| {
@@ -100,7 +100,10 @@ async fn run_once(args: &RunArgs) -> anyhow::Result<()> {
         .map_err(|errors| anyhow!("{errors}"))?;
 
     let (label, built) = match &args.input {
-        Some(path) => (path.display().to_string(), Ok(read_input(path)?)),
+        Some(path) => (
+            path.display().to_string(),
+            Ok(read_input(path, &schema.fields)?),
+        ),
         None => from_database(&config, &index, args.id.as_deref()).await?,
     };
 
@@ -187,35 +190,13 @@ async fn from_database(
     }
 }
 
-fn read_input(path: &Path) -> anyhow::Result<GenericValue> {
+/// A JSON document, typed by the index schema as the builder types a row.
+fn read_input(path: &Path, fields: &[kernel::Field]) -> anyhow::Result<GenericValue> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let json: serde_json::Value =
         serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-    Ok(from_json(json))
-}
-
-/// Untyped JSON into the document vocabulary: whole numbers as integers,
-/// other numbers as doubles, everything else as it reads.
-fn from_json(json: serde_json::Value) -> GenericValue {
-    match json {
-        serde_json::Value::Null => GenericValue::Null,
-        serde_json::Value::Bool(b) => GenericValue::Bool(b),
-        serde_json::Value::Number(n) => n
-            .as_i64()
-            .map(GenericValue::BigInt)
-            .or_else(|| n.as_f64().map(GenericValue::Double))
-            .unwrap_or(GenericValue::Null),
-        serde_json::Value::String(s) => GenericValue::String(s),
-        serde_json::Value::Array(items) => {
-            GenericValue::Array(items.into_iter().map(from_json).collect())
-        }
-        serde_json::Value::Object(map) => GenericValue::Map(
-            map.into_iter()
-                .map(|(k, v)| (k, from_json(v)))
-                .collect::<BTreeMap<_, _>>(),
-        ),
-    }
+    Ok(script::input::document(fields, json))
 }
 
 fn pretty(value: &GenericValue) -> anyhow::Result<String> {
@@ -309,19 +290,6 @@ mod tests {
         );
         assert_eq!(lookup(&doc, "variants[1].price"), None);
         assert_eq!(lookup(&doc, "missing"), None);
-    }
-
-    #[test]
-    fn json_input_keeps_integers_apart_from_numbers() {
-        let json = serde_json::json!({"n": 3, "x": 1.5, "s": "a"});
-        assert_eq!(
-            from_json(json),
-            map(vec![
-                ("n", GenericValue::BigInt(3)),
-                ("s", GenericValue::String("a".to_owned())),
-                ("x", GenericValue::Double(1.5)),
-            ])
-        );
     }
 
     #[test]

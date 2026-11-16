@@ -1,6 +1,6 @@
 # Upgrade to 0.18
 
-0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index. It also writes a `timestamp` column in ISO 8601, which changes stored documents and can break a tuned `format`: see [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601). A `decimal` field is written with every digit: see [A decimal is written with every digit](#a-decimal-is-written-with-every-digit). A filter value that doesn't fit its column no longer matches by being cut to fit: see [A filter value is compared as written](#a-filter-value-is-compared-as-written).
+0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index. It also writes a `timestamp` column in ISO 8601, which changes stored documents and can break a tuned `format`: see [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601). A `decimal` field is written with every digit: see [A decimal is written with every digit](#a-decimal-is-written-with-every-digit). A filter value that doesn't fit its column no longer matches by being cut to fit: see [A filter value is compared as written](#a-filter-value-is-compared-as-written). A script reads a date as a date, not a string: see [A date reaches a script as a date](#a-date-reaches-a-script-as-a-date).
 
 ## When to use this
 
@@ -112,6 +112,26 @@ A filter whose values fit its column (the usual case) compares exactly as before
 1. **Find them.** Check each value filter against its column's type in Postgres (`\d <table>` in `psql`). A filter on a column without a size (`text`, `numeric`, `timestamptz`) is unaffected.
 2. **Fix the value, if the old match was what was meant.** A filter written as `archived` that relied on matching `archi` now matches nothing; write the value the rows hold.
 3. **Rewrite stored documents.** A document picks up the corrected filter at its row's next write. Run [`flusso reindex <index>`](../reference/cli.md#reindex) on each affected index to rewrite every one now, with no restart: a root filter or `soft_delete` `when` that matched by a cut value tombstones those documents, one that dropped a row by it adds them back, and a join or aggregate filter changes the related rows each document holds.
+
+## A date reaches a script as a date
+
+**Breaking, for scripts that treat a date as text.** A `date`, `time` or `timestamp` value reached a script as a string; 0.18 hands over a typed [date, time or timestamp](../author/scripts/dates.md). No content hash moves and nothing is rebuilt. What changes in a script:
+
+| 0.17 script | On 0.18 | Write instead |
+| --- | --- | --- |
+| `this.createdAt.sub_string(0, 4)`, `len()`, `split`, any string method | fails: `Function not found: sub_string (timestamp, …)` | `this.createdAt.year`, or `this.createdAt.to_string()` first |
+| `this.createdAt > "2024-01-01"` | fails: a timestamp and a string can't be compared | `this.createdAt > parse_timestamp("2024-01-01T00:00:00Z")` |
+| `this.day == "2024-05-01"` | fails, as above | `this.day == date(2024, 5, 1)` |
+| `` `${this.day}` ``, `"on " + this.day`, `this.day.to_string()` | unchanged | — |
+| `this.day` returned to a `keyword` field | fails its type check | `this.day.to_string()` |
+| a string returned to a `date` or `timestamp` field | fails its type check | `parse_date(…)` / `parse_timestamp(…)`, or return the date itself |
+| `type_of(this.day) == "string"` | `false` | `type_of(this.day) == "date"` |
+
+A comparison with a string fails rather than answering `false`, so a script that compared dates as text stops its documents (under `on_error = "stop"`) instead of quietly flipping a flag.
+
+1. **Find them.** `flusso check --offline` compiles scripts but can't see types. Run each index with a script that reads a date through [`flusso script run`](../author/scripts/debugging.md#flusso-script-run) on a real row (or `--input`, which now types dates by the schema).
+2. **Rewrite** them with the table above and the [date functions](../author/scripts/dates.md#functions).
+3. **Upgrade.** A script edit changes the content hash, so the edited index is rebuilt into a new generation on the first 0.18 run, as for any script edit.
 
 ## Related
 
