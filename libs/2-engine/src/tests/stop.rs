@@ -518,3 +518,233 @@ async fn a_stopping_sink_skips_queued_snapshot_batches_and_leaves_their_index_un
     );
     sink_run.abort();
 }
+
+/// [`ClosableSource`] whose stream, once closed, ends with an error: the
+/// final position never reached the source.
+#[derive(Debug)]
+struct UnconfirmedClose(ClosableSource);
+
+#[async_trait]
+impl ChangeCapture for UnconfirmedClose {
+    async fn continuity(&self) -> source::Result<Continuity> {
+        Ok(Continuity::Resumed)
+    }
+
+    async fn prepare(&self) -> source::Result<()> {
+        Ok(())
+    }
+
+    async fn live(&self) -> source::Result<BoxStream<'static, source::Result<LiveChange>>> {
+        let live = self.0.live().await?;
+        Ok(Box::pin(futures::StreamExt::chain(
+            live,
+            futures::stream::iter([Err(source::SourceError::Connection(
+                "the final position was not confirmed to the source".to_owned(),
+            ))]),
+        )))
+    }
+
+    fn confirm(&self, position: Position) {
+        self.0.confirm(position);
+    }
+
+    fn close_live(&self) -> bool {
+        self.0.close_live()
+    }
+}
+
+#[tokio::test]
+async fn a_stop_whose_final_position_never_reaches_the_source_fails_the_run() {
+    let (source, feed) = ClosableSource::new();
+    let source = Arc::new(UnconfirmedClose(source));
+    let stream = Arc::new(ChannelStream::new(64, [sink_name("primary")]));
+    let sink = Arc::new(RecordingSink::seeded(true));
+    let ops = Arc::clone(&sink.ops);
+    let sinks = spawn_sinks(&stream, vec![(sink_name("primary"), sink as Arc<dyn Sink>)]).await;
+    let stop = Stop::new();
+    let engine = IngestEngine::new(
+        Arc::clone(&source) as Arc<dyn ChangeCapture>,
+        Arc::new(MockDocuments::default()),
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![sink_name("primary")],
+    )
+    .with_stop(stop.clone());
+    let run = tokio::spawn(async move { engine.run().await });
+
+    feed.send(upsert(1)).await.unwrap();
+    super::wait_for(|| ops.lock().unwrap().len() == 1).await;
+    stop.request();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let Err(error) = outcome else {
+        panic!("a stop that couldn't confirm its final position is not a clean stop");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("the final position was not confirmed to the source"),
+        "{error}"
+    );
+    for task in sinks {
+        task.abort();
+    }
+}
+
+/// A sink that refreshes only on a caught-up flush, as the OpenSearch sink
+/// does under `refresh_interval = "-1"`: `Deferred` otherwise.
+#[derive(Debug, Default)]
+struct RefreshesWhenCaughtUp {
+    flushes: Mutex<Vec<bool>>,
+}
+
+#[async_trait]
+impl Sink for RefreshesWhenCaughtUp {
+    async fn apply(&self, _: &kernel::Envelope) -> sink::Result<()> {
+        Ok(())
+    }
+
+    async fn flush(&self, caught_up: bool) -> sink::Result<FlushReport> {
+        self.flushes.lock().unwrap().push(caught_up);
+        Ok(FlushReport::clean().visible(if caught_up {
+            sink::Visibility::Immediate
+        } else {
+            sink::Visibility::Deferred
+        }))
+    }
+
+    async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
+        Ok(true)
+    }
+}
+
+#[tokio::test]
+async fn a_deferred_sink_still_refreshes_when_skipped_snapshot_batches_follow_the_last_live_one() {
+    let name = sink_name("primary");
+    let stream = Arc::new(ChannelStream::new(64, [name.clone()]));
+    let lane = stream.lane(&name).unwrap().producer;
+    let live = |position: u64| {
+        stream::LaneItem::Batch(stream::Batch {
+            position: Some(Position(position)),
+            changes: 1,
+            envelopes: Vec::new().into(),
+        })
+    };
+    let snapshot = stream::LaneItem::Batch(stream::Batch {
+        position: None,
+        changes: 0,
+        envelopes: Vec::new().into(),
+    });
+    lane.publish(live(5)).await.unwrap();
+    lane.publish(snapshot.clone()).await.unwrap();
+    lane.publish(snapshot).await.unwrap();
+    let sink = Arc::new(RefreshesWhenCaughtUp::default());
+    let observer = Arc::new(super::PositionObserver::default());
+    let stop = Stop::new();
+    stop.request();
+    let engine = SinkEngine::new(
+        name,
+        Arc::clone(&sink) as Arc<dyn Sink>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![mapping()],
+    )
+    .with_observer(Arc::clone(&observer) as Arc<dyn crate::Observer>)
+    .with_stop(stop);
+    let run = tokio::spawn(async move {
+        let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
+        engine.run(&mut control).await
+    });
+
+    super::wait_for(|| stream.is_idle()).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    run.abort();
+
+    assert!(
+        observer
+            .events()
+            .contains(&"searchable primary 5".to_owned()),
+        "the last live write is made searchable before the stop ends: {:?} after flushes {:?}",
+        observer.events(),
+        sink.flushes.lock().unwrap()
+    );
+}
+
+/// [`MockDocuments`] that requests `stop` while resolving the change of row
+/// `at`, as a signal landing in the middle of a ready burst would.
+#[derive(Debug)]
+struct StopsWhileResolving {
+    inner: MockDocuments,
+    stop: Stop,
+    at: i64,
+}
+
+#[async_trait]
+impl DocumentBuilder for StopsWhileResolving {
+    async fn resolve(
+        &self,
+        table: &kernel::TableName,
+        key: &RowKey,
+        before: Option<&RowImage>,
+        after: Option<&RowImage>,
+    ) -> source::Result<Vec<DocumentId>> {
+        if key.0.first().map(|(_, value)| value) == Some(&kernel::GenericValue::BigInt(self.at)) {
+            self.stop.request();
+        }
+        self.inner.resolve(table, key, before, after).await
+    }
+
+    async fn build(&self, id: &DocumentId) -> source::Result<Document> {
+        self.inner.build(id).await
+    }
+
+    async fn build_many(&self, ids: &[DocumentId]) -> source::Result<Vec<Document>> {
+        self.inner.build_many(ids).await
+    }
+
+    fn backfill_scopes(&self) -> Vec<IndexScope> {
+        self.inner.backfill_scopes()
+    }
+
+    async fn index_mappings(&self) -> source::Result<Vec<kernel::IndexMapping>> {
+        self.inner.index_mappings().await
+    }
+}
+
+#[tokio::test]
+async fn a_stop_raised_mid_burst_ends_the_batch_there_and_lands_what_was_read() {
+    let (source, feed) = ClosableSource::new();
+    let source = Arc::new(source);
+    for id in 1..=50 {
+        feed.send(upsert(id)).await.unwrap();
+    }
+    let stream = Arc::new(ChannelStream::new(64, [sink_name("primary")]));
+    let sink = Arc::new(RecordingSink::seeded(true));
+    let (ops, flushes) = (Arc::clone(&sink.ops), Arc::clone(&sink.flushes));
+    let sinks = spawn_sinks(&stream, vec![(sink_name("primary"), sink as Arc<dyn Sink>)]).await;
+    let stop = Stop::new();
+    let documents = Arc::new(StopsWhileResolving {
+        inner: MockDocuments::default(),
+        stop: stop.clone(),
+        at: 3,
+    });
+    let engine = ingest(&source, documents, &stream, &["primary"], &stop);
+
+    tokio::time::timeout(Duration::from_secs(5), engine.run())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        source.pulled.load(Ordering::SeqCst),
+        3,
+        "the ready burst is read no further than the stop"
+    );
+    assert_eq!(*flushes.lock().unwrap(), vec![(3, true)]);
+    assert_eq!(ops.lock().unwrap().len(), 3);
+    assert_eq!(source.confirmed(), vec!["confirm 2".to_owned()]);
+    for task in sinks {
+        task.abort();
+    }
+}

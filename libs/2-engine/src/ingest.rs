@@ -283,27 +283,36 @@ impl IngestEngine {
         }
         let closed = timeout_at(Instant::now() + CLOSE_WAIT, async {
             let mut unread = 0usize;
+            let mut failed = None;
             while let Some(item) = live.next().await {
-                if item.is_ok() {
-                    unread += 1;
+                match item {
+                    Ok(_) => unread += 1,
+                    Err(error) => failed = Some(error),
                 }
             }
-            unread
+            (unread, failed)
         })
         .await;
         match closed {
-            Ok(0) => {}
-            Ok(unread) => tracing::warn!(
-                unread,
-                "the live stream yielded changes while closing; dropped unconfirmed, so the next \
-                 start reads them again"
-            ),
-            Err(_) => tracing::warn!(
-                after = ?CLOSE_WAIT,
-                "the live stream did not close in time; dropping it"
-            ),
+            Ok((unread, failed)) => {
+                if unread > 0 {
+                    tracing::warn!(
+                        unread,
+                        "the live stream yielded changes while closing; dropped unconfirmed, so \
+                         the next start reads them again"
+                    );
+                }
+                match failed {
+                    Some(error) => Err(error.into()),
+                    None => Ok(()),
+                }
+            }
+            Err(_) => Err(SourceError::Connection(format!(
+                "the final position was not confirmed to the source: the live stream did not \
+                 close within {CLOSE_WAIT:?}"
+            ))
+            .into()),
         }
-        Ok(())
     }
 
     /// Buffer every change the live stream has ready *right now*, stopping at

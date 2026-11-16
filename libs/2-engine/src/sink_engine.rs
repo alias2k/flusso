@@ -312,9 +312,25 @@ impl SinkEngine {
                                 for index in &indexes {
                                     outstanding.remove(index);
                                 }
-                                tracing::info!(indexes = indexes.len(), "backfill complete");
+                                if !indexes.is_empty() {
+                                    tracing::info!(indexes = indexes.len(), "backfill complete");
+                                }
                                 None
                             }
+                        };
+                        // A stop skips snapshot batches unflushed, so the last
+                        // live flush may have run while they were still queued
+                        // (not caught up) and left its refresh to a flush that
+                        // never comes.
+                        let flushed = match flushed {
+                            None if self.stop.is_requested()
+                                && lane.is_empty()
+                                && self.waits_for_an_immediate_flush() =>
+                            {
+                                let report = self.sink.flush(true).await?;
+                                Some((None, report.visibility))
+                            }
+                            flushed => flushed,
                         };
                         // Before the acknowledgement: applied is a fact about
                         // the destination, and a listener must hear of it
@@ -395,6 +411,14 @@ impl SinkEngine {
         if let Some(position) = reached {
             self.observer.on_position_searchable(&self.name, position);
         }
+    }
+
+    /// Whether a flushed position waits for the next immediately visible flush
+    /// to become searchable.
+    fn waits_for_an_immediate_flush(&self) -> bool {
+        self.lock_unsearchable()
+            .iter()
+            .any(|(_, due)| *due == Searchable::WithNextImmediate)
     }
 
     /// When the oldest queued position becomes searchable, if that is a matter

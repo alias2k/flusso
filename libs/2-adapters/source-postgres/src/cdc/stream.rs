@@ -107,11 +107,12 @@ pub(crate) trait Replication: Send + 'static {
     fn update_applied_lsn(&self, lsn: Lsn);
 
     /// End replication gracefully, once `report` (when there is one) has been
-    /// sent to the server. The default does nothing beyond what
-    /// `update_applied_lsn` did.
-    fn close(&mut self, report: Option<Lsn>) -> impl Future<Output = ()> + Send {
+    /// sent to the server. Answers whether it was: `false` means the server
+    /// may not hold the final position. The default does nothing beyond what
+    /// `update_applied_lsn` did, and answers `true`.
+    fn close(&mut self, report: Option<Lsn>) -> impl Future<Output = bool> + Send {
         let _ = report;
-        async {}
+        async { true }
     }
 }
 
@@ -135,28 +136,24 @@ impl Replication for ReplicationClient {
     /// raised position within its status interval), then stops the worker,
     /// which sends CopyDone. Stopping first would lose the update: the worker
     /// checks its stop signal before a due status update.
-    async fn close(&mut self, report: Option<Lsn>) {
+    async fn close(&mut self, report: Option<Lsn>) -> bool {
+        let mut sent = true;
         if let Some(lsn) = report {
             let metrics = self.metrics();
-            let sent = tokio::time::timeout(CLOSE_STEP, async {
+            sent = tokio::time::timeout(CLOSE_STEP, async {
                 while metrics.last_applied_lsn() < lsn {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             })
-            .await;
-            if sent.is_err() {
-                tracing::warn!(
-                    %lsn,
-                    "the final position was not sent to the server in time; the next start may \
-                     read some changes again"
-                );
-            }
+            .await
+            .is_ok();
         }
         match tokio::time::timeout(CLOSE_STEP, self.shutdown()).await {
-            Ok(Ok(())) => tracing::info!(?report, "replication stream closed"),
+            Ok(Ok(())) => tracing::info!(?report, sent, "replication stream closed"),
             Ok(Err(error)) => tracing::warn!(%error, "replication stream closed with an error"),
             Err(_) => tracing::warn!("replication stream did not close in time; dropping it"),
         }
+        sent
     }
 }
 
@@ -174,6 +171,8 @@ struct State<C, V> {
     refresher: Option<Refresher>,
     hold: Option<Hold>,
     hold_clock: HoldClock,
+    /// The stream was closed on request: it ends.
+    closed: bool,
 }
 
 /// Snapshot reads made on their own task, so they run while the engine builds
@@ -455,6 +454,7 @@ pub(crate) fn build<C: Replication, V: Visibility>(
         refresher: None,
         hold: None,
         hold_clock: settings.hold_clock,
+        closed: false,
     };
     into_stream(state)
 }
@@ -470,11 +470,24 @@ fn into_stream<C: Replication, V: Visibility>(
             // horizon moving on idle progress is reported too.
             let confirmed = Lsn::from_u64(state.decode.ack.confirmed_lsn());
             state.client.update_applied_lsn(confirmed);
+            if state.closed {
+                return None;
+            }
             if state.decode.ack.close_requested() {
+                state.closed = true;
                 let report =
                     (confirmed.as_u64() > state.decode.ack.start_lsn()).then_some(confirmed);
-                state.client.close(report).await;
-                return None;
+                if state.client.close(report).await {
+                    return None;
+                }
+                return Some((
+                    Err(SourceError::Connection(format!(
+                        "the final position was not confirmed to the source: {confirmed} was not \
+                         sent to Postgres within {CLOSE_STEP:?}; the next start reads the changes \
+                         after the last confirmed position again"
+                    ))),
+                    state,
+                ));
             }
 
             if let Err(e) = state.take_latest() {
