@@ -17,7 +17,7 @@ A slot-level failure fails the whole call naming the slot; no partial results. F
 
 ## One blended list
 
-Declare which document types blend as an enum with one variant per type:
+Declare which document types blend as an enum with one variant per type. A root with a [context](read-time-fields.md#the-context) cannot be a variant: a blended search has nowhere to take the context from, so it is a compile error.
 
 ```rust
 #[derive(Debug, FlussoMultiDocument)]

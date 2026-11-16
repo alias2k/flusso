@@ -53,6 +53,7 @@
 - [Sorting](query/sorting.md)
 - [Maps](query/maps.md)
 - [Enums and custom values](query/enums-and-values.md)
+- [Read-time fields](query/read-time-fields.md)
 - [Several indexes](query/several-indexes.md)
 - [Results and the escape hatch](query/results-and-escape-hatch.md)
 - [Paging](query/paging.md)

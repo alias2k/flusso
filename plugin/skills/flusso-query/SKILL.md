@@ -38,6 +38,8 @@ level with `#[flusso(scope = "Purchases")]` on the root field at that `nested` o
 - **An option beyond the defaults**, a compound or standalone query type, or `SortBuilder` →
   [`options.md`](options.md).
 - **A `map:` field** in the schema → [`maps.md`](maps.md).
+- **A field that depends on the clock or the caller** (a time-driven state, `is_mine`, a per-request
+  rate), or any `context` / `rules` / `computed` attribute → [`read-time.md`](read-time.md).
 
 ## Crates and features
 

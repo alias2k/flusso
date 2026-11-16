@@ -7,6 +7,8 @@ The project's nouns, each with a pointer to the page that owns it.
 | **backfill** | Seeding an unseeded index by snapshotting its root table through the normal pipeline, before live capture. | [How flusso works](../start/how-it-works.md#seeding-and-continuity) |
 | **applied** | A fence level: the sink's flush for a change has returned, so a fetch by id sees it. | [HTTP endpoints](http.md#get-waitpositionposition) |
 | **batch** | The changes grouped into one build and sink flush: everything the stream has ready, committed the moment it would block, capped at `max_changes` / `max_delay_ms`. | [batch](config-toml.md#batch) |
+| **computed field** | A read-time field given by a Rust function over the document and the context. Value only. | [Read-time fields](../query/read-time-fields.md#computed-fields) |
+| **context** | The request-time values a root's read-time fields are decided from (the clock, the caller), in one consumer-defined type. | [Read-time fields](../query/read-time-fields.md#the-context) |
 | **convenience alias** | The bare logical name (`users`) kept as an alias on the current generation, for humans and dashboards. Best-effort. | [Sink: OpenSearch](sink-opensearch.md#index-naming) |
 | **continuity** | Whether the source's resume point (the slot) survived from the last run. `Resumed` or `Fresh`. | [Recover from a dropped slot](../operate/dropped-slot.md) |
 | **document** | One search record, assembled from a root row plus its joins and aggregates, written by a deterministic id. | [How flusso works](../start/how-it-works.md#documents-are-assembled-not-copied) |
@@ -22,9 +24,11 @@ The project's nouns, each with a pointer to the page that owns it.
 | **prefix** | A literal prepended to every name flusso owns, so deployments share a cluster. | [flusso.toml top level](config-toml.md#prefix) |
 | **publication** | The Postgres object listing which tables are replicated. Must cover every table any index reads. | [Source: Postgres](source-postgres.md#capture) |
 | **quarantine** | Skipping a rejected document under `on_error = "skip"`: logged, counted, the batch acked. | [Handle rejected documents](../operate/rejected-documents.md) |
+| **read-time field** | A field `flusso-query` decides when a document is read, because it depends on a request-time value. A rule field or a computed field. | [Read-time fields](../query/read-time-fields.md) |
 | **reindex** | Rebuilding one index into a fresh generation while the current one serves, then swapping the alias. | [Reindex without downtime](../operate/reindex.md) |
 | **reverse resolution** | Mapping a changed related row back to the parent documents it affects. | [Joins](joins.md#what-a-related-change-rebuilds) |
 | **root table** | The table a schema's documents are built from; one document per row (subject to root filters). | [Schema top-level keys](schema-top-level.md) |
+| **rule field** | A read-time field given by ordered condition → outcome rules over stored fields. Has a value, a filter, a sort and counts, with no script. | [Read-time fields](../query/read-time-fields.md#rule-fields) |
 | **script field** | A leaf computed by a Rhai script from the built document (`this` and `root`), typed by its type key like any field. | [Script fields](scripts.md) |
 | **searchable** | A fence level: a search at the destination sees the change. Trails applied by the destination's refresh while a backlog drains. | [HTTP endpoints](http.md#get-waitpositionposition) |
 | **seed marker** | The `flusso_meta` record saying an index's generation is fully backfilled. | [Sink: OpenSearch](sink-opensearch.md#seeding) |

@@ -219,6 +219,26 @@ _Avoid_: cursor (alone; that is a position), scroll, continuation token, offset
 A page cursor walk that reads one point-in-time view of the index, opened by its first page: no later write, no reindex, until it is closed or expires. Opt-in, because it holds a server-side context for its life.
 _Avoid_: snapshot (that is the source's backfill read), frozen, consistent cursor
 
+**Read-time field**:
+A field of a query document that `flusso-query` decides when the document is read, because its value depends on something no document holds: the clock, the caller. Either a rule field or a computed field. Everything a row decides on its own is a write-time field instead (a script field, an aggregate).
+_Avoid_: computed field (alone; that is one of the two kinds), virtual field, derived field (OpenSearch's own scripted feature), runtime field
+
+**Context**:
+The request-time values a root's read-time fields are decided from, in one consumer-defined type named on the root. Passed to every entry point and every rule field handle of that root.
+_Avoid_: vars, params, request (alone)
+
+**Rule field**:
+A read-time field given by an ordered list of condition → outcome arms over stored fields, where the first arm that holds decides. Decided twice from the one list: in Rust for the value on a fetched document, by the index for the filter, sort and counts. Never a script.
+_Avoid_: scripted field, case expression
+
+**Rule handle**:
+The handle of a stored field as a rule reads it, generated only for fields, and offering only tests, that Rust decides exactly as the index does. Distinct from the ordinary query handle of the same field.
+_Avoid_: rule filter, condition handle
+
+**Computed field**:
+A read-time field given by a Rust function over the document and the context. Value only: it has no filter, sort or counts.
+_Avoid_: rule field, script field (that is write-time)
+
 ### Measuring
 
 **Benchmark**:

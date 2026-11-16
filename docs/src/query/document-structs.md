@@ -91,7 +91,7 @@ pub struct Product {
 ## Escape hatches
 
 - `serde_json::Value` as a field type opts that field out of type checking.
-- `#[flusso(skip)]` drops a field from validation entirely, for a computed or app-only field (pair with `#[serde(skip)]` or `#[serde(default)]`).
+- `#[flusso(skip)]` drops a field from validation entirely, for an app-only field (pair with `#[serde(skip)]` or `#[serde(default)]`). A field flusso-query should fill when the document is read, from the clock or the caller, is a [read-time field](read-time-fields.md) instead.
 - `#[flusso(opaque)]` turns off the checks the derive hands to a field's custom type, for a plain un-derived struct. The field is still checked against the mapping: it exists, its nullability matches, and it is a `Vec<…>` exactly where the schema field is an array. It goes on a field whose type is a custom struct or enum, bare or in `Option<…>` or `Vec<…>`, at an `object`, `nested` or `json` field, where it turns off the walk into the type, or at a `keyword`/`text` field, where it turns off the variant check of a `FlussoValue` enum (or of a [hand-written `FlussoValue`](enums-and-values.md#hand-written-values)) and the type's kind is still checked. Anywhere it would turn off nothing it is a compile error:
   - a built-in leaf type (see [Types named like a built-in](#types-named-like-a-built-in)), `serde_json::Value` (or a `Vec` of it), a `HashMap`/`BTreeMap` (flattened or not), a `#[flusso(skip)]` field;
   - a `map` or a leaf other than `keyword`/`text` in the schema, where a custom type is checked by its kind alone;

@@ -29,6 +29,8 @@ All three work on `Search` and on combined search (`MultiSearch`):
 
 `.cursor(None)` starts a walk; `.cursor(page.next)` continues it. The last page's `next` is `None`.
 
+A search filtered or sorted by a [rule field](read-time-fields.md#paging) carries its clock in the query, so the whole walk uses one context.
+
 ```rust
 let mut cursor: Option<PageCursor> = None;
 loop {
