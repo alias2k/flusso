@@ -203,6 +203,7 @@ impl Daemon {
                 .with_observer(Arc::clone(&observer))
                 .with_failure_policies(failure_policies.clone())
                 .skip_backfill(options.skip_backfill)
+                .with_stop(stop.clone())
             })
             .collect();
 

@@ -467,3 +467,54 @@ async fn a_stop_requested_before_the_run_reads_nothing() {
     assert_eq!(source.pulled.load(Ordering::SeqCst), 0);
     assert_eq!(*source.log.lock().unwrap(), vec!["close".to_owned()]);
 }
+
+#[tokio::test]
+async fn a_stopping_sink_skips_queued_snapshot_batches_and_leaves_their_index_unseeded() {
+    let (source, _feed) = ClosableSource::new();
+    let source = Arc::new(source.with_snapshot(Box::pin(futures::stream::iter(
+        (1..=600).map(|id| Ok(upsert(id))),
+    ))));
+    let stream = Arc::new(ChannelStream::new(64, [sink_name("primary")]));
+    let sink = Arc::new(RecordingSink::seeded(false));
+    let (ops, marked) = (Arc::clone(&sink.ops), Arc::clone(&sink.marked));
+    let engine = SinkEngine::new(
+        sink_name("primary"),
+        sink,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![mapping()],
+    );
+    engine.stage(Continuity::Resumed).await.unwrap();
+    let stop = Stop::new();
+    let ingest_engine = ingest(
+        &source,
+        Arc::new(MockDocuments::default()),
+        &stream,
+        &["primary"],
+        &stop,
+    );
+    let ingest_run = tokio::spawn(async move { ingest_engine.run().await });
+    super::wait_for(|| !stream.is_idle() && stream.watermark().is_none()).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    stop.request();
+    let engine = engine.with_stop(stop.clone());
+    let sink_run = tokio::spawn(async move {
+        let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
+        engine.run(&mut control).await
+    });
+    tokio::time::timeout(Duration::from_secs(5), ingest_run)
+        .await
+        .expect("the drain ends once the queued snapshot is acknowledged")
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        ops.lock().unwrap().is_empty(),
+        "a snapshot batch queued when the stop came is acknowledged, not applied"
+    );
+    assert!(
+        marked.lock().unwrap().is_empty(),
+        "an index whose snapshot was skipped is not marked seeded: the next start backfills it"
+    );
+    sink_run.abort();
+}

@@ -39,6 +39,7 @@ use tokio::time::{Instant, sleep_until};
 use crate::error::{EngineError, Result};
 use crate::observer::{CommitStats, EngineId, NoopObserver, Observer};
 use crate::policy::{FailurePolicies, FailurePolicy};
+use crate::stop::Stop;
 
 /// An operation the daemon hands a running sink engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +68,10 @@ pub struct SinkEngine {
     /// oldest first. Survives a restart of this engine's run, so a position
     /// flushed before a failure is still reported once its time comes.
     unsearchable: Mutex<VecDeque<(Position, Searchable)>>,
+    stop: Stop,
+    /// Indexes whose snapshot batches were acknowledged unapplied during a
+    /// stop: their `SnapshotComplete` must not mark them seeded.
+    skipped: Mutex<BTreeSet<IndexName>>,
 }
 
 /// When a flushed position becomes searchable.
@@ -98,7 +103,18 @@ impl SinkEngine {
             skip_backfill: false,
             outstanding: Mutex::new(BTreeSet::new()),
             unsearchable: Mutex::new(VecDeque::new()),
+            stop: Stop::new(),
+            skipped: Mutex::new(BTreeSet::new()),
         }
+    }
+
+    /// The deployment's stop: once requested, a snapshot batch still on the
+    /// lane is acknowledged without being applied, and its index left
+    /// unseeded. The backfill was abandoned with the stop and runs again on
+    /// the next start, so writing it now would only hold the drain up.
+    pub fn with_stop(mut self, stop: Stop) -> Self {
+        self.stop = stop;
+        self
     }
 
     /// The universal sink keys (`backfill`).
@@ -268,11 +284,26 @@ impl SinkEngine {
                     Some(delivery) => {
                         let (item, handle) = delivery.into_parts();
                         let flushed = match item {
+                            LaneItem::Batch(batch)
+                                if batch.position.is_none() && self.stop.is_requested() =>
+                            {
+                                self.lock_skipped()
+                                    .extend(batch.envelopes.iter().map(|e| e.index.clone()));
+                                None
+                            }
                             LaneItem::Batch(batch) => {
                                 let visibility = self.commit(&batch, lane.is_empty()).await?;
                                 Some((batch.position, visibility))
                             }
                             LaneItem::SnapshotComplete { indexes } => {
+                                let skipped = self.lock_skipped().clone();
+                                for index in indexes.iter().filter(|index| skipped.contains(*index)) {
+                                    tracing::info!(%index, "stopping: its backfill was cut short, so it stays unseeded and is backfilled on the next start");
+                                }
+                                let indexes: Vec<IndexName> = indexes
+                                    .into_iter()
+                                    .filter(|index| !skipped.contains(index))
+                                    .collect();
                                 for index in &indexes {
                                     self.sink.mark_seeded(index).await?;
                                     self.observer.on_index_seeded(&self.name, index);
@@ -373,6 +404,10 @@ impl SinkEngine {
             Some((_, Searchable::At(due))) => Some(*due),
             _ => None,
         }
+    }
+
+    fn lock_skipped(&self) -> std::sync::MutexGuard<'_, BTreeSet<IndexName>> {
+        self.skipped.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn lock_unsearchable(&self) -> std::sync::MutexGuard<'_, VecDeque<(Position, Searchable)>> {
