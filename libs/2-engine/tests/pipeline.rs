@@ -1583,6 +1583,9 @@ async fn restart_rebuilds_when_the_replication_slot_was_dropped() {
         .await_alias_moved_off("things", &old_generation)
         .await;
     assert_ne!(new_generation, old_generation);
+    // The alias moves before `mark_seeded` drops the superseded generation and
+    // writes the marker, in that order: the marker says the rebuild is done.
+    second.await_seeded(1).await;
     second
         .assert_eventually("things", "4", Some("four"))
         .await
