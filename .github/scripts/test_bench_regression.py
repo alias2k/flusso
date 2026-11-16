@@ -85,12 +85,24 @@ def data_files(upto: int, steps: dict | None = None, image_change: dict | None =
     return texts
 
 
-class Gh:
-    """A fake `gh` on `PATH` that records its calls and answers `issue list` with `open_issues`."""
+BOT = "app/github-actions"
 
-    def __init__(self, tmp: pathlib.Path, open_issues: list[int]):
+
+class Gh:
+    """A fake `gh` on `PATH` that records its calls and answers `issue list` with `open_issues`.
+
+    Each open issue is a number (opened by the workflow's bot, labelled `bug`, as the script opens it)
+    or a `(number, author)` pair, labelled `bug` too. Like a search that matched loosely, the answer
+    ignores the call's filters: the script must check them.
+    """
+
+    def __init__(self, tmp: pathlib.Path, open_issues: list):
         self.calls = tmp / "gh-calls.jsonl"
-        listed = json.dumps([{"number": n, "title": ISSUE} for n in open_issues])
+        issues = [i if isinstance(i, tuple) else (i, BOT) for i in open_issues]
+        listed = json.dumps([{"number": n, "title": ISSUE, "author": {"login": who}, "labels": [{"name": "bug"}]}
+                             for n, who in issues]
+                            + [{"number": 998, "title": ISSUE + " (not this one)", "author": {"login": BOT},
+                                "labels": [{"name": "bug"}]}])
         script = tmp / "gh"
         script.write_text(
             f"#!{sys.executable}\nimport json, sys\n"
@@ -106,7 +118,7 @@ class Gh:
         return [json.loads(line) for line in self.calls.read_text().splitlines()]
 
 
-def run(script: pathlib.Path, texts: dict[str, str], *args: str, gh_issues: list[int] | None = None,
+def run(script: pathlib.Path, texts: dict[str, str], *args: str, gh_issues: list | None = None,
         missing: bool = False, env: dict | None = None, power: bool = False) -> tuple[subprocess.CompletedProcess, list[list[str]]]:
     """Run `script` over the two files as `bench.yml` does; with `gh_issues`, under `--issue` and a fake `gh`.
 
@@ -235,7 +247,7 @@ class MainsRuleIsUnchanged(unittest.TestCase):
 
 
 class TheIssue(unittest.TestCase):
-    """One issue, found by its title, opened, kept current and closed as on main."""
+    """One issue, opened, kept current and closed as on main."""
 
     def test_findings_open_the_issue_with_its_title_and_label(self):
         done, calls = run(SCRIPT, data_files(NEWEST), gh_issues=[])
@@ -251,6 +263,49 @@ class TheIssue(unittest.TestCase):
     def test_no_finding_closes_the_open_issue(self):
         _, calls = run(SCRIPT, data_files(40), gh_issues=[328])
         self.assertEqual(calls[-1][:3], ["issue", "close", "328"])
+
+
+class OnlyItsOwnIssue(unittest.TestCase):
+    """The script touches one issue: the newest open one the workflow's bot opened with its title and label."""
+
+    def test_the_list_asks_for_the_bots_labelled_open_issues(self):
+        _, calls = run(SCRIPT, data_files(40), gh_issues=[])
+        listing = calls[0]
+        self.assertEqual(listing[:4], ["issue", "list", "--state", "open"])
+        self.assertEqual(listing[listing.index("--label") + 1], "bug")
+        self.assertEqual(listing[listing.index("--author") + 1], BOT)
+        self.assertIn(f'in:title "{ISSUE}"', listing[listing.index("--search") + 1])
+        self.assertIn("author", listing[listing.index("--json") + 1].split(","))
+
+    def test_a_persons_issue_with_the_title_is_left_alone_on_a_flagged_run(self):
+        done, calls = run(SCRIPT, data_files(NEWEST), gh_issues=[(999, "someone")])
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual([c[:2] for c in calls], [["issue", "list"], ["issue", "create"]])
+
+    def test_a_persons_issue_with_the_title_is_left_alone_on_a_clean_run(self):
+        done, calls = run(SCRIPT, data_files(40), gh_issues=[(999, "someone")])
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual([c[:2] for c in calls], [["issue", "list"]])
+
+    def test_its_own_issue_is_updated_beside_a_persons(self):
+        _, calls = run(SCRIPT, data_files(NEWEST), gh_issues=[(999, "someone"), 328])
+        self.assertEqual([c[:3] for c in calls[1:]], [["issue", "edit", "328"]])
+
+    def test_of_two_of_its_issues_only_the_newest_is_updated(self):
+        done, calls = run(SCRIPT, data_files(NEWEST), gh_issues=[341, 357, (360, "someone")])
+        self.assertEqual([c[:3] for c in calls[1:]], [["issue", "edit", "357"]])
+        self.assertIn("left alone: #341", done.stdout)
+
+    def test_of_two_of_its_issues_only_the_newest_is_closed(self):
+        done, calls = run(SCRIPT, data_files(40), gh_issues=[341, 357])
+        self.assertEqual([c[:3] for c in calls[1:]], [["issue", "close", "357"]])
+        self.assertIn("left alone: #341", done.stdout)
+
+    def test_a_closed_issue_is_not_reopened(self):
+        """Only open issues are listed, so with its last issue closed a flagged run opens a new one."""
+        _, calls = run(SCRIPT, data_files(NEWEST), gh_issues=[])
+        self.assertEqual(calls[0][:4], ["issue", "list", "--state", "open"])
+        self.assertEqual([c[:2] for c in calls], [["issue", "list"], ["issue", "create"]])
 
 
 class UnreadableHistory(unittest.TestCase):
