@@ -18,7 +18,7 @@
 //!   [`Zone::resolve`] turns it back into an instant: a time in a daylight-saving **gap** moves
 //!   forward by the gap's length, a time in an **overlap** takes the earlier instant.
 //! - **Clock units** (hours, minutes, seconds) add exact elapsed time to a zoned timestamp.
-//! - **Months** clamp to the month's last day; [`whole_months`] is their inverse.
+//! - **Months** clamp to the month's last day; [`Date::months_until`] is their inverse.
 //! - **Comparing** needs two values of one kind; two zoned timestamps compare as instants.
 //! - Nothing reads the clock: a script gives the same answer on every rebuild.
 //!
