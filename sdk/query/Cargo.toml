@@ -10,6 +10,8 @@ homepage.workspace = true
 keywords.workspace = true
 categories = ["database"]
 readme.workspace = true
+# The throwaway TLS key of a test stub (`tests::fence`); only test code reads it.
+exclude = ["tests/fixtures/tls"]
 
 [lib]
 name = "flusso_query"
