@@ -812,11 +812,11 @@ impl PgDocumentBuilder {
     /// may not run `has_schema_privilege`). When it may not (a domain
     /// `app.dcit` over `ext.citext`, no USAGE on `ext`), a cast to the base
     /// type would fail every query, so the key is cast to the column's
-    /// declared type instead, as before the base type was used. That gives up one thing: a
-    /// cast to a domain checks the domain's constraints, so a key that breaks
-    /// them fails the query instead of matching nothing. The privilege is
-    /// read by the same catalog query as the type, cached and refreshed with
-    /// it.
+    /// declared type instead, as before the base type was used. That gives
+    /// up one thing: a cast to a domain checks the domain's constraints, so
+    /// a key that breaks them fails the query instead of matching nothing.
+    /// The privilege is read by the same catalog query as the type, cached
+    /// and refreshed with it.
     pub(super) async fn key_type(
         &self,
         schema: &DatabaseSchema,

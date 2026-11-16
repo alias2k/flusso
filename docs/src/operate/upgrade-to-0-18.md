@@ -100,6 +100,7 @@ A level of more than 50 fields is built as `jsonb`, which writes a number withou
 | Column | Example `value` | 0.17 compared | 0.17 effect |
 | --- | --- | --- | --- |
 | `varchar(n)`, `char(n)`, a domain over one | `archived` on `varchar(5)` | `archi` | `eq`/`in`/`like` kept rows holding `archi`; `neq`/`not_in` dropped them |
+| `varchar(n)` | `'archi  '` (trailing spaces past the size) on `varchar(5)` | `archi` | `eq` kept rows holding `archi`; `char(n)` is unaffected, its trailing spaces never count |
 | `numeric(p,s)` | `1.005` on `numeric(10,2)` | `1.01` | `eq` kept `1.01`; `gt` dropped it |
 | `numeric(p,s)` | more integer digits than `p - s` | — | every build of the index failed (`numeric field overflow`) |
 | `bit(n)`, `varbit(n)` | `101` on `bit(5)` | `10100` | `eq` kept `10100` |

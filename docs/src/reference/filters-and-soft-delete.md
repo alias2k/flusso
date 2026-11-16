@@ -31,7 +31,9 @@ Postgres compares a value with the column, as the column's type **without its si
 | `time(0)` | `{ column: opens, op: eq, value: "09:00:00.6" }` | nothing (not `09:00:01`) |
 | `char(5)` | `{ column: code, op: eq, value: "ab" }` | `ab` |
 
-`char(n)` keeps its own equality: trailing spaces never count, so `ab` equals the stored `ab   `, and `abcde  ` equals `abcde`. Any other character past the size is a value no row holds. The same holds for `varbit(n)`, the time types with a precision (`timestamp(3)`), an `interval` with a precision or fields (`interval year`), and a domain over any of them, whose `CHECK` isn't applied to the value either.
+`char(n)` keeps its own equality: trailing spaces never count, so `ab` equals the stored `ab   `, and `abcde  ` equals `abcde`. Any other character past the size is a value no row holds. On `varchar(n)` trailing spaces count: `'archi  '` doesn't equal a stored `archi`. The same holds for `varbit(n)`, the time types with a precision (`timestamp(3)`), an `interval` with a precision or fields (`interval year`), and a domain over any of them, whose `CHECK` isn't applied to the value either.
+
+A filter on an array of a domain over a sized type (`short_text[]` over `varchar(5)`) still fails the build when an element doesn't fit: the array cast applies the element domain's size and refuses the value instead of cutting it, as before 0.18.
 
 Before 0.18 the value was cast to the sized type, which cut or rounded it: see [Upgrade to 0.18](../operate/upgrade-to-0-18.md#a-filter-value-is-compared-as-written).
 

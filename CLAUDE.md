@@ -1119,9 +1119,9 @@ their index scans. When the role has no USAGE on the base type's schema (a domai
 `ext.citext`) it is the declared type's `typname` instead, as before (a cast to a domain checks its
 constraints); `has_schema_privilege` is read by the same catalog query and cached with the type, the
 backfill's key lookup follows the same rule, and a role refused `has_schema_privilege` itself (42501)
-gets the lookup once more without the probe, every key cast to its declared type unless the base type
-is in `pg_catalog`, which every role may use (`COLUMN_META_SQL_UNPROBED`, remembered per builder). `text_value::is_key_type` parses the type's
-`regtype` name as quoted identifiers (`ext.citext`, `"a.b".citext`; not `"a.citext"`). **The batched
+gets the lookup once more without the probe, every key cast to its declared type unless the base
+type is in `pg_catalog`, which every role may use (`COLUMN_META_SQL_UNPROBED`, remembered per
+builder). `text_value::is_key_type` parses the type's `regtype` name as quoted identifiers (`ext.citext`, `"a.b".citext`; not `"a.citext"`). **The batched
 build serves exactly the ids a single `build` serves, by construction**: `query::documents_query`
 reads the root rows as main did, one level in (`SELECT root.pk AS flusso_key, <document> FROM root
 WHERE root.pk = ANY(<keys>) … OFFSET 0`, the keys written in the `query::KeyForm` decided per chunk
