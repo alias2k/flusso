@@ -128,8 +128,8 @@ macro_rules! exact {
     };
 }
 
-/// `any_of` and the ordered tests, for a value of kind `$kind`.
-macro_rules! ordered {
+/// `any_of`, for a value of kind `$kind`.
+macro_rules! any_of {
     ($kind:ty) => {
         /// One of `values`.
         #[must_use]
@@ -140,7 +140,12 @@ macro_rules! ordered {
             let values: Checked<Vec<_>> = values.into_iter().map(|value| to_json(&value)).collect();
             condition(values.and_then(|values| self.field.one_of(&values)))
         }
+    };
+}
 
+/// The ordered tests, for a value of kind `$kind`.
+macro_rules! ordered {
+    ($kind:ty) => {
         /// Below `value`.
         #[must_use]
         pub fn lt(&self, value: impl FlussoValue<$kind>) -> Condition {
@@ -221,16 +226,7 @@ handle!(
 
 impl<P: Presence> RuleKeyword<P> {
     exact!(kind::Keyword);
-
-    /// One of `values`.
-    #[must_use]
-    pub fn any_of(
-        &self,
-        values: impl IntoIterator<Item = impl FlussoValue<kind::Keyword>>,
-    ) -> Condition {
-        let values: Checked<Vec<_>> = values.into_iter().map(|value| to_json(&value)).collect();
-        condition(values.and_then(|values| self.field.one_of(&values)))
-    }
+    any_of!(kind::Keyword);
 }
 
 handle!(
@@ -262,6 +258,7 @@ handle!(
 
 impl<K: RuleNumberKind, P: Presence> RuleNumber<K, P> {
     exact!(K);
+    any_of!(K);
     ordered!(K);
 }
 
@@ -282,6 +279,7 @@ handle!(
 
 impl<P: Presence> RuleDate<P> {
     exact!(kind::Date);
+    any_of!(kind::Date);
     ordered!(kind::Date);
 }
 

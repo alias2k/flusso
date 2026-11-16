@@ -63,6 +63,7 @@ pub use params::{
     ZeroTermsQuery,
 };
 pub use scalar::{Bool, Date, EqQuery, Number, RangeQuery, TermsQuery};
+pub(crate) use sort::RankFunction;
 pub use sort::{
     MapKeySort, MaybeOrderBy, Missing, OrderBy, Sort, SortBuilder, SortMode, SortOrder, Sortable,
 };

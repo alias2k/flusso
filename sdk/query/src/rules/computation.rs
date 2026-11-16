@@ -1,4 +1,10 @@
 //! Writing a root's read-time fields into each fetched document.
+//!
+//! A [`Computation`] is the value half of a root's read-time fields, bound to
+//! one context: the rule lists, each already in the form its filters are sent
+//! in, and the computed functions. A search builds it once and applies it to
+//! every hit's `_source` before the hit decodes into the root's type, so the
+//! struct's fields are filled as if the index had stored them.
 
 use std::fmt;
 use std::sync::Arc;
@@ -60,11 +66,18 @@ impl Computation {
         self.rules.is_empty() && self.computed.is_empty() && self.error.is_none()
     }
 
+    /// Fail when a rule field cannot be evaluated as written, whatever the
+    /// document.
+    pub(crate) fn check(&self) -> Result<()> {
+        match &self.error {
+            Some(reason) => Err(Error::ReadTimeField(reason.clone())),
+            None => Ok(()),
+        }
+    }
+
     /// Write every read-time field into one document's `_source`.
     pub fn apply(&self, source: &mut Value) -> Result<()> {
-        if let Some(reason) = &self.error {
-            return Err(Error::ReadTimeField(reason.clone()));
-        }
+        self.check()?;
         let decided = self
             .rules
             .iter()

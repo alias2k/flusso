@@ -1,14 +1,20 @@
 //! A rule field bound to a context: the filter, sort and counts on its value.
+//!
+//! [`RuleField`] is the query half of a rule list. It turns "the field is
+//! `Closed`" into the conditions that make the rules yield `Closed`
+//! ([`Plan::select`](super::list::Plan::select)), so the index selects
+//! exactly the documents [`Computation`](super::Computation) shows that value
+//! on.
 
 use std::cmp::Ordering;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
+use serde_json::Value;
 
-use super::condition::{Checked, Cond, Kind, Side, and, clause, invalid, not, render};
+use super::condition::{Checked, Cond, Kind, Side, and, clause, invalid, not, or, render};
 use super::list::{Plan, Rules, Slot, Yield};
-use crate::handles::{Sort, SortOrder, Sortable};
+use crate::handles::{RankFunction, Sort, SortOrder, Sortable};
 use crate::query::{Query, Root};
 use crate::search::Search;
 use crate::{Client, Result};
@@ -62,14 +68,30 @@ impl<T: Serialize> RuleField<T> {
         super::condition::to_json(value)
     }
 
+    /// The documents whose value is one of `values`. A `null` among them
+    /// stands for "no value": on a stored field, that it is missing.
     fn one_of(&self, values: &[Value]) -> Checked<Cond> {
-        self.plan
-            .as_ref()
-            .map_err(Clone::clone)?
-            .select(|value| values.contains(value), |field| field.one_of(values))
+        let held: Vec<Value> = values
+            .iter()
+            .filter(|value| !value.is_null())
+            .cloned()
+            .collect();
+        let or_missing = held.len() != values.len();
+        self.plan.as_ref().map_err(Clone::clone)?.select(
+            |value| values.contains(value),
+            |field| {
+                let holds = field.one_of(&held)?;
+                Ok(if or_missing {
+                    or([holds, not(field.exists())])
+                } else {
+                    holds
+                })
+            },
+        )
     }
 
-    /// The field is exactly `value`.
+    /// The field is exactly `value`: a fixed value that serializes the same,
+    /// or a stored field holding it. `None` is "no value".
     #[must_use]
     pub fn eq(&self, value: T) -> Query<Root> {
         Self::query(&Self::json(&value).and_then(|value| self.one_of(&[value])))
@@ -103,7 +125,19 @@ impl<T: Serialize> RuleField<T> {
         T: PartialOrd + DeserializeOwned,
     {
         let json = Self::json(value)?;
+        if json.is_null() {
+            return Err(
+                "an ordered comparison needs a value to compare with: a missing value is \
+                 neither below nor above anything"
+                    .to_owned(),
+            );
+        }
+        // No value has no order: it fails the comparison as a fixed value,
+        // as a missing stored field fails its range.
         let passes = |candidate: &Value| {
+            if candidate.is_null() {
+                return false;
+            }
             let Ok(candidate) = serde_json::from_value::<T>(candidate.clone()) else {
                 return false;
             };
@@ -183,21 +217,18 @@ impl<T: Serialize> RuleField<T> {
         Self::query(&both)
     }
 
-    /// The values in sort order: the rules' own `order`, else the schema's
-    /// declared variants, else the fixed values in the order the rules name
-    /// them.
+    /// The values in sort order: the rules' own `order`; else the schema's
+    /// declared variants, followed by every other fixed value in the order
+    /// the rules name them.
     fn ordered(&self) -> Checked<Vec<Value>> {
         if !self.rules.order.is_empty() {
             return self.rules.order.iter().map(Self::json).collect();
         }
-        if !self.schema_order.is_empty() {
-            return Ok(self
-                .schema_order
-                .iter()
-                .map(|&name| Value::from(name))
-                .collect());
-        }
-        let mut seen = Vec::new();
+        let mut seen: Vec<Value> = self
+            .schema_order
+            .iter()
+            .map(|&name| Value::from(name))
+            .collect();
         let outcomes = self
             .rules
             .arms
@@ -218,7 +249,7 @@ impl<T: Serialize> RuleField<T> {
     /// One `function_score` function per way of reaching a value. Under
     /// `score_mode: first` the score is the rank of the value the first
     /// matching arm yields; a value outside the order ranks after every other.
-    fn rank_functions(&self) -> Checked<(Vec<Value>, u64)> {
+    fn rank_functions(&self) -> Checked<(Vec<RankFunction>, u64)> {
         let plan = self.plan.as_ref().map_err(Clone::clone)?;
         let order = self.ordered()?;
         let unknown = order.len() as u64 + 1;
@@ -229,20 +260,22 @@ impl<T: Serialize> RuleField<T> {
                 .map_or(unknown, |at| at as u64 + 1)
         };
         let mut functions = Vec::new();
+        let mut ranked = |cond: &Cond, weight: u64| {
+            functions.push(RankFunction {
+                filter: render(cond),
+                weight,
+            });
+        };
         for arm in &plan.arms {
             match &arm.slot {
-                Slot::Value(value) => {
-                    functions.push(json!({ "filter": render(&arm.when), "weight": rank(value) }));
-                }
+                Slot::Value(value) => ranked(&arm.when, rank(value)),
                 Slot::Stored(field) => {
                     for value in &order {
-                        let Ok(holds) = field.equals(value) else {
-                            continue;
-                        };
-                        let filter = render(&and([arm.when.clone(), holds]));
-                        functions.push(json!({ "filter": filter, "weight": rank(value) }));
+                        if let Ok(holds) = field.equals(value) {
+                            ranked(&and([arm.when.clone(), holds]), rank(value));
+                        }
                     }
-                    functions.push(json!({ "filter": render(&arm.when), "weight": unknown }));
+                    ranked(&arm.when, unknown);
                 }
             }
         }
@@ -252,32 +285,22 @@ impl<T: Serialize> RuleField<T> {
     fn sort(&self, order: SortOrder) -> Sort {
         match self.rank_functions() {
             Ok((functions, top)) => Sort::ranked(order, functions, top),
-            Err(reason) => Sort::ranked(order, vec![json!({ "filter": invalid(&reason) })], 1),
+            Err(reason) => {
+                let refused = RankFunction {
+                    filter: invalid(&reason),
+                    weight: 1,
+                };
+                Sort::ranked(order, vec![refused], 1)
+            }
         }
-    }
-
-    /// Sort by the field's value order, first value first.
-    ///
-    /// The order travels in the score, so the request's text relevance is
-    /// replaced and `min_score` cannot be combined with it.
-    #[must_use]
-    pub fn asc(&self) -> Sort {
-        self.sort(SortOrder::Asc)
-    }
-
-    /// Sort by the field's value order, last value first. See
-    /// [`asc`](Self::asc).
-    #[must_use]
-    pub fn desc(&self) -> Sort {
-        self.sort(SortOrder::Desc)
     }
 
     /// How many of `search`'s documents have each value, in sort order, in one
     /// `_msearch` round trip.
     ///
     /// The values counted are the ones [`order`](Rules::order) lists, else the
-    /// schema's variants, else the fixed values the rules name; a value a
-    /// stored field yields outside of those is not counted.
+    /// schema's variants and the fixed values the rules name; a value a stored
+    /// field yields outside of those is not counted.
     pub async fn counts<R>(&self, search: &Search<R>, client: &Client) -> Result<Vec<(T, u64)>>
     where
         R: DeserializeOwned + Clone,
@@ -300,6 +323,11 @@ impl<T: Serialize> RuleField<T> {
     }
 }
 
+/// Sorts by the field's value order ([`Rules::order`]), `asc` first value
+/// first.
+///
+/// The order travels in the score, so the request's text relevance is
+/// replaced, and neither a relevance sort nor `min_score` can sit beside it.
 impl<T: Serialize> Sortable for RuleField<T> {
     fn asc(&self) -> Sort {
         self.sort(SortOrder::Asc)

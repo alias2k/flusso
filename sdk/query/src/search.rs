@@ -169,6 +169,16 @@ impl<T> Search<T> {
         self
     }
 
+    /// Refuse to run when one of the root's rule fields cannot be evaluated,
+    /// before anything is sent: such a search has no honest result, whether or
+    /// not this request would have decoded a document.
+    pub(crate) fn runnable(&self) -> Result<()> {
+        match &self.computation {
+            Some(computation) => computation.check(),
+            None => Ok(()),
+        }
+    }
+
     /// Write the read-time fields into every hit of a raw `_search` response.
     pub(crate) fn compute(&self, response: &mut Value) -> Result<()> {
         match &self.computation {
@@ -249,13 +259,12 @@ impl<T> Search<T> {
                 .functions
                 .iter()
                 .map(|function| {
-                    let weight = function.get("weight").and_then(Value::as_u64).unwrap_or(0);
                     let weight = if rank.descending == descending {
-                        weight
+                        function.weight
                     } else {
-                        rank.top + 1 - weight
+                        rank.top + 1 - function.weight
                     };
-                    serde_json::json!({ "filter": function.get("filter"), "weight": weight * scale })
+                    serde_json::json!({ "filter": function.filter, "weight": weight * scale })
                 })
                 .collect();
             query = serde_json::json!({ "function_score": {
@@ -585,6 +594,7 @@ impl<T> Search<T> {
         err,
     )]
     pub async fn ids(&self, client: &Client) -> Result<Vec<String>> {
+        self.runnable()?;
         let body = self.ids_body();
         let response = client.search_at(&self.physical_index(), &body).await?;
         let raw: RawIdsResponse = serde_json::from_value(response)?;
@@ -618,6 +628,7 @@ impl<T> Search<T> {
         err,
     )]
     pub async fn count(&self, client: &Client) -> Result<u64> {
+        self.runnable()?;
         let body = self.count_body();
         let response = client.count_at(&self.physical_index(), &body).await?;
         let raw: RawCount = serde_json::from_value(response)?;
@@ -645,6 +656,7 @@ where
         err,
     )]
     pub async fn send(&self, client: &Client) -> Result<SearchResponse<T>> {
+        self.runnable()?;
         let body = self.body();
         let mut response = client.search_at(&self.physical_index(), &body).await?;
         let paths = self.nested_paths();
@@ -760,6 +772,7 @@ impl<T> CursorSearch<T> {
         body: Value,
         cursor: Option<&PageCursor>,
     ) -> Result<FetchedPage> {
+        self.search.runnable()?;
         let path = self.search.physical_index();
         fetch_page(client, self.request(body, &path, cursor)?).await
     }

@@ -384,6 +384,7 @@ impl Client {
     where
         T: DeserializeOwned,
     {
+        computation.check()?;
         self.fence_before(Level::Applied).await?;
         let endpoint = format!(
             "{}/{}/_doc/{id}",
@@ -404,8 +405,8 @@ impl Client {
                 body: response.text().await.unwrap_or_default(),
             });
         }
-        // A root without read-time fields decodes straight into its type, as
-        // it always has; the others stop at JSON to have the fields written in.
+        // Only a root with read-time fields stops at JSON, to have them
+        // written in before it decodes.
         let source = if computation.is_empty() {
             let doc: GetResponse<T> = response.json().await?;
             doc.source.filter(|_| doc.found)

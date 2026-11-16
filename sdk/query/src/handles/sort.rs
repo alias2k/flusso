@@ -85,21 +85,33 @@ pub struct Sort {
 /// value, each weighted with the value's 1-based rank.
 #[derive(Debug, Clone)]
 pub(crate) struct Rank {
-    pub(crate) functions: Vec<Value>,
+    pub(crate) functions: Vec<RankFunction>,
     /// The highest rank any function gives.
     pub(crate) top: u64,
     pub(crate) descending: bool,
 }
 
+/// The documents `filter` matches rank `weight`, unless an earlier function
+/// matched them first.
+#[derive(Debug, Clone)]
+pub(crate) struct RankFunction {
+    pub(crate) filter: Value,
+    pub(crate) weight: u64,
+}
+
 impl Sort {
     /// Sort by a rule field's rank, carried in the score.
-    pub(crate) fn ranked(order: SortOrder, functions: Vec<Value>, top: u64) -> Self {
+    pub(crate) fn ranked(order: SortOrder, functions: Vec<RankFunction>, top: u64) -> Self {
+        // Two rule fields both sort on `_score`, so the functions tell them
+        // apart.
+        let filters: Vec<Value> = functions
+            .iter()
+            .map(|function| function.filter.clone())
+            .collect();
         Self {
             key: "_score".to_string(),
             body: Map::new(),
-            // Two rule fields both sort on `_score`, so the functions tell
-            // them apart.
-            dedup_id: format!("_rank:{}", Value::Array(functions.clone())),
+            dedup_id: format!("_rank:{}", Value::Array(filters)),
             script_kind: None,
             rank: Some(Rank {
                 functions,
@@ -213,17 +225,26 @@ impl Sort {
 
     /// Sort ascending.
     #[must_use]
-    pub fn asc(mut self) -> Self {
-        self.body
-            .insert("order".to_string(), Value::String("asc".to_string()));
-        self
+    pub fn asc(self) -> Self {
+        self.ordered(SortOrder::Asc)
     }
 
     /// Sort descending.
     #[must_use]
-    pub fn desc(mut self) -> Self {
-        self.body
-            .insert("order".to_string(), Value::String("desc".to_string()));
+    pub fn desc(self) -> Self {
+        self.ordered(SortOrder::Desc)
+    }
+
+    fn ordered(mut self, order: SortOrder) -> Self {
+        match &mut self.rank {
+            Some(rank) => rank.descending = matches!(order, SortOrder::Desc),
+            None => {
+                self.body.insert(
+                    "order".to_string(),
+                    Value::String(order.as_str().to_string()),
+                );
+            }
+        }
         self
     }
 

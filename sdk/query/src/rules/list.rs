@@ -1,4 +1,10 @@
 //! A rule list: ordered `condition → outcome` arms, first match wins.
+//!
+//! [`Rules`] is what a rule function builds. A [`Plan`] is the same list ready
+//! to use, and the one place both halves read it from: [`Plan::value`] decides
+//! a document's value, [`Plan::select`] gives the condition under which the
+//! rules yield a wanted value. Each arm is kept in the form it is sent in, so
+//! the two cannot drift.
 
 use serde::Serialize;
 use serde_json::Value;

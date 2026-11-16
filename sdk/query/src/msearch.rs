@@ -102,6 +102,7 @@ pub trait MsearchBundle {
 fn append_lines<T>(search: &Search<T>, prefix: &str, ndjson: &mut String) -> Result<()> {
     let index = format!("{prefix}{}", search.physical_index());
     let header = serde_json::to_string(&json!({ "index": index }))?;
+    search.runnable()?;
     let body = search.body();
     crate::rules::refuse_invalid(&body)?;
     let body = serde_json::to_string(&body)?;

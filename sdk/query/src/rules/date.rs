@@ -4,7 +4,16 @@
 //! index fills in differently on each side of a comparison, so a date constant
 //! is read as the stretch of time it covers: a bare date is its whole day,
 //! `12:00` its whole minute, and anything written down to the second is one
-//! instant.
+//! instant. A date the document holds is read from the start of its stretch,
+//! as the index stores it.
+//!
+//! ```text
+//! "2026-11-16T12:00:00.123456Z"  one instant, to the millisecond
+//! "2026-11-16T12:00"             12:00:00.000 ..= 12:00:59.999
+//! "2026-11-16"                   the whole day
+//! "2026-11"                      the whole month
+//! "1794830400000"                epoch milliseconds
+//! ```
 
 use serde_json::Value;
 
@@ -38,64 +47,111 @@ fn instant(millis: i64) -> Span {
     }
 }
 
+/// The forms the index's own date format reads: `yyyy`, `yyyy-MM`,
+/// `yyyy-MM-dd`, then optionally `T` and `HH`, `HH:mm`, `HH:mm:ss` or
+/// `HH:mm:ss.S…`, then optionally a zone. Longer runs of digits are epoch
+/// milliseconds.
 fn parse(text: &str) -> Option<Span> {
     let text = text.trim();
     if text.len() > 4 && text.bytes().all(|byte| byte.is_ascii_digit()) {
         return text.parse().ok().map(instant);
     }
-    let year: i64 = text.get(0..4)?.parse().ok()?;
-    let month: i64 = text.get(5..7)?.parse().ok()?;
-    let day: i64 = text.get(8..10)?.parse().ok()?;
-    if text.get(4..5)? != "-" || text.get(7..8)? != "-" {
+    let (date, time) = match text.find(['T', ' ']) {
+        Some(at) => (text.get(..at)?, Some(text.get(at + 1..)?)),
+        None => (text, None),
+    };
+    let mut parts = date.split('-');
+    let year = digits(parts.next()?, 4)?;
+    let month = part(parts.next(), 2)?;
+    let day = part(parts.next(), 2)?;
+    if parts.next().is_some() {
         return None;
     }
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    let first_month = month.unwrap_or(1);
+    let first_day = day.unwrap_or(1);
+    if !(1..=12).contains(&first_month) || !(1..=days_in(year, first_month)).contains(&first_day) {
         return None;
     }
-    let midnight = days_from_civil(year, month, day) * DAY;
-    let rest = text.get(10..)?;
-    if rest.is_empty() {
+    let midnight = days_from_civil(year, first_month, first_day) * DAY;
+    let Some(time) = time else {
+        // What the date leaves open runs to the start of the next one.
+        let next = match (month, day) {
+            (None, _) => days_from_civil(year + 1, 1, 1) * DAY,
+            (Some(12), None) => days_from_civil(year + 1, 1, 1) * DAY,
+            (Some(month), None) => days_from_civil(year, month + 1, 1) * DAY,
+            (Some(_), Some(_)) => midnight + DAY,
+        };
         return Some(Span {
             first: midnight,
-            last: midnight + DAY - 1,
+            last: next - 1,
         });
-    }
-    let rest = rest.strip_prefix('T').or_else(|| rest.strip_prefix(' '))?;
-    let zone_at = rest.find(['Z', '+', '-']).unwrap_or(rest.len());
-    let (time, zone) = rest.split_at(zone_at);
-    let hour: i64 = time.get(0..2)?.parse().ok()?;
-    let minute: i64 = time.get(3..5)?.parse().ok()?;
-    if time.get(2..3)? != ":" || hour > 23 || minute > 59 {
-        return None;
-    }
-    let (second, open) = match time.get(5..) {
-        None | Some("") => (0, MINUTE),
-        Some(seconds) => {
-            if seconds.get(0..1)? != ":" {
-                return None;
-            }
-            (seconds.get(1..3)?.parse::<i64>().ok()?, 1)
-        }
     };
-    if second > 59 {
+    // A time needs a whole date before it.
+    day?;
+    let zone_at = time.find(['Z', '+', '-']).unwrap_or(time.len());
+    let (clock, zone) = time.split_at(zone_at);
+    let (clock, fraction) = match clock.split_once('.') {
+        Some((clock, fraction)) => (clock, Some(fraction)),
+        None => (clock, None),
+    };
+    let mut parts = clock.split(':');
+    let hour = digits(parts.next()?, 2)?;
+    let minute = part(parts.next(), 2)?;
+    let second = part(parts.next(), 2)?;
+    if parts.next().is_some() || hour > 23 || minute.is_some_and(|minute| minute > 59) {
         return None;
     }
-    let millis = match time.get(8..) {
-        None | Some("") => 0,
+    if second.is_some_and(|second| second > 59) || (fraction.is_some() && second.is_none()) {
+        return None;
+    }
+    let millis = match fraction {
+        None => 0,
         Some(fraction) => {
-            let digits = fraction.strip_prefix('.')?;
-            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            if fraction.is_empty() || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
                 return None;
             }
-            format!("{digits:0<3}").get(0..3)?.parse::<i64>().ok()?
+            format!("{fraction:0<3}").get(0..3)?.parse::<i64>().ok()?
         }
     };
-    let first =
-        midnight + (hour * 60 + minute - offset_minutes(zone)?) * MINUTE + second * SECOND + millis;
+    let open = match (minute, second) {
+        (None, _) => 60 * MINUTE,
+        (Some(_), None) => MINUTE,
+        (Some(_), Some(_)) => 1,
+    };
+    let first = midnight
+        + (hour * 60 + minute.unwrap_or(0) - offset_minutes(zone)?) * MINUTE
+        + second.unwrap_or(0) * SECOND
+        + millis;
     Some(Span {
         first,
         last: first + open - 1,
     })
+}
+
+/// An optional part: `Some(None)` when absent, `None` when present and not
+/// `width` digits.
+fn part(text: Option<&str>, width: usize) -> Option<Option<i64>> {
+    match text {
+        Some(text) => digits(text, width).map(Some),
+        None => Some(None),
+    }
+}
+
+/// `text` as a number, when it is exactly `width` digits.
+fn digits(text: &str, width: usize) -> Option<i64> {
+    (text.len() == width && text.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| text.parse().ok())
+        .flatten()
+}
+
+fn days_in(year: i64, month: i64) -> i64 {
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
 }
 
 /// A zone suffix (`Z`, `+02:00`, `-0530`, `+02`) as minutes east of UTC.
@@ -179,6 +235,20 @@ mod tests {
     }
 
     #[test]
+    fn a_year_a_month_and_an_hour_cover_themselves() {
+        let year = read("2026");
+        assert_eq!(year.first, read("2026-01-01").first);
+        assert_eq!(year.last, read("2026-12-31").last);
+        let month = read("2026-02");
+        assert_eq!(month.first, read("2026-02-01").first);
+        assert_eq!(month.last, read("2026-02-28").last);
+        assert_eq!(read("2026-12").last, year.last);
+        assert_eq!(read("2024-02").last, read("2024-02-29").last);
+        let hour = read("2026-11-16T12Z");
+        assert_eq!((hour.first, hour.last), (NOON, NOON + 60 * MINUTE - 1));
+    }
+
+    #[test]
     fn epoch_milliseconds_read_as_text_or_number() {
         assert_eq!(read("1794830400000"), instant(NOON));
         assert_eq!(span(&json!(NOON)), Some(instant(NOON)));
@@ -189,6 +259,13 @@ mod tests {
         for text in [
             "next tuesday",
             "2026-13-01",
+            "2026-02-31",
+            "2025-02-29",
+            "2026-1-01",
+            "2026-11T12:00",
+            "2026-11-16T",
+            "2026-11-16T12:00.5",
+            "2026-11-16T12:00:00:00",
             "2026-11-16T25:00:00Z",
             "2026/11/16",
             "2026-11-16T12:00:00.Z",

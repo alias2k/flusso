@@ -17,8 +17,8 @@
 //! - the **value** on a fetched document, decided in Rust on its `_source`;
 //! - a **filter** on the value ([`RuleField::eq`] and friends), a plain query
 //!   over the stored fields the rules read;
-//! - a **sort** ([`RuleField::asc`]), a `function_score` whose weights are the
-//!   value's rank;
+//! - a **sort** (`asc` / `desc`, through [`Sortable`](crate::Sortable)), a
+//!   `function_score` whose weights are the value's rank;
 //! - **counts** per value ([`RuleField::counts`]), one `_msearch`.
 //!
 //! Conditions are built from the rule handles ([`RuleKeyword`], [`RuleBool`],

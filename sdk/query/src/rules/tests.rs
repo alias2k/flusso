@@ -13,7 +13,9 @@ use super::{
     Array, Computation, Condition, Optional, Required, RuleDate, RuleField, RuleKeyword,
     RuleNumber, Rules,
 };
-use crate::{AsQuery, Error, FlussoRoot, FlussoScope, Search, Segment, Sort, SortOrder, kind};
+use crate::{
+    AsQuery, Error, FlussoRoot, FlussoScope, Search, Segment, Sort, SortOrder, Sortable, kind,
+};
 
 const NOON: i64 = 1_794_830_400_000; // 2026-11-16T12:00:00Z
 const NOON_TEXT: &str = "2026-11-16T12:00:00Z";
@@ -537,6 +539,53 @@ mod fields {
         );
     }
 
+    fn optional_fee(cx: &Viewing) -> Rules<Option<f64>> {
+        Rules::when(signed_at().missing())
+            .then(None)
+            .when(RuleDate::<Optional>::at("discount_until").gt(cx.now))
+            .then(RuleNumber::<kind::Double, Optional>::at("discounted_fee"))
+            .otherwise(fee())
+    }
+
+    #[test]
+    fn no_value_is_matched_the_same_fixed_or_stored() {
+        let current = RuleField::new(optional_fee(&CX), &[]);
+        let discounted =
+            json!({ "range": { "discount_until": { "gt": NOON, "format": "epoch_millis" } } });
+        // `None` is the fixed `None`, and a stored field holding nothing.
+        assert_eq!(
+            current.eq(None).to_value(),
+            json!({ "bool": { "minimum_should_match": 1, "should": [
+                { "bool": { "must_not": [signed()] } },
+                { "bool": {
+                    "filter": [signed(), discounted],
+                    "must_not": [{ "exists": { "field": "discounted_fee" } }],
+                } },
+                { "bool": {
+                    "filter": [signed()],
+                    "must_not": [discounted, { "exists": { "field": "fee" } }],
+                } },
+            ] } })
+        );
+        // No value has no order: neither the fixed `None` nor a missing
+        // stored field is "below 600".
+        assert_eq!(
+            current.lt(Some(600.0)).to_value(),
+            json!({ "bool": { "minimum_should_match": 1, "should": [
+                { "bool": { "filter": [
+                    signed(),
+                    discounted,
+                    { "range": { "discounted_fee": { "lt": 600.0 } } },
+                ] } },
+                { "bool": {
+                    "filter": [signed(), { "range": { "fee": { "lt": 600.0 } } }],
+                    "must_not": [discounted],
+                } },
+            ] } })
+        );
+        assert!(refuse_invalid(&current.lt(None).to_value()).is_err());
+    }
+
     #[test]
     fn a_stored_array_is_yielded_whole() {
         let rules: Rules<Vec<String>> = Rules::when(signed_at().missing())
@@ -652,7 +701,7 @@ mod sorting {
     }
 
     #[test]
-    fn the_order_falls_back_to_the_schema_then_to_the_rules_own() {
+    fn the_order_is_the_schema_variants_then_what_else_the_rules_name() {
         let weights = |field: RuleField<State>| -> Vec<u64> {
             Contract::query().sort(field.asc()).body()["query"]["function_score"]["functions"]
                 .as_array()
@@ -661,7 +710,14 @@ mod sorting {
                 .map(|function| function["weight"].as_u64().unwrap())
                 .collect()
         };
-        // Schema order: closed 1, draft 2, active 3.
+        // The stored enum declares only what it stores. The rules add `draft`
+        // and `closed`, which rank after it: active 1, suspended 2, draft 3,
+        // closed 4.
+        assert_eq!(
+            weights(RuleField::new(visible_state(&CX), &["active", "suspended"])),
+            [3, 4, 1, 2, 3, 4, 5]
+        );
+        // A value the schema already declares keeps its declared place.
         assert_eq!(
             weights(RuleField::new(
                 visible_state(&CX),
@@ -669,11 +725,17 @@ mod sorting {
             )),
             [2, 1, 1, 2, 3, 4]
         );
-        // The rules name `draft`, then `closed`.
+        // With no declared variants, the order the rules name: `draft`, `closed`.
         assert_eq!(
             weights(RuleField::new(visible_state(&CX), &[])),
             [1, 2, 1, 2, 3]
         );
+    }
+
+    #[test]
+    fn a_rule_sort_turned_around_sorts_the_other_way() {
+        let body = Contract::query().sort(by_mine().asc().desc()).body();
+        assert_eq!(body["sort"], json!([{ "_score": { "order": "desc" } }]));
     }
 
     #[test]
@@ -859,6 +921,23 @@ mod computing {
             text.starts_with("read-time field: `converted`: its input does not read"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_rule_that_cannot_be_evaluated_is_known_before_any_document() {
+        let broken = |_: &Rate| {
+            Rules::when(RuleDate::<Required>::at("ends_at").lt("soon"))
+                .then(true)
+                .otherwise(false)
+        };
+        let refused = Computation::with(&Rate(1.0))
+            .rules("ends_soon", broken)
+            .finish();
+        let Err(Error::ReadTimeField(reason)) = refused.check() else {
+            panic!("the computation must be refused");
+        };
+        assert!(reason.starts_with("`ends_soon`: "), "{reason}");
+        assert!(computation().check().is_ok());
     }
 
     #[test]
