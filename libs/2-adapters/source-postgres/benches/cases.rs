@@ -50,9 +50,7 @@ use source::{RowKey, SourceSpec};
 use source_postgres::PgDocumentBuilder;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{AssertSqlSafe, Row};
-use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
-use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt};
 use tokio::runtime::Runtime;
 
 /// Rows in the `plain` root, the largest batch.
@@ -300,18 +298,14 @@ fn runtime() -> Runtime {
         .unwrap()
 }
 
-async fn connect() -> (Option<ContainerAsync<Postgres>>, String) {
+async fn connect() -> (Option<test_postgres::Container>, String) {
     if let Some(url) = std::env::var("REVIEW_AB_PG_URL")
         .ok()
         .filter(|url| !url.is_empty())
     {
         return (None, url);
     }
-    let container = Postgres::default()
-        .with_tag("16-alpine")
-        .start()
-        .await
-        .unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     (
         Some(container),
@@ -454,7 +448,7 @@ async fn builds(builder: &PgDocumentBuilder, case: &Case, hits: usize) -> bool {
 }
 
 async fn setup() -> (
-    Option<ContainerAsync<Postgres>>,
+    Option<test_postgres::Container>,
     PgDocumentBuilder,
     Vec<Case>,
 ) {

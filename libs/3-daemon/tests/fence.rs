@@ -50,7 +50,6 @@ use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::{AssertSqlSafe, Row};
 use stream::Stream;
 use stream_channel::ChannelStream;
-use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::core::wait::HttpWaitStrategy;
 use testcontainers_modules::testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
@@ -62,8 +61,7 @@ const WAIT: Duration = Duration::from_secs(10);
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs Docker (starts Postgres and OpenSearch containers)"]
 async fn a_read_after_a_fence_sees_the_commit() {
-    let postgres = Postgres::default()
-        .with_tag("16-alpine")
+    let postgres = test_postgres::image()
         .with_cmd([
             "postgres",
             "-c",

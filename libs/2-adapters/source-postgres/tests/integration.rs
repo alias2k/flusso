@@ -23,14 +23,13 @@ use source::document::{Document, DocumentBuilder, DocumentId};
 use source::{RowImage, RowKey, SourceSpec};
 use source_postgres::PgDocumentBuilder;
 use sqlx::postgres::PgPoolOptions;
-use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn assembles_documents_resolves_and_tombstones() {
-    let container = Postgres::default().start().await.unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
 
@@ -92,7 +91,7 @@ async fn assembles_documents_resolves_and_tombstones() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn build_many_assembles_a_set_and_tombstones_absent_keys() {
-    let container = Postgres::default().start().await.unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
 
@@ -172,7 +171,7 @@ async fn uuid_keys_round_trip_through_build_build_many_and_resolve() {
     const U2: &str = "22222222-2222-2222-2222-222222222222";
     const O1: &str = "aaaaaaaa-0000-0000-0000-000000000001";
 
-    let container = Postgres::default().start().await.unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
 
@@ -241,7 +240,7 @@ async fn uuid_keys_round_trip_through_build_build_many_and_resolve() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn typed_columns_coerce_to_canonical_variants_in_the_body() {
-    let container = Postgres::default().start().await.unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
 
@@ -344,7 +343,7 @@ async fn a_database_set_to_escape_bytea_output_still_builds_the_bytes() {
 }
 
 async fn binary_columns_and_constants_build_under(settings: &[&'static str]) {
-    let container = Postgres::default().start().await.unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
@@ -483,7 +482,7 @@ async fn binary_columns_and_constants_build_under(settings: &[&'static str]) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn a_document_that_fails_to_build_is_reported_as_the_failure() {
-    let container = Postgres::default().start().await.unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
@@ -549,7 +548,7 @@ async fn a_document_that_fails_to_build_is_reported_as_the_failure() {
 /// `items` is a tree: 1 is the root, 2 its child, 3 its grandchild, 4 a second
 /// root with no children.
 async fn items_tree(statements: &[&'static str]) -> (impl Drop, String) {
-    let container = Postgres::default().start().await.unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
@@ -774,7 +773,7 @@ async fn an_aggregate_over_the_root_table_rebuilds_the_parent() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn a_root_change_without_a_self_join_resolves_only_its_own_document() {
-    let container = Postgres::default().start().await.unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let builder = PgDocumentBuilder::connect(&url, Arc::new(users_spec()))
@@ -949,7 +948,7 @@ fn index_name(name: &str) -> IndexName {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn a_raw_filter_reads_the_root_rows_columns_in_a_batched_build() {
-    let container = Postgres::default().start().await.unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
@@ -1129,8 +1128,7 @@ fields:
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn a_raw_filter_names_the_root_rows_columns_whatever_the_batched_query_names() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd([
             "postgres",
             "-c",
@@ -1240,11 +1238,7 @@ async fn a_raw_filter_names_the_root_rows_columns_whatever_the_batched_query_nam
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn the_builders_sessions_run_without_jit() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
-        .start()
-        .await
-        .unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
@@ -1282,11 +1276,7 @@ async fn the_builders_sessions_run_without_jit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn a_key_several_rows_share_builds_the_same_row_both_ways() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
-        .start()
-        .await
-        .unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
@@ -1408,11 +1398,7 @@ fields:
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn a_batched_build_pairs_positions_without_a_nested_loop() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
-        .start()
-        .await
-        .unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
@@ -1498,11 +1484,7 @@ async fn a_batched_build_pairs_positions_without_a_nested_loop() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn a_batch_by_key_with_a_stale_type_cache_still_finds_its_rows() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
-        .start()
-        .await
-        .unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
@@ -1558,11 +1540,7 @@ fields:
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn choosing_a_shared_keys_row_reads_no_column_the_document_does_not_read() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
-        .start()
-        .await
-        .unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
@@ -1620,8 +1598,7 @@ fields:
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn a_server_that_refuses_the_jit_setting_still_connects() {
-    let container = Postgres::default()
-        .with_tag("10-alpine")
+    let container = test_postgres::pinned(test_postgres::Pinned::NoJitParameter)
         .start()
         .await
         .unwrap();
@@ -1663,8 +1640,7 @@ async fn a_small_batch_reuses_its_plan() {
     const POOL_CONNECTIONS: i64 = 10;
     const WARM_UP_PLANS: i64 = 7;
     const CALLS: i32 = 200;
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd([
             "postgres",
             "-c",
@@ -1738,11 +1714,7 @@ async fn a_small_batch_reuses_its_plan() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn a_batch_survives_its_key_column_changing_from_text_to_name() {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
-        .start()
-        .await
-        .unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();

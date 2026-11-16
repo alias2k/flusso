@@ -42,7 +42,6 @@ use source_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
 use sqlx::postgres::PgPoolOptions;
 use stream::Stream;
 use stream_channel::ChannelStream;
-use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::core::IntoContainerPort;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::testcontainers::{GenericImage, ImageExt};
@@ -86,13 +85,8 @@ enum Route {
 }
 
 /// PG 18 with logical replication: the first with `min`/`max` over `bytea`.
-async fn start_postgres() -> (
-    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
-    u16,
-    String,
-) {
-    let postgres = Postgres::default()
-        .with_tag("18-alpine")
+async fn start_postgres() -> (test_postgres::Container, u16, String) {
+    let postgres = test_postgres::pinned(test_postgres::Pinned::ByteaMinMax)
         .with_cmd([
             "postgres",
             "-c",
@@ -113,7 +107,7 @@ async fn start_postgres() -> (
 /// The URL the builder connects with over `route`, and the pooler, if any.
 async fn connect_over(
     route: Route,
-    postgres: &testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
+    postgres: &test_postgres::Container,
     url: &str,
 ) -> (
     String,

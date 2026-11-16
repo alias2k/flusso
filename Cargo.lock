@@ -1142,6 +1142,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "flusso-test-postgres",
  "rand 0.10.3",
  "reqwest",
  "serde",
@@ -1175,6 +1176,7 @@ dependencies = [
  "flusso-source-postgres",
  "flusso-stream",
  "flusso-stream-channel",
+ "flusso-test-postgres",
  "futures",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -1223,6 +1225,7 @@ dependencies = [
  "flusso-source-postgres",
  "flusso-stream",
  "flusso-stream-channel",
+ "flusso-test-postgres",
  "futures",
  "reqwest",
  "serde",
@@ -1292,6 +1295,7 @@ dependencies = [
  "flusso-source-postgres",
  "flusso-stream",
  "flusso-stream-channel",
+ "flusso-test-postgres",
  "futures",
  "reqwest",
  "rust_decimal",
@@ -1484,6 +1488,7 @@ dependencies = [
  "flusso-kernel",
  "flusso-sink",
  "flusso-source",
+ "flusso-test-postgres",
  "futures",
  "nutype",
  "pgwire-replication",
@@ -1523,6 +1528,13 @@ dependencies = [
  "serde",
  "tokio",
  "toml",
+]
+
+[[package]]
+name = "flusso-test-postgres"
+version = "0.0.0"
+dependencies = [
+ "testcontainers-modules",
 ]
 
 [[package]]

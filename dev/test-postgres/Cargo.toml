@@ -1,0 +1,20 @@
+[package]
+name = "flusso-test-postgres"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The Postgres image flusso's tests and benches start, in one place: the default tag, the FLUSSO_TEST_PG_TAG override, and the named exceptions. Not published: a dev-dependency only, which cargo drops from a published manifest."
+# Test tooling (like dev/bench), not shipping code. Published crates take it as
+# a path-only dev-dependency, which `cargo publish` strips.
+publish = false
+
+[lib]
+name = "test_postgres"
+
+[lints]
+workspace = true
+
+[dependencies]
+testcontainers-modules = { workspace = true, features = ["postgres"] }

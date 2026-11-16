@@ -110,7 +110,6 @@ use sqlx::AssertSqlSafe;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use stream::Stream;
 use stream_channel::ChannelStream;
-use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::core::wait::HttpWaitStrategy;
 use testcontainers_modules::testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
@@ -2037,7 +2036,7 @@ async fn a_non_finite_number_reaches_the_sink_as_postgres_wrote_it() {
 
 /// A running Postgres with logical replication and a connection pool.
 struct Pg {
-    _container: ContainerAsync<Postgres>,
+    _container: test_postgres::Container,
     pool: PgPool,
     url: String,
     port: u16,
@@ -2470,8 +2469,7 @@ async fn run_deployment(
 }
 
 async fn start_postgres() -> Pg {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
+    let container = test_postgres::image()
         .with_cmd([
             "postgres",
             "-c",

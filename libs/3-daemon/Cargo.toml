@@ -45,4 +45,5 @@ source-postgres.workspace = true
 sink-opensearch.workspace = true
 sqlx.workspace = true
 testcontainers-modules = { workspace = true, features = ["postgres", "http_wait"] }
+test-postgres.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls"] }

@@ -26,9 +26,9 @@
 # A libs fix reaches the shipped binaries (docker/dist) only when the cli
 # train releases: land a `fix(cli): adopt …` commit appending a line to
 # apps/cli/ADOPTIONS.md (docker/dist build in-tree from the tag checkout, so
-# any cli release carries main-tip libs). `flusso-dev-search-api` and
-# `flusso-query-e2e` are publish = false in their manifests, so release-plz
-# skips them automatically.
+# any cli release carries main-tip libs). `flusso-dev-search-api`,
+# `flusso-query-e2e`, `flusso-bench` and `flusso-test-postgres` are
+# publish = false in their manifests, so release-plz skips them automatically.
 
 [workspace]
 # Surface accidental SemVer breakage as a note in the release PR.

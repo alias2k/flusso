@@ -1,6 +1,7 @@
 //! Real-service component benches for the Postgres document builder, for attribution.
 //!
-//! These run against a genuine Postgres 17 in a container — the same
+//! These run against a genuine Postgres in a container (`postgres:16-alpine`,
+//! or the tag `FLUSSO_TEST_PG_TAG` names: `dev/test-postgres`) — the same
 //! server-side assembly SQL (`json_build_object` + `json_agg` over a join) and
 //! reverse-resolution queries the pipeline issues in production. Nothing is
 //! mocked.
@@ -41,7 +42,6 @@ use source::document::{DocumentBuilder, DocumentId};
 use source::{RowKey, SourceSpec};
 use source_postgres::PgDocumentBuilder;
 use sqlx::postgres::PgPoolOptions;
-use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use tokio::runtime::Runtime;
 
@@ -62,7 +62,7 @@ fn runtime() -> Runtime {
 /// connected, ready-to-query [`PgDocumentBuilder`], and a raw pool (used by the
 /// round-trip baseline).
 async fn setup() -> (
-    Option<testcontainers_modules::testcontainers::ContainerAsync<Postgres>>,
+    Option<test_postgres::Container>,
     PgDocumentBuilder,
     sqlx::PgPool,
 ) {
@@ -72,7 +72,7 @@ async fn setup() -> (
     {
         Some(url) => (None, url),
         None => {
-            let container = Postgres::default().start().await.unwrap();
+            let container = test_postgres::image().start().await.unwrap();
             let port = container.get_host_port_ipv4(5432).await.unwrap();
             let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
             (Some(container), url)

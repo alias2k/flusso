@@ -40,13 +40,25 @@ The workspace lints deny `unwrap_used` and `expect_used`, and test targets use `
 
 The `#[ignore]`d suites spin up containers with `testcontainers`. They're legitimately slow and occasionally flaky, so `.config/nextest.toml` puts each binary in a test group by what it needs and retries it twice: the `docker` group (no OpenSearch, eight at a time) and the `opensearch` group (anything with OpenSearch, one at a time). Both groups get a longer slow-timeout than ordinary tests, a little longer still under the `ci` profile; `.config/nextest.toml` holds the numbers. A new e2e binary must be added to the filtersets in both profiles.
 
+### Which Postgres
+
+Every test and bench that starts Postgres takes its image from one place, `dev/test-postgres` (`flusso-test-postgres`, unpublished, a dev-dependency only): `postgres:16-alpine`. `FLUSSO_TEST_PG_TAG` names another tag of the official image for the whole run, with no code change:
+
+```sh
+FLUSSO_TEST_PG_TAG=14-alpine cargo nextest run -p flusso-source-postgres --run-ignored all
+```
+
+Two tests need one version whatever the run's tag, and name it with a `test_postgres::Pinned` variant that carries the reason (each start prints one line saying which image it took instead of the run's, and why): `bytea_output` runs on Postgres 18 (the first with `min`/`max` over `bytea`), and `integration`'s JIT refusal test on Postgres 10 (no `jit` parameter). The scenario harness (`dev/bench`) and the Docker-backed component benches start the same image; the [`review-ab`](benchmarks.md#comparing-a-branch-with-its-base) command starts its own, from `--pg`.
+
+`testcontainers-modules`' `Postgres::default()` alone starts `postgres:11-alpine`, a version flusso doesn't support. `.github/scripts/check-postgres-image.py`, run by CI's `scripts` job through its unit test, fails on any import of `testcontainers_modules::postgres` outside `dev/test-postgres` (nested, glob and renamed imports included; callers name the container type `test_postgres::Container`), on `Postgres::default`, on `with_tag`/`with_name`, and on a `GenericImage` whose arguments mention `postgres` or whose image name isn't a literal. `review-ab.sh` reads its default `--pg` from the same crate's `DEFAULT_TAG`.
+
 | Crate | Binary | Needs | Proves |
 | --- | --- | --- | --- |
 | `source-postgres` | `integration` | Postgres | capture end to end: slot, stream, decode, backfill |
 | `source-postgres` | `config_coverage` | Postgres | every schema key builds against a real catalog; validation reports a typo in every relation and root position |
 | `source-postgres` | `publication` | Postgres | publication create/extend and `REPLICA IDENTITY FULL` management, incl. kept identity indexes, unowned tables and lock timeouts |
 | `source-postgres` | `introspection` | Postgres | catalog enumeration for the designer |
-| `source-postgres` | `tls` | Postgres | a hostssl-only PG 16 honors `sslmode` on both the stream and the SQL pool |
+| `source-postgres` | `tls` | Postgres | a hostssl-only Postgres honors `sslmode` on both the stream and the SQL pool |
 | `source-postgres` | `wal_idle` | Postgres | the slot advances from keepalives while watched tables are idle |
 | `source-postgres` | `partitions` | Postgres | a partitioned root and child: leaf changes arrive under the parent's name and resolve, a deleted child's pre-image reaches its old parent, backfill reads the partitions |
 | `source-postgres` | `continuity` | Postgres | `continuity()` is read-only and `Fresh` exactly while the slot is missing; `prepare()` creates it |

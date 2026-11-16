@@ -14,6 +14,8 @@ The vocabulary (benchmark, component bench, scenario, headline metric, baseline,
 
 The scenario numbers are what gets watched. The component benches exist so that when a headline metric moves, the stage that moved is already on record for the same commit.
 
+The scenarios and the Docker-backed component benches start the same Postgres image as the e2e suites; see [Which Postgres](testing.md#which-postgres).
+
 ## Headline metrics
 
 A scenario reports these under the series `<scenario>/<scale>/…`:
@@ -26,7 +28,7 @@ A scenario reports these under the series `<scenario>/<scale>/…`:
 | `peak_rss_mib`, `cpu_seconds` | MiB, s | smaller | Sampled from the child with `ps` every half second. |
 | `flush_p50_ms`, `flush_p99_ms` | ms | smaller | Attribution, not headline: the sink's flush-duration histogram from `/metrics` at the end of the run. |
 
-Every point carries the container image tags and the scale parameters in its `extra` field.
+Every point carries the container image tags and the scale parameters in its `extra` field. A component bench point carries the Postgres image (`extra.images.postgres`, printed by `cargo run -q -p flusso-test-postgres`), so a tag change restarts its window too. The stamp lands on every component point, the OpenSearch-only `opensearch` series included, so their windows restart with the rest.
 
 ## Scenarios and scales
 
@@ -60,7 +62,7 @@ To compare a branch by hand: run `just bench main` on `main`, `just bench pr` on
 `just review-ab` measures the working tree against a base on the Docker-backed benches. Each side runs several times so the noise is measured too, and a case only counts as slower once a re-run confirms it. It's for reviewing a change to the source, the engine or the sink, where the in-process gate can't see the database.
 
 ```sh
-just review-ab                                      # base origin/main, Postgres 16, every bench
+just review-ab                                      # base origin/main, the tests' default Postgres, every bench
 just review-ab main --pg 14,16,18                   # one table per Postgres version
 just review-ab main --bench cases --filter '^key/'  # one bench, a Criterion filter
 just review-ab --clean                              # delete the warm base build (results stay)
@@ -70,7 +72,7 @@ just review-ab --clean-results                      # delete target/review-ab, t
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `<base>` | `origin/main` | any commit-ish, as your clone has it: the command never fetches |
-| `--pg` | `16` | Postgres versions, comma-separated (`postgres:<v>-alpine`) |
+| `--pg` | the tests' default ([Which Postgres](testing.md#which-postgres)) | Postgres versions, comma-separated (`postgres:<v>-alpine`) |
 | `--bench` | `postgres,cases,pipeline` | bench targets; only these are built; `pipeline` also starts an OpenSearch |
 | `--filter` | none | a Criterion filter (a regex over the case id) |
 | `--limit` | `5` | the smallest change, in percent, that counts |

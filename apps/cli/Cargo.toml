@@ -69,6 +69,7 @@ webpki-root-certs.workspace = true
 # The live matrix behind the duplicate-name warning (`tests/duplicate_names.rs`):
 # the real builder and sink against Postgres and OpenSearch containers.
 testcontainers-modules = { workspace = true, features = ["postgres", "http_wait"] }
+test-postgres.workspace = true
 sqlx.workspace = true
 # The `/wait` router tests implement a tiny `ChangeCapture`, whose stream type
 # is a `futures` one.

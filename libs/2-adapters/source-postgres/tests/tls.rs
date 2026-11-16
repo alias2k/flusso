@@ -20,10 +20,9 @@ use futures::StreamExt;
 use source::cdc::ChangeCapture;
 use source_postgres::{SslMode, Tls, WalChangeCapture, replication_config, sql_connection_url};
 use sqlx::postgres::PgPoolOptions;
-use testcontainers_modules::postgres::Postgres;
+use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::core::CopyDataSource;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
-use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt};
 
 /// Reject every non-SSL TCP connection; local socket stays open for initdb.
 const PG_HBA: &str = "local all all trust\n\
@@ -43,11 +42,10 @@ const BOOT: &str = "chown postgres:postgres /tls/server.key \
                        -c ssl_key_file=/tls/server.key \
                        -c hba_file=/tls/pg_hba.conf";
 
-async fn ssl_only_postgres() -> ContainerAsync<Postgres> {
+async fn ssl_only_postgres() -> test_postgres::Container {
     // PG 14+ is required: the replication client requests the pgoutput
     // `messages` option, added in 14 (same as the engine's wal e2e).
-    Postgres::default()
-        .with_tag("16-alpine")
+    test_postgres::image()
         .with_copy_to(
             "/tls/server.crt",
             CopyDataSource::Data(include_bytes!("fixtures/tls/server.crt").to_vec()),

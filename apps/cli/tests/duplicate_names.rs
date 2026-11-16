@@ -51,7 +51,6 @@ use source::{DuplicateOutcome, NeverIndexed, RowKey, SourceSpec};
 use source_postgres::PgDocumentBuilder;
 use sqlx::AssertSqlSafe;
 use sqlx::postgres::{PgPool, PgPoolOptions};
-use testcontainers_modules::postgres::Postgres;
 use testcontainers_modules::testcontainers::core::wait::HttpWaitStrategy;
 use testcontainers_modules::testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
@@ -727,7 +726,7 @@ async fn write(
 }
 
 struct Pg {
-    _container: ContainerAsync<Postgres>,
+    _container: test_postgres::Container,
     pool: PgPool,
     url: String,
 }
@@ -738,11 +737,7 @@ struct Os {
 }
 
 async fn start_postgres() -> Pg {
-    let container = Postgres::default()
-        .with_tag("16-alpine")
-        .start()
-        .await
-        .unwrap();
+    let container = test_postgres::image().start().await.unwrap();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let pool = PgPoolOptions::new().connect(&url).await.unwrap();
