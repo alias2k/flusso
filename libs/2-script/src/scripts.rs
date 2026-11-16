@@ -475,8 +475,8 @@ fn runtime_failure(path: &str, script: &CompiledScript, error: EvalAltResult) ->
     BuildFailure {
         field: path.to_owned(),
         message: match inner {
-            // A `throw` (or a function's own error): the text is the script's, kept as written.
-            EvalAltResult::ErrorRuntime(..) => inner.to_string(),
+            // A thrown string (or a function's own error) is the script's text, kept as written.
+            EvalAltResult::ErrorRuntime(ref thrown, _) if thrown.is_string() => inner.to_string(),
             _ => crate::dates::script_names(inner.to_string()),
         },
         position: position(script.lines.iter().map(String::as_str), at),

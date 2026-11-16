@@ -1597,6 +1597,22 @@ fn a_users_own_error_text_is_left_as_written() {
 }
 
 #[test]
+fn a_thrown_date_is_named_as_scripts_name_it() {
+    for source in [
+        "throw this.start",
+        "throw [this.start]",
+        "throw #{a: this.start}",
+    ] {
+        let failure = run("keyword", source).unwrap_err();
+        assert!(
+            !failure.message.contains("script::"),
+            "{source}: {}",
+            failure.message
+        );
+    }
+}
+
+#[test]
 fn adding_months_from_the_anchor_keeps_month_ends() {
     assert_eq!(
         text("let d = date(2024, 1, 31); for i in 0..3 { d = d.add_months(1); } d.to_string()"),

@@ -410,9 +410,9 @@ impl fmt::Display for Time {
 // ── Zone ─────────────────────────────────────────────────────────────────────
 
 /// The instant jiff is asked about for the UTC instant `utc`. jiff's range ends near ±9999,
-/// chrono's near ±262,000 years: past jiff's edge the instant is clamped to it, where the
-/// database records no more changes, so the offset there holds beyond it, for every year chrono
-/// reaches. A leap second (nanoseconds past a billion) is folded into the second before.
+/// chrono's near ±262,000 years: past jiff's edge the instant is clamped to it, so the
+/// offset at the edge (late December at the maximum, local mean time at the minimum) is held
+/// beyond it, for every year chrono reaches. A leap second (nanoseconds past a billion) is folded into the second before.
 fn jiff_instant(utc: NaiveDateTime) -> jiff::Timestamp {
     let utc = utc.and_utc();
     let nanos = i32::try_from(utc.timestamp_subsec_nanos().min(999_999_999)).unwrap_or(0);
@@ -496,7 +496,7 @@ impl Zone {
             });
         };
         let Some(civil) = jiff_civil(wall) else {
-            // Past jiff's years no offset changes, so the wall clock is read at the edge's offset.
+            // Past jiff's years the wall clock is read at the offset held from the edge.
             let offset = self.offset_at(wall)?;
             return Ok(Timestamp {
                 wall,
