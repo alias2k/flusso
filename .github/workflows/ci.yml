@@ -22,16 +22,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      # Shared with the postgres-matrix legs (postgres-matrix.yml).
+      - uses: ./.github/actions/rust-test-setup
         with:
           components: clippy
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Cache build artifacts
-        uses: Swatinem/rust-cache@v2
 
       - name: Format
         run: cargo fmt --all --check
@@ -151,8 +145,9 @@ jobs:
       # (test_review_ab.py), the PR bench gate over fake cargo and Criterion
       # runs (test_bench_gate.py), and the guard that every test and bench
       # starts Postgres through dev/test-postgres
-      # (test_check_postgres_image.py, issue #342), each picked up by the
-      # `test_*.py` pattern.
+      # (test_check_postgres_image.py, issue #342), and the Postgres matrix's
+      # summary and nightly issue (test_postgres_matrix.py, issue #348), each
+      # picked up by the `test_*.py` pattern.
       - name: Test the CI scripts
         run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
 

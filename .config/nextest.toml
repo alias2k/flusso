@@ -67,6 +67,14 @@ fail-fast = false
 [profile.ci.junit]
 path = "junit.xml"
 
+# Passing tests' output too, for the binaries with a `test_postgres::pinned`
+# test: the postgres-matrix summary finds them by the one line it prints. A
+# pinned test in another binary needs its binary added here
+# (test_postgres_matrix.py checks it).
+[[profile.ci.overrides]]
+filter = 'package(flusso-engine) & binary(bytea_output) | package(flusso-source-postgres) & binary(integration)'
+junit.store-success-output = true
+
 [[profile.ci.overrides]]
 filter = 'package(flusso-source-postgres) & binary(integration) | package(flusso-source-postgres) & binary(key_matching) | package(flusso-source-postgres) & binary(filter_operands) | package(flusso-engine) & binary(wal) | package(flusso-engine) & binary(wal_release) | package(flusso-engine) & binary(bytea_output) | package(flusso-engine) & binary(type_change) | package(flusso-source-postgres) & binary(config_coverage) | package(flusso-source-postgres) & binary(publication) | package(flusso-source-postgres) & binary(introspection) | package(flusso-source-postgres) & binary(tls) | package(flusso-source-postgres) & binary(wal_idle) | package(flusso-source-postgres) & binary(partitions) | package(flusso-source-postgres) & binary(continuity) | package(flusso-source-postgres) & binary(record_pgoutput)'
 test-group = 'docker'

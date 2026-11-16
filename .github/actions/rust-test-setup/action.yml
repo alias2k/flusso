@@ -1,0 +1,38 @@
+name: Rust test setup
+description: >-
+  The toolchain, cargo-nextest and the build cache, shared by `ci.yml`'s
+  `clippy + tests` and the `postgres-matrix` legs so the two cannot drift.
+  Runs after `actions/checkout` (a local action needs the checkout first).
+
+inputs:
+  components:
+    description: Extra rustup components (e.g. `clippy`).
+    required: false
+    default: ""
+  shared-key:
+    description: >-
+      rust-cache's `shared-key`: one cache for several jobs. Empty keeps
+      rust-cache's per-job key.
+    required: false
+    default: ""
+  save-if:
+    description: rust-cache's `save-if`, as a string (`"true"` saves).
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: ${{ inputs.components }}
+
+    - name: Install cargo-nextest
+      uses: taiki-e/install-action@nextest
+
+    - name: Cache build artifacts
+      uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ inputs.shared-key }}
+        save-if: ${{ inputs.save-if }}

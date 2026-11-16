@@ -30,7 +30,7 @@ Match this before assuming green:
 
 On a PR confined to the query train (`sdk/query`, `sdk/query-derive`, `dev/query-e2e`), step 5 skips every integration-test binary of `source-postgres`, `engine` and `sink-opensearch`, which those paths can't break; everything else, the query train's own e2e included, still runs. Pushes to `main` run everything.
 
-A separate job runs a 60-second `pgoutput_decode` fuzz on a pinned nightly; another builds and lints the designer SPA; a `docs` job builds the book and link-checks it. A `bench` workflow gates PRs on the in-process benches and records scenario history on `main`; see [Benchmarks](benchmarks.md). An `audit` workflow checks RustSec advisories weekly and on manifest or lock changes; see [Dependency updates](dependencies.md).
+A separate job runs a 60-second `pgoutput_decode` fuzz on a pinned nightly; another builds and lints the designer SPA; a `docs` job builds the book and link-checks it. A `postgres-matrix` workflow runs the Postgres-backed suites on the other tested majors; see [Other majors](#other-majors). A `bench` workflow gates PRs on the in-process benches and records scenario history on `main`; see [Benchmarks](benchmarks.md). An `audit` workflow checks RustSec advisories weekly and on manifest or lock changes; see [Dependency updates](dependencies.md).
 
 ## Why clippy runs without --all-targets
 
@@ -82,6 +82,28 @@ Two tests need one version whatever the run's tag, and name it with a `test_post
 | `flusso-query-e2e` | `geo_points` | OpenSearch | `GeoPoint` reads every point form a `text` or `jsonb` column can hold with the coordinates OpenSearch indexed |
 
 The full source-to-sink e2e lives in `engine`, not in a source crate: a leaf source must not dev-depend on the engine or it can't be published first.
+
+### Other majors
+
+flusso supports Postgres 14 or newer. CI tests three majors: the oldest supported, `14-alpine`; the default, `16-alpine`; and the newest, `18-alpine`. They're `TESTED_TAGS` in `dev/test-postgres`, beside the default. Step 5 of the [CI order](#ci-order) runs the default on every PR. The `postgres-matrix` workflow runs each of the others as one leg:
+
+- **What a leg runs.** The test suites of every crate that starts Postgres, with `FLUSSO_TEST_PG_TAG` set: `cargo nextest run --profile ci --workspace --run-ignored all -E 'rdeps(flusso-test-postgres)'`. It uses the same `ci` profile as step 5 and the same setup steps (the composite action `.github/actions/rust-test-setup`). It doesn't run the Docker-backed benches (`postgres`, `pipeline`, `cases`) or `just review-ab`, which takes its image from `--pg`. A leg takes about as long as `clippy + tests`.
+- **When.** Nightly and on demand (`workflow_dispatch`). Never on a PR by itself, never a required check. To run it for a PR, dispatch it on the PR's branch. Its checks attach to the branch's head commit (the commit's checks page and the Actions tab), not to the PR's checks list:
+
+  ```sh
+  gh workflow run postgres-matrix.yml --ref <branch>
+  ```
+
+- **The summary** of each leg lists its failures, the tests that passed on a retry, and the tests that started a [pinned](#which-postgres) image instead of the leg's. The `ci` profile keeps passing output in its JUnit report for the binaries with a pinned test; `test_postgres_matrix.py` fails when a pinned test sits in a binary that isn't listed.
+- **A failing nightly** opens or updates one issue, *Postgres matrix fails on a supported major* (label `area: ci-release`), naming each failing version and its tests with a link to the run. The next all-green nightly closes it. `.github/scripts/postgres-matrix.py` maintains it and touches only the newest issue with that title that the workflow's bot opened. A closed issue isn't reopened: the next failure opens a new one. Older bot issues with the same title, and anyone else's, are left alone. A dispatched run reports through its checks only.
+- **A failing `plan` job** (it reads the tags) writes no issue; the failed run shows in the Actions tab.
+
+15 and 17 aren't tested: the oldest, the default and the newest catch what differs between majors for less than half the cost of five legs. To test another major, add its tag to `TESTED_TAGS`; the workflow reads its legs from `cargo run -q -p flusso-test-postgres -- matrix`. To run one leg locally, a package at a time:
+
+```sh
+FLUSSO_TEST_PG_TAG=18-alpine cargo nextest run --profile ci --run-ignored all -p flusso-engine
+git checkout libs/2-adapters/source-postgres/benches/fixtures/pgoutput.bin   # record_pgoutput re-records it
+```
 
 ## Special guards
 

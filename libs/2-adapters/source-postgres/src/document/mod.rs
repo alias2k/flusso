@@ -474,12 +474,32 @@ impl PgDocumentBuilder {
 
     #[tracing::instrument(name = "pg.connect", skip_all, err)]
     pub async fn connect(connection_url: &str, spec: Arc<SourceSpec>) -> Result<Self> {
+        Self::connect_pool(connection_url, spec, sqlx::postgres::PgPoolOptions::new()).await
+    }
+
+    /// [`connect`](Self::connect), with at most `max_connections` connections
+    /// in the pool instead of sqlx's default ten.
+    #[tracing::instrument(name = "pg.connect", skip_all, err)]
+    pub async fn connect_with_max_connections(
+        connection_url: &str,
+        spec: Arc<SourceSpec>,
+        max_connections: u32,
+    ) -> Result<Self> {
+        let options = sqlx::postgres::PgPoolOptions::new().max_connections(max_connections);
+        Self::connect_pool(connection_url, spec, options).await
+    }
+
+    async fn connect_pool(
+        connection_url: &str,
+        spec: Arc<SourceSpec>,
+        options: sqlx::postgres::PgPoolOptions,
+    ) -> Result<Self> {
         // The document query renders the `bytea` it can reach itself (see
         // `byte_columns`). One nested in a composite, a range or a `json` it
         // builds is rendered by the session's `bytea_output`, which this sets
         // on every connection a direct link keeps. A transaction-mode pooler
         // may not.
-        let pool = sqlx::postgres::PgPoolOptions::new()
+        let pool = options
             .after_connect(|connection, _| {
                 Box::pin(async move {
                     sqlx::Executor::execute(&mut *connection, "SET bytea_output = 'hex'").await?;

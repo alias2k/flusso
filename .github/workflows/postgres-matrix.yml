@@ -1,0 +1,135 @@
+name: postgres-matrix
+
+# The Postgres-backed suites on every tested major but the default (issue #348;
+# docs/src/contribute/testing.md). `clippy + tests` in ci.yml already runs the
+# default on every PR; this runs the others, one leg per tag:
+#
+#   plan    The legs: `flusso-test-postgres -- matrix`, the tested tags other
+#           than the default (TESTED_TAGS in dev/test-postgres, their one home).
+#   leg     The test suites of every crate that starts Postgres
+#           (`rdeps(flusso-test-postgres)`) under the `ci` profile, with
+#           FLUSSO_TEST_PG_TAG set. Its summary names the tests that started a
+#           pinned image instead.
+#   report  Nightly only: one issue, opened or updated on a failure and
+#           closed by a passing nightly (.github/scripts/postgres-matrix.py).
+#
+# Not a required check, and no `pull_request` trigger: a leg takes about as
+# long as `clippy + tests`. For a PR, dispatch it on the PR's branch
+# (`gh workflow run postgres-matrix.yml --ref <branch>`); its checks attach to
+# the head commit (its checks page, the Actions tab), not to the PR's checks list.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+# One nightly at a time (a nightly waits for the one before it); a newer
+# dispatch on a ref replaces an older one. Split by event, so a dispatch on
+# `main` never cancels a nightly.
+concurrency:
+  group: postgres-matrix-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  plan:
+    name: plan (tested majors)
+    runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.tags.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Restores the legs' cache (it holds this crate's build); saves nothing.
+      - uses: ./.github/actions/rust-test-setup
+        with:
+          shared-key: postgres-matrix
+          save-if: "false"
+
+      - name: Read the tested tags
+        id: tags
+        run: |
+          set -euo pipefail
+          tags=$(cargo run -q -p flusso-test-postgres -- matrix)
+          echo "tags=$tags" >>"$GITHUB_OUTPUT"
+          echo "Legs: $tags" >>"$GITHUB_STEP_SUMMARY"
+
+  leg:
+    name: postgres ${{ matrix.tag }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ${{ fromJSON(needs.plan.outputs.tags) }}
+    env:
+      FLUSSO_TEST_PG_TAG: ${{ matrix.tag }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # The same toolchain, nextest and cache steps as `clippy + tests`. One
+      # cache for every leg (the build doesn't depend on the tag), saved by
+      # the first leg only: legs saving under one key would race, a key per
+      # leg would double the space.
+      - uses: ./.github/actions/rust-test-setup
+        with:
+          shared-key: postgres-matrix
+          save-if: ${{ matrix.tag == fromJSON(needs.plan.outputs.tags)[0] }}
+
+      # The `ci` profile of `clippy + tests`: retries, test groups, JUnit.
+      - name: Test (every crate that starts Postgres)
+        id: test
+        run: cargo nextest run --profile ci --workspace --run-ignored all -E 'rdeps(flusso-test-postgres)'
+
+      - name: Summarize the leg
+        if: always()
+        run: |
+          python3 .github/scripts/postgres-matrix.py summary target/nextest/ci/junit.xml \
+            --tag "$FLUSSO_TEST_PG_TAG" --outcome "${{ steps.test.outcome }}" \
+            --out "postgres-matrix-$FLUSSO_TEST_PG_TAG.json" >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the leg's result
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: postgres-matrix-${{ matrix.tag }}
+          path: |
+            postgres-matrix-${{ matrix.tag }}.json
+            target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+
+  report:
+    name: report (nightly issue)
+    needs: [plan, leg]
+    # Only once the legs are known: with no plan an empty set would read as
+    # every leg passing and close the issue. A failed plan writes no issue;
+    # the failed run shows in the Actions tab.
+    if: ${{ !cancelled() && github.event_name == 'schedule' && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # This run's own artifacts: no `actions: read` needed.
+      - name: Download the legs' results
+        uses: actions/download-artifact@v8
+        with:
+          pattern: postgres-matrix-*
+          path: results
+
+      - name: Open, update or close the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAGS: ${{ needs.plan.outputs.tags }}
+        run: |
+          python3 .github/scripts/postgres-matrix.py issue results --tags "$TAGS" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
