@@ -195,12 +195,11 @@ fn leaf(value: Dynamic, out: &Output<'_>) -> Result<GenericValue, String> {
     }
 }
 
-/// A declared decimal in Rhai. Written without an exponent, it is the nearest
-/// `Decimal` (about 28 significant digits, at most 28 after the point; a next
-/// digit of 5 or more rounds away from zero). Written with an exponent, or
-/// zero, it reads as `main` read it before issue #327,
-/// through `f64`, so a tiny value is the same zero. Past ±7.9e28 it is a string
-/// of its exact digits.
+/// A declared decimal in Rhai: the nearest `Decimal` (about 28 significant
+/// digits, at most 28 after the point; a next digit of 5 or more rounds away
+/// from zero). Written with an exponent, it is the nearest `Decimal` to the
+/// `f64` its text names (`kernel::f64_to_nearest_decimal`), so a zero is
+/// unsigned. Past ±7.9e28 it is a string of its exact text.
 // Cold and out of line: without it `to_dynamic` slows on documents with no
 // declared decimal at all (measured: 2.6 µs vs 4.0 µs for 23 fields).
 #[cold]
@@ -208,22 +207,13 @@ fn leaf(value: Dynamic, out: &Output<'_>) -> Result<GenericValue, String> {
 fn declared_decimal(value: &kernel::BigDecimal) -> Dynamic {
     let text = value.as_str();
     let plain = !text.bytes().any(|b| b | 0x20 == b'e');
-    if plain
-        && let Ok(d) = Decimal::from_str(text)
-        && !d.is_zero()
-    {
-        return Dynamic::from_decimal(d);
+    if plain && let Ok(d) = Decimal::from_str(text) {
+        return Dynamic::from_decimal(if d.is_zero() { Decimal::ZERO } else { d });
     }
-    as_read_through_f64(text).map_or_else(|| Dynamic::from(text.to_owned()), Dynamic::from_decimal)
-}
-
-/// `text`, a JSON number, as the `Decimal` a `serde_json` number read gave:
-/// its text when `Decimal` takes it, else its `f64`; `None` past either.
-fn as_read_through_f64(text: &str) -> Option<Decimal> {
-    let number: serde_json::Number = serde_json::from_str(text).ok()?;
-    Decimal::from_str(&number.to_string())
+    text.parse::<f64>()
         .ok()
-        .or_else(|| number.as_f64().and_then(|f| Decimal::try_from(f).ok()))
+        .and_then(kernel::f64_to_nearest_decimal)
+        .map_or_else(|| Dynamic::from(text.to_owned()), Dynamic::from_decimal)
 }
 
 /// A `decimal` script field's result, written with every digit it holds; a

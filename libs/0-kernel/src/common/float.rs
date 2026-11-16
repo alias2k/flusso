@@ -26,7 +26,11 @@
 
 use std::fmt::{self, Write};
 
+use std::str::FromStr;
+
 use rust_decimal::Decimal;
+
+use crate::{BigDecimal, GenericValue};
 
 /// The [`Decimal`] holding exactly `value`'s shortest round-trip digits
 /// (what Postgres writes for a `float8`). `None` when no `Decimal` holds them:
@@ -38,6 +42,63 @@ pub fn f64_to_decimal(value: f64) -> Option<Decimal> {
     let mut text = Text::default();
     write!(text, "{value}").ok()?;
     Decimal::from_str_exact(text.as_str()).ok()
+}
+
+/// The [`Decimal`] nearest `value`: [`f64_to_decimal`] when it holds the
+/// double's digits, else those digits rounded to 28 fractional places (half
+/// away from zero; a zero is unsigned). `None` past ±7.9e28 or not finite.
+pub fn f64_to_nearest_decimal(value: f64) -> Option<Decimal> {
+    if let Some(exact) = f64_to_decimal(value) {
+        return Some(exact);
+    }
+    if !value.is_finite() || value.abs() >= 1.0 {
+        return None;
+    }
+    let rounded = Decimal::from_str(&format!("{value}")).ok()?;
+    Some(if rounded.is_zero() {
+        Decimal::ZERO
+    } else {
+        rounded
+    })
+}
+
+/// A JSON number read with no declared type (a `json` field, a `map` value,
+/// a value its declared type can't hold), as a document holds it. A script
+/// sees it as a decimal, or as a string past `Decimal`'s range, as before
+/// issue #366; a sink writes the very `f64`:
+///
+/// - the [`Decimal`](GenericValue::Decimal) of its shortest digits, when one
+///   holds them exactly;
+/// - below 1 with more than 28 fractional digits, the
+///   [`BigDecimal`](GenericValue::BigDecimal) of those digits: a sink writes
+///   them as they are, a script gets [`f64_to_nearest_decimal`];
+/// - past ±7.9e28, the [`String`](GenericValue::String) of its digits.
+pub fn untyped_number(value: f64) -> GenericValue {
+    if let Some(exact) = f64_to_decimal(value) {
+        return GenericValue::Decimal(exact);
+    }
+    if value.is_finite()
+        && value.abs() < 1.0
+        && let Some(digits) = BigDecimal::parse(&format!("{value:e}"))
+    {
+        return GenericValue::BigDecimal(digits);
+    }
+    GenericValue::String(value.to_string())
+}
+
+/// A JSON number with no declared type, by its kind: a whole number in `i64`
+/// as a [`BigInt`](GenericValue::BigInt), a larger one in `u64` as the exact
+/// [`Decimal`](GenericValue::Decimal), anything else as [`untyped_number`].
+pub fn untyped_json_number(number: &serde_json::Number) -> GenericValue {
+    if let Some(whole) = number.as_i64() {
+        GenericValue::BigInt(whole)
+    } else if let Some(whole) = number.as_u64() {
+        GenericValue::Decimal(Decimal::from(whole))
+    } else {
+        number
+            .as_f64()
+            .map_or_else(|| GenericValue::String(number.to_string()), untyped_number)
+    }
 }
 
 /// The `f64` nearest `value`, correctly rounded; `0.0` for a zero of either
@@ -116,8 +177,6 @@ impl Write for Text {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-
-    use std::str::FromStr;
 
     use super::*;
     use proptest::prelude::*;

@@ -107,12 +107,7 @@ pub(super) fn json_to_generic(value: serde_json::Value) -> GenericValue {
     match value {
         serde_json::Value::Null => GenericValue::Null,
         serde_json::Value::Bool(b) => GenericValue::Bool(b),
-        serde_json::Value::Number(n) => match n.as_i64() {
-            Some(i) => GenericValue::BigInt(i),
-            None => n
-                .as_f64()
-                .map_or_else(|| GenericValue::String(n.to_string()), float),
-        },
+        serde_json::Value::Number(n) => kernel::untyped_json_number(&n),
         serde_json::Value::String(s) => GenericValue::String(s),
         serde_json::Value::Array(items) => {
             GenericValue::Array(items.into_iter().map(json_to_generic).collect())
@@ -807,13 +802,15 @@ impl<'de> Visitor<'de> for Untyped {
         Ok(GenericValue::BigInt(v))
     }
 
-    #[allow(clippy::cast_precision_loss)]
     fn visit_u64<E: de::Error>(self, v: u64) -> Result<GenericValue, E> {
-        Ok(i64::try_from(v).map_or_else(|_| float(v as f64), GenericValue::BigInt))
+        Ok(i64::try_from(v).map_or_else(
+            |_| GenericValue::Decimal(Decimal::from(v)),
+            GenericValue::BigInt,
+        ))
     }
 
     fn visit_f64<E: de::Error>(self, v: f64) -> Result<GenericValue, E> {
-        Ok(float(v))
+        Ok(kernel::untyped_number(v))
     }
 
     fn visit_str<E: de::Error>(self, v: &str) -> Result<GenericValue, E> {
@@ -1189,13 +1186,7 @@ fn coerce_decimal(json: serde_json::Value) -> GenericValue {
     parsed.map_or_else(|| json_to_generic(json), GenericValue::Decimal)
 }
 
-/// A number with no declared type: the [`Decimal`](GenericValue::Decimal)
-/// holding exactly its shortest digits, or the [`Double`](GenericValue::Double)
-/// itself when no `Decimal` holds them (past ±7.9e28, more than 28 fractional
-/// digits). Either way the sink writes the very `f64` (issue #366).
-fn float(v: f64) -> GenericValue {
-    kernel::f64_to_decimal(v).map_or(GenericValue::Double(v), GenericValue::Decimal)
-}
+
 
 #[cfg(test)]
 mod tests;

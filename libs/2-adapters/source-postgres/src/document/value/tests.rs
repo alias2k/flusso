@@ -762,12 +762,14 @@ const MISREAD: &[(&str, f64)] = &[
 ];
 
 /// The value `value` reaches the sink as: the `f64` its written JSON number
-/// names, read correctly rounded.
+/// names, read correctly rounded, or the digits of an untyped number past
+/// `Decimal`'s range, which is written as a string, as on `main`.
 fn indexed(value: &GenericValue) -> f64 {
-    serde_json::to_string(&sink::Json(value))
-        .unwrap()
-        .parse()
-        .unwrap()
+    let written = serde_json::to_string(&sink::Json(value)).unwrap();
+    match serde_json::from_str::<String>(&written) {
+        Ok(digits) => digits.parse().unwrap(),
+        Err(_) => written.parse().unwrap(),
+    }
 }
 
 fn assert_same_double(got: f64, want: f64, what: &str) {
@@ -904,6 +906,7 @@ proptest::proptest! {
             float8_text(value),
         );
         let map = body_text(&doc, &fields);
+        proptest::prop_assert_eq!(&map["raw"], &kernel::untyped_number(value));
         for name in ["ratio", "plain", "raw"] {
             proptest::prop_assert_eq!(indexed(&map[name]).to_bits(), value.to_bits(), "{} {}", name, doc);
         }
