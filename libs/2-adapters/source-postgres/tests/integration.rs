@@ -1628,12 +1628,12 @@ async fn a_server_that_refuses_the_jit_setting_still_connects() {
 /// cheaper planned afresh, so the live trickle (a lone change commits a batch
 /// of one) planned every call. `pg_stat_statements` counts plans and calls.
 ///
-/// Each of the builder's connections plans a statement up to five times
-/// before trying a generic plan, so the test warms every statement up first,
-/// resets the counts, and runs the same calls again: a cached plan plans
-/// (almost) never, the old array-parameter form planned every call (601
-/// plans in 600 calls). One re-plan per statement and connection is allowed,
-/// for an invalidation such as an autovacuum `ANALYZE`.
+/// A connection plans a statement up to five times before trying a generic
+/// plan, and a pool opens connections as scheduling lets it (a connection is
+/// returned from a spawned task, so the next query may open another). The
+/// builder gets one connection, so the warm-up reaches every statement on it:
+/// after a reset the same calls must plan nothing. The old array-parameter
+/// form planned every call (601 plans in 600 calls).
 ///
 /// The counts are summed over every matching entry, since how
 /// `pg_stat_statements` groups the statements differs by major: up to 17 a
@@ -1642,8 +1642,6 @@ async fn a_server_that_refuses_the_jit_setting_still_connects() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]
 async fn a_small_batch_reuses_its_plan() {
-    /// sqlx's default pool size, which the builder keeps.
-    const POOL_CONNECTIONS: i64 = 10;
     const CALLS: i32 = 200;
     let container = test_postgres::image()
         .with_cmd([
@@ -1679,7 +1677,7 @@ async fn a_small_batch_reuses_its_plan() {
         index_name("plain"),
         schema_from(&scoped_schema("plain", "true", "true", "true")),
     )]));
-    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec))
+    let builder = PgDocumentBuilder::connect_with_max_connections(&url, Arc::new(spec), 1)
         .await
         .unwrap();
     const SIZES: [i32; 3] = [1, 4, 8];
@@ -1719,10 +1717,7 @@ async fn a_small_batch_reuses_its_plan() {
         STATEMENTS * i64::from(CALLS),
         "every warmed-up call is counted"
     );
-    assert!(
-        plans <= STATEMENTS * POOL_CONNECTIONS,
-        "planned {plans} times in {calls} warmed-up calls"
-    );
+    assert_eq!(plans, 0, "planned {plans} times in {calls} warmed-up calls");
 }
 
 /// A batch over a key column changed from `text` to `name`, the cache still
