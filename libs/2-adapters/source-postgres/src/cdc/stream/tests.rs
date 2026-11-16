@@ -19,6 +19,7 @@ fn state() -> (DecodeState, Arc<Positions>) {
         pending: VecDeque::new(),
         readable: HashSet::new(),
         unchecked: HashSet::new(),
+        last_emitted: None,
         last_snapshot: None,
         read_tables: Some(HashSet::new()),
         ack: Arc::clone(&ack),
@@ -742,6 +743,12 @@ fn transport_errors_stay_transient_and_framing_errors_are_decode_errors() {
 struct Snapshots {
     visible: Arc<std::sync::Mutex<HashSet<u32>>>,
     refuse: Arc<std::sync::atomic::AtomicBool>,
+    /// Reads never answer.
+    hang: Arc<std::sync::atomic::AtomicBool>,
+    /// This many reads fail before they answer again.
+    failing: Arc<std::sync::atomic::AtomicUsize>,
+    /// Stall inspections never answer.
+    hang_stall: Arc<std::sync::atomic::AtomicBool>,
     snapshots: Arc<std::sync::atomic::AtomicUsize>,
     stalls: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -770,18 +777,34 @@ impl Snapshots {
 
 impl Visibility for Snapshots {
     async fn snapshot(&self) -> Result<super::super::visibility::Snapshot> {
-        self.snapshots
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        use std::sync::atomic::Ordering;
+        self.snapshots.fetch_add(1, Ordering::SeqCst);
+        if self.hang.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        if self
+            .failing
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(SourceError::Query("pool timed out".to_owned()));
+        }
         Ok(self.snapshot_now())
     }
 
     async fn stall(&self, _xid: u32) -> Result<super::super::visibility::Stall> {
         self.stalls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.hang_stall.load(std::sync::atomic::Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         let refusal = self
             .refuse
             .load(std::sync::atomic::Ordering::SeqCst)
-            .then(|| super::super::visibility::standby_refusal("flusso", "flusso"));
+            .then(|| super::super::visibility::refuse_standby("flusso", "flusso"))
+            .flatten();
         Ok(super::super::visibility::Stall {
             refusal,
             waiting: vec!["pid 1".to_owned()],
@@ -1173,4 +1196,148 @@ async fn a_commit_arriving_as_the_snapshot_task_stops_is_still_checked() {
         let pause = 700 + seed % 1200;
         tokio::time::sleep(Duration::from_micros(u64::from(pause))).await;
     }
+}
+
+/// Item 6: a snapshot read that never answers (a dead connection) ends the
+/// stream with an error once reads have failed for [`READ_FAILURES_FOR`], and
+/// not silently never.
+#[tokio::test(start_paused = true)]
+async fn a_snapshot_read_that_never_answers_ends_the_stream() {
+    use futures::StreamExt;
+
+    let (mut decode, _ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    let (client, _, _) = script(Vec::new());
+    let snapshots = Snapshots::default();
+    snapshots
+        .hang
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut stream = holding_stream(decode, client, snapshots, 16, Arc::default());
+    let early =
+        tokio::time::timeout(READ_FAILURES_FOR - Duration::from_secs(1), stream.next()).await;
+    assert!(early.is_err(), "retried, not ended, within the budget");
+    let item = tokio::time::timeout(Duration::from_secs(30), stream.next())
+        .await
+        .expect("the stream ends once the budget is spent")
+        .unwrap();
+    let error = item.unwrap_err().to_string();
+    assert!(error.contains("took longer than"), "{error}");
+}
+
+/// Item 9: reads that fail for a moment (a pool timeout under load) are
+/// retried, and the transaction is emitted once a read answers.
+#[tokio::test(start_paused = true)]
+async fn a_snapshot_read_failing_for_a_moment_is_retried() {
+    use futures::StreamExt;
+
+    let (mut decode, _ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    let (client, _, _) = script(Vec::new());
+    let snapshots = Snapshots::seeing(&[7]);
+    snapshots
+        .failing
+        .store(3, std::sync::atomic::Ordering::SeqCst);
+    let mut stream = holding_stream(decode, client, snapshots.clone(), 16, Arc::default());
+    let item = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("emitted after the retries")
+        .unwrap();
+    assert!(item.is_ok(), "{item:?}");
+    assert_eq!(
+        snapshots
+            .snapshots
+            .load(std::sync::atomic::Ordering::SeqCst),
+        4
+    );
+}
+
+/// Item 6: a stall inspection that never answers doesn't end or freeze the
+/// stream: the hold goes on, and the transaction is emitted once visible.
+#[tokio::test(start_paused = true)]
+async fn a_stall_inspection_that_never_answers_leaves_the_hold_running() {
+    use futures::StreamExt;
+
+    let (mut decode, _ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    let (client, _, _) = script(Vec::new());
+    let snapshots = Snapshots::default();
+    snapshots
+        .hang_stall
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut stream = holding_stream(decode, client, snapshots.clone(), 16, Arc::default());
+    let reader = tokio::spawn(async move { stream.next().await.map(|item| item.is_ok()) });
+    tokio::time::sleep(STALL_WARNING + READ_TIMEOUT + Duration::from_secs(1)).await;
+    assert!(snapshots.stalls.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+    assert!(!reader.is_finished(), "still holding");
+    snapshots.see(&[7]);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(reader.await.unwrap(), Some(true));
+}
+
+/// Item 7: a stream reopened while the same transaction is still invisible
+/// times it from when it was first found invisible: the wait doesn't start
+/// over at each restart, and the warning comes 5 s after the first hold, not 5
+/// s after the last restart. Emitting it clears the clock.
+#[tokio::test(start_paused = true)]
+async fn a_reopened_stream_times_the_same_transaction_from_its_first_hold() {
+    use futures::StreamExt;
+    use std::sync::atomic::Ordering;
+
+    let clock = HoldClock::default();
+    let snapshots = Snapshots::default();
+    let (mut decode, _ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    let (client, _, _) = script(Vec::new());
+    let mut first = holding_stream(decode, client, snapshots.clone(), 16, Arc::clone(&clock));
+    let reader = tokio::spawn(async move { first.next().await.is_some() });
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    reader.abort();
+    let _ = reader.await;
+    assert!(held_for(&clock).is_some_and(|held| held >= Duration::from_secs(3)));
+
+    let (mut decode, _ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    let (client, _, _) = script(Vec::new());
+    let mut second = holding_stream(decode, client, snapshots.clone(), 16, Arc::clone(&clock));
+    let reader = tokio::spawn(async move { second.next().await.map(|item| item.is_ok()) });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        held_for(&clock).is_some_and(|held| held >= Duration::from_millis(3500)),
+        "carried over: {:?}",
+        held_for(&clock)
+    );
+    assert_eq!(snapshots.stalls.load(Ordering::SeqCst), 0);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        snapshots.stalls.load(Ordering::SeqCst),
+        1,
+        "warned 5 s after the first hold"
+    );
+    snapshots.see(&[7]);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(reader.await.unwrap(), Some(true));
+    assert_eq!(held_for(&clock), None, "cleared once emitted");
+}
+
+/// Item 7: a stall refusal clears the clock, so the status stops reporting a
+/// wait the capture will never resume.
+#[tokio::test(start_paused = true)]
+async fn a_stall_refusal_clears_the_clock() {
+    use futures::StreamExt;
+
+    let (mut decode, _ack) = holding_state();
+    transaction(&mut decode, 7, 100);
+    let (client, _, _) = script(Vec::new());
+    let snapshots = Snapshots::default();
+    snapshots
+        .refuse
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let clock = HoldClock::default();
+    let mut stream = holding_stream(decode, client, snapshots, 16, Arc::clone(&clock));
+    let item = tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(item.is_err());
+    assert_eq!(held_for(&clock), None);
 }

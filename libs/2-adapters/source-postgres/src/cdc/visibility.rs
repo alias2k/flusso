@@ -100,19 +100,67 @@ pub(crate) fn poll_delay(waited: Duration, previous: Duration) -> Duration {
     }
 }
 
-/// Whether `synchronous_standby_names` lists `application_name`, by name or as
-/// `*`, in any of its forms (`a, b`, `2 (a, b)`, `FIRST 1 (a)`, `ANY 1 (a)`,
-/// double-quoted names). Postgres compares names case-insensitively.
-pub(crate) fn names_standby(names: &str, application_name: &str) -> bool {
+/// How `synchronous_standby_names` takes in an `application_name`: by its
+/// name, by `*`, or both.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Listing {
+    pub(crate) by_name: bool,
+    pub(crate) by_wildcard: bool,
+}
+
+/// Read `synchronous_standby_names` in any of its forms (`a, b`,
+/// `2 (a, b)`, `FIRST 1 (a)`, `ANY 1 (a)`, double-quoted names) for
+/// `application_name`. Postgres compares names case-insensitively, and `*`
+/// matches every walsender.
+pub(crate) fn standby_listing(names: &str, application_name: &str) -> Listing {
     let tokens = standby_tokens(names);
     let listed: Vec<&Token> = match tokens.iter().position(|token| *token == Token::Open) {
         Some(open) => tokens.iter().skip(open + 1).collect(),
         None => tokens.iter().collect(),
     };
-    listed.into_iter().any(|token| match token {
-        Token::Name(name) => name == "*" || name.eq_ignore_ascii_case(application_name),
-        Token::Open | Token::Close => false,
-    })
+    let mut listing = Listing::default();
+    for token in listed {
+        if let Token::Name(name) = token {
+            listing.by_wildcard |= name == "*";
+            listing.by_name |= name.eq_ignore_ascii_case(application_name);
+        }
+    }
+    listing
+}
+
+/// The refusal for a server whose `synchronous_standby_names` takes in flusso,
+/// or `None`. Every commit would wait for flusso to confirm it while flusso
+/// waits for the commit to become visible: neither finishes.
+pub(crate) fn refuse_standby(names: &str, application_name: &str) -> Option<SourceError> {
+    let listing = standby_listing(names, application_name);
+    let how = match (listing.by_name, listing.by_wildcard) {
+        (false, false) => return None,
+        (true, false) => format!("lists '{application_name}'"),
+        (false, true) => "takes in every walsender with '*', flusso's included".to_owned(),
+        (true, true) => format!("lists '{application_name}' and '*'"),
+    };
+    let remedy = if listing.by_wildcard {
+        let also = if listing.by_name {
+            format!(", and take '{application_name}' out")
+        } else {
+            String::new()
+        };
+        format!(
+            "Replace '*' with the names of the synchronous standbys{also}, then reload. '*' \
+             matches any application_name, so renaming flusso does not help, and flusso counts \
+             among the candidates even where the other standbys could fill the quorum"
+        )
+    } else {
+        format!(
+            "Take '{application_name}' out of synchronous_standby_names and reload, or give \
+             flusso another application_name"
+        )
+    };
+    Some(SourceError::Setup(format!(
+        "the source would make flusso a synchronous standby: synchronous_standby_names = \
+         '{names}' {how}. A commit would wait for flusso to confirm it while flusso waits for \
+         the commit to become visible, so neither would finish. {remedy}"
+    )))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -166,17 +214,6 @@ fn standby_tokens(names: &str) -> Vec<Token> {
         }
     }
     tokens
-}
-
-/// The message both refusals carry: a server whose commits wait on flusso.
-pub(crate) fn standby_refusal(application_name: &str, names: &str) -> SourceError {
-    SourceError::Setup(format!(
-        "the source names flusso a synchronous standby: synchronous_standby_names = '{names}' \
-         lists '{application_name}' (or '*'). A commit would wait for flusso to confirm it while \
-         flusso waits for the commit to become visible, so neither ever finishes. Take \
-         '{application_name}' out of synchronous_standby_names (and reload), or give flusso \
-         another application_name"
-    ))
 }
 
 /// What a stall check found about a transaction held past the warning.
@@ -238,9 +275,17 @@ impl Visibility for PgVisibility {
         .map_err(query)?;
         // The setting decides it for any role. The walsender's row is a
         // cross-check: without `pg_read_all_stats` its `sync_state` is NULL.
-        let refusal = (names_standby(&names, &self.application_name)
-            || sync_state.as_deref().is_some_and(|state| state != "async"))
-        .then(|| standby_refusal(&self.application_name, &names));
+        let refusal = refuse_standby(&names, &self.application_name).or_else(|| {
+            sync_state.filter(|state| state != "async").map(|state| {
+                SourceError::Setup(format!(
+                    "flusso's walsender is a synchronous standby (sync_state = '{state}', \
+                         synchronous_standby_names = '{names}'): a commit would wait for \
+                         flusso to confirm it while flusso waits for the commit to become \
+                         visible. Change synchronous_standby_names so it no longer takes in \
+                         flusso, then reload"
+                ))
+            })
+        });
         let rows: Vec<WaitingSession> = sqlx::query_as(
             "SELECT pid, usename::text, application_name, backend_xid::text, \
                  extract(epoch FROM clock_timestamp() - state_change)::float8 \

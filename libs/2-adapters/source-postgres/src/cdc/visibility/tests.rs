@@ -78,21 +78,80 @@ fn polls_every_half_millisecond_then_back_off_to_fifty() {
 
 #[test]
 fn every_form_of_synchronous_standby_names_is_read() {
-    let lists = |names: &str| names_standby(names, "flusso");
-    assert!(!lists(""));
-    assert!(lists("flusso"));
-    assert!(lists("FLUSSO"));
-    assert!(lists("other, flusso"));
-    assert!(lists("*"));
-    assert!(lists("2 (other, flusso)"));
-    assert!(lists("FIRST 1 (other, \"Flusso\")"));
-    assert!(lists("ANY 1 (*)"));
-    assert!(lists("any 2(a,flusso,b)"));
-    assert!(!lists("nobody"));
-    assert!(!lists("FIRST 1 (flusso_replica)"));
-    assert!(!lists("\"flusso,x\""));
-    assert!(names_standby("\"a\"\"b\"", "a\"b"));
-    assert!(!lists("first 1 (other)"), "the keyword is no name");
+    let named = Listing {
+        by_name: true,
+        by_wildcard: false,
+    };
+    let wildcard = Listing {
+        by_name: false,
+        by_wildcard: true,
+    };
+    let neither = Listing::default();
+    let listing = |names: &str| standby_listing(names, "flusso");
+    assert_eq!(listing(""), neither);
+    assert_eq!(listing("flusso"), named);
+    assert_eq!(listing("FLUSSO"), named);
+    assert_eq!(listing("other, flusso"), named);
+    assert_eq!(listing("*"), wildcard);
+    assert_eq!(listing("2 (other, flusso)"), named);
+    assert_eq!(listing("FIRST 1 (other, \"Flusso\")"), named);
+    assert_eq!(listing("ANY 1 (*)"), wildcard);
+    assert_eq!(listing("FIRST 2 (a, *)"), wildcard);
+    assert_eq!(
+        listing("any 2(a,flusso,*)"),
+        Listing {
+            by_name: true,
+            by_wildcard: true,
+        }
+    );
+    assert_eq!(listing("nobody"), neither);
+    assert_eq!(listing("FIRST 1 (flusso_replica)"), neither);
+    assert_eq!(listing("\"flusso,x\""), neither);
+    assert_eq!(
+        listing("first 1 (other)"),
+        neither,
+        "the keyword is no name"
+    );
+    assert!(standby_listing("\"a\"\"b\"", "a\"b").by_name);
+}
+
+/// Each form gets a remedy that works for it: a name can be taken out or
+/// flusso renamed; `*` takes in any name, so only replacing it helps.
+#[test]
+fn the_refusal_names_a_remedy_that_works_for_its_form() {
+    let message = |names: &str| refuse_standby(names, "flusso").map(|refusal| refusal.to_string());
+    assert_eq!(message("nobody"), None);
+    for names in ["flusso", "FIRST 1 (other, \"Flusso\")", "2 (a, flusso)"] {
+        let text = message(names).unwrap();
+        assert!(
+            text.contains(&format!(
+                "synchronous_standby_names = '{names}' lists 'flusso'"
+            )),
+            "{text}"
+        );
+        assert!(text.contains("Take 'flusso' out of synchronous_standby_names and reload, or give flusso another application_name"), "{text}");
+        assert!(!text.contains("'*'"), "{text}");
+    }
+    for names in ["*", "ANY 1 (*)", "FIRST 2 (a, *)"] {
+        let text = message(names).unwrap();
+        assert!(
+            text.contains("takes in every walsender with '*', flusso's included"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Replace '*' with the names of the synchronous standbys, then reload"),
+            "{text}"
+        );
+        assert!(text.contains("renaming flusso does not help"), "{text}");
+        assert!(
+            text.contains("even where the other standbys could fill the quorum"),
+            "{text}"
+        );
+        assert!(!text.contains("another application_name"), "{text}");
+    }
+    let both = message("ANY 1 (flusso, *)").unwrap();
+    assert!(both.contains("lists 'flusso' and '*'"), "{both}");
+    assert!(both.contains("Replace '*' with the names of the synchronous standbys, and take 'flusso' out, then reload"), "{both}");
 }
 
 /// Every widened xid around `xmin`, `xmax` and the 2^32 boundary, at epochs
