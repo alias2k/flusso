@@ -128,7 +128,7 @@ pub use check::{
 };
 pub use client::Client;
 pub use cursor::PageCursor;
-pub use error::{Error, Result};
+pub use error::{Error, Result, UnavailableCause};
 pub use handles::{
     Binary, Bool, BoostMode, BoostingQuery, CombinedFieldsQuery, ConstantScoreQuery, Date, DateMap,
     DisMaxQuery, Distance, DistanceFeatureQuery, DistanceType, DistanceUnit, Enum, EqQuery,

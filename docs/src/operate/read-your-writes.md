@@ -39,7 +39,9 @@ From Rust, `flusso-query` runs the steps below itself: see [Reading your own wri
 
 4. **Read from OpenSearch**, as usual. The read doesn't go through flusso.
 
-5. **Handle `408`.** The timeout passed first: flusso is behind, or stopped. Don't fall back to reading anyway unless a stale answer is acceptable; the response carries how far the sink got.
+5. **Handle `408`.** The timeout passed first: flusso is behind, or a sink is stalled. Don't fall back to reading anyway unless a stale answer is acceptable; the response carries how far the sink got.
+
+6. **Ride out a restart.** A refused connection, a `503`, or a gateway's `502`/`504` means flusso is stopping, starting, or down: pause and ask again until the caller's own deadline, honouring `Retry-After`. A `400` or `404` won't change: don't retry it. `flusso-query` does all of this itself.
 
 ## Options and variations
 
@@ -48,6 +50,8 @@ From Rust, `flusso-query` runs the steps below itself: see [Reading your own wri
 - **Several writes, one wait.** Read the position once after the last commit. It covers everything before it.
 - **Watch the positions.** `/status` reports `applied_position` and `searchable_position` per sink, comparable with `pg_current_wal_lsn()`.
 - **Behind a synchronous standby too.** A commit returns to the writer only once it is visible, and flusso indexes it only then, so the position read after it covers the committed state. A fence on a position another session read while a commit still waited on the standby doesn't pass until that commit is visible and indexed. See [Behind a synchronous standby](../reference/source-postgres.md#behind-a-synchronous-standby).
+- **During a deploy.** flusso is one process with one replication slot, so a deploy always has a gap: the old process stops, the new one starts following the source. `/wait` refuses connections or answers `503` meanwhile. After an ordinary restart the new process answers the same question, since the position is Postgres's own; a client that retries until its deadline sees a slow read instead of an error. Size that deadline above a typical gap (the old process's [stop](../reference/cli.md#run), plus the new one's start until `/readyz` answers) and below the caller's own request timeout. `flusso-query` waits twenty seconds by default; the worst restart can outlast that, and the read then fails rather than read stale.
+- **A rebuilding index isn't vouched for.** While a sink rebuilds an index (a first backfill, a rebuild after the slot was lost, a reindex), a fence can pass before the document is readable ([#379](https://github.com/alias2k/flusso/issues/379)). Once that's fixed, `/wait` answers `503` with the reason `rebuilding` there instead.
 - **A backfill isn't fenced.** While an index is still seeding, a fence can pass before the snapshot has reached a row. Gate on `/readyz` or the index's state in `/status` for that.
 - **Neither is an index mid-reindex.** During a [reindex](reindex.md), live writes land in the new generation while readers stay on the old one until the swap. A fence passes when the write is in; a read of that index sees it after the swap. The index shows `backfilling` in `/status` meanwhile.
 

@@ -30,9 +30,9 @@
 //!   index on a running server (zero read-downtime; reads stay on the old copy
 //!   until the rebuild swaps in).
 
-// Dev-dependencies of the live `duplicate_names` test only.
+// Dev-dependencies of the live `duplicate_names` and `fence_restart` tests only.
 #[cfg(test)]
-use {sqlx as _, test_postgres as _, testcontainers_modules as _};
+use {flusso_query as _, sqlx as _, test_postgres as _, testcontainers_modules as _};
 
 mod adapters;
 mod backends;

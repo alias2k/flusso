@@ -73,21 +73,35 @@ pub enum Error {
         body: String,
     },
 
-    /// A fence ran out of time: the position was not readable within the
-    /// client's [`fence_timeout`](crate::Client::fence_timeout). Nothing was
-    /// read. `reached` is how far the sink had got, when flusso reported it.
+    /// A fence ran out of time while flusso was waiting on the position: the
+    /// last answer before the [`fence_timeout`](crate::Client::fence_timeout)
+    /// passed was "not readable yet". flusso is behind, or a sink is stalled.
+    /// Nothing was read. `reached` is how far the sink had got, when flusso
+    /// reported it.
     #[error("fence timed out before the position was readable (reached {reached:?})")]
     FenceTimeout {
         /// The source position the sink had reached, in the source's text form.
         reached: Option<String>,
     },
 
-    /// A fence could not be asked: no flusso endpoint is configured
-    /// ([`Client::flusso`](crate::Client::flusso)), flusso is unreachable, or
-    /// it is not following the source yet. Nothing was read and nothing is
-    /// retried.
-    #[error("fence unavailable: {0}")]
-    FenceUnavailable(String),
+    /// flusso could not be asked until the
+    /// [`fence_timeout`](crate::Client::fence_timeout) passed. The fence
+    /// retried the whole time; `cause` and `reason` are the last answer's.
+    /// Nothing was read.
+    #[error("fence unavailable ({cause}): {reason}")]
+    FenceUnavailable {
+        /// Why, as a category a caller can branch on.
+        cause: UnavailableCause,
+        /// Why, in words: flusso's own, or the transport's.
+        reason: String,
+    },
+
+    /// The fence cannot talk to flusso as configured, so it fails at once:
+    /// no address ([`Client::flusso`](crate::Client::flusso) was not called),
+    /// a certificate the client refuses, or a redirect it cannot follow.
+    /// Retrying would get the same answer. Nothing was read.
+    #[error("fence misconfigured: {0}")]
+    FenceMisconfigured(String),
 
     /// flusso refused the wait: a position it cannot read, or a sink it does
     /// not have.
@@ -102,6 +116,40 @@ pub enum Error {
     /// A response could not be decoded into the expected shape.
     #[error("decoding response: {0}")]
     Decode(#[from] serde_json::Error),
+}
+
+/// Why a fence could not ask flusso, in [`Error::FenceUnavailable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UnavailableCause {
+    /// flusso is stopping (a deploy, a restart).
+    Stopping,
+    /// flusso is not following the source yet: it is starting, or its ingest
+    /// engine is restarting. A daemon that names no reason (0.17) means this.
+    Starting,
+    /// A sink is rebuilding the index the fence covers, so flusso cannot vouch
+    /// for it yet.
+    Rebuilding,
+    /// flusso could not be reached: refused, reset or dropped connection, no
+    /// answer in time, or a gateway in front of it answering `502`/`503`/`504`.
+    Unreachable,
+    /// Something in front of flusso answered `429 Too Many Requests`.
+    Throttled,
+    /// flusso answered `503` with a reason this client does not know.
+    Unusable,
+}
+
+impl std::fmt::Display for UnavailableCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            UnavailableCause::Stopping => "stopping",
+            UnavailableCause::Starting => "starting",
+            UnavailableCause::Rebuilding => "rebuilding",
+            UnavailableCause::Unreachable => "unreachable",
+            UnavailableCause::Throttled => "throttled",
+            UnavailableCause::Unusable => "unusable answer",
+        })
+    }
 }
 
 /// A `Result` whose error is this crate's [`Error`](enum@Error).
