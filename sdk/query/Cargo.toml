@@ -46,9 +46,10 @@ base64 = { workspace = true }
 url = { workspace = true }
 tracing = { workspace = true }
 futures-core = { workspace = true }
-# `rt` only: a dropped pinned walk spawns its point-in-time close on the
-# caller's runtime (reqwest already requires tokio).
-tokio = { workspace = true, features = ["rt"] }
+# `rt`: a dropped pinned walk spawns its point-in-time close on the caller's
+# runtime (reqwest already requires tokio). `time`: a fence's backoff between
+# attempts while flusso restarts.
+tokio = { workspace = true, features = ["rt", "time"] }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 webpki-root-certs.workspace = true
 flusso-query-derive = { path = "../query-derive", version = "=0.17.0", optional = true }

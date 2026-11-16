@@ -3116,12 +3116,13 @@ mod walk {
 }
 
 mod fence {
+    use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use serde::Deserialize;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use tokio::net::{TcpListener, TcpStream};
 
     use crate::{Client, Error, Search};
 
@@ -3130,68 +3131,159 @@ mod fence {
     #[derive(Debug, Deserialize)]
     struct Doc {}
 
+    /// How the stub answers one `/wait`.
+    #[derive(Debug, Clone, Copy)]
+    enum Reply {
+        /// A status, extra header lines (each ending in `\r\n`), and a body.
+        Answer(u16, &'static str, &'static str),
+        /// Hold the request this long, then close the connection unanswered:
+        /// the daemon going away while the long-poll is open.
+        DropAfter(Duration),
+        /// Wait like a daemon whose own wait is capped at `cap`: the request's
+        /// `timeout_ms`, at most `cap`, then `408`.
+        Capped(Duration),
+    }
+
+    const REACHED: Reply = Reply::Answer(200, "", r#"{"reached":true,"position":"0/20"}"#);
+    const STARTING: Reply = Reply::Answer(503, "", r#"{"error":"not live yet"}"#);
+
+    type Seen = Arc<Mutex<Vec<String>>>;
+
     /// One HTTP server standing in for both flusso and OpenSearch: every
-    /// request line is recorded, `/wait` answers with `wait` (status, body),
-    /// anything else with an empty search result.
-    async fn stub(wait: (u16, &'static str)) -> std::io::Result<(String, Arc<Mutex<Vec<String>>>)> {
+    /// request line is recorded, each `/wait` takes the next of `replies` (the
+    /// last one repeats), anything else gets an empty search result.
+    async fn stub(replies: &[Reply]) -> std::io::Result<(String, Seen)> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let base = format!("http://{}", listener.local_addr()?);
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let recorded = Arc::clone(&seen);
-        tokio::spawn(async move {
-            while let Ok((mut socket, _)) = listener.accept().await {
-                let recorded = Arc::clone(&recorded);
-                tokio::spawn(async move {
-                    let mut buffer = vec![0u8; 16 * 1024];
-                    let mut read = 0;
-                    // Enough to hold the head and the small bodies these
-                    // tests send; a request is complete once its head is.
-                    while let Some(spare) = buffer.get_mut(read..) {
-                        let Ok(n) = socket.read(spare).await else {
-                            return;
-                        };
-                        if n == 0 {
-                            break;
-                        }
-                        read += n;
-                        if buffer
-                            .get(..read)
-                            .is_some_and(|b| b.windows(4).any(|w| w == b"\r\n\r\n"))
-                        {
-                            break;
-                        }
-                    }
-                    let head = String::from_utf8_lossy(buffer.get(..read).unwrap_or_default())
-                        .into_owned();
-                    let line = head.lines().next().unwrap_or_default().to_owned();
-                    let (status, body) = if line.contains(" /wait?") {
-                        wait
-                    } else {
-                        (200, r#"{"found":false,"hits":{"hits":[]},"count":0}"#)
-                    };
-                    if let Ok(mut seen) = recorded.lock() {
-                        seen.push(line);
-                    }
-                    let response = format!(
-                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                        body.len()
-                    );
-                    let _ = socket.write_all(response.as_bytes()).await;
-                });
-            }
-        });
+        let seen = serve(listener, replies);
         Ok((base, seen))
     }
 
-    fn requests(seen: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
-        seen.lock().map(|seen| seen.clone()).unwrap_or_default()
+    /// [`stub`] on an address that refuses connections for `down`, then
+    /// starts listening: flusso restarting.
+    async fn stub_after(down: Duration, replies: &[Reply]) -> std::io::Result<(String, Seen)> {
+        let address = TcpListener::bind("127.0.0.1:0").await?.local_addr()?;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+        let replies = replies.to_vec();
+        tokio::spawn(async move {
+            tokio::time::sleep(down).await;
+            if let Ok(listener) = TcpListener::bind(address).await {
+                accept(listener, replies, recorded).await;
+            }
+        });
+        Ok((format!("http://{address}"), seen))
     }
 
-    const REACHED: (u16, &str) = (200, r#"{"reached":true,"position":"0/20"}"#);
+    fn serve(listener: TcpListener, replies: &[Reply]) -> Seen {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        tokio::spawn(accept(listener, replies.to_vec(), Arc::clone(&seen)));
+        seen
+    }
+
+    async fn accept(listener: TcpListener, replies: Vec<Reply>, seen: Seen) {
+        let replies = Arc::new(Mutex::new(VecDeque::from(replies)));
+        while let Ok((socket, _)) = listener.accept().await {
+            tokio::spawn(answer(socket, Arc::clone(&replies), Arc::clone(&seen)));
+        }
+    }
+
+    async fn answer(mut socket: TcpStream, replies: Arc<Mutex<VecDeque<Reply>>>, seen: Seen) {
+        let mut buffer = vec![0u8; 16 * 1024];
+        let mut read = 0;
+        // Enough to hold the head and the small bodies these tests send; a
+        // request is complete once its head is.
+        while let Some(spare) = buffer.get_mut(read..) {
+            let Ok(n) = socket.read(spare).await else {
+                return;
+            };
+            if n == 0 {
+                break;
+            }
+            read += n;
+            if buffer
+                .get(..read)
+                .is_some_and(|b| b.windows(4).any(|w| w == b"\r\n\r\n"))
+            {
+                break;
+            }
+        }
+        let head = String::from_utf8_lossy(buffer.get(..read).unwrap_or_default()).into_owned();
+        let line = head.lines().next().unwrap_or_default().to_owned();
+        let reply = if line.contains(" /wait?") {
+            replies.lock().ok().and_then(|mut replies| {
+                if replies.len() > 1 {
+                    replies.pop_front()
+                } else {
+                    replies.front().copied()
+                }
+            })
+        } else {
+            Some(Reply::Answer(
+                200,
+                "",
+                r#"{"found":false,"hits":{"hits":[]},"count":0}"#,
+            ))
+        };
+        if let Ok(mut seen) = seen.lock() {
+            seen.push(line.clone());
+        }
+        let (status, headers, body) = match reply {
+            Some(Reply::Answer(status, headers, body)) => (status, headers, body),
+            Some(Reply::DropAfter(after)) => {
+                tokio::time::sleep(after).await;
+                return;
+            }
+            Some(Reply::Capped(cap)) => {
+                let asked = Duration::from_millis(timeout_ms(&line).unwrap_or(0));
+                tokio::time::sleep(asked.min(cap)).await;
+                (408, "", r#"{"reached":false,"position":"0/8"}"#)
+            }
+            None => return,
+        };
+        let response = format!(
+            "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{headers}connection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = socket.write_all(response.as_bytes()).await;
+    }
+
+    fn timeout_ms(line: &str) -> Option<u64> {
+        let (_, rest) = line.split_once("timeout_ms=")?;
+        rest.split(['&', ' ']).next()?.parse().ok()
+    }
+
+    /// Every request line, with each `timeout_ms` (what is left of the
+    /// deadline, so it varies by a few milliseconds) written as `T`.
+    fn requests(seen: &Seen) -> Vec<String> {
+        seen.lock()
+            .map(|seen| seen.iter().map(|line| without_timeout(line)).collect())
+            .unwrap_or_default()
+    }
+
+    fn without_timeout(line: &str) -> String {
+        match timeout_ms(line) {
+            Some(ms) => line.replace(&format!("timeout_ms={ms}"), "timeout_ms=T"),
+            None => line.to_owned(),
+        }
+    }
+
+    fn waits(seen: &Seen) -> Vec<String> {
+        requests(seen)
+            .into_iter()
+            .filter(|line| line.contains("/wait?"))
+            .collect()
+    }
+
+    fn asked_timeouts(seen: &Seen) -> Vec<u64> {
+        seen.lock()
+            .map(|seen| seen.iter().filter_map(|line| timeout_ms(line)).collect())
+            .unwrap_or_default()
+    }
 
     #[tokio::test]
     async fn a_get_waits_until_applied_then_reads() -> Result {
-        let (base, seen) = stub(REACHED).await?;
+        let (base, seen) = stub(&[REACHED]).await?;
         let client = Client::connect(&base)?.flusso(&base)?;
 
         let found: Option<Doc> = client.after("0/10").get_one("users", "abc", 7).await?;
@@ -3199,7 +3291,7 @@ mod fence {
         assert_eq!(
             requests(&seen),
             vec![
-                "GET /wait?position=0%2F10&until=applied&timeout_ms=5000 HTTP/1.1",
+                "GET /wait?position=0%2F10&until=applied&timeout_ms=T HTTP/1.1",
                 "GET /users_abc/_doc/7 HTTP/1.1",
             ]
         );
@@ -3207,8 +3299,20 @@ mod fence {
     }
 
     #[tokio::test]
+    async fn the_default_deadline_is_thirty_seconds() -> Result {
+        let (base, seen) = stub(&[REACHED]).await?;
+        Client::connect(&base)?.flusso(&base)?.wait("0/10").await?;
+        let asked = asked_timeouts(&seen);
+        assert!(
+            matches!(asked.as_slice(), [ms] if (29_000..=30_000).contains(ms)),
+            "{asked:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_search_waits_until_searchable_on_the_configured_sink() -> Result {
-        let (base, seen) = stub(REACHED).await?;
+        let (base, seen) = stub(&[REACHED]).await?;
         let client = Client::connect(&base)?
             .flusso(&base)?
             .fence_sink("primary")
@@ -3220,16 +3324,21 @@ mod fence {
         assert_eq!(
             requests(&seen),
             vec![
-                "GET /wait?position=0%2F10&until=searchable&timeout_ms=1500&sink=primary HTTP/1.1",
+                "GET /wait?position=0%2F10&until=searchable&timeout_ms=T&sink=primary HTTP/1.1",
                 "POST /users_abc/_count HTTP/1.1",
             ]
+        );
+        let asked = asked_timeouts(&seen);
+        assert!(
+            matches!(asked.as_slice(), [ms] if (1_000..=1_500).contains(ms)),
+            "{asked:?}"
         );
         Ok(())
     }
 
     #[tokio::test]
     async fn a_fenced_client_waits_once_per_level() -> Result {
-        let (base, seen) = stub(REACHED).await?;
+        let (base, seen) = stub(&[REACHED]).await?;
         let client = Client::connect(&base)?.flusso(&base)?;
         let fresh = client.after("0/10");
 
@@ -3239,15 +3348,11 @@ mod fence {
         Search::<Doc>::new("users", "abc").count(&fresh).await?;
         let _: Option<Doc> = fresh.get_one("users", "abc", 3).await?;
 
-        let waits: Vec<String> = requests(&seen)
-            .into_iter()
-            .filter(|line| line.contains("/wait?"))
-            .collect();
         assert_eq!(
-            waits,
+            waits(&seen),
             vec![
-                "GET /wait?position=0%2F10&until=applied&timeout_ms=5000 HTTP/1.1",
-                "GET /wait?position=0%2F10&until=searchable&timeout_ms=5000 HTTP/1.1",
+                "GET /wait?position=0%2F10&until=applied&timeout_ms=T HTTP/1.1",
+                "GET /wait?position=0%2F10&until=searchable&timeout_ms=T HTTP/1.1",
             ],
             "searchable covers applied, and neither is asked twice"
         );
@@ -3256,7 +3361,7 @@ mod fence {
 
     #[tokio::test]
     async fn an_unfenced_client_never_asks_flusso() -> Result {
-        let (base, seen) = stub(REACHED).await?;
+        let (base, seen) = stub(&[REACHED]).await?;
         let client = Client::connect(&base)?.flusso(&base)?;
         let _: Option<Doc> = client.get_one("users", "abc", 1).await?;
         assert_eq!(requests(&seen), vec!["GET /users_abc/_doc/1 HTTP/1.1"]);
@@ -3265,8 +3370,10 @@ mod fence {
 
     #[tokio::test]
     async fn a_timeout_fails_the_read_and_reads_nothing() -> Result {
-        let (base, seen) = stub((408, r#"{"reached":false,"position":"0/8"}"#)).await?;
-        let client = Client::connect(&base)?.flusso(&base)?;
+        let (base, seen) = stub(&[Reply::Capped(Duration::from_secs(60))]).await?;
+        let client = Client::connect(&base)?
+            .flusso(&base)?
+            .fence_timeout(Duration::from_millis(300));
 
         let error = client
             .after("0/10")
@@ -3283,22 +3390,104 @@ mod fence {
     }
 
     #[tokio::test]
-    async fn a_refusal_and_an_unready_daemon_are_distinct_errors() -> Result {
-        let (base, _) = stub((404, r#"{"error":"unknown sink `audit`"}"#)).await?;
-        let error = Client::connect(&base)?
+    async fn the_deadline_is_counted_once_across_server_waits() -> Result {
+        // The daemon caps one wait at 250 ms here (60 s in flusso): a longer
+        // deadline asks again with what is left, and ends on time.
+        let (base, seen) = stub(&[Reply::Capped(Duration::from_millis(250))]).await?;
+        let client = Client::connect(&base)?
             .flusso(&base)?
-            .wait("0/10")
+            .fence_timeout(Duration::from_millis(1000));
+
+        let started = Instant::now();
+        let error = client.wait("0/10").await.err().ok_or("must fail")?;
+        let elapsed = started.elapsed();
+
+        assert!(matches!(error, Error::FenceTimeout { .. }), "{error}");
+        assert!(
+            elapsed >= Duration::from_millis(1000) && elapsed < Duration::from_millis(1600),
+            "{elapsed:?}"
+        );
+        let asked = asked_timeouts(&seen);
+        assert!(
+            asked.len() >= 4,
+            "asked again past each capped wait: {asked:?}"
+        );
+        assert!(
+            asked.windows(2).all(|pair| pair.get(1) < pair.first()),
+            "each request asks for what is left: {asked:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_restart_is_ridden_out() -> Result {
+        // Refused for 300 ms, then two bare 503s (a 0.17 daemon starting),
+        // then reached.
+        let (base, seen) =
+            stub_after(Duration::from_millis(300), &[STARTING, STARTING, REACHED]).await?;
+        let reads = stub(&[REACHED]).await?;
+        let client = Client::connect(&reads.0)?
+            .flusso(&base)?
+            .fence_timeout(Duration::from_secs(5));
+
+        let started = Instant::now();
+        let found: Option<Doc> = client.after("0/10").get_one("users", "abc", 7).await?;
+        assert!(found.is_none());
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        assert_eq!(waits(&seen).len(), 3, "{:?}", requests(&seen));
+        assert_eq!(requests(&reads.1), vec!["GET /users_abc/_doc/7 HTTP/1.1"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_connection_dropped_mid_wait_is_asked_again() -> Result {
+        let (base, seen) = stub(&[Reply::DropAfter(Duration::from_millis(200)), REACHED]).await?;
+        let client = Client::connect(&base)?
+            .flusso(&base)?
+            .fence_timeout(Duration::from_secs(5));
+
+        client.wait("0/10").await?;
+        assert_eq!(waits(&seen).len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_daemon_that_never_comes_back_fails_at_the_deadline() -> Result {
+        let (base, seen) = stub(&[REACHED]).await?;
+        let closed = TcpListener::bind("127.0.0.1:0").await?;
+        let dead = format!("http://{}", closed.local_addr()?);
+        drop(closed);
+        let client = Client::connect(&base)?
+            .flusso(&dead)?
+            .fence_timeout(Duration::from_secs(1));
+
+        let started = Instant::now();
+        let error = client
+            .after("0/10")
+            .get_one::<Doc>("users", "abc", 7)
             .await
             .err()
             .ok_or("must fail")?;
+        let elapsed = started.elapsed();
+
         assert!(
-            matches!(&error, Error::FenceRefused { status: 404, reason } if reason.contains("audit")),
+            matches!(&error, Error::FenceUnavailable(reason) if reason.contains("unreachable")),
             "{error}"
         );
+        assert!(
+            elapsed >= Duration::from_secs(1) && elapsed < Duration::from_millis(1500),
+            "{elapsed:?}"
+        );
+        assert!(requests(&seen).is_empty(), "nothing was read");
+        Ok(())
+    }
 
-        let (base, _) = stub((503, r#"{"error":"not live yet"}"#)).await?;
+    #[tokio::test]
+    async fn a_daemon_that_stays_unready_fails_unavailable_with_its_reason() -> Result {
+        let (base, seen) = stub(&[STARTING]).await?;
         let error = Client::connect(&base)?
             .flusso(&base)?
+            .fence_timeout(Duration::from_millis(500))
             .wait_applied("0/10")
             .await
             .err()
@@ -3307,29 +3496,142 @@ mod fence {
             matches!(&error, Error::FenceUnavailable(reason) if reason == "not live yet"),
             "{error}"
         );
+        assert!(waits(&seen).len() > 1, "retried: {:?}", requests(&seen));
         Ok(())
     }
 
     #[tokio::test]
-    async fn fencing_without_a_reachable_flusso_fails_without_reading() -> Result {
-        let (base, seen) = stub(REACHED).await?;
+    async fn retry_after_sets_the_pause() -> Result {
+        let (base, seen) = stub(&[
+            Reply::Answer(
+                503,
+                "retry-after: 1\r\n",
+                r#"{"error":"flusso is shutting down"}"#,
+            ),
+            REACHED,
+        ])
+        .await?;
+        let client = Client::connect(&base)?
+            .flusso(&base)?
+            .fence_timeout(Duration::from_secs(5));
 
-        let unconfigured = Client::connect(&base)?;
-        let error = unconfigured.wait("0/10").await.err().ok_or("must fail")?;
-        assert!(matches!(error, Error::FenceUnavailable(_)), "{error}");
+        let started = Instant::now();
+        client.wait("0/10").await?;
+        let elapsed = started.elapsed();
 
-        // A port nothing listens on.
-        let closed = TcpListener::bind("127.0.0.1:0").await?;
-        let dead = format!("http://{}", closed.local_addr()?);
-        drop(closed);
+        assert!(
+            elapsed >= Duration::from_secs(1) && elapsed < Duration::from_millis(1800),
+            "waited what flusso asked, not the 100 ms backoff: {elapsed:?}"
+        );
+        assert_eq!(waits(&seen).len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_retry_after_past_the_deadline_fails_at_once() -> Result {
+        let (base, seen) = stub(&[Reply::Answer(
+            503,
+            "retry-after: 10\r\n",
+            r#"{"error":"flusso is shutting down"}"#,
+        )])
+        .await?;
+        let client = Client::connect(&base)?
+            .flusso(&base)?
+            .fence_timeout(Duration::from_secs(2));
+
+        let started = Instant::now();
+        let error = client.wait("0/10").await.err().ok_or("must fail")?;
+
+        assert!(
+            matches!(&error, Error::FenceUnavailable(reason) if reason.contains("shutting down")),
+            "{error}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(waits(&seen).len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_refusal_is_never_retried() -> Result {
+        for (status, body) in [
+            (400, r#"{"error":"invalid position"}"#),
+            (404, r#"{"error":"unknown sink `audit`"}"#),
+        ] {
+            let (base, seen) = stub(&[Reply::Answer(status, "", body), REACHED]).await?;
+            let error = Client::connect(&base)?
+                .flusso(&base)?
+                .wait("0/10")
+                .await
+                .err()
+                .ok_or("must fail")?;
+            assert!(
+                matches!(&error, Error::FenceRefused { status: s, reason } if *s == status && body.contains(reason.as_str())),
+                "{error}"
+            );
+            assert_eq!(waits(&seen).len(), 1, "{status} is not retried");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_failed_fence_waits_again_and_a_late_success_counts_once() -> Result {
+        let (base, seen) = stub(&[
+            Reply::Answer(503, "retry-after: 10\r\n", r#"{"error":"stopping"}"#),
+            STARTING,
+            REACHED,
+        ])
+        .await?;
+        let client = Client::connect(&base)?
+            .flusso(&base)?
+            .fence_timeout(Duration::from_secs(2));
+        let fresh = client.after("0/10");
+
+        assert!(fresh.get_one::<Doc>("users", "abc", 1).await.is_err());
+        let _: Option<Doc> = fresh.get_one("users", "abc", 2).await?;
+        let _: Option<Doc> = fresh.clone().get_one("users", "abc", 3).await?;
+
+        assert_eq!(
+            waits(&seen).len(),
+            3,
+            "the failure left applied unpassed; the success after one retry passed it: {:?}",
+            requests(&seen)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dropping_the_read_stops_asking() -> Result {
+        let (base, seen) = stub(&[STARTING]).await?;
+        let client = Client::connect(&base)?
+            .flusso(&base)?
+            .fence_timeout(Duration::from_secs(30));
+
+        let read = client.wait("0/10");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(400), read)
+                .await
+                .is_err()
+        );
+        let asked = waits(&seen).len();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(waits(&seen).len(), asked, "nothing kept polling");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fencing_without_a_flusso_address_fails_at_once() -> Result {
+        let (base, seen) = stub(&[REACHED]).await?;
         let error = Client::connect(&base)?
-            .flusso(&dead)?
             .after("0/10")
             .get_one::<Doc>("users", "abc", 7)
             .await
             .err()
             .ok_or("must fail")?;
-        assert!(matches!(error, Error::FenceUnavailable(_)), "{error}");
+        assert!(matches!(error, Error::FenceNotConfigured), "{error}");
         assert!(requests(&seen).is_empty(), "nothing was read");
         Ok(())
     }

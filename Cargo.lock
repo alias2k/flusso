@@ -1169,6 +1169,7 @@ dependencies = [
  "flusso-daemon",
  "flusso-design",
  "flusso-kernel",
+ "flusso-query",
  "flusso-script",
  "flusso-sink",
  "flusso-sink-opensearch",

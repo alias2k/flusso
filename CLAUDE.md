@@ -1760,8 +1760,16 @@ client asks flusso is to wait. `Client::flusso(url)` sets the daemon's public ad
 the position: the hook is in the transport (`Client::fence_before` in `sdk/query/src/fence.rs`,
 called by `get_one` → applied, and by `search_at`/`count_at`/`open_pit`/`search_pit`/`msearch_raw`
 → searchable), so every terminal is covered with no builder change, and a fenced client waits once
-per level (an `AtomicU8` its clones share). A new read path must call `fence_before`. A fence
-never falls back to a stale read: `Error::FenceTimeout`/`FenceUnavailable`/`FenceRefused`.
+per level (an `AtomicU8` its clones share; only a fence that passed marks it). A new read path must
+call `fence_before`. A fence never falls back to a stale read. It **rides out a restart** (issue
+#377): `fence_timeout` (default 30 s) is one deadline across attempts; each asks `/wait` with what is
+left; a `503` or a transport failure backs off (100 ms doubling to 2 s, or `Retry-After`; one past
+the deadline fails at once) and asks again, a `408` with time left asks again at once (the daemon caps
+one wait at 60 s), `400`/`404` never retry. Out of time, the last answer decides: `FenceTimeout`
+(flusso was waiting) or `FenceUnavailable` (it couldn't be asked); `FenceNotConfigured` and
+`FenceRefused` fail at once. Nothing is spawned, so dropping the read stops it. Guards: the stub
+tests in `tests::fence` and `apps/cli`'s `fence_restart` e2e (the real binary stopped and restarted
+on one address; `flusso-query` is a path-only dev-dependency there).
 `position::CURRENT_SQL` is the statement; the `diesel`/`diesel-async` features add
 `position::{diesel,diesel_async}::current` (backend types only, no driver). Guarded by
 `tests::fence` (a local TCP stub standing in for both servers).

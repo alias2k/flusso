@@ -73,6 +73,10 @@ webpki-root-certs.workspace = true
 testcontainers-modules = { workspace = true, features = ["postgres", "http_wait"] }
 test-postgres.workspace = true
 sqlx.workspace = true
+# The fence-restart e2e (`tests/fence_restart.rs`) reads through the client.
+# Path only, so `cargo publish` strips it and the cli and query trains stay
+# independent.
+flusso-query = { path = "../../sdk/query" }
 # The `/wait` router tests implement a tiny `ChangeCapture`, whose stream type
 # is a `futures` one.
 futures.workspace = true

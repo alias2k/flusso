@@ -32,26 +32,53 @@
 //! # }
 //! ```
 //!
-//! A fence never falls back to a stale read: when the wait runs out the read
-//! fails with [`Error::FenceTimeout`], and when the daemon cannot be asked,
-//! with [`Error::FenceUnavailable`].
+//! # Riding out a restart
+//!
+//! flusso runs as one process, so a deploy leaves a gap where `/wait` is
+//! refused or answers `503`. A fence keeps asking until its deadline
+//! ([`Client::fence_timeout`], 30 s by default), counted once across every
+//! attempt:
+//!
+//! - `200`: done.
+//! - `408`: flusso's own wait ended (it caps one at 60 s); ask again with what
+//!   is left, at once.
+//! - `503`, a refused, reset or dropped connection: flusso is unavailable;
+//!   back off (100 ms doubling to 2 s, or the `Retry-After` it sent) and ask
+//!   again. A `Retry-After` past the deadline fails at once.
+//! - `400`, `404`: refused, never retried.
+//!
+//! The source position is the database's own, so the next flusso process
+//! answers the same question. Dropping the read's future stops the loop.
+//!
+//! A fence never falls back to a stale read. When the deadline passes, the
+//! last answer decides the error: [`Error::FenceTimeout`] if flusso was
+//! waiting on the position, [`Error::FenceUnavailable`] if it could not be
+//! asked.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use reqwest::StatusCode;
+use reqwest::header::RETRY_AFTER;
 use serde::Deserialize;
+use tokio::time::Instant;
 use url::Url;
 
 use crate::client::Client;
 use crate::error::{Error, Result};
 
-/// How long a fence waits unless [`Client::fence_timeout`] says otherwise.
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a fence waits unless [`Client::fence_timeout`] says otherwise:
+/// long enough to ride out a restart of flusso.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Slack on top of the wait for the daemon's answer to travel back.
 const RESPONSE_SLACK: Duration = Duration::from_secs(2);
+
+/// The first pause after flusso could not be asked; it doubles up to
+/// [`MAX_BACKOFF`].
+const FIRST_BACKOFF: Duration = Duration::from_millis(100);
+const MAX_BACKOFF: Duration = Duration::from_secs(2);
 
 /// Where and how a client fences.
 #[derive(Debug, Clone)]
@@ -97,6 +124,20 @@ pub(crate) struct After {
     passed: AtomicU8,
 }
 
+/// What one `/wait` request came back with, short of a refusal.
+enum Attempt {
+    Reached,
+    /// flusso waited and the position was not readable yet.
+    TimedOut {
+        reached: Option<String>,
+    },
+    /// flusso could not be asked, or was not ready to answer.
+    Unavailable {
+        reason: String,
+        retry_after: Option<Duration>,
+    },
+}
+
 #[derive(Deserialize)]
 struct WaitBody {
     #[serde(default)]
@@ -128,8 +169,11 @@ impl Client {
         self
     }
 
-    /// How long a fence waits before failing with [`Error::FenceTimeout`]
-    /// (default 5 s; the daemon caps a single wait at 60 s).
+    /// The whole budget of one fence (default 30 s), counted once across
+    /// every request it makes. Within it a fence rides out a restart of
+    /// flusso, and asks again past the daemon's 60 s cap on a single wait.
+    /// Past it the read fails with [`Error::FenceTimeout`] or
+    /// [`Error::FenceUnavailable`].
     #[must_use]
     pub fn fence_timeout(mut self, timeout: Duration) -> Self {
         self.fence.timeout = timeout;
@@ -182,15 +226,60 @@ impl Client {
         name = "fence.wait",
         level = "debug",
         skip_all,
-        fields(position, until = level.as_str(), status = tracing::field::Empty),
+        fields(position, until = level.as_str(), attempts = tracing::field::Empty),
         err,
     )]
     async fn wait_for(&self, position: &str, level: Level) -> Result<()> {
         let Some(endpoint) = &self.fence.endpoint else {
-            return Err(Error::FenceUnavailable(
-                "no flusso endpoint configured; call Client::flusso(url) first".to_owned(),
-            ));
+            return Err(Error::FenceNotConfigured);
         };
+        let deadline = Instant::now() + self.fence.timeout;
+        let mut backoff = FIRST_BACKOFF;
+        let mut attempts = 0_u32;
+        loop {
+            attempts += 1;
+            tracing::Span::current().record("attempts", attempts);
+            let attempt = self.ask(endpoint, position, level, left(deadline)).await?;
+            let left = left(deadline);
+            match attempt {
+                Attempt::Reached => return Ok(()),
+                Attempt::TimedOut { reached } => {
+                    if left.is_zero() {
+                        return Err(Error::FenceTimeout { reached });
+                    }
+                    backoff = FIRST_BACKOFF;
+                }
+                Attempt::Unavailable {
+                    reason,
+                    retry_after,
+                } => {
+                    let pause = match retry_after {
+                        Some(asked) if asked >= left => {
+                            return Err(Error::FenceUnavailable(reason));
+                        }
+                        Some(asked) => asked,
+                        None => backoff.min(left),
+                    };
+                    tracing::debug!(%reason, ?pause, "flusso is unavailable; asking again");
+                    tokio::time::sleep(pause).await;
+                    if Instant::now() >= deadline {
+                        return Err(Error::FenceUnavailable(reason));
+                    }
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
+                }
+            }
+        }
+    }
+
+    /// One `GET /wait`, asking flusso to wait at most `left`. A refusal is the
+    /// `Err`; everything else is for the caller's loop to decide.
+    async fn ask(
+        &self,
+        endpoint: &str,
+        position: &str,
+        level: Level,
+        left: Duration,
+    ) -> Result<Attempt> {
         let mut url = Url::parse(&format!("{endpoint}/wait"))
             .map_err(|error| Error::Url(format!("{endpoint}: {error}")))?;
         {
@@ -198,37 +287,76 @@ impl Client {
             query
                 .append_pair("position", position)
                 .append_pair("until", level.as_str())
-                .append_pair("timeout_ms", &self.fence.timeout.as_millis().to_string());
+                .append_pair("timeout_ms", &left.as_millis().to_string());
             if let Some(sink) = &self.fence.sink {
                 query.append_pair("sink", sink);
             }
         }
         tracing::debug!(%url, "GET /wait");
-        let response = self
+        let response = match self
             .http
             .get(url)
-            .timeout(self.fence.timeout + RESPONSE_SLACK)
+            .timeout(left + RESPONSE_SLACK)
             .send()
             .await
-            .map_err(|error| Error::FenceUnavailable(format!("flusso is unreachable: {error}")))?;
+        {
+            Ok(response) => response,
+            Err(error) => {
+                return Ok(Attempt::Unavailable {
+                    reason: format!("flusso is unreachable: {}", chain(&error)),
+                    retry_after: None,
+                });
+            }
+        };
         let status = response.status();
-        tracing::Span::current().record("status", status.as_u16());
         if status.is_success() {
-            return Ok(());
+            return Ok(Attempt::Reached);
         }
-        let text = response.text().await.unwrap_or_default();
+        let retry_after = response
+            .headers()
+            .get(RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(Duration::from_secs);
+        let text = match response.text().await {
+            Ok(text) => text,
+            Err(error) => {
+                return Ok(Attempt::Unavailable {
+                    reason: format!("flusso dropped the connection: {}", chain(&error)),
+                    retry_after: None,
+                });
+            }
+        };
         let body: Option<WaitBody> = serde_json::from_str(&text).ok();
         match status {
-            StatusCode::REQUEST_TIMEOUT => Err(Error::FenceTimeout {
+            StatusCode::REQUEST_TIMEOUT => Ok(Attempt::TimedOut {
                 reached: body.and_then(|body| body.position),
             }),
-            StatusCode::SERVICE_UNAVAILABLE => Err(Error::FenceUnavailable(
-                body.and_then(|body| body.error).unwrap_or(text),
-            )),
+            StatusCode::SERVICE_UNAVAILABLE => Ok(Attempt::Unavailable {
+                reason: body.and_then(|body| body.error).unwrap_or(text),
+                retry_after,
+            }),
             _ => Err(Error::FenceRefused {
                 status: status.as_u16(),
                 reason: body.and_then(|body| body.error).unwrap_or(text),
             }),
         }
     }
+}
+
+fn left(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
+}
+
+/// An error and its sources, so "connection refused" survives reqwest's
+/// one-line summary.
+fn chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
 }
