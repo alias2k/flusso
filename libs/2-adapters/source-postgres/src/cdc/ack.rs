@@ -82,6 +82,8 @@ pub(crate) struct Positions {
     listeners: Arc<Listeners>,
     confirmed_moved: Notify,
     close: AtomicBool,
+    /// Where the stream started: what the slot already holds as confirmed.
+    start_lsn: u64,
 }
 
 #[derive(Debug)]
@@ -151,6 +153,7 @@ impl Positions {
             listeners,
             confirmed_moved: Notify::new(),
             close: AtomicBool::new(false),
+            start_lsn,
         }
     }
 
@@ -226,6 +229,11 @@ impl Positions {
     pub(crate) fn request_close(&self) {
         self.close.store(true, Ordering::SeqCst);
         self.confirmed_moved.notify_one();
+    }
+
+    /// The position the stream started at, which the slot already holds.
+    pub(crate) fn start_lsn(&self) -> u64 {
+        self.start_lsn
     }
 
     pub(crate) fn close_requested(&self) -> bool {

@@ -106,10 +106,11 @@ pub(crate) trait Replication: Send + 'static {
     /// sends a raised LSN to the server within its status interval.
     fn update_applied_lsn(&self, lsn: Lsn);
 
-    /// End replication gracefully once `lsn` was reported to the server. The
-    /// default does nothing beyond what `update_applied_lsn` did.
-    fn close(&mut self, lsn: Lsn) -> impl Future<Output = ()> + Send {
-        let _ = lsn;
+    /// End replication gracefully, once `report` (when there is one) has been
+    /// sent to the server. The default does nothing beyond what
+    /// `update_applied_lsn` did.
+    fn close(&mut self, report: Option<Lsn>) -> impl Future<Output = ()> + Send {
+        let _ = report;
         async {}
     }
 }
@@ -134,23 +135,25 @@ impl Replication for ReplicationClient {
     /// raised position within its status interval), then stops the worker,
     /// which sends CopyDone. Stopping first would lose the update: the worker
     /// checks its stop signal before a due status update.
-    async fn close(&mut self, lsn: Lsn) {
-        let metrics = self.metrics();
-        let sent = tokio::time::timeout(CLOSE_STEP, async {
-            while metrics.last_applied_lsn() < lsn {
-                tokio::time::sleep(Duration::from_millis(20)).await;
+    async fn close(&mut self, report: Option<Lsn>) {
+        if let Some(lsn) = report {
+            let metrics = self.metrics();
+            let sent = tokio::time::timeout(CLOSE_STEP, async {
+                while metrics.last_applied_lsn() < lsn {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+            if sent.is_err() {
+                tracing::warn!(
+                    %lsn,
+                    "the final position was not sent to the server in time; the next start may \
+                     read some changes again"
+                );
             }
-        })
-        .await;
-        if sent.is_err() {
-            tracing::warn!(
-                %lsn,
-                "the final position was not sent to the server in time; the next start may read \
-                 some changes again"
-            );
         }
         match tokio::time::timeout(CLOSE_STEP, self.shutdown()).await {
-            Ok(Ok(())) => tracing::info!(%lsn, "replication stream closed"),
+            Ok(Ok(())) => tracing::info!(?report, "replication stream closed"),
             Ok(Err(error)) => tracing::warn!(%error, "replication stream closed with an error"),
             Err(_) => tracing::warn!("replication stream did not close in time; dropping it"),
         }
@@ -468,7 +471,9 @@ fn into_stream<C: Replication, V: Visibility>(
             let confirmed = Lsn::from_u64(state.decode.ack.confirmed_lsn());
             state.client.update_applied_lsn(confirmed);
             if state.decode.ack.close_requested() {
-                state.client.close(confirmed).await;
+                let report =
+                    (confirmed.as_u64() > state.decode.ack.start_lsn()).then_some(confirmed);
+                state.client.close(report).await;
                 return None;
             }
 
