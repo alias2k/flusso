@@ -115,46 +115,100 @@ pub fn write(compiled: &Compiled, path: impl AsRef<Path>) -> Result<(), CompileE
 /// leaves the file (and its mtime) untouched instead of churning a committed
 /// lock.
 pub fn write_if_changed(compiled: &Compiled, path: impl AsRef<Path>) -> Result<bool, CompileError> {
-    let path = path.as_ref();
-    let bytes = to_bytes(compiled)?;
+    write_bytes_if_changed(&to_bytes(compiled)?, path.as_ref())
+}
+
+fn write_bytes_if_changed(bytes: &[u8], path: &Path) -> Result<bool, CompileError> {
     if std::fs::read(path).is_ok_and(|existing| existing == bytes) {
         return Ok(false);
     }
-    write_bytes(&bytes, path)?;
+    write_bytes(bytes, path)?;
     Ok(true)
 }
 
-/// Write `bytes` beside `path` and rename them over it, so the lock is
-/// replaced whole: a process stopped mid-write leaves the old lock (and a
-/// stray temporary file), never a truncated one.
+/// Write `bytes` to the lock at `path`, replacing it whole where the folder
+/// allows: written beside the file the path names (through any symlink),
+/// with that file's permissions, then renamed over it, so a process stopped
+/// mid-write leaves the old lock, never a truncated one. Where no file can be
+/// made beside it (a read-only folder) or a rename can't land (a single-file
+/// mount, another device), the lock is written in place, as before 0.18.
 fn write_bytes(bytes: &[u8], path: &Path) -> Result<(), CompileError> {
     let failed = |source| CompileError::Write {
         path: path.to_path_buf(),
         source,
     };
-    let name = path.file_name().map_or_else(
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    match replace(bytes, &target) {
+        Ok(()) => Ok(()),
+        Err((stage, error)) if falls_back(&error, stage) => {
+            tracing::debug!(
+                lock = %target.display(),
+                %error,
+                "can't replace the lock whole here; writing it in place"
+            );
+            std::fs::write(&target, bytes).map_err(failed)
+        }
+        Err((_, error)) => Err(failed(error)),
+    }
+}
+
+/// Which step of [`replace`] failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// Writing the file beside the lock.
+    Staging,
+    /// Renaming it over the lock.
+    Renaming,
+}
+
+/// Write `bytes` beside `target` and rename them over it.
+fn replace(bytes: &[u8], target: &Path) -> Result<(), (Stage, std::io::Error)> {
+    let name = target.file_name().map_or_else(
         || std::ffi::OsString::from("flusso.lock"),
         std::ffi::OsStr::to_os_string,
     );
     let mut temporary_name = std::ffi::OsString::from(".");
     temporary_name.push(&name);
     temporary_name.push(format!(".{}.tmp", std::process::id()));
-    let temporary = path.with_file_name(temporary_name);
-    let written = std::fs::File::create(&temporary).and_then(|mut file| {
+    let temporary = target.with_file_name(temporary_name);
+    let staged = std::fs::File::create(&temporary).and_then(|mut file| {
+        if let Ok(existing) = std::fs::metadata(target) {
+            file.set_permissions(existing.permissions())?;
+        }
         std::io::Write::write_all(&mut file, bytes)?;
         file.sync_all()
     });
-    if let Err(error) = written.and_then(|()| std::fs::rename(&temporary, path)) {
+    let result = match staged {
+        Err(error) => Err((Stage::Staging, error)),
+        Ok(()) => std::fs::rename(&temporary, target).map_err(|error| (Stage::Renaming, error)),
+    };
+    if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
-        return Err(failed(error));
     }
-    Ok(())
+    result
+}
+
+/// Whether a failed [`replace`] should fall back to writing the lock in
+/// place: no file can be made beside it, or the rename can't cross where the
+/// lock sits. Anything else (a full disk, a lock that went away) is reported.
+fn falls_back(error: &std::io::Error, stage: Stage) -> bool {
+    use std::io::ErrorKind;
+    match stage {
+        Stage::Staging => matches!(
+            error.kind(),
+            ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem
+        ),
+        Stage::Renaming => matches!(
+            error.kind(),
+            ErrorKind::ResourceBusy | ErrorKind::CrossesDevices | ErrorKind::PermissionDenied
+        ),
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::write_bytes;
+    use super::{Stage, falls_back, write_bytes, write_bytes_if_changed};
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("flusso-lock-{}-{name}", std::process::id()));
@@ -204,6 +258,148 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names, vec![std::ffi::OsString::from("flusso.lock")]);
+    }
+
+    fn names(dir: &std::path::Path) -> Vec<std::ffi::OsString> {
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_lock_updates_its_target_and_stays_a_link() {
+        let dir = scratch("symlink");
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        std::fs::write(dir.join("real/flusso.lock"), b"old").unwrap();
+        let link = dir.join("flusso.lock");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink("real/flusso.lock", &link).unwrap();
+
+        write_bytes(b"new lock", &link).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read(dir.join("real/flusso.lock")).unwrap(),
+            b"new lock"
+        );
+        assert_eq!(
+            names(&dir.join("real")),
+            vec![std::ffi::OsString::from("flusso.lock")]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_in_a_folder_flusso_cannot_write_to_is_written_in_place() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch("readonly");
+        let lock = dir.join("flusso.lock");
+        std::fs::write(&lock, b"old").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let root = std::fs::File::create(dir.join("probe")).is_ok();
+
+        let written = write_bytes(b"new lock", &lock);
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if root {
+            return;
+        }
+        written.unwrap();
+        assert_eq!(std::fs::read(&lock).unwrap(), b"new lock");
+        assert_eq!(names(&dir), vec![std::ffi::OsString::from("flusso.lock")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rewritten_lock_keeps_its_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch("permissions");
+        let lock = dir.join("flusso.lock");
+        std::fs::write(&lock, b"old").unwrap();
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        write_bytes(b"new lock", &lock).unwrap();
+
+        let mode = std::fs::metadata(&lock).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
+    }
+
+    #[test]
+    fn a_temporary_file_a_crash_left_is_reused_and_not_left_behind() {
+        let dir = scratch("leftover");
+        let lock = dir.join("flusso.lock");
+        std::fs::write(&lock, b"old").unwrap();
+        let leftover = dir.join(format!(".flusso.lock.{}.tmp", std::process::id()));
+        std::fs::write(
+            &leftover,
+            b"half a lock from a killed run, longer than the new one",
+        )
+        .unwrap();
+
+        write_bytes(b"new lock", &lock).unwrap();
+
+        assert_eq!(std::fs::read(&lock).unwrap(), b"new lock");
+        assert_eq!(names(&dir), vec![std::ffi::OsString::from("flusso.lock")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unchanged_lock_is_not_rewritten_or_staged() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = scratch("unchanged");
+        let lock = dir.join("flusso.lock");
+        std::fs::write(&lock, b"same").unwrap();
+        let before = std::fs::metadata(&lock).unwrap().ino();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let wrote = write_bytes_if_changed(b"same", &lock);
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!wrote.unwrap(), "the same bytes are not written");
+        assert_eq!(std::fs::metadata(&lock).unwrap().ino(), before);
+        assert_eq!(names(&dir), vec![std::ffi::OsString::from("flusso.lock")]);
+    }
+
+    #[test]
+    fn only_a_place_that_takes_no_rename_falls_back_to_writing_in_place() {
+        use std::io::{Error, ErrorKind};
+
+        assert!(falls_back(
+            &Error::from(ErrorKind::PermissionDenied),
+            Stage::Staging
+        ));
+        assert!(falls_back(
+            &Error::from(ErrorKind::ReadOnlyFilesystem),
+            Stage::Staging
+        ));
+        assert!(falls_back(
+            &Error::from(ErrorKind::ResourceBusy),
+            Stage::Renaming
+        ));
+        assert!(falls_back(
+            &Error::from(ErrorKind::CrossesDevices),
+            Stage::Renaming
+        ));
+        assert!(!falls_back(
+            &Error::from(ErrorKind::StorageFull),
+            Stage::Staging
+        ));
+        assert!(!falls_back(
+            &Error::from(ErrorKind::NotFound),
+            Stage::Renaming
+        ));
     }
 }
 
