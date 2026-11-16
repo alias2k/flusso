@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794799299236,
+  "lastUpdate": 1794809320908,
   "repoUrl": "https://github.com/alias2k/flusso",
   "entries": {
     "flusso (smaller is better)": [
@@ -24381,6 +24381,336 @@ window.BENCHMARK_DATA = {
             "value": 240.7954545454544,
             "unit": "ms",
             "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 40.109, \"disk_write_ms\": 319.015, \"memory_copy_ms\": 153.933}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V45 96-Core Processor\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "89390131+JakubWasilczyk-Alias2k@users.noreply.github.com",
+            "name": "Jakub Wasilczyk",
+            "username": "JakubWasilczyk-Alias2k"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0b7243403c98bc940d3e35e277b6a8de165fe965",
+          "message": "Merge pull request #357 from alias2k/ci/postgres-version-matrix-348\n\nci: run the Postgres e2e suites on 14 and 18 (nightly, on demand, by label)",
+          "timestamp": "2026-11-16T06:51:31+01:00",
+          "tree_id": "64ec26ba21fc231944e5ee03491fa8c84f95d734",
+          "url": "https://github.com/alias2k/flusso/commit/0b7243403c98bc940d3e35e277b6a8de165fe965"
+        },
+        "date": 1794809320629,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "inprocess/decode/fixture",
+            "value": 2560171.8,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "inprocess/live_drain/sinks1/1",
+            "value": 154330354.8,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "inprocess/live_drain/sinks1/256",
+            "value": 51643223.75,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "inprocess/live_drain/sinks1/64",
+            "value": 101014462.51428571,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "inprocess/live_drain/sinks2/1",
+            "value": 143016897.475,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "inprocess/live_drain/sinks2/256",
+            "value": 42238930.222222224,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "inprocess/live_drain/sinks2/64",
+            "value": 89562823.075,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "inprocess/render/delete",
+            "value": 139723.85874155405,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "inprocess/render/mid",
+            "value": 3975807.576923077,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "inprocess/render/wide",
+            "value": 39281268,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "inprocess/resolve_no_io/root_table",
+            "value": 231.80423103094563,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "inprocess/resolve_no_io/unread_update",
+            "value": 819.6979685803584,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "inprocess/resolve_no_io/unrelated_table",
+            "value": 228.85211771217394,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "inprocess/resolve_no_io/walked_from_the_key",
+            "value": 708.2840062128594,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "inprocess/scripted/flat",
+            "value": 4367910.863636363,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "inprocess/scripted/nested",
+            "value": 17521670.666666664,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "inprocess/snapshot/rows",
+            "value": 144330732.9166667,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "components/baseline/os_flush_1",
+            "value": 5246176.958333334,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "components/baseline/pg_select_1",
+            "value": 155840.0830721003,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "components/baseline/resolve_unrelated",
+            "value": 316.2704651321493,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "components/baseline/select_1",
+            "value": 153552.46989966556,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "components/batch_size/100",
+            "value": 834498390,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "components/batch_size/1000",
+            "value": 222319004,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "components/batch_size/500",
+            "value": 298631268.5,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "components/batch_size/5000",
+            "value": 146026395.75,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "components/build/0",
+            "value": 214568.10277777776,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "components/build/1",
+            "value": 220631.68913900608,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "components/build/10",
+            "value": 241572.8409035409,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "components/build/100",
+            "value": 440348.3165768194,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "components/bulk_index/1",
+            "value": 6505085.222222222,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "components/bulk_index/100",
+            "value": 11412647.587912088,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "components/bulk_index/1000",
+            "value": 34943222.58888888,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "components/bulk_index/5000",
+            "value": 191113981.25,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "components/change/item_update",
+            "value": 10193108.857142858,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "components/change_burst/1",
+            "value": 266481977.5,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "components/change_burst/16",
+            "value": 134956357.66666666,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "components/change_burst/256",
+            "value": 127363021.91666666,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "components/resolve/related_table",
+            "value": 173486.3076190476,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "components/resolve/root_table",
+            "value": 338.7332803761304,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}}"
+          },
+          {
+            "name": "complex/ci/visible_latency_p50_ms",
+            "value": 28.464133,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/visible_latency_p99_ms",
+            "value": 235.82249,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/peak_rss_mib",
+            "value": 85.109375,
+            "unit": "MiB",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/cpu_seconds",
+            "value": 2,
+            "unit": "s",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/flush_p50_ms",
+            "value": 9.176682692307692,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/flush_p99_ms",
+            "value": 146.35000000000048,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/visible_latency_p50_ms",
+            "value": 28.912449,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/visible_latency_p99_ms",
+            "value": 75.73795199999999,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/peak_rss_mib",
+            "value": 84.06640625,
+            "unit": "MiB",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/cpu_seconds",
+            "value": 16,
+            "unit": "s",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/flush_p50_ms",
+            "value": 35.59602649006623,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/flush_p99_ms",
+            "value": 244.89999999999995,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.673, \"disk_write_ms\": 78.961, \"memory_copy_ms\": 208.02}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
           }
         ]
       }
