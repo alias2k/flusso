@@ -88,7 +88,7 @@ The full source-to-sink e2e lives in `engine`, not in a source crate: a leaf sou
 flusso supports Postgres 14 or newer. CI tests three majors: the oldest supported, `14-alpine`; the default, `16-alpine`; and the newest, `18-alpine`. They're `TESTED_TAGS` in `dev/test-postgres`, beside the default. Step 5 of the [CI order](#ci-order) runs the default on every PR. The `postgres-matrix` workflow runs each of the others as one leg:
 
 - **What a leg runs.** The test suites of every crate that starts Postgres, with `FLUSSO_TEST_PG_TAG` set: `cargo nextest run --profile ci --workspace --run-ignored all -E 'rdeps(flusso-test-postgres)'`. It uses the same `ci` profile as step 5 and the same setup steps (the composite action `.github/actions/rust-test-setup`). It doesn't run the Docker-backed benches (`postgres`, `pipeline`, `cases`) or `just review-ab`, which takes its image from `--pg`. A leg takes about as long as `clippy + tests`.
-- **When.** Nightly and on demand (`workflow_dispatch`). Never on a PR by itself, never a required check. To run it for a PR, dispatch it on the PR's branch; its checks attach to the head commit and show on the PR:
+- **When.** Nightly and on demand (`workflow_dispatch`). Never on a PR by itself, never a required check. To run it for a PR, dispatch it on the PR's branch. Its checks attach to the branch's head commit (the commit's status and the Actions tab), not to the PR's checks list:
 
   ```sh
   gh workflow run postgres-matrix.yml --ref <branch>
