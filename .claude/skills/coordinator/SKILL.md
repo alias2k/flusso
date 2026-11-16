@@ -58,7 +58,7 @@ A brief contains (keep it short):
 - restore `libs/2-adapters/source-postgres/benches/fixtures/pgoutput.bin` if a test run re-recorded it;
 - out-of-scope findings are listed in the report, not fixed, and the agent creates no GitHub issues;
 - **don't cheat**: never weaken a test or drop a performance-motivated design to make a check pass;
-- **long runs in the foreground**: start every build, test, benchmark and check as a blocking call with a long timeout, never as a background command; never end the turn while one runs (nothing wakes an agent when it finishes). Say this to reviewers too;
+- **long runs in the foreground**: start every build, test, benchmark and check as a blocking call, never as a background command; never end the turn while one runs (nothing wakes an agent when it finishes). One call is limited to ten minutes, and a run that outlasts it moves to the background and the agent stops: split long runs into chunks that each fit one call (a 50-run loop as five calls of ten, a CI wait as repeated `timeout 570 gh pr checks <n> --watch`). Say this to reviewers too;
 - match CI's order from `CLAUDE.md` before reporting, pipe output through `tail`/`grep`, then **stop at "PR opened"**: report the PR URL and head SHA, don't wait for CI.
 
 Resume an agent only for tiny fixes. For a real follow-up round, start a fresh agent with a short handoff (PR, branch, what is left, files).
@@ -75,8 +75,8 @@ Resume an agent only for tiny fixes. For a real follow-up round, start a fresh a
 3. **Every re-check is a new reviewer.** Never send it to the reviewer that made the findings or to the author.
 4. **A re-check reviews the delta.** Give it the diff since the last reviewed commit, the earlier findings and the objections to them, and tell it to verify the fixes and what they could have broken, nothing else. Full depth is for round one and for the last round before merge.
 5. **Reviewers run committed tooling, they don't rebuild it:**
-   - one committed command builds `origin/main` and the branch in **separate target dirs**, starts Postgres (the version CI tests against, plus every other major the change could behave differently on), runs the Docker-backed benches on both and prints one comparison. Until the repo has it, building it is the first small PR, not something each reviewer hand-writes;
-   - reviewers copy the warm `main` build (Setup step 4) for the baseline;
+   - `just review-ab [base]` builds the base and the branch in **separate target dirs**, starts Postgres (the tests' default, or `--pg 14,16,18` when the change could behave differently by major), runs the Docker-backed benches on both and prints one table; a case counts as slower only after its re-run confirms it, and a `noise` case is run again alone with `--filter` and more `--rounds`. `docs/src/contribute/benchmarks.md` owns the details. What it cannot do yet (plans per call, a digest of the built documents, a live-drain comparison) a reviewer does by hand and reports;
+   - for anything `review-ab` does not cover, reviewers copy the warm `main` build (Setup step 4) for the baseline, each tree in its own target dir;
    - when a reviewer finds a gap with a generator or script of its own (a key type, a key length, a Postgres version), the fix adds that case to a committed test or to the comparison command, so the next reviewer only runs it;
    - the tooling is a floor, not a fence. A reviewer that needs a check the tooling can't run does it by hand this round and reports what it needed and what it did. The missing tool is then committed: in the same PR when small, otherwise as the next tooling PR. Never tell a reviewer to use only what exists;
    - push before review when you can, and have reviewers read CI's result for the suites CI runs instead of running them again.
