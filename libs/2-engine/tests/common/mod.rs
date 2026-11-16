@@ -153,6 +153,7 @@ impl SyncRep {
             ],
         )
         .await;
+        standbys_in_force(pool).await;
         Self { pool: pool.clone() }
     }
 
@@ -250,6 +251,73 @@ pub(crate) async fn sent_to(pool: &sqlx::PgPool, application_name: &str) {
         .unwrap()
     })
     .await;
+}
+
+/// Wait until Postgres makes commits wait for synchronous standbys, as
+/// `synchronous_standby_names` now asks.
+///
+/// A session reads the reloaded setting at once, but whether a commit waits
+/// is decided by a shared flag the checkpointer sets when it processes the
+/// reload, later: a commit in between doesn't wait (11 of 30 commits made just
+/// after the reload, measured on Postgres 16). So commit a write to an
+/// unpublished probe table until one is seen waiting, then cancel its wait.
+/// The reload signal also reaches each session a little later, so every write
+/// the helper doesn't mean to hold sets its commit level itself.
+pub(crate) async fn standbys_in_force(pool: &sqlx::PgPool) {
+    // Locally: a session the reload signal hasn't reached yet still has
+    // `synchronous_commit = on`, and its commit would wait forever.
+    sqlx::raw_sql(
+        "BEGIN; SET LOCAL synchronous_commit = local; \
+         CREATE TABLE IF NOT EXISTS flusso_syncrep_probe (x int); COMMIT;",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let mut connection = pool.acquire().await.unwrap().detach();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        sqlx::raw_sql("SET synchronous_commit = on")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        let probe = tokio::spawn(async move {
+            let _ = sqlx::raw_sql("INSERT INTO flusso_syncrep_probe VALUES (1)")
+                .execute(&mut connection)
+                .await;
+        });
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                 WHERE pid = $1 AND wait_event = 'SyncRep')",
+            )
+            .bind(pid)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if waiting {
+                sqlx::query("SELECT pg_cancel_backend($1)")
+                    .bind(pid)
+                    .execute(pool)
+                    .await
+                    .unwrap();
+                let _ = probe.await;
+                return;
+            }
+            if probe.is_finished() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "commits never started waiting for the synchronous standby"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }
 
 /// `ALTER SYSTEM` each statement (one per call: it refuses a transaction

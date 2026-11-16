@@ -412,6 +412,7 @@ async fn flusso_named_a_synchronous_standby_while_running_stops() {
     let mut scene = Scene::new(&[], "").await;
     scene.start().await;
     scene.standby_names("flusso").await;
+    common::standbys_in_force(&scene.pool).await;
     let pool = scene.pool.clone();
     let waiting = tokio::spawn(async move {
         sqlx::query("UPDATE parents SET name = 'p1 waits on flusso' WHERE id = 1")
