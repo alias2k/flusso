@@ -33,15 +33,20 @@ A scenario reports these under the series `<scenario>/<scale>/…`:
 Each scenario phase (backfill, trickle, burst) also gets an **attribution table**: the share of the phase's wall time each pipeline stage took. It's read from flusso's own [`flusso.stage.duration`](../reference/metrics.md#where-the-time-goes) histogram, two scrapes of `/metrics` around the phase, so the release binary needs no patch. It isn't a data point: the run logs it and writes it to `attribution.md` (and `phases.attribution` in `summary.json`), ready to paste into a PR.
 
 ```text
-**burst** (5.40 s wall)
+**burst** (23.03 s wall)
 
 | stage | work | sink | index | batches | busy s | share | ms/batch |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
-| build | live |  |  | 84 | 1.40 | 25.9% | 16.67 |
-| resolve | live |  |  | 84 | 3.55 | 65.7% | 42.26 |
-| flush | live | primary |  | 84 | 4.10 | 75.9% | 48.81 |
-| wait | | primary |  | 84 | 1.05 | 19.4% | 12.50 |
+| apply | live | primary |  | 322 | 0.22 | 0.9% | 0.68 |
+| build | live |  |  | 322 | 4.54 | 19.7% | 14.10 |
+| flush | live | primary |  | 322 | 17.79 | 77.3% | 55.26 |
+| lane_wait | live | primary |  | 322 | 0.00 | 0.0% | 0.01 |
+| publish | live |  |  | 322 | 0.01 | 0.0% | 0.02 |
+| resolve | live |  |  | 322 | 18.20 | 79.0% | 56.52 |
+| wait |  | primary |  | 322 | 4.84 | 21.0% | 15.03 |
 ```
+
+Here the ingest task is busy 99% of the burst (`resolve` 79% + `build` 20%), and the sink waits 21% of it for the next batch: the burst is ingest-bound, and the reverse lookups are most of it.
 
 How to read it:
 
