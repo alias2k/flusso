@@ -5,11 +5,12 @@
                     --base-ref <PR base branch> --default-branch <repository default branch>
                     [--root <repo>] [--output <$GITHUB_OUTPUT>] [--summary <$GITHUB_STEP_SUMMARY>]
 
-The one home of the docs-only rule (issue #402). `.github/scripts/change-class.sh` (through
-`.github/actions/change-class`) runs it in each gated job, over `git diff --name-status -z -M
-HEAD^1 HEAD` of the pull request's merge commit: the whole PR as it would merge, not the last push.
-It runs the **base's** copy of this file (`HEAD^1`), so a PR never judges itself by its own rules;
-a base without one, or a copy that fails, means a full run.
+The one home of the docs-only rule (issue #402). In each gated job `.github/actions/change-class`
+runs the base's `.github/scripts/change-class.sh`, which runs the **base's** copy of this file
+(`HEAD^1`) over `git diff --name-status -z -M HEAD^1 HEAD` of the pull request's merge commit: the
+whole PR as it would merge, not the last push. A PR never judges itself by its own rules; a base
+without these files, or a copy that fails, means a full run. `docs_only` is written last, so a
+write cut short never leaves `true` behind without the outputs it needs.
 
 - **docs-only**: a `pull_request` into the default branch whose every changed path (both sides of
   a rename) is documentation (`is_docs`). The job then runs only `DOC_TESTS` whose files changed,
@@ -244,12 +245,13 @@ def classify(
 
 
 def outputs(plan: Plan) -> str:
+    # `docs_only` last: a write cut short anywhere never leaves `true` without what it needs.
     lines = {
-        "docs_only": str(plan.docs_only).lower(),
         "cargo": str(plan.cargo).lower(),
         "nextest_packages": " ".join(f"-p {p}" for p in plan.nextest_packages),
         "nextest_filter": plan.nextest_filter,
         "doc_packages": " ".join(plan.doc_packages),
+        "docs_only": str(plan.docs_only).lower(),
     }
     return "".join(f"{k}={v}\n" for k, v in lines.items())
 

@@ -7,6 +7,7 @@ deletions, the empty and unreadable diff), and guards over this checkout that ke
 the repo moves: every documentation file a Rust source reads is covered by a `DOC_TESTS` entry, and
 every entry names files, a package, a binary and tests that exist.
 """
+import functools
 import importlib.util
 import os
 import pathlib
@@ -349,10 +350,31 @@ class Cli(unittest.TestCase):
 
 SCRIPT = HERE / "change-class.sh"
 CLASSIFIER = (HERE / "change_class.py").read_text()
+SHELL = SCRIPT.read_text()
+ACTION = REPO / ".github/actions/change-class/action.yml"
+
+
+def bootstrap() -> str:
+    """The action's own `run:` block: the one piece of the chain that is the PR's, not the base's."""
+    lines = ACTION.read_text().split("\n")
+    start = next(i for i, line in enumerate(lines) if line.strip() == "run: |") + 1
+    block = []
+    for line in lines[start:]:
+        if line.strip() and not line.startswith(" " * 8):
+            break
+        block.append(line[8:])
+    return "\n".join(block)
+
+
+def verdict(out: str) -> str | None:
+    """`docs_only` as a job reads it: the last value written wins, none means not docs-only."""
+    values = [line.split("=", 1)[1] for line in out.splitlines() if line.startswith("docs_only=")]
+    return values[-1] if values else None
 
 
 class Action(unittest.TestCase):
-    """change-class.sh end to end, over real merge commits in a throwaway repo, as a job runs it."""
+    """The action end to end, as a job runs it: its bootstrap, then the base's change-class.sh and
+    change_class.py, over real merge commits in a throwaway repo."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -364,6 +386,7 @@ class Action(unittest.TestCase):
         self.git("config", "commit.gpgsign", "false")
         self.write("docs/src/page.md", "page\n")
         self.write("libs/a/src/lib.rs", "pub fn a() {}\n")
+        self.head_sha: str | None = None
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -371,15 +394,17 @@ class Action(unittest.TestCase):
     def git(self, *args: str) -> str:
         return subprocess.run(
             ["git", "-C", str(self.root), *args], check=True, capture_output=True, text=True
-        ).stdout
+        ).stdout.strip()
 
     def write(self, path: str, text: str) -> None:
         (self.root / path).parent.mkdir(parents=True, exist_ok=True)
         (self.root / path).write_text(text)
 
-    def base(self, classifier: str | None = CLASSIFIER) -> None:
+    def base(self, classifier: str | None = CLASSIFIER, shell: str | None = SHELL) -> None:
         if classifier is not None:
             self.write(".github/scripts/change_class.py", classifier)
+        if shell is not None:
+            self.write(".github/scripts/change-class.sh", shell)
         self.git("add", "-A")
         self.git("commit", "-qm", "base")
 
@@ -390,12 +415,22 @@ class Action(unittest.TestCase):
             self.write(name, text)
         self.git("add", "-A")
         self.git("commit", "-qm", "pr")
+        self.head_sha = self.git("rev-parse", "HEAD")
         self.git("switch", "-q", "main")
         self.git("merge", "-q", "--no-ff", "-m", "merge", "pr")
 
-    def run_action(self, event: str = "pull_request", base_ref: str = "main", default: str = "main") -> tuple[str, str]:
-        out, summary = pathlib.Path(self.tmp.name, "out"), pathlib.Path(self.tmp.name, "summary")
-        out.write_text("")
+    def run_action(
+        self,
+        event: str = "pull_request",
+        base_ref: str = "main",
+        default: str = "main",
+        head_sha: str | None = None,
+        output: pathlib.Path | None = None,
+    ) -> tuple[str, str]:
+        out = output or pathlib.Path(self.tmp.name, "out")
+        summary = pathlib.Path(self.tmp.name, "summary")
+        if output is None:
+            out.write_text("")
         summary.write_text("")
         temp = pathlib.Path(self.tmp.name, "runner-temp")
         temp.mkdir(exist_ok=True)
@@ -405,26 +440,27 @@ class Action(unittest.TestCase):
             JOB="test",
             BASE_REF=base_ref,
             DEFAULT_BRANCH=default,
+            HEAD_SHA=head_sha if head_sha is not None else (self.head_sha or ""),
             GITHUB_OUTPUT=str(out),
             GITHUB_STEP_SUMMARY=str(summary),
             RUNNER_TEMP=str(temp),
         )
-        done = subprocess.run(["bash", str(SCRIPT)], cwd=self.root, env=env, capture_output=True, text=True)
+        done = subprocess.run(["bash", "-c", bootstrap()], cwd=self.root, env=env, capture_output=True, text=True)
         self.assertEqual(done.returncode, 0, done.stderr)
-        return out.read_text(), summary.read_text()
+        return (out.read_text() if out.exists() else ""), summary.read_text()
 
     def test_a_docs_only_pr_into_the_default_branch_is_docs_only(self) -> None:
         self.base()
         self.merge({"docs/src/page.md": "changed\n"})
         out, summary = self.run_action()
-        self.assertIn("docs_only=true\n", out)
+        self.assertEqual(verdict(out), "true")
         self.assertIn("docs-only: skipped", summary)
 
     def test_a_base_without_a_classifier_runs_everything(self) -> None:
         self.base(classifier=None)
         self.merge({"docs/src/page.md": "changed\n"})
         out, summary = self.run_action()
-        self.assertIn("docs_only=false\n", out)
+        self.assertEqual(verdict(out), "false")
         self.assertIn("cargo=true\n", out)
         self.assertIn("the base has no classifier", summary)
 
@@ -434,7 +470,7 @@ class Action(unittest.TestCase):
         self.assertNotEqual(loose, CLASSIFIER)
         self.merge({".github/scripts/change_class.py": loose, "libs/a/src/lib.rs": "pub fn b() {}\n"})
         out, _ = self.run_action()
-        self.assertIn("docs_only=false\n", out)
+        self.assertEqual(verdict(out), "false")
 
     def test_the_bases_copy_decides_not_the_prs(self) -> None:
         # A base whose rule calls everything docs, a PR restoring the strict rule: the base decides.
@@ -444,26 +480,26 @@ class Action(unittest.TestCase):
         self.base(classifier=permissive)
         self.merge({".github/scripts/change_class.py": CLASSIFIER, "libs/a/src/lib.rs": "pub fn c() {}\n"})
         out, _ = self.run_action()
-        self.assertIn("docs_only=true\n", out)
+        self.assertEqual(verdict(out), "true")
 
     def test_a_base_classifier_that_fails_runs_everything(self) -> None:
         self.base(classifier="raise SystemExit(3)\n")
         self.merge({"docs/src/page.md": "changed\n"})
         out, summary = self.run_action()
-        self.assertIn("docs_only=false\n", out)
+        self.assertEqual(verdict(out), "false")
         self.assertIn("classifier failed", summary)
 
     def test_a_base_classifier_that_writes_nothing_runs_everything(self) -> None:
         self.base(classifier="pass\n")
         self.merge({"docs/src/page.md": "changed\n"})
         out, _ = self.run_action()
-        self.assertEqual(out, "docs_only=false\ncargo=true\n")
+        self.assertEqual(out, "cargo=true\ndocs_only=false\n")
 
     def test_another_base_branch_runs_everything(self) -> None:
         self.base()
         self.merge({"docs/src/page.md": "changed\n"})
         out, summary = self.run_action(base_ref="feature")
-        self.assertIn("docs_only=false\n", out)
+        self.assertEqual(verdict(out), "false")
         self.assertIn("`feature`", summary)
 
     def test_every_other_event_runs_everything(self) -> None:
@@ -472,15 +508,107 @@ class Action(unittest.TestCase):
         for event in ("push", "workflow_dispatch", ""):
             with self.subTest(event):
                 out, _ = self.run_action(event=event)
-                self.assertIn("docs_only=false\n", out)
+                self.assertEqual(verdict(out), "false")
 
     def test_a_checkout_that_is_no_merge_commit_runs_everything(self) -> None:
         self.base()
         self.write("docs/src/page.md", "changed\n")
         self.git("commit", "-qam", "plain")
         out, summary = self.run_action()
-        self.assertIn("docs_only=false\n", out)
+        self.assertEqual(verdict(out), "false")
         self.assertIn("not a pull request's merge commit", summary)
+
+    def test_a_merge_whose_first_parent_is_not_the_base_runs_everything(self) -> None:
+        # The PR's head is itself "merge main into feature": checked out as is, HEAD^1 is the code
+        # branch and HEAD^2 main, so the diff is main's docs change alone. HEAD^2 is not the head.
+        self.base()
+        self.git("switch", "-qc", "feature")
+        self.write("libs/a/src/lib.rs", "pub fn code() {}\n")
+        self.git("commit", "-qam", "code")
+        self.git("switch", "-q", "main")
+        self.write("docs/src/page.md", "changed\n")
+        self.git("commit", "-qam", "docs")
+        self.git("switch", "-q", "feature")
+        self.git("merge", "-q", "--no-ff", "-m", "merge main into feature", "main")
+        head = self.git("rev-parse", "HEAD")
+        self.assertEqual(self.git("diff", "--name-only", "HEAD^1", "HEAD"), "docs/src/page.md")
+        out, summary = self.run_action(head_sha=head)
+        self.assertEqual(verdict(out), "false")
+        self.assertIn("not the pull request's head", summary)
+
+    def test_an_unknown_head_sha_runs_everything(self) -> None:
+        self.base()
+        self.merge({"docs/src/page.md": "changed\n"})
+        out, _ = self.run_action(head_sha="")
+        self.assertEqual(verdict(out), "false")
+
+    def test_a_base_without_the_shell_runs_everything(self) -> None:
+        # Bootstrapping: this PR's own base has neither file, so it runs everything.
+        self.base(shell=None)
+        self.merge({"docs/src/page.md": "changed\n"})
+        out, summary = self.run_action()
+        self.assertEqual(out, "cargo=true\ndocs_only=false\n")
+        self.assertIn("the base has no", summary)
+
+    def test_a_base_with_neither_file_runs_everything(self) -> None:
+        self.base(classifier=None, shell=None)
+        self.merge({"docs/src/page.md": "changed\n"})
+        out, _ = self.run_action()
+        self.assertEqual(verdict(out), "false")
+
+    def test_the_bases_shell_decides_not_the_prs(self) -> None:
+        # A PR rewriting change-class.sh to say docs-only is not run: the base's copy is.
+        self.base()
+        forged = "#!/usr/bin/env bash\nprintf 'cargo=false\\ndocs_only=true\\n' >>\"$GITHUB_OUTPUT\"\n"
+        self.merge({".github/scripts/change-class.sh": forged, "libs/a/src/lib.rs": "pub fn d() {}\n"})
+        out, _ = self.run_action()
+        self.assertEqual(verdict(out), "false")
+
+    def test_a_base_shell_that_fails_runs_everything(self) -> None:
+        self.base(shell="printf 'docs_only=true\\n' >>\"$GITHUB_OUTPUT\"; exit 4\n")
+        self.merge({"docs/src/page.md": "changed\n"})
+        out, summary = self.run_action()
+        self.assertEqual(verdict(out), "false")
+        self.assertIn("failed", summary)
+
+    def test_a_verdict_not_written_last_runs_everything(self) -> None:
+        # A classifier that writes docs_only first, then dies or goes on writing, gives no verdict.
+        early = (
+            "import sys\n"
+            "out = sys.argv[sys.argv.index('--output') + 1]\n"
+            "open(out, 'a').write('docs_only=true\\ncargo=false\\n')\n"
+        )
+        self.base(classifier=early)
+        self.merge({"docs/src/page.md": "changed\n"})
+        out, _ = self.run_action()
+        self.assertEqual(verdict(out), "false")
+
+    def test_every_prefix_of_a_docs_only_write_reads_as_a_full_run(self) -> None:
+        # D: a write to $GITHUB_OUTPUT cut short anywhere never leaves docs_only=true behind
+        # without the outputs it needs.
+        self.base()
+        self.merge({"plugin/x.md": "changed\n"})
+        out, _ = self.run_action()
+        self.assertEqual(verdict(out), "true")
+        self.assertTrue(out.endswith("docs_only=true\n"))
+        others = [line for line in out.splitlines() if not line.startswith("docs_only=")]
+        self.assertEqual([line.split("=", 1)[0] for line in others], ["cargo", "nextest_packages", "nextest_filter", "doc_packages"])
+        for cut in range(len(out)):
+            with self.subTest(cut=cut):
+                prefix = out[:cut]
+                if verdict(prefix) == "true":
+                    self.assertTrue(all(prefix.startswith(line + "\n") or (line + "\n") in prefix for line in others))
+
+    def test_the_classifier_reads_files_from_the_repository_top_level(self) -> None:
+        # --root is the top level, so a compiled README is found wherever the job's directory is.
+        self.write("libs/a/Cargo.toml", '[package]\nname = "flusso-a"\n')
+        self.write("libs/a/src/lib.rs", '#![doc = include_str!("../README.md")]\n')
+        self.write("libs/a/README.md", "a\n")
+        self.base()
+        self.merge({"libs/a/README.md": "b\n"})
+        out, _ = self.run_action()
+        self.assertIn("doc_packages=flusso-a\n", out)
+        self.assertEqual(verdict(out), "true")
 
 
 def tracked(*patterns: str) -> list[str]:
@@ -512,46 +640,133 @@ NOT_READS = {
         "a prefix the guard recognises in agent docs; it checks named files exist, so on_removal runs it"
     ),
     ("dev/bench/src/main.rs", "docs/s"): "a unit: documents per second",
+    ("apps/cli/src/commands/schema_cmd.rs", "{}-{}.md"): "a rendered table's name; the directory read is covered",
+    ("apps/cli/src/commands/schema_cmd.rs", "{}-{}-index.md"): "a rendered table's name; the directory read is covered",
+    ("apps/cli/tests/agent_docs_paths.rs", "md"): "the extension its covered walk of the agent docs keeps",
+    ("apps/design/src/commit/tests.rs", "../{own}/notes.md"): "a file the test writes beside its temp project",
+    ("libs/2-engine/tests/pipeline.rs", "md"): "a test table and index name",
     ("libs/2-adapters/sink-opensearch/tests/document_ids.rs", "docs"): "a key of an OpenSearch response",
     ("libs/2-adapters/source-postgres/src/cdc/capture.rs", "plugin"): "a column of pg_replication_slots",
     ("libs/2-engine/tests/bytea_output.rs", "docs"): "a test table and index name",
 }
 
 
-DOC_ROOTS = ("docs", "plugin", ".claude", ".claude/commands", ".claude/skills")
+DOC_ROOT = re.compile(r"(^|/)(docs|plugin|\.claude)(/|$)")
+ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "\\": "\\", '"': '"', "'": "'"}
+CHAR = re.compile(r"'(?:\\(?:u\{[0-9a-fA-F]+\}|x[0-9a-fA-F]{2}|.)|[^\\'\n])'")
+RAW_START = re.compile(r'[bc]?r(#*)"')
+QUOTE_START = re.compile(r'[bc]?"')
+
+
+def rust_literals(code: str) -> list[str]:
+    r"""The string literals of a Rust source as the compiler reads them: plain, byte and C strings
+    with their escapes and `\`-newline continuations, raw strings of any `#` depth; comments
+    (nested block comments too), char literals and lifetimes are stepped over."""
+    found = []
+    i, n = 0, len(code)
+    while i < n:
+        if code.startswith("//", i):
+            end = code.find("\n", i)
+            i = n if end < 0 else end
+            continue
+        if code.startswith("/*", i):
+            depth, i = 1, i + 2
+            while i < n and depth:
+                if code.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif code.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+            continue
+        starts_token = i == 0 or not (code[i - 1].isalnum() or code[i - 1] == "_")
+        raw = RAW_START.match(code, i) if starts_token else None
+        if raw:
+            close = '"' + raw.group(1)
+            start = raw.end()
+            end = code.find(close, start)
+            if end < 0:
+                break
+            found.append(code[start:end])
+            i = end + len(close)
+            continue
+        quoted = QUOTE_START.match(code, i) if starts_token or code[i] == '"' else None
+        if quoted:
+            i = quoted.end()
+            text = []
+            while i < n and code[i] != '"':
+                if code[i] == "\\" and i + 1 < n:
+                    escaped = code[i + 1]
+                    if escaped == "\n":
+                        i += 2
+                        while i < n and code[i] in " \t\r\n":
+                            i += 1
+                        continue
+                    text.append(ESCAPES.get(escaped, escaped))
+                    i += 2
+                    continue
+                text.append(code[i])
+                i += 1
+            found.append("".join(text))
+            i += 1
+            continue
+        if code[i] == "'":
+            char = CHAR.match(code, i)
+            i = char.end() if char else i + 1
+            continue
+        i += 1
+    return found
 
 
 def doc_literals(code: str) -> list[str]:
-    """String literals outside `//` comments that may name documentation: a `.md` file, anything
-    under `docs/`, `plugin/` or `.claude/`, or one of those roots itself."""
-    code = "\n".join(line for line in code.splitlines() if not line.lstrip().startswith("//"))
-    found = []
-    for literal in re.findall(r'"([^"\n]*)"', code):
-        bare = literal.split("{", 1)[0].strip("/")
-        if (
-            literal.endswith(".md")
-            or bare in DOC_ROOTS
-            or re.search(r"(^|/)(docs|plugin|\.claude)/", literal)
-        ):
-            found.append(literal)
-    return found
+    """String literals (not comments) that may name documentation: a `.md` file or extension, or a
+    path through `docs`, `plugin` or `.claude` anywhere in it."""
+    return [
+        literal
+        for literal in rust_literals(code)
+        if literal.endswith(".md") or literal == "md" or DOC_ROOT.search(literal)
+    ]
+
+
+@functools.cache
+def tree_doc_literals() -> tuple[tuple[str, list[str]], ...]:
+    """`doc_literals` of every tracked Rust source, read once per test run."""
+    return tuple((path, doc_literals((REPO / path).read_text(errors="replace"))) for path in tracked("*.rs"))
+
+
+def doc_path(literal: str) -> tuple[str, bool] | None:
+    """The path a literal names, and whether only the repository root can anchor it. A literal
+    with `{}` placeholders keeps its constant part from the docs root on; one with none of the roots
+    (`"{}.md"`, `"md"`) names nothing the guard can resolve."""
+    if "{" in literal or literal == "md":
+        root = DOC_ROOT.search(literal)
+        if root is None:
+            return None
+        return literal[root.start(2):].split("{", 1)[0], True
+    # `concat!(env!("CARGO_MANIFEST_DIR"), "/../x")` is relative to the crate.
+    return literal.lstrip("/"), False
 
 
 def doc_reads_not_covered(extra: dict[str, str] | None = None) -> list[str]:
     """Each literal a Rust source holds that names documentation no DOC_TESTS entry of its own
     package covers (and that is not its crate's compiled README), or that names nothing that exists."""
     crates = packages()
-    sources = {path: (REPO / path).read_text(errors="replace") for path in tracked("*.rs")}
-    sources.update(extra or {})
+    literals = dict(tree_doc_literals())
+    literals.update({path: doc_literals(code) for path, code in (extra or {}).items()})
     found = []
-    for source, code in sources.items():
+    for source, in_source in literals.items():
         crate = crate_of(source, crates)
-        for literal in doc_literals(code):
+        for literal in in_source:
             if (source, literal) in NOT_READS:
                 continue
-            # `format!("docs/{x}.md")` reads under its constant prefix; `concat!(…, "/../x")` is relative.
-            relative = literal.split("{", 1)[0].lstrip("/")
-            bases = [pathlib.PurePosixPath(source).parent, pathlib.PurePosixPath(crates.get(crate, ".")), pathlib.PurePosixPath(".")]
+            path = doc_path(literal)
+            if path is None:
+                found.append(f"{source}: {literal!r} names documentation the guard cannot resolve")
+                continue
+            relative, from_root = path
+            bases = [pathlib.PurePosixPath(".")]
+            if not from_root:
+                bases = [pathlib.PurePosixPath(source).parent, pathlib.PurePosixPath(crates.get(crate, "."))] + bases
             resolved = None
             for base in bases:
                 candidate = os.path.normpath(str(base / relative)) if relative else str(base)
@@ -595,18 +810,67 @@ class Repo(unittest.TestCase):
                 self.assertIn(literal, doc_literals((REPO / source).read_text()))
 
     def test_the_guard_sees_every_reader_shape(self) -> None:
+        page = "../../../docs/src/SUMMARY.md"
         shapes = {
             "top-level file": 'include_str!("../../../CLAUDE.md")',
             "directory walk": 'root.join("docs")',
+            "docs root with no slash": 'root.join("../../docs")',
             "chained join": 'root.join("plugin").join("skills")',
             "concat": 'concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/src/SUMMARY.md")',
             "format": 'format!("docs/src/reference/{name}.md")',
+            "format with a leading placeholder": 'format!("{}/../../docs/src/{}.md", root, name)',
+            "an extension": 'path.with_extension("md")',
             "unresolved page": 'std::fs::read_to_string("docs/src/no-such-page.md")',
+            "after an escaped quote": f'let a = "x\\"y"; let p = "{page}";',
+            "after a quote char": f"let q = '\"'; let p = \"{page}\";",
+            "after an escaped quote char": f"let q = '\\''; let r = '\"'; let p = \"{page}\";",
+            "after a lifetime": f"fn g<'a>(x: &'a str) {{}} let p = \"{page}\";",
+            "after a block comment holding a quote": f'/* " /* nested " */ " */ let p = "{page}";',
+            "a raw string": f'let p = r#"{page}"#;',
+            "a raw string holding a quote": f'let a = r#"say "hi""#; let p = "{page}";',
+            "a byte string": f'let p = b"{page}";',
+            "a string continued over lines": 'let p = "../../../docs/\\\n        src/SUMMARY.md";',
         }
         for shape, code in shapes.items():
             with self.subTest(shape):
-                found = doc_reads_not_covered({"libs/2-engine/src/fake.rs": f"fn f() {{ {code}; }}"})
-                self.assertTrue(found, f"{shape}: {code}")
+                fake = "libs/2-engine/src/fake.rs"
+                found = doc_reads_not_covered({fake: f"fn f() {{ {code}; }}"})
+                self.assertTrue([f for f in found if f.startswith(fake)], f"{shape}: {code}")
+
+    def test_the_reads_known_today_are_seen(self) -> None:
+        seen = dict(tree_doc_literals())
+        known = {
+            "libs/2-script/tests/dates.rs": "../../../docs/src/operate/upgrade-to-0-18.md",
+            "sdk/query-derive/tests/boundary.rs": "../../docs/src/query/document-structs.md",
+            "apps/cli/tests/agent_docs_paths.rs": ".claude/skills",
+            "apps/cli/src/commands/schema_cmd.rs": "docs/src/reference/generated",
+        }
+        for source, literal in known.items():
+            with self.subTest(source):
+                self.assertIn(literal, seen[source])
+
+    def test_comments_are_not_reads(self) -> None:
+        for code in ('// "docs/src/SUMMARY.md"', '/// see "docs/x.md"', '/* "plugin/x.md" */', "//! `docs/`"):
+            with self.subTest(code):
+                self.assertEqual(doc_literals(code + "\nfn f() {}"), [])
+
+    def test_literals_are_read_as_rust_reads_them(self) -> None:
+        cases = {
+            '"a" "b"': ["a", "b"],
+            r'"x\"y" "z"': ['x"y', "z"],
+            r'"a\\" "b"': ["a\\", "b"],
+            "'\"' \"c\"": ["c"],
+            r"'\'' '\\' '\u{22}' 'x' " + '"d"': ["d"],
+            "fn f<'a>(_: &'a str) -> &'static str { \"e\" }": ["e"],
+            'r"raw\\n" r##"has "# inside"## br"b" b"by" c"cs"': ["raw\\n", 'has "# inside', "b", "by", "cs"],
+            '"one\\\n      two"': ["onetwo"],
+            '"tab\\tnl\\n"': ["tab\tnl\n"],
+            "bar(\"q\")": ["q"],
+            '/* "no" /* "nested" */ "still no" */ "yes"': ["yes"],
+        }
+        for code, literals in cases.items():
+            with self.subTest(code):
+                self.assertEqual(rust_literals(code), literals)
 
     def test_every_compiled_readme_is_found(self) -> None:
         for lib in tracked("*src/lib.rs"):
@@ -650,7 +914,8 @@ class Repo(unittest.TestCase):
         action = (REPO / ".github/actions/change-class/action.yml").read_text()
         self.assertIn("BASE_REF: ${{ github.event.pull_request.base.ref }}", action)
         self.assertIn("DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}", action)
-        self.assertIn("run: bash .github/scripts/change-class.sh", action)
+        self.assertIn("HEAD_SHA: ${{ github.event.pull_request.head.sha }}", action)
+        self.assertIn("git show 'HEAD^1:.github/scripts/change-class.sh'", bootstrap())
 
     def test_every_gated_job_has_a_summary(self) -> None:
         workflows = "\n".join((REPO / ".github/workflows" / f).read_text() for f in ("ci.yml", "bench.yml"))

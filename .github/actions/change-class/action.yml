@@ -1,12 +1,13 @@
 name: Change class
 description: >-
   Whether this run is a docs-only pull request (issue #402), and what such a run
-  must still check. `.github/scripts/change-class.sh` runs the base's
-  `.github/scripts/change_class.py` over the whole PR as it would merge: the
-  checkout's merge commit against its first parent, so the checkout needs
-  `fetch-depth: 2`. Only a PR into the default branch can be docs-only; any
-  other event, base, or a diff or classifier that fails is a full run. Writes
-  what was skipped to the job summary.
+  must still check. It runs the base's `.github/scripts/change-class.sh`, which
+  runs the base's `.github/scripts/change_class.py` over the whole PR as it
+  would merge: the checkout's merge commit against its first parent, so the
+  checkout needs `fetch-depth: 2`. Only a PR into the default branch whose
+  merge commit's second parent is the PR's head can be docs-only; any other
+  event, base, or a script that is missing or fails is a full run. Writes what
+  was skipped to the job summary.
 
 inputs:
   job:
@@ -41,4 +42,22 @@ runs:
         JOB: ${{ inputs.job }}
         BASE_REF: ${{ github.event.pull_request.base.ref }}
         DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-      run: bash .github/scripts/change-class.sh
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      # The base's change-class.sh decides (and runs the base's change_class.py), never this PR's
+      # copy. Only what can't reach it is decided here, and it means running everything. A
+      # docs_only written after the verdict wins, so a failing script can't leave `true` behind.
+      run: |
+        full() {
+          printf 'cargo=true\ndocs_only=false\n' >>"$GITHUB_OUTPUT"
+          printf '**Full suite**: %s.\n' "$1" >>"$GITHUB_STEP_SUMMARY"
+          echo "full: $1" >&2
+        }
+        script=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/change-class.XXXXXX")
+        if [ "${EVENT:-}" != pull_request ]; then
+          full "a \`${EVENT:-unknown}\` run checks everything"
+        elif ! git show 'HEAD^1:.github/scripts/change-class.sh' >"$script" 2>/dev/null; then
+          full "the base has no \`.github/scripts/change-class.sh\`"
+        elif ! bash "$script"; then
+          echo "::warning::the base's change-class.sh failed; running everything"
+          full "the base's change-class.sh failed"
+        fi
