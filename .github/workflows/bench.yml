@@ -57,12 +57,22 @@ jobs:
         with:
           fetch-depth: 0
 
+      # A docs-only pull request benches nothing (issue #402): no bench reads
+      # documentation. The job still reports, and its summary says so.
+      - name: Docs-only?
+        id: change
+        uses: ./.github/actions/change-class
+        with:
+          job: bench
+
       - name: Install Rust
+        if: steps.change.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@stable
 
       # Caches ./target (the PR's) only; the base's target dir is seeded from
       # it below, so both sides start from the cached dependencies.
       - name: Cache build artifacts
+        if: steps.change.outputs.docs_only != 'true'
         uses: Swatinem/rust-cache@v2
 
       # The base gets its own worktree and target dir, both kept for the whole
@@ -74,6 +84,7 @@ jobs:
       # run-time inputs are identical on both sides is not run at all: it
       # cannot differ in speed, and the gate gives it no verdict.
       - name: Build the base's benches
+        if: steps.change.outputs.docs_only != 'true'
         run: |
           set -euo pipefail
           git worktree add --detach "$RUNNER_TEMP/base" ${{ github.event.pull_request.base.sha }}
@@ -92,10 +103,11 @@ jobs:
           fi
 
       - name: Build the PR's benches
+        if: steps.change.outputs.docs_only != 'true'
         run: BENCH_BUILD_ONLY=1 .github/scripts/bench-in-process.sh pr
 
       - name: Bench the base (baseline `base`)
-        if: env.BENCH_BASE_EMPTY != '1'
+        if: steps.change.outputs.docs_only != 'true' && env.BENCH_BASE_EMPTY != '1'
         run: |
           set -euo pipefail
           pr_identity="$CARGO_TARGET_DIR/bench-executables/pr.identity.tsv"
@@ -104,11 +116,13 @@ jobs:
             "$GITHUB_WORKSPACE/.github/scripts/bench-in-process.sh" base
 
       - name: Bench the PR (baseline `pr`)
+        if: steps.change.outputs.docs_only != 'true'
         run: |
           BENCH_SKIP_SAME_AS="$BASE_TARGET_DIR/bench-executables/base.identity.tsv" \
             .github/scripts/bench-in-process.sh pr
 
       - name: Compare (fail past 10% slower, confirmed by a re-run)
+        if: steps.change.outputs.docs_only != 'true'
         run: .github/scripts/bench-gate.sh "$RUNNER_TEMP/base" "$BASE_TARGET_DIR" 10
 
   scenarios:

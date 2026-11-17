@@ -1,0 +1,68 @@
+name: Change class
+description: >-
+  Whether this run is a docs-only pull request (issue #402), and what such a run
+  must still check. It runs the base's `.github/scripts/change-class.sh`, which
+  runs the base's `.github/scripts/change_class.py` over the whole PR as it
+  would merge: the checkout's merge commit against its first parent, so the
+  checkout needs `fetch-depth: 2`. Only a PR into the default branch whose
+  merge commit's second parent is the PR's head can be docs-only; any other
+  event, base, or a script that is missing or fails is a full run. Writes what
+  was skipped to the job summary.
+
+inputs:
+  job:
+    description: The gated job, a key of `change_class.py`'s SKIPPED.
+    required: true
+
+outputs:
+  docs_only:
+    description: '`true` when every changed file is documentation.'
+    value: ${{ steps.decide.outputs.docs_only }}
+  cargo:
+    description: '`true` when the job still needs a Rust toolchain.'
+    value: ${{ steps.decide.outputs.cargo }}
+  nextest_packages:
+    description: '`-p <package>` for each package a docs-reading test lives in.'
+    value: ${{ steps.decide.outputs.nextest_packages }}
+  nextest_filter:
+    description: The nextest filterset of the tests that read the changed docs; empty for none.
+    value: ${{ steps.decide.outputs.nextest_filter }}
+  doc_packages:
+    description: Packages whose compiled README changed (doctests + doc links).
+    value: ${{ steps.decide.outputs.doc_packages }}
+
+runs:
+  using: composite
+  steps:
+    - name: Decide what this change must run
+      id: decide
+      shell: bash
+      env:
+        EVENT: ${{ github.event_name }}
+        JOB: ${{ inputs.job }}
+        BASE_REF: ${{ github.event.pull_request.base.ref }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      # The base's change-class.sh decides (and runs the base's change_class.py), never this PR's
+      # copy. Only what can't reach it is decided here, and it means running everything. A
+      # docs_only written after the verdict wins, so a failing script can't leave `true` behind.
+      run: |
+        full() {
+          printf 'cargo=true\ndocs_only=false\n' >>"$GITHUB_OUTPUT"
+          printf '**Full suite**: %s.\n' "$1" >>"$GITHUB_STEP_SUMMARY"
+          echo "full: $1" >&2
+        }
+        script=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/change-class.XXXXXX")
+        # The script writes to a file of its own, copied over only when it succeeds: a script
+        # that fails after an unterminated `key<<` can't swallow the full-run verdict.
+        verdict=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/change-class.XXXXXX")
+        if [ "${EVENT:-}" != pull_request ]; then
+          full "a \`${EVENT:-unknown}\` run checks everything"
+        elif ! git show 'HEAD^1:.github/scripts/change-class.sh' >"$script" 2>/dev/null; then
+          full "the base has no \`.github/scripts/change-class.sh\`"
+        elif ! GITHUB_OUTPUT="$verdict" bash "$script"; then
+          echo "::warning::the base's change-class.sh failed; running everything"
+          full "the base's change-class.sh failed"
+        else
+          cat "$verdict" >>"$GITHUB_OUTPUT"
+        fi
