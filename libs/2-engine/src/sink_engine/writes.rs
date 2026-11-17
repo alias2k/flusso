@@ -51,7 +51,7 @@
 
 use std::cmp::Ordering as Order;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
@@ -155,6 +155,13 @@ pub(super) struct Run<'a> {
     /// The previous run failed and nothing has landed since: grant only the
     /// window's front item, alone.
     barrier: bool,
+    /// Live (positioned) and backfill batches waiting in the window.
+    live_waiting: usize,
+    backfill_waiting: usize,
+    /// When the oldest written position becomes searchable, as the fences
+    /// said when they last changed: refreshed when a position is received, a
+    /// write returns or the timer fires, not on every turn.
+    next_due: Option<Instant>,
     /// When the sink last had nothing in flight and nothing taken, while it
     /// still has nothing: the open idle window.
     idle_since: Option<Instant>,
@@ -174,6 +181,9 @@ impl<'a> Run<'a> {
             failure: None,
             lane_closed: false,
             barrier: engine.failed_run.load(Ordering::Relaxed),
+            live_waiting: 0,
+            backfill_waiting: 0,
+            next_due: None,
             idle_since: Some(Instant::now()),
         }
     }
@@ -200,12 +210,12 @@ impl<'a> Run<'a> {
                 }
             }
 
-            let room = self.failure.is_none()
-                && !self.lane_closed
-                && self.window.len() + self.flights.len() < self.capacity();
-            let next_due = self.engine.lock_fences().next_due();
+            let room = self.wants_more();
+            let next_due = self.next_due;
+            // A stop changes nothing for the loop but the backfill waiting
+            // (skipped unwritten), so it is watched only while some waits.
             let stop = self.engine.stop.clone();
-            let stopped = stop.is_requested();
+            let watch_stop = self.backfill_waiting > 0 && !stop.is_requested();
             if self.flights.is_empty() && self.window.is_empty() {
                 self.idle_since.get_or_insert_with(Instant::now);
             }
@@ -238,8 +248,9 @@ impl<'a> Run<'a> {
                 () = until(next_due) => {
                     self.close_idle();
                     self.engine.report_searchable();
+                    self.refresh_due();
                 }
-                () = stop.requested(), if !stopped => self.close_idle(),
+                () = stop.requested(), if watch_stop => self.close_idle(),
                 _ = idle_tick.tick() => self.close_idle(),
             }
         }
@@ -249,7 +260,6 @@ impl<'a> Run<'a> {
     /// reindex once nothing is in flight, and start what may start. An error
     /// here is the run's failure: the caller lets the writes in flight finish.
     async fn advance(&mut self) -> Result<()> {
-        self.fill()?;
         if self.engine.stop.is_requested() {
             self.skip_backfill().await?;
         }
@@ -269,7 +279,16 @@ impl<'a> Run<'a> {
             );
         }
         if !self.engine.reindex_pending() {
+            // Grant what is already waiting first, so an item just received
+            // starts without another trip to the lane; read more only for a
+            // slot still free, then grant what it brought.
             self.grant().await?;
+            if self.wants_more() && self.fill()? {
+                if self.engine.stop.is_requested() {
+                    self.skip_backfill().await?;
+                }
+                self.grant().await?;
+            }
         }
         Ok(())
     }
@@ -283,22 +302,57 @@ impl<'a> Run<'a> {
         }
     }
 
-    fn capacity(&self) -> usize {
-        self.engine.writes + LOOKAHEAD
+    /// Whether items are granted only from the window's front, one at a time:
+    /// an ordered sink, or a run behind the barrier of a failed one.
+    fn in_lane_order(&self) -> bool {
+        self.barrier || self.engine.sink.ordered()
     }
 
-    /// Take whatever the lane has ready, while the window has room.
-    fn fill(&mut self) -> Result<()> {
-        while !self.lane_closed && self.window.len() + self.flights.len() < self.capacity() {
+    fn slots(&self) -> usize {
+        if self.in_lane_order() {
+            1
+        } else {
+            self.engine.writes
+        }
+    }
+
+    /// Whether to take another item from the lane. Only to use it: while a
+    /// write slot is free (everything waiting is blocked, or nothing waits),
+    /// or, with only backfill waiting, to find a live item behind it, up to
+    /// [`LOOKAHEAD`] items. A delivered item leaves the lane's bound and is
+    /// acknowledged only once written, so reading ahead of the writes holds
+    /// memory and delays its release for nothing.
+    fn wants_more(&self) -> bool {
+        if self.lane_closed || self.failure.is_some() {
+            return false;
+        }
+        if self.in_lane_order() {
+            return self.window.is_empty() && self.flights.is_empty();
+        }
+        self.window.len() < LOOKAHEAD
+            && (self.flights.len() < self.slots()
+                || (self.live_waiting == 0 && self.backfill_waiting > 0))
+    }
+
+    /// Take whatever the lane has ready, while it is wanted; whether it took
+    /// anything.
+    fn fill(&mut self) -> Result<bool> {
+        let mut took = false;
+        // `is_empty` is a cheap look at the lane; a `recv` future is made
+        // only when something waits to be taken.
+        while self.wants_more() && !self.lane.is_empty() {
             match self.lane.recv().now_or_never() {
                 None => break,
                 Some(delivery) => match delivery? {
                     None => self.lane_closed = true,
-                    Some(delivery) => self.queue(delivery),
+                    Some(delivery) => {
+                        self.queue(delivery);
+                        took = true;
+                    }
                 },
             }
         }
-        Ok(())
+        Ok(took)
     }
 
     fn queue(&mut self, delivery: Delivery<LaneItem>) {
@@ -307,7 +361,9 @@ impl<'a> Run<'a> {
         let item = match item {
             LaneItem::Batch(batch) => {
                 if let Some(position) = batch.position {
-                    self.engine.lock_fences().received(position);
+                    let mut fences = self.engine.lock_fences();
+                    fences.received(position);
+                    self.next_due = fences.next_due();
                 }
                 let documents = Documents::new(&batch.envelopes);
                 Queue::Batch { batch, documents }
@@ -316,6 +372,7 @@ impl<'a> Run<'a> {
         };
         let seq = self.next_seq;
         self.next_seq += 1;
+        self.count(&item, 1);
         self.window.push_back(Queued { item, handle, seq });
     }
 
@@ -337,7 +394,7 @@ impl<'a> Run<'a> {
                 item: Queue::Batch { batch, .. },
                 handle,
                 seq,
-            }) = self.window.remove(index)
+            }) = self.take_from_window(index)
             else {
                 continue;
             };
@@ -353,9 +410,11 @@ impl<'a> Run<'a> {
     /// Start writes while there is a free slot and an admissible item, and
     /// run a `SnapshotComplete` once it is the oldest thing unfinished.
     async fn grant(&mut self) -> Result<()> {
-        let in_lane_order = self.barrier || self.engine.sink.ordered();
-        let slots = if in_lane_order { 1 } else { self.engine.writes };
-        while self.flights.len() < slots {
+        let in_lane_order = self.in_lane_order();
+        let slots = self.slots();
+        // A write handled at its first poll may have failed the run: from
+        // then on nothing new starts.
+        while self.failure.is_none() && self.flights.len() < slots {
             if matches!(
                 self.window.front(),
                 Some(Queued {
@@ -370,7 +429,7 @@ impl<'a> Run<'a> {
                     item: Queue::Complete { indexes },
                     handle,
                     ..
-                }) = self.window.pop_front()
+                }) = self.take_from_window(0)
                 {
                     self.engine.complete_snapshot(indexes).await?;
                     self.acknowledge(handle, true).await?;
@@ -389,24 +448,22 @@ impl<'a> Run<'a> {
                 item: Queue::Batch { batch, documents },
                 handle,
                 seq,
-            }) = self.window.remove(index)
+            }) = self.take_from_window(index)
             else {
                 return Ok(());
             };
             let caught_up = self.window.is_empty() && self.lane.is_empty();
-            self.launch(batch, documents, handle, seq, caught_up);
+            if let Some(landed) = self.launch(batch, documents, handle, seq, caught_up) {
+                self.landed(landed).await?;
+            }
         }
         Ok(())
     }
 
     /// The window index of the next item to write, if one is admissible.
     fn pick(&mut self) -> Option<usize> {
-        let live_waiting = self.window.iter().any(
-            |queued| matches!(&queued.item, Queue::Batch { batch, .. } if batch.position.is_some()),
-        );
-        let backfill_waiting = self.window.iter().any(
-            |queued| matches!(&queued.item, Queue::Batch { batch, .. } if batch.position.is_none()),
-        );
+        let live_waiting = self.live_waiting > 0;
+        let backfill_waiting = self.backfill_waiting > 0;
         // Nothing unfinished comes before the front item, and with one kind
         // waiting there is no contest: it is the pick, with no hashing.
         if self.flying.is_empty()
@@ -423,6 +480,9 @@ impl<'a> Run<'a> {
         }
         let mut live = None;
         let mut backfill = None;
+        // The documents of the items scanned so far: one pass over the
+        // window, each document hashed and looked up once.
+        let mut earlier: HashSet<u64> = HashSet::new();
         for (index, queued) in self.window.iter().enumerate() {
             let Queue::Batch { batch, documents } = &queued.item else {
                 break;
@@ -431,15 +491,10 @@ impl<'a> Run<'a> {
                 .flying
                 .values()
                 .all(|flight| documents.share_none_with(&flight.documents))
-                && self
-                    .window
-                    .range(..index)
-                    .all(|earlier| match &earlier.item {
-                        Queue::Batch {
-                            documents: earlier, ..
-                        } => documents.share_none_with(earlier),
-                        Queue::Complete { .. } => true,
-                    });
+                && documents
+                    .hashes()
+                    .iter()
+                    .all(|hash| !earlier.contains(hash));
             if admissible {
                 if batch.position.is_some() {
                     live.get_or_insert(index);
@@ -452,6 +507,7 @@ impl<'a> Run<'a> {
             if found_live && found_backfill {
                 break;
             }
+            earlier.extend(documents.hashes().iter().copied());
         }
         match (live, backfill) {
             (Some(live), Some(backfill)) => {
@@ -473,7 +529,7 @@ impl<'a> Run<'a> {
         handle: Box<dyn AckHandle>,
         seq: u64,
         caught_up: bool,
-    ) {
+    ) -> Option<Landed> {
         let flight = self.next_flight;
         self.next_flight += 1;
         let covers_below = self.engine.lock_fences().returned();
@@ -493,19 +549,28 @@ impl<'a> Run<'a> {
         let sink = &self.engine.sink;
         let envelopes = batch.envelopes;
         let span = tracing::debug_span!("sink.write", envelopes = envelopes.len(), caught_up);
-        self.flights.push(
-            async move {
-                let started = Instant::now();
-                let result = sink.write(&envelopes, caught_up).await;
-                Landed {
-                    flight,
-                    result,
-                    took: started.elapsed(),
-                }
+        let mut write = async move {
+            let started = Instant::now();
+            let result = sink.write(&envelopes, caught_up).await;
+            Landed {
+                flight,
+                result,
+                took: started.elapsed(),
             }
-            .instrument(span)
-            .boxed(),
-        );
+        }
+        .instrument(span)
+        .boxed();
+        // Start the write now rather than at the next turn of the loop: a
+        // request goes out at once, and a write that completes on its first
+        // poll is handled here. One still running is polled again, with the
+        // run's waker, by `flights`.
+        match (&mut write).now_or_never() {
+            Some(landed) => Some(landed),
+            None => {
+                self.flights.push(write);
+                None
+            }
+        }
     }
 
     /// A write returned: decide its rejections, move the fences, and
@@ -537,6 +602,7 @@ impl<'a> Run<'a> {
         );
         self.engine
             .write_returned(flight.position, report.visibility, flight.caught_up);
+        self.refresh_due();
         // Let go of the batch before acknowledging it, so the lane frees it
         // as the acknowledgement lands, as it did with one write at a time.
         // Freeing it here after the acknowledgement made `live_drain` at 64
@@ -582,12 +648,33 @@ impl<'a> Run<'a> {
             );
             self.engine
                 .write_returned(None, report.visibility, Some(covers_below));
+            self.refresh_due();
         }
         handle.ack().await?;
         if oldest {
             self.engine.advanced.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
+    }
+
+    fn refresh_due(&mut self) {
+        self.next_due = self.engine.lock_fences().next_due();
+    }
+
+    /// Remove the window item at `index`, keeping the counts of what waits.
+    fn take_from_window(&mut self, index: usize) -> Option<Queued> {
+        let queued = self.window.remove(index)?;
+        self.count(&queued.item, -1);
+        Some(queued)
+    }
+
+    fn count(&mut self, item: &Queue, by: isize) {
+        let counter = match item {
+            Queue::Batch { batch, .. } if batch.position.is_some() => &mut self.live_waiting,
+            Queue::Batch { .. } => &mut self.backfill_waiting,
+            Queue::Complete { .. } => return,
+        };
+        *counter = counter.saturating_add_signed(by);
     }
 
     /// Whether nothing still unfinished (waiting or in flight) came before

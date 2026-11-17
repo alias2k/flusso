@@ -965,15 +965,18 @@ async fn a_stop_rejection_beside_writes_in_flight_lets_them_land_and_holds_the_w
     rig.live(1, &["a"]).await;
     rig.live(2, &["b"]).await;
     rig.live(3, &["c"]).await;
-    until("b and c to be written", || {
-        let log = rig.probe.log();
-        log.contains(&"end b".to_owned()) && log.contains(&"end c".to_owned())
+    until("b to be written", || {
+        rig.probe.log().contains(&"end b".to_owned())
     })
     .await;
     settle().await;
     assert!(
         rig.engine.as_ref().is_some_and(|run| !run.is_finished()),
         "the run waits for a"
+    );
+    assert!(
+        !rig.probe.starts().contains(&"c".to_owned()),
+        "nothing starts once the rejection failed the run"
     );
     rig.probe.release("a");
     assert!(

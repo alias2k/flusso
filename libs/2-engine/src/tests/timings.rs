@@ -291,10 +291,9 @@ async fn a_live_batch_reports_each_stage_once_with_the_time_it_took() {
 
 #[tokio::test(start_paused = true)]
 async fn a_full_lane_shows_as_time_waiting_to_publish() {
-    // The sink engine reads up to `writes` + 32 items ahead of its writes, and
-    // falls behind by `FLUSH + APPLY - BUILD - RESOLVE` per batch, so the lane
-    // fills only after about 90 batches.
-    const CHANGES: u32 = 120;
+    // The sink engine takes an item only for a free write slot, so with one
+    // write at a time the lane fills as soon as a write outlasts a build.
+    const CHANGES: u32 = 6;
     let changes: Vec<ChangeEvent> = (1..=CHANGES as i64).map(upsert).collect();
     let source = Arc::new(MockSource::new(changes));
     let timings = run(source, SlowSink::new(true), 1, batch(1)).await;
