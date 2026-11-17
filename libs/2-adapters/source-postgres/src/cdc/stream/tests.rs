@@ -710,6 +710,175 @@ async fn a_confirmation_reaches_the_client_without_a_replication_event() {
     reader.abort();
 }
 
+/// A replication connection that never sends an event and records, in order,
+/// what it was told was applied and when it was closed.
+struct ClosingClient {
+    log: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Whether the final position reaches the server.
+    sent: bool,
+}
+
+impl Replication for ClosingClient {
+    async fn recv(&mut self) -> std::result::Result<Option<ReplicationEvent>, PgWireError> {
+        std::future::pending().await
+    }
+
+    fn update_applied_lsn(&self, lsn: Lsn) {
+        let mut log = self.log.lock().unwrap();
+        let line = format!("applied {}", lsn.as_u64());
+        if log.last() != Some(&line) {
+            log.push(line);
+        }
+    }
+
+    async fn close(&mut self, report: Option<Lsn>) -> bool {
+        self.log.lock().unwrap().push(match report {
+            Some(lsn) => format!("close {}", lsn.as_u64()),
+            None => "close, nothing to report".to_owned(),
+        });
+        self.sent || report.is_none()
+    }
+}
+
+#[tokio::test]
+async fn a_close_hands_over_the_confirmed_position_then_ends_the_stream_without_a_change() {
+    use futures::StreamExt;
+    use std::time::Duration;
+
+    let ack = Arc::new(Positions::new(0, 0, Default::default()));
+    let seq = ack.register(10);
+    ack.read_through(10);
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let client = ClosingClient {
+        log: Arc::clone(&log),
+        sent: true,
+    };
+    let catalog = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused@127.0.0.1/unused")
+        .unwrap();
+    let mut stream = build(
+        client,
+        catalog,
+        Snapshots::seeing(&[]),
+        Settings {
+            pre_image_links: Default::default(),
+            read_tables: None,
+            read_ahead: 16,
+            hold_clock: Arc::default(),
+        },
+        Arc::clone(&ack),
+        None,
+    );
+    let reader = tokio::spawn(async move { stream.next().await.is_none() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    ack.confirm(seq);
+    ack.request_close();
+    let ended = tokio::time::timeout(Duration::from_secs(1), reader)
+        .await
+        .expect("a closed stream ends")
+        .unwrap();
+
+    assert!(ended, "the stream ended without yielding a change");
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec!["applied 0", "applied 10", "close 10"],
+        "the final position is handed over, then the connection closed with it"
+    );
+}
+
+#[tokio::test]
+async fn a_close_with_nothing_confirmed_since_the_start_waits_for_no_report() {
+    use futures::StreamExt;
+    use std::time::Duration;
+
+    let ack = Arc::new(Positions::new(10, 0, Default::default()));
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let client = ClosingClient {
+        log: Arc::clone(&log),
+        sent: true,
+    };
+    let catalog = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused@127.0.0.1/unused")
+        .unwrap();
+    let mut stream = build(
+        client,
+        catalog,
+        Snapshots::seeing(&[]),
+        Settings {
+            pre_image_links: Default::default(),
+            read_tables: None,
+            read_ahead: 16,
+            hold_clock: Arc::default(),
+        },
+        Arc::clone(&ack),
+        None,
+    );
+
+    ack.request_close();
+    let ended = tokio::time::timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("a closed stream ends");
+
+    assert!(ended.is_none());
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec!["applied 10", "close, nothing to report"],
+        "the slot already holds the start position: a stop right after the start waits on nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_close_whose_final_position_never_reaches_the_server_ends_the_stream_with_an_error() {
+    use futures::StreamExt;
+    use std::time::Duration;
+
+    let ack = Arc::new(Positions::new(0, 0, Default::default()));
+    let seq = ack.register(10);
+    ack.read_through(10);
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let client = ClosingClient {
+        log: Arc::clone(&log),
+        sent: false,
+    };
+    let catalog = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://unused@127.0.0.1/unused")
+        .unwrap();
+    let mut stream = build(
+        client,
+        catalog,
+        Snapshots::seeing(&[]),
+        Settings {
+            pre_image_links: Default::default(),
+            read_tables: None,
+            read_ahead: 16,
+            hold_clock: Arc::default(),
+        },
+        Arc::clone(&ack),
+        None,
+    );
+
+    ack.confirm(seq);
+    ack.request_close();
+    let last = tokio::time::timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("a closed stream ends");
+    let after = tokio::time::timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("and stays ended");
+
+    let Some(Err(error)) = last else {
+        panic!("expected an error, got {last:?}");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("the final position was not confirmed to the source"),
+        "{error}"
+    );
+    assert!(after.is_none());
+}
+
 #[test]
 fn an_oversized_message_is_a_setup_error_naming_both_sizes() {
     let error = map_pgwire(PgWireError::MessageTooLarge {
@@ -909,6 +1078,7 @@ fn holding_stream(
         refresher: None,
         hold: None,
         hold_clock,
+        closed: false,
     })
 }
 
@@ -1191,6 +1361,7 @@ async fn a_commit_arriving_as_the_snapshot_task_stops_is_still_checked() {
         refresher: None,
         hold: None,
         hold_clock: Arc::default(),
+        closed: false,
     });
     let mut seed = 0x2545_f491_u32;
     for xid in 1..=4000u32 {

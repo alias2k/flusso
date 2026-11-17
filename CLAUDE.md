@@ -346,7 +346,10 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   (`cargo tree --offline`: `ahash` keeps `runtime-rng` beside `compile-time-rng`, issue #355) → `cargo nextest run
   --profile ci --run-ignored all` → `cargo test --doc` → `RUSTDOCFLAGS="-D warnings" cargo doc
   --workspace --no-deps --document-private-items` (broken/ambiguous/redundant intra-doc links fail
-  the build). Match these before assuming green. One scope note: on PRs confined to the query
+  the build). Match these before assuming green. A `CLI on <os> (check)` job runs `cargo check -p
+  flusso-cli --locked` on `windows-latest` and `macos-latest`, the release targets beside Linux
+  (`dist-workspace.toml`): a cross check from Linux can't build `ring`, and code that compiles only on
+  Unix (`#[cfg(unix)]` the signal and `/proc` items) would otherwise fail only at a release tag. One scope note: on PRs confined to the query
   release train (`sdk/query`, `sdk/query-derive`, `dev/query-e2e`) the nextest step swaps in a
   filterset that skips the Postgres/OpenSearch container suites those paths can't break (the
   query train's own `combined_search`, `cursor_paging`, `map_keys`, `tls`, `array_columns` + `read_time` live e2e still run); pushes to main always run everything.
@@ -729,6 +732,43 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
 - **A live stream that ends still drains queued requests.** The ingest engine returns `Ok` only
   once the live stream ended *and* no snapshot is active *and* the request consumer is empty, so
   a sink that staged its backfill before the ingest engine started is still served.
+- **A stop is a graceful drain, not an abort (issue #371).** `engine::Stop`, handed to the ingest
+  engine (`with_stop`) and the supervisor by the daemon, is checked between the live stream's items
+  (`next_live` polls it before the stream, `drain_ready` stops at it), never by aborting a task. Once
+  requested: the phase is `stopping` (not ready; `DaemonControl::reindex` → `ControlError::Stopping`);
+  nothing more is read and no request served; a snapshot in progress is dropped unacked (the sink
+  re-requests it on the next start, a backfill being idempotent), and a sink engine handed the stop
+  (`SinkEngine::with_stop`) acks snapshot batches still on its lane unapplied and skips their index's
+  `SnapshotComplete`, so it isn't marked seeded with documents missing (once skipping empties the lane
+  while a `Deferred` position waits, it flushes once as caught up: the last live flush ran with snapshot
+  batches still queued, guard `a_deferred_sink_still_refreshes_when_skipped_snapshot_batches_follow_the_last_live_one`);
+  the buffered batch is published as a
+  normal commit; `engine::drain_lanes` (the same drain `supervise` runs when the stream ends) waits until
+  every lane is acked, confirming the watermark as it moves; then `ChangeCapture::close_live` (Postgres:
+  `Positions::request_close` → the stream loop hands `confirmed_lsn` over, `Replication::close` waits until
+  a status update carried it, then stops the worker: stopping first would skip the update, the worker
+  checks its stop before a due status; with nothing confirmed past the stream's start position, which
+  the slot already holds, it stops at once) and the engine polls the stream to its end. A close that
+  couldn't hand the position over (no status update in 5 s, `Replication::close` → `false`) ends the
+  stream with `the final position was not confirmed to the source`, as does a stream that doesn't end
+  within `CLOSE_WAIT`: the run fails, so the stop exits 1, never 0, with the position unconfirmed
+  (guards: `a_close_whose_final_position_never_reaches_the_server_ends_the_stream_with_an_error`,
+  `a_stop_whose_final_position_never_reaches_the_source_fails_the_run`). A stalled sink holds
+  the drain (the watermark is the minimum); the caller's deadline bounds it. After it the supervisor
+  waits on `Fence::settled` only while a `/wait` on `searchable` is open, so a stop nobody waits on
+  doesn't sit out a `Within(refresh_interval)`. A stop during staging ends before `prepare`; an ingest
+  engine that fails while stopping is not restarted. Guards: `engine` `tests::stop` (a stop raised mid-burst
+  ends the batch there, `drain_ready`'s check; mid-build batch
+  published and flushed by every sink, final confirm before close; nothing read after the stop; an
+  abandoned snapshot re-served; queued snapshot batches skipped, their index left unseeded; a stalled
+  sink; a stop before the run), `daemon` `tests::stop`
+  (staging, `stopping` + refused reindex, searchable waiter vs none), `source-postgres`'s
+  `a_close_hands_over_the_confirmed_position_then_ends_the_stream_without_a_change`, and the
+  `flusso-cli` `shutdown` e2e (steady writes: everything at or before `confirmed_flush_lsn` indexed, a
+  restart rewrites no `_version`; a paused OpenSearch: exit 1 at the deadline naming the sink, a
+  restart converges; a fence position answered by the next process at both levels;
+  `random_stops_under_writes_converge_after_a_restart`, seeded, `FLUSSO_STOP_SEED` replays: stops at
+  random points of a backfill and live writes, then the index must equal the table).
 - **…but a seed is only as good as the stream behind it (issue #120).** Run order is
   `source.continuity()` → stage every sink (`ensure_index` all, on `Fresh` `reindex` +
   `ensure_index` every still-`is_seeded` index, request backfill) → `source.prepare()` (the
@@ -1012,7 +1052,7 @@ engine's `Observer` trait, not on any metrics backend — and owns **no transpor
 server, no process signals, no metrics *recording* or *exporter*; those are the binary's.
 `Daemon::start()` builds everything and returns a `RunningDaemon` exposing `status()` (an
 `Arc<Status>` a transport can read), `control()` (a `DaemonControl` for `reindex`), and
-`run(shutdown)`, which runs until the live stream ends or the caller's `shutdown` future fires. A binary attaches its own metrics
+`run(shutdown)`, which runs until the live stream ends, or the caller's `shutdown` future fires and the deployment has drained (the stop invariant above). A binary attaches its own metrics
 observer via `Daemon::with_observer`; the engines drive a `FanOut` (`engine::FanOut`) of the
 status observer plus any attached ones. So the daemon's public contract is *data*: the
 backend-agnostic `Observer` events and the `Status` handle.
@@ -1038,12 +1078,36 @@ attached via `with_observer`; metric names/labels/buckets live here because they
 choice), serves **two** HTTP surfaces (`http/mod.rs`): a **public** one (`/healthz` `/readyz`
 `/status` `/metrics` `/wait`, unauthenticated; `/wait` long-polls the daemon's `Fence`, default
 5 s, capped at 60 s: `200` reached, `408` timed out, `400`/`404` refused, `503` before the source
-is live) and a **private** one (`/indexes`, later `/reindex`; HTTP
+is live or once flusso is stopping; `/status` adds the process `pid`) and a **private** one (`/indexes`, later `/reindex`; HTTP
 Basic auth in `http/auth.rs`, default `admin`/`flusso` with a loud startup warning), both reading
-the daemon's `Status`, and owns SIGINT/SIGTERM. It binds **both** listeners up front (a bad
-`--public-address`/`--private-address` fails fast), then `Daemon::with_observer(otel).start()`
+the daemon's `Status`, and owns the process signals. It binds **both** listeners up front (a bad
+`--public-address`/`--private-address` fails fast; a taken one names the flusso there, from its
+`/status` pid), then `Daemon::with_observer(otel).start()`
 → register the `in_flight` observable gauge (read from `Status` at collection) → serve both →
-`run(shutdown_signal())` → drain. With no meter provider installed the global meter is a no-op
+`run(stop)` → close. **The CLI owns the stop's signals, deadline and exit code (issue #371,
+`shutdown.rs`); the daemon owns the drain** (see the engine invariant above). `SIGINT`/`SIGTERM`/`SIGHUP`,
+or the parent exiting under `--exit-with-parent` (`parent_id()` polled, no `unsafe`; opt-in), resolves
+the future handed to `RunningDaemon::run`; the whole stop (drain, then HTTP close, then telemetry flush)
+runs under `shutdown::within` (biased to the finished drain) and `--shutdown-timeout-secs` (default 30;
+`0` aborts without draining, exit 0): past it the log names the step and the sinks still holding changes
+and the process exits 1. Signals are read with `signal-hook`'s origin iterator (`extended-siginfo`, on a
+thread; tokio's signals don't give the sender): `shutdown::Repeats` forces `128 + n` on the same sender
+(pid; the kernel and outside-namespace senders are their own) twice within 500 ms, or any three within
+1 s; every other repeat logs `stop already requested …` (`Throttle`, once a second). One Ctrl-C under a
+forwarding runner is two senders, one stop; `SIGHUP` is caught only when it wasn't ignored at start
+(`/proc/self/status` `SigIgn`; not caught where `/proc` is missing). HTTP close and telemetry flush are `side_step`s: at most
+5 s each, ending before the deadline, and giving up on one is logged but still exits 0 (not the data
+path). `/wait` (`http::Waits`) stays open through the drain and answers `503` + `Retry-After` +
+`reason: stopping` once it ends (`starting` before the source is live); `/status` carries `pid` and the
+`stopping` phase. `main` builds its runtime by hand and `shutdown_timeout`s it (1 s). `flusso design`
+shares the signals/second-signal helpers. Guards: `shutdown::tests` (paused time), the `http::tests`
+`/wait`/`pid`/taken-address cases, and the `flusso-cli` `shutdown` e2e (real binary, OpenSearch group).
+A taken address names the flusso there (its `/status` pid); a busy slot names its holder from
+`pg_stat_activity` before the stream opens (`WalChangeCapture::ensure_slot_free`). The lock is written
+to a temporary file beside the file its path resolves to (through a symlink), with that file's
+permissions, and renamed (`compiled.rs`'s `write_bytes`), so a stop mid-start never truncates it; where
+no file can be made beside it (EACCES/EROFS) or the rename can't land (EBUSY/EXDEV) it is written in
+place, as before (`falls_back`; guards: `compiled::tests`). With no meter provider installed the global meter is a no-op
 and the instruments cost nothing — which is why the daemon tests run with no setup. A view in
 `telemetry/metrics.rs` overrides the flush-duration histogram buckets to seconds (OTel's defaults
 assume milliseconds). The Postgres `ChangeCapture::lag` and slot-check share a small lazily-opened

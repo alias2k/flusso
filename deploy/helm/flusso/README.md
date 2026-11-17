@@ -44,6 +44,10 @@ secrets:
     FLUSSO_ADMIN_PASSWORD: change-me
 ```
 
+## Stopping
+
+A pod stop is a graceful drain: flusso lands what is in flight, confirms it to Postgres, then exits, within `run.shutdownTimeoutSecs` (30 s). The pod's `terminationGracePeriodSeconds` is 45 s so Kubernetes doesn't kill the drain; raise both together, the grace period always above the timeout (the chart refuses otherwise). What a stop does is in the manual's [Stopping](https://alias2k.github.io/flusso/reference/cli.html#stopping).
+
 ## Values
 
 `values.yaml` documents every key. The manual lists them with defaults in [Helm chart values](https://alias2k.github.io/flusso/reference/helm-values.html); the walkthrough, including how config and secrets flow and how to reach the private surface, is [Deploy with Helm](https://alias2k.github.io/flusso/deploy/helm.html).

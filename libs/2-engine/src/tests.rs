@@ -1454,3 +1454,16 @@ async fn stop_policy_fails_the_ingest_engine_on_a_failed_document() {
     );
     assert!(harness.source.confirmed.lock().unwrap().is_empty());
 }
+
+mod stop;
+
+/// Wait (up to five seconds) until `condition` holds.
+async fn wait_for(mut condition: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !condition() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+}

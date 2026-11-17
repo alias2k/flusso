@@ -105,7 +105,20 @@ pub(crate) trait Replication: Send + 'static {
     /// Report everything through `lsn` as applied. Monotonic; the client
     /// sends a raised LSN to the server within its status interval.
     fn update_applied_lsn(&self, lsn: Lsn);
+
+    /// End replication gracefully, once `report` (when there is one) has been
+    /// sent to the server. Answers whether it was: `false` means the server
+    /// may not hold the final position. The default does nothing beyond what
+    /// `update_applied_lsn` did, and answers `true`.
+    fn close(&mut self, report: Option<Lsn>) -> impl Future<Output = bool> + Send {
+        let _ = report;
+        async { true }
+    }
 }
+
+/// The longest a closing stream waits for the server to be sent the final
+/// position, and then for the replication worker to end.
+const CLOSE_STEP: Duration = Duration::from_secs(5);
 
 impl Replication for ReplicationClient {
     fn recv(
@@ -117,6 +130,30 @@ impl Replication for ReplicationClient {
 
     fn update_applied_lsn(&self, lsn: Lsn) {
         ReplicationClient::update_applied_lsn(self, lsn);
+    }
+
+    /// Waits until a standby status update carried `lsn` (the worker sends a
+    /// raised position within its status interval), then stops the worker,
+    /// which sends CopyDone. Stopping first would lose the update: the worker
+    /// checks its stop signal before a due status update.
+    async fn close(&mut self, report: Option<Lsn>) -> bool {
+        let mut sent = true;
+        if let Some(lsn) = report {
+            let metrics = self.metrics();
+            sent = tokio::time::timeout(CLOSE_STEP, async {
+                while metrics.last_applied_lsn() < lsn {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .is_ok();
+        }
+        match tokio::time::timeout(CLOSE_STEP, self.shutdown()).await {
+            Ok(Ok(())) => tracing::info!(?report, sent, "replication stream closed"),
+            Ok(Err(error)) => tracing::warn!(%error, "replication stream closed with an error"),
+            Err(_) => tracing::warn!("replication stream did not close in time; dropping it"),
+        }
+        sent
     }
 }
 
@@ -134,6 +171,8 @@ struct State<C, V> {
     refresher: Option<Refresher>,
     hold: Option<Hold>,
     hold_clock: HoldClock,
+    /// The stream was closed on request: it ends.
+    closed: bool,
 }
 
 /// Snapshot reads made on their own task, so they run while the engine builds
@@ -415,6 +454,7 @@ pub(crate) fn build<C: Replication, V: Visibility>(
         refresher: None,
         hold: None,
         hold_clock: settings.hold_clock,
+        closed: false,
     };
     into_stream(state)
 }
@@ -428,9 +468,27 @@ fn into_stream<C: Replication, V: Visibility>(
             // Report how far the engine has durably confirmed so the slot can
             // advance and the server can recycle WAL. Every turn, so the
             // horizon moving on idle progress is reported too.
-            state
-                .client
-                .update_applied_lsn(Lsn::from_u64(state.decode.ack.confirmed_lsn()));
+            let confirmed = Lsn::from_u64(state.decode.ack.confirmed_lsn());
+            state.client.update_applied_lsn(confirmed);
+            if state.closed {
+                return None;
+            }
+            if state.decode.ack.close_requested() {
+                state.closed = true;
+                let report =
+                    (confirmed.as_u64() > state.decode.ack.start_lsn()).then_some(confirmed);
+                if state.client.close(report).await {
+                    return None;
+                }
+                return Some((
+                    Err(SourceError::Connection(format!(
+                        "the final position was not confirmed to the source: {confirmed} was not \
+                         sent to Postgres within {CLOSE_STEP:?}; the next start reads the changes \
+                         after the last confirmed position again"
+                    ))),
+                    state,
+                ));
+            }
 
             if let Err(e) = state.take_latest() {
                 state.decode.done = true;

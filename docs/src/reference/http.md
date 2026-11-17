@@ -15,7 +15,7 @@ Bind addresses: `--public-address` / `--private-address`, then `FLUSSO_PUBLIC_AD
 
 ## GET /readyz
 
-`200` when the phase is `backfilling` or `live`; `503` while `starting` or after `stopped`. A stopped pipeline is deliberately not ready.
+`200` when the phase is `backfilling` or `live`; `503` while `starting`, `stopping`, or after `stopped`. A stopping or stopped pipeline is deliberately not ready.
 
 ## GET /status
 
@@ -23,7 +23,8 @@ The live status document as JSON: the deployment, then one block per sink.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `phase` | `starting` \| `backfilling` \| `live` \| `stopped` | Where the deployment is: `starting` until the ingest engine follows the source and every sink has staged (and again while a failed ingest engine restarts), `backfilling` while any sink still seeds, `stopped` once the source stream ended. |
+| `pid` | int | The flusso process's id, to stop it by. |
+| `phase` | `starting` \| `backfilling` \| `live` \| `stopping` \| `stopped` | Where the deployment is: `starting` until the ingest engine follows the source and every sink has staged (and again while a failed ingest engine restarts), `backfilling` while any sink still seeds, `stopping` from a [stop](cli.md#stopping) until its drain ends, `stopped` once the source stream ended. |
 | `uptime_seconds` | int | Since the daemon started. A reindex does not restart anything. |
 | `indexes` | map of name to `pending` \| `backfilling` \| `seeded` | Per-index state across sinks: the least advanced sink's state. |
 | `changes_captured` | int | Changes the ingest engine pulled from the source. |
@@ -52,6 +53,7 @@ A source position is in the source's own text form: for Postgres, a WAL LSN such
 
 ```json
 {
+  "pid": 48213,
   "phase": "live",
   "uptime_seconds": 412,
   "indexes": { "orders": "seeded", "products": "seeded", "users": "seeded" },
@@ -102,9 +104,9 @@ Hold the request until a commit is readable: a fence. `position` is what the cli
 | `408` | The timeout passed first. Nothing is wrong with the request; ask again or give up. |
 | `400` | `position` is missing or not a position the source can read, or `until`, `sink`, or `timeout_ms` is malformed. |
 | `404` | `sink` is not a configured sink. |
-| `503` | The source isn't following live changes yet (startup, or the ingest engine is restarting). |
+| `503` | This process can't answer now. `Retry-After: 1`, and `reason` says why: `starting` (the source isn't following live changes yet: startup, or the ingest engine is restarting) or `stopping` (the [stop](cli.md#stopping)'s drain is over). |
 
-`200` and `408` share a body; errors carry `{"error": "…"}`.
+`200` and `408` share a body; errors carry `{"error": "…"}`, a `503` also `"reason"`.
 
 ```json
 { "reached": true, "position": "0/16B3780", "until": "searchable", "sink": "primary" }
@@ -115,6 +117,8 @@ Hold the request until a commit is readable: a fence. `position` is what the cli
 - **It only waits.** Nothing is flushed or refreshed on a caller's behalf. Under a draining backlog `searchable` trails `applied` by up to the sink's [`refresh_interval`](sink-opensearch.md#refresh).
 - **A backfill isn't covered, nor an index mid-reindex.** Positions belong to live changes; an index that is still seeding, or being rebuilt behind its alias, is reported by `/status`.
 - **A position already passed answers at once**, however old it is.
+- **During a stop it keeps answering.** A wait open when the stop begins, or opened during the drain, is answered `200` if its position lands meanwhile: that is when in-flight commits reach the sinks. While a wait on `searchable` is open the drain also waits out the sink's refresh interval, inside the stop's deadline. Once the drain is over every wait still open is answered `503` with `reason: stopping`, and so is a new one.
+- **A `503` means ask again**, against the same address, until your own timeout. The position is the source's own (a WAL LSN), so the next process answers the same question: it starts from the position the last one confirmed, which after a graceful stop covers everything the last one indexed.
 
 The runbook is [Read your own writes](../operate/read-your-writes.md); the Rust client is [Reading your own writes](../query/read-your-writes.md).
 
@@ -131,6 +135,6 @@ Stage a from-scratch rebuild of one index into a fresh generation on one sink, o
 | `202 Accepted` | Queued. Each targeted sink engine stages the new generation between two batches and requests its own snapshot; nothing restarts, reads stay on the old generation until the swap, and untargeted sinks are untouched. A sink with `backfill = false` logs and ignores it. Watch `/status` for the index leaving and returning to `seeded` under that sink. |
 | `400` | Missing `index` parameter, or `index`/`sink` is not a valid name. |
 | `404` | Not a configured index, or not a configured sink. |
-| `503` | That sink's operation queue is full, or its engine has stopped for good. |
+| `503` | That sink's operation queue is full, its engine has stopped for good, or flusso is [stopping](cli.md#stopping). |
 
 The runbook is [Reindex without downtime](../operate/reindex.md); the CLI wrapper is [`flusso reindex`](cli.md#reindex).

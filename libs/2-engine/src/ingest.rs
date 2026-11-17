@@ -27,6 +27,11 @@
 //! while some lane is still silent does the engine hold the snapshot for up to
 //! [`BatchPolicy::max_delay`] so a reindex fanned to every sink, each answering
 //! between its own batches, is one pass over the table.
+//!
+//! A [`Stop`] ends the engine gracefully instead of where it stands: no further
+//! read, the buffered batch published, every lane drained and confirmed, the
+//! live stream closed once the source has the final position. See
+//! [`Stop`] for the sequence.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -45,10 +50,18 @@ use tokio::time::{Duration, Instant, sleep_until, timeout_at};
 use crate::error::{EngineError, Result};
 use crate::observer::{BuildStats, EngineId, NoopObserver, Observer};
 use crate::policy::{BatchPolicy, FailurePolicies, FailurePolicy};
+use crate::stop::{Stop, drain_lanes};
 
 /// How often the watermark is confirmed to the source while no commit happens,
 /// so acknowledgements that arrive during a quiet period still advance it.
 const CONFIRM_TICK: Duration = Duration::from_secs(1);
+
+/// The longest a stopping engine polls the live stream for its end after
+/// asking the source to close it. Past it the stream is dropped. Longer than
+/// the source's own bounds added up (the Postgres stream allows 5 s to send
+/// the final position and 5 s to close), so a close that just fits is not
+/// reported as one that failed.
+const CLOSE_WAIT: Duration = Duration::from_secs(12);
 
 /// The producing end of every sink's lane, by sink name.
 type Lanes = BTreeMap<SinkName, Box<dyn Producer<LaneItem>>>;
@@ -66,6 +79,14 @@ pub struct IngestEngine {
     observer: Arc<dyn Observer>,
     batch: BatchPolicy,
     failure_policies: FailurePolicies,
+    stop: Stop,
+}
+
+/// How the engine's run ended without an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ended {
+    LiveEnded,
+    Stopped,
 }
 
 impl IngestEngine {
@@ -84,7 +105,16 @@ impl IngestEngine {
             observer: Arc::new(NoopObserver),
             batch: BatchPolicy::default(),
             failure_policies: FailurePolicies::default(),
+            stop: Stop::new(),
         }
+    }
+
+    /// End gracefully once `stop` is requested: no further read, the batch in
+    /// flight published, every lane drained and confirmed, the stream closed
+    /// (see [`Stop`]).
+    pub fn with_stop(mut self, stop: Stop) -> Self {
+        self.stop = stop;
+        self
     }
 
     /// Report lifecycle and progress to `observer`.
@@ -120,8 +150,11 @@ impl IngestEngine {
     pub async fn run(&self) -> Result<()> {
         let result = self.run_inner().await;
         match &result {
-            Ok(()) => {
-                tracing::info!("ingest engine stopped: live stream ended");
+            Ok(ended) => {
+                match ended {
+                    Ended::LiveEnded => tracing::info!("ingest engine stopped: live stream ended"),
+                    Ended::Stopped => tracing::info!("ingest engine stopped: stop requested"),
+                }
                 self.observer.on_engine_stopped(&EngineId::Ingest);
             }
             Err(error) => {
@@ -130,10 +163,10 @@ impl IngestEngine {
                     .on_engine_error(&EngineId::Ingest, &error.to_string());
             }
         }
-        result
+        result.map(|_| ())
     }
 
-    async fn run_inner(&self) -> Result<()> {
+    async fn run_inner(&self) -> Result<Ended> {
         self.source.prepare().await?;
         let lanes: Lanes = self
             .sinks
@@ -165,14 +198,29 @@ impl IngestEngine {
             if live_ended && snapshot.is_none() && requests.is_empty() {
                 self.commit_live(&mut pending, &lanes).await?;
                 self.confirm(&mut last_confirmed);
-                return Ok(());
+                return Ok(Ended::LiveEnded);
+            }
+            if self.stop.is_requested() {
+                if let Some(abandoned) = snapshot.take() {
+                    tracing::info!(
+                        indexes = abandoned.indexes.len(),
+                        "stop requested: abandoning the snapshot in progress; its request is \
+                         served again on the next start"
+                    );
+                }
+                self.wind_down(&mut pending, &lanes, live, live_ended, &mut last_confirmed)
+                    .await?;
+                return Ok(Ended::Stopped);
             }
             let deadline = pending.deadline.unwrap_or_else(far_future);
             tokio::select! {
-                change = live.next(), if !live_ended => match change {
-                    None => live_ended = true,
-                    Some(Err(error)) => return Err(error.into()),
-                    Some(Ok((position, event))) => {
+                // While the live stream is open, `next_live` watches the stop.
+                () = self.stop.requested(), if live_ended => {}
+                change = next_live(&mut live, &self.stop), if !live_ended => match change {
+                    Next::Stopped => {}
+                    Next::Change(None) => live_ended = true,
+                    Next::Change(Some(Err(error))) => return Err(error.into()),
+                    Next::Change(Some(Ok((position, event)))) => {
                         self.buffer_live(&mut pending, position, event).await?;
                         live_ended = self.drain_ready(&mut live, &mut pending).await?;
                         self.commit_live(&mut pending, &lanes).await?;
@@ -215,6 +263,61 @@ impl IngestEngine {
         }
     }
 
+    /// The rest of a stop: publish the buffered batch, wait until every lane
+    /// acknowledged it (confirming as the watermark moves), then close the
+    /// live stream so the final position reaches the source.
+    async fn wind_down(
+        &self,
+        pending: &mut PendingBatch,
+        lanes: &Lanes,
+        mut live: LiveStream,
+        live_ended: bool,
+        last_confirmed: &mut Option<Position>,
+    ) -> Result<()> {
+        tracing::info!(
+            buffered = pending.count,
+            "stop requested: reading no further changes; landing what is in flight"
+        );
+        self.commit_live(pending, lanes).await?;
+        drain_lanes(&*self.stream, &*self.source, last_confirmed).await;
+        tracing::info!(position = ?last_confirmed, "every sink acknowledged; closing the live stream");
+        if live_ended || !self.source.close_live() {
+            return Ok(());
+        }
+        let closed = timeout_at(Instant::now() + CLOSE_WAIT, async {
+            let mut unread = 0usize;
+            let mut failed = None;
+            while let Some(item) = live.next().await {
+                match item {
+                    Ok(_) => unread += 1,
+                    Err(error) => failed = Some(error),
+                }
+            }
+            (unread, failed)
+        })
+        .await;
+        match closed {
+            Ok((unread, failed)) => {
+                if unread > 0 {
+                    tracing::warn!(
+                        unread,
+                        "the live stream yielded changes while closing; dropped unconfirmed, so \
+                         the next start reads them again"
+                    );
+                }
+                match failed {
+                    Some(error) => Err(error.into()),
+                    None => Ok(()),
+                }
+            }
+            Err(_) => Err(SourceError::Connection(format!(
+                "the final position was not confirmed to the source: the live stream did not \
+                 close within {CLOSE_WAIT:?}"
+            ))
+            .into()),
+        }
+    }
+
     /// Buffer every change the live stream has ready *right now*, stopping at
     /// a full batch, the batch's deadline, or the moment the stream would
     /// block. Returns whether the stream ended. The caller commits on return
@@ -222,7 +325,7 @@ impl IngestEngine {
     /// waiting out `max_delay` would only add latency, while a burst keeps the
     /// stream ready and fills the batch — for at most `max_delay`.
     async fn drain_ready(&self, live: &mut LiveStream, pending: &mut PendingBatch) -> Result<bool> {
-        while pending.is_open() {
+        while pending.is_open() && !self.stop.is_requested() {
             match live.next().now_or_never() {
                 None => return Ok(false),
                 Some(None) => return Ok(true),
@@ -518,6 +621,35 @@ impl IngestEngine {
         self.observer.on_snapshot_completed(&indexes);
         Ok(())
     }
+}
+
+/// What the live arm of the loop got.
+enum Next {
+    /// The stop was requested first; nothing was read.
+    Stopped,
+    Change(Option<source::Result<LiveChange>>),
+}
+
+/// The next live change, unless the stop is requested first: checked before
+/// the stream on every poll, so a stop is never raced by a ready change. The
+/// check is an atomic load; the stop's waker is registered only when the
+/// stream would wait, so a busy stream pays nothing more.
+async fn next_live(live: &mut LiveStream, stop: &Stop) -> Next {
+    let notified = stop.notified();
+    tokio::pin!(notified);
+    std::future::poll_fn(|cx| {
+        if stop.is_requested() {
+            return std::task::Poll::Ready(Next::Stopped);
+        }
+        if let std::task::Poll::Ready(change) = live.poll_next_unpin(cx) {
+            return std::task::Poll::Ready(Next::Change(change));
+        }
+        match notified.as_mut().poll(cx) {
+            std::task::Poll::Ready(()) => std::task::Poll::Ready(Next::Stopped),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    })
+    .await
 }
 
 /// A batch in the making: the deduplicated document ids the buffered changes

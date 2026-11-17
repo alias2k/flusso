@@ -13,7 +13,9 @@
 //! operational HTTP surfaces, and process signals. It binds both listeners,
 //! installs the meter provider, starts the daemon, serves its public
 //! status/metrics + private control surface, and runs until the stream ends or
-//! a signal arrives — then drains and flushes.
+//! a stop arrives (a signal, or with `--exit-with-parent` the parent exiting).
+//! Then it closes the surfaces and flushes telemetry under a deadline; see
+//! [`crate::shutdown`] for what a stop does and how it is bounded.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -24,13 +26,13 @@ use anyhow::Context;
 use clap::Args;
 use config::Config;
 use daemon::{Daemon, DaemonOptions};
-use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 use crate::DEFAULT_LOCK;
 use crate::adapters;
 use crate::backends::FlussoBackends;
 use crate::http::{self, BasicAuth, DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USER};
+use crate::shutdown::{self, Cause, Drained, Progress, Signals};
 use crate::telemetry::observer::OtelObserver;
 use crate::telemetry::script_log::ScriptFailureLog;
 use crate::telemetry::{self, metrics};
@@ -145,10 +147,33 @@ pub(crate) struct RunArgs {
     /// to 50.
     #[arg(long, env = "FLUSSO_BATCH_MAX_DELAY_MS")]
     batch_max_delay_ms: Option<u64>,
+
+    /// How long a stop may take, in seconds, from the first signal to exit.
+    /// A stop drains: nothing new is read, what is in flight lands on every
+    /// sink and is confirmed to Postgres, then the HTTP surfaces close and
+    /// telemetry is flushed. Past the deadline flusso logs the step and the
+    /// sinks it gave up on and exits 1. `0` doesn't drain: it stops at once
+    /// and exits 0, the one exit 0 that confirmed nothing. The same sender
+    /// signalling twice within 500 ms, or any three signals within 1 s, exit
+    /// at once. Whatever wasn't confirmed is read again on the next start.
+    #[arg(long, env = "FLUSSO_SHUTDOWN_TIMEOUT_SECS", default_value_t = shutdown::DEFAULT_TIMEOUT_SECS)]
+    shutdown_timeout_secs: u64,
+
+    /// Stop when the process that started flusso exits (checked twice a
+    /// second), as if it had sent SIGTERM. For task runners and other parents
+    /// that can die without stopping their children; off by default, so a
+    /// run started in the background from a shell outlives the shell.
+    #[arg(long, env = "FLUSSO_EXIT_WITH_PARENT")]
+    exit_with_parent: bool,
 }
 
 pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let tracer_provider = telemetry::init_tracing();
+    let parent = if args.exit_with_parent {
+        shutdown::parent()
+    } else {
+        None
+    };
 
     let mut config = resolve_config(&args)?;
 
@@ -194,12 +219,8 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
 
     // Bind both listeners before opening DB connections or starting the pipeline,
     // so a bad address fails fast.
-    let public_listener = TcpListener::bind(public_addr)
-        .await
-        .with_context(|| format!("binding public HTTP surface to {public_addr}"))?;
-    let private_listener = TcpListener::bind(private_addr)
-        .await
-        .with_context(|| format!("binding private HTTP surface to {private_addr}"))?;
+    let public_listener = http::bind("public", public_addr, Some(public_addr)).await?;
+    let private_listener = http::bind("private", private_addr, None).await?;
 
     let basic_auth = Arc::new(BasicAuth::new(args.admin_user, args.admin_password));
     if basic_auth.uses_default_password() {
@@ -232,6 +253,7 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let _in_flight_gauge = metrics::register_in_flight_gauge(Arc::clone(&status));
     let _visibility_wait_gauge = metrics::register_visibility_wait_gauge(Arc::clone(&status));
 
+    let waits = http::Waits::default();
     let (public_shutdown, public_rx) = oneshot::channel::<()>();
     let (private_shutdown, private_rx) = oneshot::channel::<()>();
     let public = tokio::spawn(http::serve(
@@ -241,6 +263,7 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
             status: Arc::clone(&status),
             registry,
             fence,
+            waits: waits.clone(),
         }),
         public_rx,
     ));
@@ -257,23 +280,146 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         private_rx,
     ));
 
-    let result = running.run(shutdown_signal()).await;
+    let mut signals = Signals::install()?;
+    let (stop, stop_rx) = oneshot::channel::<()>();
+    let run = running.run(async {
+        let _ = stop_rx.await;
+    });
+    tokio::pin!(run);
+    let mut first_sender = None;
+    let ended = tokio::select! {
+        result = &mut run => Some(result),
+        cause = shutdown::requested(&mut signals, parent) => {
+            match cause {
+                Cause::Signal(signal, sender) => {
+                    first_sender = sender;
+                    tracing::info!(
+                        signal = signal.name(),
+                        "stopping: landing what is in flight, then closing. Send the signal \
+                         twice quickly to exit now"
+                    );
+                }
+                Cause::ParentExited { parent } => tracing::warn!(
+                    parent,
+                    "the parent process {parent} exited; stopping (--exit-with-parent)"
+                ),
+            }
+            None
+        }
+    };
 
-    let _ = public_shutdown.send(());
-    let _ = private_shutdown.send(());
-    for (task, surface) in [(public, "public"), (private, "private")] {
-        if let Err(error) = task.await {
-            tracing::warn!(%error, surface, "HTTP server task did not shut down cleanly");
+    let timeout = Duration::from_secs(args.shutdown_timeout_secs);
+    if ended.is_none() && timeout.is_zero() {
+        tracing::info!(
+            "stopped without draining, as asked (--shutdown-timeout-secs 0): whatever was not \
+             confirmed is read again on the next start"
+        );
+        waits.end_before_exit().await;
+        return Ok(());
+    }
+    let began = tokio::time::Instant::now();
+    let deadline = began + timeout;
+    let progress = Progress::default();
+    let stopping = async {
+        let result = match ended {
+            Some(result) => result,
+            None => {
+                progress.set(shutdown::DRAINING);
+                let _ = stop.send(());
+                run.await
+            }
+        };
+        progress.set("closing the HTTP surfaces");
+        waits.end();
+        let _ = public_shutdown.send(());
+        let _ = private_shutdown.send(());
+        let closed = shutdown::side_step(deadline, async {
+            for (task, surface) in [(public, "public"), (private, "private")] {
+                if let Err(error) = task.await {
+                    tracing::warn!(%error, surface, "HTTP server task did not shut down cleanly");
+                }
+            }
+        })
+        .await;
+        if !closed {
+            tracing::warn!("an HTTP connection did not close in time; leaving it");
+        }
+        progress.set("flushing telemetry");
+        let flushed = shutdown::side_step(deadline, async {
+            let flushed = tokio::task::spawn_blocking(move || {
+                metrics.shutdown();
+                if let Some(provider) = tracer_provider
+                    && let Err(error) = provider.shutdown()
+                {
+                    tracing::warn!(%error, "failed to flush OTLP tracer on shutdown");
+                }
+            })
+            .await;
+            if let Err(error) = flushed {
+                tracing::warn!(%error, "flushing telemetry failed");
+            }
+        })
+        .await;
+        if !flushed {
+            tracing::warn!("telemetry did not flush in time; the last spans and metrics are lost");
+        }
+        result
+    };
+    let mut shown = shutdown::Throttle::default();
+    let interrupt = shutdown::forced(&mut signals, (began, first_sender), |signal| {
+        if !shown.allow(tokio::time::Instant::now()) {
+            return;
+        }
+        let unfinished = shutdown::unfinished_sinks(&status.snapshot());
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        tracing::warn!(
+            signal = signal.name(),
+            "stop already requested: {}{}, {}s left. Send the signal twice quickly to exit now",
+            progress.current(),
+            if unfinished.is_empty() {
+                String::new()
+            } else {
+                format!(" ({unfinished})")
+            },
+            left.as_secs(),
+        );
+    });
+    match shutdown::within(timeout, &progress, interrupt, stopping).await {
+        Drained::Done(result) => result,
+        Drained::TimedOut { step } => {
+            let unfinished = shutdown::unfinished_sinks(&status.snapshot());
+            tracing::error!(
+                step,
+                unfinished = %unfinished,
+                "shutdown deadline of {}s passed while {step}{}; exiting without it \
+                 (whatever was not acknowledged is read again on the next start)",
+                timeout.as_secs(),
+                if step == shutdown::DRAINING && !unfinished.is_empty() {
+                    format!(" ({unfinished})")
+                } else {
+                    String::new()
+                },
+            );
+            waits.end_before_exit().await;
+            std::process::exit(1);
+        }
+        Drained::Forced(signal) => {
+            let unfinished = shutdown::unfinished_sinks(&status.snapshot());
+            tracing::warn!(
+                signal = signal.name(),
+                "forced: exiting at once while {}{}; whatever was not acknowledged is read again \
+                 on the next start",
+                progress.current(),
+                if unfinished.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({unfinished})")
+                },
+            );
+            waits.end_before_exit().await;
+            std::process::exit(signal.exit_code());
         }
     }
-    metrics.shutdown();
-    if let Some(provider) = tracer_provider
-        && let Err(error) = provider.shutdown()
-    {
-        tracing::warn!(%error, "failed to flush OTLP tracer on shutdown");
-    }
-
-    result
 }
 
 /// What `run` does to obtain its [`Config`], decided purely from the flags plus
@@ -359,34 +505,3 @@ fn load_lock(path: &Path) -> anyhow::Result<Config> {
 
 #[cfg(test)]
 mod tests;
-
-/// Resolve once either Ctrl-C (SIGINT) or, on Unix, SIGTERM arrives — the
-/// process's signals are the binary's to own, not the daemon library's.
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        if let Err(error) = tokio::signal::ctrl_c().await {
-            tracing::warn!(%error, "failed to listen for Ctrl-C");
-            std::future::pending::<()>().await;
-        }
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
-            }
-            Err(error) => {
-                tracing::warn!(%error, "failed to install SIGTERM handler");
-                std::future::pending::<()>().await;
-            }
-        }
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        () = ctrl_c => {},
-        () = terminate => {},
-    }
-}

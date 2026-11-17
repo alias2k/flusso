@@ -46,6 +46,8 @@ Like `cargo run`, it compiles first. With a `flusso.toml` present (the default p
 | `--index-prefix <prefix>` | `prefix` from config, else none | Prefix every owned index name. |
 | `--batch-max-changes <n>` | `[batch] max_changes`, else `256` | Commit a batch once this many live changes have accumulated. |
 | `--batch-max-delay-ms <ms>` | `[batch] max_delay_ms`, else `50` | The longest a batch stays open while changes keep arriving. |
+| `--shutdown-timeout-secs <n>` | `30` | How long a [stop](#stopping) may take, from the first signal to exit. Past it flusso gives up on what is left and exits `1`. `0` doesn't drain: it stops reading, abandons what is in flight (read again on the next start) and exits `0`. |
+| `--exit-with-parent` | off | Stop when the process that started flusso exits, as if it had sent `SIGTERM`. As an env var, `FLUSSO_EXIT_WITH_PARENT=true` (like every boolean flag, `1` is refused). See [Stopping](#stopping). |
 
 The adapter flags (`--slot`, `--publication`, `--manage-publication`, `--manage-replica-identity`, `--pretty`, `--queue-capacity`) are laid over the file's port tables before every table is validated against its adapter; an unknown option or type fails here, before anything connects. Both listeners are bound before the pipeline starts, so a bad address fails fast. A lock-write failure is fatal.
 
@@ -74,6 +76,43 @@ Once connected, and before any index is touched, `run` runs the same check as [`
 - **An unreachable database** fails as it always has, as `connecting to Postgres`, before validation runs.
 
 There's no flag to skip it. Run `flusso check` before deploying a changed config to see the same list without stopping anything.
+
+### Stopping
+
+A stop is a graceful drain: flusso lands what it already read, confirms it to Postgres, then exits.
+
+| What stops `run` | What flusso does |
+| --- | --- |
+| `SIGTERM`, `SIGINT` (Ctrl-C), `SIGHUP` | The drain below. `SIGHUP` (a closed terminal, a task runner passing on its own hang-up) is a stop, not a reload; a run started with it ignored (`nohup`) keeps ignoring it on Linux, and elsewhere `SIGHUP` keeps its default action (the process ends at once, as before 0.18). |
+| The parent process exits, under `--exit-with-parent` | The same drain, logged as `the parent process <pid> exited`. Checked twice a second. A parent that is already `init` (PID 1, as in a container) is never followed. |
+| **The same sender twice within 500 ms**, or **three stop signals within 1 s** from anyone | Exits at once with `128 + n`: `129` (`SIGHUP`), `130` (`SIGINT`), `143` (`SIGTERM`), logging `forced: exiting at once while <step>`. Pressing Ctrl-C twice quickly does it, directly or under a task runner. |
+| On Windows: Ctrl-C, Ctrl-Break, a closed console, a system shutdown | The same drain. Windows reports no sender, so only three within 1 s force it, and Windows itself ends the process a few seconds after a closed console or a shutdown, drained or not. `--exit-with-parent` is ignored there, with a warning. |
+| Any other repeat | The same request: the drain carries on, and flusso logs `stop already requested: <step> (<sink>: <n> changes in flight), <n>s left. Send the signal twice quickly to exit now` (at most once a second). |
+
+A sender is the process that sent the signal (`siginfo`): the kernel for a terminal's Ctrl-C or hang-up, the task runner for its forwarded copy, `0` for one outside the container (`docker stop`, Kubernetes). One Ctrl-C under a task runner that forwards it is two signals from two senders, so it drains. A stop loop re-sending `SIGTERM` every second never forces. `/bin/kill` and `pkill` are a new sender each time: three of them within a second force. On macOS a terminal's Ctrl-C carries no sender, so there three presses force (two under a task runner).
+
+The drain, in order:
+
+1. **Stop taking in work.** The phase turns `stopping`: [`/readyz`](http.md#get-readyz) answers `503`, a new [`/reindex`](http.md#post-reindexindexnamesinkname) is refused with `503`. No further change is read from the replication stream and no new backfill is served.
+2. **Finish the batch in flight.** What was being built is published to every sink, as any commit. A backfill in progress is abandoned at a row boundary, and its batches already queued for a sink are acknowledged without being written: its index stays unseeded, so the next start backfills it again (a backfill writes deterministic ids; what it wrote so far is overwritten). The abandoned backfill costs the stop nothing; the live changes already read still land, so under write load the stop takes as long as they do.
+3. **Every sink lands its lane**: apply, flush, acknowledge, sink by sink, until nothing is left. A stalled or unreachable sink doesn't slow the others; it is what the deadline is for.
+4. **Confirm and close the stream.** The position every sink acknowledged is confirmed to the slot, flusso waits until Postgres was sent it, then ends replication. The next start resumes there and reads nothing already indexed again.
+5. **Answer the fences.** An open [`/wait`](http.md#get-waitpositionposition) on `searchable` is held while a sink's refresh interval would still answer it within the deadline; then every wait still open is answered `503` "stopping".
+6. **Close**: the HTTP surfaces, then the telemetry flush, each given at most 5 s of what is left.
+
+`--shutdown-timeout-secs` (30 s) covers all of it. At the deadline flusso logs `shutdown deadline of <n>s passed while <step> (<sink>: <n> changes in flight, …)` and exits `1`. That is safe: a change no sink acknowledged was never confirmed to the slot, so the next start reads it again (at-least-once), and rebuilding a document gives the same document.
+
+| Exit | Means |
+| --- | --- |
+| `0` | Every step of the drain completed: what was read is indexed and its final position confirmed to Postgres. The one exception is `--shutdown-timeout-secs 0`, which doesn't drain and logs `stopped without draining, as asked`. An HTTP connection left open or telemetry that didn't flush in its 5 s is logged, not counted: neither is the data path. |
+| `1` | The deadline passed during the drain, the final position couldn't be confirmed to Postgres (`the final position was not confirmed to the source`), or the pipeline failed. |
+| `128 + n` | The drain was forced (the rule above). |
+
+Until the pipeline is started (through [validation at start](#validation-at-start)), a signal ends the process the default way, at once; a parent that exits meanwhile is noticed as soon as it is.
+
+Whatever stops flusso must wait longer than the deadline before killing it: Kubernetes' `terminationGracePeriodSeconds` (the Helm chart sets 45), compose's `stop_grace_period` (Docker's default is 10 s: set `35s`), systemd's `TimeoutStopSec` (90 s by default), moon's `killProcessThreshold` (2 s by default). Each pairing is in [Run under a task runner or supervisor](../deploy/compile-and-run.md#run-under-a-task-runner-or-supervisor).
+
+Without `--exit-with-parent`, a flusso whose parent dies keeps running, like any daemon: it holds its addresses and its replication slot, so the next start fails on the address with `another flusso is already serving there; it reports pid <pid>` (followed by the system's `Address already in use`; inside a container that pid is the one in its own namespace), or, on other addresses, retries the slot with `replication slot "<slot>" is in use by Postgres backend <pid> (…)`.
 
 ## check
 

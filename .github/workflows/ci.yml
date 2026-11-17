@@ -211,6 +211,29 @@ jobs:
           path: libs/2-adapters/source-postgres/fuzz/artifacts/
           if-no-files-found: ignore
 
+  other-platforms:
+    name: CLI on ${{ matrix.os }} (check)
+    # The release targets beside Linux (dist-workspace.toml) build only on a
+    # release tag. A cross check from Linux can't run `ring`'s build script
+    # (it needs MSVC's lib.exe or the Apple SDK), so each is checked on its own
+    # runner: code that compiles only on Unix fails here, not at the release.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check the CLI
+        run: cargo check -p flusso-cli --locked
+
   designer-frontend:
     name: designer SPA (build + no drift)
     runs-on: ubuntu-latest

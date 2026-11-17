@@ -61,8 +61,16 @@ run:
   skipBackfill: false
   queueCapacity: 1024
   lagPollSecs: 15
+  # Passed as --shutdown-timeout-secs: how long a stop may drain what is in
+  # flight before flusso gives up and exits 1. Keep it below
+  # terminationGracePeriodSeconds, or Kubernetes kills the drain.
+  shutdownTimeoutSecs: 30
   # Any extra raw args appended verbatim, e.g. ["--pretty"].
   extraArgs: []
+
+# How long Kubernetes waits after SIGTERM before SIGKILL. Must exceed
+# run.shutdownTimeoutSecs (the chart fails otherwise), so a stop drains in full.
+terminationGracePeriodSeconds: 45
 
 # The operational HTTP surfaces.
 http:

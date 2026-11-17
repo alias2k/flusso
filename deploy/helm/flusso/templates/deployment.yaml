@@ -1,6 +1,9 @@
 {{- if gt (int .Values.replicaCount) 1 }}
 {{- fail "flusso consumes a single Postgres replication slot: replicaCount must be 1" }}
 {{- end }}
+{{- if le (int .Values.terminationGracePeriodSeconds) (int .Values.run.shutdownTimeoutSecs) }}
+{{- fail "terminationGracePeriodSeconds must exceed run.shutdownTimeoutSecs, or Kubernetes kills flusso mid-drain" }}
+{{- end }}
 {{- $useConfig := or .Values.config.create .Values.config.existingConfigMap -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -32,6 +35,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -71,6 +75,8 @@ spec:
             - {{ .Values.run.queueCapacity | quote }}
             - --lag-poll-secs
             - {{ .Values.run.lagPollSecs | quote }}
+            - --shutdown-timeout-secs
+            - {{ .Values.run.shutdownTimeoutSecs | quote }}
             {{- if .Values.run.skipBackfill }}
             - --skip-backfill
             {{- end }}
