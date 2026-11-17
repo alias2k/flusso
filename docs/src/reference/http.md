@@ -40,12 +40,12 @@ The live status document as JSON: the deployment, then one block per sink.
 | `script_failures.<index>.last` | object | The most recent: `id`, `field` (path, e.g. `variants[2].gross`), `message`, `line` and `column` in the script (null without a position), `at` (RFC 3339). |
 | `sinks.<name>.phase` | `starting` \| `backfilling` \| `live` \| `failed` \| `stopped` | `failed` while the daemon waits to restart that sink engine; the others keep running. |
 | `sinks.<name>.indexes` | map of name to state | That sink's own view of each index. |
-| `sinks.<name>.changes_committed` | int | Changes whose batch this sink flushed and acked. |
+| `sinks.<name>.changes_committed` | int | Changes whose batch this sink wrote and acked. |
 | `sinks.<name>.changes_in_flight` | int | Captured minus this sink's committed. |
 | `sinks.<name>.envelopes_applied` | int | Documents written to this sink. |
 | `sinks.<name>.batches` | int | |
 | `sinks.<name>.documents_quarantined` | int | Non-zero means data is being dropped under `on_error = "skip"`. |
-| `sinks.<name>.last_flush_micros` | int | Duration of this sink's most recent flush. |
+| `sinks.<name>.last_flush_micros` | int | Duration of this sink's most recently finished write. |
 | `sinks.<name>.applied_position` | string or null | The source position this sink has applied. |
 | `sinks.<name>.searchable_position` | string or null | The source position this sink can search. Trails `applied_position` by the destination's refresh while a backlog drains. |
 
@@ -94,7 +94,7 @@ Hold the request until a commit is readable: a fence. `position` is what the cli
 | Parameter | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `position` | string | — | The source position to wait for, in the source's own text form. |
-| `until` | `applied` \| `searchable` | `searchable` | `applied`: the sink's flush returned, so a fetch by id sees the commit. `searchable`: a search sees it too. |
+| `until` | `applied` \| `searchable` | `searchable` | `applied`: the sink's writes up to it returned, so a fetch by id sees the commit. `searchable`: a search sees it too. |
 | `sink` | string | none | Wait for this sink only. Omitted, the wait covers every sink, so the slowest one decides. |
 | `timeout_ms` | int | `5000` | How long to hold the request. Values above `60000` are cut to `60000`. |
 

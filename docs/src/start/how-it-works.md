@@ -24,13 +24,13 @@ The reverse direction is what makes sync possible. When a row changes, flusso re
 ## The pipeline
 
 ```text
-ChangeCapture ─▶ ingest engine ─▶ lane per sink ─▶ sink engine ─▶ apply ─▶ flush ─▶ ack
+ChangeCapture ─▶ ingest engine ─▶ lane per sink ─▶ sink engine ─▶ write ×4 ─▶ ack
                  resolve · build once · publish                                     └▶ watermark ─▶ slot
 ```
 
-An **ingest engine** follows Postgres logical replication, resolves each change to the document ids it affects, deduplicates them, builds each document **once** per batch, and publishes the batch onto one lane per sink. A **sink engine** per sink pulls from its lane, applies the documents, flushes them as one bulk request, and acknowledges. Sinks are independent: each seeds itself, a reindex targets one sink, and one sink's outage stops only that sink.
+An **ingest engine** follows Postgres logical replication, resolves each change to the document ids it affects, deduplicates them, builds each document **once** per batch, and publishes the batch onto one lane per sink. A **sink engine** per sink pulls from its lane and writes several batches at once as bulk requests (never two holding the same document, live changes before backfill pages), acknowledging each as it lands. Sinks are independent: each seeds itself, a reindex targets one sink, and one sink's outage stops only that sink.
 
-Delivery is **at-least-once**. Each lane's acknowledgements feed a watermark, and the replication slot advances only to the lowest position **every** sink has flushed. A crash before a flush redelivers that sink's batch; the rebuild is idempotent, so redelivery is harmless.
+Delivery is **at-least-once**. Each lane's acknowledgements feed a watermark, and the replication slot advances only to the lowest position **every** sink has written, everything before it included. A crash before a write returns redelivers that sink's batch; the rebuild is idempotent, so redelivery is harmless.
 
 ## flusso owns the index
 
@@ -46,7 +46,7 @@ A seed is only as good as the stream behind it. If the replication slot is missi
 
 ## When the destination says no
 
-A flush-wide failure (OpenSearch unreachable, the whole request refused) always stops the run; the batch is redelivered on restart. An **item-level rejection** (one document with a mapping conflict) is decided by the `on_error` policy: `stop` halts the run, `skip` quarantines the document, counts it, and lets the batch through. See [Handle rejected documents](../operate/rejected-documents.md).
+A write-wide failure (OpenSearch unreachable, the whole request refused) always stops the run; the batch is redelivered on restart. An **item-level rejection** (one document with a mapping conflict) is decided by the `on_error` policy: `stop` halts the run, `skip` quarantines the document, counts it, and lets the batch through. See [Handle rejected documents](../operate/rejected-documents.md).
 
 ## Where this shows up
 

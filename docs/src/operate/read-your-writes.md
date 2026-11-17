@@ -57,10 +57,10 @@ From Rust, `flusso-query` runs the steps below itself: see [Reading your own wri
 
 > ⚠️ **Warning** — A position read *inside* the transaction lies before its commit, so the fence can pass before the write is in. A position read from a **replica** is that replica's replay position, not the one flusso follows. Both fail quietly: the wait returns `200` and the read is stale.
 
-> ℹ️ **Info** — flusso never refreshes or flushes because someone waits. A `searchable` fence passes at once when flusso is caught up, because a caught-up flush refreshes anyway; while a backlog drains it passes when the index's periodic refresh is due.
+> ℹ️ **Info** — flusso never refreshes or writes because someone waits. A `searchable` fence passes at once when flusso is caught up, because a caught-up write refreshes anyway; while a backlog drains it passes when the index's periodic refresh is due.
 
 ## Related
 
 - [HTTP endpoints](../reference/http.md#get-waitpositionposition) for parameters and responses.
-- [Sink: OpenSearch](../reference/sink-opensearch.md#refresh) for when a flush becomes searchable.
+- [Sink: OpenSearch](../reference/sink-opensearch.md#refresh) for when a write becomes searchable.
 - [Watch it run](watch-it-run.md).

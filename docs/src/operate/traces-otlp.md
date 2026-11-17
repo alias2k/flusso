@@ -27,7 +27,7 @@ You run a collector, Jaeger, Tempo, or a vendor endpoint and want flusso's trace
 
 3. **Add headers or a service name** through the SDK's standard variables: `OTEL_EXPORTER_OTLP_HEADERS=authorization=Bearer …`, `OTEL_SERVICE_NAME=flusso-prod`. The resource's default service name is `flusso`.
 
-4. **Verify.** A span per batch flush appears in the backend; metrics arrive every 10 s.
+4. **Verify.** A span per batch write appears in the backend; metrics arrive every 10 s.
 
 ## Options and variations
 

@@ -264,7 +264,7 @@ async fn a_live_batch_reports_each_stage_once_with_the_time_it_took() {
     assert_eq!(
         timings.of(Stage::Write),
         vec![(Stage::Write, live, primary.clone(), APPLY * 3 + FLUSH)],
-        "a write is the item's apply and flush together"
+        "a write is one Sink::write of the item"
     );
     let sink_idle: Vec<Timing> = timings
         .of(Stage::Idle)

@@ -4,7 +4,7 @@ Decide what a single bad document does to the pipeline, find the ones that were 
 
 ## When to use this
 
-OpenSearch accepted a bulk request but refused one document: a value that doesn't fit the mapping, a string too long for a keyword, a malformed date. This is an **item-level rejection**. A flush-wide failure (cluster down, request refused) is different and always stops the run until it recovers. So is a document refused because the cluster is busy (HTTP 429 or 503): it is [resent](../reference/sink-opensearch.md#retries), never quarantined.
+OpenSearch accepted a bulk request but refused one document: a value that doesn't fit the mapping, a string too long for a keyword, a malformed date. This is an **item-level rejection**. A write-wide failure (cluster down, request refused) is different and always stops the run until it recovers. So is a document refused because the cluster is busy (HTTP 429 or 503): it is [resent](../reference/sink-opensearch.md#retries), never quarantined.
 
 ## Steps
 

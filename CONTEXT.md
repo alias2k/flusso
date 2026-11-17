@@ -73,8 +73,16 @@ What travels up the request lane: a sink engine asking for a snapshot of one or 
 _Avoid_: command, job, ticket
 
 **Sink**:
-The port that applies documents to a destination and reports which it accepted, rejected, or already holds. Each sink has its own engine, its own seeding, its own reindex.
+The port that writes documents to a destination and reports which it accepted, rejected, or already holds. Each sink has its own engine, its own seeding, its own reindex.
 _Avoid_: destination, target, output, writer
+
+**Write**:
+One `Sink::write` call: one batch's envelopes sent to the sink. A sink engine runs up to `writes` of them at once, never two holding the same document, live batches before backfill pages. A write is *caught up* when nothing is queued behind it; a caught-up write makes everything written before it searchable.
+_Avoid_: flush, apply, request (a write may take several bulk requests)
+
+**Admission**:
+The rule that a batch starts writing only when no earlier batch still being written, or waiting ahead of it on the lane, shares a document with it. It keeps each document's builds landing in order while writes overlap.
+_Avoid_: locking, ordering, serialization
 
 ### What flows
 
@@ -95,7 +103,7 @@ An opaque, ordered, serializable offset in the source's change feed, assigned by
 _Avoid_: LSN, offset, cursor, ack, checkpoint
 
 **Watermark**:
-The lowest position every lane has acknowledged. The stream owns it; the ingest engine forwards it to the source as confirmation.
+The lowest position, over every lane, that the lane has acknowledged with everything before it: a lane's part stops before its oldest unacknowledged positioned batch, since batches are acknowledged in any order. The stream owns it; the ingest engine forwards it to the source as confirmation.
 _Avoid_: low-water mark, min ack, commit point
 
 **Quiet stream**:
@@ -111,11 +119,11 @@ A wait until a sink, or every sink, has reached a caller-supplied source positio
 _Avoid_: barrier, sync point, flush wait
 
 **Applied**:
-The fence level at which a sink's flush for a change has returned, so a fetch by id at the destination sees it. A sink has applied a source position when every source commit at or before it is applied.
+The fence level at which a sink's write for a change, and every earlier one, has returned, so a fetch by id at the destination sees it. A sink has applied a source position when every source commit at or before it is applied.
 _Avoid_: flushed, durable, committed, written
 
 **Searchable**:
-The fence level at which a search at the destination also sees the change. It trails applied by the destination's refresh while a backlog drains; a sink reports when each flush becomes searchable and is never asked to refresh.
+The fence level at which a search at the destination also sees the change. It trails applied by the destination's refresh while a backlog drains; a sink reports when each write becomes searchable and is never asked to refresh because a reader waits.
 _Avoid_: refreshed, indexed
 
 **Document**:

@@ -1,6 +1,6 @@
 # Upgrade to 0.18
 
-0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index. It also writes a `timestamp` column in ISO 8601, which changes stored documents and can break a tuned `format`: see [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601). A `decimal` field is written with every digit: see [A decimal is written with every digit](#a-decimal-is-written-with-every-digit). A `double` is indexed as the exact value Postgres holds: see [A float or double is indexed as Postgres holds it](#a-float-or-double-is-indexed-as-postgres-holds-it). A filter value that doesn't fit its column no longer matches by being cut to fit: see [A filter value is compared as written](#a-filter-value-is-compared-as-written). A script reads a date as a date, not a string: see [A date reaches a script as a date](#a-date-reaches-a-script-as-a-date). A change is indexed only once its transaction is visible: see [A change waits until its commit is visible](#a-change-waits-until-its-commit-is-visible). A fenced read in `flusso-query` waits through a restart of flusso, with a 20 s default timeout: see [A fenced read waits through a restart](#a-fenced-read-waits-through-a-restart). A stop drains and has a deadline and new exit codes: see [A stop drains, then exits](#a-stop-drains-then-exits). A document OpenSearch refuses as busy is resent instead of reaching `on_error`: see [A busy cluster no longer drops documents](#a-busy-cluster-no-longer-drops-documents). `/metrics` gains per-stage timings, and the engine's observer types change for code embedding the crates: see [Stage timings in /metrics](#stage-timings-in-metrics).
+0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index. It also writes a `timestamp` column in ISO 8601, which changes stored documents and can break a tuned `format`: see [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601). A `decimal` field is written with every digit: see [A decimal is written with every digit](#a-decimal-is-written-with-every-digit). A `double` is indexed as the exact value Postgres holds: see [A float or double is indexed as Postgres holds it](#a-float-or-double-is-indexed-as-postgres-holds-it). A filter value that doesn't fit its column no longer matches by being cut to fit: see [A filter value is compared as written](#a-filter-value-is-compared-as-written). A script reads a date as a date, not a string: see [A date reaches a script as a date](#a-date-reaches-a-script-as-a-date). A change is indexed only once its transaction is visible: see [A change waits until its commit is visible](#a-change-waits-until-its-commit-is-visible). A fenced read in `flusso-query` waits through a restart of flusso, with a 20 s default timeout: see [A fenced read waits through a restart](#a-fenced-read-waits-through-a-restart). A stop drains and has a deadline and new exit codes: see [A stop drains, then exits](#a-stop-drains-then-exits). A document OpenSearch refuses as busy is resent instead of reaching `on_error`: see [A busy cluster no longer drops documents](#a-busy-cluster-no-longer-drops-documents). `/metrics` gains per-stage timings, and the engine's observer types change for code embedding the crates: see [Stage timings in /metrics](#stage-timings-in-metrics). Each sink writes several batches at once, and a custom `Sink` implements one `write` instead of `apply` and `flush`: see [Each sink writes several batches at once](#each-sink-writes-several-batches-at-once).
 
 ## When to use this
 
@@ -218,6 +218,28 @@ A comparison with a string, a number or another kind fails rather than answering
   | `disk usage exceeded flood-stage watermark` | the flood-stage disk block was on |
   | `primary shard is not active` | a primary shard was unavailable |
   | `Data too large` | a circuit breaker tripped (may appear; not seen in testing) |
+
+## Each sink writes several batches at once
+
+0.17 wrote one batch at a time per sink, and OpenSearch sat partly idle while flusso waited for each bulk request. 0.18 keeps up to [`[concurrency] writes`](../reference/config-toml.md#concurrency) bulk requests in flight per sink (default 4). What changes:
+
+- **More requests at once reach OpenSearch.** A small cluster that answered 0.17's single request comfortably may now answer some items `429`; flusso retries those, but if the sink keeps restarting with `… still refused as busy`, lower `writes` (`--writes` / `FLUSSO_WRITES`) or `[concurrency] writes`. `writes = 1` writes one batch at a time, as 0.17 did.
+- **Order holds per document.** Two batches holding the same document are never written at once, so a document's newer version still lands after its older one. Live changes go before a backfill's pages, except every fourth write slot both could take.
+- **`[concurrency]` is never written into `flusso.lock`.** `run` with a `flusso.toml` reads it; `run --locked` takes the flag, the env var, or the default.
+- **An idle sink refreshes once more.** A burst's last writes can finish after the write that refreshed, so a sink that goes idle with documents not yet searchable sends one empty caught-up write: on OpenSearch, a `_refresh` of the indexes written since. A burst is then searchable as it ends instead of up to `refresh_interval` (default 10 s) later.
+- **Metrics read per write.** `flusso.flush.duration` and `last_flush_micros` time one write; with several in flight their sum exceeds wall time. `flusso.batches` counts writes.
+
+**Embedding the crates.** The `Sink` port changed:
+
+| 0.17 | 0.18 |
+| --- | --- |
+| `apply(&self, &Envelope)` for each envelope, then `flush(&self, caught_up)` | `write(&self, &[Envelope], caught_up) -> WriteReport`, one call per batch, **safe for concurrent calls**; keep no buffer between calls |
+| `FlushReport` | `WriteReport`, the same fields |
+| `caught_up`: refresh this flush's documents | `caught_up`: make everything written by the writes that returned before this call searchable too, then report `Immediate` |
+| `Visibility::Deferred`: until the next `Immediate` flush | until the next caught-up write that reports `Immediate` |
+| `Stream::watermark`: the highest acknowledgement per lane, minimum over lanes | the position before each lane's oldest unacknowledged positioned item, minimum over lanes |
+
+`SinkEngine::with_writes(n)` sets the writes in flight (default 1 for the engine on its own; the daemon passes `[concurrency] writes`), and `daemon::writes(&config)` resolves the setting.
 
 ## A backfill of related indexes is faster and holds more in memory
 
