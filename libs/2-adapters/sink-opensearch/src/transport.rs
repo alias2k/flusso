@@ -328,6 +328,25 @@ impl OpensearchSink {
     /// Refresh several indexes in one request. A name that no longer exists (a
     /// generation a reindex dropped) is skipped: there is nothing left of it
     /// to make searchable.
+    /// The number of primary shards `index` has, if the cluster says.
+    pub(crate) async fn primary_shards(&self, index: &str) -> Result<Option<u32>> {
+        let url = format!("{}/{index}/_settings/index.number_of_shards", self.base_url);
+        let body: Value = self
+            .send_ok(self.client.get(&url), "shard count lookup failed")
+            .await?
+            .json()
+            .await
+            .map_err(|e| request_error("failed to parse the shard count", e))?;
+        Ok(body
+            .as_object()
+            .and_then(|indexes| indexes.values().next())
+            .and_then(|settings| settings.pointer("/settings/index/number_of_shards"))
+            .and_then(|shards| match shards {
+                Value::String(text) => text.parse().ok(),
+                other => other.as_u64().and_then(|n| u32::try_from(n).ok()),
+            }))
+    }
+
     pub(crate) async fn refresh_indexes(&self, indexes: &BTreeSet<String>) -> Result<()> {
         let names: Vec<&str> = indexes.iter().map(String::as_str).collect();
         let url = format!(

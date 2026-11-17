@@ -108,6 +108,13 @@ impl Sink for OpensearchSink {
         // mark_seeded swaps them — so reads never hit a half-built index. The
         // hash alias is load-bearing (the query client reads through it), so its
         // failure propagates; the `{logical}` convenience alias stays best-effort.
+        let single_shard = match self.primary_shards(&index).await {
+            Ok(shards) => shards == Some(1),
+            Err(error) => {
+                debug!(%error, index = %index, "could not read the shard count; a caught-up write will refresh it separately");
+                false
+            }
+        };
         let serving = self.alias_holders(&hash_alias).await?;
         if seeded || serving.is_empty() {
             self.try_ensure_alias(&hash_alias, &index).await?;
@@ -120,7 +127,7 @@ impl Sink for OpensearchSink {
                 generation: index,
                 hash_alias,
                 seeded,
-                single_shard: false,
+                single_shard,
             },
         );
         Ok(())
@@ -156,6 +163,7 @@ impl Sink for OpensearchSink {
     /// document: it is never sent, so the rest of the write still lands.
     #[tracing::instrument(name = "os.write", skip_all, fields(documents = envelopes.len(), caught_up), err)]
     async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> Result<WriteReport> {
+        let sent_at = self.lock_unrefreshed().point();
         let mut actions = Vec::with_capacity(envelopes.len());
         for envelope in envelopes {
             actions.push(self.bulk_action(envelope)?);
@@ -177,7 +185,7 @@ impl Sink for OpensearchSink {
         });
 
         if actions.is_empty() && rejected.is_empty() {
-            let visibility = self.settle_visibility(caught_up, &actions).await;
+            let visibility = self.settle_visibility(caught_up, &actions, sent_at).await;
             return Ok(WriteReport::clean().visible(visibility).sent(0));
         }
 
@@ -230,7 +238,7 @@ impl Sink for OpensearchSink {
             }
         }
 
-        let visibility = self.settle_visibility(caught_up, &actions).await;
+        let visibility = self.settle_visibility(caught_up, &actions, sent_at).await;
         Ok(WriteReport::clean()
             .rejecting(rejected)
             .visible(visibility)
@@ -352,7 +360,12 @@ impl OpensearchSink {
     /// as the port requires. If that refresh fails the documents are still
     /// durable: the indexes stay remembered for the next caught-up write, and
     /// the write reports what the periodic refresh promises.
-    async fn settle_visibility(&self, caught_up: bool, written: &[BulkAction]) -> Visibility {
+    async fn settle_visibility(
+        &self,
+        caught_up: bool,
+        written: &[BulkAction],
+        sent_at: u64,
+    ) -> Visibility {
         let unforced = match self.refresh_period() {
             Some(period) => Visibility::Within(period),
             None => Visibility::Deferred,
@@ -362,28 +375,31 @@ impl OpensearchSink {
                 return Visibility::Immediate;
             }
             self.lock_unrefreshed()
-                .extend(written.iter().map(|action| action.index().to_owned()));
+                .mark(written.iter().map(|action| action.index().to_owned()));
             return unforced;
         }
         // One caught-up refresh at a time: a second one waits here, then sees
         // what this one put back if it failed, so neither answers `Immediate`
         // before a refresh covering the earlier writes succeeded.
         let _refreshing = self.refreshing.lock().await;
-        let pending = std::mem::take(&mut *self.lock_unrefreshed());
+        let pending = self.lock_unrefreshed().take_uncovered(sent_at, |index| {
+            written.iter().any(|action| action.index() == index) && self.single_shard(index)
+        });
         if pending.is_empty() {
             return Visibility::Immediate;
         }
-        match self.refresh_indexes(&pending).await {
+        let names: BTreeSet<String> = pending.keys().cloned().collect();
+        match self.refresh_indexes(&names).await {
             Ok(()) => Visibility::Immediate,
             Err(error) => {
                 warn!(%error, "could not refresh indexes earlier writes left unrefreshed; retrying on the next caught-up write");
-                self.lock_unrefreshed().extend(pending);
+                self.lock_unrefreshed().restore(pending);
                 unforced
             }
         }
     }
 
-    fn lock_unrefreshed(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
+    fn lock_unrefreshed(&self) -> std::sync::MutexGuard<'_, crate::refresh::Unrefreshed> {
         self.unrefreshed
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

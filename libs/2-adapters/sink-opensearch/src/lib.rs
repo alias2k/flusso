@@ -8,6 +8,7 @@ mod bulk;
 mod config;
 mod generations;
 mod mapping;
+mod refresh;
 mod settings;
 mod sink_impl;
 mod transport;
@@ -49,7 +50,7 @@ pub fn bench_render_bulk(envelopes: &[kernel::Envelope]) -> Result<String> {
     Ok(body)
 }
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex as SyncMutex, PoisonError};
 use std::time::Duration;
@@ -107,7 +108,7 @@ pub struct OpensearchSink {
     /// Indexes written by a write that forced no refresh, which the next
     /// caught-up write refreshes (see [`write`](OpensearchSink::write)).
     /// Shared across clones and concurrent writes.
-    pub(crate) unrefreshed: Arc<SyncMutex<BTreeSet<String>>>,
+    pub(crate) unrefreshed: Arc<SyncMutex<refresh::Unrefreshed>>,
     /// Held by a caught-up write from taking `unrefreshed` until its refresh
     /// returned (or the set was put back), so a later caught-up write waits
     /// and never answers `Immediate` over a refresh still running or failed.
@@ -244,7 +245,7 @@ impl OpensearchSink {
             },
             per_index_settings: Arc::new(HashMap::new()),
             index_prefix: String::new(),
-            unrefreshed: Arc::new(SyncMutex::new(BTreeSet::new())),
+            unrefreshed: Arc::new(SyncMutex::new(refresh::Unrefreshed::default())),
             refreshing: Arc::new(tokio::sync::Mutex::new(())),
             targets: Arc::new(SyncMutex::new(HashMap::new())),
         })
@@ -344,6 +345,19 @@ impl OpensearchSink {
     }
 
     /// Record what is known about a logical index.
+    /// Whether the physical index (a generation or a hash alias) a bulk
+    /// action names has one primary shard, as far as the sink knows.
+    pub(crate) fn single_shard(&self, physical: &str) -> bool {
+        self.targets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .any(|target| {
+                target.single_shard
+                    && (target.generation == physical || target.hash_alias == physical)
+            })
+    }
+
     pub(crate) fn set_target(&self, logical: &str, target: IndexTarget) {
         self.targets
             .lock()
