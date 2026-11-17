@@ -53,10 +53,13 @@ just review-ab origin/main         # A/B the working tree against a base on thos
 just review-digest                 # same documents as the base? (see below)
 just review-plans                  # same query plans as the base? (see below)
 just bench-scenario reference ci   # a scenario; also `complex`, `sync-standby`, and `default` scale
+just bench-startup reference 8     # time to `live` with each index declared 8 times (see below)
 just load                          # the soak tool: watch it, it produces no comparable number
 ```
 
 `bench-scenario` starts its own containers, builds a release `flusso` without the designer (or takes `FLUSSO_BIN`), and writes `target/bench/<scenario>-<scale>/{smaller,bigger,summary}.json`. `BENCH_PG_URL` and `BENCH_OS_URL` point it at an existing pair instead; the Postgres must have `wal_level = logical` and both must be empty.
+
+`bench-startup` measures start-up instead of the four phases (`flusso-bench --startup <copies>`): each of the scenario's indexes declared `copies` times under its own name, `--skip-backfill`, timed from spawning the binary to `/status` `live`. Each of `--runs` rounds (3) starts fresh (no index, slot or publication) and then restarts. It writes `target/bench/<scenario>-startup/startup.json`, every start with the load average beside it, and the min/median/max per kind. It's a by-hand check for a change to staging; `bench.yml` doesn't run it. To compare two builds, pass each as `FLUSSO_BIN` against one `BENCH_PG_URL`/`BENCH_OS_URL` pair, alternating, so the load the machine is under falls on both alike.
 
 To compare a branch by hand: run `just bench main` on `main`, `just bench pr` on the branch, then `just bench-compare main pr`. Criterion keeps both under `target/criterion`.
 
