@@ -202,6 +202,13 @@ A comparison with a string, a number or another kind fails rather than answering
 - **`/status` has a `stopping` phase** and a `pid`; `/readyz` is `503` while stopping; a `/wait` `503` now carries `Retry-After` and a `reason` (`starting` or `stopping`).
 - **Embedding the crates.** `RunningDaemon::run` no longer returns as soon as its `shutdown` future fires: it drains first, with no deadline of its own (bound it in the caller). `daemon::Phase` gains `Stopping` and `ControlError` gains `Stopping`; both are `#[non_exhaustive]` now. `ChangeCapture` gains `close_live` (default: not supported). `flusso_design::serve` takes the shutdown future as a second argument.
 
+## A backfill of related indexes is faster and holds more in memory
+
+0.17 ran one query per row and relation while backfilling indexes that read each other's tables, and built the same documents several times. 0.18 builds each document once, with no query per row.
+
+- **Peak memory during a backfill can rise.** Documents are now built faster than a sink takes them, so built batches wait in the sink's lane: up to `capacity` batches (1,024) of `max_changes` documents (256) each. Under a tight memory limit, lower [`capacity`](../reference/stream-channel.md) (`--queue-capacity`) or raise the limit.
+- **A root without a single-column primary key gets no document from a backfill.** That was already the rule (see [Postgres source](../reference/source-postgres.md)), but 0.17 could index some of its rows by accident while backfilling a related index.
+
 ## Related
 
 - [Field types](../reference/field-types.md) for what a `binary` field, a `constant`, a `timestamp` and a [`decimal`](../reference/field-types.md#numbers) index.

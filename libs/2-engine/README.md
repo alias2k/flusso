@@ -39,9 +39,10 @@ have accumulated, with [`max_delay`](BatchPolicy::max_delay) as the cap while
 changes keep arriving ([`BatchPolicy`]). Each change is resolved to the
 documents it touches, deduplicated, built once, and published as one
 `Batch` — the envelopes plus the position of the last change — to every lane.
-Snapshot rows for a backfill flow through the same resolve → build path but
-are published only to the lanes that requested them, without a position, and
-end with a `SnapshotComplete` marker. Both kinds interleave on one task, so
+Snapshot rows for a backfill go through the same build path but are not
+resolved: each row is its own document, once per requested index rooted at its
+table. They are published only to the lanes that requested them, without a
+position, and end with a `SnapshotComplete` marker. Both kinds interleave on one task, so
 lane order is build order.
 
 After each commit it reads the stream's watermark — the lowest position every
