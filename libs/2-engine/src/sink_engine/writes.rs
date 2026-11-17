@@ -143,7 +143,6 @@ pub(super) struct Run<'a> {
     contested: u64,
     failure: Option<EngineError>,
     lane_closed: bool,
-    reindex: Option<Vec<IndexName>>,
     /// The previous run failed and nothing has landed since: grant only the
     /// window's front item, alone.
     barrier: bool,
@@ -164,7 +163,6 @@ impl<'a> Run<'a> {
             contested: 0,
             failure: None,
             lane_closed: false,
-            reindex: None,
             barrier: engine.failed_run.load(Ordering::Relaxed),
             idle_since: Some(Instant::now()),
         }
@@ -218,11 +216,13 @@ impl<'a> Run<'a> {
                         Ok(Some(delivery)) => self.queue(delivery),
                     }
                 }
-                message = control.recv(), if control_open && self.reindex.is_none() && self.failure.is_none() => {
+                message = control.recv(), if control_open && !self.engine.reindex_pending() && self.failure.is_none() => {
                     self.close_idle();
                     match message {
                         None => control_open = false,
-                        Some(SinkControl::Reindex { indexes }) => self.reindex = Some(indexes),
+                        Some(SinkControl::Reindex { indexes }) => {
+                            *self.engine.lock_pending_reindex() = Some(indexes);
+                        }
                     }
                 }
                 () = until(next_due) => {
@@ -243,16 +243,22 @@ impl<'a> Run<'a> {
         if self.engine.stop.is_requested() {
             self.skip_backfill().await?;
         }
-        if self.flights.is_empty()
-            && let Some(indexes) = self.reindex.take()
-        {
+        let pending = if self.flights.is_empty() {
+            self.engine.lock_pending_reindex().take()
+        } else {
+            None
+        };
+        if let Some(indexes) = pending {
             let started = Instant::now();
-            self.engine.reindex(indexes).await?;
+            if let Err(error) = self.engine.reindex(indexes.clone()).await {
+                *self.engine.lock_pending_reindex() = Some(indexes);
+                return Err(error);
+            }
             self.engine.observer.on_stage(
                 StageTiming::new(Stage::Reindex, started.elapsed()).sink(&self.engine.name),
             );
         }
-        if self.reindex.is_none() {
+        if !self.engine.reindex_pending() {
             self.grant().await?;
         }
         Ok(())

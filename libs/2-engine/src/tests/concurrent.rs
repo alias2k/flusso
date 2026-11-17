@@ -1042,9 +1042,10 @@ async fn a_reindex_taken_before_a_failed_write_is_staged_after_the_restart() {
         .count();
     assert_eq!(reindexes, 1, "staged once");
     let mut requests = rig.stream.requests().unwrap().consumer;
-    let mut asked = 0;
-    while let Some(Ok(Some(_))) = requests.recv().now_or_never() {
-        asked += 1;
+    // Held, not dropped: a dropped delivery is redelivered.
+    let mut asked = Vec::new();
+    while let Some(Ok(Some(request))) = requests.recv().now_or_never() {
+        asked.push(request);
     }
-    assert_eq!(asked, 1, "its backfill is requested once");
+    assert_eq!(asked.len(), 1, "its backfill is requested once");
 }

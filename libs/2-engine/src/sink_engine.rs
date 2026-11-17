@@ -118,6 +118,13 @@ pub struct SinkEngine {
     acknowledged: AtomicU64,
     /// Lane items written at once.
     writes: usize,
+    /// A reindex taken off the control channel and not yet staged. It
+    /// outlives a run, so a run failing with writes in flight doesn't lose a
+    /// reindex the daemon already accepted; the next run stages it once its
+    /// writes in flight returned. A reindex still pending when a stop ends
+    /// the deployment is dropped with it (the daemon refuses new ones once
+    /// stopping).
+    pending_reindex: Mutex<Option<Vec<IndexName>>>,
     /// The last run ended in an error: the next one writes the oldest
     /// redelivered item alone before anything else (see `writes`).
     failed_run: AtomicBool,
@@ -148,6 +155,7 @@ impl SinkEngine {
             acknowledged: AtomicU64::new(0),
             writes: 1,
             failed_run: AtomicBool::new(false),
+            pending_reindex: Mutex::new(None),
         }
     }
 
@@ -433,6 +441,16 @@ impl SinkEngine {
 
     fn lock_fences(&self) -> std::sync::MutexGuard<'_, Fences> {
         self.fences.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn lock_pending_reindex(&self) -> std::sync::MutexGuard<'_, Option<Vec<IndexName>>> {
+        self.pending_reindex
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn reindex_pending(&self) -> bool {
+        self.lock_pending_reindex().is_some()
     }
 
     fn lock_skipped(&self) -> std::sync::MutexGuard<'_, BTreeSet<IndexName>> {
