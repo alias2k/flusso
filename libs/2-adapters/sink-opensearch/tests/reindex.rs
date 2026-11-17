@@ -819,8 +819,8 @@ async fn a_flush_reports_when_its_documents_become_searchable() {
     );
     assert_eq!(
         manual.flush(false).await.unwrap().visibility,
-        Visibility::Deferred,
-        "an empty flush must not release what is still unrefreshed",
+        Visibility::Immediate,
+        "an empty write that isn't caught up reports on itself alone: it wrote nothing",
     );
     assert!(
         doc_exists(&client, &base, &hash_alias, "3").await,
