@@ -126,6 +126,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use async_trait::async_trait;
+use futures::{StreamExt, TryStreamExt};
 use kernel::common::{ColumnName, FieldName, IndexName};
 use kernel::{
     Aggregate, AggregateKey, AggregateOp, Column, ColumnPair, DatabaseSchema, Field, FieldSource,
@@ -496,38 +497,63 @@ impl Diagnostic {
     }
 }
 
+/// How many indexes [`validate_indexes`] checks at once. Each check is a run
+/// of small catalog lookups one after another; overlapping a few indexes hides
+/// their round trips without taking more than a few of the store's
+/// connections at start.
+const VALIDATE_CONCURRENCY: usize = 4;
+
 /// Validate every index in `spec` against the store behind `catalog`, returning
 /// the disagreements found. An empty result means the declared schema matches
 /// the database. The spec already holds only enabled indexes.
+///
+/// A few indexes are checked at once; the diagnostics come back in the spec's
+/// index order, as one index after another would give them.
 pub async fn validate_indexes(spec: &SourceSpec, catalog: &dyn Catalog) -> Result<Vec<Diagnostic>> {
+    // Built up front, so the buffered stream holds no closure over borrows.
+    let checks: Vec<_> = spec
+        .indexes()
+        .map(|(name, schema)| validate_index(name, schema, catalog))
+        .collect();
+    let per_index: Vec<Vec<Diagnostic>> = futures::stream::iter(checks)
+        .buffered(VALIDATE_CONCURRENCY)
+        .try_collect()
+        .await?;
+    Ok(per_index.concat())
+}
+
+/// [`validate_indexes`] for one index.
+async fn validate_index(
+    name: &IndexName,
+    schema: &IndexSchema,
+    catalog: &dyn Catalog,
+) -> Result<Vec<Diagnostic>> {
     let mut diagnostics = Vec::new();
-    for (name, schema) in spec.indexes() {
-        let mut checker = Checker {
-            index: name,
-            db_schema: &schema.db_schema,
-            catalog,
-            tables: HashMap::new(),
-            primary_keys: HashMap::new(),
-            path: Vec::new(),
-            positions: Vec::new(),
-            anchor: Anchor::Field,
-            uncarried: 0,
-            date_mapped: false,
-            out: &mut diagnostics,
-        };
-        checker
-            .fields(&schema.table, &schema.fields, schema.primary_key.as_ref())
-            .await?;
-        checker.root(schema).await?;
-        duplicate_names(
-            name,
-            &schema.fields,
-            true,
-            &mut Vec::new(),
-            &mut diagnostics,
-        );
-        timestamp_formats(name, &schema.fields, &mut Vec::new(), &mut diagnostics);
-    }
+    let mut checker = Checker {
+        index: name,
+        db_schema: &schema.db_schema,
+        catalog,
+        tables: HashMap::new(),
+        primary_keys: HashMap::new(),
+        path: Vec::new(),
+        positions: Vec::new(),
+        anchor: Anchor::Field,
+        uncarried: 0,
+        date_mapped: false,
+        out: &mut diagnostics,
+    };
+    checker
+        .fields(&schema.table, &schema.fields, schema.primary_key.as_ref())
+        .await?;
+    checker.root(schema).await?;
+    duplicate_names(
+        name,
+        &schema.fields,
+        true,
+        &mut Vec::new(),
+        &mut diagnostics,
+    );
+    timestamp_formats(name, &schema.fields, &mut Vec::new(), &mut diagnostics);
     Ok(diagnostics)
 }
 
@@ -1792,6 +1818,90 @@ mod tests {
             diagnostics[0].message.contains("unknown column"),
             "got: {}",
             diagnostics[0].message,
+        );
+    }
+
+    /// Every column unknown; each lookup yields `yields(table)` times first,
+    /// counting how many lookups are in flight at once.
+    #[derive(Default)]
+    struct Yielding {
+        in_flight: std::sync::atomic::AtomicUsize,
+        peak: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Yielding {
+        /// Earlier tables answer later, so an ordered result is not an
+        /// accident of finishing order.
+        fn yields(table: &TableName) -> usize {
+            let n: usize = table.as_ref().trim_start_matches('t').parse().unwrap();
+            20 - n
+        }
+    }
+
+    #[async_trait]
+    impl Catalog for Yielding {
+        async fn column(
+            &self,
+            schema: &DatabaseSchema,
+            table: &TableName,
+            column: &ColumnName,
+        ) -> Result<ColumnInfo> {
+            use std::sync::atomic::Ordering;
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            for _ in 0..Self::yields(table) {
+                let mut yielded = false;
+                std::future::poll_fn(|cx| {
+                    if yielded {
+                        std::task::Poll::Ready(())
+                    } else {
+                        yielded = true;
+                        cx.waker().wake_by_ref();
+                        std::task::Poll::Pending
+                    }
+                })
+                .await;
+            }
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Err(SourceError::UnknownColumn(format!(
+                "{schema}.{table}.{column}"
+            )))
+        }
+
+        async fn has_table(&self, _: &DatabaseSchema, _: &TableName) -> Result<bool> {
+            Ok(true)
+        }
+    }
+
+    /// Indexes are checked a few at a time (issue #398), and their findings
+    /// still come back in the spec's index order.
+    #[test]
+    fn indexes_are_checked_concurrently_and_reported_in_order() {
+        let mut indexes = BTreeMap::new();
+        for i in 0..10 {
+            let schema: IndexSchema = serde_json::from_value(json!({
+                "version": 1,
+                "table": format!("t{i}"),
+                "db_schema": "public",
+                "fields": [{
+                    "field": "title",
+                    "source": { "column": { "column": "title", "ty": "keyword", "nullable": true } },
+                }],
+            }))
+            .unwrap();
+            indexes.insert(IndexName::try_new(format!("index_{i}")).unwrap(), schema);
+        }
+        let spec = SourceSpec::new(indexes);
+        let catalog = Yielding::default();
+
+        let diagnostics = futures::executor::block_on(validate_indexes(&spec, &catalog)).unwrap();
+
+        let named: Vec<&str> = diagnostics.iter().map(|d| d.index.as_ref()).collect();
+        let expected: Vec<String> = (0..10).map(|i| format!("index_{i}")).collect();
+        assert_eq!(named, expected);
+        assert_eq!(
+            catalog.peak.load(std::sync::atomic::Ordering::SeqCst),
+            VALIDATE_CONCURRENCY
         );
     }
 

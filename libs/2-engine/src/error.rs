@@ -1,3 +1,6 @@
+use std::fmt;
+
+use kernel::IndexName;
 use thiserror::Error;
 
 /// Result alias for the engine.
@@ -43,4 +46,32 @@ pub enum EngineError {
         id: String,
         failure: Box<source::document::BuildFailure>,
     },
+
+    /// Staging failed for one or more of a sink's indexes. Each is named with
+    /// its own error; the indexes not listed were staged.
+    #[error("{0}")]
+    Staging(StagingFailures),
+}
+
+/// The indexes a sink failed to stage, in the sink's index order, each with
+/// its error.
+#[derive(Debug)]
+pub struct StagingFailures(pub(crate) Vec<(IndexName, sink::SinkError)>);
+
+impl StagingFailures {
+    /// Each failed index with its error.
+    pub fn iter(&self) -> impl Iterator<Item = &(IndexName, sink::SinkError)> {
+        self.0.iter()
+    }
+}
+
+impl fmt::Display for StagingFailures {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "staging failed for")?;
+        for (n, (index, error)) in self.0.iter().enumerate() {
+            let separator = if n == 0 { "" } else { ";" };
+            write!(f, "{separator} index `{index}`: {error}")?;
+        }
+        Ok(())
+    }
 }

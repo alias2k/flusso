@@ -1064,6 +1064,7 @@ fn batch_policy_lays_the_config_over_the_engine_defaults() {
 }
 
 mod backoff;
+mod staging;
 mod stop;
 
 /// `inner`, with a live stream that is whatever is sent on the returned

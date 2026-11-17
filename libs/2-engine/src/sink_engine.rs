@@ -9,6 +9,13 @@
 //! without a shared engine: rebuilds are staged before the resume point exists,
 //! and the resume point exists before any snapshot runs.
 //!
+//! The indexes are staged concurrently, a few at a time
+//! ([`STAGE_CONCURRENCY`]): each index's own steps stay in order, and nothing
+//! orders one index against another, since each has its own target on the
+//! destination. Staging is all or nothing per pass: when an index fails, the
+//! others still finish, the error names every failed index, and the daemon
+//! retries the whole stage (each step is idempotent).
+//!
 //! The loop ([`SinkEngine::run`]) applies each batch's envelopes, flushes once
 //! at the batch boundary, decides item-level rejections by the failure
 //! policies, and acknowledges: flush-then-ack is what makes delivery
@@ -30,6 +37,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use futures::StreamExt;
 use kernel::{IndexMapping, IndexName, Position, SinkName};
 use sink::{Sink, SinkOptions, Visibility};
 use source::cdc::Continuity;
@@ -37,10 +45,19 @@ use stream::{LaneItem, Request, Stream};
 use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until};
 
-use crate::error::{EngineError, Result};
+use crate::error::{EngineError, Result, StagingFailures};
 use crate::observer::{CommitStats, EngineId, NoopObserver, Observer};
 use crate::policy::{FailurePolicies, FailurePolicy};
 use crate::stop::Stop;
+
+/// How many of a sink's indexes are staged at once.
+///
+/// Staging is a few round trips per index, so overlapping them is most of the
+/// gain. A destination such as OpenSearch applies index creations one
+/// cluster-state update at a time, so more in flight only queues on its
+/// master; the bound keeps a deployment with hundreds of indexes from
+/// flooding it, or the client's connection pool, at start.
+pub(crate) const STAGE_CONCURRENCY: usize = 8;
 
 /// An operation the daemon hands a running sink engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +65,15 @@ pub enum SinkControl {
     /// Rebuild `indexes` into fresh generations: stage them and request a
     /// snapshot. Handled between two batches; nothing restarts.
     Reindex { indexes: Vec<IndexName> },
+}
+
+/// What staging does to one index.
+#[derive(Debug, Clone, Copy)]
+enum Step {
+    /// `ensure_index`, then `is_seeded` when asked.
+    Ensure { ask_seeded: bool },
+    /// `reindex` and `ensure_index`, then `is_seeded` when asked.
+    Rebuild { ask_seeded: bool },
 }
 
 /// One sink's engine over its lane.
@@ -161,32 +187,40 @@ impl SinkEngine {
     /// request a backfill for what is still unseeded. Idempotent; the daemon
     /// runs it before the ingest engine prepares the source, and again before
     /// each restart of this engine (with `Resumed`).
+    ///
+    /// The indexes are staged concurrently, at most eight at a time, each
+    /// index's own steps in order. Every index is staged even when another
+    /// fails; the error then names each failed index.
     #[tracing::instrument(name = "sink.stage", skip_all, fields(sink = %self.name, ?continuity))]
     pub async fn stage(&self, continuity: Continuity) -> Result<()> {
-        for mapping in &self.mappings {
-            self.sink.ensure_index(mapping).await?;
-        }
+        let backfill = self.options.backfill;
+        let mut seeded = self
+            .each_index(
+                self.mappings.iter(),
+                Step::Ensure {
+                    ask_seeded: backfill,
+                },
+            )
+            .await?;
         self.observer
             .on_indexes_ensured(&self.name, self.mappings.len());
 
-        if !self.options.backfill {
+        if !backfill {
             tracing::info!("backfill disabled for this sink; live changes only");
             self.observer.on_sink_started(&self.name);
             return Ok(());
         }
 
         if continuity == Continuity::Fresh {
-            self.rebuild_stale_seeds().await?;
+            self.rebuild_stale_seeds(&mut seeded).await?;
         }
 
-        let mut unseeded = Vec::new();
-        for mapping in &self.mappings {
-            if !self.sink.is_seeded(&mapping.index).await? {
-                unseeded.push(mapping.index.clone());
-            }
-        }
         let already_requested = self.outstanding();
-        unseeded.retain(|index| !already_requested.contains(index));
+        let unseeded: Vec<IndexName> = seeded
+            .into_iter()
+            .filter(|(mapping, seeded)| !seeded && !already_requested.contains(&mapping.index))
+            .map(|(mapping, _)| mapping.index.clone())
+            .collect();
         if self.skip_backfill {
             if !unseeded.is_empty() {
                 tracing::warn!(
@@ -213,13 +247,15 @@ impl SinkEngine {
     /// in flight. Under `skip_backfill` nothing is staged: a staged target
     /// nobody backfills would take the live writes while the old copy keeps
     /// serving reads.
-    async fn rebuild_stale_seeds(&self) -> Result<()> {
-        let mut stale: Vec<&IndexMapping> = Vec::new();
-        for mapping in &self.mappings {
-            if self.sink.is_seeded(&mapping.index).await? {
-                stale.push(mapping);
-            }
-        }
+    ///
+    /// `seeded` is each index with whether it is seeded; a rebuilt index's
+    /// answer is asked again.
+    async fn rebuild_stale_seeds(&self, seeded: &mut [(&IndexMapping, bool)]) -> Result<()> {
+        let stale: Vec<&IndexMapping> = seeded
+            .iter()
+            .filter(|(_, seeded)| *seeded)
+            .map(|(mapping, _)| *mapping)
+            .collect();
         if stale.is_empty() {
             return Ok(());
         }
@@ -233,11 +269,68 @@ impl SinkEngine {
         if self.skip_backfill {
             return Ok(());
         }
-        for mapping in stale {
-            self.sink.reindex(mapping).await?;
-            self.sink.ensure_index(mapping).await?;
+        let rebuilt = self
+            .each_index(stale, Step::Rebuild { ask_seeded: true })
+            .await?;
+        for (mapping, now) in rebuilt {
+            if let Some((_, seeded)) = seeded.iter_mut().find(|(m, _)| m.index == mapping.index) {
+                *seeded = now;
+            }
         }
         Ok(())
+    }
+
+    /// Run `step` for each of `mappings`, at most [`STAGE_CONCURRENCY`] at
+    /// once, and return each mapping with whether it is seeded (`false` when
+    /// not asked), in the order given. Every step runs to its end: when any
+    /// fails, the error names each failed index with its own error.
+    async fn each_index<'a>(
+        &self,
+        mappings: impl IntoIterator<Item = &'a IndexMapping>,
+        step: Step,
+    ) -> Result<Vec<(&'a IndexMapping, bool)>> {
+        // Built up front, so the buffered stream holds no closure: one over
+        // borrowed mappings makes the engine's future not provably `Send`.
+        let steps: Vec<_> = mappings
+            .into_iter()
+            .enumerate()
+            .map(|(order, mapping)| async move { (order, mapping, self.step(step, mapping).await) })
+            .collect();
+        let mut outcomes: Vec<_> = futures::stream::iter(steps)
+            .buffer_unordered(STAGE_CONCURRENCY)
+            .collect()
+            .await;
+        outcomes.sort_unstable_by_key(|(order, _, _)| *order);
+        let mut done = Vec::with_capacity(outcomes.len());
+        let mut failed = Vec::new();
+        for (_, mapping, outcome) in outcomes {
+            match outcome {
+                Ok(seeded) => done.push((mapping, seeded)),
+                Err(error) => failed.push((mapping.index.clone(), error)),
+            }
+        }
+        if failed.is_empty() {
+            Ok(done)
+        } else {
+            Err(EngineError::Staging(StagingFailures(failed)))
+        }
+    }
+
+    /// One index's staging steps, in order.
+    async fn step(&self, step: Step, mapping: &IndexMapping) -> sink::Result<bool> {
+        let ask_seeded = match step {
+            Step::Ensure { ask_seeded } => ask_seeded,
+            Step::Rebuild { ask_seeded } => {
+                self.sink.reindex(mapping).await?;
+                ask_seeded
+            }
+        };
+        self.sink.ensure_index(mapping).await?;
+        if ask_seeded {
+            self.sink.is_seeded(&mapping.index).await
+        } else {
+            Ok(false)
+        }
     }
 
     async fn request_backfill(&self, indexes: Vec<IndexName>) -> Result<()> {
@@ -517,7 +610,7 @@ impl SinkEngine {
             return Ok(());
         }
         let outstanding = self.outstanding();
-        let mut staged = Vec::new();
+        let mut chosen = Vec::new();
         for index in indexes {
             let Some(mapping) = self.mappings.iter().find(|m| m.index == index) else {
                 tracing::warn!(%index, "reindex requested for an index this sink does not maintain; ignoring");
@@ -528,10 +621,14 @@ impl SinkEngine {
                 continue;
             }
             tracing::info!(%index, "reindex requested; staging a fresh generation");
-            self.sink.reindex(mapping).await?;
-            self.sink.ensure_index(mapping).await?;
-            staged.push(index);
+            chosen.push(mapping);
         }
+        let staged: Vec<IndexName> = self
+            .each_index(chosen, Step::Rebuild { ask_seeded: false })
+            .await?
+            .into_iter()
+            .map(|(mapping, _)| mapping.index.clone())
+            .collect();
         if !staged.is_empty() {
             self.request_backfill(staged).await?;
         }

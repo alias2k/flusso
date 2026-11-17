@@ -1457,6 +1457,7 @@ async fn stop_policy_fails_the_ingest_engine_on_a_failed_document() {
 
 mod busy;
 mod snapshot;
+mod staging;
 mod stop;
 
 /// Wait (up to five seconds) until `condition` holds.
