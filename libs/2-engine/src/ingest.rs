@@ -57,8 +57,11 @@ use crate::stop::{Stop, drain_lanes};
 const CONFIRM_TICK: Duration = Duration::from_secs(1);
 
 /// The longest a stopping engine polls the live stream for its end after
-/// asking the source to close it. Past it the stream is dropped.
-const CLOSE_WAIT: Duration = Duration::from_secs(10);
+/// asking the source to close it. Past it the stream is dropped. Longer than
+/// the source's own bounds added up (the Postgres stream allows 5 s to send
+/// the final position and 5 s to close), so a close that just fits is not
+/// reported as one that failed.
+const CLOSE_WAIT: Duration = Duration::from_secs(12);
 
 /// The producing end of every sink's lane, by sink name.
 type Lanes = BTreeMap<SinkName, Box<dyn Producer<LaneItem>>>;

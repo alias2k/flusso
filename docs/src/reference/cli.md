@@ -86,6 +86,7 @@ A stop is a graceful drain: flusso lands what it already read, confirms it to Po
 | `SIGTERM`, `SIGINT` (Ctrl-C), `SIGHUP` | The drain below. `SIGHUP` (a closed terminal, a task runner passing on its own hang-up) is a stop, not a reload; a run started with it ignored (`nohup`) keeps ignoring it on Linux, and elsewhere `SIGHUP` keeps its default action (the process ends at once, as before 0.18). |
 | The parent process exits, under `--exit-with-parent` | The same drain, logged as `the parent process <pid> exited`. Checked twice a second. A parent that is already `init` (PID 1, as in a container) is never followed. |
 | **The same sender twice within 500 ms**, or **three stop signals within 1 s** from anyone | Exits at once with `128 + n`: `129` (`SIGHUP`), `130` (`SIGINT`), `143` (`SIGTERM`), logging `forced: exiting at once while <step>`. Pressing Ctrl-C twice quickly does it, directly or under a task runner. |
+| On Windows: Ctrl-C, Ctrl-Break, a closed console, a system shutdown | The same drain. Windows reports no sender, so only three within 1 s force it, and Windows itself ends the process a few seconds after a closed console or a shutdown, drained or not. `--exit-with-parent` is ignored there, with a warning. |
 | Any other repeat | The same request: the drain carries on, and flusso logs `stop already requested: <step> (<sink>: <n> changes in flight), <n>s left. Send the signal twice quickly to exit now` (at most once a second). |
 
 A sender is the process that sent the signal (`siginfo`): the kernel for a terminal's Ctrl-C or hang-up, the task runner for its forwarded copy, `0` for one outside the container (`docker stop`, Kubernetes). One Ctrl-C under a task runner that forwards it is two signals from two senders, so it drains. A stop loop re-sending `SIGTERM` every second never forces. `/bin/kill` and `pkill` are a new sender each time: three of them within a second force. On macOS a terminal's Ctrl-C carries no sender, so there three presses force (two under a task runner).
@@ -105,7 +106,7 @@ The drain, in order:
 | --- | --- |
 | `0` | Every step of the drain completed: what was read is indexed and its final position confirmed to Postgres. The one exception is `--shutdown-timeout-secs 0`, which doesn't drain and logs `stopped without draining, as asked`. An HTTP connection left open or telemetry that didn't flush in its 5 s is logged, not counted: neither is the data path. |
 | `1` | The deadline passed during the drain, the final position couldn't be confirmed to Postgres (`the final position was not confirmed to the source`), or the pipeline failed. |
-| `128 + n` | A second stop signal ended the drain. |
+| `128 + n` | The drain was forced (the rule above). |
 
 Until the pipeline is started (through [validation at start](#validation-at-start)), a signal ends the process the default way, at once; a parent that exits meanwhile is noticed as soon as it is.
 
