@@ -334,7 +334,7 @@ A long stall has two costs:
 | `LaneItem::Batch` | `index`, `envelopes`, heap `bytes`, `oldest: Option<Position>`; `SnapshotComplete` names one index |
 | `Request` | `Backfill { sink }` per index lane, plus a fresh build of ids for one lane |
 | `DocumentBuilder` | already shareable; gains `keys(index, after, limit)`; `Document::Upsert` gains its heap size; a second pool for resolution |
-| `Sink` | `write(&self, index, &[Envelope], caught_up) -> FlushReport` replaces `apply` + `flush`; concurrent calls allowed; retryable items kept apart from rejections |
+| `Sink` | `write(&self, &[Envelope], caught_up) -> WriteReport` replaces `apply` + `flush` (stage 2); concurrent calls allowed; busy items retried inside the write, never reported. `caught_up` makes every write that returned before the call searchable, not only its own documents. The `index` argument comes with per-`(index, sink)` lanes (stage 7): until then a lane item spans indexes |
 | channel adapter | releases per ticket, not by moving a cursor back (today it re-serves items still being written); lanes bounded by bytes alone |
 | `/wait`, `flusso-query` | `index` on `/wait`; `Client::after` passes its index; the fence cache keyed by `(level, index)` |
 
@@ -392,6 +392,12 @@ Each stage leaves `main` correct and is measured on `reference` before and after
    - per-id admission and live-first selection on the sink's one lane;
    - the lane watermark taken before its oldest unacknowledged item (from the predecessor recorded at delivery), with fence reports following it;
    - in-flight writes awaited on a restart.
+
+   Settled in its PR (#386 stage 2):
+   - **The window.** The sink engine reads ahead into a window of at most `writes + 32` unfinished items. The channel's ledger holds delivered items outside the lane's bound, so an unbounded read-ahead would unbound memory. Live-first therefore sees only the window until stage 7.
+   - **Every fourth grant** at the writer slots counts only *contested* grants (live and backfill both admissible). Uncontested grants don't move the counter.
+   - **Caught up** is decided at grant: nothing else is queued or waiting on the lane. A caught-up write makes every write that returned before it searchable. When the engine goes idle with a written position not yet searchable, it sends an empty caught-up write. With several writes in flight, the last one granted isn't the last to finish, and the default `refresh_interval` is 10 s.
+   - **A failed write** stops new grants; the writes in flight are awaited, the successful ones acknowledged, then the error ends the run.
 3. **Keyset backfill on the builder pool:** no long transaction, one connection fewer. It doesn't depend on stage 2, so concurrent writes land first.
 4. **The build gate and concurrent builds on the one ingest task.** Builds are published in position order (a small reorder buffer), because stage 2's watermark still trusts lane order.
 5. **The memory budget:** the global limit, the backfill half and the one-batch grant. The per-index half lands with stage 8a.
