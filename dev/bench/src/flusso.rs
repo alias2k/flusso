@@ -38,8 +38,9 @@ fn free_port() -> Result<SocketAddr> {
 
 impl Flusso {
     /// Start `bin run` on `config`, with the source and sink pointed at the
-    /// given URLs through their override variables. Logs go to
-    /// `workdir/flusso.log`, the lock to `workdir/flusso.lock`.
+    /// given URLs through their override variables, and `extra` after the
+    /// harness's own flags. Logs go to `workdir/flusso.log`, the lock to
+    /// `workdir/flusso.lock`.
     pub(crate) async fn spawn(
         bin: &Path,
         config: &Path,
@@ -47,6 +48,7 @@ impl Flusso {
         pg_url: &str,
         os_url: &str,
         rss_cap_mib: u64,
+        extra: &[&str],
     ) -> Result<Self> {
         let public = free_port()?;
         let private = free_port()?;
@@ -62,6 +64,7 @@ impl Flusso {
             .arg(public.to_string())
             .arg("--private-address")
             .arg(private.to_string())
+            .args(extra)
             .env("SOURCE_POSTGRES_CONNECTION_URL", pg_url)
             .env("PRIMARY_OPENSEARCH_URL", os_url)
             .env(
@@ -157,6 +160,23 @@ impl Flusso {
                 bail!("the backfill did not finish within {cap:?}");
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// Wait until `/status` reports `live`, seeded or not. Returns the time
+    /// from `started` to that moment.
+    pub(crate) async fn wait_live(&mut self, started: Instant, cap: Duration) -> Result<Duration> {
+        loop {
+            self.check_alive()?;
+            if let Ok(status) = self.status().await
+                && status.get("phase").and_then(|p| p.as_str()) == Some("live")
+            {
+                return Ok(started.elapsed());
+            }
+            if started.elapsed() > cap {
+                bail!("flusso was not live within {cap:?}");
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
 

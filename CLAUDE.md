@@ -74,7 +74,8 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   (or `BENCH_PG_URL`/`BENCH_OS_URL`) through `reference` (the dev store, three indexes),
   `complex` (the worst-case document) and `sync-standby` (`reference` with its writers behind an
   emulated 2 ms synchronous standby, `dev/bench/src/standby.rs`; by hand only, not in `bench.yml`)
-  at a `ci` or `default` scale, and report the headline
+  at a `ci` or `default` scale (or `--startup <copies>`, `just bench-startup`: time to `live` with each
+  index declared `copies` times, `--skip-backfill`, fresh then restart, `startup.rs`; by hand only), and report the headline
   metrics: visible latency p50/p99 (commit → searchable, via the `updated_at`/`updatedAt` stamp on
   the dev root tables), drain throughput of a burst, backfill throughput, peak RSS + CPU (sampled
   with `ps`), plus flush p50/p99 from `/metrics` for attribution. (2) **Docker-backed component
@@ -744,6 +745,17 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   `a_backfill_with_every_lane_asking_starts_without_waiting`,
   `a_straggling_reindex_request_within_max_delay_joins_the_snapshot`, the daemon's
   `unseeded_sink_is_backfilled_without_touching_its_sibling`.
+- **A sink's indexes are staged concurrently (issue #398).** `SinkEngine::each_index` runs one
+  `Step` per index, `STAGE_CONCURRENCY` (8) at once, each index's own steps in order; the `Sink`
+  port allows `ensure_index`/`is_seeded`/`reindex` at once for different indexes, never for one,
+  never beside `apply`/`flush`/`mark_seeded`. After a failure no further index is started (a
+  hanging cluster would cost a timeout per wave), the ones in flight finish, and
+  `EngineError::Staging` names every failure seen; the daemon retries the whole stage. A reindex
+  control stages the same way, each index once even when named twice. `validate_indexes` checks `VALIDATE_CONCURRENCY` (4) indexes at
+  once, reported in index order. Guards: the engine's `tests::staging`, the daemon's
+  `every_index_of_every_sink_is_staged_before_the_source_prepares`, `validation::tests`'
+  `indexes_are_checked_concurrently_and_reported_in_order`, the OpenSearch `reindex` e2e's
+  `many_indexes_staged_at_once_each_get_their_own_generation` (24 at once on a fresh cluster).
 - **A live stream that ends still drains queued requests.** The ingest engine returns `Ok` only
   once the live stream ended *and* no snapshot is active *and* the request consumer is empty, so
   a sink that staged its backfill before the ingest engine started is still served.
@@ -1991,7 +2003,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]` proc-macros | `sdk/query-derive/src/` — `lib.rs` (entry points + `Attrs`), `doc.rs` (field parsing/validation + the recursive handle tree + `embed_checks`), `read_time.rs` (what `context`/`rules`/`computed` generate, and which stored fields get a rule handle), `fragment.rs` (the location-free shape check), `spec.rs` (baking a level into `&[FieldSpec]`), `resolve.rs` (finding `flusso.toml`); the const-check vocabulary is `sdk/query/src/check.rs`. Plus the `flusso-query-derive` memory note |
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |
 | The Postgres image tests and benches start (default tag, `FLUSSO_TEST_PG_TAG`, `Pinned` exceptions, `Container`) + its guard | `dev/test-postgres/` (`flusso-test-postgres`, `publish = false`, path-only dev-dependency), `.github/scripts/check-postgres-image.py` + `test_check_postgres_image.py`, `docs/src/contribute/testing.md` ("Which Postgres") |
-| Benchmarks: scenario harness, in-process + Docker benches, CI gate + history | `dev/bench/` (`flusso-bench`: `src/main.rs` phases, `scenario.rs` mixes, `scale.rs` presets, `flusso.rs` child process, `scenarios/`), `libs/2-engine/benches/{engine,pipeline}.rs`, `libs/2-adapters/source-postgres/benches/{pgoutput,resolve,postgres,cases,review}.rs` + `tests/record_pgoutput.rs`, `libs/2-adapters/sink-opensearch/benches/{render,opensearch}.rs`, `.github/workflows/bench.yml`, `.github/scripts/bench-*.{py,sh}`, `.github/scripts/review-ab*.{sh,py}` (`just review-ab`, `review-digest`, `review-plans`; the two review modes' harness is `benches/review.rs`, over `cases.rs`'s roots), `docs/src/contribute/benchmarks.md`, ADR 0006 |
+| Benchmarks: scenario harness, in-process + Docker benches, CI gate + history | `dev/bench/` (`flusso-bench`: `src/main.rs` phases, `scenario.rs` mixes, `scale.rs` presets, `startup.rs` time to `live`, `flusso.rs` child process, `scenarios/`), `libs/2-engine/benches/{engine,pipeline}.rs`, `libs/2-adapters/source-postgres/benches/{pgoutput,resolve,postgres,cases,review}.rs` + `tests/record_pgoutput.rs`, `libs/2-adapters/sink-opensearch/benches/{render,opensearch}.rs`, `.github/workflows/bench.yml`, `.github/scripts/bench-*.{py,sh}`, `.github/scripts/review-ab*.{sh,py}` (`just review-ab`, `review-digest`, `review-plans`; the two review modes' harness is `benches/review.rs`, over `cases.rs`'s roots), `docs/src/contribute/benchmarks.md`, ADR 0006 |
 | Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore`; user-facing shipping recipes in `docs/src/deploy/docker.md` |
 | Kubernetes deploy (Helm chart) | `deploy/helm/flusso/` — `Chart.yaml`, `values.yaml`, `templates/`, `README.md` |
 | Agent-facing docs (the Claude plugin + internal commands) | `plugin/` — `ARCHITECTURE.md` is the contract (one corpus/three consumers, who owns which meaning, the self-containment rule), `skills/*/SKILL.md` the knowledge corpus (`flusso-query` discloses `migration.md`/`options.md`/`maps.md`/`read-time.md`), `commands/` thin workflow entries, `agents/flusso-expert.md`, `hooks/`; `.claude/commands/{implement,new-issue}.md` the internal spine; `.claude/skills/coordinator/SKILL.md` how a round of issues is driven through agents (order of work, the two independent reviews, merge and issue rules). Guarded by `apps/cli/tests/agent_docs_paths.rs` |

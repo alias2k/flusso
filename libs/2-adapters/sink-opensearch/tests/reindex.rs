@@ -21,6 +21,9 @@
 //! reports (issue #136): searchable at once when caught up, within
 //! `refresh_interval` otherwise, and deferred to the next caught-up flush,
 //! which then really makes it searchable, when automatic refresh is off.
+//! Staging many indexes at once (issue #398) runs on a fresh cluster, where
+//! every index's first meta write races to create the shared meta index, then
+//! on a restart, then as concurrent reindexes.
 //!
 //! Requires Docker. `#[ignore]`d like the other e2e tests; run with:
 //!
@@ -893,4 +896,96 @@ fn upsert(index: &IndexName, id: &str, doc: &GenericValue) -> Envelope {
         Some(Position(0)),
         chrono::Utc::now(),
     )
+}
+
+/// How many indexes the concurrent staging test stages at once: every one at
+/// the same time, more than the sink engine's bound.
+const AT_ONCE: usize = 24;
+
+/// `AT_ONCE` mappings of the shape [`mapping`] gives, each its own logical index.
+fn many_mappings() -> Vec<IndexMapping> {
+    (0..AT_ONCE)
+        .map(|i| IndexMapping {
+            index: IndexName::try_new(format!("many_{i:02}")).unwrap(),
+            ..mapping()
+        })
+        .collect()
+}
+
+/// Run `step` on `sink` for every mapping at once and wait for all of them.
+async fn all_at_once<F, Fut>(sink: &std::sync::Arc<OpensearchSink>, step: F)
+where
+    F: Fn(std::sync::Arc<OpensearchSink>, IndexMapping) -> Fut,
+    Fut: std::future::Future<Output = sink::Result<()>> + Send + 'static,
+{
+    let mut tasks = tokio::task::JoinSet::new();
+    for mapping in many_mappings() {
+        tasks.spawn(step(std::sync::Arc::clone(sink), mapping));
+    }
+    while let Some(joined) = tasks.join_next().await {
+        joined.unwrap().unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn many_indexes_staged_at_once_each_get_their_own_generation() {
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let hash = mapping().hash;
+
+    // A fresh cluster: no meta index yet, so the first meta writes race to
+    // create it.
+    let first = std::sync::Arc::new(sink(&base));
+    all_at_once(&first, |sink, mapping| async move {
+        sink.ensure_index(&mapping).await?;
+        assert!(!sink.is_seeded(&mapping.index).await?);
+        Ok(())
+    })
+    .await;
+    for mapping in many_mappings() {
+        let hash_alias = format!("{}_{hash}", mapping.index);
+        assert_eq!(
+            alias_targets(&client, &base, &hash_alias).await,
+            vec![format!("{hash_alias}_1")],
+        );
+        first.mark_seeded(&mapping.index).await.unwrap();
+    }
+
+    // A restart: every index found seeded, nothing recreated.
+    let restarted = std::sync::Arc::new(sink(&base));
+    all_at_once(&restarted, |sink, mapping| async move {
+        sink.ensure_index(&mapping).await?;
+        assert!(sink.is_seeded(&mapping.index).await?);
+        Ok(())
+    })
+    .await;
+
+    // Rebuilds staged at once, as a `Fresh` source stages them: each index
+    // gets its own next generation, its reads left on the first.
+    let rebuilt = std::sync::Arc::new(sink(&base));
+    all_at_once(&rebuilt, |sink, mapping| async move {
+        sink.ensure_index(&mapping).await?;
+        sink.reindex(&mapping).await?;
+        sink.ensure_index(&mapping).await?;
+        assert!(!sink.is_seeded(&mapping.index).await?);
+        Ok(())
+    })
+    .await;
+    for mapping in many_mappings() {
+        let hash_alias = format!("{}_{hash}", mapping.index);
+        assert_eq!(
+            generations(&client, &base, &hash_alias).await,
+            vec![format!("{hash_alias}_1"), format!("{hash_alias}_2")],
+        );
+        assert_eq!(
+            alias_targets(&client, &base, &hash_alias).await,
+            vec![format!("{hash_alias}_1")],
+        );
+        rebuilt.mark_seeded(&mapping.index).await.unwrap();
+        assert_eq!(
+            alias_targets(&client, &base, &hash_alias).await,
+            vec![format!("{hash_alias}_2")],
+        );
+    }
 }

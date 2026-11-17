@@ -112,6 +112,15 @@ impl Default for SinkOptions {
 /// (e.g. OpenSearch bulk) can hold writes until then, while a streaming sink
 /// can write immediately and flush cheaply. Sinks never build a document: the
 /// envelope carries the built document, its id, and its position.
+///
+/// **Staging is concurrent across indexes.** The sink engine stages a sink's
+/// indexes several at a time: [`ensure_index`](Self::ensure_index),
+/// [`is_seeded`](Self::is_seeded) and [`reindex`](Self::reindex) may run at
+/// once for *different* indexes, never two at once for the same index, and
+/// never beside [`apply`](Self::apply), [`flush`](Self::flush) or
+/// [`mark_seeded`](Self::mark_seeded) (staging happens before the first batch
+/// and between two batches). State a sink shares between indexes, such as one
+/// metadata store, must take concurrent writes for different indexes.
 #[async_trait]
 pub trait Sink: std::fmt::Debug + Send + Sync {
     /// Ensure the destination index exists, creating it from `mapping` if it is

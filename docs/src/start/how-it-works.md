@@ -40,7 +40,7 @@ A [reindex](../operate/reindex.md) builds the next generation behind the same al
 
 ## Seeding and continuity
 
-On start, flusso asks the sink whether each index is already seeded. Seeded state lives in a small `flusso_meta` index. Unseeded indexes are backfilled from a snapshot of their root tables through the same pipeline, then marked seeded. Each root row is its own document, built once, however many indexes read its table as a relation.
+On start, flusso asks the sink whether each index is already seeded. Seeded state lives in a small `flusso_meta` index. A sink's indexes are created and checked eight at a time, and `/status` reports `live` only once every index of every sink has been. Unseeded indexes are backfilled from a snapshot of their root tables through the same pipeline, then marked seeded. Each root row is its own document, built once, however many indexes read its table as a relation.
 
 A seed is only as good as the stream behind it. If the replication slot is missing at start (the database was replaced, or someone dropped the slot), every change since the last seed is unobservable, so flusso rebuilds every seeded index into a fresh generation before backfilling. The rebuild is staged *before* the slot is created, so a crash in between comes back to the same decision. Dropping the slot is therefore the supported way to force a full rebuild. See [Recover from a dropped slot](../operate/dropped-slot.md).
 

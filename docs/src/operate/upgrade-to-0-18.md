@@ -226,6 +226,13 @@ A comparison with a string, a number or another kind fails rather than answering
 - **Peak memory during a backfill can rise.** Documents are now built faster than a sink takes them, so built batches wait in the sink's lane: up to `capacity` batches (1,024) of `max_changes` documents (256) each. Under a tight memory limit, lower [`capacity`](../reference/stream-channel.md) (`--queue-capacity`) or raise the limit.
 - **A root without a single-column primary key gets no document from a backfill.** That was already the rule (see [Postgres source](../reference/source-postgres.md)), but 0.17 could index some of its rows by accident while backfilling a related index.
 
+## Indexes are staged at once at start
+
+0.17 created and checked a sink's indexes one after another before following the source. 0.18 does eight at a time and checks four indexes against Postgres at once. With 24 indexes, `live` came a quarter to a third sooner on a fresh cluster, where OpenSearch creates indexes one at a time, and about twice as fast on a restart.
+
+- **A start sends more requests at once**: up to eight per sink to OpenSearch, and four catalog queries to Postgres at once, which takes up to four more Postgres connections while the start validates (measured: `flusso check` on 8 indexes went from 5 connections to 9). A role with a tight `CONNECTION LIMIT`, or a small PgBouncer pool in front of Postgres, needs room for them.
+- **A failed start names every index that failed**, each with its own error (``staging failed for index `users_1`: …; index `orders_3`: …``), where 0.17 named none. Once one index fails no further one is started, so a cluster that is down costs one request timeout per attempt, not one per index; the whole stage is retried as before.
+
 ## Related
 
 - [Field types](../reference/field-types.md) for what a `binary` field, a `constant`, a `timestamp` and a [`decimal`](../reference/field-types.md#numbers) index.

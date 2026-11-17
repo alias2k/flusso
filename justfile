@@ -256,6 +256,13 @@ review-plans base="origin/main" *args:
 bench-scenario scenario="reference" scale="ci":
     cargo run -p flusso-bench -- --scenario {{scenario}} --scale {{scale}} --out target/bench
 
+# Start-up on the real binary: time to `live` with each index declared `copies`
+# times and the backfill skipped, fresh and on restart. Writes
+# target/bench/<scenario>-startup/startup.json. The harness itself is a debug
+# build; what it measures is the release flusso it builds, or FLUSSO_BIN.
+bench-startup scenario="reference" copies="8" runs="3":
+    cargo run -p flusso-bench -- --scenario {{scenario}} --startup {{copies}} --runs {{runs}} --out target/bench
+
 # ── load & observability ───────────────────────────────────────────────────────
 
 # Soak: production-like load for N users (default 20000) that you watch live;

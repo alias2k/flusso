@@ -40,6 +40,11 @@ impl Sink for OpensearchSink {
     ///
     /// The outcome also picks where [`apply`](Self::apply) writes: a seeded
     /// index through its hash alias, an unseeded one through its generation.
+    ///
+    /// Safe to run for several indexes at once: each has its own meta
+    /// document (keyed by its hash alias), generations and aliases, and the
+    /// shared meta index is created by its first write, which OpenSearch's
+    /// auto-create takes from several writers at once.
     #[tracing::instrument(
         name = "os.ensure_index",
         skip_all,
