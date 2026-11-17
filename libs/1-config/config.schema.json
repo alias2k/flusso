@@ -152,7 +152,8 @@
           ],
           "format": "uint",
           "minimum": 1,
-          "description": "Bulk writes each sink runs at once (default 4). Two writes never hold\nthe same document, and live changes go before backfill pages. `1`\nwrites one lane item at a time."
+          "description": "Bulk writes each sink runs at once (default 4). Two writes never hold\nthe same document, and live changes go before backfill pages. `1`\nwrites one lane item at a time. At most 64.",
+          "maximum": 64
         }
       },
       "description": "How much the pipeline does at once, from a `flusso.toml` `[concurrency]`\ntable. A property of the machine that runs flusso, not of the deployment:\nit is never written into `flusso.lock`, so `run --locked` takes it from\n`--writes` / `FLUSSO_WRITES` or the default. Every key is optional."
@@ -465,7 +466,7 @@
           "type": "integer",
           "format": "uint",
           "minimum": 0,
-          "description": "Changes buffered between capture and processing before capture waits.\nA bounded buffer is what makes the slowest sink pace ingest.",
+          "description": "Batches each lane queues before the ingest engine waits. A bounded\nbuffer is what makes the slowest sink pace ingest. A sink engine also\nholds up to `writes` + 32 batches it has taken and not yet\nacknowledged, outside this bound.",
           "default": 1024
         }
       },

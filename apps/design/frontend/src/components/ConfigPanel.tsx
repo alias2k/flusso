@@ -204,6 +204,8 @@ export function ConfigPanel({
               value={config.concurrency?.writes}
               onChange={(v) => onChange({ ...config, concurrency: { ...config.concurrency, writes: v } })}
               placeholder="4"
+              min={1}
+              max={64}
             />
           </Field>
         </div>

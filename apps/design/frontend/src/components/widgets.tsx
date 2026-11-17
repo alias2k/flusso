@@ -463,10 +463,14 @@ export function Num({
   value,
   onChange,
   placeholder,
+  min,
+  max,
 }: {
   value: number | undefined;
   onChange: (v: number | undefined) => void;
   placeholder?: string;
+  min?: number;
+  max?: number;
 }) {
   const [refused, setRefused] = useState<string | null>(null);
   return (
@@ -474,13 +478,17 @@ export function Num({
       type="number"
       value={refused ?? value ?? ""}
       placeholder={placeholder}
+      min={min}
+      max={max}
       className={cn(refused !== null && "invalid")}
       aria-invalid={refused !== null ? true : undefined}
       onChange={(e) => {
         const n = e.target.value === "" ? undefined : Number(e.target.value);
         const rounded = n !== undefined && Number.isInteger(n) && !Number.isSafeInteger(n);
-        setRefused(rounded ? e.target.value : null);
-        if (!rounded) onChange(n);
+        const outside = n !== undefined && ((min !== undefined && n < min) || (max !== undefined && n > max));
+        const kept = rounded || outside;
+        setRefused(kept ? e.target.value : null);
+        if (!kept) onChange(n);
       }}
     />
   );

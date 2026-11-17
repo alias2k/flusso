@@ -150,8 +150,9 @@ pub(crate) struct RunArgs {
 
     /// Bulk writes each sink runs at once. Overrides `[concurrency].writes`
     /// from config; defaults to 4. Two writes never hold the same document,
-    /// and live changes go before backfill pages. Never written into the lock.
-    #[arg(long, env = "FLUSSO_WRITES")]
+    /// and live changes go before backfill pages. At most 64. Never written
+    /// into the lock.
+    #[arg(long, env = "FLUSSO_WRITES", value_parser = config::parse_writes)]
     writes: Option<std::num::NonZeroUsize>,
 
     /// How long a stop may take, in seconds, from the first signal to exit.
