@@ -957,7 +957,7 @@ impl Sink for RejectingSink {
     }
 
     async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
-        let rejected = self
+        let rejected: Vec<_> = self
             .staged
             .lock()
             .unwrap()
@@ -968,10 +968,7 @@ impl Sink for RejectingSink {
                 reason: "simulated item-level rejection".to_owned(),
             })
             .collect();
-        Ok(FlushReport {
-            rejected,
-            ..FlushReport::default()
-        })
+        Ok(FlushReport::clean().rejecting(rejected))
     }
 
     async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
@@ -1133,6 +1130,25 @@ impl Observer for RecordingObserver {
         self.events.lock().unwrap().push("live".to_owned());
     }
 
+    fn on_stage(&self, timing: crate::StageTiming<'_>) {
+        let mut event = format!("stage {}", timing.stage.as_str());
+        if let Some(work) = timing.work {
+            event.push_str(&format!(" {}", work.as_str()));
+        }
+        if let Some(sink) = timing.sink {
+            event.push_str(&format!(" {sink}"));
+        }
+        self.events.lock().unwrap().push(event);
+    }
+
+    fn on_startup_step(&self, step: crate::StartupStep, sink: Option<&SinkName>, _: Duration) {
+        let mut event = format!("startup {}", step.as_str());
+        if let Some(sink) = sink {
+            event.push_str(&format!(" {sink}"));
+        }
+        self.events.lock().unwrap().push(event);
+    }
+
     fn on_batch_built(&self, stats: BuildStats) {
         self.events
             .lock()
@@ -1173,12 +1189,23 @@ async fn reports_lifecycle_and_progress_to_the_observer() {
     let events = observer.events.lock().unwrap();
     assert_eq!(
         *events,
-        vec![
-            "sink started primary".to_owned(),
-            "live".to_owned(),
-            "built 2".to_owned(),
-            "committed primary 2".to_owned(),
+        [
+            "startup stage primary",
+            "sink started primary",
+            "startup prepare",
+            "startup open_live",
+            "live",
+            "stage idle",
+            "stage resolve live",
+            "stage build live",
+            "stage lane_wait live primary",
+            "stage publish live",
+            "built 2",
+            "stage idle primary",
+            "stage write live primary",
+            "committed primary 2",
         ]
+        .map(str::to_owned)
     );
 }
 
@@ -1459,6 +1486,7 @@ mod busy;
 mod snapshot;
 mod staging;
 mod stop;
+mod timings;
 
 /// Wait (up to five seconds) until `condition` holds.
 async fn wait_for(mut condition: impl FnMut() -> bool) {

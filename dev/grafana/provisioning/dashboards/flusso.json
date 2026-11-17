@@ -226,6 +226,155 @@
         "type": "prometheus",
         "uid": "prometheus"
       }
+    },
+    {
+      "id": 11,
+      "title": "Ingest: busy seconds per second, by stage (stacked; the mean number in flight, may pass 1 once stages run concurrently)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 40
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (stage, work) (rate(flusso_stage_duration_seconds_sum{sink=\"\", stage!=\"lane_wait\"}[1m]))",
+          "legendFormat": "{{stage}} {{work}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Sinks: busy seconds per second, by sink and stage (stacked; the mean number in flight, may pass 1 per sink once writes run concurrently)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 40
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (sink, stage) (rate(flusso_stage_duration_seconds_sum{stage=~\"idle|write|seed|reindex\", sink!=\"\"}[1m]))",
+          "legendFormat": "{{sink}} {{stage}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "Time per batch, by stage (mean)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (stage, work) (rate(flusso_stage_duration_seconds_sum{stage!=\"idle\"}[5m])) / sum by (stage, work) (rate(flusso_stage_duration_seconds_count{stage!=\"idle\"}[5m]))",
+          "legendFormat": "{{stage}} {{work}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "title": "Flush size (mean per flush)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (sink, work) (rate(flusso_flush_documents_sum[5m])) / sum by (sink, work) (rate(flusso_flush_documents_count[5m]))",
+          "legendFormat": "{{sink}} {{work}} documents",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (sink, work) (rate(flusso_flush_size_bytes_sum[5m])) / sum by (sink, work) (rate(flusso_flush_size_bytes_count[5m])) / 1024",
+          "legendFormat": "{{sink}} {{work}} KiB",
+          "refId": "B"
+        }
+      ]
     }
   ]
 }

@@ -32,11 +32,12 @@ fn primary() -> SinkName {
 }
 
 fn commit(changes: usize, envelopes: usize) -> CommitStats {
-    CommitStats {
+    CommitStats::new(
         envelopes,
         changes,
-        flush: Duration::from_millis(5),
-    }
+        Duration::from_millis(5),
+        crate::Work::Live,
+    )
 }
 
 /// The observer drives the status surface through a full lifecycle — one

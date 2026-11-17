@@ -7,10 +7,26 @@ use serde_json::json;
 
 use crate::scenario::Probe;
 
+/// How long a probe sleeps between two polls: fine enough that the midpoint's
+/// error stays a few milliseconds, coarse enough that a probe costs
+/// OpenSearch a handful of `_count` requests.
+const POLL_EVERY: Duration = Duration::from_millis(5);
+
+/// How the latency is measured, stamped on each latency point's
+/// `extra.images.probe`: points measured otherwise (before #399, a 20 ms
+/// poll taking the hit's answer, about 10 ms high) have none, so the step
+/// between them restarts the series' window instead of mixing two levels.
+pub(crate) const METHOD: &str = "midpoint-5ms";
+
 /// Poll `_count` on the index's convenience alias until the document carries
 /// the probe's stamp or a later one (a second write to the same row inside the
-/// latency window must not hide the first); the elapsed time since `committed`
-/// is the visible latency. Fails past `cap`.
+/// latency window must not hide the first). Fails past `cap`.
+///
+/// The document became searchable after the last poll that missed it was
+/// sent and before the poll that found it was: the visible latency is the
+/// midpoint of the two, measured from `committed`. That leaves no bias from
+/// the polling (a 20 ms poll, taking the hit's answer, added about 10 ms;
+/// #387) and an error of at most half of [`POLL_EVERY`] plus one round trip.
 pub(crate) async fn wait_visible(
     client: &reqwest::Client,
     os_url: &str,
@@ -29,7 +45,9 @@ pub(crate) async fn wait_visible(
             }
         }
     });
+    let mut missed_at = committed;
     loop {
+        let sent = Instant::now();
         let response = client
             .post(&url)
             .json(&body)
@@ -39,9 +57,11 @@ pub(crate) async fn wait_visible(
         if response.status().is_success() {
             let value: serde_json::Value = response.json().await?;
             if value.get("count").and_then(|c| c.as_u64()).unwrap_or(0) > 0 {
-                return Ok(committed.elapsed());
+                let between = sent.duration_since(missed_at) / 2;
+                return Ok(missed_at.duration_since(committed) + between);
             }
         }
+        missed_at = sent;
         if committed.elapsed() > cap {
             bail!(
                 "{}/{} with updatedAt={} never became visible within {cap:?}",
@@ -50,6 +70,6 @@ pub(crate) async fn wait_visible(
                 probe.stamp
             );
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(POLL_EVERY).await;
     }
 }

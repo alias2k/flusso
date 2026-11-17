@@ -12,6 +12,10 @@ flusso records OpenTelemetry instruments and exposes them two ways: a Prometheus
 | `flusso.script.failures` | counter | | `index`, `field`, `policy` | Documents that failed to build: a [script failed](scripts.md#failures), or an [`array: true`](field-types.md#array) column held an object. `field` is the path with array positions folded (`variants[].gross`); `policy` is `skip` (the document kept its indexed version) or `stop` (the ingest engine stopped; each retry counts). Non-zero means documents are going stale. Alert on it. See [Script fields](scripts.md#failures). |
 | `flusso.batches` | counter | | `sink` | Batches that sink flushed. |
 | `flusso.flush.duration` | histogram | s | `sink` | Time per flush at that sink. Buckets from 1 ms to 10 s. |
+| `flusso.flush.documents` | histogram | | `sink`, `work` | Documents per flush at that sink. A flush that wrote nothing (a live batch that resolved to no document) isn't counted. Buckets from 1 to 10,000. |
+| `flusso.flush.size` | histogram | By | `sink`, `work` | Bytes per flush, where the sink counts them (OpenSearch: the `_bulk` bodies; stdout: none). Same flushes as `flusso.flush.documents`. Buckets from 1 KiB to 64 MiB. |
+| `flusso.stage.duration` | histogram | s | `stage`, `work`, `sink`, `index` | Time each pipeline stage took, once per batch, lane item, idle stretch or operation. See [Where the time goes](#where-the-time-goes). Buckets from 100 µs to 30 s. |
+| `flusso.startup.duration` | gauge | s | `step`, `sink` | Time a start spent in each step. See [Start-up](#start-up). |
 | `flusso.indexes` | gauge | | `sink` | Indexes ensured at that sink this run. |
 | `flusso.indexes.seeded` | counter | | `sink`, `index` | Indexes whose backfill completed at that sink this run. |
 | `flusso.replication.slot_lag` | gauge | By | | Bytes the confirmed position trails the WAL head by. Sampled every `--lag-poll-secs`. The confirmed position is the slowest sink's. |
@@ -32,6 +36,10 @@ The Prometheus reader applies the usual conventions: dots become underscores, co
 | `flusso.script.failures` | `flusso_script_failures_total{index,field,policy}` |
 | `flusso.batches` | `flusso_batches_total{sink}` |
 | `flusso.flush.duration` | `flusso_flush_duration_seconds_bucket{sink}`, `_sum`, `_count` |
+| `flusso.flush.documents` | `flusso_flush_documents_bucket{sink,work}`, `_sum`, `_count` |
+| `flusso.flush.size` | `flusso_flush_size_bytes_bucket{sink,work}`, `_sum`, `_count` |
+| `flusso.stage.duration` | `flusso_stage_duration_seconds_bucket{stage,work,sink,index}`, `_sum`, `_count` |
+| `flusso.startup.duration` | `flusso_startup_duration_seconds{step,sink}` |
 | `flusso.indexes` | `flusso_indexes{sink}` |
 | `flusso.indexes.seeded` | `flusso_indexes_seeded_total{sink,index}` |
 | `flusso.replication.slot_lag` | `flusso_replication_slot_lag_bytes` |
@@ -39,6 +47,51 @@ The Prometheus reader applies the usual conventions: dots become underscores, co
 | `flusso.errors` | `flusso_errors_total{engine}` |
 
 The scope labels (`otel_scope_name`, `otel_scope_version`) are dropped; there is one scope.
+
+## Where the time goes
+
+`flusso.stage.duration` records one sample per batch (ingest side), lane item (sink side), idle stretch or operation, for each stage. A label is present only where the stage has it.
+
+| `stage` | Task | `work` | `sink` | What the time is |
+| --- | --- | --- | --- | --- |
+| `idle` | ingest | | | Nothing in flight and nothing taken: waiting on the source with no snapshot running. |
+| `page` | ingest | `backfill` | | Getting snapshot rows from the source: waiting for the next page of keys, decoding and buffering each row. While a snapshot runs, the ingest task's waits are `page`, not `idle`. |
+| `resolve` | ingest | `live` | | Taking the changes the stream has ready and resolving each to the documents it touches: the reverse lookups. |
+| `build` | ingest | both | | Building a batch's documents. |
+| `publish` | ingest | both | | Handing a built batch to every lane, until the last one took it: for a snapshot batch, copying each lane's slice of its documents first. High means a lane is full (`lane_wait` says which), or, in a backfill with several sinks, the copies. |
+| `lane_wait` | ingest | both | ✓ | The same, per lane: names the full one. Ingest time, labelled with the sink it waited on; overlaps `publish`. |
+| `snapshot` | ingest | `backfill` | | Opening a snapshot (gathering the requests it serves, opening its row stream) and closing it (`SnapshotComplete` to each lane, acknowledging the requests). |
+| `idle` | sink | | ✓ | Nothing in flight and nothing taken: waiting for the next lane item. |
+| `write` | sink | both | ✓ | Writing one lane item to the destination: applying its documents and flushing them. The OpenSearch sink renders the JSON in its flush. Also a flush with nothing new to apply, as at a stop. `flusso.flush.duration` is the flush part alone. |
+| `seed` | sink | `backfill` | ✓ | Recording one index as seeded at the destination (`index` label): for OpenSearch a refresh, the settings restored and the alias moved. |
+| `reindex` | sink | | ✓ | Staging a reindex asked for while running. |
+
+`index` is set on `seed` today. A stage that becomes per index later carries it too.
+
+An idle stretch is cut at least once a second, so a quiet hour reads as a flat line rather than one spike when work resumes. The part still open at a scrape is reported up to a second later, so it lands in the next scrape window: over a short window, a task's stages can sum to a second more or less than the window. Each task's stages add up to its wall time, less small bookkeeping no stage times (acknowledgements, confirmations, the drain at a stop).
+
+The `_sum` is the seconds a stage was busy, so its rate is **busy seconds per wall second**: the mean number of that stage in flight. A stage a task runs one at a time stays at or under 1. Once a task runs a stage concurrently (several writes in flight per sink, several builds), it can pass 1.
+
+```promql
+# the ingest task, per stage
+sum by (stage, work) (rate(flusso_stage_duration_seconds_sum{sink="", stage!="lane_wait"}[1m]))
+# each sink, per stage
+sum by (sink, stage) (rate(flusso_stage_duration_seconds_sum{stage=~"idle|write|seed|reindex", sink!=""}[1m]))
+```
+
+The busier side sets the pace: a sink rarely `idle` while ingest is often `idle` is sink-bound, and the other way round is ingest-bound. The dev dashboard plots both, the time per batch, and the flush size; `flusso-bench` prints the same as a table per phase ([Where the time went](../contribute/benchmarks.md#where-the-time-went)).
+
+## Start-up
+
+`flusso.startup.duration` holds each step of a start, one gauge per `step`, set again when the step runs again:
+
+| `step` | What the time is |
+| --- | --- |
+| `source` | Connecting to Postgres and validating the indexes against it. |
+| `stage` | Staging one sink (`sink` label): ensuring its indexes, retiring stale seeds, asking for its backfill. Set again on each re-stage after a sink engine restarts. A reindex while running is the `reindex` stage instead. |
+| `prepare` | Creating or checking the publication, replica identity and slot. |
+| `open_live` | Opening the replication stream. |
+| `live` | From `flusso run` starting to the first live stream: config, lock, the steps above. Once per process: a restarted ingest engine doesn't set it again. |
 
 ## Derived: backlog drain ETA
 

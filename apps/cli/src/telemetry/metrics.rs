@@ -21,7 +21,9 @@ use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::metrics::ObservableGauge;
 use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::metrics::{Aggregation, PeriodicReader, SdkMeterProvider, Stream};
+use opentelemetry_sdk::metrics::{
+    Aggregation, MeterProviderBuilder, PeriodicReader, SdkMeterProvider, Stream,
+};
 use prometheus::Registry;
 
 use crate::telemetry::{OtlpProtocol, OtlpSignal, otlp_protocol};
@@ -34,6 +36,61 @@ const OTLP_PUSH_INTERVAL: Duration = Duration::from_secs(10);
 const FLUSH_BUCKETS_SECONDS: &[f64] = &[
     0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
+
+/// Buckets for `flusso.stage.duration`, in seconds: a resolve or an apply is
+/// tens of microseconds, a wait for an item can be minutes. Spans 100 µs to
+/// 30 s; the `_sum` is exact whatever the buckets.
+const STAGE_BUCKETS_SECONDS: &[f64] = &[
+    0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
+    5.0, 10.0, 30.0,
+];
+
+/// Buckets for `flusso.flush.documents`: a trickle flushes one, a backfill
+/// batch up to `max_changes` (default 256), a merged flush more.
+const FLUSH_DOCUMENT_BUCKETS: &[f64] = &[
+    1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0,
+];
+
+/// Buckets for `flusso.flush.size`, in bytes: 1 KiB to 64 MiB, by fours.
+const FLUSH_SIZE_BUCKETS_BYTES: &[f64] = &[
+    1024.0,
+    4096.0,
+    16384.0,
+    65536.0,
+    262_144.0,
+    1_048_576.0,
+    4_194_304.0,
+    16_777_216.0,
+    67_108_864.0,
+];
+
+/// The explicit buckets of each histogram flusso records, by instrument name.
+fn buckets(instrument: &str) -> Option<&'static [f64]> {
+    match instrument {
+        "flusso.flush.duration" => Some(FLUSH_BUCKETS_SECONDS),
+        "flusso.stage.duration" => Some(STAGE_BUCKETS_SECONDS),
+        "flusso.flush.documents" => Some(FLUSH_DOCUMENT_BUCKETS),
+        "flusso.flush.size" => Some(FLUSH_SIZE_BUCKETS_BYTES),
+        _ => None,
+    }
+}
+
+/// A meter provider builder with flusso's histogram buckets
+/// ([`buckets`]) applied.
+pub(crate) fn provider_builder() -> MeterProviderBuilder {
+    SdkMeterProvider::builder()
+        .with_resource(resource())
+        .with_view(|instrument: &opentelemetry_sdk::metrics::Instrument| {
+            let boundaries = buckets(instrument.name())?;
+            Stream::builder()
+                .with_aggregation(Aggregation::ExplicitBucketHistogram {
+                    boundaries: boundaries.to_vec(),
+                    record_min_max: true,
+                })
+                .build()
+                .ok()
+        })
+}
 
 /// Owns the installed meter provider (for shutdown) and, when Prometheus is on,
 /// the registry the `/metrics` endpoint renders.
@@ -65,23 +122,7 @@ impl Metrics {
 /// configures an endpoint. With neither, the provider has no readers and every
 /// instrument is a cheap no-op.
 pub(crate) fn init(prometheus: bool) -> anyhow::Result<Metrics> {
-    let flush_view = |instrument: &opentelemetry_sdk::metrics::Instrument| {
-        (instrument.name() == "flusso.flush.duration")
-            .then(|| {
-                Stream::builder()
-                    .with_aggregation(Aggregation::ExplicitBucketHistogram {
-                        boundaries: FLUSH_BUCKETS_SECONDS.to_vec(),
-                        record_min_max: true,
-                    })
-                    .build()
-                    .ok()
-            })
-            .flatten()
-    };
-
-    let mut builder = SdkMeterProvider::builder()
-        .with_resource(resource())
-        .with_view(flush_view);
+    let mut builder = provider_builder();
 
     let registry = if prometheus {
         let registry = Registry::new();

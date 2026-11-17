@@ -78,7 +78,10 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   index declared `copies` times, `--skip-backfill`, fresh then restart, `startup.rs`; by hand only), and report the headline
   metrics: visible latency p50/p99 (commit → searchable, via the `updated_at`/`updatedAt` stamp on
   the dev root tables), drain throughput of a burst, backfill throughput, peak RSS + CPU (sampled
-  with `ps`), plus flush p50/p99 from `/metrics` for attribution. (2) **Docker-backed component
+  with `ps`), plus flush p50/p99 from `/metrics` for attribution and, per phase, a table of each
+  stage's busy seconds per wall second, by task (`attribution.md`, from `flusso.stage.duration`;
+  issue #399). The latency probe polls every 5 ms and reports the midpoint between the last miss and
+  the hit; latency points carry `extra.images.probe` so that change restarts their window. (2) **Docker-backed component
   benches** (`postgres`, `opensearch`, `engine`'s `pipeline` — attribution only; its backfill group
   is gone; plus `source-postgres`'s `cases`, `build_many` over batch sizes, hit ratios, key types and
   root shapes, run only by `just bench-components` and `just review-ab`, never by `bench.yml`, so the
@@ -893,7 +896,30 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   the trait, never on metrics or a status backend. The daemon's `Status` phase falls back to
   `Starting` on an ingest error (the supervisor restarts it); only a clean
   `on_engine_stopped(Ingest)` is the final `Stopped`. `reports_lifecycle_and_progress_to_the_observer`
-  guards the emit points.
+  guards the emit points. **Where time goes is one event** (issue #399): `Observer::on_stage(StageTiming)`
+  names a `Stage` by what it is, per task: ingest `idle`, `page` (getting snapshot rows: key-page
+  waits, decoding and buffering; `read` is kept for ADR 0012's reader), `resolve`, `build`, `publish`, `lane_wait` (ingest time
+  with a `sink` label), `snapshot` (open/close); each sink `idle`, `write` (apply + flush: the
+  ADR's `Sink::write`, so stage 2 keeps the name), `seed` (`mark_seeded`, per `index`),
+  `reindex`; with `work` (live/backfill), `sink` and `index` where known. Reported **once per
+  batch, lane item, idle stretch or operation, never per change or document**; an idle window
+  closes on every `select!` arm before its work and is cut by a 1 s tick (the sink's `IDLE_TICK`
+  arm, the ingest `confirm_tick`), so a quiet hour is a flat line; the ingest loop reads no clock
+  of its own: `mark` (where the last arm's work ended) carries across iterations, `waited` closes
+  the wait from it (`idle` with no snapshot, else the snapshot's `page`), and the row arm's one clock
+  read per row puts the whole row (wait, decode, buffer) into `page`. A task's stages add up to its wall time less bookkeeping (acks, confirms, a stop);
+  share is busy seconds per wall second, which passes 1 once a task runs a stage concurrently.
+  `on_startup_step` per start step (`source`, `stage` per sink, `prepare`, `open_live`). The CLI
+  records them as `flusso.stage.duration{stage,work,sink,index}`, `flusso.flush.documents`/
+  `flusso.flush.size` (non-empty flushes; bytes from `FlushReport.bytes`) and the
+  `flusso.startup.duration` gauge (`live` once per process); `flusso-bench` prints an attribution
+  table per phase, grouped by task with an `other` row (`dev/bench/src/attribution.rs`).
+  `FlushReport`, `CommitStats`, `StageTiming`, `Stage` and `StartupStep` are `#[non_exhaustive]`
+  (builders: `FlushReport::clean()…`, `CommitStats::new`). When an engine is restructured, keep
+  reporting each stage at its new home, with the `index`/`sink` it now runs per. Guards:
+  `tests::timings` (paused clock: each stage's time, a full lane, a backfill's pages/snapshot/seed,
+  idle cut every second and a reindex not idle), `telemetry::observer::tests` (the `/metrics`
+  names), `attribution::tests`, and `test_bench_regression.py`'s `ProbeMarker`.
 
 ### The daemon (`libs/3-daemon/src/lib.rs`) — domain only
 

@@ -22,6 +22,10 @@
 //! Throughout, the child's peak resident set and CPU time are sampled
 //! (`peak_rss_mib`, `cpu_seconds`), and the flush-duration histogram from
 //! `/metrics` gives the attribution figures (`flush_p50_ms`, `flush_p99_ms`).
+//! Each of phases 2–4 also gets an **attribution table** (`attribution.rs`):
+//! the share of its wall time each pipeline stage took, per sink, read from
+//! flusso's `flusso.stage.duration` histogram, logged and written to
+//! `attribution.md` and `summary.json` (not a data point).
 //!
 //! ```text
 //! flusso-bench --scenario reference --scale ci --out target/bench/reference-ci
@@ -34,6 +38,7 @@
 //! or `FLUSSO_BIN`, else a release build of `flusso-cli --no-default-features`
 //! is made first.
 
+mod attribution;
 mod flusso;
 mod probe;
 mod report;
@@ -52,6 +57,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use sqlx::postgres::PgPoolOptions;
 
+use crate::attribution::{Attribution, Scrape};
 use crate::report::{Failure, Images, Report};
 use crate::scale::{Scale, ScaleName};
 use crate::scenario::{Scenario, ScenarioName};
@@ -226,6 +232,13 @@ async fn run(
     .await?;
     let backfill = child.wait_seeded(spawned, remaining("backfill")?).await?;
     let backfill_docs_per_s = documents as f64 / backfill.as_secs_f64();
+    let seeded = Scrape::parse(&child.metrics().await?);
+    let mut attributions = vec![Attribution::between(
+        "backfill",
+        &Scrape::default(),
+        &seeded,
+        backfill.as_secs_f64(),
+    )];
     tracing::info!(
         seconds = %format!("{:.1}", backfill.as_secs_f64()),
         docs_per_s = %format!("{backfill_docs_per_s:.0}"),
@@ -244,6 +257,8 @@ async fn run(
     };
     let ids = Arc::new(scenario.id_counters(scale));
     let probe_cap = Duration::from_secs(60).min(remaining("latency")?);
+    let trickle_before = Scrape::parse(&child.metrics().await?);
+    let trickle_started = Instant::now();
     let latencies = writer::probed_trickle(
         &pool,
         scenario,
@@ -254,6 +269,12 @@ async fn run(
         probe_cap,
     )
     .await?;
+    attributions.push(Attribution::between(
+        "trickle",
+        &trickle_before,
+        &Scrape::parse(&child.metrics().await?),
+        trickle_started.elapsed().as_secs_f64(),
+    ));
     let p50 = latencies
         .percentile(0.5)
         .context("no latency samples")?
@@ -278,11 +299,10 @@ async fn run(
         .await
         .context("settling before the burst")?;
     let baseline = child.captured().await?;
-    let flushes_before = report::histogram_count(
-        &child.metrics().await?,
-        "flusso_flush_duration_seconds",
-        "primary",
-    );
+    let burst_before = child.metrics().await?;
+    let flushes_before =
+        report::histogram_count(&burst_before, "flusso_flush_duration_seconds", "primary");
+    let burst_before = Scrape::parse(&burst_before);
     let burst = writer::burst(
         &pool,
         Arc::clone(scenario),
@@ -311,6 +331,12 @@ async fn run(
 
     // ── attribution + resources ──────────────────────────────────────────────
     let metrics = child.metrics().await?;
+    attributions.push(Attribution::between(
+        "burst",
+        &burst_before,
+        &Scrape::parse(&metrics),
+        drain_seconds,
+    ));
     let burst_flushes =
         report::histogram_count(&metrics, "flusso_flush_duration_seconds", "primary")
             .zip(flushes_before)
@@ -340,12 +366,18 @@ async fn run(
             "drain_seconds": drain_seconds,
             "burst_flushes": burst_flushes,
             "total_seconds": run_started.elapsed().as_secs_f64(),
+            "attribution": attributions,
         }),
         smaller: Vec::new(),
         bigger: Vec::new(),
+        attribution: attributions
+            .iter()
+            .map(Attribution::markdown)
+            .collect::<Vec<_>>()
+            .join("\n"),
     };
-    report.smaller("visible_latency_p50_ms", "ms", p50);
-    report.smaller("visible_latency_p99_ms", "ms", p99);
+    report.latency("visible_latency_p50_ms", p50);
+    report.latency("visible_latency_p99_ms", p99);
     report.smaller("peak_rss_mib", "MiB", resources.peak_rss_mib);
     report.smaller("cpu_seconds", "s", resources.cpu_seconds);
     if let Some(p) = flush_p50 {
