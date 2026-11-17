@@ -21,6 +21,9 @@ use crate::{EngineError, SinkControl, SinkEngine};
 
 const INDEXES: usize = 24;
 
+// A bound of 1 would pass every `peak == STAGE_CONCURRENCY` check below.
+const _: () = assert!(STAGE_CONCURRENCY > 1);
+
 /// How long each staging call of [`SlowSink`] takes.
 const CALL: Duration = Duration::from_millis(10);
 
@@ -238,8 +241,8 @@ async fn a_fresh_source_requests_the_rebuilt_and_the_unseeded_indexes_once() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn every_failing_index_is_named_and_the_others_are_still_staged() {
-    let failing = [name(3), name(17)];
+async fn every_failure_seen_is_named_and_the_chains_in_flight_finish() {
+    let failing = [name(3), name(5)];
     let staged = staged(SlowSink::default().failing(failing.clone()), INDEXES);
     let error = staged.engine.stage(Continuity::Resumed).await.unwrap_err();
 
@@ -256,10 +259,10 @@ async fn every_failing_index_is_named_and_the_others_are_still_staged() {
         );
         assert!(message.contains(&format!("{index} refused")), "{message:?}");
     }
-    for i in 0..INDEXES {
+    for i in 0..STAGE_CONCURRENCY {
         assert!(
             staged.sink.calls().contains(&format!("ensure {}", name(i))),
-            "{} was staged",
+            "{} was in flight and finished",
             name(i)
         );
     }
@@ -267,6 +270,37 @@ async fn every_failing_index_is_named_and_the_others_are_still_staged() {
         staged.requests().await.is_empty(),
         "a failed stage requests nothing; it is retried whole"
     );
+}
+
+/// A cluster that takes connections and never answers: every call fails after
+/// its timeout. The stage gives up after one wave, not one per eight indexes.
+#[tokio::test(start_paused = true)]
+async fn after_a_failure_no_new_index_is_started() {
+    let staged = staged(SlowSink::default().failing((0..INDEXES).map(name)), INDEXES);
+    let started = tokio::time::Instant::now();
+    let error = staged.engine.stage(Continuity::Resumed).await.unwrap_err();
+
+    assert!(
+        started.elapsed() < CALL * 2,
+        "took {:?}, more than one failure's duration",
+        started.elapsed()
+    );
+    let EngineError::Staging(failures) = &error else {
+        panic!("expected a staging error, got {error:?}");
+    };
+    let named: Vec<String> = failures
+        .iter()
+        .map(|(index, _)| index.to_string())
+        .collect();
+    let in_flight: Vec<String> = (0..STAGE_CONCURRENCY).map(name).collect();
+    assert_eq!(named, in_flight, "only the indexes started are reported");
+    for i in STAGE_CONCURRENCY..INDEXES {
+        assert!(
+            staged.sink.calls_for(&name(i)).is_empty(),
+            "{} was never started",
+            name(i)
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -323,4 +357,43 @@ async fn a_reindex_control_stages_its_indexes_concurrently() {
         );
     }
     assert_eq!(requests(&staged.1).await, vec![all]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reindex_naming_an_index_twice_stages_it_once() {
+    let all: Vec<String> = (0..2).map(name).collect();
+    let staged = staged(SlowSink::seeded(all.clone()), 2);
+    staged.engine.stage(Continuity::Resumed).await.unwrap();
+
+    let first = mappings(1).remove(0).index;
+    let second = mappings(2).remove(1).index;
+    let (control, mut receiver) = tokio::sync::mpsc::channel(1);
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![first.clone(), second, first],
+        })
+        .await
+        .unwrap();
+    drop(control);
+    let Staged {
+        sink,
+        stream,
+        engine,
+    } = staged;
+    let run = tokio::spawn(async move { engine.run(&mut receiver).await });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while sink.calls_for(&name(1)).len() < 4 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(CALL).await;
+    }
+    tokio::time::sleep(CALL * 4).await;
+    run.abort();
+
+    assert!(!sink.one_index_overlapped.load(Ordering::SeqCst));
+    for index in &all {
+        assert_eq!(
+            sink.calls_for(index),
+            ["ensure", "seeded?", "reindex", "ensure"]
+        );
+    }
+    assert_eq!(requests(&stream).await, vec![all]);
 }

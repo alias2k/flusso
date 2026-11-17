@@ -12,9 +12,10 @@
 //! The indexes are staged concurrently, a few at a time
 //! ([`STAGE_CONCURRENCY`]): each index's own steps stay in order, and nothing
 //! orders one index against another, since each has its own target on the
-//! destination. Staging is all or nothing per pass: when an index fails, the
-//! others still finish, the error names every failed index, and the daemon
-//! retries the whole stage (each step is idempotent).
+//! destination. Staging is all or nothing per pass: once an index fails no
+//! further index is started, the ones in flight finish, the error names every
+//! failure seen, and the daemon retries the whole stage (each step is
+//! idempotent), which starts the rest.
 //!
 //! The loop ([`SinkEngine::run`]) applies each batch's envelopes, flushes once
 //! at the batch boundary, decides item-level rejections by the failure
@@ -38,6 +39,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use kernel::{IndexMapping, IndexName, Position, SinkName};
 use sink::{Sink, SinkOptions, Visibility};
 use source::cdc::Continuity;
@@ -189,8 +191,8 @@ impl SinkEngine {
     /// each restart of this engine (with `Resumed`).
     ///
     /// The indexes are staged concurrently, at most eight at a time, each
-    /// index's own steps in order. Every index is staged even when another
-    /// fails; the error then names each failed index.
+    /// index's own steps in order. After a failure no further index is
+    /// started; the error names every failure seen.
     #[tracing::instrument(name = "sink.stage", skip_all, fields(sink = %self.name, ?continuity))]
     pub async fn stage(&self, continuity: Continuity) -> Result<()> {
         let backfill = self.options.backfill;
@@ -282,24 +284,35 @@ impl SinkEngine {
 
     /// Run `step` for each of `mappings`, at most [`STAGE_CONCURRENCY`] at
     /// once, and return each mapping with whether it is seeded (`false` when
-    /// not asked), in the order given. Every step runs to its end: when any
-    /// fails, the error names each failed index with its own error.
+    /// not asked), in the order given.
+    ///
+    /// After a failure no further index is started: a destination that is
+    /// down or never answers fails every index alike, and each wave would cost
+    /// one more request timeout. The ones in flight run to their end, and the
+    /// error names every failure seen; the daemon retries the whole stage,
+    /// which starts the rest.
     async fn each_index<'a>(
         &self,
         mappings: impl IntoIterator<Item = &'a IndexMapping>,
         step: Step,
     ) -> Result<Vec<(&'a IndexMapping, bool)>> {
-        // Built up front, so the buffered stream holds no closure: one over
-        // borrowed mappings makes the engine's future not provably `Send`.
-        let steps: Vec<_> = mappings
-            .into_iter()
-            .enumerate()
-            .map(|(order, mapping)| async move { (order, mapping, self.step(step, mapping).await) })
-            .collect();
-        let mut outcomes: Vec<_> = futures::stream::iter(steps)
-            .buffer_unordered(STAGE_CONCURRENCY)
-            .collect()
-            .await;
+        let mut waiting = mappings.into_iter().enumerate();
+        let mut running = FuturesUnordered::new();
+        let mut outcomes = Vec::new();
+        let mut failed_once = false;
+        loop {
+            while !failed_once && running.len() < STAGE_CONCURRENCY {
+                let Some((order, mapping)) = waiting.next() else {
+                    break;
+                };
+                running.push(async move { (order, mapping, self.step(step, mapping).await) });
+            }
+            let Some(outcome) = running.next().await else {
+                break;
+            };
+            failed_once |= outcome.2.is_err();
+            outcomes.push(outcome);
+        }
         outcomes.sort_unstable_by_key(|(order, _, _)| *order);
         let mut done = Vec::with_capacity(outcomes.len());
         let mut failed = Vec::new();
@@ -618,6 +631,10 @@ impl SinkEngine {
             };
             if outstanding.contains(&index) {
                 tracing::warn!(%index, "reindex requested while its snapshot is still outstanding; ignoring");
+                continue;
+            }
+            // Two chains for one index at once are what the `Sink` port forbids.
+            if chosen.iter().any(|m: &&IndexMapping| m.index == index) {
                 continue;
             }
             tracing::info!(%index, "reindex requested; staging a fresh generation");
