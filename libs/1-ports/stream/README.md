@@ -21,3 +21,6 @@ The stream port: what sits between the ingest engine and the sink engines. One *
 - **Backpressure is the in-process trade.** With the bounded channel adapter (`stream-channel`), a full lane blocks the ingest engine, so the slowest sink paces ingest. A broker-backed adapter is what removes that.
 
 > ℹ️ **Info** — the port is generic over the payload, so the same `Producer`/`Consumer` pair carries envelopes down and requests up. A broker-backed adapter implements the same three methods; nothing in the engines changes.
+
+- a list item
+lazy continuation line
