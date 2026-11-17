@@ -9,7 +9,8 @@
 //! **Admission.** An item starts only when no earlier unfinished item shares
 //! a document with it, so a document is never written twice at once and a
 //! later build always lands after an earlier one. Documents are compared by a
-//! 64-bit hash of `(index, id)`: a collision only holds an item back.
+//! 64-bit hash of `(index, id)`, kept sorted per item so two items are
+//! compared in one merge walk: a collision only holds an item back.
 //!
 //! **Selection.** Live items (they carry a position) go before backfill items,
 //! except every fourth grant both could take, which goes to the oldest
@@ -34,8 +35,9 @@
 //! writes   L1 a, L2 c        B1 waits for L1 (a); L3 waits behind the barrier
 //! ```
 
+use std::cmp::Ordering as Order;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -96,8 +98,6 @@ pub(super) struct Run<'a> {
     window: VecDeque<Queued>,
     flights: FuturesUnordered<BoxFuture<'a, Landed>>,
     flying: HashMap<u64, Flight>,
-    /// Documents being written, counted per hash.
-    writing: HashMap<u64, u32>,
     next_flight: u64,
     /// Grants both kinds could take; every fourth goes to backfill.
     contested: u64,
@@ -117,7 +117,6 @@ impl<'a> Run<'a> {
             window: VecDeque::new(),
             flights: FuturesUnordered::new(),
             flying: HashMap::new(),
-            writing: HashMap::new(),
             next_flight: 0,
             contested: 0,
             failure: None,
@@ -237,7 +236,9 @@ impl<'a> Run<'a> {
                 if let Some(position) = batch.position {
                     self.engine.lock_fences().received(position);
                 }
-                let documents = batch.envelopes.iter().map(document_hash).collect();
+                let mut documents: Vec<u64> = batch.envelopes.iter().map(document_hash).collect();
+                documents.sort_unstable();
+                documents.dedup();
                 Queue::Batch { batch, documents }
             }
             LaneItem::SnapshotComplete { indexes } => Queue::Complete { indexes },
@@ -322,16 +323,25 @@ impl<'a> Run<'a> {
         let backfill_waiting = self.window.iter().any(
             |queued| matches!(&queued.item, Queue::Batch { batch, .. } if batch.position.is_none()),
         );
-        let mut earlier: HashSet<u64> = HashSet::new();
         let mut live = None;
         let mut backfill = None;
         for (index, queued) in self.window.iter().enumerate() {
             let Queue::Batch { batch, documents } = &queued.item else {
                 break;
             };
-            let admissible = documents.iter().all(|document| {
-                !self.writing.contains_key(document) && !earlier.contains(document)
-            });
+            let admissible = self
+                .flying
+                .values()
+                .all(|flight| disjoint(documents, &flight.documents))
+                && self
+                    .window
+                    .range(..index)
+                    .all(|earlier| match &earlier.item {
+                        Queue::Batch {
+                            documents: earlier, ..
+                        } => disjoint(documents, earlier),
+                        Queue::Complete { .. } => true,
+                    });
             if admissible {
                 if batch.position.is_some() {
                     live.get_or_insert(index);
@@ -344,7 +354,6 @@ impl<'a> Run<'a> {
             if found_live && found_backfill {
                 break;
             }
-            earlier.extend(documents.iter().copied());
         }
         match (live, backfill) {
             (Some(live), Some(backfill)) => {
@@ -366,9 +375,6 @@ impl<'a> Run<'a> {
         handle: Box<dyn AckHandle>,
         caught_up: bool,
     ) {
-        for document in &documents {
-            *self.writing.entry(*document).or_default() += 1;
-        }
         let flight = self.next_flight;
         self.next_flight += 1;
         let covers_below = self.engine.lock_fences().returned();
@@ -413,14 +419,6 @@ impl<'a> Run<'a> {
                 .work(flight.work)
                 .sink(&self.engine.name),
         );
-        for document in &flight.documents {
-            if let Some(count) = self.writing.get_mut(document) {
-                *count -= 1;
-                if *count == 0 {
-                    self.writing.remove(document);
-                }
-            }
-        }
         let report = match landed.result {
             Ok(report) => report,
             Err(error) => {
@@ -584,6 +582,23 @@ fn work_of(position: Option<Position>) -> Work {
     } else {
         Work::Backfill
     }
+}
+
+/// Whether two sorted lists of document hashes share none.
+fn disjoint(a: &[u64], b: &[u64]) -> bool {
+    let (mut a, mut b) = (a.iter().peekable(), b.iter().peekable());
+    while let (Some(x), Some(y)) = (a.peek(), b.peek()) {
+        match x.cmp(y) {
+            Order::Less => {
+                a.next();
+            }
+            Order::Greater => {
+                b.next();
+            }
+            Order::Equal => return false,
+        }
+    }
+    true
 }
 
 /// A document's admission key: a hash of its index and id.
