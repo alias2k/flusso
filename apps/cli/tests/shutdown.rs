@@ -626,6 +626,174 @@ fn project_opensearch(url: &str, os_url: &str, name: &str) -> PathBuf {
     dir
 }
 
+/// Stops at random points (mid-backfill, mid-live) under inserts, updates and
+/// deletes, each followed by a restart; the index must end equal to the
+/// table. Seeded: `FLUSSO_STOP_SEED=<seed>` replays a failing run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn random_stops_under_writes_converge_after_a_restart() {
+    let seed = std::env::var("FLUSSO_STOP_SEED")
+        .ok()
+        .and_then(|seed| seed.parse().ok())
+        .unwrap_or_else(|| (unique() % u128::from(u32::MAX)) as u64);
+    eprintln!("seed {seed}: replay with FLUSSO_STOP_SEED={seed}");
+    let mut random = Lcg(seed);
+    let (_postgres, url) = common::start_postgres(TABLE).await;
+    let (_opensearch, os_url) = common::start_opensearch().await;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO t SELECT g, 'row ' || g FROM generate_series(1, 100000) g")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let dir = project_opensearch(&url, &os_url, "converge");
+
+    for round in 0..3 {
+        let mut flusso = Flusso::start(&dir, &[]);
+        let writing = Arc::new(AtomicBool::new(true));
+        let writer = tokio::spawn(write_randomly(
+            pool.clone(),
+            Arc::clone(&writing),
+            random.next(),
+        ));
+        let delay = Duration::from_millis(random.next() % 4_000);
+        tokio::time::sleep(delay).await;
+        flusso.signal("TERM");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        writing.store(false, Ordering::SeqCst);
+        writer.await.unwrap();
+        let status = flusso.exit_within(Duration::from_secs(40));
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "seed {seed}, round {round}, stopped {delay:?} after going live: {}",
+            flusso.stderr()
+        );
+    }
+
+    let mut last = Flusso::start(&dir, &[]);
+    let wanted: std::collections::BTreeMap<i32, String> = sqlx::query_as("SELECT id, name FROM t")
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let indexed = loop {
+        let indexed = names(&os_url, "t").await;
+        if indexed == wanted || Instant::now() > deadline {
+            break indexed;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    };
+    last.signal("TERM");
+    last.exit_within(Duration::from_secs(40));
+    let missing: Vec<_> = wanted
+        .keys()
+        .filter(|id| !indexed.contains_key(id))
+        .take(5)
+        .collect();
+    let stale: Vec<_> = indexed
+        .iter()
+        .filter(|(id, name)| wanted.get(id).is_some_and(|wanted| wanted != *name))
+        .take(5)
+        .collect();
+    let extra: Vec<_> = indexed
+        .keys()
+        .filter(|id| !wanted.contains_key(id))
+        .take(5)
+        .collect();
+    assert!(
+        missing.is_empty() && stale.is_empty() && extra.is_empty(),
+        "seed {seed}: the index differs from the table: missing {missing:?}, stale {stale:?}, \
+         extra {extra:?} ({} rows, {} documents)",
+        wanted.len(),
+        indexed.len()
+    );
+}
+
+/// A small seeded generator, enough to replay a run.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        self.0 >> 33
+    }
+}
+
+/// Random inserts, updates and deletes on `t` until `writing` turns false.
+async fn write_randomly(pool: sqlx::PgPool, writing: Arc<AtomicBool>, seed: u64) {
+    let mut random = Lcg(seed);
+    while writing.load(Ordering::SeqCst) {
+        let id = i32::try_from(random.next() % 120_000).unwrap() + 1;
+        let statement = match random.next() % 3 {
+            0 => {
+                "INSERT INTO t VALUES ($1, 'new ' || $1) ON CONFLICT (id) DO UPDATE SET name = 'again ' || $1"
+            }
+            1 => "UPDATE t SET name = 'updated ' || $1 || ' ' || clock_timestamp() WHERE id = $1",
+            _ => "DELETE FROM t WHERE id = $1",
+        };
+        sqlx::query(statement)
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+/// Every document of `index` by its `id`, with its `name`, read with a scroll.
+async fn names(os_url: &str, index: &str) -> std::collections::BTreeMap<i32, String> {
+    let http = reqwest::Client::new();
+    http.post(format!("{os_url}/{index}/_refresh"))
+        .send()
+        .await
+        .unwrap();
+    let mut found = std::collections::BTreeMap::new();
+    let mut page: serde_json::Value = http
+        .post(format!("{os_url}/{index}/_search?scroll=1m"))
+        .json(&serde_json::json!({ "size": 10_000, "_source": ["id", "name"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    loop {
+        let hits = page["hits"]["hits"].as_array().cloned().unwrap_or_default();
+        if hits.is_empty() {
+            break;
+        }
+        for hit in hits {
+            found.insert(
+                i32::try_from(hit["_source"]["id"].as_i64().unwrap()).unwrap(),
+                hit["_source"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            );
+        }
+        let scroll = page["_scroll_id"].as_str().unwrap().to_owned();
+        page = http
+            .post(format!("{os_url}/_search/scroll"))
+            .json(&serde_json::json!({ "scroll": "1m", "scroll_id": scroll }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    }
+    found
+}
+
 const TABLE: &str = "CREATE TABLE t (id int PRIMARY KEY, name text)";
 
 /// A project of one index over `t`, writing to stdout.
