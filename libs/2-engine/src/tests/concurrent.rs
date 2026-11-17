@@ -26,7 +26,7 @@ use stream_channel::ChannelStream;
 use tokio::sync::Notify;
 
 use super::{PositionObserver, mapping, sink_name, users};
-use crate::{Observer, Result, SinkControl, SinkEngine, Stop};
+use crate::{FailurePolicies, FailurePolicy, Observer, Result, SinkControl, SinkEngine, Stop};
 
 /// A small deterministic generator, so a schedule replays from its seed.
 #[derive(Debug)]
@@ -61,6 +61,10 @@ struct Probe {
     held: Mutex<HashSet<String>>,
     released: Notify,
     fail_once: Mutex<HashSet<String>>,
+    /// Up to this many writes fail at random (one in eight), from the delays'
+    /// generator, so a seed replays them.
+    random_failures: AtomicUsize,
+    rejects: Mutex<HashSet<String>>,
     delays: Option<Mutex<Rng>>,
     caught_up: Mutex<Vec<bool>>,
     visibility: fn(bool) -> Visibility,
@@ -79,6 +83,8 @@ impl Probe {
             held: Mutex::default(),
             released: Notify::new(),
             fail_once: Mutex::default(),
+            random_failures: AtomicUsize::new(0),
+            rejects: Mutex::default(),
             delays: None,
             caught_up: Mutex::default(),
             visibility: |_| Visibility::Immediate,
@@ -100,6 +106,21 @@ impl Probe {
 
     fn failing_once(self, ids: &[&str]) -> Self {
         self.fail_once
+            .lock()
+            .unwrap()
+            .extend(ids.iter().map(|id| (*id).to_owned()));
+        self
+    }
+
+    fn failing_at_random(self, writes: usize) -> Self {
+        self.random_failures.store(writes, Ordering::SeqCst);
+        self
+    }
+
+    /// Reject these documents item by item, on every write: the engine's
+    /// failure policy decides them.
+    fn rejecting(self, ids: &[&str]) -> Self {
+        self.rejects
             .lock()
             .unwrap()
             .extend(ids.iter().map(|id| (*id).to_owned()));
@@ -173,7 +194,17 @@ impl Sink for Probe {
         let failed = {
             let mut fail_once = self.fail_once.lock().unwrap();
             ids.iter().any(|id| fail_once.remove(id))
-        };
+        } || (self.random_failures.load(Ordering::SeqCst) > 0
+            && self
+                .delays
+                .as_ref()
+                .is_some_and(|rng| rng.lock().unwrap().below(8) == 0)
+            && self
+                .random_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok());
 
         if !failed {
             let mut versions = self.versions.lock().unwrap();
@@ -206,7 +237,21 @@ impl Sink for Probe {
         if failed {
             return Err(sink::SinkError::Write(format!("{label} failed")));
         }
-        Ok(WriteReport::clean().visible((self.visibility)(caught_up)))
+        let rejected: Vec<sink::RejectedDocument> = {
+            let rejects = self.rejects.lock().unwrap();
+            envelopes
+                .iter()
+                .filter(|e| rejects.contains(&e.id))
+                .map(|e| sink::RejectedDocument {
+                    index: e.index.to_string(),
+                    id: e.id.clone(),
+                    reason: "simulated rejection".to_owned(),
+                })
+                .collect()
+        };
+        Ok(WriteReport::clean()
+            .rejecting(rejected)
+            .visible((self.visibility)(caught_up)))
     }
 
     async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
@@ -245,6 +290,10 @@ struct Rig {
 
 impl Rig {
     fn new(probe: Probe, writes: usize) -> Self {
+        Self::with_policies(probe, writes, FailurePolicies::default())
+    }
+
+    fn with_policies(probe: Probe, writes: usize, policies: FailurePolicies) -> Self {
         let name = sink_name("primary");
         let stream = Arc::new(ChannelStream::new(1024, [name.clone()]));
         let lane = stream.lane(&name).unwrap().producer;
@@ -260,6 +309,7 @@ impl Rig {
                 vec![mapping()],
             )
             .with_writes(writes)
+            .with_failure_policies(policies)
             .with_stop(stop.clone())
             .with_observer(Arc::clone(&observer) as Arc<dyn Observer>),
         );
@@ -394,18 +444,23 @@ fn seeds() -> Vec<u64> {
 
 /// Random lane traffic over a few documents: live batches and backfill pages
 /// in any mix, each holding a random set of ids, every write taking a random
-/// time. Builds are numbered in lane order (the version), as the one ingest
-/// task builds them. Whatever the schedule, no document is written twice at
-/// once, its versions never go down, every document ends at its last version,
-/// and the lane drains with the watermark at the last position.
+/// time, and up to three writes failing at random: each failure ends the run
+/// and the engine restarts, as the daemon restarts it, so an earlier item
+/// fails while later ones sharing its documents wait. Builds are numbered in
+/// lane order (the version), as the one ingest task builds them. Whatever the
+/// schedule, no document is written twice at once, its versions never go
+/// down, every document ends at its last version, and the lane drains with
+/// the watermark at the last position.
 #[tokio::test(start_paused = true)]
 async fn a_document_is_never_written_twice_at_once_and_its_versions_never_go_down() {
     const IDS: [&str; 6] = ["a", "b", "c", "d", "e", "f"];
     let mut concurrent = false;
+    let mut restarted = false;
     for writes in [1, 2, 4] {
         for seed in seeds() {
             let mut rng = Rng(seed * 7919 + writes as u64);
-            let mut rig = Rig::new(Probe::new().with_delays(seed), writes).start();
+            let mut rig =
+                Rig::new(Probe::new().with_delays(seed).failing_at_random(3), writes).start();
             let mut last: HashMap<&str, i64> = HashMap::new();
             let mut position = 0;
             for _ in 0..60 {
@@ -427,7 +482,21 @@ async fn a_document_is_never_written_twice_at_once_and_its_versions_never_go_dow
                     tokio::time::sleep(Duration::from_millis(rng.below(5))).await;
                 }
             }
-            until("the lane to drain", || rig.stream.is_idle()).await;
+            for _ in 0..60_000 {
+                if rig.stream.is_idle() {
+                    break;
+                }
+                if rig.engine.as_ref().is_some_and(|run| run.is_finished()) {
+                    assert!(rig.ended().await.is_err(), "only a failure ends the run");
+                    restarted = true;
+                    rig = rig.start();
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            assert!(
+                rig.stream.is_idle(),
+                "seed {seed}, writes {writes}: the lane drains"
+            );
 
             let probe = &rig.probe;
             assert!(
@@ -452,6 +521,7 @@ async fn a_document_is_never_written_twice_at_once_and_its_versions_never_go_dow
         }
     }
     assert!(concurrent, "some schedule wrote several items at once");
+    assert!(restarted, "some schedule failed a write and restarted");
 }
 
 #[tokio::test(start_paused = true)]
@@ -871,4 +941,68 @@ async fn a_failed_acknowledgement_still_waits_for_the_writes_in_flight() {
         "the failed acknowledgement ends the run"
     );
     assert!(probe.log().contains(&"end a".to_owned()));
+}
+
+/// Under `stop`, a document rejected in one write while others are in flight
+/// beside it fails the run once they returned: they are acknowledged, the
+/// rejected item is not, and the watermark stops before it.
+#[tokio::test(start_paused = true)]
+async fn a_stop_rejection_beside_writes_in_flight_lets_them_land_and_holds_the_watermark() {
+    let mut rig = Rig::new(Probe::new().holding(&["a"]).rejecting(&["b"]), 4).start();
+    rig.live(1, &["a"]).await;
+    rig.live(2, &["b"]).await;
+    rig.live(3, &["c"]).await;
+    until("b and c to be written", || {
+        let log = rig.probe.log();
+        log.contains(&"end b".to_owned()) && log.contains(&"end c".to_owned())
+    })
+    .await;
+    settle().await;
+    assert!(
+        rig.engine.as_ref().is_some_and(|run| !run.is_finished()),
+        "the run waits for a"
+    );
+    rig.probe.release("a");
+    assert!(
+        rig.ended().await.is_err(),
+        "the rejection under stop fails the run"
+    );
+    assert_eq!(
+        rig.stream.watermark(),
+        Some(Position(1)),
+        "a landed; b is unacknowledged, so the lane confirms nothing past 1"
+    );
+}
+
+/// Under `skip`, a rejected document is quarantined and its write
+/// acknowledged while other writes run beside it: the run goes on and the
+/// lane drains.
+#[tokio::test(start_paused = true)]
+async fn a_skip_rejection_beside_writes_in_flight_is_quarantined_and_the_run_goes_on() {
+    let mut rig = Rig::with_policies(
+        Probe::new().holding(&["a"]).rejecting(&["b"]),
+        4,
+        FailurePolicies::new(FailurePolicy::Skip),
+    )
+    .start();
+    rig.live(1, &["a"]).await;
+    rig.live(2, &["b"]).await;
+    rig.live(3, &["c"]).await;
+    until("b and c to be written", || {
+        let log = rig.probe.log();
+        log.contains(&"end b".to_owned()) && log.contains(&"end c".to_owned())
+    })
+    .await;
+    assert_eq!(
+        rig.stream.watermark(),
+        None,
+        "a is still being written, so nothing is confirmed yet"
+    );
+    rig.probe.release("a");
+    until("the lane to drain", || rig.stream.is_idle()).await;
+    assert_eq!(rig.stream.watermark(), Some(Position(3)));
+    assert!(
+        rig.engine.as_ref().is_some_and(|run| !run.is_finished()),
+        "a skipped rejection does not end the run"
+    );
 }
