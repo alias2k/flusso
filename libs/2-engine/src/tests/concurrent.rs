@@ -733,3 +733,142 @@ async fn an_idle_engine_makes_its_last_writes_searchable() {
         "the idle write is caught up"
     );
 }
+
+/// A stream over a channel whose acknowledgement of any item holding
+/// document `fail` errs, as a broker might.
+#[derive(Debug)]
+struct FailingAcks {
+    inner: Arc<ChannelStream>,
+    fail: &'static str,
+}
+
+impl Stream for FailingAcks {
+    fn lane(&self, sink: &kernel::SinkName) -> stream::Result<stream::Lane> {
+        let lane = self.inner.lane(sink)?;
+        Ok(stream::Lane {
+            producer: lane.producer,
+            consumer: Box::new(FailingConsumer {
+                inner: lane.consumer,
+                fail: self.fail,
+            }),
+        })
+    }
+
+    fn requests(&self) -> stream::Result<stream::RequestLane> {
+        self.inner.requests()
+    }
+
+    fn watermark(&self) -> Option<Position> {
+        self.inner.watermark()
+    }
+
+    fn is_idle(&self) -> bool {
+        self.inner.is_idle()
+    }
+}
+
+#[derive(Debug)]
+struct FailingConsumer {
+    inner: Box<dyn stream::Consumer<LaneItem>>,
+    fail: &'static str,
+}
+
+#[async_trait]
+impl stream::Consumer<LaneItem> for FailingConsumer {
+    async fn recv(&mut self) -> stream::Result<Option<stream::Delivery<LaneItem>>> {
+        let Some(delivery) = self.inner.recv().await? else {
+            return Ok(None);
+        };
+        let fails = matches!(
+            delivery.item(),
+            LaneItem::Batch(batch) if batch.envelopes.iter().any(|e| e.id == self.fail)
+        );
+        if !fails {
+            return Ok(Some(delivery));
+        }
+        let (item, handle) = delivery.into_parts();
+        Ok(Some(stream::Delivery::new(
+            item,
+            Box::new(FailingAck(handle)),
+        )))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+}
+
+#[derive(Debug)]
+struct FailingAck(Box<dyn stream::AckHandle>);
+
+#[async_trait]
+impl stream::AckHandle for FailingAck {
+    async fn ack(self: Box<Self>) -> stream::Result<()> {
+        Err(stream::QueueError::Consume(
+            "simulated acknowledgement failure".to_owned(),
+        ))
+    }
+
+    async fn nack(self: Box<Self>) -> stream::Result<()> {
+        self.0.nack().await
+    }
+}
+
+/// An acknowledgement that errs ends the run like a failed write: the writes
+/// in flight beside it are awaited first, so none is abandoned mid-request
+/// for any stream adapter.
+#[tokio::test(start_paused = true)]
+async fn a_failed_acknowledgement_still_waits_for_the_writes_in_flight() {
+    let name = sink_name("primary");
+    let channel = Arc::new(ChannelStream::new(1024, [name.clone()]));
+    let stream = Arc::new(FailingAcks {
+        inner: Arc::clone(&channel),
+        fail: "b",
+    });
+    let probe = Arc::new(Probe::new().holding(&["a"]));
+    let engine = SinkEngine::new(
+        name.clone(),
+        Arc::clone(&probe) as Arc<dyn Sink>,
+        stream as Arc<dyn Stream>,
+        vec![mapping()],
+    )
+    .with_writes(4);
+    let lane = channel.lane(&name).unwrap().producer;
+    let run = tokio::spawn(async move {
+        let (_control, mut rx) = tokio::sync::mpsc::channel(1);
+        engine.run(&mut rx).await
+    });
+    for (position, id) in [(1, "a"), (2, "b")] {
+        let envelopes: Arc<[Envelope]> = vec![Envelope::upsert(
+            users(),
+            id,
+            GenericValue::Map(BTreeMap::new()),
+            Some(Position(position)),
+            chrono::Utc::now(),
+        )]
+        .into();
+        lane.publish(LaneItem::Batch(Batch {
+            position: Some(Position(position)),
+            changes: 1,
+            envelopes,
+        }))
+        .await
+        .unwrap();
+    }
+    until("b to be written", || {
+        probe.log().contains(&"end b".to_owned())
+    })
+    .await;
+    settle().await;
+    assert!(
+        !run.is_finished(),
+        "the run ended with a's write still in flight"
+    );
+
+    probe.release("a");
+    assert!(
+        run.await.unwrap().is_err(),
+        "the failed acknowledgement ends the run"
+    );
+    assert!(probe.log().contains(&"end a".to_owned()));
+}
