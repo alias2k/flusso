@@ -1,5 +1,5 @@
 //! The HTTP plumbing against an OpenSearch cluster: the bulk request (with
-//! retry and item-level rejection handling), the small request helpers, and the
+//! retry, resending items refused as busy, and item-level rejection handling), the small request helpers, and the
 //! generic per-index operations (create, exists, delete, refresh, settings,
 //! listing). Higher layers ([`generations`](crate) and the [`Sink`](crate) impl)
 //! build on these.
@@ -23,7 +23,7 @@ use sink::{RejectedDocument, Result, SinkError};
 use tracing::{debug, warn};
 
 use crate::OpensearchSink;
-use crate::bulk::{BulkAction, build_bulk_url, bulk_rejected};
+use crate::bulk::{BulkAction, build_bulk_url, bulk_action_fragment, read_bulk_response};
 use crate::mapping::build_index_body;
 
 /// A `reqwest` failure as a [`SinkError::Write`]: `context`, the error, and
@@ -98,13 +98,19 @@ impl OpensearchSink {
     /// status for the whole request) are transient and **retried** with
     /// exponential backoff, except a refused server certificate, which fails
     /// at once: it is configuration (`ca_file`, `tls_verify`), not a blip.
-    /// **Item-level rejections** — a 2xx bulk response in
-    /// which OpenSearch accepted some actions and refused others (a mapping
-    /// conflict, a malformed value) — are **not** retried: re-sending the same
-    /// document yields the same rejection. They are returned as
-    /// [`RejectedDocument`]s for the engine's failure policy to handle, while
-    /// the accepted actions in the same request stay applied, except a missing
-    /// target, which is an `Err` (see the `bulk` module docs).
+    ///
+    /// **Items refused as busy** (429 or 503 inside a 2xx response, see the
+    /// `bulk` module docs) are resent alone, from the same retry budget and
+    /// backoff: the accepted items are applied and never sent twice. Items
+    /// still busy once `max_retries` is spent fail the flush with an `Err`, so
+    /// the sink engine restarts with its own backoff and the batch is
+    /// redelivered; a busy item never reaches `on_error`.
+    ///
+    /// **Item-level rejections** — a mapping conflict, a malformed value — are
+    /// **not** retried: re-sending the same document yields the same rejection.
+    /// They are returned as [`RejectedDocument`]s, each once, for the engine's
+    /// failure policy to handle, except a missing target, which is an `Err`
+    /// (see the `bulk` module docs).
     #[tracing::instrument(
         name = "os.bulk",
         level = "debug",
@@ -124,20 +130,27 @@ impl OpensearchSink {
 
         let url = build_bulk_url(&self.base_url, self.pipeline.as_deref(), refresh);
 
+        let mut sending: Vec<&BulkAction> = actions.iter().collect();
+        let mut resend_body: Option<String> = None;
+        let mut rejected = Vec::new();
         let mut last_err: Option<SinkError> = None;
 
         for attempt in 0..=self.max_retries {
             if attempt > 0 {
                 let backoff = Duration::from_millis(200u64.saturating_mul(1u64 << (attempt - 1)));
                 tokio::time::sleep(backoff).await;
-                warn!(attempt, "retrying OpenSearch bulk request");
+                warn!(
+                    attempt,
+                    documents = sending.len(),
+                    "retrying OpenSearch bulk request"
+                );
             }
 
             let req = self
                 .client
                 .post(&url)
                 .header("Content-Type", "application/x-ndjson")
-                .body(body.to_owned());
+                .body(resend_body.as_deref().unwrap_or(body).to_owned());
 
             match self.maybe_auth(req).send().await {
                 Ok(resp) if resp.status().is_success() => {
@@ -146,14 +159,41 @@ impl OpensearchSink {
                         .await
                         .map_err(|e| request_error("failed to read bulk response", e))?;
 
-                    let rejected = bulk_rejected(&result, actions)?;
+                    let read = read_bulk_response(&result, &sending)?;
                     debug!(
-                        count = actions.len(),
-                        rejected = rejected.len(),
+                        count = sending.len(),
+                        rejected = read.rejected.len(),
+                        busy = read.busy.len(),
                         refresh,
                         "bulk request applied",
                     );
-                    return Ok(rejected);
+                    rejected.extend(read.rejected);
+                    if read.busy.is_empty() {
+                        return Ok(rejected);
+                    }
+                    sending = read
+                        .busy
+                        .iter()
+                        .filter_map(|&i| sending.get(i).copied())
+                        .collect();
+                    let mut body = String::new();
+                    for action in &sending {
+                        body.push_str(&bulk_action_fragment(action)?);
+                    }
+                    resend_body = Some(body);
+                    let reason = read.busy_reason.unwrap_or_default();
+                    warn!(
+                        documents = sending.len(),
+                        %reason,
+                        "OpenSearch refused documents as busy; resending them",
+                    );
+                    let documents = sending.len();
+                    let plural = if documents == 1 { "" } else { "s" };
+                    last_err = Some(SinkError::Write(format!(
+                        "{documents} document{plural} still refused as busy after {} retries \
+                         (last: {reason}); failing the flush so the batch is redelivered",
+                        self.max_retries
+                    )));
                 }
                 Ok(resp) => {
                     let status = resp.status();

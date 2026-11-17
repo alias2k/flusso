@@ -10,7 +10,7 @@ The in-process stream adapter: one bounded `tokio` mpsc channel per sink lane pl
 | **Lanes** | [`lane`](stream::Stream::lane) hands out a producer + consumer over the *same* channel every time, so a restarted engine re-attaches |
 | **Requests** | [`requests`](stream::Stream::requests): the upward lane sink engines put `Backfill` requests on |
 | **Backpressure** | `publish` waits when a lane is full — the slowest sink paces ingest |
-| **Redelivery** | every delivered item stays in an in-flight ledger until acked; nacked or dropped unacked → redelivered in order |
+| **Redelivery** | every delivered item stays in an in-flight ledger until acked; nacked or dropped unacked → that delivery alone redelivered, in lane order |
 | **Watermark** | [`watermark`](stream::Stream::watermark) = the lowest position every lane has acked |
 
 ## How it works
@@ -21,8 +21,9 @@ handle carries. Several deliveries can be outstanding at once — the ingest
 engine holds every coalesced backfill request until the snapshot is published
 — and each acknowledges on its own. Acking removes the item and, for a lane
 batch, records its position; nacking a delivery, or dropping its handle
-unacked (an engine that died holding it), moves the redelivery cursor back so
-the next `recv` serves it again before pulling anything new. A restarted
+unacked (an engine that died holding it), marks that delivery alone due: the
+next `recv` serves the earliest due one again before pulling anything new,
+and the deliveries still in flight are left alone. A restarted
 engine gets a fresh consumer over the same channel and is redelivered what
 its predecessor left.
 

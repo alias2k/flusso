@@ -69,8 +69,10 @@ pub struct OpensearchConfig {
     /// Request timeout, in seconds.
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
-    /// Retries for a transient failure of a whole bulk request. A refused TLS
-    /// certificate is never retried.
+    /// Retries for a transient bulk failure: a whole request that failed, or
+    /// documents OpenSearch refused as busy (HTTP 429 or 503), which are resent
+    /// alone. Busy documents left after the last retry fail the flush, and the
+    /// batch is redelivered. A refused TLS certificate is never retried.
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
     /// An ingest pipeline applied to every indexed document.

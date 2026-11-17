@@ -10,7 +10,7 @@
 | `batch_size` | int | `1000` | Documents per bulk request. |
 | `max_bytes` | int | `10485760` | Maximum serialized size of one bulk request, in bytes. A flush is split so no request exceeds this, independent of `batch_size`, keeping requests under OpenSearch's `http.max_content_length` (100 MB by default). A single document larger than this is sent on its own. |
 | `timeout_secs` | int | `30` | Request timeout, in seconds. |
-| `max_retries` | int | `3` | Retries for a transient failure of a whole bulk request. A refused TLS certificate is never retried. |
+| `max_retries` | int | `3` | Retries for a transient bulk failure: a whole request that failed, or documents OpenSearch refused as busy (HTTP 429 or 503), which are resent alone. Busy documents left after the last retry fail the flush, and the batch is redelivered. A refused TLS certificate is never retried. |
 | `pipeline` | string | none | An ingest pipeline applied to every indexed document. |
 | `number_of_shards` | int | `1` | Primary shards for each index flusso creates. |
 | `number_of_replicas` | int | `1` | Replica shards for each index flusso creates. |

@@ -546,7 +546,7 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0,
-          "description": "Retries for a transient failure of a whole bulk request. A refused TLS\ncertificate is never retried.",
+          "description": "Retries for a transient bulk failure: a whole request that failed, or\ndocuments OpenSearch refused as busy (HTTP 429 or 503), which are resent\nalone. Busy documents left after the last retry fail the flush, and the\nbatch is redelivered. A refused TLS certificate is never retried.",
           "default": 3
         },
         "pipeline": {

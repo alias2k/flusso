@@ -124,20 +124,36 @@ struct Channel<T> {
     state: Mutex<Ledger<T>>,
 }
 
-/// Delivered, not yet acknowledged items in delivery order, each under a
-/// ticket its ack handle carries. Everything at or after `cursor` is due for
-/// redelivery: a nack or a dropped consumer moves the cursor back, `recv`
-/// serves from it before pulling anything new off the channel.
+/// Delivered, not yet acknowledged items in lane order, each under a ticket
+/// its ack handle carries. An entry marked `due` was released (nacked, or its
+/// handle dropped unacked) and is served again by the next `recv`, the
+/// earliest first, before anything new is pulled off the channel. Releasing
+/// one ticket leaves every other delivery in flight alone.
 #[derive(Debug)]
 struct Ledger<T> {
-    in_flight: Vec<(Ticket, T)>,
-    cursor: usize,
+    in_flight: Vec<InFlight<T>>,
     next_ticket: Ticket,
     /// The last position acknowledged on this lane.
     acked: Option<Position>,
 }
 
+#[derive(Debug)]
+struct InFlight<T> {
+    ticket: Ticket,
+    item: T,
+    due: bool,
+}
+
 type Ticket = u64;
+
+impl<T: Clone> Ledger<T> {
+    /// Hand out the earliest due entry again, if any.
+    fn take_due(&mut self) -> Option<(Ticket, T)> {
+        let entry = self.in_flight.iter_mut().find(|entry| entry.due)?;
+        entry.due = false;
+        Some((entry.ticket, entry.item.clone()))
+    }
+}
 
 impl<T> Channel<T> {
     fn lock(&self) -> std::sync::MutexGuard<'_, Ledger<T>> {
@@ -148,25 +164,21 @@ impl<T> Channel<T> {
         self.lock().acked
     }
 
-    /// Mark `tickets` for redelivery: the cursor moves back to the earliest of
-    /// them, so it and everything delivered after it come back in their original
-    /// order (a lane consumer processes in order, so what followed a failed item
-    /// is redone too).
+    /// Mark `tickets` due for redelivery. Only they come back, in lane order;
+    /// a ticket already acknowledged is ignored.
     fn release(&self, tickets: &[Ticket]) {
         let mut ledger = self.lock();
-        let earliest = ledger
-            .in_flight
-            .iter()
-            .position(|(t, _)| tickets.contains(t));
-        if let Some(index) = earliest {
-            ledger.cursor = ledger.cursor.min(index);
+        for entry in &mut ledger.in_flight {
+            if tickets.contains(&entry.ticket) {
+                entry.due = true;
+            }
         }
     }
 
     /// Nothing queued behind the deliveries already handed out.
     fn is_caught_up(&self) -> bool {
         let ledger = self.lock();
-        ledger.cursor == ledger.in_flight.len() && self.queue_is_empty()
+        !ledger.in_flight.iter().any(|entry| entry.due) && self.queue_is_empty()
     }
 
     /// Nothing queued and nothing delivered but unacknowledged.
@@ -187,7 +199,6 @@ impl<T: Positioned + Clone + Send + 'static> Channel<T> {
             rx: tokio::sync::Mutex::new(rx),
             state: Mutex::new(Ledger {
                 in_flight: Vec::new(),
-                cursor: 0,
                 next_ticket: 0,
                 acked: None,
             }),
@@ -195,43 +206,35 @@ impl<T: Positioned + Clone + Send + 'static> Channel<T> {
     }
 
     async fn recv(&self) -> Option<(Ticket, T)> {
-        if let Some(redelivery) = self.redelivery() {
+        if let Some(redelivery) = self.lock().take_due() {
             return Some(redelivery);
         }
         let item = self.rx.lock().await.recv().await?;
         let mut ledger = self.lock();
         let ticket = ledger.next_ticket;
         ledger.next_ticket += 1;
-        ledger.in_flight.push((ticket, item.clone()));
-        // A release that landed while awaiting the channel moved the cursor
-        // back: serve the redelivery first and leave the new item in order
-        // behind it, so nothing is delivered twice or out of order.
-        if ledger.cursor + 1 < ledger.in_flight.len() {
-            let entry = ledger.in_flight.get(ledger.cursor).cloned()?;
-            ledger.cursor += 1;
-            return Some(entry);
-        }
-        ledger.cursor = ledger.in_flight.len();
-        Some((ticket, item))
-    }
-
-    fn redelivery(&self) -> Option<(Ticket, T)> {
-        let mut ledger = self.lock();
-        let entry = ledger.in_flight.get(ledger.cursor).cloned()?;
-        ledger.cursor += 1;
-        Some(entry)
+        // A release that landed while awaiting the channel made an earlier
+        // entry due: serve it first and leave the new item due behind it, so
+        // nothing is delivered twice or out of order.
+        ledger.in_flight.push(InFlight {
+            ticket,
+            item,
+            due: true,
+        });
+        ledger.take_due()
     }
 
     fn ack(&self, ticket: Ticket) {
         let mut ledger = self.lock();
-        let Some(index) = ledger.in_flight.iter().position(|(t, _)| *t == ticket) else {
+        let Some(index) = ledger
+            .in_flight
+            .iter()
+            .position(|entry| entry.ticket == ticket)
+        else {
             return;
         };
-        let (_, item) = ledger.in_flight.remove(index);
-        if index < ledger.cursor {
-            ledger.cursor -= 1;
-        }
-        if let Some(position) = item.position() {
+        let entry = ledger.in_flight.remove(index);
+        if let Some(position) = entry.item.position() {
             ledger.acked = Some(ledger.acked.map_or(position, |p| p.max(position)));
         }
     }

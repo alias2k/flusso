@@ -4,7 +4,7 @@ Decide what a single bad document does to the pipeline, find the ones that were 
 
 ## When to use this
 
-OpenSearch accepted a bulk request but refused one document: a value that doesn't fit the mapping, a string too long for a keyword, a malformed date. This is an **item-level rejection**. A flush-wide failure (cluster down, request refused) is different and always stops the run until it recovers.
+OpenSearch accepted a bulk request but refused one document: a value that doesn't fit the mapping, a string too long for a keyword, a malformed date. This is an **item-level rejection**. A flush-wide failure (cluster down, request refused) is different and always stops the run until it recovers. So is a document refused because the cluster is busy (HTTP 429 or 503): it is [resent](../reference/sink-opensearch.md#retries), never quarantined.
 
 ## Steps
 
@@ -36,7 +36,7 @@ OpenSearch accepted a bulk request but refused one document: a value that doesn'
 
 - **Global default.** `on_error = "skip"` at the top level makes it the default for every index; a per-index `stop` then opts one back in.
 - **One `stop` halts the batch.** In a batch touching a `stop` index and a `skip` index, a rejection in the `stop` index halts the whole batch before any quarantine is recorded.
-- **The sink never retries a rejection**; re-sending re-rejects. Only transient transport failures are retried, per `max_retries`.
+- **The sink never retries a rejection**; re-sending re-rejects. Only transient failures are retried, per `max_retries`: a failed request, and documents refused as busy. See [Retries](../reference/sink-opensearch.md#retries).
 - **A script that fails on a document** is governed by the same policy, one step earlier: `skip` publishes nothing for it, so it keeps its indexed version on every sink. It's counted in `flusso_script_failures_total`, not as a quarantine; alert on it too: `increase(flusso_script_failures_total[10m]) > 0`. See [Script fields](../reference/scripts.md#failures).
 
 ## Related
