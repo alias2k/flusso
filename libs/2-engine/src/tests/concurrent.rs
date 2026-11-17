@@ -1049,3 +1049,29 @@ async fn a_reindex_taken_before_a_failed_write_is_staged_after_the_restart() {
     }
     assert_eq!(asked.len(), 1, "its backfill is requested once");
 }
+
+/// The supervisor resets its restart backoff after a run that made progress.
+/// Progress is the sink's oldest unfinished item landing, not any
+/// acknowledgement: a later item landing beside an older one that then fails
+/// leaves the sink where it was, so that run made none.
+#[tokio::test(start_paused = true)]
+async fn only_the_oldest_unfinished_item_landing_counts_as_progress() {
+    let mut rig = Rig::new(Probe::new().holding(&["a"]).failing_once(&["a"]), 4).start();
+    rig.live(1, &["a"]).await;
+    rig.live(2, &["b"]).await;
+    until("b to be written", || {
+        rig.probe.log().contains(&"end b".to_owned())
+    })
+    .await;
+    rig.probe.release("a");
+    assert!(rig.ended().await.is_err());
+    assert_eq!(
+        rig.sink_engine.acknowledged(),
+        0,
+        "b landed behind a, which failed: no progress"
+    );
+
+    let rig = rig.start();
+    until("the lane to drain", || rig.stream.is_idle()).await;
+    assert!(rig.sink_engine.acknowledged() > 0, "a landing is progress");
+}
