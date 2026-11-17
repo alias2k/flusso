@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use kernel::{Envelope, GenericValue, IndexName, Position, SinkName};
-use sink::Sink;
+use sink::{Sink, Visibility};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 use super::request_error;
@@ -77,22 +78,28 @@ async fn credentials_in_the_url_never_reach_the_message() {
 struct StubBulk {
     url: String,
     requests: Arc<Mutex<Vec<Vec<String>>>>,
+    /// Every request's method and path (`POST /_bulk?refresh=true`), in order.
+    lines: Arc<Mutex<Vec<String>>>,
 }
 
 async fn stub_bulk(answer: impl Fn(usize, &str) -> u16 + Send + Sync + 'static) -> StubBulk {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let requests: Arc<Mutex<Vec<Vec<String>>>> = Arc::default();
+    let lines: Arc<Mutex<Vec<String>>> = Arc::default();
     let answer = Arc::new(answer);
     let recorded = Arc::clone(&requests);
+    let recorded_lines = Arc::clone(&lines);
     tokio::spawn(async move {
         loop {
             let (socket, _) = listener.accept().await.unwrap();
             let answer = Arc::clone(&answer);
             let recorded = Arc::clone(&recorded);
+            let recorded_lines = Arc::clone(&recorded_lines);
             tokio::spawn(async move {
                 let mut socket = tokio::io::BufStream::new(socket);
-                while let Some(body) = read_request(&mut socket).await {
+                while let Some((line, body)) = read_request(&mut socket).await {
+                    recorded_lines.lock().unwrap().push(line);
                     let ids = bulk_ids(&body);
                     let request = {
                         let mut recorded = recorded.lock().unwrap();
@@ -116,12 +123,27 @@ async fn stub_bulk(answer: impl Fn(usize, &str) -> u16 + Send + Sync + 'static) 
             });
         }
     });
-    StubBulk { url, requests }
+    StubBulk {
+        url,
+        requests,
+        lines,
+    }
 }
 
-/// The body of the next request on `socket`, or `None` once the client closed it.
-async fn read_request(socket: &mut tokio::io::BufStream<tokio::net::TcpStream>) -> Option<String> {
+/// The method and path, and the body, of the next request on `socket`, or
+/// `None` once the client closed it.
+async fn read_request(
+    socket: &mut tokio::io::BufStream<tokio::net::TcpStream>,
+) -> Option<(String, String)> {
     let mut length = 0usize;
+    let mut request_line = String::new();
+    if socket.read_line(&mut request_line).await.ok()? == 0 {
+        return None;
+    }
+    let request_line = request_line
+        .trim_end()
+        .trim_end_matches(" HTTP/1.1")
+        .to_owned();
     loop {
         let mut line = String::new();
         if socket.read_line(&mut line).await.ok()? == 0 {
@@ -138,7 +160,7 @@ async fn read_request(socket: &mut tokio::io::BufStream<tokio::net::TcpStream>) 
     }
     let mut body = vec![0; length];
     socket.read_exact(&mut body).await.ok()?;
-    Some(String::from_utf8(body).unwrap())
+    Some((request_line, String::from_utf8(body).unwrap()))
 }
 
 /// The `_id` of every action in an NDJSON bulk body, skipping source lines.
@@ -307,4 +329,61 @@ async fn a_batch_written_again_after_a_failed_write_is_sent_once() {
     sink.write(&upserts(&["1", "2"]), false).await.unwrap();
 
     assert_eq!(*stub.requests.lock().unwrap(), [vec!["1", "2"]]);
+}
+
+/// Several writes at once each send their own documents, and only those:
+/// the sink keeps nothing between calls.
+#[tokio::test]
+async fn concurrent_writes_each_send_their_own_documents() {
+    let stub = stub_bulk(|_, _| 201).await;
+    let sink = sink(&stub.url, 0);
+    let batches: Vec<Vec<String>> = (0..8)
+        .map(|write| (0..5).map(|doc| format!("{write}-{doc}")).collect())
+        .collect();
+
+    let writes = batches.iter().map(|ids| {
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let envelopes = upserts(&ids);
+        let sink = &sink;
+        async move { sink.write(&envelopes, false).await.unwrap() }
+    });
+    futures::future::join_all(writes).await;
+
+    let mut sent = stub.requests.lock().unwrap().clone();
+    sent.sort();
+    let mut expected = batches.clone();
+    expected.sort();
+    assert_eq!(
+        sent, expected,
+        "one request per write, holding its documents"
+    );
+}
+
+/// A write that isn't caught up forces no refresh and leaves its index to
+/// the next caught-up write, which refreshes it after its own bulk request:
+/// everything written before it is searchable when it returns.
+#[tokio::test]
+async fn a_caught_up_write_refreshes_what_earlier_writes_left() {
+    let stub = stub_bulk(|_, _| 201).await;
+    let sink = sink(&stub.url, 0);
+
+    let report = sink.write(&upserts(&["1"]), false).await.unwrap();
+    assert_eq!(
+        report.visibility,
+        Visibility::Within(Duration::from_secs(1))
+    );
+    let report = sink.write(&upserts(&["2"]), true).await.unwrap();
+    assert_eq!(report.visibility, Visibility::Immediate);
+    let report = sink.write(&[], true).await.unwrap();
+    assert_eq!(report.visibility, Visibility::Immediate);
+
+    assert_eq!(
+        *stub.lines.lock().unwrap(),
+        [
+            "POST /_bulk",
+            "POST /_bulk?refresh=true",
+            "POST /users/_refresh?ignore_unavailable=true"
+        ],
+        "the caught-up write refreshes what the first one left, once"
+    );
 }

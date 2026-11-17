@@ -199,3 +199,81 @@ async fn a_batch_is_not_acked_until_its_busy_documents_are_written() {
     assert_eq!(requests.lock().unwrap().len(), 3);
     assert_eq!(stream.watermark(), Some(Position(0)));
 }
+
+fn item(position: u64, ids: &[&str]) -> stream::LaneItem {
+    let envelopes: Vec<Envelope> = ids
+        .iter()
+        .map(|id| {
+            Envelope::upsert(
+                super::users(),
+                *id,
+                kernel::GenericValue::Map(Default::default()),
+                Some(Position(position)),
+                chrono::Utc::now(),
+            )
+        })
+        .collect();
+    stream::LaneItem::Batch(stream::Batch {
+        position: Some(Position(position)),
+        changes: 1,
+        envelopes: envelopes.into(),
+    })
+}
+
+/// With several writes in flight, an item whose document is refused as busy
+/// holds back only the items sharing a document with it: a later item over
+/// other documents is written meanwhile, a later item over the busy document
+/// waits until it lands, and the watermark stays before the busy item.
+#[tokio::test]
+async fn a_busy_item_holds_back_only_the_items_sharing_its_documents() {
+    let refusals = std::sync::atomic::AtomicUsize::new(0);
+    let stub = stub_bulk(move |_, id| {
+        if id == "1" && refusals.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
+            429
+        } else {
+            201
+        }
+    })
+    .await;
+    let requests = Arc::clone(&stub.requests);
+    let name = sink_name("primary");
+    let stream = Arc::new(stream_channel::ChannelStream::new(16, [name.clone()]));
+    let lane = stream.lane(&name).unwrap().producer;
+    let engine = crate::SinkEngine::new(
+        name,
+        Arc::new(opensearch(&stub.url)),
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![super::mapping()],
+    )
+    .with_writes(4);
+    let (_control, mut rx) = tokio::sync::mpsc::channel(1);
+    let run = tokio::spawn(async move { engine.run(&mut rx).await });
+
+    lane.publish(item(1, &["1", "3"])).await.unwrap();
+    lane.publish(item(2, &["2"])).await.unwrap();
+    lane.publish(item(3, &["1", "4"])).await.unwrap();
+    wait_for(|| requests.lock().unwrap().contains(&vec!["2".to_owned()])).await;
+    assert_eq!(stream.watermark(), None, "1 is still refused as busy");
+
+    wait_for(|| stream.is_idle()).await;
+    run.abort();
+    let requests = requests.lock().unwrap().clone();
+    let holding_one: Vec<Vec<String>> = requests
+        .iter()
+        .filter(|ids| ids.contains(&"1".to_owned()))
+        .cloned()
+        .collect();
+    assert_eq!(
+        holding_one,
+        [vec!["1", "3"], vec!["1"], vec!["1"], vec!["1", "4"]],
+        "item 3 is sent only once item 1 is written"
+    );
+    let at = |ids: &[&str]| {
+        requests
+            .iter()
+            .position(|r| r.iter().map(String::as_str).eq(ids.iter().copied()))
+            .unwrap()
+    };
+    assert!(at(&["2"]) < at(&["1", "4"]));
+    assert_eq!(stream.watermark(), Some(Position(3)));
+}

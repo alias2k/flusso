@@ -109,6 +109,9 @@ pub struct SinkEngine {
     skipped: Mutex<BTreeSet<IndexName>>,
     /// Lane items acknowledged over this engine's life, across restarts.
     acknowledged: AtomicU64,
+    /// Lane items written at once.
+    #[allow(dead_code)]
+    writes: usize,
 }
 
 /// When a flushed position becomes searchable.
@@ -143,6 +146,7 @@ impl SinkEngine {
             stop: Stop::new(),
             skipped: Mutex::new(BTreeSet::new()),
             acknowledged: AtomicU64::new(0),
+            writes: 1,
         }
     }
 
@@ -158,6 +162,13 @@ impl SinkEngine {
     /// The universal sink keys (`backfill`).
     pub fn with_options(mut self, options: SinkOptions) -> Self {
         self.options = options;
+        self
+    }
+
+    /// How many lane items this engine writes at once (at least one; the
+    /// default). Honoured from the next commit.
+    pub fn with_writes(mut self, writes: usize) -> Self {
+        self.writes = writes.max(1);
         self
     }
 
