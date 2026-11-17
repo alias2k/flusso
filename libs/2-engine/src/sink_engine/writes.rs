@@ -33,6 +33,12 @@
 //! error is returned. Every unfinished item is released with its handle, and
 //! the lane redelivers it, in lane order, to the restarted engine.
 //!
+//! **After a failed run** the next run writes the oldest redelivered item
+//! alone, as a barrier, and opens the window only once a write landed. So a
+//! write that fails every time (a `stop` rejection, a destination refusing
+//! it) halts the sink as one write at a time did: nothing behind it lands on
+//! each restart, no progress resets the backoff, and the lane fills.
+//!
 //! ```text
 //! window   [L1 a] [B1 a,b] [L2 c] [SnapshotComplete] [L3 a]
 //! writes   L1 a, L2 c        B1 waits for L1 (a); L3 waits behind the barrier
@@ -137,6 +143,9 @@ pub(super) struct Run<'a> {
     failure: Option<EngineError>,
     lane_closed: bool,
     reindex: Option<Vec<IndexName>>,
+    /// The previous run failed and nothing has landed since: grant only the
+    /// window's front item, alone.
+    barrier: bool,
     /// When the sink last had nothing in flight and nothing taken, while it
     /// still has nothing: the open idle window.
     idle_since: Option<Instant>,
@@ -155,6 +164,7 @@ impl<'a> Run<'a> {
             failure: None,
             lane_closed: false,
             reindex: None,
+            barrier: engine.failed_run.load(Ordering::Relaxed),
             idle_since: Some(Instant::now()),
         }
     }
@@ -309,7 +319,8 @@ impl<'a> Run<'a> {
     /// Start writes while there is a free slot and an admissible item, and
     /// run a `SnapshotComplete` once it is the oldest thing unfinished.
     async fn grant(&mut self) -> Result<()> {
-        while self.flights.len() < self.engine.writes {
+        let slots = if self.barrier { 1 } else { self.engine.writes };
+        while self.flights.len() < slots {
             if matches!(
                 self.window.front(),
                 Some(Queued {
@@ -330,7 +341,12 @@ impl<'a> Run<'a> {
                 }
                 continue;
             }
-            let Some(index) = self.pick() else {
+            let picked = if self.barrier {
+                self.window.front().map(|_| 0)
+            } else {
+                self.pick()
+            };
+            let Some(index) = picked else {
                 return Ok(());
             };
             let Some(Queued {
@@ -487,7 +503,9 @@ impl<'a> Run<'a> {
         // Freeing it here after the acknowledgement made `live_drain` at 64
         // changes per batch half again slower (glibc, pinned bench).
         drop(flight.documents);
-        self.acknowledge(flight.handle).await
+        self.acknowledge(flight.handle).await?;
+        self.barrier = false;
+        Ok(())
     }
 
     fn fail(&mut self, error: EngineError) {

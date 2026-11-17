@@ -38,7 +38,7 @@
 //! observes; nothing here asks the sink to refresh because a reader waits.
 
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use futures::StreamExt;
@@ -118,6 +118,9 @@ pub struct SinkEngine {
     acknowledged: AtomicU64,
     /// Lane items written at once.
     writes: usize,
+    /// The last run ended in an error: the next one writes the oldest
+    /// redelivered item alone before anything else (see `writes`).
+    failed_run: AtomicBool,
 }
 
 impl SinkEngine {
@@ -144,6 +147,7 @@ impl SinkEngine {
             skipped: Mutex::new(BTreeSet::new()),
             acknowledged: AtomicU64::new(0),
             writes: 1,
+            failed_run: AtomicBool::new(false),
         }
     }
 
@@ -398,6 +402,7 @@ impl SinkEngine {
     #[tracing::instrument(name = "sink.run", skip_all, fields(sink = %self.name))]
     pub async fn run(&self, control: &mut mpsc::Receiver<SinkControl>) -> Result<()> {
         let result = self.run_inner(control).await;
+        self.failed_run.store(result.is_err(), Ordering::Relaxed);
         let id = EngineId::Sink(self.name.clone());
         match &result {
             Ok(()) => {
