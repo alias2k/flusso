@@ -27,10 +27,11 @@
 //! leaves the engine idle, a position not yet searchable gets an empty
 //! caught-up write.
 //!
-//! **Failure.** A write that fails, or a `stop` rejection, ends the run: no
-//! new item starts, the writes in flight are awaited (the sink bounds each by
-//! its own timeouts and retries) and acknowledged when they succeeded, then the
-//! error is returned. Every unfinished item is released with its handle, and
+//! **Failure.** A write that fails, a `stop` rejection, or any other error
+//! of the run (the lane failing to deliver or acknowledge, staging a reindex)
+//! ends the run: no new item starts, the writes in flight are awaited (the
+//! sink bounds each by its own timeouts and retries) and acknowledged when
+//! they succeeded, then the first error is returned. Every unfinished item is released with its handle, and
 //! the lane redelivers it, in lane order, to the restarted engine.
 //!
 //! **After a failed run** the next run writes the oldest redelivered item
@@ -177,23 +178,10 @@ impl<'a> Run<'a> {
         let mut idle_tick = tokio::time::interval_at(Instant::now() + IDLE_TICK, IDLE_TICK);
         idle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            if self.failure.is_none() {
-                self.fill()?;
-                if self.engine.stop.is_requested() {
-                    self.skip_backfill().await?;
-                }
-                if self.flights.is_empty()
-                    && let Some(indexes) = self.reindex.take()
-                {
-                    let started = Instant::now();
-                    self.engine.reindex(indexes).await?;
-                    self.engine.observer.on_stage(
-                        StageTiming::new(Stage::Reindex, started.elapsed()).sink(&self.engine.name),
-                    );
-                }
-                if self.reindex.is_none() {
-                    self.grant().await?;
-                }
+            if self.failure.is_none()
+                && let Err(error) = self.advance().await
+            {
+                self.fail(error);
             }
             if self.flights.is_empty() {
                 if let Some(failure) = self.failure.take() {
@@ -216,15 +204,18 @@ impl<'a> Run<'a> {
             tokio::select! {
                 landed = self.flights.next(), if !self.flights.is_empty() => {
                     self.close_idle();
-                    if let Some(landed) = landed {
-                        self.landed(landed).await?;
+                    if let Some(landed) = landed
+                        && let Err(error) = self.landed(landed).await
+                    {
+                        self.fail(error);
                     }
                 }
                 delivery = self.lane.recv(), if room => {
                     self.close_idle();
-                    match delivery? {
-                        None => self.lane_closed = true,
-                        Some(delivery) => self.queue(delivery),
+                    match delivery {
+                        Err(error) => self.fail(error.into()),
+                        Ok(None) => self.lane_closed = true,
+                        Ok(Some(delivery)) => self.queue(delivery),
                     }
                 }
                 message = control.recv(), if control_open && self.reindex.is_none() && self.failure.is_none() => {
@@ -242,6 +233,29 @@ impl<'a> Run<'a> {
                 _ = idle_tick.tick() => self.close_idle(),
             }
         }
+    }
+
+    /// Take what the lane has ready, skip waiting backfill on a stop, stage a
+    /// reindex once nothing is in flight, and start what may start. An error
+    /// here is the run's failure: the caller lets the writes in flight finish.
+    async fn advance(&mut self) -> Result<()> {
+        self.fill()?;
+        if self.engine.stop.is_requested() {
+            self.skip_backfill().await?;
+        }
+        if self.flights.is_empty()
+            && let Some(indexes) = self.reindex.take()
+        {
+            let started = Instant::now();
+            self.engine.reindex(indexes).await?;
+            self.engine.observer.on_stage(
+                StageTiming::new(Stage::Reindex, started.elapsed()).sink(&self.engine.name),
+            );
+        }
+        if self.reindex.is_none() {
+            self.grant().await?;
+        }
+        Ok(())
     }
 
     /// Report the open idle window, if any. Every arm closes it before its
@@ -510,7 +524,7 @@ impl<'a> Run<'a> {
 
     fn fail(&mut self, error: EngineError) {
         if self.failure.is_none() {
-            tracing::error!(%error, writes_in_flight = self.flights.len(), "a write failed; waiting for the writes in flight");
+            tracing::error!(%error, writes_in_flight = self.flights.len(), "the sink engine's run failed; waiting for the writes in flight");
             self.failure = Some(error);
         }
     }
