@@ -661,7 +661,11 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   leaves the engine idle a position not yet searchable gets an **empty caught-up write**, since
   the last writes of a burst can return after the caught-up one. The OpenSearch sink reports
   `Within(refresh_interval)` for an unforced write (`Deferred` with `refresh_interval = "-1"`),
-  remembers every index an unforced write touched, and refreshes them in the next caught-up write; its
+  remembers every index an unforced write touched, and refreshes them in the next caught-up write,
+  one caught-up refresh at a time (`refreshing`: take, refresh, put back on failure), so a second
+  caught-up write never answers `Immediate` over a refresh still running or failed (guards
+  `a_caught_up_write_waits_for_an_earlier_refresh_still_running`,
+  `a_caught_up_write_refreshes_what_a_failed_refresh_put_back`); its
   `ensure_index` refreshes a seeded generation once per start, because what an earlier run left
   unrefreshed is remembered nowhere (fences are unavailable until staging is done). An index
   mid-reindex is **not** covered: live writes go to the new generation while the alias serves the
@@ -784,7 +788,7 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
 - **A sink's indexes are staged concurrently (issue #398).** `SinkEngine::each_index` runs one
   `Step` per index, `STAGE_CONCURRENCY` (8) at once, each index's own steps in order; the `Sink`
   port allows `ensure_index`/`is_seeded`/`reindex` at once for different indexes, never for one,
-  never beside `apply`/`flush`/`mark_seeded`. After a failure no further index is started (a
+  never beside `write`/`mark_seeded`. After a failure no further index is started (a
   hanging cluster would cost a timeout per wave), the ones in flight finish, and
   `EngineError::Staging` names every failure seen; the daemon retries the whole stage. A reindex
   control stages the same way, each index once even when named twice. `validate_indexes` checks `VALIDATE_CONCURRENCY` (4) indexes at
@@ -892,7 +896,10 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   in flight, and nothing behind it starts until it is done; a reindex waits for the writes in flight.
   A write is **caught up** when the window and the lane have nothing else. A **failure** (a write
   `Err`, a `stop` rejection) starts nothing new: the writes in flight are awaited and acked when they
-  succeeded, then the run ends with the first error and the lane redelivers only what is unacked.
+  succeeded, then the run ends with the first error and the lane redelivers only what is unacked;
+  the engine remembers the failed run (`failed_run`), and the next run is a **barrier**: it grants
+  only the window's front item until a write lands, so a `stop` rejection or a write refused every
+  time halts the sink (nothing behind it lands, the backoff grows, the lane fills).
   A lane closing ends the run once the window and the writes in flight are done. Guards: the
   engine's `tests::concurrent` (`a_document_is_never_written_twice_at_once_and_its_versions_never_go_down`,
   seeded, `FLUSSO_SCHEDULE_SEED` replays; `writes_run_at_once_up_to_the_setting`,
@@ -901,7 +908,9 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   `live_goes_first_except_every_fourth_contested_grant`, `a_snapshot_complete_is_a_barrier`,
   `a_reindex_waits_for_the_writes_in_flight`, `a_failed_write_lets_the_others_finish_and_comes_back_alone`,
   `a_stop_finishes_the_writes_in_flight_and_skips_waiting_backfill`,
-  `an_idle_engine_makes_its_last_writes_searchable`), `tests::busy`'s
+  `an_idle_engine_makes_its_last_writes_searchable`,
+  `after_a_failed_run_the_oldest_item_is_written_alone_until_it_lands`), the daemon's
+  `a_stop_rejection_halts_a_sink_writing_several_items_at_once`, `tests::busy`'s
   `a_busy_item_holds_back_only_the_items_sharing_its_documents`, the daemon's
   `writes_default_to_four_unless_the_config_sets_them`, the golden lock (its `flusso.toml` sets
   `[concurrency]`, the lock stays byte-identical), and the sinks' concurrency tests below.
