@@ -120,6 +120,7 @@ impl Sink for OpensearchSink {
                 generation: index,
                 hash_alias,
                 seeded,
+                single_shard: false,
             },
         );
         Ok(())

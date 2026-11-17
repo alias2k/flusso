@@ -516,3 +516,30 @@ async fn a_caught_up_write_refreshes_what_a_failed_refresh_put_back() {
         "the second caught-up write refreshed what the failed refresh put back"
     );
 }
+
+/// The sink knows `users` writes to one single-shard generation: a caught-up
+/// write's own `?refresh=true` bulk already refreshes the whole index, so
+/// the earlier unforced write to it costs no extra `_refresh`.
+#[tokio::test]
+async fn a_caught_up_write_over_the_one_index_left_unrefreshed_sends_no_extra_refresh() {
+    let stub = stub_bulk(|_, _| 201).await;
+    let sink = sink(&stub.url, 0);
+    sink.set_target(
+        "users",
+        crate::IndexTarget {
+            generation: "users_1".to_owned(),
+            hash_alias: "users".to_owned(),
+            seeded: false,
+            single_shard: true,
+        },
+    );
+
+    sink.write(&upserts(&["1"]), false).await.unwrap();
+    let report = sink.write(&upserts(&["2"]), true).await.unwrap();
+    assert_eq!(report.visibility, Visibility::Immediate);
+    assert_eq!(
+        *stub.lines.lock().unwrap(),
+        ["POST /_bulk", "POST /_bulk?refresh=true"],
+        "the caught-up bulk's own refresh covers the single-shard index"
+    );
+}

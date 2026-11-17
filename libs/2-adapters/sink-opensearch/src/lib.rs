@@ -127,6 +127,11 @@ pub(crate) struct IndexTarget {
     pub(crate) hash_alias: String,
     /// Whether the active generation is seeded.
     pub(crate) seeded: bool,
+    /// Whether the active generation has one primary shard, read from the
+    /// cluster when the target was learned (`false` when it couldn't be): a
+    /// bulk sent with `?refresh=true` refreshes only the shards it touched,
+    /// so only then does it refresh the whole index.
+    pub(crate) single_shard: bool,
 }
 
 impl IndexTarget {
