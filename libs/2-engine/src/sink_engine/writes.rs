@@ -76,6 +76,8 @@ const LOOKAHEAD: usize = 32;
 struct Queued {
     item: Queue,
     handle: Box<dyn AckHandle>,
+    /// Its place in lane order within this run.
+    seq: u64,
 }
 
 enum Queue {
@@ -120,6 +122,7 @@ struct Flight {
     changes: usize,
     work: Work,
     documents: Documents,
+    seq: u64,
     /// For a caught-up write, how many writes had returned at its grant.
     caught_up: Option<u64>,
 }
@@ -139,6 +142,8 @@ pub(super) struct Run<'a> {
     flights: FuturesUnordered<BoxFuture<'a, Landed>>,
     flying: HashMap<u64, Flight>,
     next_flight: u64,
+    /// The lane-order number the next delivered item gets.
+    next_seq: u64,
     /// Grants both kinds could take; every fourth goes to backfill.
     contested: u64,
     failure: Option<EngineError>,
@@ -160,6 +165,7 @@ impl<'a> Run<'a> {
             flights: FuturesUnordered::new(),
             flying: HashMap::new(),
             next_flight: 0,
+            next_seq: 0,
             contested: 0,
             failure: None,
             lane_closed: false,
@@ -304,7 +310,9 @@ impl<'a> Run<'a> {
             }
             LaneItem::SnapshotComplete { indexes } => Queue::Complete { indexes },
         };
-        self.window.push_back(Queued { item, handle });
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.window.push_back(Queued { item, handle, seq });
     }
 
     /// Once a stop is requested, backfill items still waiting are
@@ -324,6 +332,7 @@ impl<'a> Run<'a> {
             let Some(Queued {
                 item: Queue::Batch { batch, .. },
                 handle,
+                seq,
             }) = self.window.remove(index)
             else {
                 continue;
@@ -331,7 +340,8 @@ impl<'a> Run<'a> {
             self.engine
                 .lock_skipped()
                 .extend(batch.envelopes.iter().map(|e| e.index.clone()));
-            self.acknowledge(handle).await?;
+            let oldest = self.is_oldest(seq);
+            self.acknowledge(handle, oldest).await?;
         }
         Ok(())
     }
@@ -354,10 +364,11 @@ impl<'a> Run<'a> {
                 if let Some(Queued {
                     item: Queue::Complete { indexes },
                     handle,
+                    ..
                 }) = self.window.pop_front()
                 {
                     self.engine.complete_snapshot(indexes).await?;
-                    self.acknowledge(handle).await?;
+                    self.acknowledge(handle, true).await?;
                 }
                 continue;
             }
@@ -372,12 +383,13 @@ impl<'a> Run<'a> {
             let Some(Queued {
                 item: Queue::Batch { batch, documents },
                 handle,
+                seq,
             }) = self.window.remove(index)
             else {
                 return Ok(());
             };
             let caught_up = self.window.is_empty() && self.lane.is_empty();
-            self.launch(batch, documents, handle, caught_up);
+            self.launch(batch, documents, handle, seq, caught_up);
         }
         Ok(())
     }
@@ -454,6 +466,7 @@ impl<'a> Run<'a> {
         batch: Batch,
         documents: Documents,
         handle: Box<dyn AckHandle>,
+        seq: u64,
         caught_up: bool,
     ) {
         let flight = self.next_flight;
@@ -468,6 +481,7 @@ impl<'a> Run<'a> {
                 changes: batch.changes,
                 work: work_of(batch.position),
                 documents,
+                seq,
                 caught_up: caught_up.then_some(covers_below),
             },
         );
@@ -523,7 +537,8 @@ impl<'a> Run<'a> {
         // Freeing it here after the acknowledgement made `live_drain` at 64
         // changes per batch half again slower (glibc, pinned bench).
         drop(flight.documents);
-        self.acknowledge(flight.handle).await?;
+        let oldest = self.is_oldest(flight.seq);
+        self.acknowledge(flight.handle, oldest).await?;
         self.barrier = false;
         Ok(())
     }
@@ -540,7 +555,10 @@ impl<'a> Run<'a> {
     /// write, so the last writes of a burst don't wait out the refresh
     /// interval (or, with automatic refresh off, for traffic that may not
     /// come). It runs before the acknowledgement so a drain waits for it.
-    async fn acknowledge(&mut self, handle: Box<dyn AckHandle>) -> Result<()> {
+    ///
+    /// `oldest`: the item was the oldest unfinished one in lane order, so the
+    /// sink moved forward (the supervisor's measure of progress).
+    async fn acknowledge(&mut self, handle: Box<dyn AckHandle>, oldest: bool) -> Result<()> {
         let idle = self.window.is_empty() && self.flights.is_empty() && self.lane.is_empty();
         if idle
             && self.failure.is_none()
@@ -561,8 +579,17 @@ impl<'a> Run<'a> {
                 .write_returned(None, report.visibility, Some(covers_below));
         }
         handle.ack().await?;
-        self.engine.acknowledged.fetch_add(1, Ordering::Relaxed);
+        if oldest {
+            self.engine.advanced.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(())
+    }
+
+    /// Whether nothing still unfinished (waiting or in flight) came before
+    /// the item at `seq` in lane order.
+    fn is_oldest(&self, seq: u64) -> bool {
+        self.window.iter().all(|queued| queued.seq > seq)
+            && self.flying.values().all(|flight| flight.seq > seq)
     }
 }
 

@@ -917,8 +917,10 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
 - **Item-level rejections vs write-wide errors.** `Sink::write` returns a `WriteReport`:
   `Err` is write-wide (transport down, whole request refused) and stops *that sink engine*,
   which the daemon restarts with exponential backoff (1 s doubling to `max_restart_backoff`,
-  default 60 s, reset to 1 s after a run that made progress: the sink engine acknowledged a lane
-  item, `SinkEngine::acknowledged`, or the ingest engine moved its source forward,
+  default 60 s, reset to 1 s after a run that made progress: the sink engine's oldest unfinished
+  lane item landed, `SinkEngine::advanced` (not any acknowledgement: a later item landing beside an
+  older one that then fails is no progress; guard `only_the_oldest_unfinished_item_landing_counts_as_progress`),
+  or the ingest engine moved its source forward,
   `IngestEngine::advances`: `ChangeCapture::reached` past the furthest it reported (keepalives on a
   quiet stream count), or, only for a source that answers no `reached`, confirmed past its furthest
   confirmation (a reopened stream numbers a replayed change afresh, so a stream position moves on

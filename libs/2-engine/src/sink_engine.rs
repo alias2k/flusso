@@ -114,8 +114,9 @@ pub struct SinkEngine {
     /// Indexes whose snapshot batches were acknowledged unapplied during a
     /// stop: their `SnapshotComplete` must not mark them seeded.
     skipped: Mutex<BTreeSet<IndexName>>,
-    /// Lane items acknowledged over this engine's life, across restarts.
-    acknowledged: AtomicU64,
+    /// How often the oldest unfinished lane item landed, over this engine's
+    /// life, across restarts.
+    advanced: AtomicU64,
     /// Lane items written at once.
     writes: usize,
     /// A reindex taken off the control channel and not yet staged. It
@@ -152,7 +153,7 @@ impl SinkEngine {
             fences: Mutex::new(Fences::default()),
             stop: Stop::new(),
             skipped: Mutex::new(BTreeSet::new()),
-            acknowledged: AtomicU64::new(0),
+            advanced: AtomicU64::new(0),
             writes: 1,
             failed_run: AtomicBool::new(false),
             pending_reindex: Mutex::new(None),
@@ -199,11 +200,13 @@ impl SinkEngine {
         self
     }
 
-    /// How many lane items this engine has acknowledged since it was built,
-    /// across restarts of its run: a supervisor reads it to tell a run that
-    /// made progress from one that failed where the last one did.
-    pub fn acknowledged(&self) -> u64 {
-        self.acknowledged.load(Ordering::Relaxed)
+    /// How often this engine's oldest unfinished lane item landed since it
+    /// was built, across restarts of its run: a supervisor reads it to tell a
+    /// run that made progress from one that failed where the last one did.
+    /// A later item landing beside an older one that then fails is not
+    /// progress: the sink is still stuck at the older one.
+    pub fn advanced(&self) -> u64 {
+        self.advanced.load(Ordering::Relaxed)
     }
 
     /// The sink this engine drives.

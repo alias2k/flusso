@@ -15,7 +15,8 @@
 //! failure, or a `stop` policy rejection) is restarted with exponential backoff
 //! (one second, doubling to `max_restart_backoff` while it keeps failing with
 //! no progress; a run that made progress starts the next wait at one second
-//! again: a sink engine acknowledged a lane item, the ingest engine moved its
+//! again: a sink engine's oldest unfinished lane item landed
+//! ([`SinkEngine::advanced`]), the ingest engine moved its
 //! source forward, see [`IngestEngine::advances`]. A replayed change or
 //! backfill page published again is not progress) and its lane
 //! redelivers the batch it left unacknowledged, so a poison
@@ -183,11 +184,11 @@ pub(crate) async fn run_all(
                     stage_until_ok(&engine, Continuity::Resumed, max_backoff).await;
                 }
                 first = false;
-                let acknowledged = engine.acknowledged();
+                let acknowledged = engine.advanced();
                 match engine.run(&mut receiver).await {
                     Ok(()) => return Ok::<(), anyhow::Error>(()),
                     Err(_) => {
-                        if engine.acknowledged() > acknowledged {
+                        if engine.advanced() > acknowledged {
                             backoff.reset();
                         }
                         backoff.wait().await;

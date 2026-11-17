@@ -1066,12 +1066,12 @@ async fn only_the_oldest_unfinished_item_landing_counts_as_progress() {
     rig.probe.release("a");
     assert!(rig.ended().await.is_err());
     assert_eq!(
-        rig.sink_engine.acknowledged(),
+        rig.sink_engine.advanced(),
         0,
         "b landed behind a, which failed: no progress"
     );
 
     let rig = rig.start();
     until("the lane to drain", || rig.stream.is_idle()).await;
-    assert!(rig.sink_engine.acknowledged() > 0, "a landing is progress");
+    assert!(rig.sink_engine.advanced() > 0, "a landing is progress");
 }
