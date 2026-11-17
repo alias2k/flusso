@@ -45,7 +45,7 @@ flusso is running and you want to know whether it's keeping up, what it's done, 
 
 ## Options and variations
 
-- **Push instead of scrape.** The same instruments export over OTLP every 10 s when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. See [Ship traces over OTLP](traces-otlp.md).
+- **Push instead of scrape.** The same instruments export over OTLP every 10 s when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. See [Ship traces over OTLP](ship-traces-otlp.md).
 - **Generate load** to see the numbers move: the dev stack's `dev/load.sql` defines `simulate_production()`, a read-modify-write loop.
 - **Structured logs.** `FLUSSO_LOG_FORMAT=json` for a log pipeline; `RUST_LOG=flusso=debug,info` when chasing something.
 - **The `just` shortcuts** in the repository: `just status`, `just metrics`, `just eta`, `just grafana`.

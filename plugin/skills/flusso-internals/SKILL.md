@@ -5,8 +5,8 @@ description: Change the flusso Rust codebase — add a source/sink backend, edit
 
 # Working on the flusso implementation
 
-For authoring config use **flusso-schema**; for the read client use **flusso-query**. This skill is
-for changing the Rust.
+For authoring config use **flusso-schema**; for the read client use **flusso-query**. This skill
+is for changing the Rust code.
 
 **The repo's `CLAUDE.md` owns the detail and is the only current copy.** It is a living index kept
 in lockstep with the code, and it is already loaded in any checkout, so this skill does not restate

@@ -34,7 +34,7 @@
 # Operate
 
 - [Watch it run](operate/watch-it-run.md)
-- [Ship traces over OTLP](operate/traces-otlp.md)
+- [Ship traces over OTLP](operate/ship-traces-otlp.md)
 - [Reindex without downtime](operate/reindex.md)
 - [Read your own writes](operate/read-your-writes.md)
 - [Handle rejected documents](operate/rejected-documents.md)

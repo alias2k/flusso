@@ -30,3 +30,4 @@ enable = true
 "/guides/configuration.html#index-analysis--subfields" = "../reference/sink-opensearch.html#analysis-and-subfields"
 "/guides/querying.html" = "../query/overview.html"
 "/guides/deploying.html" = "../deploy/docker.html"
+"/operate/traces-otlp.html" = "ship-traces-otlp.html"
