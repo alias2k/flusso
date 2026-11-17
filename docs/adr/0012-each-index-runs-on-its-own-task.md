@@ -394,7 +394,7 @@ Each stage leaves `main` correct and is measured on `reference` before and after
    - in-flight writes awaited on a restart.
 
    Settled in its PR (#386 stage 2):
-   - **The window.** The sink engine reads ahead into a window of at most `writes + 32` unfinished items. The channel's ledger holds delivered items outside the lane's bound, so an unbounded read-ahead would unbound memory. Live-first therefore sees only the window until stage 7.
+   - **The window.** The sink engine takes an item from the lane only to use it: for a free write slot, or, with only backfill waiting, to find a live item behind it, up to 32 waiting. The channel's ledger holds delivered items outside the lane's bound, so a sink holds at most `writes + 32` delivered items beside its lane's `capacity`. Live-first therefore sees only the window until stage 7. Reading ahead regardless (the first version) cost the in-process bench at `writes = 1`: an item read early was acknowledged after the ingest engine had dropped its copy, so the sink freed the batch while the next one was built.
    - **Every fourth grant** at the writer slots counts only *contested* grants (live and backfill both admissible). Uncontested grants don't move the counter.
    - **Caught up** is decided at grant: nothing else is queued or waiting on the lane. A caught-up write makes every write that returned before it searchable. When the engine goes idle with a written position not yet searchable, it sends an empty caught-up write. With several writes in flight, the last one granted isn't the last to finish, and the default `refresh_interval` is 10 s.
    - **A failed write** stops new grants; the writes in flight are awaited, the successful ones acknowledged, then the error ends the run.

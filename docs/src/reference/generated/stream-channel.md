@@ -2,4 +2,4 @@
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `type` | `"channel"` | — | Required. Selects this adapter for `[stream]`. |
-| `capacity` | int | `1024` | Changes buffered between capture and processing before capture waits. A bounded buffer is what makes the slowest sink pace ingest. |
+| `capacity` | int | `1024` | Batches each lane queues before the ingest engine waits. A bounded buffer is what makes the slowest sink pace ingest. A sink engine also holds up to `writes` + 32 batches it has taken and not yet acknowledged, outside this bound. |

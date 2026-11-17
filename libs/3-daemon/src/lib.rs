@@ -82,8 +82,9 @@ pub fn batch_policy(config: &Config) -> BatchPolicy {
 }
 
 /// Lane items each sink writes at once when `[concurrency] writes` is unset.
-/// Measured on OpenSearch (ADR 0012): 4 in flight gives about 3× one, 8
-/// little more, 16 less.
+/// End to end on `reference` (#408) backfill ran about 1.4× one write at 2
+/// and 4, slower at 8; the 3× of ADR 0012 was raw OpenSearch bulk throughput
+/// in its prototype.
 pub const DEFAULT_WRITES: usize = 4;
 
 /// Lane items each sink writes at once: `[concurrency] writes`, else

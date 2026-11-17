@@ -221,14 +221,15 @@ A comparison with a string, a number or another kind fails rather than answering
 
 ## Each sink writes several batches at once
 
-0.17 wrote one batch at a time per sink, and OpenSearch sat partly idle while flusso waited for each bulk request. 0.18 keeps up to [`[concurrency] writes`](../reference/config-toml.md#concurrency) bulk requests in flight per sink (default 4). What changes:
+0.17 wrote one batch at a time per sink, and OpenSearch sat partly idle while flusso waited for each bulk request. 0.18 keeps up to [`[concurrency] writes`](../reference/config-toml.md#concurrency) bulk requests in flight per sink (default 4, at most 64). On the `reference` benchmark a backfill ran about 1.4× faster at 2 or 4 writes than at one; live latency and burst drain didn't move. What changes:
 
 - **More requests at once reach OpenSearch.** A small cluster that answered 0.17's single request comfortably may now answer some items `429`; flusso retries those, but if the sink keeps restarting with `… still refused as busy`, lower `writes` (`--writes` / `FLUSSO_WRITES`) or `[concurrency] writes`. `writes = 1` writes one batch at a time, as 0.17 did.
 - **Order holds per document.** Two batches holding the same document are never written at once, so a document's newer version still lands after its older one. Live changes go before a backfill's pages, except every fourth write slot both could take.
 - **A `stop` rejection still halts the sink, a few batches later.** Batches already written beside the rejected one, up to `writes` − 1 of them, can land before the sink stops. On every restart the rejected batch is then written alone, and nothing behind it lands until it is fixed, as in 0.17: the restart backoff grows and the lane fills. `writes = 1` stops exactly where 0.17 did.
 - **A stdout sink keeps lane order.** It writes one batch at a time in the order they were published, whatever `writes` says, since its readers consume its output in order. A custom `Sink` that emits a stream says so with `fn ordered(&self) -> bool { true }`.
 - **`[concurrency]` is never written into `flusso.lock`.** `run` with a `flusso.toml` reads it; `run --locked` takes the flag, the env var, or the default.
-- **An idle sink refreshes once more.** A burst's last writes can finish after the write that refreshed, so a sink that goes idle with documents not yet searchable sends one empty caught-up write: on OpenSearch, a `_refresh` of the indexes written since. A burst is then searchable as it ends instead of up to `refresh_interval` (default 10 s) later.
+- **A burst is searchable as it ends.** A burst's last writes can finish after the write that refreshed, so a sink that goes idle with documents not yet searchable sends one empty caught-up write. On OpenSearch every caught-up write also refreshes the indexes earlier writes left unrefreshed, not only under `refresh_interval = "-1"` as in 0.17, so a fence's `searchable` no longer waits up to `refresh_interval` (default 10 s) after a burst. The cost is at most one `_refresh` request per catch-up, and none when the only index left unrefreshed has one primary shard and the caught-up write's own `?refresh=true` bulk wrote it (the common single-index case). Caught-up refreshes run one at a time.
+- **Each sink holds a few more batches.** A sink engine takes up to `writes` + 32 batches from its lane before acknowledging them, beside the lane's `capacity`: see [stream: channel](../reference/stream-channel.md).
 - **Metrics read per write.** `flusso.flush.duration` and `last_flush_micros` time one write; with several in flight their sum exceeds wall time. `flusso.batches` counts writes.
 
 **Embedding the crates.** The `Sink` port changed:
@@ -240,6 +241,8 @@ A comparison with a string, a number or another kind fails rather than answering
 | `caught_up`: refresh this flush's documents | `caught_up`: make everything written by the writes that returned before this call searchable too, then report `Immediate` |
 | `Visibility::Deferred`: until the next `Immediate` flush | until the next caught-up write that reports `Immediate` |
 | `Stream::watermark`: the highest acknowledgement per lane, minimum over lanes | the position before each lane's oldest unacknowledged positioned item, minimum over lanes |
+| — | `Sink::ordered()` (default `false`): `true` for a sink whose readers consume its output in order; the engine then writes one batch at a time in lane order |
+| `SinkEngine::acknowledged()` | `SinkEngine::advanced()`: how often the oldest unfinished lane item landed, which a supervisor reads as progress |
 
 `SinkEngine::with_writes(n)` sets the writes in flight (default 1 for the engine on its own; the daemon passes `[concurrency] writes`), and `daemon::writes(&config)` resolves the setting.
 

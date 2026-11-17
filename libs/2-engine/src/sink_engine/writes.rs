@@ -1,10 +1,13 @@
 //! One run of a sink engine: up to `writes` lane items written at once.
 //!
 //! The run keeps a **window** of delivered, unfinished items in lane order:
-//! the ones waiting, and the ones being written. It reads ahead from the lane
-//! only while the window holds fewer than `writes + LOOKAHEAD` items, because
-//! a delivered item leaves the lane's bound, so an unbounded read-ahead would
-//! unbound memory.
+//! the ones waiting, and the ones being written. It takes an item from the
+//! lane only to use it: while a write slot is free, or, with only backfill
+//! waiting, to find a live item behind it, never more than `LOOKAHEAD`
+//! waiting. A delivered item leaves the lane's bound and is acknowledged only
+//! once written, so each sink holds at most `writes + LOOKAHEAD` delivered
+//! items beside the lane's own `capacity`, and with live traffic alone about
+//! `writes`. The lane is read only when it reports something waiting.
 //!
 //! **Admission.** An item starts only when no earlier unfinished item shares
 //! a document with it, so a document is never written twice at once and a
@@ -72,8 +75,8 @@ use crate::error::{EngineError, Result};
 use crate::observer::{CommitStats, Stage, StageTiming, Work};
 use crate::policy::FailurePolicy;
 
-/// Items the window holds beyond the writes in flight, to find admissible
-/// and live items behind blocked or backfill ones.
+/// The most items the window holds waiting, to find admissible items behind
+/// blocked ones and live items behind backfill.
 const LOOKAHEAD: usize = 32;
 
 /// A delivered item waiting in the window.

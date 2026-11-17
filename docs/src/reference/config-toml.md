@@ -61,11 +61,11 @@ Precedence is flag (`--batch-max-changes` / `--batch-max-delay-ms`), then `FLUSS
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `writes` | integer ≥ 1 | `4` | Bulk writes each sink runs at once. `1` writes one batch at a time. |
+| `writes` | integer 1–64 | `4` | Bulk writes each sink runs at once. `1` writes one batch at a time. A sink that emits an ordered stream (stdout) always writes one at a time. |
 
 Several writes run at once, but never two holding the same document, so each document's later version still lands after its earlier one. Live changes go before backfill pages, except every fourth write slot both could take, so a backfill can't stall live indexing and live traffic can't starve a backfill.
 
-On OpenSearch, 4 writes in flight measured about 3× one; 8 a little more; 16 less than 8 (ADR 0012). Raise it for a cluster with headroom, lower it if the cluster answers `429`.
+End to end on the `reference` benchmark, 2 and 4 writes backfilled about 1.4× faster than one, and 8 a little slower than 4; live latency and burst drain didn't move, since resolving changes on the ingest side bounds them. (ADR 0012's 3× was raw OpenSearch bulk throughput, not flusso end to end.) Raise it for a cluster with headroom, lower it if the cluster answers `429`. Above 64 is refused. Each write holds one delivered batch, so a sink holds up to `writes` + 32 batches beside its lane: see [stream: channel](stream-channel.md).
 
 The table is a property of the machine that runs flusso, so it is **never written into `flusso.lock`**: `run` with a `flusso.toml` reads it, `run --locked` takes the flag or the env var, else the default. Precedence is flag (`--writes`), then `FLUSSO_WRITES`, then this table, then the default. See [CLI](cli.md#run).
 

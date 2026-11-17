@@ -665,7 +665,11 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   one caught-up refresh at a time (`refreshing`: take, refresh, put back on failure), so a second
   caught-up write never answers `Immediate` over a refresh still running or failed (guards
   `a_caught_up_write_waits_for_an_earlier_refresh_still_running`,
-  `a_caught_up_write_refreshes_what_a_failed_refresh_put_back`); its
+  `a_caught_up_write_refreshes_what_a_failed_refresh_put_back`), skipping an index its own
+  `?refresh=true` bulk covered: one it wrote, with one primary shard (read per generation in
+  `ensure_index`, `IndexTarget.single_shard`; a bulk refreshes only the shards it touched) and marked
+  before the bulk was sent (`refresh.rs`'s `Unrefreshed`, marks with sequence numbers; guards
+  `a_caught_up_write_over_the_one_index_left_unrefreshed_sends_no_extra_refresh`, `refresh::tests`); its
   `ensure_index` refreshes a seeded generation once per start, because what an earlier run left
   unrefreshed is remembered nowhere (fences are unavailable until staging is done). An index
   mid-reindex is **not** covered: live writes go to the new generation while the alias serves the
@@ -885,9 +889,14 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
 - **Several writes per sink, one document at a time (ADR 0012 stage 2).** A sink engine writes up to
   `writes` lane items at once (`[concurrency] writes`, `--writes` / `FLUSSO_WRITES`, default 4
   `daemon::DEFAULT_WRITES`; `SinkEngine::with_writes`, default 1; `Config.concurrency` is
-  `#[serde(skip)]`, **never in the lock**, so `run --locked` takes the flag, env or default). It reads
-  ahead into a **window** of at most `writes + LOOKAHEAD` (32) delivered items, bounded because a
-  delivered item leaves the lane's bound (`sink_engine/writes.rs`). **Admission**: an item starts
+  `#[serde(skip)]`, **never in the lock**, so `run --locked` takes the flag, env or default). It takes
+  an item from the lane only to use it (a free write slot, or a live item to find behind backfill)
+  into a **window** of at most `LOOKAHEAD` (32) waiting items, so a sink holds at most `writes + 32`
+  delivered items beside the lane's `capacity` (`sink_engine/writes.rs`; `wants_more`). A granted
+  write is polled at once and one that completes on its first poll is handled there; `grant` stops
+  once that fails the run. The lane is read only when `is_empty` says something waits (a `recv`
+  future per turn cost `live_drain` at `writes = 1`: the acknowledgement came later after receipt,
+  so the sink, not the ingest engine, freed the batch while the next one was built). **Admission**: an item starts
   only when no earlier unfinished item (in flight, or waiting ahead of it) shares a document
   (`(index, id)` hashed to `u64`, only when a comparison is needed: nothing in flight and one kind
   waiting grants the front item unhashed; a collision only holds an item back). **Selection**: live

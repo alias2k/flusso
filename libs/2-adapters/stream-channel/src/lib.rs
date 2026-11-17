@@ -316,7 +316,8 @@ impl<T: Positioned + Clone + Send + Sync + 'static> Consumer<T> for ChannelConsu
     }
 }
 
-/// Acking removes the item from the ledger and records its position. Nacking,
+/// Acking removes the item from the ledger (the watermark is read from what
+/// remains: see `Channel::acked`). Nacking,
 /// or dropping the handle unacked (an engine that died holding it), marks the
 /// item for redelivery on the next `recv`.
 struct ChannelAck<T> {
