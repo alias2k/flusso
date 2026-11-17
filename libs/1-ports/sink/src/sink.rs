@@ -236,4 +236,15 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     async fn reindex(&self, _: &IndexMapping) -> Result<()> {
         Ok(())
     }
+
+    /// Whether the destination is a stream its readers consume in order (an
+    /// emitting sink, such as stdout): the engine then hands it lane items in
+    /// exact lane order, one write at a time, whatever `[concurrency] writes`
+    /// says, with no live item overtaking an earlier backfill page. The
+    /// default `false` lets the engine write several items at once and order
+    /// them per document only, which a destination keyed by document id (a
+    /// search index) is indifferent to.
+    fn ordered(&self) -> bool {
+        false
+    }
 }

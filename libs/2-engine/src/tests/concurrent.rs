@@ -69,6 +69,7 @@ struct Probe {
     delays: Option<Mutex<Rng>>,
     caught_up: Mutex<Vec<bool>>,
     visibility: fn(bool) -> Visibility,
+    ordered: bool,
 }
 
 impl Probe {
@@ -89,6 +90,7 @@ impl Probe {
             delays: None,
             caught_up: Mutex::default(),
             visibility: |_| Visibility::Immediate,
+            ordered: false,
         }
     }
 
@@ -125,6 +127,12 @@ impl Probe {
             .lock()
             .unwrap()
             .extend(ids.iter().map(|id| (*id).to_owned()));
+        self
+    }
+
+    /// A sink whose readers consume its output in order.
+    fn ordered(mut self) -> Self {
+        self.ordered = true;
         self
     }
 
@@ -262,6 +270,10 @@ impl Sink for Probe {
     async fn mark_seeded(&self, index: &IndexName) -> sink::Result<()> {
         self.log.lock().unwrap().push(format!("seeded {index}"));
         Ok(())
+    }
+
+    fn ordered(&self) -> bool {
+        self.ordered
     }
 
     async fn reindex(&self, mapping: &IndexMapping) -> sink::Result<()> {
@@ -1074,4 +1086,28 @@ async fn only_the_oldest_unfinished_item_landing_counts_as_progress() {
     let rig = rig.start();
     until("the lane to drain", || rig.stream.is_idle()).await;
     assert!(rig.sink_engine.advanced() > 0, "a landing is progress");
+}
+
+/// An ordered sink (an emitting one, such as stdout) gets its items in exact
+/// lane order, one at a time, whatever `writes` says: no later disjoint item
+/// starts beside a held one, and no live item overtakes an earlier backfill
+/// page.
+#[tokio::test(start_paused = true)]
+async fn an_ordered_sink_gets_its_items_in_lane_order_one_at_a_time() {
+    let mut rig = Rig::new(Probe::new().ordered().holding(&["a"]), 4).start();
+    rig.live(1, &["a"]).await;
+    rig.backfill(&["p"]).await;
+    rig.live(2, &["c"]).await;
+    rig.live(3, &["d"]).await;
+    settle().await;
+    assert_eq!(
+        rig.probe.starts(),
+        ["a"],
+        "nothing starts beside the held item"
+    );
+
+    rig.probe.release("a");
+    until("the lane to drain", || rig.stream.is_idle()).await;
+    assert_eq!(rig.probe.starts(), ["a", "p", "c", "d"], "exact lane order");
+    assert_eq!(rig.probe.most_at_once(), 1);
 }
