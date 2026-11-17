@@ -660,6 +660,7 @@ NOT_READS = {
         "a prefix the guard recognises in agent docs; it checks named files exist, so on_removal runs it"
     ),
     ("dev/bench/src/main.rs", "docs/s"): "a unit: documents per second",
+    ("dev/bench/src/report.rs", "attribution.md"): "a report the bench writes into its results folder",
     ("apps/cli/src/commands/schema_cmd.rs", "{}-{}.md"): "a rendered table's name; the directory read is covered",
     ("apps/cli/src/commands/schema_cmd.rs", "{}-{}-index.md"): "a rendered table's name; the directory read is covered",
     ("apps/cli/tests/agent_docs_paths.rs", "md"): "the extension its covered walk of the agent docs keeps",
