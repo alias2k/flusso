@@ -1455,6 +1455,7 @@ async fn stop_policy_fails_the_ingest_engine_on_a_failed_document() {
     assert!(harness.source.confirmed.lock().unwrap().is_empty());
 }
 
+mod snapshot;
 mod stop;
 
 /// Wait (up to five seconds) until `condition` holds.
