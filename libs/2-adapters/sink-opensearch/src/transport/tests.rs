@@ -82,7 +82,20 @@ struct StubBulk {
     lines: Arc<Mutex<Vec<String>>>,
 }
 
+/// How the stub answers a `_refresh`: its status, once the future resolves.
+/// `refresh` counts the refresh requests from 0.
+type RefreshAnswer =
+    Arc<dyn Fn(usize) -> futures::future::BoxFuture<'static, u16> + Send + Sync + 'static>;
+
 async fn stub_bulk(answer: impl Fn(usize, &str) -> u16 + Send + Sync + 'static) -> StubBulk {
+    stub_bulk_refreshing(answer, Arc::new(|_| Box::pin(async { 200 }))).await
+}
+
+async fn stub_bulk_refreshing(
+    answer: impl Fn(usize, &str) -> u16 + Send + Sync + 'static,
+    refresh: RefreshAnswer,
+) -> StubBulk {
+    let refreshes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let requests: Arc<Mutex<Vec<Vec<String>>>> = Arc::default();
@@ -96,10 +109,25 @@ async fn stub_bulk(answer: impl Fn(usize, &str) -> u16 + Send + Sync + 'static) 
             let answer = Arc::clone(&answer);
             let recorded = Arc::clone(&recorded);
             let recorded_lines = Arc::clone(&recorded_lines);
+            let refresh = Arc::clone(&refresh);
+            let refreshes = Arc::clone(&refreshes);
             tokio::spawn(async move {
                 let mut socket = tokio::io::BufStream::new(socket);
                 while let Some((line, body)) = read_request(&mut socket).await {
+                    let is_refresh = line.contains("/_refresh");
                     recorded_lines.lock().unwrap().push(line);
+                    if is_refresh {
+                        let count = refreshes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let status = refresh(count).await;
+                        let body = "{}";
+                        let response = format!(
+                            "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        socket.write_all(response.as_bytes()).await.unwrap();
+                        socket.flush().await.unwrap();
+                        continue;
+                    }
                     let ids = bulk_ids(&body);
                     let request = {
                         let mut recorded = recorded.lock().unwrap();
@@ -385,5 +413,106 @@ async fn a_caught_up_write_refreshes_what_earlier_writes_left() {
             "POST /users/_refresh?ignore_unavailable=true"
         ],
         "the caught-up write refreshes what the first one left, once"
+    );
+}
+
+/// A refresh the stub holds until `release`, answered with `status`, after
+/// telling `arrived`. Later refreshes answer 200 at once.
+fn held_first_refresh(
+    arrived: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    status: u16,
+) -> RefreshAnswer {
+    Arc::new(move |count| {
+        let arrived = Arc::clone(&arrived);
+        let release = Arc::clone(&release);
+        Box::pin(async move {
+            if count > 0 {
+                return 200;
+            }
+            arrived.notify_one();
+            release.notified().await;
+            status
+        })
+    })
+}
+
+/// Two caught-up writes overlap. The second must not answer `Immediate` while
+/// the first one's refresh of what earlier writes left is still running: its
+/// answer would let those positions go searchable before any refresh did.
+#[tokio::test]
+async fn a_caught_up_write_waits_for_an_earlier_refresh_still_running() {
+    let arrived = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let stub = stub_bulk_refreshing(
+        |_, _| 201,
+        held_first_refresh(Arc::clone(&arrived), Arc::clone(&release), 200),
+    )
+    .await;
+    let sink = Arc::new(sink(&stub.url, 0));
+
+    sink.write(&upserts(&["1"]), false).await.unwrap();
+    let first = tokio::spawn({
+        let sink = Arc::clone(&sink);
+        async move { sink.write(&upserts(&["2"]), true).await.unwrap() }
+    });
+    arrived.notified().await;
+    let second = tokio::spawn({
+        let sink = Arc::clone(&sink);
+        async move { sink.write(&[], true).await.unwrap() }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !second.is_finished(),
+        "the second caught-up write answered while the refresh covering earlier writes was still running"
+    );
+
+    release.notify_one();
+    assert_eq!(first.await.unwrap().visibility, Visibility::Immediate);
+    assert_eq!(second.await.unwrap().visibility, Visibility::Immediate);
+}
+
+/// The first caught-up write's refresh fails: the second must refresh what
+/// it put back before it answers `Immediate`.
+#[tokio::test]
+async fn a_caught_up_write_refreshes_what_a_failed_refresh_put_back() {
+    let arrived = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let stub = stub_bulk_refreshing(
+        |_, _| 201,
+        held_first_refresh(Arc::clone(&arrived), Arc::clone(&release), 500),
+    )
+    .await;
+    let sink = Arc::new(sink(&stub.url, 0));
+
+    sink.write(&upserts(&["1"]), false).await.unwrap();
+    let first = tokio::spawn({
+        let sink = Arc::clone(&sink);
+        async move { sink.write(&upserts(&["2"]), true).await.unwrap() }
+    });
+    arrived.notified().await;
+    let second = tokio::spawn({
+        let sink = Arc::clone(&sink);
+        async move { sink.write(&[], true).await.unwrap() }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    release.notify_one();
+
+    assert_eq!(
+        first.await.unwrap().visibility,
+        Visibility::Within(Duration::from_secs(1)),
+        "a failed refresh leaves what earlier writes wrote to the refresh interval"
+    );
+    assert_eq!(second.await.unwrap().visibility, Visibility::Immediate);
+    let refreshes = stub
+        .lines
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|line| line.contains("/_refresh"))
+        .count();
+    assert_eq!(
+        refreshes, 2,
+        "the second caught-up write refreshed what the failed refresh put back"
     );
 }
