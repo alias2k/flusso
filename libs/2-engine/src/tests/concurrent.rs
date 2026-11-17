@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::FutureExt;
 use kernel::{Envelope, GenericValue, IndexMapping, IndexName, Position};
 use sink::{Sink, Visibility, WriteReport};
 use stream::{Batch, LaneItem, Producer, Stream};
@@ -1005,4 +1006,45 @@ async fn a_skip_rejection_beside_writes_in_flight_is_quarantined_and_the_run_goe
         rig.engine.as_ref().is_some_and(|run| !run.is_finished()),
         "a skipped rejection does not end the run"
     );
+}
+
+/// A reindex taken off the control channel while a write is in flight
+/// survives that write failing: the restarted engine stages it and requests
+/// its backfill exactly once. (A reindex still pending when a stop ends the
+/// deployment is dropped with it: the daemon refuses reindexes once stopping.)
+#[tokio::test(start_paused = true)]
+async fn a_reindex_taken_before_a_failed_write_is_staged_after_the_restart() {
+    let mut rig = Rig::new(Probe::new().holding(&["a"]).failing_once(&["a"]), 4).start();
+    rig.live(1, &["a"]).await;
+    settle().await;
+    rig.control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    settle().await;
+    rig.probe.release("a");
+    assert!(rig.ended().await.is_err(), "the failed write ends the run");
+
+    let rig = rig.start();
+    until("the reindex", || {
+        rig.probe.log().contains(&"reindex users".to_owned())
+    })
+    .await;
+    until("the lane to drain", || rig.stream.is_idle()).await;
+    settle().await;
+    let reindexes = rig
+        .probe
+        .log()
+        .iter()
+        .filter(|line| *line == "reindex users")
+        .count();
+    assert_eq!(reindexes, 1, "staged once");
+    let mut requests = rig.stream.requests().unwrap().consumer;
+    let mut asked = 0;
+    while let Some(Ok(Some(_))) = requests.recv().now_or_never() {
+        asked += 1;
+    }
+    assert_eq!(asked, 1, "its backfill is requested once");
 }
