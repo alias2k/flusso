@@ -97,3 +97,4 @@ is covered).
 | `policy` | run configuration — [`BatchPolicy`], [`FailurePolicies`] |
 | `observer` | the progress trait, with the sink dimension |
 | `error` | the error type |
+

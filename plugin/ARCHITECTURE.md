@@ -77,3 +77,4 @@ not spend a file read on four bullets. Change both together.
 `apps/cli/tests/agent_docs_paths.rs` asserts that every repo path named in `plugin/**` and
 `.claude/commands/**` exists. A pointer-heavy corpus rots mostly by moved files, so the cheap check
 is the one that pays. It does not verify prose against behavior; that stays a review concern.
+
