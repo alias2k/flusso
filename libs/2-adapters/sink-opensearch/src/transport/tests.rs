@@ -163,8 +163,8 @@ fn bulk_item(id: &str, status: u16) -> serde_json::Value {
             return serde_json::json!({ "index": { "_index": "users", "_id": id, "status": 201 } });
         }
         429 => (
-            "es_rejected_execution_exception",
-            "rejected execution: the write queue is full",
+            "rejected_execution_exception",
+            "rejected execution of org.opensearch.action.support.replication.TransportWriteAction on QueueResizingOpenSearchThreadPoolExecutor[name = node/write, queue capacity = 10000]",
         ),
         503 => (
             "unavailable_shards_exception",
@@ -262,4 +262,29 @@ async fn items_still_busy_after_the_retries_fail_the_flush() {
     assert!(error.contains("1 document"), "{error}");
     assert!(error.contains("429"), "{error}");
     assert_eq!(*stub.requests.lock().unwrap(), [vec!["1", "2"], vec!["2"]],);
+}
+
+#[test]
+fn a_document_written_twice_in_one_request_is_caught() {
+    use crate::bulk::BulkAction;
+    let index = |id: &str| BulkAction::Index {
+        index: "users_1".to_owned(),
+        id: id.to_owned(),
+        doc: "{}".to_owned(),
+        require_alias: false,
+    };
+    let delete = |index: &str, id: &str| BulkAction::Delete {
+        index: index.to_owned(),
+        id: id.to_owned(),
+    };
+
+    assert!(super::one_write_per_document(&[
+        index("1"),
+        index("2"),
+        delete("orders_1", "1")
+    ]));
+    assert!(!super::one_write_per_document(&[
+        index("1"),
+        delete("users_1", "1")
+    ]));
 }

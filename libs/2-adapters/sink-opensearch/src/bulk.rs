@@ -26,7 +26,7 @@
 //!
 //! ```text
 //! {"index":{"_index":"users_1a2b_1","_id":"42","status":429,
-//!   "error":{"type":"es_rejected_execution_exception","reason":"rejected execution of …"}}}
+//!   "error":{"type":"rejected_execution_exception","reason":"rejected execution of … on …[name = node/write, …]"}}}
 //! ```
 //!
 //! Some ids OpenSearch refuses before it runs the request at all, and one of

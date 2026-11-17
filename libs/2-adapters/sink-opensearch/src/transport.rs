@@ -84,6 +84,14 @@ fn rustls_error<'a>(cause: &'a (dyn std::error::Error + 'static)) -> Option<&'a 
     rustls_error(inner)
 }
 
+/// Whether no two of `actions` write the same document (index and `_id`).
+fn one_write_per_document(actions: &[BulkAction]) -> bool {
+    let mut seen = std::collections::HashSet::with_capacity(actions.len());
+    actions
+        .iter()
+        .all(|action| seen.insert((action.index(), action.id())))
+}
+
 impl OpensearchSink {
     /// Send one prebuilt NDJSON `body` (the actions in `actions`, in order) as a
     /// single bulk request. The caller (`flush`) is responsible for keeping
@@ -176,6 +184,14 @@ impl OpensearchSink {
                         .iter()
                         .filter_map(|&i| sending.get(i).copied())
                         .collect();
+                    // Resending a subset reorders writes: it is safe only while
+                    // a request holds one write per document (the ingest engine
+                    // dedups ids per batch; the sink engine flushes one batch at
+                    // a time). ADR 0012's stage 2 must keep that true.
+                    debug_assert!(
+                        one_write_per_document(actions),
+                        "a bulk request writes one document twice"
+                    );
                     let mut body = String::new();
                     for action in &sending {
                         body.push_str(&bulk_action_fragment(action)?);

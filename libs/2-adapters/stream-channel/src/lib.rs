@@ -129,6 +129,11 @@ struct Channel<T> {
 /// handle dropped unacked) and is served again by the next `recv`, the
 /// earliest first, before anything new is pulled off the channel. Releasing
 /// one ticket leaves every other delivery in flight alone.
+///
+/// So a released delivery can come back after later ones were acknowledged.
+/// "A later message on a lane is the newer state" therefore holds only while
+/// a consumer keeps one delivery of a sink lane in flight, as the sink engine
+/// does today (ADR 0012's stage 2 replaces that with per-document admission).
 #[derive(Debug)]
 struct Ledger<T> {
     in_flight: Vec<InFlight<T>>,

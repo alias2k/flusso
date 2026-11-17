@@ -41,6 +41,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Utc;
 use futures::future::try_join_all;
@@ -86,6 +87,8 @@ pub struct IngestEngine {
     batch: BatchPolicy,
     failure_policies: FailurePolicies,
     stop: Stop,
+    /// Batches published over this engine's life, across restarts.
+    published: AtomicU64,
 }
 
 /// How the engine's run ended without an error.
@@ -112,6 +115,7 @@ impl IngestEngine {
             batch: BatchPolicy::default(),
             failure_policies: FailurePolicies::default(),
             stop: Stop::new(),
+            published: AtomicU64::new(0),
         }
     }
 
@@ -121,6 +125,13 @@ impl IngestEngine {
     pub fn with_stop(mut self, stop: Stop) -> Self {
         self.stop = stop;
         self
+    }
+
+    /// How many batches, live or snapshot, this engine has published since it
+    /// was built, across restarts of its run: a supervisor reads it to tell a
+    /// run that made progress from one that failed where the last one did.
+    pub fn published(&self) -> u64 {
+        self.published.load(Ordering::Relaxed)
     }
 
     /// Report lifecycle and progress to `observer`.
@@ -395,6 +406,7 @@ impl IngestEngine {
         )
         .await?;
         pending.clear();
+        self.published.fetch_add(1, Ordering::Relaxed);
         self.observer.on_batch_built(stats);
         tracing::debug!("batch built and published");
         Ok(())
@@ -592,6 +604,7 @@ impl IngestEngine {
             })));
         }
         try_join_all(publishes).await?;
+        self.published.fetch_add(1, Ordering::Relaxed);
         self.observer.on_batch_built(BuildStats {
             changes: 0,
             documents: envelopes.len(),

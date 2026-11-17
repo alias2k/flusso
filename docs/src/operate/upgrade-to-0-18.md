@@ -199,6 +199,7 @@ A comparison with a string, a number or another kind fails rather than answering
 - **Under moon or another task runner, add `--exit-with-parent`** (or `FLUSSO_EXIT_WITH_PARENT=true`). Without it a flusso whose runner died keeps running and holds the slot and port 9464, as in 0.17: it is opt-in, because a `flusso run &` meant to outlive its shell must keep doing so.
 - **Press Ctrl-C twice quickly to exit at once** (`130`; `143` for `SIGTERM`): the same sender twice within 500 ms, or three signals within a second. A single Ctrl-C forwarded by a task runner is one stop; any other repeat logs that the stop is under way.
 - **`SIGHUP` is a stop**, not a crash: 0.17 died of it without flushing anything. A run started under `nohup` still ignores it on Linux; on macOS `SIGHUP` keeps ending the process at once, as in 0.17.
+- **A sink whose cluster keeps refusing documents as busy holds the drain** until the deadline: see [A busy cluster no longer drops documents](#a-busy-cluster-no-longer-drops-documents).
 - **`/status` has a `stopping` phase** and a `pid`; `/readyz` is `503` while stopping; a `/wait` `503` now carries `Retry-After` and a `reason` (`starting` or `stopping`).
 - **Embedding the crates.** `RunningDaemon::run` no longer returns as soon as its `shutdown` future fires: it drains first, with no deadline of its own (bound it in the caller). `daemon::Phase` gains `Stopping` and `ControlError` gains `Stopping`; both are `#[non_exhaustive]` now. `ChangeCapture` gains `close_live` (default: not supported). `flusso_design::serve` takes the shutdown future as a second argument.
 
@@ -208,7 +209,15 @@ A comparison with a string, a number or another kind fails rather than answering
 
 - **`flusso_documents_quarantined_total` and `documents_quarantined` no longer count busy refusals.** An alert on them now fires only for documents OpenSearch refused for what they hold.
 - **A sustained 429 shows up as a sink restarting**, `last_error` reading `… still refused as busy after <n> retries`, where 0.17 under `skip` showed quarantines. Raise `max_retries` to wait longer inside one flush, or relieve the cluster.
-- **Documents 0.17 quarantined as busy are still missing.** Find `es_rejected_execution_exception` or `unavailable_shards_exception` in the quarantine log lines, then run [`flusso reindex <index>`](../reference/cli.md#reindex) on those indexes once 0.18 is live.
+- **A stop during a sustained 429 waits for the deadline and exits `1`**: the batch it holds can't be written, so the drain never finishes (see [A stop drains, then exits](#a-stop-drains-then-exits)). 0.17 under `skip` quarantined the documents and exited `0`. Nothing is lost: the next start redelivers the batch.
+- **Documents 0.17 quarantined as busy are still missing.** The quarantine log line (`document rejected by sink; quarantining and continuing`) carries OpenSearch's `reason` only, not the error type. Search those lines for these reasons, then run [`flusso reindex <index>`](../reference/cli.md#reindex) on each index they name once 0.18 is live:
+
+  | Reason contains | Refused because |
+  | --- | --- |
+  | `rejected execution of` | the write queue was full |
+  | `disk usage exceeded flood-stage watermark` | the flood-stage disk block was on |
+  | `primary shard is not active` | a primary shard was unavailable |
+  | `Data too large` | a circuit breaker tripped (may appear; not seen in testing) |
 
 ## A backfill of related indexes is faster and holds more in memory
 

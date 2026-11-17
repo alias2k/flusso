@@ -355,7 +355,7 @@ fn busy_response(status: u64, kind: &str) -> Value {
 #[test]
 fn an_item_refused_with_429_is_transient_not_a_rejection() {
     let actions = [index_action("1"), index_action("2"), index_action("3")];
-    let response = busy_response(429, "es_rejected_execution_exception");
+    let response = busy_response(429, "rejected_execution_exception");
 
     let outcome = read(&response, &actions).unwrap();
 
@@ -378,7 +378,7 @@ fn an_item_refused_with_503_is_transient_not_a_rejection() {
 
 #[test]
 fn a_busy_item_no_action_answers_fails_the_flush() {
-    let response = busy_response(429, "es_rejected_execution_exception");
+    let response = busy_response(429, "rejected_execution_exception");
 
     let error = read(&response, &[index_action("1")])
         .unwrap_err()

@@ -107,8 +107,8 @@ fn bulk_item(id: &str, status: u16) -> serde_json::Value {
             return serde_json::json!({ "index": { "_index": "users", "_id": id, "status": 201 } });
         }
         429 => (
-            "es_rejected_execution_exception",
-            "rejected execution: the write queue is full",
+            "rejected_execution_exception",
+            "rejected execution of org.opensearch.action.support.replication.TransportWriteAction on QueueResizingOpenSearchThreadPoolExecutor[name = node/write, queue capacity = 10000]",
         ),
         503 => (
             "unavailable_shards_exception",

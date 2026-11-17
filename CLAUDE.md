@@ -733,7 +733,9 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   same index) doesn't ask twice. A seeded sibling sees nothing. The channel adapter therefore keeps
   a **ticketed in-flight ledger** per lane: several deliveries can be outstanding, each acked by
   ticket; a nacked or dropped-unacked delivery is marked due by its own ticket and redelivered alone,
-  due ones in lane order, never the deliveries still in flight beside it (issue #395; guards
+  due ones in lane order, never the deliveries still in flight beside it, so a released delivery can
+  follow later acked ones: lane order is document order only while a consumer keeps one sink-lane
+  delivery in flight, as the sink engine does (issue #395; guards
   `releasing_one_delivery_redelivers_only_that_one`, `released_deliveries_come_back_in_lane_order`). (A single redelivery slot
   made the coalescing loop receive the same request forever — the OOM behind the first attempts.)
   Guards: `an_unseeded_sink_requests_a_snapshot_then_marks_seeded`, `a_seeded_sink_requests_nothing`,
@@ -829,7 +831,9 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
 - **Item-level rejections vs flush-wide errors.** `Sink::flush` returns a `FlushReport`:
   `Err` is flush-wide (transport down, whole request refused) and stops *that sink engine*,
   which the daemon restarts with exponential backoff (1 s doubling to `max_restart_backoff`,
-  default 60 s) while the ingest engine and the other sinks keep running — its lane fills, so a
+  default 60 s, reset to 1 s after a run that made progress: the sink engine acknowledged a lane
+  item, `SinkEngine::acknowledged`, or the ingest engine published a batch, `IngestEngine::published`;
+  guards `tests::backoff`'s `*_restarts_after_one_second_again` / `*_doubles_its_backoff`) while the ingest engine and the other sinks keep running — its lane fills, so a
   stalled sink eventually paces ingest and pins WAL (per-sink lag/in-flight are the alarm). An
   `Ok` report lists documents the destination *applied the batch but rejected* individually. The
   `FailurePolicies` (global `FailurePolicy` default + per-index overrides, from config `on_error`,
@@ -844,7 +848,8 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   `bulk::is_busy`) from the same `max_retries` budget and backoff as a request-wide failure, and
   items still busy after it fail the flush (`Err`), so the batch stays unacked until every document
   in it is written or rejected for what it holds; a busy item never reaches `on_error`, and a real
-  rejection beside it is reported once. An id OpenSearch validates before
+  rejection beside it is reported once. Resending a subset is safe only while a request writes each
+  document once (ids deduped per batch, one batch per flush): `transport.rs` `debug_assert!`s it. An id OpenSearch validates before
   running `_bulk` (an upsert's past 512 UTF-8 bytes, or an empty one) would 400 the *whole* request,
   so `flush` rejects it item-level without sending it (`bulk::refused_id`; issue #301; never truncate
   or hash it); a delete's over-long id is sent (OpenSearch answers `not_found`). Guarded by

@@ -23,7 +23,10 @@ engine holds every coalesced backfill request until the snapshot is published
 batch, records its position; nacking a delivery, or dropping its handle
 unacked (an engine that died holding it), marks that delivery alone due: the
 next `recv` serves the earliest due one again before pulling anything new,
-and the deliveries still in flight are left alone. A restarted
+and the deliveries still in flight are left alone. A released delivery can
+therefore come back after later ones were acknowledged, so a lane's order is
+the order of its documents only while its consumer keeps one delivery in
+flight, as the sink engine does. A restarted
 engine gets a fresh consumer over the same channel and is redelivered what
 its predecessor left.
 

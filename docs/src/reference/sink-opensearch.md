@@ -17,7 +17,12 @@ A flush sends its documents in bulk requests and retries what can succeed on a s
 | Single documents refused for any other reason (a mapping conflict, a malformed value, a version conflict) | never: the same document is refused again | n/a: each is an [item-level rejection](index-and-on-error.md#on_error), reported once |
 | The server's certificate | never | the flush fails at once (see below) |
 
-A busy document never reaches [`on_error`](index-and-on-error.md#on_error): under `skip` it is not quarantined, and under `stop` it doesn't stop the sink. When the flush fails, the sink engine restarts with backoff and the batch it held comes back, so nothing it carried is confirmed or lost. Each resend logs `OpenSearch refused documents as busy; resending them` with the count and OpenSearch's reason; a flush that runs out of retries fails with `… still refused as busy after <n> retries`.
+A busy document never reaches [`on_error`](index-and-on-error.md#on_error): under `skip` it is not quarantined, and under `stop` it doesn't stop the sink. When the flush fails, the sink engine restarts with backoff (one second, doubling to 60 s while it keeps failing, back to one second once a restart writes a batch) and the batch it held comes back, so nothing it carried is confirmed or lost.
+
+What a long busy spell costs:
+
+- **The sink falls behind.** While it retries (a full disk, a cluster refusing work for minutes) its lane fills, the ingest engine is paced to it, and the replication slot keeps WAL on the Postgres server until the sink catches up. Watch the sink's lag and the slot's retained WAL; see [Watch it run](../operate/watch-it-run.md).
+- **A redelivered batch is written again in full.** The documents OpenSearch accepted before the flush failed are rewritten, with `refresh=true` when the sink is caught up: more load on a cluster that is already refusing work. Each resend logs `OpenSearch refused documents as busy; resending them` with the count and OpenSearch's reason; a flush that runs out of retries fails with `… still refused as busy after <n> retries`.
 
 ## TLS and transport errors
 
