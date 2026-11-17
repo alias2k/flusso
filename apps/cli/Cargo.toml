@@ -48,7 +48,7 @@ clap.workspace = true
 serde_json = { workspace = true, features = ["float_roundtrip"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 # Telemetry export + the operational HTTP surface are the binary's concern (the
 # daemon library just records to the global meter and exposes its Status).
 opentelemetry = { workspace = true, features = ["metrics"] }
@@ -67,6 +67,10 @@ base64.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls", "query"] }
 webpki-root-certs.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# Who sent a stop signal: the same sender twice quickly forces the exit.
+signal-hook.workspace = true
+
 [dev-dependencies]
 # The live matrix behind the duplicate-name warning (`tests/duplicate_names.rs`):
 # the real builder and sink against Postgres and OpenSearch containers.
@@ -80,3 +84,5 @@ flusso-query = { path = "../../sdk/query" }
 # The `/wait` router tests implement a tiny `ChangeCapture`, whose stream type
 # is a `futures` one.
 futures.workspace = true
+# Paused time for the shutdown deadline's unit tests.
+tokio = { workspace = true, features = ["test-util"] }

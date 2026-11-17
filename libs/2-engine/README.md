@@ -27,6 +27,7 @@ ChangeCapture ─▶ IngestEngine ─┤                                        
 | **A seed is only as good as the stream behind it** | a missing resume point invalidates every earlier seed — those indexes are rebuilt, staged *before* the point is created | `continuity` → stage → `prepare` → snapshot |
 | **Requests are at-least-once** | a crash mid-snapshot redelivers the request; ten concurrent requests for one index are one pass over the table | ack after `SnapshotComplete`, coalescing |
 | **Item rejections vs flush errors** | one poison doc doesn't have to stop the run — or the other sinks | [`FailurePolicies`] per sink engine |
+| **A stop drains, never aborts** | a requested [`Stop`] publishes the batch in flight, lands every lane, confirms the watermark and closes the source's stream before the run ends | [`Stop`] checked between the stream's items, [`drain_lanes`], [`ChangeCapture::close_live`](source::cdc::ChangeCapture::close_live) |
 | **Applied, then searchable, per sink** | a fence can tell "a get sees it" from "a search sees it" without anyone forcing a refresh | [`Observer::on_position_applied`] before the ack, [`Observer::on_position_searchable`] from each flush's reported visibility |
 
 ## The ingest engine

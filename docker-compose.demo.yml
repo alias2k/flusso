@@ -21,6 +21,9 @@ services:
       target: demo
     image: flusso:dev
     container_name: flusso-flusso
+    # A stop drains for up to 30 s (--shutdown-timeout-secs); Docker's default
+    # 10 s would kill it mid-drain.
+    stop_grace_period: 35s
     environment:
       # Point the baked-in (127.0.0.1) config at the in-network service names.
       SOURCE_POSTGRES_CONNECTION_URL: "postgres://postgres:postgres@postgres:5432/flusso"

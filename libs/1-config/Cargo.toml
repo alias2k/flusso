@@ -20,6 +20,7 @@ workspace = true
 [dependencies]
 kernel.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 serde.workspace = true
 schemars.workspace = true
 serde_yaml.workspace = true

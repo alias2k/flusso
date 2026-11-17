@@ -32,7 +32,7 @@ You have a validated config and want to run it, locally or in a deployment. The 
 
 4. **Restart without a backfill.** Once seeded, a restart skips the backfill on its own because the sink remembers. `--skip-backfill` forces that even when the sink disagrees; it exists for recovery, not routine use.
 
-5. **Stop.** `SIGINT` or `SIGTERM` drains in-flight batches and flushes telemetry. Unconfirmed changes are redelivered on the next start; that's the at-least-once guarantee doing its job.
+5. **Stop.** `SIGTERM`, `SIGINT` or `SIGHUP` drains: nothing new is read, what is in flight lands on every sink and is confirmed to Postgres, then flusso exits `0`, within 30 seconds by default. The same sender twice within half a second (Ctrl-C pressed twice), or three signals within a second, exit at once; whatever wasn't confirmed is read again on the next start. The sequence, deadline and exit codes are in [Stopping](../reference/cli.md#stopping).
 
 ## Options and variations
 
@@ -42,7 +42,48 @@ You have a validated config and want to run it, locally or in a deployment. The 
 - **Logs** go to stderr; `RUST_LOG` filters them; `FLUSSO_LOG_FORMAT=json` structures them.
 - **Queue depth.** `[stream] capacity` (or `--queue-capacity`) bounds changes buffered between capture and the sink. Capture blocks when it's full; that's back-pressure, not a fault. See [Stream: channel](../reference/stream-channel.md).
 
+## Run under a task runner or supervisor
+
+One flusso per replication slot: a second one on the same addresses fails at start, and on other addresses waits for the slot. So whatever starts flusso must also stop it, and give the [drain](../reference/cli.md#stopping) its 30 seconds before killing it.
+
+| Supervisor | Waits after `SIGTERM` by default | Set |
+| --- | --- | --- |
+| Kubernetes | 30 s | `terminationGracePeriodSeconds` above the deadline. The Helm chart sets 45 (`terminationGracePeriodSeconds`) and refuses a value at or below `run.shutdownTimeoutSecs`. |
+| Docker / compose | 10 s | `docker stop -t 35`, or `stop_grace_period: 35s` on the service. |
+| systemd | 90 s | Nothing; `TimeoutStopSec` already exceeds it. |
+| moon | 2 s | `killProcessThreshold`, see below. |
+
+### Under moon or another task runner
+
+A task runner on a dev machine starts flusso as its child and can die without stopping it: killed, crashed, or taken down with its terminal around a laptop's sleep. flusso then keeps running, holding port 9464 and the slot, and the next start reports `another flusso is already serving there; it reports pid <pid>`. Two settings fix that:
+
+- **`--exit-with-parent`** (or `FLUSSO_EXIT_WITH_PARENT=true`; `1` is refused): flusso stops, draining as usual, when the process that started it is gone.
+- **The runner's kill delay above the deadline**, so a stop the runner asks for isn't cut short.
+
+For moon, in the project's `moon.yml`:
+
+```yaml
+tasks:
+  flusso:
+    command: 'flusso run --exit-with-parent'
+    options:
+      persistent: true
+```
+
+and in `.moon/workspace.yml` (or `MOON_PIPELINE_KILL_PROCESS_THRESHOLD=35000` in the environment):
+
+```yaml
+pipeline:
+  killProcessThreshold: 35000
+```
+
+moon runs the command as its own child, so flusso follows moon itself. In general flusso follows its **direct** parent: keep `flusso run` the task's only command, and in a wrapper script start it with `exec flusso run …`. A shell that stays in between survives a runner that is killed, and flusso would follow the shell. One Ctrl-C reaches flusso twice, from the terminal and forwarded by the runner: that is one stop, and it drains. Press it twice quickly to exit at once.
+
+### A flusso left over
+
+`/status` on its public address names the `pid` it reports (inside a container, its own namespace's). `kill <pid>` stops it gracefully; two `kill`s from the same shell within half a second stop it at once.
+
 ## Related
 
 - [Ship with Docker](docker.md) and [Deploy with Helm](helm.md) for the two packaging routes.
-- [CLI](../reference/cli.md#run) for every `run` flag.
+- [CLI](../reference/cli.md#run) for every `run` flag, and [Stopping](../reference/cli.md#stopping) for what a stop does.

@@ -21,6 +21,8 @@ Every value the chart at `deploy/helm/flusso/` accepts, with its default. `value
 | `run.skipBackfill` | `false` | Passed as `--skip-backfill`. |
 | `run.queueCapacity` | `1024` | Passed as `--queue-capacity`. |
 | `run.lagPollSecs` | `15` | Passed as `--lag-poll-secs`. |
+| `run.shutdownTimeoutSecs` | `30` | Passed as `--shutdown-timeout-secs`: how long a [stop](cli.md#stopping) may drain. |
+| `terminationGracePeriodSeconds` | `45` | How long Kubernetes waits after `SIGTERM` before `SIGKILL`. Must exceed `run.shutdownTimeoutSecs`; the chart fails otherwise. |
 | `run.extraArgs` | `[]` | Raw args appended verbatim. |
 | `http.port` | `9464` | Public surface, bound to `0.0.0.0` and exposed by the Service. |
 | `http.privatePort` | `9465` | Private surface, bound to localhost only. |

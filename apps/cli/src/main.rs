@@ -38,6 +38,7 @@ mod adapters;
 mod backends;
 mod commands;
 mod http;
+mod shutdown;
 mod telemetry;
 
 use clap::{Parser, Subcommand};
@@ -87,9 +88,22 @@ enum Command {
     Reindex(ReindexArgs),
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    match Cli::parse().command {
+/// How long the runtime waits, once a command has returned, for work that
+/// is still running (a blocking DNS lookup, an exporter thread) before the
+/// process exits without it.
+const RUNTIME_SHUTDOWN: std::time::Duration = std::time::Duration::from_secs(1);
+
+fn main() -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(dispatch(Cli::parse().command));
+    runtime.shutdown_timeout(RUNTIME_SHUTDOWN);
+    result
+}
+
+async fn dispatch(command: Command) -> anyhow::Result<()> {
+    match command {
         Command::Build(args) => commands::build::execute(args),
         Command::Run(args) => commands::run::execute(args).await,
         Command::Check(args) => commands::check::execute(args).await,

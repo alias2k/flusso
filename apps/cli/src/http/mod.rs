@@ -16,11 +16,13 @@ mod auth;
 pub(crate) use auth::{BasicAuth, DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USER};
 
 use std::collections::{BTreeMap, HashMap};
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
@@ -31,7 +33,7 @@ use daemon::{
 use prometheus::{Registry, TextEncoder};
 use serde_json::json;
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 /// How long `/wait` waits when the request names no `timeout_ms`.
 const DEFAULT_WAIT: Duration = Duration::from_secs(5);
@@ -47,6 +49,165 @@ pub(crate) struct PublicState {
     pub registry: Option<Registry>,
     /// The daemon's fence: what `/wait` waits on.
     pub fence: Fence,
+    /// The open `/wait`s, and whether the stop's drain is over.
+    pub waits: Waits,
+}
+
+/// How long a refused `/wait` should wait before asking again, in seconds.
+const RETRY_AFTER_SECS: &str = "1";
+
+/// The `/wait` requests in flight, and the moment a stop's drain is over.
+/// During the drain a wait goes on as usual (in-flight commits land then);
+/// once it is over every open or new wait is answered `503` "stopping".
+#[derive(Debug, Clone)]
+pub(crate) struct Waits {
+    over: Arc<watch::Sender<bool>>,
+    open: Arc<AtomicUsize>,
+}
+
+impl Default for Waits {
+    fn default() -> Self {
+        Self {
+            over: Arc::new(watch::Sender::new(false)),
+            open: Arc::default(),
+        }
+    }
+}
+
+impl Waits {
+    /// The drain is over: answer every open wait and refuse new ones.
+    pub(crate) fn end(&self) {
+        self.over.send_replace(true);
+    }
+
+    /// [`end`](Self::end), then give the open waits up to a second to be
+    /// answered before the process exits under them.
+    pub(crate) async fn end_before_exit(&self) {
+        self.end();
+        let _ = tokio::time::timeout(Duration::from_secs(1), async {
+            while self.open.load(Ordering::SeqCst) > 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+    }
+
+    fn is_over(&self) -> bool {
+        *self.over.borrow()
+    }
+
+    async fn over(&self) {
+        let mut seen = self.over.subscribe();
+        let _ = seen.wait_for(|over| *over).await;
+    }
+
+    fn enter(&self) -> OpenWait {
+        self.open.fetch_add(1, Ordering::SeqCst);
+        OpenWait(Arc::clone(&self.open))
+    }
+}
+
+/// One open wait, counted until dropped.
+struct OpenWait(Arc<AtomicUsize>);
+
+impl Drop for OpenWait {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// `503` with `Retry-After` and why: `stopping` (this process is going away;
+/// the next one answers the same position) or `starting` (the source isn't
+/// live yet).
+fn unavailable(reason: &str, error: String) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, RETRY_AFTER_SECS)],
+        Json(json!({ "error": error, "reason": reason })),
+    )
+        .into_response()
+}
+
+/// Bind `surface`'s listener on `address`. An address already taken gets an
+/// error naming the flusso there when `probe` (that flusso's public address,
+/// usually `address` itself) answers `/status` with its pid.
+pub(crate) async fn bind(
+    surface: &'static str,
+    address: SocketAddr,
+    probe: Option<SocketAddr>,
+) -> anyhow::Result<TcpListener> {
+    let error = match TcpListener::bind(address).await {
+        Ok(listener) => return Ok(listener),
+        Err(error) => error,
+    };
+    let context = format!("binding the {surface} HTTP surface to {address}");
+    if error.kind() != std::io::ErrorKind::AddrInUse {
+        return Err(anyhow::Error::new(error).context(context));
+    }
+    let holder = match probe {
+        Some(probe) => running_pid(probe).await,
+        None => None,
+    };
+    let flag = format!("--{surface}-address");
+    let explained = match holder {
+        Some(pid) => format!(
+            "{context}: another flusso is already serving there; it reports pid {pid}{}. Stop it \
+             before starting this one, or give this run its own {flag} and --slot",
+            if is_local_flusso(pid) {
+                ", a flusso process on this host"
+            } else {
+                " (from a container that is the pid inside it, not one on this host)"
+            }
+        ),
+        None => format!(
+            "{context}: possibly a flusso still running. Stop whatever holds the address, or \
+             pass {flag}"
+        ),
+    };
+    Err(anyhow::Error::new(error).context(explained))
+}
+
+/// Whether a process `pid` runs here and is a flusso: its name, read from
+/// `/proc` or, without one (macOS), from `ps`. Anything unreadable is "no".
+fn is_local_flusso(pid: u64) -> bool {
+    let name = std::fs::read_to_string(format!("/proc/{pid}/comm")).or_else(|_| {
+        std::process::Command::new("ps")
+            .args(["-o", "comm=", "-p", &pid.to_string()])
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+    });
+    name.is_ok_and(|name| {
+        name.trim()
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.starts_with("flusso"))
+    })
+}
+
+/// The pid a flusso serving its public surface on `address` reports in
+/// `/status`, if one answers within a second.
+async fn running_pid(address: SocketAddr) -> Option<u64> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let exchange = async {
+        let mut stream = tokio::net::TcpStream::connect(address).await.ok()?;
+        stream
+            .write_all(b"GET /status HTTP/1.0\r\nHost: flusso\r\n\r\n")
+            .await
+            .ok()?;
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.ok()?;
+        let text = String::from_utf8(response).ok()?;
+        let (_, body) = text.split_once("\r\n\r\n")?;
+        serde_json::from_str::<serde_json::Value>(body)
+            .ok()?
+            .get("pid")?
+            .as_u64()
+    };
+    tokio::time::timeout(Duration::from_secs(1), exchange)
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Serve `router` on `listener` until `shutdown` fires.
@@ -114,8 +275,21 @@ async fn readyz(State(state): State<PublicState>) -> impl IntoResponse {
     }
 }
 
-async fn status(State(state): State<PublicState>) -> impl IntoResponse {
-    Json(state.status.snapshot())
+async fn status(State(state): State<PublicState>) -> Response {
+    let mut body = match serde_json::to_value(state.status.snapshot()) {
+        Ok(body) => body,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to encode the status: {error}\n"),
+            )
+                .into_response();
+        }
+    };
+    if let Some(fields) = body.as_object_mut() {
+        fields.insert("pid".to_owned(), json!(std::process::id()));
+    }
+    Json(body).into_response()
 }
 
 async fn metrics(State(state): State<PublicState>) -> impl IntoResponse {
@@ -190,7 +364,21 @@ async fn wait(
         sink,
         timeout,
     };
-    let (status, reached, position) = match state.fence.wait(&request).await {
+    let stopping = || {
+        unavailable(
+            "stopping",
+            "flusso is stopping; ask again: the next process answers the same position".to_owned(),
+        )
+    };
+    if state.waits.is_over() {
+        return stopping();
+    }
+    let _open = state.waits.enter();
+    let waited = tokio::select! {
+        waited = state.fence.wait(&request) => waited,
+        () = state.waits.over() => return stopping(),
+    };
+    let (status, reached, position) = match waited {
         Ok(FenceOutcome::Reached { position }) => (StatusCode::OK, true, position),
         Ok(FenceOutcome::TimedOut { position }) => (StatusCode::REQUEST_TIMEOUT, false, position),
         Err(error @ FenceError::InvalidPosition(_)) => {
@@ -200,7 +388,7 @@ async fn wait(
             return refuse(StatusCode::NOT_FOUND, error.to_string());
         }
         Err(error @ FenceError::Unavailable(_)) => {
-            return refuse(StatusCode::SERVICE_UNAVAILABLE, error.to_string());
+            return unavailable("starting", error.to_string());
         }
     };
     (
@@ -280,9 +468,7 @@ async fn reindex(
         Err(ControlError::UnknownSink(name)) => {
             (StatusCode::NOT_FOUND, format!("unknown sink {name}\n")).into_response()
         }
-        Err(error @ (ControlError::Busy(_) | ControlError::Closed(_))) => {
-            (StatusCode::SERVICE_UNAVAILABLE, format!("{error}\n")).into_response()
-        }
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, format!("{error}\n")).into_response(),
     }
 }
 

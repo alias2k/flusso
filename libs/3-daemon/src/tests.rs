@@ -1062,3 +1062,75 @@ fn batch_policy_lays_the_config_over_the_engine_defaults() {
     config.batch.max_delay_ms = Some(10);
     assert_eq!(batch_policy(&config).max_delay, Duration::from_millis(10));
 }
+
+mod stop;
+
+/// `inner`, with a live stream that is whatever is sent on the returned
+/// channel (positions from 0), open until the sender is dropped.
+#[derive(Debug)]
+struct FedSource<C> {
+    inner: C,
+    feed: Mutex<Option<tokio::sync::mpsc::Receiver<ChangeEvent>>>,
+}
+
+impl<C> FedSource<C> {
+    fn new(inner: C) -> (Self, tokio::sync::mpsc::Sender<ChangeEvent>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        (
+            Self {
+                inner,
+                feed: Mutex::new(Some(rx)),
+            },
+            tx,
+        )
+    }
+}
+
+#[async_trait]
+impl<C: ChangeCapture> ChangeCapture for FedSource<C> {
+    async fn continuity(&self) -> source::Result<Continuity> {
+        self.inner.continuity().await
+    }
+
+    async fn prepare(&self) -> source::Result<()> {
+        self.inner.prepare().await
+    }
+
+    async fn live(&self) -> source::Result<BoxStream<'static, source::Result<LiveChange>>> {
+        let Some(feed) = self.feed.lock().unwrap().take() else {
+            return Ok(Box::pin(stream::pending()));
+        };
+        Ok(Box::pin(stream::unfold(
+            (feed, 0u64),
+            |(mut feed, next)| async move {
+                let event = feed.recv().await?;
+                Some((Ok((Position(next), event)), (feed, next + 1)))
+            },
+        )))
+    }
+
+    fn confirm(&self, position: Position) {
+        self.inner.confirm(position);
+    }
+
+    fn parse_position(&self, text: &str) -> source::Result<source::cdc::SourcePosition> {
+        self.inner.parse_position(text)
+    }
+
+    fn reached(&self, position: Option<Position>) -> Option<source::cdc::SourcePosition> {
+        self.inner.reached(position)
+    }
+}
+
+/// [`backends`] over any capture.
+fn backends_for(
+    capture: Arc<dyn ChangeCapture>,
+    sinks: Vec<(SinkName, Arc<dyn Sink>, SinkOptions)>,
+) -> Arc<MockBackends> {
+    Arc::new(MockBackends {
+        capture,
+        documents: Arc::new(ScriptedDocuments),
+        sinks,
+        built: Arc::new(Mutex::new(Vec::new())),
+    })
+}

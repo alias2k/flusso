@@ -173,6 +173,8 @@ fn start(dir: &Path, public: SocketAddr) -> Child {
             &public.to_string(),
             "--private-address",
             "127.0.0.1:0",
+            "--shutdown-timeout-secs",
+            "10",
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -181,7 +183,8 @@ fn start(dir: &Path, public: SocketAddr) -> Child {
         .unwrap()
 }
 
-/// Stop flusso as a deploy does, with `SIGTERM`, and wait for it to exit.
+/// Stop flusso as a deploy does, with `SIGTERM`, and wait for it to exit: its
+/// drain is given 10 s (`start`), the kill comes well after.
 fn stop(flusso: &mut Child) {
     let _ = Command::new("kill")
         .args(["-TERM", &flusso.id().to_string()])

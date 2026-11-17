@@ -68,6 +68,7 @@ flusso is going into a container. Two things get "compiled" and conflating them 
 
   `COPY . .` preserves the directory structure so relative paths resolve; the ignore file keeps the rest of the repo out of the context. BuildKit honors `<name>.dockerignore` beside its Dockerfile, so the allowlist affects nothing else. A `COPY *.schema.yml` can't do this: Docker's `COPY` has no `**` and flattens matches into one directory.
 
+- **Give a stop time to drain.** `docker stop` waits 10 s before `SIGKILL`, a stop may take 30: run `docker stop -t 35`, or set `stop_grace_period: 35s` under compose. See [Run under a task runner or supervisor](compile-and-run.md#run-under-a-task-runner-or-supervisor).
 - **The image itself** is `debian:bookworm-slim` plus `ca-certificates`, runs as uid 65532, exposes 9464, and is built with `--no-default-features`, so it has no `flusso design`.
 
 ## Related
