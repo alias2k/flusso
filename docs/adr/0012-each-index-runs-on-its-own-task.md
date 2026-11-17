@@ -14,7 +14,7 @@ Today one ingest task builds every index in turn, and each sink writes one batch
 - **Order holds per document**: never built twice at once, never written twice at once, a later build lands after an earlier one. No versioned writes.
 - **A position describes itself**, so the source keeps no map of every change. The engine's `Progress` confirms the slot up to the oldest change some lane hasn't landed.
 - **Fences and "caught up" are per `(index, sink)`.**
-- **A lane that pins too much WAL, or an index too far behind, is dropped and rebuilt.**
+- **A stalled lane pins the slot**, as a stalled sink does today, and alerts. The other indexes keep going while memory allows. Dropping and rebuilding a stalled index is left to its own design.
 
 ```text
                           ┌─ pending(users) ─▶ index task(users) ──┬─ lane(users,primary) ──┐
@@ -59,11 +59,11 @@ ChangeCapture ─▶ reader ──┼─ pending(orders) ▶ index task(orders) 
 
 - Keeps up to `writes` bulk requests in flight. Each write is one lane item: one index's documents.
 - Picks the next item in this order:
-  1. live items before backfill items;
+  1. live before backfill, except every fourth grant (section 5);
   2. lanes take turns;
   3. within a lane, the earliest admissible item (section 2) first.
 
-**Backfill requests** are per index (`Request::Backfill { sink }` on that index's request lane). Requests from several sinks coalesce, as today. Two indexes rooted at one table each page its keys (0.3 s on `reference`).
+**Backfill requests** are per index (`Request::Backfill { sink }`) and coalesce across sinks, as today.
 
 ### Why a task per index building batches, not a task per document
 
@@ -96,18 +96,12 @@ How the hard cases come out:
 
 - **An item partly answered 429 stays unfinished** until its retried documents are written. Otherwise a newer build of the same id would be admitted, and the stale retry would overwrite it.
 - **A sink engine restarts.** It waits for writes in flight (up to the request timeout), then the lane redelivers only unacknowledged items, in order.
-- **An index task restarts.** Taken, unpublished ids go back to pending.
-- **The reader restarts.** It re-marks ids; that costs rebuilds, never a wrong document.
+- **An index task or the reader restarts.** Unpublished ids go back to pending, or are re-marked; that costs rebuilds, never a wrong document.
 - **A reindex, a re-stage, or `SnapshotComplete`** is a barrier on its lane: it starts when nothing before it is unfinished, and nothing after it starts until it is done.
 
 **Residual risk, as today.** A bulk request the client gave up on can still run on OpenSearch and land after a newer build of the same id.
 
-**Versioned writes: rejected.**
-
-- A build sequence isn't snapshot order across connections.
-- A Postgres snapshot isn't totally ordered.
-- A backfill build has no position.
-- An OpenSearch delete keeps its version only for `index.gc_deletes` (60 s), after which an older upsert revives the document.
+**Versioned writes: rejected.** A build sequence isn't snapshot order across connections, a Postgres snapshot isn't totally ordered, a backfill build has no position, and an OpenSearch delete keeps its version only for `index.gc_deletes` (60 s), after which an older upsert revives the document.
 
 ## 3. Confirmation and fences
 
@@ -134,9 +128,9 @@ How the hard cases come out:
 | `Before(o)`: `o` is the oldest outstanding position | `o.confirm_before` | `o.fence_before` |
 | `Through(p)`: nothing outstanding, *routed* is `p`, and `p.seq + 1 == next_seq` | the live horizon | the live horizon |
 | `Through(p)`: nothing outstanding, but a later change was emitted | `p.confirm_through` | `p.confirm_through` |
-| `Idle`: nothing routed and nothing emitted (a fresh process on idle tables) | the live horizon | the live horizon |
+| `Idle`: nothing routed yet | the live horizon while `next_seq` is still the capture's first seq, else the confirmed LSN | the same |
 
-**Why the `next_seq` test.** A change the capture emitted but the reader hasn't routed yet is in no lane. With the horizon alone, a fence or the tick would pass it, and a crash would lose it. Using only `p`'s stamps instead would stop idle WAL from being released (#111/#204). The test uses the horizon exactly when everything emitted has been routed. `next_seq` outlives a reopened stream, so after an ingest restart on idle tables, *routed* (an old-stream position) still matches.
+**Why the `next_seq` test.** An emitted change the reader hasn't routed is in no lane, so the horizon alone would fence or confirm past it, and a crash would lose it. Using only `p`'s stamps would stop idle WAL being released (#111/#204). `next_seq` outlives a reopened stream, so the test also holds after an ingest restart. `Idle` is decided by the capture for the same reason: in a fresh process, change 0 can be emitted, with the horizon past it, before the reader routes it.
 
 **Calls.**
 
@@ -147,7 +141,7 @@ How the hard cases come out:
 
 - *Routed*: the newest routed position.
 - *Outstanding per lane*: a multiset of positions (oldest of each pending id, build in flight, unacknowledged lane item). Each lane keeps its minimum incrementally.
-- The case is taken over every live lane. Dropped lanes don't count (section 5).
+- The case is taken over every lane.
 - The reader marks ids and records *routed* under one lock.
 
 **Lanes.**
@@ -163,20 +157,14 @@ How the hard cases come out:
 - `Client::after` passes its root's index; `_msearch` and a combined search pass the union of their roots.
 - The client's once-per-level cache (`passed` in `sdk/query/src/fence.rs`) is keyed by `(level, index)`. A union fence that passes marks each of its indexes.
 - A disabled index gets `FenceRefused`.
-- **A dropped or re-staging lane answers `503`** with a reason until it is seeded again. It has nothing outstanding, so the table would otherwise pass it while nothing is written.
+- **A lane re-staging after `index_not_found` answers `503`** with a reason until it is seeded again. It has nothing outstanding, so the table would otherwise pass it while nothing is written.
 - "Caught up" is per lane: a write is caught up when its lane has nothing else queued or in flight. A `Deferred` refresh of an index runs when its own lane empties.
 
 ## 4. Where concurrency pays
 
 From #389, on `reference` under load ≈32: key fetch 0.3 s, build 5.8–7.4 s, flushes 12.6–16.8 s.
 
-**Prototype** (throwaway, not committed): the `reference` config and data at `default` scale.
-
-- `build_many` with *N* callers on one pool.
-- Pre-built batches written through *N* `OpensearchSink`s into fresh indexes.
-- A built document's heap, counted with a counting allocator.
-
-Setup: Postgres 16 and OpenSearch 2 (one node, 1 GiB heap, one shard per index), local containers, data in cache, 24 cores, three runs.
+**Prototype** (throwaway, not committed) on the `reference` config and data at `default` scale: `build_many` with *N* callers on one pool, pre-built batches written through *N* `OpensearchSink`s into fresh indexes, and a counting allocator for a document's heap. Postgres 16 and OpenSearch 2 (one node, 1 GiB heap, one shard per index), local containers, data in cache, 24 cores, three runs.
 
 `build_many`, 256 keys per call, all three indexes (62,000 documents), load average 2.4–5.2, documents/s:
 
@@ -213,8 +201,7 @@ Heap of a built document against its JSON, per index, load average 22–24 (the 
 What it says:
 
 - OpenSearch takes overlapping bulk requests as well on one index as across several. 4 in flight gives about 3×, 8 gives 3.5–4×, and 16 is slower than 8. So `writes` is per sink.
-- Postgres scales to 8 calls and flattens by 16, on cached data.
-- Serially, writing takes about 2.3× the build time, as in #389.
+- Postgres scales to 8 calls and flattens by 16, on cached data. Serially, writing takes about 2.3× the build time, as in #389.
 - Budgets count heap bytes, not JSON. 256 `users` documents hold about 4 MiB.
 - **Expected:** about 3× faster backfill with 4 builds and 4 writes. No index's backfill delays another index's live changes.
 
@@ -277,9 +264,8 @@ Checked against:
 
 - `max_pending_documents` deployment-wide; past it the reader waits, and every index stalls.
 - An id costs 150–250 B with its position (more for long keys).
-- **One index may hold at most half the cap**; past that it is dropped (below). Wide churn on a stalled index (10,000 distinct ids/s) reaches that ceiling in under a minute, long before any WAL threshold.
 
-**Realistic RSS with the defaults: about 0.8–1.1 GiB at worst.**
+**Realistic RSS with the defaults: about 0.8–1.1 GiB at worst, up to about 24 indexes.** 200 indexes add about 800 MiB (one batch per index).
 
 | Part | Size |
 | --- | --- |
@@ -290,16 +276,25 @@ Checked against:
 | allocator overhead | 10–20% |
 | baseline | ~100 MiB |
 
-The Helm chart gets `requests.memory: 512Mi`, `limits.memory: 1536Mi` (today `resources: {}`).
+**A stalled lane or index, in this version:**
 
-**A stalled lane** pins the slot at its oldest outstanding position. That costs WAL on the primary (past `max_slot_wal_keep_size` the slot is invalidated, and every index on every sink is rebuilt). It also costs replay: a restart replays that WAL for every index.
+- It pins the slot at its oldest outstanding position, as a stalled sink does today.
+- `/status` and metrics give each lane's stall age and WAL behind; an alert fires past 10 minutes or 1 GiB.
+- The other indexes keep going while memory allows. Once the pending cap or the built budget is reached, the reader waits and every index stalls, as backpressure does today.
+- A busy index under a bulk update paces the reader the same way, and triggers nothing.
+- The reader never waits on age or WAL: that doesn't stop the primary writing WAL.
 
-- **Alert on age and WAL.** `/status` and metrics give each lane's stall age and the WAL behind it, with an alert past 10 minutes or 1 GiB. Age only alerts: a whole sink down for maintenance must not rebuild every index on it.
-- **Drop.** A lane is dropped when its WAL behind passes `drop_stalled_wal_mib`. A whole index is dropped on every lane when its pending ids pass half of `max_pending_documents`. On by default. Start warns when `drop_stalled_wal_mib` isn't below `max_slot_wal_keep_size`.
-- **Dropping a lane** clears its outstanding positions from `Progress` and stops publishing to it. Pending ids are per index, so they are cleared only when every lane of the index is dropped. An index with every lane dropped builds nothing until it is reindexed.
-- **Recovery.** The sink engine retries staging a reindex of a dropped lane with backoff. Live publishing to the lane resumes **at the reindex barrier, before the backfill's first page**: a change made in between, on a row the walk already passed, would otherwise be lost. `/status` shows `dropped` until the lane is seeded.
-- **A loop of drops stages nothing while unseeded** (`reindex` no-ops on an unseeded index, #121).
-- **The reader never waits on age or WAL.** Stopping it doesn't stop the primary writing WAL; it would only stall the healthy indexes.
+A long stall has two costs:
+
+- **Replay.** A restart replays the pinned WAL for every index.
+- **Slot invalidation.** Past `max_slot_wal_keep_size`, the slot is invalidated and every index on every sink is rebuilt.
+
+**Capping those costs by dropping and rebuilding one index is deferred to its own issue and design.** Three review rounds found holes in it; the next design starts from them:
+
+- record the drop in the sink's meta before it takes effect, or a restart reads the sink as seeded and loses the changes made meanwhile (so an unreachable sink is never dropped);
+- recover into a new generation, or documents deleted meanwhile survive;
+- call a lane stalled when it has acknowledged nothing for a window, not when its pending count is high (a busy index is healthy);
+- discard the lane's queued items, or they keep holding budget.
 
 ## 6. Failure and lifecycle
 
@@ -315,13 +310,7 @@ The Helm chart gets `requests.memory: 512Mi`, `limits.memory: 1536Mi` (today `re
 | `index_not_found` | re-stages that `(index, sink)` at a lane barrier: `ensure_index`, a backfill request, then redelivery. This replaces today's sink-wide restart (#123) |
 | a transport failure | fails every lane: the sink is down |
 
-**Stop (#371)**, in order:
-
-1. The reader reads nothing more.
-2. Index tasks publish their builds in flight and take nothing new. Pending ids are left unconfirmed, for replay.
-3. Backfills are abandoned unacknowledged.
-4. Sinks finish their live items and skip backfill items.
-5. `Progress` confirms as acknowledgements arrive, and the stream closes.
+**Stop (#371):** the reader stops reading; index tasks publish their builds in flight and leave pending ids unconfirmed for replay; backfills are abandoned unacknowledged; sinks finish live items and skip backfill items; `Progress` confirms as acknowledgements arrive, then the stream closes.
 
 **Staging (#120)**, unchanged in order: `continuity()`, then every sink staged, then `prepare()`, then the reader and index tasks start.
 
@@ -360,13 +349,13 @@ The Helm chart gets `requests.memory: 512Mi`, `limits.memory: 1536Mi` (today `re
 
 - `a_change_emitted_but_not_routed_is_never_fenced_or_confirmed`, with a keepalive in between
 - `the_tick_releases_idle_wal_while_routed_stays_put`
+- `a_fresh_process_never_confirms_its_first_unrouted_change`
 - `an_idle_stream_after_an_ingest_restart_still_releases_wal`
 - `a_later_build_finishing_first_confirms_nothing_past_an_earlier_one` (stage 4)
-- `a_dropped_lane_never_passes_a_fence`
 
 **Seeded random** (`FLUSSO_SCHEDULE_SEED`):
 
-- random delays, backfills, reindexes, 429s, a deleted generation, drops;
+- random delays, backfills, reindexes, 429s, a deleted generation;
 - tasks killed at random;
 - at every confirmation and fence answer, every covered change is on the named sinks at its version or newer;
 - at the end, every sink equals the table.
@@ -378,25 +367,12 @@ The Helm chart gets `requests.memory: 512Mi`, `limits.memory: 1536Mi` (today `re
 
 **Fixes, failures and bounds:**
 
-- `a_released_ticket_redelivers_only_itself`
-- `an_item_refused_with_429_is_retried_not_rejected`
-- `a_partly_refused_item_admits_no_newer_build_of_its_ids`
-- `an_idle_index_never_pins_the_slot`
-- `a_failed_index_holds_up_no_other_index`
-- `a_stalled_lane_never_deadlocks_the_budget`
-- `a_parked_lane_with_a_full_budget_unparks`
-- `an_oversized_batch_is_granted_alone`
-- `backfill_never_blocks_a_live_build`
-- `backfill_gets_permits_under_a_steady_trickle`
-- `live_goes_first_with_one_build_and_one_write`
-- `a_trickle_is_built_one_batch_at_a_time`
-- `a_missing_generation_on_one_lane_is_rebuilt_while_the_others_write`
-- `a_dropped_lane_resumes_live_before_its_backfill_walks`
-- `an_index_past_its_pending_ceiling_is_dropped`
-- `a_loop_of_drops_stages_nothing_while_unseeded`
-- `a_restarted_backfill_resumes_from_its_last_key`
-- `positions_stay_bounded_while_one_index_is_stalled`
-- a 24-index backfill holding at most 9 Postgres connections
+- `a_released_ticket_redelivers_only_itself`, `an_item_refused_with_429_is_retried_not_rejected`, `a_partly_refused_item_admits_no_newer_build_of_its_ids`
+- `an_idle_index_never_pins_the_slot`, `a_failed_index_holds_up_no_other_index`
+- `a_stalled_lane_never_deadlocks_the_budget`, `a_parked_lane_with_a_full_budget_unparks`, `an_oversized_batch_is_granted_alone`
+- `backfill_never_blocks_a_live_build`, `backfill_gets_permits_under_a_steady_trickle`, `live_goes_first_with_one_build_and_one_write`, `a_trickle_is_built_one_batch_at_a_time`
+- `a_missing_generation_on_one_lane_is_rebuilt_while_the_others_write`, `a_restarted_backfill_resumes_from_its_last_key`
+- `positions_stay_bounded_while_one_index_is_stalled`; a 24-index backfill holding at most 9 Postgres connections
 
 **Client:**
 
@@ -426,18 +402,8 @@ Each stage leaves `main` correct and is measured on `reference` before and after
    - 8b. Per-index restart and backfill resume.
    - 8c. Stall age, WAL behind, and the alert.
 9. **Per-lane failure:** parking with fresh builds; re-staging on `index_not_found`.
-10. **Drop and rebuild:** WAL per lane and pending per index; resume at the barrier.
 
-**Beside the code**, in the stage that changes each:
-
-- `CLAUDE.md`, `CONTEXT.md`;
-- ADR 0003 superseded in part, ADR 0009 amended;
-- the Reference pages (`config-toml.md`, CLI flags, `/status`, `/wait`, metrics), `contribute/pipeline.md`, and the query manual's fence chapter;
-- the upgrade page (`Sink`, `Position`, `max_delay_ms`, `[stream] capacity`, `/wait`, per-lane `index_not_found`);
-- `config.schema.json`;
-- the designer (`ConfigPanel.tsx`, every locale, dist);
-- the `flusso-query` README and the `plugin/**` skills on `/wait`;
-- the Helm chart, Grafana, `dev/prometheus`, `dev/bench`'s `/metrics` parsing, and the in-process `engine` bench baseline.
+**Beside the code**, in the stage that changes each: `CLAUDE.md` and `CONTEXT.md`; ADR 0003 (superseded in part) and 0009 (amended); the Reference pages, `contribute/pipeline.md` and the query fence chapter; the upgrade page; `config.schema.json`; the designer (`ConfigPanel.tsx`, every locale, dist); the `flusso-query` README and `plugin/**`; the Helm chart, Grafana, `dev/prometheus`, `dev/bench`'s `/metrics` parsing and the `engine` bench baseline.
 
 **Settled in the stage's PR, not here:**
 
@@ -446,9 +412,16 @@ Each stage leaves `main` correct and is measured on `reference` before and after
 - `Progress`'s lock layout, and the atomic move from pending to in flight;
 - the `/wait` index for a raw `Client` request;
 - the keyset SQL;
-- `Retry-After` on a dropped lane;
-- metric names;
-- Helm values.
+- `Retry-After` on a re-staging lane;
+- metric names, and the Helm values beyond question 8;
+- a build's set of lanes, taken when it publishes, not when it starts;
+- what an index-task failure does in 8a before 8b exists, and whether pending sets survive it;
+- where unpositioned backfill pages sit in stage 4's reorder buffer;
+- which stage removes the item-count bound on lanes;
+- the overshoot bound with up to `builds` reservations at once;
+- `confirm_before` defined as the horizon at emission;
+- the channel ledger keeping a parked item's `Arc` (its accounting released, its memory not);
+- which backoff the 429 retry and the parked-lane retry use.
 
 **Later, when a measurement asks:**
 
@@ -462,12 +435,13 @@ Each stage leaves `main` correct and is measured on `reference` before and after
 The reviewers' recommendation is the proposed default.
 
 1. **`builds = 4`, `writes = 4`.** *Yes.* Cost: 8 measured faster (5× and 3.5–4×), but on cached data, so that speed is left to the setting.
-2. **A stalled lane.** *Alert on age and WAL; drop on WAL (8 GiB) or the per-index pending ceiling; on by default.* Cost: a dropped lane is rebuilt from scratch.
+2. **A stalled lane pins the slot and alerts; dropping and rebuilding it is a later design.** *Yes.* Cost: a long stall costs replay and, past `max_slot_wal_keep_size`, a full rebuild, as today.
 3. **Fences per `(index, sink)`.** *Yes.* Cost: a `/wait` parameter and a query-train release.
 4. **Item 429s retried as transient, plain retry first.** *Yes.* Cost: a document refused with 429 for good retries for ever, and the stall alert shows it.
-5. **Concurrency within one index only for a backlog.** *Yes.* Cost: a hot index under a trickle uses one build at a time.
+5. **At most two live builds per index, a second only for a backlog.** *Yes.* Cost: a hot index uses at most two of the `builds` permits for live changes.
 6. **A parked lane asks for a fresh build of its ids.** *Yes.* Cost: one more request kind on the index task.
 7. **A stop leaves unbuilt ids for replay.** *Yes.* Cost: the next start rebuilds them.
+8. **Helm memory defaults.** Today `resources: {}`. *Ship `requests.memory: 512Mi`, and leave the limit commented out with the formula beside it* (`max_built_mib` + one batch per index + pending + ~100 MiB). Cost: no OOM-kill protection by default; a `1536Mi` limit could OOM-kill a deployment with many indexes or large documents that runs today.
 
 ## Settings
 
@@ -478,8 +452,7 @@ All in `flusso.toml`, never baked into the lock. Flag beats env, env beats file.
 | `[concurrency] builds` (`--builds` / `FLUSSO_BUILDS`) | 4 | builds and key pages at once; the builder pool |
 | `[concurrency] writes` (`--writes` / `FLUSSO_WRITES`) | 4 | bulk requests in flight per sink |
 | `[concurrency] max_built_mib` (`--max-built-mib` / `FLUSSO_MAX_BUILT_MIB`) | 512 | heap of built documents not yet acknowledged |
-| `[concurrency] max_pending_documents` (`--max-pending-documents` / `FLUSSO_MAX_PENDING_DOCUMENTS`) | 1,000,000 | pending ids before the reader waits; half of it per index before that index is dropped |
-| `[concurrency] drop_stalled_wal_mib` (`--drop-stalled-wal-mib` / `FLUSSO_DROP_STALLED_WAL_MIB`) | 8192 | WAL a lane may hold behind before it is dropped; `0` never drops |
+| `[concurrency] max_pending_documents` (`--max-pending-documents` / `FLUSSO_MAX_PENDING_DOCUMENTS`) | 1,000,000 | pending ids before the reader waits |
 | `[batch] max_changes` (existing) | 256 | documents per build and per write |
 | `[batch] max_delay_ms` (existing) | 50 | now only how long backfill requests coalesce |
 | `[stream] capacity` (existing) | — | deprecated: still loads, ignored, warns |
@@ -493,7 +466,6 @@ All in `flusso.toml`, never baked into the lock. Flag beats env, env beats file.
 | backfill share at the build gate and writer slots | every 4th grant | section 5 |
 | one index's share of `max_built_mib` | half | section 5 |
 | backfill's share of `max_built_mib` | half | section 5 |
-| one index's share of `max_pending_documents` | half, then dropped | section 5 |
 | live builds in flight per index | 1, a 2nd while ≥ `max_changes` pending | section 1 |
 | keys per backfill page | 1,024 | section 5 |
 | documents per `build_many` query | up to 512 | as today |
