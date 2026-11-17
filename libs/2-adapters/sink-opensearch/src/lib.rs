@@ -108,6 +108,10 @@ pub struct OpensearchSink {
     /// caught-up write refreshes (see [`write`](OpensearchSink::write)).
     /// Shared across clones and concurrent writes.
     pub(crate) unrefreshed: Arc<SyncMutex<BTreeSet<String>>>,
+    /// Held by a caught-up write from taking `unrefreshed` until its refresh
+    /// returned (or the set was put back), so a later caught-up write waits
+    /// and never answers `Immediate` over a refresh still running or failed.
+    pub(crate) refreshing: Arc<tokio::sync::Mutex<()>>,
     /// Logical index name → where it lives and where its writes go, learned
     /// from [`ensure_index`](OpensearchSink::ensure_index) and updated by
     /// [`mark_seeded`](OpensearchSink::mark_seeded). Shared across clones.
@@ -236,6 +240,7 @@ impl OpensearchSink {
             per_index_settings: Arc::new(HashMap::new()),
             index_prefix: String::new(),
             unrefreshed: Arc::new(SyncMutex::new(BTreeSet::new())),
+            refreshing: Arc::new(tokio::sync::Mutex::new(())),
             targets: Arc::new(SyncMutex::new(HashMap::new())),
         })
     }

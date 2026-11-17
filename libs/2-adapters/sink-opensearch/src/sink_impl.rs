@@ -130,7 +130,8 @@ impl Sink for OpensearchSink {
     /// Each envelope becomes one bulk action, addressed by its index's write
     /// target (see `IndexTarget::write_target`). Nothing is kept between
     /// calls, so concurrent writes share only the targets and the set of
-    /// indexes left unrefreshed, each behind its own lock. A write that fails
+    /// indexes left unrefreshed, each behind its own lock. Caught-up writes
+    /// refresh one at a time: a later one waits for an earlier refresh. A write that fails
     /// before sending (an upsert carrying no document) sends nothing.
     ///
     /// The actions are split into bulk requests bounded by **both** caps: at
@@ -363,6 +364,10 @@ impl OpensearchSink {
                 .extend(written.iter().map(|action| action.index().to_owned()));
             return unforced;
         }
+        // One caught-up refresh at a time: a second one waits here, then sees
+        // what this one put back if it failed, so neither answers `Immediate`
+        // before a refresh covering the earlier writes succeeded.
+        let _refreshing = self.refreshing.lock().await;
         let pending = std::mem::take(&mut *self.lock_unrefreshed());
         if pending.is_empty() {
             return Visibility::Immediate;
