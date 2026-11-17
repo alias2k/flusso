@@ -354,16 +354,20 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   release train (`sdk/query`, `sdk/query-derive`, `dev/query-e2e`) the nextest step swaps in a
   filterset that skips the Postgres/OpenSearch container suites those paths can't break (the
   query train's own `combined_search`, `cursor_paging`, `map_keys`, `tls`, `array_columns` + `read_time` live e2e still run); pushes to main always run everything.
-  A second scope note (issue #402): a PR whose every changed file (both sides of a rename; the whole PR
-  as it would merge, `HEAD^1..HEAD` of the merge commit) is documentation is **docs-only**: `ci.yml`'s
-  `test`, `fuzz`, `designer-frontend`, `other-platforms` and `bench.yml`'s `in-process` run
-  `.github/actions/change-class` (fetch-depth 2) first and skip their heavy steps, so each still reports
-  green under its name with a "docs-only: skipped …" summary; `test` runs only the `DOC_TESTS` whose files
-  changed and the doctests + doc links of a crate whose compiled README changed; `docs` and `scripts` run
-  in full. The rule, its patterns and `DOC_TESTS` live in `.github/scripts/change_class.py` (manual:
-  `docs/src/contribute/testing.md`); `test_change_class.py` fails when a Rust source reads a doc file no
-  `DOC_TESTS` entry covers, so a new `include_str!` of a page needs an entry. Any other event, or a diff
-  that can't be taken, runs everything.
+  A second scope note (issue #402): a PR **into the default branch** whose every changed file (both
+  sides of a rename; the whole PR as it would merge, `HEAD^1..HEAD` of the merge commit) is
+  documentation is **docs-only** (nothing under `.github/` is): `ci.yml`'s `test`, `fuzz`,
+  `designer-frontend`, `other-platforms` and `bench.yml`'s `in-process` run
+  `.github/actions/change-class` (fetch-depth 2; `.github/scripts/change-class.sh`) first and skip
+  their heavy steps, so each still reports green under its name with a "docs-only: skipped …"
+  summary; `test` runs only the `DOC_TESTS` whose files changed and clippy + doctests + doc links of a
+  crate whose compiled README changed (clippy's doc lints read it), and saves no build cache; `docs`
+  and `scripts` run in full. The script runs the **base's** `change_class.py` (`git show HEAD^1:…`),
+  never the PR's, and runs everything when it is missing, fails or gives no verdict. The rule, its
+  patterns and `DOC_TESTS` live in `change_class.py` (manual: `docs/src/contribute/testing.md`);
+  `test_change_class.py` fails on a Rust literal naming documentation that no `DOC_TESTS` entry
+  covers or `NOT_READS` explains, so a new `include_str!` of a page needs an entry. Any other event or
+  base, or a diff that can't be taken, runs everything.
   A `docs` job builds the mdBook (`mdbook build docs`), link-checks it (`lychee --offline
   --include-fragments --root-dir docs/book 'docs/book/**/*.html'`), and runs
   `.github/scripts/check-manual-links.sh`. A separate `fuzz` job runs a 60-second

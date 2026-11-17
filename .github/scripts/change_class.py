@@ -2,16 +2,22 @@
 """Which checks a pull request must run: the whole suite, or what documentation can break.
 
     change_class.py --event <github.event_name> --job <job> [--changes <file> | --unknown]
+                    --base-ref <PR base branch> --default-branch <repository default branch>
                     [--root <repo>] [--output <$GITHUB_OUTPUT>] [--summary <$GITHUB_STEP_SUMMARY>]
 
-The one home of the docs-only rule (issue #402). `.github/actions/change-class` runs it in each
-gated job, over `git diff --name-status -z -M HEAD^1 HEAD` of the pull request's merge commit (the
-whole PR as it would merge, not the last push).
+The one home of the docs-only rule (issue #402). `.github/scripts/change-class.sh` (through
+`.github/actions/change-class`) runs it in each gated job, over `git diff --name-status -z -M
+HEAD^1 HEAD` of the pull request's merge commit: the whole PR as it would merge, not the last push.
+It runs the **base's** copy of this file (`HEAD^1`), so a PR never judges itself by its own rules;
+a base without one, or a copy that fails, means a full run.
 
-- **docs-only**: every changed path (both sides of a rename) is documentation (`is_docs`). The
-  job then runs only `DOC_TESTS` whose files changed, and doctests + doc links of each crate whose
-  `README.md` changed and is compiled into it (`#![doc = include_str!("../README.md")]`).
-- **full**: anything else, every event but `pull_request`, and an unknown or unreadable diff.
+- **docs-only**: a `pull_request` into the default branch whose every changed path (both sides of
+  a rename) is documentation (`is_docs`). The job then runs only `DOC_TESTS` whose files changed,
+  and clippy, doctests and doc links of each crate whose `README.md` changed and is compiled into
+  it (`#![doc = include_str!("../README.md")]`).
+- **full**: anything else: every other event, a PR on another base (its head carries that branch's
+  commits, which a docs-only run would vouch for unbuilt), anything under `.github/`, and an
+  unknown or unreadable diff.
 
 Outputs (`$GITHUB_OUTPUT`): `docs_only`, `cargo` (a toolchain is needed), `nextest_packages`
 (`-p a -p b`), `nextest_filter` (a nextest filterset, empty when no test reads the change),
@@ -19,7 +25,6 @@ Outputs (`$GITHUB_OUTPUT`): `docs_only`, `cargo` (a toolchain is needed), `nexte
 a pass of the full suite.
 """
 import argparse
-import fnmatch
 import pathlib
 import re
 import sys
@@ -33,8 +38,6 @@ DOCS = (
     "plugin/**.md",
     ".claude/commands/**.md",
     ".claude/skills/**.md",
-    ".github/ISSUE_TEMPLATE/*.md",
-    ".github/PULL_REQUEST_TEMPLATE.md",
     "apps/cli/ADOPTIONS.md",
 )
 
@@ -148,6 +151,8 @@ def matches(path: str, pattern: str) -> bool:
 
 
 def is_docs(path: str) -> bool:
+    if path.startswith(".github/"):
+        return False  # a change to CI runs CI, templates and READMEs included
     if any(matches(path, p) for p in DOCS):
         return True
     parts = path.split("/")
@@ -196,9 +201,19 @@ def compiled_readme(root: pathlib.Path, path: str) -> str | None:
     return package.group(1)
 
 
-def classify(event: str, changes: list[Change] | None, root: pathlib.Path) -> Plan:
+def classify(
+    event: str,
+    changes: list[Change] | None,
+    root: pathlib.Path,
+    base_ref: str | None,
+    default_branch: str | None,
+) -> Plan:
     if event != "pull_request":
         return full(f"a `{event}` run checks everything")
+    if not base_ref or not default_branch:
+        return full("the pull request's base or the default branch is unknown")
+    if base_ref != default_branch:
+        return full(f"the pull request's base is `{base_ref}`, not the default branch `{default_branch}`")
     if changes is None:
         return full("the change set could not be read")
     if not changes:
@@ -244,7 +259,7 @@ def summary(plan: Plan, job: str) -> str:
         return f"**Full suite**: {plan.reason}.\n"
     ran = [f"`{t.what}` ({t.package})" for t in plan.tests if job == "test"]
     if job == "test":
-        ran += [f"doctests and doc links of `{p}` (its README changed)" for p in plan.doc_packages]
+        ran += [f"clippy, doctests and doc links of `{p}` (its README changed)" for p in plan.doc_packages]
     text = f"**docs-only: skipped** {SKIPPED[job]}.\n"
     if job == "test":
         text += "\nRan: " + ("; ".join(ran) if ran else "nothing here (no test reads these files)") + ".\n"
@@ -259,6 +274,8 @@ def main(argv: list[str]) -> int:
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--changes", type=pathlib.Path, help="git diff --name-status -z -M output")
     source.add_argument("--unknown", action="store_true", help="the diff could not be taken")
+    parser.add_argument("--base-ref", help="the pull request's base branch")
+    parser.add_argument("--default-branch", help="the repository's default branch")
     parser.add_argument("--root", type=pathlib.Path, default=pathlib.Path("."))
     parser.add_argument("--output", type=pathlib.Path)
     parser.add_argument("--summary", type=pathlib.Path)
@@ -270,7 +287,7 @@ def main(argv: list[str]) -> int:
             changes = parse_name_status(args.changes.read_bytes())
         except (OSError, ValueError, UnicodeDecodeError) as error:
             print(f"::warning::cannot read the change set ({error}); running everything", file=sys.stderr)
-    plan = classify(args.event, changes, args.root)
+    plan = classify(args.event, changes, args.root, args.base_ref, args.default_branch)
 
     text = outputs(plan)
     if args.output:

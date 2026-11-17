@@ -27,8 +27,14 @@ spec.loader.exec_module(rule)
 Change = rule.Change
 
 
-def classify(*changes: Change, event: str = "pull_request", root: pathlib.Path = REPO):
-    return rule.classify(event, list(changes), root)
+def classify(
+    *changes: Change,
+    event: str = "pull_request",
+    root: pathlib.Path = REPO,
+    base: str | None = "main",
+    default: str | None = "main",
+):
+    return rule.classify(event, list(changes), root, base, default)
 
 
 def m(path: str) -> Change:
@@ -51,8 +57,6 @@ class Patterns(unittest.TestCase):
         "plugin/ARCHITECTURE.md",
         ".claude/commands/implement.md",
         ".claude/skills/coordinator/SKILL.md",
-        ".github/ISSUE_TEMPLATE/bug_report.md",
-        ".github/PULL_REQUEST_TEMPLATE.md",
         "apps/cli/ADOPTIONS.md",
         "apps/cli/README.md",
         "apps/cli/CHANGELOG.md",
@@ -69,6 +73,11 @@ class Patterns(unittest.TestCase):
         ".github/scripts/change_class.py",
         ".github/actions/change-class/action.yml",
         ".claude/settings.json",
+        ".github/ISSUE_TEMPLATE/bug_report.md",
+        ".github/PULL_REQUEST_TEMPLATE.md",
+        ".github/README.md",
+        ".github/scripts/README.md",
+        ".github/docs/x.md",
         "plugin/hooks/hooks.json",
         "plugin/.claude-plugin/plugin.json",
         "libs/1-config/tests/compat/README.md",
@@ -90,6 +99,14 @@ class Patterns(unittest.TestCase):
 
     def test_code_and_data(self) -> None:
         for path in self.CODE:
+            with self.subTest(path):
+                self.assertFalse(rule.is_docs(path))
+
+    def test_nothing_under_dot_github_is_documentation(self) -> None:
+        # A PR that changes CI must run CI: no pattern may ever reach into `.github/`.
+        paths = [p for p in tracked(".github") if p.startswith(".github/")]
+        self.assertGreater(len(paths), 20)
+        for path in paths + [".github/README.md", ".github/CHANGELOG.md", ".github/a/b/README.md"]:
             with self.subTest(path):
                 self.assertFalse(rule.is_docs(path))
 
@@ -118,7 +135,22 @@ class Rule(unittest.TestCase):
         self.assertFalse(classify().docs_only)
 
     def test_an_unknown_diff_runs_everything(self) -> None:
-        self.assertFalse(rule.classify("pull_request", None, REPO).docs_only)
+        self.assertFalse(rule.classify("pull_request", None, REPO, "main", "main").docs_only)
+
+    def test_a_pr_on_another_base_runs_everything(self) -> None:
+        # Stacked on a code branch, the head carries that branch's commits, which a docs-only
+        # run would vouch for without building them.
+        plan = classify(m("docs/src/SUMMARY.md"), base="ci/other-work", default="main")
+        self.assertFalse(plan.docs_only)
+        self.assertIn("ci/other-work", plan.reason)
+
+    def test_the_default_branch_is_whatever_the_repository_names(self) -> None:
+        self.assertTrue(classify(m("docs/src/SUMMARY.md"), base="trunk", default="trunk").docs_only)
+
+    def test_an_unknown_base_or_default_branch_runs_everything(self) -> None:
+        for base, default in ((None, "main"), ("main", None), ("", ""), (None, None)):
+            with self.subTest(base=base, default=default):
+                self.assertFalse(classify(m("docs/src/SUMMARY.md"), base=base, default=default).docs_only)
 
     def test_every_other_event_runs_everything(self) -> None:
         for event in ("push", "workflow_dispatch", "schedule", "pull_request_target", "merge_group"):
@@ -255,7 +287,7 @@ class NameStatus(unittest.TestCase):
                 sorted(changes, key=lambda c: c.path),
                 [Change("A", "README.md"), Change("D", "docs/gone.md"), Change("R", "docs/new page.md", "docs/old page.md")],
             )
-            self.assertTrue(rule.classify("pull_request", changes, root).docs_only)
+            self.assertTrue(rule.classify("pull_request", changes, root, "main", "main").docs_only)
 
 
 class Cli(unittest.TestCase):
@@ -266,7 +298,8 @@ class Cli(unittest.TestCase):
             if changes is not None:
                 pathlib.Path(tmp, "changes").write_bytes(changes)
                 extra = ["--changes", str(pathlib.Path(tmp, "changes"))]
-            rule.main([*args, *extra, "--root", str(REPO), "--output", str(out), "--summary", str(summary)])
+            branches = [] if "--base-ref" in args else ["--base-ref", "main", "--default-branch", "main"]
+            rule.main([*args, *branches, *extra, "--root", str(REPO), "--output", str(out), "--summary", str(summary)])
             return out.read_text(), summary.read_text()
 
     def test_docs_only_outputs_and_summary(self) -> None:
@@ -284,6 +317,21 @@ class Cli(unittest.TestCase):
                 _, summary = self.run_cli("--event", "pull_request", "--job", job, changes=b"M\0docs/a.md\0")
                 self.assertIn(f"docs-only: skipped** {skipped}", summary)
 
+    def test_a_compiled_readme_names_clippy_in_the_summary(self) -> None:
+        out, summary = self.run_cli(
+            "--event", "pull_request", "--job", "test", changes=b"M\0libs/1-ports/stream/README.md\0"
+        )
+        self.assertIn("doc_packages=flusso-stream\n", out)
+        self.assertIn("clippy, doctests and doc links of `flusso-stream`", summary)
+
+    def test_another_base_on_the_command_line_runs_everything(self) -> None:
+        out, summary = self.run_cli(
+            "--event", "pull_request", "--job", "test", "--base-ref", "feature", "--default-branch", "main",
+            changes=b"M\0docs/a.md\0",
+        )
+        self.assertIn("docs_only=false\n", out)
+        self.assertIn("Full suite", summary)
+
     def test_full_outputs(self) -> None:
         out, summary = self.run_cli("--event", "pull_request", "--job", "fuzz", changes=b"M\0Cargo.toml\0")
         self.assertIn("docs_only=false\n", out)
@@ -297,6 +345,142 @@ class Cli(unittest.TestCase):
         self.assertIn("docs_only=false\n", out)
         out, _ = self.run_cli("--event", "pull_request", "--job", "test")
         self.assertIn("docs_only=false\n", out)
+
+
+SCRIPT = HERE / "change-class.sh"
+CLASSIFIER = (HERE / "change_class.py").read_text()
+
+
+class Action(unittest.TestCase):
+    """change-class.sh end to end, over real merge commits in a throwaway repo, as a job runs it."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name, "repo")
+        self.root.mkdir()
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "t@example.com")
+        self.git("config", "user.name", "t")
+        self.git("config", "commit.gpgsign", "false")
+        self.write("docs/src/page.md", "page\n")
+        self.write("libs/a/src/lib.rs", "pub fn a() {}\n")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def git(self, *args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(self.root), *args], check=True, capture_output=True, text=True
+        ).stdout
+
+    def write(self, path: str, text: str) -> None:
+        (self.root / path).parent.mkdir(parents=True, exist_ok=True)
+        (self.root / path).write_text(text)
+
+    def base(self, classifier: str | None = CLASSIFIER) -> None:
+        if classifier is not None:
+            self.write(".github/scripts/change_class.py", classifier)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "base")
+
+    def merge(self, files: dict[str, str]) -> None:
+        """A PR branch writing `files`, checked out as GitHub's merge commit (parent 1 the base)."""
+        self.git("switch", "-qc", "pr")
+        for name, text in files.items():
+            self.write(name, text)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "pr")
+        self.git("switch", "-q", "main")
+        self.git("merge", "-q", "--no-ff", "-m", "merge", "pr")
+
+    def run_action(self, event: str = "pull_request", base_ref: str = "main", default: str = "main") -> tuple[str, str]:
+        out, summary = pathlib.Path(self.tmp.name, "out"), pathlib.Path(self.tmp.name, "summary")
+        out.write_text("")
+        summary.write_text("")
+        temp = pathlib.Path(self.tmp.name, "runner-temp")
+        temp.mkdir(exist_ok=True)
+        env = dict(
+            os.environ,
+            EVENT=event,
+            JOB="test",
+            BASE_REF=base_ref,
+            DEFAULT_BRANCH=default,
+            GITHUB_OUTPUT=str(out),
+            GITHUB_STEP_SUMMARY=str(summary),
+            RUNNER_TEMP=str(temp),
+        )
+        done = subprocess.run(["bash", str(SCRIPT)], cwd=self.root, env=env, capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return out.read_text(), summary.read_text()
+
+    def test_a_docs_only_pr_into_the_default_branch_is_docs_only(self) -> None:
+        self.base()
+        self.merge({"docs/src/page.md": "changed\n"})
+        out, summary = self.run_action()
+        self.assertIn("docs_only=true\n", out)
+        self.assertIn("docs-only: skipped", summary)
+
+    def test_a_base_without_a_classifier_runs_everything(self) -> None:
+        self.base(classifier=None)
+        self.merge({"docs/src/page.md": "changed\n"})
+        out, summary = self.run_action()
+        self.assertIn("docs_only=false\n", out)
+        self.assertIn("cargo=true\n", out)
+        self.assertIn("the base has no classifier", summary)
+
+    def test_a_pr_loosening_the_classifier_is_judged_by_the_base(self) -> None:
+        self.base()
+        loose = CLASSIFIER.replace('    "docs/**",\n', '    "docs/**",\n    "libs/**",\n')
+        self.assertNotEqual(loose, CLASSIFIER)
+        self.merge({".github/scripts/change_class.py": loose, "libs/a/src/lib.rs": "pub fn b() {}\n"})
+        out, _ = self.run_action()
+        self.assertIn("docs_only=false\n", out)
+
+    def test_the_bases_copy_decides_not_the_prs(self) -> None:
+        # A base whose rule calls everything docs, a PR restoring the strict rule: the base decides.
+        permissive = CLASSIFIER.replace(
+            "def is_docs(path: str) -> bool:\n", "def is_docs(path: str) -> bool:\n    return True\n"
+        )
+        self.base(classifier=permissive)
+        self.merge({".github/scripts/change_class.py": CLASSIFIER, "libs/a/src/lib.rs": "pub fn c() {}\n"})
+        out, _ = self.run_action()
+        self.assertIn("docs_only=true\n", out)
+
+    def test_a_base_classifier_that_fails_runs_everything(self) -> None:
+        self.base(classifier="raise SystemExit(3)\n")
+        self.merge({"docs/src/page.md": "changed\n"})
+        out, summary = self.run_action()
+        self.assertIn("docs_only=false\n", out)
+        self.assertIn("classifier failed", summary)
+
+    def test_a_base_classifier_that_writes_nothing_runs_everything(self) -> None:
+        self.base(classifier="pass\n")
+        self.merge({"docs/src/page.md": "changed\n"})
+        out, _ = self.run_action()
+        self.assertEqual(out, "docs_only=false\ncargo=true\n")
+
+    def test_another_base_branch_runs_everything(self) -> None:
+        self.base()
+        self.merge({"docs/src/page.md": "changed\n"})
+        out, summary = self.run_action(base_ref="feature")
+        self.assertIn("docs_only=false\n", out)
+        self.assertIn("`feature`", summary)
+
+    def test_every_other_event_runs_everything(self) -> None:
+        self.base()
+        self.merge({"docs/src/page.md": "changed\n"})
+        for event in ("push", "workflow_dispatch", ""):
+            with self.subTest(event):
+                out, _ = self.run_action(event=event)
+                self.assertIn("docs_only=false\n", out)
+
+    def test_a_checkout_that_is_no_merge_commit_runs_everything(self) -> None:
+        self.base()
+        self.write("docs/src/page.md", "changed\n")
+        self.git("commit", "-qam", "plain")
+        out, summary = self.run_action()
+        self.assertIn("docs_only=false\n", out)
+        self.assertIn("not a pull request's merge commit", summary)
 
 
 def tracked(*patterns: str) -> list[str]:
@@ -316,54 +500,113 @@ def packages() -> dict[str, str]:
     return found
 
 
-# String literals in Rust code that resolve to a documentation file but are no read of it.
+# Literals the guard flags that read no documentation, each with why. Keyed by (source, literal).
 NOT_READS = {
-    ("apps/design/src/commit/journal.rs", "README.md"),  # a file name a save journal may hold
+    ("apps/design/src/commit/journal.rs", "README.md"): "a file name a save journal may hold",
+    ("apps/design/src/commit/tests.rs", "notes.md"): "a file the test writes in its own temp project",
+    ("apps/cli/src/commands/schema_cmd.rs", "sink-opensearch-index.md"): "a rendered table's name, compared in memory",
+    ("apps/cli/src/commands/schema_cmd.rs", "sink-stdout-index.md"): "a rendered table's name, compared in memory",
+    ("apps/cli/src/commands/schema_cmd.rs", "sink-opensearch.md"): "a rendered table's name, compared in memory",
+    ("apps/cli/src/commands/schema_cmd.rs", "source-postgres.md"): "a rendered table's name, compared in memory",
+    ("apps/cli/tests/agent_docs_paths.rs", "docs/"): (
+        "a prefix the guard recognises in agent docs; it checks named files exist, so on_removal runs it"
+    ),
+    ("dev/bench/src/main.rs", "docs/s"): "a unit: documents per second",
+    ("libs/2-adapters/sink-opensearch/tests/document_ids.rs", "docs"): "a key of an OpenSearch response",
+    ("libs/2-adapters/source-postgres/src/cdc/capture.rs", "plugin"): "a column of pg_replication_slots",
+    ("libs/2-engine/tests/bytea_output.rs", "docs"): "a test table and index name",
 }
+
+
+DOC_ROOTS = ("docs", "plugin", ".claude", ".claude/commands", ".claude/skills")
+
+
+def doc_literals(code: str) -> list[str]:
+    """String literals outside `//` comments that may name documentation: a `.md` file, anything
+    under `docs/`, `plugin/` or `.claude/`, or one of those roots itself."""
+    code = "\n".join(line for line in code.splitlines() if not line.lstrip().startswith("//"))
+    found = []
+    for literal in re.findall(r'"([^"\n]*)"', code):
+        bare = literal.split("{", 1)[0].strip("/")
+        if (
+            literal.endswith(".md")
+            or bare in DOC_ROOTS
+            or re.search(r"(^|/)(docs|plugin|\.claude)/", literal)
+        ):
+            found.append(literal)
+    return found
+
+
+def doc_reads_not_covered(extra: dict[str, str] | None = None) -> list[str]:
+    """Each literal a Rust source holds that names documentation no DOC_TESTS entry of its own
+    package covers (and that is not its crate's compiled README), or that names nothing that exists."""
+    crates = packages()
+    sources = {path: (REPO / path).read_text(errors="replace") for path in tracked("*.rs")}
+    sources.update(extra or {})
+    found = []
+    for source, code in sources.items():
+        crate = crate_of(source, crates)
+        for literal in doc_literals(code):
+            if (source, literal) in NOT_READS:
+                continue
+            # `format!("docs/{x}.md")` reads under its constant prefix; `concat!(…, "/../x")` is relative.
+            relative = literal.split("{", 1)[0].lstrip("/")
+            bases = [pathlib.PurePosixPath(source).parent, pathlib.PurePosixPath(crates.get(crate, ".")), pathlib.PurePosixPath(".")]
+            resolved = None
+            for base in bases:
+                candidate = os.path.normpath(str(base / relative)) if relative else str(base)
+                if not candidate.startswith("..") and (REPO / candidate).exists():
+                    resolved = candidate
+                    break
+            if resolved is None:
+                found.append(f"{source}: {literal!r} names nothing that exists")
+                continue
+            probe = resolved + "/x.md" if (REPO / resolved).is_dir() else resolved
+            if resolved == "." or not rule.is_docs(probe):
+                continue
+            if rule.compiled_readme(REPO, resolved) == crate:
+                continue
+            if any(t.package == crate and any(rule.matches(probe, r) for r in t.reads) for t in rule.DOC_TESTS):
+                continue
+            found.append(f"{source}: {literal!r} reads {resolved}")
+    return found
+
+
+def crate_of(path: str, crates: dict[str, str]) -> str | None:
+    best = None
+    for name, directory in crates.items():
+        if path.startswith(directory + "/") and (best is None or len(directory) > len(crates[best])):
+            best = name
+    return best
 
 
 class Repo(unittest.TestCase):
     """The rule against this checkout: what reads docs today is what DOC_TESTS runs."""
 
-    def crate_of(self, path: str, crates: dict[str, str]) -> str | None:
-        best = None
-        for name, directory in crates.items():
-            if path.startswith(directory + "/") and (best is None or len(directory) > len(crates[best])):
-                best = name
-        return best
-
     def test_every_documentation_file_rust_reads_is_covered(self) -> None:
-        crates = packages()
-        uncovered = []
-        for source in tracked("*.rs"):
-            code = "\n".join(
-                line for line in (REPO / source).read_text(errors="replace").splitlines()
-                if not line.lstrip().startswith("//")
-            )
-            crate = self.crate_of(source, crates)
-            for literal in re.findall(r'"([^"\n]*)"', code):
-                if not (literal.endswith(".md") or re.search(r"(^|/)(docs|plugin|\.claude)(/|$)", literal)):
-                    continue
-                if (source, literal) in NOT_READS:
-                    continue
-                bases = [pathlib.PurePosixPath(source).parent, pathlib.PurePosixPath(crates.get(crate, ".")), pathlib.PurePosixPath(".")]
-                for base in bases:
-                    resolved = os.path.normpath(str(base / literal))
-                    if resolved.startswith("..") or "/" not in resolved or not (REPO / resolved).exists():
-                        continue
-                    probe = resolved + "/x.md" if (REPO / resolved).is_dir() else resolved
-                    if not rule.is_docs(probe):
-                        break
-                    if rule.compiled_readme(REPO, resolved) == crate:
-                        break
-                    if any(
-                        t.package == crate and any(rule.matches(probe, r) for r in t.reads)
-                        for t in rule.DOC_TESTS
-                    ):
-                        break
-                    uncovered.append(f"{source}: {literal!r} reads {resolved}")
-                    break
-        self.assertEqual(uncovered, [], "add a DocTest to change_class.py for each, or list it in NOT_READS")
+        self.assertEqual(
+            doc_reads_not_covered(), [], "add a DocTest to change_class.py for each, or list it in NOT_READS"
+        )
+
+    def test_every_not_read_is_still_in_its_source(self) -> None:
+        for (source, literal), why in NOT_READS.items():
+            with self.subTest(source=source, literal=literal):
+                self.assertTrue(why)
+                self.assertIn(literal, doc_literals((REPO / source).read_text()))
+
+    def test_the_guard_sees_every_reader_shape(self) -> None:
+        shapes = {
+            "top-level file": 'include_str!("../../../CLAUDE.md")',
+            "directory walk": 'root.join("docs")',
+            "chained join": 'root.join("plugin").join("skills")',
+            "concat": 'concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/src/SUMMARY.md")',
+            "format": 'format!("docs/src/reference/{name}.md")',
+            "unresolved page": 'std::fs::read_to_string("docs/src/no-such-page.md")',
+        }
+        for shape, code in shapes.items():
+            with self.subTest(shape):
+                found = doc_reads_not_covered({"libs/2-engine/src/fake.rs": f"fn f() {{ {code}; }}"})
+                self.assertTrue(found, f"{shape}: {code}")
 
     def test_every_compiled_readme_is_found(self) -> None:
         for lib in tracked("*src/lib.rs"):
@@ -388,6 +631,26 @@ class Repo(unittest.TestCase):
                 sources = "\n".join(p.read_text() for p in directory.rglob("*.rs") if "target" not in p.parts)
                 for name in re.findall(r"test\(=?([\w:]+)\)", test.filter):
                     self.assertRegex(sources, rf"fn {name.split('::')[-1]}\(", name)
+
+    def test_the_test_job_checks_a_compiled_readme_as_clippy_does(self) -> None:
+        # Clippy's doc lints read a README compiled with `include_str!` (`doc_lazy_continuation`).
+        ci = (REPO / ".github/workflows/ci.yml").read_text()
+        step = ci.split("- name: Clippy, doctests and doc links of the crates whose README changed", 1)[1]
+        step = step.split("\n      - ", 1)[0]
+        for command in ('cargo clippy -p "$package"', 'cargo test --doc -p "$package"', 'cargo doc -p "$package"'):
+            self.assertIn(command, step)
+
+    def test_a_docs_only_run_never_saves_the_build_cache(self) -> None:
+        ci = (REPO / ".github/workflows/ci.yml").read_text()
+        setup = ci.split("- uses: ./.github/actions/rust-test-setup", 1)[1].split("\n      - ", 1)[0]
+        self.assertIn("if: steps.change.outputs.docs_only != 'true' || steps.change.outputs.cargo == 'true'", setup)
+        self.assertIn("save-if: ${{ steps.change.outputs.docs_only != 'true' }}", setup)
+
+    def test_the_action_passes_the_base_and_the_default_branch(self) -> None:
+        action = (REPO / ".github/actions/change-class/action.yml").read_text()
+        self.assertIn("BASE_REF: ${{ github.event.pull_request.base.ref }}", action)
+        self.assertIn("DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}", action)
+        self.assertIn("run: bash .github/scripts/change-class.sh", action)
 
     def test_every_gated_job_has_a_summary(self) -> None:
         workflows = "\n".join((REPO / ".github/workflows" / f).read_text() for f in ("ci.yml", "bench.yml"))

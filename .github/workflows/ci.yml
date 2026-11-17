@@ -35,10 +35,13 @@ jobs:
           job: test
 
       # Shared with the postgres-matrix legs (postgres-matrix.yml).
+      # A docs-only run builds little: it must not save that as the PR's
+      # build cache, which later full runs would restore and build cold.
       - uses: ./.github/actions/rust-test-setup
-        if: steps.change.outputs.cargo == 'true'
+        if: steps.change.outputs.docs_only != 'true' || steps.change.outputs.cargo == 'true'
         with:
           components: clippy
+          save-if: ${{ steps.change.outputs.docs_only != 'true' }}
 
       - name: Format
         if: steps.change.outputs.docs_only != 'true'
@@ -120,8 +123,9 @@ jobs:
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 
       # Docs-only: only the tests that read the changed files (the selection
-      # lives in change_class.py's DOC_TESTS), and the doctests and doc links
-      # of each crate whose compiled README changed.
+      # lives in change_class.py's DOC_TESTS), and clippy (its doc lints read a
+      # README compiled with `include_str!`), the doctests and the doc links of
+      # each crate whose compiled README changed.
       - name: Test what reads the changed docs
         if: steps.change.outputs.docs_only == 'true' && steps.change.outputs.nextest_filter != ''
         env:
@@ -129,13 +133,14 @@ jobs:
           FILTER: ${{ steps.change.outputs.nextest_filter }}
         run: cargo nextest run --profile ci $PACKAGES -E "$FILTER"
 
-      - name: Doctests and doc links of the crates whose README changed
+      - name: Clippy, doctests and doc links of the crates whose README changed
         if: steps.change.outputs.docs_only == 'true' && steps.change.outputs.doc_packages != ''
         env:
           PACKAGES: ${{ steps.change.outputs.doc_packages }}
         run: |
           set -euo pipefail
           for package in $PACKAGES; do
+            cargo clippy -p "$package"
             cargo test --doc -p "$package"
             RUSTDOCFLAGS="-D warnings" cargo doc -p "$package" --no-deps --document-private-items
           done
