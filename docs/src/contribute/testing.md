@@ -30,6 +30,16 @@ Match this before assuming green:
 
 On a PR confined to the query train (`sdk/query`, `sdk/query-derive`, `dev/query-e2e`), step 5 skips every integration-test binary of `source-postgres`, `engine` and `sink-opensearch`, which those paths can't break; everything else, the query train's own e2e included, still runs. Pushes to `main` run everything.
 
+### Docs-only pull requests
+
+A PR whose every changed file is documentation skips what documentation can't break. The required checks still report under their own names, and each skipping job's summary starts with **docs-only: skipped** and names what it left out, so a skip never passes for a full run.
+
+- **What counts as documentation.** `docs/**` (the manual, ADRs, `STYLE.md`), the top-level `*.md` files, the `*.md` files under `plugin/`, `.claude/commands/` and `.claude/skills/`, the issue and PR templates, `apps/cli/ADOPTIONS.md`, and any `README.md` or `CHANGELOG.md` outside a `tests`, `fixtures`, `benches`, `examples`, `src`, `fuzz`, `scenarios`, `frontend` or `dist` directory. Anything else, one file is enough, runs everything.
+- **What is diffed.** The whole PR as it would merge: the merge commit against the base. So a docs-only push to a PR that also changes code still runs everything. Diffing against the previous push would be cheaper, but the required checks vouch for the merge result, and a green docs-only push would hide a code change that never got a full run. A rename counts both of its paths.
+- **What still runs.** The `manual (build + links)` and `CI scripts (tests)` jobs, always in full. In `clippy + tests`, only the tests that read the changed files: `agent_docs_paths` for a change under `plugin/` or `.claude/`, and for any deleted or renamed file; the generated-tables drift test for `docs/src/reference/generated/`; the upgrade-page snippets for `upgrade-to-0-18.md`; the derive's two manual checks for `document-structs.md` and the query `maps.md` pages. A crate `README.md` compiled into its crate (`#![doc = include_str!("../README.md")]`) also runs that crate's doctests and doc links. Removing such a README runs everything.
+- **What is skipped.** fmt, clippy, the `cargo check` steps, the full nextest run with every container suite, the workspace doctests and doc links, the fuzz run, the designer SPA job, the CLI check on Windows and macOS, and the in-process bench A/B.
+- **Where the rule lives.** `.github/scripts/change_class.py`: the patterns, and `DOC_TESTS`, which test reads which files. `test_change_class.py` fails when a Rust source reads a documentation file no `DOC_TESTS` entry covers, so a new `include_str!` of a page needs an entry there. Every other event (a push to `main`, `workflow_dispatch`) runs everything, and so does a diff the job can't take.
+
 A separate job runs a 60-second `pgoutput_decode` fuzz on a pinned nightly; another builds and lints the designer SPA; a `docs` job builds the book and link-checks it. A `postgres-matrix` workflow runs the Postgres-backed suites on the other tested majors; see [Other majors](#other-majors). A `bench` workflow gates PRs on the in-process benches and records scenario history on `main`; see [Benchmarks](benchmarks.md). An `audit` workflow checks RustSec advisories weekly and on manifest or lock changes; see [Dependency updates](dependencies.md).
 
 ## Why clippy runs without --all-targets

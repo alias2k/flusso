@@ -21,18 +21,33 @@ jobs:
     # Postgres e2e tests (testcontainers) need.
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      # A docs-only pull request (issue #402) skips the steps below that
+      # documentation can't break; the job still reports under its name, and
+      # its summary says what was skipped. `fetch-depth: 2` gives the merge
+      # commit's base for the diff.
+      - name: Docs-only?
+        id: change
+        uses: ./.github/actions/change-class
+        with:
+          job: test
 
       # Shared with the postgres-matrix legs (postgres-matrix.yml).
       - uses: ./.github/actions/rust-test-setup
+        if: steps.change.outputs.cargo == 'true'
         with:
           components: clippy
 
       - name: Format
+        if: steps.change.outputs.docs_only != 'true'
         run: cargo fmt --all --check
 
       # `--all-targets` is intentionally omitted from clippy: several test crates
       # use `.unwrap()`, which the workspace lints deny on non-test targets.
       - name: Clippy
+        if: steps.change.outputs.docs_only != 'true'
         run: cargo clippy --workspace
 
       # Clippy (above, no `--all-targets`) and nextest only compile lib/bin and
@@ -43,17 +58,20 @@ jobs:
       # The `bench` features expose the crate-private decoder/renderer to the
       # in-process benches; without them those two bench targets are skipped.
       - name: Check all targets (benches, examples)
+        if: steps.change.outputs.docs_only != 'true'
         run: cargo check --workspace --all-targets --features flusso-source-postgres/bench,flusso-sink-opensearch/bench
 
       # The Docker runtime image builds the CLI without the designer; make sure
       # that server-only configuration keeps compiling.
       - name: Check server-only build (no designer)
+        if: steps.change.outputs.docs_only != 'true'
         run: cargo check -p flusso-cli --no-default-features
 
       # Here, not in `scripts`: it reads the resolved features with `cargo tree
       # --offline`, which needs this job's toolchain and fetched crates (under a
       # second; `scripts` has neither). Its unit test runs in `scripts`.
       - name: Check the binary keeps a per-process hash seed (issue #355)
+        if: steps.change.outputs.docs_only != 'true'
         run: .github/scripts/check-ahash-seed.py
 
       # PRs confined to the query release train (sdk/query, sdk/query-derive,
@@ -64,7 +82,7 @@ jobs:
       # any file outside those trees means the full run.
       - name: Decide e2e scope
         id: scope
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && steps.change.outputs.docs_only != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -77,7 +95,7 @@ jobs:
       # tests; the `ci` profile gives them retries and a longer timeout. The
       # `query.rs` proptests are ordinary `#[test]`s, so they run here too.
       - name: Test (unit + integration + e2e)
-        if: steps.scope.outputs.read_side_only != 'true'
+        if: steps.change.outputs.docs_only != 'true' && steps.scope.outputs.read_side_only != 'true'
         run: cargo nextest run --profile ci --workspace --run-ignored all
 
       # Read-side-only PRs: the same run minus the container-backed
@@ -85,11 +103,12 @@ jobs:
       # is container e2e, so excluding them by kind is exact. The query train's
       # own live e2e (dev/query-e2e's combined_search, cursor_paging, map_keys, tls, array_columns, geo_points, read_time) still run.
       - name: Test (read-side scope — full unit/integration + query e2e)
-        if: steps.scope.outputs.read_side_only == 'true'
+        if: steps.change.outputs.docs_only != 'true' && steps.scope.outputs.read_side_only == 'true'
         run: cargo nextest run --profile ci --workspace --run-ignored all -E 'all() - (kind(test) & (package(flusso-source-postgres) + package(flusso-engine) + package(flusso-sink-opensearch)))'
 
       # nextest does not run doctests; run them separately.
       - name: Doctests
+        if: steps.change.outputs.docs_only != 'true'
         run: cargo test --workspace --doc
 
       # The crate docs are a living reference (lots of intra-doc `[`links`]`), so
@@ -97,7 +116,29 @@ jobs:
       # link into a build error. `--document-private-items` checks internal docs
       # too, since much of the documentation is on private items.
       - name: Doc links
+        if: steps.change.outputs.docs_only != 'true'
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
+
+      # Docs-only: only the tests that read the changed files (the selection
+      # lives in change_class.py's DOC_TESTS), and the doctests and doc links
+      # of each crate whose compiled README changed.
+      - name: Test what reads the changed docs
+        if: steps.change.outputs.docs_only == 'true' && steps.change.outputs.nextest_filter != ''
+        env:
+          PACKAGES: ${{ steps.change.outputs.nextest_packages }}
+          FILTER: ${{ steps.change.outputs.nextest_filter }}
+        run: cargo nextest run --profile ci $PACKAGES -E "$FILTER"
+
+      - name: Doctests and doc links of the crates whose README changed
+        if: steps.change.outputs.docs_only == 'true' && steps.change.outputs.doc_packages != ''
+        env:
+          PACKAGES: ${{ steps.change.outputs.doc_packages }}
+        run: |
+          set -euo pipefail
+          for package in $PACKAGES; do
+            cargo test --doc -p "$package"
+            RUSTDOCFLAGS="-D warnings" cargo doc -p "$package" --no-deps --document-private-items
+          done
 
       - name: Upload test report
         if: always()
@@ -155,7 +196,9 @@ jobs:
       # summary and nightly issue (test_postgres_matrix.py, issue #348), and
       # the reproducible-seed guard over recorded `cargo tree` output
       # (test_check_ahash_seed.py, issue #355; the guard itself runs in
-      # `test`), each picked up by the `test_*.py` pattern.
+      # `test`), and the docs-only rule against this checkout
+      # (test_change_class.py, issue #402), each picked up by the `test_*.py`
+      # pattern.
       - name: Test the CI scripts
         run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
 
@@ -164,6 +207,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      # Docs-only pull requests skip the rest (issue #402).
+      - name: Docs-only?
+        id: change
+        uses: ./.github/actions/change-class
+        with:
+          job: fuzz
 
       # cargo-fuzz needs nightly (sanitizer/coverage instrumentation). The
       # repo's rust-toolchain.toml pins stable; the explicit `+nightly` below
@@ -175,16 +227,19 @@ jobs:
       # every run with no code change. Bump this date once a later nightly is
       # confirmed to compile the fuzz target again.
       - name: Install Rust (nightly)
+        if: steps.change.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-07-22
 
       - name: Install cargo-fuzz
+        if: steps.change.outputs.docs_only != 'true'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
 
       - name: Cache build artifacts
+        if: steps.change.outputs.docs_only != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: libs/2-adapters/source-postgres/fuzz
@@ -200,6 +255,7 @@ jobs:
       # which isn't installed and whose static crt is incompatible with the ASan
       # the fuzzer needs ("sanitizer is incompatible with statically linked libc").
       - name: Fuzz pgoutput decoder (60s)
+        if: steps.change.outputs.docs_only != 'true'
         working-directory: libs/2-adapters/source-postgres
         run: cargo +nightly-2026-07-22 fuzz run pgoutput_decode --target x86_64-unknown-linux-gnu -- -max_total_time=60
 
@@ -224,14 +280,26 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      # Docs-only pull requests skip the rest (issue #402).
+      - name: Docs-only?
+        id: change
+        uses: ./.github/actions/change-class
+        with:
+          job: other-platforms
 
       - name: Install Rust
+        if: steps.change.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache build artifacts
+        if: steps.change.outputs.docs_only != 'true'
         uses: Swatinem/rust-cache@v2
 
       - name: Check the CLI
+        if: steps.change.outputs.docs_only != 'true'
         run: cargo check -p flusso-cli --locked
 
   designer-frontend:
@@ -239,8 +307,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      # Docs-only pull requests skip the rest (issue #402).
+      - name: Docs-only?
+        id: change
+        uses: ./.github/actions/change-class
+        with:
+          job: designer
 
       - name: Install Node
+        if: steps.change.outputs.docs_only != 'true'
         uses: actions/setup-node@v7
         with:
           node-version: 22
@@ -248,14 +326,17 @@ jobs:
           cache-dependency-path: apps/design/frontend/package-lock.json
 
       - name: Install deps
+        if: steps.change.outputs.docs_only != 'true'
         working-directory: apps/design/frontend
         run: npm ci
 
       - name: Format check
+        if: steps.change.outputs.docs_only != 'true'
         working-directory: apps/design/frontend
         run: npm run format:check
 
       - name: Lint
+        if: steps.change.outputs.docs_only != 'true'
         working-directory: apps/design/frontend
         run: npm run lint -- --max-warnings 0
 
@@ -263,6 +344,7 @@ jobs:
       # catalog, and every locale must define the same key set — so a new feature
       # can't ship UI without its translations. See scripts/check-i18n.mjs.
       - name: Check translations are complete
+        if: steps.change.outputs.docs_only != 'true'
         working-directory: apps/design/frontend
         run: npm run check:i18n
 
@@ -270,6 +352,7 @@ jobs:
       # name box applies its name, the rename chips) under Node's own test
       # runner, which strips the types.
       - name: Test the frontend model
+        if: steps.change.outputs.docs_only != 'true'
         working-directory: apps/design/frontend
         run: npm test
 
@@ -278,10 +361,12 @@ jobs:
       # fail if it drifts from what's committed — a reproducible `npm ci` + Vite
       # build yields identical (content-hashed) output for the same source.
       - name: Build the SPA
+        if: steps.change.outputs.docs_only != 'true'
         working-directory: apps/design/frontend
         run: npm run build
 
       - name: Check the committed dist is up to date
+        if: steps.change.outputs.docs_only != 'true'
         run: |
           if ! git diff --quiet -- apps/design/dist; then
             echo "::error::apps/design/dist is stale — run 'npm --prefix apps/design/frontend ci && npm --prefix apps/design/frontend run build' and commit the result."
