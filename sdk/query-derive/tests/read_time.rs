@@ -350,3 +350,116 @@ fn a_schema_key_named_like_an_entry_point_keeps_a_handle() {
         ])
     );
 }
+
+/// A root over the fixture holding one field of every kind.
+#[derive(Debug, Deserialize, FlussoRoot)]
+#[flusso(
+    index = "boundary",
+    config = "tests/fixtures/flusso.toml",
+    scope_mod = "every_kind",
+    context = Viewing
+)]
+struct EveryKind {
+    id: String,
+}
+
+/// Every kind a rule can read, with the presence its level and declaration
+/// give it. The kinds with no handle are `ui/rule_handle_missing_for_a_kind.rs`.
+#[test]
+fn every_readable_kind_has_a_rule_handle() {
+    let doc = EveryKind::doc();
+    let _: RuleKeyword<Required> = doc.kw();
+    let _: RuleKeyword<Optional> = doc.kwo();
+    let _: RuleKeyword<Array> = doc.kwa();
+    let _: RuleKeyword<Array> = doc.kwao();
+    let _: RuleKeyword<Required> = doc.uu();
+    let _: RuleKeyword<Required> = doc.ev();
+    let _: RuleKeyword<Required> = doc.kns();
+    let _: RuleBool<Optional> = doc.bo();
+    let _: RuleBool<Required> = doc.ex();
+    let _: RuleNumber<kind::Short, Required> = doc.sh();
+    let _: RuleNumber<kind::Integer, Required> = doc.it();
+    let _: RuleNumber<kind::Long, Required> = doc.n();
+    let _: RuleNumber<kind::Long, Optional> = doc.nn();
+    let _: RuleNumber<kind::Long, Required> = doc.ct();
+    let _: RuleNumber<kind::Long, Array> = doc.ids();
+    let _: RuleNumber<kind::Double, Required> = doc.db();
+    let _: RuleNumber<kind::Double, Optional> = doc.av();
+    let _: RuleNumber<kind::Decimal, Required> = doc.dc();
+    let _: RuleDate<Required> = doc.dt();
+    let _: RuleDate<Required> = doc.ts();
+    let _: RuleKeyword<Required> = doc.ob().k();
+    let _: RuleNumber<kind::Long, Required> = doc.ob().n();
+    // A to-one join can find no row, whatever its fields declare.
+    let _: RuleKeyword<Optional> = doc.ho().k();
+    let _: RuleNumber<kind::Long, Optional> = doc.ho().n();
+    let _: RuleKeyword<Optional> = doc.bt().k();
+
+    assert_eq!(
+        doc.ho().n().gte(3).and(doc.uu().exists()).to_value(),
+        json!({ "bool": { "filter": [
+            { "range": { "ho.n": { "gte": 3 } } },
+            { "exists": { "field": "uu" } },
+        ] } })
+    );
+}
+
+/// Two ways a read-time field takes a stored field's name without being a
+/// rule field of the same key: a rule field of that Rust name written under
+/// another key, and a computed field written over the stored key.
+#[derive(Debug, Deserialize, FlussoRoot)]
+#[flusso(
+    index = "contracts",
+    config = "tests/fixtures/flusso.toml",
+    scope_mod = "shadowing",
+    context = Viewing
+)]
+struct Shadowing {
+    id: String,
+    #[flusso(rules = shown_state)]
+    #[serde(rename = "shownState")]
+    state: State,
+    #[flusso(computed = shouted_title)]
+    title: String,
+}
+
+fn shown_state(_: &Viewing) -> Rules<State> {
+    let doc = Shadowing::doc();
+    Rules::when(doc.signed_at().missing())
+        .then(State::Draft)
+        .otherwise(doc.state())
+}
+
+#[derive(Deserialize)]
+struct Titled {
+    title: String,
+}
+
+fn shouted_title(titled: &Titled, _: &Viewing) -> String {
+    titled.title.to_uppercase()
+}
+
+#[test]
+fn a_stored_field_keeps_a_handle_whichever_way_its_name_is_taken() -> Result {
+    let _: RuleField<State> = Shadowing::state(&CX);
+    let in_index: Enum = Shadowing::stored_state();
+    assert_eq!(
+        in_index.eq(State::Active).to_value(),
+        json!({ "term": { "state": "active" } })
+    );
+    assert_eq!(
+        Shadowing::stored_title().matches("hosting").to_value(),
+        json!({ "match": { "title": "hosting" } })
+    );
+
+    let mut source = stored();
+    source["signed_at"] = Value::Null;
+    Shadowing::computation(&CX).apply(&mut source)?;
+    // The rule field is written beside the stored field it reads, not over it.
+    assert_eq!(source["shownState"], "draft");
+    assert_eq!(source["state"], "suspended");
+    assert_eq!(source["title"], "HOSTING");
+    let read: Shadowing = serde_json::from_value(source)?;
+    assert_eq!((read.state, read.title.as_str()), (State::Draft, "HOSTING"));
+    Ok(())
+}
