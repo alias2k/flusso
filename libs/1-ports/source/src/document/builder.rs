@@ -136,6 +136,10 @@ impl std::fmt::Display for BuildFailure {
 /// snapshot for it. A document is identified by its root row, so snapshotting
 /// the **root table** alone seeds the whole index — `build` pulls in every join
 /// and aggregate server-side when each root row is assembled.
+///
+/// The engine takes each snapshot row of `root` as the index's document keyed
+/// by the row's [`RowKey`], with no [`resolve`](DocumentBuilder::resolve):
+/// a snapshot's key must be the key a document of this index is built by.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexScope {
     pub index: IndexName,

@@ -65,6 +65,7 @@ Two tests need one version whatever the run's tag, and name it with a `test_post
 | `source-postgres` | `record_pgoutput` | Postgres | not a test: re-records the decode bench's fixture (see [Benchmarks](benchmarks.md#re-recording-the-pgoutput-fixture)) |
 | `engine` | `wal` | Postgres | which op the engine emits per change, against a recording sink, including none for an update of columns no document reads |
 | `engine` | `wal_release` | Postgres | the slot releases WAL that produces no document, confirms within 5 s of the last flush, and a stalled sink pins it while a `backfill = false` sink does not |
+| `engine` | `backfill` | Postgres | a backfill of indexes that read each other's root tables runs no reverse lookup and writes every document once, equal to its `build` |
 | `engine` | `bytea_output` | Postgres + PgBouncer | a `bytea` reads as the same text in backfill and live changes whatever the server's `bytea_output`, through a transaction-mode pooler |
 | `engine` | `pipeline` | both | the full source-to-OpenSearch path, read back over HTTP: live ops across key types, soft-delete, backfill, the seed-marker contradictions, reverse resolution of deleted and re-parented children |
 | `sink-opensearch` | `reindex` | OpenSearch | generations, alias swap, retracted markers, index-prefix isolation, per-index `index_settings`, and the visibility a flush reports |

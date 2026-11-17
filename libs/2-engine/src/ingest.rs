@@ -8,11 +8,17 @@
 //! documents they touch (deduplicated), built once with
 //! [`DocumentBuilder::build_many`], and published as one [`Batch`] to every
 //! lane, carrying the position of the last change. Snapshot rows for a
-//! backfill flow through the same resolve → build path but are published only
-//! to the lanes that requested them, without a position, followed by a
-//! [`LaneItem::SnapshotComplete`]. Both kinds interleave on this single task,
-//! so lane order is build order and a document's later message is always the
-//! newer state.
+//! backfill go through the same build path but are not resolved: a snapshot
+//! reads every row of each requested index's root table, so a row is its own
+//! document, once per requested index rooted at its table (see
+//! [`IndexScope`](source::document::IndexScope)), and every document is
+//! reached exactly once by its own root row. Resolving a row like a live
+//! change would cost a reverse query per related path and rebuild the parents
+//! of related indexes over and over (issue #385). Snapshot batches are
+//! published only to the lanes that requested them, without a position,
+//! followed by a [`LaneItem::SnapshotComplete`]. Both kinds interleave on this
+//! single task, so lane order is build order and a document's later message is
+//! always the newer state.
 //!
 //! After every commit the engine reads the stream's watermark — the lowest
 //! position every lane has acknowledged — and hands it to the source as
@@ -40,7 +46,7 @@ use chrono::Utc;
 use futures::future::try_join_all;
 use futures::stream::BoxStream;
 use futures::{FutureExt, StreamExt};
-use kernel::{Envelope, IndexName, Position, SinkName};
+use kernel::{Envelope, IndexName, Position, SinkName, TableName};
 use source::cdc::{ChangeCapture, ChangeEvent, LiveChange};
 use source::document::{BuildFailure, Document, DocumentBuilder, DocumentId};
 use source::{SnapshotTable, SourceError};
@@ -236,7 +242,7 @@ impl IngestEngine {
                     match row {
                         Some(Err(error)) => return Err(error.into()),
                         Some(Ok(event)) => {
-                            self.buffer_snapshot(active, event).await?;
+                            active.buffer(&event);
                             if active.batch.is_full() {
                                 self.commit_snapshot(active, &lanes).await?;
                             }
@@ -521,17 +527,23 @@ impl IngestEngine {
         }
         let indexes: BTreeSet<IndexName> = requested.values().flatten().cloned().collect();
         let mut tables: Vec<SnapshotTable> = Vec::new();
+        let mut roots: HashMap<TableName, Vec<IndexName>> = HashMap::new();
         for index in &indexes {
-            if let Some(root) = scopes.get(index)
-                && !tables.contains(root)
-            {
-                tables.push(root.clone());
+            if let Some(root) = scopes.get(index) {
+                roots
+                    .entry(root.table.clone())
+                    .or_default()
+                    .push(index.clone());
+                if !tables.contains(root) {
+                    tables.push(root.clone());
+                }
             }
         }
         let mut snapshot = Snapshot {
             stream: Box::pin(futures::stream::empty()),
             requested,
             indexes: indexes.iter().cloned().collect(),
+            roots,
             handles,
             batch: PendingBatch::new(self.batch.max_changes),
         };
@@ -549,18 +561,6 @@ impl IngestEngine {
         self.observer.on_snapshot_started(&ordered);
         snapshot.stream = self.source.snapshot(&tables).await?;
         Ok(Some(snapshot))
-    }
-
-    async fn buffer_snapshot(&self, snapshot: &mut Snapshot, event: ChangeEvent) -> Result<()> {
-        let affected = self
-            .documents
-            .resolve(event.table(), event.key(), event.before(), event.after())
-            .await?;
-        let requested = affected
-            .into_iter()
-            .filter(|id| snapshot.indexes.contains(&id.index));
-        snapshot.batch.add(requested);
-        Ok(())
     }
 
     /// Build the snapshot batch once and publish each lane the slice of it that
@@ -708,14 +708,34 @@ impl PendingBatch {
     }
 }
 
-/// A running snapshot: its row stream, who asked for what, the request handles
-/// to acknowledge at the end, and the batch being filled.
+/// A running snapshot: its row stream, who asked for what, the requested
+/// indexes by root table, the request handles to acknowledge at the end, and
+/// the batch being filled.
 struct Snapshot {
     stream: BoxStream<'static, source::Result<ChangeEvent>>,
     requested: BTreeMap<SinkName, BTreeSet<IndexName>>,
     indexes: HashSet<IndexName>,
+    roots: HashMap<TableName, Vec<IndexName>>,
     handles: Vec<Box<dyn AckHandle>>,
     batch: PendingBatch,
+}
+
+impl Snapshot {
+    /// Buffer a snapshot row as its own document in every requested index
+    /// rooted at its table. Matched by table name, as
+    /// [`DocumentBuilder::resolve`] matches a change. A key with a null part
+    /// addresses no document.
+    fn buffer(&mut self, row: &ChangeEvent) {
+        let key = row.key();
+        let indexes = match self.roots.get(row.table()) {
+            Some(indexes) if !key.has_null() => indexes.as_slice(),
+            _ => &[],
+        };
+        self.batch.add(indexes.iter().map(|index| DocumentId {
+            index: index.clone(),
+            key: key.clone(),
+        }));
+    }
 }
 
 async fn next_snapshot_row(

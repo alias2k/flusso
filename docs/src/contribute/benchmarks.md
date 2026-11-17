@@ -171,7 +171,7 @@ It's `review-ab.sh --digest`: the same lock, warm base build, stamp, provenance 
 | `build` | 20 present ids and 2 missing ones, one at a time |
 | `build_many<16` | 10 present ids and 1 missing one: the array-constructor key form |
 | `build_many>=16` | every row and 5 missing ids: the array-parameter key form, chunked |
-| `backfill` | the root's snapshot, resolved, then built in batches of 256, as the ingest engine does |
+| `backfill` | the root's snapshot, each row its own document, built in batches of 256, as the ingest engine does |
 
 Each document is written as the sink would get it (`sink::to_json`, keys sorted), and the table has one row per index:
 

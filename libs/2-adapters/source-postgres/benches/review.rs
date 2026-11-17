@@ -206,8 +206,8 @@ async fn digest(settings: &Settings) -> String {
     out
 }
 
-/// The root's documents as a backfill builds them: the snapshot's rows,
-/// resolved, then built in batches as the ingest engine does.
+/// The root's documents as a backfill builds them: each snapshot row its own
+/// document, built in batches as the ingest engine does.
 async fn backfill(
     builder: &PgDocumentBuilder,
     capture: &WalChangeCapture,
@@ -221,15 +221,10 @@ async fn backfill(
     let mut ids = Vec::new();
     while let Some(event) = rows.next().await {
         let event = event.unwrap();
-        let resolved = builder
-            .resolve(event.table(), event.key(), event.before(), event.after())
-            .await
-            .unwrap();
-        ids.extend(
-            resolved
-                .into_iter()
-                .filter(|id| id.index.as_ref() == root.table),
-        );
+        ids.push(DocumentId {
+            index: kernel::IndexName::try_new(root.table).unwrap(),
+            key: event.key().clone(),
+        });
     }
     let mut documents = Vec::with_capacity(ids.len());
     for batch in ids.chunks(BACKFILL_BATCH) {

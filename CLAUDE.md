@@ -180,7 +180,7 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   reports `Fresh` exactly while the slot is missing, `prepare()` creates it — issue #120;
   `partitions`: a range-partitioned root and child stream under the parent's name via
   `publish_via_partition_root`, resolve, and backfill through the parent — issue #143) plus
-  `engine`'s `wal`, `wal_release`, `visibility`, and `pipeline`
+  `engine`'s `wal`, `wal_release`, `visibility`, `backfill`, and `pipeline`
   binaries (`wal_release`, issue #204: with the engines running over recording sinks, the slot's
   `confirmed_flush_lsn` and `restart_lsn` pass the WAL written by changes that produce no document
   — an unread table under `FOR ALL TABLES`, unread-column updates, filtered/soft-deleted/orphaned
@@ -704,11 +704,22 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   creation hung on a session the reload signal hadn't reached.
 - **Built once; build order is delivery order.** A batch buffers `(Position, ChangeEvent)`s,
   resolves each to `DocumentId`s, dedups, then `build_many` assembles each touched document
-  **once** for all sinks. Snapshot rows go through the same path but are published *without* a
-  position and *only* to the requesting lanes, ending with `LaneItem::SnapshotComplete`; snapshot
-  and live builds are serialized on the one ingest task, so on any lane a later message is the
-  newer state and sinks need no versioning. Guards:
-  `builds_a_repeatedly_touched_document_once_per_batch`, `snapshots_go_only_to_the_requesting_lane`.
+  **once** for all sinks. Snapshot rows go through the same build but are **never resolved**
+  (issue #385): a snapshot reads every row of each requested index's root table, so a row is its
+  own document, once per requested index rooted at its table (`Snapshot::buffer`, matched by table
+  name as `resolve` matches; a key with a null part addresses nothing), and each document is built
+  once per snapshot. Resolving it like a live change ran a reverse query per related path and row
+  and rebuilt related indexes' parents in every batch a child row landed in. They are published
+  *without* a position and *only* to the requesting lanes, ending with `LaneItem::SnapshotComplete`;
+  snapshot and live builds are serialized on the one ingest task, so on any lane a later message is
+  the newer state and sinks need no versioning. Guards:
+  `builds_a_repeatedly_touched_document_once_per_batch`, `snapshots_go_only_to_the_requesting_lane`,
+  `tests::snapshot`'s `a_backfill_of_related_indexes_builds_each_document_once` /
+  `a_backfill_beside_seeded_related_indexes_writes_them_nothing` /
+  `a_backfill_of_one_of_two_indexes_on_a_table_builds_only_that_one`, and `engine`'s `backfill` e2e
+  (`pg_stat_statements`: no reverse lookup; every document once and equal to its `build`; two
+  indexes on one table, a self-referencing `has_many`, `soft_delete`, a root filter, seeded
+  siblings).
 - **Backfill is each *sink's* decision, and requests are at-least-once.** `stage` asks the sink
   `is_seeded` per index and sends one `Backfill` request for the unseeded set (skipped under
   `--skip-backfill` or the sink's `backfill = false`, the stateless-sink opt-out); the ingest
