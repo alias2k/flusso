@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Each index runs on its own task; order is kept per document
