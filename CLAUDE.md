@@ -885,7 +885,8 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   ahead into a **window** of at most `writes + LOOKAHEAD` (32) delivered items, bounded because a
   delivered item leaves the lane's bound (`sink_engine/writes.rs`). **Admission**: an item starts
   only when no earlier unfinished item (in flight, or waiting ahead of it) shares a document
-  (`(index, id)` hashed to `u64`; a collision only holds an item back). **Selection**: live
+  (`(index, id)` hashed to `u64`, only when a comparison is needed: nothing in flight and one kind
+  waiting grants the front item unhashed; a collision only holds an item back). **Selection**: live
   (positioned) items first, every fourth *contested* grant (both kinds admissible) to the oldest
   admissible backfill item; a `SnapshotComplete` starts once it is the window's front and nothing is
   in flight, and nothing behind it starts until it is done; a reindex waits for the writes in flight.

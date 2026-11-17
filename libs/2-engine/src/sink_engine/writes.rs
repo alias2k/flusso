@@ -10,7 +10,10 @@
 //! a document with it, so a document is never written twice at once and a
 //! later build always lands after an earlier one. Documents are compared by a
 //! 64-bit hash of `(index, id)`, kept sorted per item so two items are
-//! compared in one merge walk: a collision only holds an item back.
+//! compared in one merge walk: a collision only holds an item back. The
+//! hashes are computed only when a comparison is needed: with nothing in
+//! flight and one kind waiting, the front item is granted as it is, so a
+//! sink writing one item at a time hashes nothing.
 //!
 //! **Selection.** Live items (they carry a position) go before backfill items,
 //! except every fourth grant both could take, which goes to the oldest
@@ -40,6 +43,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use futures::FutureExt;
@@ -68,8 +72,37 @@ struct Queued {
 }
 
 enum Queue {
-    Batch { batch: Batch, documents: Vec<u64> },
+    Batch { batch: Batch, documents: Documents },
     Complete { indexes: Vec<IndexName> },
+}
+
+/// An item's documents as admission keys, hashed on first use.
+struct Documents {
+    envelopes: Arc<[Envelope]>,
+    hashes: OnceLock<Vec<u64>>,
+}
+
+impl Documents {
+    fn new(envelopes: &Arc<[Envelope]>) -> Self {
+        Self {
+            envelopes: Arc::clone(envelopes),
+            hashes: OnceLock::new(),
+        }
+    }
+
+    /// The sorted, distinct hashes of the documents.
+    fn hashes(&self) -> &[u64] {
+        self.hashes.get_or_init(|| {
+            let mut hashes: Vec<u64> = self.envelopes.iter().map(document_hash).collect();
+            hashes.sort_unstable();
+            hashes.dedup();
+            hashes
+        })
+    }
+
+    fn share_none_with(&self, other: &Documents) -> bool {
+        disjoint(self.hashes(), other.hashes())
+    }
 }
 
 /// A write in flight.
@@ -79,7 +112,7 @@ struct Flight {
     envelopes: usize,
     changes: usize,
     work: Work,
-    documents: Vec<u64>,
+    documents: Documents,
     /// For a caught-up write, how many writes had returned at its grant.
     caught_up: Option<u64>,
 }
@@ -236,9 +269,7 @@ impl<'a> Run<'a> {
                 if let Some(position) = batch.position {
                     self.engine.lock_fences().received(position);
                 }
-                let mut documents: Vec<u64> = batch.envelopes.iter().map(document_hash).collect();
-                documents.sort_unstable();
-                documents.dedup();
+                let documents = Documents::new(&batch.envelopes);
                 Queue::Batch { batch, documents }
             }
             LaneItem::SnapshotComplete { indexes } => Queue::Complete { indexes },
@@ -323,6 +354,20 @@ impl<'a> Run<'a> {
         let backfill_waiting = self.window.iter().any(
             |queued| matches!(&queued.item, Queue::Batch { batch, .. } if batch.position.is_none()),
         );
+        // Nothing unfinished comes before the front item, and with one kind
+        // waiting there is no contest: it is the pick, with no hashing.
+        if self.flying.is_empty()
+            && !(live_waiting && backfill_waiting)
+            && matches!(
+                self.window.front(),
+                Some(Queued {
+                    item: Queue::Batch { .. },
+                    ..
+                })
+            )
+        {
+            return Some(0);
+        }
         let mut live = None;
         let mut backfill = None;
         for (index, queued) in self.window.iter().enumerate() {
@@ -332,14 +377,14 @@ impl<'a> Run<'a> {
             let admissible = self
                 .flying
                 .values()
-                .all(|flight| disjoint(documents, &flight.documents))
+                .all(|flight| documents.share_none_with(&flight.documents))
                 && self
                     .window
                     .range(..index)
                     .all(|earlier| match &earlier.item {
                         Queue::Batch {
                             documents: earlier, ..
-                        } => disjoint(documents, earlier),
+                        } => documents.share_none_with(earlier),
                         Queue::Complete { .. } => true,
                     });
             if admissible {
@@ -371,7 +416,7 @@ impl<'a> Run<'a> {
     fn launch(
         &mut self,
         batch: Batch,
-        documents: Vec<u64>,
+        documents: Documents,
         handle: Box<dyn AckHandle>,
         caught_up: bool,
     ) {
@@ -437,6 +482,11 @@ impl<'a> Run<'a> {
         );
         self.engine
             .write_returned(flight.position, report.visibility, flight.caught_up);
+        // Let go of the batch before acknowledging it, so the lane frees it
+        // as the acknowledgement lands, as it did with one write at a time.
+        // Freeing it here after the acknowledgement made `live_drain` at 64
+        // changes per batch half again slower (glibc, pinned bench).
+        drop(flight.documents);
         self.acknowledge(flight.handle).await
     }
 
