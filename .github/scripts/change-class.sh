@@ -41,6 +41,8 @@ if ! "$python" -I "$tmp/change_class.py" --event "$EVENT" --job "${JOB:-}" \
   full "the base's classifier failed"
 fi
 # The verdict must be the last line: anything after it, or a write cut short, reads as no verdict.
-tail -n 1 "$tmp/output" 2>/dev/null | grep -q '^docs_only=' || full "the base's classifier gave no verdict"
+# Exactly `true` or `false`: `if:` compares without regard to case, so `True` would skip too.
+tail -n 1 "$tmp/output" 2>/dev/null | tr -d '\r' | grep -qxE 'docs_only=(true|false)' \
+  || full "the base's classifier gave no verdict"
 cat "$tmp/output" >>"$GITHUB_OUTPUT"
 cat "$tmp/summary" >>"$GITHUB_STEP_SUMMARY" 2>/dev/null || true

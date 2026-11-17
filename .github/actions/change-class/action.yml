@@ -53,11 +53,16 @@ runs:
           echo "full: $1" >&2
         }
         script=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/change-class.XXXXXX")
+        # The script writes to a file of its own, copied over only when it succeeds: a script
+        # that fails after an unterminated `key<<` can't swallow the full-run verdict.
+        verdict=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/change-class.XXXXXX")
         if [ "${EVENT:-}" != pull_request ]; then
           full "a \`${EVENT:-unknown}\` run checks everything"
         elif ! git show 'HEAD^1:.github/scripts/change-class.sh' >"$script" 2>/dev/null; then
           full "the base has no \`.github/scripts/change-class.sh\`"
-        elif ! bash "$script"; then
+        elif ! GITHUB_OUTPUT="$verdict" bash "$script"; then
           echo "::warning::the base's change-class.sh failed; running everything"
           full "the base's change-class.sh failed"
+        else
+          cat "$verdict" >>"$GITHUB_OUTPUT"
         fi

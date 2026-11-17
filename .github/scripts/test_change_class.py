@@ -583,6 +583,26 @@ class Action(unittest.TestCase):
         out, _ = self.run_action()
         self.assertEqual(verdict(out), "false")
 
+    def test_a_verdict_that_is_not_exactly_true_or_false_runs_everything(self) -> None:
+        # `if:` compares without regard to case, so `True` would skip the heavy steps too.
+        loose = (
+            "import sys\n"
+            "out = sys.argv[sys.argv.index('--output') + 1]\n"
+            "open(out, 'a').write('cargo=false\\ndocs_only=True\\n')\n"
+        )
+        self.base(classifier=loose)
+        self.merge({"docs/src/page.md": "changed\n"})
+        out, _ = self.run_action()
+        self.assertEqual(verdict(out), "false")
+
+    def test_a_base_shell_that_fails_cannot_swallow_the_full_run_verdict(self) -> None:
+        # An unterminated `key<<` would turn the override appended after it into that key's value.
+        self.base(shell="printf 'docs_only=true\\nk<<docs_only=false\\n' >>\"$GITHUB_OUTPUT\"; exit 4\n")
+        self.merge({"docs/src/page.md": "changed\n"})
+        out, _ = self.run_action()
+        self.assertNotIn("k<<", out)
+        self.assertEqual(verdict(out), "false")
+
     def test_every_prefix_of_a_docs_only_write_reads_as_a_full_run(self) -> None:
         # D: a write to $GITHUB_OUTPUT cut short anywhere never leaves docs_only=true behind
         # without the outputs it needs.
