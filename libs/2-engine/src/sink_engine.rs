@@ -1,5 +1,6 @@
 //! The sink engine: one per sink. Stage the sink's indexes, request whatever
-//! backfill the sink needs, then receive → apply → flush → acknowledge.
+//! backfill the sink needs, then receive → write → acknowledge, with up to
+//! `writes` lane items written at once.
 //!
 //! Staging ([`SinkEngine::stage`]) is the sink's own seeding decision: ensure
 //! every index, retire seeds the source can no longer honor (a `Fresh`
@@ -17,41 +18,43 @@
 //! failure seen, and the daemon retries the whole stage (each step is
 //! idempotent), which starts the rest.
 //!
-//! The loop ([`SinkEngine::run`]) applies each batch's envelopes, flushes once
-//! at the batch boundary, decides item-level rejections by the failure
-//! policies, and acknowledges: flush-then-ack is what makes delivery
-//! at-least-once, because the acknowledgement is what moves this lane's
-//! watermark. A `SnapshotComplete` marker records its indexes as seeded. A
-//! reindex arrives as a control message and is staged between two batches:
-//! `reindex` + `ensure_index` on the sink, then a fresh `Backfill` request.
+//! The loop ([`SinkEngine::run`], in `writes`) writes each lane item with
+//! one [`Sink::write`], several at once but never two holding the same
+//! document, decides item-level rejections by the failure policies, and
+//! acknowledges: write-then-ack is what makes delivery at-least-once, because
+//! the acknowledgement is what moves this lane's watermark, and the lane's
+//! watermark never passes an item still being written. A `SnapshotComplete`
+//! marker records its indexes as seeded once everything before it is written.
+//! A reindex arrives as a control message and is staged once the writes in
+//! flight returned: `reindex` + `ensure_index` on the sink, then a fresh
+//! `Backfill` request.
 //!
-//! The loop also reports the sink's two **fence levels** to the observer.
-//! *Applied* is the position of the batch just flushed, reported before its
-//! acknowledgement (see the loop for why the order matters). *Searchable*
-//! trails it by what each flush reported ([`Visibility`]): the engine queues
-//! every positioned flush with the moment it becomes searchable and reports the
-//! position of the last one that has, in order, so a searchable position always
-//! means "this and everything before it". The engine only observes; nothing
-//! here asks the sink to refresh.
+//! The loop also reports the sink's two **fence levels** to the observer, in
+//! position order whatever order the writes finish in (`fences`). *Applied* is
+//! the last position before the oldest one still being written, reported
+//! before the acknowledgement that lets the watermark pass it. *Searchable*
+//! trails it by what each write reported ([`Visibility`](sink::Visibility)), so a searchable
+//! position always means "this and everything before it". The engine only
+//! observes; nothing here asks the sink to refresh because a reader waits.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
-use kernel::{IndexMapping, IndexName, Position, SinkName};
-use sink::{Sink, SinkOptions, Visibility};
+use kernel::{IndexMapping, IndexName, SinkName};
+use sink::{Sink, SinkOptions};
 use source::cdc::Continuity;
-use stream::{LaneItem, Request, Stream};
+use stream::{Request, Stream};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant, sleep_until};
 
+use self::fences::Fences;
+
 use crate::error::{EngineError, Result, StagingFailures};
-use crate::observer::{
-    CommitStats, EngineId, NoopObserver, Observer, Stage, StageTiming, StartupStep, Work,
-};
-use crate::policy::{FailurePolicies, FailurePolicy};
+use crate::observer::{EngineId, NoopObserver, Observer, Stage, StageTiming, StartupStep};
+use crate::policy::FailurePolicies;
 use crate::stop::Stop;
 
 /// How many of a sink's indexes are staged at once.
@@ -66,6 +69,9 @@ pub(crate) const STAGE_CONCURRENCY: usize = 8;
 /// The longest an idle window stays open before it is reported, so a quiet
 /// sink reads as idle in every scrape, not as one spike when work resumes.
 const IDLE_TICK: Duration = Duration::from_secs(1);
+
+mod fences;
+mod writes;
 
 /// An operation the daemon hands a running sink engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,10 +105,11 @@ pub struct SinkEngine {
     /// received yet. Survives a restart of this engine's run, so re-staging
     /// doesn't ask for a snapshot the ingest engine is already serving.
     outstanding: Mutex<BTreeSet<IndexName>>,
-    /// Flushed positions not yet reported as searchable,
-    /// oldest first. Survives a restart of this engine's run, so a position
-    /// flushed before a failure is still reported once its time comes.
-    unsearchable: Mutex<VecDeque<(Position, Searchable)>>,
+    /// The fence levels over the positions received, in position order.
+    /// Survives a restart of this engine's run, so a redelivered item keeps
+    /// its place and a position written before a failure is still reported
+    /// once its time comes.
+    fences: Mutex<Fences>,
     stop: Stop,
     /// Indexes whose snapshot batches were acknowledged unapplied during a
     /// stop: their `SnapshotComplete` must not mark them seeded.
@@ -110,17 +117,7 @@ pub struct SinkEngine {
     /// Lane items acknowledged over this engine's life, across restarts.
     acknowledged: AtomicU64,
     /// Lane items written at once.
-    #[allow(dead_code)]
     writes: usize,
-}
-
-/// When a flushed position becomes searchable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Searchable {
-    /// At this instant (already passed for an immediate flush).
-    At(Instant),
-    /// When a later flush of this sink reports [`Visibility::Immediate`].
-    WithNextImmediate,
 }
 
 impl SinkEngine {
@@ -142,7 +139,7 @@ impl SinkEngine {
             failure_policies: FailurePolicies::default(),
             skip_backfill: false,
             outstanding: Mutex::new(BTreeSet::new()),
-            unsearchable: Mutex::new(VecDeque::new()),
+            fences: Mutex::new(Fences::default()),
             stop: Stop::new(),
             skipped: Mutex::new(BTreeSet::new()),
             acknowledged: AtomicU64::new(0),
@@ -165,8 +162,8 @@ impl SinkEngine {
         self
     }
 
-    /// How many lane items this engine writes at once (at least one; the
-    /// default). Honoured from the next commit.
+    /// How many lane items this engine writes at once: at least one, which
+    /// is the default. The daemon sets `[concurrency] writes`.
     pub fn with_writes(mut self, writes: usize) -> Self {
         self.writes = writes.max(1);
         self
@@ -394,9 +391,10 @@ impl SinkEngine {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Follow the lane until it closes (`Ok`) or a sink, stream, or `stop`
-    /// policy error stops the engine (`Err`). Control messages arriving on
-    /// `control` are handled between batches.
+    /// Follow the lane until it closes and everything taken from it is
+    /// written (`Ok`), or until a sink, stream, or `stop` policy error stops
+    /// the engine (`Err`), once the writes in flight beside it returned.
+    /// Control messages arriving on `control` are handled between writes.
     #[tracing::instrument(name = "sink.run", skip_all, fields(sink = %self.name))]
     pub async fn run(&self, control: &mut mpsc::Receiver<SinkControl>) -> Result<()> {
         let result = self.run_inner(control).await;
@@ -415,270 +413,25 @@ impl SinkEngine {
     }
 
     async fn run_inner(&self, control: &mut mpsc::Receiver<SinkControl>) -> Result<()> {
-        let mut lane = self.stream.lane(&self.name)?.consumer;
-        let mut control_open = true;
-        let mut idle_since = Instant::now();
-        let mut idle_tick = tokio::time::interval_at(idle_since + IDLE_TICK, IDLE_TICK);
-        idle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            let next_searchable = self.next_searchable_at();
-            tokio::select! {
-                delivery = lane.recv() => match delivery? {
-                    None => return Ok(()),
-                    Some(delivery) => {
-                        self.idle_until(idle_since);
-                        let (item, handle) = delivery.into_parts();
-                        let flushed = match item {
-                            LaneItem::Batch(batch)
-                                if batch.position.is_none() && self.stop.is_requested() =>
-                            {
-                                self.lock_skipped()
-                                    .extend(batch.envelopes.iter().map(|e| e.index.clone()));
-                                None
-                            }
-                            LaneItem::Batch(batch) => {
-                                let visibility = self.commit(&batch, lane.is_empty()).await?;
-                                Some((batch.position, visibility))
-                            }
-                            LaneItem::SnapshotComplete { indexes } => {
-                                let skipped = self.lock_skipped().clone();
-                                for index in indexes.iter().filter(|index| skipped.contains(*index)) {
-                                    tracing::info!(%index, "stopping: its backfill was cut short, so it stays unseeded and is backfilled on the next start");
-                                }
-                                let indexes: Vec<IndexName> = indexes
-                                    .into_iter()
-                                    .filter(|index| !skipped.contains(index))
-                                    .collect();
-                                for index in &indexes {
-                                    let started = Instant::now();
-                                    self.sink.mark_seeded(index).await?;
-                                    self.observer.on_stage(
-                                        StageTiming::new(Stage::Seed, started.elapsed())
-                                            .work(Work::Backfill)
-                                            .sink(&self.name)
-                                            .index(index),
-                                    );
-                                    self.observer.on_index_seeded(&self.name, index);
-                                }
-                                let mut outstanding = self.lock_outstanding();
-                                for index in &indexes {
-                                    outstanding.remove(index);
-                                }
-                                if !indexes.is_empty() {
-                                    tracing::info!(indexes = indexes.len(), "backfill complete");
-                                }
-                                None
-                            }
-                        };
-                        // A stop skips snapshot batches unflushed, so the last
-                        // live flush may have run while they were still queued
-                        // (not caught up) and left its refresh to a flush that
-                        // never comes.
-                        let flushed = match flushed {
-                            None if self.stop.is_requested()
-                                && lane.is_empty()
-                                && self.waits_for_an_immediate_flush() =>
-                            {
-                                let started = Instant::now();
-                                let report = self.sink.write(&[], true).await?;
-                                self.observer.on_stage(
-                                    StageTiming::new(Stage::Write, started.elapsed())
-                                        .work(Work::Live)
-                                        .sink(&self.name),
-                                );
-                                Some((None, report.visibility))
-                            }
-                            flushed => flushed,
-                        };
-                        // Before the acknowledgement: applied is a fact about
-                        // the destination, and a listener must hear of it
-                        // before the source can be told the position is
-                        // confirmed and forget it.
-                        if let Some((position, visibility)) = flushed {
-                            self.report_positions(position, visibility);
-                        }
-                        handle.ack().await?;
-                        self.acknowledged.fetch_add(1, Ordering::Relaxed);
-                        idle_since = Instant::now();
-                    }
-                },
-                message = control.recv(), if control_open => {
-                    let started = self.idle_until(idle_since);
-                    match message {
-                        None => control_open = false,
-                        Some(SinkControl::Reindex { indexes }) => {
-                            self.reindex(indexes).await?;
-                            self.observer.on_stage(
-                                StageTiming::new(Stage::Reindex, started.elapsed()).sink(&self.name),
-                            );
-                        }
-                    }
-                    idle_since = Instant::now();
-                }
-                () = until(next_searchable) => {
-                    self.idle_until(idle_since);
-                    self.report_searchable();
-                    idle_since = Instant::now();
-                }
-                _ = idle_tick.tick() => idle_since = self.idle_until(idle_since),
-            }
-        }
+        let lane = self.stream.lane(&self.name)?.consumer;
+        writes::Run::new(self, lane).run(control).await
     }
 
     /// Close an idle window (nothing in flight, nothing taken) and report it;
     /// return the moment it closed.
-    fn idle_until(&self, since: Instant) -> Instant {
+    pub(super) fn idle_until(&self, since: Instant) -> Instant {
         let now = Instant::now();
         self.observer
             .on_stage(StageTiming::new(Stage::Idle, now - since).sink(&self.name));
         now
     }
 
-    /// Report a flush that returned: its position is applied, and it joins the
-    /// queue of positions waiting to become searchable. A snapshot batch has no
-    /// position, but an immediate flush of one still releases what earlier
-    /// flushes deferred.
-    fn report_positions(&self, position: Option<Position>, visibility: Visibility) {
-        // The caught-up path, and the hot one: nothing is waiting and this
-        // flush is searchable already, so there is nothing to queue.
-        if visibility == Visibility::Immediate && self.lock_unsearchable().is_empty() {
-            if let Some(position) = position {
-                self.observer.on_position_applied(&self.name, position);
-                self.observer.on_position_searchable(&self.name, position);
-            }
-            return;
-        }
-        let now = Instant::now();
-        {
-            let mut queue = self.lock_unsearchable();
-            if visibility == Visibility::Immediate {
-                for (_, due) in queue.iter_mut() {
-                    if *due == Searchable::WithNextImmediate {
-                        *due = Searchable::At(now);
-                    }
-                }
-            }
-            if let Some(position) = position {
-                queue.push_back((
-                    position,
-                    match visibility {
-                        Visibility::Immediate => Searchable::At(now),
-                        Visibility::Within(delay) => Searchable::At(now + delay),
-                        Visibility::Deferred => Searchable::WithNextImmediate,
-                    },
-                ));
-            }
-        }
-        if let Some(position) = position {
-            self.observer.on_position_applied(&self.name, position);
-        }
-        self.report_searchable();
-    }
-
-    /// Report the last queued position whose time has come, and drop it and
-    /// everything before it. In order: a position that is not searchable yet
-    /// holds back the ones behind it.
-    fn report_searchable(&self) {
-        let now = Instant::now();
-        let mut reached = None;
-        {
-            let mut queue = self.lock_unsearchable();
-            while let Some((position, Searchable::At(due))) = queue.front().copied() {
-                if due > now {
-                    break;
-                }
-                reached = Some(position);
-                queue.pop_front();
-            }
-        }
-        if let Some(position) = reached {
-            self.observer.on_position_searchable(&self.name, position);
-        }
-    }
-
-    /// Whether a flushed position waits for the next immediately visible flush
-    /// to become searchable.
-    fn waits_for_an_immediate_flush(&self) -> bool {
-        self.lock_unsearchable()
-            .iter()
-            .any(|(_, due)| *due == Searchable::WithNextImmediate)
-    }
-
-    /// When the oldest queued position becomes searchable, if that is a matter
-    /// of time.
-    fn next_searchable_at(&self) -> Option<Instant> {
-        match self.lock_unsearchable().front() {
-            Some((_, Searchable::At(due))) => Some(*due),
-            _ => None,
-        }
+    fn lock_fences(&self) -> std::sync::MutexGuard<'_, Fences> {
+        self.fences.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn lock_skipped(&self) -> std::sync::MutexGuard<'_, BTreeSet<IndexName>> {
         self.skipped.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn lock_unsearchable(&self) -> std::sync::MutexGuard<'_, VecDeque<(Position, Searchable)>> {
-        self.unsearchable
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Apply every envelope, flush once, decide rejections by policy. The
-    /// caller acknowledges only after this returns `Ok`: a crash before the
-    /// flush leaves the batch unacknowledged and redelivered, re-applied
-    /// idempotently; a `stop` rejection returns `Err` with the batch still
-    /// unacknowledged. Returns when the flush's documents become searchable.
-    #[tracing::instrument(name = "sink.commit", level = "debug", skip_all, fields(envelopes = batch.envelopes.len(), caught_up))]
-    async fn commit(&self, batch: &stream::Batch, caught_up: bool) -> Result<Visibility> {
-        let work = if batch.position.is_some() {
-            Work::Live
-        } else {
-            Work::Backfill
-        };
-        let flush_start = Instant::now();
-        let report = self.sink.write(&batch.envelopes, caught_up).await?;
-        let flush = flush_start.elapsed();
-        self.observer.on_stage(
-            StageTiming::new(Stage::Write, flush)
-                .work(work)
-                .sink(&self.name),
-        );
-
-        // A single `stop`-policy rejection stops the run, decided *before* any
-        // quarantine event is emitted, so a `skip` document in the same batch
-        // isn't double-counted when the unacknowledged batch is redelivered.
-        if !report.is_clean() {
-            let mut stop_count = 0usize;
-            let mut stop_example = String::new();
-            for doc in &report.rejected {
-                if self.failure_policies.resolve(&doc.index) == FailurePolicy::Stop {
-                    if stop_count == 0 {
-                        stop_example =
-                            format!("{}/{}: {}", doc.index, shown_id(&doc.id), doc.reason);
-                    }
-                    stop_count += 1;
-                }
-            }
-            if stop_count > 0 {
-                return Err(EngineError::DocumentsRejected(stop_count, stop_example));
-            }
-            for doc in &report.rejected {
-                tracing::warn!(
-                    index = %doc.index,
-                    id = %shown_id(&doc.id),
-                    reason = %doc.reason,
-                    "document rejected by sink; quarantining and continuing",
-                );
-                self.observer
-                    .on_document_quarantined(&self.name, &doc.index, &doc.id, &doc.reason);
-            }
-        }
-
-        self.observer.on_batch_committed(
-            &self.name,
-            CommitStats::new(batch.envelopes.len(), batch.changes, flush, work).sent(report.bytes),
-        );
-        Ok(report.visibility)
     }
 
     /// Stage a rebuild of `indexes` and request their snapshot. The current

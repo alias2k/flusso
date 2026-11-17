@@ -8,6 +8,10 @@ on_error = "skip"
 max_changes = 64
 max_delay_ms = 10
 
+# A property of the machine that runs flusso: never written into the lock.
+[concurrency]
+writes = 8
+
 [server]
 public_address = "0.0.0.0:9464"
 private_address = "127.0.0.1:9465"

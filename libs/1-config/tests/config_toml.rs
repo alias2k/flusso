@@ -253,6 +253,33 @@ fn server_section_is_optional_and_strict() {
 }
 
 #[test]
+fn concurrency_section_converts_and_is_optional_and_strict() {
+    let config = convert("[source]\ntype = \"postgres\"\n");
+    assert_eq!(
+        config.concurrency.writes, None,
+        "no [concurrency] means the defaults"
+    );
+    let config = convert(
+        r#"
+        [source]
+        type = "postgres"
+
+        [concurrency]
+        writes = 8
+        "#,
+    );
+    assert_eq!(config.concurrency.writes, std::num::NonZeroUsize::new(8));
+    for (table, refused) in [("writes = 0", "writes"), ("builds = 4", "builds")] {
+        let error = parse(&format!(
+            "[source]\ntype = \"postgres\"\n\n[concurrency]\n{table}\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(refused) || error.contains("zero"), "{error}");
+    }
+}
+
+#[test]
 fn batch_section_converts_and_is_optional_and_strict() {
     let config = convert("[source]\ntype = \"postgres\"\n");
     assert!(config.batch.is_empty(), "no [batch] means engine defaults");

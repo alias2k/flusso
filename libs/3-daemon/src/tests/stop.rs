@@ -43,12 +43,16 @@ impl HeldSink {
 
 #[async_trait]
 impl Sink for HeldSink {
-    async fn write(&self, _envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
-        if self.held.load(Ordering::SeqCst) {
-            self.flushing.notify_one();
-            self.release.notified().await;
+    async fn write(&self, envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
+        // An empty write is the engine asking an idle sink to refresh: held
+        // and counted are the writes of documents.
+        if !envelopes.is_empty() {
+            if self.held.load(Ordering::SeqCst) {
+                self.flushing.notify_one();
+                self.release.notified().await;
+            }
+            *self.flushed.lock().unwrap() += 1;
         }
-        *self.flushed.lock().unwrap() += 1;
         Ok(WriteReport::clean().visible(self.visibility))
     }
 

@@ -1318,18 +1318,16 @@ async fn an_immediately_visible_flush_is_applied_then_searchable() {
 
 #[tokio::test(start_paused = true)]
 async fn a_position_becomes_searchable_when_its_refresh_interval_passes() {
-    use sink::Visibility::{Immediate, Within};
-    let rig = PositionRig::start(ScriptedVisibility::new([
-        Within(Duration::from_secs(10)),
-        Immediate,
-    ]));
+    use sink::Visibility::Within;
+    let within = Within(Duration::from_secs(10));
+    let rig = PositionRig::start(ScriptedVisibility::new([within, within, within]));
     rig.publish(Some(1)).await;
     rig.publish(Some(2)).await;
     rig.settle().await;
     assert_eq!(
         rig.observer.events(),
         vec!["applied primary 1", "applied primary 2"],
-        "position 2 was refreshed, but 1 before it was not: nothing is searchable yet"
+        "no write, the idle caught-up one included, made them searchable"
     );
 
     tokio::time::sleep(Duration::from_secs(9)).await;
@@ -1346,9 +1344,11 @@ async fn a_position_becomes_searchable_when_its_refresh_interval_passes() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_deferred_position_waits_for_the_next_immediate_flush() {
+async fn a_deferred_position_waits_for_a_caught_up_immediate_write() {
     use sink::Visibility::{Deferred, Immediate};
-    let rig = PositionRig::start(ScriptedVisibility::new([Deferred, Deferred, Immediate]));
+    let rig = PositionRig::start(ScriptedVisibility::new([
+        Deferred, Deferred, Deferred, Immediate,
+    ]));
     rig.publish(Some(1)).await;
     rig.publish(Some(2)).await;
     rig.settle().await;
@@ -1357,7 +1357,8 @@ async fn a_deferred_position_waits_for_the_next_immediate_flush() {
     assert_eq!(
         rig.observer.events(),
         vec!["applied primary 1", "applied primary 2"],
-        "no amount of time makes a deferred position searchable"
+        "the idle caught-up write couldn't refresh, and no amount of time makes a deferred \
+         position searchable"
     );
 
     rig.publish(Some(3)).await;

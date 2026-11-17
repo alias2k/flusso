@@ -771,6 +771,7 @@ fn config() -> Config {
         )]),
         on_error: Default::default(),
         batch: Default::default(),
+        concurrency: Default::default(),
         server: Default::default(),
         prefix: String::new(),
     };

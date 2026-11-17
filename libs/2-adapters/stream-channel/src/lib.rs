@@ -130,16 +130,18 @@ struct Channel<T> {
 /// earliest first, before anything new is pulled off the channel. Releasing
 /// one ticket leaves every other delivery in flight alone.
 ///
-/// So a released delivery can come back after later ones were acknowledged.
-/// "A later message on a lane is the newer state" therefore holds only while
-/// a consumer keeps one delivery of a sink lane in flight, as the sink engine
-/// does today (ADR 0012's stage 2 replaces that with per-document admission).
+/// So a released delivery can come back after later ones were acknowledged,
+/// and deliveries are acknowledged in any order: the sink engine writes
+/// several at once and keeps per-document order itself (ADR 0012). The
+/// lane's watermark is therefore not the highest acknowledgement but the last
+/// positioned item delivered before the oldest unacknowledged positioned one,
+/// which each entry records when it is first delivered.
 #[derive(Debug)]
 struct Ledger<T> {
     in_flight: Vec<InFlight<T>>,
     next_ticket: Ticket,
-    /// The last position acknowledged on this lane.
-    acked: Option<Position>,
+    /// The position of the last positioned item first delivered on this lane.
+    delivered: Option<Position>,
 }
 
 #[derive(Debug)]
@@ -147,6 +149,9 @@ struct InFlight<T> {
     ticket: Ticket,
     item: T,
     due: bool,
+    /// The position of the last positioned item delivered before this one:
+    /// what the lane may confirm while this one is unacknowledged.
+    before: Option<Position>,
 }
 
 type Ticket = u64;
@@ -163,10 +168,6 @@ impl<T: Clone> Ledger<T> {
 impl<T> Channel<T> {
     fn lock(&self) -> std::sync::MutexGuard<'_, Ledger<T>> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn acked(&self) -> Option<Position> {
-        self.lock().acked
     }
 
     /// Mark `tickets` due for redelivery. Only they come back, in lane order;
@@ -205,8 +206,24 @@ impl<T: Positioned + Clone + Send + 'static> Channel<T> {
             state: Mutex::new(Ledger {
                 in_flight: Vec::new(),
                 next_ticket: 0,
-                acked: None,
+                delivered: None,
             }),
+        }
+    }
+
+    /// The last positioned item delivered before the oldest unacknowledged
+    /// positioned one; with none unacknowledged, the last positioned item
+    /// delivered. Items still queued are newer than every delivered one, so
+    /// they never lower it.
+    fn acked(&self) -> Option<Position> {
+        let ledger = self.lock();
+        match ledger
+            .in_flight
+            .iter()
+            .find(|entry| entry.item.position().is_some())
+        {
+            Some(oldest) => oldest.before,
+            None => ledger.delivered,
         }
     }
 
@@ -218,6 +235,10 @@ impl<T: Positioned + Clone + Send + 'static> Channel<T> {
         let mut ledger = self.lock();
         let ticket = ledger.next_ticket;
         ledger.next_ticket += 1;
+        let before = ledger.delivered;
+        if let Some(position) = item.position() {
+            ledger.delivered = Some(position);
+        }
         // A release that landed while awaiting the channel made an earlier
         // entry due: serve it first and leave the new item due behind it, so
         // nothing is delivered twice or out of order.
@@ -225,6 +246,7 @@ impl<T: Positioned + Clone + Send + 'static> Channel<T> {
             ticket,
             item,
             due: true,
+            before,
         });
         ledger.take_due()
     }
@@ -238,10 +260,7 @@ impl<T: Positioned + Clone + Send + 'static> Channel<T> {
         else {
             return;
         };
-        let entry = ledger.in_flight.remove(index);
-        if let Some(position) = entry.item.position() {
-            ledger.acked = Some(ledger.acked.map_or(position, |p| p.max(position)));
-        }
+        ledger.in_flight.remove(index);
     }
 }
 

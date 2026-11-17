@@ -15,7 +15,7 @@ use kernel::PortEntry;
 
 use crate::toml::ConfigToml;
 
-use super::{BatchConfig, Config, DEFAULT_STREAM_KIND, ServerConfig};
+use super::{BatchConfig, ConcurrencyConfig, Config, DEFAULT_STREAM_KIND, ServerConfig};
 
 /// Infallible (nothing is resolved or interpreted here), so this is a `From`;
 /// the blanket impl still gives callers a `TryFrom<ConfigToml>`.
@@ -32,6 +32,9 @@ impl From<ConfigToml> for Config {
             batch: BatchConfig {
                 max_changes: toml.batch.max_changes,
                 max_delay_ms: toml.batch.max_delay_ms,
+            },
+            concurrency: ConcurrencyConfig {
+                writes: toml.concurrency.writes,
             },
             server: ServerConfig {
                 public_address: toml.server.public_address,

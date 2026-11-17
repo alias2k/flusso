@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use entities::Batch;
+use entities::Concurrency;
 use entities::IndexEntry;
 use entities::Server;
 use kernel::PortEntry;
@@ -38,7 +39,8 @@ use kernel::common;
 pub struct ConfigToml {
     // Field order is the `flusso.toml` serialization order: the `toml` writer
     // floats the scalar globals (prefix, on_error) to the top, then emits tables
-    // in declaration order — source, stream, batch, server, sinks, indexes.
+    // in declaration order — source, stream, batch, concurrency, server, sinks,
+    // indexes.
     /// The database rows come from: `type` selects the source adapter, the
     /// rest of the table is that adapter's options.
     pub source: PortEntry,
@@ -65,6 +67,11 @@ pub struct ConfigToml {
     /// and their `FLUSSO_*` variables override them (flag > env > file).
     #[serde(default, skip_serializing_if = "Batch::is_empty")]
     pub batch: Batch,
+    /// How much the pipeline does at once. Never written into `flusso.lock`:
+    /// `--writes` / `FLUSSO_WRITES` override it, and give it to `run --locked`
+    /// (flag > env > file).
+    #[serde(default, skip_serializing_if = "Concurrency::is_empty")]
+    pub concurrency: Concurrency,
     /// Bind addresses for the operational HTTP surfaces. The `FLUSSO_*`
     /// variables and CLI flags override these (flag > env > file).
     #[serde(default, skip_serializing_if = "Server::is_empty")]

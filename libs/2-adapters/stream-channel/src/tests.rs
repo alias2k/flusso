@@ -166,7 +166,11 @@ async fn several_deliveries_can_be_outstanding_and_ack_independently() {
     assert!(!stream.is_idle(), "but three are unacknowledged");
 
     second_handle.ack().await.unwrap();
-    assert_eq!(stream.watermark(), Some(Position(2)));
+    assert_eq!(
+        stream.watermark(),
+        None,
+        "2 is acknowledged, but 1 before it is not"
+    );
     first_handle.nack().await.unwrap();
     drop(third_handle);
 

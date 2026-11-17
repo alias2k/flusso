@@ -81,6 +81,20 @@ pub fn batch_policy(config: &Config) -> BatchPolicy {
     }
 }
 
+/// Lane items each sink writes at once when `[concurrency] writes` is unset.
+/// Measured on OpenSearch (ADR 0012): 4 in flight gives about 3× one, 8
+/// little more, 16 less.
+pub const DEFAULT_WRITES: usize = 4;
+
+/// Lane items each sink writes at once: `[concurrency] writes`, else
+/// [`DEFAULT_WRITES`].
+pub fn writes(config: &Config) -> usize {
+    config
+        .concurrency
+        .writes
+        .map_or(DEFAULT_WRITES, NonZeroUsize::get)
+}
+
 /// A configured-but-not-yet-running deployment over one [`Config`].
 #[derive(Debug)]
 pub struct Daemon {
@@ -205,6 +219,7 @@ impl Daemon {
                     mappings.clone(),
                 )
                 .with_options(parts.options)
+                .with_writes(writes(&config))
                 .with_observer(Arc::clone(&observer))
                 .with_failure_policies(failure_policies.clone())
                 .skip_backfill(options.skip_backfill)

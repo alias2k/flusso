@@ -661,6 +661,7 @@ fn backendless_config() -> Config {
         )]),
         on_error: Default::default(),
         batch: Default::default(),
+        concurrency: Default::default(),
         server: Default::default(),
         prefix: String::new(),
     }
@@ -1041,6 +1042,15 @@ async fn failed_ingest_engine_restarts_and_resumes_the_stream() {
     assert_eq!(snap.errors, 1);
     assert_eq!(snap.sinks["primary"].changes_committed, 2);
     assert_eq!(snap.phase, Phase::Stopped);
+}
+
+#[test]
+fn writes_default_to_four_unless_the_config_sets_them() {
+    let mut config = backendless_config();
+    assert_eq!(writes(&config), DEFAULT_WRITES);
+    assert_eq!(DEFAULT_WRITES, 4);
+    config.concurrency.writes = std::num::NonZeroUsize::new(1);
+    assert_eq!(writes(&config), 1);
 }
 
 #[test]

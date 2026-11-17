@@ -291,14 +291,18 @@ async fn a_live_batch_reports_each_stage_once_with_the_time_it_took() {
 
 #[tokio::test(start_paused = true)]
 async fn a_full_lane_shows_as_time_waiting_to_publish() {
-    let changes: Vec<ChangeEvent> = (1..=6).map(upsert).collect();
+    // The sink engine reads up to `writes` + 32 items ahead of its writes, and
+    // falls behind by `FLUSH + APPLY - BUILD - RESOLVE` per batch, so the lane
+    // fills only after about 90 batches.
+    const CHANGES: u32 = 120;
+    let changes: Vec<ChangeEvent> = (1..=CHANGES as i64).map(upsert).collect();
     let source = Arc::new(MockSource::new(changes));
     let timings = run(source, SlowSink::new(true), 1, batch(1)).await;
 
     let lane_wait = timings.of(Stage::LaneWait);
     let publish = timings.of(Stage::Publish);
-    assert_eq!(lane_wait.len(), 6);
-    assert_eq!(publish.len(), 6);
+    assert_eq!(lane_wait.len(), CHANGES as usize);
+    assert_eq!(publish.len(), CHANGES as usize);
     assert!(
         publish.iter().map(|t| t.3).max().unwrap() >= FLUSH - BUILD - RESOLVE,
         "a batch built while the lane is full waits for the sink's flush: {publish:?}"
@@ -309,7 +313,7 @@ async fn a_full_lane_shows_as_time_waiting_to_publish() {
             "a lane never waits longer than the publish"
         );
     }
-    assert_eq!(timings.total(Stage::Write), (APPLY + FLUSH) * 6);
+    assert_eq!(timings.total(Stage::Write), (APPLY + FLUSH) * CHANGES);
     assert!(
         timings.total(Stage::Publish) > Duration::ZERO,
         "the ingest side was blocked on the lane"

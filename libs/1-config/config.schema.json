@@ -40,6 +40,14 @@
         }
       ]
     },
+    "concurrency": {
+      "description": "How much the pipeline does at once. Never written into `flusso.lock`:\n`--writes` / `FLUSSO_WRITES` override it, and give it to `run --locked`\n(flag > env > file).",
+      "allOf": [
+        {
+          "$ref": "#/definitions/Concurrency"
+        }
+      ]
+    },
     "server": {
       "description": "Bind addresses for the operational HTTP surfaces. The `FLUSSO_*`\nvariables and CLI flags override these (flag > env > file).",
       "allOf": [
@@ -132,6 +140,22 @@
         }
       },
       "description": "How live changes are grouped into one batch, from a `flusso.toml` `[batch]`\ntable. Both keys are optional; an omitted key keeps the engine's default.\n`--batch-max-changes` / `--batch-max-delay-ms` (and their `FLUSSO_*` env\nvars) override them at run time (flag > env > file)."
+    },
+    "Concurrency": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "writes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 1,
+          "description": "Bulk writes each sink runs at once (default 4). Two writes never hold\nthe same document, and live changes go before backfill pages. `1`\nwrites one lane item at a time."
+        }
+      },
+      "description": "How much the pipeline does at once, from a `flusso.toml` `[concurrency]`\ntable. A property of the machine that runs flusso, not of the deployment:\nit is never written into `flusso.lock`, so `run --locked` takes it from\n`--writes` / `FLUSSO_WRITES` or the default. Every key is optional."
     },
     "Server": {
       "type": "object",
@@ -532,7 +556,7 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0,
-          "description": "Maximum serialized size of one bulk request, in bytes. A flush is split\nso no request exceeds this, independent of `batch_size`, keeping\nrequests under OpenSearch's `http.max_content_length` (100 MB by\ndefault). A single document larger than this is sent on its own.",
+          "description": "Maximum serialized size of one bulk request, in bytes. A write is split\nso no request exceeds this, independent of `batch_size`, keeping\nrequests under OpenSearch's `http.max_content_length` (100 MB by\ndefault). A single document larger than this is sent on its own.",
           "default": 10485760
         },
         "timeout_secs": {
@@ -546,7 +570,7 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0,
-          "description": "Retries for a transient bulk failure: a whole request that failed, or\ndocuments OpenSearch refused as busy (HTTP 429 or 503), which are resent\nalone. Busy documents left after the last retry fail the flush, and the\nbatch is redelivered. A refused TLS certificate is never retried.",
+          "description": "Retries for a transient bulk failure: a whole request that failed, or\ndocuments OpenSearch refused as busy (HTTP 429 or 503), which are resent\nalone. Busy documents left after the last retry fail the write, and the\nbatch is redelivered. A refused TLS certificate is never retried.",
           "default": 3
         },
         "pipeline": {
@@ -572,7 +596,7 @@
         },
         "refresh_interval": {
           "type": "string",
-          "description": "The `refresh_interval` applied to each index once its backfill completes:\nthe steady-state visibility ceiling (`\"10s\"`, `\"1s\"`, or `\"-1\"` to\ndisable automatic refresh). Indexes are seeded with refresh off and\nhanded this value afterwards; a flush that catches the pipeline up\nforces an immediate refresh, so this only bounds staleness while a\nbacklog drains. With `\"-1\"`, that catching-up flush also refreshes\nwhat the backlog wrote.",
+          "description": "The `refresh_interval` applied to each index once its backfill completes:\nthe steady-state visibility ceiling (`\"10s\"`, `\"1s\"`, or `\"-1\"` to\ndisable automatic refresh). Indexes are seeded with refresh off and\nhanded this value afterwards; a write that catches the pipeline up\nforces an immediate refresh of everything written before it, so this\nonly bounds staleness while a backlog drains.",
           "default": "10s"
         },
         "text_analysis": {
