@@ -9,6 +9,7 @@ mod doc;
 mod fragment;
 mod map;
 mod multi;
+mod read_time;
 mod resolve;
 mod serde_attr;
 mod spec;
@@ -114,6 +115,9 @@ struct Attrs {
     scope_mod: Option<Ident>,
     config: Option<String>,
     rename_all: Option<String>,
+    /// `context = Type` — the request-time values the root's read-time
+    /// fields are decided from.
+    context: Option<syn::Type>,
 }
 
 impl Attrs {
@@ -122,6 +126,7 @@ impl Attrs {
         let mut index_span = input.ident.span();
         let mut scope_mod: Option<Ident> = None;
         let mut config: Option<String> = None;
+        let mut context: Option<syn::Type> = None;
 
         for attr in input
             .attrs
@@ -154,10 +159,14 @@ impl Attrs {
                     let lit: LitStr = meta.value()?.parse()?;
                     once(&meta, config.is_some(), "a root reads one `flusso.toml`")?;
                     config = Some(lit.value());
+                } else if meta.path.is_ident("context") {
+                    let ty: syn::Type = meta.value()?.parse()?;
+                    once(&meta, context.is_some(), "a root reads one context")?;
+                    context = Some(ty);
                 } else {
                     return Err(meta.error(
                         "unknown `flusso` attribute (expected `index`, `config`, \
-                         or `scope_mod`)",
+                         `scope_mod`, or `context`)",
                     ));
                 }
                 Ok(())
@@ -177,6 +186,7 @@ impl Attrs {
             scope_mod,
             config,
             rename_all: serde_attr::rename_all(&input.attrs),
+            context,
         })
     }
 }
@@ -257,6 +267,7 @@ fn expand(input: DeriveInput) -> TokenStream2 {
         &fields,
         &tracked,
         resolved.auto_subfields,
+        attrs.context.as_ref(),
     );
 
     let mut out = items;

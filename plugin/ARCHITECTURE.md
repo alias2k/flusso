@@ -56,6 +56,7 @@ home; everything else points at it.
 | Read-side migrations (onto flusso; off the removed `FlussoDocument`/`path` form) | `skills/flusso-query/migration.md` |
 | Per-type query options, closed param enums, compound/extra query types, `SortBuilder` verbs | `skills/flusso-query/options.md` |
 | Dynamic-key `map` fields | `skills/flusso-query/maps.md` |
+| Read-time fields (`context`, rule fields, computed fields) | `skills/flusso-query/read-time.md` |
 | Sorting rules (every kind, including ordered enums and map-key fallback) | `skills/flusso-query/SKILL.md`, one `## Sorting` section |
 | Paging (offset vs page cursor) | `skills/flusso-query/SKILL.md`, one `## Paging` section |
 | Reading a write right after making it (fences: the position, the two levels, the errors) | `skills/flusso-query/SKILL.md`, one `## Reading your own writes` section |

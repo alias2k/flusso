@@ -15,6 +15,7 @@
 //! # #[derive(serde::Deserialize)] struct User { email: String }
 //! # impl FlussoScope for User { const PATH: &'static [Segment] = &[]; }
 //! # impl FlussoRoot for User {
+//! #     type Context = ();
 //! #     const INDEX: &'static str = "users";
 //! #     const SCHEMA_HASH: &'static str = "xxxxxx";
 //! # }

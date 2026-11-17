@@ -9,6 +9,7 @@ use syn::{Field, Fields, Ident, LitStr, Type};
 
 use config::{Mapping, MappingType, ResolvedField};
 
+use crate::read_time::{Presence, ReadTimeItems, ReadTimeNames, read_time_items, rule_handles};
 use crate::resolve::PathSegment;
 use crate::serde_attr::serde_metas;
 use crate::value::Kind;
@@ -36,6 +37,33 @@ pub(crate) struct DocField<'a> {
     /// container level, and everything under it. Escapes a collision with a type
     /// the caller already has, and shortens a deep chain.
     pub(crate) scope: Option<Ident>,
+    /// `#[flusso(rules = …)]` / `#[flusso(computed = …)]` — the root decides
+    /// this field when a document is read, so the schema has nothing to check
+    /// it against.
+    pub(crate) read_time: Option<ReadTime>,
+}
+
+/// How a root decides a field when a document is read.
+pub(crate) enum ReadTime {
+    /// `rules = path`: `fn(&Context) -> Rules<FieldType>`.
+    Rules(syn::Path),
+    /// `computed = path`: `fn(&Input, &Context) -> FieldType`.
+    Computed(syn::Path),
+}
+
+impl ReadTime {
+    pub(crate) fn path(&self) -> &syn::Path {
+        match self {
+            ReadTime::Rules(path) | ReadTime::Computed(path) => path,
+        }
+    }
+
+    pub(crate) fn attr(&self) -> &'static str {
+        match self {
+            ReadTime::Rules(_) => "rules",
+            ReadTime::Computed(_) => "computed",
+        }
+    }
 }
 
 /// Parse a struct's named fields, resolving each document key from serde's
@@ -78,7 +106,9 @@ pub(crate) fn parse_fields<'a>(
         let serde = serde_key(field);
         let flatten = crate::serde_attr::flatten(&field.attrs);
         let read = doc_key(ident, serde.rename.clone(), rename_all);
+        let read_time = read_time_attr(ident, &attrs, flatten)?;
         if let Some(renamed) = &attrs.rename
+            && read_time.is_none()
             && !flatten
             && !crate::serde_attr::skips_deserializing(&field.attrs)
             && let Some(error) = unseen_rename(ident, renamed, &read, &serde)
@@ -94,9 +124,59 @@ pub(crate) fn parse_fields<'a>(
             renamed: attrs.rename.as_ref().map(LitStr::span),
             flatten,
             scope: attrs.scope,
+            read_time,
         });
     }
     Ok(out)
+}
+
+/// A field's `rules` or `computed`, or the error for a combination that cannot
+/// mean anything: both at once, or beside an attribute about the schema field
+/// a read-time field does not have.
+fn read_time_attr(
+    ident: &Ident,
+    attrs: &FieldAttrs,
+    flatten: bool,
+) -> syn::Result<Option<ReadTime>> {
+    let read_time = match (&attrs.rules, &attrs.computed) {
+        (None, None) => return Ok(None),
+        (Some(rules), Some(_)) => {
+            return Err(syn::Error::new(
+                rules.span(),
+                format!(
+                    "`{ident}` has both `rules` and `computed`, and a field is decided one way: \
+                     `rules` when it is filtered or sorted on, `computed` otherwise — keep one"
+                ),
+            ));
+        }
+        (Some(rules), None) => ReadTime::Rules(rules.clone()),
+        (None, Some(computed)) => ReadTime::Computed(computed.clone()),
+    };
+    let beside = if attrs.skip {
+        Some("`skip`")
+    } else if attrs.opaque.is_some() {
+        Some("`opaque`")
+    } else if attrs.rename.is_some() {
+        Some("`rename`")
+    } else if attrs.scope.is_some() {
+        Some("`scope`")
+    } else if flatten {
+        Some("`#[serde(flatten)]`")
+    } else {
+        None
+    };
+    if let Some(beside) = beside {
+        let attr = read_time.attr();
+        return Err(syn::Error::new(
+            read_time.path().span(),
+            format!(
+                "`{ident}` is decided when a document is read (`{attr}`), so it is not checked \
+                 against a schema field and {beside} has nothing to act on — remove {beside}, or \
+                 remove `{attr}`"
+            ),
+        ));
+    }
+    Ok(Some(read_time))
 }
 
 /// The error for a `#[flusso(…)]` on a field serde passes over in a
@@ -231,12 +311,15 @@ fn unseen_rename(
 }
 
 /// A field's `#[flusso(…)]` attributes: `skip`, `opaque`, `rename = "…"`,
-/// `scope = "…"`, read from every `#[flusso(…)]` on the field.
+/// `scope = "…"`, `rules = …`, `computed = …`, read from every `#[flusso(…)]`
+/// on the field.
 struct FieldAttrs {
     skip: bool,
     opaque: Option<Span>,
     rename: Option<LitStr>,
     scope: Option<Ident>,
+    rules: Option<syn::Path>,
+    computed: Option<syn::Path>,
 }
 
 fn flusso_field_attr(field: &Field) -> syn::Result<FieldAttrs> {
@@ -244,6 +327,8 @@ fn flusso_field_attr(field: &Field) -> syn::Result<FieldAttrs> {
     let mut opaque = None;
     let mut rename = None;
     let mut scope = None;
+    let mut rules = None;
+    let mut computed = None;
     for attr in field
         .attrs
         .iter()
@@ -271,10 +356,18 @@ fn flusso_field_attr(field: &Field) -> syn::Result<FieldAttrs> {
                         "`scope` must be a valid type name, e.g. `scope = \"Orders\"`",
                     )
                 })?);
+            } else if meta.path.is_ident("rules") {
+                let path: syn::Path = meta.value()?.parse()?;
+                crate::once(&meta, rules.is_some(), "a field has one rule list")?;
+                rules = Some(path);
+            } else if meta.path.is_ident("computed") {
+                let path: syn::Path = meta.value()?.parse()?;
+                crate::once(&meta, computed.is_some(), "one function computes a field")?;
+                computed = Some(path);
             } else {
                 return Err(meta.error(
                     "unknown `flusso` field attribute (expected `skip`, `opaque`, \
-                     `rename`, or `scope`)",
+                     `rename`, `scope`, `rules`, or `computed`)",
                 ));
             }
             Ok(())
@@ -285,6 +378,8 @@ fn flusso_field_attr(field: &Field) -> syn::Result<FieldAttrs> {
         opaque,
         rename,
         scope,
+        rules,
+        computed,
     })
 }
 
@@ -314,6 +409,7 @@ fn newtype_field(field: &Field) -> syn::Result<DocField<'_>> {
         renamed: None,
         flatten: true,
         scope: None,
+        read_time: None,
     })
 }
 
@@ -329,7 +425,9 @@ pub(crate) fn validate(
     let mut errors = Vec::new();
     let mut asserts = Vec::new();
     let mut renamed_keys = std::collections::HashSet::new();
-    for field in fields {
+    // A read-time field is not read from the index, so no schema field
+    // answers for its type.
+    for field in fields.iter().filter(|field| field.read_time.is_none()) {
         let structured = level
             .iter()
             .find(|r| r.name.as_ref() == field.doc_key)
@@ -565,7 +663,7 @@ fn is_structured(resolved: &ResolvedField) -> bool {
 
 /// Whether an indexed field gets a namespace of its own: a `nested` array, or
 /// an `object` with children that isn't a `map`.
-fn has_namespace(resolved: &ResolvedField) -> bool {
+pub(crate) fn has_namespace(resolved: &ResolvedField) -> bool {
     match resolved.mapping.mapping_type {
         MappingType::Nested => true,
         MappingType::Object => {
@@ -865,7 +963,7 @@ fn check_array_of_maps(
 /// always a mistake). Numerics split per type so values can't cross losslessly;
 /// `decimal` carries the `double`-vs-`decimal` distinction the mapping type
 /// erases. The marker tokens live on [`Kind::marker`]; this only classifies.
-fn kind_of(mapping_type: &MappingType, decimal: bool) -> Option<Kind> {
+pub(crate) fn kind_of(mapping_type: &MappingType, decimal: bool) -> Option<Kind> {
     Some(match mapping_type {
         MappingType::Keyword => Kind::Keyword,
         MappingType::Text => Kind::Text,
@@ -1171,6 +1269,7 @@ pub(crate) fn codegen(
     fields: &[DocField],
     tracked: &[String],
     auto_subfields: bool,
+    context: Option<&Type>,
 ) -> TokenStream {
     // A `#[flusso(scope = "…")]` on a root field renames that level's namespace
     // (and everything under it). Only the root's own fields can carry it — a
@@ -1200,10 +1299,23 @@ pub(crate) fn codegen(
     let mut ctx = Namespaces {
         auto_subfields,
         renames,
+        read_time: ReadTimeNames::of(fields, context.is_some()),
         module: module.clone(),
         scopes: std::collections::HashMap::new(),
         emitted: TokenStream::new(),
     };
+
+    let read_time = read_time_items(&module, level, fields, context);
+    if context.is_some() {
+        let doc = Ident::new("Doc", Span::call_site());
+        let handles = rule_handles(&doc, "", Presence::Required, level);
+        ctx.emitted.extend(quote! {
+            /// The stored fields a rule can read, generated from the schema.
+            pub mod rules {
+                #handles
+            }
+        });
+    }
 
     let root_scope = quote! { ::flusso_query::Root };
     let handles = ctx.emit_level(ident, &root_scope, "", &[], level, Receiver::Associated);
@@ -1240,6 +1352,7 @@ pub(crate) fn codegen(
         quote! { const _: &[u8] = include_bytes!(#lit); }
     });
 
+    let ReadTimeItems { root, inherent } = read_time;
     quote! {
         #(#tracked)*
 
@@ -1249,9 +1362,11 @@ pub(crate) fn codegen(
         impl ::flusso_query::FlussoRoot for #ident {
             const INDEX: &'static str = #index;
             const SCHEMA_HASH: &'static str = #hash;
+            #root
         }
         impl #ident {
             #handles
+            #inherent
         }
 
         #namespaces
@@ -1272,6 +1387,8 @@ struct Namespaces {
     auto_subfields: bool,
     /// Root-field scope renames, keyed by document key.
     renames: std::collections::HashMap<String, Ident>,
+    /// The names the root's read-time fields take from its query handles.
+    read_time: ReadTimeNames,
     /// The module the namespaces live in — referenced from the root's handles,
     /// but not from inside the module, where the names are already in scope.
     module: Ident,
@@ -1349,8 +1466,14 @@ impl Namespaces {
                 nested: matches!(resolved.mapping.mapping_type, MappingType::Nested),
             });
             let key = resolved.name.as_ref();
-            let (name, child) = match generated_ident(&to_snake_case(key), key)
-                .and_then(|name| Ok((name, self.child_ident(base, key, segments.is_empty())?)))
+            let at_root = segments.is_empty();
+            let handle = if at_root {
+                self.read_time.stored_handle(key, &to_snake_case(key))
+            } else {
+                to_snake_case(key)
+            };
+            let (name, child) = match generated_ident(&handle, key)
+                .and_then(|name| Ok((name, self.child_ident(base, key, at_root)?)))
                 .and_then(|(name, child)| {
                     claim_handle(&mut handle_keys, &name, &path, prefix, receiver)?;
                     Ok((name, child))
@@ -1662,7 +1785,7 @@ const KEYWORDS: &[&str] = &[
 /// caller spells `r#type`); the few a raw identifier cannot spell (`self`,
 /// `Self`, `super`, `crate`) take a trailing `_`. A name no identifier can
 /// spell (key `_`) is an error naming the key.
-fn generated_ident(name: &str, key: &str) -> syn::Result<Ident> {
+pub(crate) fn generated_ident(name: &str, key: &str) -> syn::Result<Ident> {
     match name {
         "self" | "Self" | "super" | "crate" => {
             return Ok(Ident::new(&format!("{name}_"), Span::call_site()));
@@ -1683,7 +1806,7 @@ fn generated_ident(name: &str, key: &str) -> syn::Result<Ident> {
 
 /// A document key as a type-name fragment: `orders` → `Orders`,
 /// `billingAddress` → `BillingAddress`, `postal_code` → `PostalCode`.
-fn to_pascal_case(name: &str) -> String {
+pub(crate) fn to_pascal_case(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut upper_next = true;
     for ch in name.chars() {
@@ -1925,7 +2048,7 @@ pub(crate) fn embed_checks(
     scope: &str,
 ) -> TokenStream {
     let mut calls = TokenStream::new();
-    for field in fields {
+    for field in fields.iter().filter(|field| field.read_time.is_none()) {
         let span = field.ty.span();
         if field.flatten {
             calls.extend(crate::fragment::flattened_field(

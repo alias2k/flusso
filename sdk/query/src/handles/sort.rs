@@ -75,9 +75,62 @@ pub struct Sort {
     /// script's `params.missing` (the `missing` body field is ignored on a
     /// `_script` sort) with a direction-correct sentinel for the value kind.
     script_kind: Option<MapSortValueKind>,
+    /// `Some` for a rule field's sort: the `function_score` functions that
+    /// make the score the value's rank. [`Search`](crate::Search) wraps its
+    /// query in them and sorts on `_score`; nothing else can run one.
+    rank: Option<Rank>,
+}
+
+/// A rule field's sort: one `function_score` function per way of reaching a
+/// value, each weighted with the value's 1-based rank.
+#[derive(Debug, Clone)]
+pub(crate) struct Rank {
+    pub(crate) functions: Vec<RankFunction>,
+    /// The highest rank any function gives.
+    pub(crate) top: u64,
+    pub(crate) descending: bool,
+}
+
+/// The documents `filter` matches rank `weight`, unless an earlier function
+/// matched them first.
+#[derive(Debug, Clone)]
+pub(crate) struct RankFunction {
+    pub(crate) filter: Value,
+    pub(crate) weight: u64,
 }
 
 impl Sort {
+    /// Sort by a rule field's rank, carried in the score.
+    pub(crate) fn ranked(order: SortOrder, functions: Vec<RankFunction>, top: u64) -> Self {
+        // Two rule fields both sort on `_score`, so the functions tell them
+        // apart.
+        let filters: Vec<Value> = functions
+            .iter()
+            .map(|function| function.filter.clone())
+            .collect();
+        Self {
+            key: "_score".to_string(),
+            body: Map::new(),
+            dedup_id: format!("_rank:{}", Value::Array(filters)),
+            script_kind: None,
+            rank: Some(Rank {
+                functions,
+                top,
+                descending: matches!(order, SortOrder::Desc),
+            }),
+        }
+    }
+
+    /// What a rule field's sort ranks by.
+    pub(crate) fn rank(&self) -> Option<&Rank> {
+        self.rank.as_ref()
+    }
+
+    /// A relevance sort: the `_score` key, and not a rule field's.
+    pub(crate) fn sorts_on_score(&self) -> bool {
+        self.key == "_score" && self.rank.is_none()
+    }
+
     /// A field/order sort: `{ "<field>": { "order": "asc"|"desc" } }`.
     pub(crate) fn new(field: &str, order: SortOrder) -> Self {
         let mut body = Map::new();
@@ -95,6 +148,7 @@ impl Sort {
             key,
             body,
             script_kind: None,
+            rank: None,
         }
     }
 
@@ -147,6 +201,7 @@ impl Sort {
             body,
             dedup_id,
             script_kind: Some(kind),
+            rank: None,
         }
     }
 
@@ -170,17 +225,26 @@ impl Sort {
 
     /// Sort ascending.
     #[must_use]
-    pub fn asc(mut self) -> Self {
-        self.body
-            .insert("order".to_string(), Value::String("asc".to_string()));
-        self
+    pub fn asc(self) -> Self {
+        self.ordered(SortOrder::Asc)
     }
 
     /// Sort descending.
     #[must_use]
-    pub fn desc(mut self) -> Self {
-        self.body
-            .insert("order".to_string(), Value::String("desc".to_string()));
+    pub fn desc(self) -> Self {
+        self.ordered(SortOrder::Desc)
+    }
+
+    fn ordered(mut self, order: SortOrder) -> Self {
+        match &mut self.rank {
+            Some(rank) => rank.descending = matches!(order, SortOrder::Desc),
+            None => {
+                self.body.insert(
+                    "order".to_string(),
+                    Value::String(order.as_str().to_string()),
+                );
+            }
+        }
         self
     }
 
@@ -318,6 +382,13 @@ impl Sort {
     }
 
     pub(crate) fn to_value(&self) -> Value {
+        if self.rank.is_some() {
+            return crate::rules::invalid(
+                "a rule field's sort ranks through the query's score, which only a search of \
+                 its own root can arrange; a combined search and a nested projection cannot \
+                 sort by it",
+            );
+        }
         let mut outer = Map::new();
         outer.insert(self.key.clone(), Value::Object(self.body.clone()));
         Value::Object(outer)

@@ -13,6 +13,7 @@ Sort on any sortable handle with `.asc()`/`.desc()`, tune the resulting `Sort`, 
 | `Enum` with declared variants | the prebaked `.sort` subfield, so the **declared order**, no script |
 | `Geo` | `distance_from(center)` nearest-first, or `distance_sort(center, order, DistanceUnit)` |
 | a map, by key | `sort_key("it").or("en")`; see [Maps](maps.md#sorting-by-key) |
+| a rule field | the order its rules give, carried in the score; see [Read-time fields](read-time-fields.md#order-for-sorts-and-counts) |
 
 ## Tuning a Sort
 

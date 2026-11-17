@@ -179,6 +179,7 @@ impl Client {
         err,
     )]
     pub(crate) async fn search_at(&self, path: &str, body: &Value) -> Result<Value> {
+        crate::rules::refuse_invalid(body)?;
         self.fence_before(Level::Searchable).await?;
         let endpoint = format!("{}/{}/_search", self.base, self.prefixed(path));
         tracing::debug!(%endpoint, query = %body, "POST _search");
@@ -196,6 +197,7 @@ impl Client {
         err,
     )]
     pub(crate) async fn count_at(&self, path: &str, body: &Value) -> Result<Value> {
+        crate::rules::refuse_invalid(body)?;
         self.fence_before(Level::Searchable).await?;
         let endpoint = format!("{}/{}/_count", self.base, self.prefixed(path));
         tracing::debug!(%endpoint, query = %body, "POST _count");
@@ -238,6 +240,7 @@ impl Client {
         err,
     )]
     pub(crate) async fn search_pit(&self, body: &Value) -> Result<Value> {
+        crate::rules::refuse_invalid(body)?;
         self.fence_before(Level::Searchable).await?;
         let endpoint = format!("{}/_search", self.base);
         tracing::debug!(%endpoint, query = %body, "POST _search (point in time)");
@@ -365,6 +368,23 @@ impl Client {
     where
         T: DeserializeOwned,
     {
+        self.get_one_with(index, hash, id, crate::rules::Computation::none())
+            .await
+    }
+
+    /// [`get_one`](Self::get_one), writing `computation`'s read-time fields
+    /// into the document before it decodes.
+    pub(crate) async fn get_one_with<T>(
+        &self,
+        index: &str,
+        hash: &str,
+        id: impl std::fmt::Display,
+        computation: crate::rules::Computation,
+    ) -> Result<Option<T>>
+    where
+        T: DeserializeOwned,
+    {
+        computation.check()?;
         self.fence_before(Level::Applied).await?;
         let endpoint = format!(
             "{}/{}/_doc/{id}",
@@ -385,17 +405,23 @@ impl Client {
                 body: response.text().await.unwrap_or_default(),
             });
         }
-        let doc: GetResponse<T> = response.json().await?;
-        match (doc.found, doc.source) {
-            (true, Some(source)) => {
-                tracing::debug!(found = true, "GET _doc resolved");
-                Ok(Some(source))
+        // Only a root with read-time fields stops at JSON, to have them
+        // written in before it decodes.
+        let source = if computation.is_empty() {
+            let doc: GetResponse<T> = response.json().await?;
+            doc.source.filter(|_| doc.found)
+        } else {
+            let doc: GetResponse<Value> = response.json().await?;
+            match doc.source.filter(|_| doc.found) {
+                Some(mut source) => {
+                    computation.apply(&mut source)?;
+                    Some(serde_json::from_value(source)?)
+                }
+                None => None,
             }
-            _ => {
-                tracing::debug!(found = false, "GET _doc resolved");
-                Ok(None)
-            }
-        }
+        };
+        tracing::debug!(found = source.is_some(), "GET _doc resolved");
+        Ok(source)
     }
 }
 

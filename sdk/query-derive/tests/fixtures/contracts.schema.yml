@@ -1,0 +1,67 @@
+# A root with read-time fields: every kind a rule can read, and one of each it
+# cannot (text, a 32-bit float, a field with mapping options, a map, a nested
+# array).
+version: 1
+table: contracts
+primary_key: id
+
+fields:
+  - keyword: id
+    required: true
+  - text: title
+    required: true
+  - keyword: owner_id
+    required: true
+  - timestamp: signed_at
+    required: false
+  - timestamp: starts_at
+    required: true
+  - timestamp: ends_at
+    required: true
+  - enum: state
+    required: true
+    variants: [active, suspended, terminated]
+  - boolean: auto_renew
+    required: true
+  - integer: notice_days
+    required: true
+  - double: monthly_fee
+    required: true
+  - double: discounted_fee
+    required: false
+  - timestamp: discount_until
+    required: false
+  - decimal: list_price
+    required: true
+  - float: rating
+    required: false
+  - keyword: code
+    required: true
+    options: { normalizer: lowercase }
+  - map: labels
+    values: keyword
+    required: false
+  - ids: tags
+    table: contract_tags
+    foreign_key: contract_id
+    element_type: keyword
+  - object: billing
+    fields:
+      - keyword: country
+        required: true
+      - double: vat_rate
+        required: false
+  - has_one: owner
+    table: owners
+    foreign_key: contract_id
+    primary_key: contract_id
+    fields:
+      - keyword: plan
+        required: true
+  - has_many: invoices
+    table: invoices
+    foreign_key: contract_id
+    primary_key: id
+    fields:
+      - keyword: status
+        required: true

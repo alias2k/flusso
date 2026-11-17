@@ -78,6 +78,7 @@ Optional features: `decimal` (`rust_decimal::Decimal` as a `decimal` or `double`
 | combine clauses, set options | [Composing queries and options](composing.md) |
 | filter by or shape a nested array | [Nested collections](nested.md) |
 | sort, including across nesting | [Sorting](sorting.md) |
+| declare a field that depends on the clock or the caller | [Read-time fields](read-time-fields.md) |
 | dynamic-key fields | [Maps](maps.md) |
 | Rust enums and newtypes as values | [Enums and custom values](enums-and-values.md) |
 | several indexes in one call | [Several indexes](several-indexes.md) |

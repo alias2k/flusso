@@ -8,6 +8,7 @@ error[E0277]: the trait bound `Geo: Sortable` is not satisfied
    |
    = help: the following other types implement trait `Sortable`:
              MapKeySort<S>
+             RuleField<T>
              flusso_query::Bool<S>
              flusso_query::Date<S>
              flusso_query::Enum<S, Sub>

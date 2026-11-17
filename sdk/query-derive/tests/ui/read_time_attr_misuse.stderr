@@ -1,0 +1,29 @@
+error: `flag` has both `rules` and `computed`, and a field is decided one way: `rules` when it is filtered or sorted on, `computed` otherwise — keep one
+  --> tests/ui/read_time_attr_misuse.rs:19:22
+   |
+19 |     #[flusso(rules = flag, computed = text)]
+   |                      ^^^^
+
+error: `flag` is decided when a document is read (`rules`), so it is not checked against a schema field and `skip` has nothing to act on — remove `skip`, or remove `rules`
+  --> tests/ui/read_time_attr_misuse.rs:26:28
+   |
+26 |     #[flusso(skip, rules = flag)]
+   |                            ^^^^
+
+error: `flag` is decided when a document is read (`computed`), so it is not checked against a schema field and `rename` has nothing to act on — remove `rename`, or remove `computed`
+  --> tests/ui/read_time_attr_misuse.rs:33:25
+   |
+33 |     #[flusso(computed = text, rename = "state")]
+   |                         ^^^^
+
+error: `rules` is given twice, and a field has one rule list — keep one `rules`
+  --> tests/ui/read_time_attr_misuse.rs:41:28
+   |
+41 |     #[flusso(rules = flag, rules = flag)]
+   |                            ^^^^^^^^^^^^
+
+error: `context` is given twice, and a root reads one context — keep one `context`
+  --> tests/ui/read_time_attr_misuse.rs:46:50
+   |
+46 | #[flusso(index = "contracts", context = Viewing, context = Viewing)]
+   |                                                  ^^^^^^^^^^^^^^^^^

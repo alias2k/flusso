@@ -1,0 +1,143 @@
+error[E0599]: no method named `mm` found for struct `Doc` in the current scope
+  --> tests/ui/rule_handle_missing_for_a_kind.rs:17:17
+   |
+ 8 | #[derive(serde::Deserialize, FlussoRoot)]
+   |                              ---------- method `mm` not found for this struct
+...
+17 |     let _ = doc.mm();
+   |                 ^^ method not found in `Doc`
+
+error[E0599]: no method named `mp` found for struct `Doc` in the current scope
+  --> tests/ui/rule_handle_missing_for_a_kind.rs:18:17
+   |
+ 8 | #[derive(serde::Deserialize, FlussoRoot)]
+   |                              ---------- method `mp` not found for this struct
+...
+18 |     let _ = doc.mp();
+   |                 ^^ method not found in `Doc`
+
+error[E0599]: no method named `mpn` found for struct `Doc` in the current scope
+  --> tests/ui/rule_handle_missing_for_a_kind.rs:19:17
+   |
+ 8 | #[derive(serde::Deserialize, FlussoRoot)]
+   |                              ---------- method `mpn` not found for this struct
+...
+19 |     let _ = doc.mpn();
+   |                 ^^^ method not found in `Doc`
+
+error[E0599]: no method named `js` found for struct `Doc` in the current scope
+  --> tests/ui/rule_handle_missing_for_a_kind.rs:20:17
+   |
+ 8 | #[derive(serde::Deserialize, FlussoRoot)]
+   |                              ---------- method `js` not found for this struct
+...
+20 |     let _ = doc.js();
+   |                 ^^
+   |
+help: there is a method `ts` with a similar name
+   |
+20 -     let _ = doc.js();
+20 +     let _ = doc.ts();
+   |
+
+error[E0599]: no method named `jsa` found for struct `Doc` in the current scope
+  --> tests/ui/rule_handle_missing_for_a_kind.rs:21:17
+   |
+ 8 | #[derive(serde::Deserialize, FlussoRoot)]
+   |                              ---------- method `jsa` not found for this struct
+...
+21 |     let _ = doc.jsa();
+   |                 ^^^ method not found in `Doc`
+
+error[E0599]: no method named `gp` found for struct `Doc` in the current scope
+  --> tests/ui/rule_handle_missing_for_a_kind.rs:22:17
+   |
+ 8 | #[derive(serde::Deserialize, FlussoRoot)]
+   |                              ---------- method `gp` not found for this struct
+...
+22 |     let _ = doc.gp();
+   |                 ^^ method not found in `Doc`
+
+error[E0599]: no method named `cm` found for struct `Doc` in the current scope
+  --> tests/ui/rule_handle_missing_for_a_kind.rs:23:17
+   |
+ 8 | #[derive(serde::Deserialize, FlussoRoot)]
+   |                              ---------- method `cm` not found for this struct
+...
+23 |     let _ = doc.cm();
+   |                 ^^
+   |
+help: there is a method `ct` with a similar name
+   |
+23 -     let _ = doc.cm();
+23 +     let _ = doc.ct();
+   |
+
+error[E0599]: no method named `co` found for struct `Doc` in the current scope
+  --> tests/ui/rule_handle_missing_for_a_kind.rs:24:17
+   |
+ 8 | #[derive(serde::Deserialize, FlussoRoot)]
+   |                              ---------- method `co` not found for this struct
+...
+24 |     let _ = doc.co();
+   |                 ^^
+   |
+help: there is a method `bo` with a similar name
+   |
+24 -     let _ = doc.co();
+24 +     let _ = doc.bo();
+   |
+
+error[E0599]: no method named `fl` found for struct `Doc` in the current scope
+  --> tests/ui/rule_handle_missing_for_a_kind.rs:25:17
+   |
+ 8 | #[derive(serde::Deserialize, FlussoRoot)]
+   |                              ---------- method `fl` not found for this struct
+...
+25 |     let _ = doc.fl();
+   |                 ^^ method not found in `Doc`
+
+error[E0599]: no method named `bi` found for struct `Doc` in the current scope
+  --> tests/ui/rule_handle_missing_for_a_kind.rs:26:17
+   |
+ 8 | #[derive(serde::Deserialize, FlussoRoot)]
+   |                              ---------- method `bi` not found for this struct
+...
+26 |     let _ = doc.bi();
+   |                 ^^
+   |
+help: there is a method `bo` with a similar name
+   |
+26 -     let _ = doc.bi();
+26 +     let _ = doc.bo();
+   |
+
+error[E0599]: no method named `cu` found for struct `Doc` in the current scope
+  --> tests/ui/rule_handle_missing_for_a_kind.rs:27:17
+   |
+ 8 | #[derive(serde::Deserialize, FlussoRoot)]
+   |                              ---------- method `cu` not found for this struct
+...
+27 |     let _ = doc.cu();
+   |                 ^^
+   |
+help: there is a method `ct` with a similar name
+   |
+27 -     let _ = doc.cu();
+27 +     let _ = doc.ct();
+   |
+
+error[E0599]: no method named `hu` found for struct `Doc` in the current scope
+  --> tests/ui/rule_handle_missing_for_a_kind.rs:28:17
+   |
+ 8 | #[derive(serde::Deserialize, FlussoRoot)]
+   |                              ---------- method `hu` not found for this struct
+...
+28 |     let _ = doc.hu();
+   |                 ^^
+   |
+help: there is a method `ho` with a similar name
+   |
+28 -     let _ = doc.hu();
+28 +     let _ = doc.ho();
+   |

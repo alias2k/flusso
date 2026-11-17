@@ -61,6 +61,33 @@ async fn busy_ada(client: &Client) -> anyhow::Result<()> {
 
 Values are typed by **kind**: numerics widen losslessly (`eq(5)` on a `long`, never a float on an integer), and a `#[derive(FlussoValue)]` newtype or enum queries with no cast. Subfield accessors (`.keyword()`, `.keyword_lowercase()`, `.text()`) exist only where the sink provisioned the subfield.
 
+## Fields that depend on the clock or the caller
+
+What a row decides on its own, flusso stores. What needs a request-time value is declared on the root and decided when a document is read:
+
+```rust
+#[derive(serde::Deserialize, FlussoRoot)]
+#[flusso(index = "contracts", context = Viewing)]
+struct Contract {
+    id: String,
+    #[flusso(rules = visible_state)]
+    state: ContractState,
+}
+
+fn visible_state(cx: &Viewing) -> Rules<ContractState> {
+    let doc = Contract::doc();
+    Rules::when(doc.signed_at().missing()).then(ContractState::Draft)
+        .when(doc.ends_at().lt(cx.now)).then(ContractState::Closed)
+        .otherwise(doc.state())
+}
+
+Contract::query(&cx)
+    .filter(Contract::state(&cx).eq(ContractState::Closed))
+    .sort(Contract::state(&cx).asc())
+```
+
+One rule list gives the value, the filter, the sort and the counts, with no script; a `#[flusso(computed = …)]` field is any Rust function, value only. See [Read-time fields](https://alias2k.github.io/flusso/query/read-time-fields.html).
+
 ## Features
 
 | Feature | Adds |

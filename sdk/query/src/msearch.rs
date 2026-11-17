@@ -102,7 +102,10 @@ pub trait MsearchBundle {
 fn append_lines<T>(search: &Search<T>, prefix: &str, ndjson: &mut String) -> Result<()> {
     let index = format!("{prefix}{}", search.physical_index());
     let header = serde_json::to_string(&json!({ "index": index }))?;
-    let body = serde_json::to_string(&search.body())?;
+    search.runnable()?;
+    let body = search.body();
+    crate::rules::refuse_invalid(&body)?;
+    let body = serde_json::to_string(&body)?;
     ndjson.push_str(&header);
     ndjson.push('\n');
     ndjson.push_str(&body);
@@ -147,6 +150,7 @@ where
     if !paths.is_empty() {
         merge_inner_hits(&mut entry, &paths);
     }
+    search.compute(&mut entry)?;
     let page = SearchResponse::from_value(entry)?;
     if page.is_partial() {
         tracing::warn!(

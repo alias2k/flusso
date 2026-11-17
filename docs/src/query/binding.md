@@ -19,7 +19,7 @@ At compile time the macro:
 
 There is no `build.rs`, no generated file to `include!`, no committed mapping to keep in sync.
 
-A root takes one `index`, one `config` and one `scope_mod`: giving one twice is a compile error, not "last one wins".
+A root takes one `index`, one `config`, one `scope_mod` and one `context` (the type its [read-time fields](read-time-fields.md) are decided from): giving one twice is a compile error, not "last one wins".
 
 ## Index name and schema hash
 
@@ -68,10 +68,13 @@ impl User {
 }
 
 impl FlussoRoot for User {
+    type Context = ();                          // no read-time fields
     const INDEX: &str = "users";
     const SCHEMA_HASH: &str = "3f2a1b9c…";
 }
 ```
+
+A root with `context = Viewing` gets `query(cx: &Viewing)` and `get(cx, client, id)` instead, a `doc()` namespace of rule handles, and one `fn state(cx) -> RuleField<…>` per rule field; see [Read-time fields](read-time-fields.md).
 
 A handle is named for its schema key in snake_case (`fullName` → `full_name()`). A key that is a Rust keyword, strict or reserved in any edition (`type`, `try`, `gen`), gets a raw identifier (`type` → `User::r#type()`), and `self`, `Self`, `super` and `crate`, which a raw identifier can't spell, take a trailing `_`. A key no identifier can spell, such as `_`, is a compile error naming the key. Two keys at one level that give the same name (`fullName` and `full_name` both give `full_name()`), and a key named `exists` inside an `object` (which has its own `exists()` presence check), are a compile error naming both keys; rename one in the schema.
 

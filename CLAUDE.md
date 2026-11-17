@@ -22,7 +22,7 @@ endpoint is documented once, on a page under `docs/src/reference/`, and the how-
 there instead of restating it. Adapter option tables are **generated** (`just schema-gen` →
 `docs/src/reference/generated/`) and included by the adapter pages; edit the doc comment on the
 adapter's config struct, never the table. Docker recipes are `docs/src/deploy/docker.md`, the query
-manual is the fifteen chapters under `docs/src/query/`, the designer is
+manual is the sixteen chapters under `docs/src/query/`, the designer is
 `docs/src/author/design-visually.md` + `designer-reference.md`, and the human-facing
 architecture tour is `docs/src/contribute/` (this file stays the agent-facing index). Page
 types, templates, and the ownership rule are in `docs/STYLE.md`. Every crate has its own
@@ -352,7 +352,7 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   Unix (`#[cfg(unix)]` the signal and `/proc` items) would otherwise fail only at a release tag. One scope note: on PRs confined to the query
   release train (`sdk/query`, `sdk/query-derive`, `dev/query-e2e`) the nextest step swaps in a
   filterset that skips the Postgres/OpenSearch container suites those paths can't break (the
-  query train's own `combined_search`, `cursor_paging`, `map_keys`, `tls` + `array_columns` live e2e still run); pushes to main always run everything.
+  query train's own `combined_search`, `cursor_paging`, `map_keys`, `tls`, `array_columns` + `read_time` live e2e still run); pushes to main always run everything.
   A `docs` job builds the mdBook (`mdbook build docs`), link-checks it (`lychee --offline
   --include-fragments --root-dir docs/book 'docs/book/**/*.html'`), and runs
   `.github/scripts/check-manual-links.sh`. A separate `fuzz` job runs a 60-second
@@ -1844,6 +1844,59 @@ levels; `flusso-query` is a path-only dev-dependency there).
 `position::{diesel,diesel_async}::current` (backend types only, no driver). Guarded by
 `tests::fence` (a local TCP stub standing in for both servers).
 
+**Read-time fields (issue #381, ADR 0011).** A root names a context type
+(`#[flusso(index = …, context = Viewing)]`; `FlussoRoot::Context`, `()` for a plain root) and declares
+`#[flusso(rules = f)]` / `#[flusso(computed = f)]` fields, decided when a document is read
+(`sdk/query/src/rules/`). A rule field is ordered `Condition → outcome` arms (`Rules<T>`); the one
+list is decided twice and the two must agree: in Rust on `_source` for the value (`Plan::value`), and
+as plain queries for the filter, sort and counts (`RuleField<T>`; `Plan::select`), never a script.
+Invariants to keep when editing:
+- **A test exists only if Rust decides it as the index does.** Conditions are built from rule handles
+  (`RuleKeyword`/`RuleBool`/`RuleNumber<K>`/`RuleDate`), which the derive emits behind `Root::doc()`
+  (`read_time.rs`'s `rule_handles`) for keyword, boolean, whole-number, `double`, `decimal` and date leaves
+  and the plain objects holding them, and only when the mapping has no option outside
+  `RULE_SAFE_OPTIONS`. A new handle or test needs both halves (`Test::render` and `Test::holds` in
+  `condition.rs`) and a case in the live fuzz. A document value of another type than its field is
+  read as the index coerced it (`condition.rs`'s `scalar`: a fraction in a whole-number field
+  dropped towards zero, a number or boolean spelled as text, `""` as `false`).
+- **Rust decides the form that is sent.** `positive` pushes negations down and flips a negated range
+  on a field the schema declares always present (`Presence::TOTAL`); `Plan` stores each arm as sent
+  (`when`, `unless`) and `Plan::value` refuses a document no filter would select (`UNDECIDED`).
+  "No value" is one thing on both sides: a fixed `null` and a missing stored field are selected
+  together by `eq(None)` and fail every ordered comparison (`RuleField::one_of` / `compares`).
+- **The value order** (sort, counts, and ordered comparison through a stored keyword) is
+  `Rules::order`, else the replaced enum's `variants:` followed by the other fixed values the rules
+  name (`RuleField::ordered`): a stored enum rarely declares what only the rules yield.
+- **Dates compare at the millisecond** (`date.rs`): a timestamp to the second is one instant, a bare
+  date its whole day, with `gt`/`lte` measured from the end of the stretch. The plain `Date` handle
+  still lets OpenSearch read the whole second (issue #382).
+- **The handle's type carries presence** (`Required`/`Optional`/`Array`), which decides what an arm
+  may yield it as (`IntoOutcome`: `T`, `Option<T>`, `Vec<T>`; `assume_present()` is the opt-out).
+- **A rule sort is the score**: `Sort::ranked` carries `function_score` functions, `Search::ranked`
+  wraps the finished query (outside a `filter_nested` projection) and packs adjacent rule sorts;
+  `Sort::to_value` of a rule sort is the invalid stand-in, so a combined search or a nested
+  projection refuses it.
+- **What survives compilation is refused before sending.** A rule that cannot be evaluated renders as
+  the `flusso_invalid_rule` stand-in clause; `rules::refuse_invalid` stops it in `search_at`,
+  `count_at`, `search_pit` and `msearch` (`append_lines`) as `Error::ReadTimeField`. A new transport
+  that sends a query body must call it. A rule list that cannot be built fails every terminal of
+  its root before anything is sent (`Search::runnable`, `Computation::check`).
+- **Every read path computes.** `Computation` (rules first, all from the stored document; computed
+  fields after, in declaration order) is applied in `Search::send`, `CursorSearch::send_from`,
+  `msearch::decode_slot` and `Client::get_one_with`, before the document decodes. A new read path
+  must apply it. A combined search cannot, so its derive requires `CombinedSearchVariant`
+  (`Context = ()`; issue #383).
+- The derive names the handle of a stored root field `stored_<name>()` when the root itself takes
+  the plain name: a read-time field replaces it, or (on a root with a context) the key generates
+  `doc`/`query`/`get` (`ReadTimeNames`).
+Guards: `rules::tests` (incl. `pushing_negations_down_never_changes_what_a_condition_decides`, and
+`reading`: every read path over a local stub server, computed, and refused with nothing sent),
+`rules::date::tests`, the derive's `tests/read_time.rs` (`every_readable_kind_has_a_rule_handle`
+over the `boundary` fixture) and the `rule_*` / `read_time_*` / `context_root_*` UI cases
+(`rule_handle_missing_for_a_kind`: every kind with no handle), and the `read_time` live e2e
+(values, filters, sorts, walks and counts against a plain-Rust oracle; random conditions decided by
+the index and by Rust, over coerced values too: `store_loose_values`).
+
 ## Keeping this file current
 
 This file is a living index — keep it accurate as part of normal work, no separate ask
@@ -1899,15 +1952,15 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | Editor schema + Reference table generation (`flusso schema config\|docs`, drift test) | `apps/cli/src/commands/schema_cmd.rs`; artifacts at `libs/1-config/config.schema.json`, `docs/src/reference/generated/` |
 | CLI subcommands (`build`/`run`/`check`/`schema`/`indexes`/`reindex`) | `apps/cli/src/` — `main.rs` dispatches; `commands/` holds one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves the HTTP surfaces, drives `Daemon::start`/`run`, owns signals; `check.rs`, `schema_cmd.rs`, the `indexes`/`reindex` HTTP-client `admin.rs`, shared `print.rs`); `telemetry/` and `http/` hold the transport, `backends.rs` the backend assembly |
 | On-demand reindex (alias-over-generations, per sink, no restart) | sink: `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`reindex`/`ensure_index`/`mark_seeded`) + `generations.rs` (generation helpers); engine `SinkEngine::reindex` (staged between batches + a `Backfill` request); daemon `DaemonControl::reindex` (`supervise.rs`); CLI `http/mod.rs` (`POST /reindex?index&sink`), `commands/admin.rs` (client, `--sink`). Deferred write-side zero-downtime follow-on: issue #6 |
-| Query client (`flusso-query`) | `sdk/query/src/` (`cursor.rs`: page cursors; `walk.rs`: streaming a walk; `fence.rs`: fenced reads; `position.rs`: reading the source position) |
-| `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]` proc-macros | `sdk/query-derive/src/` — `lib.rs` (entry points + `Attrs`), `doc.rs` (field parsing/validation + the recursive handle tree + `embed_checks`), `fragment.rs` (the location-free shape check), `spec.rs` (baking a level into `&[FieldSpec]`), `resolve.rs` (finding `flusso.toml`); the const-check vocabulary is `sdk/query/src/check.rs`. Plus the `flusso-query-derive` memory note |
+| Query client (`flusso-query`) | `sdk/query/src/` (`cursor.rs`: page cursors; `walk.rs`: streaming a walk; `fence.rs`: fenced reads; `position.rs`: reading the source position; `rules/`: read-time fields — `condition.rs` the two-sided tests, `date.rs`, `handles.rs` the rule handles, `list.rs` `Rules`/`Plan`, `field.rs` `RuleField`, `computation.rs`) |
+| `#[derive(FlussoRoot)]` / `#[derive(FlussoFragment)]` proc-macros | `sdk/query-derive/src/` — `lib.rs` (entry points + `Attrs`), `doc.rs` (field parsing/validation + the recursive handle tree + `embed_checks`), `read_time.rs` (what `context`/`rules`/`computed` generate, and which stored fields get a rule handle), `fragment.rs` (the location-free shape check), `spec.rs` (baking a level into `&[FieldSpec]`), `resolve.rs` (finding `flusso.toml`); the const-check vocabulary is `sdk/query/src/check.rs`. Plus the `flusso-query-derive` memory note |
 | Runnable example (stack, seed, consumer) | `dev/` (`flusso.toml`, `postgres/init/`, `search-api/`) |
 | The Postgres image tests and benches start (default tag, `FLUSSO_TEST_PG_TAG`, `Pinned` exceptions, `Container`) + its guard | `dev/test-postgres/` (`flusso-test-postgres`, `publish = false`, path-only dev-dependency), `.github/scripts/check-postgres-image.py` + `test_check_postgres_image.py`, `docs/src/contribute/testing.md` ("Which Postgres") |
 | Benchmarks: scenario harness, in-process + Docker benches, CI gate + history | `dev/bench/` (`flusso-bench`: `src/main.rs` phases, `scenario.rs` mixes, `scale.rs` presets, `flusso.rs` child process, `scenarios/`), `libs/2-engine/benches/{engine,pipeline}.rs`, `libs/2-adapters/source-postgres/benches/{pgoutput,resolve,postgres,cases,review}.rs` + `tests/record_pgoutput.rs`, `libs/2-adapters/sink-opensearch/benches/{render,opensearch}.rs`, `.github/workflows/bench.yml`, `.github/scripts/bench-*.{py,sh}`, `.github/scripts/review-ab*.{sh,py}` (`just review-ab`, `review-digest`, `review-plans`; the two review modes' harness is `benches/review.rs`, over `cases.rs`'s roots), `docs/src/contribute/benchmarks.md`, ADR 0006 |
 | Registry image / containerized demo | `Dockerfile` (`runtime` target = config-less registry image; `demo` target = + baked dev lock), `docker-compose.demo.yml` (override adding the `flusso` service, built from the `demo` target), `.dockerignore`; user-facing shipping recipes in `docs/src/deploy/docker.md` |
 | Kubernetes deploy (Helm chart) | `deploy/helm/flusso/` — `Chart.yaml`, `values.yaml`, `templates/`, `README.md` |
-| Agent-facing docs (the Claude plugin + internal commands) | `plugin/` — `ARCHITECTURE.md` is the contract (one corpus/three consumers, who owns which meaning, the self-containment rule), `skills/*/SKILL.md` the knowledge corpus (`flusso-query` discloses `migration.md`/`options.md`/`maps.md`), `commands/` thin workflow entries, `agents/flusso-expert.md`, `hooks/`; `.claude/commands/{implement,new-issue}.md` the internal spine; `.claude/skills/coordinator/SKILL.md` how a round of issues is driven through agents (order of work, the two independent reviews, merge and issue rules). Guarded by `apps/cli/tests/agent_docs_paths.rs` |
-| Domain glossary + architecture decisions | `CONTEXT.md` (the vocabulary: kernel / ports / adapters / engine / daemon, stream / lane / envelope / position / source position / fence, operation vs primitive vs transport) and `docs/adr/` (0001 adapter-owned config, 0004 the rename, 0005 lock format 3, 0006 benchmarks, 0007 reverse resolution reads the pre-image, 0008 page cursors are keyset with an opt-in point-in-time, 0009 a fence waits on the source's own position, per sink, at two observed levels: accepted; 0010 a change is emitted once its transaction is visible: accepted, issue #343; 0002/0003 the engine split: `proposed` until phase 2 of #130 lands) |
+| Agent-facing docs (the Claude plugin + internal commands) | `plugin/` — `ARCHITECTURE.md` is the contract (one corpus/three consumers, who owns which meaning, the self-containment rule), `skills/*/SKILL.md` the knowledge corpus (`flusso-query` discloses `migration.md`/`options.md`/`maps.md`/`read-time.md`), `commands/` thin workflow entries, `agents/flusso-expert.md`, `hooks/`; `.claude/commands/{implement,new-issue}.md` the internal spine; `.claude/skills/coordinator/SKILL.md` how a round of issues is driven through agents (order of work, the two independent reviews, merge and issue rules). Guarded by `apps/cli/tests/agent_docs_paths.rs` |
+| Domain glossary + architecture decisions | `CONTEXT.md` (the vocabulary: kernel / ports / adapters / engine / daemon, stream / lane / envelope / position / source position / fence, operation vs primitive vs transport) and `docs/adr/` (0001 adapter-owned config, 0004 the rename, 0005 lock format 3, 0006 benchmarks, 0007 reverse resolution reads the pre-image, 0008 page cursors are keyset with an opt-in point-in-time, 0009 a fence waits on the source's own position, per sink, at two observed levels: accepted; 0010 a change is emitted once its transaction is visible: accepted, issue #343; 0011 read-time fields are rules decided twice, with no script: accepted, issue #381; 0002/0003 the engine split: `proposed` until phase 2 of #130 lands) |
 
 ## Conventions
 

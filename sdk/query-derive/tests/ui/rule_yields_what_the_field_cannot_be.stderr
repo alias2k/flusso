@@ -1,0 +1,78 @@
+error[E0277]: `RuleNumber<flusso_query::kind::Double, Optional>` cannot be what a `Rules<{float}>` yields
+  --> tests/ui/rule_yields_what_the_field_cannot_be.rs:19:20
+   |
+19 |         .otherwise(doc.discounted_fee())
+   |          --------- ^^^^^^^^^^^^^^^^^^^^ not a `{float}`, and not a stored field that reads as one
+   |          |
+   |          required by a bound introduced by this call
+   |
+   = note: yield a `{float}`, or the handle of a stored field of the matching kind
+   = note: a field that can be missing reads as `Option<…>` (or as the plain type after `.assume_present()`), and an array field as `Vec<…>`
+help: the trait `IntoOutcome<{float}>` is not implemented for `RuleNumber<flusso_query::kind::Double, Optional>`
+      but trait `IntoOutcome<std::option::Option<_>>` is implemented for it
+  --> $WORKSPACE/sdk/query/src/rules/list.rs
+   |
+   |         impl<V: FlussoValue<$kind>> IntoOutcome<$target> for $handle<$($number,)? $presence> {
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+   | stored_outcome!(RuleNumber<kind::Double>, kind::Double);
+   | ------------------------------------------------------- in this macro invocation
+   = help: for that trait implementation, expected `std::option::Option<_>`, found `{float}`
+note: required by a bound in `RulesBuilder::<T>::otherwise`
+  --> $WORKSPACE/sdk/query/src/rules/list.rs
+   |
+   |     pub fn otherwise(self, outcome: impl IntoOutcome<T>) -> Rules<T> {
+   |                                          ^^^^^^^^^^^^^^ required by this bound in `RulesBuilder::<T>::otherwise`
+   = note: this error originates in the macro `stored_outcome` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `bool` is not a valid value for a `flusso_query::kind::Keyword` field
+  --> tests/ui/rule_yields_what_the_field_cannot_be.rs:26:20
+   |
+26 |         .otherwise(doc.state())
+   |          --------- ^^^^^^^^^^^ unsupported field type
+   |          |
+   |          required by a bound introduced by this call
+   |
+   = note: use a built-in leaf type, or a type with `#[derive(FlussoValue)]` of the matching kind
+help: the trait `FlussoValue<flusso_query::kind::Keyword>` is not implemented for `bool`
+      but trait `FlussoValue<flusso_query::kind::Bool>` is implemented for it
+  --> $WORKSPACE/sdk/query/src/handles/mod.rs
+   |
+   | impl FlussoValue<kind::Bool> for bool {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for that trait implementation, expected `flusso_query::kind::Bool`, found `flusso_query::kind::Keyword`
+   = note: required for `RuleKeyword` to implement `IntoOutcome<bool>`
+note: required by a bound in `RulesBuilder::<T>::otherwise`
+  --> $WORKSPACE/sdk/query/src/rules/list.rs
+   |
+   |     pub fn otherwise(self, outcome: impl IntoOutcome<T>) -> Rules<T> {
+   |                                          ^^^^^^^^^^^^^^ required by this bound in `RulesBuilder::<T>::otherwise`
+
+error[E0277]: `RuleKeyword<flusso_query::rules::Array>` cannot be what a `Rules<std::string::String>` yields
+  --> tests/ui/rule_yields_what_the_field_cannot_be.rs:33:20
+   |
+33 |         .otherwise(doc.tags())
+   |          --------- ^^^^^^^^^^ not a `std::string::String`, and not a stored field that reads as one
+   |          |
+   |          required by a bound introduced by this call
+   |
+   = help: the trait `IntoOutcome<std::string::String>` is not implemented for `RuleKeyword<flusso_query::rules::Array>`
+   = note: yield a `std::string::String`, or the handle of a stored field of the matching kind
+   = note: a field that can be missing reads as `Option<…>` (or as the plain type after `.assume_present()`), and an array field as `Vec<…>`
+help: the following other types implement trait `IntoOutcome<T>`
+  --> $WORKSPACE/sdk/query/src/rules/list.rs
+   |
+   |         impl<V: FlussoValue<$kind>> IntoOutcome<$target> for $handle<$($number,)? $presence> {
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |         |
+   |         `RuleKeyword<flusso_query::rules::Array>` implements `IntoOutcome<Vec<V>>`
+   |         `RuleKeyword<flusso_query::rules::Array>` implements `IntoOutcome<std::option::Option<Vec<V>>>`
+...
+   | stored_outcome!(RuleKeyword, kind::Keyword);
+   | ------------------------------------------- in this macro invocation
+note: required by a bound in `RulesBuilder::<T>::otherwise`
+  --> $WORKSPACE/sdk/query/src/rules/list.rs
+   |
+   |     pub fn otherwise(self, outcome: impl IntoOutcome<T>) -> Rules<T> {
+   |                                          ^^^^^^^^^^^^^^ required by this bound in `RulesBuilder::<T>::otherwise`
+   = note: this error originates in the macro `stored_outcome` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -68,6 +68,7 @@ const DEFAULT_SIZE: u64 = 10;
 /// # #[derive(serde::Deserialize)] struct User { email: String }
 /// # impl FlussoScope for User { const PATH: &'static [Segment] = &[]; }
 /// # impl FlussoRoot for User {
+/// #     type Context = ();
 /// #     const INDEX: &'static str = "users";
 /// #     const SCHEMA_HASH: &'static str = "xxxxxx";
 /// # }
@@ -398,6 +399,11 @@ pub(crate) fn keep_alive_param(keep_alive: Duration) -> String {
 ///   search it, and close it after the last page — or after a first page that
 ///   fails, which would otherwise hold it until the keep-alive lapses.
 pub(crate) async fn fetch_page(client: &Client, request: PageRequest<'_>) -> Result<FetchedPage> {
+    // Before a point-in-time is opened for a search that will be refused.
+    request
+        .body
+        .values()
+        .try_for_each(crate::rules::refuse_invalid)?;
     let bound_path = client.prefixed(request.path);
     let (pinned, opened) = match (request.cursor, request.pin) {
         (Some(cursor), _) => (cursor.pinned.clone(), false),

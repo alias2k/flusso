@@ -55,6 +55,7 @@ impl FlussoScope for Product {
     const PATH: &'static [Segment] = &[];
 }
 impl FlussoRoot for Product {
+    type Context = ();
     const INDEX: &'static str = "products";
     const SCHEMA_HASH: &'static str = "00000177";
 }
@@ -113,7 +114,10 @@ async fn ids(client: &Client, query: impl AsQuery<Root>) -> Vec<String> {
     ids_in::<Product>(client, query).await
 }
 
-async fn ids_in<R: FlussoRoot>(client: &Client, query: impl AsQuery<Root>) -> Vec<String> {
+async fn ids_in<R: FlussoRoot<Context = ()>>(
+    client: &Client,
+    query: impl AsQuery<Root>,
+) -> Vec<String> {
     let mut ids: Vec<String> = R::query()
         .filter(query)
         .send(client)
@@ -229,6 +233,7 @@ impl FlussoScope for Catalog {
     const PATH: &'static [Segment] = &[];
 }
 impl FlussoRoot for Catalog {
+    type Context = ();
     const INDEX: &'static str = "catalog";
     const SCHEMA_HASH: &'static str = "00000186";
 }
@@ -248,6 +253,7 @@ impl FlussoScope for Tagged {
     const PATH: &'static [Segment] = &[];
 }
 impl FlussoRoot for Tagged {
+    type Context = ();
     const INDEX: &'static str = "tagged";
     const SCHEMA_HASH: &'static str = "00001860";
 }
@@ -313,7 +319,7 @@ fn per_key<Q: AsQuery<Root>>(keys: &[&str], query: impl Fn(&str) -> Q) -> Query<
 
 /// Run the cross-key query and its per-key `or`, assert they agree, and
 /// return the matching ids.
-async fn agree<R: FlussoRoot>(
+async fn agree<R: FlussoRoot<Context = ()>>(
     client: &Client,
     cross_key: impl AsQuery<Root>,
     or_of_keys: Query<Root>,
@@ -874,6 +880,7 @@ impl FlussoScope for Tricky {
     const PATH: &'static [Segment] = &[];
 }
 impl FlussoRoot for Tricky {
+    type Context = ();
     const INDEX: &'static str = "tricky";
     const SCHEMA_HASH: &'static str = "00001861";
 }
@@ -884,6 +891,7 @@ impl FlussoScope for TrickySubfields {
     const PATH: &'static [Segment] = &[];
 }
 impl FlussoRoot for TrickySubfields {
+    type Context = ();
     const INDEX: &'static str = "tricky_subfields";
     const SCHEMA_HASH: &'static str = "00001910";
 }

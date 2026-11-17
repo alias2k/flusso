@@ -1,0 +1,12 @@
+# Document keys named like what a root with a context generates for itself.
+version: 1
+table: things
+primary_key: id
+
+fields:
+  - keyword: id
+    required: true
+  - keyword: query
+    required: true
+  - keyword: doc
+    required: true

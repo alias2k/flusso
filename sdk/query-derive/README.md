@@ -40,6 +40,13 @@ time and **with no database**:
 
 A schema change that breaks a field fails the build — that's the safety net.
 
+With `#[flusso(context = YourType)]` the root also declares **read-time fields**, decided when a
+document is read from a request-time value (the clock, the caller): `#[flusso(rules = function)]`
+gives a field its value plus a filter, sort and counts with no script, and
+`#[flusso(computed = function)]` gives a value from any Rust function. The entry points then take
+the context (`Contract::query(&cx)`), and `Contract::doc()` holds the rule handles of the stored
+fields a rule can read. See [Read-time fields](https://alias2k.github.io/flusso/query/read-time-fields.html).
+
 ## What `FlussoFragment` does
 
 A fragment names no index and no path, so one declaration covers every place its shape

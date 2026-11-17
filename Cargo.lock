@@ -1396,6 +1396,7 @@ dependencies = [
  "flusso-sink-opensearch",
  "futures",
  "reqwest",
+ "rust_decimal",
  "serde",
  "serde_json",
  "testcontainers-modules",
