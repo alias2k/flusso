@@ -766,7 +766,9 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   `a_close_hands_over_the_confirmed_position_then_ends_the_stream_without_a_change`, and the
   `flusso-cli` `shutdown` e2e (steady writes: everything at or before `confirmed_flush_lsn` indexed, a
   restart rewrites no `_version`; a paused OpenSearch: exit 1 at the deadline naming the sink, a
-  restart converges; a fence position answered by the next process at both levels).
+  restart converges; a fence position answered by the next process at both levels;
+  `random_stops_under_writes_converge_after_a_restart`, seeded, `FLUSSO_STOP_SEED` replays: stops at
+  random points of a backfill and live writes, then the index must equal the table).
 - **…but a seed is only as good as the stream behind it (issue #120).** Run order is
   `source.continuity()` → stage every sink (`ensure_index` all, on `Fresh` `reindex` +
   `ensure_index` every still-`is_seeded` index, request backfill) → `source.prepare()` (the
