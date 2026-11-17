@@ -288,3 +288,21 @@ fn a_document_written_twice_in_one_request_is_caught() {
         delete("users_1", "1")
     ]));
 }
+
+/// A batch whose apply fails partway is redelivered whole to the restarted
+/// engine, which applies it again on the same sink: what the failed attempt
+/// buffered must not be written a second time.
+#[tokio::test]
+async fn a_batch_applied_again_after_a_failed_apply_is_written_once() {
+    let stub = stub_bulk(|_, _| 201).await;
+    let sink = sink(&stub.url, 0);
+    let mut no_document = upsert("2");
+    no_document.document = None;
+
+    sink.apply(&upsert("1")).await.unwrap();
+    sink.apply(&no_document).await.unwrap_err();
+    apply_all(&sink, &["1", "2"]).await;
+    sink.flush(false).await.unwrap();
+
+    assert_eq!(*stub.requests.lock().unwrap(), [vec!["1", "2"]]);
+}
