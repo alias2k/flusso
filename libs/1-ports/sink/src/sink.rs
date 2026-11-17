@@ -133,6 +133,11 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
 
     /// Apply one envelope: index the document on an upsert, remove it on a
     /// delete. An emitting sink forwards the envelope as-is.
+    ///
+    /// An `Err` abandons the batch: the engine stops and the lane redelivers
+    /// the batch whole, to this same sink. A sink that buffers until
+    /// [`flush`](Self::flush) drops what the batch buffered before the error,
+    /// or the redelivered batch writes it twice.
     async fn apply(&self, envelope: &Envelope) -> Result<()>;
 
     /// Flush any buffered writes so everything applied so far is durable.

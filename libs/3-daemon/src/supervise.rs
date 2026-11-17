@@ -14,8 +14,10 @@
 //! Isolation, not fail-fast: a sink engine that stops on an error (a flush-wide
 //! failure, or a `stop` policy rejection) is restarted with exponential backoff
 //! (one second, doubling to `max_restart_backoff` while it keeps failing with
-//! no progress; a run that acknowledged a lane item, or for the ingest engine
-//! published a batch, starts the next wait at one second again) and its lane
+//! no progress; a run that made progress starts the next wait at one second
+//! again: a sink engine acknowledged a lane item, the ingest engine moved its
+//! source forward, see [`IngestEngine::advances`]. A replayed change or
+//! backfill page published again is not progress) and its lane
 //! redelivers the batch it left unacknowledged, so a poison
 //! document loops on that one sink while the others continue. Its lane fills up
 //! meanwhile, so with the in-process stream the ingest engine eventually waits
@@ -199,7 +201,7 @@ pub(crate) async fn run_all(
     let mut ingest_task = AbortOnDrop(tokio::spawn(async move {
         let mut backoff = Backoff::new(max_backoff);
         loop {
-            let published = ingest.published();
+            let advances = ingest.advances();
             match ingest.run().await {
                 Ok(()) => return Ok::<(), anyhow::Error>(()),
                 // A failed engine can't wind down; a restart would read anew.
@@ -209,7 +211,7 @@ pub(crate) async fn run_all(
                     ));
                 }
                 Err(_) => {
-                    if ingest.published() > published {
+                    if ingest.advances() > advances {
                         backoff.reset();
                     }
                     tokio::select! {

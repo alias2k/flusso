@@ -832,8 +832,11 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   `Err` is flush-wide (transport down, whole request refused) and stops *that sink engine*,
   which the daemon restarts with exponential backoff (1 s doubling to `max_restart_backoff`,
   default 60 s, reset to 1 s after a run that made progress: the sink engine acknowledged a lane
-  item, `SinkEngine::acknowledged`, or the ingest engine published a batch, `IngestEngine::published`;
-  guards `tests::backoff`'s `*_restarts_after_one_second_again` / `*_doubles_its_backoff`) while the ingest engine and the other sinks keep running — its lane fills, so a
+  item, `SinkEngine::acknowledged`, or the ingest engine moved its source forward,
+  `IngestEngine::advances`: confirmed past its furthest confirmation, `ChangeCapture::reached` past
+  the furthest it reported (keepalives on a quiet stream count), or a snapshot finished; publishing
+  is not progress, since a restart publishes a replayed change or backfill page again; guards
+  `tests::backoff`'s `*_restarts_after_one_second_again` / `*_doubles_its_backoff`) while the ingest engine and the other sinks keep running — its lane fills, so a
   stalled sink eventually paces ingest and pins WAL (per-sink lag/in-flight are the alarm). An
   `Ok` report lists documents the destination *applied the batch but rejected* individually. The
   `FailurePolicies` (global `FailurePolicy` default + per-index overrides, from config `on_error`,
@@ -849,7 +852,10 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   items still busy after it fail the flush (`Err`), so the batch stays unacked until every document
   in it is written or rejected for what it holds; a busy item never reaches `on_error`, and a real
   rejection beside it is reported once. Resending a subset is safe only while a request writes each
-  document once (ids deduped per batch, one batch per flush): `transport.rs` `debug_assert!`s it. An id OpenSearch validates before
+  document once (ids deduped per batch, one batch per flush): `transport.rs` `debug_assert!`s it. A
+  failed `apply` abandons the batch, which the lane redelivers whole to the same sink, so the
+  OpenSearch sink clears its buffer on an `apply` error (the `Sink::apply` contract; guard
+  `a_batch_applied_again_after_a_failed_apply_is_written_once`). An id OpenSearch validates before
   running `_bulk` (an upsert's past 512 UTF-8 bytes, or an empty one) would 400 the *whole* request,
   so `flush` rejects it item-level without sending it (`bulk::refused_id`; issue #301; never truncate
   or hash it); a delete's over-long id is sent (OpenSearch answers `not_found`). Guarded by

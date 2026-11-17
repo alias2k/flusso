@@ -40,15 +40,15 @@
 //! [`Stop`] for the sequence.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use chrono::Utc;
 use futures::future::try_join_all;
 use futures::stream::BoxStream;
 use futures::{FutureExt, StreamExt};
 use kernel::{Envelope, IndexName, Position, SinkName, TableName};
-use source::cdc::{ChangeCapture, ChangeEvent, LiveChange};
+use source::cdc::{ChangeCapture, ChangeEvent, LiveChange, SourcePosition};
 use source::document::{BuildFailure, Document, DocumentBuilder, DocumentId};
 use source::{SnapshotTable, SourceError};
 use stream::{AckHandle, Batch, Consumer, LaneItem, Producer, Request, Stream};
@@ -87,8 +87,19 @@ pub struct IngestEngine {
     batch: BatchPolicy,
     failure_policies: FailurePolicies,
     stop: Stop,
-    /// Batches published over this engine's life, across restarts.
-    published: AtomicU64,
+    /// How many times this engine moved the source forward (see
+    /// [`advances`](Self::advances)), across restarts of its run.
+    advances: AtomicU64,
+    /// The furthest this engine has confirmed, and the furthest its source
+    /// reported reaching, across restarts of its run.
+    furthest: Mutex<Furthest>,
+}
+
+/// The furthest an ingest engine has moved its source, over its life.
+#[derive(Debug, Default)]
+struct Furthest {
+    confirmed: Option<Position>,
+    reached: Option<SourcePosition>,
 }
 
 /// How the engine's run ended without an error.
@@ -115,7 +126,8 @@ impl IngestEngine {
             batch: BatchPolicy::default(),
             failure_policies: FailurePolicies::default(),
             stop: Stop::new(),
-            published: AtomicU64::new(0),
+            advances: AtomicU64::new(0),
+            furthest: Mutex::new(Furthest::default()),
         }
     }
 
@@ -127,11 +139,15 @@ impl IngestEngine {
         self
     }
 
-    /// How many batches, live or snapshot, this engine has published since it
-    /// was built, across restarts of its run: a supervisor reads it to tell a
-    /// run that made progress from one that failed where the last one did.
-    pub fn published(&self) -> u64 {
-        self.published.load(Ordering::Relaxed)
+    /// How many times this engine has moved its source forward since it was
+    /// built, across restarts of its run: it confirmed a position further than
+    /// any before, the source reported reading further than ever (keepalives
+    /// on a quiet stream included), or a backfill finished. Publishing a batch
+    /// is not enough: a restart publishes a replayed change or backfill page
+    /// again. A supervisor reads it to tell a run that made progress from one
+    /// that failed where the last one did.
+    pub fn advances(&self) -> u64 {
+        self.advances.load(Ordering::Relaxed)
     }
 
     /// Report lifecycle and progress to `observer`.
@@ -406,7 +422,6 @@ impl IngestEngine {
         )
         .await?;
         pending.clear();
-        self.published.fetch_add(1, Ordering::Relaxed);
         self.observer.on_batch_built(stats);
         tracing::debug!("batch built and published");
         Ok(())
@@ -499,13 +514,22 @@ impl IngestEngine {
         Ok(deliveries)
     }
 
-    /// Hand the stream's watermark to the source when it moved.
+    /// Hand the stream's watermark to the source when it moved, and count an
+    /// advance past the furthest this engine ever got.
     fn confirm(&self, last_confirmed: &mut Option<Position>) {
-        if let Some(watermark) = self.stream.watermark()
+        let watermark = self.stream.watermark();
+        if let Some(watermark) = watermark
             && *last_confirmed != Some(watermark)
         {
             self.source.confirm(watermark);
             *last_confirmed = Some(watermark);
+        }
+        let reached = self.source.reached(watermark);
+        let mut furthest = self.furthest.lock().unwrap_or_else(PoisonError::into_inner);
+        if watermark > furthest.confirmed || reached > furthest.reached {
+            furthest.confirmed = furthest.confirmed.max(watermark);
+            furthest.reached = furthest.reached.max(reached);
+            self.advances.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -604,7 +628,6 @@ impl IngestEngine {
             })));
         }
         try_join_all(publishes).await?;
-        self.published.fetch_add(1, Ordering::Relaxed);
         self.observer.on_batch_built(BuildStats {
             changes: 0,
             documents: envelopes.len(),
@@ -631,6 +654,7 @@ impl IngestEngine {
         }
         let indexes: Vec<IndexName> = snapshot.indexes.iter().cloned().collect();
         tracing::info!(indexes = indexes.len(), "snapshot complete");
+        self.advances.fetch_add(1, Ordering::Relaxed);
         self.observer.on_snapshot_completed(&indexes);
         Ok(())
     }
