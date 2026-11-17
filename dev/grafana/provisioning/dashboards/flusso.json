@@ -226,6 +226,155 @@
         "type": "prometheus",
         "uid": "prometheus"
       }
+    },
+    {
+      "id": 11,
+      "title": "Ingest: share of time per stage (stacked; 100% = the ingest task always busy)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 40
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (stage, work) (rate(flusso_stage_duration_seconds_sum{stage=~\"read|resolve|build|publish\"}[1m]))",
+          "legendFormat": "{{stage}} {{work}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Sinks: share of time per stage (stacked; each sink's stages add up to 100%, wait = idle)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 40
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (sink, stage) (rate(flusso_stage_duration_seconds_sum{stage=~\"wait|apply|flush\"}[1m]))",
+          "legendFormat": "{{sink}} {{stage}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "Time per batch, by stage (mean)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (stage, work) (rate(flusso_stage_duration_seconds_sum{stage!=\"wait\"}[5m])) / sum by (stage, work) (rate(flusso_stage_duration_seconds_count{stage!=\"wait\"}[5m]))",
+          "legendFormat": "{{stage}} {{work}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "title": "Flush size (mean per flush)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (sink, work) (rate(flusso_flush_documents_sum[5m])) / sum by (sink, work) (rate(flusso_flush_documents_count[5m]))",
+          "legendFormat": "{{sink}} {{work}} documents",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (sink, work) (rate(flusso_flush_size_bytes_sum[5m])) / sum by (sink, work) (rate(flusso_flush_size_bytes_count[5m])) / 1024",
+          "legendFormat": "{{sink}} {{work}} KiB",
+          "refId": "B"
+        }
+      ]
     }
   ]
 }

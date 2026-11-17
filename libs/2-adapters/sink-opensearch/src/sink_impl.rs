@@ -251,6 +251,7 @@ impl Sink for OpensearchSink {
         Ok(FlushReport {
             rejected,
             visibility,
+            bytes: Some(total_bytes as u64),
         })
     }
 

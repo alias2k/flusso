@@ -48,7 +48,9 @@ use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until};
 
 use crate::error::{EngineError, Result, StagingFailures};
-use crate::observer::{CommitStats, EngineId, NoopObserver, Observer};
+use crate::observer::{
+    CommitStats, EngineId, NoopObserver, Observer, Stage, StageTiming, StartupStep, Work,
+};
 use crate::policy::{FailurePolicies, FailurePolicy};
 use crate::stop::Stop;
 
@@ -195,6 +197,7 @@ impl SinkEngine {
     /// started; the error names every failure seen.
     #[tracing::instrument(name = "sink.stage", skip_all, fields(sink = %self.name, ?continuity))]
     pub async fn stage(&self, continuity: Continuity) -> Result<()> {
+        let started = Instant::now();
         let backfill = self.options.backfill;
         let mut seeded = self
             .each_index(
@@ -209,7 +212,7 @@ impl SinkEngine {
 
         if !backfill {
             tracing::info!("backfill disabled for this sink; live changes only");
-            self.observer.on_sink_started(&self.name);
+            self.staged(started);
             return Ok(());
         }
 
@@ -235,8 +238,14 @@ impl SinkEngine {
         } else {
             tracing::info!("every index is seeded; no backfill needed");
         }
-        self.observer.on_sink_started(&self.name);
+        self.staged(started);
         Ok(())
+    }
+
+    fn staged(&self, started: Instant) {
+        self.observer
+            .on_startup_step(StartupStep::Stage, Some(&self.name), started.elapsed());
+        self.observer.on_sink_started(&self.name);
     }
 
     /// The source has no resume point, so every seed this sink recorded is
@@ -393,12 +402,16 @@ impl SinkEngine {
     async fn run_inner(&self, control: &mut mpsc::Receiver<SinkControl>) -> Result<()> {
         let mut lane = self.stream.lane(&self.name)?.consumer;
         let mut control_open = true;
+        let mut idle_since = Instant::now();
         loop {
             let next_searchable = self.next_searchable_at();
             tokio::select! {
                 delivery = lane.recv() => match delivery? {
                     None => return Ok(()),
                     Some(delivery) => {
+                        self.observer.on_stage(
+                            StageTiming::new(Stage::Wait, idle_since.elapsed()).sink(&self.name),
+                        );
                         let (item, handle) = delivery.into_parts();
                         let flushed = match item {
                             LaneItem::Batch(batch)
@@ -458,6 +471,7 @@ impl SinkEngine {
                         }
                         handle.ack().await?;
                         self.acknowledged.fetch_add(1, Ordering::Relaxed);
+                        idle_since = Instant::now();
                     }
                 },
                 message = control.recv(), if control_open => match message {
@@ -565,12 +579,28 @@ impl SinkEngine {
     /// unacknowledged. Returns when the flush's documents become searchable.
     #[tracing::instrument(name = "sink.commit", level = "debug", skip_all, fields(envelopes = batch.envelopes.len(), caught_up))]
     async fn commit(&self, batch: &stream::Batch, caught_up: bool) -> Result<Visibility> {
+        let work = if batch.position.is_some() {
+            Work::Live
+        } else {
+            Work::Backfill
+        };
+        let apply_start = Instant::now();
         for envelope in batch.envelopes.iter() {
             self.sink.apply(envelope).await?;
         }
         let flush_start = Instant::now();
+        self.observer.on_stage(
+            StageTiming::new(Stage::Apply, flush_start - apply_start)
+                .work(work)
+                .sink(&self.name),
+        );
         let report = self.sink.flush(caught_up).await?;
         let flush = flush_start.elapsed();
+        self.observer.on_stage(
+            StageTiming::new(Stage::Flush, flush)
+                .work(work)
+                .sink(&self.name),
+        );
 
         // A single `stop`-policy rejection stops the run, decided *before* any
         // quarantine event is emitted, so a `skip` document in the same batch
@@ -608,6 +638,8 @@ impl SinkEngine {
                 envelopes: batch.envelopes.len(),
                 changes: batch.changes,
                 flush,
+                work,
+                bytes: report.bytes,
             },
         );
         Ok(report.visibility)

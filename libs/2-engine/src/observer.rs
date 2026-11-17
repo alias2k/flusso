@@ -5,6 +5,33 @@
 //! Every sink-side event names the sink, so status and metrics carry a sink
 //! dimension. Ingest-side events have no sink: they describe the one build
 //! path every lane is fed from.
+//!
+//! **Where time goes** is one event, [`Observer::on_stage`]: a [`Stage`] by
+//! what it is (resolve, build, publish, wait for a lane, apply, flush, wait
+//! for an item), with the sink and index it belongs to where the engine knows
+//! them. It is reported once per batch or lane item, never per change or per
+//! document, so it costs an `Instant::now()` pair per batch. Start-up is
+//! [`Observer::on_startup_step`], once per step.
+//!
+//! ```
+//! use std::time::Duration;
+//! use engine::{Observer, Stage, StageTiming, Work};
+//!
+//! #[derive(Debug)]
+//! struct Busy(std::sync::Mutex<Duration>);
+//!
+//! impl Observer for Busy {
+//!     fn on_stage(&self, timing: StageTiming<'_>) {
+//!         if timing.stage == Stage::Build {
+//!             *self.0.lock().unwrap() += timing.elapsed;
+//!         }
+//!     }
+//! }
+//!
+//! let busy = Busy(Default::default());
+//! busy.on_stage(StageTiming::new(Stage::Build, Duration::from_millis(3)).work(Work::Live));
+//! assert_eq!(*busy.0.lock().unwrap(), Duration::from_millis(3));
+//! ```
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,6 +65,160 @@ pub struct CommitStats {
     pub changes: usize,
     /// How long the flush took.
     pub flush: Duration,
+    /// Live changes or a backfill.
+    pub work: Work,
+    /// Bytes the flush sent, when the sink reports them.
+    pub bytes: Option<u64>,
+}
+
+/// A step of the pipeline that takes time, named by what it is. The engines
+/// report each through [`Observer::on_stage`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Stage {
+    /// Ingest, backfill: waiting for the source to hand over snapshot rows
+    /// (a key page). Only the waits are counted: a row already fetched costs
+    /// nothing here.
+    Read,
+    /// Ingest, live: taking the changes the stream has ready and resolving
+    /// each to the documents it touches (the reverse lookups).
+    Resolve,
+    /// Ingest: building a batch's documents (`build_many`) into envelopes.
+    Build,
+    /// Ingest: publishing a built batch to its lanes, until the last lane took
+    /// it. Long when a lane is full.
+    Publish,
+    /// Ingest, per sink: until that sink's lane took the batch. The longest
+    /// of these is [`Publish`](Self::Publish).
+    LaneWait,
+    /// Sink: idle, waiting for the next lane item.
+    Wait,
+    /// Sink: applying a batch's envelopes (buffering, rendering).
+    Apply,
+    /// Sink: flushing a batch to the destination.
+    Flush,
+}
+
+impl Stage {
+    /// Every stage, in pipeline order.
+    pub const ALL: [Stage; 8] = [
+        Stage::Read,
+        Stage::Resolve,
+        Stage::Build,
+        Stage::Publish,
+        Stage::LaneWait,
+        Stage::Wait,
+        Stage::Apply,
+        Stage::Flush,
+    ];
+
+    /// The stage's name in metrics and logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Stage::Read => "read",
+            Stage::Resolve => "resolve",
+            Stage::Build => "build",
+            Stage::Publish => "publish",
+            Stage::LaneWait => "lane_wait",
+            Stage::Wait => "wait",
+            Stage::Apply => "apply",
+            Stage::Flush => "flush",
+        }
+    }
+}
+
+/// Which work a timing belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Work {
+    /// Live changes from the stream.
+    Live,
+    /// A backfill (snapshot) batch.
+    Backfill,
+}
+
+impl Work {
+    /// The work's name in metrics and logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Work::Live => "live",
+            Work::Backfill => "backfill",
+        }
+    }
+}
+
+/// How long one [`Stage`] took, once: for a batch, or a lane item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StageTiming<'a> {
+    /// What took the time.
+    pub stage: Stage,
+    /// Live or backfill work; `None` where it is neither (a sink waiting).
+    pub work: Option<Work>,
+    /// The sink it happened at, for a sink stage or a lane.
+    pub sink: Option<&'a SinkName>,
+    /// The index it was for, where the stage runs per index.
+    pub index: Option<&'a IndexName>,
+    /// How long it took.
+    pub elapsed: Duration,
+}
+
+impl<'a> StageTiming<'a> {
+    /// `stage` took `elapsed`, for no particular work, sink or index.
+    pub fn new(stage: Stage, elapsed: Duration) -> Self {
+        Self {
+            stage,
+            work: None,
+            sink: None,
+            index: None,
+            elapsed,
+        }
+    }
+
+    /// For `work`.
+    #[must_use]
+    pub fn work(mut self, work: Work) -> Self {
+        self.work = Some(work);
+        self
+    }
+
+    /// At `sink`.
+    #[must_use]
+    pub fn sink(mut self, sink: &'a SinkName) -> Self {
+        self.sink = Some(sink);
+        self
+    }
+
+    /// For `index`.
+    #[must_use]
+    pub fn index(mut self, index: &'a IndexName) -> Self {
+        self.index = Some(index);
+        self
+    }
+}
+
+/// A step between a start and the live stream, timed once per start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StartupStep {
+    /// Connecting to the source and validating the indexes against it.
+    Source,
+    /// Staging one sink: ensuring its indexes, retiring stale seeds, asking for
+    /// its backfill. Reported per sink, and again on each re-stage.
+    Stage,
+    /// Preparing the source's resume point (Postgres: publication, replica
+    /// identity, slot).
+    Prepare,
+    /// Opening the live stream.
+    OpenLive,
+}
+
+impl StartupStep {
+    /// The step's name in metrics and logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StartupStep::Source => "source",
+            StartupStep::Stage => "stage",
+            StartupStep::Prepare => "prepare",
+            StartupStep::OpenLive => "open_live",
+        }
+    }
 }
 
 /// The engine an event or error belongs to: the ingest engine, or one sink's.
@@ -62,6 +243,18 @@ impl std::fmt::Display for EngineId {
 pub trait Observer: std::fmt::Debug + Send + Sync {
     /// The ingest engine opened the live stream and is following it.
     fn on_live_started(&self) {}
+
+    /// One stage of the pipeline took `timing.elapsed` (see [`Stage`]).
+    /// Reported per batch or lane item, so keep it cheap.
+    fn on_stage(&self, timing: StageTiming<'_>) {
+        let _ = timing;
+    }
+
+    /// A start-up step took `elapsed`; `sink` names the sink a
+    /// [`StartupStep::Stage`] staged.
+    fn on_startup_step(&self, step: StartupStep, sink: Option<&SinkName>, elapsed: Duration) {
+        let _ = (step, sink, elapsed);
+    }
 
     /// One live change was captured into the current batch.
     fn on_change_captured(&self) {}
@@ -189,6 +382,18 @@ impl Observer for FanOut {
     fn on_change_captured(&self) {
         for observer in &self.observers {
             observer.on_change_captured();
+        }
+    }
+
+    fn on_stage(&self, timing: StageTiming<'_>) {
+        for observer in &self.observers {
+            observer.on_stage(timing);
+        }
+    }
+
+    fn on_startup_step(&self, step: StartupStep, sink: Option<&SinkName>, elapsed: Duration) {
+        for observer in &self.observers {
+            observer.on_startup_step(step, sink, elapsed);
         }
     }
 

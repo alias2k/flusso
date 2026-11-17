@@ -22,7 +22,9 @@ pub use supervise::{ControlError, DaemonControl};
 
 use supervise::ControlReceivers;
 
-pub use engine::{BuildStats, CommitStats, EngineId, Observer};
+pub use engine::{
+    BuildStats, CommitStats, EngineId, Observer, Stage, StageTiming, StartupStep, Work,
+};
 pub use kernel::{IndexName, SinkName};
 
 use std::future::Future;
@@ -139,8 +141,10 @@ impl Daemon {
         );
 
         let config = Arc::new(config);
+        let source_started = Instant::now();
         let SourceParts { capture, documents } =
             backends.source(Arc::clone(&config), &options).await?;
+        let source_took = source_started.elapsed();
         let sinks = backends.sinks(&config).await?;
         let sink_names: Vec<SinkName> = sinks.iter().map(|s| s.name.clone()).collect();
         let stream: Arc<dyn Stream> = backends.stream(&config, &sink_names)?;
@@ -165,6 +169,7 @@ impl Daemon {
         ];
         observers.extend(extra_observers);
         let observer: Arc<dyn Observer> = Arc::new(FanOut::new(observers));
+        observer.on_startup_step(StartupStep::Source, None, source_took);
 
         let mut failure_policies = FailurePolicies::new(config.on_error);
         for (name, index) in &config.indexes {

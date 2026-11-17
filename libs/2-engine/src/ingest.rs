@@ -55,7 +55,9 @@ use stream::{AckHandle, Batch, Consumer, LaneItem, Producer, Request, Stream};
 use tokio::time::{Duration, Instant, sleep_until, timeout_at};
 
 use crate::error::{EngineError, Result};
-use crate::observer::{BuildStats, EngineId, NoopObserver, Observer};
+use crate::observer::{
+    BuildStats, EngineId, NoopObserver, Observer, Stage, StageTiming, StartupStep, Work,
+};
 use crate::policy::{BatchPolicy, FailurePolicies, FailurePolicy};
 use crate::stop::{Stop, drain_lanes};
 
@@ -201,7 +203,10 @@ impl IngestEngine {
     }
 
     async fn run_inner(&self) -> Result<Ended> {
+        let started = Instant::now();
         self.source.prepare().await?;
+        self.observer
+            .on_startup_step(StartupStep::Prepare, None, started.elapsed());
         let lanes: Lanes = self
             .sinks
             .iter()
@@ -215,7 +220,10 @@ impl IngestEngine {
             .map(|scope| (scope.index, scope.root))
             .collect();
 
+        let started = Instant::now();
         let mut live: LiveStream = self.source.live().await?;
+        self.observer
+            .on_startup_step(StartupStep::OpenLive, None, started.elapsed());
         tracing::info!("following live changes");
         self.observer.on_live_started();
 
@@ -255,8 +263,12 @@ impl IngestEngine {
                     Next::Change(None) => live_ended = true,
                     Next::Change(Some(Err(error))) => return Err(error.into()),
                     Next::Change(Some(Ok((position, event)))) => {
+                        let started = Instant::now();
                         self.buffer_live(&mut pending, position, event).await?;
                         live_ended = self.drain_ready(&mut live, &mut pending).await?;
+                        self.observer.on_stage(
+                            StageTiming::new(Stage::Resolve, started.elapsed()).work(Work::Live),
+                        );
                         self.commit_live(&mut pending, &lanes).await?;
                         self.confirm(&mut last_confirmed);
                     }
@@ -405,26 +417,54 @@ impl IngestEngine {
         }
         let started = Instant::now();
         let (envelopes, by_index) = self.build(&pending.ids, pending.position).await?;
+        let build = started.elapsed();
+        self.observer
+            .on_stage(StageTiming::new(Stage::Build, build).work(Work::Live));
         let stats = BuildStats {
             changes: pending.count,
             documents: envelopes.len(),
             documents_by_index: by_index.into_iter().collect(),
-            build: started.elapsed(),
+            build,
         };
         let item = LaneItem::Batch(Batch {
             position: pending.position,
             changes: pending.count,
             envelopes: envelopes.into(),
         });
-        try_join_all(
+        self.publish(
             lanes
-                .values()
-                .map(|producer| producer.publish(item.clone())),
+                .iter()
+                .map(|(sink, producer)| (sink, producer, item.clone())),
+            Work::Live,
         )
         .await?;
         pending.clear();
         self.observer.on_batch_built(stats);
         tracing::debug!("batch built and published");
+        Ok(())
+    }
+
+    /// Publish each item to its lane, all at once, so a full lane delays only
+    /// its own copy. Times each lane ([`Stage::LaneWait`]) and the whole
+    /// ([`Stage::Publish`]).
+    async fn publish<'a>(
+        &self,
+        items: impl IntoIterator<Item = (&'a SinkName, &'a Box<dyn Producer<LaneItem>>, LaneItem)>,
+        work: Work,
+    ) -> Result<()> {
+        let started = Instant::now();
+        try_join_all(items.into_iter().map(|(sink, producer, item)| async move {
+            producer.publish(item).await?;
+            self.observer.on_stage(
+                StageTiming::new(Stage::LaneWait, started.elapsed())
+                    .work(work)
+                    .sink(sink),
+            );
+            Ok::<_, EngineError>(())
+        }))
+        .await?;
+        self.observer
+            .on_stage(StageTiming::new(Stage::Publish, started.elapsed()).work(work));
         Ok(())
     }
 
@@ -590,6 +630,7 @@ impl IngestEngine {
             roots,
             handles,
             batch: PendingBatch::new(self.batch.max_changes),
+            read_wait: Duration::ZERO,
         };
         if tables.is_empty() {
             self.finish_snapshot(&mut snapshot, lanes).await?;
@@ -610,11 +651,20 @@ impl IngestEngine {
     /// Build the snapshot batch once and publish each lane the slice of it that
     /// lane requested, with no position.
     async fn commit_snapshot(&self, snapshot: &mut Snapshot, lanes: &Lanes) -> Result<()> {
+        let read = std::mem::take(&mut snapshot.read_wait);
+        if snapshot.batch.count == 0 && read.is_zero() {
+            return Ok(());
+        }
+        self.observer
+            .on_stage(StageTiming::new(Stage::Read, read).work(Work::Backfill));
         if snapshot.batch.count == 0 {
             return Ok(());
         }
         let started = Instant::now();
         let (envelopes, by_index) = self.build(&snapshot.batch.ids, None).await?;
+        let build = started.elapsed();
+        self.observer
+            .on_stage(StageTiming::new(Stage::Build, build).work(Work::Backfill));
         let mut publishes = Vec::with_capacity(snapshot.requested.len());
         for (sink, indexes) in &snapshot.requested {
             let slice: Vec<Envelope> = envelopes
@@ -629,18 +679,22 @@ impl IngestEngine {
                 tracing::warn!(%sink, "snapshot requested by a sink with no lane; dropping its slice");
                 continue;
             };
-            publishes.push(producer.publish(LaneItem::Batch(Batch {
-                position: None,
-                changes: 0,
-                envelopes: slice.into(),
-            })));
+            publishes.push((
+                sink,
+                producer,
+                LaneItem::Batch(Batch {
+                    position: None,
+                    changes: 0,
+                    envelopes: slice.into(),
+                }),
+            ));
         }
-        try_join_all(publishes).await?;
+        self.publish(publishes, Work::Backfill).await?;
         self.observer.on_batch_built(BuildStats {
             changes: 0,
             documents: envelopes.len(),
             documents_by_index: by_index.into_iter().collect(),
-            build: started.elapsed(),
+            build,
         });
         snapshot.batch.clear();
         Ok(())
@@ -763,6 +817,8 @@ struct Snapshot {
     roots: HashMap<TableName, Vec<IndexName>>,
     handles: Vec<Box<dyn AckHandle>>,
     batch: PendingBatch,
+    /// How long the engine waited on `stream` since the last batch.
+    read_wait: Duration,
 }
 
 impl Snapshot {
@@ -783,12 +839,54 @@ impl Snapshot {
     }
 }
 
+/// The snapshot's next row. The time from the stream first answering
+/// "not yet" until it yields, or until the `select!` drops this future, is
+/// added to the snapshot's `read_wait`: a row already fetched costs no clock
+/// read, so only the source's key pages are timed.
 async fn next_snapshot_row(
     snapshot: &mut Option<Snapshot>,
 ) -> Option<std::result::Result<ChangeEvent, SourceError>> {
-    match snapshot {
-        Some(active) => active.stream.next().await,
-        None => std::future::pending().await,
+    let Some(Snapshot {
+        stream, read_wait, ..
+    }) = snapshot
+    else {
+        return std::future::pending().await;
+    };
+    let mut wait = ReadWait {
+        total: read_wait,
+        since: None,
+    };
+    std::future::poll_fn(move |cx| match stream.poll_next_unpin(cx) {
+        std::task::Poll::Ready(row) => {
+            wait.stop();
+            std::task::Poll::Ready(row)
+        }
+        std::task::Poll::Pending => {
+            wait.since.get_or_insert_with(Instant::now);
+            std::task::Poll::Pending
+        }
+    })
+    .await
+}
+
+/// Adds the time since `since` to `total` when it stops, or is dropped
+/// waiting.
+struct ReadWait<'a> {
+    total: &'a mut Duration,
+    since: Option<Instant>,
+}
+
+impl ReadWait<'_> {
+    fn stop(&mut self) {
+        if let Some(since) = self.since.take() {
+            *self.total += since.elapsed();
+        }
+    }
+}
+
+impl Drop for ReadWait<'_> {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 

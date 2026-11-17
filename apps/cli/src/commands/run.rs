@@ -168,6 +168,7 @@ pub(crate) struct RunArgs {
 }
 
 pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
     let tracer_provider = telemetry::init_tracing();
     let parent = if args.exit_with_parent {
         shutdown::parent()
@@ -240,7 +241,7 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     };
 
     let backends: Arc<dyn daemon::Backends> = Arc::new(FlussoBackends);
-    let otel_observer: Arc<dyn daemon::Observer> = Arc::new(OtelObserver::new());
+    let otel_observer: Arc<dyn daemon::Observer> = Arc::new(OtelObserver::new(started));
     let running = Daemon::new(config, Arc::clone(&backends))
         .with_options(options)
         .with_observer(otel_observer)

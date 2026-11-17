@@ -36,6 +36,8 @@ fn commit(changes: usize, envelopes: usize) -> CommitStats {
         envelopes,
         changes,
         flush: Duration::from_millis(5),
+        work: crate::Work::Live,
+        bytes: None,
     }
 }
 

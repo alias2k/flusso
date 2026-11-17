@@ -22,11 +22,36 @@ A scenario reports these under the series `<scenario>/<scale>/…`:
 
 | Metric | Unit | Direction | How it's measured |
 | --- | --- | --- | --- |
-| `visible_latency_p50_ms`, `visible_latency_p99_ms` | ms | smaller | A paced trickle of changes; each stamped root-row update is timed from commit until a search on the index's alias returns the document with that stamp. Refresh included: this is what a user sees. Only root-row updates carry the stamp, so related-table changes are in the mix but not timed. |
+| `visible_latency_p50_ms`, `visible_latency_p99_ms` | ms | smaller | A paced trickle of changes; each stamped root-row update is timed from commit until a search on the index's alias returns the document with that stamp. Refresh included: this is what a user sees. The probe polls every 5 ms and takes the midpoint between the last search that missed and the one that found it, so polling adds no bias (a 20 ms poll that took the hit's answer added about 10 ms) and an error of a few milliseconds either way. Only root-row updates carry the stamp, so related-table changes are in the mix but not timed. |
 | `drain_changes_per_s` | changes/s | bigger | Several writers commit a fixed burst as fast as Postgres accepts. Time runs from the first write until `changes_captured` covers every row written and every sink has nothing in flight. The report also records how long the writers themselves took, so a Postgres-bound run is recognisable. |
 | `backfill_docs_per_s` | docs/s | bigger | Documents seeded divided by the time from spawning the binary until `/status` reports `live` with every index seeded. |
 | `peak_rss_mib`, `cpu_seconds` | MiB, s | smaller | Sampled from the child with `ps` every half second. |
 | `flush_p50_ms`, `flush_p99_ms` | ms | smaller | Attribution, not headline: the sink's flush-duration histogram from `/metrics` at the end of the run. |
+
+## Where the time went
+
+Each scenario phase (backfill, trickle, burst) also gets an **attribution table**: the share of the phase's wall time each pipeline stage took. It's read from flusso's own [`flusso.stage.duration`](../reference/metrics.md#where-the-time-goes) histogram, two scrapes of `/metrics` around the phase, so the release binary needs no patch. It isn't a data point: the run logs it and writes it to `attribution.md` (and `phases.attribution` in `summary.json`), ready to paste into a PR.
+
+```text
+**burst** (5.40 s wall)
+
+| stage | work | sink | index | batches | busy s | share | ms/batch |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| build | live |  |  | 84 | 1.40 | 25.9% | 16.67 |
+| resolve | live |  |  | 84 | 3.55 | 65.7% | 42.26 |
+| flush | live | primary |  | 84 | 4.10 | 75.9% | 48.81 |
+| wait | | primary |  | 84 | 1.05 | 19.4% | 12.50 |
+```
+
+How to read it:
+
+- **One task's shares add up to 100% at most.** The ingest task is `read` + `resolve` + `build` + `publish`; whatever is missing it spent idle, waiting for the source. Each sink engine is `wait` + `apply` + `flush`.
+- **The busier side sets the pace.** A sink near 100% with the ingest task idle is sink-bound; the ingest task near 100% with the sink mostly in `wait` is ingest-bound.
+- **`publish` is the ingest task blocked on a full lane**, `lane_wait` the same per sink: a high one names the slow sink.
+- **`read` counts only waits for the source's key pages**, so it stays low unless the snapshot cursor is the limit.
+- The **flush table** gives documents and KiB per flush per sink; the backfill table adds the **start-up steps** (source, staging per sink, prepare, open_live, and `live`, the whole time to the live stream).
+
+Rows appear per `sink` and per `index` where the engine reports them, so a change that splits work per index shows up without touching the harness.
 
 Every point carries the container image tags and the scale parameters in its `extra` field. A component bench point carries the Postgres image (`extra.images.postgres`, printed by `cargo run -q -p flusso-test-postgres`), so a tag change restarts its window too. The stamp lands on every component point, the OpenSearch-only `opensearch` series included, so their windows restart with the rest.
 
@@ -57,7 +82,7 @@ just bench-startup reference 8     # time to `live` with each index declared 8 t
 just load                          # the soak tool: watch it, it produces no comparable number
 ```
 
-`bench-scenario` starts its own containers, builds a release `flusso` without the designer (or takes `FLUSSO_BIN`), and writes `target/bench/<scenario>-<scale>/{smaller,bigger,summary}.json`. `BENCH_PG_URL` and `BENCH_OS_URL` point it at an existing pair instead; the Postgres must have `wal_level = logical` and both must be empty.
+`bench-scenario` starts its own containers, builds a release `flusso` without the designer (or takes `FLUSSO_BIN`), and writes `target/bench/<scenario>-<scale>/{smaller,bigger,summary}.json` and `attribution.md`. `BENCH_PG_URL` and `BENCH_OS_URL` point it at an existing pair instead; the Postgres must have `wal_level = logical` and both must be empty.
 
 `bench-startup` measures start-up instead of the four phases (`flusso-bench --startup <copies>`): each of the scenario's indexes declared `copies` times under its own name, `--skip-backfill`, timed from spawning the binary to `/status` `live`. Each of `--runs` rounds (3) starts fresh (no index, slot or publication) and then restarts. It writes `target/bench/<scenario>-startup/startup.json`, every start with the load average beside it, and the min/median/max per kind. It's a by-hand check for a change to staging; `bench.yml` doesn't run it. To compare two builds, pass each as `FLUSSO_BIN` against one `BENCH_PG_URL`/`BENCH_OS_URL` pair, alternating, so the load the machine is under falls on both alike.
 

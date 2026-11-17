@@ -53,10 +53,7 @@ impl Sink for HeldSink {
             self.release.notified().await;
         }
         *self.flushed.lock().unwrap() += 1;
-        Ok(FlushReport {
-            rejected: Vec::new(),
-            visibility: self.visibility,
-        })
+        Ok(FlushReport::clean().visible(self.visibility))
     }
 
     async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {

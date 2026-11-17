@@ -25,6 +25,9 @@ pub(crate) struct Report {
     pub(crate) phases: serde_json::Value,
     pub(crate) smaller: Vec<Point>,
     pub(crate) bigger: Vec<Point>,
+    /// The phases' attribution tables, as Markdown.
+    #[serde(skip)]
+    pub(crate) attribution: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -76,6 +79,9 @@ impl Report {
         write("smaller.json", &self.smaller)?;
         write("bigger.json", &self.bigger)?;
         write("summary.json", self)?;
+        let path = dir.join("attribution.md");
+        std::fs::write(&path, &self.attribution)
+            .with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
 
@@ -84,6 +90,9 @@ impl Report {
         for point in self.smaller.iter().chain(self.bigger.iter()) {
             let metric = point.name.rsplit('/').next().unwrap_or(point.name.as_str());
             tracing::info!("  {metric:<28} {:>14.3} {}", point.value, point.unit);
+        }
+        for line in self.attribution.lines() {
+            tracing::info!("{line}");
         }
     }
 }

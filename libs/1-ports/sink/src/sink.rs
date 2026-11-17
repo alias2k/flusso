@@ -23,6 +23,9 @@ pub struct FlushReport {
     /// id. The sink only reports what its flush did; the sink engine turns the
     /// reports into the sink's searchable position.
     pub visibility: Visibility,
+    /// Bytes the flush sent to the destination, when the sink counts them
+    /// (the OpenSearch sink: its `_bulk` bodies). Reported as a metric only.
+    pub bytes: Option<u64>,
 }
 
 /// When the documents of one [`flush`](Sink::flush) become searchable.
@@ -66,6 +69,13 @@ impl FlushReport {
     #[must_use]
     pub fn visible(mut self, visibility: Visibility) -> Self {
         self.visibility = visibility;
+        self
+    }
+
+    /// Set how many bytes the flush sent.
+    #[must_use]
+    pub fn sent(mut self, bytes: u64) -> Self {
+        self.bytes = Some(bytes);
         self
     }
 
