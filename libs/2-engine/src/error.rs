@@ -48,7 +48,7 @@ pub enum EngineError {
     },
 
     /// Staging failed for one or more of a sink's indexes. Each is named with
-    /// its own error; the indexes not listed were staged.
+    /// its own error; the indexes not listed were staged or never started.
     #[error("{0}")]
     Staging(StagingFailures),
 }

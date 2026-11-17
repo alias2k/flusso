@@ -1,7 +1,7 @@
 //! Staging a sink with many indexes (issue #398): the indexes are staged
 //! concurrently, at most [`STAGE_CONCURRENCY`] at a time, each index's own
 //! steps in order; one backfill request names every unseeded index; a failure
-//! names its index, and every other index is still staged.
+//! names its index, the indexes in flight finish, and no new one is started.
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -265,6 +265,16 @@ async fn every_failure_seen_is_named_and_the_chains_in_flight_finish() {
             "{} was in flight and finished",
             name(i)
         );
+        if !failing.contains(&name(i)) {
+            assert!(
+                staged
+                    .sink
+                    .calls()
+                    .contains(&format!("seeded? {}", name(i))),
+                "{} ran its chain to the end",
+                name(i)
+            );
+        }
     }
     assert!(
         staged.requests().await.is_empty(),
