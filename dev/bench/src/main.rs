@@ -27,6 +27,9 @@
 //! flusso-bench --scenario reference --scale ci --out target/bench/reference-ci
 //! ```
 //!
+//! `--startup <COPIES>` measures start-up instead (see `startup.rs`): time to
+//! `live` with each index declared `COPIES` times and the backfill skipped.
+//!
 //! Needs Docker (or the two env URLs) and the `flusso` binary: `--flusso-bin`
 //! or `FLUSSO_BIN`, else a release build of `flusso-cli --no-default-features`
 //! is made first.
@@ -38,6 +41,7 @@ mod scale;
 mod scenario;
 mod services;
 mod standby;
+mod startup;
 mod writer;
 
 use std::path::{Path, PathBuf};
@@ -74,6 +78,13 @@ struct Args {
     /// Seed for the change generator.
     #[arg(long, default_value_t = 42)]
     seed: u64,
+    /// Measure start-up instead of the four phases: each index declared this
+    /// many times, the backfill skipped, time to `live` fresh and on restart.
+    #[arg(long, value_name = "COPIES")]
+    startup: Option<usize>,
+    /// How many fresh + restart rounds `--startup` times.
+    #[arg(long, default_value_t = 3)]
+    runs: usize,
 }
 
 #[tokio::main]
@@ -94,9 +105,16 @@ async fn main() -> Result<()> {
         args.scale.as_str()
     ));
     let bin = match args.flusso_bin {
-        Some(bin) => bin,
+        // The child runs in its own folder, so a relative path would miss.
+        Some(bin) => bin
+            .canonicalize()
+            .with_context(|| format!("finding {}", bin.display()))?,
         None => build_flusso().await?,
     };
+    if let Some(copies) = args.startup {
+        let out = args.out.join(format!("{}-startup", args.scenario.as_str()));
+        return startup::run(&scenario, copies, args.runs, &bin, &out).await;
+    }
 
     let mut phase = "setup".to_owned();
     match run(&scenario, &scale, &bin, args.seed, &mut phase).await {
@@ -203,6 +221,7 @@ async fn run(
         &services.pg_url,
         &services.os_url,
         scale.rss_cap_mib,
+        &[],
     )
     .await?;
     let backfill = child.wait_seeded(spawned, remaining("backfill")?).await?;
