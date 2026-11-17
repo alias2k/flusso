@@ -897,16 +897,17 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   `Starting` on an ingest error (the supervisor restarts it); only a clean
   `on_engine_stopped(Ingest)` is the final `Stopped`. `reports_lifecycle_and_progress_to_the_observer`
   guards the emit points. **Where time goes is one event** (issue #399): `Observer::on_stage(StageTiming)`
-  names a `Stage` by what it is, per task: ingest `idle`, `page` (a snapshot key-page wait;
-  `read` is kept for ADR 0012's reader), `resolve`, `build`, `publish`, `lane_wait` (ingest time
+  names a `Stage` by what it is, per task: ingest `idle`, `page` (getting snapshot rows: key-page
+  waits, decoding and buffering; `read` is kept for ADR 0012's reader), `resolve`, `build`, `publish`, `lane_wait` (ingest time
   with a `sink` label), `snapshot` (open/close); each sink `idle`, `write` (apply + flush: the
   ADR's `Sink::write`, so stage 2 keeps the name), `seed` (`mark_seeded`, per `index`),
   `reindex`; with `work` (live/backfill), `sink` and `index` where known. Reported **once per
   batch, lane item, idle stretch or operation, never per change or document**; an idle window
   closes on every `select!` arm before its work and is cut by a 1 s tick (the sink's `IDLE_TICK`
-  arm, the ingest `confirm_tick`), so a quiet hour is a flat line; while a snapshot runs the
-  ingest wait is `page` (`next_snapshot_row`'s `ReadWait`, timed only while the stream is pending),
-  not `idle`. A task's stages add up to its wall time less bookkeeping (acks, confirms, a stop);
+  arm, the ingest `confirm_tick`), so a quiet hour is a flat line; the ingest loop reads no clock
+  of its own: `mark` (where the last arm's work ended) carries across iterations, `waited` closes
+  the wait from it (`idle` with no snapshot, else the snapshot's `page`), and the row arm's one clock
+  read per row puts the whole row (wait, decode, buffer) into `page`. A task's stages add up to its wall time less bookkeeping (acks, confirms, a stop);
   share is busy seconds per wall second, which passes 1 once a task runs a stage concurrently.
   `on_startup_step` per start step (`source`, `stage` per sink, `prepare`, `open_live`). The CLI
   records them as `flusso.stage.duration{stage,work,sink,index}`, `flusso.flush.documents`/

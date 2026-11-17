@@ -232,6 +232,9 @@ impl IngestEngine {
         let mut last_confirmed: Option<Position> = None;
         let mut confirm_tick = tokio::time::interval(CONFIRM_TICK);
         let mut live_ended = false;
+        // Where the last arm's work ended: every arm times its wait from here,
+        // so the loop reads no clock of its own.
+        let mut mark = Instant::now();
 
         loop {
             // A live stream that ends while a snapshot runs or requests wait
@@ -255,28 +258,22 @@ impl IngestEngine {
                 return Ok(Ended::Stopped);
             }
             let deadline = pending.deadline.unwrap_or_else(far_future);
-            // With a snapshot running, a wait is the snapshot stream's: its
-            // `ReadWait` counts it as `Page`.
-            let idle = Idle {
-                since: Instant::now(),
-                counted: snapshot.is_none(),
-            };
             tokio::select! {
                 // While the live stream is open, `next_live` watches the stop.
                 () = self.stop.requested(), if live_ended => {
-                    self.woke(idle);
+                    mark = self.waited(mark, &mut snapshot);
                 }
                 change = next_live(&mut live, &self.stop), if !live_ended => match change {
                     Next::Stopped => {
-                        self.woke(idle);
+                        mark = self.waited(mark, &mut snapshot);
                     }
                     Next::Change(None) => {
-                        self.woke(idle);
+                        mark = self.waited(mark, &mut snapshot);
                         live_ended = true;
                     }
                     Next::Change(Some(Err(error))) => return Err(error.into()),
                     Next::Change(Some(Ok((position, event)))) => {
-                        let started = self.woke(idle);
+                        let started = self.waited(mark, &mut snapshot);
                         self.buffer_live(&mut pending, position, event).await?;
                         live_ended = self.drain_ready(&mut live, &mut pending).await?;
                         self.observer.on_stage(
@@ -284,12 +281,14 @@ impl IngestEngine {
                         );
                         self.commit_live(&mut pending, &lanes).await?;
                         self.confirm(&mut last_confirmed);
+                        mark = Instant::now();
                     }
                 },
                 () = sleep_until(deadline), if pending.deadline.is_some() => {
-                    self.woke(idle);
+                    self.waited(mark, &mut snapshot);
                     self.commit_live(&mut pending, &lanes).await?;
                     self.confirm(&mut last_confirmed);
+                    mark = Instant::now();
                 }
                 row = next_snapshot_row(&mut snapshot), if snapshot.is_some() => {
                     let Some(active) = snapshot.as_mut() else { continue };
@@ -297,11 +296,18 @@ impl IngestEngine {
                         Some(Err(error)) => return Err(error.into()),
                         Some(Ok(event)) => {
                             active.buffer(&event);
+                            // The one clock read per row: the wait for it, if
+                            // any, its decoding and buffering, all `Page`.
+                            let now = Instant::now();
+                            active.page_wait += now - mark;
+                            mark = now;
                             if active.batch.is_full() {
                                 self.commit_snapshot(active, &lanes).await?;
+                                mark = Instant::now();
                             }
                         }
                         None => {
+                            active.page_wait += mark.elapsed();
                             self.commit_snapshot(active, &lanes).await?;
                             let started = Instant::now();
                             self.finish_snapshot(active, &lanes).await?;
@@ -310,39 +316,46 @@ impl IngestEngine {
                                     .work(Work::Backfill),
                             );
                             snapshot = None;
+                            mark = Instant::now();
                         }
                     }
                 },
                 request = requests.recv(), if snapshot.is_none() => match request? {
                     None => {
-                        self.woke(idle);
+                        mark = self.waited(mark, &mut snapshot);
                         tracing::warn!("request lane closed; no further backfills can be served");
                         requests = Box::new(ClosedConsumer);
                     }
                     Some(first) => {
-                        let started = self.woke(idle);
+                        let started = self.waited(mark, &mut snapshot);
                         let deliveries = self.collect_requests(first, &mut requests, &lanes).await?;
                         snapshot = self.start_snapshot(deliveries, &scopes, &lanes).await?;
+                        mark = Instant::now();
                         self.observer.on_stage(
-                            StageTiming::new(Stage::Snapshot, started.elapsed()).work(Work::Backfill),
+                            StageTiming::new(Stage::Snapshot, mark - started).work(Work::Backfill),
                         );
                     }
                 },
                 _ = confirm_tick.tick() => {
-                    self.woke(idle);
+                    mark = self.waited(mark, &mut snapshot);
                     self.confirm(&mut last_confirmed);
                 }
             }
         }
     }
 
-    /// Close an idle window as the loop wakes: report it when it counts, and
-    /// return the moment, so the work that follows times from it.
-    fn woke(&self, idle: Idle) -> Instant {
+    /// Close the wait since `since` as the loop wakes, and return the moment,
+    /// so the work that follows times from it. With no snapshot running the
+    /// wait is [`Stage::Idle`]; with one, the loop was waiting on its rows
+    /// too, so it is the snapshot's [`Stage::Page`] (reported with its next
+    /// batch).
+    fn waited(&self, since: Instant, snapshot: &mut Option<Snapshot>) -> Instant {
         let now = Instant::now();
-        if idle.counted {
-            self.observer
-                .on_stage(StageTiming::new(Stage::Idle, now - idle.since));
+        match snapshot {
+            Some(active) => active.page_wait += now - since,
+            None => self
+                .observer
+                .on_stage(StageTiming::new(Stage::Idle, now - since)),
         }
         now
     }
@@ -455,7 +468,8 @@ impl IngestEngine {
         }
         let started = Instant::now();
         let (envelopes, by_index) = self.build(&pending.ids, pending.position).await?;
-        let build = started.elapsed();
+        let built = Instant::now();
+        let build = built - started;
         self.observer
             .on_stage(StageTiming::new(Stage::Build, build).work(Work::Live));
         let stats = BuildStats {
@@ -474,6 +488,7 @@ impl IngestEngine {
                 .iter()
                 .map(|(sink, producer)| (sink, producer, item.clone())),
             Work::Live,
+            built,
         )
         .await?;
         pending.clear();
@@ -484,13 +499,14 @@ impl IngestEngine {
 
     /// Publish each item to its lane, all at once, so a full lane delays only
     /// its own copy. Times each lane ([`Stage::LaneWait`]) and the whole
-    /// ([`Stage::Publish`]).
+    /// ([`Stage::Publish`]) from `started`, the end of the build, so cutting
+    /// the items is publishing too.
     async fn publish<'a>(
         &self,
         items: impl IntoIterator<Item = (&'a SinkName, &'a Box<dyn Producer<LaneItem>>, LaneItem)>,
         work: Work,
+        started: Instant,
     ) -> Result<()> {
-        let started = Instant::now();
         try_join_all(items.into_iter().map(|(sink, producer, item)| async move {
             producer.publish(item).await?;
             self.observer.on_stage(
@@ -700,9 +716,11 @@ impl IngestEngine {
         }
         let started = Instant::now();
         let (envelopes, by_index) = self.build(&snapshot.batch.ids, None).await?;
-        let build = started.elapsed();
+        let built = Instant::now();
+        let build = built - started;
         self.observer
             .on_stage(StageTiming::new(Stage::Build, build).work(Work::Backfill));
+        // Cutting each lane's slice copies its documents: part of publishing.
         let mut publishes = Vec::with_capacity(snapshot.requested.len());
         for (sink, indexes) in &snapshot.requested {
             let slice: Vec<Envelope> = envelopes
@@ -727,7 +745,7 @@ impl IngestEngine {
                 }),
             ));
         }
-        self.publish(publishes, Work::Backfill).await?;
+        self.publish(publishes, Work::Backfill, built).await?;
         self.observer.on_batch_built(BuildStats {
             changes: 0,
             documents: envelopes.len(),
@@ -758,14 +776,6 @@ impl IngestEngine {
         self.observer.on_snapshot_completed(&indexes);
         Ok(())
     }
-}
-
-/// An idle window of the loop: since when it waits, and whether that wait
-/// counts as [`Stage::Idle`].
-#[derive(Debug, Clone, Copy)]
-struct Idle {
-    since: Instant,
-    counted: bool,
 }
 
 /// What the live arm of the loop got.
@@ -863,7 +873,8 @@ struct Snapshot {
     roots: HashMap<TableName, Vec<IndexName>>,
     handles: Vec<Box<dyn AckHandle>>,
     batch: PendingBatch,
-    /// How long the engine waited on `stream` since the last batch.
+    /// Time spent getting rows since the last batch: waiting for key pages,
+    /// decoding and buffering rows.
     page_wait: Duration,
 }
 
@@ -885,54 +896,12 @@ impl Snapshot {
     }
 }
 
-/// The snapshot's next row. The time from the stream first answering
-/// "not yet" until it yields, or until the `select!` drops this future, is
-/// added to the snapshot's `page_wait`: a row already fetched costs no clock
-/// read, so only the source's key pages are timed.
 async fn next_snapshot_row(
     snapshot: &mut Option<Snapshot>,
 ) -> Option<std::result::Result<ChangeEvent, SourceError>> {
-    let Some(Snapshot {
-        stream, page_wait, ..
-    }) = snapshot
-    else {
-        return std::future::pending().await;
-    };
-    let mut wait = ReadWait {
-        total: page_wait,
-        since: None,
-    };
-    std::future::poll_fn(move |cx| match stream.poll_next_unpin(cx) {
-        std::task::Poll::Ready(row) => {
-            wait.stop();
-            std::task::Poll::Ready(row)
-        }
-        std::task::Poll::Pending => {
-            wait.since.get_or_insert_with(Instant::now);
-            std::task::Poll::Pending
-        }
-    })
-    .await
-}
-
-/// Adds the time since `since` to `total` when it stops, or is dropped
-/// waiting.
-struct ReadWait<'a> {
-    total: &'a mut Duration,
-    since: Option<Instant>,
-}
-
-impl ReadWait<'_> {
-    fn stop(&mut self) {
-        if let Some(since) = self.since.take() {
-            *self.total += since.elapsed();
-        }
-    }
-}
-
-impl Drop for ReadWait<'_> {
-    fn drop(&mut self) {
-        self.stop();
+    match snapshot {
+        Some(active) => active.stream.next().await,
+        None => std::future::pending().await,
     }
 }
 

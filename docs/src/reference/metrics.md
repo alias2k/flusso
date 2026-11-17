@@ -55,10 +55,10 @@ The scope labels (`otel_scope_name`, `otel_scope_version`) are dropped; there is
 | `stage` | Task | `work` | `sink` | What the time is |
 | --- | --- | --- | --- | --- |
 | `idle` | ingest | | | Nothing in flight and nothing taken: waiting on the source with no snapshot running. |
-| `page` | ingest | `backfill` | | Waiting for the source to hand over the next page of snapshot keys. A row already fetched costs nothing. |
+| `page` | ingest | `backfill` | | Getting snapshot rows from the source: waiting for the next page of keys, decoding and buffering each row. While a snapshot runs, the ingest task's waits are `page`, not `idle`. |
 | `resolve` | ingest | `live` | | Taking the changes the stream has ready and resolving each to the documents it touches: the reverse lookups. |
 | `build` | ingest | both | | Building a batch's documents. |
-| `publish` | ingest | both | | Handing a built batch to every lane, until the last one took it. High means a lane is full: a sink is the limit. |
+| `publish` | ingest | both | | Handing a built batch to every lane, until the last one took it: for a snapshot batch, copying each lane's slice of its documents first. High means a lane is full (`lane_wait` says which), or, in a backfill with several sinks, the copies. |
 | `lane_wait` | ingest | both | ✓ | The same, per lane: names the full one. Ingest time, labelled with the sink it waited on; overlaps `publish`. |
 | `snapshot` | ingest | `backfill` | | Opening a snapshot (gathering the requests it serves, opening its row stream) and closing it (`SnapshotComplete` to each lane, acknowledging the requests). |
 | `idle` | sink | | ✓ | Nothing in flight and nothing taken: waiting for the next lane item. |
@@ -68,7 +68,7 @@ The scope labels (`otel_scope_name`, `otel_scope_version`) are dropped; there is
 
 `index` is set on `seed` today. A stage that becomes per index later carries it too.
 
-An idle stretch is cut at least once a second, so a quiet hour reads as a flat line rather than one spike when work resumes. Each task's stages add up to its wall time, less small bookkeeping no stage times (acknowledgements, confirmations, the drain at a stop).
+An idle stretch is cut at least once a second, so a quiet hour reads as a flat line rather than one spike when work resumes. The part still open at a scrape is reported up to a second later, so it lands in the next scrape window: over a short window, a task's stages can sum to a second more or less than the window. Each task's stages add up to its wall time, less small bookkeeping no stage times (acknowledgements, confirmations, the drain at a stop).
 
 The `_sum` is the seconds a stage was busy, so its rate is **busy seconds per wall second**: the mean number of that stage in flight. A stage a task runs one at a time stays at or under 1. Once a task runs a stage concurrently (several writes in flight per sink, several builds), it can pass 1.
 

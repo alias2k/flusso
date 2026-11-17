@@ -111,17 +111,19 @@ pub enum Stage {
     /// source with no snapshot running, a sink waiting for a lane item. Cut
     /// at least every second, so a quiet hour reads as a flat line.
     Idle,
-    /// Ingest, backfill: waiting for the source to hand over the next page
-    /// of snapshot keys. Only the waits are counted: a row already fetched
-    /// costs nothing here.
+    /// Ingest, backfill: getting snapshot rows from the source: waiting for
+    /// the next page of keys, and decoding and buffering each row. With a
+    /// snapshot running, the ingest task's waits are its, not `Idle`.
     Page,
     /// Ingest, live: taking the changes the stream has ready and resolving
     /// each to the documents it touches (the reverse lookups).
     Resolve,
     /// Ingest: building a batch's documents (`build_many`) into envelopes.
     Build,
-    /// Ingest: publishing a built batch to its lanes, until the last lane took
-    /// it. Long when a lane is full.
+    /// Ingest: publishing a built batch to its lanes, from the end of the
+    /// build until the last lane took it: cutting each lane's slice of a
+    /// snapshot batch (a copy of its documents), then the wait. Long when a
+    /// lane is full.
     Publish,
     /// Ingest, per sink: until that sink's lane took the batch. Ingest time,
     /// labelled with the sink it waited on; it overlaps

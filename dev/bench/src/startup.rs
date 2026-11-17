@@ -10,7 +10,11 @@
 //! - **restart**: the same deployment started again, every index already there.
 //!
 //! Each start is timed from spawning the binary to `/status` reporting `live`,
-//! with `--skip-backfill`, and stopped with SIGTERM before the next. The load
+//! with `--skip-backfill`, and stopped with SIGTERM before the next. Beside
+//! it, each start keeps the steps flusso timed itself
+//! (`flusso.startup.duration`: `source`, `stage` per sink, `prepare`,
+//! `open_live`, and `live` from `flusso run` starting), read from `/metrics`
+//! once it is live; the outside figure also covers the process starting. The load
 //! average at each start is recorded beside it, since the figures are only
 //! comparable on a quiet machine. The store holds the scenario's tables and no
 //! rows: nothing here reads them. Tables an earlier `--startup` run left are
@@ -48,6 +52,8 @@ struct Start {
     round: usize,
     seconds: f64,
     load_average: Option<f64>,
+    /// The start-up steps flusso reported, in seconds.
+    steps: std::collections::BTreeMap<String, f64>,
 }
 
 /// Min, median and max of one kind of start.
@@ -105,12 +111,17 @@ pub(crate) async fn run(
         reset(&pool, &client, &services.os_url).await?;
         for kind in ["fresh", "restart"] {
             let load_average = load_average();
-            let seconds = time_to_live(bin, &config, workdir.path(), &services).await?;
+            let (seconds, steps) = time_to_live(bin, &config, workdir.path(), &services).await?;
+            let shown: Vec<String> = steps
+                .iter()
+                .map(|(step, seconds)| format!("{step} {seconds:.3}"))
+                .collect();
             tracing::info!(
                 kind,
                 round,
                 seconds = %format!("{seconds:.3}"),
                 load_average = ?load_average,
+                steps = %shown.join(", "),
                 "reached live"
             );
             starts.push(Start {
@@ -118,6 +129,7 @@ pub(crate) async fn run(
                 round,
                 seconds,
                 load_average,
+                steps,
             });
         }
     }
@@ -152,13 +164,14 @@ pub(crate) async fn run(
     Ok(())
 }
 
-/// Spawn the binary, wait for `live`, stop it. Returns the seconds to `live`.
+/// Spawn the binary, wait for `live`, stop it. Returns the seconds to `live`
+/// and the start-up steps flusso reported.
 async fn time_to_live(
     bin: &Path,
     config: &Path,
     workdir: &Path,
     services: &services::Services,
-) -> Result<f64> {
+) -> Result<(f64, std::collections::BTreeMap<String, f64>)> {
     let spawned = Instant::now();
     let mut child = Flusso::spawn(
         bin,
@@ -171,8 +184,18 @@ async fn time_to_live(
     )
     .await?;
     let seconds = child.wait_live(spawned, START_CAP).await?.as_secs_f64();
+    // `/status` turns live before the metrics observer records `live`: the
+    // status observer hears the event first.
+    let mut steps = std::collections::BTreeMap::new();
+    for _ in 0..50 {
+        steps = crate::attribution::Scrape::parse(&child.metrics().await?).startup_steps();
+        if steps.contains_key("live") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     child.stop().await?;
-    Ok(seconds)
+    Ok((seconds, steps))
 }
 
 /// No index, slot or publication: what a first start on a fresh cluster finds.

@@ -93,6 +93,24 @@ impl Scrape {
     }
 }
 
+impl Scrape {
+    /// The start-up steps flusso recorded (`flusso.startup.duration`), in
+    /// seconds, by step and, for `stage`, sink (`stage primary`).
+    pub(crate) fn startup_steps(&self) -> BTreeMap<String, f64> {
+        self.startup
+            .iter()
+            .map(|(labels, seconds)| {
+                let name = if labels.sink.is_empty() {
+                    labels.stage.clone()
+                } else {
+                    format!("{} {}", labels.stage, labels.sink)
+                };
+                (name, *seconds)
+            })
+            .collect()
+    }
+}
+
 /// `name{labels} value` → its parts; `None` for a comment or another shape.
 fn sample(line: &str) -> Option<(&str, Labels, f64)> {
     if line.starts_with('#') {
@@ -297,18 +315,7 @@ impl Attribution {
             })
             .collect();
         let startup = if before.startup.is_empty() {
-            after
-                .startup
-                .iter()
-                .map(|(labels, seconds)| {
-                    let name = if labels.sink.is_empty() {
-                        labels.stage.clone()
-                    } else {
-                        format!("{} {}", labels.stage, labels.sink)
-                    };
-                    (name, *seconds)
-                })
-                .collect()
+            after.startup_steps()
         } else {
             BTreeMap::new()
         };
