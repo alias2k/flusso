@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794923935924,
+  "lastUpdate": 1794929091058,
   "repoUrl": "https://github.com/alias2k/flusso",
   "entries": {
     "flusso (smaller is better)": [
@@ -28215,6 +28215,372 @@ window.BENCHMARK_DATA = {
             "value": 238.31818181818184,
             "unit": "ms",
             "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.395, \"disk_write_ms\": 136.928, \"memory_copy_ms\": 220.615}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "89390131+JakubWasilczyk-Alias2k@users.noreply.github.com",
+            "name": "Jakub Wasilczyk",
+            "username": "JakubWasilczyk-Alias2k"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "1c12b9a615bfb48b96a7194c182a052c11ad8efd",
+          "message": "Merge pull request #392 from alias2k/design/per-index-tasks-386\n\ndocs(adr): 0012 each index runs on its own task (proposed, #386)",
+          "timestamp": "2026-11-17T16:04:58+01:00",
+          "tree_id": "b3bd5d08a4b26eb12d6bf5937c6ded44e6b53b21",
+          "url": "https://github.com/alias2k/flusso/commit/1c12b9a615bfb48b96a7194c182a052c11ad8efd"
+        },
+        "date": 1794929090103,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "inprocess/decode/fixture",
+            "value": 3397064.6333333333,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "inprocess/documents/double_array",
+            "value": 99470.09829545455,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "inprocess/documents/doubles",
+            "value": 27378.35808899177,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "inprocess/documents/keywords",
+            "value": 29206.15436901505,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "inprocess/documents/untyped",
+            "value": 73644.70752164502,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "inprocess/live_drain/sinks1/1",
+            "value": 187418849.25,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "inprocess/live_drain/sinks1/256",
+            "value": 59216278.39444444,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "inprocess/live_drain/sinks1/64",
+            "value": 98804486.34722222,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "inprocess/live_drain/sinks2/1",
+            "value": 192723094.5,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "inprocess/live_drain/sinks2/256",
+            "value": 50262753.72916667,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "inprocess/live_drain/sinks2/64",
+            "value": 107404828.325,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "inprocess/render/delete",
+            "value": 174745.98926767678,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "inprocess/render/mid",
+            "value": 5190508.5,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "inprocess/render/wide",
+            "value": 46961196.25,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "inprocess/resolve_no_io/root_table",
+            "value": 338.56247278732076,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "inprocess/resolve_no_io/unread_update",
+            "value": 1114.1918318605208,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "inprocess/resolve_no_io/unrelated_table",
+            "value": 294.72415173146885,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "inprocess/resolve_no_io/walked_from_the_key",
+            "value": 1001.5735884054326,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "inprocess/scripted/dates_unused",
+            "value": 7167109.5,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "inprocess/scripted/dates_used",
+            "value": 5413633.055555556,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "inprocess/scripted/flat",
+            "value": 6112376.625,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "inprocess/scripted/nested",
+            "value": 26523428.75,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "inprocess/snapshot/rows",
+            "value": 132354428.05555555,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "components/baseline/os_flush_1",
+            "value": 10768399.92857143,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "components/baseline/pg_select_1",
+            "value": 254971.61075161336,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "components/baseline/resolve_unrelated",
+            "value": 430.52394960606046,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "components/baseline/select_1",
+            "value": 275480.69125000003,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "components/batch_size/100",
+            "value": 1129402997,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "components/batch_size/1000",
+            "value": 324754308.5,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "components/batch_size/500",
+            "value": 424390494.25,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "components/batch_size/5000",
+            "value": 210095813.5,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "components/build/0",
+            "value": 392056.2797348485,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "components/build/1",
+            "value": 397623.90031800396,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "components/build/10",
+            "value": 414991.18733465613,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "components/build/100",
+            "value": 762130.1474892589,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "components/bulk_index/1",
+            "value": 13050382.097222222,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "components/bulk_index/100",
+            "value": 18101262.37121212,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "components/bulk_index/1000",
+            "value": 56206040.75,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "components/bulk_index/5000",
+            "value": 257185276,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "components/change/item_update",
+            "value": 17540382.6875,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "components/change_burst/1",
+            "value": 555753539.1666667,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "components/change_burst/16",
+            "value": 224733138.9625,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "components/change_burst/256",
+            "value": 203085333.98214287,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "components/resolve/related_table",
+            "value": 293941.0710978836,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "components/resolve/root_table",
+            "value": 502.08749612285334,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}}"
+          },
+          {
+            "name": "complex/ci/visible_latency_p50_ms",
+            "value": 29.160308999999998,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/visible_latency_p99_ms",
+            "value": 237.073426,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/peak_rss_mib",
+            "value": 84.9140625,
+            "unit": "MiB",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/cpu_seconds",
+            "value": 3,
+            "unit": "s",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/flush_p50_ms",
+            "value": 18.311518324607334,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/flush_p99_ms",
+            "value": 223.0833333333332,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/visible_latency_p50_ms",
+            "value": 29.475259,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/visible_latency_p99_ms",
+            "value": 117.850552,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/peak_rss_mib",
+            "value": 179.12890625,
+            "unit": "MiB",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/cpu_seconds",
+            "value": 7,
+            "unit": "s",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/flush_p50_ms",
+            "value": 29.097222222222225,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/flush_p99_ms",
+            "value": 243.89534883720933,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 60.012, \"disk_write_ms\": 89.194, \"memory_copy_ms\": 193.293}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
           }
         ]
       }
