@@ -231,13 +231,15 @@ impl Sink for Probe {
 /// producing end, so a test publishes items by hand.
 struct Rig {
     probe: Arc<Probe>,
+    /// One engine for the whole test: a restart runs it again, as the daemon
+    /// does, so what it keeps across runs (fences, a failed run) carries over.
+    sink_engine: Arc<SinkEngine>,
     stream: Arc<ChannelStream>,
     observer: Arc<PositionObserver>,
     lane: Box<dyn Producer<LaneItem>>,
     control: tokio::sync::mpsc::Sender<SinkControl>,
     engine: Option<tokio::task::JoinHandle<Result<()>>>,
     stop: Stop,
-    writes: usize,
     version: i64,
 }
 
@@ -247,33 +249,35 @@ impl Rig {
         let stream = Arc::new(ChannelStream::new(1024, [name.clone()]));
         let lane = stream.lane(&name).unwrap().producer;
         let (control, _) = tokio::sync::mpsc::channel(4);
+        let probe = Arc::new(probe);
+        let observer = Arc::new(PositionObserver::default());
+        let stop = Stop::new();
+        let sink_engine = Arc::new(
+            SinkEngine::new(
+                name,
+                Arc::clone(&probe) as Arc<dyn Sink>,
+                Arc::clone(&stream) as Arc<dyn Stream>,
+                vec![mapping()],
+            )
+            .with_writes(writes)
+            .with_stop(stop.clone())
+            .with_observer(Arc::clone(&observer) as Arc<dyn Observer>),
+        );
         Self {
-            probe: Arc::new(probe),
+            probe,
+            sink_engine,
             stream,
-            observer: Arc::new(PositionObserver::default()),
+            observer,
             lane,
             control,
             engine: None,
-            stop: Stop::new(),
-            writes,
+            stop,
             version: 0,
         }
     }
 
-    fn engine(&self) -> SinkEngine {
-        SinkEngine::new(
-            sink_name("primary"),
-            Arc::clone(&self.probe) as Arc<dyn Sink>,
-            Arc::clone(&self.stream) as Arc<dyn Stream>,
-            vec![mapping()],
-        )
-        .with_writes(self.writes)
-        .with_stop(self.stop.clone())
-        .with_observer(Arc::clone(&self.observer) as Arc<dyn Observer>)
-    }
-
     fn start(mut self) -> Self {
-        let engine = self.engine();
+        let engine = Arc::clone(&self.sink_engine);
         let (control, mut rx) = tokio::sync::mpsc::channel(4);
         self.control = control;
         self.engine = Some(tokio::spawn(async move { engine.run(&mut rx).await }));
@@ -618,6 +622,53 @@ async fn a_failed_write_lets_the_others_finish_and_comes_back_alone() {
     until("the lane to drain", || rig.stream.is_idle()).await;
     assert_eq!(rig.probe.starts(), ["a", "b", "c", "a"]);
     assert_eq!(rig.stream.watermark(), Some(Position(3)));
+}
+
+/// After a run that ended in a failed write, the restarted engine writes the
+/// oldest redelivered item alone, as a barrier: a write that fails every time
+/// (a `stop` rejection, a destination refusing it) then halts the sink, as
+/// with one write at a time, instead of letting later items land beside it on
+/// every restart. Once that item lands, writes run at once again.
+#[tokio::test(start_paused = true)]
+async fn after_a_failed_run_the_oldest_item_is_written_alone_until_it_lands() {
+    let mut rig = Rig::new(Probe::new().holding(&["a"]).failing_once(&["a"]), 4).start();
+    rig.live(1, &["a"]).await;
+    rig.live(2, &["b"]).await;
+    until("b to be written", || {
+        rig.probe.log().iter().any(|l| l == "end b")
+    })
+    .await;
+    rig.probe.release("a");
+    assert!(rig.ended().await.is_err(), "the failed write ends the run");
+
+    rig.probe
+        .held
+        .lock()
+        .unwrap()
+        .extend(["a".to_owned(), "c".to_owned()]);
+    let mut rig = rig.start();
+    rig.live(3, &["c"]).await;
+    rig.live(4, &["d"]).await;
+    settle().await;
+    assert_eq!(
+        rig.probe.starts(),
+        ["a", "b", "a"],
+        "nothing starts beside the redelivered item until it lands"
+    );
+
+    rig.probe.release("a");
+    until("d to be written", || {
+        rig.probe.log().iter().any(|l| l == "end d")
+    })
+    .await;
+    assert_eq!(rig.probe.starts(), ["a", "b", "a", "c", "d"]);
+    assert!(
+        !rig.probe.log().contains(&"end c".to_owned()),
+        "once the barrier landed, d was written while c was still held"
+    );
+    rig.probe.release("c");
+    until("the lane to drain", || rig.stream.is_idle()).await;
+    assert_eq!(rig.stream.watermark(), Some(Position(4)));
 }
 
 /// A stop lets the live writes in flight land and skips the backfill still
