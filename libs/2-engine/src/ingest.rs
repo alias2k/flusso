@@ -140,9 +140,10 @@ impl IngestEngine {
     }
 
     /// How many times this engine has moved its source forward since it was
-    /// built, across restarts of its run: it confirmed a position further than
-    /// any before, the source reported reading further than ever (keepalives
-    /// on a quiet stream included), or a backfill finished. Publishing a batch
+    /// built, across restarts of its run: the source reported reading further
+    /// than ever (keepalives on a quiet stream included), or, for a source that
+    /// reports no such position, it confirmed a position further than any
+    /// before, or a backfill finished. Publishing a batch
     /// is not enough: a restart publishes a replayed change or backfill page
     /// again. A supervisor reads it to tell a run that made progress from one
     /// that failed where the last one did.
@@ -526,9 +527,16 @@ impl IngestEngine {
         }
         let reached = self.source.reached(watermark);
         let mut furthest = self.furthest.lock().unwrap_or_else(PoisonError::into_inner);
-        if watermark > furthest.confirmed || reached > furthest.reached {
-            furthest.confirmed = furthest.confirmed.max(watermark);
-            furthest.reached = furthest.reached.max(reached);
+        // A reopened stream numbers a replayed change afresh, so the stream's
+        // own position moves on every replay: the source's answer decides
+        // whenever it gives one.
+        let moved = match reached {
+            Some(_) => reached > furthest.reached,
+            None => watermark > furthest.confirmed,
+        };
+        furthest.confirmed = furthest.confirmed.max(watermark);
+        furthest.reached = furthest.reached.max(reached);
+        if moved {
             self.advances.fetch_add(1, Ordering::Relaxed);
         }
     }

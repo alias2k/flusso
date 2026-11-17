@@ -1,8 +1,8 @@
 //! A failed engine restarts after a backoff that starts at one second and
 //! doubles while it keeps failing without progress. A run that made progress
-//! (a sink engine acknowledged a lane item; the ingest engine confirmed a
-//! position further than ever, its source reached further, or a backfill
-//! finished) resets it, so a short outage never lengthens every later recovery.
+//! (a sink engine acknowledged a lane item; the ingest engine's source reached
+//! further than ever, or confirmed further where the source reports no such
+//! position, or a backfill finished) resets it, so a short outage never lengthens every later recovery.
 //! On paused time: each test reads the restart waits off the virtual clock.
 
 use std::sync::Arc;
@@ -381,6 +381,49 @@ async fn a_backfill_failing_at_the_same_row_doubles_its_backoff() {
     let sink = Arc::new(ScriptedFlushes::new(&[]).unseeded());
 
     run_until_opened(source, &times, 5, sink, config).await;
+
+    assert_eq!(times.waits(), [1, 2, 4, 8]);
+}
+
+/// A source that, like Postgres, numbers a replayed change afresh on every
+/// reopened stream, and reports having reached no further than just below the
+/// commit that keeps failing.
+#[derive(Debug)]
+struct ReplaysUnderNewPositions(ScriptedStreams);
+
+#[async_trait]
+impl ChangeCapture for ReplaysUnderNewPositions {
+    async fn continuity(&self) -> source::Result<Continuity> {
+        Ok(Continuity::Resumed)
+    }
+    async fn prepare(&self) -> source::Result<()> {
+        Ok(())
+    }
+    async fn live(&self) -> source::Result<BoxStream<'static, source::Result<LiveChange>>> {
+        self.0.live().await
+    }
+    fn confirm(&self, _: Position) {}
+    fn reached(&self, _: Option<Position>) -> Option<source::cdc::SourcePosition> {
+        Some(source::cdc::SourcePosition(41))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_split_transaction_replayed_under_new_positions_doubles_its_backoff() {
+    let replay = Run::ChangeThenFail {
+        position: None,
+        after: Duration::from_millis(200),
+    };
+    let source = Arc::new(ReplaysUnderNewPositions(ScriptedStreams::new(&[replay; 4])));
+    let times = Arc::clone(&source.0.times);
+    run_until_opened(
+        source,
+        &times,
+        5,
+        ScriptedFlushes::new(&[]),
+        backendless_config(),
+    )
+    .await;
 
     assert_eq!(times.waits(), [1, 2, 4, 8]);
 }

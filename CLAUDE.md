@@ -833,8 +833,10 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   which the daemon restarts with exponential backoff (1 s doubling to `max_restart_backoff`,
   default 60 s, reset to 1 s after a run that made progress: the sink engine acknowledged a lane
   item, `SinkEngine::acknowledged`, or the ingest engine moved its source forward,
-  `IngestEngine::advances`: confirmed past its furthest confirmation, `ChangeCapture::reached` past
-  the furthest it reported (keepalives on a quiet stream count), or a snapshot finished; publishing
+  `IngestEngine::advances`: `ChangeCapture::reached` past the furthest it reported (keepalives on a
+  quiet stream count), or, only for a source that answers no `reached`, confirmed past its furthest
+  confirmation (a reopened stream numbers a replayed change afresh, so a stream position moves on
+  every replay), or a snapshot finished; publishing
   is not progress, since a restart publishes a replayed change or backfill page again; guards
   `tests::backoff`'s `*_restarts_after_one_second_again` / `*_doubles_its_backoff`) while the ingest engine and the other sinks keep running — its lane fills, so a
   stalled sink eventually paces ingest and pins WAL (per-sink lag/in-flight are the alarm). An
