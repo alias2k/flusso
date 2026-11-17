@@ -122,33 +122,21 @@ impl Sink for OpensearchSink {
 
     /// Buffer one envelope's bulk action, addressed by its index's write
     /// target (see `IndexTarget::write_target`).
+    ///
+    /// A failure drops everything buffered since the last flush: the engine
+    /// abandons the batch and the lane redelivers it whole, so keeping what
+    /// was already applied would write those documents twice.
     async fn apply(&self, envelope: &Envelope) -> Result<()> {
-        let logical = envelope.index.as_ref();
-        let (index, require_alias) = match self.target(logical) {
-            Some(target) => {
-                let (index, require_alias) = target.write_target();
-                (index.to_owned(), require_alias)
+        match self.bulk_action(envelope) {
+            Ok(action) => {
+                self.buffer.lock().await.push(action);
+                Ok(())
             }
-            None => (logical.to_owned(), false),
-        };
-        let id = envelope.id.clone();
-        let action = match (envelope.op, &envelope.document) {
-            (Op::Upsert, Some(document)) => BulkAction::Index {
-                index,
-                id,
-                doc: render_document(document)?,
-                require_alias,
-            },
-            (Op::Upsert, None) => {
-                return Err(SinkError::Write(format!(
-                    "upsert of {}/{id} carries no document",
-                    envelope.index
-                )));
+            Err(error) => {
+                self.buffer.lock().await.clear();
+                Err(error)
             }
-            (Op::Delete, _) => BulkAction::Delete { index, id },
-        };
-        self.buffer.lock().await.push(action);
-        Ok(())
+        }
     }
 
     /// Drain the buffer and send all buffered operations to OpenSearch.
@@ -409,5 +397,35 @@ impl OpensearchSink {
         self.unrefreshed
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The bulk action that writes `envelope`, addressed by its index's write
+    /// target (see `IndexTarget::write_target`).
+    fn bulk_action(&self, envelope: &Envelope) -> Result<BulkAction> {
+        let logical = envelope.index.as_ref();
+        let (index, require_alias) = match self.target(logical) {
+            Some(target) => {
+                let (index, require_alias) = target.write_target();
+                (index.to_owned(), require_alias)
+            }
+            None => (logical.to_owned(), false),
+        };
+        let id = envelope.id.clone();
+        let action = match (envelope.op, &envelope.document) {
+            (Op::Upsert, Some(document)) => BulkAction::Index {
+                index,
+                id,
+                doc: render_document(document)?,
+                require_alias,
+            },
+            (Op::Upsert, None) => {
+                return Err(SinkError::Write(format!(
+                    "upsert of {}/{id} carries no document",
+                    envelope.index
+                )));
+            }
+            (Op::Delete, _) => BulkAction::Delete { index, id },
+        };
+        Ok(action)
     }
 }

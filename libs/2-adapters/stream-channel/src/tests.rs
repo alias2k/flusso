@@ -212,3 +212,67 @@ fn unknown_lane_is_an_error() {
     ));
     assert_eq!(stream.sinks().count(), 1);
 }
+
+/// Releasing one of several deliveries redelivers that one alone: the others
+/// are still being processed and are neither served again nor disturbed.
+#[tokio::test]
+async fn releasing_one_delivery_redelivers_only_that_one() {
+    let stream = ChannelStream::new(8, [sink("a")]);
+    let lane = stream.lane(&sink("a")).unwrap();
+    for position in 1..=4 {
+        lane.producer.publish(batch(position)).await.unwrap();
+    }
+    let mut consumer = lane.consumer;
+    let (_, first) = consumer.recv().await.unwrap().unwrap().into_parts();
+    let (_, second) = consumer.recv().await.unwrap().unwrap().into_parts();
+    let (_, third) = consumer.recv().await.unwrap().unwrap().into_parts();
+
+    first.nack().await.unwrap();
+
+    let (redelivered, first) = consumer.recv().await.unwrap().unwrap().into_parts();
+    assert_eq!(redelivered.position(), Some(Position(1)));
+    let (next, fourth) = consumer.recv().await.unwrap().unwrap().into_parts();
+    assert_eq!(
+        next.position(),
+        Some(Position(4)),
+        "the deliveries still in flight are not served again"
+    );
+    assert!(consumer.is_empty());
+
+    for handle in [second, third, first, fourth] {
+        handle.ack().await.unwrap();
+    }
+    assert!(stream.is_idle());
+    assert_eq!(stream.watermark(), Some(Position(4)));
+}
+
+/// Released deliveries come back in lane order, whatever order they were
+/// released in, and the ones left in flight stay out of it.
+#[tokio::test]
+async fn released_deliveries_come_back_in_lane_order() {
+    let stream = ChannelStream::new(8, [sink("a")]);
+    let lane = stream.lane(&sink("a")).unwrap();
+    for position in 1..=3 {
+        lane.producer.publish(batch(position)).await.unwrap();
+    }
+    let mut consumer = lane.consumer;
+    let (_, first) = consumer.recv().await.unwrap().unwrap().into_parts();
+    let (_, second) = consumer.recv().await.unwrap().unwrap().into_parts();
+    let (_, third) = consumer.recv().await.unwrap().unwrap().into_parts();
+
+    drop(third);
+    first.nack().await.unwrap();
+    assert!(!consumer.is_empty(), "two deliveries are due again");
+
+    let (again, first) = consumer.recv().await.unwrap().unwrap().into_parts();
+    assert_eq!(again.position(), Some(Position(1)));
+    let (again, third) = consumer.recv().await.unwrap().unwrap().into_parts();
+    assert_eq!(again.position(), Some(Position(3)));
+    assert!(consumer.is_empty(), "the second is still in flight");
+
+    second.ack().await.unwrap();
+    first.ack().await.unwrap();
+    third.ack().await.unwrap();
+    assert!(stream.is_idle());
+    assert_eq!(stream.watermark(), Some(Position(3)));
+}

@@ -1063,6 +1063,7 @@ fn batch_policy_lays_the_config_over_the_engine_defaults() {
     assert_eq!(batch_policy(&config).max_delay, Duration::from_millis(10));
 }
 
+mod backoff;
 mod stop;
 
 /// `inner`, with a live stream that is whatever is sent on the returned

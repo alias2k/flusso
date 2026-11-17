@@ -1,6 +1,10 @@
 use super::*;
 use serde_json::json;
 
+fn read(response: &Value, actions: &[BulkAction]) -> Result<BulkResponse> {
+    read_bulk_response(response, &actions.iter().collect::<Vec<_>>())
+}
+
 #[test]
 fn bulk_body_index_produces_two_ndjson_lines() {
     let doc = json!({ "email": "ada@x.io" }).to_string();
@@ -86,13 +90,13 @@ fn bulk_url_pipeline_and_refresh() {
 }
 
 #[test]
-fn bulk_rejected_is_empty_when_no_errors_flag() {
+fn read_bulk_response_is_empty_when_no_errors_flag() {
     let resp = json!({ "errors": false, "items": [] });
-    assert!(bulk_rejected(&resp, &[]).unwrap().is_empty());
+    assert!(read(&resp, &[]).unwrap().rejected.is_empty());
 }
 
 #[test]
-fn bulk_rejected_reports_the_item_with_a_4xx_status_and_its_reason() {
+fn read_bulk_response_reports_the_item_with_a_4xx_status_and_its_reason() {
     let resp = json!({
         "errors": true,
         "items": [{ "index": {
@@ -100,7 +104,7 @@ fn bulk_rejected_reports_the_item_with_a_4xx_status_and_its_reason() {
             "error": { "type": "mapper_parsing_exception", "reason": "failed to parse field" }
         } }]
     });
-    let rejected = bulk_rejected(&resp, &[]).unwrap();
+    let rejected = read(&resp, &[]).unwrap().rejected;
     assert_eq!(rejected.len(), 1);
     assert_eq!(rejected[0].index, "users_ab12");
     assert_eq!(rejected[0].id, "1");
@@ -108,7 +112,7 @@ fn bulk_rejected_reports_the_item_with_a_4xx_status_and_its_reason() {
 }
 
 #[test]
-fn bulk_rejected_maps_position_to_the_originating_action() {
+fn read_bulk_response_maps_position_to_the_originating_action() {
     // Two actions; the second is rejected. The rejection carries the
     // action's index/id (by position), not just the response's echo.
     let actions = [
@@ -131,19 +135,19 @@ fn bulk_rejected_maps_position_to_the_originating_action() {
                          "error": { "reason": "boom" } } }
         ]
     });
-    let rejected = bulk_rejected(&resp, &actions).unwrap();
+    let rejected = read(&resp, &actions).unwrap().rejected;
     assert_eq!(rejected.len(), 1);
     assert_eq!(rejected[0].id, "2");
     assert_eq!(rejected[0].reason, "boom");
 }
 
 #[test]
-fn bulk_rejected_is_empty_when_all_items_succeed() {
+fn read_bulk_response_is_empty_when_all_items_succeed() {
     let resp = json!({
         "errors": true,
         "items": [{ "index": { "_index": "x", "_id": "1", "status": 200 } }]
     });
-    assert!(bulk_rejected(&resp, &[]).unwrap().is_empty());
+    assert!(read(&resp, &[]).unwrap().rejected.is_empty());
 }
 
 #[test]
@@ -232,7 +236,7 @@ fn a_missing_alias_fails_the_whole_flush() {
                 "reason": "no such index [users_ab12] and [require_alias] request flag is [true] and [users_ab12] is not an alias"
             } } }]
     });
-    let err = bulk_rejected(&resp, &actions).unwrap_err().to_string();
+    let err = read(&resp, &actions).unwrap_err().to_string();
     assert!(err.contains("users_ab12 is missing"), "{err}");
     assert!(err.contains("is not an alias"), "{err}");
 }
@@ -248,7 +252,7 @@ fn a_delete_against_a_missing_index_fails_the_whole_flush() {
         "items": [{ "delete": { "_index": "users_ab12", "_id": "1", "status": 404,
             "error": { "type": "index_not_found_exception", "reason": "no such index [users_ab12]" } } }]
     });
-    assert!(bulk_rejected(&resp, &actions).is_err());
+    assert!(read(&resp, &actions).is_err());
 }
 
 fn index_action(id: &str) -> BulkAction {
@@ -332,4 +336,53 @@ fn action_lines_are_written_as_before() {
             assert_eq!(fragment, format!("{meta}\n{{\"a\":1}}\n"));
         }
     }
+}
+
+fn busy_response(status: u64, kind: &str) -> Value {
+    json!({
+        "errors": true,
+        "items": [
+            { "index": { "_index": "users", "_id": "1", "status": 201 } },
+            { "index": { "_index": "users", "_id": "2", "status": status,
+                         "error": { "type": kind, "reason": "the cluster is busy" } } },
+            { "index": { "_index": "users", "_id": "3", "status": 400,
+                         "error": { "type": "mapper_parsing_exception",
+                                    "reason": "failed to parse field [age]" } } },
+        ]
+    })
+}
+
+#[test]
+fn an_item_refused_with_429_is_transient_not_a_rejection() {
+    let actions = [index_action("1"), index_action("2"), index_action("3")];
+    let response = busy_response(429, "rejected_execution_exception");
+
+    let outcome = read(&response, &actions).unwrap();
+
+    let rejected: Vec<&str> = outcome.rejected.iter().map(|doc| doc.id.as_str()).collect();
+    assert_eq!(rejected, ["3"], "only the mapping error is a rejection");
+    assert_eq!(outcome.busy, [1], "the busy item is resent by position");
+}
+
+#[test]
+fn an_item_refused_with_503_is_transient_not_a_rejection() {
+    let actions = [index_action("1"), index_action("2"), index_action("3")];
+    let response = busy_response(503, "unavailable_shards_exception");
+
+    let outcome = read(&response, &actions).unwrap();
+
+    let rejected: Vec<&str> = outcome.rejected.iter().map(|doc| doc.id.as_str()).collect();
+    assert_eq!(rejected, ["3"], "only the mapping error is a rejection");
+    assert_eq!(outcome.busy, [1], "the busy item is resent by position");
+}
+
+#[test]
+fn a_busy_item_no_action_answers_fails_the_flush() {
+    let response = busy_response(429, "rejected_execution_exception");
+
+    let error = read(&response, &[index_action("1")])
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("refused as busy"), "{error}");
 }

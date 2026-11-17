@@ -27,6 +27,7 @@
 //! here asks the sink to refresh.
 
 use std::collections::{BTreeSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use kernel::{IndexMapping, IndexName, Position, SinkName};
@@ -72,6 +73,8 @@ pub struct SinkEngine {
     /// Indexes whose snapshot batches were acknowledged unapplied during a
     /// stop: their `SnapshotComplete` must not mark them seeded.
     skipped: Mutex<BTreeSet<IndexName>>,
+    /// Lane items acknowledged over this engine's life, across restarts.
+    acknowledged: AtomicU64,
 }
 
 /// When a flushed position becomes searchable.
@@ -105,6 +108,7 @@ impl SinkEngine {
             unsearchable: Mutex::new(VecDeque::new()),
             stop: Stop::new(),
             skipped: Mutex::new(BTreeSet::new()),
+            acknowledged: AtomicU64::new(0),
         }
     }
 
@@ -139,6 +143,13 @@ impl SinkEngine {
     pub fn skip_backfill(mut self, skip: bool) -> Self {
         self.skip_backfill = skip;
         self
+    }
+
+    /// How many lane items this engine has acknowledged since it was built,
+    /// across restarts of its run: a supervisor reads it to tell a run that
+    /// made progress from one that failed where the last one did.
+    pub fn acknowledged(&self) -> u64 {
+        self.acknowledged.load(Ordering::Relaxed)
     }
 
     /// The sink this engine drives.
@@ -340,6 +351,7 @@ impl SinkEngine {
                             self.report_positions(position, visibility);
                         }
                         handle.ack().await?;
+                        self.acknowledged.fetch_add(1, Ordering::Relaxed);
                     }
                 },
                 message = control.recv(), if control_open => match message {

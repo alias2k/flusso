@@ -732,7 +732,11 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   not-yet-complete indexes so re-staging after its own restart (and a reindex control for the
   same index) doesn't ask twice. A seeded sibling sees nothing. The channel adapter therefore keeps
   a **ticketed in-flight ledger** per lane: several deliveries can be outstanding, each acked by
-  ticket; a nacked or dropped-unacked delivery is redelivered in order. (A single redelivery slot
+  ticket; a nacked or dropped-unacked delivery is marked due by its own ticket and redelivered alone,
+  due ones in lane order, never the deliveries still in flight beside it, so a released delivery can
+  follow later acked ones: lane order is document order only while a consumer keeps one sink-lane
+  delivery in flight, as the sink engine does (issue #395; guards
+  `releasing_one_delivery_redelivers_only_that_one`, `released_deliveries_come_back_in_lane_order`). (A single redelivery slot
   made the coalescing loop receive the same request forever — the OOM behind the first attempts.)
   Guards: `an_unseeded_sink_requests_a_snapshot_then_marks_seeded`, `a_seeded_sink_requests_nothing`,
   `backfill_false_makes_a_stateless_sink_live_only`,
@@ -827,7 +831,14 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
 - **Item-level rejections vs flush-wide errors.** `Sink::flush` returns a `FlushReport`:
   `Err` is flush-wide (transport down, whole request refused) and stops *that sink engine*,
   which the daemon restarts with exponential backoff (1 s doubling to `max_restart_backoff`,
-  default 60 s) while the ingest engine and the other sinks keep running — its lane fills, so a
+  default 60 s, reset to 1 s after a run that made progress: the sink engine acknowledged a lane
+  item, `SinkEngine::acknowledged`, or the ingest engine moved its source forward,
+  `IngestEngine::advances`: `ChangeCapture::reached` past the furthest it reported (keepalives on a
+  quiet stream count), or, only for a source that answers no `reached`, confirmed past its furthest
+  confirmation (a reopened stream numbers a replayed change afresh, so a stream position moves on
+  every replay), or a snapshot finished; publishing
+  is not progress, since a restart publishes a replayed change or backfill page again; guards
+  `tests::backoff`'s `*_restarts_after_one_second_again` / `*_doubles_its_backoff`) while the ingest engine and the other sinks keep running — its lane fills, so a
   stalled sink eventually paces ingest and pins WAL (per-sink lag/in-flight are the alarm). An
   `Ok` report lists documents the destination *applied the batch but rejected* individually. The
   `FailurePolicies` (global `FailurePolicy` default + per-index overrides, from config `on_error`,
@@ -836,11 +847,24 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   (`Observer::on_document_quarantined`, with the sink) and acks so the poison isn't redelivered.
   A single `Stop` halts the whole batch before any quarantine event is emitted. The OpenSearch
   sink does *not* retry item-level rejections, and reports a missing target
-  (`index_not_found_exception`) as flush-wide, not as a rejection. An id OpenSearch validates before
+  (`index_not_found_exception`) as flush-wide, not as a rejection. An item refused as **busy**
+  (429 or 503: a full write queue, a circuit breaker, an unavailable shard; issue #395) is neither:
+  `send_bulk_chunk` resends those items alone (`bulk::read_bulk_response` lists them by position,
+  `bulk::is_busy`) from the same `max_retries` budget and backoff as a request-wide failure, and
+  items still busy after it fail the flush (`Err`), so the batch stays unacked until every document
+  in it is written or rejected for what it holds; a busy item never reaches `on_error`, and a real
+  rejection beside it is reported once. Resending a subset is safe only while a request writes each
+  document once (ids deduped per batch, one batch per flush): `transport.rs` `debug_assert!`s it. A
+  failed `apply` abandons the batch, which the lane redelivers whole to the same sink, so the
+  OpenSearch sink clears its buffer on an `apply` error (the `Sink::apply` contract; guard
+  `a_batch_applied_again_after_a_failed_apply_is_written_once`). An id OpenSearch validates before
   running `_bulk` (an upsert's past 512 UTF-8 bytes, or an empty one) would 400 the *whole* request,
   so `flush` rejects it item-level without sending it (`bulk::refused_id`; issue #301; never truncate
   or hash it); a delete's over-long id is sent (OpenSearch answers `not_found`). Guarded by
-  `skip_policy_*`/`stop_policy_*`/`per_index_stop_*`, `bulk::tests`' `refused_id` cases, the sink's
+  `skip_policy_*`/`stop_policy_*`/`per_index_stop_*`, `bulk::tests`' `refused_id` cases and
+  `an_item_refused_with_{429,503}_is_transient_not_a_rejection`, `transport::tests`'
+  `items_refused_as_busy_are_resent_until_written` / `items_still_busy_after_the_retries_fail_the_flush`
+  (a stub `_bulk`), the engine's `tests::busy::a_batch_is_not_acked_until_its_busy_documents_are_written`, the sink's
   `document_ids` e2e (seeded alias and unseeded generation, multi-byte ids at the limit), and
   `pipeline`'s `an_id_past_512_bytes_is_decided_by_on_error` (`skip` acks, `stop` leaves it unacked).
 - **A document a script fails on is decided on the ingest side (issue #198).** A

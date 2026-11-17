@@ -13,7 +13,12 @@
 //!
 //! Isolation, not fail-fast: a sink engine that stops on an error (a flush-wide
 //! failure, or a `stop` policy rejection) is restarted with exponential backoff
-//! and its lane redelivers the batch it left unacknowledged, so a poison
+//! (one second, doubling to `max_restart_backoff` while it keeps failing with
+//! no progress; a run that made progress starts the next wait at one second
+//! again: a sink engine acknowledged a lane item, the ingest engine moved its
+//! source forward, see [`IngestEngine::advances`]. A replayed change or
+//! backfill page published again is not progress) and its lane
+//! redelivers the batch it left unacknowledged, so a poison
 //! document loops on that one sink while the others continue. Its lane fills up
 //! meanwhile, so with the in-process stream the ingest engine eventually waits
 //! on it: a stalled sink pins WAL until it recovers, and the per-sink lag and
@@ -178,9 +183,15 @@ pub(crate) async fn run_all(
                     stage_until_ok(&engine, Continuity::Resumed, max_backoff).await;
                 }
                 first = false;
+                let acknowledged = engine.acknowledged();
                 match engine.run(&mut receiver).await {
                     Ok(()) => return Ok::<(), anyhow::Error>(()),
-                    Err(_) => backoff.wait().await,
+                    Err(_) => {
+                        if engine.acknowledged() > acknowledged {
+                            backoff.reset();
+                        }
+                        backoff.wait().await;
+                    }
                 }
             }
         });
@@ -190,6 +201,7 @@ pub(crate) async fn run_all(
     let mut ingest_task = AbortOnDrop(tokio::spawn(async move {
         let mut backoff = Backoff::new(max_backoff);
         loop {
+            let advances = ingest.advances();
             match ingest.run().await {
                 Ok(()) => return Ok::<(), anyhow::Error>(()),
                 // A failed engine can't wind down; a restart would read anew.
@@ -199,6 +211,9 @@ pub(crate) async fn run_all(
                     ));
                 }
                 Err(_) => {
+                    if ingest.advances() > advances {
+                        backoff.reset();
+                    }
                     tokio::select! {
                         () = backoff.wait() => {}
                         () = ingest_stop.requested() => {
@@ -273,7 +288,8 @@ async fn stage_until_ok(engine: &SinkEngine, continuity: Continuity, max_backoff
     }
 }
 
-/// Exponential backoff from one second, doubling to a cap.
+/// Exponential backoff from one second, doubling to a cap, until a
+/// [`reset`](Self::reset).
 #[derive(Debug)]
 struct Backoff {
     next: Duration,
@@ -283,9 +299,19 @@ struct Backoff {
 impl Backoff {
     fn new(max: Duration) -> Self {
         Self {
-            next: Duration::from_secs(1).min(max),
+            next: Self::first(max),
             max,
         }
+    }
+
+    fn first(max: Duration) -> Duration {
+        Duration::from_secs(1).min(max)
+    }
+
+    /// Start over at one second: the engine made progress since the last
+    /// failure, so the next one is a new outage, not the same one repeating.
+    fn reset(&mut self) {
+        self.next = Self::first(self.max);
     }
 
     async fn wait(&mut self) {

@@ -17,7 +17,17 @@
 //!
 //! A response item reporting `index_not_found_exception` means the target is
 //! gone, which is the sink's problem rather than the document's: it fails the
-//! whole flush (see [`bulk_rejected`]).
+//! whole flush (see [`read_bulk_response`]).
+//!
+//! A response item refused with 429 or 503 is **busy**, not rejected: a full
+//! write queue, a tripped circuit breaker, a primary shard not yet active. The
+//! document is fine, so `send_bulk_chunk` resends those items alone, with
+//! backoff, and they never reach `on_error`:
+//!
+//! ```text
+//! {"index":{"_index":"users_1a2b_1","_id":"42","status":429,
+//!   "error":{"type":"rejected_execution_exception","reason":"rejected execution of … on …[name = node/write, …]"}}}
+//! ```
 //!
 //! Some ids OpenSearch refuses before it runs the request at all, and one of
 //! them fails the **whole** request with HTTP 400: an index action whose `_id`
@@ -193,37 +203,60 @@ pub(crate) fn plan_chunks(sizes: &[usize], batch_size: usize, max_bytes: usize) 
     chunks
 }
 
-/// Extract the item-level rejections from a 2xx bulk response.
+/// What a 2xx bulk response says about the actions it answered.
+#[derive(Debug, Default)]
+pub(crate) struct BulkResponse {
+    /// Documents refused for a reason resending won't change.
+    pub(crate) rejected: Vec<RejectedDocument>,
+    /// Positions, in the request, of the actions refused as busy.
+    pub(crate) busy: Vec<usize>,
+    /// How the last busy item was refused: status, error type and reason.
+    pub(crate) busy_reason: Option<String>,
+}
+
+/// Whether an item refused with `status` is the cluster being busy, so the
+/// same document can be written later: 429 (a full write queue, a tripped
+/// circuit breaker, a flood-stage disk block) and 503 (a shard unavailable or
+/// timed out). Every other status is about the document.
+pub(crate) fn is_busy(status: u64) -> bool {
+    matches!(status, 429 | 503)
+}
+
+/// Read the item-level outcome of a 2xx bulk response to `actions`.
 ///
 /// A bulk response is `errors: true` when *any* item failed, but its accepted
-/// items are still applied. Each entry in `items` reports a per-document status;
-/// those `>= 400` are rejections. They are matched **by position** to `actions`
-/// (the bulk API preserves order), so the rejection carries the originating
-/// document's index and id; if the arrays ever disagree, the response's own
-/// `_index`/`_id` are used as a fallback. Returns empty when nothing failed.
+/// items are still applied. Each entry in `items` reports a per-document
+/// status, matched **by position** to `actions` (the bulk API preserves
+/// order). Of those `>= 400`:
 ///
-/// An item failing with `index_not_found_exception` is **not** a rejection: the
-/// target index or alias is gone (deleted while running), so every document
-/// bound for it would fail the same way. That returns a flush-wide `Err`, which
+/// - **busy** ([`is_busy`]): listed by position, for the caller to resend;
+/// - anything else is a **rejection** carrying the originating document's
+///   index and id; if the arrays ever disagree, the response's own
+///   `_index`/`_id` are used as a fallback.
+///
+/// An item failing with `index_not_found_exception` is neither: the target
+/// index or alias is gone (deleted while running), so every document bound
+/// for it would fail the same way. That returns a flush-wide `Err`, which
 /// stops the sink engine; its restart re-runs `ensure_index`, which recreates
-/// the generation and reseeds it.
-pub(crate) fn bulk_rejected(
+/// the generation and reseeds it. So does a busy item past the end of
+/// `actions`, which can't be resent.
+pub(crate) fn read_bulk_response(
     response: &Value,
-    actions: &[BulkAction],
-) -> Result<Vec<RejectedDocument>> {
+    actions: &[&BulkAction],
+) -> Result<BulkResponse> {
+    let mut read = BulkResponse::default();
     let has_errors = response
         .get("errors")
         .and_then(Value::as_bool)
         .unwrap_or(false);
     if !has_errors {
-        return Ok(Vec::new());
+        return Ok(read);
     }
 
     let Some(items) = response.get("items").and_then(|v| v.as_array()) else {
-        return Ok(Vec::new());
+        return Ok(read);
     };
 
-    let mut rejected = Vec::new();
     for (i, item) in items.iter().enumerate() {
         let op = item
             .get("index")
@@ -238,13 +271,31 @@ pub(crate) fn bulk_rejected(
         }
 
         let error = op.get("error");
+        let kind = error.and_then(|e| e.get("type")).and_then(Value::as_str);
         let reason = error
             .and_then(|e| e.get("reason"))
             .and_then(|r| r.as_str())
             .map(str::to_owned)
             .unwrap_or_else(|| format!("rejected with status {status}"));
 
-        let (index, id) = match actions.get(i) {
+        let action = actions.get(i);
+        if is_busy(status) {
+            if action.is_none() {
+                return Err(SinkError::Write(format!(
+                    "bulk response item {i} was refused as busy (HTTP {status}) but the request \
+                     had only {} actions; failing the flush so the batch is redelivered",
+                    actions.len()
+                )));
+            }
+            read.busy.push(i);
+            read.busy_reason = Some(format!(
+                "HTTP {status} {}: {reason}",
+                kind.unwrap_or("error")
+            ));
+            continue;
+        }
+
+        let (index, id) = match action {
             Some(action) => (action.index().to_owned(), action.id().to_owned()),
             None => (
                 op.get("_index")
@@ -257,17 +308,15 @@ pub(crate) fn bulk_rejected(
                     .to_owned(),
             ),
         };
-        if error.and_then(|e| e.get("type")).and_then(Value::as_str)
-            == Some("index_not_found_exception")
-        {
+        if kind == Some("index_not_found_exception") {
             return Err(SinkError::Write(format!(
                 "bulk write target {index} is missing (deleted while running?); \
                  failing the flush so a restart recreates it: {reason}"
             )));
         }
-        rejected.push(RejectedDocument { index, id, reason });
+        read.rejected.push(RejectedDocument { index, id, reason });
     }
-    Ok(rejected)
+    Ok(read)
 }
 
 #[cfg(test)]
