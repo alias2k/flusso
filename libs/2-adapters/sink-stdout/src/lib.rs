@@ -106,6 +106,12 @@ impl Sink for StdoutSink {
         written.map_err(|e| SinkError::Write(e.to_string()))?;
         Ok(WriteReport::clean())
     }
+
+    /// Its output is a stream read in order: lines come in lane order, one
+    /// write at a time, whatever `[concurrency] writes` says.
+    fn ordered(&self) -> bool {
+        true
+    }
 }
 
 /// At-a-glance facts about a serialized document: how many top-level fields it

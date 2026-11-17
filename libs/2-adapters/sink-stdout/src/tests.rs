@@ -177,3 +177,11 @@ fn concurrent_writes_never_interleave_their_lines() {
     let runs = 1 + writers.windows(2).filter(|pair| pair[0] != pair[1]).count();
     assert_eq!(runs, WRITES, "each write's lines are one run");
 }
+
+/// Readers consume stdout in order, so the sink asks the engine for lane
+/// order, one write at a time.
+#[test]
+fn the_stdout_sink_is_ordered() {
+    let sink = StdoutSink::new(SinkName::try_new("audit").unwrap(), false);
+    assert!(sink::Sink::ordered(&sink));
+}

@@ -34,6 +34,10 @@
 //! they succeeded, then the first error is returned. Every unfinished item is released with its handle, and
 //! the lane redelivers it, in lane order, to the restarted engine.
 //!
+//! **An ordered sink** ([`Sink::ordered`](sink::Sink::ordered), an emitting
+//! one such as stdout) gets its items in exact lane order, one write at a
+//! time, whatever `writes` says: its readers consume its output in order.
+//!
 //! **After a failed run** the next run writes the oldest redelivered item
 //! alone, as a barrier, and opens the window only once a write landed. So a
 //! write that fails every time (a `stop` rejection, a destination refusing
@@ -349,7 +353,8 @@ impl<'a> Run<'a> {
     /// Start writes while there is a free slot and an admissible item, and
     /// run a `SnapshotComplete` once it is the oldest thing unfinished.
     async fn grant(&mut self) -> Result<()> {
-        let slots = if self.barrier { 1 } else { self.engine.writes };
+        let in_lane_order = self.barrier || self.engine.sink.ordered();
+        let slots = if in_lane_order { 1 } else { self.engine.writes };
         while self.flights.len() < slots {
             if matches!(
                 self.window.front(),
@@ -372,7 +377,7 @@ impl<'a> Run<'a> {
                 }
                 continue;
             }
-            let picked = if self.barrier {
+            let picked = if in_lane_order {
                 self.window.front().map(|_| 0)
             } else {
                 self.pick()
