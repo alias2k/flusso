@@ -1,0 +1,205 @@
+//! A document the destination refuses because it is busy (an item-level 429
+//! or 503) is written later, never handed to `on_error`: the lane item that
+//! carries it stays unacknowledged until it lands. Driven through the real
+//! OpenSearch sink against a stand-in `_bulk` endpoint.
+
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use kernel::{Envelope, IndexName, Position, SinkName};
+use sink::{FlushReport, Sink};
+use source::cdc::Continuity;
+use stream::Stream;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+
+use super::{Harness, MockSource, QuarantineObserver, sink_name, upsert, wait_for};
+use crate::{FailurePolicies, FailurePolicy, Observer};
+
+/// A stand-in for OpenSearch's `_bulk`: answers each action with the status
+/// `answer(request, id)` picks (`request` counts from 0) and records the ids
+/// each request carried.
+struct StubBulk {
+    url: String,
+    requests: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+async fn stub_bulk(answer: impl Fn(usize, &str) -> u16 + Send + Sync + 'static) -> StubBulk {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let requests: Arc<Mutex<Vec<Vec<String>>>> = Arc::default();
+    let answer = Arc::new(answer);
+    let recorded = Arc::clone(&requests);
+    tokio::spawn(async move {
+        loop {
+            let (socket, _) = listener.accept().await.unwrap();
+            let answer = Arc::clone(&answer);
+            let recorded = Arc::clone(&recorded);
+            tokio::spawn(async move {
+                let mut socket = tokio::io::BufStream::new(socket);
+                while let Some(body) = read_request(&mut socket).await {
+                    let ids = bulk_ids(&body);
+                    let request = {
+                        let mut recorded = recorded.lock().unwrap();
+                        recorded.push(ids.clone());
+                        recorded.len() - 1
+                    };
+                    let items: Vec<serde_json::Value> = ids
+                        .iter()
+                        .map(|id| bulk_item(id, answer(request, id)))
+                        .collect();
+                    let errors = items.iter().any(|item| item["index"]["status"] != 201);
+                    let body = serde_json::json!({ "took": 1, "errors": errors, "items": items })
+                        .to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                    socket.flush().await.unwrap();
+                }
+            });
+        }
+    });
+    StubBulk { url, requests }
+}
+
+/// The body of the next request on `socket`, or `None` once the client closed it.
+async fn read_request(socket: &mut tokio::io::BufStream<tokio::net::TcpStream>) -> Option<String> {
+    let mut length = 0usize;
+    loop {
+        let mut line = String::new();
+        if socket.read_line(&mut line).await.ok()? == 0 {
+            return None;
+        }
+        if line == "\r\n" {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            length = value.trim().parse().unwrap();
+        }
+    }
+    let mut body = vec![0; length];
+    socket.read_exact(&mut body).await.ok()?;
+    Some(String::from_utf8(body).unwrap())
+}
+
+/// The `_id` of every action in an NDJSON bulk body, skipping source lines.
+fn bulk_ids(body: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut lines = body.lines();
+    while let Some(line) = lines.next() {
+        let action: serde_json::Value = serde_json::from_str(line).unwrap();
+        if let Some(index) = action.get("index") {
+            ids.push(index["_id"].as_str().unwrap().to_owned());
+            lines.next();
+        } else if let Some(delete) = action.get("delete") {
+            ids.push(delete["_id"].as_str().unwrap().to_owned());
+        }
+    }
+    ids
+}
+
+fn bulk_item(id: &str, status: u16) -> serde_json::Value {
+    let error = match status {
+        201 => {
+            return serde_json::json!({ "index": { "_index": "users", "_id": id, "status": 201 } });
+        }
+        429 => (
+            "es_rejected_execution_exception",
+            "rejected execution: the write queue is full",
+        ),
+        503 => (
+            "unavailable_shards_exception",
+            "primary shard is not active",
+        ),
+        _ => ("mapper_parsing_exception", "failed to parse field [age]"),
+    };
+    serde_json::json!({ "index": {
+        "_index": "users", "_id": id, "status": status,
+        "error": { "type": error.0, "reason": error.1 },
+    } })
+}
+
+/// The OpenSearch sink with staging left out, so only `_bulk` reaches the stub.
+#[derive(Debug)]
+struct BulkOnly(sink_opensearch::OpensearchSink);
+
+#[async_trait]
+impl Sink for BulkOnly {
+    async fn apply(&self, envelope: &Envelope) -> sink::Result<()> {
+        self.0.apply(envelope).await
+    }
+
+    async fn flush(&self, caught_up: bool) -> sink::Result<FlushReport> {
+        self.0.flush(caught_up).await
+    }
+
+    async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
+        Ok(true)
+    }
+}
+
+fn opensearch(url: &str) -> BulkOnly {
+    let config = sink_opensearch::OpensearchConfig {
+        url: kernel::Secret::Value(url.to_owned()),
+        username: None,
+        password: None,
+        tls_verify: true,
+        ca_file: None,
+        batch_size: 1000,
+        max_bytes: 10 * 1024 * 1024,
+        timeout_secs: 5,
+        max_retries: 3,
+        pipeline: None,
+        number_of_shards: 1,
+        number_of_replicas: 0,
+        refresh_interval: "1s".to_owned(),
+        text_analysis: sink_opensearch::TextAnalysis::Builtin,
+        auto_subfields: true,
+        index_settings: Default::default(),
+    };
+    BulkOnly(
+        sink_opensearch::OpensearchSink::from_config(
+            &SinkName::try_new("primary").unwrap(),
+            &config,
+        )
+        .unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn a_batch_is_not_acked_until_its_busy_documents_are_written() {
+    let stub = stub_bulk(|request, _| if request < 2 { 429 } else { 201 }).await;
+    let requests = Arc::clone(&stub.requests);
+    let observer = Arc::new(QuarantineObserver::default());
+    let observer_dyn: Arc<dyn Observer> = Arc::clone(&observer) as Arc<dyn Observer>;
+    let harness = Harness::new(
+        MockSource::new(vec![upsert(1)]),
+        vec![(sink_name("primary"), Arc::new(opensearch(&stub.url)))],
+    )
+    .map_sinks(move |engine| {
+        engine
+            .with_observer(Arc::clone(&observer_dyn))
+            .with_failure_policies(FailurePolicies::new(FailurePolicy::Skip))
+    });
+    let stream = Arc::clone(&harness.stream);
+
+    let run = tokio::spawn(harness.run(Continuity::Resumed));
+    wait_for(|| requests.lock().unwrap().len() >= 2).await;
+    assert_eq!(
+        stream.watermark(),
+        None,
+        "the document is still refused as busy: the batch is not acknowledged"
+    );
+
+    let outcomes = run.await.unwrap();
+    assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
+    assert!(
+        observer.quarantined.lock().unwrap().is_empty(),
+        "a busy refusal never reaches on_error"
+    );
+    assert_eq!(requests.lock().unwrap().len(), 3);
+    assert_eq!(stream.watermark(), Some(Position(0)));
+}

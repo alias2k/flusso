@@ -41,7 +41,7 @@ chrono = { workspace = true, features = ["clock"] }
 toml.workspace = true
 kernel.workspace = true
 sink.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }
 testcontainers-modules = { workspace = true, features = ["http_wait"] }
 criterion.workspace = true
 rustls = { workspace = true, features = ["ring", "std"] }

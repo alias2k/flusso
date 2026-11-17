@@ -333,3 +333,39 @@ fn action_lines_are_written_as_before() {
         }
     }
 }
+
+fn busy_response(status: u64, kind: &str) -> Value {
+    json!({
+        "errors": true,
+        "items": [
+            { "index": { "_index": "users", "_id": "1", "status": 201 } },
+            { "index": { "_index": "users", "_id": "2", "status": status,
+                         "error": { "type": kind, "reason": "the cluster is busy" } } },
+            { "index": { "_index": "users", "_id": "3", "status": 400,
+                         "error": { "type": "mapper_parsing_exception",
+                                    "reason": "failed to parse field [age]" } } },
+        ]
+    })
+}
+
+#[test]
+fn an_item_refused_with_429_is_transient_not_a_rejection() {
+    let actions = [index_action("1"), index_action("2"), index_action("3")];
+    let response = busy_response(429, "es_rejected_execution_exception");
+
+    let read = bulk_rejected(&response, &actions).unwrap();
+
+    let rejected: Vec<&str> = read.iter().map(|doc| doc.id.as_str()).collect();
+    assert_eq!(rejected, ["3"], "only the mapping error is a rejection");
+}
+
+#[test]
+fn an_item_refused_with_503_is_transient_not_a_rejection() {
+    let actions = [index_action("1"), index_action("2"), index_action("3")];
+    let response = busy_response(503, "unavailable_shards_exception");
+
+    let read = bulk_rejected(&response, &actions).unwrap();
+
+    let rejected: Vec<&str> = read.iter().map(|doc| doc.id.as_str()).collect();
+    assert_eq!(rejected, ["3"], "only the mapping error is a rejection");
+}
