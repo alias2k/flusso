@@ -6,6 +6,10 @@ A `[sinks.<name>]` table with `type = "stdout"` writes every operation to standa
 
 Logs go to stderr, so stdout stays a clean data stream. When `flusso.toml` defines no sinks at all, `run` uses a stdout sink; `--pretty` then controls its formatting.
 
+## Order
+
+Lines come in the order the ingest engine published them, one write at a time: [`[concurrency] writes`](config-toml.md#concurrency) doesn't apply to this sink. A live change never overtakes a backfill row published before it, so a consumer that resumes from the last `seq` it read skips nothing.
+
 ## The envelope
 
 The kernel envelope every lane carries, written as-is with the document as JSON, so a consumer deserializes the same type. A NATS sink (#128) forwards the same shape.
