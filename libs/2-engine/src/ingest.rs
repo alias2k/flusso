@@ -652,8 +652,8 @@ async fn next_live(live: &mut LiveStream, stop: &Stop) -> Next {
     .await
 }
 
-/// A batch in the making: the deduplicated document ids the buffered changes
-/// (or snapshot rows) resolved to, how many were buffered, and — for a live
+/// A batch in the making: the deduplicated document ids of the buffered changes
+/// (or snapshot rows), how many were buffered, and — for a live
 /// batch — the last position and the flush deadline.
 #[derive(Debug)]
 struct PendingBatch {

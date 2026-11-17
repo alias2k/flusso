@@ -143,6 +143,9 @@ pub trait ChangeCapture: std::fmt::Debug + Send + Sync {
     /// index with. The stream ends when the snapshot is complete; there is no
     /// in-band boundary marker.
     ///
+    /// Each event names its table as `tables` does: the engine routes a row to
+    /// its indexes by that name, so a partition's row carries the parent's.
+    ///
     /// The default is an empty stream, for mechanisms that cannot snapshot.
     async fn snapshot(
         &self,
