@@ -389,6 +389,32 @@ class StampedHistory(unittest.TestCase):
                 self.assertEqual(stamped_runs, plain_runs)
 
 
+class ProbeMarker(unittest.TestCase):
+    """A latency point names its probe in `extra.images.probe` (issue #399): the step the 5 ms
+    midpoint probe made (about 10 ms down) restarts the window, so a regression after it is
+    measured against the new level, not hidden behind the old one."""
+
+    MINE = load_script(SCRIPT, "bench_regression_probe")
+
+    def series(self, marked: bool) -> dict:
+        def point(value: float, probe: str | None) -> dict:
+            images = dict(IMAGES, **({"probe": probe} if probe else {}))
+            return {"tool": "customSmallerIsBetter", "commit": {"id": "c"},
+                    "benches": [{"name": "reference/ci/visible_latency_p50_ms", "value": value,
+                                 "extra": json.dumps({"images": images})}]}
+        new = "midpoint-5ms" if marked else None
+        values = [(27.0, None)] * 6 + [(14.0, new)] * 2 + [(20.0, new)] * 2
+        return {"entries": {"smaller": [point(v, p) for v, p in values]}}
+
+    def test_a_regression_right_after_the_probe_change_is_caught(self):
+        found = self.MINE.analyse(self.series(marked=True), 25, 20, 5, 3.0)
+        self.assertEqual([f["series"] for f in found], ["reference/ci/visible_latency_p50_ms"])
+        self.assertEqual(found[0]["baseline"], 14.0)
+
+    def test_without_the_marker_the_old_level_hides_it(self):
+        self.assertEqual(self.MINE.analyse(self.series(marked=False), 25, 20, 5, 3.0), [])
+
+
 class DetectionPower(unittest.TestCase):
     """How large a lasting step the rule catches on each series, measured, in the summary; a count in the issue."""
 

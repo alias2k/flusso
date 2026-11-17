@@ -79,8 +79,9 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   metrics: visible latency p50/p99 (commit → searchable, via the `updated_at`/`updatedAt` stamp on
   the dev root tables), drain throughput of a burst, backfill throughput, peak RSS + CPU (sampled
   with `ps`), plus flush p50/p99 from `/metrics` for attribution and, per phase, a table of each
-  stage's share of the wall time (`attribution.md`, from `flusso.stage.duration`; issue #399). The
-  latency probe polls every 5 ms and reports the midpoint between the last miss and the hit. (2) **Docker-backed component
+  stage's busy seconds per wall second, by task (`attribution.md`, from `flusso.stage.duration`;
+  issue #399). The latency probe polls every 5 ms and reports the midpoint between the last miss and
+  the hit; latency points carry `extra.images.probe` so that change restarts their window. (2) **Docker-backed component
   benches** (`postgres`, `opensearch`, `engine`'s `pipeline` — attribution only; its backfill group
   is gone; plus `source-postgres`'s `cases`, `build_many` over batch sizes, hit ratios, key types and
   root shapes, run only by `just bench-components` and `just review-ab`, never by `bench.yml`, so the
@@ -896,17 +897,28 @@ backfill) then recv → `apply` → `flush` → ack. Everything they drive — `
   `Starting` on an ingest error (the supervisor restarts it); only a clean
   `on_engine_stopped(Ingest)` is the final `Stopped`. `reports_lifecycle_and_progress_to_the_observer`
   guards the emit points. **Where time goes is one event** (issue #399): `Observer::on_stage(StageTiming)`
-  names a `Stage` by what it is (`read`, `resolve`, `build`, `publish`, `lane_wait`, `wait`, `apply`,
-  `flush`) with `work` (live/backfill), `sink` and `index` where known, reported **once per batch or
-  lane item, never per change or document** (an `Instant::now()` pair per batch; a snapshot row
-  already fetched reads no clock: `next_snapshot_row`'s `ReadWait` times only a pending poll), and
+  names a `Stage` by what it is, per task: ingest `idle`, `page` (a snapshot key-page wait;
+  `read` is kept for ADR 0012's reader), `resolve`, `build`, `publish`, `lane_wait` (ingest time
+  with a `sink` label), `snapshot` (open/close); each sink `idle`, `write` (apply + flush: the
+  ADR's `Sink::write`, so stage 2 keeps the name), `seed` (`mark_seeded`, per `index`),
+  `reindex`; with `work` (live/backfill), `sink` and `index` where known. Reported **once per
+  batch, lane item, idle stretch or operation, never per change or document**; an idle window
+  closes on every `select!` arm before its work and is cut by a 1 s tick (the sink's `IDLE_TICK`
+  arm, the ingest `confirm_tick`), so a quiet hour is a flat line; while a snapshot runs the
+  ingest wait is `page` (`next_snapshot_row`'s `ReadWait`, timed only while the stream is pending),
+  not `idle`. A task's stages add up to its wall time less bookkeeping (acks, confirms, a stop);
+  share is busy seconds per wall second, which passes 1 once a task runs a stage concurrently.
   `on_startup_step` per start step (`source`, `stage` per sink, `prepare`, `open_live`). The CLI
-  records them as `flusso.stage.duration{stage,work,sink,index}` (its `_sum` rate is the share of
-  time), `flusso.flush.documents`/`flusso.flush.size` (bytes from `FlushReport.bytes`) and the
-  `flusso.startup.duration` gauge; `flusso-bench` prints an attribution table per phase from them
-  (`dev/bench/src/attribution.rs`). When an engine is restructured, keep reporting each stage at its
-  new home, with the `index`/`sink` it now runs per. Guards: `tests::timings` (paused clock),
-  `telemetry::observer::tests` (the `/metrics` names).
+  records them as `flusso.stage.duration{stage,work,sink,index}`, `flusso.flush.documents`/
+  `flusso.flush.size` (non-empty flushes; bytes from `FlushReport.bytes`) and the
+  `flusso.startup.duration` gauge (`live` once per process); `flusso-bench` prints an attribution
+  table per phase, grouped by task with an `other` row (`dev/bench/src/attribution.rs`).
+  `FlushReport`, `CommitStats`, `StageTiming`, `Stage` and `StartupStep` are `#[non_exhaustive]`
+  (builders: `FlushReport::clean()…`, `CommitStats::new`). When an engine is restructured, keep
+  reporting each stage at its new home, with the `index`/`sink` it now runs per. Guards:
+  `tests::timings` (paused clock: each stage's time, a full lane, a backfill's pages/snapshot/seed,
+  idle cut every second and a reindex not idle), `telemetry::observer::tests` (the `/metrics`
+  names), `attribution::tests`, and `test_bench_regression.py`'s `ProbeMarker`.
 
 ### The daemon (`libs/3-daemon/src/lib.rs`) — domain only
 

@@ -15,7 +15,9 @@ use crate::Result;
 /// not the destination's, so retrying redelivers the same poison — the engine
 /// handles them per its failure policy (stop, or quarantine and continue)
 /// instead of looping. An empty report means everything flushed cleanly.
+/// Built with [`FlushReport::clean`] and its builders; more fields may come.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct FlushReport {
     /// Documents the destination accepted the batch but rejected individually.
     pub rejected: Vec<RejectedDocument>,
@@ -69,6 +71,13 @@ impl FlushReport {
     #[must_use]
     pub fn visible(mut self, visibility: Visibility) -> Self {
         self.visibility = visibility;
+        self
+    }
+
+    /// Add documents the destination rejected individually.
+    #[must_use]
+    pub fn rejecting(mut self, rejected: impl IntoIterator<Item = RejectedDocument>) -> Self {
+        self.rejected.extend(rejected);
         self
     }
 

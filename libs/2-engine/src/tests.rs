@@ -957,7 +957,7 @@ impl Sink for RejectingSink {
     }
 
     async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
-        let rejected = self
+        let rejected: Vec<_> = self
             .staged
             .lock()
             .unwrap()
@@ -968,10 +968,7 @@ impl Sink for RejectingSink {
                 reason: "simulated item-level rejection".to_owned(),
             })
             .collect();
-        Ok(FlushReport {
-            rejected,
-            ..FlushReport::default()
-        })
+        Ok(FlushReport::clean().rejecting(rejected))
     }
 
     async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
@@ -1198,14 +1195,14 @@ async fn reports_lifecycle_and_progress_to_the_observer() {
             "startup prepare",
             "startup open_live",
             "live",
+            "stage idle",
             "stage resolve live",
             "stage build live",
             "stage lane_wait live primary",
             "stage publish live",
             "built 2",
-            "stage wait primary",
-            "stage apply live primary",
-            "stage flush live primary",
+            "stage idle primary",
+            "stage write live primary",
             "committed primary 2",
         ]
         .map(str::to_owned)

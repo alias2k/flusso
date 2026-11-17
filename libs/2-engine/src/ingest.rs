@@ -255,15 +255,28 @@ impl IngestEngine {
                 return Ok(Ended::Stopped);
             }
             let deadline = pending.deadline.unwrap_or_else(far_future);
+            // With a snapshot running, a wait is the snapshot stream's: its
+            // `ReadWait` counts it as `Page`.
+            let idle = Idle {
+                since: Instant::now(),
+                counted: snapshot.is_none(),
+            };
             tokio::select! {
                 // While the live stream is open, `next_live` watches the stop.
-                () = self.stop.requested(), if live_ended => {}
+                () = self.stop.requested(), if live_ended => {
+                    self.woke(idle);
+                }
                 change = next_live(&mut live, &self.stop), if !live_ended => match change {
-                    Next::Stopped => {}
-                    Next::Change(None) => live_ended = true,
+                    Next::Stopped => {
+                        self.woke(idle);
+                    }
+                    Next::Change(None) => {
+                        self.woke(idle);
+                        live_ended = true;
+                    }
                     Next::Change(Some(Err(error))) => return Err(error.into()),
                     Next::Change(Some(Ok((position, event)))) => {
-                        let started = Instant::now();
+                        let started = self.woke(idle);
                         self.buffer_live(&mut pending, position, event).await?;
                         live_ended = self.drain_ready(&mut live, &mut pending).await?;
                         self.observer.on_stage(
@@ -274,6 +287,7 @@ impl IngestEngine {
                     }
                 },
                 () = sleep_until(deadline), if pending.deadline.is_some() => {
+                    self.woke(idle);
                     self.commit_live(&mut pending, &lanes).await?;
                     self.confirm(&mut last_confirmed);
                 }
@@ -289,24 +303,48 @@ impl IngestEngine {
                         }
                         None => {
                             self.commit_snapshot(active, &lanes).await?;
+                            let started = Instant::now();
                             self.finish_snapshot(active, &lanes).await?;
+                            self.observer.on_stage(
+                                StageTiming::new(Stage::Snapshot, started.elapsed())
+                                    .work(Work::Backfill),
+                            );
                             snapshot = None;
                         }
                     }
                 },
                 request = requests.recv(), if snapshot.is_none() => match request? {
                     None => {
+                        self.woke(idle);
                         tracing::warn!("request lane closed; no further backfills can be served");
                         requests = Box::new(ClosedConsumer);
                     }
                     Some(first) => {
+                        let started = self.woke(idle);
                         let deliveries = self.collect_requests(first, &mut requests, &lanes).await?;
                         snapshot = self.start_snapshot(deliveries, &scopes, &lanes).await?;
+                        self.observer.on_stage(
+                            StageTiming::new(Stage::Snapshot, started.elapsed()).work(Work::Backfill),
+                        );
                     }
                 },
-                _ = confirm_tick.tick() => self.confirm(&mut last_confirmed),
+                _ = confirm_tick.tick() => {
+                    self.woke(idle);
+                    self.confirm(&mut last_confirmed);
+                }
             }
         }
+    }
+
+    /// Close an idle window as the loop wakes: report it when it counts, and
+    /// return the moment, so the work that follows times from it.
+    fn woke(&self, idle: Idle) -> Instant {
+        let now = Instant::now();
+        if idle.counted {
+            self.observer
+                .on_stage(StageTiming::new(Stage::Idle, now - idle.since));
+        }
+        now
     }
 
     /// The rest of a stop: publish the buffered batch, wait until every lane
@@ -630,7 +668,7 @@ impl IngestEngine {
             roots,
             handles,
             batch: PendingBatch::new(self.batch.max_changes),
-            read_wait: Duration::ZERO,
+            page_wait: Duration::ZERO,
         };
         if tables.is_empty() {
             self.finish_snapshot(&mut snapshot, lanes).await?;
@@ -651,12 +689,12 @@ impl IngestEngine {
     /// Build the snapshot batch once and publish each lane the slice of it that
     /// lane requested, with no position.
     async fn commit_snapshot(&self, snapshot: &mut Snapshot, lanes: &Lanes) -> Result<()> {
-        let read = std::mem::take(&mut snapshot.read_wait);
-        if snapshot.batch.count == 0 && read.is_zero() {
+        let page = std::mem::take(&mut snapshot.page_wait);
+        if snapshot.batch.count == 0 && page.is_zero() {
             return Ok(());
         }
         self.observer
-            .on_stage(StageTiming::new(Stage::Read, read).work(Work::Backfill));
+            .on_stage(StageTiming::new(Stage::Page, page).work(Work::Backfill));
         if snapshot.batch.count == 0 {
             return Ok(());
         }
@@ -720,6 +758,14 @@ impl IngestEngine {
         self.observer.on_snapshot_completed(&indexes);
         Ok(())
     }
+}
+
+/// An idle window of the loop: since when it waits, and whether that wait
+/// counts as [`Stage::Idle`].
+#[derive(Debug, Clone, Copy)]
+struct Idle {
+    since: Instant,
+    counted: bool,
 }
 
 /// What the live arm of the loop got.
@@ -818,7 +864,7 @@ struct Snapshot {
     handles: Vec<Box<dyn AckHandle>>,
     batch: PendingBatch,
     /// How long the engine waited on `stream` since the last batch.
-    read_wait: Duration,
+    page_wait: Duration,
 }
 
 impl Snapshot {
@@ -841,19 +887,19 @@ impl Snapshot {
 
 /// The snapshot's next row. The time from the stream first answering
 /// "not yet" until it yields, or until the `select!` drops this future, is
-/// added to the snapshot's `read_wait`: a row already fetched costs no clock
+/// added to the snapshot's `page_wait`: a row already fetched costs no clock
 /// read, so only the source's key pages are timed.
 async fn next_snapshot_row(
     snapshot: &mut Option<Snapshot>,
 ) -> Option<std::result::Result<ChangeEvent, SourceError>> {
     let Some(Snapshot {
-        stream, read_wait, ..
+        stream, page_wait, ..
     }) = snapshot
     else {
         return std::future::pending().await;
     };
     let mut wait = ReadWait {
-        total: read_wait,
+        total: page_wait,
         since: None,
     };
     std::future::poll_fn(move |cx| match stream.poll_next_unpin(cx) {

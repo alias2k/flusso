@@ -8,19 +8,23 @@
 //! Where time goes is `flusso.stage.duration`, one histogram for every
 //! [`Stage`](daemon::Stage) labelled by `stage`, `work`, `sink` and `index`
 //! where the engine knows them: its `_sum` is the seconds a stage was busy, so
-//! `rate(_sum)` is the share of wall time it takes, and its buckets are the
-//! per-batch distribution. Start-up is `flusso.startup.duration`, a gauge per
-//! step of the last start.
+//! `rate(_sum)` is its busy seconds per wall second (the mean number in flight:
+//! up to 1 for a stage one task runs one at a time, more once a task runs it
+//! concurrently), and its buckets are the per-batch distribution. Start-up is
+//! `flusso.startup.duration`, a gauge per step, `live` once per process.
 
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Instant;
 
 use daemon::{
     BuildStats, CommitStats, EngineId, IndexName, Observer, SinkName, StageTiming, StartupStep,
 };
 use kernel::FailurePolicy;
-use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
+use opentelemetry::{KeyValue, StringValue};
 use source::document::BuildFailure;
 
 use super::script_log::field_label;
@@ -43,6 +47,8 @@ pub(crate) struct OtelObserver {
     slot_lag: Gauge<u64>,
     indexes: Gauge<u64>,
     started: Instant,
+    live_recorded: AtomicBool,
+    sink_labels: RwLock<BTreeMap<SinkName, KeyValue>>,
 }
 
 impl OtelObserver {
@@ -55,6 +61,8 @@ impl OtelObserver {
     pub(crate) fn with_meter(meter: &Meter, started: Instant) -> Self {
         Self {
             started,
+            live_recorded: AtomicBool::new(false),
+            sink_labels: RwLock::new(BTreeMap::new()),
             changes_captured: meter
                 .u64_counter("flusso.changes.captured")
                 .with_description("Changes pulled from the source by the ingest engine")
@@ -116,10 +124,11 @@ impl OtelObserver {
                 .f64_histogram("flusso.stage.duration")
                 .with_unit("s")
                 .with_description(
-                    "Time each pipeline stage took, once per batch or lane item, by stage \
-                     (read, resolve, build, publish, lane_wait, wait, apply, flush), work \
-                     (live, backfill), sink and index where known. rate(_sum) is the share \
-                     of time the stage takes.",
+                    "Time each pipeline stage took, once per batch, lane item, idle stretch or \
+                     operation, by stage (idle, page, resolve, build, publish, lane_wait, \
+                     snapshot, write, seed, reindex), work (live, backfill), sink and index \
+                     where known. rate(_sum) is busy seconds per wall second: the mean number \
+                     in flight, above 1 when a task runs the stage concurrently.",
                 )
                 .build(),
             startup_duration: meter
@@ -127,7 +136,7 @@ impl OtelObserver {
                 .with_unit("s")
                 .with_description(
                     "Time the last start spent in each step (source, stage per sink, prepare, \
-                     open_live), and in all of them until the live stream (live)",
+                     open_live), and from the process start to the first live stream (live)",
                 )
                 .build(),
             slot_lag: meter
@@ -143,8 +152,25 @@ impl OtelObserver {
     }
 }
 
-fn sink_label(sink: &SinkName) -> KeyValue {
-    KeyValue::new("sink", sink.as_ref().to_owned())
+impl OtelObserver {
+    /// The `sink` label, built once per sink: its value is shared, so a label
+    /// costs a reference count, not a copy of the name.
+    fn sink_label(&self, sink: &SinkName) -> KeyValue {
+        if let Some(label) = self
+            .sink_labels
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(sink)
+        {
+            return label.clone();
+        }
+        let label = KeyValue::new("sink", StringValue::from(Arc::<str>::from(sink.as_ref())));
+        self.sink_labels
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(sink.clone(), label.clone());
+        label
+    }
 }
 
 impl Observer for OtelObserver {
@@ -153,6 +179,11 @@ impl Observer for OtelObserver {
     }
 
     fn on_live_started(&self) {
+        // Once per process: a restarted ingest engine opens the stream again,
+        // and the time since the process started would read as a slow start.
+        if self.live_recorded.swap(true, Ordering::Relaxed) {
+            return;
+        }
         self.startup_duration.record(
             self.started.elapsed().as_secs_f64(),
             &[KeyValue::new("step", "live")],
@@ -166,7 +197,7 @@ impl Observer for OtelObserver {
             labels.push(KeyValue::new("work", work.as_str()));
         }
         if let Some(sink) = timing.sink {
-            labels.push(sink_label(sink));
+            labels.push(self.sink_label(sink));
         }
         if let Some(index) = timing.index {
             labels.push(KeyValue::new("index", index.as_ref().to_owned()));
@@ -183,7 +214,7 @@ impl Observer for OtelObserver {
     ) {
         let mut labels = vec![KeyValue::new("step", step.as_str())];
         if let Some(sink) = sink {
-            labels.push(sink_label(sink));
+            labels.push(self.sink_label(sink));
         }
         self.startup_duration.record(elapsed.as_secs_f64(), &labels);
     }
@@ -198,26 +229,34 @@ impl Observer for OtelObserver {
     }
 
     fn on_indexes_ensured(&self, sink: &SinkName, count: usize) {
-        self.indexes.record(count as u64, &[sink_label(sink)]);
+        self.indexes.record(count as u64, &[self.sink_label(sink)]);
     }
 
     fn on_index_seeded(&self, sink: &SinkName, index: &IndexName) {
         self.indexes_seeded.add(
             1,
             &[
-                sink_label(sink),
+                self.sink_label(sink),
                 KeyValue::new("index", index.as_ref().to_owned()),
             ],
         );
     }
 
     fn on_batch_committed(&self, sink: &SinkName, stats: CommitStats) {
-        let label = [sink_label(sink)];
+        let label = [self.sink_label(sink)];
         self.changes_committed.add(stats.changes as u64, &label);
         self.batches.add(1, &label);
         self.flush_duration
             .record(stats.flush.as_secs_f64(), &label);
-        let sized = [sink_label(sink), KeyValue::new("work", stats.work.as_str())];
+        // One denominator for both: a flush that wrote nothing (a live
+        // batch that resolved to no document) is in neither.
+        if stats.envelopes == 0 {
+            return;
+        }
+        let sized = [
+            self.sink_label(sink),
+            KeyValue::new("work", stats.work.as_str()),
+        ];
         self.flush_documents.record(stats.envelopes as u64, &sized);
         if let Some(bytes) = stats.bytes {
             self.flush_size.record(bytes, &sized);
@@ -227,7 +266,10 @@ impl Observer for OtelObserver {
     fn on_document_quarantined(&self, sink: &SinkName, index: &str, _id: &str, _reason: &str) {
         self.documents_quarantined.add(
             1,
-            &[sink_label(sink), KeyValue::new("index", index.to_owned())],
+            &[
+                self.sink_label(sink),
+                KeyValue::new("index", index.to_owned()),
+            ],
         );
     }
 

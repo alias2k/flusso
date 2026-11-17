@@ -45,7 +45,7 @@ use sink::{Sink, SinkOptions, Visibility};
 use source::cdc::Continuity;
 use stream::{LaneItem, Request, Stream};
 use tokio::sync::mpsc;
-use tokio::time::{Instant, sleep_until};
+use tokio::time::{Duration, Instant, sleep_until};
 
 use crate::error::{EngineError, Result, StagingFailures};
 use crate::observer::{
@@ -62,6 +62,10 @@ use crate::stop::Stop;
 /// master; the bound keeps a deployment with hundreds of indexes from
 /// flooding it, or the client's connection pool, at start.
 pub(crate) const STAGE_CONCURRENCY: usize = 8;
+
+/// The longest an idle window stays open before it is reported, so a quiet
+/// sink reads as idle in every scrape, not as one spike when work resumes.
+const IDLE_TICK: Duration = Duration::from_secs(1);
 
 /// An operation the daemon hands a running sink engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -403,15 +407,15 @@ impl SinkEngine {
         let mut lane = self.stream.lane(&self.name)?.consumer;
         let mut control_open = true;
         let mut idle_since = Instant::now();
+        let mut idle_tick = tokio::time::interval_at(idle_since + IDLE_TICK, IDLE_TICK);
+        idle_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             let next_searchable = self.next_searchable_at();
             tokio::select! {
                 delivery = lane.recv() => match delivery? {
                     None => return Ok(()),
                     Some(delivery) => {
-                        self.observer.on_stage(
-                            StageTiming::new(Stage::Wait, idle_since.elapsed()).sink(&self.name),
-                        );
+                        self.idle_until(idle_since);
                         let (item, handle) = delivery.into_parts();
                         let flushed = match item {
                             LaneItem::Batch(batch)
@@ -435,7 +439,14 @@ impl SinkEngine {
                                     .filter(|index| !skipped.contains(index))
                                     .collect();
                                 for index in &indexes {
+                                    let started = Instant::now();
                                     self.sink.mark_seeded(index).await?;
+                                    self.observer.on_stage(
+                                        StageTiming::new(Stage::Seed, started.elapsed())
+                                            .work(Work::Backfill)
+                                            .sink(&self.name)
+                                            .index(index),
+                                    );
                                     self.observer.on_index_seeded(&self.name, index);
                                 }
                                 let mut outstanding = self.lock_outstanding();
@@ -457,7 +468,13 @@ impl SinkEngine {
                                 && lane.is_empty()
                                 && self.waits_for_an_immediate_flush() =>
                             {
+                                let started = Instant::now();
                                 let report = self.sink.flush(true).await?;
+                                self.observer.on_stage(
+                                    StageTiming::new(Stage::Write, started.elapsed())
+                                        .work(Work::Live)
+                                        .sink(&self.name),
+                                );
                                 Some((None, report.visibility))
                             }
                             flushed => flushed,
@@ -474,13 +491,36 @@ impl SinkEngine {
                         idle_since = Instant::now();
                     }
                 },
-                message = control.recv(), if control_open => match message {
-                    None => control_open = false,
-                    Some(SinkControl::Reindex { indexes }) => self.reindex(indexes).await?,
-                },
-                () = until(next_searchable) => self.report_searchable(),
+                message = control.recv(), if control_open => {
+                    let started = self.idle_until(idle_since);
+                    match message {
+                        None => control_open = false,
+                        Some(SinkControl::Reindex { indexes }) => {
+                            self.reindex(indexes).await?;
+                            self.observer.on_stage(
+                                StageTiming::new(Stage::Reindex, started.elapsed()).sink(&self.name),
+                            );
+                        }
+                    }
+                    idle_since = Instant::now();
+                }
+                () = until(next_searchable) => {
+                    self.idle_until(idle_since);
+                    self.report_searchable();
+                    idle_since = Instant::now();
+                }
+                _ = idle_tick.tick() => idle_since = self.idle_until(idle_since),
             }
         }
+    }
+
+    /// Close an idle window (nothing in flight, nothing taken) and report it;
+    /// return the moment it closed.
+    fn idle_until(&self, since: Instant) -> Instant {
+        let now = Instant::now();
+        self.observer
+            .on_stage(StageTiming::new(Stage::Idle, now - since).sink(&self.name));
+        now
     }
 
     /// Report a flush that returned: its position is applied, and it joins the
@@ -589,15 +629,11 @@ impl SinkEngine {
             self.sink.apply(envelope).await?;
         }
         let flush_start = Instant::now();
-        self.observer.on_stage(
-            StageTiming::new(Stage::Apply, flush_start - apply_start)
-                .work(work)
-                .sink(&self.name),
-        );
         let report = self.sink.flush(caught_up).await?;
-        let flush = flush_start.elapsed();
+        let written = Instant::now();
+        let flush = written - flush_start;
         self.observer.on_stage(
-            StageTiming::new(Stage::Flush, flush)
+            StageTiming::new(Stage::Write, written - apply_start)
                 .work(work)
                 .sink(&self.name),
         );
@@ -634,13 +670,7 @@ impl SinkEngine {
 
         self.observer.on_batch_committed(
             &self.name,
-            CommitStats {
-                envelopes: batch.envelopes.len(),
-                changes: batch.changes,
-                flush,
-                work,
-                bytes: report.bytes,
-            },
+            CommitStats::new(batch.envelopes.len(), batch.changes, flush, work).sent(report.bytes),
         );
         Ok(report.visibility)
     }

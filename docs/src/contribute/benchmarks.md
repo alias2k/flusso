@@ -22,7 +22,7 @@ A scenario reports these under the series `<scenario>/<scale>/…`:
 
 | Metric | Unit | Direction | How it's measured |
 | --- | --- | --- | --- |
-| `visible_latency_p50_ms`, `visible_latency_p99_ms` | ms | smaller | A paced trickle of changes; each stamped root-row update is timed from commit until a search on the index's alias returns the document with that stamp. Refresh included: this is what a user sees. The probe polls every 5 ms and takes the midpoint between the last search that missed and the one that found it, so polling adds no bias (a 20 ms poll that took the hit's answer added about 10 ms) and an error of a few milliseconds either way. Only root-row updates carry the stamp, so related-table changes are in the mix but not timed. |
+| `visible_latency_p50_ms`, `visible_latency_p99_ms` | ms | smaller | A paced trickle of changes; each stamped root-row update is timed from commit until a search on the index's alias returns the document with that stamp. Refresh included: this is what a user sees. The probe polls every 5 ms and takes the midpoint between the last search that missed and the one that found it, so polling adds no bias and an error of a few milliseconds either way. That is about ten `_count` requests per probe, some 200 a second at the `ci` rate, against the OpenSearch being measured. Latency points from before this probe (issue #399) were measured with a 20 ms poll that took the hit's answer, and read about 10 ms high; the new points carry `extra.images.probe`, so the step between them restarts each latency series' window. Only root-row updates carry the stamp, so related-table changes are in the mix but not timed. |
 | `drain_changes_per_s` | changes/s | bigger | Several writers commit a fixed burst as fast as Postgres accepts. Time runs from the first write until `changes_captured` covers every row written and every sink has nothing in flight. The report also records how long the writers themselves took, so a Postgres-bound run is recognisable. |
 | `backfill_docs_per_s` | docs/s | bigger | Documents seeded divided by the time from spawning the binary until `/status` reports `live` with every index seeded. |
 | `peak_rss_mib`, `cpu_seconds` | MiB, s | smaller | Sampled from the child with `ps` every half second. |
@@ -30,31 +30,36 @@ A scenario reports these under the series `<scenario>/<scale>/…`:
 
 ## Where the time went
 
-Each scenario phase (backfill, trickle, burst) also gets an **attribution table**: the share of the phase's wall time each pipeline stage took. It's read from flusso's own [`flusso.stage.duration`](../reference/metrics.md#where-the-time-goes) histogram, two scrapes of `/metrics` around the phase, so the release binary needs no patch. It isn't a data point: the run logs it and writes it to `attribution.md` (and `phases.attribution` in `summary.json`), ready to paste into a PR.
+Each scenario phase (backfill, trickle, burst) also gets an **attribution table**: how much of the phase's wall time each pipeline stage took, per task. It's read from flusso's own [`flusso.stage.duration`](../reference/metrics.md#where-the-time-goes) histogram, two scrapes of `/metrics` around the phase, so the release binary needs no patch. It isn't a data point: the run logs it and writes it to `attribution.md` (and `phases.attribution` in `summary.json`), ready to paste into a PR.
 
 ```text
-**burst** (23.03 s wall)
+**burst** (7.37 s wall)
 
-| stage | work | sink | index | batches | busy s | share | ms/batch |
-| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
-| apply | live | primary |  | 322 | 0.22 | 0.9% | 0.68 |
-| build | live |  |  | 322 | 4.54 | 19.7% | 14.10 |
-| flush | live | primary |  | 322 | 17.79 | 77.3% | 55.26 |
-| lane_wait | live | primary |  | 322 | 0.00 | 0.0% | 0.01 |
-| publish | live |  |  | 322 | 0.01 | 0.0% | 0.02 |
-| resolve | live |  |  | 322 | 18.20 | 79.0% | 56.52 |
-| wait |  | primary |  | 322 | 4.84 | 21.0% | 15.03 |
+| task | stage | work | sink | index | batches | busy s | busy/wall | ms/batch |
+| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| ingest | idle |  |  |  | 120 | 0.03 | 0.00 | 0.22 |
+| ingest | resolve | live |  |  | 113 | 5.48 | 0.74 | 48.50 |
+| ingest | build | live |  |  | 113 | 1.73 | 0.23 | 15.29 |
+| ingest | publish | live |  |  | 113 | 0.00 | 0.00 | 0.02 |
+| ingest | lane_wait | live | primary |  | 113 | 0.00 | 0.00 | 0.01 |
+| ingest | other |  |  |  |  | 0.13 | 0.02 |  |
+| sink primary | idle |  | primary |  | 120 | 1.69 | 0.23 | 14.09 |
+| sink primary | write | live | primary |  | 113 | 5.52 | 0.75 | 48.82 |
+| sink primary | other |  |  |  |  | 0.16 | 0.02 |  |
 ```
 
-Here the ingest task is busy 99% of the burst (`resolve` 79% + `build` 20%), and the sink waits 21% of it for the next batch: the burst is ingest-bound, and the reverse lookups are most of it.
+Here the ingest task is busy all the burst (`resolve` 0.74 + `build` 0.23), while the sink is `idle` for 0.23 of it: the burst is ingest-bound, and the reverse lookups are most of it.
 
 How to read it:
 
-- **One task's shares add up to 100% at most.** The ingest task is `read` + `resolve` + `build` + `publish`; whatever is missing it spent idle, waiting for the source. Each sink engine is `wait` + `apply` + `flush`.
-- **The busier side sets the pace.** A sink near 100% with the ingest task idle is sink-bound; the ingest task near 100% with the sink mostly in `wait` is ingest-bound.
+- **Rows are grouped by task**: the ingest task first, then each sink. `lane_wait` is ingest time (the ingest task waiting on that sink's lane), so it sits with the ingest rows, and it overlaps `publish`.
+- **`busy/wall` is busy seconds per wall second**: the mean number of that stage in flight. A stage a task runs one at a time stays at or under 1, and one task's stages add up to about 1. Once a task runs a stage concurrently (several writes or builds in flight), it can pass 1.
+- **`start-up`** opens each task in the backfill table: the time before its loop ran. For the ingest task that's the `live` start-up step (process start to the live stream); a sink's loop starts as the source is prepared, so it's `live` less `prepare` and `open_live`.
+- **`other`** is the wall time a task's stages and start-up don't account for: acknowledgements, confirmations, a stop, and the idle stretch still open when the phase ends. An idle stretch is cut every second, so up to a second of a task's idle time at a phase boundary can land in `other` there and in the next phase's `idle`. Anything larger is a gap in the timing. It goes negative once stages overlap.
+- **The busier side sets the pace.** A sink rarely `idle` while the ingest task often is: sink-bound. The ingest task rarely `idle` while the sink mostly is: ingest-bound.
 - **`publish` is the ingest task blocked on a full lane**, `lane_wait` the same per sink: a high one names the slow sink.
-- **`read` counts only waits for the source's key pages**, so it stays low unless the snapshot cursor is the limit.
-- The **flush table** gives documents and KiB per flush per sink; the backfill table adds the **start-up steps** (source, staging per sink, prepare, open_live, and `live`, the whole time to the live stream).
+- **`page` counts only waits for the source's key pages**, so it stays low unless the snapshot cursor is the limit.
+- The **flush table** gives documents and KiB per flush per sink (flushes that wrote something); the backfill table adds the **start-up steps** (source, staging per sink, prepare, open_live, and `live`, the whole time to the first live stream).
 
 Rows appear per `sink` and per `index` where the engine reports them, so a change that splits work per index shows up without touching the harness.
 

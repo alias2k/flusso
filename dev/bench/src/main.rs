@@ -376,8 +376,8 @@ async fn run(
             .collect::<Vec<_>>()
             .join("\n"),
     };
-    report.smaller("visible_latency_p50_ms", "ms", p50);
-    report.smaller("visible_latency_p99_ms", "ms", p99);
+    report.latency("visible_latency_p50_ms", p50);
+    report.latency("visible_latency_p99_ms", p99);
     report.smaller("peak_rss_mib", "MiB", resources.peak_rss_mib);
     report.smaller("cpu_seconds", "s", resources.cpu_seconds);
     if let Some(p) = flush_p50 {

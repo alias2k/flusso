@@ -12,6 +12,12 @@ use crate::scenario::Probe;
 /// OpenSearch a handful of `_count` requests.
 const POLL_EVERY: Duration = Duration::from_millis(5);
 
+/// How the latency is measured, stamped on each latency point's
+/// `extra.images.probe`: points measured otherwise (before #399, a 20 ms
+/// poll taking the hit's answer, about 10 ms high) have none, so the step
+/// between them restarts the series' window instead of mixing two levels.
+pub(crate) const METHOD: &str = "midpoint-5ms";
+
 /// Poll `_count` on the index's convenience alias until the document carries
 /// the probe's stamp or a later one (a second write to the same row inside the
 /// latency window must not hide the first). Fails past `cap`.

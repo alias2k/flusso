@@ -229,7 +229,7 @@
     },
     {
       "id": 11,
-      "title": "Ingest: share of time per stage (stacked; 100% = the ingest task always busy)",
+      "title": "Ingest: busy seconds per second, by stage (stacked; the mean number in flight, may pass 1 once stages run concurrently)",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -243,7 +243,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "percentunit",
+          "unit": "short",
           "custom": {
             "stacking": {
               "mode": "normal"
@@ -259,7 +259,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (stage, work) (rate(flusso_stage_duration_seconds_sum{stage=~\"read|resolve|build|publish\"}[1m]))",
+          "expr": "sum by (stage, work) (rate(flusso_stage_duration_seconds_sum{sink=\"\", stage!=\"lane_wait\"}[1m]))",
           "legendFormat": "{{stage}} {{work}}",
           "refId": "A"
         }
@@ -267,7 +267,7 @@
     },
     {
       "id": 12,
-      "title": "Sinks: share of time per stage (stacked; each sink's stages add up to 100%, wait = idle)",
+      "title": "Sinks: busy seconds per second, by sink and stage (stacked; the mean number in flight, may pass 1 per sink once writes run concurrently)",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -281,7 +281,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "percentunit",
+          "unit": "short",
           "custom": {
             "stacking": {
               "mode": "normal"
@@ -297,7 +297,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (sink, stage) (rate(flusso_stage_duration_seconds_sum{stage=~\"wait|apply|flush\"}[1m]))",
+          "expr": "sum by (sink, stage) (rate(flusso_stage_duration_seconds_sum{stage=~\"idle|write|seed|reindex\", sink!=\"\"}[1m]))",
           "legendFormat": "{{sink}} {{stage}}",
           "refId": "A"
         }
@@ -329,7 +329,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (stage, work) (rate(flusso_stage_duration_seconds_sum{stage!=\"wait\"}[5m])) / sum by (stage, work) (rate(flusso_stage_duration_seconds_count{stage!=\"wait\"}[5m]))",
+          "expr": "sum by (stage, work) (rate(flusso_stage_duration_seconds_sum{stage!=\"idle\"}[5m])) / sum by (stage, work) (rate(flusso_stage_duration_seconds_count{stage!=\"idle\"}[5m]))",
           "legendFormat": "{{stage}} {{work}}",
           "refId": "A"
         }

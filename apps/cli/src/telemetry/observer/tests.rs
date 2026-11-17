@@ -54,11 +54,11 @@ fn stage_timings_are_exposed_as_one_histogram_by_stage_work_and_sink() {
     observer.on_stage(StageTiming::new(Stage::Resolve, Duration::from_millis(3)).work(Work::Live));
     observer.on_stage(StageTiming::new(Stage::Resolve, Duration::from_millis(5)).work(Work::Live));
     observer.on_stage(
-        StageTiming::new(Stage::Flush, Duration::from_millis(40))
+        StageTiming::new(Stage::Write, Duration::from_millis(40))
             .work(Work::Backfill)
             .sink(&primary),
     );
-    observer.on_stage(StageTiming::new(Stage::Wait, Duration::from_secs(2)).sink(&primary));
+    observer.on_stage(StageTiming::new(Stage::Idle, Duration::from_secs(2)).sink(&primary));
     observer.on_stage(
         StageTiming::new(Stage::Build, Duration::from_millis(7))
             .work(Work::Live)
@@ -78,7 +78,7 @@ fn stage_timings_are_exposed_as_one_histogram_by_stage_work_and_sink() {
     assert_eq!(
         value(
             &text,
-            r#"flusso_stage_duration_seconds_bucket{sink="primary",stage="flush",work="backfill",le="0.05"}"#
+            r#"flusso_stage_duration_seconds_bucket{sink="primary",stage="write",work="backfill",le="0.05"}"#
         ),
         1.0,
         "the stage buckets apply, not OTel's millisecond defaults"
@@ -86,7 +86,7 @@ fn stage_timings_are_exposed_as_one_histogram_by_stage_work_and_sink() {
     assert_eq!(
         value(
             &text,
-            r#"flusso_stage_duration_seconds_sum{sink="primary",stage="wait"}"#
+            r#"flusso_stage_duration_seconds_sum{sink="primary",stage="idle"}"#
         ),
         2.0
     );
@@ -105,23 +105,15 @@ fn a_commit_records_the_flush_documents_and_size_by_sink_and_work() {
     let (observer, registry, _provider) = recorder();
     observer.on_batch_committed(
         &sink("primary"),
-        CommitStats {
-            envelopes: 128,
-            changes: 0,
-            flush: Duration::from_millis(60),
-            work: Work::Backfill,
-            bytes: Some(50_000),
-        },
+        CommitStats::new(128, 0, Duration::from_millis(60), Work::Backfill).sent(Some(50_000)),
     );
     observer.on_batch_committed(
         &sink("audit"),
-        CommitStats {
-            envelopes: 1,
-            changes: 1,
-            flush: Duration::from_millis(1),
-            work: Work::Live,
-            bytes: None,
-        },
+        CommitStats::new(1, 1, Duration::from_millis(1), Work::Live),
+    );
+    observer.on_batch_committed(
+        &sink("audit"),
+        CommitStats::new(0, 1, Duration::from_millis(1), Work::Live).sent(Some(0)),
     );
 
     let text = scrape(&registry);
@@ -155,7 +147,7 @@ fn a_commit_records_the_flush_documents_and_size_by_sink_and_work() {
     );
     assert!(
         !text.contains(r#"flusso_flush_size_bytes_count{sink="audit""#),
-        "a sink that counts no bytes records no size"
+        "a sink that counts no bytes records no size, and an empty flush neither"
     );
     assert_eq!(
         value(
@@ -177,6 +169,12 @@ fn start_up_steps_are_a_gauge_per_step_and_sink() {
     );
     observer.on_startup_step(StartupStep::Prepare, None, Duration::from_millis(80));
     observer.on_startup_step(StartupStep::OpenLive, None, Duration::from_millis(5));
+    observer.on_live_started();
+    let first = value(
+        &scrape(&registry),
+        r#"flusso_startup_duration_seconds{step="live"}"#,
+    );
+    std::thread::sleep(Duration::from_millis(20));
     observer.on_live_started();
 
     let text = scrape(&registry);
@@ -202,5 +200,9 @@ fn start_up_steps_are_a_gauge_per_step_and_sink() {
         ),
         0.005
     );
-    assert!(value(&text, r#"flusso_startup_duration_seconds{step="live"}"#) >= 0.0);
+    assert_eq!(
+        value(&text, r#"flusso_startup_duration_seconds{step="live"}"#),
+        first,
+        "a restarted ingest engine opening the stream again doesn't move the start-up time"
+    );
 }

@@ -59,6 +59,22 @@ impl Report {
         }
     }
 
+    /// A latency point: its `extra.images` also names how the probe measured,
+    /// so a change of probe restarts the series' window in
+    /// `bench-regression.py`, as an image change does.
+    pub(crate) fn latency(&mut self, metric: &str, value: f64) {
+        let mut images = serde_json::json!(self.images);
+        if let Some(fields) = images.as_object_mut() {
+            fields.insert("probe".to_owned(), serde_json::json!(crate::probe::METHOD));
+        }
+        let extra = serde_json::json!({ "images": images, "scale": self.scale }).to_string();
+        let point = Point {
+            extra: Some(extra),
+            ..self.point(metric, "ms", value)
+        };
+        self.smaller.push(point);
+    }
+
     pub(crate) fn smaller(&mut self, metric: &str, unit: &str, value: f64) {
         let point = self.point(metric, unit, value);
         self.smaller.push(point);

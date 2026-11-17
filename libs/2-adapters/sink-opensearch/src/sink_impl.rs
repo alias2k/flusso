@@ -195,7 +195,7 @@ impl Sink for OpensearchSink {
 
         if actions.is_empty() && rejected.is_empty() {
             let visibility = self.settle_visibility(caught_up, &actions).await;
-            return Ok(FlushReport::clean().visible(visibility));
+            return Ok(FlushReport::clean().visible(visibility).sent(0));
         }
 
         let mut fragments = Vec::with_capacity(actions.len());
@@ -248,11 +248,10 @@ impl Sink for OpensearchSink {
         }
 
         let visibility = self.settle_visibility(caught_up, &actions).await;
-        Ok(FlushReport {
-            rejected,
-            visibility,
-            bytes: Some(total_bytes as u64),
-        })
+        Ok(FlushReport::clean()
+            .rejecting(rejected)
+            .visible(visibility)
+            .sent(total_bytes as u64))
     }
 
     async fn is_seeded(&self, index: &IndexName) -> Result<bool> {
