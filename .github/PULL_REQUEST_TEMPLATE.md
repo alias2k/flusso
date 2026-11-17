@@ -31,3 +31,4 @@ I ran the same gate CI runs (`just ci`, plus the extra CI-only steps):
 ## Notes for reviewers
 
 <!-- Anything that needs context: trade-offs, follow-ups, areas to scrutinize. Remove if none. -->
+
