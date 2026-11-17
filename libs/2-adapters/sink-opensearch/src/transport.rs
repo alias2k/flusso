@@ -94,13 +94,13 @@ fn one_write_per_document(actions: &[BulkAction]) -> bool {
 
 impl OpensearchSink {
     /// Send one prebuilt NDJSON `body` (the actions in `actions`, in order) as a
-    /// single bulk request. The caller (`flush`) is responsible for keeping
+    /// single bulk request. The caller (`write`) is responsible for keeping
     /// `body` within the count and byte caps; this just transmits it.
     ///
     /// When `refresh` is `true`, appends `?refresh=true` to the URL so
     /// OpenSearch performs a segment refresh after the request completes and
     /// all documents become immediately searchable. Pass `false` for
-    /// intermediate chunks; the final chunk in a flush carries the refresh.
+    /// intermediate chunks; the final chunk in a write carries the refresh.
     ///
     /// **Transport and request-wide failures** (connection error, a non-2xx
     /// status for the whole request) are transient and **retried** with
@@ -110,7 +110,7 @@ impl OpensearchSink {
     /// **Items refused as busy** (429 or 503 inside a 2xx response, see the
     /// `bulk` module docs) are resent alone, from the same retry budget and
     /// backoff: the accepted items are applied and never sent twice. Items
-    /// still busy once `max_retries` is spent fail the flush with an `Err`, so
+    /// still busy once `max_retries` is spent fail the write with an `Err`, so
     /// the sink engine restarts with its own backoff and the batch is
     /// redelivered; a busy item never reaches `on_error`.
     ///
@@ -186,8 +186,8 @@ impl OpensearchSink {
                         .collect();
                     // Resending a subset reorders writes: it is safe only while
                     // a request holds one write per document (the ingest engine
-                    // dedups ids per batch; the sink engine flushes one batch at
-                    // a time). ADR 0012's stage 2 must keep that true.
+                    // dedups ids per batch, and the sink engine never runs two
+                    // writes holding the same document at once).
                     debug_assert!(
                         one_write_per_document(actions),
                         "a bulk request writes one document twice"
@@ -207,7 +207,7 @@ impl OpensearchSink {
                     let plural = if documents == 1 { "" } else { "s" };
                     last_err = Some(SinkError::Write(format!(
                         "{documents} document{plural} still refused as busy after {} retries \
-                         (last: {reason}); failing the flush so the batch is redelivered",
+                         (last: {reason}); failing the write so the batch is redelivered",
                         self.max_retries
                     )));
                 }
@@ -347,7 +347,7 @@ impl OpensearchSink {
     /// Set `index`'s steady-state `refresh_interval` (the configured value, e.g.
     /// `"10s"`), called once seeding completes — it was `-1` (refresh off) at
     /// creation for fast bulk seeding. This is the visibility ceiling under
-    /// load; a caught-up `flush` refreshes sooner on top of it.
+    /// load; a caught-up `write` refreshes sooner on top of it.
     pub(crate) async fn restore_auto_refresh(&self, index: &str) -> Result<()> {
         let url = format!("{}/{index}/_settings", self.base_url);
         let req = self

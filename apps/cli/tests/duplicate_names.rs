@@ -701,6 +701,7 @@ async fn write(
 ) -> Run {
     let name = IndexName::try_new(index).unwrap();
     sink.ensure_index(&mapping).await.unwrap();
+    let mut envelopes = Vec::new();
     for (i, body) in run.bodies.iter().enumerate() {
         if let Some(body) = body {
             let envelope = Envelope::upsert(
@@ -710,10 +711,10 @@ async fn write(
                 None,
                 Default::default(),
             );
-            sink.apply(&envelope).await.unwrap();
+            envelopes.push(envelope);
         }
     }
-    let report = sink.flush(true).await.unwrap();
+    let report = sink.write(&envelopes, true).await.unwrap();
     run.rejected = vec![None; run.rows.len()];
     for rejection in report.rejected {
         let row: usize = rejection.id.parse::<usize>().unwrap() - 1;

@@ -10,7 +10,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use kernel::{ColumnName, Envelope, IndexMapping, IndexName, Op, Position, SinkName, TableName};
-use sink::{FlushReport, Sink, SinkOptions};
+use sink::{Sink, SinkOptions, WriteReport};
 use source::cdc::{ChangeCapture, ChangeEvent, Continuity, LiveChange};
 use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
 use source::{RowImage, RowKey, SnapshotTable};
@@ -256,21 +256,19 @@ impl RecordingSink {
 
 #[async_trait]
 impl Sink for RecordingSink {
-    async fn apply(&self, envelope: &Envelope) -> sink::Result<()> {
-        self.ops.lock().unwrap().push(format!(
-            "{} {} {}",
-            envelope.op,
-            envelope.index.as_ref(),
-            envelope.id
-        ));
-        self.pending.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-
-    async fn flush(&self, caught_up: bool) -> sink::Result<FlushReport> {
+    async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> sink::Result<WriteReport> {
+        for envelope in envelopes {
+            self.ops.lock().unwrap().push(format!(
+                "{} {} {}",
+                envelope.op,
+                envelope.index.as_ref(),
+                envelope.id
+            ));
+            self.pending.fetch_add(1, Ordering::SeqCst);
+        }
         let n = self.pending.swap(0, Ordering::SeqCst);
         self.flushes.lock().unwrap().push((n, caught_up));
-        Ok(FlushReport::clean())
+        Ok(WriteReport::clean())
     }
 
     async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
@@ -537,15 +535,11 @@ struct GatedSink {
 
 #[async_trait]
 impl Sink for GatedSink {
-    async fn apply(&self, _: &Envelope) -> sink::Result<()> {
-        Ok(())
-    }
-
-    async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
+    async fn write(&self, _envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
         if !self.released.swap(true, Ordering::SeqCst) {
             self.release.notified().await;
         }
-        Ok(FlushReport::clean())
+        Ok(WriteReport::clean())
     }
 
     async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
@@ -838,15 +832,13 @@ struct CrashSink {
 
 #[async_trait]
 impl Sink for CrashSink {
-    async fn apply(&self, envelope: &Envelope) -> sink::Result<()> {
-        self.staging.lock().unwrap().push((
-            format!("{}/{}", envelope.index.as_ref(), envelope.id),
-            envelope.op,
-        ));
-        Ok(())
-    }
-
-    async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
+    async fn write(&self, envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
+        for envelope in envelopes {
+            self.staging.lock().unwrap().push((
+                format!("{}/{}", envelope.index.as_ref(), envelope.id),
+                envelope.op,
+            ));
+        }
         if self.fail_next_flush.swap(false, Ordering::SeqCst) {
             self.staging.lock().unwrap().clear();
             return Err(sink::SinkError::Write(
@@ -857,7 +849,7 @@ impl Sink for CrashSink {
         for (key, op) in self.staging.lock().unwrap().drain(..) {
             store.insert(key, op);
         }
-        Ok(FlushReport::clean())
+        Ok(WriteReport::clean())
     }
 
     async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
@@ -948,15 +940,13 @@ struct RejectingSink {
 
 #[async_trait]
 impl Sink for RejectingSink {
-    async fn apply(&self, envelope: &Envelope) -> sink::Result<()> {
-        self.staged
-            .lock()
-            .unwrap()
-            .push((envelope.index.as_ref().to_owned(), envelope.id.clone()));
-        Ok(())
-    }
-
-    async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
+    async fn write(&self, envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
+        for envelope in envelopes {
+            self.staged
+                .lock()
+                .unwrap()
+                .push((envelope.index.as_ref().to_owned(), envelope.id.clone()));
+        }
         let rejected: Vec<_> = self
             .staged
             .lock()
@@ -968,7 +958,7 @@ impl Sink for RejectingSink {
                 reason: "simulated item-level rejection".to_owned(),
             })
             .collect();
-        Ok(FlushReport::clean().rejecting(rejected))
+        Ok(WriteReport::clean().rejecting(rejected))
     }
 
     async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
@@ -1225,13 +1215,9 @@ impl ScriptedVisibility {
 
 #[async_trait]
 impl Sink for ScriptedVisibility {
-    async fn apply(&self, _: &Envelope) -> sink::Result<()> {
-        Ok(())
-    }
-
-    async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
+    async fn write(&self, _envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
         let visibility = self.script.lock().unwrap().pop_front().unwrap_or_default();
-        Ok(FlushReport::clean().visible(visibility))
+        Ok(WriteReport::clean().visible(visibility))
     }
 
     async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {

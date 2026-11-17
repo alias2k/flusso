@@ -469,7 +469,7 @@ impl SinkEngine {
                                 && self.waits_for_an_immediate_flush() =>
                             {
                                 let started = Instant::now();
-                                let report = self.sink.flush(true).await?;
+                                let report = self.sink.write(&[], true).await?;
                                 self.observer.on_stage(
                                     StageTiming::new(Stage::Write, started.elapsed())
                                         .work(Work::Live)
@@ -624,16 +624,11 @@ impl SinkEngine {
         } else {
             Work::Backfill
         };
-        let apply_start = Instant::now();
-        for envelope in batch.envelopes.iter() {
-            self.sink.apply(envelope).await?;
-        }
         let flush_start = Instant::now();
-        let report = self.sink.flush(caught_up).await?;
-        let written = Instant::now();
-        let flush = written - flush_start;
+        let report = self.sink.write(&batch.envelopes, caught_up).await?;
+        let flush = flush_start.elapsed();
         self.observer.on_stage(
-            StageTiming::new(Stage::Write, written - apply_start)
+            StageTiming::new(Stage::Write, flush)
                 .work(work)
                 .sink(&self.name),
         );

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use kernel::{Envelope, IndexName, Position, SinkName};
-use sink::{FlushReport, Sink};
+use sink::{Sink, WriteReport};
 use source::cdc::Continuity;
 use stream::Stream;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
@@ -128,12 +128,8 @@ struct BulkOnly(sink_opensearch::OpensearchSink);
 
 #[async_trait]
 impl Sink for BulkOnly {
-    async fn apply(&self, envelope: &Envelope) -> sink::Result<()> {
-        self.0.apply(envelope).await
-    }
-
-    async fn flush(&self, caught_up: bool) -> sink::Result<FlushReport> {
-        self.0.flush(caught_up).await
+    async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> sink::Result<WriteReport> {
+        self.0.write(envelopes, caught_up).await
     }
 
     async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {

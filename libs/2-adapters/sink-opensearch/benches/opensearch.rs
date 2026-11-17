@@ -152,26 +152,28 @@ fn document(i: usize) -> GenericValue {
     GenericValue::Map(map)
 }
 
-/// Buffer `docs` as upserts and flush them — the operation under measurement.
-/// Reusing the same ids across iterations keeps the index size stable (each
-/// flush overwrites rather than grows), so we measure indexing, not growth.
+/// Write `docs` as upserts in one caught-up write — the operation under
+/// measurement. Reusing the same ids across iterations keeps the index size
+/// stable (each write overwrites rather than grows), so we measure indexing,
+/// not growth.
 async fn index_batch(
     sink: &sink_opensearch::OpensearchSink,
     index: &IndexName,
     docs: &[(String, GenericValue)],
 ) {
-    for (id, doc) in docs {
-        sink.apply(&Envelope::upsert(
-            index.clone(),
-            id,
-            doc.clone(),
-            Some(Position(0)),
-            chrono::Utc::now(),
-        ))
-        .await
-        .unwrap();
-    }
-    sink.flush(true).await.unwrap();
+    let envelopes: Vec<Envelope> = docs
+        .iter()
+        .map(|(id, doc)| {
+            Envelope::upsert(
+                index.clone(),
+                id,
+                doc.clone(),
+                Some(Position(0)),
+                chrono::Utc::now(),
+            )
+        })
+        .collect();
+    sink.write(&envelopes, true).await.unwrap();
 }
 
 fn bench(c: &mut Criterion) {

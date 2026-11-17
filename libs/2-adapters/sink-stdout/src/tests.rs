@@ -129,6 +129,51 @@ fn pretty_is_multiline() {
 }
 
 #[test]
-fn flush_runs_via_an_executor() {
-    futures::executor::block_on(audit().flush(true)).unwrap();
+fn a_write_runs_via_an_executor() {
+    futures::executor::block_on(audit().write(&[], true)).unwrap();
+}
+
+/// Writes run concurrently, and each lands as one run of lines: two writes'
+/// lines never interleave, so a reader can split the output per write.
+#[test]
+fn concurrent_writes_never_interleave_their_lines() {
+    const WRITES: usize = 8;
+    const LINES: usize = 200;
+    let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = StdoutSink {
+        out: Output::Buffer(std::sync::Arc::clone(&buffer)),
+        ..audit()
+    };
+    std::thread::scope(|scope| {
+        for writer in 0..WRITES {
+            let sink = &sink;
+            scope.spawn(move || {
+                let envelopes: Vec<Envelope> = (0..LINES)
+                    .map(|line| {
+                        Envelope::upsert(
+                            index(),
+                            format!("{writer}-{line}"),
+                            document(),
+                            None,
+                            ts(),
+                        )
+                    })
+                    .collect();
+                futures::executor::block_on(sink.write(&envelopes, false)).unwrap();
+            });
+        }
+    });
+
+    let text = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+    let writers: Vec<String> = text
+        .lines()
+        .map(|line| {
+            let value: Value = serde_json::from_str(line).unwrap();
+            let id = value["id"].as_str().unwrap().to_owned();
+            id.split('-').next().unwrap().to_owned()
+        })
+        .collect();
+    assert_eq!(writers.len(), WRITES * LINES);
+    let runs = 1 + writers.windows(2).filter(|pair| pair[0] != pair[1]).count();
+    assert_eq!(runs, WRITES, "each write's lines are one run");
 }

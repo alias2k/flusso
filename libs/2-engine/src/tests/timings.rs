@@ -129,16 +129,14 @@ impl SlowSink {
 
 #[async_trait]
 impl Sink for SlowSink {
-    async fn apply(&self, _: &Envelope) -> sink::Result<()> {
-        tokio::time::sleep(APPLY).await;
-        self.pending.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-
-    async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
+    async fn write(&self, envelopes: &[Envelope], _: bool) -> sink::Result<WriteReport> {
+        for _ in envelopes {
+            tokio::time::sleep(APPLY).await;
+            self.pending.fetch_add(1, Ordering::SeqCst);
+        }
         tokio::time::sleep(FLUSH).await;
         let documents = self.pending.swap(0, Ordering::SeqCst);
-        Ok(FlushReport::clean().sent(documents as u64 * 100))
+        Ok(WriteReport::clean().sent(documents as u64 * 100))
     }
 
     async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {

@@ -51,6 +51,10 @@ use kernel::{
 use serde_json::{Value, json};
 use sink::Sink;
 use sink_opensearch::OpensearchSink;
+
+#[path = "support/buffered.rs"]
+mod buffered;
+use buffered::Buffered;
 use testcontainers_modules::testcontainers::core::wait::HttpWaitStrategy;
 use testcontainers_modules::testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
@@ -81,7 +85,7 @@ async fn start_opensearch() -> (ContainerAsync<GenericImage>, String) {
     (container, format!("http://127.0.0.1:{port}"))
 }
 
-fn sink(base_url: &str) -> OpensearchSink {
+fn sink(base_url: &str) -> Buffered {
     let config = sink_opensearch::OpensearchConfig {
         url: kernel::Secret::Value(base_url.to_owned()),
         username: None,
@@ -100,7 +104,9 @@ fn sink(base_url: &str) -> OpensearchSink {
         auto_subfields: true,
         index_settings: Default::default(),
     };
-    OpensearchSink::from_config(&kernel::SinkName::try_new("test").unwrap(), &config).unwrap()
+    Buffered::new(
+        OpensearchSink::from_config(&kernel::SinkName::try_new("test").unwrap(), &config).unwrap(),
+    )
 }
 
 fn field(name: &str, mapping_type: MappingType, children: Vec<ResolvedField>) -> ResolvedField {
@@ -172,11 +178,11 @@ fn generic(value: Value) -> GenericValue {
     }
 }
 
-async fn upsert(sink: &OpensearchSink, id: &str, doc: Value) {
+async fn upsert(sink: &Buffered, id: &str, doc: Value) {
     upsert_into(sink, LOGICAL, id, doc).await;
 }
 
-async fn upsert_into(sink: &OpensearchSink, logical: &str, id: &str, doc: Value) {
+async fn upsert_into(sink: &Buffered, logical: &str, id: &str, doc: Value) {
     sink.apply(&Envelope::upsert(
         IndexName::try_new(logical).unwrap(),
         id,

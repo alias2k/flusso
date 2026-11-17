@@ -10,7 +10,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use kernel::{ContentHash, DatabaseSchema, Envelope, GenericValue, IndexMapping, IndexName};
 use kernel::{SinkName, TableName};
-use sink::{FlushReport, Sink, SinkOptions};
+use sink::{Sink, SinkOptions, WriteReport};
 use source::cdc::Continuity;
 use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
 use source::{RowImage, RowKey, SnapshotTable};
@@ -111,12 +111,8 @@ impl Sink for SlowStaging {
         Ok(())
     }
 
-    async fn apply(&self, _: &Envelope) -> sink::Result<()> {
-        Ok(())
-    }
-
-    async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
-        Ok(FlushReport::clean())
+    async fn write(&self, _: &[Envelope], _: bool) -> sink::Result<WriteReport> {
+        Ok(WriteReport::clean())
     }
 
     async fn is_seeded(&self, index: &IndexName) -> sink::Result<bool> {

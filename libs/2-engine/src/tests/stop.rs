@@ -9,7 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use kernel::{IndexName, Position, SinkName};
-use sink::{FlushReport, Sink};
+use sink::{Sink, WriteReport};
 use source::cdc::{ChangeCapture, ChangeEvent, Continuity, LiveChange};
 use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
 use source::{RowImage, RowKey, SnapshotTable};
@@ -192,11 +192,11 @@ struct StalledSink;
 
 #[async_trait]
 impl Sink for StalledSink {
-    async fn apply(&self, _: &kernel::Envelope) -> sink::Result<()> {
-        Ok(())
-    }
-
-    async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
+    async fn write(
+        &self,
+        _envelopes: &[kernel::Envelope],
+        _caught_up: bool,
+    ) -> sink::Result<WriteReport> {
         std::future::pending().await
     }
 
@@ -602,13 +602,13 @@ struct RefreshesWhenCaughtUp {
 
 #[async_trait]
 impl Sink for RefreshesWhenCaughtUp {
-    async fn apply(&self, _: &kernel::Envelope) -> sink::Result<()> {
-        Ok(())
-    }
-
-    async fn flush(&self, caught_up: bool) -> sink::Result<FlushReport> {
+    async fn write(
+        &self,
+        _envelopes: &[kernel::Envelope],
+        caught_up: bool,
+    ) -> sink::Result<WriteReport> {
         self.flushes.lock().unwrap().push(caught_up);
-        Ok(FlushReport::clean().visible(if caught_up {
+        Ok(WriteReport::clean().visible(if caught_up {
             sink::Visibility::Immediate
         } else {
             sink::Visibility::Deferred

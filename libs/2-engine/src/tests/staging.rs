@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use kernel::{ContentHash, Envelope, IndexMapping, IndexName};
-use sink::{FlushReport, Sink, SinkError, SinkOptions};
+use sink::{Sink, SinkError, SinkOptions, WriteReport};
 use source::cdc::Continuity;
 use stream::{Request, Stream};
 use stream_channel::ChannelStream;
@@ -106,12 +106,8 @@ impl Sink for SlowSink {
         Ok(())
     }
 
-    async fn apply(&self, _: &Envelope) -> sink::Result<()> {
-        Ok(())
-    }
-
-    async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
-        Ok(FlushReport::clean())
+    async fn write(&self, _: &[Envelope], _: bool) -> sink::Result<WriteReport> {
+        Ok(WriteReport::clean())
     }
 
     async fn is_seeded(&self, index: &IndexName) -> sink::Result<bool> {

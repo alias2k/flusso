@@ -13,7 +13,7 @@ use kernel::{
     ColumnName, DatabaseSchema, Envelope, GenericValue, IndexMapping, PortEntry, Position,
     TableName,
 };
-use sink::{FlushReport, Sink, SinkError, SinkOptions};
+use sink::{Sink, SinkError, SinkOptions, WriteReport};
 use source::cdc::{ChangeEvent, LiveChange};
 use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
 use source::{RowImage, RowKey, SnapshotTable};
@@ -575,23 +575,21 @@ impl RecordingSink {
 
 #[async_trait]
 impl Sink for RecordingSink {
-    async fn apply(&self, envelope: &Envelope) -> sink::Result<()> {
-        self.ops.lock().unwrap().push(format!(
-            "{} {} {}",
-            envelope.op,
-            envelope.index.as_ref(),
-            envelope.id
-        ));
-        Ok(())
-    }
-
-    async fn flush(&self, _caught_up: bool) -> sink::Result<FlushReport> {
+    async fn write(&self, envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
+        for envelope in envelopes {
+            self.ops.lock().unwrap().push(format!(
+                "{} {} {}",
+                envelope.op,
+                envelope.index.as_ref(),
+                envelope.id
+            ));
+        }
         let remaining = self.failing_flushes.load(Ordering::SeqCst);
         if remaining > 0 {
             self.failing_flushes.store(remaining - 1, Ordering::SeqCst);
             return Err(SinkError::Write("simulated outage".to_owned()));
         }
-        Ok(FlushReport::clean())
+        Ok(WriteReport::clean())
     }
 
     async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {

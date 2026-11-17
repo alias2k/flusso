@@ -253,6 +253,7 @@ async fn a_time_column_under_a_date_field_is_reported_only_where_no_document_ind
                 )]),
             })
             .collect();
+        let mut envelopes = Vec::new();
         for (row, document) in builder
             .build_many(&ids)
             .await
@@ -270,9 +271,9 @@ async fn a_time_column_under_a_date_field_is_reported_only_where_no_document_ind
                 None,
                 Default::default(),
             );
-            sink.apply(&envelope).await.unwrap();
+            envelopes.push(envelope);
         }
-        let report = sink.flush(true).await.unwrap();
+        let report = sink.write(&envelopes, true).await.unwrap();
         let reasons: Vec<String> = report.rejected.iter().map(|r| r.reason.clone()).collect();
         let rejected: Vec<String> = report.rejected.into_iter().map(|r| r.id).collect();
         let row_1_indexed = !rejected.contains(&"1".to_owned());

@@ -60,7 +60,7 @@ pub struct OpensearchConfig {
     /// Documents per bulk request.
     #[serde(default = "default_batch_size")]
     pub batch_size: u32,
-    /// Maximum serialized size of one bulk request, in bytes. A flush is split
+    /// Maximum serialized size of one bulk request, in bytes. A write is split
     /// so no request exceeds this, independent of `batch_size`, keeping
     /// requests under OpenSearch's `http.max_content_length` (100 MB by
     /// default). A single document larger than this is sent on its own.
@@ -71,7 +71,7 @@ pub struct OpensearchConfig {
     pub timeout_secs: u64,
     /// Retries for a transient bulk failure: a whole request that failed, or
     /// documents OpenSearch refused as busy (HTTP 429 or 503), which are resent
-    /// alone. Busy documents left after the last retry fail the flush, and the
+    /// alone. Busy documents left after the last retry fail the write, and the
     /// batch is redelivered. A refused TLS certificate is never retried.
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
@@ -88,10 +88,9 @@ pub struct OpensearchConfig {
     /// The `refresh_interval` applied to each index once its backfill completes:
     /// the steady-state visibility ceiling (`"10s"`, `"1s"`, or `"-1"` to
     /// disable automatic refresh). Indexes are seeded with refresh off and
-    /// handed this value afterwards; a flush that catches the pipeline up
-    /// forces an immediate refresh, so this only bounds staleness while a
-    /// backlog drains. With `"-1"`, that catching-up flush also refreshes
-    /// what the backlog wrote.
+    /// handed this value afterwards; a write that catches the pipeline up
+    /// forces an immediate refresh of everything written before it, so this
+    /// only bounds staleness while a backlog drains.
     #[serde(default = "default_refresh_interval")]
     pub refresh_interval: String,
     /// Which analysis toolkit the built-in `flusso_*` analyzers use.

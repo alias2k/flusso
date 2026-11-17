@@ -214,13 +214,11 @@ fn upsert(id: &str) -> Envelope {
     )
 }
 
-async fn apply_all(sink: &OpensearchSink, ids: &[&str]) {
-    for id in ids {
-        sink.apply(&upsert(id)).await.unwrap();
-    }
+fn upserts(ids: &[&str]) -> Vec<Envelope> {
+    ids.iter().map(|id| upsert(id)).collect()
 }
 
-/// A full write queue refuses some items of a request; the flush resends those
+/// A full write queue refuses some items of a request; the write resends those
 /// alone until they are written, and reports the one real rejection once.
 #[tokio::test]
 async fn items_refused_as_busy_are_resent_until_written() {
@@ -232,9 +230,10 @@ async fn items_refused_as_busy_are_resent_until_written() {
     })
     .await;
     let sink = sink(&stub.url, 3);
-    apply_all(&sink, &["1", "2", "3", "4"]).await;
-
-    let report = sink.flush(false).await.unwrap();
+    let report = sink
+        .write(&upserts(&["1", "2", "3", "4"]), false)
+        .await
+        .unwrap();
 
     let rejected: Vec<(&str, &str)> = report
         .rejected
@@ -249,15 +248,18 @@ async fn items_refused_as_busy_are_resent_until_written() {
     );
 }
 
-/// Items still refused as busy once the retries are spent fail the flush: the
+/// Items still refused as busy once the retries are spent fail the write: the
 /// batch stays unacknowledged and comes back, never handed to `on_error`.
 #[tokio::test]
-async fn items_still_busy_after_the_retries_fail_the_flush() {
+async fn items_still_busy_after_the_retries_fail_the_write() {
     let stub = stub_bulk(|_, id| if id == "2" { 429 } else { 201 }).await;
     let sink = sink(&stub.url, 1);
-    apply_all(&sink, &["1", "2"]).await;
 
-    let error = sink.flush(false).await.unwrap_err().to_string();
+    let error = sink
+        .write(&upserts(&["1", "2"]), false)
+        .await
+        .unwrap_err()
+        .to_string();
 
     assert!(error.contains("1 document"), "{error}");
     assert!(error.contains("429"), "{error}");
@@ -289,20 +291,20 @@ fn a_document_written_twice_in_one_request_is_caught() {
     ]));
 }
 
-/// A batch whose apply fails partway is redelivered whole to the restarted
-/// engine, which applies it again on the same sink: what the failed attempt
-/// buffered must not be written a second time.
+/// A write that fails before sending sends nothing, and keeps nothing: the
+/// lane redelivers the batch whole to the restarted engine, which writes it
+/// again on the same sink, so each document reaches OpenSearch once.
 #[tokio::test]
-async fn a_batch_applied_again_after_a_failed_apply_is_written_once() {
+async fn a_batch_written_again_after_a_failed_write_is_sent_once() {
     let stub = stub_bulk(|_, _| 201).await;
     let sink = sink(&stub.url, 0);
     let mut no_document = upsert("2");
     no_document.document = None;
 
-    sink.apply(&upsert("1")).await.unwrap();
-    sink.apply(&no_document).await.unwrap_err();
-    apply_all(&sink, &["1", "2"]).await;
-    sink.flush(false).await.unwrap();
+    sink.write(&[upsert("1"), no_document], false)
+        .await
+        .unwrap_err();
+    sink.write(&upserts(&["1", "2"]), false).await.unwrap();
 
     assert_eq!(*stub.requests.lock().unwrap(), [vec!["1", "2"]]);
 }

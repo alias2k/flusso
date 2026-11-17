@@ -627,19 +627,21 @@ struct DocumentSink(Arc<Mutex<Vec<(String, Value)>>>);
 
 #[async_trait]
 impl Sink for DocumentSink {
-    async fn apply(&self, envelope: &Envelope) -> SinkResult<()> {
-        if let Some(document) = &envelope.document {
-            let mut document = sink::to_json(document);
-            if let Some(Value::Array(ids)) = document.get_mut("partIds") {
-                ids.sort_by_key(ToString::to_string);
+    async fn write(
+        &self,
+        envelopes: &[Envelope],
+        _caught_up: bool,
+    ) -> SinkResult<sink::WriteReport> {
+        for envelope in envelopes {
+            if let Some(document) = &envelope.document {
+                let mut document = sink::to_json(document);
+                if let Some(Value::Array(ids)) = document.get_mut("partIds") {
+                    ids.sort_by_key(ToString::to_string);
+                }
+                self.0.lock().unwrap().push((envelope.id.clone(), document));
             }
-            self.0.lock().unwrap().push((envelope.id.clone(), document));
         }
-        Ok(())
-    }
-
-    async fn flush(&self, _caught_up: bool) -> SinkResult<sink::FlushReport> {
-        Ok(sink::FlushReport::clean())
+        Ok(sink::WriteReport::clean())
     }
 }
 

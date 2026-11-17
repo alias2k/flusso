@@ -12,7 +12,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
 use kernel::{Envelope, IndexName, Position};
-use sink::{FlushReport, Sink, SinkError, SinkOptions};
+use sink::{Sink, SinkError, SinkOptions, WriteReport};
 use source::cdc::{ChangeCapture, Continuity, LiveChange};
 use tokio::time::Instant;
 
@@ -55,16 +55,12 @@ impl ScriptedFlushes {
 
 #[async_trait]
 impl Sink for ScriptedFlushes {
-    async fn apply(&self, _: &Envelope) -> sink::Result<()> {
-        Ok(())
-    }
-
-    async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
+    async fn write(&self, _envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
         self.flushed_at.lock().unwrap().push(Instant::now());
         if self.script.lock().unwrap().pop() == Some(false) {
             return Err(SinkError::Write("simulated outage".to_owned()));
         }
-        Ok(FlushReport::clean())
+        Ok(WriteReport::clean())
     }
 
     async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
@@ -259,11 +255,7 @@ struct NeverFlushes;
 
 #[async_trait]
 impl Sink for NeverFlushes {
-    async fn apply(&self, _: &Envelope) -> sink::Result<()> {
-        Ok(())
-    }
-
-    async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
+    async fn write(&self, _envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
         std::future::pending().await
     }
 

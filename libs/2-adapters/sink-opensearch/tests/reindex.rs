@@ -50,6 +50,10 @@ use reqwest::StatusCode;
 use serde_json::Value;
 use sink::Sink;
 use sink_opensearch::OpensearchSink;
+
+#[path = "support/buffered.rs"]
+mod buffered;
+use buffered::Buffered;
 use testcontainers_modules::testcontainers::core::wait::HttpWaitStrategy;
 use testcontainers_modules::testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
@@ -84,9 +88,9 @@ async fn start_opensearch() -> (ContainerAsync<GenericImage>, String) {
 
 /// A fresh sink for `base_url` — one per "run", as the pipeline builds a new sink
 /// on each (re)start.
-fn sink(base_url: &str) -> OpensearchSink {
+fn sink(base_url: &str) -> Buffered {
     let name = kernel::SinkName::try_new("test").unwrap();
-    OpensearchSink::from_config(&name, &sink_config(base_url)).unwrap()
+    Buffered::new(OpensearchSink::from_config(&name, &sink_config(base_url)).unwrap())
 }
 
 /// The test sink's configuration: replicas off for a single-node cluster.
@@ -113,8 +117,13 @@ fn sink_config(base_url: &str) -> sink_opensearch::OpensearchConfig {
 
 /// A fresh sink that prepends `prefix` to every name it owns — the deployment
 /// index prefix, as a `flusso run --index-prefix` would.
-fn sink_with_prefix(base_url: &str, prefix: &str) -> OpensearchSink {
-    sink(base_url).with_index_prefix(prefix)
+fn sink_with_prefix(base_url: &str, prefix: &str) -> Buffered {
+    let name = kernel::SinkName::try_new("test").unwrap();
+    Buffered::new(
+        OpensearchSink::from_config(&name, &sink_config(base_url))
+            .unwrap()
+            .with_index_prefix(prefix),
+    )
 }
 
 /// The explicit mapping the documents conform to. The hash is fixed, so the two
@@ -707,12 +716,14 @@ async fn index_settings_land_on_the_created_generation_per_index_winning() {
         "mapping.total_fields.limit": 1500,
         "index": { "max_result_window": 20000 },
     }));
-    let sink = OpensearchSink::from_config(&kernel::SinkName::try_new("test").unwrap(), &config)
-        .unwrap()
-        .with_index_settings([(
-            wide.clone(),
-            settings(serde_json::json!({ "mapping.total_fields.limit": 2000 })),
-        )]);
+    let sink = Buffered::new(
+        OpensearchSink::from_config(&kernel::SinkName::try_new("test").unwrap(), &config)
+            .unwrap()
+            .with_index_settings([(
+                wide.clone(),
+                settings(serde_json::json!({ "mapping.total_fields.limit": 2000 })),
+            )]),
+    );
     sink.ensure_index(&mapping()).await.unwrap();
     sink.ensure_index(&wide_mapping)
         .await
@@ -779,14 +790,16 @@ async fn a_flush_reports_when_its_documents_become_searchable() {
     );
 
     // ── Automatic refresh off: deferred until a caught-up flush ──────────────
-    let manual = OpensearchSink::from_config(
-        &kernel::SinkName::try_new("test").unwrap(),
-        &sink_opensearch::OpensearchConfig {
-            refresh_interval: "-1".to_owned(),
-            ..sink_config(&base)
-        },
-    )
-    .unwrap();
+    let manual = Buffered::new(
+        OpensearchSink::from_config(
+            &kernel::SinkName::try_new("test").unwrap(),
+            &sink_opensearch::OpensearchConfig {
+                refresh_interval: "-1".to_owned(),
+                ..sink_config(&base)
+            },
+        )
+        .unwrap(),
+    );
     manual.ensure_index(&mapping).await.unwrap();
     manual.mark_seeded(&index).await.unwrap();
     client
@@ -836,14 +849,16 @@ async fn a_flush_reports_when_its_documents_become_searchable() {
         Visibility::Deferred,
     );
     assert_eq!(search_count(&client, &base, &hash_alias).await, before + 1);
-    let restarted = OpensearchSink::from_config(
-        &kernel::SinkName::try_new("test").unwrap(),
-        &sink_opensearch::OpensearchConfig {
-            refresh_interval: "-1".to_owned(),
-            ..sink_config(&base)
-        },
-    )
-    .unwrap();
+    let restarted = Buffered::new(
+        OpensearchSink::from_config(
+            &kernel::SinkName::try_new("test").unwrap(),
+            &sink_opensearch::OpensearchConfig {
+                refresh_interval: "-1".to_owned(),
+                ..sink_config(&base)
+            },
+        )
+        .unwrap(),
+    );
     restarted.ensure_index(&mapping).await.unwrap();
     assert_eq!(
         search_count(&client, &base, &hash_alias).await,
@@ -913,9 +928,9 @@ fn many_mappings() -> Vec<IndexMapping> {
 }
 
 /// Run `step` on `sink` for every mapping at once and wait for all of them.
-async fn all_at_once<F, Fut>(sink: &std::sync::Arc<OpensearchSink>, step: F)
+async fn all_at_once<F, Fut>(sink: &std::sync::Arc<Buffered>, step: F)
 where
-    F: Fn(std::sync::Arc<OpensearchSink>, IndexMapping) -> Fut,
+    F: Fn(std::sync::Arc<Buffered>, IndexMapping) -> Fut,
     Fut: std::future::Future<Output = sink::Result<()>> + Send + 'static,
 {
     let mut tasks = tokio::task::JoinSet::new();
