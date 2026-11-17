@@ -161,12 +161,20 @@ fn scalar(kind: Kind, value: &Value) -> Option<Scalar> {
         (Kind::Keyword, Value::Number(number)) => Some(Scalar::Text(number.to_string())),
         (Kind::Keyword, Value::Bool(flag)) => Some(Scalar::Text(flag.to_string())),
         (Kind::Bool, Value::Bool(flag)) => Some(Scalar::Bool(*flag)),
-        (Kind::Bool, Value::String(text)) => text.parse().ok().map(Scalar::Bool),
+        (Kind::Bool, Value::String(text)) => match text.as_str() {
+            "true" => Some(Scalar::Bool(true)),
+            "false" | "" => Some(Scalar::Bool(false)),
+            _ => None,
+        },
         (Kind::Whole, Value::Number(number)) => number
             .as_i64()
-            .map(Scalar::Whole)
-            .or_else(|| number.as_f64().map(Scalar::Float)),
-        (Kind::Whole, Value::String(text)) => text.parse().ok().map(Scalar::Whole),
+            .or_else(|| number.as_f64().and_then(whole_part))
+            .map(Scalar::Whole),
+        (Kind::Whole, Value::String(text)) => text
+            .parse()
+            .ok()
+            .or_else(|| text.parse().ok().and_then(whole_part))
+            .map(Scalar::Whole),
         (Kind::Double, Value::Number(number)) => number.as_f64().map(Scalar::Float),
         (Kind::Double, Value::String(text)) => text.parse().ok().map(Scalar::Float),
         (Kind::Date, value) => date::span(value).map(|span| Scalar::Whole(span.first)),
@@ -175,13 +183,21 @@ fn scalar(kind: Kind, value: &Value) -> Option<Scalar> {
     .filter(|scalar| !matches!(scalar, Scalar::Float(number) if !number.is_finite()))
 }
 
+/// The whole number the index stores for a fraction sent to a whole-number
+/// field: the fraction dropped, towards zero.
+fn whole_part(number: f64) -> Option<i64> {
+    let whole = number.trunc();
+    // Both bounds are exact as `f64`; `i64::MAX` itself is not.
+    (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0)
+        .contains(&whole)
+        .then_some(whole as i64)
+}
+
 fn compare(left: &Scalar, right: &Scalar) -> Option<Ordering> {
     match (left, right) {
         (Scalar::Text(left), Scalar::Text(right)) => Some(left.cmp(right)),
         (Scalar::Bool(left), Scalar::Bool(right)) => Some(left.cmp(right)),
         (Scalar::Whole(left), Scalar::Whole(right)) => Some(left.cmp(right)),
-        (Scalar::Whole(left), Scalar::Float(right)) => (*left as f64).partial_cmp(right),
-        (Scalar::Float(left), Scalar::Whole(right)) => left.partial_cmp(&(*right as f64)),
         (Scalar::Float(left), Scalar::Float(right)) => left.partial_cmp(right),
         _ => None,
     }

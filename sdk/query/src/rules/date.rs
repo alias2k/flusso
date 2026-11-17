@@ -249,6 +249,33 @@ mod tests {
     }
 
     #[test]
+    fn a_month_has_the_days_the_calendar_gives_it() {
+        // (the last day of the month, the day after it that does not exist)
+        for (last, past) in [
+            ("2026-01-31", "2026-01-32"),
+            ("2026-04-30", "2026-04-31"),
+            ("2026-06-30", "2026-06-31"),
+            ("2026-09-30", "2026-09-31"),
+            ("2026-11-30", "2026-11-31"),
+            ("2026-02-28", "2026-02-29"),
+            ("2024-02-29", "2024-02-30"),
+            // A century is a leap year only when 400 divides it.
+            ("2000-02-29", "2000-02-30"),
+            ("2100-02-28", "2100-02-29"),
+            ("1900-02-28", "1900-02-29"),
+        ] {
+            let month = last.get(..7).unwrap();
+            assert_eq!(read(month).last, read(last).last, "{month}");
+            assert_eq!(span(&json!(past)), None, "{past}");
+        }
+        // Days run on from one month into the next, a leap day included.
+        assert_eq!(read("2024-03-01").first, read("2024-02-29").last + 1);
+        assert_eq!(read("2100-03-01").first, read("2100-02-28").last + 1);
+        assert_eq!(read("1970-01-01").first, 0);
+        assert_eq!(read("1969-12-31").last, -1);
+    }
+
+    #[test]
     fn epoch_milliseconds_read_as_text_or_number() {
         assert_eq!(read("1794830400000"), instant(NOON));
         assert_eq!(span(&json!(NOON)), Some(instant(NOON)));
@@ -270,6 +297,11 @@ mod tests {
             "2026/11/16",
             "2026-11-16T12:00:00.Z",
             "2026-11-16T12:00:00+2",
+            "2026-11-16T12:00:00+020",
+            "2026-11-16T12:00:00+0a:00",
+            "2026-11-16T12:00:00 02:00",
+            "2026-11-16-01",
+            "2026-11-16T12:00:00é",
             "",
         ] {
             assert_eq!(span(&json!(text)), None, "{text}");

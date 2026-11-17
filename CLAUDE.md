@@ -1792,7 +1792,9 @@ Invariants to keep when editing:
   (`read_time.rs`'s `rule_handles`) for keyword, boolean, whole-number, `double`, `decimal` and date leaves
   and the plain objects holding them, and only when the mapping has no option outside
   `RULE_SAFE_OPTIONS`. A new handle or test needs both halves (`Test::render` and `Test::holds` in
-  `condition.rs`) and a case in the live fuzz.
+  `condition.rs`) and a case in the live fuzz. A document value of another type than its field is
+  read as the index coerced it (`condition.rs`'s `scalar`: a fraction in a whole-number field
+  dropped towards zero, a number or boolean spelled as text, `""` as `false`).
 - **Rust decides the form that is sent.** `positive` pushes negations down and flips a negated range
   on a field the schema declares always present (`Presence::TOTAL`); `Plan` stores each arm as sent
   (`when`, `unless`) and `Plan::value` refuses a document no filter would select (`UNDECIDED`).
@@ -1823,10 +1825,13 @@ Invariants to keep when editing:
 - The derive names the handle of a stored root field `stored_<name>()` when the root itself takes
   the plain name: a read-time field replaces it, or (on a root with a context) the key generates
   `doc`/`query`/`get` (`ReadTimeNames`).
-Guards: `rules::tests` (incl. `pushing_negations_down_never_changes_what_a_condition_decides`),
-`rules::date::tests`, the derive's `tests/read_time.rs` and the `rule_*` / `read_time_*` /
-`context_root_*` UI cases, and the `read_time` live e2e (values, filters, sorts, walks and counts
-against a plain-Rust oracle; random conditions decided by the index and by Rust).
+Guards: `rules::tests` (incl. `pushing_negations_down_never_changes_what_a_condition_decides`, and
+`reading`: every read path over a local stub server, computed, and refused with nothing sent),
+`rules::date::tests`, the derive's `tests/read_time.rs` (`every_readable_kind_has_a_rule_handle`
+over the `boundary` fixture) and the `rule_*` / `read_time_*` / `context_root_*` UI cases
+(`rule_handle_missing_for_a_kind`: every kind with no handle), and the `read_time` live e2e
+(values, filters, sorts, walks and counts against a plain-Rust oracle; random conditions decided by
+the index and by Rust, over coerced values too: `store_loose_values`).
 
 ## Keeping this file current
 

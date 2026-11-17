@@ -93,6 +93,7 @@ How values compare, on both sides:
 - **Keywords** compare exactly, as the document spells them.
 - **Dates** compare at the millisecond. A timestamp written to the second is that instant; a bare date is its whole day, so `lt("2026-12-01")` is "before the 1st" and `lte("2026-12-01")` is "through the 1st".
 - **Decimals** compare as the index holds them: as the nearest `double`.
+- **A value of another type than its field** compares as the index stored it: a fraction in a whole-number field without its fraction (`2.5` and `"2.9"` are `2`), a number or boolean written as text as that number or boolean.
 
 > 💡 **Did you know** — Arithmetic between a field and the clock has no test (`ends_at - now < notice_days`). Move the maths to one side: store `notice_starts_at` at write time and test `notice_starts_at <= now`, or compare `ends_at` with `now + 30 days` computed in the rule function.
 

@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use super::condition::{Cond, holds, positive, refuse_invalid, render};
 use super::{
-    Array, Computation, Condition, Optional, Required, RuleDate, RuleField, RuleKeyword,
+    Array, Computation, Condition, Optional, Required, RuleBool, RuleDate, RuleField, RuleKeyword,
     RuleNumber, Rules,
 };
 use crate::{
@@ -100,10 +100,93 @@ mod conditions {
         assert!(fee().eq(600).holds(&doc));
         // A number spelled as text is read as the index coerces it.
         assert!(seats().gt(11).holds(&doc));
+        assert!(fee().eq(600.5).holds(&json!({ "fee": "600.5" })));
+        assert!(
+            seats()
+                .eq(i64::MIN)
+                .holds(&json!({ "seats": -9_223_372_036_854_775_808.0 }))
+        );
         assert_eq!(
             query(fee().between(1.5, 2)),
             json!({ "range": { "fee": { "gte": 1.5, "lte": 2.0 } } })
         );
+    }
+
+    #[test]
+    fn a_value_the_index_coerces_is_read_the_same_way() {
+        // A whole-number field stores a fraction without it, towards zero,
+        // however the number is spelled.
+        for (stored, whole) in [
+            (json!(2.5), 2),
+            (json!(-2.5), -2),
+            (json!("7.9"), 7),
+            (json!("-7.9"), -7),
+            (json!("1e1"), 10),
+            (json!(3.0), 3),
+        ] {
+            let doc = json!({ "seats": stored });
+            assert!(seats().eq(whole).holds(&doc), "{doc}");
+            assert!(seats().between(whole, whole).holds(&doc), "{doc}");
+            assert!(!seats().gt(whole).holds(&doc), "{doc}");
+            assert!(!seats().lt(whole).holds(&doc), "{doc}");
+        }
+        // A boolean field reads its two words, and an empty string as `false`.
+        let renews = RuleBool::<Required>::at("auto_renew");
+        for (stored, flag) in [
+            (json!(true), true),
+            (json!("true"), true),
+            (json!(false), false),
+            (json!("false"), false),
+            (json!(""), false),
+        ] {
+            let doc = json!({ "auto_renew": stored });
+            assert!(renews.eq(flag).holds(&doc), "{doc}");
+            assert!(!renews.eq(!flag).holds(&doc), "{doc}");
+        }
+        // What the mapping would refuse is no value at all.
+        for doc in [
+            json!({ "seats": "many" }),
+            json!({ "seats": 1e30 }),
+            // One past the largest `long`.
+            json!({ "seats": 9_223_372_036_854_775_808.0 }),
+            json!({ "seats": true }),
+            json!({ "fee": "NaN" }),
+            json!({ "fee": [] }),
+            json!({ "auto_renew": "yes" }),
+            json!({ "auto_renew": 1 }),
+        ] {
+            assert!(!seats().exists().holds(&doc), "{doc}");
+            assert!(!seats().gte(i64::MIN).holds(&doc), "{doc}");
+            assert!(!fee().exists().holds(&doc), "{doc}");
+            assert!(!renews.exists().holds(&doc), "{doc}");
+        }
+    }
+
+    #[test]
+    fn a_path_is_read_through_objects_only() {
+        let country = RuleKeyword::<Optional>::at("billing.country");
+        assert!(
+            country
+                .eq("IT")
+                .holds(&json!({ "billing": { "country": "IT" } }))
+        );
+        assert!(country.missing().holds(&json!({ "billing": "IT" })));
+        assert!(country.missing().holds(&json!({ "billing": null })));
+        assert!(country.missing().holds(&json!("IT")));
+    }
+
+    #[test]
+    fn a_number_that_is_no_number_is_refused_before_the_request_is_sent() {
+        for broken in [fee().gt(f64::NAN), fee().eq(f64::INFINITY)] {
+            assert!(!broken.holds(&json!({ "fee": 1.0 })));
+            let Err(Error::ReadTimeField(reason)) = refuse_invalid(&query(broken)) else {
+                panic!("the request must be refused");
+            };
+            assert!(
+                reason.contains("is not a number value, so it cannot be compared with `fee`"),
+                "{reason}"
+            );
+        }
     }
 
     #[test]
@@ -200,6 +283,31 @@ mod conditions {
             query(state().eq("a").not().not()),
             json!({ "terms": { "state": ["a"] } })
         );
+    }
+
+    #[test]
+    fn no_values_match_nothing_and_the_negation_of_that_everything() {
+        let nothing = || state().any_of([""; 0]);
+        let everything = || nothing().not();
+        let is_a = || state().eq("a");
+        let doc = json!({ "state": "a" });
+        assert_eq!(query(everything()), json!({ "match_all": {} }));
+        assert!(!nothing().holds(&doc));
+        assert!(everything().holds(&doc));
+        assert!(everything().holds(&json!({})));
+        // Either one disappears from a group it cannot change, and decides a
+        // group it settles.
+        assert_eq!(query(is_a().and(everything())), query(is_a()));
+        assert_eq!(query(is_a().or(nothing())), query(is_a()));
+        assert_eq!(query(is_a().and(nothing())), json!({ "match_none": {} }));
+        assert_eq!(query(is_a().or(everything())), json!({ "match_all": {} }));
+        assert_eq!(
+            query(everything().and(everything())),
+            json!({ "match_all": {} })
+        );
+        assert_eq!(query(nothing().or(nothing())), json!({ "match_none": {} }));
+        assert!(is_a().or(everything()).holds(&json!({ "state": "b" })));
+        assert!(!is_a().and(nothing()).holds(&doc));
     }
 
     #[test]
@@ -511,6 +619,44 @@ mod fields {
         );
     }
 
+    #[test]
+    fn an_ordered_comparison_skips_a_known_value_the_type_cannot_hold() {
+        // `archived` is declared by the schema and is no `State`: a document
+        // holding it does not decode, so no comparison selects it.
+        let ordered = RuleField::new(visible_state(&CX), &["archived", "active", "suspended"]);
+        let below = ordered.lte(State::Suspended).to_value().to_string();
+        assert!(
+            below.contains(r#"{"terms":{"state":["active","suspended","draft","closed"]}}"#),
+            "{below}"
+        );
+        assert!(!below.contains("archived"), "{below}");
+    }
+
+    #[test]
+    fn an_arm_that_never_holds_yields_nothing() {
+        let rules = || {
+            Rules::when(state().any_of([""; 0]))
+                .then("never")
+                .when(state().eq("a"))
+                .then("first")
+                .otherwise("rest")
+        };
+        let field = RuleField::new(rules(), &[]);
+        assert_eq!(field.eq("never").to_value(), json!({ "match_none": {} }));
+        assert_eq!(
+            field.eq("first").to_value(),
+            json!({ "terms": { "state": ["a"] } })
+        );
+        assert_eq!(
+            field.eq("rest").to_value(),
+            json!({ "bool": { "must_not": [{ "terms": { "state": ["a"] } }] } })
+        );
+        let computation = Computation::with(&()).rules("which", |()| rules()).finish();
+        let mut source = json!({ "state": "a" });
+        computation.apply(&mut source).unwrap();
+        assert_eq!(source["which"], "first");
+    }
+
     fn fee_rules(cx: &Viewing) -> Rules<f64> {
         Rules::when(RuleDate::<Optional>::at("discount_until").gt(cx.now))
             .then(RuleNumber::<kind::Double>::at("discounted_fee"))
@@ -736,6 +882,8 @@ mod sorting {
     fn a_rule_sort_turned_around_sorts_the_other_way() {
         let body = Contract::query().sort(by_mine().asc().desc()).body();
         assert_eq!(body["sort"], json!([{ "_score": { "order": "desc" } }]));
+        let body = Contract::query().sort(by_mine().desc().asc()).body();
+        assert_eq!(body["sort"], json!([{ "_score": { "order": "asc" } }]));
     }
 
     #[test]
@@ -822,6 +970,30 @@ mod sorting {
             .sort(wide(0).asc())
             .sort(wide(1_000).asc());
         assert!(refuse_invalid(&two.body()).is_ok());
+    }
+
+    #[test]
+    fn one_score_keeps_two_to_the_24th_combinations_apart_and_no_more() {
+        // `values` known values rank 1 to `values`, anything else one past
+        // them, and the next sort starts above that: `values + 2` steps.
+        let ranked = |values: u32, seed: u32| {
+            let order: Vec<u32> = (0..values).map(|value| value + seed).collect();
+            RuleField::new(
+                Rules::when(state().eq("a"))
+                    .then(seed)
+                    .otherwise(seed + 1)
+                    .order(order),
+                &[],
+            )
+        };
+        let fits = Contract::query()
+            .sort(ranked(4_094, 0).asc())
+            .sort(ranked(4_094, 10_000).asc());
+        assert!(refuse_invalid(&fits.body()).is_ok());
+        let over = Contract::query()
+            .sort(ranked(4_094, 0).asc())
+            .sort(ranked(4_095, 10_000).asc());
+        assert!(refusal(&over).contains("more value combinations"));
     }
 
     #[test]
@@ -924,6 +1096,23 @@ mod computing {
     }
 
     #[test]
+    fn a_computed_value_that_does_not_serialize_names_its_field() {
+        fn pairs(_: &Value, _: &Rate) -> std::collections::BTreeMap<(u8, u8), u8> {
+            std::collections::BTreeMap::from([((1, 2), 3)])
+        }
+        let error = Computation::with(&Rate(2.0))
+            .computed("pairs", pairs)
+            .finish()
+            .apply(&mut json!({}))
+            .unwrap_err();
+        let text = error.to_string();
+        assert!(
+            text.starts_with("read-time field: `pairs`: its value does not serialize"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn a_rule_that_cannot_be_evaluated_is_known_before_any_document() {
         let broken = |_: &Rate| {
             Rules::when(RuleDate::<Required>::at("ends_at").lt("soon"))
@@ -944,8 +1133,347 @@ mod computing {
     fn a_root_without_read_time_fields_computes_nothing() {
         assert!(Computation::none().is_empty());
         assert!(Computation::with(&()).finish().is_empty());
+        let rate = Rate(2.0);
+        assert!(!computation().is_empty());
+        assert!(
+            !Computation::with(&rate)
+                .rules("discounted", discounted)
+                .finish()
+                .is_empty()
+        );
+        assert!(
+            !Computation::with(&rate)
+                .computed("converted", converted)
+                .finish()
+                .is_empty()
+        );
         let mut source = json!({ "fee": 1 });
         Computation::none().apply(&mut source).unwrap();
         assert_eq!(source, json!({ "fee": 1 }));
+    }
+}
+
+/// Every read path of a root with read-time fields, against a local server
+/// standing in for OpenSearch: the fields are on whatever comes back, and
+/// what cannot be evaluated is refused with nothing sent.
+mod reading {
+    use std::sync::{Arc, Mutex};
+
+    use futures::TryStreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    use super::*;
+    use crate::Client;
+
+    type Result = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    #[derive(Clone)]
+    struct Clock {
+        now: &'static str,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Deserialize)]
+    struct Listed {
+        id: String,
+        state: String,
+        label: String,
+    }
+
+    impl FlussoScope for Listed {
+        const PATH: &'static [Segment] = &[];
+    }
+
+    impl FlussoRoot for Listed {
+        type Context = Clock;
+        const INDEX: &'static str = "contracts";
+        const SCHEMA_HASH: &'static str = "xxxxxx";
+
+        fn computation(cx: &Clock) -> Computation {
+            Computation::with(cx)
+                .rules("state", state_at)
+                .computed("label", label)
+                .finish()
+        }
+    }
+
+    fn state_at(cx: &Clock) -> Rules<String> {
+        Rules::when(ends_at().lt(cx.now))
+            .then("closed".to_owned())
+            .otherwise("open".to_owned())
+    }
+
+    #[derive(Deserialize)]
+    struct Shown {
+        id: String,
+        state: String,
+    }
+
+    fn label(shown: &Shown, cx: &Clock) -> String {
+        format!("{} is {} at {}", shown.id, shown.state, cx.now)
+    }
+
+    fn listed(id: &str, state: &str) -> Listed {
+        Listed {
+            id: id.to_owned(),
+            state: state.to_owned(),
+            label: format!("{id} is {state} at {NOON_TEXT}"),
+        }
+    }
+
+    /// What the stored documents become at noon.
+    fn at_noon() -> Vec<Listed> {
+        vec![listed("a", "closed"), listed("b", "open")]
+    }
+
+    const NOON_CLOCK: Clock = Clock { now: NOON_TEXT };
+    /// A clock no rule can compare a date with.
+    const NO_CLOCK: Clock = Clock { now: "soon" };
+
+    const STORED_A: &str = r#"{"id":"a","ends_at":"2026-11-01T00:00:00Z"}"#;
+    const STORED_B: &str = r#"{"id":"b","ends_at":"2026-12-01T00:00:00Z"}"#;
+
+    /// A search response holding both documents, reporting `total` matches.
+    fn hits(total: usize) -> String {
+        format!(
+            r#"{{"hits":{{"total":{{"value":{total},"relation":"eq"}},"hits":[
+                {{"_id":"a","_score":1.0,"sort":[1.0,"a"],"_source":{STORED_A}}},
+                {{"_id":"b","_score":1.0,"sort":[1.0,"b"],"_source":{STORED_B}}}]}}}}"#
+        )
+    }
+
+    type Seen = Arc<Mutex<Vec<String>>>;
+
+    /// A server answering each request by its path with the two stored
+    /// documents, recording every request line.
+    async fn stub() -> std::io::Result<(Client, Seen)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let base = format!("http://{}", listener.local_addr()?);
+        let seen = Seen::default();
+        let recorded = Arc::clone(&seen);
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                tokio::spawn(answer(socket, Arc::clone(&recorded)));
+            }
+        });
+        let client = Client::connect(&base).map_err(std::io::Error::other)?;
+        Ok((client, seen))
+    }
+
+    async fn answer(mut socket: TcpStream, seen: Seen) {
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let text = String::from_utf8_lossy(&request);
+            if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                let expected = head
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")?
+                            .trim()
+                            .parse()
+                            .ok()
+                    })
+                    .unwrap_or(0);
+                if body.len() >= expected {
+                    break;
+                }
+            }
+            match socket.read(&mut chunk).await {
+                Ok(read) if read > 0 => request.extend_from_slice(&chunk[..read]),
+                _ => break,
+            }
+        }
+        let request = String::from_utf8_lossy(&request).into_owned();
+        let line = request.lines().next().unwrap_or_default().to_owned();
+        let body = if line.contains("/_msearch") {
+            // One response per search (a header line and a body line each),
+            // the n-th reporting 10 + n matches.
+            let sent = request.split_once("\r\n\r\n").map_or("", |(_, body)| body);
+            let searches = sent.lines().filter(|line| !line.is_empty()).count() / 2;
+            let responses: Vec<String> = (0..searches).map(|at| hits(10 + at)).collect();
+            format!(r#"{{"responses":[{}]}}"#, responses.join(","))
+        } else if line.contains("/_search/point_in_time") {
+            r#"{"pit_id":"pinned"}"#.to_owned()
+        } else if line.contains("/_doc/") {
+            format!(r#"{{"found":true,"_source":{STORED_A}}}"#)
+        } else if line.contains("/_count") {
+            r#"{"count":2}"#.to_owned()
+        } else {
+            hits(2)
+        };
+        seen.lock().unwrap().push(line);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = socket.write_all(response.as_bytes()).await;
+    }
+
+    fn sources(page: crate::SearchResponse<Listed>) -> Vec<Listed> {
+        page.hits.into_iter().map(|hit| hit.source).collect()
+    }
+
+    fn refused<T>(result: crate::Result<T>) -> String {
+        match result {
+            Err(Error::ReadTimeField(reason)) => reason,
+            Err(other) => panic!("refused for another reason: {other}"),
+            Ok(_) => panic!("the request must be refused"),
+        }
+    }
+
+    #[tokio::test]
+    async fn every_read_path_decides_the_read_time_fields() -> Result {
+        let (client, seen) = stub().await?;
+        let search = || Listed::query_in(&NOON_CLOCK).size(5);
+
+        assert_eq!(sources(search().send(&client).await?), at_noon());
+        assert_eq!(
+            Listed::get_in(&NOON_CLOCK, &client, "a").await?,
+            Some(listed("a", "closed"))
+        );
+        for page in client.msearch_all(&[search(), search()]).await? {
+            assert_eq!(sources(page), at_noon());
+        }
+        let (first, second) = client.msearch((&search(), &search())).await?;
+        assert_eq!(sources(first), at_noon());
+        assert_eq!(sources(second), at_noon());
+        assert_eq!(
+            sources(search().cursor(None).send(&client).await?),
+            at_noon()
+        );
+        let walked: Vec<Listed> = search()
+            .cursor(None)
+            .hits(&client)
+            .map_ok(|hit| hit.source)
+            .try_collect()
+            .await?;
+        assert_eq!(walked, at_noon());
+        let paged: Vec<crate::SearchResponse<Listed>> =
+            search().cursor(None).pages(&client).try_collect().await?;
+        assert_eq!(
+            paged.into_iter().flat_map(sources).collect::<Vec<_>>(),
+            at_noon()
+        );
+
+        // A pinned walk opens a point-in-time, reads through it, and is done.
+        let pinned = search().cursor(None).point_in_time().send(&client).await?;
+        assert_eq!(sources(pinned), at_noon());
+
+        let seen = seen.lock().unwrap();
+        assert!(seen.len() >= 9, "{seen:?}");
+        assert!(seen[7].contains("/_search/point_in_time"), "{seen:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_same_documents_read_at_another_moment_show_other_values() -> Result {
+        let (client, _seen) = stub().await?;
+        let earlier = Clock {
+            now: "2026-10-01T00:00:00Z",
+        };
+        let states: Vec<String> = sources(Listed::query_in(&earlier).send(&client).await?)
+            .into_iter()
+            .map(|listed| listed.state)
+            .collect();
+        assert_eq!(states, ["open", "open"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn counts_ask_once_for_every_value_in_order() -> Result {
+        let (client, seen) = stub().await?;
+        let state = RuleField::new(
+            state_at(&NOON_CLOCK).order(["open", "closed"].map(str::to_owned)),
+            &[],
+        );
+        let counts = state
+            .counts(&Listed::query_in(&NOON_CLOCK), &client)
+            .await?;
+        assert_eq!(counts, [("open".to_owned(), 10), ("closed".to_owned(), 11)]);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert!(seen[0].contains("/_msearch"), "{seen:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_rule_list_that_cannot_be_evaluated_sends_nothing() -> Result {
+        let (client, seen) = stub().await?;
+        let search = || Listed::query_in(&NO_CLOCK).size(5);
+
+        let reasons = [
+            refused(search().send(&client).await),
+            refused(search().ids(&client).await),
+            refused(search().count(&client).await),
+            refused(Listed::get_in(&NO_CLOCK, &client, "a").await),
+            refused(client.msearch_all(&[search()]).await),
+            refused(client.msearch((&search(), &search())).await),
+            refused(search().cursor(None).send(&client).await),
+            refused(search().cursor(None).ids(&client).await),
+            refused(search().cursor(None).point_in_time().send(&client).await),
+            refused(
+                search()
+                    .cursor(None)
+                    .hits(&client)
+                    .try_collect::<Vec<_>>()
+                    .await,
+            ),
+            refused(
+                search()
+                    .cursor(None)
+                    .id_stream(&client)
+                    .try_collect::<Vec<_>>()
+                    .await,
+            ),
+        ];
+        for reason in reasons {
+            assert!(
+                reason.starts_with("`state`: `\"soon\"` is not a date"),
+                "{reason}"
+            );
+        }
+        assert_eq!(*seen.lock().unwrap(), Vec::<String>::new());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_filter_or_sort_that_cannot_be_evaluated_sends_nothing() -> Result {
+        let (client, seen) = stub().await?;
+        let state = |cx: &Clock| RuleField::new(state_at(cx), &[]);
+        // The root's own fields are sound; the filter and the sort are built
+        // from a clock that is not one.
+        let filtered = || {
+            Listed::query_in(&NOON_CLOCK)
+                .size(5)
+                .filter(state(&NO_CLOCK).eq("open".to_owned()))
+        };
+        let sorted = || {
+            Listed::query_in(&NOON_CLOCK)
+                .size(5)
+                .sort(state(&NO_CLOCK).asc())
+        };
+        let searches: [&dyn Fn() -> Search<Listed>; 2] = [&filtered, &sorted];
+
+        for search in searches {
+            let reasons = [
+                refused(search().send(&client).await),
+                refused(search().ids(&client).await),
+                refused(client.msearch_all(&[search()]).await),
+                refused(search().cursor(None).send(&client).await),
+                refused(search().cursor(None).point_in_time().send(&client).await),
+            ];
+            for reason in reasons {
+                assert!(reason.contains("`\"soon\"` is not a date"), "{reason}");
+            }
+        }
+        assert!(refused(filtered().count(&client).await).contains("`\"soon\"` is not a date"));
+        let counted = state(&NO_CLOCK)
+            .counts(&Listed::query_in(&NOON_CLOCK), &client)
+            .await;
+        assert!(refused(counted).contains("`\"soon\"` is not a date"));
+        assert_eq!(*seen.lock().unwrap(), Vec::<String>::new());
+        Ok(())
     }
 }

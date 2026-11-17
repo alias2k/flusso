@@ -1314,6 +1314,110 @@ async fn sources(base: &str) -> BTreeMap<String, Value> {
         .collect()
 }
 
+/// Documents holding what a column of another type than its field declares
+/// can send: the index stores the value coerced to the mapping and keeps
+/// `_source` as written, so Rust has to coerce the same way. Returns how many
+/// were stored.
+async fn store_loose_values(base: &str, like: &str) -> usize {
+    let index = Contract::physical_index();
+    let http = reqwest::Client::new();
+    let template: Value = http
+        .get(format!("{base}/{index}/_doc/{like}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let loose = [
+        ("notice_days", json!(2.5)),
+        ("notice_days", json!(-2.5)),
+        ("notice_days", json!("7")),
+        ("notice_days", json!("7.9")),
+        ("notice_days", json!("-7.9")),
+        ("notice_days", json!("1e1")),
+        ("monthly_fee", json!("455.4")),
+        ("monthly_fee", json!(455)),
+        ("auto_renew", json!("true")),
+        ("auto_renew", json!("false")),
+        ("auto_renew", json!("")),
+        ("owner_id", json!(5)),
+        ("owner_id", json!(true)),
+        ("list_price", json!("120.50")),
+        ("ends_at", json!(1_794_830_400_000_i64)),
+        ("ends_at", json!("1794830400000")),
+        ("ends_at", json!("2026-11-16")),
+    ];
+    for (at, (field, value)) in loose.iter().enumerate() {
+        let mut source = template["_source"].clone();
+        source["id"] = json!(format!("loose-{at}"));
+        source[*field] = value.clone();
+        http.put(format!("{base}/{index}/_doc/loose-{at}"))
+            .json(&source)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap_or_else(|error| panic!("`{field}: {value}` is refused: {error}"));
+    }
+    refresh(base, &index).await;
+    loose.len()
+}
+
+/// One condition per coerced value, on each side of it.
+fn conditions_on_loose_values() -> Vec<(&'static str, Condition)> {
+    let doc = Contract::doc();
+    let noon = "2026-11-16T12:00:00Z";
+    vec![
+        ("notice_days == 2", doc.notice_days().eq(2)),
+        ("notice_days == -2", doc.notice_days().eq(-2)),
+        (
+            "notice_days in (2, 3]",
+            doc.notice_days()
+                .gt(2)
+                .and(doc.notice_days().lte(3))
+                .not()
+                .and(doc.notice_days().between(-2, 2)),
+        ),
+        ("notice_days < 0", doc.notice_days().lt(0)),
+        (
+            "notice_days between -2 and -1",
+            doc.notice_days().between(-2, -1),
+        ),
+        ("notice_days == 7", doc.notice_days().eq(7)),
+        ("notice_days == -7", doc.notice_days().eq(-7)),
+        ("notice_days == 10", doc.notice_days().eq(10)),
+        ("monthly_fee == 455.4", doc.monthly_fee().eq(455.4)),
+        ("monthly_fee == 455", doc.monthly_fee().eq(455)),
+        (
+            "monthly_fee between 455 and 455.4",
+            doc.monthly_fee().between(455, 455.4),
+        ),
+        ("auto_renew == true", doc.auto_renew().eq(true)),
+        ("auto_renew == false", doc.auto_renew().eq(false)),
+        ("auto_renew != true", doc.auto_renew().ne(true)),
+        ("owner_id == 5", doc.owner_id().eq("5")),
+        ("owner_id == true", doc.owner_id().eq("true")),
+        ("owner_id in 5, true", doc.owner_id().any_of(["5", "true"])),
+        (
+            "list_price == 120.50",
+            doc.list_price().eq(Decimal::new(12_050, 2)),
+        ),
+        (
+            "list_price > 120.49",
+            doc.list_price()
+                .gt(Decimal::new(12_049, 2))
+                .and(doc.list_price().lt(Decimal::new(12_051, 2))),
+        ),
+        ("ends_at == noon", doc.ends_at().eq(noon)),
+        ("ends_at within the day", doc.ends_at().eq("2026-11-16")),
+        (
+            "ends_at <= noon",
+            doc.ends_at().lte(noon).and(doc.ends_at().gte("2026-11-16")),
+        ),
+    ]
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs Docker (starts an OpenSearch container)"]
 async fn random_conditions_agree_with_the_index() {
@@ -1321,8 +1425,9 @@ async fn random_conditions_agree_with_the_index() {
         Utc.with_ymd_and_hms(2026, 11, 16, 12, 0, 0).unwrap() + Duration::microseconds(123_456);
     let seeds = edges(now);
     let (_container, base, client, _sink) = start(&seeds).await;
+    let loose = store_loose_values(&base, &seeds[0].id).await;
     let sources = sources(&base).await;
-    assert_eq!(sources.len(), seeds.len());
+    assert_eq!(sources.len(), seeds.len() + loose);
     let cx = cx(now);
     let mut fees: Vec<f64> = seeds
         .iter()
@@ -1352,9 +1457,27 @@ async fn random_conditions_agree_with_the_index() {
             ));
         }
     }
+    for (name, rule) in conditions_on_loose_values() {
+        let in_rust: BTreeSet<String> = sources
+            .iter()
+            .filter(|(_, source)| rule.holds(source))
+            .map(|(id, _)| id.clone())
+            .collect();
+        let in_index = set(ids(&client, Contract::query(&cx).filter(rule)).await);
+        if !in_rust.iter().any(|id| id.starts_with("loose-")) {
+            differs.push(format!("{name}: Rust selects no coerced value"));
+        }
+        if in_index != in_rust {
+            let extra: Vec<_> = in_index.difference(&in_rust).take(4).collect();
+            let missing: Vec<_> = in_rust.difference(&in_index).take(4).collect();
+            differs.push(format!(
+                "{name}: index only {extra:?}, Rust only {missing:?}"
+            ));
+        }
+    }
     println!(
         "{total} random conditions over {} contracts: {} differ",
-        seeds.len(),
+        sources.len(),
         differs.len()
     );
     assert!(
