@@ -1,0 +1,59 @@
+name: Change class
+description: >-
+  Whether this run is a docs-only pull request (issue #402), and what such a run
+  must still check. Decided by `.github/scripts/change_class.py` over the whole
+  PR as it would merge: the checkout's merge commit against its first parent,
+  so the checkout needs `fetch-depth: 2`. Any other event, or a diff that can't
+  be taken, is a full run. Writes what was skipped to the job summary.
+
+inputs:
+  job:
+    description: The gated job, a key of `change_class.py`'s SKIPPED.
+    required: true
+
+outputs:
+  docs_only:
+    description: '`true` when every changed file is documentation.'
+    value: ${{ steps.decide.outputs.docs_only }}
+  cargo:
+    description: '`true` when the job still needs a Rust toolchain.'
+    value: ${{ steps.decide.outputs.cargo }}
+  nextest_packages:
+    description: '`-p <package>` for each package a docs-reading test lives in.'
+    value: ${{ steps.decide.outputs.nextest_packages }}
+  nextest_filter:
+    description: The nextest filterset of the tests that read the changed docs; empty for none.
+    value: ${{ steps.decide.outputs.nextest_filter }}
+  doc_packages:
+    description: Packages whose compiled README changed (doctests + doc links).
+    value: ${{ steps.decide.outputs.doc_packages }}
+
+runs:
+  using: composite
+  steps:
+    - name: Decide what this change must run
+      id: decide
+      shell: bash
+      env:
+        EVENT: ${{ github.event_name }}
+        JOB: ${{ inputs.job }}
+      run: |
+        set -uo pipefail
+        args=(--event "$EVENT" --job "$JOB" --output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY")
+        changes="$RUNNER_TEMP/change-class.changes"
+        # On a pull request the checkout is the merge commit: parent 1 is the
+        # base, parent 2 the PR head. Anything else is not a diff to trust.
+        if [ "$EVENT" = pull_request ] \
+          && git rev-parse --verify --quiet HEAD^2 >/dev/null \
+          && git diff --name-status -z -M HEAD^1 HEAD >"$changes"; then
+          args+=(--changes "$changes")
+        else
+          args+=(--unknown)
+        fi
+        # Windows runners may name it `python` only.
+        python=$(command -v python3 || command -v python || echo python3)
+        if ! "$python" .github/scripts/change_class.py "${args[@]}"; then
+          echo "::warning::change_class.py failed; running everything"
+          echo "docs_only=false" >>"$GITHUB_OUTPUT"
+          echo "cargo=true" >>"$GITHUB_OUTPUT"
+        fi
