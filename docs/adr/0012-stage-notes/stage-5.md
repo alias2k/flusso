@@ -179,3 +179,33 @@ Line references are to `d082b9e5`.
 - **The other 1.43 s is seeding.** The three `seed` steps (0.47 + 0.19 + 0.77 s) run one after another at the end, with no write in flight: 27% of the wall.
 - **What the average means.** Over the writing part alone, the sink is about 3 deep, close to `writes = 4`, with no idle. The writes themselves are saturated (48 ms each), so the time left over is seeding, not admission. Admission can't be the cause anyway: backfill items share no ids, so it never holds one back.
 - **Where the next gain is:** the seed (refresh, settings, alias move), track A's #410/#403. After that, OpenSearch's bulk throughput.
+
+## Measured
+
+**Setup.** `flusso-bench`, scale `default`, release build of `87d4f247` (stage 7 included), `builds = 4`, `writes = 4`, flusso pinned to CPUs 0-3,12-15. `/status` `memory` and the process RSS were sampled every 250 ms. One run per budget; load 5–12.
+
+| scenario, budget | backfill docs/s | burst changes/s | peak RSS | held peak (backfill) | RSS − held |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `reference`, 512 MiB | 13,144 | 1,744 | 352 MiB | 255.5 MiB | 97 MiB |
+| `reference`, 128 MiB | 14,401 | 1,796 | 170 MiB | 67.2 MiB | 103 MiB |
+| `reference`, 32 MiB | 10,402 | 1,797 | 106 MiB | 19.5 MiB | 86 MiB |
+| `complex`, 512 MiB | 2,314 | 1,853 | 161 MiB | 112.5 MiB | 49 MiB |
+| `complex`, 128 MiB | 2,437 | 1,865 | 125 MiB | 63.4 MiB | 62 MiB |
+| `complex`, 32 MiB | 1,539 | 1,790 | 78 MiB | 23.0 MiB | 55 MiB |
+
+Peak RSS before the budget, at `builds = 4`: 348–371 MiB (stage 4). At `builds = 1`: 97–141 MiB.
+
+**What it says:**
+
+- **The walk is honest.** RSS minus held bytes stays near a constant for each scenario (86–103 MiB on `reference`, 49–62 on `complex`: the process's own working set). Held bytes track the documents' real heap. The per-document check against a counting allocator agrees: 0.87–1.09 (`tests/heap_walk.rs`).
+- **The bound holds.** Held never passed the backfill half by more than one estimate per build in flight: 255.5 MiB at a 256 MiB half; 67.2 at 64; 19.5 at 16.
+- **At the default 512 MiB the backfill's half is what binds on `reference`,** at 256 MiB, and peak RSS stays at 352 MiB, where stage 4 left it. So the default does not bring RSS back near `builds = 1`'s.
+- **128 MiB does, at no cost:** the backfill rate is the same or better (14,401 vs 13,144 docs/s) at 170 MiB RSS.
+- **32 MiB costs a quarter of the backfill rate** (10,402): too few batches fit in flight for 4 builds and 4 writes.
+- **Recommendation:** default 128 MiB rather than the ADR's 512. The ADR sized 512 for about 24 indexes, so revisit at 8a, where one index gets at most half. Not changed here: the default is the ADR's, so it's the owner's call.
+- **The burst** is not paced by the budget at any setting (1,744–1,865 changes/s).
+
+**Not measured:**
+
+- the e2e-level RSS assertion (`reference` at 64 MiB staying under a stated RSS); the 128 and 32 MiB runs above stand in for it;
+- three rounds per budget setting: one run each.

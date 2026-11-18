@@ -261,3 +261,50 @@ stream. Unit tests missed it twice over: their mocks finish inline, and their st
 - The live-first rule and its every-fourth counter are per gate. A deployment-wide gate across
   index tasks needs the counter shared.
 - The `2 × builds` bound becomes per index.
+
+## After the review
+
+**The per-item cost holds only for builds that finish on their first poll** (review item 5). The Postgres builder never does, so every batch, a lone change included, is spawned. Each one then pays:
+
+- the task;
+- the landing box;
+- the `Woken` `Arc`;
+- the `Flights` entry;
+- one extra wake-up hop.
+
+Counted with the live-path counter (20,000 changes, `max_changes = 1`, one sink, `builds = 1`, no budget). The second build's `build_many` yields once, as a query does. Branch head is `87d4f247`, which includes stage 7.
+
+| per change | `main` (`ffd54d22`) | branch, spawned | branch, polled in place |
+| --- | ---: | ---: | ---: |
+| allocations, build finishes on its first poll | 41.16 | 57.48 | 57.48 |
+| allocations, build pending on its first poll | 41.00 | 67.00 | 59.46 |
+| ingest-task polls, build pending on its first poll | 1.000 | 1.000 | 0.016 |
+
+- The +16 allocations in the first row came after stage 4's own count of 42.16 at `532308cc`, so they are most likely stage 7's per-lane split; I have not counted that separately.
+- Spawning costs about 7.5 allocations per batch over polling in place, plus the hop.
+
+**What spawning buys**, measured (`reference` and `complex`, builds 4, writes 4, two interleaved rounds, load 6–20):
+
+| | `reference` backfill docs/s | build ms/batch | `complex` backfill docs/s | build ms/batch |
+| --- | --- | --- | --- | --- |
+| spawned | 15,139 · 11,478 | 18.8 · 27.2 | 2,238 · 2,643 | 49.3 · 50.2 |
+| in place | 15,151 · 11,213 | 24.0 · 34.2 | 2,558 · 2,392 | 72.4 · 69.1 |
+
+- Each build is 22–45% faster spawned: its decode, coercion and scripts run on other cores.
+- End to end, the backfill is the same, because the sink bounds it (stage 4's attribution).
+- **Kept spawning.** Its cost is a few µs per batch against a build of milliseconds. Its gain shows as soon as the sink stops being the bound: track A's seeding work, stage 7's per-lane writes, 8a's index tasks. Revisit if the in-process gate disagrees.
+
+**Batch cutting differs from `main`** (review item 6). Resolving now overlaps the build, and the pending batch is granted the moment the previous build lands. So in a resolve-bound burst a batch holds what resolved during one build.
+
+Measured: `reference`, default scale, `writes = 4`, three interleaved rounds, load 4–11 (another track's e2e ran between rounds; under the asked-for ~6 for part of it). Branch head is `87d4f247`:
+
+| | burst changes/s | builds per burst | changes per build | sink writes per burst | docs per write | `resolve` busy s | p50 / p99 ms |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `main` | 1,676 · 1,511 · 1,704 | 198–213 | 94–101 | 199–213 | 120–129 | 9.3–10.5 | 5.6–12.7 / 35–42 |
+| branch, builds 1 | 1,767 · 1,593 · 1,878 | 237–273 | 73–84 | 696–811 | 31–37 | 11.5–13.7 | 12.2–13.1 / 32–50 |
+| branch, builds 4 | 1,650 · 1,650 · 1,737 | 248–264 | 76–81 | 739–788 | 33–35 | 12.4–13.1 | 12.6–12.9 / 35–42 |
+
+- **About 20% more, smaller builds, as the reviewer said.** The burst drain is not lower for it: median 1,676 on `main`, 1,767 at builds 1, 1,650 at builds 4.
+- **`resolve` itself got slower.** It takes about 27% more busy time per change, because it now overlaps the builds against the same Postgres. The overlap gives that back in wall time.
+- **Smaller writes are stage 7's.** The sink's writes per burst went up 3.5× and its documents per write down 4×, from one lane per `(index, sink)`. Track B's `fa6a2071` merges ready items for that.
+- **No batch-filling rule added.** Smaller batches cost no throughput here, so #135's semantics stay as they are.
