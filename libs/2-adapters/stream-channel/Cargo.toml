@@ -18,6 +18,7 @@ name = "stream_channel"
 workspace = true
 
 [dependencies]
+tracing.workspace = true
 stream.workspace = true
 kernel = { workspace = true, features = ["derive"] }
 serde.workspace = true

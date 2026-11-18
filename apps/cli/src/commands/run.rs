@@ -99,8 +99,8 @@ pub(crate) struct RunArgs {
     #[arg(long, env = "FLUSSO_PRETTY")]
     pretty: bool,
 
-    /// Maximum changes buffered between capture and processing. Overrides
-    /// `[stream] capacity`; defaults to it, then to 1024.
+    /// Deprecated, and ignored with a warning, as `[stream] capacity` is:
+    /// `--max-built-mib` bounds what the lanes hold.
     #[arg(long, env = "FLUSSO_QUEUE_CAPACITY")]
     queue_capacity: Option<usize>,
 

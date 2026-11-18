@@ -6,7 +6,7 @@
 //! use stream_channel::ChannelConfig;
 //!
 //! let config = ChannelConfig::from_options(Options::empty()).unwrap();
-//! assert_eq!(config.capacity, 1024);
+//! assert_eq!(config.capacity, None);
 //! ```
 
 use kernel::AdapterConfig;
@@ -14,28 +14,18 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// The `[stream]` options for `type = "channel"`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, AdapterConfig)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, AdapterConfig,
+)]
 #[serde(deny_unknown_fields)]
 #[adapter(port = stream, kind = "channel")]
 pub struct ChannelConfig {
-    /// Batches each lane queues before the ingest engine waits. A bounded
-    /// buffer is what makes the slowest sink pace ingest. A sink engine also
-    /// holds up to `writes` + 32 batches it has taken and not yet
-    /// acknowledged, outside this bound.
-    #[serde(default = "default_capacity")]
-    pub capacity: usize,
-}
-
-fn default_capacity() -> usize {
-    1024
-}
-
-impl Default for ChannelConfig {
-    fn default() -> Self {
-        Self {
-            capacity: default_capacity(),
-        }
-    }
+    /// Deprecated, and ignored: still accepted, with a warning at start.
+    /// What the lanes hold is bounded in bytes by `[concurrency]
+    /// max_built_mib`, which a sink that stops acknowledging fills, pacing
+    /// ingest; each lane keeps a fixed backstop of 1,048,576 items.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<usize>,
 }
 
 #[cfg(test)]
@@ -58,9 +48,6 @@ mod tests {
         let description = ChannelConfig::description();
         assert_eq!(description.kind, "channel");
         assert!(description.secrets.is_empty());
-        assert_eq!(
-            description.example.get("capacity").and_then(|v| v.as_i64()),
-            Some(1024)
-        );
+        assert_eq!(description.example.get("capacity"), None);
     }
 }

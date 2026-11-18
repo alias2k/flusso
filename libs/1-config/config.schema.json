@@ -483,11 +483,13 @@
           "description": "Selects the channel stream adapter."
         },
         "capacity": {
-          "type": "integer",
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint",
           "minimum": 0,
-          "description": "Batches each lane queues before the ingest engine waits. A bounded\nbuffer is what makes the slowest sink pace ingest. A sink engine also\nholds up to `writes` + 32 batches it has taken and not yet\nacknowledged, outside this bound.",
-          "default": 1024
+          "description": "Deprecated, and ignored: still accepted, with a warning at start.\nWhat the lanes hold is bounded in bytes by `[concurrency]\nmax_built_mib`, which a sink that stops acknowledging fills, pacing\ningest; each lane keeps a fixed backstop of 1,048,576 items."
         }
       },
       "description": "The `[stream]` options for `type = \"channel\"`.",

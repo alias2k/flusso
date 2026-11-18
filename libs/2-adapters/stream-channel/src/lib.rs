@@ -32,6 +32,12 @@ pub struct ChannelStream {
     requests: Arc<Channel<Request>>,
 }
 
+/// How many items a lane built from configuration holds before publishing
+/// waits: a backstop that never binds before the ingest engine's memory
+/// budget, which counts at least 1 KiB per batch (512 MiB holds at most
+/// 524,288 batches). A bounded channel doesn't allocate its capacity.
+pub const LANE_BACKSTOP: usize = 1 << 20;
+
 impl ChannelStream {
     /// A stream with the lanes `lanes`, plus a request lane holding
     /// `capacity` items. A sink's lanes share `capacity` between them: each
@@ -58,9 +64,21 @@ impl ChannelStream {
         }
     }
 
-    /// Build from the adapter's own configuration.
+    /// Build from the adapter's own configuration: every lane, and the
+    /// request lane, with the [`LANE_BACKSTOP`]. A `capacity` the config
+    /// still names is ignored, with a warning: the memory budget bounds what
+    /// lanes hold.
     pub fn from_config(config: &ChannelConfig, lanes: impl IntoIterator<Item = LaneKey>) -> Self {
-        Self::new(config.capacity, lanes)
+        if let Some(capacity) = config.capacity {
+            tracing::warn!(
+                capacity,
+                "[stream] capacity (and --queue-capacity) is deprecated and ignored: \
+                 [concurrency] max_built_mib bounds what the lanes hold"
+            );
+        }
+        let lanes: Vec<LaneKey> = lanes.into_iter().collect();
+        let per_sink = lanes.len().max(1);
+        Self::new(LANE_BACKSTOP.saturating_mul(per_sink), lanes)
     }
 
     /// A stream with one lane per pair of `indexes` and `sinks`.
