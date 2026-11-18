@@ -190,6 +190,22 @@ A comparison with a string, a number or another kind fails rather than answering
 - **A missing `.flusso(url)` is `Error::FenceMisconfigured`**, which was a `FenceUnavailable`. `Error` is `#[non_exhaustive]`, so this is silent: code that matched `FenceUnavailable` to spot the missing address compiles and falls through to its wildcard arm. Match `FenceMisconfigured` for it. A certificate the client refuses and a redirect loop are `FenceMisconfigured` too, at once.
 - **Remove a retry loop around fenced reads**, if one was written for deploys: it now multiplies the timeout.
 
+## A fence holds while an index is seeded or rebuilt
+
+**Breaking, correct.** 0.17 answered `/wait` with `200` for a position whose document a read couldn't see yet, while a sink seeded an index for the first time, rebuilt every seeded index after the replication slot was lost, or ran a [reindex](reindex.md) ([#379](https://github.com/alias2k/flusso/issues/379)). A fenced read then returned a stale or missing document. 0.18 vouches only for what reads see (see [HTTP endpoints](../reference/http.md#get-waitpositionposition)). What changes:
+
+| Wait, while the index it needs is… | 0.17 | 0.18 |
+| --- | --- | --- |
+| seeded for the first time | `200` once the lane wrote the change | held; `200` once seeded, else `503` `backfilling` at the timeout |
+| rebuilt after a lost slot | `200` once the lane wrote the change | held; `200` once seeded, else `503` `rebuilding` |
+| reindexed, position before the reindex began | `200` | `200` |
+| reindexed, position after it began | `200`, read stale until the swap | held; `200` once seeded, else `503` `rebuilding` |
+| any of these, timeout passed | `408` | `503` with the reason |
+
+- **`flusso-query`** retries a `503` until `fence_timeout`, then fails with `FenceUnavailable` and the new cause `Backfilling`, or `Rebuilding`. A rebuild longer than the timeout fails the read where 0.17 returned stale data: handle the error, or size the timeout for it.
+- **The upgrade itself backfills** the indexes whose content hash moved ([Steps](#steps)): fenced reads of those indexes wait for that backfill. Reads naming other indexes don't.
+- **A plain-HTTP caller** that treated `503` as "flusso is down" sees it during rebuilds too: read `reason`.
+
 ## A stop drains, then exits
 
 0.17 dropped everything on `SIGTERM`, and could then wait forever: a client that went silent mid-request held the HTTP surfaces open and every further signal was ignored, so only `SIGKILL` ended it. A process whose task runner died kept running unnoticed. 0.18 drains instead (see [Stopping](../reference/cli.md#stopping)):

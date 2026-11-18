@@ -721,7 +721,7 @@ is the one concrete piece.
   **source position** after its commit (`pg_current_wal_lsn()`) and waits on the daemon's `Fence`
   (`libs/3-daemon/src/fence.rs`; the CLI serves it as `GET /wait`) until a sink, or every sink, has
   every commit at or before it **applied** (its write and every earlier one returned) or **searchable** (a refresh covered
-  it). Nothing is flushed or refreshed for a waiter, and a backfill is not covered. Three pieces,
+  it). Nothing is flushed or refreshed for a waiter. Four pieces,
   each load-bearing: (1) `ChangeCapture::reached(Landed) -> Option<SourcePosition>` translates how
   far a sink's lane landed (`Progress::lane(sink, Level::Applied | Searchable)`) into the source's
   terms. The Postgres `Positions` (`cdc/ack.rs`) reads it off the stamps plus a **horizon** (the LSN
@@ -753,10 +753,22 @@ is the one concrete piece.
   before the bulk was sent (`refresh.rs`'s `Unrefreshed`, marks with sequence numbers; guards
   `a_caught_up_write_over_the_one_index_left_unrefreshed_sends_no_extra_refresh`, `refresh::tests`); its
   `ensure_index` refreshes a seeded generation once per start, because what an earlier run left
-  unrefreshed is remembered nowhere (fences are unavailable until staging is done). An index
-  mid-reindex is **not** covered: live writes go to the new generation while the alias serves the
-  old one (#6). (3) The fence reads both levels off `Progress` per sink whenever a waiter checks
-  (searchable never above applied), and keeps each level monotonic across a reopened source stream. Guards: the Postgres adapter's
+  unrefreshed is remembered nowhere (fences are unavailable until staging is done). (3) The fence reads both levels off `Progress` per sink whenever a waiter checks
+  (searchable never above applied), and keeps each level monotonic across a reopened source stream.
+  (4) **It vouches only for what reads see (#379, `fence-rebuilding.md`).** Each lane's `Serving`
+  (beside its `Furthest`, same mutex) is set by the sink engine's events through `FenceObserver`:
+  `on_sink_started` serves a `Pending` lane, `on_backfill_requested` makes it `Backfilling` (a
+  `Rebuilding` lane stays), `on_index_rebuilding` (emitted in the `Rebuild` staging step **before**
+  `Sink::reindex`) makes it `Rebuilding`, freezing what a lane that served its writes had reached
+  (the old generation gets nothing new after it: the on-demand reindex runs with no write in
+  flight), else `None` (a `Fresh` start vouches for nothing), `on_index_seeded` (after
+  `mark_seeded` refreshed and moved the alias) serves it. A wait needing an unserved lane holds and
+  passes when seeded; at its timeout it is `FenceOutcome::Unserved` → `503` `backfilling` /
+  `rebuilding` + `lanes`. Guards: `fence::tests`' `a_backfilling_index_*`, `a_reindex_*`,
+  `a_rebuild_after_a_fresh_source_vouches_for_nothing`, `a_recreated_index_*`,
+  `a_wait_naming_only_healthy_indexes_*`, the engine's
+  `an_index_is_announced_rebuilding_before_the_sink_moves_its_writes`, `http::tests`'
+  `a_wait_on_an_index_being_seeded_or_rebuilt_*`, the `fence` e2e. Guards: the Postgres adapter's
   `a_split_transaction_is_not_confirmed_until_its_last_change`,
   `a_keepalive_during_a_flight_does_not_pin_the_resume_point`,
   `confirmation_stops_at_a_commit_boundary_where_a_fence_goes_further`, `reached_*`,

@@ -45,3 +45,16 @@ The first fact above changed. The source no longer keeps a map from position to 
 - **What still holds:** a fence claims everything short of the oldest outstanding change's commit (`o.fence_before`), and a split transaction is fenced only once its last change has landed; searchable never runs ahead of applied; each level is monotonic across a reopened source stream.
 - **No longer needed:** reporting applied before the acknowledgement so the source could still translate the position, and the fence's own queue of translations taken at applied time. The position carries the answer for as long as anyone holds it.
 - **One answer is lower than before.** With every routed change landed and a later one emitted but not yet routed, the fence answers the last landed change's own commit (`p.confirm_through`), not "short of the next commit": the engine no longer reports which emitted change comes next. A waiter waits until that change is routed and lands; nothing is ever claimed early.
+
+## Amendment: a fence vouches only for what reads see (#379)
+
+The consequence "a backfill is not fenced, and neither is an index mid-reindex" no longer holds.
+
+- **Why it changed.** Since #377 a client rides out a restart, so a `Fresh` restart turned that documented limit into a `200` followed by a stale read.
+- **What makes it possible.** Fences are per `(index, sink)` lane since ADR 0012 stage 7. Holding one lane no longer stalls the other indexes of the sink, which was the reason for the limit.
+- **The decision.** Each lane tracks whether reads see what it writes, from the sink engine's staging, rebuild and seed events.
+  - A wait that needs a lane being seeded or rebuilt holds until it is seeded, and passes then.
+  - Past its timeout it is answered `503` with the reason `backfilling` or `rebuilding`.
+  - During an on-demand reindex the serving generation gets nothing new, so the lane still vouches for what it had reached when the rebuild began.
+  - After a `Fresh` source it vouches for nothing until seeded.
+- **Where it's written up:** `docs/adr/0012-stage-notes/fence-rebuilding.md`.

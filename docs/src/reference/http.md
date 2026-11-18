@@ -119,7 +119,7 @@ Hold the request until a commit is readable: a fence. `position` is what the cli
 | `408` | The timeout passed first. Nothing is wrong with the request; ask again or give up. |
 | `400` | `position` is missing or not a position the source can read, or `until`, `sink`, `index`, or `timeout_ms` is malformed. |
 | `404` | `sink` is not a configured sink, or an `index` is not an enabled index. |
-| `503` | This process can't answer now. `Retry-After: 1`, and `reason` says why: `starting` (the source isn't following live changes yet: startup, or the ingest engine is restarting) or `stopping` (the [stop](cli.md#stopping)'s drain is over). |
+| `503` | This process can't answer now, or can't vouch for the position yet. `Retry-After: 1`, and `reason` says why: `starting` (the source isn't following live changes yet: startup, or the ingest engine is restarting), `stopping` (the [stop](cli.md#stopping)'s drain is over), `backfilling` or `rebuilding` (below). |
 
 `200` and `408` share a body; errors carry `{"error": "…"}`, a `503` also `"reason"`.
 
@@ -129,8 +129,15 @@ Hold the request until a commit is readable: a fence. `position` is what the cli
 
 `position` is how far the lanes waited on have got (the slowest one): at or past the one asked for on `200`, short of it on `408`. `indexes` echoes the `index` parameters, empty when none was given.
 
+A `503` for an index being seeded or rebuilt also names the lanes holding it up:
+
+```json
+{ "error": "reads don't see this position yet: users on primary (rebuilding)", "reason": "rebuilding",
+  "position": "0/16B3780", "lanes": [{ "index": "users", "sink": "primary", "state": "rebuilding" }] }
+```
+
 - **It only waits.** Nothing is flushed or refreshed on a caller's behalf. Under a draining backlog `searchable` trails `applied` by up to the sink's [`refresh_interval`](sink-opensearch.md#refresh).
-- **A backfill isn't covered, nor an index mid-reindex.** Positions belong to live changes; an index that is still seeding, or being rebuilt behind its alias, is reported by `/status`.
+- **It vouches only for what reads see.** While a sink seeds an index for the first time, reads see it filling; while it rebuilds one (a [reindex](../operate/reindex.md), or every seeded index after the [slot was lost](../operate/dropped-slot.md)), reads see the old copy and live writes go to the new one. A wait that needs such an index holds, and is answered `200` the moment the index is seeded and covers the position. If the timeout comes first it is `503` with `reason: backfilling` or `rebuilding` instead of `408`. During a reindex the old copy still serves everything written before the reindex began, so a wait for such a position is `200` throughout. Without the slot, the old copy misses changes, so after a lost slot nothing is vouched for until the rebuild is seeded. The reason is `rebuilding` when any lane holding the wait rebuilds, else `backfilling`.
 - **A position already passed answers at once**, however old it is.
 - **During a stop it keeps answering.** A wait open when the stop begins, or opened during the drain, is answered `200` if its position lands meanwhile: that is when in-flight commits reach the sinks. While a wait on `searchable` is open the drain also waits out the sink's refresh interval, inside the stop's deadline. Once the drain is over every wait still open is answered `503` with `reason: stopping`, and so is a new one.
 - **A `503` means ask again**, against the same address, until your own timeout. The position is the source's own (a WAL LSN), so the next process answers the same question: it starts from the position the last one confirmed, which after a graceful stop covers everything the last one indexed.
