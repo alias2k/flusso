@@ -210,10 +210,7 @@ async fn backfill(builder: &PgDocumentBuilder, root: &Root) -> Vec<Document> {
     let index = kernel::IndexName::try_new(root.table).unwrap();
     let mut keys: Vec<RowKey> = Vec::new();
     loop {
-        let page = builder
-            .keys(&index, keys.last(), KEY_PAGE)
-            .await
-            .unwrap();
+        let page = builder.keys(&index, keys.last(), KEY_PAGE).await.unwrap();
         let last = page.len() < KEY_PAGE;
         keys.extend(page);
         if last {
