@@ -718,10 +718,12 @@ impl<'a> Run<'a> {
     /// waits for more. An ordered sink, and a lane behind a failed run's
     /// barrier, write one item alone.
     fn pick(&mut self) -> Vec<usize> {
-        // One item waiting, nothing in flight: no contest, nothing to merge,
-        // so it is the pick, with no hashing.
-        if self.window.len() == 1
+        // One lane, nothing in flight, one kind waiting: no contest, no turn
+        // to take, so the front is the pick. Unless another item could join it
+        // in the write, nothing needs hashing, as with one item per write.
+        if self.lanes.len() == 1
             && self.flying.is_empty()
+            && !(self.live_waiting > 0 && self.backfill_waiting > 0)
             && matches!(
                 self.window.front(),
                 Some(Queued {
@@ -729,6 +731,7 @@ impl<'a> Run<'a> {
                     ..
                 })
             )
+            && !self.could_join_the_front()
         {
             return vec![0];
         }
@@ -867,6 +870,34 @@ impl<'a> Run<'a> {
             }
         }
         picked
+    }
+
+    /// Whether another waiting item could join the front item in one write:
+    /// merging is on for its lane, and some item before the lane's first
+    /// `SnapshotComplete` is small enough to fit beside it.
+    fn could_join_the_front(&self) -> bool {
+        let Some(Queued {
+            item: Queue::Batch { batch, .. },
+            lane,
+            ..
+        }) = self.window.front()
+        else {
+            return false;
+        };
+        if self.ordered() || self.in_lane_order(*lane) {
+            return false;
+        }
+        let room = self.merge_limit().saturating_sub(batch.envelopes.len());
+        room > 0
+            && self
+                .window
+                .iter()
+                .skip(1)
+                .take_while(|queued| matches!(queued.item, Queue::Batch { .. }))
+                .any(|queued| match &queued.item {
+                    Queue::Batch { batch, .. } => batch.envelopes.len() <= room,
+                    Queue::Complete { .. } => false,
+                })
     }
 
     fn launch(
