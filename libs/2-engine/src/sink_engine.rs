@@ -127,6 +127,9 @@ pub struct SinkEngine {
     /// the deployment is dropped with it (the daemon refuses new ones once
     /// stopping).
     pending_reindex: Mutex<Option<Vec<IndexName>>>,
+    /// Whether `pending_reindex` holds one: the run asks every turn, so
+    /// the answer is read without the lock.
+    reindex_waiting: AtomicBool,
     /// The last run ended in an error, or none has run yet: the next run
     /// writes the oldest item alone before anything else (see `writes`). A
     /// fresh engine starts with it set, since a previous process may have
@@ -160,6 +163,7 @@ impl SinkEngine {
             writes: 1,
             failed_run: AtomicBool::new(true),
             pending_reindex: Mutex::new(None),
+            reindex_waiting: AtomicBool::new(false),
         }
     }
 
@@ -455,8 +459,23 @@ impl SinkEngine {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
+    fn set_pending_reindex(&self, indexes: Vec<IndexName>) {
+        let mut pending = self.lock_pending_reindex();
+        *pending = Some(indexes);
+        self.reindex_waiting.store(true, Ordering::Release);
+    }
+
+    fn take_pending_reindex(&self) -> Option<Vec<IndexName>> {
+        if !self.reindex_pending() {
+            return None;
+        }
+        let mut pending = self.lock_pending_reindex();
+        self.reindex_waiting.store(false, Ordering::Release);
+        pending.take()
+    }
+
     fn reindex_pending(&self) -> bool {
-        self.lock_pending_reindex().is_some()
+        self.reindex_waiting.load(Ordering::Acquire)
     }
 
     fn lock_skipped(&self) -> std::sync::MutexGuard<'_, BTreeSet<IndexName>> {

@@ -822,6 +822,26 @@ async fn a_stop_finishes_the_writes_in_flight_and_skips_waiting_backfill() {
     assert_eq!(rig.stream.watermark(), Some(Position(2)));
 }
 
+/// A stop requested while the run waits on its only write, with nothing
+/// waiting and no room (the narrow wait, which doesn't watch the stop): the
+/// write lands, and backfill arriving meanwhile is acknowledged unwritten,
+/// its index left unseeded.
+#[tokio::test(start_paused = true)]
+async fn a_stop_during_the_only_write_still_skips_the_backfill_behind_it() {
+    let mut rig = Rig::new(Probe::new().holding(&["a"]), 1).warm().await;
+    rig.live(1, &["a"]).await;
+    until("a to be written", || rig.probe.starts() == ["a"]).await;
+    rig.stop.request();
+    rig.backfill(&["p"]).await;
+    rig.complete().await;
+    settle().await;
+    rig.probe.release("a");
+    until("the lane to drain", || rig.stream.is_idle()).await;
+    assert_eq!(rig.probe.starts(), ["a"], "the backfill page is skipped");
+    assert!(!rig.probe.log().contains(&"seeded users".to_owned()));
+    assert_eq!(rig.stream.watermark(), Some(Position(1)));
+}
+
 /// Three writes in flight; the last one granted is caught up and returns
 /// first, so its refresh can't cover the two that return after it. Once the
 /// engine is idle it sends an empty caught-up write, and every position is

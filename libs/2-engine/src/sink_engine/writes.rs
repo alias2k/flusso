@@ -65,7 +65,7 @@
 
 use std::cmp::Ordering as Order;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
@@ -157,7 +157,7 @@ pub(super) struct Run<'a> {
     lane: Box<dyn Consumer<LaneItem>>,
     window: VecDeque<Queued>,
     flights: Flights<'a, Landed>,
-    flying: HashMap<u64, Flight>,
+    flying: Vec<(u64, Flight)>,
     next_flight: u64,
     /// The lane-order number the next delivered item gets.
     next_seq: u64,
@@ -187,7 +187,7 @@ impl<'a> Run<'a> {
             lane,
             window: VecDeque::new(),
             flights: Flights::new(),
-            flying: HashMap::new(),
+            flying: Vec::new(),
             next_flight: 0,
             next_seq: 0,
             contested: 0,
@@ -227,10 +227,43 @@ impl<'a> Run<'a> {
             let next_due = self.next_due;
             // A stop changes nothing for the loop but the backfill waiting
             // (skipped unwritten), so it is watched only while some waits.
-            let stop = self.engine.stop.clone();
+            let engine = self.engine;
+            let stop = &engine.stop;
             let watch_stop = self.backfill_waiting > 0 && !stop.is_requested();
             if self.flights.is_empty() && self.window.is_empty() {
                 self.idle_since.get_or_insert_with(Instant::now);
+            }
+            // Writing with nothing waiting and no room to take more, only a
+            // write landing, a reindex arriving or a position coming due can
+            // change anything: the lane, a stop and the idle tick are left
+            // out of the wait, as one write at a time left them while it
+            // flushed. A `select!` builds and polls every branch on every
+            // turn: about a tenth of the loop's cost per lane item at one
+            // change per batch.
+            if !room && !watch_stop && self.window.is_empty() && !self.flights.is_empty() {
+                tokio::select! {
+                    biased;
+                    landed = self.flights.next() => {
+                        if let Some(landed) = landed
+                            && let Err(error) = self.landed(landed).await
+                        {
+                            self.fail(error);
+                        }
+                    }
+                    message = control.recv(), if control_open && !self.engine.reindex_pending() && self.failure.is_none() => {
+                        match message {
+                            None => control_open = false,
+                            Some(SinkControl::Reindex { indexes }) => {
+                                self.engine.set_pending_reindex(indexes);
+                            }
+                        }
+                    }
+                    () = until(next_due) => {
+                        self.engine.report_searchable();
+                        self.refresh_due();
+                    }
+                }
+                continue;
             }
             tokio::select! {
                 landed = self.flights.next(), if !self.flights.is_empty() => {
@@ -254,7 +287,7 @@ impl<'a> Run<'a> {
                     match message {
                         None => control_open = false,
                         Some(SinkControl::Reindex { indexes }) => {
-                            *self.engine.lock_pending_reindex() = Some(indexes);
+                            self.engine.set_pending_reindex(indexes);
                         }
                     }
                 }
@@ -277,14 +310,14 @@ impl<'a> Run<'a> {
             self.skip_backfill().await?;
         }
         let pending = if self.flights.is_empty() {
-            self.engine.lock_pending_reindex().take()
+            self.engine.take_pending_reindex()
         } else {
             None
         };
         if let Some(indexes) = pending {
             let started = Instant::now();
             if let Err(error) = self.engine.reindex(indexes.clone()).await {
-                *self.engine.lock_pending_reindex() = Some(indexes);
+                self.engine.set_pending_reindex(indexes);
                 return Err(error);
             }
             self.engine.observer.on_stage(
@@ -502,7 +535,8 @@ impl<'a> Run<'a> {
             };
             let admissible = self
                 .flying
-                .values()
+                .iter()
+                .map(|(_, flight)| flight)
                 .all(|flight| documents.share_none_with(&flight.documents))
                 && documents
                     .hashes()
@@ -546,7 +580,7 @@ impl<'a> Run<'a> {
         let flight = self.next_flight;
         self.next_flight += 1;
         let covers_below = caught_up.then(|| self.engine.lock_fences().returned());
-        self.flying.insert(
+        self.flying.push((
             flight,
             Flight {
                 handle,
@@ -558,7 +592,7 @@ impl<'a> Run<'a> {
                 seq,
                 caught_up: covers_below,
             },
-        );
+        ));
         let sink = &self.engine.sink;
         let envelopes = batch.envelopes;
         let span = tracing::debug_span!("sink.write", envelopes = envelopes.len(), caught_up);
@@ -570,9 +604,13 @@ impl<'a> Run<'a> {
                 result,
                 took: started.elapsed(),
             }
-        }
-        .instrument(span)
-        .boxed();
+        };
+        // A disabled span still costs an enter and exit per poll.
+        let write = if span.is_disabled() {
+            write.boxed()
+        } else {
+            write.instrument(span).boxed()
+        };
         // Start the write now rather than at the next turn of the loop: a
         // request goes out at once, and a write that completes on its first
         // poll is handled here.
@@ -582,9 +620,10 @@ impl<'a> Run<'a> {
     /// A write returned: decide its rejections, move the fences, and
     /// acknowledge it, or record the failure that ends the run.
     async fn landed(&mut self, landed: Landed) -> Result<()> {
-        let Some(flight) = self.flying.remove(&landed.flight) else {
+        let Some(index) = self.flying.iter().position(|(id, _)| *id == landed.flight) else {
             return Ok(());
         };
+        let (_, flight) = self.flying.swap_remove(index);
         self.engine.observer.on_stage(
             StageTiming::new(Stage::Write, landed.took)
                 .work(flight.work)
@@ -707,7 +746,7 @@ impl<'a> Run<'a> {
     /// the item at `seq` in lane order.
     fn is_oldest(&self, seq: u64) -> bool {
         self.window.iter().all(|queued| queued.seq > seq)
-            && self.flying.values().all(|flight| flight.seq > seq)
+            && self.flying.iter().all(|(_, flight)| flight.seq > seq)
     }
 }
 

@@ -900,7 +900,12 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   once that fails the run. While there is room the `select!` awaits the lane's `recv` (the
   wake-up for the next item), through `next_delivery`, which makes the boxed `recv` future only when
   polled (`select!` evaluates a disabled branch's expression too); between waits, `fill` takes what
-  is queued only when `is_empty` says something is. **Admission**: an item starts
+  is queued only when `is_empty` says something is (the channel answers from atomics, its due count
+  and the queue's capacity, never the ledger lock the ingest shares; an acked handle takes no lock
+  on drop; guard `only_a_handle_dropped_unacked_is_redelivered`). With nothing waiting and no room the
+  run waits only on the landing write, a control message and a due position (the lane, a stop and the
+  idle tick can't matter there; guards `a_reindex_taken_before_a_failed_write_is_staged_after_the_restart`,
+  `a_stop_during_the_only_write_still_skips_the_backfill_behind_it`). **Admission**: an item starts
   only when no earlier unfinished item (in flight, or waiting ahead of it) shares a document
   (`(index, id)` hashed to `u64`, only when a comparison is needed: nothing in flight and one kind
   waiting grants the front item unhashed; a collision only holds an item back). **Selection**: live
