@@ -229,13 +229,18 @@ fn bulk_item(id: &str, status: u16) -> serde_json::Value {
 }
 
 fn sink(url: &str, max_retries: u32) -> OpensearchSink {
+    sink_chunked(url, max_retries, 1000)
+}
+
+/// A sink whose bulk requests carry at most `batch_size` documents.
+fn sink_chunked(url: &str, max_retries: u32, batch_size: u32) -> OpensearchSink {
     let config = OpensearchConfig {
         url: kernel::Secret::Value(url.to_owned()),
         username: None,
         password: None,
         tls_verify: true,
         ca_file: None,
-        batch_size: 1000,
+        batch_size,
         max_bytes: 10 * 1024 * 1024,
         timeout_secs: 5,
         max_retries,
@@ -541,5 +546,83 @@ async fn a_caught_up_write_over_the_one_index_left_unrefreshed_sends_no_extra_re
         *stub.lines.lock().unwrap(),
         ["POST /_bulk", "POST /_bulk?refresh=true"],
         "the caught-up bulk's own refresh covers the single-shard index"
+    );
+}
+
+/// A caught-up write split into chunks over two single-shard indexes: each
+/// chunk carries `?refresh=true`, which is what lets the write skip a
+/// separate `_refresh` of both. If only the last chunk refreshed, the first
+/// index would be taken as covered without a refresh.
+#[tokio::test]
+async fn every_chunk_of_a_caught_up_write_refreshes_what_it_wrote() {
+    let stub = stub_bulk(|_, _| 201).await;
+    let sink = sink_chunked(&stub.url, 0, 1);
+    for logical in ["users", "orders"] {
+        sink.set_target(
+            logical,
+            crate::IndexTarget {
+                generation: format!("{logical}_1"),
+                hash_alias: logical.to_owned(),
+                seeded: false,
+                single_shard: true,
+            },
+        );
+    }
+    let in_index = |index: &str, id: &str| {
+        Envelope::upsert(
+            IndexName::try_new(index).unwrap(),
+            id,
+            GenericValue::Map(BTreeMap::new()),
+            Some(Position(0)),
+            chrono::Utc::now(),
+        )
+    };
+
+    sink.write(&[in_index("users", "1"), in_index("orders", "1")], false)
+        .await
+        .unwrap();
+    let report = sink
+        .write(&[in_index("users", "2"), in_index("orders", "2")], true)
+        .await
+        .unwrap();
+    assert_eq!(report.visibility, Visibility::Immediate);
+    assert_eq!(
+        *stub.lines.lock().unwrap(),
+        [
+            "POST /_bulk",
+            "POST /_bulk",
+            "POST /_bulk?refresh=true",
+            "POST /_bulk?refresh=true",
+        ],
+        "both chunks of the caught-up write refreshed what they wrote, so no _refresh follows"
+    );
+}
+
+/// An index of several primary shards (or an unknown count) is refreshed
+/// separately: the caught-up bulk refreshed only the shards it touched.
+#[tokio::test]
+async fn a_caught_up_write_over_a_multi_shard_index_still_refreshes_it() {
+    let stub = stub_bulk(|_, _| 201).await;
+    let sink = sink(&stub.url, 0);
+    sink.set_target(
+        "users",
+        crate::IndexTarget {
+            generation: "users_1".to_owned(),
+            hash_alias: "users".to_owned(),
+            seeded: false,
+            single_shard: false,
+        },
+    );
+
+    sink.write(&upserts(&["1"]), false).await.unwrap();
+    let report = sink.write(&upserts(&["2"]), true).await.unwrap();
+    assert_eq!(report.visibility, Visibility::Immediate);
+    assert_eq!(
+        *stub.lines.lock().unwrap(),
+        [
+            "POST /_bulk",
+            "POST /_bulk?refresh=true",
+            "POST /users_1/_refresh?ignore_unavailable=true",
+        ],
     );
 }
