@@ -1650,6 +1650,7 @@ async fn a_dropped_engine_aborts_its_running_builds() {
     )
     .ingest(|ingest| ingest.with_batch(batch(1)).with_builds(4));
     let sink = deployment.start_sink().await;
+    let budget = deployment.budget.clone().unwrap();
     let ingest = deployment.ingest;
     let run = tokio::spawn(async move { ingest.run().await });
     while builder.grants().len() < 3 {
@@ -1664,6 +1665,11 @@ async fn a_dropped_engine_aborts_its_running_builds() {
         builder.cancelled.load(Ordering::SeqCst),
         3,
         "every held build is dropped with the engine"
+    );
+    assert_eq!(
+        budget.held(),
+        crate::Held::default(),
+        "the aborted builds gave their reservations back"
     );
     sink.abort();
 }
@@ -1872,4 +1878,90 @@ async fn a_batch_split_across_lanes_gives_its_bytes_back_once_the_last_lane_land
     for task in tasks {
         task.abort();
     }
+}
+
+/// A stop in the middle of a backfill abandons the snapshot: the batches it
+/// had built are published and written, the rest never built, and every byte
+/// the budget counted comes back.
+#[tokio::test(start_paused = true)]
+async fn a_snapshot_abandoned_at_a_stop_gives_every_byte_back() {
+    let db = Database::new(200, Vec::new());
+    let builder = Builder::new(
+        &db,
+        Behaviour {
+            delay: Some(Duration::from_millis(5)),
+            ..Behaviour::default()
+        },
+    );
+    let stop = Stop::new();
+    let mut deployment = Deployment::new(
+        Feed::new(&db).open(),
+        Arc::clone(&builder),
+        Recorder::seeded(false),
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(4))
+            .with_builds(4)
+            .with_stop(stop.clone())
+    })
+    .with_budget(16 * KIB, usize::MAX);
+    let sink = deployment.start_sink().await;
+    let driver = {
+        let builder = Arc::clone(&builder);
+        tokio::spawn(async move {
+            while builder.grants().len() < 6 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            stop.request();
+        })
+    };
+    let result = deployment.ingest.run().await;
+    driver.await.unwrap();
+    deployment.drained().await;
+    deployment.assert_released().await;
+    sink.abort();
+    assert!(result.is_ok(), "{result:?}");
+    assert!(
+        builder.grants().len() < 50,
+        "the backfill stopped part way: {} builds",
+        builder.grants().len()
+    );
+}
+
+/// The ingest engine fails while a stalled sink's lane still holds charged
+/// batches; it is restarted, the sink resumes, and every byte comes back:
+/// a charge outlives the run that built it, and goes when its batch lands.
+#[tokio::test(start_paused = true)]
+async fn an_ingest_restart_while_lanes_hold_charges_gives_every_byte_back() {
+    let db = Database::new(0, (0..12).map(Change::upsert).collect());
+    let builder = Builder::new(
+        &db,
+        Behaviour {
+            fail_once: Mutex::new(HashSet::from([8])),
+            ..Behaviour::default()
+        },
+    );
+    let recorder = Recorder::seeded(true);
+    recorder.stall();
+    let mut deployment = Deployment::new(Feed::new(&db), builder, Arc::clone(&recorder))
+        .ingest(|ingest| ingest.with_batch(batch(2)).with_builds(4))
+        .with_budget(64 * KIB, usize::MAX);
+    let resumer = {
+        let recorder = Arc::clone(&recorder);
+        let budget = deployment.budget.clone().unwrap();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let held = budget.held().total;
+            recorder.resume();
+            held
+        })
+    };
+    let failed = deployment.run_to_end(2).await;
+    assert!(
+        resumer.await.unwrap() > 0,
+        "the stalled lane held charged batches"
+    );
+    assert_eq!(failed, 1, "the build of 8 failed once");
+    assert_eq!(deployment.recorder.state(), db.expected());
 }
