@@ -364,6 +364,13 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
         let _ = (sink, stats);
     }
 
+    /// A write of `sink` sent `refreshes` requests that refresh the
+    /// destination (what its `WriteReport` counted): caught-up writes and the
+    /// empty caught-up write of a lane going quiet.
+    fn on_refreshes(&self, sink: &SinkName, refreshes: u64) {
+        let _ = (sink, refreshes);
+    }
+
     /// A sink rejected one document and the `skip` policy left it out.
     fn on_document_quarantined(&self, sink: &SinkName, index: &str, id: &str, reason: &str) {
         let _ = (sink, index, id, reason);
@@ -507,6 +514,12 @@ impl Observer for FanOut {
     fn on_changes_settled(&self, sink: &SinkName, changes: usize) {
         for observer in &self.observers {
             observer.on_changes_settled(sink, changes);
+        }
+    }
+
+    fn on_refreshes(&self, sink: &SinkName, refreshes: u64) {
+        for observer in &self.observers {
+            observer.on_refreshes(sink, refreshes);
         }
     }
 

@@ -34,6 +34,7 @@ const STAGE: &str = "flusso_stage_duration_seconds";
 const FLUSH_DOCUMENTS: &str = "flusso_flush_documents";
 const FLUSH_SIZE: &str = "flusso_flush_size_bytes";
 const STARTUP: &str = "flusso_startup_duration_seconds";
+const REFRESHES: &str = "flusso_sink_refreshes_total";
 
 /// One series' labels that matter here; any other label is ignored, so a
 /// label flusso adds later doesn't break the parse.
@@ -59,6 +60,8 @@ pub(crate) struct Scrape {
     flush_documents: BTreeMap<Labels, Totals>,
     flush_size: BTreeMap<Labels, Totals>,
     startup: BTreeMap<Labels, f64>,
+    /// Refresh requests sent, per sink (`flusso.sink.refreshes`).
+    refreshes: BTreeMap<String, f64>,
 }
 
 impl Scrape {
@@ -69,6 +72,10 @@ impl Scrape {
             let Some((name, labels, value)) = sample(line) else {
                 continue;
             };
+            if name == REFRESHES {
+                scrape.refreshes.insert(labels.sink.clone(), value);
+                continue;
+            }
             let (family, part) = match name.rsplit_once('_') {
                 Some((family, part @ ("sum" | "count"))) => (family, part),
                 _ => (name, ""),
@@ -207,6 +214,8 @@ pub(crate) struct Attribution {
     pub(crate) stages: Vec<Row>,
     pub(crate) other: Vec<Other>,
     pub(crate) flushes: Vec<FlushSize>,
+    /// Refresh requests each sink sent in the phase.
+    pub(crate) refreshes: BTreeMap<String, f64>,
     /// Start-up steps in seconds (the backfill phase only).
     pub(crate) startup: BTreeMap<String, f64>,
 }
@@ -314,6 +323,15 @@ impl Attribution {
                 })
             })
             .collect();
+        let refreshes = after
+            .refreshes
+            .iter()
+            .map(|(sink, now)| {
+                let earlier = before.refreshes.get(sink).copied().unwrap_or(0.0);
+                (sink.clone(), now - earlier)
+            })
+            .filter(|(_, sent)| *sent > 0.0)
+            .collect();
         let startup = if before.startup.is_empty() {
             after.startup_steps()
         } else {
@@ -325,6 +343,7 @@ impl Attribution {
             stages,
             other,
             flushes,
+            refreshes,
             startup,
         }
     }
@@ -384,6 +403,12 @@ impl Attribution {
                 );
             }
         }
+        if !self.refreshes.is_empty() {
+            let _ = writeln!(out, "\n| refreshes | sink | count |\n| --- | --- | ---: |");
+            for (sink, sent) in &self.refreshes {
+                let _ = writeln!(out, "| | {sink} | {sent:.0} |");
+            }
+        }
         if !self.startup.is_empty() {
             let _ = writeln!(out, "\n| start-up step | seconds |\n| --- | ---: |");
             for (step, seconds) in &self.startup {
@@ -406,6 +431,7 @@ flusso_stage_duration_seconds_bucket{stage=\"build\",work=\"live\",le=\"0.1\"} 4
 flusso_stage_duration_seconds_sum{stage=\"build\",work=\"live\"} 0.2
 flusso_stage_duration_seconds_count{stage=\"build\",work=\"live\"} 4
 flusso_startup_duration_seconds{sink=\"primary\",step=\"stage\"} 0.3
+flusso_sink_refreshes_total{sink=\"primary\"} 5
 ";
 
     const AFTER: &str = "\
@@ -426,7 +452,19 @@ flusso_flush_size_bytes_count{sink=\"primary\",work=\"live\"} 20
 flusso_flush_duration_seconds_sum{sink=\"primary\"} 3
 flusso_startup_duration_seconds{sink=\"primary\",step=\"stage\"} 0.3
 flusso_startup_duration_seconds{step=\"live\"} 1.5
+flusso_sink_refreshes_total{sink=\"primary\"} 12
 ";
+
+    #[test]
+    fn refreshes_are_counted_per_sink_over_the_phase() {
+        let attribution =
+            Attribution::between("burst", &Scrape::parse(BEFORE), &Scrape::parse(AFTER), 4.0);
+        assert_eq!(
+            attribution.refreshes,
+            BTreeMap::from([("primary".to_owned(), 7.0)])
+        );
+        assert!(attribution.markdown().contains("| | primary | 7 |"));
+    }
 
     #[test]
     fn a_phase_is_the_difference_between_two_scrapes_grouped_by_task() {

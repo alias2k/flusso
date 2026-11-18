@@ -28,6 +28,10 @@ pub struct WriteReport {
     /// Bytes the write sent to the destination, when the sink counts them
     /// (the OpenSearch sink: its `_bulk` bodies). Reported as a metric only.
     pub bytes: Option<u64>,
+    /// Requests the write sent that refresh the destination (the OpenSearch
+    /// sink: `_refresh` calls and `_bulk` requests with `?refresh=true`).
+    /// Reported as a metric only.
+    pub refreshes: u64,
 }
 
 /// When the documents of one [`write`](Sink::write) become searchable.
@@ -135,6 +139,13 @@ impl WriteReport {
     #[must_use]
     pub fn sent(mut self, bytes: u64) -> Self {
         self.bytes = Some(bytes);
+        self
+    }
+
+    /// Set how many requests of the write refreshed the destination.
+    #[must_use]
+    pub fn refreshed(mut self, refreshes: u64) -> Self {
+        self.refreshes = refreshes;
         self
     }
 
@@ -294,6 +305,7 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
             let report = self.write(part, false).await?;
             folded.visibility = folded.visibility.later(report.visibility);
             bytes = sum_bytes(bytes, report.bytes);
+            folded.refreshes += report.refreshes;
             folded.rejected.extend(report.rejected);
         }
         let report = self.write(last, caught_up).await?;
@@ -303,6 +315,7 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
             folded.visibility.later(report.visibility)
         };
         folded.bytes = sum_bytes(bytes, report.bytes);
+        folded.refreshes += report.refreshes;
         folded.rejected.extend(report.rejected);
         Ok(folded)
     }

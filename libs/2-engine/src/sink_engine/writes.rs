@@ -1167,6 +1167,11 @@ impl<'a> Run<'a> {
                 Some((key, part.position?))
             })
             .collect();
+        if report.refreshes > 0 {
+            self.engine
+                .observer
+                .on_refreshes(&self.engine.name, report.refreshes);
+        }
         let returned = self.engine.write_returned(
             &written,
             report.visibility,
@@ -1283,6 +1288,11 @@ impl<'a> Run<'a> {
                     .work(Work::Live)
                     .sink(&self.engine.name),
             );
+            if report.refreshes > 0 {
+                self.engine
+                    .observer
+                    .on_refreshes(&self.engine.name, report.refreshes);
+            }
             let returned = self.engine.write_returned(
                 &[],
                 report.visibility,

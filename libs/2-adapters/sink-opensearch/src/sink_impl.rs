@@ -261,8 +261,12 @@ impl Sink for OpensearchSink {
         });
 
         if actions.is_empty() && rejected.is_empty() {
-            let visibility = self.settle_visibility(caught_up, &actions, sent_at).await;
-            return Ok(WriteReport::clean().visible(visibility).sent(0));
+            let (visibility, refreshes) =
+                self.settle_visibility(caught_up, &actions, sent_at).await;
+            return Ok(WriteReport::clean()
+                .visible(visibility)
+                .sent(0)
+                .refreshed(refreshes));
         }
 
         let mut fragments = Vec::with_capacity(actions.len());
@@ -314,11 +318,17 @@ impl Sink for OpensearchSink {
             }
         }
 
-        let visibility = self.settle_visibility(caught_up, &actions, sent_at).await;
+        let (visibility, refreshes) = self.settle_visibility(caught_up, &actions, sent_at).await;
+        let refreshing_bulks = if caught_up.is_caught_up() {
+            plan.len() as u64
+        } else {
+            0
+        };
         Ok(WriteReport::clean()
             .rejecting(rejected)
             .visible(visibility)
-            .sent(total_bytes as u64))
+            .sent(total_bytes as u64)
+            .refreshed(refreshing_bulks + refreshes))
     }
 
     /// `batch_size`: the engine merges ready items up to it, so a merged
@@ -534,18 +544,18 @@ impl OpensearchSink {
         caught_up: CaughtUp<'_>,
         written: &[BulkAction],
         sent_at: u64,
-    ) -> Visibility {
+    ) -> (Visibility, u64) {
         let unforced = match self.refresh_period() {
             Some(period) => Visibility::Within(period),
             None => Visibility::Deferred,
         };
         if !caught_up.is_caught_up() {
             if written.is_empty() {
-                return Visibility::Immediate;
+                return (Visibility::Immediate, 0);
             }
             self.lock_unrefreshed()
                 .mark(written.iter().map(|action| action.index().to_owned()));
-            return unforced;
+            return (unforced, 0);
         }
         // One caught-up refresh at a time: a second one waits here, then sees
         // what this one put back if it failed, so neither answers `Immediate`
@@ -562,15 +572,15 @@ impl OpensearchSink {
                 written.iter().any(|action| action.index() == index) && self.single_shard(index)
             });
         if pending.is_empty() {
-            return Visibility::Immediate;
+            return (Visibility::Immediate, 0);
         }
         let names: BTreeSet<String> = pending.keys().cloned().collect();
         match self.refresh_indexes(&names).await {
-            Ok(()) => Visibility::Immediate,
+            Ok(()) => (Visibility::Immediate, 1),
             Err(error) => {
                 warn!(%error, "could not refresh indexes earlier writes left unrefreshed; retrying on the next caught-up write");
                 self.lock_unrefreshed().restore(pending);
-                unforced
+                (unforced, 1)
             }
         }
     }

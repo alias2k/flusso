@@ -39,6 +39,7 @@ pub(crate) struct OtelObserver {
     documents_quarantined: Counter<u64>,
     script_failures: Counter<u64>,
     errors: Counter<u64>,
+    refreshes: Counter<u64>,
     flush_duration: Histogram<f64>,
     flush_documents: Histogram<u64>,
     flush_size: Histogram<u64>,
@@ -105,6 +106,13 @@ impl OtelObserver {
             errors: meter
                 .u64_counter("flusso.errors")
                 .with_description("Errors that stopped an engine (the daemon restarts it)")
+                .build(),
+            refreshes: meter
+                .u64_counter("flusso.sink.refreshes")
+                .with_description(
+                    "Requests a sink sent that refresh the destination (OpenSearch: `_refresh` \
+                     calls and `_bulk` requests with `?refresh=true`)",
+                )
                 .build(),
             flush_duration: meter
                 .f64_histogram("flusso.flush.duration")
@@ -261,6 +269,10 @@ impl Observer for OtelObserver {
         if let Some(bytes) = stats.bytes {
             self.flush_size.record(bytes, &sized);
         }
+    }
+
+    fn on_refreshes(&self, sink: &SinkName, refreshes: u64) {
+        self.refreshes.add(refreshes, &[self.sink_label(sink)]);
     }
 
     fn on_document_quarantined(&self, sink: &SinkName, index: &str, _id: &str, _reason: &str) {

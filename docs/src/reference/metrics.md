@@ -27,6 +27,7 @@ flusso records OpenTelemetry instruments and exposes them two ways: a Prometheus
 | `flusso.replication.slot_lag` | gauge | By | | Bytes the confirmed position trails the WAL head by. Sampled every `--lag-poll-secs`. The confirmed position is the slowest sink's. |
 | `flusso.replication.visibility_wait` | gauge | s | | Seconds the source has held a committed transaction that isn't visible yet; every later change waits behind it. `0` while nothing waits. Read at scrape time. Past a few seconds it means a synchronous standby isn't answering: see [Behind a synchronous standby](source-postgres.md#behind-a-synchronous-standby). Alert on it: the dev stack's `dev/prometheus/rules/flusso.rules.yml` has `FlussoVisibilityWait`, over 30 s for a minute. |
 | `flusso.errors` | counter | | `engine` | Errors that stopped an engine: `ingest`, or `sink:<name>`. A sink engine is restarted with backoff; the counter keeps climbing while it fails. |
+| `flusso.sink.refreshes` | counter | | `sink` | Requests the sink sent that refresh the destination: for OpenSearch, `_refresh` calls and `_bulk` requests with `?refresh=true`. A caught-up write (its index has nothing else waiting) refreshes; a write during a backlog doesn't. Compare with `flusso.batches` to see how many writes refresh. |
 
 ## Prometheus names
 
@@ -57,6 +58,7 @@ The Prometheus reader applies the usual conventions: dots become underscores, co
 | `flusso.replication.slot_lag` | `flusso_replication_slot_lag_bytes` |
 | `flusso.replication.visibility_wait` | `flusso_replication_visibility_wait_seconds` |
 | `flusso.errors` | `flusso_errors_total{engine}` |
+| `flusso.sink.refreshes` | `flusso_sink_refreshes_total{sink}` |
 
 The scope labels (`otel_scope_name`, `otel_scope_version`) are dropped; there is one scope.
 
