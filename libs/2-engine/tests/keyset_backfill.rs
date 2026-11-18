@@ -70,10 +70,7 @@ impl Sink for LastWrite {
                 Some(document) => format!("upsert {}", sink::to_json(document)),
                 None => "delete".to_owned(),
             };
-            state.insert(
-                (envelope.index.to_string(), envelope.id.clone()),
-                written,
-            );
+            state.insert((envelope.index.to_string(), envelope.id.clone()), written);
         }
         Ok(sink::WriteReport::clean())
     }
@@ -193,7 +190,11 @@ async fn writes(pool: &PgPool, n: usize, k: i64) {
             200_000 + n,
             behind - 5
         ),
-        format!("UPDATE items SET id = {} WHERE id = {}", -(1_000 + n), ahead + 5),
+        format!(
+            "UPDATE items SET id = {} WHERE id = {}",
+            -(1_000 + n),
+            ahead + 5
+        ),
         format!(
             "UPDATE items SET parent_id = parent_id % {PARENTS} + 1 \
              WHERE id IN ({}, {}, {})",
@@ -358,7 +359,11 @@ async fn expected(url: &str, pool: &PgPool) -> BTreeMap<(String, String), String
         .unwrap();
     let mut out = BTreeMap::new();
     for name in INDEXES {
-        let table = if name == "parents" { "parents" } else { "items" };
+        let table = if name == "parents" {
+            "parents"
+        } else {
+            "items"
+        };
         let ids: Vec<i64> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT id::int8 FROM {table} ORDER BY id"
         )))
