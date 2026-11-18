@@ -38,6 +38,7 @@
 - [Reindex without downtime](operate/reindex.md)
 - [Read your own writes](operate/read-your-writes.md)
 - [Handle rejected documents](operate/rejected-documents.md)
+- [A lane is stalled](operate/stalled-lane.md)
 - [Recover from a dropped slot](operate/dropped-slot.md)
 - [Secure the private surface](operate/private-surface.md)
 - [Upgrade to 0.17](operate/upgrade-to-0-17.md)

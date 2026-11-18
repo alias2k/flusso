@@ -123,6 +123,22 @@ metrics:
     relabelings: []
     metricRelabelings: []
 
+# Prometheus Operator PrometheusRule with flusso's alerts: a stalled lane
+# (one index into one sink landing nothing, which pins the replication slot
+# for every index) and a commit held while not visible. Requires the
+# Prometheus Operator CRDs.
+prometheusRule:
+  enabled: false
+  # Namespace to create the PrometheusRule in; defaults to the release namespace.
+  namespace: ""
+  # Extra labels (e.g. to match your Prometheus `ruleSelector`).
+  labels: {}
+  # A lane is stalled past either threshold, for `for`.
+  laneStallSeconds: 600
+  laneWalBehindBytes: 1073741824
+  for: 5m
+  severity: page
+
 serviceAccount:
   create: true
   name: ""

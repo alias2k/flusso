@@ -1,0 +1,38 @@
+{{- if .Values.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "flusso.fullname" . }}
+  namespace: {{ .Values.prometheusRule.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "flusso.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: flusso_alerts
+      rules:
+        - alert: FlussoLaneStalled
+          expr: flusso_lane_stall_age_seconds > {{ .Values.prometheusRule.laneStallSeconds }} or flusso_lane_wal_behind_bytes > {{ .Values.prometheusRule.laneWalBehindBytes | int64 }}
+          for: {{ .Values.prometheusRule.for }}
+          labels:
+            severity: {{ .Values.prometheusRule.severity }}
+          annotations:
+            summary: "flusso's {{ "{{" }} $labels.index {{ "}}" }} lane into {{ "{{" }} $labels.sink {{ "}}" }} has landed nothing for a while"
+            description: >-
+              The lane's oldest change has not been written to the sink. Until it
+              is, the replication slot keeps WAL for every index. Look at the
+              sink's errors in the log, then fix the cause, skip the document, or
+              reindex.
+        - alert: FlussoVisibilityWait
+          expr: flusso_replication_visibility_wait_seconds > 30
+          for: 1m
+          labels:
+            severity: {{ .Values.prometheusRule.severity }}
+          annotations:
+            summary: "flusso has held a commit that isn't visible for {{ "{{" }} $value | humanizeDuration {{ "}}" }}"
+            description: >-
+              Postgres keeps a commit invisible while it waits for a synchronous
+              standby. Nothing after it is indexed until it is visible.
+{{- end }}

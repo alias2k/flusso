@@ -7,6 +7,9 @@ flusso records OpenTelemetry instruments and exposes them two ways: a Prometheus
 | `flusso.changes.captured` | counter | | | Changes the ingest engine pulled from the source. |
 | `flusso.changes.committed` | counter | | `sink` | Changes whose batch that sink wrote and acked. |
 | `flusso.changes.in_flight` | gauge | | `sink` | Captured minus that sink's committed: the back-pressure signal per sink. Read from status at scrape time, so it stays current while a sink is stalled. |
+| `flusso.lane.stall_age` | gauge | s | `index`, `sink` | How long the lane's oldest outstanding change has stayed its oldest: the lane has written nothing for that long. 0 while nothing is outstanding or while it lands steadily; sampled every second. Alert on it: [A lane is stalled](../operate/stalled-lane.md). |
+| `flusso.lane.wal_behind` | gauge | By | `index`, `sink` | Bytes of WAL the replication slot keeps because of the lane, while it has a change outstanding. |
+| `flusso.slot.pinned_by` | gauge | | `index`, `sink` | 1 on the lane holding the slot back the most; no series while no lane has a change outstanding. |
 | `flusso.lane.outstanding` | gauge | | `index`, `sink` | Items routed to that `(index, sink)` lane and not written yet. Read at scrape time. The lane that stays high is the one holding back the replication slot and every fence on its index. |
 | `flusso.documents.built` | counter | | `index` | Documents assembled by the ingest engine, once for every sink. The unlabeled total is the sum. |
 | `flusso.documents.quarantined` | counter | | `sink`, `index` | Documents that sink rejected and its engine skipped under `on_error = "skip"`. Non-zero means data is being dropped. Alert on it. |
@@ -35,6 +38,9 @@ The Prometheus reader applies the usual conventions: dots become underscores, co
 | `flusso.changes.committed` | `flusso_changes_committed_total{sink}` |
 | `flusso.changes.in_flight` | `flusso_changes_in_flight{sink}` |
 | `flusso.lane.outstanding` | `flusso_lane_outstanding{index,sink}` |
+| `flusso.lane.stall_age` | `flusso_lane_stall_age_seconds{index,sink}` |
+| `flusso.lane.wal_behind` | `flusso_lane_wal_behind_bytes{index,sink}` |
+| `flusso.slot.pinned_by` | `flusso_slot_pinned_by{index,sink}` |
 | `flusso.documents.built` | `flusso_documents_built_total{index}` |
 | `flusso.documents.quarantined` | `flusso_documents_quarantined_total{sink,index}` |
 | `flusso.script.failures` | `flusso_script_failures_total{index,field,policy}` |

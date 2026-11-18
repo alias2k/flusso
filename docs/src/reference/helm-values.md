@@ -42,6 +42,13 @@ Every value the chart at `deploy/helm/flusso/` accepts, with its default. `value
 | `serviceAccount.create`, `name`, `annotations` | `true`, `""`, `{}` | |
 | `livenessProbe` | `GET /healthz` on `http`, 5 s delay, 10 s period | |
 | `readinessProbe` | `GET /readyz` on `http`, 5 s delay, 10 s period, `failureThreshold: 30` | The threshold rides out a long backfill. |
+| `prometheusRule.enabled` | `false` | Create a Prometheus Operator `PrometheusRule` with `FlussoLaneStalled` and `FlussoVisibilityWait`. Requires the operator's CRDs. |
+| `prometheusRule.namespace` | `""` | Defaults to the release namespace. |
+| `prometheusRule.labels` | `{}` | Extra labels, to match your Prometheus `ruleSelector`. |
+| `prometheusRule.laneStallSeconds` | `600` | `FlussoLaneStalled` fires past this stall age… |
+| `prometheusRule.laneWalBehindBytes` | `1073741824` | …or past this much WAL held by one lane (1 GiB). |
+| `prometheusRule.for` | `5m` | How long the condition holds before the alert fires. |
+| `prometheusRule.severity` | `page` | The alerts' `severity` label. |
 | `resources` | `requests.memory: 512Mi` | No limit by default. A limit needs room for `[concurrency] max_built_mib` (512 MiB) + `builds` batches + about 100 MiB, plus 10–20% allocator overhead; see [config.toml](config-toml.md#concurrency). |
 | `podAnnotations`, `podLabels` | `{}` | |
 | `podSecurityContext` | non-root, uid/gid 65532 | |
