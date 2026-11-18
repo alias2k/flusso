@@ -216,4 +216,25 @@ Per index, after the change:
 
 ### Seeding at once (§3)
 
-Not measured: it needs the engine change in §3.4. Track C measured 27% of `reference`'s backfill wall time in serial seeding at `builds = 4` on the branch. That is the number to compare against once it lands.
+Before is `33f60c08`, the branch just before the `seed:` engine commits. After is `98dd7cdd`. Both are release builds, run at `--scale default` with the default `builds = 4` and `writes = 4`, pinned to cores 0-3,12-15. The two builds alternated, three rounds each, with load averages from 4.6 to 13.8.
+
+Seed time is summed per index. "Seed wall" is the time some seed was running: the union of each index's seed interval, from the `marked seeded` debug line's end timestamp and step times. Each share is over the backfill's wall time.
+
+| Scenario | Build | Backfill wall, r1 / r2 / r3 | Seed, summed | Seed wall | Seed wall share |
+| --- | --- | --- | --- | --- | --- |
+| reference | before | 3.54 / 3.63 / 3.69 s | 858 / 1,119 / 1,086 ms | 858 / 1,119 / 1,086 ms | 24.2 / 30.8 / 29.4% |
+| reference | after | 4.89 / 3.46 / 3.39 s | 1,288 / 891 / 1,285 ms | 1,269 / 812 / 1,072 ms | 25.9 / 23.5 / 31.6% |
+| complex | before | 1.64 / 1.53 / 1.88 s | 477 / 452 / 544 ms | the same | 29.1 / 29.5 / 29.0% |
+| complex | after | 1.55 / 1.63 / 1.56 s | 458 / 446 / 412 ms | the same | 29.5 / 27.3 / 26.4% |
+
+**What this shows.** Seeding at once doesn't shorten these backfills. The seed share is unchanged, about 27% (track C's number).
+
+- **The seeds hardly overlap.** On `reference` the seed wall is nearly the summed time. The ingest engine walks the requested indexes one after another, so each index's `SnapshotComplete` arrives when its own walk ends, and the seeds come one at a time anyway.
+- **An early seed no longer stalls the sink**, but that bought nothing visible. The sink was not on the critical path: while it stalled, the ingest kept building into the memory budget, and the sink caught up after.
+- **What remains is the last index's refresh**, after its last write: 150–580 ms, almost all of each `refresh+settings+lookup` step. It is serial by nature: a rebuild's aliases may not move before it, and it can only start after the last write. `complex` has one index, so nothing there could overlap at all.
+
+**What would cut it** (not done; for the coordinator to place):
+
+1. **Walks running at once** (stage 8a's per-index ingest tasks). The indexes then finish together, the seeds overlap for real, and the seed wall becomes the longest refresh instead of the sum.
+2. **Not waiting for the refresh on a first seed.** The aliases are already on the generation, so the refresh only makes the backfill searchable sooner. The marker could be written without it, and the refresh left to the steady `refresh_interval` or the next caught-up write. A rebuild must still wait for it before its aliases move.
+3. **A smaller final refresh.** Refreshing now and then during the backfill, rather than holding `refresh_interval = -1` throughout, would spread that cost across the backfill. That is a trade against bulk speed, to be measured.
