@@ -224,6 +224,7 @@ fn item(position: u64, ids: &[&str]) -> stream::LaneItem {
 /// holds back only the items sharing a document with it: a later item over
 /// other documents is written meanwhile, a later item over the busy document
 /// waits until it lands, and the watermark stays before the busy item.
+/// Item 0 lands first, since a fresh engine writes its first item alone.
 #[tokio::test]
 async fn a_busy_item_holds_back_only_the_items_sharing_its_documents() {
     let refusals = std::sync::atomic::AtomicUsize::new(0);
@@ -248,12 +249,18 @@ async fn a_busy_item_holds_back_only_the_items_sharing_its_documents() {
     .with_writes(4);
     let (_control, mut rx) = tokio::sync::mpsc::channel(1);
     let run = tokio::spawn(async move { engine.run(&mut rx).await });
+    lane.publish(item(0, &["0"])).await.unwrap();
+    wait_for(|| stream.watermark() == Some(Position(0))).await;
 
     lane.publish(item(1, &["1", "3"])).await.unwrap();
     lane.publish(item(2, &["2"])).await.unwrap();
     lane.publish(item(3, &["1", "4"])).await.unwrap();
     wait_for(|| requests.lock().unwrap().contains(&vec!["2".to_owned()])).await;
-    assert_eq!(stream.watermark(), None, "1 is still refused as busy");
+    assert_eq!(
+        stream.watermark(),
+        Some(Position(0)),
+        "1 is still refused as busy"
+    );
 
     wait_for(|| stream.is_idle()).await;
     run.abort();

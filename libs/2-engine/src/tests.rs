@@ -1235,6 +1235,9 @@ impl PositionObserver {
     fn events(&self) -> Vec<String> {
         self.events.lock().unwrap().clone()
     }
+    fn forget(&self) {
+        self.events.lock().unwrap().clear();
+    }
 }
 
 impl Observer for PositionObserver {

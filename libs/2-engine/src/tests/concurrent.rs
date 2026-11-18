@@ -347,6 +347,22 @@ impl Rig {
         self
     }
 
+    /// Start, and land one write at position 0 before the test's own items:
+    /// a fresh engine writes its first item alone (a previous process may
+    /// have stopped on it), so a test of several writes at once starts after
+    /// one has landed. The warm-up leaves no trace in the logs.
+    async fn warm(self) -> Self {
+        let mut rig = self.start();
+        rig.live(0, &["warm"]).await;
+        until("the warm-up write", || {
+            rig.stream.watermark() == Some(Position(0))
+        })
+        .await;
+        rig.probe.log.lock().unwrap().clear();
+        rig.observer.forget();
+        rig
+    }
+
     /// The outcome of the running engine, once it ends.
     async fn ended(&mut self) -> Result<()> {
         self.engine.take().unwrap().await.unwrap()
@@ -540,7 +556,7 @@ async fn a_document_is_never_written_twice_at_once_and_its_versions_never_go_dow
 #[tokio::test(start_paused = true)]
 async fn writes_run_at_once_up_to_the_setting() {
     let rig_probe = Probe::new().holding(&["a", "b", "c", "d"]);
-    let mut rig = Rig::new(rig_probe, 3).start();
+    let mut rig = Rig::new(rig_probe, 3).warm().await;
     for (position, id) in ["a", "b", "c", "d"].into_iter().enumerate() {
         rig.live(position as u64 + 1, &[id]).await;
     }
@@ -565,7 +581,7 @@ async fn writes_run_at_once_up_to_the_setting() {
 /// it, while items holding other documents go ahead.
 #[tokio::test(start_paused = true)]
 async fn an_item_waits_for_an_earlier_one_sharing_a_document() {
-    let mut rig = Rig::new(Probe::new().holding(&["a"]), 4).start();
+    let mut rig = Rig::new(Probe::new().holding(&["a"]), 4).warm().await;
     rig.live(1, &["a", "b"]).await;
     rig.live(2, &["a"]).await;
     rig.live(3, &["c"]).await;
@@ -582,7 +598,7 @@ async fn an_item_waits_for_an_earlier_one_sharing_a_document() {
 /// it lands.
 #[tokio::test(start_paused = true)]
 async fn a_later_write_finishing_first_moves_neither_the_watermark_nor_the_fence() {
-    let mut rig = Rig::new(Probe::new().holding(&["a"]), 4).start();
+    let mut rig = Rig::new(Probe::new().holding(&["a"]), 4).warm().await;
     rig.live(1, &["a"]).await;
     rig.live(2, &["b"]).await;
     rig.live(3, &["c"]).await;
@@ -596,7 +612,11 @@ async fn a_later_write_finishing_first_moves_neither_the_watermark_nor_the_fence
     })
     .await;
     settle().await;
-    assert_eq!(rig.stream.watermark(), None, "1 is still being written");
+    assert_eq!(
+        rig.stream.watermark(),
+        Some(Position(0)),
+        "1 is still being written"
+    );
     assert!(rig.applied().is_empty(), "{:?}", rig.applied());
 
     rig.probe.release("a");
@@ -607,23 +627,38 @@ async fn a_later_write_finishing_first_moves_neither_the_watermark_nor_the_fence
 
 /// With writes = 1, live items go before backfill items queued ahead of them,
 /// except every fourth grant both could take, which goes to the oldest
-/// backfill item. Once one kind runs out the other takes every grant.
+/// backfill item. Once one kind runs out the other takes every grant. Held
+/// gate writes fill every slot while the items queue, so the engine sees them
+/// all before it grants any.
 #[tokio::test(start_paused = true)]
 async fn live_goes_first_except_every_fourth_contested_grant() {
     for writes in [1, 2] {
-        let mut rig = Rig::new(Probe::new(), writes);
+        let gates: Vec<String> = (0..writes).map(|n| format!("gate{n}")).collect();
+        let gates: Vec<&str> = gates.iter().map(String::as_str).collect();
+        let mut rig = Rig::new(Probe::new().holding(&gates), writes).warm().await;
+        for (n, gate) in gates.iter().enumerate() {
+            rig.live(n as u64 + 1, &[gate]).await;
+        }
+        until("the gates to be written", || {
+            rig.probe.starts().len() == writes
+        })
+        .await;
         for page in 0..8 {
             rig.backfill(&[&format!("b{page}")]).await;
         }
         for position in 0..8 {
-            rig.live(position + 1, &[&format!("l{position}")]).await;
+            rig.live(position + 10, &[&format!("l{position}")]).await;
         }
-        let rig = rig.start();
+        settle().await;
+        for gate in &gates {
+            rig.probe.release(gate);
+        }
         until("the lane to drain", || rig.stream.is_idle()).await;
         let kinds: String = rig
             .probe
             .starts()
             .iter()
+            .filter(|ids| !ids.starts_with("gate"))
             .map(|ids| if ids.starts_with('b') { 'B' } else { 'L' })
             .collect();
         assert_eq!(kinds, "LLLBLLLBLLBBBBBB", "writes = {writes}");
@@ -684,7 +719,9 @@ async fn a_reindex_waits_for_the_writes_in_flight() {
 /// rewrites 1 alone.
 #[tokio::test(start_paused = true)]
 async fn a_failed_write_lets_the_others_finish_and_comes_back_alone() {
-    let mut rig = Rig::new(Probe::new().holding(&["a"]).failing_once(&["a"]), 4).start();
+    let mut rig = Rig::new(Probe::new().holding(&["a"]).failing_once(&["a"]), 4)
+        .warm()
+        .await;
     rig.live(1, &["a"]).await;
     rig.live(2, &["b"]).await;
     rig.live(3, &["c"]).await;
@@ -699,7 +736,11 @@ async fn a_failed_write_lets_the_others_finish_and_comes_back_alone() {
     .await;
     rig.probe.release("a");
     assert!(rig.ended().await.is_err(), "the failed write ends the run");
-    assert_eq!(rig.stream.watermark(), None, "1 is not written");
+    assert_eq!(
+        rig.stream.watermark(),
+        Some(Position(0)),
+        "1 is not written"
+    );
 
     let rig = rig.start();
     until("the lane to drain", || rig.stream.is_idle()).await;
@@ -714,7 +755,9 @@ async fn a_failed_write_lets_the_others_finish_and_comes_back_alone() {
 /// every restart. Once that item lands, writes run at once again.
 #[tokio::test(start_paused = true)]
 async fn after_a_failed_run_the_oldest_item_is_written_alone_until_it_lands() {
-    let mut rig = Rig::new(Probe::new().holding(&["a"]).failing_once(&["a"]), 4).start();
+    let mut rig = Rig::new(Probe::new().holding(&["a"]).failing_once(&["a"]), 4)
+        .warm()
+        .await;
     rig.live(1, &["a"]).await;
     rig.live(2, &["b"]).await;
     until("b to be written", || {
@@ -758,7 +801,7 @@ async fn after_a_failed_run_the_oldest_item_is_written_alone_until_it_lands() {
 /// waiting: its index isn't marked seeded.
 #[tokio::test(start_paused = true)]
 async fn a_stop_finishes_the_writes_in_flight_and_skips_waiting_backfill() {
-    let mut rig = Rig::new(Probe::new().holding(&["a", "b"]), 2).start();
+    let mut rig = Rig::new(Probe::new().holding(&["a", "b"]), 2).warm().await;
     rig.live(1, &["a"]).await;
     rig.live(2, &["b"]).await;
     rig.backfill(&["p"]).await;
@@ -792,7 +835,7 @@ async fn an_idle_engine_makes_its_last_writes_searchable() {
             Visibility::Within(Duration::from_secs(10))
         }
     });
-    let mut rig = Rig::new(probe, 4).start();
+    let mut rig = Rig::new(probe, 4).warm().await;
     rig.live(1, &["a"]).await;
     rig.live(2, &["b"]).await;
     rig.live(3, &["c"]).await;
@@ -921,7 +964,7 @@ async fn a_failed_acknowledgement_still_waits_for_the_writes_in_flight() {
         let (_control, mut rx) = tokio::sync::mpsc::channel(1);
         engine.run(&mut rx).await
     });
-    for (position, id) in [(1, "a"), (2, "b")] {
+    for (position, id) in [(0, "warm"), (1, "a"), (2, "b")] {
         let envelopes: Arc<[Envelope]> = vec![Envelope::upsert(
             users(),
             id,
@@ -1000,7 +1043,8 @@ async fn a_skip_rejection_beside_writes_in_flight_is_quarantined_and_the_run_goe
         4,
         FailurePolicies::new(FailurePolicy::Skip),
     )
-    .start();
+    .warm()
+    .await;
     rig.live(1, &["a"]).await;
     rig.live(2, &["b"]).await;
     rig.live(3, &["c"]).await;
@@ -1011,7 +1055,7 @@ async fn a_skip_rejection_beside_writes_in_flight_is_quarantined_and_the_run_goe
     .await;
     assert_eq!(
         rig.stream.watermark(),
-        None,
+        Some(Position(0)),
         "a is still being written, so nothing is confirmed yet"
     );
     rig.probe.release("a");
@@ -1071,7 +1115,10 @@ async fn a_reindex_taken_before_a_failed_write_is_staged_after_the_restart() {
 /// leaves the sink where it was, so that run made none.
 #[tokio::test(start_paused = true)]
 async fn only_the_oldest_unfinished_item_landing_counts_as_progress() {
-    let mut rig = Rig::new(Probe::new().holding(&["a"]).failing_once(&["a"]), 4).start();
+    let mut rig = Rig::new(Probe::new().holding(&["a"]).failing_once(&["a"]), 4)
+        .warm()
+        .await;
+    let warmed = rig.sink_engine.advanced();
     rig.live(1, &["a"]).await;
     rig.live(2, &["b"]).await;
     until("b to be written", || {
@@ -1082,13 +1129,13 @@ async fn only_the_oldest_unfinished_item_landing_counts_as_progress() {
     assert!(rig.ended().await.is_err());
     assert_eq!(
         rig.sink_engine.advanced(),
-        0,
+        warmed,
         "b landed behind a, which failed: no progress"
     );
 
     let rig = rig.start();
     until("the lane to drain", || rig.stream.is_idle()).await;
-    assert!(rig.sink_engine.advanced() > 0, "a landing is progress");
+    assert!(rig.sink_engine.advanced() > warmed, "a landing is progress");
 }
 
 /// An ordered sink (an emitting one, such as stdout) gets its items in exact
