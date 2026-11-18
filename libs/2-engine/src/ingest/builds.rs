@@ -67,9 +67,11 @@ pub(super) enum Job {
         position: Option<Position>,
         changes: usize,
     },
-    /// A snapshot batch, to each lane the slice it asked for.
+    /// A snapshot batch, to each lane the slice it asked for, each index's
+    /// slice carrying how far its walk got (the batch's greatest key of it).
     Backfill {
         requested: BTreeMap<SinkName, BTreeSet<IndexName>>,
+        marks: BTreeMap<IndexName, stream::WalkMark>,
     },
     /// A snapshot's end: `SnapshotComplete` to every lane that asked.
     Complete(Box<Snapshot>),

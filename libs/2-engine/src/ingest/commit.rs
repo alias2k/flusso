@@ -138,12 +138,41 @@ impl IngestEngine {
             builds.spare(self.batch.max_changes),
         );
         snapshot.batch.clear();
+        let marks = self.walk_marks(&ids).await;
         let job = Job::Backfill {
-            requested: snapshot.requested.clone(),
+            requested: snapshot.lanes_now(),
+            marks,
         };
         builds
             .start(&self.documents, ids, job, &|built| self.halts(built))
             .await;
+    }
+
+    /// Each index's mark for this batch: its greatest key, the last of the
+    /// index's ids (a walk buffers them in key order), as the source writes
+    /// it. An index the source can't mark gets none, and its lanes record
+    /// nothing for this batch.
+    async fn walk_marks(
+        &self,
+        ids: &[source::document::DocumentId],
+    ) -> BTreeMap<IndexName, stream::WalkMark> {
+        let mut last: BTreeMap<&IndexName, &source::RowKey> = BTreeMap::new();
+        for id in ids {
+            last.insert(&id.index, &id.key);
+        }
+        let mut marks = BTreeMap::new();
+        for (index, key) in last {
+            match self.documents.walk_mark(index, key).await {
+                Ok(Some(mark)) => {
+                    marks.insert(index.clone(), stream::WalkMark::new(mark));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%index, %error, "could not mark how far this backfill batch got; its lanes record nothing for it")
+                }
+            }
+        }
+        marks
     }
 
     /// The time the snapshot spent getting keys since its last batch.
@@ -200,8 +229,8 @@ impl IngestEngine {
                     self.publish_live(built, oldest, position, changes, &hold, lanes)
                         .await?;
                 }
-                (Job::Backfill { requested }, Some(built)) => {
-                    self.publish_backfill(built, &requested, &hold, lanes)
+                (Job::Backfill { requested, marks }, Some(built)) => {
+                    self.publish_backfill(built, &requested, &marks, &hold, lanes)
                         .await?;
                 }
                 (_, None) => {}
@@ -291,6 +320,7 @@ impl IngestEngine {
         &self,
         built: Built,
         requested: &BTreeMap<SinkName, std::collections::BTreeSet<IndexName>>,
+        marks: &BTreeMap<IndexName, stream::WalkMark>,
         hold: &Hold,
         lanes: &Lanes,
     ) -> Result<()> {
@@ -319,7 +349,7 @@ impl IngestEngine {
                         changes: 0,
                         envelopes: Arc::clone(envelopes),
                         hold: hold.clone(),
-                        walked: None,
+                        walked: marks.get(index).cloned(),
                     }),
                 ));
             }

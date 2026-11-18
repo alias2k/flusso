@@ -1,7 +1,23 @@
 //! Serving backfill requests: coalescing them into one snapshot, walking
 //! each index's root keys in pages, and completing it.
+//!
+//! **A resumed walk** (ADR 0012 stage 8b). A request may carry where its
+//! lane's last walk durably got (`Request::Backfill.after`). The walk of an
+//! index starts after the least of its lanes' points and is cut into
+//! segments at the others, in the source's own key order
+//! ([`DocumentBuilder::compare_keys`]): a lane receives the walk's batches
+//! from the segment after its point on, so a sink that already holds 90% of
+//! the table isn't sent it again. A batch that straddles a segment's end goes
+//! to the lanes of its last key: a lane joining there gets a few documents it
+//! holds already, never one fewer.
+//!
+//! ```text
+//! lanes   A (no point)   B after k₁   C after k₂
+//! walk    (·, k₁] → A    (k₁, k₂] → A, B    (k₂, last] → A, B, C
+//! ```
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::cmp::Ordering as KeyOrder;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -77,20 +93,31 @@ impl IngestEngine {
         lanes: &Lanes,
     ) -> Result<Option<Snapshot>> {
         let mut requested: BTreeMap<SinkName, BTreeSet<IndexName>> = BTreeMap::new();
+        let mut points: BTreeMap<IndexName, Vec<(SinkName, Option<stream::WalkMark>)>> =
+            BTreeMap::new();
         let mut handles = Vec::with_capacity(deliveries.len());
         for delivery in deliveries {
             let (request, handle) = delivery.into_parts();
-            let Request::Backfill { index, sink, .. } = request;
+            let Request::Backfill { index, sink, after } = request;
             if scopes.contains(&index) {
-                requested.entry(sink).or_default().insert(index);
+                requested
+                    .entry(sink.clone())
+                    .or_default()
+                    .insert(index.clone());
+                points.entry(index).or_default().push((sink, after));
             } else {
                 tracing::warn!(index = %index, %sink, "backfill requested for an index the source does not build; ignoring");
             }
             handles.push(handle);
         }
         let indexes: BTreeSet<IndexName> = requested.values().flatten().cloned().collect();
+        let mut plans = HashMap::with_capacity(points.len());
+        for (index, points) in points {
+            let plan = plan_walk(self.documents.as_ref(), &index, points).await;
+            plans.insert(index, plan);
+        }
         let mut snapshot = Snapshot {
-            walk: Walk::new(Arc::clone(&self.documents), indexes.iter().cloned()),
+            walk: Walk::new(Arc::clone(&self.documents), indexes.iter().cloned()).planned(plans),
             requested,
             indexes: indexes.iter().cloned().collect(),
             handles,
@@ -159,6 +186,23 @@ pub(super) struct Snapshot {
 }
 
 impl Snapshot {
+    /// The lanes a batch built now goes to: each requested index to the
+    /// lanes its walk has reached.
+    pub(super) fn lanes_now(&self) -> BTreeMap<SinkName, BTreeSet<IndexName>> {
+        self.requested
+            .iter()
+            .map(|(sink, indexes)| {
+                let reached = indexes
+                    .iter()
+                    .filter(|index| self.walk.reaches(index, sink))
+                    .cloned()
+                    .collect();
+                (sink.clone(), reached)
+            })
+            .filter(|(_, indexes): &(SinkName, BTreeSet<IndexName>)| !indexes.is_empty())
+            .collect()
+    }
+
     /// Whether the loop should read keys for it: its walk goes on and its
     /// batch has room. A full batch waits for a build slot.
     pub(super) fn wants_keys(&self) -> bool {
@@ -206,6 +250,26 @@ pub(super) struct Walk {
     pub(super) last: bool,
     /// The read in flight: the walk's bound, then its pages.
     pub(super) fetch: Option<BoxFuture<'static, source::Result<Fetched>>>,
+    /// Per index, where its walk starts and which lanes join where; an
+    /// index with none walks from the first key for every lane.
+    pub(super) plans: HashMap<IndexName, WalkPlan>,
+    /// Whether the front index's walk has started (its start set).
+    started: bool,
+    /// Lanes whose point the walk has read up to: they join once the keys
+    /// still in hand (all at or before their point) are taken.
+    joining: BTreeSet<SinkName>,
+}
+
+/// Where one index's walk starts and which lanes it serves from where.
+#[derive(Debug, Default)]
+pub(super) struct WalkPlan {
+    /// The key the walk starts after; `None` for the first key.
+    start: Option<RowKey>,
+    /// The lanes the walk serves now.
+    active: BTreeSet<SinkName>,
+    /// The points further lanes join at, in key order: a segment ends at
+    /// each, and its lanes are served from there on.
+    joins: VecDeque<(RowKey, BTreeSet<SinkName>)>,
 }
 
 /// What a walk's read brings back.
@@ -236,7 +300,24 @@ impl Walk {
             keys: VecDeque::new(),
             last: false,
             fetch: None,
+            plans: HashMap::new(),
+            started: false,
+            joining: BTreeSet::new(),
         }
+    }
+
+    /// The same walk, with each index's start and lanes' points.
+    pub(super) fn planned(mut self, plans: HashMap<IndexName, WalkPlan>) -> Self {
+        self.plans = plans;
+        self
+    }
+
+    /// Whether the walk of `index` serves `sink`'s lane now: from its start
+    /// with no plan, else once the walk passed the lane's point.
+    pub(super) fn reaches(&self, index: &IndexName, sink: &SinkName) -> bool {
+        self.plans
+            .get(index)
+            .is_none_or(|plan| plan.active.contains(sink))
     }
 
     /// The next step: keys in hand at once, else the next read: the front
@@ -246,15 +327,42 @@ impl Walk {
             if !self.keys.is_empty() {
                 return Ok(Step::Keys);
             }
+            if !self.joining.is_empty() {
+                let joining = std::mem::take(&mut self.joining);
+                if let Some(plan) = self
+                    .indexes
+                    .front()
+                    .and_then(|index| self.plans.get_mut(index))
+                {
+                    plan.active.extend(joining);
+                }
+            }
             if self.last {
-                self.indexes.pop_front();
+                if let Some(done) = self.indexes.pop_front()
+                    && let Some(plan) = self.plans.get_mut(&done)
+                {
+                    let joining: Vec<SinkName> =
+                        plan.joins.drain(..).flat_map(|(_, sinks)| sinks).collect();
+                    plan.active.extend(joining);
+                }
                 self.through = None;
                 self.after = None;
                 self.last = false;
+                self.started = false;
             }
             let Some(index) = self.indexes.front() else {
                 return Ok(Step::Done);
             };
+            if !self.started {
+                self.started = true;
+                self.after = self.plans.get(index).and_then(|plan| plan.start.clone());
+            }
+            // The segment ends at the next lane's point, else at the bound.
+            let segment_end = self
+                .plans
+                .get(index)
+                .and_then(|plan| plan.joins.front())
+                .map(|(point, _)| point.clone());
             let fetch =
                 self.fetch.get_or_insert_with(|| {
                     let documents = Arc::clone(&self.documents);
@@ -264,7 +372,8 @@ impl Walk {
                             documents.last_key(&index).await.map(Fetched::Through)
                         }),
                         Some(through) => {
-                            let (after, through) = (self.after.clone(), through.clone());
+                            let after = self.after.clone();
+                            let through = segment_end.clone().unwrap_or_else(|| through.clone());
                             Box::pin(async move {
                                 documents
                                     .keys(&index, after.as_ref(), &through, KEY_PAGE)
@@ -280,13 +389,120 @@ impl Walk {
                 Fetched::Through(None) => self.last = true,
                 Fetched::Through(Some(through)) => self.through = Some(through),
                 Fetched::Page(keys) => {
-                    self.last = keys.len() < KEY_PAGE;
+                    let short = keys.len() < KEY_PAGE;
                     self.after = keys.last().cloned().or(self.after.take());
                     self.keys.extend(keys);
+                    // A short page ends the segment: the lanes whose point
+                    // it reached join, and the next segment follows the
+                    // point itself (every key up to it is read).
+                    let joined = short
+                        .then(|| {
+                            let index = self.indexes.front()?;
+                            self.plans.get_mut(index)?.joins.pop_front()
+                        })
+                        .flatten();
+                    match joined {
+                        Some((point, sinks)) => {
+                            self.joining.extend(sinks);
+                            self.after = Some(point);
+                        }
+                        None => self.last = short,
+                    }
                 }
             }
         }
     }
+}
+
+/// Where `index`'s walk starts, and which lanes join where, from each
+/// requesting lane's recorded point: the least point starts it, a lane with
+/// none starts it from the first key, and every other lane joins at its own
+/// point. Points are read back and ordered by the source; one it no longer
+/// accepts, or an order it can't tell, falls back to the first key for that
+/// lane, never past a key the lane lacks.
+async fn plan_walk(
+    documents: &dyn DocumentBuilder,
+    index: &IndexName,
+    points: Vec<(SinkName, Option<stream::WalkMark>)>,
+) -> WalkPlan {
+    let mut from_first: BTreeSet<SinkName> = BTreeSet::new();
+    let mut marked: Vec<(RowKey, SinkName)> = Vec::new();
+    for (sink, after) in points {
+        let key = match after {
+            None => None,
+            Some(mark) => match documents.resume_after(index, mark.as_str()).await {
+                Ok(key) => key,
+                Err(error) => {
+                    tracing::warn!(%index, %sink, %error, "could not read the recorded backfill checkpoint; this lane's backfill starts from the first key");
+                    None
+                }
+            },
+        };
+        match key {
+            Some(key) => marked.push((key, sink)),
+            None => {
+                from_first.insert(sink);
+            }
+        }
+    }
+    let mut groups: Vec<(RowKey, BTreeSet<SinkName>)> = Vec::new();
+    for (key, sink) in marked {
+        match place(documents, index, &groups, &key).await {
+            Some(Placed::Equal(at)) => {
+                if let Some((_, sinks)) = groups.get_mut(at) {
+                    sinks.insert(sink);
+                }
+            }
+            Some(Placed::Before(at)) => groups.insert(at, (key, BTreeSet::from([sink]))),
+            None => {
+                tracing::warn!(%index, %sink, "the source can't order this lane's checkpoint against the others'; its backfill starts from the first key");
+                from_first.insert(sink);
+            }
+        }
+    }
+    for (_, sinks) in &groups {
+        for sink in sinks {
+            tracing::info!(%index, %sink, "resuming this lane's backfill after the point its last walk durably got to");
+        }
+    }
+    let mut joins: VecDeque<(RowKey, BTreeSet<SinkName>)> = groups.into();
+    let (start, active) = if from_first.is_empty() {
+        match joins.pop_front() {
+            Some((start, sinks)) => (Some(start), sinks),
+            None => (None, BTreeSet::new()),
+        }
+    } else {
+        (None, from_first)
+    };
+    WalkPlan {
+        start,
+        active,
+        joins,
+    }
+}
+
+/// Where `key` goes among `groups` (in key order): at a group equal to it,
+/// or before the group at an index. `None` when the source can't order it.
+enum Placed {
+    Equal(usize),
+    Before(usize),
+}
+
+async fn place(
+    documents: &dyn DocumentBuilder,
+    index: &IndexName,
+    groups: &[(RowKey, BTreeSet<SinkName>)],
+    key: &RowKey,
+) -> Option<Placed> {
+    for (at, (point, _)) in groups.iter().enumerate() {
+        match documents.compare_keys(index, key, point).await {
+            Ok(Some(KeyOrder::Less)) => return Some(Placed::Before(at)),
+            Ok(Some(KeyOrder::Equal)) => return Some(Placed::Equal(at)),
+            Ok(Some(KeyOrder::Greater)) => {}
+            Ok(None) | Err(_) => return None,
+        }
+    }
+    Some(Placed::Before(groups.len()))
 }
 
 pub(super) async fn next_snapshot_step(snapshot: &mut Option<Snapshot>) -> source::Result<Step> {
