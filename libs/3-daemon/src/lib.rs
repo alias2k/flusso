@@ -96,6 +96,20 @@ pub fn writes(config: &Config) -> usize {
         .map_or(DEFAULT_WRITES, NonZeroUsize::get)
 }
 
+/// Document builds the ingest engine runs at once when `[concurrency] builds`
+/// is unset. ADR 0012's prototype measured 3.0× one build at 4 and 5× at 8 on
+/// a backfill.
+pub const DEFAULT_BUILDS: usize = 4;
+
+/// Document builds the ingest engine runs at once: `[concurrency] builds`,
+/// else [`DEFAULT_BUILDS`].
+pub fn builds(config: &Config) -> usize {
+    config
+        .concurrency
+        .builds
+        .map_or(DEFAULT_BUILDS, NonZeroUsize::get)
+}
+
 /// A configured-but-not-yet-running deployment over one [`Config`].
 #[derive(Debug)]
 pub struct Daemon {
@@ -206,6 +220,7 @@ impl Daemon {
             sink_names.clone(),
         )
         .with_batch(batch_policy(&config))
+        .with_builds(builds(&config))
         .with_observer(Arc::clone(&observer))
         .with_failure_policies(failure_policies.clone())
         .with_stop(stop.clone());

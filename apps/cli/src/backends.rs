@@ -153,9 +153,16 @@ async fn build_documents(
 ) -> anyhow::Result<(Arc<dyn DocumentBuilder>, ColumnTypes)> {
     let scripts = compile_scripts(config)?;
     let spec = Arc::new(source_spec(config));
-    let builder = PgDocumentBuilder::connect(connection_url, Arc::clone(&spec))
-        .await
-        .context("connecting to Postgres")?;
+    // Every build the ingest engine runs at once holds a connection, beside
+    // one change being resolved and one backfill page being read.
+    let connections = u32::try_from(daemon::builds(config) + 2).unwrap_or(u32::MAX);
+    let builder = PgDocumentBuilder::connect_with_max_connections(
+        connection_url,
+        Arc::clone(&spec),
+        connections,
+    )
+    .await
+    .context("connecting to Postgres")?;
     validate_at_start(&spec, &builder, config).await?;
     let column_types = builder.column_types();
     Ok((

@@ -1069,6 +1069,15 @@ fn writes_default_to_four_unless_the_config_sets_them() {
 }
 
 #[test]
+fn builds_default_to_four_unless_the_config_sets_them() {
+    let mut config = backendless_config();
+    assert_eq!(builds(&config), DEFAULT_BUILDS);
+    assert_eq!(DEFAULT_BUILDS, 4);
+    config.concurrency.builds = std::num::NonZeroUsize::new(1);
+    assert_eq!(builds(&config), 1);
+}
+
+#[test]
 fn batch_policy_lays_the_config_over_the_engine_defaults() {
     let defaults = engine::BatchPolicy::default();
     let mut config = backendless_config();

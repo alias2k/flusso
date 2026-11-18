@@ -155,6 +155,14 @@ pub(crate) struct RunArgs {
     #[arg(long, env = "FLUSSO_WRITES", value_parser = config::parse_writes)]
     writes: Option<std::num::NonZeroUsize>,
 
+    /// Document builds the ingest engine runs at once. Overrides
+    /// `[concurrency].builds` from config; defaults to 4. A document is never
+    /// built twice at once, each lane gets batches in the order they started,
+    /// and live batches go before backfill pages. At most 32. Never written
+    /// into the lock.
+    #[arg(long, env = "FLUSSO_BUILDS", value_parser = config::parse_builds)]
+    builds: Option<std::num::NonZeroUsize>,
+
     /// How long a stop may take, in seconds, from the first signal to exit.
     /// A stop drains: nothing new is read, what is in flight lands on every
     /// sink and is confirmed to Postgres, then the HTTP surfaces close and
@@ -201,6 +209,9 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     }
     if let Some(writes) = args.writes {
         config.concurrency.writes = Some(writes);
+    }
+    if let Some(builds) = args.builds {
+        config.concurrency.builds = Some(builds);
     }
 
     // Adapter knobs given as flags/env are laid over the file's entries, then
