@@ -89,10 +89,6 @@ impl Slot {
     fn is_ready(&self) -> bool {
         self.built.is_some() || matches!(self.job, Job::Complete(_))
     }
-
-    fn is_live(&self) -> bool {
-        matches!(self.job, Job::Live { .. })
-    }
 }
 
 /// Which kind of batch a free slot goes to.
@@ -111,7 +107,8 @@ pub(super) struct Builds {
     flights: Flights<'static, (u64, Option<Output>)>,
     /// The sorted id hashes of each running build, by slot number.
     holding: Vec<(u64, Vec<u64>)>,
-    live_running: usize,
+    /// The slot numbers of the live builds running on their own tasks.
+    live_running: Vec<u64>,
     contested: u64,
     /// A build failed: nothing more is granted.
     halted: bool,
@@ -136,7 +133,7 @@ impl Builds {
             front: 0,
             flights: Flights::new(),
             holding: Vec::new(),
-            live_running: 0,
+            live_running: Vec::new(),
             contested: 0,
             halted: false,
             spare: Vec::new(),
@@ -176,8 +173,9 @@ impl Builds {
         if !self.has_room() {
             return None;
         }
-        let live = live
-            .is_some_and(|(ids, full)| (self.live_running == 0 || full) && !self.holds_any(ids));
+        let live = live.is_some_and(|(ids, full)| {
+            (self.live_running.is_empty() || full) && !self.holds_any(ids)
+        });
         let backfill = backfill.is_some_and(|ids| !self.holds_any(ids));
         match (live, backfill) {
             (true, true) => {
@@ -252,7 +250,7 @@ impl Builds {
         let handle = tokio::spawn(build);
         let landing = Box::pin(async move { (seq, handle.await.ok()) });
         if live {
-            self.live_running += 1;
+            self.live_running.push(seq);
         }
         if let Some(output) = self.flights.start(landing) {
             self.land(output.0, output.1, halts);
@@ -272,9 +270,11 @@ impl Builds {
         output: Option<Output>,
         halts: &(dyn Fn(&Built) -> bool + Sync),
     ) {
-        let running = self.holding.iter().position(|(held, _)| *held == seq);
-        if let Some(at) = running {
+        if let Some(at) = self.holding.iter().position(|(held, _)| *held == seq) {
             self.holding.swap_remove(at);
+        }
+        if let Some(at) = self.live_running.iter().position(|live| *live == seq) {
+            self.live_running.swap_remove(at);
         }
         let Some(slot) = seq
             .checked_sub(self.front)
@@ -282,9 +282,6 @@ impl Builds {
         else {
             return;
         };
-        if running.is_some() && slot.is_live() {
-            self.live_running = self.live_running.saturating_sub(1);
-        }
         let built = match output {
             Some(Output { mut ids, built }) => {
                 ids.clear();
