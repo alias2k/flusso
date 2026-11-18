@@ -76,6 +76,40 @@ impl OpensearchSink {
             .unwrap_or_default())
     }
 
+    /// The holders of each of `aliases`, in one lookup. An alias held by no
+    /// index maps to an empty list.
+    pub(crate) async fn alias_map(&self, aliases: &[&str]) -> Result<Holders> {
+        let url = format!("{}/_alias/{}", self.base_url, aliases.join(","));
+        let resp = self
+            .maybe_auth(self.client.get(&url))
+            .send()
+            .await
+            .map_err(|e| request_error("alias lookup failed", e))?;
+        // A 404 still lists the aliases that exist, beside an `error` naming
+        // the missing ones.
+        let status = resp.status();
+        if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
+            return Err(Self::status_error(resp, "alias lookup failed").await);
+        }
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| request_error("failed to parse alias response", e))?;
+        Ok(holders_of(aliases, &body))
+    }
+
+    /// Apply an `_aliases` body: every action in one cluster-state update.
+    pub(crate) async fn update_aliases(&self, actions: &Value) -> Result<()> {
+        let url = format!("{}/_aliases", self.base_url);
+        let req = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(actions);
+        self.send_ok(req, "alias update failed").await?;
+        Ok(())
+    }
+
     async fn put_meta(&self, id: &str, doc: Value) -> Result<()> {
         let url = format!("{}/{}/_doc/{id}", self.base_url, self.meta_index());
         let req = self
@@ -178,6 +212,70 @@ fn plan_alias_actions(alias: &str, target: &str, holders: &[String]) -> Option<V
         .collect();
     actions.push(json!({ "add": { "index": target, "alias": alias } }));
     Some(json!({ "actions": actions }))
+}
+
+/// Which indexes hold each alias: alias name → its holders, sorted.
+pub(crate) type Holders = std::collections::BTreeMap<String, Vec<String>>;
+
+/// Read an `_alias/{a},{b}` answer into [`Holders`], every asked alias
+/// present, an absent one with no holders. The answer is keyed by index;
+/// `error` and `status` sit beside them when an alias is missing.
+fn holders_of(aliases: &[&str], body: &Value) -> Holders {
+    let mut holders: Holders = aliases
+        .iter()
+        .map(|alias| ((*alias).to_owned(), Vec::new()))
+        .collect();
+    if let Some(indexes) = body.as_object() {
+        for (index, entry) in indexes {
+            let Some(names) = entry.get("aliases").and_then(Value::as_object) else {
+                continue;
+            };
+            for alias in names.keys() {
+                if let Some(list) = holders.get_mut(alias) {
+                    list.push(index.clone());
+                }
+            }
+        }
+    }
+    for list in holders.values_mut() {
+        list.sort();
+    }
+    holders
+}
+
+/// The one `_aliases` body that finishes a seed: `aliases` all pointing at
+/// exactly `target`, and every index in `stale` removed, in a single atomic
+/// call. Readers see the old generation or the new one, never neither and
+/// never both. `None` when there is nothing to do.
+///
+/// An alias held by an index the call removes needs no `remove` of its own:
+/// removing an index removes its aliases.
+pub(crate) fn plan_seed_actions(
+    target: &str,
+    aliases: &[(&str, &[String])],
+    stale: &std::collections::BTreeSet<String>,
+) -> Option<Value> {
+    let mut actions: Vec<Value> = Vec::new();
+    for (alias, holders) in aliases {
+        if holders.len() == 1 && holders.iter().all(|holder| holder == target) {
+            continue;
+        }
+        actions.extend(
+            holders
+                .iter()
+                .filter(|holder| holder.as_str() != target && !stale.contains(*holder))
+                .map(|holder| json!({ "remove": { "index": holder, "alias": alias } })),
+        );
+        if !holders.iter().any(|holder| holder == target) {
+            actions.push(json!({ "add": { "index": target, "alias": alias } }));
+        }
+    }
+    actions.extend(
+        stale
+            .iter()
+            .map(|index| json!({ "remove_index": { "index": index } })),
+    );
+    (!actions.is_empty()).then(|| json!({ "actions": actions }))
 }
 
 /// The concrete index name for generation `gen` behind a hash alias — what the

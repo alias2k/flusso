@@ -12,7 +12,9 @@ use sink::{RejectedDocument, Result, Sink, SinkError, Visibility, WriteReport};
 use tracing::{debug, info, warn};
 
 use crate::bulk::{BulkAction, bulk_action_fragment, plan_chunks, refused_id, render_document};
-use crate::generations::{generation_name, next_generation, parse_generation};
+use crate::generations::{
+    self, generation_name, next_generation, parse_generation, plan_seed_actions,
+};
 use crate::{IndexTarget, OpensearchSink};
 
 #[async_trait]
@@ -74,8 +76,9 @@ impl Sink for OpensearchSink {
             }
         };
         let index = generation_name(&hash_alias, generation);
-
-        if self.index_exists(&index).await? {
+        let convenience = self.convenience_alias(logical);
+        let exists = self.index_exists(&index).await?;
+        if exists {
             debug!(index, "generation exists; leaving its mapping untouched");
             // What an earlier run wrote without a refresh is remembered
             // nowhere. One refresh per start makes it searchable, so a run can
@@ -83,16 +86,48 @@ impl Sink for OpensearchSink {
             if seeded {
                 self.refresh_index(&index).await?;
             }
-        } else {
-            if seeded {
-                warn!(
-                    index,
-                    "the seed marker names a generation that no longer exists; \
-                     recreating it empty and reseeding",
-                );
-                seeded = false;
+        } else if seeded {
+            warn!(
+                index,
+                "the seed marker names a generation that no longer exists; \
+                 recreating it empty and reseeding",
+            );
+            seeded = false;
+        }
+
+        let mut holders = self
+            .alias_map(&[hash_alias.as_str(), convenience.as_str()])
+            .await?;
+        let held = |holders: &generations::Holders, alias: &str| {
+            holders.get(alias).cloned().unwrap_or_default()
+        };
+        // Point the aliases at this generation when it's the live seeded one,
+        // or when nothing serves yet (the first generation). A rebuild of an
+        // already-served index leaves them on the old generation until
+        // mark_seeded swaps them, so reads never hit a half-built index.
+        let first = held(&holders, &hash_alias).is_empty();
+
+        if !exists {
+            // The aliases this generation takes anyway, attached at creation:
+            // one cluster-state update instead of one per alias. Never the
+            // convenience alias while another index holds it: an alias added
+            // at creation removes it from nothing.
+            let mut attached: Vec<&str> = Vec::new();
+            if first {
+                attached.push(&hash_alias);
+                if held(&holders, &convenience).is_empty() {
+                    attached.push(&convenience);
+                }
             }
-            self.create_index(&index, mapping).await?;
+            if self.create_index(&index, mapping, &attached).await? {
+                for alias in attached {
+                    holders.insert(alias.to_owned(), vec![index.clone()]);
+                }
+            } else {
+                holders = self
+                    .alias_map(&[hash_alias.as_str(), convenience.as_str()])
+                    .await?;
+            }
         }
 
         // Persist the active generation for an unseeded index, so a resumed run
@@ -113,17 +148,24 @@ impl Sink for OpensearchSink {
             }
         };
 
-        // Point the aliases at this generation when it's the live seeded one, or
-        // the first generation (nothing else serving yet). A reindex of an
-        // already-served index leaves the aliases on the old generation until
-        // mark_seeded swaps them — so reads never hit a half-built index. The
-        // hash alias is load-bearing (the query client reads through it), so its
-        // failure propagates; the `{logical}` convenience alias stays best-effort.
-        let serving = self.alias_holders(&hash_alias).await?;
-        if seeded || serving.is_empty() {
-            self.try_ensure_alias(&hash_alias, &index).await?;
-            self.ensure_alias(&self.convenience_alias(logical), &index)
-                .await;
+        // The hash alias is load-bearing (the query client reads through it),
+        // so its failure propagates; the convenience alias stays best-effort.
+        if seeded || first {
+            let serving = held(&holders, &hash_alias);
+            let named = held(&holders, &convenience);
+            let hash = (hash_alias.as_str(), serving.as_slice());
+            let both = [hash, (convenience.as_str(), named.as_slice())];
+            let none = BTreeSet::new();
+            if let Some(actions) = plan_seed_actions(&index, &both, &none)
+                && self.update_aliases(&actions).await.is_err()
+            {
+                if let Some(hash_only) =
+                    plan_seed_actions(&index, std::slice::from_ref(&hash), &none)
+                {
+                    self.update_aliases(&hash_only).await?;
+                }
+                self.ensure_alias(&convenience, &index).await;
+            }
         }
         self.set_target(
             logical,
@@ -289,28 +331,51 @@ impl Sink for OpensearchSink {
         } = &target;
         let active = parse_generation(hash_alias, generation).unwrap_or(1);
 
-        self.refresh_index(generation).await?;
-        self.restore_auto_refresh(generation).await?;
+        // The refresh, the steady-state refresh interval and the lookups are
+        // independent: run at once, the step costs the slowest of them. The
+        // aliases move only after the refresh, so they never point readers at
+        // an unrefreshed generation.
+        let mut steps = Steps::start();
+        let convenience = self.convenience_alias(logical);
+        let ((), (), (serving, named, stale)) = tokio::try_join!(
+            self.refresh_index(generation),
+            self.restore_auto_refresh(generation),
+            self.seed_lookup(hash_alias, &convenience, generation),
+        )?;
+        steps.mark("refresh+settings+lookup");
 
-        // Computed before the swap: afterwards the alias holders are just the
-        // active generation.
-        let stale: BTreeSet<String> = self
-            .alias_holders(hash_alias)
-            .await?
-            .into_iter()
-            .chain(self.list_generations(hash_alias).await?)
-            .filter(|name| name != generation && parse_generation(hash_alias, name).is_some())
-            .collect();
-
-        self.try_ensure_alias(hash_alias, generation).await?;
-        self.ensure_alias(&self.convenience_alias(logical), generation)
-            .await;
-
-        for name in &stale {
-            self.delete_index(name).await?;
+        // One atomic call moves both aliases and drops the old generations:
+        // readers see the old generation or the new one. Refused (the
+        // convenience alias's name taken by an index, or a stale generation
+        // gone meanwhile), the holders are read again and the hash alias
+        // moves alone; the convenience alias stays best-effort.
+        let hash = (hash_alias.as_str(), serving.as_slice());
+        let both = [hash, (convenience.as_str(), named.as_slice())];
+        if let Some(actions) = plan_seed_actions(generation, &both, &stale)
+            && let Err(error) = self.update_aliases(&actions).await
+        {
+            warn!(
+                index = logical,
+                %error,
+                "could not swap the aliases and drop the old generations in one call; \
+                 reading them again and moving the hash alias alone",
+            );
+            let (serving, _, stale) = self
+                .seed_lookup(hash_alias, &convenience, generation)
+                .await?;
+            let hash = (hash_alias.as_str(), serving.as_slice());
+            if let Some(hash_only) =
+                plan_seed_actions(generation, std::slice::from_ref(&hash), &stale)
+            {
+                self.update_aliases(&hash_only).await?;
+            }
+            self.ensure_alias(&convenience, generation).await;
         }
+        steps.mark("aliases");
 
         self.write_index_meta(hash_alias, active, true).await?;
+        steps.mark("marker");
+        debug!(index = logical, %generation, steps = %steps, "marked seeded");
         self.set_target(
             logical,
             IndexTarget {
@@ -355,6 +420,31 @@ impl Sink for OpensearchSink {
 }
 
 impl OpensearchSink {
+    /// What a seed of `generation` finds: the hash alias's holders, the
+    /// convenience alias's, and every other generation of the hash alias
+    /// (alias holders and orphans alike, #121), to be dropped.
+    async fn seed_lookup(
+        &self,
+        hash_alias: &str,
+        convenience: &str,
+        generation: &str,
+    ) -> Result<(Vec<String>, Vec<String>, BTreeSet<String>)> {
+        let aliases = [hash_alias, convenience];
+        let (mut holders, generations) = tokio::try_join!(
+            self.alias_map(&aliases),
+            self.list_generations(hash_alias),
+        )?;
+        let serving = holders.remove(hash_alias).unwrap_or_default();
+        let named = holders.remove(convenience).unwrap_or_default();
+        let stale = serving
+            .iter()
+            .cloned()
+            .chain(generations)
+            .filter(|name| name != generation && parse_generation(hash_alias, name).is_some())
+            .collect();
+        Ok((serving, named, stale))
+    }
+
     /// When the write that just sent `written` becomes searchable.
     ///
     /// A write that isn't caught up leaves its indexes to the next caught-up
@@ -437,5 +527,36 @@ impl OpensearchSink {
             (Op::Delete, _) => BulkAction::Delete { index, id },
         };
         Ok(action)
+    }
+}
+
+/// How long each step of a `mark_seeded` took, for its debug line.
+struct Steps {
+    last: std::time::Instant,
+    done: Vec<(&'static str, std::time::Duration)>,
+}
+
+impl Steps {
+    fn start() -> Self {
+        Self {
+            last: std::time::Instant::now(),
+            done: Vec::new(),
+        }
+    }
+
+    fn mark(&mut self, step: &'static str) {
+        let now = std::time::Instant::now();
+        self.done.push((step, now - self.last));
+        self.last = now;
+    }
+}
+
+impl std::fmt::Display for Steps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (n, (step, took)) in self.done.iter().enumerate() {
+            let sep = if n == 0 { "" } else { " " };
+            write!(f, "{sep}{step}={:.1}ms", took.as_secs_f64() * 1000.0)?;
+        }
+        Ok(())
     }
 }
