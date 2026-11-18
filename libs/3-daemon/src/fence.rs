@@ -28,6 +28,7 @@
 //!     position: "0/16B3748".to_owned(),
 //!     level: "applied".parse().unwrap(),
 //!     sink: None,
+//!     indexes: Vec::new(),
 //!     timeout: Duration::from_secs(5),
 //! };
 //! assert_eq!(request.level, FenceLevel::Applied);
@@ -41,9 +42,10 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
 use engine::{Level, Observer, Progress};
-use kernel::{Position, SinkName};
+use kernel::{IndexName, Position, SinkName};
 use serde::Serialize;
 use source::cdc::{ChangeCapture, SourcePosition};
+use stream::LaneKey;
 use tokio::sync::Notify;
 use tokio::time::{Instant, timeout_at};
 
@@ -98,6 +100,8 @@ pub struct FenceRequest {
     pub level: FenceLevel,
     /// The sink to wait for; `None` waits for every sink.
     pub sink: Option<SinkName>,
+    /// The indexes to wait for; empty waits for every index.
+    pub indexes: Vec<IndexName>,
     /// How long to wait before giving up.
     pub timeout: Duration,
 }
@@ -121,6 +125,9 @@ pub enum FenceError {
     /// No sink of that name is configured.
     #[error("unknown sink `{0}`")]
     UnknownSink(String),
+    /// No enabled index of that name is configured.
+    #[error("unknown index `{0}`")]
+    UnknownIndex(String),
     /// The source cannot say how far it is: its live stream is not open yet,
     /// or it has no position a client could wait on.
     #[error("fences are not available: {0}")]
@@ -141,10 +148,23 @@ pub struct FencePositions {
 /// One sink's fence positions, in the source's own text form.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SinkPositions {
-    /// How far this sink has applied.
+    /// How far this sink has applied (its slowest index).
     pub applied: Option<String>,
-    /// How far this sink is searchable.
+    /// How far this sink is searchable (its slowest index).
     pub searchable: Option<String>,
+    /// The same pair for each index of this sink: each `(index, sink)` lane.
+    pub indexes: BTreeMap<IndexName, LanePositions>,
+}
+
+/// One `(index, sink)` lane's fence positions, in the source's own text form.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LanePositions {
+    /// How far this lane has applied.
+    pub applied: Option<String>,
+    /// How far this lane is searchable.
+    pub searchable: Option<String>,
+    /// Items routed to this lane and not landed.
+    pub outstanding: usize,
 }
 
 /// The handle a transport waits on. Cheap to clone.
@@ -157,7 +177,7 @@ pub struct Fence {
 struct Inner {
     source: Arc<dyn ChangeCapture>,
     progress: Arc<Progress>,
-    sinks: BTreeMap<SinkName, Mutex<Furthest>>,
+    lanes: BTreeMap<LaneKey, Mutex<Furthest>>,
     /// Woken whenever any sink's position or the source's answer may have
     /// moved; every waiter re-checks.
     moved: Notify,
@@ -195,7 +215,7 @@ impl Drop for SearchableWait<'_> {
     }
 }
 
-/// The furthest source position each level of one sink has been seen to
+/// The furthest source position each level of one lane has been seen to
 /// stand for. They only grow, so a reopened source stream (which restarts
 /// from what *every* sink confirmed) never walks a sink back from what it
 /// already reached.
@@ -206,19 +226,19 @@ struct Furthest {
 }
 
 impl Fence {
-    /// A fence over `source` for `sinks`, reading how far each sink's lane
-    /// landed from `progress`.
+    /// A fence over `source` for `lanes` (one per `(index, sink)`), reading
+    /// how far each landed from `progress`.
     pub fn new(
         source: Arc<dyn ChangeCapture>,
         progress: Arc<Progress>,
-        sinks: impl IntoIterator<Item = SinkName>,
+        lanes: impl IntoIterator<Item = LaneKey>,
     ) -> Self {
         let inner = Arc::new(Inner {
             source: Arc::clone(&source),
             progress,
-            sinks: sinks
+            lanes: lanes
                 .into_iter()
-                .map(|sink| (sink, Mutex::new(Furthest::default())))
+                .map(|lane| (lane, Mutex::new(Furthest::default())))
                 .collect(),
             moved: Notify::new(),
             searchable_waits: AtomicUsize::new(0),
@@ -252,17 +272,17 @@ impl Fence {
         self.inner.moved.notify_waiters();
     }
 
-    /// How far `sink` is for `level`, in the source's terms. `None` while the
+    /// How far `lane` is for `level`, in the source's terms. `None` while the
     /// source cannot say.
     ///
-    /// Read off what the sink's lane landed (or made searchable), so it keeps
-    /// moving over idle WAL. Searchable never runs ahead of applied.
-    fn reached(&self, sink: &SinkName, level: FenceLevel) -> Option<SourcePosition> {
-        let mut furthest = lock(self.inner.sinks.get(sink)?);
+    /// Read off what the lane landed (or made searchable), so it keeps moving
+    /// over idle WAL. Searchable never runs ahead of applied.
+    fn reached(&self, lane: &LaneKey, level: FenceLevel) -> Option<SourcePosition> {
+        let mut furthest = lock(self.inner.lanes.get(lane)?);
         let applied = self
             .inner
             .progress
-            .lane(sink, Level::Applied)
+            .lane(lane, Level::Applied)
             .and_then(|landed| self.inner.source.reached(landed));
         furthest.applied = furthest.applied.max(applied);
         match level {
@@ -271,7 +291,7 @@ impl Fence {
                 let searchable = self
                     .inner
                     .progress
-                    .lane(sink, Level::Searchable)
+                    .lane(lane, Level::Searchable)
                     .and_then(|landed| self.inner.source.reached(landed));
                 furthest.searchable = furthest.searchable.max(searchable.min(furthest.applied));
                 furthest.searchable
@@ -279,43 +299,35 @@ impl Fence {
         }
     }
 
-    /// The slowest of `sinks` for `level`. `None` if any cannot be placed.
+    /// The slowest of `lanes` for `level`. `None` if any cannot be placed.
     fn slowest<'a>(
         &self,
-        sinks: impl IntoIterator<Item = &'a SinkName>,
+        lanes: impl IntoIterator<Item = &'a LaneKey>,
         level: FenceLevel,
     ) -> Option<SourcePosition> {
         let mut slowest: Option<SourcePosition> = None;
         let mut any = false;
-        for sink in sinks {
-            let reached = self.reached(sink, level)?;
+        for lane in lanes {
+            let reached = self.reached(lane, level)?;
             slowest = Some(slowest.map_or(reached, |low| low.min(reached)));
             any = true;
         }
         if any { slowest } else { None }
     }
 
-    /// Wait until the requested sink (or every sink) has reached the requested
-    /// position at the requested level, or the timeout passes.
+    /// Wait until the requested lanes (the named sink, or every sink, by the
+    /// named indexes, or every index) have reached the requested position at
+    /// the requested level, or the timeout passes.
     ///
     /// Returns at once when the position is already reached, and `Err` at once
-    /// when the wait cannot start: an unreadable position, an unknown sink, or
-    /// a source whose live stream is not open yet.
+    /// when the wait cannot start: an unreadable position, an unknown sink or
+    /// index, or a source whose live stream is not open yet.
     pub async fn wait(&self, request: &FenceRequest) -> Result<FenceOutcome, FenceError> {
         let source = &self.inner.source;
         let target = source
             .parse_position(&request.position)
             .map_err(|error| FenceError::InvalidPosition(error.to_string()))?;
-        let sinks: Vec<&SinkName> = match &request.sink {
-            Some(sink) => vec![
-                self.inner
-                    .sinks
-                    .get_key_value(sink)
-                    .map(|(name, _)| name)
-                    .ok_or_else(|| FenceError::UnknownSink(sink.to_string()))?,
-            ],
-            None => self.inner.sinks.keys().collect(),
-        };
+        let lanes = self.select(request.sink.as_ref(), &request.indexes)?;
         let deadline = Instant::now() + request.timeout;
         let _open = OpenWait::enter(&self.inner);
         let _counted = (request.level == FenceLevel::Searchable).then(|| {
@@ -329,7 +341,7 @@ impl Fence {
             tokio::pin!(moved);
             moved.as_mut().enable();
 
-            let Some(reached) = self.slowest(sinks.iter().copied(), request.level) else {
+            let Some(reached) = self.slowest(lanes.iter().copied(), request.level) else {
                 return Err(FenceError::Unavailable(
                     "the source is not following live changes yet".to_owned(),
                 ));
@@ -355,9 +367,9 @@ impl Fence {
             tokio::pin!(moved);
             moved.as_mut().enable();
             if self.inner.searchable_waits.load(Ordering::SeqCst) == 0
-                || self.inner.sinks.keys().all(|sink| {
-                    self.inner.progress.lane(sink, Level::Searchable)
-                        == self.inner.progress.lane(sink, Level::Applied)
+                || self.inner.lanes.keys().all(|lane| {
+                    self.inner.progress.lane(lane, Level::Searchable)
+                        == self.inner.progress.lane(lane, Level::Applied)
                 })
             {
                 return;
@@ -366,26 +378,58 @@ impl Fence {
         }
     }
 
-    /// Where every sink is right now, for a status surface.
+    /// The lanes a request names: `sink` (or every sink) by `indexes` (or
+    /// every index).
+    fn select(
+        &self,
+        sink: Option<&SinkName>,
+        indexes: &[IndexName],
+    ) -> Result<Vec<&LaneKey>, FenceError> {
+        if let Some(sink) = sink
+            && !self.inner.lanes.keys().any(|lane| &lane.sink == sink)
+        {
+            return Err(FenceError::UnknownSink(sink.to_string()));
+        }
+        for index in indexes {
+            if !self.inner.lanes.keys().any(|lane| &lane.index == index) {
+                return Err(FenceError::UnknownIndex(index.to_string()));
+            }
+        }
+        Ok(self
+            .inner
+            .lanes
+            .keys()
+            .filter(|lane| sink.is_none_or(|sink| &lane.sink == sink))
+            .filter(|lane| indexes.is_empty() || indexes.contains(&lane.index))
+            .collect())
+    }
+
+    /// Where every sink and lane is right now, for a status surface.
     pub fn positions(&self) -> FencePositions {
         let format = |position: Option<SourcePosition>| {
             position.map(|p| self.inner.source.format_position(p))
         };
-        let names = || self.inner.sinks.keys();
+        let lanes = || self.inner.lanes.keys();
+        let mut sinks: BTreeMap<SinkName, SinkPositions> = BTreeMap::new();
+        for lane in lanes() {
+            sinks.entry(lane.sink.clone()).or_default().indexes.insert(
+                lane.index.clone(),
+                LanePositions {
+                    applied: format(self.reached(lane, FenceLevel::Applied)),
+                    searchable: format(self.reached(lane, FenceLevel::Searchable)),
+                    outstanding: self.inner.progress.outstanding(lane),
+                },
+            );
+        }
+        for (sink, positions) in &mut sinks {
+            let of_sink = || lanes().filter(|lane| &lane.sink == sink);
+            positions.applied = format(self.slowest(of_sink(), FenceLevel::Applied));
+            positions.searchable = format(self.slowest(of_sink(), FenceLevel::Searchable));
+        }
         FencePositions {
-            applied: format(self.slowest(names(), FenceLevel::Applied)),
-            searchable: format(self.slowest(names(), FenceLevel::Searchable)),
-            sinks: names()
-                .map(|sink| {
-                    (
-                        sink.clone(),
-                        SinkPositions {
-                            applied: format(self.reached(sink, FenceLevel::Applied)),
-                            searchable: format(self.reached(sink, FenceLevel::Searchable)),
-                        },
-                    )
-                })
-                .collect(),
+            applied: format(self.slowest(lanes(), FenceLevel::Applied)),
+            searchable: format(self.slowest(lanes(), FenceLevel::Searchable)),
+            sinks,
         }
     }
 }
@@ -409,11 +453,11 @@ impl FenceObserver {
 }
 
 impl Observer for FenceObserver {
-    fn on_position_applied(&self, _: &SinkName, _: Position) {
+    fn on_position_applied(&self, _: &LaneKey, _: Position) {
         self.fence.moved();
     }
 
-    fn on_position_searchable(&self, _: &SinkName, _: Position) {
+    fn on_position_searchable(&self, _: &LaneKey, _: Position) {
         self.fence.moved();
     }
 }

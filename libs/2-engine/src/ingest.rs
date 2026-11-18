@@ -59,7 +59,7 @@ use kernel::{IndexName, SinkName};
 use source::SourceError;
 use source::cdc::{ChangeCapture, Landed, LiveChange};
 use source::document::{DocumentBuilder, DocumentId};
-use stream::{Consumer, LaneItem, Producer, Request, Stream};
+use stream::{Consumer, LaneItem, LaneKey, Producer, Request, Stream};
 use tokio::time::{Duration, Instant, timeout_at};
 
 use crate::budget::Budget;
@@ -82,8 +82,8 @@ use snapshot::{ClosedConsumer, Snapshot, Step, next_snapshot_step};
 /// reported as one that failed.
 const CLOSE_WAIT: Duration = Duration::from_secs(12);
 
-/// The producing end of every sink's lane, by sink name.
-type Lanes = BTreeMap<SinkName, Box<dyn Producer<LaneItem>>>;
+/// The producing end of every `(index, sink)` lane.
+type Lanes = BTreeMap<LaneKey, Box<dyn Producer<LaneItem>>>;
 
 /// The source's live change stream.
 type LiveStream = BoxStream<'static, source::Result<LiveChange>>;
@@ -244,7 +244,11 @@ impl IngestEngine {
         let lanes: Lanes = self
             .sinks
             .iter()
-            .map(|sink| Ok((sink.clone(), self.stream.lane(sink)?.producer)))
+            .flat_map(|sink| self.stream.lanes(sink))
+            .map(|key| {
+                let producer = self.stream.lane(&key)?.producer;
+                Ok((key, producer))
+            })
             .collect::<Result<_>>()?;
         let requests = self.stream.requests()?.consumer;
         let scopes: HashSet<IndexName> = self.documents.backfill_indexes().into_iter().collect();

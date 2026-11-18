@@ -9,7 +9,7 @@ use futures::future::{BoxFuture, try_join_all};
 use kernel::{IndexName, SinkName};
 use source::RowKey;
 use source::document::{DocumentBuilder, DocumentId};
-use stream::{AckHandle, Consumer, LaneItem, Request};
+use stream::{AckHandle, Consumer, LaneItem, LaneKey, Request};
 use tokio::time::{Duration, Instant, timeout_at};
 
 use crate::error::Result;
@@ -44,7 +44,10 @@ impl IngestEngine {
                     sink
                 })
                 .collect();
-            if lanes.keys().all(|lane| asked.contains(lane)) {
+            // Requests come one per index: once every sink asked, what is
+            // already queued still joins (a sink's other indexes).
+            let everyone = lanes.keys().all(|lane| asked.contains(&lane.sink));
+            if everyone && requests.is_empty() {
                 break;
             }
             let next = if requests.is_empty() {
@@ -77,18 +80,12 @@ impl IngestEngine {
         let mut handles = Vec::with_capacity(deliveries.len());
         for delivery in deliveries {
             let (request, handle) = delivery.into_parts();
-            let Request::Backfill { sink, indexes } = request;
-            let known: BTreeSet<IndexName> = indexes
-                .into_iter()
-                .filter(|index| {
-                    let known = scopes.contains(index);
-                    if !known {
-                        tracing::warn!(index = %index, %sink, "backfill requested for an index the source does not build; ignoring");
-                    }
-                    known
-                })
-                .collect();
-            requested.entry(sink).or_default().extend(known);
+            let Request::Backfill { index, sink } = request;
+            if scopes.contains(&index) {
+                requested.entry(sink).or_default().insert(index);
+            } else {
+                tracing::warn!(index = %index, %sink, "backfill requested for an index the source does not build; ignoring");
+            }
             handles.push(handle);
         }
         let indexes: BTreeSet<IndexName> = requested.values().flatten().cloned().collect();
@@ -122,11 +119,15 @@ impl IngestEngine {
         snapshot: &mut Snapshot,
         lanes: &Lanes,
     ) -> Result<()> {
-        let markers = snapshot.requested.iter().filter_map(|(sink, indexes)| {
-            lanes.get(sink).map(|producer| {
-                producer.publish(LaneItem::SnapshotComplete {
-                    indexes: indexes.iter().cloned().collect(),
-                })
+        let markers = snapshot.requested.iter().flat_map(|(sink, indexes)| {
+            indexes.iter().filter_map(|index| {
+                lanes
+                    .get(&LaneKey::new(index.clone(), sink.clone()))
+                    .map(|producer| {
+                        producer.publish(LaneItem::SnapshotComplete {
+                            index: index.clone(),
+                        })
+                    })
             })
         });
         try_join_all(markers).await?;

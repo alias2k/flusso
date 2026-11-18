@@ -219,6 +219,7 @@ async fn a_read_after_a_fence_sees_the_commit() {
             position: position.clone(),
             level: FenceLevel::Applied,
             sink: None,
+            indexes: Vec::new(),
             timeout: Duration::from_millis(500),
         })
         .await
@@ -310,6 +311,7 @@ async fn a_fence_never_covers_a_commit_read_before_it_was_visible() {
             position: past_the_commit.clone(),
             level: FenceLevel::Applied,
             sink: PRIMARY.map(|name| SinkName::try_new(name).unwrap()),
+            indexes: Vec::new(),
             timeout: Duration::from_secs(3),
         })
         .await
@@ -656,6 +658,7 @@ impl Client {
                 position: position.to_owned(),
                 level,
                 sink: sink.map(|name| SinkName::try_new(name).unwrap()),
+                indexes: Vec::new(),
                 timeout: WAIT,
             })
             .await
@@ -819,8 +822,8 @@ impl Backends for RealBackends {
         })
     }
 
-    fn stream(&self, _: &Config, sinks: &[SinkName]) -> anyhow::Result<Arc<dyn Stream>> {
-        Ok(Arc::new(ChannelStream::new(1024, sinks.iter().cloned())))
+    fn stream(&self, _: &Config, lanes: &[stream::LaneKey]) -> anyhow::Result<Arc<dyn Stream>> {
+        Ok(Arc::new(ChannelStream::new(1024, lanes.iter().cloned())))
     }
 
     async fn sinks(&self, _: &Config) -> anyhow::Result<Vec<SinkParts>> {

@@ -124,6 +124,7 @@ async fn a_fence_on_a_healthy_sink_passes_while_a_sibling_lane_is_full() {
             position: written.to_string(),
             level: FenceLevel::Applied,
             sink: Some(super::primary()),
+            indexes: Vec::new(),
             timeout: Duration::from_secs(1),
         })
         .await;

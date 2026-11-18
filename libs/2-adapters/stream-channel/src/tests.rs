@@ -1,9 +1,18 @@
 use super::*;
-use kernel::Position;
+use kernel::{IndexName, Position};
 use stream::Batch;
 
 fn sink(name: &str) -> SinkName {
     SinkName::try_new(name).unwrap()
+}
+
+fn index(name: &str) -> IndexName {
+    IndexName::try_new(name).unwrap()
+}
+
+/// The `users` lane of `name`.
+fn key(name: &str) -> LaneKey {
+    LaneKey::new(index("users"), sink(name))
 }
 
 fn batch(position: u64) -> LaneItem {
@@ -23,8 +32,8 @@ fn envelopes_of(item: &LaneItem) -> &Arc<[kernel::Envelope]> {
 
 #[tokio::test]
 async fn publishes_and_consumes_in_order() {
-    let stream = ChannelStream::new(8, [sink("a")]);
-    let lane = stream.lane(&sink("a")).unwrap();
+    let stream = ChannelStream::new(8, [key("a")]);
+    let lane = stream.lane(&key("a")).unwrap();
     lane.producer.publish(batch(1)).await.unwrap();
     lane.producer.publish(batch(2)).await.unwrap();
     let mut consumer = lane.consumer;
@@ -45,8 +54,8 @@ async fn publishes_and_consumes_in_order() {
 async fn a_delivery_and_its_redelivery_share_the_published_envelopes() {
     let published = batch(1);
     let envelopes = Arc::clone(envelopes_of(&published));
-    let stream = ChannelStream::new(8, [sink("a")]);
-    let lane = stream.lane(&sink("a")).unwrap();
+    let stream = ChannelStream::new(8, [key("a")]);
+    let lane = stream.lane(&key("a")).unwrap();
     lane.producer.publish(published).await.unwrap();
 
     let mut consumer = lane.consumer;
@@ -59,8 +68,8 @@ async fn a_delivery_and_its_redelivery_share_the_published_envelopes() {
 
 #[tokio::test]
 async fn an_unacked_item_is_redelivered_to_the_next_consumer() {
-    let stream = ChannelStream::new(8, [sink("a")]);
-    let lane = stream.lane(&sink("a")).unwrap();
+    let stream = ChannelStream::new(8, [key("a")]);
+    let lane = stream.lane(&key("a")).unwrap();
     lane.producer.publish(batch(1)).await.unwrap();
     lane.producer.publish(batch(2)).await.unwrap();
 
@@ -70,7 +79,7 @@ async fn an_unacked_item_is_redelivered_to_the_next_consumer() {
     delivery.nack().await.unwrap();
     drop(first);
 
-    let mut second = stream.lane(&sink("a")).unwrap().consumer;
+    let mut second = stream.lane(&key("a")).unwrap().consumer;
     let (redelivered, handle) = second.recv().await.unwrap().unwrap().into_parts();
     assert_eq!(redelivered.position(), Some(Position::new(1)));
     handle.ack().await.unwrap();
@@ -80,11 +89,11 @@ async fn an_unacked_item_is_redelivered_to_the_next_consumer() {
 
 #[tokio::test]
 async fn requests_travel_up_and_are_redelivered_until_acked() {
-    let stream = ChannelStream::new(8, [sink("a")]);
+    let stream = ChannelStream::new(8, [key("a")]);
     let requests = stream.requests().unwrap();
     let request = Request::Backfill {
+        index: index("users"),
         sink: sink("a"),
-        indexes: vec![kernel::IndexName::try_new("users").unwrap()],
     };
     requests.producer.publish(request.clone()).await.unwrap();
     let mut consumer = requests.consumer;
@@ -103,8 +112,8 @@ async fn requests_travel_up_and_are_redelivered_until_acked() {
 /// and whatever is nacked or dropped unacked comes back in its original order.
 #[tokio::test]
 async fn several_deliveries_can_be_outstanding_and_ack_independently() {
-    let stream = ChannelStream::new(8, [sink("a")]);
-    let lane = stream.lane(&sink("a")).unwrap();
+    let stream = ChannelStream::new(8, [key("a")]);
+    let lane = stream.lane(&key("a")).unwrap();
     for position in 1..=3 {
         lane.producer.publish(batch(position)).await.unwrap();
     }
@@ -147,8 +156,8 @@ async fn several_deliveries_can_be_outstanding_and_ack_independently() {
 /// lane reads empty and idle.
 #[tokio::test]
 async fn only_a_handle_dropped_unacked_is_redelivered() {
-    let stream = ChannelStream::new(8, [sink("a")]);
-    let lane = stream.lane(&sink("a")).unwrap();
+    let stream = ChannelStream::new(8, [key("a")]);
+    let lane = stream.lane(&key("a")).unwrap();
     lane.producer.publish(batch(1)).await.unwrap();
     lane.producer.publish(batch(2)).await.unwrap();
     let mut consumer = lane.consumer;
@@ -180,8 +189,8 @@ async fn only_a_handle_dropped_unacked_is_redelivered() {
 /// backlog is queued.
 #[tokio::test]
 async fn caught_up_ignores_the_delivery_being_processed() {
-    let stream = ChannelStream::new(8, [sink("a")]);
-    let lane = stream.lane(&sink("a")).unwrap();
+    let stream = ChannelStream::new(8, [key("a")]);
+    let lane = stream.lane(&key("a")).unwrap();
     lane.producer.publish(batch(1)).await.unwrap();
     lane.producer.publish(batch(2)).await.unwrap();
     let mut consumer = lane.consumer;
@@ -200,20 +209,20 @@ async fn caught_up_ignores_the_delivery_being_processed() {
 
 #[test]
 fn unknown_lane_is_an_error() {
-    let stream = ChannelStream::new(1, [sink("a")]);
+    let stream = ChannelStream::new(1, [key("a")]);
     assert!(matches!(
-        stream.lane(&sink("zzz")),
+        stream.lane(&key("zzz")),
         Err(QueueError::UnknownLane(_))
     ));
-    assert_eq!(stream.sinks().count(), 1);
+    assert_eq!(stream.sinks(), [sink("a")]);
 }
 
 /// Releasing one of several deliveries redelivers that one alone: the others
 /// are still being processed and are neither served again nor disturbed.
 #[tokio::test]
 async fn releasing_one_delivery_redelivers_only_that_one() {
-    let stream = ChannelStream::new(8, [sink("a")]);
-    let lane = stream.lane(&sink("a")).unwrap();
+    let stream = ChannelStream::new(8, [key("a")]);
+    let lane = stream.lane(&key("a")).unwrap();
     for position in 1..=4 {
         lane.producer.publish(batch(position)).await.unwrap();
     }
@@ -244,8 +253,8 @@ async fn releasing_one_delivery_redelivers_only_that_one() {
 /// released in, and the ones left in flight stay out of it.
 #[tokio::test]
 async fn released_deliveries_come_back_in_lane_order() {
-    let stream = ChannelStream::new(8, [sink("a")]);
-    let lane = stream.lane(&sink("a")).unwrap();
+    let stream = ChannelStream::new(8, [key("a")]);
+    let lane = stream.lane(&key("a")).unwrap();
     for position in 1..=3 {
         lane.producer.publish(batch(position)).await.unwrap();
     }
@@ -267,5 +276,57 @@ async fn released_deliveries_come_back_in_lane_order() {
     second.ack().await.unwrap();
     first.ack().await.unwrap();
     third.ack().await.unwrap();
+    assert!(stream.is_idle());
+}
+
+/// A sink's lanes share the configured capacity: each holds its part, so a
+/// sink holds about `capacity` items whatever the number of its indexes.
+#[tokio::test]
+async fn a_sinks_lanes_share_its_capacity() {
+    let users = LaneKey::new(index("users"), sink("a"));
+    let orders = LaneKey::new(index("orders"), sink("a"));
+    let audit = LaneKey::new(index("users"), sink("audit"));
+    let stream = ChannelStream::new(4, [users.clone(), orders.clone(), audit.clone()]);
+    for (key, room) in [(&users, 2), (&orders, 2), (&audit, 4)] {
+        let producer = stream.lane(key).unwrap().producer;
+        for position in 0..room {
+            producer.publish(batch(position)).await.unwrap();
+        }
+        let mut full = producer.publish(batch(room));
+        let polled = full
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()));
+        assert!(polled.is_pending(), "{key} holds {room} items");
+    }
+    assert_eq!(stream.lanes(&sink("a")), [orders, users]);
+}
+
+/// Lanes are independent: an item released on one lane is redelivered there
+/// alone, and another lane's deliveries go on.
+#[tokio::test]
+async fn a_release_on_one_lane_leaves_the_others_alone() {
+    let users = LaneKey::new(index("users"), sink("a"));
+    let orders = LaneKey::new(index("orders"), sink("a"));
+    let stream = ChannelStream::new(8, [users.clone(), orders.clone()]);
+    let users_lane = stream.lane(&users).unwrap();
+    let orders_lane = stream.lane(&orders).unwrap();
+    users_lane.producer.publish(batch(1)).await.unwrap();
+    orders_lane.producer.publish(batch(2)).await.unwrap();
+    orders_lane.producer.publish(batch(3)).await.unwrap();
+
+    let mut users_consumer = users_lane.consumer;
+    let mut orders_consumer = orders_lane.consumer;
+    let delivery = users_consumer.recv().await.unwrap().unwrap();
+    let (first, handle) = orders_consumer.recv().await.unwrap().unwrap().into_parts();
+    assert_eq!(first.position(), Some(Position::new(2)));
+    delivery.nack().await.unwrap();
+    handle.ack().await.unwrap();
+
+    let (again, handle) = users_consumer.recv().await.unwrap().unwrap().into_parts();
+    assert_eq!(again.position(), Some(Position::new(1)));
+    handle.ack().await.unwrap();
+    let (next, handle) = orders_consumer.recv().await.unwrap().unwrap().into_parts();
+    assert_eq!(next.position(), Some(Position::new(3)));
+    handle.ack().await.unwrap();
     assert!(stream.is_idle());
 }

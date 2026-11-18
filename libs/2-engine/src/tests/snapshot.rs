@@ -286,8 +286,9 @@ async fn backfill(
     max_changes: usize,
 ) {
     let names: Vec<SinkName> = sinks.iter().map(|(name, _)| name.clone()).collect();
-    let stream = Arc::new(ChannelStream::new(64, names.clone()));
-    let progress = Arc::new(crate::Progress::new(names.clone()));
+    let indexes: Vec<IndexName> = mappings().into_iter().map(|m| m.index).collect();
+    let stream = Arc::new(ChannelStream::over(64, indexes.clone(), names.clone()));
+    let progress = Arc::new(crate::Progress::of(indexes, names.clone()));
     let mut tasks = Vec::new();
     let mut controls = Vec::new();
     for (name, sink) in sinks {

@@ -131,13 +131,19 @@ struct Staged {
 
 fn staged(sink: SlowSink, indexes: usize) -> Staged {
     let sink = Arc::new(sink);
-    let stream = Arc::new(ChannelStream::new(64, vec![sink_name("primary")]));
+    let mappings = mappings(indexes);
+    let names: Vec<IndexName> = mappings.iter().map(|m| m.index.clone()).collect();
+    let stream = Arc::new(ChannelStream::over(
+        64,
+        names.clone(),
+        vec![sink_name("primary")],
+    ));
     let engine = SinkEngine::new(
         sink_name("primary"),
         Arc::clone(&sink) as Arc<dyn Sink>,
         Arc::clone(&stream) as Arc<dyn Stream>,
-        mappings(indexes),
-        Arc::new(crate::Progress::new([sink_name("primary")])),
+        mappings,
+        Arc::new(crate::Progress::of(names, [sink_name("primary")])),
     );
     Staged {
         sink,
@@ -156,18 +162,22 @@ impl Staged {
 async fn requests(stream: &ChannelStream) -> Vec<Vec<String>> {
     {
         let mut consumer = stream.requests().unwrap().consumer;
-        let mut requests = Vec::new();
+        let mut requests: Vec<String> = Vec::new();
         while let Ok(Ok(Some(delivery))) =
             tokio::time::timeout(Duration::from_millis(1), consumer.recv()).await
         {
             let (request, handle) = delivery.into_parts();
             handle.ack().await.unwrap();
-            let Request::Backfill { indexes, .. } = request;
-            let mut names: Vec<String> = indexes.iter().map(|i| i.as_ref().to_owned()).collect();
-            names.sort();
-            requests.push(names);
+            let Request::Backfill { index, .. } = request;
+            requests.push(index.as_ref().to_owned());
         }
-        requests
+        // One staging's requests, one per index, read together.
+        requests.sort();
+        if requests.is_empty() {
+            Vec::new()
+        } else {
+            vec![requests]
+        }
     }
 }
 

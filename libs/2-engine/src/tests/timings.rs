@@ -182,8 +182,12 @@ async fn run(
     let timings = Arc::new(Timings::default());
     let observer: Arc<dyn Observer> = Arc::clone(&timings) as Arc<dyn Observer>;
     let primary = sink_name("primary");
-    let stream = Arc::new(ChannelStream::new(capacity, [primary.clone()]));
-    let progress = Arc::new(crate::Progress::new([primary.clone()]));
+    let stream = Arc::new(ChannelStream::over(
+        capacity,
+        [super::users()],
+        [primary.clone()],
+    ));
+    let progress = Arc::new(crate::Progress::of([super::users()], [primary.clone()]));
     let engine = SinkEngine::new(
         primary.clone(),
         sink,
@@ -369,8 +373,8 @@ async fn a_quiet_pipeline_reports_idle_every_second_and_a_reindex_is_not_idle() 
     let timings = Arc::new(Timings::default());
     let observer: Arc<dyn Observer> = Arc::clone(&timings) as Arc<dyn Observer>;
     let primary = sink_name("primary");
-    let stream = Arc::new(ChannelStream::new(64, [primary.clone()]));
-    let progress = Arc::new(crate::Progress::new([primary.clone()]));
+    let stream = Arc::new(ChannelStream::over(64, [super::users()], [primary.clone()]));
+    let progress = Arc::new(crate::Progress::of([super::users()], [primary.clone()]));
     let engine = SinkEngine::new(
         primary.clone(),
         SlowSink::new(true),

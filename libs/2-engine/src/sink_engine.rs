@@ -46,7 +46,7 @@ use futures::stream::FuturesUnordered;
 use kernel::{IndexMapping, IndexName, SinkName};
 use sink::{Sink, SinkOptions};
 use source::cdc::Continuity;
-use stream::{Request, Stream};
+use stream::{LaneKey, Request, Stream};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant, sleep_until};
 
@@ -74,6 +74,29 @@ const IDLE_TICK: Duration = Duration::from_secs(1);
 mod fences;
 pub(crate) mod flights;
 mod writes;
+
+/// Which lanes a failed run is blamed on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Blame {
+    /// The last run ended cleanly: no barrier, every landing is progress.
+    Nobody,
+    /// A fresh engine, or a failure no one lane caused: every lane has a
+    /// barrier, every landing is progress.
+    Everyone,
+    /// A failure on these lanes: only they have a barrier, and only a landing
+    /// on them is progress.
+    Lanes(BTreeSet<LaneKey>),
+}
+
+impl Blame {
+    /// Whether `lane` is blamed (or nothing is, and so everyone counts).
+    pub(crate) fn covers(&self, lane: &LaneKey) -> bool {
+        match self {
+            Blame::Nobody | Blame::Everyone => true,
+            Blame::Lanes(lanes) => lanes.contains(lane),
+        }
+    }
+}
 
 /// An operation the daemon hands a running sink engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,11 +157,11 @@ pub struct SinkEngine {
     /// Whether `pending_reindex` holds one: the run asks every turn, so
     /// the answer is read without the lock.
     reindex_waiting: AtomicBool,
-    /// The last run ended in an error, or none has run yet: the next run
-    /// writes the oldest item alone before anything else (see `writes`). A
-    /// fresh engine starts with it set, since a previous process may have
-    /// stopped on that item.
-    failed_run: AtomicBool,
+    /// Which lanes the last run's failure is blamed on: their next run writes
+    /// its oldest item alone before anything else (see `writes`). A fresh
+    /// engine blames every lane, since a previous process may have stopped
+    /// on any.
+    blame: Mutex<Blame>,
 }
 
 impl SinkEngine {
@@ -168,7 +191,7 @@ impl SinkEngine {
             skipped: Mutex::new(BTreeSet::new()),
             advanced: AtomicU64::new(0),
             writes: 1,
-            failed_run: AtomicBool::new(true),
+            blame: Mutex::new(Blame::Everyone),
             pending_reindex: Mutex::new(None),
             reindex_waiting: AtomicBool::new(false),
         }
@@ -399,12 +422,14 @@ impl SinkEngine {
     async fn request_backfill(&self, indexes: Vec<IndexName>) -> Result<()> {
         tracing::info!(indexes = indexes.len(), "requesting backfill");
         let producer = self.stream.requests()?.producer;
-        producer
-            .publish(Request::Backfill {
-                sink: self.name.clone(),
-                indexes: indexes.clone(),
-            })
-            .await?;
+        for index in &indexes {
+            producer
+                .publish(Request::Backfill {
+                    index: index.clone(),
+                    sink: self.name.clone(),
+                })
+                .await?;
+        }
         self.lock_outstanding().extend(indexes.iter().cloned());
         self.observer.on_backfill_requested(&self.name, &indexes);
         Ok(())
@@ -427,7 +452,11 @@ impl SinkEngine {
     #[tracing::instrument(name = "sink.run", skip_all, fields(sink = %self.name))]
     pub async fn run(&self, control: &mut mpsc::Receiver<SinkControl>) -> Result<()> {
         let result = self.run_inner(control).await;
-        self.failed_run.store(result.is_err(), Ordering::Relaxed);
+        match &result {
+            Ok(()) => self.set_blame(Blame::Nobody),
+            Err(_) if matches!(self.blame(), Blame::Nobody) => self.set_blame(Blame::Everyone),
+            Err(_) => {}
+        }
         let id = EngineId::Sink(self.name.clone());
         match &result {
             Ok(()) => {
@@ -443,8 +472,31 @@ impl SinkEngine {
     }
 
     async fn run_inner(&self, control: &mut mpsc::Receiver<SinkControl>) -> Result<()> {
-        let lane = self.stream.lane(&self.name)?.consumer;
-        writes::Run::new(self, lane).run(control).await
+        let lanes = self
+            .lane_keys()
+            .into_iter()
+            .map(|key| Ok((key.clone(), self.stream.lane(&key)?.consumer)))
+            .collect::<Result<Vec<_>>>()?;
+        writes::Run::new(self, lanes).run(control).await
+    }
+
+    /// The lanes this engine reads: one per index it maintains.
+    fn lane_keys(&self) -> Vec<LaneKey> {
+        self.mappings
+            .iter()
+            .map(|mapping| LaneKey::new(mapping.index.clone(), self.name.clone()))
+            .collect()
+    }
+
+    pub(super) fn blame(&self) -> Blame {
+        self.blame
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(super) fn set_blame(&self, blame: Blame) {
+        *self.blame.lock().unwrap_or_else(PoisonError::into_inner) = blame;
     }
 
     /// Close an idle window (nothing in flight, nothing taken) and report it;

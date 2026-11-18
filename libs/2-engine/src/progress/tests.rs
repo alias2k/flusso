@@ -3,8 +3,11 @@ use std::thread;
 
 use super::*;
 
-fn sink(name: &str) -> SinkName {
-    SinkName::try_new(name).unwrap()
+fn sink(name: &str) -> LaneKey {
+    LaneKey::new(
+        kernel::IndexName::try_new("users").unwrap(),
+        kernel::SinkName::try_new(name).unwrap(),
+    )
 }
 
 fn p(seq: u64) -> Position {
@@ -12,7 +15,7 @@ fn p(seq: u64) -> Position {
 }
 
 /// Register a batch on each of `lanes`, as each lane's send succeeds.
-fn publish(progress: &Progress, lanes: &[&SinkName], oldest: u64, last: u64) {
+fn publish(progress: &Progress, lanes: &[&LaneKey], oldest: u64, last: u64) {
     for lane in lanes {
         progress.published(lane, p(oldest), p(last));
     }
@@ -267,7 +270,7 @@ fn reach(landed: Landed) -> u64 {
 /// registered yet), against a model: every answer must equal the model's.
 #[test]
 fn every_interleaving_answers_as_the_model_does() {
-    let names: Vec<SinkName> = ["a", "b", "c"].iter().map(|n| sink(n)).collect();
+    let names: Vec<LaneKey> = ["a", "b", "c"].iter().map(|n| sink(n)).collect();
     for seed in 1..=300u64 {
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         let lanes = 1 + rng.below(3);
@@ -375,7 +378,7 @@ fn every_interleaving_answers_as_the_model_does() {
 fn concurrent_registration_and_landing_never_answer_past_a_lane() {
     const LANES: usize = 3;
     const BATCHES: u64 = 3_000;
-    let names: Vec<SinkName> = (0..LANES).map(|l| sink(&format!("s{l}"))).collect();
+    let names: Vec<LaneKey> = (0..LANES).map(|l| sink(&format!("s{l}"))).collect();
     let progress = Arc::new(Progress::new(names.iter().cloned()));
     // Per lane: the queue of items sent to it, and the newest seq its sink
     // landed with everything the lane needs before it (`u64::MAX`: none).

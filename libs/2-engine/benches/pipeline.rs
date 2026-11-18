@@ -186,9 +186,16 @@ async fn run_deployment(
     batch: BatchPolicy,
 ) {
     let name = SinkName::try_new("bench").unwrap();
-    let stream = Arc::new(ChannelStream::new(1024, [name.clone()]));
+    let stream = Arc::new(ChannelStream::over(
+        1024,
+        documents.backfill_indexes(),
+        [name.clone()],
+    ));
     let mappings = documents.index_mappings().await.unwrap();
-    let progress = Arc::new(engine::Progress::new([name.clone()]));
+    let progress = Arc::new(engine::Progress::of(
+        documents.backfill_indexes(),
+        [name.clone()],
+    ));
     let sink_engine = SinkEngine::new(
         name.clone(),
         sink,

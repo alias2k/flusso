@@ -356,9 +356,13 @@ impl Backends for MockBackends {
         })
     }
 
-    fn stream(&self, _config: &Config, sinks: &[SinkName]) -> anyhow::Result<Arc<dyn Stream>> {
+    fn stream(
+        &self,
+        _config: &Config,
+        lanes: &[::stream::LaneKey],
+    ) -> anyhow::Result<Arc<dyn Stream>> {
         self.built.lock().unwrap().push("stream");
-        Ok(Arc::new(ChannelStream::new(64, sinks.iter().cloned())))
+        Ok(Arc::new(ChannelStream::new(64, lanes.iter().cloned())))
     }
 
     async fn sinks(&self, _config: &Config) -> anyhow::Result<Vec<SinkParts>> {

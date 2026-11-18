@@ -359,14 +359,14 @@ impl Harness {
     fn new(source: MockSource, sinks: Vec<(SinkName, Arc<dyn Sink>)>) -> Self {
         let documents = Arc::new(MockDocuments::paging(&source));
         let names: Vec<SinkName> = sinks.iter().map(|(n, _)| n.clone()).collect();
-        let stream = Arc::new(ChannelStream::new(64, names.clone()));
+        let stream = Arc::new(ChannelStream::over(64, [users()], names.clone()));
         let source = Arc::new(source);
         let ingest = IngestEngine::new(
             Arc::clone(&source) as Arc<dyn ChangeCapture>,
             Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
             Arc::clone(&stream) as Arc<dyn Stream>,
             names.clone(),
-            Arc::new(Progress::new(names)),
+            Arc::new(Progress::of([users()], names)),
         );
         let progress = ingest.progress();
         let sinks = sinks
@@ -739,8 +739,12 @@ async fn a_straggling_reindex_request_within_max_delay_joins_the_snapshot() {
     let b = Arc::new(RecordingSink::seeded(true));
     let a_marked = Arc::clone(&a.marked);
     let b_marked = Arc::clone(&b.marked);
-    let stream = Arc::new(ChannelStream::new(64, [sink_name("a"), sink_name("b")]));
-    let progress = Arc::new(Progress::new([sink_name("a"), sink_name("b")]));
+    let stream = Arc::new(ChannelStream::over(
+        64,
+        [users()],
+        [sink_name("a"), sink_name("b")],
+    ));
+    let progress = Arc::new(Progress::of([users()], [sink_name("a"), sink_name("b")]));
     let source = Arc::new(MockSource::new(vec![]).with_snapshot(vec![upsert(10)]));
     let events = Arc::clone(&source.events);
     let mut controls = Vec::new();
@@ -1127,8 +1131,8 @@ async fn reindex_control_stages_and_requests_a_snapshot_without_restarting() {
     let reindexed = Arc::clone(&sink.reindexed);
     let marked = Arc::clone(&sink.marked);
     let ops = Arc::clone(&sink.ops);
-    let stream = Arc::new(ChannelStream::new(64, [sink_name("primary")]));
-    let progress = Arc::new(Progress::new([sink_name("primary")]));
+    let stream = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
+    let progress = Arc::new(Progress::of([users()], [sink_name("primary")]));
     let source = Arc::new(MockSource::new(vec![]).with_snapshot(vec![upsert(10)]));
     let documents = Arc::new(MockDocuments::paging(&source));
     let engine = SinkEngine::new(
@@ -1306,18 +1310,18 @@ impl PositionObserver {
 }
 
 impl Observer for PositionObserver {
-    fn on_position_applied(&self, sink: &SinkName, position: Position) {
+    fn on_position_applied(&self, lane: &stream::LaneKey, position: Position) {
         self.events
             .lock()
             .unwrap()
-            .push(format!("applied {sink} {}", position.seq));
+            .push(format!("applied {} {}", lane.sink, position.seq));
     }
 
-    fn on_position_searchable(&self, sink: &SinkName, position: Position) {
+    fn on_position_searchable(&self, lane: &stream::LaneKey, position: Position) {
         self.events
             .lock()
             .unwrap()
-            .push(format!("searchable {sink} {}", position.seq));
+            .push(format!("searchable {} {}", lane.sink, position.seq));
     }
 }
 
@@ -1333,17 +1337,20 @@ struct PositionRig {
 impl PositionRig {
     fn start(sink: Arc<dyn Sink>) -> Self {
         let name = sink_name("primary");
-        let stream: Arc<dyn Stream> = Arc::new(ChannelStream::new(64, [name.clone()]));
+        let stream: Arc<dyn Stream> = Arc::new(ChannelStream::over(64, [users()], [name.clone()]));
         let observer = Arc::new(PositionObserver::default());
         let engine = SinkEngine::new(
             name.clone(),
             sink,
             Arc::clone(&stream),
             vec![mapping()],
-            Arc::new(Progress::new([name.clone()])),
+            Arc::new(Progress::of([users()], [name.clone()])),
         )
         .with_observer(Arc::clone(&observer) as Arc<dyn Observer>);
-        let lane = stream.lane(&name).unwrap().producer;
+        let lane = stream
+            .lane(&stream::LaneKey::new(users(), name.clone()))
+            .unwrap()
+            .producer;
         let (control, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
         Self {
             observer,

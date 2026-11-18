@@ -17,7 +17,7 @@ use kernel::SinkName;
 use sink::{Sink, SinkOptions};
 use source::cdc::ChangeCapture;
 use source::document::DocumentBuilder;
-use stream::Stream;
+use stream::{LaneKey, Stream};
 
 use crate::DaemonOptions;
 
@@ -67,8 +67,8 @@ pub trait Backends: std::fmt::Debug + Send + Sync {
         options: &DaemonOptions,
     ) -> anyhow::Result<SourceParts>;
 
-    /// The stream with one lane per sink in `sinks`.
-    fn stream(&self, config: &Config, sinks: &[SinkName]) -> anyhow::Result<Arc<dyn Stream>>;
+    /// The stream with exactly `lanes`: one per `(index, sink)`.
+    fn stream(&self, config: &Config, lanes: &[LaneKey]) -> anyhow::Result<Arc<dyn Stream>>;
 
     /// Every configured sink, in name order. An empty config yields the
     /// composition root's default sink.

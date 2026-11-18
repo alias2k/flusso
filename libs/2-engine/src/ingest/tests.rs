@@ -680,7 +680,11 @@ struct Deployment {
 
 impl Deployment {
     fn new(feed: Feed, builder: Arc<Builder>, recorder: Arc<Recorder>) -> Self {
-        let stream = Arc::new(ChannelStream::new(64, [sink_name()]));
+        let stream = Arc::new(ChannelStream::over(
+            64,
+            [kernel::IndexName::try_new("users").unwrap()],
+            [sink_name()],
+        ));
         let feed = Arc::new(feed);
         let published = Arc::new(Mutex::new(Vec::new()));
         let spy = Arc::new(Spy {
@@ -692,7 +696,10 @@ impl Deployment {
             Arc::clone(&builder) as Arc<dyn DocumentBuilder>,
             spy as Arc<dyn Stream>,
             vec![sink_name()],
-            Arc::new(crate::Progress::new([sink_name()])),
+            Arc::new(crate::Progress::of(
+                [kernel::IndexName::try_new("users").unwrap()],
+                [sink_name()],
+            )),
         );
         let sink = SinkEngine::new(
             sink_name(),

@@ -20,10 +20,14 @@
 //!
 //! ```
 //! use engine::{Level, Progress};
-//! use kernel::{Position, SinkName};
+//! use kernel::{IndexName, Position, SinkName};
 //! use source::cdc::Landed;
+//! use stream::LaneKey;
 //!
-//! let primary = SinkName::try_new("primary").unwrap();
+//! let primary = LaneKey::new(
+//!     IndexName::try_new("users").unwrap(),
+//!     SinkName::try_new("primary").unwrap(),
+//! );
 //! let progress = Progress::new([primary.clone()]);
 //! assert_eq!(progress.landed(), Landed::Idle);
 //!
@@ -64,8 +68,9 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
-use kernel::{Position, SinkName};
+use kernel::{IndexName, Position, SinkName};
 use source::cdc::Landed;
+use stream::LaneKey;
 
 /// Which of a lane's two levels to read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,7 +85,7 @@ pub enum Level {
 /// engine run.
 pub struct Progress {
     registry: Mutex<Registry>,
-    marks: BTreeMap<SinkName, Marks>,
+    marks: BTreeMap<LaneKey, Marks>,
     /// Called after every registration: a fence waiter may pass now.
     listener: OnceLock<Listener>,
 }
@@ -100,7 +105,7 @@ impl std::fmt::Debug for Progress {
 /// What the ingest engine routed to each lane and no mark covers yet.
 #[derive(Debug, Default)]
 struct Registry {
-    lanes: BTreeMap<SinkName, Registered>,
+    lanes: BTreeMap<LaneKey, Registered>,
 }
 
 /// One lane's routed items not yet covered, as `(key, oldest)` in routing
@@ -123,8 +128,8 @@ struct Marks {
 
 impl Progress {
     /// Nothing routed, over `lanes`.
-    pub fn new(lanes: impl IntoIterator<Item = SinkName>) -> Self {
-        let marks: BTreeMap<SinkName, Marks> = lanes
+    pub fn new(lanes: impl IntoIterator<Item = LaneKey>) -> Self {
+        let marks: BTreeMap<LaneKey, Marks> = lanes
             .into_iter()
             .map(|lane| (lane, Marks::default()))
             .collect();
@@ -140,6 +145,19 @@ impl Progress {
         }
     }
 
+    /// Nothing routed, over one lane per pair of `indexes` and `sinks`.
+    pub fn of(
+        indexes: impl IntoIterator<Item = IndexName>,
+        sinks: impl IntoIterator<Item = SinkName> + Clone,
+    ) -> Self {
+        Self::new(indexes.into_iter().flat_map(|index| {
+            sinks
+                .clone()
+                .into_iter()
+                .map(move |sink| LaneKey::new(index.clone(), sink))
+        }))
+    }
+
     /// Call `listener` after every registration (one listener: the fence's).
     pub fn on_registered(&self, listener: Listener) {
         let _ = self.listener.set(listener);
@@ -147,7 +165,7 @@ impl Progress {
 
     /// `lane` took the item of a batch covering `oldest..=last`. Call it once
     /// the lane's own send succeeded, in position order per lane.
-    pub fn published(&self, lane: &SinkName, oldest: Position, last: Position) {
+    pub fn published(&self, lane: &LaneKey, oldest: Position, last: Position) {
         {
             let mut registry = lock(&self.registry);
             if let Some(registered) = registry.lanes.get_mut(lane) {
@@ -161,7 +179,7 @@ impl Progress {
 
     /// A batch through `last` had nothing for `lane`: the lane has every
     /// change through `last` it needs, once its earlier items are registered.
-    pub fn skipped(&self, lane: &SinkName, last: Position) {
+    pub fn skipped(&self, lane: &LaneKey, last: Position) {
         {
             let mut registry = lock(&self.registry);
             if let Some(registered) = registry.lanes.get_mut(lane) {
@@ -179,7 +197,7 @@ impl Progress {
 
     /// `lane` has landed, in lane order, every item through the one keyed
     /// `through` (its last position). Never moves back.
-    pub fn applied(&self, lane: &SinkName, through: Position) {
+    pub fn applied(&self, lane: &LaneKey, through: Position) {
         if let Some(marks) = self.marks.get(lane) {
             raise(&marks.applied, through);
         }
@@ -187,7 +205,7 @@ impl Progress {
 
     /// Every item `lane` routed through the one keyed `through` is
     /// searchable. Never moves back.
-    pub fn searchable(&self, lane: &SinkName, through: Position) {
+    pub fn searchable(&self, lane: &LaneKey, through: Position) {
         if let Some(marks) = self.marks.get(lane) {
             raise(&marks.searchable, through);
         }
@@ -202,7 +220,7 @@ impl Progress {
 
     /// What `lane` has reached at `level`; `None` for a lane this progress
     /// doesn't know.
-    pub fn lane(&self, lane: &SinkName, level: Level) -> Option<Landed> {
+    pub fn lane(&self, lane: &LaneKey, level: Level) -> Option<Landed> {
         self.over([lane], level)
     }
 
@@ -215,7 +233,7 @@ impl Progress {
     /// lane's answer older, never wider.
     pub fn over<'a>(
         &self,
-        lanes: impl IntoIterator<Item = &'a SinkName>,
+        lanes: impl IntoIterator<Item = &'a LaneKey>,
         level: Level,
     ) -> Option<Landed> {
         let mut registry = lock(&self.registry);
@@ -236,7 +254,7 @@ impl Progress {
     }
 
     /// How many items routed to `lane` it hasn't landed.
-    pub fn outstanding(&self, lane: &SinkName) -> usize {
+    pub fn outstanding(&self, lane: &LaneKey) -> usize {
         let Some(marks) = self.marks.get(lane) else {
             return 0;
         };
@@ -248,7 +266,7 @@ impl Progress {
     }
 
     /// Whether `lane` has nothing routed to it outstanding at `level`.
-    pub fn is_clear(&self, lane: &SinkName, level: Level) -> bool {
+    pub fn is_clear(&self, lane: &LaneKey, level: Level) -> bool {
         self.lane(lane, level)
             .is_none_or(|landed| !matches!(landed, Landed::Before(_)))
     }

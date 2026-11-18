@@ -8,12 +8,13 @@
 //! what the gate allows and publishes every slot that is ready, in order.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use chrono::Utc;
 use futures::future::try_join_all;
 use kernel::{Envelope, IndexName, Position, SinkName};
 use source::document::{BuildFailure, Document, DocumentId};
-use stream::{Batch, LaneItem, Producer};
+use stream::{Batch, LaneItem, LaneKey, Producer};
 use tokio::time::Instant;
 
 use super::builds::{Builds, Built, Grant, Job};
@@ -227,31 +228,57 @@ impl IngestEngine {
             documents_by_index: by_index.into_iter().collect(),
             build: built.took,
         };
-        let item = LaneItem::Batch(Batch {
-            position,
-            changes,
-            envelopes: envelopes.into(),
-        });
+        // One item per lane of an index the batch built something for: the
+        // envelopes of that index, in build order. A sink's first item carries
+        // the batch's changes; a sink with no item is told they settled.
+        let mut by_lane: Vec<(&LaneKey, &Box<dyn Producer<LaneItem>>, LaneItem)> = Vec::new();
+        let mut skipped: Vec<&LaneKey> = Vec::new();
+        let mut counted: Vec<&SinkName> = Vec::new();
+        let groups = group_by_index(envelopes);
+        for (key, producer) in lanes {
+            match groups.get(&key.index) {
+                Some(envelopes) => {
+                    let first = !counted.contains(&&key.sink);
+                    if first {
+                        counted.push(&key.sink);
+                    }
+                    by_lane.push((
+                        key,
+                        producer,
+                        LaneItem::Batch(Batch {
+                            position,
+                            changes: if first { changes } else { 0 },
+                            envelopes: Arc::clone(envelopes),
+                        }),
+                    ));
+                }
+                None => skipped.push(key),
+            }
+        }
         // Each lane is registered as its own send succeeds, so a full lane
         // holds back only itself. Until then the source's own test keeps
         // that lane's older answer short of these changes, and a lane that
         // lands the item first leaves its mark for the registration to find.
         let routed = oldest.zip(position);
-        self.publish(
-            lanes
-                .iter()
-                .map(|(sink, producer)| (sink, producer, item.clone())),
-            Work::Live,
-            started,
-            routed,
-        )
-        .await?;
+        if let Some((_, last)) = routed {
+            for key in &skipped {
+                self.progress.skipped(key, last);
+            }
+        }
+        for key in skipped {
+            if !counted.contains(&&key.sink) {
+                counted.push(&key.sink);
+                self.observer.on_changes_settled(&key.sink, changes);
+            }
+        }
+        self.publish(by_lane, Work::Live, started, routed).await?;
         self.observer.on_batch_built(stats);
         tracing::debug!("batch built and published");
         Ok(())
     }
 
-    /// A snapshot batch: each lane the slice it requested, with no position.
+    /// A snapshot batch: each `(index, sink)` lane that asked for its index
+    /// that index's envelopes, with no position.
     async fn publish_backfill(
         &self,
         built: Built,
@@ -262,36 +289,35 @@ impl IngestEngine {
         self.observer
             .on_stage(StageTiming::new(Stage::Build, built.took).work(Work::Backfill));
         let started = Instant::now();
-        // Cutting each lane's slice copies its documents: part of publishing.
-        let mut publishes = Vec::with_capacity(requested.len());
+        let groups = group_by_index(envelopes);
+        let documents: usize = groups.values().map(|envelopes| envelopes.len()).sum();
+        let mut publishes = Vec::new();
         for (sink, indexes) in requested {
-            let slice: Vec<Envelope> = envelopes
-                .iter()
-                .filter(|envelope| indexes.contains(&envelope.index))
-                .cloned()
-                .collect();
-            if slice.is_empty() {
-                continue;
+            for index in indexes {
+                let Some(envelopes) = groups.get(index) else {
+                    continue;
+                };
+                let key = LaneKey::new(index.clone(), sink.clone());
+                let Some((key, producer)) = lanes.get_key_value(&key) else {
+                    tracing::warn!(%sink, %index, "snapshot requested for a lane that does not exist; dropping its slice");
+                    continue;
+                };
+                publishes.push((
+                    key,
+                    producer,
+                    LaneItem::Batch(Batch {
+                        position: None,
+                        changes: 0,
+                        envelopes: Arc::clone(envelopes),
+                    }),
+                ));
             }
-            let Some(producer) = lanes.get(sink) else {
-                tracing::warn!(%sink, "snapshot requested by a sink with no lane; dropping its slice");
-                continue;
-            };
-            publishes.push((
-                sink,
-                producer,
-                LaneItem::Batch(Batch {
-                    position: None,
-                    changes: 0,
-                    envelopes: slice.into(),
-                }),
-            ));
         }
         self.publish(publishes, Work::Backfill, started, None)
             .await?;
         self.observer.on_batch_built(BuildStats {
             changes: 0,
-            documents: envelopes.len(),
+            documents,
             documents_by_index: by_index.into_iter().collect(),
             build: built.took,
         });
@@ -306,20 +332,20 @@ impl IngestEngine {
     /// cutting the items is publishing too.
     pub(super) async fn publish<'a>(
         &self,
-        items: impl IntoIterator<Item = (&'a SinkName, &'a Box<dyn Producer<LaneItem>>, LaneItem)>,
+        items: impl IntoIterator<Item = (&'a LaneKey, &'a Box<dyn Producer<LaneItem>>, LaneItem)>,
         work: Work,
         started: Instant,
         routed: Option<(Position, Position)>,
     ) -> Result<()> {
-        try_join_all(items.into_iter().map(|(sink, producer, item)| async move {
+        try_join_all(items.into_iter().map(|(lane, producer, item)| async move {
             producer.publish(item).await?;
             if let Some((oldest, last)) = routed {
-                self.progress.published(sink, oldest, last);
+                self.progress.published(lane, oldest, last);
             }
             self.observer.on_stage(
                 StageTiming::new(Stage::LaneWait, started.elapsed())
                     .work(work)
-                    .sink(sink),
+                    .sink(&lane.sink),
             );
             Ok::<_, EngineError>(())
         }))
@@ -375,4 +401,20 @@ impl IngestEngine {
             FailurePolicy::Skip => Ok(()),
         }
     }
+}
+
+/// The envelopes of each index, in build order, each group shared by every
+/// lane of its index.
+fn group_by_index(envelopes: Vec<Envelope>) -> BTreeMap<IndexName, Arc<[Envelope]>> {
+    let mut groups: BTreeMap<IndexName, Vec<Envelope>> = BTreeMap::new();
+    for envelope in envelopes {
+        groups
+            .entry(envelope.index.clone())
+            .or_default()
+            .push(envelope);
+    }
+    groups
+        .into_iter()
+        .map(|(index, envelopes)| (index, envelopes.into()))
+        .collect()
 }

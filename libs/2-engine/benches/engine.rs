@@ -323,18 +323,22 @@ async fn run_deployment(capture: MockCapture, sinks: usize, batch: BatchPolicy) 
     let names: Vec<SinkName> = (0..sinks)
         .map(|i| SinkName::try_new(format!("sink{i}")).unwrap())
         .collect();
-    let stream = Arc::new(ChannelStream::new(1024, names.clone()));
     let pace = Arc::new(Pace::default());
     let documents: Arc<dyn DocumentBuilder> = Arc::new(MockDocuments {
         pace: Arc::clone(&pace),
         rows: capture.rows,
     });
     let mappings = documents.index_mappings().await.unwrap();
+    let indexes: Vec<_> = mappings
+        .iter()
+        .map(|mapping| mapping.index.clone())
+        .collect();
+    let stream = Arc::new(ChannelStream::over(1024, indexes.clone(), names.clone()));
     let seeded = capture.rows == 0;
 
     let mut tasks = Vec::new();
     let mut controls = Vec::new();
-    let progress = Arc::new(engine::Progress::new(names.iter().cloned()));
+    let progress = Arc::new(engine::Progress::of(indexes, names.iter().cloned()));
     for name in &names {
         let sink: Arc<dyn Sink> = Arc::new(CountingSink {
             seeded,

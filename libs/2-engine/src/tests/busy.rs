@@ -238,9 +238,16 @@ async fn a_busy_item_holds_back_only_the_items_sharing_its_documents() {
     .await;
     let requests = Arc::clone(&stub.requests);
     let name = sink_name("primary");
-    let stream = Arc::new(stream_channel::ChannelStream::new(16, [name.clone()]));
-    let lane = stream.lane(&name).unwrap().producer;
-    let progress = Arc::new(crate::Progress::new([name.clone()]));
+    let stream = Arc::new(stream_channel::ChannelStream::over(
+        16,
+        [super::users()],
+        [name.clone()],
+    ));
+    let lane = stream
+        .lane(&stream::LaneKey::new(super::users(), name.clone()))
+        .unwrap()
+        .producer;
+    let progress = Arc::new(crate::Progress::of([super::users()], [name.clone()]));
     let publish = |position: u64, ids: &[&str]| {
         let item = item(position, ids);
         let lane = &lane;
@@ -249,7 +256,11 @@ async fn a_busy_item_holds_back_only_the_items_sharing_its_documents() {
         async move {
             lane.publish(item).await.unwrap();
             let position = Position::new(position);
-            progress.published(name, position, position);
+            progress.published(
+                &stream::LaneKey::new(super::users(), name.clone()),
+                position,
+                position,
+            );
         }
     };
     let engine = crate::SinkEngine::new(

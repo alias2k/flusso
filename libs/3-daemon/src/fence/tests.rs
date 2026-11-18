@@ -5,6 +5,8 @@ use futures::stream::BoxStream;
 use source::SourceError;
 use source::cdc::{AdvanceListener, Continuity, Landed, LiveChange};
 
+use stream::LaneKey;
+
 use super::*;
 
 /// A source whose positions are plain numbers. It mirrors the Postgres
@@ -106,38 +108,67 @@ struct Rig {
     source: Arc<NumberedSource>,
     progress: Arc<Progress>,
     observer: FenceObserver,
-    sinks: Vec<SinkName>,
+    lanes: Vec<LaneKey>,
+}
+
+fn index(name: &str) -> IndexName {
+    IndexName::try_new(name).unwrap()
+}
+
+/// The `users` lane of sink `on`.
+fn lane(on: &str) -> LaneKey {
+    LaneKey::new(index("users"), sink(on))
 }
 
 impl Rig {
     /// The ingest engine published a batch of `position` to every lane.
     fn route(&self, position: Position) {
-        for sink in &self.sinks {
-            self.progress.published(sink, position, position);
+        for lane in &self.lanes {
+            self.progress.published(lane, position, position);
         }
     }
 
-    /// `on` landed the item of `position`.
+    /// The `users` lane of `on` landed the item of `position`.
     fn applied(&self, on: &str, position: Position) {
-        self.progress.applied(&sink(on), position);
-        self.observer.on_position_applied(&sink(on), position);
+        self.applied_on(&lane(on), position);
     }
 
-    /// `on` made everything through `position` searchable.
+    /// `lane` landed the item of `position`.
+    fn applied_on(&self, lane: &LaneKey, position: Position) {
+        self.progress.applied(lane, position);
+        self.observer.on_position_applied(lane, position);
+    }
+
+    /// The `users` lane of `on` made everything through `position`
+    /// searchable.
     fn searchable(&self, on: &str, position: Position) {
-        self.progress.searchable(&sink(on), position);
-        self.observer.on_position_searchable(&sink(on), position);
+        self.searchable_on(&lane(on), position);
+    }
+
+    /// `lane` made everything through `position` searchable.
+    fn searchable_on(&self, lane: &LaneKey, position: Position) {
+        self.progress.searchable(lane, position);
+        self.observer.on_position_searchable(lane, position);
     }
 }
 
+/// A fence over the `users` index of `sinks`.
 fn fence(sinks: &[&str]) -> Rig {
+    fence_over(&["users"], sinks)
+}
+
+/// A fence over every lane of `indexes` × `sinks`.
+fn fence_over(indexes: &[&str], sinks: &[&str]) -> Rig {
     let source = Arc::new(NumberedSource::default());
-    let names: Vec<SinkName> = sinks.iter().map(|name| sink(name)).collect();
-    let progress = Arc::new(Progress::new(names.iter().cloned()));
+    let lanes: Vec<LaneKey> = indexes
+        .iter()
+        .flat_map(|i| sinks.iter().map(move |s| LaneKey::new(index(i), sink(s))))
+        .collect();
+    let progress = Arc::new(Progress::new(lanes.iter().cloned()));
     let fence = Fence::new(
         Arc::clone(&source) as Arc<dyn ChangeCapture>,
         Arc::clone(&progress),
-        names.iter().cloned(),
+        lanes.iter().cloned(),
     );
     let observer = FenceObserver::new(fence.clone());
     Rig {
@@ -145,7 +176,7 @@ fn fence(sinks: &[&str]) -> Rig {
         source,
         progress,
         observer,
-        sinks: names,
+        lanes,
     }
 }
 
@@ -154,6 +185,7 @@ fn request(position: &str, level: FenceLevel, on: Option<&str>) -> FenceRequest 
         position: position.to_owned(),
         level,
         sink: on.map(sink),
+        indexes: Vec::new(),
         timeout: Duration::from_secs(5),
     }
 }

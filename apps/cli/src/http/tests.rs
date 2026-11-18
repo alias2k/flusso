@@ -80,13 +80,17 @@ async fn serve_stoppable(at: u64) -> (String, Arc<SteadySource>, Waits) {
     let source = Arc::new(SteadySource::default());
     source.at.store(at, Ordering::SeqCst);
     let primary = SinkName::try_new("primary").unwrap();
+    let lane = stream::LaneKey::new(
+        kernel::IndexName::try_new("users").unwrap(),
+        primary.clone(),
+    );
     let state = PublicState {
         status: Arc::new(Status::new([], [primary.clone()], Instant::now())),
         registry: None,
         fence: Fence::new(
             Arc::clone(&source) as Arc<dyn ChangeCapture>,
-            Arc::new(daemon::Progress::new([primary.clone()])),
-            [primary],
+            Arc::new(daemon::Progress::new([lane.clone()])),
+            [lane],
         ),
         waits: waits.clone(),
     };
@@ -109,14 +113,14 @@ async fn a_reached_position_answers_200_with_where_the_sink_is() {
     assert_eq!(status, 200);
     assert_eq!(
         body,
-        json!({ "reached": true, "position": "40", "until": "searchable", "sink": null })
+        json!({ "reached": true, "position": "40", "until": "searchable", "sink": null, "indexes": [] })
     );
 
     let (status, body) = get_wait(&base, "position=40&until=applied&sink=primary").await;
     assert_eq!(status, 200);
     assert_eq!(
         body,
-        json!({ "reached": true, "position": "40", "until": "applied", "sink": "primary" })
+        json!({ "reached": true, "position": "40", "until": "applied", "sink": "primary", "indexes": [] })
     );
 }
 
@@ -129,7 +133,7 @@ async fn an_unreached_position_answers_408_after_the_timeout() {
     assert!(started.elapsed() >= Duration::from_millis(150));
     assert_eq!(
         body,
-        json!({ "reached": false, "position": "40", "until": "searchable", "sink": null })
+        json!({ "reached": false, "position": "40", "until": "searchable", "sink": null, "indexes": [] })
     );
 }
 

@@ -9,11 +9,13 @@ use kernel::{Envelope, IndexName, Position};
 use sink::{Sink, WriteReport};
 use source::cdc::{ChangeCapture, Landed};
 use source::document::DocumentBuilder;
-use stream::Stream;
+use stream::{LaneKey, Stream};
 use stream_channel::ChannelStream;
 use tokio::sync::mpsc;
 
-use super::{MockDocuments, MockSource, RecordingSink, mapping, sink_name, upsert, wait_for};
+use super::{
+    MockDocuments, MockSource, RecordingSink, mapping, sink_name, upsert, users, wait_for,
+};
 use crate::{BatchPolicy, IngestEngine, Level, SinkControl, SinkEngine};
 
 /// A sink whose writes never return.
@@ -46,14 +48,21 @@ fn bound(landed: Landed) -> u64 {
 #[tokio::test]
 async fn a_healthy_lane_reaches_what_it_landed_while_a_sibling_lane_is_full() {
     let (healthy, stalled) = (sink_name("healthy"), sink_name("stalled"));
-    let stream = Arc::new(ChannelStream::new(1, [healthy.clone(), stalled.clone()]));
+    let stream = Arc::new(ChannelStream::over(
+        1,
+        [users()],
+        [healthy.clone(), stalled.clone()],
+    ));
     let source = Arc::new(MockSource::new((0..60).map(upsert).collect()));
     let ingest = IngestEngine::new(
         Arc::clone(&source) as Arc<dyn ChangeCapture>,
         Arc::new(MockDocuments::default()) as Arc<dyn DocumentBuilder>,
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![healthy.clone(), stalled.clone()],
-        Arc::new(crate::Progress::new([healthy.clone(), stalled.clone()])),
+        Arc::new(crate::Progress::of(
+            [users()],
+            [healthy.clone(), stalled.clone()],
+        )),
     )
     .with_batch(BatchPolicy {
         max_changes: 1,
@@ -88,13 +97,15 @@ async fn a_healthy_lane_reaches_what_it_landed_while_a_sibling_lane_is_full() {
     wait_for(|| ops.lock().unwrap().len() >= 3).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     let written = ops.lock().unwrap().len() as u64;
-    let reached = progress.lane(&healthy, Level::Applied).unwrap();
+    let reached = progress
+        .lane(&LaneKey::new(users(), healthy.clone()), Level::Applied)
+        .unwrap();
     assert!(
         bound(reached) >= written,
         "the healthy sink wrote positions 0..{written}, its lane says {reached:?}"
     );
     assert_eq!(
-        progress.lane(&stalled, Level::Applied),
+        progress.lane(&LaneKey::new(users(), stalled.clone()), Level::Applied),
         Some(Landed::Before(Position::new(0))),
         "the stalled lane still pins at its first item"
     );

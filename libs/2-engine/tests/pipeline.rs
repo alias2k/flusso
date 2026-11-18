@@ -2699,10 +2699,17 @@ async fn run_deployment(
     policies: FailurePolicies,
 ) -> engine::Result<()> {
     let name = SinkName::try_new("e2e").unwrap();
-    let stream: Arc<dyn Stream> = Arc::new(ChannelStream::new(1024, [name.clone()]));
+    let stream: Arc<dyn Stream> = Arc::new(ChannelStream::over(
+        1024,
+        documents.backfill_indexes(),
+        [name.clone()],
+    ));
     let continuity = capture.continuity().await?;
     let mappings = documents.index_mappings().await?;
-    let progress = Arc::new(engine::Progress::new([name.clone()]));
+    let progress = Arc::new(engine::Progress::of(
+        documents.backfill_indexes(),
+        [name.clone()],
+    ));
     let sink_engine = SinkEngine::new(
         name.clone(),
         sink,

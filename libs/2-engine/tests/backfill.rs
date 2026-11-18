@@ -316,10 +316,17 @@ async fn backfill(port: u16, url: &str, sink: Arc<RecordingSink>) -> Vec<String>
     let capture: Arc<dyn ChangeCapture> =
         Arc::new(WalChangeCapture::new(replication(port), url.to_owned()));
     let name = SinkName::try_new("recording").unwrap();
-    let stream: Arc<dyn Stream> = Arc::new(ChannelStream::new(1024, [name.clone()]));
+    let stream: Arc<dyn Stream> = Arc::new(ChannelStream::over(
+        1024,
+        documents.backfill_indexes(),
+        [name.clone()],
+    ));
     let continuity = capture.continuity().await.unwrap();
     let mappings = documents.index_mappings().await.unwrap();
-    let progress = Arc::new(engine::Progress::new([name.clone()]));
+    let progress = Arc::new(engine::Progress::of(
+        documents.backfill_indexes(),
+        [name.clone()],
+    ));
     let sink_engine = SinkEngine::new(
         name.clone(),
         Arc::clone(&sink) as Arc<dyn Sink>,

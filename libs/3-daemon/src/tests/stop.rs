@@ -237,6 +237,7 @@ async fn a_stop_ends_once_the_last_flush_is_searchable_and_answers_a_searchable_
                 position: "1".to_owned(),
                 level: FenceLevel::Searchable,
                 sink: None,
+                indexes: Vec::new(),
                 timeout: Duration::from_secs(20),
             })
             .await

@@ -1,6 +1,6 @@
-//! What travels on the stream: [`LaneItem`]s down each sink's lane,
-//! [`Request`]s up the request lane, and the [`Stream`] port that hands out
-//! their ends.
+//! What travels on the stream: [`LaneItem`]s down each `(index, sink)` lane
+//! ([`LaneKey`]), [`Request`]s up the request lane, and the [`Stream`] port
+//! that hands out their ends.
 //!
 //! ```
 //! use kernel::Position;
@@ -23,16 +23,38 @@ use serde::{Deserialize, Serialize};
 pub enum LaneItem {
     /// The envelopes one ingest commit built, in build order.
     Batch(Batch),
-    /// The snapshot the lane requested for `indexes` is fully published; the
-    /// sink engine may now record them as seeded.
-    SnapshotComplete { indexes: Vec<IndexName> },
+    /// The snapshot the lane requested for its index is fully published; the
+    /// sink engine may now record the index as seeded.
+    SnapshotComplete { index: IndexName },
 }
 
-/// The envelopes one ingest commit built, in build order, with the position of
-/// the last change the batch covers. A live batch with no envelopes (every
-/// change resolved to nothing this sink indexes) still carries its position,
-/// so the engine can tell when every lane landed it. A snapshot batch
-/// carries none.
+/// Which lane: one index, as one sink receives it. Ordered by index, then
+/// sink.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct LaneKey {
+    /// The index whose documents the lane carries.
+    pub index: IndexName,
+    /// The sink that receives them.
+    pub sink: SinkName,
+}
+
+impl LaneKey {
+    /// The lane of `index` into `sink`.
+    pub fn new(index: IndexName, sink: SinkName) -> Self {
+        Self { index, sink }
+    }
+}
+
+impl std::fmt::Display for LaneKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.index, self.sink)
+    }
+}
+
+/// One index's envelopes from one ingest commit, in build order, with the
+/// position of the last change the commit covers (its key on the lane: one
+/// commit puts at most one item on a lane). An index the commit built nothing
+/// for gets no item. A snapshot batch carries no position.
 ///
 /// The envelopes are shared, not owned: one build is published to every lane
 /// and held for redelivery without copying the documents, so a batch is
@@ -64,16 +86,13 @@ impl LaneItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Request {
-    /// Snapshot `indexes` into `sink`'s lane, ending with a
+    /// Snapshot `index` into its lane to `sink`, ending with a
     /// [`LaneItem::SnapshotComplete`]. Acknowledged by the ingest engine only
     /// after that marker is published, so a crash mid-snapshot redelivers it.
-    Backfill {
-        sink: SinkName,
-        indexes: Vec<IndexName>,
-    },
+    Backfill { index: IndexName, sink: SinkName },
 }
 
-/// The two ends of one sink's lane.
+/// The two ends of one `(index, sink)` lane.
 #[derive(Debug)]
 pub struct Lane {
     /// Where the ingest engine publishes.
@@ -91,16 +110,20 @@ pub struct RequestLane {
     pub consumer: Box<dyn crate::Consumer<Request>>,
 }
 
-/// The stream port: one lane per sink downward, one request lane upward, and
-/// nothing else: how far each lane has landed is the engine's `Progress`.
+/// The stream port: one lane per `(index, sink)` downward, one request lane
+/// upward, and nothing else: how far each lane has landed is the engine's
+/// `Progress`.
 ///
 /// `lane` and `requests` are idempotent: calling them again returns fresh ends
 /// over the *same* lane, which is how the daemon re-attaches a restarted engine
 /// (the previous consumer's unacknowledged item is redelivered to the new one).
 pub trait Stream: std::fmt::Debug + Send + Sync {
-    /// The lane for `sink`. An unknown sink is an error: the set of lanes is
-    /// fixed when the stream is built.
-    fn lane(&self, sink: &SinkName) -> crate::Result<Lane>;
+    /// The lane `key`. An unknown key is an error: the set of lanes is fixed
+    /// when the stream is built.
+    fn lane(&self, key: &LaneKey) -> crate::Result<Lane>;
+
+    /// Every lane into `sink`, in index order.
+    fn lanes(&self, sink: &SinkName) -> Vec<LaneKey>;
 
     /// The request lane.
     fn requests(&self) -> crate::Result<RequestLane>;

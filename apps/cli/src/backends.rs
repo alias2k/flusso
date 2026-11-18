@@ -25,7 +25,7 @@ use source_postgres::{
     ColumnTypes, PgDocumentBuilder, PostgresConfig, WalChangeCapture, replication_config,
     sql_connection_url,
 };
-use stream::Stream;
+use stream::{LaneKey, Stream};
 use stream_channel::ChannelStream;
 
 use script::{ScriptedBuilder, Scripts};
@@ -76,11 +76,11 @@ impl Backends for FlussoBackends {
         Ok(SourceParts { capture, documents })
     }
 
-    fn stream(&self, config: &Config, sinks: &[SinkName]) -> anyhow::Result<Arc<dyn Stream>> {
+    fn stream(&self, config: &Config, lanes: &[LaneKey]) -> anyhow::Result<Arc<dyn Stream>> {
         let channel = adapters::stream_config(config)?;
         Ok(Arc::new(ChannelStream::from_config(
             &channel,
-            sinks.iter().cloned(),
+            lanes.iter().cloned(),
         )))
     }
 

@@ -12,7 +12,7 @@ pub use backends::{Backends, SinkParts, SourceParts};
 pub use engine::{Budget, Held, Progress};
 pub use fence::{
     Fence, FenceError, FenceLevel, FenceObserver, FenceOutcome, FencePositions, FenceRequest,
-    SinkPositions,
+    LanePositions, SinkPositions,
 };
 pub use observer::StatusObserver;
 pub use status::{
@@ -38,7 +38,7 @@ use config::Config;
 use engine::{BatchPolicy, FailurePolicies, FanOut, IngestEngine, SinkEngine};
 use kernel::IndexMapping;
 use source::cdc::{ChangeCapture, Continuity};
-use stream::Stream;
+use stream::{LaneKey, Stream};
 
 /// How a [`Daemon`] run is parameterized: the knobs that belong to the
 /// deployment as a whole. Adapter settings (the slot, the publication,
@@ -192,17 +192,26 @@ impl Daemon {
         let source_took = source_started.elapsed();
         let sinks = backends.sinks(&config).await?;
         let sink_names: Vec<SinkName> = sinks.iter().map(|s| s.name.clone()).collect();
-        let stream: Arc<dyn Stream> = backends.stream(&config, &sink_names)?;
         let mappings: Vec<IndexMapping> = documents
             .index_mappings()
             .await
             .context("resolving the index mappings")?;
+        // One lane per (index, sink): every index a sink engine maintains.
+        let lanes: Vec<LaneKey> = mappings
+            .iter()
+            .flat_map(|mapping| {
+                sink_names
+                    .iter()
+                    .map(|sink| LaneKey::new(mapping.index.clone(), sink.clone()))
+            })
+            .collect();
+        let stream: Arc<dyn Stream> = backends.stream(&config, &lanes)?;
 
-        let progress = Arc::new(Progress::new(sink_names.iter().cloned()));
+        let progress = Arc::new(Progress::new(lanes.iter().cloned()));
         let fence = Fence::new(
             Arc::clone(&capture),
             Arc::clone(&progress),
-            sink_names.iter().cloned(),
+            lanes.iter().cloned(),
         );
         let budget = Arc::new(Budget::new(max_built_bytes(&config)));
         let status = Arc::new(

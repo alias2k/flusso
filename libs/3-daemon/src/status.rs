@@ -311,6 +311,16 @@ impl Status {
         self.documents_built.fetch_add(documents, Ordering::Relaxed);
     }
 
+    /// `changes` built into no document `sink` receives: settled for it
+    /// without a write.
+    pub(crate) fn settle_changes(&self, sink: &SinkName, changes: u64) {
+        if let Some(status) = self.sink(sink) {
+            status
+                .changes_committed
+                .fetch_add(changes, Ordering::Relaxed);
+        }
+    }
+
     pub(crate) fn record_commit(
         &self,
         sink: &SinkName,

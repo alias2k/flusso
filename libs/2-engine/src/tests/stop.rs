@@ -18,7 +18,7 @@ use stream::Stream;
 use stream_channel::ChannelStream;
 use tokio::sync::{Notify, mpsc};
 
-use super::{MockDocuments, RecordingSink, mapping, sink_name, upsert};
+use super::{MockDocuments, RecordingSink, mapping, sink_name, upsert, users};
 use crate::{IngestEngine, Progress, SinkControl, SinkEngine, Stop};
 
 /// A live stream fed through a channel that counts every change it hands
@@ -267,7 +267,7 @@ impl Sink for StalledSink {
 
 /// The lanes of `stream`, for a `Progress` over them.
 fn stream_sinks(stream: &ChannelStream) -> Vec<SinkName> {
-    stream.sinks().cloned().collect()
+    stream.sinks()
 }
 
 /// Stage and spawn one sink engine per sink; returns their tasks.
@@ -318,8 +318,12 @@ async fn a_stop_during_a_build_publishes_the_batch_and_every_sink_lands_it_befor
     let source = Arc::new(source);
     let documents = Arc::new(GatedDocuments::default());
     documents.gated.store(true, Ordering::SeqCst);
-    let stream = Arc::new(ChannelStream::new(64, [sink_name("a"), sink_name("b")]));
-    let progress = Arc::new(Progress::new(stream_sinks(&stream)));
+    let stream = Arc::new(ChannelStream::over(
+        64,
+        [users()],
+        [sink_name("a"), sink_name("b")],
+    ));
+    let progress = Arc::new(Progress::of([users()], stream_sinks(&stream)));
     let a = Arc::new(RecordingSink::seeded(true));
     let b = Arc::new(RecordingSink::seeded(true));
     let (a_ops, b_ops) = (Arc::clone(&a.ops), Arc::clone(&b.ops));
@@ -376,8 +380,8 @@ async fn a_stop_during_a_build_publishes_the_batch_and_every_sink_lands_it_befor
 async fn nothing_is_read_from_the_live_stream_once_the_stop_is_requested() {
     let (source, feed) = ClosableSource::new();
     let source = Arc::new(source);
-    let stream = Arc::new(ChannelStream::new(64, [sink_name("primary")]));
-    let progress = Arc::new(Progress::new(stream_sinks(&stream)));
+    let stream = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
+    let progress = Arc::new(Progress::of([users()], stream_sinks(&stream)));
     let sink = Arc::new(RecordingSink::seeded(true));
     let ops = Arc::clone(&sink.ops);
     let sinks = spawn_sinks(
@@ -422,8 +426,8 @@ async fn a_snapshot_waiting_on_a_page_is_abandoned_and_its_request_served_again_
     let (source, _feed) = ClosableSource::new();
     let source = Arc::new(source);
     let hanging = Arc::new(HangingKeys::default());
-    let stream = Arc::new(ChannelStream::new(64, [sink_name("primary")]));
-    let progress = Arc::new(Progress::new(stream_sinks(&stream)));
+    let stream = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
+    let progress = Arc::new(Progress::of([users()], stream_sinks(&stream)));
     let sink = Arc::new(RecordingSink::seeded(false));
     let marked = Arc::clone(&sink.marked);
     let sinks = spawn_sinks(
@@ -478,11 +482,12 @@ async fn a_snapshot_waiting_on_a_page_is_abandoned_and_its_request_served_again_
 async fn a_stalled_sink_does_not_keep_the_other_from_landing_its_lane_and_holds_only_the_end() {
     let (source, feed) = ClosableSource::new();
     let source = Arc::new(source);
-    let stream = Arc::new(ChannelStream::new(
+    let stream = Arc::new(ChannelStream::over(
         64,
+        [users()],
         [sink_name("healthy"), sink_name("stalled")],
     ));
-    let progress = Arc::new(Progress::new(stream_sinks(&stream)));
+    let progress = Arc::new(Progress::of([users()], stream_sinks(&stream)));
     let healthy = Arc::new(RecordingSink::seeded(true));
     let flushes = Arc::clone(&healthy.flushes);
     let sinks = spawn_sinks(
@@ -530,8 +535,8 @@ async fn a_stalled_sink_does_not_keep_the_other_from_landing_its_lane_and_holds_
 async fn a_stop_requested_before_the_run_reads_nothing() {
     let (source, feed) = ClosableSource::new();
     let source = Arc::new(source);
-    let stream = Arc::new(ChannelStream::new(64, [sink_name("primary")]));
-    let progress = Arc::new(Progress::new(stream_sinks(&stream)));
+    let stream = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
+    let progress = Arc::new(Progress::of([users()], stream_sinks(&stream)));
     feed.send(upsert(1)).await.unwrap();
     let stop = Stop::new();
     stop.request();
@@ -557,8 +562,8 @@ async fn a_stop_requested_before_the_run_reads_nothing() {
 async fn a_stopping_sink_skips_queued_snapshot_batches_and_leaves_their_index_unseeded() {
     let (source, _feed) = ClosableSource::new();
     let source = Arc::new(source);
-    let stream = Arc::new(ChannelStream::new(64, [sink_name("primary")]));
-    let progress = Arc::new(Progress::new(stream_sinks(&stream)));
+    let stream = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
+    let progress = Arc::new(Progress::of([users()], stream_sinks(&stream)));
     let sink = Arc::new(RecordingSink::seeded(false));
     let (ops, marked) = (Arc::clone(&sink.ops), Arc::clone(&sink.marked));
     let engine = SinkEngine::new(
@@ -643,8 +648,8 @@ impl ChangeCapture for UnconfirmedClose {
 async fn a_stop_whose_final_position_never_reaches_the_source_fails_the_run() {
     let (source, feed) = ClosableSource::new();
     let source = Arc::new(UnconfirmedClose(source));
-    let stream = Arc::new(ChannelStream::new(64, [sink_name("primary")]));
-    let progress = Arc::new(Progress::new(stream_sinks(&stream)));
+    let stream = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
+    let progress = Arc::new(Progress::of([users()], stream_sinks(&stream)));
     let sink = Arc::new(RecordingSink::seeded(true));
     let ops = Arc::clone(&sink.ops);
     let sinks = spawn_sinks(
@@ -716,8 +721,11 @@ impl Sink for RefreshesWhenCaughtUp {
 #[tokio::test]
 async fn a_deferred_sink_still_refreshes_when_skipped_snapshot_batches_follow_the_last_live_one() {
     let name = sink_name("primary");
-    let stream = Arc::new(ChannelStream::new(64, [name.clone()]));
-    let lane = stream.lane(&name).unwrap().producer;
+    let stream = Arc::new(ChannelStream::over(64, [users()], [name.clone()]));
+    let lane = stream
+        .lane(&stream::LaneKey::new(users(), name.clone()))
+        .unwrap()
+        .producer;
     let live = |position: u64| {
         stream::LaneItem::Batch(stream::Batch {
             position: Some(Position::new(position)),
@@ -742,7 +750,7 @@ async fn a_deferred_sink_still_refreshes_when_skipped_snapshot_batches_follow_th
         Arc::clone(&sink) as Arc<dyn Sink>,
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![mapping()],
-        Arc::new(crate::Progress::new([name])),
+        Arc::new(crate::Progress::of([users()], [name])),
     )
     .with_observer(Arc::clone(&observer) as Arc<dyn crate::Observer>)
     .with_stop(stop);
@@ -827,8 +835,8 @@ async fn a_stop_raised_mid_burst_ends_the_batch_there_and_lands_what_was_read() 
     for id in 1..=50 {
         feed.send(upsert(id)).await.unwrap();
     }
-    let stream = Arc::new(ChannelStream::new(64, [sink_name("primary")]));
-    let progress = Arc::new(Progress::new(stream_sinks(&stream)));
+    let stream = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
+    let progress = Arc::new(Progress::of([users()], stream_sinks(&stream)));
     let sink = Arc::new(RecordingSink::seeded(true));
     let (ops, flushes) = (Arc::clone(&sink.ops), Arc::clone(&sink.flushes));
     let sinks = spawn_sinks(

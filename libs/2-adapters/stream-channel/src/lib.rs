@@ -10,17 +10,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
-use kernel::SinkName;
+use kernel::{IndexName, SinkName};
 use stream::{
-    AckHandle, Consumer, Delivery, Lane, LaneItem, Producer, QueueError, Request, RequestLane,
-    Result, Stream,
+    AckHandle, Consumer, Delivery, Lane, LaneItem, LaneKey, Producer, QueueError, Request,
+    RequestLane, Result, Stream,
 };
 use tokio::sync::mpsc;
 
-/// The in-process stream: one bounded channel per sink lane and one for
-/// requests.
+/// The in-process stream: one bounded channel per `(index, sink)` lane and
+/// one for requests.
 ///
-/// Built once by the daemon with the full sink set; every [`Stream::lane`] and
+/// Built once by the daemon with the full lane set; every [`Stream::lane`] and
 /// [`Stream::requests`] call hands out fresh ends over the same channels, so a
 /// restarted engine re-attaches and is redelivered whatever its predecessor
 /// left unacknowledged. Several deliveries may be outstanding at once (the
@@ -28,41 +28,78 @@ use tokio::sync::mpsc;
 /// published); each is acknowledged on its own.
 #[derive(Debug)]
 pub struct ChannelStream {
-    lanes: BTreeMap<SinkName, Arc<Channel<LaneItem>>>,
+    lanes: BTreeMap<LaneKey, Arc<Channel<LaneItem>>>,
     requests: Arc<Channel<Request>>,
 }
 
 impl ChannelStream {
-    /// A stream with one lane per sink in `sinks`, each holding `capacity`
-    /// items before publishing waits, plus a request lane of the same size.
-    pub fn new(capacity: usize, sinks: impl IntoIterator<Item = SinkName>) -> Self {
+    /// A stream with the lanes `lanes`, plus a request lane holding
+    /// `capacity` items. A sink's lanes share `capacity` between them: each
+    /// holds `max(1, capacity / its sink's lanes)` items before publishing
+    /// waits, so a sink holds about `capacity` items however many indexes it
+    /// receives.
+    pub fn new(capacity: usize, lanes: impl IntoIterator<Item = LaneKey>) -> Self {
         let capacity = capacity.max(1);
+        let lanes: Vec<LaneKey> = lanes.into_iter().collect();
+        let mut per_sink: BTreeMap<&SinkName, usize> = BTreeMap::new();
+        for key in &lanes {
+            *per_sink.entry(&key.sink).or_default() += 1;
+        }
+        let bound = |key: &LaneKey| {
+            let shared = per_sink.get(&key.sink).copied().unwrap_or(1).max(1);
+            (capacity / shared).max(1)
+        };
         Self {
-            lanes: sinks
-                .into_iter()
-                .map(|sink| (sink, Arc::new(Channel::new(capacity))))
+            lanes: lanes
+                .iter()
+                .map(|key| (key.clone(), Arc::new(Channel::new(bound(key)))))
                 .collect(),
             requests: Arc::new(Channel::new(capacity)),
         }
     }
 
     /// Build from the adapter's own configuration.
-    pub fn from_config(config: &ChannelConfig, sinks: impl IntoIterator<Item = SinkName>) -> Self {
-        Self::new(config.capacity, sinks)
+    pub fn from_config(config: &ChannelConfig, lanes: impl IntoIterator<Item = LaneKey>) -> Self {
+        Self::new(config.capacity, lanes)
     }
 
-    /// The sinks this stream has a lane for.
-    pub fn sinks(&self) -> impl Iterator<Item = &SinkName> {
+    /// A stream with one lane per pair of `indexes` and `sinks`.
+    pub fn over(
+        capacity: usize,
+        indexes: impl IntoIterator<Item = IndexName>,
+        sinks: impl IntoIterator<Item = SinkName> + Clone,
+    ) -> Self {
+        let lanes: Vec<LaneKey> = indexes
+            .into_iter()
+            .flat_map(|index| {
+                sinks
+                    .clone()
+                    .into_iter()
+                    .map(move |sink| LaneKey::new(index.clone(), sink))
+            })
+            .collect();
+        Self::new(capacity, lanes)
+    }
+
+    /// The lanes of this stream.
+    pub fn keys(&self) -> impl Iterator<Item = &LaneKey> {
         self.lanes.keys()
+    }
+
+    /// Every sink this stream has a lane into.
+    pub fn sinks(&self) -> Vec<SinkName> {
+        let sinks: std::collections::BTreeSet<&SinkName> =
+            self.lanes.keys().map(|key| &key.sink).collect();
+        sinks.into_iter().cloned().collect()
     }
 }
 
 impl Stream for ChannelStream {
-    fn lane(&self, sink: &SinkName) -> Result<Lane> {
+    fn lane(&self, key: &LaneKey) -> Result<Lane> {
         let channel = self
             .lanes
-            .get(sink)
-            .ok_or_else(|| QueueError::UnknownLane(sink.to_string()))?;
+            .get(key)
+            .ok_or_else(|| QueueError::UnknownLane(key.to_string()))?;
         Ok(Lane {
             producer: Box::new(ChannelProducer {
                 channel: Arc::clone(channel),
@@ -71,6 +108,14 @@ impl Stream for ChannelStream {
                 channel: Arc::clone(channel),
             }),
         })
+    }
+
+    fn lanes(&self, sink: &SinkName) -> Vec<LaneKey> {
+        self.lanes
+            .keys()
+            .filter(|key| &key.sink == sink)
+            .cloned()
+            .collect()
     }
 
     fn requests(&self) -> Result<RequestLane> {

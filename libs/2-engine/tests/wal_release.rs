@@ -594,12 +594,19 @@ async fn deploy(url: &str, spec: SourceSpec, sinks: Vec<SinkSpec>, tuning: Tunin
             .unwrap(),
     );
     let names: Vec<SinkName> = sinks.iter().map(|s| s.name.clone()).collect();
-    let stream: Arc<dyn Stream> = Arc::new(ChannelStream::new(1024, names.clone()));
+    let stream: Arc<dyn Stream> = Arc::new(ChannelStream::over(
+        1024,
+        documents.backfill_indexes(),
+        names.clone(),
+    ));
     let continuity = capture.continuity().await.unwrap();
     let mappings = documents.index_mappings().await.unwrap();
 
     let mut engines: Vec<BoxFuture<'static, engine::Result<()>>> = Vec::new();
-    let progress = Arc::new(engine::Progress::new(names.iter().cloned()));
+    let progress = Arc::new(engine::Progress::of(
+        documents.backfill_indexes(),
+        names.iter().cloned(),
+    ));
     for spec in sinks {
         let engine = SinkEngine::new(
             spec.name,

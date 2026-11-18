@@ -41,6 +41,7 @@ use std::time::Duration;
 
 use kernel::{IndexName, Position, SinkName};
 use source::document::BuildFailure;
+use stream::LaneKey;
 
 use crate::policy::FailurePolicy;
 
@@ -353,6 +354,12 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
     }
 
     /// A sink engine applied, flushed, and acknowledged one batch.
+    /// A batch built `changes` source changes into no document `sink`
+    /// receives: they are settled for `sink` without a write.
+    fn on_changes_settled(&self, sink: &SinkName, changes: usize) {
+        let _ = (sink, changes);
+    }
+
     fn on_batch_committed(&self, sink: &SinkName, stats: CommitStats) {
         let _ = (sink, stats);
     }
@@ -376,23 +383,22 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
         let _ = (index, id, failure, policy);
     }
 
-    /// `sink` flushed every live change up to and including `position`: a
-    /// fetch by id at the destination now sees them. Reported as the flush
-    /// returns and *before* the batch is acknowledged, so whoever listens
-    /// knows of a position before the source can be told it is confirmed. A
-    /// redelivered batch can repeat an earlier position; keep the highest.
-    fn on_position_applied(&self, sink: &SinkName, position: Position) {
-        let _ = (sink, position);
+    /// `lane`'s sink wrote every live change of the lane up to and including
+    /// `position`: a fetch by id at the destination now sees them. Reported
+    /// as the write returns and *before* the item is acknowledged. A
+    /// redelivered item can repeat an earlier position; keep the highest.
+    fn on_position_applied(&self, lane: &LaneKey, position: Position) {
+        let _ = (lane, position);
     }
 
-    /// Every live change up to and including `position` can now be *searched*
-    /// at `sink`'s destination, as its flushes reported
+    /// Every live change of `lane` up to and including `position` can now be
+    /// *searched* at its sink's destination, as its writes reported
     /// ([`Visibility`](sink::Visibility)). Trails
     /// [`on_position_applied`](Self::on_position_applied) by however long the
     /// destination takes to refresh. A redelivered batch can repeat an earlier
     /// position; keep the highest.
-    fn on_position_searchable(&self, sink: &SinkName, position: Position) {
-        let _ = (sink, position);
+    fn on_position_searchable(&self, lane: &LaneKey, position: Position) {
+        let _ = (lane, position);
     }
 
     /// An engine stopped on an error. The daemon decides whether it restarts.
@@ -498,6 +504,12 @@ impl Observer for FanOut {
         }
     }
 
+    fn on_changes_settled(&self, sink: &SinkName, changes: usize) {
+        for observer in &self.observers {
+            observer.on_changes_settled(sink, changes);
+        }
+    }
+
     fn on_batch_committed(&self, sink: &SinkName, stats: CommitStats) {
         for observer in &self.observers {
             observer.on_batch_committed(sink, stats.clone());
@@ -522,15 +534,15 @@ impl Observer for FanOut {
         }
     }
 
-    fn on_position_applied(&self, sink: &SinkName, position: Position) {
+    fn on_position_applied(&self, lane: &LaneKey, position: Position) {
         for observer in &self.observers {
-            observer.on_position_applied(sink, position);
+            observer.on_position_applied(lane, position);
         }
     }
 
-    fn on_position_searchable(&self, sink: &SinkName, position: Position) {
+    fn on_position_searchable(&self, lane: &LaneKey, position: Position) {
         for observer in &self.observers {
-            observer.on_position_searchable(sink, position);
+            observer.on_position_searchable(lane, position);
         }
     }
 

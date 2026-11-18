@@ -30,6 +30,7 @@ use super::{PositionObserver, mapping, sink_name, users};
 use crate::{
     FailurePolicies, FailurePolicy, Observer, Progress, Result, SinkControl, SinkEngine, Stop,
 };
+use stream::LaneKey;
 
 /// A small deterministic generator, so a schedule replays from its seed.
 #[derive(Debug)]
@@ -312,13 +313,16 @@ impl Rig {
 
     fn with_policies(probe: Probe, writes: usize, policies: FailurePolicies) -> Self {
         let name = sink_name("primary");
-        let stream = Arc::new(ChannelStream::new(1024, [name.clone()]));
-        let lane = stream.lane(&name).unwrap().producer;
+        let stream = Arc::new(ChannelStream::over(1024, [users()], [name.clone()]));
+        let lane = stream
+            .lane(&LaneKey::new(users(), name.clone()))
+            .unwrap()
+            .producer;
         let (control, _) = tokio::sync::mpsc::channel(4);
         let probe = Arc::new(probe);
         let observer = Arc::new(PositionObserver::default());
         let stop = Stop::new();
-        let progress = Arc::new(Progress::new([name.clone()]));
+        let progress = Arc::new(Progress::of([users()], [name.clone()]));
         let sink_engine = Arc::new(
             SinkEngine::new(
                 name.clone(),
@@ -408,7 +412,11 @@ impl Rig {
             }))
             .await
             .unwrap();
-        self.progress.published(&self.name, position, position);
+        self.progress.published(
+            &LaneKey::new(users(), self.name.clone()),
+            position,
+            position,
+        );
     }
 
     async fn backfill(&mut self, ids: &[&str]) {
@@ -425,9 +433,7 @@ impl Rig {
 
     async fn complete(&self) {
         self.lane
-            .publish(LaneItem::SnapshotComplete {
-                indexes: vec![users()],
-            })
+            .publish(LaneItem::SnapshotComplete { index: users() })
             .await
             .unwrap();
     }
@@ -907,8 +913,8 @@ struct FailingAcks {
 }
 
 impl Stream for FailingAcks {
-    fn lane(&self, sink: &kernel::SinkName) -> stream::Result<stream::Lane> {
-        let lane = self.inner.lane(sink)?;
+    fn lane(&self, key: &LaneKey) -> stream::Result<stream::Lane> {
+        let lane = self.inner.lane(key)?;
         Ok(stream::Lane {
             producer: lane.producer,
             consumer: Box::new(FailingConsumer {
@@ -916,6 +922,10 @@ impl Stream for FailingAcks {
                 fail: self.fail,
             }),
         })
+    }
+
+    fn lanes(&self, sink: &kernel::SinkName) -> Vec<LaneKey> {
+        self.inner.lanes(sink)
     }
 
     fn requests(&self) -> stream::Result<stream::RequestLane> {
@@ -980,7 +990,7 @@ impl stream::AckHandle for FailingAck {
 #[tokio::test(start_paused = true)]
 async fn a_failed_acknowledgement_still_waits_for_the_writes_in_flight() {
     let name = sink_name("primary");
-    let channel = Arc::new(ChannelStream::new(1024, [name.clone()]));
+    let channel = Arc::new(ChannelStream::over(1024, [users()], [name.clone()]));
     let stream = Arc::new(FailingAcks {
         inner: Arc::clone(&channel),
         fail: "b",
@@ -991,10 +1001,13 @@ async fn a_failed_acknowledgement_still_waits_for_the_writes_in_flight() {
         Arc::clone(&probe) as Arc<dyn Sink>,
         stream as Arc<dyn Stream>,
         vec![mapping()],
-        Arc::new(crate::Progress::new([name.clone()])),
+        Arc::new(crate::Progress::of([users()], [name.clone()])),
     )
     .with_writes(4);
-    let lane = channel.lane(&name).unwrap().producer;
+    let lane = channel
+        .lane(&LaneKey::new(users(), name.clone()))
+        .unwrap()
+        .producer;
     let run = tokio::spawn(async move {
         let (_control, mut rx) = tokio::sync::mpsc::channel(1);
         engine.run(&mut rx).await
