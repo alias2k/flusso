@@ -2,7 +2,7 @@
 status: accepted
 ---
 
-> **Implementation status (the first merge, PR #422).** In: stages 1–7, 8b's backfill resume, 8c (stall age, WAL behind, the alert), and #379 (a fence holds while an index is seeded or rebuilt). Some 8a groundwork is in as well: the build permits, resolution on its own connection, and `Progress`'s pending sets, which nothing marks yet. **Not yet:** 8a's reader and index tasks, the per-index budget half, per-index restart (8b), and stage 9 (per-lane failure). Until then one ingest task builds every index, and a failure stops a sink's whole run.
+> **Implementation status (the first merge, PR #422).** In: stages 1–2 (already on `main`) and 3–7, 8b's backfill resume, 8c (stall age, WAL behind, the alert), and #379 (a fence holds while an index is seeded or rebuilt). Some 8a groundwork is in as well: the build permits, resolution on its own connection, and `Progress`'s pending sets, which nothing marks yet. **Not yet:** 8a's reader and index tasks, the per-index budget half, per-index restart (8b), and stage 9 (per-lane failure). Until then one ingest task builds every index, and a failure stops a sink's whole run.
 
 # Each index runs on its own task; order is kept per document
 
