@@ -282,6 +282,20 @@ acquisitions, wakes per change) with the same counting as stage 6 §9, then rate
 - **Track A** (`ingest/snapshot.rs`, `Walk`): frozen from step 4. The walk moves into the index task
   as it is, over one index (`Walk::new(documents, [index])`); the coalescing moves to the task.
 
+## 10a. What stage 7's review changes here
+
+- **Item size and requests per document.** Stage 7's sink merges only within a lane once lanes have
+  writes out (a write is as slow as its slowest part), so a burst's requests per document fall back to
+  `main`'s only when each lane item is about a batch. Here each index task takes up to `max_changes`
+  ids per build, so a busy index publishes items of about a batch on its own: this stage is where
+  `main`'s documents per write come back. Measured on `reference` at the end of the stage (writes and
+  documents per write in a burst, against `main` and stage 7).
+- **Requests acknowledged per index** (review 12): each index task acknowledges its own index's
+  requests after its `SnapshotComplete`, so an index walked first is no longer held until the last
+  index of a coalesced walk is done.
+- **Seeds are flights on the sink side** (track A): nothing here depends on how a sink seeds.
+- **Per-lane caught up and slots** (review 1, 4, 5): the sink side is unchanged by this stage.
+
 ## 11. Open points for the review
 
 - `changes_committed` per sink: computed from `Progress` (proposed) or an approximate per-item count.
