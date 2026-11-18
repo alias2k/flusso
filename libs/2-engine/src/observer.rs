@@ -338,6 +338,14 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
         let _ = (sink, count);
     }
 
+    /// A sink engine is about to stage a fresh generation of `index` (a
+    /// reindex, or a rebuild after a `Fresh` source): from here until
+    /// [`on_index_seeded`](Self::on_index_seeded), its live writes go to the
+    /// new generation while reads still see the old one.
+    fn on_index_rebuilding(&self, sink: &SinkName, index: &IndexName) {
+        let _ = (sink, index);
+    }
+
     /// A sink engine asked for a snapshot of `indexes` into its lane.
     fn on_backfill_requested(&self, sink: &SinkName, indexes: &[IndexName]) {
         let _ = (sink, indexes);
@@ -490,6 +498,12 @@ impl Observer for FanOut {
     fn on_indexes_ensured(&self, sink: &SinkName, count: usize) {
         for observer in &self.observers {
             observer.on_indexes_ensured(sink, count);
+        }
+    }
+
+    fn on_index_rebuilding(&self, sink: &SinkName, index: &IndexName) {
+        for observer in &self.observers {
+            observer.on_index_rebuilding(sink, index);
         }
     }
 

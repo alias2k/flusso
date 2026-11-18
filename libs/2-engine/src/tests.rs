@@ -1595,3 +1595,88 @@ async fn wait_for(mut condition: impl FnMut() -> bool) {
     .await
     .unwrap();
 }
+
+/// Logs the rebuild events into the sink's own event list, so their order
+/// against `Sink::reindex` shows.
+#[derive(Debug)]
+struct RebuildEvents(Arc<Mutex<Vec<String>>>);
+
+impl Observer for RebuildEvents {
+    fn on_index_rebuilding(&self, _: &SinkName, index: &IndexName) {
+        self.0.lock().unwrap().push(format!("rebuilding {index}"));
+    }
+
+    fn on_backfill_requested(&self, _: &SinkName, indexes: &[IndexName]) {
+        for index in indexes {
+            self.0.lock().unwrap().push(format!("requested {index}"));
+        }
+    }
+
+    fn on_index_seeded(&self, _: &SinkName, index: &IndexName) {
+        self.0.lock().unwrap().push(format!("seeded {index}"));
+    }
+}
+
+/// A fence stops vouching for an index before its writes move to a new
+/// generation (#379): the rebuilding event comes before `Sink::reindex`, on a
+/// `Fresh` start and on an on-demand reindex alike.
+#[tokio::test]
+async fn an_index_is_announced_rebuilding_before_the_sink_moves_its_writes() {
+    let engine = |events: &Arc<Mutex<Vec<String>>>, stream: &Arc<ChannelStream>| {
+        let sink = Arc::new(RecordingSink::seeded(true).with_events(events));
+        let marked = Arc::clone(&sink.marked);
+        let engine = SinkEngine::new(
+            sink_name("primary"),
+            sink,
+            Arc::clone(stream) as Arc<dyn Stream>,
+            vec![mapping()],
+            Arc::new(Progress::of([users()], [sink_name("primary")])),
+        )
+        .with_observer(Arc::new(RebuildEvents(Arc::clone(events))));
+        (engine, marked)
+    };
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let stream = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
+    let (fresh, _) = engine(&events, &stream);
+    fresh.stage(Continuity::Fresh).await.unwrap();
+    assert_eq!(
+        *events.lock().unwrap(),
+        ["rebuilding users", "reindex users", "requested users"]
+    );
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let stream = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
+    let progress = Arc::new(Progress::of([users()], [sink_name("primary")]));
+    let (resumed, marked) = engine(&events, &stream);
+    resumed.stage(Continuity::Resumed).await.unwrap();
+    let (control, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
+    let sink_task = tokio::spawn(async move { resumed.run(&mut rx).await });
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    let source = Arc::new(MockSource::new(vec![]).with_snapshot(vec![upsert(10)]));
+    let ingest = IngestEngine::new(
+        Arc::clone(&source) as Arc<dyn ChangeCapture>,
+        Arc::new(MockDocuments::paging(&source)),
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![sink_name("primary")],
+        progress,
+    );
+    let ingest_task = tokio::spawn(async move { ingest.run().await });
+    wait_for(|| !marked.lock().unwrap().is_empty()).await;
+    ingest_task.abort();
+    sink_task.abort();
+    assert_eq!(
+        *events.lock().unwrap(),
+        [
+            "rebuilding users",
+            "reindex users",
+            "requested users",
+            "seeded users"
+        ]
+    );
+}

@@ -422,6 +422,10 @@ impl SinkEngine {
         let ask_seeded = match step {
             Step::Ensure { ask_seeded } => ask_seeded,
             Step::Rebuild { ask_seeded } => {
+                // Before the sink moves its writes: a fence must stop vouching
+                // for this index first (#379).
+                self.observer
+                    .on_index_rebuilding(&self.name, &mapping.index);
                 self.sink.reindex(mapping).await?;
                 ask_seeded
             }
