@@ -621,18 +621,21 @@ is the one concrete piece.
   the commit LSN if it is its commit's last change, else `confirm_before`), so the capture keeps
   only `next_seq`, the horizon and the confirmed LSN, no map. The ingest engine **routes** a live
   batch: after every lane accepted it (`commit.rs`'s `publish_live`), `Progress::published(lanes,
-  oldest, last)` registers it per lane, then `routed`. A sink engine reports an item **landed**
-  (`Progress::wrote`, in `writes.rs`'s `write_returned`) when its write returned with nothing refused
-  for good, before the ack; a landing reported before its registration, or twice, is matched or
-  dropped. `Progress::landed()` is `Before(oldest unlanded)` / `Through(routed)` / `Idle`
+  oldest, last)` registers it on every lane it went to and moves `routed`, under one lock. A sink
+  engine raises its lane's **marks** (`Progress::applied` / `searchable`, in `writes.rs`'s
+  `write_returned`, before the ack): the last item written, and made searchable, with every item
+  before it in lane order (`Fences`' in-order answers); lane order is registration order, so a mark
+  covers every registered item up to it, and one that runs ahead covers an item registered later. `Progress::landed()` is `Before(oldest unlanded)` / `Through(routed)` / `Idle`
   (`source::cdc::Landed`); the ingest engine hands it to `ChangeCapture::confirm` after a commit when
   it changed and on the 1 s tick **always**, since the source's answer moves with idle WAL while
   the case stays put; `drain_lanes` the same. The source decides what an emitted-but-unrouted change
   means: `Through(p)` follows the horizon only while `p.seq + 1 == next_seq`, else `p.confirm_through`;
   `Idle` follows it only while nothing was ever emitted (`FIRST_SEQ`), else nothing moves. Confirmation
-  is monotonic. **Locks:** the ingest engine writes each lane's `registered` and `routed`; a sink
-  engine only its lane's `reports`; a reader copies `routed` first, then settles each lane (both
-  locks), so a batch registered after the copy is never counted as landed under the older `routed`.
+  is monotonic. **Locks:** the registrations and `routed` sit under one lock that only the ingest
+  engine (once per publish and per confirmation) and a fence reader take; a sink engine never does.
+  Each mark is one `AtomicU64` with one writer (its lane's sink engine), raised by a plain load and
+  store. Per run of `live_drain_held/sinks2/1` (20,000 lane items), counted in the bench: lane ledger
+  locks 60,030 → 40,067, plus 20,002 registry locks and 40,000 mark stores.
   The Postgres capture confirms within ~1 s of the last flush (issue #205): `Positions::confirm` wakes
   the stream loop (`confirmed_moved`), which hands `confirmed_lsn()` to the replication client at once
   instead of at the next replication event, and `WalChangeCapture::new` sets the client's status and
@@ -647,7 +650,7 @@ is the one concrete piece.
   Guards: `progress::tests` (`every_interleaving_answers_as_the_model_does`, 300 seeded interleavings
   against a model; `a_stalled_lane_pins_confirmation_and_its_own_fence_only`,
   `a_lane_with_nothing_routed_to_it_pins_nothing`, `a_landing_reported_before_its_registration_still_counts`,
-  `a_repeated_landing_lands_nothing_else`), `confirms_no_position_before_its_flush`,
+  `a_mark_never_moves_back`), `confirms_no_position_before_its_flush`,
   `redelivers_the_unacked_batch_to_a_restarted_sink_engine`, the channel adapter's
   `several_deliveries_can_be_outstanding_and_ack_independently`, the daemon's
   `failed_sink_engine_restarts_and_redelivers` / `failed_ingest_engine_restarts_and_resumes_the_stream`,

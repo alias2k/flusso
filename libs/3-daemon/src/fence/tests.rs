@@ -117,13 +117,13 @@ impl Rig {
 
     /// `on` landed the item of `position`.
     fn applied(&self, on: &str, position: Position) {
-        self.progress.wrote(&sink(on), Some(position), None);
+        self.progress.applied(&sink(on), position);
         self.observer.on_position_applied(&sink(on), position);
     }
 
     /// `on` made everything through `position` searchable.
     fn searchable(&self, on: &str, position: Position) {
-        self.progress.wrote(&sink(on), None, Some(position));
+        self.progress.searchable(&sink(on), position);
         self.observer.on_position_searchable(&sink(on), position);
     }
 }

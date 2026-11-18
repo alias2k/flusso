@@ -202,3 +202,21 @@ computes its case when it checks.
 - Keys must stay unique per lane. With one item per `(index, sink)` per batch they are, as long as the key is still the batch's last position.
 - The fence reads `Progress::lane(sink, level)` per sink; per `(index, sink)` it takes the minimum over the named lanes. `FenceObserver` only wakes waiters, so the events can stay per sink.
 - `Fence::settled` compares each lane's searchable and applied cases; it becomes per lane unchanged.
+
+## 9. After review: no lock on the sink's path
+
+The first version gave each lane two locks: one for registrations (ingest) and one for reports (sink), and the confirmation settled every lane under both. Now:
+
+- **Registrations and `routed`:** one lock, taken by the ingest engine once per publish and once per confirmation, and by a fence reader. No sink engine takes it.
+- **Each lane's marks:** two `AtomicU64`s, applied and searchable, each the last key covered, in lane order, `+ 1`. The lane's sink engine is their one writer and raises them by a plain load and store, from `Fences`' in-order answers. A reader drops the registrations a mark covers.
+
+Counted inside the bench, per run (one iteration, Criterion `--test`), `ffd54d22` against this commit:
+
+| `live_drain_held/…/1` | lane ledger locks | registry locks | mark stores | confirmations |
+| --- | ---: | ---: | ---: | ---: |
+| `sinks1`, before | 30,060 | — | — | 10,002 |
+| `sinks1`, now | 26,073 | 20,002 | 20,000 | 10,002 |
+| `sinks2`, before | 60,030 | — | — | 10,002 |
+| `sinks2`, now | 40,067 | 20,002 | 40,000 | 10,002 |
+
+Lane ledger locks are shared by the ingest engine (publish) and a sink engine (receive, acknowledge); the confirmation used to take one per lane. Registry locks are uncontended in the bench (no fence). The mark stores are plain stores on x86 (a mark moves once per item at one change per batch); the sink engine's own `Fences` lock is unchanged.

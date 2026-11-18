@@ -788,11 +788,11 @@ impl SinkEngine {
         Ok(())
     }
 
-    /// A write returned: record it, report the item landed and how far the
-    /// sink is searchable to the progress (before the caller acknowledges it,
-    /// so a fence never waits on an acknowledgement), and tell observers what
-    /// became applied and searchable, applied first. One fences lock and one
-    /// progress lock: a write returns once per lane item.
+    /// A write returned: record it, raise the lane's marks in the progress
+    /// (before the caller acknowledges it, so a fence never waits on an
+    /// acknowledgement), and tell observers what became applied and
+    /// searchable, applied first. One fences lock, and an atomic per mark
+    /// that moved: a write returns once per lane item.
     fn write_returned(
         &self,
         position: Option<Position>,
@@ -812,7 +812,12 @@ impl SinkEngine {
             (applied, searchable, returned)
         };
         if let Some(progress) = &self.progress {
-            progress.wrote(&self.name, position, searchable);
+            if let Some(applied) = applied {
+                progress.applied(&self.name, applied);
+            }
+            if let Some(searchable) = searchable {
+                progress.searchable(&self.name, searchable);
+            }
         }
         if let Some(position) = applied {
             self.observer.on_position_applied(&self.name, position);
@@ -828,7 +833,7 @@ impl SinkEngine {
         let reached = self.lock_fences().advance_searchable(Instant::now());
         if let Some(position) = reached {
             if let Some(progress) = &self.progress {
-                progress.wrote(&self.name, None, Some(position));
+                progress.searchable(&self.name, position);
             }
             self.observer.on_position_searchable(&self.name, position);
         }
