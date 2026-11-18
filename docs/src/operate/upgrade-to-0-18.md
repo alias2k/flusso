@@ -281,7 +281,7 @@ A comparison with a string, a number or another kind fails rather than answering
 
 - **`[stream] capacity` and `--queue-capacity` are deprecated.** They still load, flusso warns at start, and they do nothing. Remove them when convenient. The Helm chart's `run.queueCapacity` now defaults to unset.
 - **A stalled sink paces ingest by bytes.** Once built documents waiting for it reach the budget, the ingest engine builds nothing more until it acknowledges some, as a full queue did. A backfill holds at most half the budget, so live changes keep room.
-- **Size memory from the budget.** Plan `max_built_mib` + `builds` batches + about 100 MiB, plus 10–20% for the allocator. The Helm chart now requests 512 MiB of memory and sets no limit; its `values.yaml` gives the formula for one.
+- **Size memory from the budget.** Plan from the formula in [config.toml](../reference/config-toml.md#concurrency): `max_built_mib`, the batches in flight past it, request bodies and the source's read-ahead, about 100 MiB, plus 10–20% for the allocator. The Helm chart now requests 512 MiB of memory and sets no limit; its `values.yaml` gives the formula for one.
 - **New in `/status` and `/metrics`:** `memory` (`limit_bytes`, `built_bytes`, `backfill_bytes`), `flusso.memory.built` and `flusso.memory.refused`.
 - **Embedding the crates.** `IngestEngine::with_budget(Arc<Budget>)` counts built documents (without it, nothing is counted, as before). `stream::Batch` gains `hold: Hold`; a `Batch` written by hand sets `hold: Default::default()`. `ChannelConfig::capacity` is now `Option<usize>` and is ignored by `ChannelStream::from_config`.
 

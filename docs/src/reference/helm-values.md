@@ -49,7 +49,7 @@ Every value the chart at `deploy/helm/flusso/` accepts, with its default. `value
 | `prometheusRule.laneWalBehindBytes` | `1073741824` | …or past this much WAL held by one lane (1 GiB). |
 | `prometheusRule.for` | `5m` | How long the condition holds before the alert fires. |
 | `prometheusRule.severity` | `page` | The alerts' `severity` label. |
-| `resources` | `requests.memory: 512Mi` | No limit by default. A limit needs room for `[concurrency] max_built_mib` (512 MiB) + `builds` batches + about 100 MiB, plus 10–20% allocator overhead; see [config.toml](config-toml.md#concurrency). |
+| `resources` | `requests.memory: 512Mi` | No limit by default. A limit needs room for `[concurrency] max_built_mib` (512 MiB), the batches past it, what the budget doesn't count (request bodies, the source's read-ahead) and about 100 MiB, plus 10–20% allocator overhead; the formula is in [config.toml](config-toml.md#concurrency). |
 | `podAnnotations`, `podLabels` | `{}` | |
 | `podSecurityContext` | non-root, uid/gid 65532 | |
 | `securityContext` | no privilege escalation, read-only root filesystem, all capabilities dropped | |

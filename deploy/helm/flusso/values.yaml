@@ -161,9 +161,16 @@ readinessProbe:
 
 # Memory: built documents are held within `[concurrency] max_built_mib`
 # (default 512 MiB) until every sink acknowledges them. A limit, if you set
-# one, needs room for max_built_mib + `builds` batches (one batch of 256
-# documents is a few MiB) + about 100 MiB baseline, plus 10-20% for the
-# allocator. A limit below that can OOM-kill a deployment that runs today.
+# one, needs room for:
+#   max_built_mib
+#   + up to 2 x `builds` batches past it (each in-flight build counts what it
+#     really built; a batch of 256 documents is a few MiB)
+#   + what the budget does NOT count: per sink, `writes` x one bulk request
+#     body (the rendered JSON of a write), and the source's read-ahead of
+#     `[batch] max_changes` x 16 changes, each with its row images
+#   + about 100 MiB baseline,
+# plus 10-20% for the allocator. A limit below that can OOM-kill a deployment
+# that runs today.
 resources:
   requests:
     memory: 512Mi
