@@ -300,6 +300,19 @@ struct Builder {
     overlapped: AtomicBool,
     now: AtomicUsize,
     most: AtomicUsize,
+    /// Builds dropped before they finished.
+    cancelled: Arc<AtomicUsize>,
+}
+
+/// Counts a build dropped before it finished.
+struct Unfinished(Option<Arc<AtomicUsize>>);
+
+impl Drop for Unfinished {
+    fn drop(&mut self) {
+        if let Some(cancelled) = self.0.take() {
+            cancelled.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 }
 
 impl Builder {
@@ -312,6 +325,7 @@ impl Builder {
             overlapped: AtomicBool::new(false),
             now: AtomicUsize::new(0),
             most: AtomicUsize::new(0),
+            cancelled: Arc::default(),
         })
     }
 
@@ -441,7 +455,9 @@ impl DocumentBuilder for Builder {
         }
         let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
         self.most.fetch_max(now, Ordering::SeqCst);
+        let mut unfinished = Unfinished(Some(Arc::clone(&self.cancelled)));
         let result = self.work(&ids).await;
+        unfinished.0 = None;
         self.now.fetch_sub(1, Ordering::SeqCst);
         let mut building = self.building.lock().unwrap();
         for id in &ids {
@@ -1463,4 +1479,42 @@ async fn a_batch_bigger_than_the_budget_still_builds() {
         .with_budget(KIB, usize::MAX);
     deployment.run_to_end(0).await;
     assert_eq!(deployment.recorder.state(), db.expected());
+}
+
+/// An engine whose run future is dropped (a supervisor aborting it, a
+/// shutdown deadline) leaves no build running: its spawned builds are
+/// aborted with it, so nothing keeps reading the source.
+#[tokio::test(start_paused = true)]
+async fn a_dropped_engine_aborts_its_running_builds() {
+    let db = Database::new(0, (0..3).map(Change::upsert).collect());
+    let builder = Builder::new(
+        &db,
+        Behaviour {
+            held: Mutex::new(HashSet::from([0, 1, 2])),
+            ..Behaviour::default()
+        },
+    );
+    let mut deployment = Deployment::new(
+        Feed::new(&db).open(),
+        Arc::clone(&builder),
+        Recorder::seeded(true),
+    )
+    .ingest(|ingest| ingest.with_batch(batch(1)).with_builds(4));
+    let sink = deployment.start_sink().await;
+    let ingest = deployment.ingest;
+    let run = tokio::spawn(async move { ingest.run().await });
+    while builder.grants().len() < 3 {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    run.abort();
+    let _ = run.await;
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        builder.cancelled.load(Ordering::SeqCst),
+        3,
+        "every held build is dropped with the engine"
+    );
+    sink.abort();
 }
