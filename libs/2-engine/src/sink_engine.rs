@@ -126,8 +126,10 @@ pub struct SinkEngine {
     /// the deployment is dropped with it (the daemon refuses new ones once
     /// stopping).
     pending_reindex: Mutex<Option<Vec<IndexName>>>,
-    /// The last run ended in an error: the next one writes the oldest
-    /// redelivered item alone before anything else (see `writes`).
+    /// The last run ended in an error, or none has run yet: the next run
+    /// writes the oldest item alone before anything else (see `writes`). A
+    /// fresh engine starts with it set, since a previous process may have
+    /// stopped on that item.
     failed_run: AtomicBool,
 }
 
@@ -155,7 +157,7 @@ impl SinkEngine {
             skipped: Mutex::new(BTreeSet::new()),
             advanced: AtomicU64::new(0),
             writes: 1,
-            failed_run: AtomicBool::new(false),
+            failed_run: AtomicBool::new(true),
             pending_reindex: Mutex::new(None),
         }
     }

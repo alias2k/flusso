@@ -44,11 +44,15 @@
 //! one such as stdout) gets its items in exact lane order, one write at a
 //! time, whatever `writes` says: its readers consume its output in order.
 //!
-//! **After a failed run** the next run writes the oldest redelivered item
-//! alone, as a barrier, and opens the window only once a write landed. So a
-//! write that fails every time (a `stop` rejection, a destination refusing
-//! it) halts the sink as one write at a time did: nothing behind it lands on
-//! each restart, no progress resets the backoff, and the lane fills.
+//! **After a failed run, and on a fresh engine,** the run writes the oldest
+//! item alone, as a barrier, and opens the window only once a write landed.
+//! A fresh engine counts because a previous process may have stopped on that
+//! item. So a write that fails every time (a `stop` rejection, a destination
+//! refusing it) halts the sink after its first run: on every restart, of the
+//! engine or of the process, nothing behind it lands, no progress resets the
+//! backoff, and the lane fills. In the run that first meets it, writes
+//! already granted beside it, and disjoint ones granted while it is in
+//! flight, can land; the lane's watermark stays before it.
 //!
 //! ```text
 //! window   [L1 a] [B1 a,b] [L2 c] [SnapshotComplete] [L3 a]
