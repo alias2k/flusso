@@ -300,10 +300,15 @@ struct Rig {
     name: SinkName,
     observer: Arc<PositionObserver>,
     lane: Box<dyn Producer<LaneItem>>,
+    /// With a second index (`orders`), its lane: ids `d`, `e`, `f` and
+    /// `orders-*` go there, every other to `users`.
+    orders: Option<Box<dyn Producer<LaneItem>>>,
     control: tokio::sync::mpsc::Sender<SinkControl>,
     engine: Option<tokio::task::JoinHandle<Result<()>>>,
     stop: Stop,
     version: i64,
+    /// The version each id was last published at.
+    published: HashMap<String, i64>,
 }
 
 impl Rig {
@@ -327,29 +332,72 @@ impl Rig {
         )
     }
 
+    /// Over two indexes, `users` and `orders`, merging when `merge`.
+    fn two_indexes(probe: Probe, writes: usize, merge: bool) -> Self {
+        Self::over(
+            probe,
+            writes,
+            FailurePolicies::default(),
+            if merge {
+                crate::BatchPolicy::default().max_changes
+            } else {
+                1
+            },
+            true,
+        )
+    }
+
     fn built(
         probe: Probe,
         writes: usize,
         policies: FailurePolicies,
         write_documents: usize,
     ) -> Self {
+        Self::over(probe, writes, policies, write_documents, false)
+    }
+
+    fn over(
+        probe: Probe,
+        writes: usize,
+        policies: FailurePolicies,
+        write_documents: usize,
+        two: bool,
+    ) -> Self {
         let name = sink_name("primary");
-        let stream = Arc::new(ChannelStream::over(1024, [users()], [name.clone()]));
+        let indexes: Vec<IndexName> = if two {
+            vec![orders(), users()]
+        } else {
+            vec![users()]
+        };
+        let stream = Arc::new(ChannelStream::over(1024, indexes.clone(), [name.clone()]));
         let lane = stream
             .lane(&LaneKey::new(users(), name.clone()))
             .unwrap()
             .producer;
+        let orders_lane = two.then(|| {
+            stream
+                .lane(&LaneKey::new(orders(), name.clone()))
+                .unwrap()
+                .producer
+        });
         let (control, _) = tokio::sync::mpsc::channel(4);
         let probe = Arc::new(probe);
         let observer = Arc::new(PositionObserver::default());
         let stop = Stop::new();
-        let progress = Arc::new(Progress::of([users()], [name.clone()]));
+        let progress = Arc::new(Progress::of(indexes.clone(), [name.clone()]));
+        let mappings = indexes
+            .iter()
+            .map(|index| IndexMapping {
+                index: index.clone(),
+                ..mapping()
+            })
+            .collect();
         let sink_engine = Arc::new(
             SinkEngine::new(
                 name.clone(),
                 Arc::clone(&probe) as Arc<dyn Sink>,
                 Arc::clone(&stream) as Arc<dyn Stream>,
-                vec![mapping()],
+                mappings,
                 Arc::clone(&progress),
             )
             .with_writes(writes)
@@ -366,10 +414,12 @@ impl Rig {
             name,
             observer,
             lane,
+            orders: orders_lane,
             control,
             engine: None,
             stop,
             version: 0,
+            published: HashMap::new(),
         }
     }
 
@@ -402,13 +452,48 @@ impl Rig {
         self.engine.take().unwrap().await.unwrap()
     }
 
+    /// The index an id belongs to.
+    fn index_of(&self, id: &str) -> IndexName {
+        if self.orders.is_some() && (matches!(id, "d" | "e" | "f") || id.starts_with("orders-")) {
+            orders()
+        } else {
+            users()
+        }
+    }
+
+    /// The ids of each index, users first; an index with none is left out.
+    fn split<'a>(&self, ids: &[&'a str]) -> Vec<(IndexName, Vec<&'a str>)> {
+        let mut parts: Vec<(IndexName, Vec<&str>)> = Vec::new();
+        for index in [users(), orders()] {
+            let mine: Vec<&str> = ids
+                .iter()
+                .copied()
+                .filter(|id| self.index_of(id) == index)
+                .collect();
+            if !mine.is_empty() {
+                parts.push((index, mine));
+            }
+        }
+        parts
+    }
+
+    fn producer(&self, index: &IndexName) -> &dyn Producer<LaneItem> {
+        match &self.orders {
+            Some(orders_lane) if *index == orders() => orders_lane.as_ref(),
+            _ => self.lane.as_ref(),
+        }
+    }
+
     fn envelopes(&mut self, ids: &[&str], position: Option<Position>) -> Arc<[Envelope]> {
         self.version += 1;
         let version = self.version;
+        for id in ids {
+            self.published.insert((*id).to_owned(), version);
+        }
         ids.iter()
             .map(|id| {
                 Envelope::upsert(
-                    users(),
+                    self.index_of(id),
                     *id,
                     GenericValue::Map(BTreeMap::from([(
                         "v".to_owned(),
@@ -422,37 +507,51 @@ impl Rig {
             .into()
     }
 
-    /// Publish a live item, then register it as the ingest engine does.
+    /// Publish a live batch, one item per index it touches, then register
+    /// each as the ingest engine does (a lane it has nothing for, skipped).
     async fn live(&mut self, position: u64, ids: &[&str]) {
         let position = Position::new(position);
-        let envelopes = self.envelopes(ids, Some(position));
-        self.lane
-            .publish(LaneItem::Batch(Batch {
-                position: Some(position),
-                changes: 1,
-                envelopes,
-                hold: Default::default(),
-            }))
-            .await
-            .unwrap();
-        self.progress.published(
-            &LaneKey::new(users(), self.name.clone()),
-            position,
-            position,
-        );
+        let parts = self.split(ids);
+        for (index, mine) in &parts {
+            let envelopes = self.envelopes(mine, Some(position));
+            self.producer(index)
+                .publish(LaneItem::Batch(Batch {
+                    position: Some(position),
+                    changes: 1,
+                    envelopes,
+                    hold: Default::default(),
+                }))
+                .await
+                .unwrap();
+            self.progress.published(
+                &LaneKey::new(index.clone(), self.name.clone()),
+                position,
+                position,
+            );
+        }
+        if self.orders.is_some() {
+            for index in [users(), orders()] {
+                if !parts.iter().any(|(touched, _)| *touched == index) {
+                    self.progress
+                        .skipped(&LaneKey::new(index, self.name.clone()), position);
+                }
+            }
+        }
     }
 
     async fn backfill(&mut self, ids: &[&str]) {
-        let envelopes = self.envelopes(ids, None);
-        self.lane
-            .publish(LaneItem::Batch(Batch {
-                position: None,
-                changes: 0,
-                envelopes,
-                hold: Default::default(),
-            }))
-            .await
-            .unwrap();
+        for (index, mine) in self.split(ids) {
+            let envelopes = self.envelopes(&mine, None);
+            self.producer(&index)
+                .publish(LaneItem::Batch(Batch {
+                    position: None,
+                    changes: 0,
+                    envelopes,
+                    hold: Default::default(),
+                }))
+                .await
+                .unwrap();
+        }
     }
 
     async fn complete(&self) {
@@ -525,13 +624,15 @@ fn seeds() -> Vec<u64> {
 fn a_document_is_never_written_twice_at_once_and_its_versions_never_go_down() {
     let mut concurrent = false;
     let mut restarted = false;
-    for merge in [false, true] {
-        for writes in [1, 2, 4] {
-            for seed in seeds() {
-                let (at_once, failed) =
-                    super::paused_runtime().block_on(one_schedule(seed, writes, merge));
-                concurrent |= at_once;
-                restarted |= failed;
+    for two in [false, true] {
+        for merge in [false, true] {
+            for writes in [1, 2, 4] {
+                for seed in seeds() {
+                    let (at_once, failed) =
+                        super::paused_runtime().block_on(one_schedule(seed, writes, merge, two));
+                    concurrent |= at_once;
+                    restarted |= failed;
+                }
             }
         }
     }
@@ -541,12 +642,14 @@ fn a_document_is_never_written_twice_at_once_and_its_versions_never_go_down() {
 
 /// One schedule of the test above, on its own runtime so a seed replays
 /// alone: whether it wrote several items at once, and whether it restarted.
-async fn one_schedule(seed: u64, writes: usize, merge: bool) -> (bool, bool) {
+async fn one_schedule(seed: u64, writes: usize, merge: bool, two: bool) -> (bool, bool) {
     const IDS: [&str; 6] = ["a", "b", "c", "d", "e", "f"];
     let mut restarted = false;
     let mut rng = Rng(seed * 7919 + writes as u64);
     let probe = Probe::new().with_delays(seed).failing_at_random(3);
-    let mut rig = if merge {
+    let mut rig = if two {
+        Rig::two_indexes(probe, writes, merge)
+    } else if merge {
         Rig::merging(probe, writes)
     } else {
         Rig::new(probe, writes)
@@ -566,7 +669,7 @@ async fn one_schedule(seed: u64, writes: usize, merge: bool) -> (bool, bool) {
             rig.live(position, &ids).await;
         }
         for id in &ids {
-            last.insert(id, rig.version);
+            last.insert(id, rig.published[*id]);
         }
         if rng.below(4) == 0 {
             tokio::time::sleep(Duration::from_millis(rng.below(5))).await;
@@ -585,24 +688,24 @@ async fn one_schedule(seed: u64, writes: usize, merge: bool) -> (bool, bool) {
     }
     assert!(
         rig.stream.is_idle(),
-        "seed {seed}, writes {writes}, merge {merge}: the lane drains"
+        "seed {seed}, writes {writes}, merge {merge}, two indexes {two}: the lane drains"
     );
 
     let probe = &rig.probe;
     assert!(
         !probe.overlapped.load(Ordering::SeqCst),
-        "seed {seed}, writes {writes}, merge {merge}: a document was written twice at once"
+        "seed {seed}, writes {writes}, merge {merge}, two indexes {two}: a document was written twice at once"
     );
     assert!(
         !probe.regressed.load(Ordering::SeqCst),
-        "seed {seed}, writes {writes}, merge {merge}: a document's version went down"
+        "seed {seed}, writes {writes}, merge {merge}, two indexes {two}: a document's version went down"
     );
     let written = probe.versions.lock().unwrap().clone();
     for (id, version) in &last {
         assert_eq!(
             written.get(*id),
             Some(version),
-            "seed {seed}, writes {writes}, merge {merge}: {id} ends at its last version"
+            "seed {seed}, writes {writes}, merge {merge}, two indexes {two}: {id} ends at its last version"
         );
     }
     assert_eq!(super::covered(&rig.progress), Some(Position::new(position)));
@@ -1389,4 +1492,8 @@ async fn an_ordered_sink_gets_its_items_in_lane_order_one_at_a_time() {
     until("the lane to drain", || rig.stream.is_idle()).await;
     assert_eq!(rig.probe.starts(), ["a", "p", "c", "d"], "exact lane order");
     assert_eq!(rig.probe.most_at_once(), 1);
+}
+
+fn orders() -> IndexName {
+    IndexName::try_new("orders").unwrap()
 }

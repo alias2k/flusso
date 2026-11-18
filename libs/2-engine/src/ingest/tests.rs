@@ -302,6 +302,8 @@ struct Builder {
     most: AtomicUsize,
     /// Builds dropped before they finished.
     cancelled: Arc<AtomicUsize>,
+    /// Over two indexes: odd ids are `orders`' documents, even ids `users'`.
+    two: bool,
 }
 
 /// Counts a build dropped before it finished.
@@ -326,7 +328,31 @@ impl Builder {
             now: AtomicUsize::new(0),
             most: AtomicUsize::new(0),
             cancelled: Arc::default(),
+            two: false,
         })
+    }
+
+    /// The builder over two indexes, `users` (even ids) and `orders` (odd).
+    fn two(db: &Arc<Database>, behaviour: Behaviour) -> Arc<Self> {
+        let mut builder = Arc::into_inner(Self::new(db, behaviour)).unwrap();
+        builder.two = true;
+        Arc::new(builder)
+    }
+
+    fn index_of(&self, id: i64) -> IndexName {
+        if self.two && id % 2 == 1 {
+            orders()
+        } else {
+            users()
+        }
+    }
+
+    fn indexes(&self) -> Vec<IndexName> {
+        if self.two {
+            vec![orders(), users()]
+        } else {
+            vec![users()]
+        }
     }
 
     fn release(&self, id: i64) {
@@ -387,7 +413,7 @@ impl Builder {
         let mut documents = Vec::with_capacity(ids.len());
         for (id, version) in ids.iter().zip(versions) {
             let document_id = DocumentId {
-                index: users(),
+                index: self.index_of(*id),
                 key: key(*id),
             };
             if self
@@ -432,7 +458,7 @@ impl DocumentBuilder for Builder {
         _after: Option<&RowImage>,
     ) -> source::Result<Vec<DocumentId>> {
         Ok(vec![DocumentId {
-            index: users(),
+            index: self.index_of(id_of(key)),
             key: key.clone(),
         }])
     }
@@ -467,16 +493,19 @@ impl DocumentBuilder for Builder {
     }
 
     fn backfill_indexes(&self) -> Vec<IndexName> {
-        vec![users()]
+        self.indexes()
     }
 
-    async fn last_key(&self, _index: &IndexName) -> source::Result<Option<RowKey>> {
-        Ok(self.db.rows.checked_sub(1).map(key))
+    async fn last_key(&self, index: &IndexName) -> source::Result<Option<RowKey>> {
+        Ok((0..self.db.rows)
+            .rev()
+            .find(|id| self.index_of(*id) == *index)
+            .map(key))
     }
 
     async fn keys(
         &self,
-        _index: &IndexName,
+        index: &IndexName,
         after: Option<&RowKey>,
         through: &RowKey,
         limit: usize,
@@ -486,11 +515,19 @@ impl DocumentBuilder for Builder {
         }
         let start = after.map_or(0, |after| id_of(after) + 1);
         let end = self.db.rows.min(id_of(through) + 1);
-        Ok((start..end).take(limit).map(key).collect())
+        Ok((start..end)
+            .filter(|id| self.index_of(*id) == *index)
+            .take(limit)
+            .map(key)
+            .collect())
     }
 
     async fn index_mappings(&self) -> source::Result<Vec<IndexMapping>> {
-        Ok(vec![mapping()])
+        Ok(self
+            .indexes()
+            .into_iter()
+            .map(|index| IndexMapping { index, ..mapping() })
+            .collect())
     }
 }
 
@@ -627,13 +664,17 @@ impl Sink for Recorder {
 #[derive(Debug)]
 struct Spy {
     inner: Arc<ChannelStream>,
-    published: Arc<Mutex<Vec<u64>>>,
+    published: Published,
 }
+
+/// Every position published, per lane, in lane order.
+type Published = Arc<Mutex<BTreeMap<stream::LaneKey, Vec<u64>>>>;
 
 #[derive(Debug)]
 struct SpyProducer {
     inner: Box<dyn stream::Producer<stream::LaneItem>>,
-    published: Arc<Mutex<Vec<u64>>>,
+    lane: stream::LaneKey,
+    published: Published,
 }
 
 #[async_trait]
@@ -644,7 +685,12 @@ impl stream::Producer<stream::LaneItem> for SpyProducer {
         let position = item.position();
         self.inner.publish(item).await?;
         if let Some(position) = position {
-            self.published.lock().unwrap().push(position.seq);
+            self.published
+                .lock()
+                .unwrap()
+                .entry(self.lane.clone())
+                .or_default()
+                .push(position.seq);
         }
         Ok(())
     }
@@ -656,6 +702,7 @@ impl Stream for Spy {
         Ok(stream::Lane {
             producer: Box::new(SpyProducer {
                 inner: lane.producer,
+                lane: key.clone(),
                 published: Arc::clone(&self.published),
             }),
             consumer: lane.consumer,
@@ -678,8 +725,8 @@ impl Stream for Spy {
 /// One ingest engine and one sink engine over a channel stream.
 struct Deployment {
     stream: Arc<ChannelStream>,
-    /// Every position published, in lane order.
-    published: Arc<Mutex<Vec<u64>>>,
+    /// Every position published, per lane, in lane order.
+    published: Published,
     feed: Arc<Feed>,
     recorder: Arc<Recorder>,
     ingest: IngestEngine,
@@ -689,13 +736,10 @@ struct Deployment {
 
 impl Deployment {
     fn new(feed: Feed, builder: Arc<Builder>, recorder: Arc<Recorder>) -> Self {
-        let stream = Arc::new(ChannelStream::over(
-            64,
-            [kernel::IndexName::try_new("users").unwrap()],
-            [sink_name()],
-        ));
+        let indexes = builder.indexes();
+        let stream = Arc::new(ChannelStream::over(64, indexes.clone(), [sink_name()]));
         let feed = Arc::new(feed);
-        let published = Arc::new(Mutex::new(Vec::new()));
+        let published: Published = Arc::default();
         let spy = Arc::new(Spy {
             inner: Arc::clone(&stream),
             published: Arc::clone(&published),
@@ -705,16 +749,16 @@ impl Deployment {
             Arc::clone(&builder) as Arc<dyn DocumentBuilder>,
             spy as Arc<dyn Stream>,
             vec![sink_name()],
-            Arc::new(crate::Progress::of(
-                [kernel::IndexName::try_new("users").unwrap()],
-                [sink_name()],
-            )),
+            Arc::new(crate::Progress::of(indexes.clone(), [sink_name()])),
         );
         let sink = SinkEngine::new(
             sink_name(),
             Arc::clone(&recorder) as Arc<dyn Sink>,
             Arc::clone(&stream) as Arc<dyn Stream>,
-            vec![mapping()],
+            indexes
+                .into_iter()
+                .map(|index| IndexMapping { index, ..mapping() })
+                .collect(),
             ingest.progress(),
         );
         Self {
@@ -911,14 +955,19 @@ async fn schedule(seed: u64, builds: usize, open: bool) {
         .collect();
     let max_changes = 1 + random.below(8) as usize;
     let db = Database::new(rows, log);
-    let builder = Builder::new(
-        &db,
-        Behaviour {
-            random: Some(Mutex::new(Rng::new(seed.wrapping_mul(31)))),
-            failures_left: AtomicUsize::new(random.below(4) as usize),
-            ..Behaviour::default()
-        },
-    );
+    // Every other seed over two indexes (odd ids `orders`', even `users'`):
+    // a batch splits by index, each lane in its own order.
+    let two = seed % 2 == 0;
+    let behaviour = Behaviour {
+        random: Some(Mutex::new(Rng::new(seed.wrapping_mul(31)))),
+        failures_left: AtomicUsize::new(random.below(4) as usize),
+        ..Behaviour::default()
+    };
+    let builder = if two {
+        Builder::two(&db, behaviour)
+    } else {
+        Builder::new(&db, behaviour)
+    };
     let feed = Feed::new(&db).with_gaps(seed.wrapping_mul(17));
     let feed = if open { feed.open() } else { feed };
     let stop = Stop::new();
@@ -936,7 +985,7 @@ async fn schedule(seed: u64, builds: usize, open: bool) {
     }
 
     let context = format!(
-        "seed {seed}, builds {builds}, {changes} changes over {ids} ids, {rows} rows, max_changes {max_changes}"
+        "seed {seed}, builds {builds}, two indexes {two}, {changes} changes over {ids} ids, {rows} rows, max_changes {max_changes}"
     );
     assert!(
         !builder.overlapped.load(Ordering::SeqCst),
@@ -951,11 +1000,12 @@ async fn schedule(seed: u64, builds: usize, open: bool) {
         regressed.is_empty(),
         "a document's version went down: {regressed:?} ({context})"
     );
-    let positions = deployment.published.lock().unwrap().clone();
-    assert!(
-        positions.windows(2).all(|pair| pair[0] < pair[1]),
-        "the lane's positions are out of order: {positions:?} ({context})"
-    );
+    for (lane, positions) in deployment.published.lock().unwrap().iter() {
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "{lane}'s positions are out of order: {positions:?} ({context})"
+        );
+    }
     assert_eq!(
         deployment.recorder.state(),
         db.expected(),
@@ -1666,7 +1716,16 @@ async fn a_stop_while_a_closed_batch_waits_for_a_build_ends_the_run() {
 
     assert!(result.is_ok(), "{result:?}");
     assert_eq!(builder.grants(), vec![vec![0], vec![1]]);
-    assert_eq!(deployment.published.lock().unwrap().clone(), vec![0, 1]);
+    assert_eq!(
+        deployment
+            .published
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>(),
+        [vec![0, 1]]
+    );
     assert_eq!(
         db.visible.load(Ordering::SeqCst),
         2,

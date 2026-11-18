@@ -436,13 +436,18 @@ async fn lanes_take_turns_so_a_backlog_on_one_index_does_not_starve_another() {
     }
     users_lane.publish(item(users(), 10)).await.unwrap();
 
+    // Past its first landings: a fresh engine writes each lane's front alone
+    // until it lands, which alternates the lanes by itself. One item per
+    // write, so the order of writes is the order of grants.
     let engine = SinkEngine::new(
         primary,
         Arc::clone(&sink) as Arc<dyn Sink>,
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![index_mapping(orders()), index_mapping(users())],
         progress,
-    );
+    )
+    .with_write_documents(1);
+    engine.set_blame(crate::sink_engine::Blame::Nobody);
     let task = tokio::spawn(async move {
         let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
         engine.run(&mut control).await
