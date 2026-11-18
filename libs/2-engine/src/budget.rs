@@ -278,7 +278,8 @@ impl Drop for Charge {
 }
 
 /// The heap a built document will hold once it is an envelope: its body's
-/// tree, its rendered id and the envelope itself.
+/// tree, its rendered id, its index name (each envelope owns a copy) and the
+/// envelope itself.
 pub fn document_bytes(document: &Document) -> usize {
     let (id, body) = match document {
         Document::Upsert { id, body } => (id, Some(body)),
@@ -290,7 +291,7 @@ pub fn document_bytes(document: &Document) -> usize {
         .iter()
         .map(|(column, value)| column.as_ref().len() + value_bytes(value) + 8)
         .sum();
-    size_of::<Envelope>() + key + body.map_or(0, value_bytes)
+    size_of::<Envelope>() + id.index.as_ref().len() + key + body.map_or(0, value_bytes)
 }
 
 /// The nodes of a map of `len` entries: one leaf up to eleven, then leaves
@@ -332,6 +333,20 @@ pub fn value_bytes(value: &GenericValue) -> usize {
 mod tests {
     use std::collections::BTreeMap;
     use std::time::Duration;
+
+    #[test]
+    fn a_document_counts_its_index_name() {
+        let delete = |index: &str| Document::Delete {
+            id: source::document::DocumentId {
+                index: kernel::IndexName::try_new(index).unwrap(),
+                key: source::RowKey(Vec::new()),
+            },
+        };
+        assert_eq!(
+            document_bytes(&delete("a_much_longer_index_name")) - document_bytes(&delete("a")),
+            "a_much_longer_index_name".len() - 1
+        );
+    }
 
     use super::*;
 
