@@ -204,7 +204,7 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   `CONFIRM_BOUND` (5 s, what flusso controls; also from the last sink flush for bursts and lone
   changes that produce documents, issue #205), `restart_lsn` within `RELEASE_BOUND` (45 s, also
   waits on Postgres's next `running_xacts` record), and the sinks got exactly the expected ops; a stalled sink
-  pins the slot at its last flushed position (the watermark's minimum over lanes) until it catches
+  pins the slot at its oldest unlanded position (`Progress`'s `Before` over every lane) until it catches
   up, a `backfill = false` sink does not; the full
   source→engine→sink e2e lives in `engine` — a leaf source crate must not dev-depend on
   the engine, or it can't be published before the engine and the layering is violated);
@@ -597,7 +597,7 @@ arm in `apps/cli/src/backends.rs`. See "Config layer" below.
 
 ```text
                  ┌─ lane ─▶ SinkEngine(primary) ─▶ write ×writes ─▶ ack ─┐
-ChangeCapture ─▶ IngestEngine ─┤                                            ├─▶ watermark ─▶ confirm
+ChangeCapture ─▶ IngestEngine ─┤                                            ├─▶ Progress ─▶ confirm
   resolve · build once · publish└─ lane ─▶ SinkEngine(audit)   ─▶ write ×writes ─▶ ack ─┘
                  ◀─ request lane ─ Backfill { sink, indexes } ─────────────────────
 ```
@@ -608,62 +608,77 @@ publish one `LaneItem::Batch` of kernel `Envelope`s to every sink's lane; it als
 **request lane** and serves `Request::Backfill { sink, indexes }` as snapshots. One **sink
 engine** per sink (`SinkEngine`): `stage` (ensure indexes, retire stale seeds, request its
 backfill) then recv → `write` (up to `writes` at once) → ack. Everything they drive — `ChangeCapture`,
-`DocumentBuilder`, `Stream` (lanes + request lane + watermark), `Sink` — is a **trait object**.
+`DocumentBuilder`, `Stream` (lanes + request lane), `Sink` — is a **trait object**; the engine's
+`Progress` (`libs/2-engine/src/progress.rs`, one per deployment, shared by both engines and the fence)
+is the one concrete piece.
 `FanOutSink` is gone; sinks are independent. Key invariants to preserve when editing the engines:
 
-- **At-least-once via write-then-ack and the watermark.** A sink engine acks a lane item *only
-  after* the `Sink::write` that made its documents durable; acks arrive in any order (several
-  writes in flight), so a lane's part of `Stream::watermark()` is the position delivered before its
-  **oldest unacknowledged** positioned item (the channel's ledger records each entry's predecessor
-  at first delivery, `InFlight.before`), the watermark is the **minimum** over lanes, and the ingest
-  engine hands it to `ChangeCapture::confirm` after each commit (and on a 1 s tick), so the slot
-  advances past a change exactly when *every* sink has landed it. The Postgres capture confirms
-  within ~1 s of the last flush (issue #205): `Positions::confirm` wakes the stream loop
-  (`confirmed_moved`), which hands `confirmed_lsn()` to the replication client at once instead of
-  at the next replication event, and `WalChangeCapture::new` sets the client's status and idle
-  wake-up intervals to 1 s (`STATUS_INTERVAL`, fixed, no option). `Positions` stays the one place
-  that computes what may be confirmed; only the moment of hand-over is new. `pgwire-replication`
-  0.5 sends a raised LSN within its status interval on its own (issue #215), but only once
-  `update_applied_lsn` is called, which only the stream loop can do (`recv` takes `&mut`), so the
-  wake-up stays: without it a confirm waits for the next replication event (measured +1 s quiet,
-  up to +1 s under a trickle). Guards:
-  `a_confirmation_reaches_the_client_without_a_replication_event` (`cdc::stream` unit, over the
-  `Replication` seam) and `wal_release`'s `the_slot_confirms_within_seconds_of_the_last_flush` (`CONFIRM_BOUND`, 5 s). A sink engine that dies before
-  its write returns leaves the item unacked; the lane redelivers it to the restarted engine (idempotent
-  rebuild, deterministic id). Positions are monotonic for the life of the source across
-  reopened streams (`Positions::new(start_lsn, first_seq)` continues from the previous map), so
-  the watermark the lanes hold across an ingest-engine restart never names a new-stream change.
-  Guards: `confirms_no_position_before_its_flush`,
+- **At-least-once via write-then-ack and `Progress` (ADR 0012 stage 6).** A position describes
+  itself: `kernel::Position { seq, fence_before, confirm_before, confirm_through }`, the stamps the
+  source's own (Postgres, `cdc/ack.rs`'s `Positions::emit`, under the one lock it takes per change:
+  `fence_before` = commit LSN − 1, `confirm_before` = the **horizon** before it, `confirm_through` =
+  the commit LSN if it is its commit's last change, else `confirm_before`), so the capture keeps
+  only `next_seq`, the horizon and the confirmed LSN, no map. The ingest engine **routes** a live
+  batch: after every lane accepted it (`commit.rs`'s `publish_live`), `Progress::published(lanes,
+  oldest, last)` registers it per lane, then `routed`. A sink engine reports an item **landed**
+  (`Progress::wrote`, in `writes.rs`'s `write_returned`) when its write returned with nothing refused
+  for good, before the ack; a landing reported before its registration, or twice, is matched or
+  dropped. `Progress::landed()` is `Before(oldest unlanded)` / `Through(routed)` / `Idle`
+  (`source::cdc::Landed`); the ingest engine hands it to `ChangeCapture::confirm` after a commit when
+  it changed and on the 1 s tick **always**, since the source's answer moves with idle WAL while
+  the case stays put; `drain_lanes` the same. The source decides what an emitted-but-unrouted change
+  means: `Through(p)` follows the horizon only while `p.seq + 1 == next_seq`, else `p.confirm_through`;
+  `Idle` follows it only while nothing was ever emitted (`FIRST_SEQ`), else nothing moves. Confirmation
+  is monotonic. **Locks:** the ingest engine writes each lane's `registered` and `routed`; a sink
+  engine only its lane's `reports`; a reader copies `routed` first, then settles each lane (both
+  locks), so a batch registered after the copy is never counted as landed under the older `routed`.
+  The Postgres capture confirms within ~1 s of the last flush (issue #205): `Positions::confirm` wakes
+  the stream loop (`confirmed_moved`), which hands `confirmed_lsn()` to the replication client at once
+  instead of at the next replication event, and `WalChangeCapture::new` sets the client's status and
+  idle wake-up intervals to 1 s (`STATUS_INTERVAL`, fixed, no option). `pgwire-replication` 0.5 sends
+  a raised LSN within its status interval on its own (issue #215), but only once `update_applied_lsn`
+  is called, which only the stream loop can do (`recv` takes `&mut`), so the wake-up stays. Idle WAL
+  is released by the tick's confirmation (keepalives move the horizon only; `read_through` confirms
+  nothing). A sink engine that dies before its write returns leaves the item unacked; the lane
+  redelivers it to the restarted engine (idempotent rebuild, deterministic id). Positions are
+  monotonic for the life of the source across reopened streams (`Positions::new(start_lsn,
+  first_seq)` continues `next_seq`), so the `next_seq` test stays exact across an ingest restart.
+  Guards: `progress::tests` (`every_interleaving_answers_as_the_model_does`, 300 seeded interleavings
+  against a model; `a_stalled_lane_pins_confirmation_and_its_own_fence_only`,
+  `a_lane_with_nothing_routed_to_it_pins_nothing`, `a_landing_reported_before_its_registration_still_counts`,
+  `a_repeated_landing_lands_nothing_else`), `confirms_no_position_before_its_flush`,
   `redelivers_the_unacked_batch_to_a_restarted_sink_engine`, the channel adapter's
-  `watermark_is_the_minimum_over_lanes`/`several_deliveries_can_be_outstanding_and_ack_independently`/
-  `a_later_ack_never_moves_the_watermark_past_an_earlier_unacked_item`/
-  `a_released_delivery_holds_the_watermark_until_it_is_acked`,
-  the daemon's `failed_sink_engine_restarts_and_redelivers` /
-  `failed_ingest_engine_restarts_and_resumes_the_stream`, the Postgres adapter's
-  `a_reopened_stream_continues_the_numbering`, and the `wal_release` e2e (an empty batch is still
-  published and acked, keepalives move the horizon, a `backfill = false` lane acks).
+  `several_deliveries_can_be_outstanding_and_ack_independently`, the daemon's
+  `failed_sink_engine_restarts_and_redelivers` / `failed_ingest_engine_restarts_and_resumes_the_stream`,
+  the Postgres adapter's `ack::tests` (`a_change_emitted_but_not_routed_is_never_fenced_or_confirmed`,
+  `the_tick_releases_idle_wal_while_routed_stays_put`, `a_fresh_process_never_confirms_its_first_unrouted_change`,
+  `an_idle_stream_after_an_ingest_restart_still_releases_wal`, `a_reopened_stream_continues_the_numbering`,
+  `a_position_is_stamped_from_its_commit_and_the_horizon_before_it`),
+  `a_confirmation_reaches_the_client_without_a_replication_event` (`cdc::stream` unit, over the
+  `Replication` seam), and the `wal_release` e2e (`the_slot_confirms_within_seconds_of_the_last_flush`,
+  `CONFIRM_BOUND` 5 s; an empty batch is still published and lands, keepalives move the horizon, a
+  `backfill = false` lane lands).
 - **A fence only observes, per sink, at two levels (issue #136, ADR 0009).** A client reads the
   **source position** after its commit (`pg_current_wal_lsn()`) and waits on the daemon's `Fence`
   (`libs/3-daemon/src/fence.rs`; the CLI serves it as `GET /wait`) until a sink, or every sink, has
   every commit at or before it **applied** (its write and every earlier one returned) or **searchable** (a refresh covered
   it). Nothing is flushed or refreshed for a waiter, and a backfill is not covered. Three pieces,
-  each load-bearing: (1) `ChangeCapture::reached(Option<Position>) -> Option<SourcePosition>`
-  translates a stream position into the source's terms. The Postgres `Positions` map
-  (`cdc/ack.rs`) answers it from its entries plus a **horizon** (the LSN through which everything
-  read is registered: moved by the last change of a commit being emitted, and by a keepalive or a
-  filtered commit while nothing is buffered; seeded from the slot's `confirmed_flush_lsn`). The
-  answer is **strictly below the next outstanding change's LSN**, because the changes of one
-  transaction share its commit LSN: a transaction split across batches is neither confirmed nor
-  fenced until its last change is in. A fence claims everything short of that commit (`next - 1`);
-  `confirm` stops at the **end of the last covered commit**, because Postgres skips a transaction
-  whose commit record *starts* before the confirmed LSN (never confirm into an unprocessed
-  commit's record). (2) A sink
+  each load-bearing: (1) `ChangeCapture::reached(Landed) -> Option<SourcePosition>` translates how
+  far a sink's lane landed (`Progress::lane(sink, Level::Applied | Searchable)`) into the source's
+  terms. The Postgres `Positions` (`cdc/ack.rs`) reads it off the stamps plus a **horizon** (the LSN
+  through which everything read is emitted: moved by the last change of a commit being emitted, and
+  by a keepalive or a filtered commit while nothing is buffered; seeded from the slot's
+  `confirmed_flush_lsn`). `Before(o)` answers `o.fence_before`, **strictly below the oldest
+  outstanding change's commit**, because the changes of one transaction share its commit LSN: a
+  transaction split across batches is neither confirmed nor fenced until its last change has landed.
+  A fence claims everything short of that commit; `confirm` stops at `o.confirm_before`, the **end of
+  the last covered commit**, because Postgres skips a transaction whose commit record *starts* before
+  the confirmed LSN (never confirm into an unprocessed commit's record). (2) A sink
   *reports* visibility (`WriteReport.visibility`: `Immediate` / `Within(d)` / `Deferred`); the
   sink engine keeps the positions it received in position order (`sink_engine/fences.rs`, kept
-  across restarts of its run) and reports `Observer::on_position_applied` for the last position
-  before the oldest one still being written, **before the ack** that lets the watermark pass it (the
-  source forgets a position once every sink confirmed it, so the fence must hear first), and
-  `on_position_searchable` in the same order with a timer arm. A **caught-up** write (nothing else
+  across restarts of its run), reports each item landed and how far it is searchable to `Progress`
+  **before the ack**, and `Observer::on_position_applied` / `on_position_searchable` in position
+  order (the daemon's `FenceObserver` only wakes waiters on them), with a timer arm for searchable. A **caught-up** write (nothing else
   queued or waiting) makes every write that returned before its grant searchable (the
   `Sink::write` contract; each returned write gets a sequence number), and before the ack that
   leaves the engine idle a position not yet searchable gets an **empty caught-up write**, since
@@ -681,9 +696,8 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   `ensure_index` refreshes a seeded generation once per start, because what an earlier run left
   unrefreshed is remembered nowhere (fences are unavailable until staging is done). An index
   mid-reindex is **not** covered: live writes go to the new generation while the alias serves the
-  old one (#6). (3) The fence
-  translates a position when it is applied and keeps that answer until it is searchable, and
-  keeps each level monotonic across a reopened source stream. Guards: the Postgres adapter's
+  old one (#6). (3) The fence reads both levels off `Progress` per sink whenever a waiter checks
+  (searchable never above applied), and keeps each level monotonic across a reopened source stream. Guards: the Postgres adapter's
   `a_split_transaction_is_not_confirmed_until_its_last_change`,
   `a_keepalive_during_a_flight_does_not_pin_the_resume_point`,
   `confirmation_stops_at_a_commit_boundary_where_a_fence_goes_further`, `reached_*`,
@@ -853,7 +867,7 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   `a_deferred_sink_still_refreshes_when_skipped_snapshot_batches_follow_the_last_live_one`);
   the buffered batch is published as a
   normal commit; `engine::drain_lanes` (the same drain `supervise` runs when the stream ends) waits until
-  every lane is acked, confirming the watermark as it moves; then `ChangeCapture::close_live` (Postgres:
+  every lane is acked, confirming what landed as it moves; then `ChangeCapture::close_live` (Postgres:
   `Positions::request_close` → the stream loop hands `confirmed_lsn` over, `Replication::close` waits until
   a status update carried it, then stops the worker: stopping first would skip the update, the worker
   checks its stop before a due status; with nothing confirmed past the stream's start position, which
@@ -863,7 +877,7 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   within `CLOSE_WAIT`: the run fails, so the stop exits 1, never 0, with the position unconfirmed
   (guards: `a_close_whose_final_position_never_reaches_the_server_ends_the_stream_with_an_error`,
   `a_stop_whose_final_position_never_reaches_the_source_fails_the_run`). A stalled sink holds
-  the drain (the watermark is the minimum); the caller's deadline bounds it. After it the supervisor
+  the drain (confirmation follows the slowest lane); the caller's deadline bounds it. After it the supervisor
   waits on `Fence::settled` only while a `/wait` on `searchable` is open, so a stop nobody waits on
   doesn't sit out a `Within(refresh_interval)`. A stop during staging ends before `prepare`; an ingest
   engine that fails while stopping is not restarted. Guards: `engine` `tests::stop` (a stop raised mid-burst
@@ -956,7 +970,7 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   writes its oldest unconfirmed item alone), and the next run is a **barrier**: it grants only the
   window's front item until a write lands, so a `stop` rejection or a write refused every time halts
   the sink across engine restarts (nothing behind it lands, the backoff grows, the lane fills); in
-  the run that first meets it, disjoint writes started while it is in flight can land, the watermark
+  the run that first meets it, disjoint writes started while it is in flight can land, confirmation
   staying before it; a new process whose oldest unconfirmed item was already written (a sibling
   lags, a confirmation was lost) lands it and opens the window, and disjoint items past the failing
   one, granted beside it or while it is in flight, can land before it fails (nothing lost).
@@ -964,7 +978,7 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   engine's `tests::concurrent` (`a_document_is_never_written_twice_at_once_and_its_versions_never_go_down`,
   seeded, `FLUSSO_SCHEDULE_SEED` replays; `writes_run_at_once_up_to_the_setting`,
   `an_item_waits_for_an_earlier_one_sharing_a_document`,
-  `a_later_write_finishing_first_moves_neither_the_watermark_nor_the_fence`,
+  `a_later_write_finishing_first_moves_neither_confirmation_nor_the_fence`,
   `live_goes_first_except_every_fourth_contested_grant`, `a_snapshot_complete_is_a_barrier`,
   `a_reindex_waits_for_the_writes_in_flight`, `a_failed_write_lets_the_others_finish_and_comes_back_alone`,
   `a_stop_finishes_the_writes_in_flight_and_skips_waiting_backfill`,
@@ -2144,12 +2158,12 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 
 | To work on… | Go to |
 | --- | --- |
-| The sync loops / batching / ack ordering | `libs/2-engine/src/` — `ingest.rs` (`IngestEngine`: the run loop; `ingest/live.rs` batching and dedup, `ingest/builds.rs` the build gate and the grant-ordered slots, `ingest/commit.rs` granting and publishing, `ingest/snapshot.rs` request coalescing and the key walk, `ingest/confirm.rs` watermark confirm), `sink_engine.rs` (`SinkEngine`: `stage`, reindex staging) with `sink_engine/writes.rs` (the run: window, admission, live-first selection, barriers, concurrent writes, failure policies) and `sink_engine/fences.rs` (applied/searchable in position order), `sink_engine/flights.rs` (the writes in flight, polled when woken), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` (drives both engines over a real `ChannelStream`) |
+| The sync loops / batching / ack ordering | `libs/2-engine/src/` — `ingest.rs` (`IngestEngine`: the run loop; `ingest/live.rs` batching and dedup, `ingest/builds.rs` the build gate and the grant-ordered slots, `ingest/commit.rs` granting and publishing, `ingest/snapshot.rs` request coalescing and the key walk, `ingest/confirm.rs` confirming `Progress::landed`; `progress.rs` the per-lane `Progress`), `sink_engine.rs` (`SinkEngine`: `stage`, reindex staging) with `sink_engine/writes.rs` (the run: window, admission, live-first selection, barriers, concurrent writes, failure policies) and `sink_engine/fences.rs` (applied/searchable in position order), `sink_engine/flights.rs` (the writes in flight, polled when woken), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` (drives both engines over a real `ChannelStream`) |
 | Pipeline observability trait (`Observer`, `BuildStats`/`CommitStats`, `EngineId`, `FanOut`) | `libs/2-engine/src/observer.rs` |
 | Script fields (Rhai): compile, run, strip input-only fields, the `DocumentBuilder` decorator, the sandbox, value conversion, typed dates | `libs/2-script/src/` — `scripts.rs` (`Scripts`: plan + apply), `builder.rs` (`ScriptedBuilder`), `sandbox.rs`, `value.rs`, `dates.rs` + `dates/library.rs` (the date types + their Rhai registration), `view.rs` (a `map` of dates typed for scripts), `input.rs` (JSON typed by the schema); `benches/scripted.rs`; CLI `commands/script.rs` (`flusso script run`), `telemetry/script_log.rs` |
 | Daemon (domain): supervisor, `DaemonControl`, per-sink `Status`, `StatusObserver`, lag poll, the fence | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `supervise.rs` (stage → spawn → restart with backoff; `DaemonControl::reindex`), `backends.rs` (`Backends` trait + `SourceParts`/`SinkParts` seam), `observer.rs`, `status.rs`, `lag.rs`, `fence.rs` (`Fence`/`FenceRequest`/`FenceOutcome`/`FenceObserver`) |
 | Read-after-visible (issue #343): holding a change until its transaction is visible, the stall warning, the synchronous-standby refusal | `libs/2-adapters/source-postgres/src/cdc/stream.rs` (the hold in `pending`, the snapshot read on its own task), `cdc/visibility.rs` (`Snapshot`, `widen`, `poll_delay`, `refuse_standby`, `standby_listing`, `PgVisibility`), `cdc/capture.rs` (`check_server`, `with_read_ahead`, `readable_wait`); `libs/3-daemon/src/status.rs` (`with_source`); CLI `telemetry/metrics.rs` (`register_visibility_wait_gauge`); e2e `libs/2-engine/tests/visibility.rs`; scenario `dev/bench/src/standby.rs` (`sync-standby`) |
-| Read-your-writes (fences), end to end | source: `libs/1-ports/source/src/cdc/capture.rs` (`SourcePosition`, `reached`, `on_advance`), `libs/2-adapters/source-postgres/src/cdc/ack.rs` (`Positions`: entries + horizon) and `stream.rs` (who moves the horizon); sink: `libs/1-ports/sink/src/sink.rs` (`Visibility`), `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`settle_visibility`); engine: `libs/2-engine/src/sink_engine.rs` (`report_positions`, the searchable queue); daemon: `libs/3-daemon/src/fence.rs`; CLI: `apps/cli/src/http/mod.rs` (`wait`); client: `sdk/query/src/fence.rs`, `position.rs`; e2e: `libs/3-daemon/tests/fence.rs` |
+| Read-your-writes (fences), end to end | source: `libs/1-ports/source/src/cdc/capture.rs` (`SourcePosition`, `reached`, `on_advance`), `libs/2-adapters/source-postgres/src/cdc/ack.rs` (`Positions`: stamps + horizon, no map) and `stream.rs` (who moves the horizon); sink: `libs/1-ports/sink/src/sink.rs` (`Visibility`), `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`settle_visibility`); engine: `libs/2-engine/src/progress.rs` (`Progress`: what each lane landed), `sink_engine/writes.rs` (`write_returned` reports to it), `sink_engine/fences.rs` (the searchable queue); daemon: `libs/3-daemon/src/fence.rs`; CLI: `apps/cli/src/http/mod.rs` (`wait`); client: `sdk/query/src/fence.rs`, `position.rs`; e2e: `libs/3-daemon/tests/fence.rs` |
 | Adapter registry (the one place that names adapters): `type` → config struct, `validate`, descriptions, flag overrides | `apps/cli/src/adapters.rs` |
 | Adapter assembly (build the running source/sinks): the `Backends` impl | `apps/cli/src/backends.rs` (`FlussoBackends` — Postgres source + OpenSearch/stdout sinks) |
 | Transport + telemetry (binary): exporters, metrics recording, HTTP surfaces, auth, signals | `apps/cli/src/` — `telemetry/mod.rs` (traces), `telemetry/metrics.rs` (meter provider + `in_flight` gauge), `telemetry/observer.rs` (`OtelObserver`), `http/mod.rs` (public + private routers + `serve`), `http/auth.rs` (Basic auth), `commands/run.rs` (orchestration + signals) |
@@ -2163,7 +2177,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | Visual schema designer (web app: introspect → edit → preview → write files) | `apps/design/` (`flusso-design`) — `server.rs` (axum + JSON API: project/catalog/test-connection/**parse**/**expression**/**value**/preview/validate/**sample**/diff/save; `value.rs` reads a typed inspector value as its saved file will in its slot (`constant`/`default`/`option`; a `default` takes only a scalar), refusing a number it cannot hold exactly or nesting past `MAX_DEPTH` (32, so preview/diff/save stay under serde_json's 128 levels), and returns the file's spelling for the *Saved as* note; the frontend's `model/exact.ts` keeps integers past 2^53 exact in every parse/clone, and `model/pending.ts` holds values still being read, one per target, flushed before Save/Code/undo (Save waits a bounded time and refuses, naming the field, on a read that failed or got no answer) and dropped on Reset; a reply is applied through the setter of the render it was typed in, which addresses the field by `uid` (`edit.updateField`), and the inspector is keyed by that uid), `codegen.rs` (model → canonical `*.schema.yml`/`flusso.toml`: a new file's form), `api.rs`'s `plan` (every save check, before any write: which on-disk index each saved index is comes from `SaveRequest.identity`, else by name, never from the request's word; a file the review leaves out is not checked; after any save every index of the on-disk `flusso.toml` has a file of its own with its own schema), the **stale-page check** (issue #280: `load_project` returns `Project.digests`, SHA-256 per project-relative file the model came from (`../x` outside the folder), `null` = absent; the page sends them as `SaveRequest.digests` — **required**, and `SaveRequest` denies unknown fields: `read_save_request` answers a page of another designer version with a 400 `BadRequest { reload }` — and merges `SaveResponse.digests` after its own save; `flusso.toml` is compared **first** (`stale_file`), before `plan` reads the disk: the review is that entry alone (`stale_config`), the save a `Stale` 409; then `plan` marks `OpDiff.stale` per file (a file the page never loaded counts as expected absent) and `save_with` refuses, under the lock, an applied entry that is marked; the expected digests go into `commit` as `Expect::Holds` (`Write.expect`/`Remove.expect`): `Journal::plan` takes them as the journal's `before`, and `run` re-checks each file (`Disk::holds`, not a counted step; `Disk::editing_at_check` is the test hook) right before the rename that replaces or removes it, so a lock-free writer meanwhile stops the commit with `Changed`, `undo_reached` undoes the renames done (keeping any file written since, `Disk::with_edit` is the test hook), and the API answers the same 409 naming every changed file — only a write between that check and the rename can still be lost; "overwrite anyway" sends the review's `StaleFile.on_disk`; completed recoveries are kept per process (`COMPLETED`) and reported on a diff/save whose digests show the page hasn't seen them (`unseen_recoveries`, compared before the save writes), and the page shows each `RecoveredSave.id` once; "overwrite anyway" recomputes the review with the override (`api.diff`'s `overwrite`), so Write shows every file it writes; guards: `tests/api.rs`'s `a_page_cannot_save_over_a_file_another_page_saved` and siblings, `a_config_another_page_restructured_is_the_refusal_not_a_failed_check`, `a_request_from_another_designer_version_is_told_to_reload`, `api::tests`' `a_file_written_*` and `an_editor_writing_during_a_save_gets_a_save_or_the_refusal`, and `commit::tests`' `an_editor_write_after_any_step_is_kept_and_nothing_is_left`), `commit/` (the all-or-nothing commit, kill- and power-loss-safe, issue #274; invariant in `mod.rs`'s doc: the project is, or after recovery becomes, exactly before or after a save: under `lock.rs`'s advisory lock (`.flusso-save.lock`, std `File::try_lock`, held for the whole commit and every recovery; never followed: a link or non-file there is `LockError::NotAFile`), `journal.rs` writes `.flusso-save.journal` (format 2 JSON: every destination and removal **relative to the config's folder**, with SHA-256 of each file before and after; temp/backup names are derived from the path, a token and the position, never stored). Order: a **record** in the user's state folder (`state.rs`: `<token>.json` = journal bytes' digest + canonical config folder + `committed`, under `$XDG_STATE_HOME/flusso/design-saves/` via `etcetera`, 0700/0600, `create_new` through a hard-linked temp, never followed, non-blocking reads, a folder or record open to others or another owner's is not used; `State::for_saving` falls back to an unrecorded save, logged once; pruned at start past 180 days, or with its folder missing once past 7 days (`GONE_AGE`); a temp a killed private write left goes once its pid is dead (an hour where that can't be checked); a unit test sees only its thread's `state::use_test_dir`, the integration tests call `api::use_state_dir`), then the journal, flushed temp files, hard-link backups, renames with `flusso.toml` last, the **commit point = marking the record committed** (one rename, then the state folder flushed), rename to `.flusso-save.done`, cleanup, record removed last; journal/staging/temps are written and read with `O_NOFOLLOW` (`disk.rs`'s `no_follow`). **A journal is acted on only when a record of this folder names its exact bytes**, so once, in its own folder: `recover.rs` decides roll back vs finish from the record, never the file name; a file holding a **third text** (neither its before- nor after-text, or deleted) is another program's write and is kept, never blocks (`recover::Kept`, `RecoveredSave.kept`): `finish` cleans up around it, a rollback restores the rest (`Backups::Keep` in recovery keeps and names its before-text backup, `Backups::Drop` in the save's own undo drops it, a backup holding the kept bytes always goes), so the result is before or after plus that write, never a mix; only an unreadable file, a missing backup or a failed step blocks; `Journal::steps` then accepts only what a save writes (plain names, leading `..` for a `plan`-accepted outside file, no save-file name, no link, config only as the last write, removals inside, `dirs` ancestors of a destination, ≤ `MAX_ENTRIES` paths of ≤ `fspath::MAX_PATH` bytes); anything else (no record, another folder's, no state folder, too large, malformed, not a save, `.journal` + `.done` both) is never acted on: `recover.rs` blocks with a read-only `Report` that looks only inside the config folder (`Inside`; an outside path is text, `Holds::Outside`) and gives `Report::route` back/forward as literal `HandStep`s (each file's `Fix`, every implied temp/backup on disk whatever it holds, created folders if empty, the journal last) plus "delete only the journal"; a blocked *recorded* save carries its `Direction`, per `Problem` a `fix` from a copy verified by digest at report time (never a backup while finishing: the after-text is nowhere else) and, when every problem is a missing backup, `keep` steps; `commit::tests` follow every such step literally and assert the promised state. Every recovery action is digest-gated (an empty temp is deleted only while rolling back and its file unreplaced; a `dirs` folder only when empty); `fspath::on_disk` (shared with `plan`, which caps request paths at `MAX_PATH`) bisects for the deepest existing ancestor, so resolution is O(log n) canonicalizations; the backups are deleted only once the commit mark is flushed; `api.rs`'s `recover_project` runs it at `flusso design` start, on `/api/project` (handlers run it under `spawn_blocking`), and before a diff/save that finds a journal: a rollback lets the diff/save go on with the notice, a completion is reported except the process's own save whose cleanup it left (`OWN_CLEANUP`), and the pages that loaded before it are caught by the digest check below; a blocked one is a 409 too (carrying `SaveRecovery`, with `BlockedSave.report`; the frontend's `components/Recovery.tsx` shows the notice or, when blocked, the files and the report instead of the project); stray `*.flusso-save.*` files with no journal are only reported; `disk.rs`'s `Disk` counts steps so `commit::tests` fails, or stops dead after, each one, for the commit and for recovery itself, and `a_process_aborted_mid_save_is_recovered` re-runs the test binary as a child that aborts mid-save), `keep/` (a save, `/api/diff` and the preview's YAML over an existing file: its text is patched only where the canonical renderings of its model and the saved model differ, so comments and untouched formatting stay — `yaml.rs` a line-based block scanner: the comment block directly above a key/item is its own, a blank-line-separated one is nobody's and stays put, a list's trailing comments are the list's; `toml_doc.rs` over `toml_edit`, the same rules for headers via markers in their prefixes; list items, `[[index]]` entries and sinks pair by identity — `pairing.rs`, from the uids/index ids/sink ids the client sends as `FileOp.identity`/`SaveRequest.identity`/`PreviewRequest.identity` (before = the model the base reads as, after = the saved model; a sink rename is applied to the TOML in place, `[index.sinks]` included, before the patch; an identity with an empty, repeated or unknown id is ignored), else by name, never by slot; a `|+` scalar owns the blank lines after it, so the patcher drops blank lines it would put after one (`KEPT_OPEN`); a comment dropped while its owner may still exist counts in `OpDiff.dropped`; the result is re-parsed and must equal the model, else the canonical form with `OpDiff.notice`; the Code-mode text is the save `base` — `FileOp.base`, the design store's `texts`, under undo with `doc`), `preview.rs` (mapping + document tree), `assets.rs` (embedded SPA); CLI `design` subcommand in `apps/cli/src/commands/design.rs`; frontend under `apps/design/frontend/` (React Flow node-graph canvas — `model/` projects the `IndexSchema` tree ↔ nodes/edges + path-addressed edits (every field carries a client-only `uid` from `ids.ts`: a container's is its node id, which collapse state + drag positions key on, and inspector edits address a field by it; stripped from every request), plus `complete.ts` (incomplete-field checks) and `prune.ts` (drops incomplete pieces from the **live preview** payload only, so a mid-build blank name doesn't 400 the strict backend, and lists them; that copy is lossy, so Code mode seeds from the unpruned schema and refuses to open while anything would be pruned), `selection.ts` (the selection carries the selected field's uid; the store re-points its path after every doc change and clears it once the field is gone), `rowIds.ts` (option rows keyed by a row id, not their editable key), `components/` the canvas/nodes/inspector/catalog-browser), built to `apps/design/dist/`; property round-trip in `apps/design/tests/roundtrip.rs` (also: random edits saved into a hand-written, commented file keep every comment with the field it names). The **sample document** preview builds a real doc from one live row via `PgDocumentBuilder::sample_document` (postgres crate — keeps sqlx/`RowKey` there; reuses the `build` path + `sink::to_json`) |
 | `Sink` trait (`write`, safe for concurrent calls; seeding; `reindex`), `WriteReport`, `SinkOptions`, JSON render | `libs/1-ports/sink/src/` |
 | OpenSearch sink (bulk, mappings, seeding; alias-over-generations + reindex) | `libs/2-adapters/sink-opensearch/src/` — `lib.rs` (the `OpensearchSink` type + ctor), `sink_impl.rs` (the `Sink` impl), `transport.rs` (HTTP plumbing + index CRUD), `generations.rs` (aliases, meta doc, generation naming), `mapping.rs` (index body/analysis), `bulk.rs` (wire format + chunking) |
-| Stream port (`Stream`, lanes, `LaneItem`/`Request`, `Producer`/`Consumer`/`AckHandle`) / in-process channel adapter (ticketed in-flight ledger, watermark) | `libs/1-ports/stream/src/` (`items.rs`, `queue.rs`), `libs/2-adapters/stream-channel/src/lib.rs` |
+| Stream port (`Stream`, lanes, `LaneItem`/`Request`, `Producer`/`Consumer`/`AckHandle`) / in-process channel adapter (ticketed in-flight ledger) | `libs/1-ports/stream/src/` (`items.rs`, `queue.rs`), `libs/2-adapters/stream-channel/src/lib.rs` |
 | Editor schema + Reference table generation (`flusso schema config\|docs`, drift test) | `apps/cli/src/commands/schema_cmd.rs`; artifacts at `libs/1-config/config.schema.json`, `docs/src/reference/generated/` |
 | CLI subcommands (`build`/`run`/`check`/`schema`/`indexes`/`reindex`) | `apps/cli/src/` — `main.rs` dispatches; `commands/` holds one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves the HTTP surfaces, drives `Daemon::start`/`run`, owns signals; `check.rs`, `schema_cmd.rs`, the `indexes`/`reindex` HTTP-client `admin.rs`, shared `print.rs`); `telemetry/` and `http/` hold the transport, `backends.rs` the backend assembly |
 | On-demand reindex (alias-over-generations, per sink, no restart) | sink: `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`reindex`/`ensure_index`/`mark_seeded`) + `generations.rs` (generation helpers); engine `SinkEngine::reindex` (staged between batches + a `Backfill` request); daemon `DaemonControl::reindex` (`supervise.rs`); CLI `http/mod.rs` (`POST /reindex?index&sink`), `commands/admin.rs` (client, `--sink`). Deferred write-side zero-downtime follow-on: issue #6 |

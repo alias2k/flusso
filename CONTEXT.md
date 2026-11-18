@@ -57,7 +57,7 @@ One sink's ordered feed inside the stream. A stacked sink's lane is fed by the s
 _Avoid_: channel, topic, subject, partition
 
 **Batch**:
-The unit a lane carries and a sink engine acknowledges: the envelopes one ingest commit built, in build order, with the position of the last change it covers. A batch with no envelopes still carries its position.
+The unit a lane carries and a sink engine acknowledges: the envelopes one ingest commit built, in build order, with the position of the last change it covers (its key in the progress). A batch with no envelopes still carries its position.
 _Avoid_: chunk, bundle, message group
 
 **Build gate**:
@@ -103,12 +103,20 @@ An updated row's new values, carried only beside a pre-image. Compared with it t
 _Avoid_: new row, after image, new tuple
 
 **Position**:
-An opaque, ordered, serializable offset in the source's change feed, assigned by the source and meaningful only to it. The source confirms a position once every lane has acknowledged it. Snapshot batches carry none.
+One change's place in the source's change feed: an ordered `seq`, plus stamps only the source reads (what it may confirm or fence while the change is the oldest outstanding, and once it has landed). It describes itself, so the source keeps no map of what it emitted. Snapshot batches carry none.
 _Avoid_: LSN, offset, cursor, ack, checkpoint
 
-**Watermark**:
-The lowest position, over every lane, that the lane has acknowledged with everything before it: a lane's part stops before its oldest unacknowledged positioned batch, since batches are acknowledged in any order. The stream owns it; the ingest engine forwards it to the source as confirmation.
-_Avoid_: low-water mark, min ack, commit point
+**Progress**:
+The engine's record, per lane, of what was routed to the lane and has not yet landed or become searchable, plus the newest routed position. One per deployment; it outlives every engine run. Confirmation and fences are read off it as a landed case.
+_Avoid_: watermark (the stream no longer keeps one), ledger, tracker
+
+**Landed** (`Before(o)` / `Through(p)` / `Idle`):
+How far some lanes have landed what was routed to them: everything before `o`, the oldest position still outstanding; or everything through `p`, the newest routed; or nothing routed yet. The source turns it into a source position from the positions' stamps, and only it knows whether a change was emitted after `p`.
+_Avoid_: watermark, min ack, commit point
+
+**Routed**:
+A batch is routed once the ingest engine has published it to every lane it goes to and registered it in the progress. A change emitted but not routed is in no lane, so only the source's own `next_seq` test keeps it from being confirmed.
+_Avoid_: sent, enqueued
 
 **Quiet stream**:
 The live stream having no change ready right now. A change arriving on a quiet stream has nothing to batch with.

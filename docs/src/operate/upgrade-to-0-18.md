@@ -240,7 +240,7 @@ A comparison with a string, a number or another kind fails rather than answering
 | `FlushReport` | `WriteReport`, the same fields |
 | `caught_up`: refresh this flush's documents | `caught_up`: make everything written by the writes that returned before this call searchable too, then report `Immediate` |
 | `Visibility::Deferred`: until the next `Immediate` flush | until the next caught-up write that reports `Immediate` |
-| `Stream::watermark`: the highest acknowledgement per lane, minimum over lanes | the position before each lane's oldest unacknowledged positioned item, minimum over lanes |
+| `Stream::watermark`: the highest acknowledgement per lane, minimum over lanes | removed: see [below](#confirmation-and-fences-read-the-engines-progress) |
 | — | `Sink::ordered()` (default `false`): `true` for a sink whose readers consume its output in order; the engine then writes one batch at a time in lane order |
 | `SinkEngine::acknowledged()` | `SinkEngine::advanced()`: how often the oldest unfinished lane item landed, which a supervisor reads as progress |
 
@@ -285,6 +285,27 @@ A comparison with a string, a number or another kind fails rather than answering
 0.18 records where the pipeline's time goes: [`flusso.stage.duration`](../reference/metrics.md#where-the-time-goes) per stage, `flusso.flush.documents` and `flusso.flush.size` per flush, and [`flusso.startup.duration`](../reference/metrics.md#start-up) per start-up step. Existing series are unchanged. A deployment needs nothing.
 
 - **Embedding the crates.** `Observer` gains `on_stage` and `on_startup_step` (both default to nothing). `sink::FlushReport` and `engine::CommitStats` are `#[non_exhaustive]` and gain `bytes` (and `CommitStats` `work`): build them with `FlushReport::clean()` and its builders (`visible`, `rejecting`, `sent`) and `CommitStats::new(…).sent(…)`, not a struct literal. A sink that counts the bytes it sends reports them with `sent`; it is a metric only.
+
+## Confirmation and fences read the engine's progress
+
+The Postgres source no longer keeps a map of every change it emitted until every sink confirmed it. Each position carries what the source needs to confirm or fence at it, and the engine keeps, per sink, what it routed there and the sink hasn't landed. A deployment needs nothing; nothing is rebuilt.
+
+- **Memory no longer grows with a stalled sink's backlog in the source.** The map held one entry per emitted change until every sink caught up.
+- **Idle WAL is released by the engine's once-a-second confirmation**, not by the keepalive itself: the slot follows unrelated WAL within about two seconds, as before.
+- **A fence can answer a little lower while a change is between the source and the lanes.** It never claims a change the sinks haven't landed; at worst a waiter waits until that change lands.
+- **An emitting sink's output is unchanged:** the position is still written as `seq`, the same string.
+
+**Embedding the crates.**
+
+| 0.17 | 0.18 |
+| --- | --- |
+| `kernel::Position(n)`, `position.0` | `Position::new(n)`, `position.seq`; a source stamps its own with `Position::stamped(seq, fence_before, confirm_before, confirm_through)` |
+| `ChangeCapture::confirm(&self, Position)` | `confirm(&self, Landed)`: `Before(oldest)`, `Through(newest routed)` or `Idle`. Called after each commit and once a second whatever changed; keep it monotonic |
+| `ChangeCapture::reached(&self, Option<Position>)` | `reached(&self, Landed)` |
+| `Stream::watermark()` | removed; `engine::Progress` keeps what each lane landed |
+| `engine::drain_lanes(stream, source, &mut Option<Position>)` | `drain_lanes(stream, source, &Progress, &mut Option<Landed>)` |
+| `Fence::new(source, sinks)` | `Fence::new(source, progress, sinks)` |
+| one `IngestEngine` and its `SinkEngine`s over a stream | the same, sharing one `Progress`: `IngestEngine::with_progress` and `SinkEngine::with_progress`. An ingest engine alone gets its own; a sink engine without one confirms nothing |
 
 ## Related
 
