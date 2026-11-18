@@ -37,9 +37,7 @@
 //! assert_eq!(budget.held().total, 0);
 //! ```
 
-#![allow(dead_code)] // stub until the accountant lands
-
-use std::collections::BTreeMap;
+use std::mem::size_of;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -52,10 +50,18 @@ use crate::observer::Work;
 /// The least a batch counts, so empty batches still bound the item count.
 pub const FLOOR: usize = 1024;
 
+/// A B-tree leaf: eleven key-value slots and a small header.
+const MAP_LEAF: usize = 11 * (size_of::<String>() + size_of::<GenericValue>()) + 16;
+
+/// An internal B-tree node: a leaf plus its twelve edges.
+const MAP_INTERNAL: usize = MAP_LEAF + 12 * size_of::<usize>();
+
 /// Bytes of built documents held, in all and by backfill.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Held {
+    /// Every kind, reservations included.
     pub total: usize,
+    /// Backfill's share of `total`.
     pub backfill: usize,
 }
 
@@ -95,13 +101,37 @@ impl Budget {
 
     /// What is held now, reservations included.
     pub fn held(&self) -> Held {
-        Held::default()
+        let backfill = self.backfill.load(Ordering::Acquire);
+        let total = self.total.load(Ordering::Acquire);
+        Held {
+            total: total.max(backfill),
+            backfill,
+        }
     }
 
-    /// Reserve `estimate` bytes for a build of `work`, if the rules allow.
+    /// Reserve `estimate` bytes for a build of `work`, if the rules allow:
+    /// within the limit, backfill within half of it, and always one batch
+    /// for a kind holding nothing. Only the ingest engine reserves, so the
+    /// check and the add need no lock: anything else only releases.
     pub fn try_reserve(self: &Arc<Self>, work: Work, estimate: usize) -> Option<Reservation> {
-        let _ = (work, estimate);
-        None
+        let Held { total, backfill } = self.held();
+        let fits = match work {
+            Work::Live => total - backfill == 0 || total.saturating_add(estimate) <= self.limit,
+            Work::Backfill => {
+                backfill == 0
+                    || (backfill.saturating_add(estimate) <= self.limit / 2
+                        && total.saturating_add(estimate) <= self.limit)
+            }
+        };
+        if !fits {
+            return None;
+        }
+        self.add(work, estimate);
+        Some(Reservation {
+            budget: Arc::clone(self),
+            work,
+            bytes: estimate,
+        })
     }
 
     /// Say the engine waits for a release: the next release wakes
@@ -113,6 +143,26 @@ impl Budget {
     /// Resolves after a release that followed [`want_release`](Self::want_release).
     pub async fn released(&self) {
         self.released.notified().await;
+    }
+
+    fn add(&self, work: Work, bytes: usize) {
+        if work == Work::Backfill {
+            self.backfill.fetch_add(bytes, Ordering::AcqRel);
+        }
+        self.total.fetch_add(bytes, Ordering::AcqRel);
+    }
+
+    fn release(&self, work: Work, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        self.total.fetch_sub(bytes, Ordering::AcqRel);
+        if work == Work::Backfill {
+            self.backfill.fetch_sub(bytes, Ordering::AcqRel);
+        }
+        if self.waiting.swap(false, Ordering::AcqRel) {
+            self.released.notify_one();
+        }
     }
 }
 
@@ -126,15 +176,32 @@ pub struct Reservation {
 }
 
 impl Reservation {
+    /// The kind of work it was reserved for.
+    pub fn work(&self) -> Work {
+        self.work
+    }
+
     /// The build landed with `bytes` of documents: hold that much (at least
     /// [`FLOOR`]) instead of the estimate, until the returned charge drops.
-    pub fn settle(self, bytes: usize) -> Charge {
-        let _ = bytes;
+    pub fn settle(mut self, bytes: usize) -> Charge {
+        let bytes = bytes.max(FLOOR);
+        let reserved = std::mem::take(&mut self.bytes);
+        if bytes > reserved {
+            self.budget.add(self.work, bytes - reserved);
+        } else {
+            self.budget.release(self.work, reserved - bytes);
+        }
         Charge {
             budget: Arc::clone(&self.budget),
             work: self.work,
-            bytes: 0,
+            bytes,
         }
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        self.budget.release(self.work, self.bytes);
     }
 }
 
@@ -153,30 +220,66 @@ impl Charge {
     }
 }
 
+impl Drop for Charge {
+    fn drop(&mut self) {
+        self.budget.release(self.work, self.bytes);
+    }
+}
+
 /// The heap a built document will hold once it is an envelope: its body's
 /// tree, its rendered id and the envelope itself.
 pub fn document_bytes(document: &Document) -> usize {
-    let _ = document;
-    0
+    let (id, body) = match document {
+        Document::Upsert { id, body } => (id, Some(body)),
+        Document::Delete { id } | Document::Failed { id, .. } => (id, None),
+    };
+    let key: usize = id
+        .key
+        .0
+        .iter()
+        .map(|(column, value)| column.as_ref().len() + value_bytes(value) + 8)
+        .sum();
+    size_of::<Envelope>() + key + body.map_or(0, value_bytes)
+}
+
+/// The nodes of a map of `len` entries: one leaf up to eleven, then leaves
+/// about two-thirds full under internal nodes.
+fn map_nodes(len: usize) -> usize {
+    match len {
+        0 => 0,
+        1..=11 => MAP_LEAF,
+        _ => {
+            let leaves = len.div_ceil(8);
+            leaves * MAP_LEAF + leaves.div_ceil(8) * MAP_INTERNAL
+        }
+    }
 }
 
 /// The heap `value` owns, not counting the value itself.
 pub fn value_bytes(value: &GenericValue) -> usize {
-    let _ = value;
-    0
-}
-
-#[allow(dead_code)]
-fn sizes() -> (usize, usize) {
-    (
-        std::mem::size_of::<Envelope>(),
-        std::mem::size_of::<BTreeMap<String, GenericValue>>(),
-    )
+    match value {
+        GenericValue::String(text) => text.capacity(),
+        GenericValue::Bytes(bytes) => bytes.capacity(),
+        GenericValue::BigDecimal(decimal) => decimal.as_str().len(),
+        GenericValue::Array(items) => {
+            items.capacity() * size_of::<GenericValue>()
+                + items.iter().map(value_bytes).sum::<usize>()
+        }
+        GenericValue::Map(entries) => {
+            map_nodes(entries.len())
+                + entries
+                    .iter()
+                    .map(|(key, value)| key.capacity() + value_bytes(value))
+                    .sum::<usize>()
+        }
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::time::Duration;
 
     use super::*;
