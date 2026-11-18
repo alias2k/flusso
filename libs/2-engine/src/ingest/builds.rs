@@ -10,8 +10,9 @@
 //! own, ready at once, so it follows the snapshot's last batch.
 //!
 //! **Bound.** At most `builds` builds run, and the queue holds at most
-//! `2 × builds` slots, running or built. A slow build at the front holds back
-//! at most `2 × builds − 1` built batches behind it.
+//! `2 × builds` slots, running or built, plus a snapshot's completion (queued
+//! without a free slot; it holds no documents). A slow build at the front
+//! holds back at most `2 × builds − 1` built batches behind it.
 //!
 //! **Admission.** A batch is granted only when no running build holds any of
 //! its documents. A later build of a document therefore starts after the
@@ -27,7 +28,8 @@
 //! **Running a build.** A build is polled once where it is granted. If that
 //! finishes it, nothing is spawned; otherwise it is spawned on its own task,
 //! so its CPU work runs beside the engine's and it makes progress while the
-//! engine publishes. A spawned build is awaited through [`Flights`].
+//! engine publishes. A spawned build is awaited through [`Flights`], and
+//! aborted when the run's future is dropped, so none outlives the engine.
 //!
 //! ```text
 //! slots    [L1 ready] [B1 running] [L2 ready] [Complete]
@@ -43,6 +45,7 @@ use std::task::Poll;
 use futures::future::BoxFuture;
 use kernel::{IndexName, Position, SinkName};
 use source::document::{Document, DocumentBuilder, DocumentId};
+use tokio::task::AbortHandle;
 use tokio::time::{Duration, Instant};
 
 use super::snapshot::Snapshot;
@@ -155,6 +158,17 @@ pub(super) struct Builds {
     refused: Option<Work>,
     /// The kinds counted as waiting for the budget since their last grant.
     waiting: (bool, bool),
+    /// The spawned builds, aborted when the run's future is dropped (a
+    /// supervisor's abort, a shutdown deadline) so none outlives it.
+    spawned: Vec<(u64, AbortHandle)>,
+}
+
+impl Drop for Builds {
+    fn drop(&mut self) {
+        for (_, build) in self.spawned.drain(..) {
+            build.abort();
+        }
+    }
 }
 
 impl std::fmt::Debug for Builds {
@@ -186,6 +200,7 @@ impl Builds {
             },
             refused: None,
             waiting: (false, false),
+            spawned: Vec::new(),
         }
     }
 
@@ -354,6 +369,7 @@ impl Builds {
             self.holding.push((seq, held));
         }
         let handle = tokio::spawn(build);
+        self.spawned.push((seq, handle.abort_handle()));
         let landing = Box::pin(async move { (seq, handle.await.ok()) });
         if live {
             self.live_running.push(seq);
@@ -381,6 +397,9 @@ impl Builds {
         }
         if let Some(at) = self.live_running.iter().position(|live| *live == seq) {
             self.live_running.swap_remove(at);
+        }
+        if let Some(at) = self.spawned.iter().position(|(spawned, _)| *spawned == seq) {
+            self.spawned.swap_remove(at);
         }
         let Some(slot) = seq
             .checked_sub(self.front)

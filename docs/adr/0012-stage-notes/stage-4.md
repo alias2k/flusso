@@ -74,7 +74,7 @@ before; only more of them are built at once.
 - **Unpositioned backfill items sit at their grant's place**, deterministically. They need no
   position: the watermark reads only positioned items. A lane that didn't ask for an index gets no
   slice, as today.
-- **Bound: `2 × builds` slots, in flight or built.** No grant while the buffer holds that many. A
+- **Bound: `2 × builds` slots, in flight or built, plus a snapshot's completion** (queued without a free slot; it holds no documents). No grant while the buffer holds that many. A
   slow build at the front can hold at most `2 × builds − 1` built batches behind it, each at most
   `max_changes` documents: 2,048 documents with the defaults, a few MiB on `reference`. That is on
   top of what the lanes hold. This is the only new memory until stage 5's budget.
