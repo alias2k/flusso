@@ -102,24 +102,48 @@ impl Progress {
         }
     }
 
-    /// A batch covering `oldest..=last` is on `lanes`.
+    /// A batch covering `oldest..=last` is on `lanes`. Call it after the
+    /// items are published, in position order; a lane not named has nothing
+    /// outstanding for the batch.
     pub fn published<'a>(
         &self,
         lanes: impl IntoIterator<Item = &'a SinkName>,
         oldest: Position,
         last: Position,
     ) {
-        let _ = (lanes.into_iter().count(), oldest, last);
+        for lane in lanes {
+            if let Some(lane) = self.lanes.get(lane) {
+                let mut registered = lock(&lane.registered);
+                registered.unlanded.push_back((last.seq, oldest));
+                registered.unsearchable.push_back((last.seq, oldest));
+                registered.newest = Some(last.seq);
+            }
+        }
+        let mut routed = lock(&self.routed);
+        *routed = Some(routed.map_or(last, |routed| routed.max(last)));
     }
 
-    /// `lane` landed the item keyed `landed`.
+    /// `lane` landed the item keyed `landed` (its last position), and every
+    /// item through `searchable_through` is searchable. Either may come before
+    /// the item is registered, and more than once.
     pub fn wrote(
         &self,
         lane: &SinkName,
         landed: Option<Position>,
         searchable_through: Option<Position>,
     ) {
-        let _ = (lane, landed, searchable_through);
+        if landed.is_none() && searchable_through.is_none() {
+            return;
+        }
+        if let Some(lane) = self.lanes.get(lane) {
+            let mut reports = lock(&lane.reports);
+            if let Some(landed) = landed {
+                reports.landed.insert(landed.seq);
+            }
+            if let Some(through) = searchable_through {
+                reports.searchable_through = reports.searchable_through.max(Some(through.seq));
+            }
+        }
     }
 
     /// The newest position routed.
@@ -127,23 +151,30 @@ impl Progress {
         *lock(&self.routed)
     }
 
-    /// What every lane has landed.
+    /// What every lane has landed: what the source may confirm.
     pub fn landed(&self) -> Landed {
-        Landed::Idle
+        let routed = self.routed();
+        let oldest = self
+            .lanes
+            .values()
+            .filter_map(|lane| lane.outstanding(Level::Applied))
+            .min();
+        case(oldest, routed)
     }
 
-    /// What `lane` has reached at `level`.
+    /// What `lane` has reached at `level`; `None` for a lane this progress
+    /// doesn't know.
     pub fn lane(&self, lane: &SinkName, level: Level) -> Option<Landed> {
-        let _ = level;
-        self.lanes
-            .get(lane)
-            .map(|lane| case(lane.outstanding(level), None))
+        let routed = self.routed();
+        let lane = self.lanes.get(lane)?;
+        Some(case(lane.outstanding(level), routed))
     }
 
     /// Whether `lane` has nothing routed to it outstanding at `level`.
     pub fn is_clear(&self, lane: &SinkName, level: Level) -> bool {
-        let _ = (lane, level);
-        true
+        self.lanes
+            .get(lane)
+            .is_none_or(|lane| lane.outstanding(level).is_none())
     }
 }
 
@@ -151,12 +182,6 @@ impl Lane {
     /// Match the reports against what is registered, then the oldest position
     /// still outstanding at `level`.
     fn outstanding(&self, level: Level) -> Option<Position> {
-        let _ = (&self.registered, &self.reports, level);
-        None
-    }
-
-    #[allow(dead_code)]
-    fn settle(&self, level: Level) -> Option<Position> {
         let mut registered = lock(&self.registered);
         let mut reports = lock(&self.reports);
         while let Some((key, _)) = registered.unlanded.front() {
