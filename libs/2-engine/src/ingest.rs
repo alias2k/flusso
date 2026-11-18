@@ -45,6 +45,8 @@ mod commit;
 mod confirm;
 mod live;
 mod snapshot;
+#[cfg(test)]
+mod tests;
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -91,6 +93,7 @@ pub struct IngestEngine {
     sinks: Vec<SinkName>,
     observer: Arc<dyn Observer>,
     batch: BatchPolicy,
+    builds: usize,
     failure_policies: FailurePolicies,
     stop: Stop,
     /// How many times this engine moved the source forward (see
@@ -123,6 +126,7 @@ impl IngestEngine {
             sinks,
             observer: Arc::new(NoopObserver),
             batch: BatchPolicy::default(),
+            builds: 1,
             failure_policies: FailurePolicies::default(),
             stop: Stop::new(),
             advances: AtomicU64::new(0),
@@ -170,6 +174,13 @@ impl IngestEngine {
             max_changes: batch.max_changes.max(1),
             ..batch
         };
+        self
+    }
+
+    /// Build up to `builds` batches at once (at least one). Each lane still
+    /// gets its items in the order they were granted.
+    pub fn with_builds(mut self, builds: usize) -> Self {
+        self.builds = builds.max(1);
         self
     }
 
