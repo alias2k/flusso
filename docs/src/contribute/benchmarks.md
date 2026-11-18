@@ -102,7 +102,7 @@ How to read it:
 - **`other`** is the wall time a task's stages and start-up don't account for: acknowledgements, confirmations, a stop, and the idle stretch still open when the phase ends. An idle stretch is cut every second, so up to a second of a task's idle time at a phase boundary can land in `other` there and in the next phase's `idle`. Anything larger is a gap in the timing. It goes negative once stages overlap.
 - **The busier side sets the pace.** A sink rarely `idle` while the ingest task often is: sink-bound. The ingest task rarely `idle` while the sink mostly is: ingest-bound.
 - **`publish` is the ingest task blocked on a full lane**, `lane_wait` the same per sink: a high one names the slow sink.
-- **`page` is getting snapshot rows**: waiting for the source's key pages, then decoding and buffering each row. High with `build` low means the snapshot cursor is the limit.
+- **`page` is getting a backfill's keys**: waiting for the next page of root keys and buffering them. High with `build` low means reading the keys is the limit.
 - The **flush table** gives documents and KiB per flush per sink (flushes that wrote something); the backfill table adds the **start-up steps** (source, staging per sink, prepare, open_live, and `live`, the whole time to the first live stream).
 
 Rows appear per `sink` and per `index` where the engine reports them, so a change that splits work per index shows up without touching the harness.
@@ -163,6 +163,7 @@ just review-ab --clean-results                      # delete target/review-ab, t
 | `--limit` | `5` | the smallest change, in percent, that counts |
 | `--rounds` | `3` | runs per side; 2 is weaker (a 3.45% first-pass flag rate per case under bursts), more narrows the spread |
 | `--own-benches` | off | run each side's own bench sources instead of the head's on both |
+| `--own-review` | off | with `--digest` or `--plans`: run each side's own `review` harness over its own `cases.rs`, nothing laid over the base; for a change to what a form calls, compared with the base's own way (the base must have the harness) |
 | `--bench-cpus`, `--server-cpus` | from `nproc` | core lists (`taskset -c` syntax) for the bench process and the containers; also `REVIEW_AB_BENCH_CPUS`, `REVIEW_AB_SERVER_CPUS` |
 | `--no-pin` | | run unpinned; also `REVIEW_AB_PIN=0` |
 | `--clean` | | remove the cache, `~/.cache/flusso/review-ab`, and nothing else (results stay), then exit |
@@ -246,14 +247,14 @@ just review-digest main --pg 14,18       # one table per version
 just review-digest --filter '^k_'        # only these indexes (a regex over the index name)
 ```
 
-It's `review-ab.sh --digest`: the same lock, warm base build, stamp, provenance check, named containers and CPU pinning as `review-ab`, with the `review` bench target run once per side instead of Criterion. That target includes `cases.rs` for its roots and is laid over the base with it; only a review mode builds it, so `just review-ab` itself still builds any base it built before. What the harness needs from the crate is listed in its `// review-ab requires:` lines, and a base that lacks one is refused with its name: the modes need a base from #357 on (`PgDocumentBuilder::connect_with_max_connections`). On a fresh database per side it seeds the [review cases](#the-review-cases)' roots and, per root index, builds:
+It's `review-ab.sh --digest`: the same lock, warm base build, stamp, provenance check, named containers and CPU pinning as `review-ab`, with the `review` bench target run once per side instead of Criterion. That target includes `cases.rs` for its roots and is laid over the base with it; only a review mode builds it, so `just review-ab` itself still builds any base it built before. What the harness needs from the crate is listed in its `// review-ab requires:` lines, and a base that lacks one is refused with its name: the modes need a base from #357 on (`PgDocumentBuilder::connect_with_max_connections`), and the harness from #386's stage 3 on needs `DocumentBuilder::keys`. To compare a base older than that, pass `--own-review`: each side then runs its own harness, the base's backfill form its cursor, the head's its key pages (`just review-digest origin/main --own-review`). On a fresh database per side it seeds the [review cases](#the-review-cases)' roots and, per root index, builds:
 
 | Form | What |
 | --- | --- |
 | `build` | 20 present ids and 2 missing ones, one at a time |
 | `build_many<16` | 10 present ids and 1 missing one: the array-constructor key form |
 | `build_many>=16` | every row and 5 missing ids: the array-parameter key form, chunked |
-| `backfill` | the root's snapshot, each row its own document, built in batches of 256, as the ingest engine does |
+| `backfill` | the root's key pages (1,024 keys each), each key its own document, built in batches of 256, as the ingest engine does |
 
 Each document is written as the sink would get it (`sink::to_json`, keys sorted), and the table has one row per index:
 
@@ -269,7 +270,7 @@ Each document is written as the sink would get it (`sink::to_json`, keys sorted)
 - `forms disagree`: on one side, two forms built different documents for the same id: `build` against `build_many`, say. It's flagged even when base and head agree, since the two forms must never differ.
 - `no documents`: neither side built a document for an index the harness declared.
 
-The digest covers the forms, not the history: a missing id is a tombstone in each form. Below the table, a note per index says what the harness left out: the composite-key and keyless roots get no missing ids (a change's key there is more than `id` and the harness makes up `id` alone, so the tombstone path of those roots is not compared) and no `backfill` rows (a snapshot skips a table without a single-column primary key, as `flusso run` does). Exit 0 when every index is `same`, 1 on a difference, 2 on a setup error.
+The digest covers the forms, not the history: a missing id is a tombstone in each form. Below the table, a note per index says what the harness left out: the composite-key and keyless roots get no missing ids (a change's key there is more than `id` and the harness makes up `id` alone, so the tombstone path of those roots is not compared) and no `backfill` rows (a backfill skips a root without a single-column primary key, as `flusso run` does). Exit 0 when every index is `same`, 1 on a difference, 2 on a setup error.
 
 What it can't see: the `cases` schema is two `keyword` columns and one `has_many` child (`id`, `label`, ordered by `id`), so nothing about
 

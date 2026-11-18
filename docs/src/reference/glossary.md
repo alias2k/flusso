@@ -4,7 +4,7 @@ The project's nouns, each with a pointer to the page that owns it.
 
 | Term | Means | Home |
 | --- | --- | --- |
-| **backfill** | Seeding an unseeded index by snapshotting its root table through the normal pipeline, before live capture. | [How flusso works](../start/how-it-works.md#seeding-and-continuity) |
+| **backfill** | Seeding an unseeded index by reading its root keys, a page at a time, and building each through the normal pipeline beside live capture. | [How flusso works](../start/how-it-works.md#seeding-and-continuity) |
 | **applied** | A fence level: the sink's write for a change, and every earlier one, has returned, so a fetch by id sees it. | [HTTP endpoints](http.md#get-waitpositionposition) |
 | **batch** | The changes grouped into one build and one write per sink: everything the stream has ready, committed the moment it would block, capped at `max_changes` / `max_delay_ms`. | [batch](config-toml.md#batch) |
 | **computed field** | A read-time field given by a Rust function over the document and the context. Value only. | [Read-time fields](../query/read-time-fields.md#computed-fields) |

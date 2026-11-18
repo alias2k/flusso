@@ -72,6 +72,8 @@ A key that moved between `timestamp` and `timestamptz` while flusso ran is compa
 
 A `bytea` nested inside another value is different: a field of a composite type, an array of composites, a range, or a multi-dimensional `bytea[]` read by a field that isn't `binary`. So is a column changed to `bytea` while flusso runs, until its table's next change or a restart. Postgres renders it by the session's `bytea_output`. flusso sets `bytea_output = hex` on each connection it opens, and a transaction-mode pool may not keep it. If a document reads such a value, set it on the database or role too: `ALTER ROLE flusso SET bytea_output = 'hex'`.
 
+A backfill's key pages are single statements on those pooled connections, so transaction mode serves them as it serves any query.
+
 The connections that build documents and read the backfill also set `jit = off`; the one that reads the slot's lag doesn't. A batch over a partitioned root, or over a document with several `has_many`, passes the default `jit_above_cost` at a few hundred keys, and then compiles before it runs. Measured, turning it off made documents with several `has_many` 11 to 27% faster and one aggregate-heavy document about 3% slower. A transaction-mode pool may not keep the setting; set it on the role there: `ALTER ROLE flusso SET jit = off`. A server that refuses it, such as Postgres 10, which has no `jit`, keeps its own setting, and flusso logs a warning and runs.
 
 ## Capture
@@ -99,7 +101,13 @@ flusso consumes a logical replication **slot** and subscribes to a **publication
   - **A root key whose text changes moves its documents.** A document's `_id` is the root key as text, so a change like `numeric` → `numeric(10,2)` (`1.5` becomes `1.50`) gives each row a new document, `1.50`, on its next change. A change flusso read before the `ALTER` still carries `1.5` and still updates the document `1.5`: it finds its row, since `1.5 = 1.50`. The old documents stay; [reindex](../operate/reindex.md) to drop them.
   - **A related table recreated with its primary key on another column** is followed only after a restart.
   - **A type the schema can't work with fails every build of its index** until the schema or the column is changed back: a link Postgres can't compare with its key (a `text` link to an `integer` key), a transform the new type doesn't take, a dropped column. The error names the index and points at `flusso check`, which reports the field ([`link_type_mismatch`](cli.md#what-the-database-check-verifies) for the link), and `run` refuses to start on it. Meanwhile the ingest engine restarts with backoff and its retries fail the same way. Once the database matches again, the next retry builds the change, with no restart.
-- **Backfill** snapshots the root tables of unseeded indexes before live capture. `--skip-backfill` skips it. A partitioned root is read through the parent, every partition included.
+- **Backfill** reads the root keys of each unseeded index in pages of 1,024, in key order, after the slot exists, and builds each key as its document. `--skip-backfill` skips it. A partitioned root is read through the parent, every partition included.
+  - **No long transaction.** Each page is one statement (`WHERE key > $last ORDER BY key LIMIT 1024`, an index range scan on the primary key) on the connections that build documents. Between pages flusso holds no lock and no snapshot, so an `ALTER TABLE` on a root waits for one page at most, and vacuum isn't held back for the length of a backfill.
+  - **Rows written meanwhile land.** A page names only keys; each document is read when it is built. A row that gets a key behind the walk is in the WAL, which the slot keeps from before the first page, so it is built live.
+  - **Only a root with a single-column primary key is read**, the one `primary_key` names. Any other root (no primary key, a composite one, a view) is skipped with a warning, and its index is marked seeded with what live changes bring.
+  - Indexes rooted at one table each read it once.
+  - A stop or restart mid-backfill starts that backfill over from the first key.
+  - A type with its comparison operators in a schema outside the role's `search_path` (say `citext` installed in `ext`) is still read whole, but each page then sorts the rest of the table. Put that schema on the role's `search_path` to keep the index scan.
 
 ## Server requirements
 

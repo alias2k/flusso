@@ -55,12 +55,12 @@ The scope labels (`otel_scope_name`, `otel_scope_version`) are dropped; there is
 | `stage` | Task | `work` | `sink` | What the time is |
 | --- | --- | --- | --- | --- |
 | `idle` | ingest | | | Nothing in flight and nothing taken: waiting on the source with no snapshot running. |
-| `page` | ingest | `backfill` | | Getting snapshot rows from the source: waiting for the next page of keys, decoding and buffering each row. While a snapshot runs, the ingest task's waits are `page`, not `idle`. |
+| `page` | ingest | `backfill` | | Getting a backfill's keys: waiting for the next page of root keys and buffering them. While a backfill runs, the ingest task's waits are `page`, not `idle`. |
 | `resolve` | ingest | `live` | | Taking the changes the stream has ready and resolving each to the documents it touches: the reverse lookups. |
 | `build` | ingest | both | | Building a batch's documents. |
 | `publish` | ingest | both | | Handing a built batch to every lane, until the last one took it: for a snapshot batch, copying each lane's slice of its documents first. High means a lane is full (`lane_wait` says which), or, in a backfill with several sinks, the copies. |
 | `lane_wait` | ingest | both | ✓ | The same, per lane: names the full one. Ingest time, labelled with the sink it waited on; overlaps `publish`. |
-| `snapshot` | ingest | `backfill` | | Opening a snapshot (gathering the requests it serves, opening its row stream) and closing it (`SnapshotComplete` to each lane, acknowledging the requests). |
+| `snapshot` | ingest | `backfill` | | Opening a backfill (gathering the requests it serves) and closing it (`SnapshotComplete` to each lane, acknowledging the requests). |
 | `idle` | sink | | ✓ | Nothing in flight and nothing taken: no write running and no lane item waiting. A sink waiting for one of its writes to return is not idle. |
 | `write` | sink | both | ✓ | Writing one lane item to the destination, one [`Sink::write`](../contribute/pipeline.md#several-writes-per-sink-one-document-at-a-time): for OpenSearch, rendering it and sending its `_bulk` request. Reported once per write, so with `writes` above 1 several overlap and the rate passes 1. Also an empty caught-up write, as when the sink goes idle with a position not yet searchable. `flusso.flush.duration` times the same writes. |
 | `seed` | sink | `backfill` | ✓ | Recording one index as seeded at the destination (`index` label): for OpenSearch a refresh, the settings restored and the alias moved. |
