@@ -5,6 +5,7 @@ mod backends;
 mod fence;
 mod lag;
 mod observer;
+mod stall;
 pub mod status;
 mod supervise;
 
@@ -15,6 +16,7 @@ pub use fence::{
     LanePositions, SinkPositions,
 };
 pub use observer::StatusObserver;
+pub use stall::{LaneStall, SAMPLE_EVERY, STALL_WARN, StallEvent, Stalls};
 pub use status::{
     IndexState, LastScriptFailure, Phase, ScriptFailures, SinkPhase, SinkSnapshot, Status,
     StatusSnapshot,
@@ -214,6 +216,7 @@ impl Daemon {
             lanes.iter().cloned(),
         );
         let budget = Arc::new(Budget::new(max_built_bytes(&config)));
+        let stalls = Arc::new(Stalls::new(lanes.iter().cloned()));
         let status = Arc::new(
             Status::new(
                 config.indexes.keys().cloned(),
@@ -222,7 +225,8 @@ impl Daemon {
             )
             .with_fence(fence.clone())
             .with_source(Arc::clone(&capture))
-            .with_budget(Arc::clone(&budget)),
+            .with_budget(Arc::clone(&budget))
+            .with_stalls(Arc::clone(&stalls)),
         );
         let mut observers: Vec<Arc<dyn Observer>> = vec![
             Arc::new(StatusObserver::new(Arc::clone(&status))),
@@ -294,6 +298,8 @@ impl Daemon {
             options,
             stop,
             budget,
+            stalls,
+            progress,
         })
     }
 }
@@ -315,6 +321,8 @@ pub struct RunningDaemon {
     options: DaemonOptions,
     stop: engine::Stop,
     budget: Arc<Budget>,
+    stalls: Arc<Stalls>,
+    progress: Arc<Progress>,
 }
 
 impl RunningDaemon {
@@ -371,12 +379,21 @@ impl RunningDaemon {
             options,
             stop,
             budget: _,
+            stalls,
+            progress,
         } = self;
 
         let _lag = LagGuard(tokio::spawn(lag::poll(
             Arc::clone(&source),
             Arc::clone(&observer),
             options.lag_poll_interval,
+        )));
+
+        let _stalls = LagGuard(tokio::spawn(stall::watch(
+            stalls,
+            progress,
+            Arc::clone(&source),
+            Arc::clone(&status),
         )));
 
         let supervised = supervise::run_all(

@@ -7,6 +7,8 @@
 //! failing sink visible without stopping the others.
 
 use engine::Budget;
+
+use crate::stall::{LaneStall, Stalls};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -91,6 +93,8 @@ pub struct Status {
     /// Where the visibility wait comes from; `None` reports none.
     source: Option<Arc<dyn ChangeCapture>>,
     budget: Option<Arc<Budget>>,
+    /// Where each lane's stall comes from; `None` reports none.
+    stalls: Option<Arc<Stalls>>,
 }
 
 /// The live status of one sink engine.
@@ -138,6 +142,8 @@ impl SinkStatus {
                             applied_position: lane.applied,
                             searchable_position: lane.searchable,
                             outstanding: lane.outstanding,
+                            stall_seconds: None,
+                            wal_behind_bytes: None,
                         },
                     )
                 })
@@ -184,7 +190,30 @@ impl Status {
             fence: None,
             source: None,
             budget: None,
+            stalls: None,
         }
+    }
+
+    /// Report each lane's stall and the lane that pins the slot.
+    pub fn with_stalls(mut self, stalls: Arc<Stalls>) -> Self {
+        self.stalls = Some(stalls);
+        self
+    }
+
+    /// The last slot lag sampled, if any.
+    pub fn slot_lag(&self) -> Option<u64> {
+        self.slot_lag_known
+            .load(Ordering::Relaxed)
+            .then(|| self.slot_lag_bytes.load(Ordering::Relaxed))
+    }
+
+    /// Every lane's stall as of the last sample, and the lane pinning the
+    /// slot: what the binary's gauges read.
+    pub fn stalls(&self) -> (Vec<(stream::LaneKey, LaneStall)>, Option<stream::LaneKey>) {
+        self.stalls
+            .as_ref()
+            .map(|stalls| (stalls.lanes(), stalls.pinned_by()))
+            .unwrap_or_default()
     }
 
     /// Report the memory budget's holding at each snapshot.
@@ -449,10 +478,18 @@ impl Status {
             .iter()
             .map(|(name, status)| {
                 let positions = positions.sinks.remove(name).unwrap_or_default();
-                (
-                    name.as_ref().to_owned(),
-                    status.snapshot(captured, positions),
-                )
+                let mut snapshot = status.snapshot(captured, positions);
+                if let Some(stalls) = &self.stalls {
+                    for (index, lane) in &mut snapshot.lanes {
+                        let Ok(index) = IndexName::try_new(index.as_str()) else {
+                            continue;
+                        };
+                        let stall = stalls.lane(&stream::LaneKey::new(index, name.clone()));
+                        lane.stall_seconds = Some(stall.stalled_for.as_secs_f64());
+                        lane.wal_behind_bytes = stall.wal_behind;
+                    }
+                }
+                (name.as_ref().to_owned(), snapshot)
             })
             .collect();
         let indexes = self
@@ -494,6 +531,14 @@ impl Status {
                 .iter()
                 .map(|(index, failures)| (index.as_ref().to_owned(), failures.clone()))
                 .collect(),
+            pinned_by: self
+                .stalls
+                .as_ref()
+                .and_then(|stalls| stalls.pinned_by())
+                .map(|lane| LaneId {
+                    index: lane.index.as_ref().to_owned(),
+                    sink: lane.sink.as_ref().to_owned(),
+                }),
             memory: self.budget.as_ref().map(|budget| {
                 let held = budget.held();
                 MemorySnapshot {
@@ -558,6 +603,9 @@ pub struct StatusSnapshot {
     /// with a failure appear.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub script_failures: BTreeMap<String, ScriptFailures>,
+    /// The lane that holds the replication slot back the most: the one with
+    /// the oldest outstanding change. `None` while no lane has one.
+    pub pinned_by: Option<LaneId>,
     /// The memory budget for built documents; `None` when the deployment
     /// counts none.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -630,4 +678,20 @@ pub struct LaneSnapshot {
     pub searchable_position: Option<String>,
     /// Items routed to this lane and not landed yet.
     pub outstanding: usize,
+    /// How long the lane's oldest outstanding item has stayed its oldest:
+    /// the lane has landed nothing for that long. 0 while nothing is
+    /// outstanding; absent when the deployment tracks no stalls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stall_seconds: Option<f64>,
+    /// Bytes of WAL the replication slot holds because of this lane; absent
+    /// while nothing is outstanding or before the first lag sample.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wal_behind_bytes: Option<u64>,
+}
+
+/// A lane in `/status`'s `pinned_by`.
+#[derive(Debug, Clone, Serialize)]
+pub struct LaneId {
+    pub index: String,
+    pub sink: String,
 }

@@ -286,6 +286,7 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let _in_flight_gauge = metrics::register_in_flight_gauge(Arc::clone(&status));
     let _visibility_wait_gauge = metrics::register_visibility_wait_gauge(Arc::clone(&status));
     let _lane_outstanding_gauge = metrics::register_lane_outstanding_gauge(Arc::clone(&status));
+    let _stall_gauges = metrics::register_stall_gauges(Arc::clone(&status));
     let _memory_instruments = metrics::register_memory_instruments(running.budget());
 
     let waits = http::Waits::default();

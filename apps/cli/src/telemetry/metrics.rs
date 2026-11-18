@@ -198,6 +198,70 @@ pub(crate) fn register_lane_outstanding_gauge(status: Arc<Status>) -> Observable
         .build()
 }
 
+/// Stalled lanes, read from the daemon's [`Status`] at collection, per
+/// `(index, sink)` lane: `flusso.lane.stall_age` (seconds the lane's oldest
+/// outstanding item has stayed its oldest), `flusso.lane.wal_behind` (bytes
+/// of WAL the slot holds because of it, while it has something outstanding)
+/// and `flusso.slot.pinned_by` (1 on the lane holding the slot back most).
+pub(crate) fn register_stall_gauges(
+    status: Arc<Status>,
+) -> (
+    ObservableGauge<f64>,
+    ObservableGauge<u64>,
+    ObservableGauge<u64>,
+) {
+    let meter = global::meter("flusso");
+    let lane = |key: &stream::LaneKey| {
+        [
+            KeyValue::new("index", key.index.as_ref().to_owned()),
+            KeyValue::new("sink", key.sink.as_ref().to_owned()),
+        ]
+    };
+    let ages = Arc::clone(&status);
+    let stall_age = meter
+        .f64_observable_gauge("flusso.lane.stall_age")
+        .with_unit("s")
+        .with_description(
+            "Seconds an (index, sink) lane's oldest outstanding item has stayed its oldest: the \
+             lane has landed nothing for that long; 0 while nothing is outstanding",
+        )
+        .with_callback(move |observer| {
+            for (key, stall) in ages.stalls().0 {
+                observer.observe(stall.stalled_for.as_secs_f64(), &lane(&key));
+            }
+        })
+        .build();
+    let behind = Arc::clone(&status);
+    let wal_behind = meter
+        .u64_observable_gauge("flusso.lane.wal_behind")
+        .with_unit("By")
+        .with_description(
+            "Bytes of WAL the replication slot holds because of an (index, sink) lane, while \
+             it has something outstanding",
+        )
+        .with_callback(move |observer| {
+            for (key, stall) in behind.stalls().0 {
+                if let Some(bytes) = stall.wal_behind {
+                    observer.observe(bytes, &lane(&key));
+                }
+            }
+        })
+        .build();
+    let pinned_by = meter
+        .u64_observable_gauge("flusso.slot.pinned_by")
+        .with_description(
+            "1 on the (index, sink) lane holding the replication slot back the most; absent \
+             while no lane has anything outstanding",
+        )
+        .with_callback(move |observer| {
+            if let Some(key) = status.stalls().1 {
+                observer.observe(1, &lane(&key));
+            }
+        })
+        .build();
+    (stall_age, wal_behind, pinned_by)
+}
+
 /// Register `flusso.replication.visibility_wait` as an observable gauge that reads
 /// the daemon's [`Status`] at collection time: seconds the source has held a
 /// committed change it can't read back yet, `0` while nothing waits.
