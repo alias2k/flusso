@@ -881,3 +881,105 @@ async fn a_backfill_checkpoint_lives_with_its_unseeded_generation() {
         "a record creates no meta doc"
     );
 }
+
+/// Final review, finding 1: a plain index already named like the convenience
+/// alias (`users`) must not stop a first start. The create request can't
+/// carry that alias (OpenSearch refuses the whole request), so the first
+/// generation is created with the hash alias alone and the convenience alias
+/// stays best effort, as `main` had it; the seed and the writes go through
+/// the hash alias, and the plain index is left as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_plain_index_named_like_the_convenience_alias_never_stops_a_first_start() {
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let h1 = format!("users_{}", ContentHash::new(1));
+    let mapping = mapping("users", 1);
+    let created = client.put(format!("{base}/users")).send().await.unwrap();
+    assert!(created.status().is_success(), "{:?}", created.text().await);
+
+    let sink = sink(&base);
+    sink.ensure_index(&mapping)
+        .await
+        .expect("a first start goes on beside a plain index named like the alias");
+    assert_eq!(
+        alias_targets(&client, &base, h1.as_str()).await,
+        [format!("{h1}_1")]
+    );
+    write(&sink, &mapping.index, &[1, 2, 3]).await;
+    sink.mark_seeded(&mapping.index)
+        .await
+        .expect("the seed moves the hash alias alone");
+
+    assert_eq!(
+        generations(&client, &base, h1.as_str()).await,
+        [format!("{h1}_1")]
+    );
+    assert_eq!(
+        alias_targets(&client, &base, h1.as_str()).await,
+        [format!("{h1}_1")]
+    );
+    assert_eq!(
+        searchable(&client, &base, h1.as_str()).await,
+        ["1", "2", "3"]
+    );
+    assert_eq!(marker(&client, &base, h1.as_str()).await, (1, true));
+    assert_eq!(
+        searchable(&client, &base, "users").await,
+        Vec::<String>::new(),
+        "the plain index is left as it was"
+    );
+    let plain = client.get(format!("{base}/users")).send().await.unwrap();
+    let plain: Value = plain.json().await.unwrap();
+    assert!(
+        plain.get("users").is_some(),
+        "`users` is still the plain index: {plain}"
+    );
+}
+
+/// Final review, finding 3: a crash between creating a first generation (with
+/// its aliases) and writing its meta doc. The next start finds no meta doc and
+/// an unseeded generation already holding the hash alias: it reuses that
+/// generation rather than create generation 2 beside it, which would leave
+/// readers on the empty generation 1 until the seed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_first_generation_left_without_its_meta_doc_is_reused() {
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let h1 = format!("users_{}", ContentHash::new(1));
+    let mapping = mapping("users", 1);
+    sink(&base).ensure_index(&mapping).await.unwrap();
+    let deleted = client
+        .delete(format!("{base}/flusso_meta/_doc/{h1}?refresh=true"))
+        .send()
+        .await
+        .unwrap();
+    assert!(deleted.status().is_success(), "{:?}", deleted.text().await);
+
+    let restarted = sink(&base);
+    restarted.ensure_index(&mapping).await.unwrap();
+    assert_eq!(
+        generations(&client, &base, h1.as_str()).await,
+        [format!("{h1}_1")],
+        "no second generation beside the one serving"
+    );
+    assert_eq!(
+        alias_targets(&client, &base, h1.as_str()).await,
+        [format!("{h1}_1")]
+    );
+    assert_eq!(
+        alias_targets(&client, &base, "users").await,
+        [format!("{h1}_1")]
+    );
+    assert_eq!(marker(&client, &base, h1.as_str()).await, (1, false));
+
+    write(&restarted, &mapping.index, &[1, 2]).await;
+    restarted.mark_seeded(&mapping.index).await.unwrap();
+    assert_eq!(
+        generations(&client, &base, h1.as_str()).await,
+        [format!("{h1}_1")]
+    );
+    assert_eq!(searchable(&client, &base, "users").await, ["1", "2"]);
+    assert_eq!(marker(&client, &base, h1.as_str()).await, (1, true));
+}
