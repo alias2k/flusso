@@ -148,7 +148,7 @@ It goes on the upgrade page under breaking changes. ADR 0009 gets an amendment: 
 | the fence's per-lane state and `Unserved` | `76940d45` | `cargo nextest run -p flusso-daemon` (9 new `fence::tests`) | in the 634 below |
 | `/wait` `503` with reason and lanes | `16daeb0a` | `http::tests` | in the 634 below |
 | `UnavailableCause::Backfilling` | `e5c55c6a` | `flusso-query` stub tests | in the 634 below |
-| e2e | `4f83d964`, `9afbc1ec` | `cargo nextest run --profile ci --run-ignored all -E 'binary(fence)'` | 3 passed |
+| e2e | `4f83d964`, `229e57ff` | `cargo nextest run --profile ci --run-ignored all -E 'binary(fence)'` | 3 passed |
 | docs | `46ba4c54` | `mdbook build docs` | builds |
 
 **Whole packages:** `cargo nextest run -p flusso-daemon -p flusso-cli -p flusso-query -p flusso-engine`, 634 passed.
