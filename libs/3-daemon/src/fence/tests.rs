@@ -112,7 +112,9 @@ struct Rig {
 impl Rig {
     /// The ingest engine published a batch of `position` to every lane.
     fn route(&self, position: Position) {
-        self.progress.published(&self.sinks, position, position);
+        for sink in &self.sinks {
+            self.progress.published(sink, position, position);
+        }
     }
 
     /// `on` landed the item of `position`.

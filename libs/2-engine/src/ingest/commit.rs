@@ -218,20 +218,20 @@ impl IngestEngine {
             changes,
             envelopes: envelopes.into(),
         });
+        // Each lane is registered as its own send succeeds, so a full lane
+        // holds back only itself. Until then the source's own test keeps
+        // that lane's older answer short of these changes, and a lane that
+        // lands the item first leaves its mark for the registration to find.
+        let routed = oldest.zip(position);
         self.publish(
             lanes
                 .iter()
                 .map(|(sink, producer)| (sink, producer, item.clone())),
             Work::Live,
             started,
+            routed,
         )
         .await?;
-        // After every lane has the item: until then the source's own test
-        // keeps the older routed position short of these changes, and a lane
-        // that lands the item first leaves its report for this to find.
-        if let (Some(oldest), Some(last)) = (oldest, position) {
-            self.progress.published(lanes.keys(), oldest, last);
-        }
         self.observer.on_batch_built(stats);
         tracing::debug!("batch built and published");
         Ok(())
@@ -273,7 +273,8 @@ impl IngestEngine {
                 }),
             ));
         }
-        self.publish(publishes, Work::Backfill, started).await?;
+        self.publish(publishes, Work::Backfill, started, None)
+            .await?;
         self.observer.on_batch_built(BuildStats {
             changes: 0,
             documents: envelopes.len(),
@@ -284,7 +285,9 @@ impl IngestEngine {
     }
 
     /// Publish each item to its lane, all at once, so a full lane delays only
-    /// its own copy. Times each lane ([`Stage::LaneWait`]) and the whole
+    /// its own copy, and register each live item (`routed`: its batch's
+    /// oldest and last position) in the progress as its own lane takes it.
+    /// Times each lane ([`Stage::LaneWait`]) and the whole
     /// ([`Stage::Publish`]) from `started`, the moment publishing began, so
     /// cutting the items is publishing too.
     pub(super) async fn publish<'a>(
@@ -292,9 +295,13 @@ impl IngestEngine {
         items: impl IntoIterator<Item = (&'a SinkName, &'a Box<dyn Producer<LaneItem>>, LaneItem)>,
         work: Work,
         started: Instant,
+        routed: Option<(Position, Position)>,
     ) -> Result<()> {
         try_join_all(items.into_iter().map(|(sink, producer, item)| async move {
             producer.publish(item).await?;
+            if let Some((oldest, last)) = routed {
+                self.progress.published(sink, oldest, last);
+            }
             self.observer.on_stage(
                 StageTiming::new(Stage::LaneWait, started.elapsed())
                     .work(work)

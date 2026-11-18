@@ -408,7 +408,7 @@ impl Rig {
             }))
             .await
             .unwrap();
-        self.progress.published([&self.name], position, position);
+        self.progress.published(&self.name, position, position);
     }
 
     async fn backfill(&mut self, ids: &[&str]) {

@@ -249,7 +249,7 @@ async fn a_busy_item_holds_back_only_the_items_sharing_its_documents() {
         async move {
             lane.publish(item).await.unwrap();
             let position = Position::new(position);
-            progress.published([name], position, position);
+            progress.published(name, position, position);
         }
     };
     let engine = crate::SinkEngine::new(

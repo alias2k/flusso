@@ -1,19 +1,22 @@
 //! How far each lane has landed the changes routed to it: the one place
 //! confirmation and fences are computed from (ADR 0012).
 //!
-//! The ingest engine **routes** a batch: it publishes it to its lanes, then
-//! registers it here with the batch's oldest position and its last (the
-//! item's key on every lane). Each sink engine reports how far, in lane
-//! order, its writes have **landed** (returned, nothing refused for good) and
-//! are **searchable**: the last item written with every item before it. From
-//! that, a [`Landed`] case:
+//! The ingest engine **routes** a batch: as each lane's send succeeds, it
+//! registers the item there with the batch's oldest position and its last
+//! (the item's key on every lane), and a lane the batch has nothing for is
+//! told it was skipped. Each sink engine reports how far, in lane order, its
+//! writes have **landed** (returned, nothing refused for good) and are
+//! **searchable**: the last item written with every item before it. Each
+//! lane answers a [`Landed`] case:
 //!
-//! - `Before(o)`: `o` is the oldest position some lane hasn't landed;
-//! - `Through(p)`: nothing outstanding, `p` the newest routed;
-//! - `Idle`: nothing routed yet.
+//! - `Before(o)`: `o` is the oldest position the lane hasn't landed;
+//! - `Through(p)`: nothing outstanding, `p` the newest routed to the lane;
+//! - `Idle`: nothing routed to the lane yet.
 //!
-//! The source turns the case into its own terms (`ChangeCapture::confirm`,
-//! `ChangeCapture::reached`), so it keeps no map of the changes it emitted.
+//! Several lanes answer as the one that covers least: what the source may
+//! confirm is every lane's answer at once. The source turns the case into its
+//! own terms (`ChangeCapture::confirm`, `ChangeCapture::reached`), so it keeps
+//! no map of the changes it emitted.
 //!
 //! ```
 //! use engine::{Level, Progress};
@@ -24,7 +27,7 @@
 //! let progress = Progress::new([primary.clone()]);
 //! assert_eq!(progress.landed(), Landed::Idle);
 //!
-//! progress.published([&primary], Position::new(1), Position::new(3));
+//! progress.published(&primary, Position::new(1), Position::new(3));
 //! assert_eq!(progress.landed(), Landed::Before(Position::new(1)));
 //!
 //! progress.applied(&primary, Position::new(3));
@@ -36,19 +39,30 @@
 //! );
 //! ```
 //!
+//! **Why no answer claims too much.** A lane's answer covers only what is
+//! registered on it, and an item is registered only after its send succeeded,
+//! so a lane never answers past an item it doesn't hold. Until the item is
+//! registered the lane answers `Through` its previous newest (or `Idle`):
+//! the batch's changes were already emitted, so the source's own `next_seq`
+//! test keeps that `Through` short of them, and an `Idle` after an emission
+//! moves nothing. Several lanes take the least answer, so a lane still behind
+//! a registration holds the others back.
+//!
 //! **Who writes what.** The ingest engine is the only writer of the
-//! registrations and `routed`, under one lock it takes once per batch; the
-//! sink engines never take it. A lane's sink engine is the only writer of
-//! its two marks, one atomic each, which it raises without a lock. Lane
-//! order is registration order, so "through key k" covers every registered
-//! item up to k. A reader (the ingest engine's confirmation, a fence) takes
-//! the registrations' lock, reads the marks, and drops what they cover. A
-//! mark may run ahead of the registrations (a lane lands an item before it
-//! is registered): it is kept, and covers the item once it is.
+//! registrations, under one lock it takes once per lane per batch; the sink
+//! engines never take it. A lane's sink engine is the only writer of its two
+//! marks, one atomic each, which it raises without a lock. Lane order is
+//! registration order, so "through key k" covers every registered item up to
+//! k. A reader (the ingest engine's confirmation, a fence) takes the
+//! registrations' lock, reads every lane's marks under it, and drops what they
+//! cover: no registration lands between two lanes' answers, and a mark read
+//! early only makes its lane's answer older. A mark may run ahead of the
+//! registrations (a lane lands an item before it is registered): it is kept,
+//! and covers the item once it is.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use kernel::{Position, SinkName};
 use source::cdc::Landed;
@@ -62,27 +76,41 @@ pub enum Level {
     Searchable,
 }
 
-/// The landing state of every lane, and the newest routed position. One per
-/// deployment; it outlives every engine run.
-#[derive(Debug)]
+/// The landing state of every lane. One per deployment; it outlives every
+/// engine run.
 pub struct Progress {
     registry: Mutex<Registry>,
     marks: BTreeMap<SinkName, Marks>,
+    /// Called after every registration: a fence waiter may pass now.
+    listener: OnceLock<Listener>,
 }
 
-/// What the ingest engine routed and no lane's marks cover yet.
+/// What [`Progress::on_registered`] calls.
+pub type Listener = Arc<dyn Fn() + Send + Sync>;
+
+impl std::fmt::Debug for Progress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Progress")
+            .field("registry", &self.registry)
+            .field("marks", &self.marks)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What the ingest engine routed to each lane and no mark covers yet.
 #[derive(Debug, Default)]
 struct Registry {
-    routed: Option<Position>,
     lanes: BTreeMap<SinkName, Registered>,
 }
 
 /// One lane's routed items not yet covered, as `(key, oldest)` in routing
-/// order.
+/// order, and the newest position routed to it.
 #[derive(Debug, Default)]
 struct Registered {
     unlanded: VecDeque<(u64, Position)>,
     unsearchable: VecDeque<(u64, Position)>,
+    /// Every change through it that the lane needs is registered on it.
+    newest: Option<Position>,
 }
 
 /// How far one lane's sink engine has written, in lane order: the key's
@@ -102,33 +130,51 @@ impl Progress {
             .collect();
         Self {
             registry: Mutex::new(Registry {
-                routed: None,
                 lanes: marks
                     .keys()
                     .map(|lane| (lane.clone(), Registered::default()))
                     .collect(),
             }),
             marks,
+            listener: OnceLock::new(),
         }
     }
 
-    /// A batch covering `oldest..=last` is on `lanes`. Call it after the
-    /// items are published, in position order; a lane not named has nothing
-    /// outstanding for the batch. One lock, whatever the number of lanes.
-    pub fn published<'a>(
-        &self,
-        lanes: impl IntoIterator<Item = &'a SinkName>,
-        oldest: Position,
-        last: Position,
-    ) {
-        let mut registry = lock(&self.registry);
-        for lane in lanes {
+    /// Call `listener` after every registration (one listener: the fence's).
+    pub fn on_registered(&self, listener: Listener) {
+        let _ = self.listener.set(listener);
+    }
+
+    /// `lane` took the item of a batch covering `oldest..=last`. Call it once
+    /// the lane's own send succeeded, in position order per lane.
+    pub fn published(&self, lane: &SinkName, oldest: Position, last: Position) {
+        {
+            let mut registry = lock(&self.registry);
             if let Some(registered) = registry.lanes.get_mut(lane) {
                 registered.unlanded.push_back((last.seq, oldest));
                 registered.unsearchable.push_back((last.seq, oldest));
+                registered.newest = Some(registered.newest.map_or(last, |n| n.max(last)));
             }
         }
-        registry.routed = Some(registry.routed.map_or(last, |routed| routed.max(last)));
+        self.registered();
+    }
+
+    /// A batch through `last` had nothing for `lane`: the lane has every
+    /// change through `last` it needs, once its earlier items are registered.
+    pub fn skipped(&self, lane: &SinkName, last: Position) {
+        {
+            let mut registry = lock(&self.registry);
+            if let Some(registered) = registry.lanes.get_mut(lane) {
+                registered.newest = Some(registered.newest.map_or(last, |n| n.max(last)));
+            }
+        }
+        self.registered();
+    }
+
+    fn registered(&self) {
+        if let Some(listener) = self.listener.get() {
+            listener();
+        }
     }
 
     /// `lane` has landed, in lane order, every item through the one keyed
@@ -147,39 +193,74 @@ impl Progress {
         }
     }
 
-    /// The newest position routed.
-    pub fn routed(&self) -> Option<Position> {
-        lock(&self.registry).routed
-    }
-
-    /// What every lane has landed: what the source may confirm.
+    /// What every lane has landed: what the source may confirm. The lane
+    /// that covers least decides.
     pub fn landed(&self) -> Landed {
-        let mut registry = lock(&self.registry);
-        let routed = registry.routed;
-        let oldest = registry
-            .lanes
-            .iter_mut()
-            .filter_map(|(lane, registered)| {
-                registered.outstanding(self.marks.get(lane)?, Level::Applied)
-            })
-            .min();
-        case(oldest, routed)
+        self.over(self.marks.keys(), Level::Applied)
+            .unwrap_or(Landed::Idle)
     }
 
     /// What `lane` has reached at `level`; `None` for a lane this progress
     /// doesn't know.
     pub fn lane(&self, lane: &SinkName, level: Level) -> Option<Landed> {
-        let marks = self.marks.get(lane)?;
+        self.over([lane], level)
+    }
+
+    /// What every one of `lanes` has reached at `level`: the answer of the
+    /// lane that covers least. `None` when one is a lane this progress
+    /// doesn't know, or `lanes` is empty.
+    ///
+    /// Every lane is read under the one registry lock, so no registration
+    /// lands between two lanes' answers; a mark read early only makes that
+    /// lane's answer older, never wider.
+    pub fn over<'a>(
+        &self,
+        lanes: impl IntoIterator<Item = &'a SinkName>,
+        level: Level,
+    ) -> Option<Landed> {
         let mut registry = lock(&self.registry);
-        let routed = registry.routed;
-        let registered = registry.lanes.get_mut(lane)?;
-        Some(case(registered.outstanding(marks, level), routed))
+        let mut least: Option<Landed> = None;
+        for lane in lanes {
+            let marks = self.marks.get(lane)?;
+            let registered = registry.lanes.get_mut(lane)?;
+            let answer = match registered.outstanding(marks, level) {
+                Some(oldest) => Landed::Before(oldest),
+                None => registered.newest.map_or(Landed::Idle, Landed::Through),
+            };
+            least = Some(match least {
+                Some(least) if bound(least) <= bound(answer) => least,
+                _ => answer,
+            });
+        }
+        least
+    }
+
+    /// How many items routed to `lane` it hasn't landed.
+    pub fn outstanding(&self, lane: &SinkName) -> usize {
+        let Some(marks) = self.marks.get(lane) else {
+            return 0;
+        };
+        let mut registry = lock(&self.registry);
+        registry.lanes.get_mut(lane).map_or(0, |registered| {
+            registered.outstanding(marks, Level::Applied);
+            registered.unlanded.len()
+        })
     }
 
     /// Whether `lane` has nothing routed to it outstanding at `level`.
     pub fn is_clear(&self, lane: &SinkName, level: Level) -> bool {
         self.lane(lane, level)
             .is_none_or(|landed| !matches!(landed, Landed::Before(_)))
+    }
+}
+
+/// The seq just past what `landed` covers; on a tie `Before` is the lower,
+/// since it is what a lane with an item outstanding answers.
+fn bound(landed: Landed) -> (u64, u8) {
+    match landed {
+        Landed::Before(oldest) => (oldest.seq, 0),
+        Landed::Through(last) => (last.seq.saturating_add(1), 1),
+        Landed::Idle => (0, 0),
     }
 }
 
@@ -217,14 +298,6 @@ fn raise(mark: &AtomicU64, through: Position) {
     let covered = through.seq.saturating_add(1);
     if covered > mark.load(Ordering::Relaxed) {
         mark.store(covered, Ordering::Release);
-    }
-}
-
-fn case(oldest: Option<Position>, routed: Option<Position>) -> Landed {
-    match (oldest, routed) {
-        (Some(oldest), _) => Landed::Before(oldest),
-        (None, Some(routed)) => Landed::Through(routed),
-        (None, None) => Landed::Idle,
     }
 }
 

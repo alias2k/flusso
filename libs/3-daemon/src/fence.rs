@@ -163,6 +163,24 @@ struct Inner {
     moved: Notify,
     /// How many waits on `searchable` are open.
     searchable_waits: AtomicUsize,
+    /// How many waits are open: a registration wakes them only then.
+    waits: AtomicUsize,
+}
+
+/// Counts one open wait, so registrations know to wake it.
+struct OpenWait<'a>(&'a Inner);
+
+impl<'a> OpenWait<'a> {
+    fn enter(inner: &'a Inner) -> Self {
+        inner.waits.fetch_add(1, Ordering::AcqRel);
+        Self(inner)
+    }
+}
+
+impl Drop for OpenWait<'_> {
+    fn drop(&mut self) {
+        self.0.waits.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Counts one open wait on `searchable`, and wakes [`Fence::settled`] when it
@@ -203,12 +221,24 @@ impl Fence {
                 .collect(),
             moved: Notify::new(),
             searchable_waits: AtomicUsize::new(0),
+            waits: AtomicUsize::new(0),
         });
         // Weak: the source keeps its listeners for life, and must not keep the
         // fence (and through it, itself) alive.
         let listener: Weak<Inner> = Arc::downgrade(&inner);
         source.on_advance(Arc::new(move || {
             if let Some(inner) = listener.upgrade() {
+                inner.moved.notify_waiters();
+            }
+        }));
+        // A lane registering an item it already landed can let a waiter
+        // pass: wake them, and only when some wait (registration is on the
+        // ingest engine's path for every batch).
+        let registrations: Weak<Inner> = Arc::downgrade(&inner);
+        inner.progress.on_registered(Arc::new(move || {
+            if let Some(inner) = registrations.upgrade()
+                && inner.waits.load(Ordering::Acquire) > 0
+            {
                 inner.moved.notify_waiters();
             }
         }));
@@ -285,6 +315,7 @@ impl Fence {
             None => self.inner.sinks.keys().collect(),
         };
         let deadline = Instant::now() + request.timeout;
+        let _open = OpenWait::enter(&self.inner);
         let _counted = (request.level == FenceLevel::Searchable).then(|| {
             self.inner.searchable_waits.fetch_add(1, Ordering::SeqCst);
             SearchableWait(&self.inner)
