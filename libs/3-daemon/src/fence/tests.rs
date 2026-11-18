@@ -432,6 +432,60 @@ fn the_status_document_carries_the_positions() {
     );
 }
 
+/// ADR 0012 stage 8c: a lane whose oldest item stays outstanding ages in
+/// `/status` and pins the slot; its sibling that landed stays at 0.
+#[test]
+fn the_status_document_carries_each_lanes_stall_and_the_pinning_lane() {
+    let rig = fence_over(&["users", "orders"], &["primary"]);
+    let stalls = Arc::new(crate::Stalls::new(rig.lanes.iter().cloned()));
+    let status = crate::Status::new(
+        [index("users"), index("orders")],
+        [sink("primary")],
+        std::time::Instant::now(),
+    )
+    .with_fence(rig.fence.clone())
+    .with_stalls(Arc::clone(&stalls));
+    let users = LaneKey::new(index("users"), sink("primary"));
+    let orders = LaneKey::new(index("orders"), sink("primary"));
+    let change = rig.source.emit(20);
+    rig.route(change);
+    rig.applied_on(&users, change);
+
+    let start = tokio::time::Instant::now();
+    stalls.sample(start, &rig.progress, &*rig.source, Some(4_096));
+    stalls.sample(
+        start + std::time::Duration::from_secs(90),
+        &rig.progress,
+        &*rig.source,
+        Some(4_096),
+    );
+
+    let json = serde_json::to_value(status.snapshot()).unwrap();
+    let lanes = &json["sinks"]["primary"]["lanes"];
+    assert_eq!(lanes["orders"]["stall_seconds"], 90.0, "{json}");
+    assert_eq!(lanes["orders"]["wal_behind_bytes"], 4_096, "{json}");
+    assert_eq!(lanes["users"]["stall_seconds"], 0.0, "{json}");
+    assert!(lanes["users"].get("wal_behind_bytes").is_none(), "{json}");
+    assert_eq!(
+        json["pinned_by"],
+        serde_json::json!({ "index": "orders", "sink": "primary" })
+    );
+
+    rig.applied_on(&orders, change);
+    stalls.sample(
+        start + std::time::Duration::from_secs(91),
+        &rig.progress,
+        &*rig.source,
+        Some(0),
+    );
+    let json = serde_json::to_value(status.snapshot()).unwrap();
+    assert_eq!(
+        json["sinks"]["primary"]["lanes"]["orders"]["stall_seconds"],
+        0.0
+    );
+    assert!(json["pinned_by"].is_null(), "{json}");
+}
+
 fn on_indexes(position: &str, level: FenceLevel, indexes: &[&str]) -> FenceRequest {
     FenceRequest {
         indexes: indexes.iter().map(|name| index(name)).collect(),

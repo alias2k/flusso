@@ -203,14 +203,18 @@ pub(crate) fn register_lane_outstanding_gauge(status: Arc<Status>) -> Observable
 /// outstanding item has stayed its oldest), `flusso.lane.wal_behind` (bytes
 /// of WAL the slot holds because of it, while it has something outstanding)
 /// and `flusso.slot.pinned_by` (1 on the lane holding the slot back most).
-pub(crate) fn register_stall_gauges(
-    status: Arc<Status>,
-) -> (
+pub(crate) fn register_stall_gauges(status: Arc<Status>) -> StallGauges {
+    stall_gauges(&global::meter("flusso"), status)
+}
+
+/// The three gauges [`register_stall_gauges`] keeps registered.
+pub(crate) type StallGauges = (
     ObservableGauge<f64>,
     ObservableGauge<u64>,
     ObservableGauge<u64>,
-) {
-    let meter = global::meter("flusso");
+);
+
+fn stall_gauges(meter: &opentelemetry::metrics::Meter, status: Arc<Status>) -> StallGauges {
     let lane = |key: &stream::LaneKey| {
         [
             KeyValue::new("index", key.index.as_ref().to_owned()),
@@ -348,4 +352,85 @@ fn otlp_reader() -> anyhow::Result<PeriodicReader<opentelemetry_otlp::MetricExpo
 
 fn resource() -> Resource {
     Resource::builder().with_service_name("flusso").build()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::time::Duration;
+
+    use daemon::{Progress, Stalls};
+    use kernel::{IndexName, Position, SinkName};
+    use opentelemetry::metrics::MeterProvider;
+    use prometheus::TextEncoder;
+    use source::cdc::{ChangeCapture, Continuity, Landed, LiveChange};
+    use stream::LaneKey;
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct NoPositions;
+
+    #[async_trait::async_trait]
+    impl ChangeCapture for NoPositions {
+        async fn continuity(&self) -> source::Result<Continuity> {
+            Ok(Continuity::Resumed)
+        }
+        async fn prepare(&self) -> source::Result<()> {
+            Ok(())
+        }
+        async fn live(
+            &self,
+        ) -> source::Result<futures::stream::BoxStream<'static, source::Result<LiveChange>>>
+        {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+        fn confirm(&self, _: Landed) {}
+    }
+
+    #[test]
+    fn a_stalled_lane_is_exported_with_its_age_wal_and_as_the_pinning_lane() {
+        let users = LaneKey::new(
+            IndexName::try_new("users").unwrap(),
+            SinkName::try_new("primary").unwrap(),
+        );
+        let progress = Progress::new([users.clone()]);
+        let stalls = Arc::new(Stalls::new([users.clone()]));
+        progress.published(&users, Position::new(3), Position::new(3));
+        let start = tokio::time::Instant::now();
+        stalls.sample(start, &progress, &NoPositions, Some(2_048));
+        stalls.sample(
+            start + Duration::from_secs(30),
+            &progress,
+            &NoPositions,
+            Some(2_048),
+        );
+        let status = Arc::new(
+            Status::new(
+                [users.index.clone()],
+                [users.sink.clone()],
+                std::time::Instant::now(),
+            )
+            .with_stalls(stalls),
+        );
+
+        let registry = Registry::new();
+        let exporter = opentelemetry_prometheus::exporter()
+            .with_registry(registry.clone())
+            .scope_info_enabled(false)
+            .build()
+            .unwrap();
+        let provider = provider_builder().with_reader(exporter).build();
+        let _gauges = stall_gauges(&provider.meter("flusso"), status);
+        let text = TextEncoder::new()
+            .encode_to_string(&registry.gather())
+            .unwrap();
+        for line in [
+            r#"flusso_lane_stall_age_seconds{index="users",sink="primary"} 30"#,
+            r#"flusso_lane_wal_behind_bytes{index="users",sink="primary"} 2048"#,
+            r#"flusso_slot_pinned_by{index="users",sink="primary"} 1"#,
+        ] {
+            assert!(text.contains(line), "no `{line}` in:\n{text}");
+        }
+    }
 }
