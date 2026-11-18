@@ -990,6 +990,62 @@ async fn failed_sink_engine_restarts_and_redelivers() {
     assert_eq!(snap.sinks["primary"].batches, 1);
 }
 
+/// Stage-8c review: a sink engine failing and restarting with backoff over
+/// the item it never lands keeps the lane's stall age: the age is the
+/// lane's, read off the deployment's `Progress`, not the engine run's. Once
+/// the sink writes again the lane lands and the age clears.
+#[tokio::test(start_paused = true)]
+async fn a_restarting_sink_engine_keeps_its_lanes_stall_age() {
+    let sink = Arc::new(RecordingSink::seeded());
+    sink.failing_flushes.store(u64::MAX, Ordering::SeqCst);
+    let (source, _end) = ScriptedSource::new(vec![row_event(false, 1)]).held_open();
+    let backends = backends(
+        source,
+        vec![(
+            primary(),
+            Arc::clone(&sink) as Arc<dyn Sink>,
+            SinkOptions::default(),
+        )],
+    );
+    let running = Daemon::new(backendless_config(), backends)
+        .with_options(DaemonOptions {
+            max_restart_backoff: Duration::from_millis(500),
+            ..DaemonOptions::default()
+        })
+        .start()
+        .await
+        .unwrap();
+    let status = running.status();
+    let run = tokio::spawn(running.run(std::future::pending::<()>()));
+    let lane = |status: &Status| {
+        let snapshot = serde_json::to_value(status.snapshot()).unwrap();
+        (
+            snapshot["sinks"]["primary"]["lanes"]["users"]["stall_seconds"].as_f64(),
+            snapshot["errors"].as_u64().unwrap_or(0),
+        )
+    };
+
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let (early, errors_early) = lane(&status);
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    let (late, errors_late) = lane(&status);
+    let (early, late) = (early.unwrap(), late.unwrap());
+    assert!(
+        errors_late > errors_early && errors_early >= 2,
+        "the sink engine kept failing and restarting: {errors_early} then {errors_late}"
+    );
+    assert!(early >= 8.0, "the lane aged across restarts: {early}");
+    assert!(
+        late >= early + 19.0,
+        "and kept aging through every restart: {early} then {late}"
+    );
+
+    sink.failing_flushes.store(0, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(lane(&status).0, Some(0.0), "the item landed: no age");
+    run.abort();
+}
+
 /// The caller's shutdown future stops the run even while the source stream is
 /// open.
 #[tokio::test]
