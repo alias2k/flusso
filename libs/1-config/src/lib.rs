@@ -16,7 +16,7 @@ pub use compiled::{
 pub use deployment::{Config, DEFAULT_STREAM_KIND, Index, ServerConfig};
 pub use loader::{LoadError, load};
 pub use toml::SinkEntry;
-pub use toml::entities::{MAX_WRITES, parse_writes};
+pub use toml::entities::{MAX_BUILDS, MAX_WRITES, parse_builds, parse_writes};
 
 // Re-export the kernel vocabulary so downstream crates depend only on `config`
 // rather than reaching for `kernel` as well. The assembled `Config` family

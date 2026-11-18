@@ -41,7 +41,7 @@
       ]
     },
     "concurrency": {
-      "description": "How much the pipeline does at once. Never written into `flusso.lock`:\n`--writes` / `FLUSSO_WRITES` override it, and give it to `run --locked`\n(flag > env > file).",
+      "description": "How much the pipeline does at once. Never written into `flusso.lock`:\n`--writes` / `FLUSSO_WRITES` and `--builds` / `FLUSSO_BUILDS` override\nit, and give it to `run --locked`\n(flag > env > file).",
       "allOf": [
         {
           "$ref": "#/definitions/Concurrency"
@@ -154,9 +154,19 @@
           "minimum": 1,
           "description": "Bulk writes each sink runs at once (default 4). Two writes never hold\nthe same document, and live changes go before backfill pages. `1`\nwrites one lane item at a time. At most 64.",
           "maximum": 64
+        },
+        "builds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 1,
+          "description": "Document builds the ingest engine runs at once (default 4). A document\nis never built twice at once, and each lane still gets batches in the\norder they were started. Live batches go before backfill pages. `1`\nbuilds one batch at a time. At most 32; the source's builder pool\nholds `builds + 2` connections.",
+          "maximum": 32
         }
       },
-      "description": "How much the pipeline does at once, from a `flusso.toml` `[concurrency]`\ntable. A property of the machine that runs flusso, not of the deployment:\nit is never written into `flusso.lock`, so `run --locked` takes it from\n`--writes` / `FLUSSO_WRITES` or the default. Every key is optional."
+      "description": "How much the pipeline does at once, from a `flusso.toml` `[concurrency]`\ntable. A property of the machine that runs flusso, not of the deployment:\nit is never written into `flusso.lock`, so `run --locked` takes it from\n`--writes` / `FLUSSO_WRITES` and `--builds` / `FLUSSO_BUILDS` or the\ndefaults. Every key is optional."
     },
     "Server": {
       "type": "object",

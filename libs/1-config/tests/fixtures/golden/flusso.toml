@@ -11,6 +11,7 @@ max_delay_ms = 10
 # A property of the machine that runs flusso: never written into the lock.
 [concurrency]
 writes = 8
+builds = 6
 
 [server]
 public_address = "0.0.0.0:9464"

@@ -59,7 +59,8 @@ pub struct Config {
     /// How much the pipeline does at once (`[concurrency]`). Never written
     /// into the lock, and read back from one as unset: it belongs to the
     /// machine that runs flusso, which sets it with `--writes` /
-    /// `FLUSSO_WRITES` (which win over the file).
+    /// `FLUSSO_WRITES` and `--builds` / `FLUSSO_BUILDS` (which win over the
+    /// file).
     #[serde(skip)]
     pub concurrency: ConcurrencyConfig,
     /// Bind addresses for the operational HTTP surfaces. Read by the binary, not
@@ -126,6 +127,8 @@ impl BatchConfig {
 pub struct ConcurrencyConfig {
     /// Lane items each sink writes at once.
     pub writes: Option<NonZeroUsize>,
+    /// Document builds the ingest engine runs at once.
+    pub builds: Option<NonZeroUsize>,
 }
 
 /// One index in a [`Config`], paired with whether it is built on this run.

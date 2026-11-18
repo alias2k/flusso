@@ -266,10 +266,16 @@ fn concurrency_section_converts_and_is_optional_and_strict() {
 
         [concurrency]
         writes = 8
+        builds = 6
         "#,
     );
     assert_eq!(config.concurrency.writes, std::num::NonZeroUsize::new(8));
-    for (table, refused) in [("writes = 0", "writes"), ("builds = 4", "builds")] {
+    assert_eq!(config.concurrency.builds, std::num::NonZeroUsize::new(6));
+    for (table, refused) in [
+        ("writes = 0", "writes"),
+        ("builds = 0", "builds"),
+        ("reads = 4", "reads"),
+    ] {
         let error = parse(&format!(
             "[source]\ntype = \"postgres\"\n\n[concurrency]\n{table}\n"
         ))
@@ -464,6 +470,26 @@ fn writes_past_the_cap_are_refused_naming_it() {
     assert!(error.contains("64"), "{error}");
     let config = convert("[source]\ntype = \"postgres\"\n\n[concurrency]\nwrites = 64\n");
     assert_eq!(config.concurrency.writes, std::num::NonZeroUsize::new(64));
+}
+
+#[test]
+fn builds_past_the_cap_are_refused_naming_it() {
+    let error = parse("[source]\ntype = \"postgres\"\n\n[concurrency]\nbuilds = 33\n")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("32"), "{error}");
+    let config = convert("[source]\ntype = \"postgres\"\n\n[concurrency]\nbuilds = 32\n");
+    assert_eq!(config.concurrency.builds, std::num::NonZeroUsize::new(32));
+}
+
+#[test]
+fn the_builds_flag_takes_the_same_cap() {
+    assert_eq!(
+        config::parse_builds("4"),
+        Ok(std::num::NonZeroUsize::new(4).unwrap())
+    );
+    assert!(config::parse_builds("33").unwrap_err().contains("32"));
+    assert!(config::parse_builds("0").is_err());
 }
 
 #[test]
