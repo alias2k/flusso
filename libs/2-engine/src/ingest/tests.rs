@@ -37,7 +37,8 @@ use stream_channel::ChannelStream;
 use tokio::sync::Notify;
 
 use crate::{
-    BatchPolicy, FailurePolicies, FailurePolicy, IngestEngine, SinkControl, SinkEngine, Stop,
+    BatchPolicy, Budget, FailurePolicies, FailurePolicy, IngestEngine, SinkControl, SinkEngine,
+    Stop,
 };
 
 /// A small deterministic generator, so a schedule replays from its seed.
@@ -487,9 +488,24 @@ struct Recorder {
     last: Mutex<BTreeMap<i64, Option<u64>>>,
     highest: Mutex<BTreeMap<i64, u64>>,
     regressed: Mutex<Vec<String>>,
+    /// While set, every write waits.
+    stalled: AtomicBool,
+    resumed: Notify,
+    /// A budget and the most it may hold, checked at every write.
+    watch: Mutex<Option<(Arc<Budget>, usize)>>,
+    overdrawn: Mutex<Vec<usize>>,
 }
 
 impl Recorder {
+    fn stall(&self) {
+        self.stalled.store(true, Ordering::SeqCst);
+    }
+
+    fn resume(&self) {
+        self.stalled.store(false, Ordering::SeqCst);
+        self.resumed.notify_waiters();
+    }
+
     fn seeded(seeded: bool) -> Arc<Self> {
         let recorder = Self::default();
         recorder.seeded.store(seeded, Ordering::SeqCst);
@@ -528,6 +544,21 @@ impl Recorder {
 #[async_trait]
 impl Sink for Recorder {
     async fn write(&self, envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
+        loop {
+            let resumed = self.resumed.notified();
+            tokio::pin!(resumed);
+            resumed.as_mut().enable();
+            if !self.stalled.load(Ordering::SeqCst) {
+                break;
+            }
+            resumed.await;
+        }
+        if let Some((budget, most)) = &*self.watch.lock().unwrap() {
+            let held = budget.held().total;
+            if held > *most {
+                self.overdrawn.lock().unwrap().push(held);
+            }
+        }
         let mut documents = Vec::with_capacity(envelopes.len());
         let mut last = self.last.lock().unwrap();
         for envelope in envelopes {
@@ -576,6 +607,7 @@ struct Deployment {
     recorder: Arc<Recorder>,
     ingest: IngestEngine,
     sink: Option<SinkEngine>,
+    budget: Option<Arc<Budget>>,
 }
 
 impl Deployment {
@@ -602,7 +634,39 @@ impl Deployment {
             recorder,
             ingest,
             sink: Some(sink),
+            budget: None,
         }
+    }
+
+    /// Hold built documents within `bytes`, and check at every write that the
+    /// budget holds at most `most`.
+    fn with_budget(mut self, bytes: usize, most: usize) -> Self {
+        let budget = Arc::new(Budget::new(bytes));
+        self.ingest = self.ingest.with_budget(Arc::clone(&budget));
+        *self.recorder.watch.lock().unwrap() = Some((Arc::clone(&budget), most));
+        self.budget = Some(budget);
+        self
+    }
+
+    /// Every byte the budget counted came back once the lanes drained.
+    async fn assert_released(&self) {
+        let Some(budget) = &self.budget else {
+            return;
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while budget.held() != crate::Held::default() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the budget still holds {:?} after the lanes drained",
+                budget.held()
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let overdrawn = self.recorder.overdrawn.lock().unwrap().clone();
+        assert!(
+            overdrawn.is_empty(),
+            "the budget held more than allowed at some write: {overdrawn:?}"
+        );
     }
 
     fn ingest(mut self, f: impl FnOnce(IngestEngine) -> IngestEngine) -> Self {
@@ -656,6 +720,7 @@ impl Deployment {
             }
         }
         self.drained().await;
+        self.assert_released().await;
         sink.abort();
         failed
     }
@@ -1199,4 +1264,140 @@ async fn one_build_at_a_time_builds_and_publishes_as_before() {
          [[0, 1, 2, 3, 4], [5, 6, 7, 8, 9], [10, 11, 12, 13, 14], [15, 16, 17, 18, 19], [20, 21, 22]])",
         "backfill batches built and published as before"
     );
+}
+
+const KIB: usize = 1024;
+
+/// A budget of a few batches, a slow sink, live changes and a backfill over
+/// the same rows, failures and restarts: the budget never holds more than
+/// its limit plus one batch per build, nothing deadlocks, and every byte
+/// comes back.
+#[tokio::test(start_paused = true)]
+async fn random_schedules_under_a_tiny_budget_stay_within_it_and_finish() {
+    let seeds: Vec<u64> = match std::env::var("FLUSSO_BUILD_SCHEDULE_SEED") {
+        Ok(seed) => vec![seed.parse().unwrap()],
+        Err(_) => (1..=30).collect(),
+    };
+    for seed in seeds {
+        for builds in [1, 4] {
+            let mut random = Rng::new(seed);
+            let rows = 1 + random.below(40) as i64;
+            let log: Vec<Change> = (0..1 + random.below(80))
+                .map(|_| Change {
+                    id: random.below(rows as u64) as i64,
+                    delete: random.below(6) == 0,
+                })
+                .collect();
+            let max_changes = 1 + random.below(8) as usize;
+            let db = Database::new(rows, log);
+            let builder = Builder::new(
+                &db,
+                Behaviour {
+                    random: Some(Mutex::new(Rng::new(seed.wrapping_mul(31)))),
+                    failures_left: AtomicUsize::new(random.below(3) as usize),
+                    ..Behaviour::default()
+                },
+            );
+            let limit = 8 * KIB;
+            // A reservation is its estimate: at most `max_changes` documents
+            // at the first estimate's 16 KiB, before any build landed.
+            let batch_bytes = max_changes * 16 * KIB;
+            let mut deployment = Deployment::new(
+                Feed::new(&db).with_gaps(seed.wrapping_mul(17)),
+                builder,
+                Recorder::seeded(false),
+            )
+            .ingest(|ingest| ingest.with_batch(batch(max_changes)).with_builds(builds))
+            .with_budget(limit, limit + builds * batch_bytes);
+            deployment.run_to_end(8).await;
+            assert_eq!(
+                deployment.recorder.state(),
+                db.expected(),
+                "seed {seed}, builds {builds}"
+            );
+        }
+    }
+}
+
+/// A sink that stops acknowledging holds the budget's bytes, so builds stop
+/// once it is full; when the sink resumes, every batch lands and every byte
+/// comes back.
+#[tokio::test(start_paused = true)]
+#[ignore = "red until the published batch carries its charge (stage 5, after stage 7's items.rs)"]
+async fn a_stalled_sink_paces_builds_and_they_resume_when_it_does() {
+    let db = Database::new(200, Vec::new());
+    let builder = instant(&db);
+    let recorder = Recorder::seeded(false);
+    recorder.stall();
+    let mut deployment =
+        Deployment::new(Feed::new(&db), Arc::clone(&builder), Arc::clone(&recorder))
+            .ingest(|ingest| ingest.with_batch(batch(4)).with_builds(4))
+            .with_budget(16 * KIB, usize::MAX);
+    let resumer = {
+        let builder = Arc::clone(&builder);
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let stalled_at = builder.grants().len();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let later = builder.grants().len();
+            recorder.resume();
+            (stalled_at, later)
+        })
+    };
+    deployment.run_to_end(0).await;
+    let (stalled_at, later) = resumer.await.unwrap();
+    assert_eq!(
+        stalled_at, later,
+        "no build is granted while the stalled sink holds the budget"
+    );
+    assert!(
+        stalled_at < 50,
+        "builds stop well before the 50 batches of the backfill: {stalled_at}"
+    );
+    assert_eq!(deployment.recorder.state(), db.expected());
+}
+
+/// A backfill holds at most half the budget, so a live change is still built
+/// while the backfill's batches wait on a stalled sink.
+#[tokio::test(start_paused = true)]
+async fn live_keeps_room_beside_a_backfill_holding_its_half() {
+    let db = Database::new(200, vec![Change::upsert(1000)]);
+    let builder = instant(&db);
+    let recorder = Recorder::seeded(false);
+    recorder.stall();
+    let mut deployment = Deployment::new(
+        Feed::new(&db).with_delay(Duration::from_millis(100)),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+    )
+    .ingest(|ingest| ingest.with_batch(batch(4)).with_builds(4))
+    .with_budget(16 * KIB, usize::MAX);
+    let resumer = {
+        let builder = Arc::clone(&builder);
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let live_built = builder.grants().iter().any(|ids| ids.contains(&1000));
+            recorder.resume();
+            live_built
+        })
+    };
+    deployment.run_to_end(0).await;
+    assert!(
+        resumer.await.unwrap(),
+        "the live change was built while the backfill waited on the sink"
+    );
+    assert_eq!(deployment.recorder.state(), db.expected());
+}
+
+/// A batch larger than the whole budget is still built, alone.
+#[tokio::test(start_paused = true)]
+async fn a_batch_bigger_than_the_budget_still_builds() {
+    let db = Database::new(64, (0..20).map(Change::upsert).collect());
+    let mut deployment = Deployment::new(Feed::new(&db), instant(&db), Recorder::seeded(false))
+        .ingest(|ingest| ingest.with_batch(batch(32)).with_builds(4))
+        .with_budget(KIB, usize::MAX);
+    deployment.run_to_end(0).await;
+    assert_eq!(deployment.recorder.state(), db.expected());
 }

@@ -62,6 +62,7 @@ use source::document::{DocumentBuilder, DocumentId};
 use stream::{Consumer, LaneItem, Producer, Request, Stream};
 use tokio::time::{Duration, Instant, timeout_at};
 
+use crate::budget::Budget;
 use crate::error::{EngineError, Result};
 use crate::observer::{EngineId, NoopObserver, Observer, Stage, StageTiming, StartupStep, Work};
 use crate::policy::{BatchPolicy, FailurePolicies};
@@ -97,6 +98,7 @@ pub struct IngestEngine {
     observer: Arc<dyn Observer>,
     batch: BatchPolicy,
     builds: usize,
+    budget: Option<Arc<Budget>>,
     failure_policies: FailurePolicies,
     stop: Stop,
     /// How many times this engine moved the source forward (see
@@ -135,6 +137,7 @@ impl IngestEngine {
             observer: Arc::new(NoopObserver),
             batch: BatchPolicy::default(),
             builds: 1,
+            budget: None,
             failure_policies: FailurePolicies::default(),
             stop: Stop::new(),
             advances: AtomicU64::new(0),
@@ -192,6 +195,14 @@ impl IngestEngine {
         self
     }
 
+    /// Hold built documents within `budget` (see [`Budget`]): a build is
+    /// granted only when the budget has room, and its bytes are held until
+    /// every lane acknowledged its batch. Without one nothing is counted.
+    pub fn with_budget(mut self, budget: Arc<Budget>) -> Self {
+        self.budget = Some(budget);
+        self
+    }
+
     /// Build up to `builds` batches at once (at least one). Each lane still
     /// gets its items in the order they were granted.
     pub fn with_builds(mut self, builds: usize) -> Self {
@@ -245,7 +256,7 @@ impl IngestEngine {
         tracing::info!("following live changes");
         self.observer.on_live_started();
 
-        let mut builds = Builds::new(self.builds);
+        let mut builds = Builds::new(self.builds, self.budget.clone());
         let ended = self
             .follow(&lanes, requests, &scopes, live, &mut builds)
             .await;
@@ -332,6 +343,11 @@ impl IngestEngine {
                         mark = Instant::now();
                     }
                 },
+                () = released(self.budget.as_deref()), if builds.refused().is_some() => {
+                    self.grant(&mut pending, &mut snapshot, builds, lanes).await?;
+                    self.confirm(&mut last_confirmed, false);
+                    mark = Instant::now();
+                }
                 landed = builds.next(), if building => {
                     self.landed(landed, &mut pending, &mut snapshot, builds, lanes).await?;
                     self.confirm(&mut last_confirmed, false);
@@ -453,6 +469,14 @@ impl IngestEngine {
             ))
             .into()),
         }
+    }
+}
+
+/// The next release of `budget`'s bytes; never, without a budget.
+async fn released(budget: Option<&Budget>) {
+    match budget {
+        Some(budget) => budget.released().await,
+        None => std::future::pending().await,
     }
 }
 

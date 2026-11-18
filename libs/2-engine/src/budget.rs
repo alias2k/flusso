@@ -114,16 +114,7 @@ impl Budget {
     /// for a kind holding nothing. Only the ingest engine reserves, so the
     /// check and the add need no lock: anything else only releases.
     pub fn try_reserve(self: &Arc<Self>, work: Work, estimate: usize) -> Option<Reservation> {
-        let Held { total, backfill } = self.held();
-        let fits = match work {
-            Work::Live => total - backfill == 0 || total.saturating_add(estimate) <= self.limit,
-            Work::Backfill => {
-                backfill == 0
-                    || (backfill.saturating_add(estimate) <= self.limit / 2
-                        && total.saturating_add(estimate) <= self.limit)
-            }
-        };
-        if !fits {
+        if !self.fits(work, estimate) {
             return None;
         }
         self.add(work, estimate);
@@ -132,6 +123,20 @@ impl Budget {
             work,
             bytes: estimate,
         })
+    }
+
+    /// Whether [`try_reserve`](Self::try_reserve) would grant `estimate`
+    /// bytes to `work` now.
+    pub fn fits(&self, work: Work, estimate: usize) -> bool {
+        let Held { total, backfill } = self.held();
+        match work {
+            Work::Live => total - backfill == 0 || total.saturating_add(estimate) <= self.limit,
+            Work::Backfill => {
+                backfill == 0
+                    || (backfill.saturating_add(estimate) <= self.limit / 2
+                        && total.saturating_add(estimate) <= self.limit)
+            }
+        }
     }
 
     /// Say the engine waits for a release: the next release wakes

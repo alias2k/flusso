@@ -96,6 +96,17 @@ impl IngestEngine {
                 self.start_live(pending, builds).await;
                 continue;
             }
+            if builds.running() == 0 {
+                // Nothing builds: what holds the last batch back is the
+                // budget, which the sinks' acknowledgements free.
+                match (pending.count > 0, builds.refused(), self.budget.as_deref()) {
+                    (true, Some(_), Some(budget)) => {
+                        budget.released().await;
+                        continue;
+                    }
+                    _ => return Ok(()),
+                }
+            }
             match builds.next().await {
                 Some((seq, output)) => builds.land(seq, output, &|built| self.halts(built)),
                 None => return Ok(()),
@@ -160,8 +171,11 @@ impl IngestEngine {
     /// with nothing after it published.
     async fn publish_ready(&self, builds: &mut Builds, lanes: &Lanes) -> Result<bool> {
         let mut published = false;
-        while let Some((job, built)) = builds.pop_ready() {
+        while let Some((job, built, charge)) = builds.pop_ready() {
             published = true;
+            // Until the published batch carries its charge, it is released
+            // once every lane has taken the batch.
+            let _charge = charge;
             match (job, built) {
                 (Job::Complete(mut finished), _) => {
                     let started = Instant::now();
