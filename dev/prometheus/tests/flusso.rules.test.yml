@@ -1,8 +1,8 @@
 # promtool unit tests for flusso's alerts:
-#   docker run --rm --entrypoint promtool -v "$PWD/dev/prometheus/rules:/rules:ro" \
-#     prom/prometheus test rules /rules/flusso.rules.test.yml
+#   docker run --rm --entrypoint promtool -v "$PWD/dev/prometheus:/p:ro" \
+#     prom/prometheus test rules /p/tests/flusso.rules.test.yml
 rule_files:
-  - flusso.rules.yml
+  - ../rules/flusso.rules.yml
 
 evaluation_interval: 1m
 

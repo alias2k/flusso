@@ -144,11 +144,16 @@ git checkout libs/2-adapters/source-postgres/benches/fixtures/pgoutput.bin   # r
 Not in CI yet. Run them by hand when you touch `dev/prometheus/rules/` or `deploy/helm/flusso/`; neither tool needs installing, the images carry them.
 
 ```sh
-# The dev rules: syntax, then the rule unit tests (flusso.rules.test.yml).
-docker run --rm -v "$PWD/dev/prometheus/rules:/rules:ro" --entrypoint promtool \
-  prom/prometheus:v3.5.0 check rules /rules/flusso.rules.yml
-docker run --rm -v "$PWD/dev/prometheus/rules:/rules:ro" --entrypoint promtool \
-  prom/prometheus:v3.5.0 test rules /rules/flusso.rules.test.yml
+# The dev Prometheus as compose mounts it: its config and every file under
+# rules/, then the server itself starting on them.
+P="$PWD/dev/prometheus"
+docker run --rm --entrypoint promtool \
+  -v "$P/prometheus.yml:/etc/prometheus/prometheus.yml:ro" -v "$P/rules:/etc/prometheus/rules:ro" \
+  prom/prometheus:v3.5.0 check config /etc/prometheus/prometheus.yml
+
+# The rule unit tests (dev/prometheus/tests/, outside the rules/ the server loads).
+docker run --rm --entrypoint promtool -v "$P:/p:ro" \
+  prom/prometheus:v3.5.0 test rules /p/tests/flusso.rules.test.yml
 
 # The chart, with the PrometheusRule on; then its rendered rules through promtool.
 docker run --rm -v "$PWD/deploy/helm/flusso:/chart:ro" alpine/helm:3.16.4 \
