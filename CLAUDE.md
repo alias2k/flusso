@@ -960,8 +960,10 @@ is the one concrete piece.
   `FLUSSO_BATCH_*` override at run time, never baked into the lock) controls batch grouping:
   after the live arm buffers a change, `IngestEngine::drain_ready` buffers every change the
   stream has ready (`now_or_never`) while the batch `is_open` (not full, deadline not passed), and
-  the engine commits the moment the stream would block, so a burst fills batches for at most
-  `max_delay` while a trickle never waits it out. The `sleep_until` deadline arm stays. `max_changes:
+  the batch goes to the build gate the moment the stream would block, so a burst fills batches for
+  at most `max_delay` while a trickle never waits it out. Grants are event-driven (a buffered change,
+  a landed build, a budget release, the snapshot taking keys); there is no deadline arm: a batch past
+  its deadline only stops taking changes, and is granted when the gate allows. `max_changes:
   1` reproduces a write per change. The coalescing wait for further requests is `max_delay`. Guards:
   `a_lone_change_on_a_quiet_stream_commits_without_waiting`,
   `max_delay_caps_a_batch_while_changes_keep_arriving` (both on a channel-fed `MockSource::fed`
