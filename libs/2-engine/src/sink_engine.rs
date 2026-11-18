@@ -71,6 +71,7 @@ pub(crate) const STAGE_CONCURRENCY: usize = 8;
 const IDLE_TICK: Duration = Duration::from_secs(1);
 
 mod fences;
+mod flights;
 mod writes;
 
 /// An operation the daemon hands a running sink engine.

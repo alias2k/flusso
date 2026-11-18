@@ -68,8 +68,6 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use futures::FutureExt;
-use futures::future::BoxFuture;
-use futures::stream::{FuturesUnordered, StreamExt};
 use kernel::{Envelope, IndexName, Position};
 use sink::{Visibility, WriteReport};
 use stream::{AckHandle, Batch, Consumer, Delivery, LaneItem};
@@ -77,6 +75,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tracing::Instrument;
 
+use super::flights::Flights;
 use super::{IDLE_TICK, SinkControl, SinkEngine, shown_id, until};
 use crate::error::{EngineError, Result};
 use crate::observer::{CommitStats, Stage, StageTiming, Work};
@@ -153,7 +152,7 @@ pub(super) struct Run<'a> {
     engine: &'a SinkEngine,
     lane: Box<dyn Consumer<LaneItem>>,
     window: VecDeque<Queued>,
-    flights: FuturesUnordered<BoxFuture<'a, Landed>>,
+    flights: Flights<'a, Landed>,
     flying: HashMap<u64, Flight>,
     next_flight: u64,
     /// The lane-order number the next delivered item gets.
@@ -183,7 +182,7 @@ impl<'a> Run<'a> {
             engine,
             lane,
             window: VecDeque::new(),
-            flights: FuturesUnordered::new(),
+            flights: Flights::new(),
             flying: HashMap::new(),
             next_flight: 0,
             next_seq: 0,
@@ -559,7 +558,7 @@ impl<'a> Run<'a> {
         let sink = &self.engine.sink;
         let envelopes = batch.envelopes;
         let span = tracing::debug_span!("sink.write", envelopes = envelopes.len(), caught_up);
-        let mut write = async move {
+        let write = async move {
             let started = Instant::now();
             let result = sink.write(&envelopes, caught_up).await;
             Landed {
@@ -572,15 +571,8 @@ impl<'a> Run<'a> {
         .boxed();
         // Start the write now rather than at the next turn of the loop: a
         // request goes out at once, and a write that completes on its first
-        // poll is handled here. One still running is polled again, with the
-        // run's waker, by `flights`.
-        match (&mut write).now_or_never() {
-            Some(landed) => Some(landed),
-            None => {
-                self.flights.push(write);
-                None
-            }
-        }
+        // poll is handled here.
+        self.flights.start(write)
     }
 
     /// A write returned: decide its rejections, move the fences, and

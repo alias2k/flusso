@@ -893,7 +893,10 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   an item from the lane only to use it (a free write slot, or a live item to find behind backfill)
   into a **window** of at most `LOOKAHEAD` (32) waiting items, so a sink holds at most `writes + 32`
   delivered items beside the lane's `capacity` (`sink_engine/writes.rs`; `wants_more`). A granted
-  write is polled at once and one that completes on its first poll is handled there; `grant` stops
+  write is polled at once and one that completes on its first poll is handled there (one still running
+  waits in `sink_engine/flights.rs`'s `Flights`, polled only when its own waker fired: `FuturesUnordered`
+  woke the run after every all-pending pass, an empty wake-up per waiting write that failed the gate
+  at `live_drain_held/sinks2/1`; guard `a_pass_that_leaves_every_future_pending_does_not_wake_the_run`); `grant` stops
   once that fails the run. While there is room the `select!` awaits the lane's `recv` (the
   wake-up for the next item), through `next_delivery`, which makes the boxed `recv` future only when
   polled (`select!` evaluates a disabled branch's expression too); between waits, `fill` takes what
@@ -2096,7 +2099,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 
 | To work on… | Go to |
 | --- | --- |
-| The sync loops / batching / ack ordering | `libs/2-engine/src/` — `ingest.rs` (`IngestEngine`: batching, dedup, build once, publish, request coalescing, snapshots, watermark confirm), `sink_engine.rs` (`SinkEngine`: `stage`, reindex staging) with `sink_engine/writes.rs` (the run: window, admission, live-first selection, barriers, concurrent writes, failure policies) and `sink_engine/fences.rs` (applied/searchable in position order), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` (drives both engines over a real `ChannelStream`) |
+| The sync loops / batching / ack ordering | `libs/2-engine/src/` — `ingest.rs` (`IngestEngine`: batching, dedup, build once, publish, request coalescing, snapshots, watermark confirm), `sink_engine.rs` (`SinkEngine`: `stage`, reindex staging) with `sink_engine/writes.rs` (the run: window, admission, live-first selection, barriers, concurrent writes, failure policies) and `sink_engine/fences.rs` (applied/searchable in position order), `sink_engine/flights.rs` (the writes in flight, polled when woken), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` (drives both engines over a real `ChannelStream`) |
 | Pipeline observability trait (`Observer`, `BuildStats`/`CommitStats`, `EngineId`, `FanOut`) | `libs/2-engine/src/observer.rs` |
 | Script fields (Rhai): compile, run, strip input-only fields, the `DocumentBuilder` decorator, the sandbox, value conversion, typed dates | `libs/2-script/src/` — `scripts.rs` (`Scripts`: plan + apply), `builder.rs` (`ScriptedBuilder`), `sandbox.rs`, `value.rs`, `dates.rs` + `dates/library.rs` (the date types + their Rhai registration), `view.rs` (a `map` of dates typed for scripts), `input.rs` (JSON typed by the schema); `benches/scripted.rs`; CLI `commands/script.rs` (`flusso script run`), `telemetry/script_log.rs` |
 | Daemon (domain): supervisor, `DaemonControl`, per-sink `Status`, `StatusObserver`, lag poll, the fence | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `supervise.rs` (stage → spawn → restart with backoff; `DaemonControl::reindex`), `backends.rs` (`Backends` trait + `SourceParts`/`SinkParts` seam), `observer.rs`, `status.rs`, `lag.rs`, `fence.rs` (`Fence`/`FenceRequest`/`FenceOutcome`/`FenceObserver`) |
