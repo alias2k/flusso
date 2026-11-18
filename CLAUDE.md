@@ -911,10 +911,13 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   `Err`, a `stop` rejection) starts nothing new: the writes in flight are awaited and acked when they
   succeeded, then the run ends with the first error and the lane redelivers only what is unacked;
   the engine remembers the failed run (`failed_run`, also set on a fresh engine, so every process
-  writes its first item alone), and the next run is a **barrier**: it grants only the window's front
-  item until a write lands, so a `stop` rejection or a write refused every time halts the sink
-  (nothing behind it lands, the backoff grows, the lane fills); in the run that first meets it,
-  disjoint writes started while it is in flight can land, the watermark staying before it.
+  writes its oldest unconfirmed item alone), and the next run is a **barrier**: it grants only the
+  window's front item until a write lands, so a `stop` rejection or a write refused every time halts
+  the sink across engine restarts (nothing behind it lands, the backoff grows, the lane fills); in
+  the run that first meets it, disjoint writes started while it is in flight can land, the watermark
+  staying before it; a new process whose oldest unconfirmed item was already written (a sibling
+  lags, a confirmation was lost) lands it, opens the window, and lands up to `writes` − 1 disjoint
+  items past the failing one again before it fails (nothing lost).
   A lane closing ends the run once the window and the writes in flight are done. Guards: the
   engine's `tests::concurrent` (`a_document_is_never_written_twice_at_once_and_its_versions_never_go_down`,
   seeded, `FLUSSO_SCHEDULE_SEED` replays; `writes_run_at_once_up_to_the_setting`,

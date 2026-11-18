@@ -48,11 +48,15 @@
 //! item alone, as a barrier, and opens the window only once a write landed.
 //! A fresh engine counts because a previous process may have stopped on that
 //! item. So a write that fails every time (a `stop` rejection, a destination
-//! refusing it) halts the sink after its first run: on every restart, of the
-//! engine or of the process, nothing behind it lands, no progress resets the
-//! backoff, and the lane fills. In the run that first meets it, writes
-//! already granted beside it, and disjoint ones granted while it is in
-//! flight, can land; the lane's watermark stays before it.
+//! refusing it) halts the sink after its first run: on every restart of the
+//! engine nothing behind it lands, no progress resets the backoff, and the
+//! lane fills. In the run that first meets it, writes already granted beside
+//! it, and disjoint ones granted while it is in flight, can land; the lane's
+//! watermark stays before it. A new process writes its oldest *unconfirmed*
+//! item alone: when that is an older item already written (a sibling sink
+//! lags, or the confirmation never reached the source), it lands, the window
+//! opens, and disjoint items past the failing one land again before it fails.
+//! Nothing is lost.
 //!
 //! ```text
 //! window   [L1 a] [B1 a,b] [L2 c] [SnapshotComplete] [L3 a]
