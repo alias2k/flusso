@@ -166,7 +166,7 @@ docker run --rm -v "$PWD/deploy/helm/flusso:/chart:ro" alpine/helm:3.16.4 \
       -c 'cat > /tmp/rules.yml && promtool check rules /tmp/rules.yml'
 ```
 
-`flusso.rules.test.yml` holds the alert's cases: a stalled lane fires 5 minutes after passing 10, a sibling that keeps landing doesn't, and 2 GiB of WAL fires while the lane is young.
+`flusso.rules.test.yml` holds the alert's cases: a stalled lane fires 5 minutes after passing 10, a sibling that keeps landing doesn't, a catch-up with 2 GiB of slot lag and lanes that keep landing doesn't, and the same lag behind a lane silent for over a minute fires on WAL. The two copies of the alerts (the dev rules and the chart's template) are kept equal by `.github/scripts/test_alert_rule_copies.py`, in the `scripts` job.
 
 ## Where this shows up
 

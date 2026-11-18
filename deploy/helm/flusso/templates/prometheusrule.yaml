@@ -13,18 +13,6 @@ spec:
   groups:
     - name: flusso_alerts
       rules:
-        - alert: FlussoLaneStalled
-          expr: flusso_lane_stall_age_seconds > {{ .Values.prometheusRule.laneStallSeconds }} or flusso_lane_wal_behind_bytes > {{ .Values.prometheusRule.laneWalBehindBytes | int64 }}
-          for: {{ .Values.prometheusRule.for }}
-          labels:
-            severity: {{ .Values.prometheusRule.severity }}
-          annotations:
-            summary: "flusso's {{ "{{" }} $labels.index {{ "}}" }} lane into {{ "{{" }} $labels.sink {{ "}}" }} has landed nothing for a while"
-            description: >-
-              The lane's oldest change has not been written to the sink. Until it
-              is, the replication slot keeps WAL for every index. Look at the
-              sink's errors in the log, then fix the cause, skip the document, or
-              reindex.
         - alert: FlussoVisibilityWait
           expr: flusso_replication_visibility_wait_seconds > 30
           for: 1m
@@ -34,5 +22,37 @@ spec:
             summary: "flusso has held a commit that isn't visible for {{ "{{" }} $value | humanizeDuration {{ "}}" }}"
             description: >-
               Postgres keeps a commit invisible while it waits for a synchronous
-              standby. Nothing after it is indexed until it is visible.
+              standby. Nothing after it is indexed until it is visible: bring the
+              standby back, or take it out of synchronous_standby_names and reload.
+            runbook_url: https://alias2k.github.io/flusso/reference/source-postgres.html#behind-a-synchronous-standby
+        - alert: FlussoLaneStalled
+          expr: flusso_lane_stall_age_seconds > {{ .Values.prometheusRule.laneStallSeconds }}
+          for: {{ .Values.prometheusRule.for }}
+          labels:
+            severity: {{ .Values.prometheusRule.severity }}
+            reason: age
+          annotations:
+            summary: "flusso's {{ "{{" }} $labels.index {{ "}}" }} lane into {{ "{{" }} $labels.sink {{ "}}" }} has landed nothing for {{ "{{" }} $value | humanizeDuration {{ "}}" }}"
+            description: >-
+              The lane's oldest change has not been written to the sink. Until it
+              is, the replication slot keeps WAL for every index. Look at the
+              sink's errors in the log (a write block on the index, a document
+              refused under on_error = "stop", the cluster down), then fix the
+              cause, skip the document, or reindex.
+            runbook_url: https://alias2k.github.io/flusso/operate/stalled-lane.html
+        - alert: FlussoLaneStalled
+          expr: flusso_lane_wal_behind_bytes > {{ .Values.prometheusRule.laneWalBehindBytes | int64 }} and flusso_lane_stall_age_seconds > {{ .Values.prometheusRule.laneWalStallSeconds }}
+          for: {{ .Values.prometheusRule.for }}
+          labels:
+            severity: {{ .Values.prometheusRule.severity }}
+            reason: wal
+          annotations:
+            summary: "flusso's {{ "{{" }} $labels.index {{ "}}" }} lane into {{ "{{" }} $labels.sink {{ "}}" }} has landed nothing for over a minute while the slot keeps {{ "{{" }} $value | humanize1024 {{ "}}" }}B of WAL behind it"
+            description: >-
+              The lane's oldest change has not been written to the sink. Until it
+              is, the replication slot keeps WAL for every index. Look at the
+              sink's errors in the log (a write block on the index, a document
+              refused under on_error = "stop", the cluster down), then fix the
+              cause, skip the document, or reindex.
+            runbook_url: https://alias2k.github.io/flusso/operate/stalled-lane.html
 {{- end }}

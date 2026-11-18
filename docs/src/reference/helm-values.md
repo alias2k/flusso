@@ -46,7 +46,8 @@ Every value the chart at `deploy/helm/flusso/` accepts, with its default. `value
 | `prometheusRule.namespace` | `""` | Defaults to the release namespace. |
 | `prometheusRule.labels` | `{}` | Extra labels, to match your Prometheus `ruleSelector`. |
 | `prometheusRule.laneStallSeconds` | `600` | `FlussoLaneStalled` fires past this stall age… |
-| `prometheusRule.laneWalBehindBytes` | `1073741824` | …or past this much WAL held by one lane (1 GiB). |
+| `prometheusRule.laneWalBehindBytes` | `1073741824` | …or past this much WAL kept behind one lane (1 GiB, WAL not read yet included)… |
+| `prometheusRule.laneWalStallSeconds` | `60` | …while that lane has landed nothing for this long, so a catch-up whose lanes keep landing doesn't page. |
 | `prometheusRule.for` | `5m` | How long the condition holds before the alert fires. |
 | `prometheusRule.severity` | `page` | The alerts' `severity` label. |
 | `resources` | `requests.memory: 512Mi` | No limit by default. A limit needs room for `[concurrency] max_built_mib` (512 MiB), the batches past it, what the budget doesn't count (request bodies, the source's read-ahead) and about 100 MiB, plus 10–20% allocator overhead; the formula is in [config.toml](config-toml.md#concurrency). |

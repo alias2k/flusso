@@ -133,9 +133,14 @@ prometheusRule:
   namespace: ""
   # Extra labels (e.g. to match your Prometheus `ruleSelector`).
   labels: {}
-  # A lane is stalled past either threshold, for `for`.
+  # FlussoLaneStalled fires, after `for`, when a lane has landed nothing for
+  # `laneStallSeconds`, or when the slot keeps more than `laneWalBehindBytes`
+  # of WAL behind a lane that has landed nothing for `laneWalStallSeconds`
+  # (the WAL counted includes WAL flusso hasn't read, so a healthy catch-up,
+  # whose lanes land every second, is kept from paging by that age).
   laneStallSeconds: 600
   laneWalBehindBytes: 1073741824
+  laneWalStallSeconds: 60
   for: 5m
   severity: page
 
