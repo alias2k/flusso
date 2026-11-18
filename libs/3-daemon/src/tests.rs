@@ -1253,3 +1253,92 @@ fn backends_with(
         built: Arc::new(Mutex::new(Vec::new())),
     })
 }
+
+/// Builds that panic: `at_once` before anything is awaited (in the ingest
+/// task's own poll), else after a yield (on the build's own task).
+#[derive(Debug)]
+struct PanickingDocuments {
+    at_once: bool,
+}
+
+#[async_trait]
+impl DocumentBuilder for PanickingDocuments {
+    async fn resolve(
+        &self,
+        table: &TableName,
+        key: &RowKey,
+        before: Option<&RowImage>,
+        after: Option<&RowImage>,
+    ) -> source::Result<Vec<DocumentId>> {
+        ScriptedDocuments::default()
+            .resolve(table, key, before, after)
+            .await
+    }
+
+    #[allow(clippy::panic)]
+    async fn build(&self, _: &DocumentId) -> source::Result<Document> {
+        if !self.at_once {
+            tokio::task::yield_now().await;
+        }
+        panic!("a build that panics");
+    }
+
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        vec![users()]
+    }
+
+    async fn last_key(&self, _: &IndexName) -> source::Result<Option<RowKey>> {
+        Ok(None)
+    }
+
+    async fn keys(
+        &self,
+        _: &IndexName,
+        _: Option<&RowKey>,
+        _: &RowKey,
+        _: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        Ok(Vec::new())
+    }
+
+    async fn index_mappings(&self) -> source::Result<Vec<IndexMapping>> {
+        ScriptedDocuments::default().index_mappings().await
+    }
+}
+
+/// A build that panics never hangs the deployment. On its own task (it
+/// awaited first) it is a failed build: an engine error, the ingest engine
+/// fails and the daemon restarts it. In the ingest task's own poll (it
+/// panicked before awaiting anything) it unwinds the ingest task, as main's
+/// inline builds did, and the deployment ends with an error.
+#[tokio::test]
+async fn a_panicking_build_ends_or_restarts_the_ingest_engine_but_never_hangs() {
+    for at_once in [false, true] {
+        let sink = Arc::new(RecordingSink::seeded());
+        let backends = backends_with(
+            Arc::new(ScriptedSource::new(vec![row_event(false, 1)])),
+            Arc::new(PanickingDocuments { at_once }),
+            vec![(primary(), sink as Arc<dyn Sink>, SinkOptions::default())],
+        );
+        let running = Daemon::new(backendless_config(), backends)
+            .with_options(fast_restarts())
+            .start()
+            .await
+            .unwrap();
+        let status = running.status();
+        let run = tokio::spawn(running.run(tokio::time::sleep(Duration::from_millis(500))));
+        let result = tokio::time::timeout(Duration::from_secs(20), run)
+            .await
+            .unwrap_or_else(|_| panic!("at_once {at_once}: the deployment hung"))
+            .unwrap();
+        if at_once {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("ingest engine task failed"), "{error}");
+        } else {
+            assert!(
+                status.snapshot().errors >= 1,
+                "the failed build is an engine error"
+            );
+        }
+    }
+}

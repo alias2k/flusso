@@ -376,6 +376,10 @@ impl Builds {
                 bytes,
             }
         });
+        // A build that panics on this first poll panics the ingest task, as
+        // a build run inline always did: the daemon then ends the deployment
+        // with the task's error. One that panics later, on its own task,
+        // lands as a failed build (`land`), which ends the run.
         if let Poll::Ready(output) = futures::poll!(build.as_mut()) {
             self.land(seq, Some(output), halts);
             return;
