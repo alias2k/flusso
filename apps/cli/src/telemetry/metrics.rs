@@ -19,7 +19,7 @@ use anyhow::Context;
 use daemon::Status;
 use opentelemetry::KeyValue;
 use opentelemetry::global;
-use opentelemetry::metrics::ObservableGauge;
+use opentelemetry::metrics::{ObservableCounter, ObservableGauge};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::{
     Aggregation, MeterProviderBuilder, PeriodicReader, SdkMeterProvider, Stream,
@@ -196,6 +196,47 @@ pub(crate) fn register_visibility_wait_gauge(status: Arc<Status>) -> ObservableG
             );
         })
         .build()
+}
+
+/// The memory budget's holding, read at collection: `flusso.memory.built`
+/// (bytes, by `work`) and `flusso.memory.refused` (batches that waited for
+/// the budget, by `work`).
+pub(crate) fn register_memory_instruments(
+    budget: Arc<daemon::Budget>,
+) -> (ObservableGauge<u64>, ObservableCounter<u64>) {
+    let meter = global::meter("flusso");
+    let held = Arc::clone(&budget);
+    let built = meter
+        .u64_observable_gauge("flusso.memory.built")
+        .with_unit("By")
+        .with_description(
+            "Bytes of built documents not yet acknowledged by every sink, reservations of \
+             builds in flight included, by work (live, backfill)",
+        )
+        .with_callback(move |observer| {
+            let now = held.held();
+            observer.observe(
+                (now.total - now.backfill.min(now.total)) as u64,
+                &[KeyValue::new("work", "live")],
+            );
+            observer.observe(now.backfill as u64, &[KeyValue::new("work", "backfill")]);
+        })
+        .build();
+    let refused = meter
+        .u64_observable_counter("flusso.memory.refused")
+        .with_description(
+            "Times a batch waited for the memory budget before it could be built, by work",
+        )
+        .with_callback(move |observer| {
+            for work in [daemon::Work::Live, daemon::Work::Backfill] {
+                observer.observe(
+                    budget.refused(work),
+                    &[KeyValue::new("work", work.as_str())],
+                );
+            }
+        })
+        .build();
+    (built, refused)
 }
 
 /// Whether an OTLP endpoint is configured (general or metrics-specific).

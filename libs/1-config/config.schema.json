@@ -164,6 +164,16 @@
           "minimum": 1,
           "description": "Document builds the ingest engine runs at once (default 4). A document\nis never built twice at once, and each lane still gets batches in the\norder they were started. Live batches go before backfill pages. `1`\nbuilds one batch at a time. At most 32; the source's builder pool\nholds `builds + 2` connections.",
           "maximum": 32
+        },
+        "max_built_mib": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 16,
+          "description": "MiB of built documents held before the ingest engine waits (default\n512): what it built and every sink has not yet acknowledged. A\nbackfill holds at most half of it, so live changes always have room,\nand a batch larger than the whole budget still builds, alone. Counts\nheap, not JSON: a document holds 8–10× its JSON size. At least 16, at\nmost 1,048,576.",
+          "maximum": 1048576
         }
       },
       "description": "How much the pipeline does at once, from a `flusso.toml` `[concurrency]`\ntable. A property of the machine that runs flusso, not of the deployment:\nit is never written into `flusso.lock`, so `run --locked` takes it from\n`--writes` / `FLUSSO_WRITES` and `--builds` / `FLUSSO_BUILDS` or the\ndefaults. Every key is optional."

@@ -12,6 +12,7 @@ max_delay_ms = 10
 [concurrency]
 writes = 8
 builds = 6
+max_built_mib = 256
 
 [server]
 public_address = "0.0.0.0:9464"

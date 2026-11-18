@@ -304,7 +304,7 @@ export interface ConfigToml {
   prefix?: string;
   on_error?: unknown;
   batch?: { max_changes?: number; max_delay_ms?: number };
-  concurrency?: { writes?: number; builds?: number };
+  concurrency?: { writes?: number; builds?: number; max_built_mib?: number };
   server?: Record<string, unknown>;
 }
 

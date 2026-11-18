@@ -39,7 +39,7 @@
 
 use std::mem::size_of;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use kernel::{Envelope, GenericValue};
 use source::document::Document;
@@ -75,6 +75,8 @@ pub struct Budget {
     backfill: AtomicUsize,
     waiting: AtomicBool,
     released: Notify,
+    refused_live: AtomicU64,
+    refused_backfill: AtomicU64,
 }
 
 impl Budget {
@@ -86,6 +88,26 @@ impl Budget {
             backfill: AtomicUsize::new(0),
             waiting: AtomicBool::new(false),
             released: Notify::new(),
+            refused_live: AtomicU64::new(0),
+            refused_backfill: AtomicU64::new(0),
+        }
+    }
+
+    /// Count a batch of `work` the budget held back: once per wait, not per
+    /// look.
+    pub fn note_refused(&self, work: Work) {
+        self.refusals(work).fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How many times a batch of `work` waited for the budget.
+    pub fn refused(&self, work: Work) -> u64 {
+        self.refusals(work).load(Ordering::Relaxed)
+    }
+
+    fn refusals(&self, work: Work) -> &AtomicU64 {
+        match work {
+            Work::Live => &self.refused_live,
+            Work::Backfill => &self.refused_backfill,
         }
     }
 

@@ -6,6 +6,7 @@
 //! consistent-enough snapshot. Per-sink state is what makes a stalled or
 //! failing sink visible without stopping the others.
 
+use engine::Budget;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -89,6 +90,7 @@ pub struct Status {
     fence: Option<Fence>,
     /// Where the visibility wait comes from; `None` reports none.
     source: Option<Arc<dyn ChangeCapture>>,
+    budget: Option<Arc<Budget>>,
 }
 
 /// The live status of one sink engine.
@@ -167,7 +169,14 @@ impl Status {
             indexes,
             fence: None,
             source: None,
+            budget: None,
         }
+    }
+
+    /// Report the memory budget's holding at each snapshot.
+    pub fn with_budget(mut self, budget: Arc<Budget>) -> Self {
+        self.budget = Some(budget);
+        self
     }
 
     /// Read how long the source has held a change it can't read back yet
@@ -452,9 +461,29 @@ impl Status {
                 .iter()
                 .map(|(index, failures)| (index.as_ref().to_owned(), failures.clone()))
                 .collect(),
+            memory: self.budget.as_ref().map(|budget| {
+                let held = budget.held();
+                MemorySnapshot {
+                    limit_bytes: budget.limit(),
+                    built_bytes: held.total,
+                    backfill_bytes: held.backfill,
+                }
+            }),
             sinks,
         }
     }
+}
+
+/// The memory budget for built documents, in `/status`.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct MemorySnapshot {
+    /// `[concurrency] max_built_mib`, in bytes.
+    pub limit_bytes: usize,
+    /// Bytes of built documents not yet acknowledged by every sink,
+    /// reservations of builds in flight included.
+    pub built_bytes: usize,
+    /// Backfill's share of `built_bytes`; at most half the limit.
+    pub backfill_bytes: usize,
 }
 
 /// The `/status` document.
@@ -496,6 +525,10 @@ pub struct StatusSnapshot {
     /// with a failure appear.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub script_failures: BTreeMap<String, ScriptFailures>,
+    /// The memory budget for built documents; `None` when the deployment
+    /// counts none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemorySnapshot>,
     pub sinks: BTreeMap<String, SinkSnapshot>,
 }
 

@@ -15,6 +15,13 @@ pub const MAX_WRITES: usize = 64;
 /// a typo from opening hundreds.
 pub const MAX_BUILDS: usize = 32;
 
+/// The least `max_built_mib` takes: below it a single `users`-like batch
+/// (about 4 MiB) fills the budget, and every build waits for the last.
+pub const MIN_BUILT_MIB: usize = 16;
+
+/// The most `max_built_mib` takes: a TiB, so a typo can't overflow a count.
+pub const MAX_BUILT_MIB: usize = 1 << 20;
+
 /// How much the pipeline does at once, from a `flusso.toml` `[concurrency]`
 /// table. A property of the machine that runs flusso, not of the deployment:
 /// it is never written into `flusso.lock`, so `run --locked` takes it from
@@ -45,6 +52,49 @@ pub struct Concurrency {
     )]
     #[schemars(range(min = 1, max = 32))]
     pub builds: Option<NonZeroUsize>,
+    /// MiB of built documents held before the ingest engine waits (default
+    /// 512): what it built and every sink has not yet acknowledged. A
+    /// backfill holds at most half of it, so live changes always have room,
+    /// and a batch larger than the whole budget still builds, alone. Counts
+    /// heap, not JSON: a document holds 8–10× its JSON size. At least 16, at
+    /// most 1,048,576.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "bounded_built_mib"
+    )]
+    #[schemars(range(min = 16, max = 1_048_576))]
+    pub max_built_mib: Option<NonZeroUsize>,
+}
+
+/// `max_built_mib`, refused outside [`MIN_BUILT_MIB`]..=[`MAX_BUILT_MIB`].
+fn bounded_built_mib<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<NonZeroUsize>, D::Error> {
+    match Option::<NonZeroUsize>::deserialize(deserializer)? {
+        Some(mib) => built_mib_in_bounds(mib)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+        None => Ok(None),
+    }
+}
+
+fn built_mib_in_bounds(mib: NonZeroUsize) -> Result<NonZeroUsize, String> {
+    if (MIN_BUILT_MIB..=MAX_BUILT_MIB).contains(&mib.get()) {
+        Ok(mib)
+    } else {
+        Err(format!(
+            "max_built_mib = {mib} is outside {MIN_BUILT_MIB}..={MAX_BUILT_MIB} MiB"
+        ))
+    }
+}
+
+/// `max_built_mib` from a flag or an env var, with the file's bounds.
+pub fn parse_max_built_mib(text: &str) -> Result<NonZeroUsize, String> {
+    let mib: NonZeroUsize = text
+        .parse()
+        .map_err(|_| format!("`{text}` is not a whole number of MiB, at least 1"))?;
+    built_mib_in_bounds(mib)
 }
 
 /// `builds`, refused past [`MAX_BUILDS`].
@@ -104,6 +154,6 @@ pub fn parse_writes(text: &str) -> Result<NonZeroUsize, String> {
 impl Concurrency {
     /// True when no key is set, so serialization can omit the table.
     pub fn is_empty(&self) -> bool {
-        self.writes.is_none() && self.builds.is_none()
+        self.writes.is_none() && self.builds.is_none() && self.max_built_mib.is_none()
     }
 }

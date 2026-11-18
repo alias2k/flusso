@@ -129,6 +129,8 @@ pub struct ConcurrencyConfig {
     pub writes: Option<NonZeroUsize>,
     /// Document builds the ingest engine runs at once.
     pub builds: Option<NonZeroUsize>,
+    /// MiB of built documents held before the ingest engine waits.
+    pub max_built_mib: Option<NonZeroUsize>,
 }
 
 /// One index in a [`Config`], paired with whether it is built on this run.

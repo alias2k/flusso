@@ -709,12 +709,17 @@ mod tests {
             [concurrency]
             writes = 8
             builds = 6
+            max_built_mib = 256
         "#;
         let config = ConfigToml::try_parse(raw).unwrap();
         let regenerated = config_to_toml(&config).unwrap();
         let reparsed = ConfigToml::try_parse(&regenerated).unwrap();
         assert_eq!(reparsed.concurrency.writes, std::num::NonZeroUsize::new(8));
         assert_eq!(reparsed.concurrency.builds, std::num::NonZeroUsize::new(6));
+        assert_eq!(
+            reparsed.concurrency.max_built_mib,
+            std::num::NonZeroUsize::new(256)
+        );
         assert!(regenerated.contains("[concurrency]"), "{regenerated}");
     }
 

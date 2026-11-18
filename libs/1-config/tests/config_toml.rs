@@ -267,10 +267,15 @@ fn concurrency_section_converts_and_is_optional_and_strict() {
         [concurrency]
         writes = 8
         builds = 6
+        max_built_mib = 256
         "#,
     );
     assert_eq!(config.concurrency.writes, std::num::NonZeroUsize::new(8));
     assert_eq!(config.concurrency.builds, std::num::NonZeroUsize::new(6));
+    assert_eq!(
+        config.concurrency.max_built_mib,
+        std::num::NonZeroUsize::new(256)
+    );
     for (table, refused) in [
         ("writes = 0", "writes"),
         ("builds = 0", "builds"),
@@ -480,6 +485,29 @@ fn builds_past_the_cap_are_refused_naming_it() {
     assert!(error.contains("32"), "{error}");
     let config = convert("[source]\ntype = \"postgres\"\n\n[concurrency]\nbuilds = 32\n");
     assert_eq!(config.concurrency.builds, std::num::NonZeroUsize::new(32));
+}
+
+#[test]
+fn max_built_mib_outside_its_bounds_is_refused_naming_them() {
+    for refused in ["15", "1048577"] {
+        let error = parse(&format!(
+            "[source]\ntype = \"postgres\"\n\n[concurrency]\nmax_built_mib = {refused}\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("16..=1048576"), "{error}");
+    }
+    let config = convert("[source]\ntype = \"postgres\"\n\n[concurrency]\nmax_built_mib = 16\n");
+    assert_eq!(
+        config.concurrency.max_built_mib,
+        std::num::NonZeroUsize::new(16)
+    );
+    assert_eq!(
+        config::parse_max_built_mib("512"),
+        Ok(std::num::NonZeroUsize::new(512).unwrap())
+    );
+    assert!(config::parse_max_built_mib("8").unwrap_err().contains("16"));
+    assert!(config::parse_max_built_mib("0").is_err());
 }
 
 #[test]

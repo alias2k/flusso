@@ -1075,6 +1075,14 @@ fn writes_default_to_four_unless_the_config_sets_them() {
 }
 
 #[test]
+fn the_budget_defaults_to_512_mib_unless_the_config_sets_it() {
+    let mut config = backendless_config();
+    assert_eq!(max_built_bytes(&config), 512 * 1024 * 1024);
+    config.concurrency.max_built_mib = std::num::NonZeroUsize::new(64);
+    assert_eq!(max_built_bytes(&config), 64 * 1024 * 1024);
+}
+
+#[test]
 fn builds_default_to_four_unless_the_config_sets_them() {
     let mut config = backendless_config();
     assert_eq!(builds(&config), DEFAULT_BUILDS);

@@ -9,7 +9,7 @@ pub mod status;
 mod supervise;
 
 pub use backends::{Backends, SinkParts, SourceParts};
-pub use engine::Progress;
+pub use engine::{Budget, Held, Progress};
 pub use fence::{
     Fence, FenceError, FenceLevel, FenceObserver, FenceOutcome, FencePositions, FenceRequest,
     SinkPositions,
@@ -112,6 +112,20 @@ pub fn builds(config: &Config) -> usize {
         .map_or(DEFAULT_BUILDS, NonZeroUsize::get)
 }
 
+/// MiB of built documents held when `[concurrency] max_built_mib` is unset
+/// (ADR 0012 §5).
+pub const DEFAULT_MAX_BUILT_MIB: usize = 512;
+
+/// Bytes of built documents the ingest engine holds before it waits:
+/// `[concurrency] max_built_mib`, else [`DEFAULT_MAX_BUILT_MIB`].
+pub fn max_built_bytes(config: &Config) -> usize {
+    config
+        .concurrency
+        .max_built_mib
+        .map_or(DEFAULT_MAX_BUILT_MIB, NonZeroUsize::get)
+        .saturating_mul(1024 * 1024)
+}
+
 /// A configured-but-not-yet-running deployment over one [`Config`].
 #[derive(Debug)]
 pub struct Daemon {
@@ -190,6 +204,7 @@ impl Daemon {
             Arc::clone(&progress),
             sink_names.iter().cloned(),
         );
+        let budget = Arc::new(Budget::new(max_built_bytes(&config)));
         let status = Arc::new(
             Status::new(
                 config.indexes.keys().cloned(),
@@ -197,7 +212,8 @@ impl Daemon {
                 Instant::now(),
             )
             .with_fence(fence.clone())
-            .with_source(Arc::clone(&capture)),
+            .with_source(Arc::clone(&capture))
+            .with_budget(Arc::clone(&budget)),
         );
         let mut observers: Vec<Arc<dyn Observer>> = vec![
             Arc::new(StatusObserver::new(Arc::clone(&status))),
@@ -229,6 +245,7 @@ impl Daemon {
         )
         .with_batch(batch_policy(&config))
         .with_builds(builds(&config))
+        .with_budget(Arc::clone(&budget))
         .with_observer(Arc::clone(&observer))
         .with_failure_policies(failure_policies.clone())
         .with_stop(stop.clone());
@@ -266,6 +283,7 @@ impl Daemon {
             observer,
             options,
             stop,
+            budget,
         })
     }
 }
@@ -286,6 +304,7 @@ pub struct RunningDaemon {
     observer: Arc<dyn Observer>,
     options: DaemonOptions,
     stop: engine::Stop,
+    budget: Arc<Budget>,
 }
 
 impl RunningDaemon {
@@ -293,6 +312,12 @@ impl RunningDaemon {
     /// to read while the daemon runs. Cheap to clone.
     pub fn status(&self) -> Arc<Status> {
         Arc::clone(&self.status)
+    }
+
+    /// The memory budget the ingest engine builds within, for a transport to
+    /// report (see [`Budget`]). Cheap to clone.
+    pub fn budget(&self) -> Arc<Budget> {
+        Arc::clone(&self.budget)
     }
 
     /// The fence: what a transport waits on so a client can read its own
@@ -335,6 +360,7 @@ impl RunningDaemon {
             observer,
             options,
             stop,
+            budget: _,
         } = self;
 
         let _lag = LagGuard(tokio::spawn(lag::poll(

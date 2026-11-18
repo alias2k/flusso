@@ -153,6 +153,8 @@ pub(super) struct Builds {
     per_document: PerDocument,
     /// The last choice found a batch the budget alone refused.
     refused: Option<Work>,
+    /// The kinds counted as waiting for the budget since their last grant.
+    waiting: (bool, bool),
 }
 
 impl std::fmt::Debug for Builds {
@@ -183,6 +185,7 @@ impl Builds {
                 backfill: FIRST_ESTIMATE,
             },
             refused: None,
+            waiting: (false, false),
         }
     }
 
@@ -207,6 +210,13 @@ impl Builds {
         }
         budget.want_release();
         self.refused.get_or_insert(work);
+        let waiting = match work {
+            Work::Live => &mut self.waiting.0,
+            Work::Backfill => &mut self.waiting.1,
+        };
+        if !std::mem::replace(waiting, true) {
+            budget.note_refused(work);
+        }
         false
     }
 
@@ -302,6 +312,10 @@ impl Builds {
         let seq = self.front + self.slots.len() as u64;
         let live = matches!(job, Job::Live { .. });
         let work = if live { Work::Live } else { Work::Backfill };
+        match work {
+            Work::Live => self.waiting.0 = false,
+            Work::Backfill => self.waiting.1 = false,
+        }
         let reservation = self
             .budget
             .as_ref()

@@ -163,6 +163,14 @@ pub(crate) struct RunArgs {
     #[arg(long, env = "FLUSSO_BUILDS", value_parser = config::parse_builds)]
     builds: Option<std::num::NonZeroUsize>,
 
+    /// MiB of built documents held before the ingest engine waits for the
+    /// sinks to acknowledge some. Overrides `[concurrency].max_built_mib`
+    /// from config; defaults to 512. A backfill holds at most half. Counts
+    /// heap, about 8–10× a document's JSON. 16 to 1,048,576. Never written
+    /// into the lock.
+    #[arg(long, env = "FLUSSO_MAX_BUILT_MIB", value_parser = config::parse_max_built_mib)]
+    max_built_mib: Option<std::num::NonZeroUsize>,
+
     /// How long a stop may take, in seconds, from the first signal to exit.
     /// A stop drains: nothing new is read, what is in flight lands on every
     /// sink and is confirmed to Postgres, then the HTTP surfaces close and
@@ -212,6 +220,9 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     }
     if let Some(builds) = args.builds {
         config.concurrency.builds = Some(builds);
+    }
+    if let Some(max_built_mib) = args.max_built_mib {
+        config.concurrency.max_built_mib = Some(max_built_mib);
     }
 
     // Adapter knobs given as flags/env are laid over the file's entries, then
@@ -274,6 +285,7 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let fence = running.fence();
     let _in_flight_gauge = metrics::register_in_flight_gauge(Arc::clone(&status));
     let _visibility_wait_gauge = metrics::register_visibility_wait_gauge(Arc::clone(&status));
+    let _memory_instruments = metrics::register_memory_instruments(running.budget());
 
     let waits = http::Waits::default();
     let (public_shutdown, public_rx) = oneshot::channel::<()>();
