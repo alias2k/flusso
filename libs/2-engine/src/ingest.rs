@@ -393,6 +393,14 @@ impl IngestEngine {
                 },
                 _ = confirm_tick.tick() => {
                     mark = self.waited(mark, &mut snapshot, building);
+                    // A backstop, not the mechanism: a batch the budget held
+                    // back is granted on a release (the arm above). Should a
+                    // release ever go unheard, the next tick still grants it,
+                    // so it costs a second, never the run.
+                    if builds.refused().is_some() {
+                        self.grant(&mut pending, &mut snapshot, builds, lanes).await?;
+                        mark = Instant::now();
+                    }
                     self.confirm(&mut last_confirmed, true);
                 }
             }

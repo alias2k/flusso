@@ -121,10 +121,13 @@ impl Budget {
         self.limit
     }
 
-    /// What is held now, reservations included.
+    /// What is held now, reservations included. The two counters are read
+    /// one after the other, so a backfill release landing between them can
+    /// read as live room for an instant: at most one live batch granted a
+    /// little early, never a byte lost or counted twice.
     pub fn held(&self) -> Held {
-        let backfill = self.backfill.load(Ordering::Acquire);
-        let total = self.total.load(Ordering::Acquire);
+        let backfill = self.backfill.load(Ordering::SeqCst);
+        let total = self.total.load(Ordering::SeqCst);
         Held {
             total: total.max(backfill),
             backfill,
@@ -164,7 +167,7 @@ impl Budget {
     /// Say the engine waits for a release: the next release wakes
     /// [`released`](Self::released).
     pub fn want_release(&self) {
-        self.waiting.store(true, Ordering::Release);
+        self.waiting.store(true, Ordering::SeqCst);
     }
 
     /// Resolves after a release that followed [`want_release`](Self::want_release).
@@ -174,20 +177,25 @@ impl Budget {
 
     fn add(&self, work: Work, bytes: usize) {
         if work == Work::Backfill {
-            self.backfill.fetch_add(bytes, Ordering::AcqRel);
+            self.backfill.fetch_add(bytes, Ordering::SeqCst);
         }
-        self.total.fetch_add(bytes, Ordering::AcqRel);
+        self.total.fetch_add(bytes, Ordering::SeqCst);
     }
 
+    /// Every access to `total`, `backfill` and `waiting` is `SeqCst`: the
+    /// engine stores its wish then loads the totals, a release subtracts then
+    /// swaps the wish, and only a single total order guarantees one of the
+    /// two sees the other (with acquire/release both could miss, and the
+    /// wake be lost).
     fn release(&self, work: Work, bytes: usize) {
         if bytes == 0 {
             return;
         }
-        self.total.fetch_sub(bytes, Ordering::AcqRel);
+        self.total.fetch_sub(bytes, Ordering::SeqCst);
         if work == Work::Backfill {
-            self.backfill.fetch_sub(bytes, Ordering::AcqRel);
+            self.backfill.fetch_sub(bytes, Ordering::SeqCst);
         }
-        if self.waiting.swap(false, Ordering::AcqRel) {
+        if self.waiting.swap(false, Ordering::SeqCst) {
             self.released.notify_one();
         }
     }
@@ -433,6 +441,28 @@ mod tests {
             .await
             .expect("the release woke the waiter")
             .unwrap();
+    }
+
+    /// (Review of stage 5.) The wish comes before the check: a release on
+    /// another thread between the two then still wakes the engine (the
+    /// notification is kept as a permit), where the other order lost it and
+    /// left ingest waiting for ever.
+    #[tokio::test(start_paused = true)]
+    async fn a_release_between_the_wish_and_the_check_is_not_lost() {
+        let budget = budget(64);
+        let charge = budget
+            .try_reserve(Work::Live, 60 * KIB)
+            .unwrap()
+            .settle(60 * KIB);
+        let _backfill = budget.try_reserve(Work::Backfill, 2 * KIB).unwrap();
+        budget.want_release();
+        assert!(!budget.fits(Work::Live, 8 * KIB));
+        // A sink engine acknowledges the last batch on another thread, here.
+        drop(charge);
+        tokio::time::timeout(Duration::from_secs(60), budget.released())
+            .await
+            .expect("the engine waiting for a release is woken");
+        assert!(budget.fits(Work::Live, 8 * KIB), "room is back");
     }
 
     #[test]

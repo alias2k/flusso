@@ -220,10 +220,13 @@ impl Builds {
         let Some(budget) = &self.budget else {
             return true;
         };
+        // The wish comes first: a release landing between it and the check
+        // still wakes the engine (kept as a permit, costing at most one
+        // spurious wake), where a check first could lose it for good.
+        budget.want_release();
         if budget.fits(work, self.estimate(work, ids)) {
             return true;
         }
-        budget.want_release();
         self.refused.get_or_insert(work);
         let waiting = match work {
             Work::Live => &mut self.waiting.0,

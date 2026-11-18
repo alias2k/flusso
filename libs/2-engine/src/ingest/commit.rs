@@ -18,6 +18,7 @@ use stream::{Batch, Hold, LaneItem, LaneKey, Producer};
 use tokio::time::Instant;
 
 use super::builds::{Builds, Built, Grant, Job};
+use super::confirm::CONFIRM_TICK;
 use super::live::PendingBatch;
 use super::snapshot::Snapshot;
 use super::{IngestEngine, Lanes, document_id};
@@ -102,7 +103,9 @@ impl IngestEngine {
                 // budget, which the sinks' acknowledgements free.
                 match (pending.count > 0, builds.refused(), self.budget.as_deref()) {
                     (true, Some(_), Some(budget)) => {
-                        budget.released().await;
+                        // The release wakes this; the timeout is a backstop
+                        // should one ever go unheard.
+                        let _ = tokio::time::timeout(CONFIRM_TICK, budget.released()).await;
                         continue;
                     }
                     _ => return Ok(()),
