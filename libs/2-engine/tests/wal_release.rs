@@ -627,8 +627,9 @@ async fn deploy(url: &str, spec: SourceSpec, sinks: Vec<SinkSpec>, tuning: Tunin
             .boxed(),
         );
     }
-    let ingest =
-        IngestEngine::new(capture, documents, stream, names, progress).with_batch(tuning.batch);
+    let ingest = IngestEngine::new(capture, documents, stream, names, progress)
+        .with_builds(common::e2e_builds())
+        .with_batch(tuning.batch);
     engines.push(async move { ingest.run().await }.boxed());
     let stopped = Arc::new(Mutex::new(None));
     let outcome = Arc::clone(&stopped);

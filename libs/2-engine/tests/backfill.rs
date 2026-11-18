@@ -337,12 +337,12 @@ async fn backfill(port: u16, url: &str, sink: Arc<RecordingSink>) -> Vec<String>
     sink_engine.stage(continuity).await.unwrap();
     // Small batches: a document built from a related row in one batch and
     // from its own root row in another is built twice.
-    let ingest = IngestEngine::new(capture, documents, stream, vec![name], progress).with_batch(
-        BatchPolicy {
+    let ingest = IngestEngine::new(capture, documents, stream, vec![name], progress)
+        .with_builds(common::e2e_builds())
+        .with_batch(BatchPolicy {
             max_changes: 4,
             max_delay: Duration::from_millis(10),
-        },
-    );
+        });
     let (_control, mut control_rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
     let mut engine = tokio::spawn(async move {
         tokio::select! {

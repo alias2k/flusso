@@ -52,6 +52,14 @@ The workspace lints deny `unwrap_used` and `expect_used`, and test targets use `
 
 The `#[ignore]`d suites spin up containers with `testcontainers`. They're legitimately slow and occasionally flaky, so `.config/nextest.toml` puts each binary in a test group by what it needs and retries it twice: the `docker` group (no OpenSearch, eight at a time) and the `opensearch` group (anything with OpenSearch, one at a time). Both groups get a longer slow-timeout than ordinary tests, a little longer still under the `ci` profile; `.config/nextest.toml` holds the numbers. A new e2e binary must be added to the filtersets in both profiles.
 
+### How many builds
+
+The engine's Postgres e2e binaries (`pipeline`, `wal`, `wal_release`, `visibility`, `backfill`, `keyset_backfill`, `type_change`, `bytea_output`) run their ingest engine with `builds = 4`, the daemon's default, so they test what a deployment runs. `FLUSSO_E2E_BUILDS` sets another number for the whole run; `1` builds one batch at a time:
+
+```sh
+FLUSSO_E2E_BUILDS=1 cargo nextest run -p flusso-engine --run-ignored all -E 'binary(wal)'
+```
+
 ### Which Postgres
 
 Every test and bench that starts Postgres takes its image from one place, `dev/test-postgres` (`flusso-test-postgres`, unpublished, a dev-dependency only): `postgres:16-alpine`. `FLUSSO_TEST_PG_TAG` names another tag of the official image for the whole run, with no code change:

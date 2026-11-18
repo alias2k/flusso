@@ -710,7 +710,8 @@ async fn run_deployment(
         Arc::clone(&progress),
     );
     sink_engine.stage(continuity).await?;
-    let ingest = IngestEngine::new(capture, documents, stream, vec![name], progress);
+    let ingest = IngestEngine::new(capture, documents, stream, vec![name], progress)
+        .with_builds(common::e2e_builds());
     let (_control, mut control_rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
     tokio::select! {
         result = ingest.run() => result,

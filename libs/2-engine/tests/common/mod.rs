@@ -18,6 +18,15 @@ use source::SourceSpec;
 use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
+/// The builds an e2e ingest engine runs at once: `FLUSSO_E2E_BUILDS`, else
+/// 4, the daemon's `DEFAULT_BUILDS`: what a deployment runs.
+pub(crate) fn e2e_builds() -> usize {
+    std::env::var("FLUSSO_E2E_BUILDS")
+        .ok()
+        .and_then(|builds| builds.parse().ok())
+        .unwrap_or(4)
+}
+
 /// A PG 16 with logical replication, and its connection URL. PG 14+ is
 /// required: the replication client requests the pgoutput `messages` option.
 pub(crate) async fn start_postgres() -> (test_postgres::Container, String) {
