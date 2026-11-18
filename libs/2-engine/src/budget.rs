@@ -77,6 +77,21 @@ pub struct Budget {
     released: Notify,
     refused_live: AtomicU64,
     refused_backfill: AtomicU64,
+    #[cfg(test)]
+    after_check: AfterCheck,
+}
+
+/// A test's hook run once right after [`Budget::fits`] decided: where a
+/// release racing the engine's check lands.
+#[cfg(test)]
+#[derive(Default)]
+struct AfterCheck(std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>);
+
+#[cfg(test)]
+impl std::fmt::Debug for AfterCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AfterCheck")
+    }
 }
 
 impl Budget {
@@ -90,7 +105,19 @@ impl Budget {
             released: Notify::new(),
             refused_live: AtomicU64::new(0),
             refused_backfill: AtomicU64::new(0),
+            #[cfg(test)]
+            after_check: AfterCheck::default(),
         }
+    }
+
+    /// Run `hook` once, right after the next [`fits`](Self::fits) decides.
+    #[cfg(test)]
+    pub(crate) fn after_check(&self, hook: impl FnOnce() + Send + 'static) {
+        *self
+            .after_check
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(hook));
     }
 
     /// Count a batch of `work` the budget held back: once per wait, not per
@@ -154,14 +181,25 @@ impl Budget {
     /// bytes to `work` now.
     pub fn fits(&self, work: Work, estimate: usize) -> bool {
         let Held { total, backfill } = self.held();
-        match work {
+        let fits = match work {
             Work::Live => total - backfill == 0 || total.saturating_add(estimate) <= self.limit,
             Work::Backfill => {
                 backfill == 0
                     || (backfill.saturating_add(estimate) <= self.limit / 2
                         && total.saturating_add(estimate) <= self.limit)
             }
+        };
+        #[cfg(test)]
+        if let Some(hook) = self
+            .after_check
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            hook();
         }
+        fits
     }
 
     /// Say the engine waits for a release: the next release wakes

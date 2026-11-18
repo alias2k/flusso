@@ -509,3 +509,35 @@ fn share_any(left: &[u64], right: &[u64]) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::ingest::confirm::CONFIRM_TICK;
+
+    /// Stage-5 review: a release landing right after the budget refused a
+    /// batch, before anything else, still wakes the engine at once; the wake
+    /// isn't left to the confirm tick's backstop.
+    #[tokio::test(start_paused = true)]
+    async fn a_release_right_after_the_check_wakes_the_refused_engine() {
+        let budget = Arc::new(Budget::new(64 * 1024));
+        let charge = budget
+            .try_reserve(Work::Live, 60 * 1024)
+            .unwrap()
+            .settle(60 * 1024);
+        let mut builds = Builds::new(4, Some(Arc::clone(&budget)));
+        budget.after_check(move || drop(charge));
+
+        assert!(
+            !builds.affordable(Work::Live, 1),
+            "60 KiB held: a 16 KiB batch doesn't fit in 64"
+        );
+        tokio::time::timeout(CONFIRM_TICK - Duration::from_millis(1), budget.released())
+            .await
+            .expect("the release after the check wakes the engine before the confirm tick");
+        assert!(builds.affordable(Work::Live, 1), "and the batch is granted");
+    }
+}
