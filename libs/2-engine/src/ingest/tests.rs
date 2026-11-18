@@ -176,6 +176,8 @@ struct Feed {
     db: Arc<Database>,
     from: AtomicUsize,
     gaps: Option<Arc<Mutex<Rng>>>,
+    /// A fixed wait before each change, when set.
+    delay: Option<Duration>,
     open: bool,
     confirmed: Mutex<Vec<Position>>,
 }
@@ -186,9 +188,15 @@ impl Feed {
             db: Arc::clone(db),
             from: AtomicUsize::new(0),
             gaps: None,
+            delay: None,
             open: false,
             confirmed: Mutex::default(),
         }
+    }
+
+    fn with_delay(mut self, delay: Duration) -> Self {
+        self.delay = Some(delay);
+        self
     }
 
     fn with_gaps(mut self, seed: u64) -> Self {
@@ -221,6 +229,7 @@ impl ChangeCapture for Feed {
     async fn live(&self) -> source::Result<BoxStream<'static, source::Result<LiveChange>>> {
         let db = Arc::clone(&self.db);
         let gaps = self.gaps.clone();
+        let delay = self.delay;
         let open = self.open;
         let from = self.from.load(Ordering::SeqCst);
         Ok(Box::pin(futures::stream::unfold(from, move |next| {
@@ -233,6 +242,9 @@ impl ChangeCapture for Feed {
                     }
                     return None;
                 };
+                if let Some(delay) = delay {
+                    tokio::time::sleep(delay).await;
+                }
                 if let Some(gaps) = gaps {
                     let gap = gaps.lock().unwrap().below(4);
                     if gap > 0 {
@@ -271,6 +283,8 @@ struct Behaviour {
     document_fails_once: Mutex<HashSet<i64>>,
     /// Every build takes this long.
     delay: Option<Duration>,
+    /// Every key page takes this long to read.
+    keys_delay: Option<Duration>,
 }
 
 /// Builds documents from the [`Database`], reading each version when the
@@ -445,6 +459,9 @@ impl DocumentBuilder for Builder {
         after: Option<&RowKey>,
         limit: usize,
     ) -> source::Result<Vec<RowKey>> {
+        if let Some(delay) = self.behaviour.keys_delay {
+            tokio::time::sleep(delay).await;
+        }
         let start = after.map_or(0, |after| id_of(after) + 1);
         Ok((start..self.db.rows).take(limit).map(key).collect())
     }
@@ -658,6 +675,10 @@ async fn schedule(seed: u64, builds: usize) {
     } else {
         1 + random.below(40) as i64
     };
+    // With a backfill, live changes write rows the backfill also builds:
+    // a row can change between its page's read and its build, and a page and
+    // a live batch can hold the same document.
+    let ids = if rows > 0 { ids.min(rows) } else { ids };
     let changes = 1 + random.below(120) as usize;
     let log: Vec<Change> = (0..changes)
         .map(|_| Change {
@@ -780,6 +801,103 @@ async fn a_lone_change_on_a_quiet_stream_still_commits_at_once() {
     assert!(started.elapsed() < Duration::from_secs(1));
     run.abort();
     sink.abort();
+}
+
+/// A backfill page and a live batch holding one document, in either order:
+/// the second waits for the first's build, reads the row after it, and lands
+/// after it, so the row's change between the page's read and its build ends
+/// indexed.
+#[tokio::test(start_paused = true)]
+async fn a_backfill_page_and_a_live_batch_of_one_document_build_one_after_the_other() {
+    for page_first in [true, false] {
+        // Rows 0..4, one page of four keys; the live change writes row 2.
+        let db = Database::new(4, vec![Change::upsert(2)]);
+        let builder = Builder::new(
+            &db,
+            Behaviour {
+                held: Mutex::new(HashSet::from([2])),
+                keys_delay: (!page_first).then_some(Duration::from_millis(5)),
+                ..Behaviour::default()
+            },
+        );
+        let feed = if page_first {
+            Feed::new(&db).with_delay(Duration::from_millis(5))
+        } else {
+            Feed::new(&db)
+        };
+        let mut deployment = Deployment::new(feed, Arc::clone(&builder), Recorder::seeded(false))
+            .ingest(|ingest| ingest.with_batch(batch(4)).with_builds(4));
+        let releaser = {
+            let builder = Arc::clone(&builder);
+            tokio::spawn(async move {
+                while builder.grants().len() < 1 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                assert_eq!(
+                    builder.grants().len(),
+                    1,
+                    "the second build of row 2 waits for the first"
+                );
+                builder.release(2);
+            })
+        };
+        deployment.run_to_end(0).await;
+        releaser.await.unwrap();
+
+        let expected = if page_first {
+            vec![vec![0, 1, 2, 3], vec![2]]
+        } else {
+            vec![vec![2], vec![0, 1, 2, 3]]
+        };
+        assert_eq!(builder.grants(), expected, "page first: {page_first}");
+        assert!(!builder.overlapped.load(Ordering::SeqCst));
+        assert!(
+            deployment.recorder.regressed.lock().unwrap().is_empty(),
+            "row 2 never went back to the page's older read (page first: {page_first})"
+        );
+        assert_eq!(deployment.recorder.state(), db.expected());
+        assert_eq!(deployment.recorder.state().get(&2), Some(&1));
+    }
+}
+
+/// On a stream that stays open, each change lands though the build before
+/// it ran on its own task: a partial live batch waits only while a live build
+/// runs, not for ever after.
+#[tokio::test(start_paused = true)]
+async fn changes_apart_on_an_open_stream_each_land_after_a_spawned_build() {
+    for builds in [1, 4] {
+        let db = Database::new(0, (0..3).map(Change::upsert).collect());
+        let builder = Builder::new(
+            &db,
+            Behaviour {
+                delay: Some(Duration::from_millis(10)),
+                ..Behaviour::default()
+            },
+        );
+        let mut deployment = Deployment::new(
+            Feed::new(&db).with_delay(Duration::from_millis(50)).open(),
+            builder,
+            Recorder::seeded(true),
+        )
+        .ingest(|ingest| ingest.with_batch(batch(256)).with_builds(builds));
+        let sink = deployment.start_sink().await;
+        let recorder = Arc::clone(&deployment.recorder);
+        let ingest = deployment.ingest;
+        let run = tokio::spawn(async move { ingest.run().await });
+        let started = tokio::time::Instant::now();
+        while recorder.positions().len() < 3 {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "builds {builds}: only {:?} landed",
+                recorder.positions()
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(recorder.positions(), vec![0, 1, 2]);
+        run.abort();
+        sink.abort();
+    }
 }
 
 #[tokio::test(start_paused = true)]
