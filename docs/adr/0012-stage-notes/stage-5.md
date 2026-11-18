@@ -258,3 +258,15 @@ The stage-5 review's items, each with its commit and what was run on it. "Whole 
 | the three-round table | `2612085a` | `run4.sh`: `flusso-bench --scenario {reference,complex} --scale default` at 512 / 128 / 32 MiB, 3 rounds | 18 runs, all exit 0 |
 
 Also run at `2612085a`: `cargo clippy --workspace`, `cargo check --workspace --all-targets --features flusso-source-postgres/bench,flusso-sink-opensearch/bench`, `cargo check -p flusso-cli --no-default-features`, `cargo fmt --all --check`: all clean.
+
+## Independent review at `2612085a` (with stage 8c), and what was done
+
+The review found the stage-5 fixes not sound until two items were fixed. The stage-8c items are in `stage-8c.md`.
+
+| item | finding | commit | check |
+| --- | --- | --- | --- |
+| 1 (high) | the `flusso-cli` test target didn't compile: a `stream::Batch` in `backends.rs`'s capacity test lacked `walked` (track A's port change crossed `3bf541c4`) | already fixed at the tip by `d4d2dff3`; confirmed with `cargo check --workspace --all-targets --features flusso-source-postgres/bench,flusso-sink-opensearch/bench`, now run before every push | builds |
+| 4 (medium) | nothing guarded the lost-release fix: with `affordable` swapped back to check-then-wish, every engine test still passed | `5945358b`: `ingest::builds::tests::a_release_right_after_the_check_wakes_the_refused_engine`, through a test-only hook in `Budget::fits` that drops a charge right after the check; paused time, the wake before `CONFIRM_TICK`, then the grant | passes; **fails with the order swapped** (run, `cargo nextest run -p flusso-engine -E 'test(a_release_right_after_the_check)'`) |
+| 9 (low, note) | one estimate per kind | below | n/a |
+
+**One estimate per kind throttles small documents behind large ones.** An index with large documents raises the average for every batch of its kind. Another index with small documents is then estimated as large, and gets about one batch in flight where its real size would fit several. That costs throughput, not liveness: rule 4 always grants a kind holding nothing one batch, and the real bytes are what is held. Stage 8a's per-index budget is where it goes away: each index gets its own average and its own half, so a heavy index's documents stop being averaged with a light one's.

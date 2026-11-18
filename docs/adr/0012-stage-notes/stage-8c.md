@@ -129,4 +129,28 @@ A page "A lane is stalled":
 | `/status` and gauge tests | `063bd120` | `cargo nextest run -p flusso-daemon -p flusso-cli` | 164 passed |
 | as built | `bafadd0c` | docs only | n/a |
 
-The exact promtool and helm commands are in `docs/src/contribute/testing.md` ("Alert rules and the chart").
+The exact promtool and helm commands are in `docs/src/contribute/testing.md` ("Alert rules and the chart"). The rule tests have since moved to `dev/prometheus/tests/` (review item 2, below).
+
+## Independent review at `2612085a`, and what was done
+
+The review found stage 8c not sound until the items below were fixed. Everything else it checked held:
+
+- age semantics: zero with nothing outstanding, a monotonic clock, snapshot items not registered, searchable lag not a stall, redelivery keeps the oldest;
+- the watcher's cost;
+- no stale metric series.
+
+| item | finding | decision / fix | commit | check |
+| --- | --- | --- | --- | --- |
+| 1 (high) | `flusso-cli` tests didn't compile (`walked`) | fixed at the tip by `d4d2dff3`; the `--all-targets` check now runs before every push | — | builds |
+| 2 (high) | the dev Prometheus exited 2: `rules/*.yml` also loaded the rule *tests* | tests moved to `dev/prometheus/tests/`, `rule_files: [../rules/flusso.rules.yml]` | `231a22c5` | on the compose mounts: `promtool check config` passes (exit 1 with the old layout); the real server starts ("Server is ready") |
+| 3 (medium) | the WAL branch paged a healthy catch-up and a landing lane (`wal_behind` includes unread WAL; an ingest restart charges every outstanding lane the whole lag) | coordinator's decision: `wal_behind` keeps meaning WAL the slot retains behind the lane. The alert splits into `reason: age` (> 600 s) and `reason: wal` (> 1 GiB **and** age > 60 s), each with its own summary. Docs: the gauge includes unread WAL, is computed from the lag polled every 15 s, and a failed poll keeps the last value | `991db4a7` | promtool: a catch-up with 2 GiB and age ≤ 1 s doesn't fire; 2 GiB behind a lane silent past 60 s fires after 5 min; the age case still fires at 16 min |
+| 5 (medium) | two rule copies, drifted, unguarded | the Helm copy rewritten to match the dev rules (causes, `FlussoVisibilityWait`'s remedy); `runbook_url` on every alert; `.github/scripts/test_alert_rule_copies.py` renders the template with the chart's defaults (stdlib) and compares | `991db4a7`, `a2008198` | 3 tests pass; one fails when a copy is edited |
+| 6 (low) | `pinned_by` disagreed with `Progress::landed` on a tie (one LSN, two seqs) | `Progress::pinned_by` (the lane `landed()` is decided by; track B's file, announced), used by `stall.rs` | `5490d8d6`, `308a4aa0` | `a_tie_at_one_source_position_names_the_lane_landed_is_decided_by` |
+| 7 (low) | no test that a restart keeps the age; a process restart resets it silently | daemon test `a_restarting_sink_engine_keeps_its_lanes_stall_age` (paused time, a sink failing every write, restarted with backoff). **Decided: a runbook note, not an alert.** The scrape job's name and the restart metric are deployment-specific: the runbook and the chart README give `up{job=…} == 0` and the pod restart count to alert on | `efdf1269`, `991db4a7` | passes |
+| 8 (low) | docs gaps | upgrade entry ("A stalled lane is named, measured and alerted on"), the chart README's "Alerts", `pinned_by` and `wal_behind_bytes` in the `/status` example | `c71c4a91` | `mdbook build docs`, `check-manual-links.sh` |
+
+**Where the WAL gate could hide something.** A lane that keeps landing, but more slowly than the source writes, never ages past 60 s, so neither branch fires while the slot's lag grows.
+
+- That isn't a stall: the lane moves.
+- The slot lag (`flusso:backlog_drain_eta_seconds`) is the signal there. No alert covers it today, as before this stage.
+- No case was found where the gate hides a lane that has stopped.
