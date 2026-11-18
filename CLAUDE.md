@@ -928,7 +928,8 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   which the daemon restarts with exponential backoff (1 s doubling to `max_restart_backoff`,
   default 60 s, reset to 1 s after a run that made progress: the sink engine's oldest unfinished
   lane item landed, `SinkEngine::advanced` (not any acknowledgement: a later item landing beside an
-  older one that then fails is no progress; guard `only_the_oldest_unfinished_item_landing_counts_as_progress`),
+  older one that then fails is no progress; guards `only_the_oldest_unfinished_item_landing_counts_as_progress`,
+  `a_write_landing_after_an_older_one_failed_is_no_progress`),
   or the ingest engine moved its source forward,
   `IngestEngine::advances`: `ChangeCapture::reached` past the furthest it reported (keepalives on a
   quiet stream count), or, only for a source that answers no `reached`, confirmed past its furthest

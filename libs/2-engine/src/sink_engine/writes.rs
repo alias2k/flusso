@@ -631,7 +631,8 @@ impl<'a> Run<'a> {
     /// come). It runs before the acknowledgement so a drain waits for it.
     ///
     /// `oldest`: the item was the oldest unfinished one in lane order, so the
-    /// sink moved forward (the supervisor's measure of progress).
+    /// sink moved forward (the supervisor's measure of progress), unless the
+    /// run already failed: an older item then failed and comes back first.
     async fn acknowledge(&mut self, handle: Box<dyn AckHandle>, oldest: bool) -> Result<()> {
         let idle = self.window.is_empty() && self.flights.is_empty() && self.lane.is_empty();
         if idle
@@ -654,7 +655,7 @@ impl<'a> Run<'a> {
             self.refresh_due();
         }
         handle.ack().await?;
-        if oldest {
+        if oldest && self.failure.is_none() {
             self.engine.advanced.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
