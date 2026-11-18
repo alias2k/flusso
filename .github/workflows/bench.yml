@@ -200,6 +200,14 @@ jobs:
           FLUSSO_BIN: ${{ github.workspace }}/target/release/flusso
         run: cargo run -p flusso-bench -- --scenario complex --scale ci --out bench-out/scenarios
 
+      - name: The memory budget binds (`reference`, default scale, 64 MiB)
+        env:
+          FLUSSO_BIN: ${{ github.workspace }}/target/release/flusso
+          FLUSSO_MAX_BUILT_MIB: "64"
+          FLUSSO_BUILDS: "4"
+          FLUSSO_WRITES: "4"
+        run: cargo run -p flusso-bench -- --scenario reference --scale default --out bench-out/budget --max-peak-rss-mib 224
+
       - name: Merge the data points
         run: |
           set -euo pipefail

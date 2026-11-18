@@ -91,6 +91,10 @@ struct Args {
     /// How many fresh + restart rounds `--startup` times.
     #[arg(long, default_value_t = 3)]
     runs: usize,
+    /// Fail the run when flusso's peak RSS passes this many MiB: a check that
+    /// the memory budget (`FLUSSO_MAX_BUILT_MIB`) still binds.
+    #[arg(long, value_name = "MIB")]
+    max_peak_rss_mib: Option<f64>,
 }
 
 #[tokio::main]
@@ -128,7 +132,18 @@ async fn main() -> Result<()> {
             report.write(&out)?;
             report.log();
             tracing::info!(dir = %out.display(), "report written");
-            Ok(())
+            let peak = report
+                .smaller
+                .iter()
+                .find(|point| point.name.ends_with("/peak_rss_mib"))
+                .map(|point| point.value);
+            match (args.max_peak_rss_mib, peak) {
+                (Some(cap), Some(peak)) if peak > cap => anyhow::bail!(
+                    "flusso's peak RSS was {peak:.0} MiB, past the cap of {cap:.0} MiB: \
+                     is the memory budget still binding?"
+                ),
+                _ => Ok(()),
+            }
         }
         Err(error) => {
             let failure = Failure {

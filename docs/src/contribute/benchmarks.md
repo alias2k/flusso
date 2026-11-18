@@ -121,6 +121,8 @@ Two scales, `ci` and `default`; the presets are in `dev/bench/src/scale.rs`. The
 
 Caps: a wall-clock cap for the whole run and an RSS cap on the child. Either one failing writes `failure.json` with the phase and reason and turns the job red.
 
+**The memory budget's check.** `--max-peak-rss-mib <MiB>` fails a run whose flusso peaked above it. `just bench-budget` runs `reference` at default scale with `FLUSSO_MAX_BUILT_MIB=64`, `FLUSSO_BUILDS=4` and `FLUSSO_WRITES=4`, capped at 224 MiB. The cap leaves room for about 100 MiB of working set plus the 64 MiB budget; without a binding budget the backfill peaks near 350 MiB. CI runs it on every push to `main` (`scenarios` job), so a change that stops the budget binding fails a step, not just a dashboard. It is not a data point.
+
 ## Running locally
 
 ```sh
