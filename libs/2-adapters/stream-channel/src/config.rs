@@ -18,8 +18,10 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 #[adapter(port = stream, kind = "channel")]
 pub struct ChannelConfig {
-    /// Changes buffered between capture and processing before capture waits.
-    /// A bounded buffer is what makes the slowest sink pace ingest.
+    /// Batches each lane queues before the ingest engine waits. A bounded
+    /// buffer is what makes the slowest sink pace ingest. A sink engine also
+    /// holds up to `writes` + 32 batches it has taken and not yet
+    /// acknowledged, outside this bound.
     #[serde(default = "default_capacity")]
     pub capacity: usize,
 }

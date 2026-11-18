@@ -1,6 +1,6 @@
 //! The [`Sink`] trait implementation: how the sink engine's `ensure_index` /
-//! `apply` / `flush` / `is_seeded` / `mark_seeded` / `reindex` calls drive the
-//! alias-over-generations scheme and the bulk buffer. The
+//! `write` / `is_seeded` / `mark_seeded` / `reindex` calls drive the
+//! alias-over-generations scheme and the bulk writes. The
 //! lower-level pieces live in [`transport`](crate), [`generations`](crate),
 //! [`mapping`](crate), and [`bulk`](crate).
 
@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 use async_trait::async_trait;
 use kernel::{Envelope, IndexMapping, IndexName, Op};
-use sink::{FlushReport, RejectedDocument, Result, Sink, SinkError, Visibility};
+use sink::{RejectedDocument, Result, Sink, SinkError, Visibility, WriteReport};
 use tracing::{debug, info, warn};
 
 use crate::bulk::{BulkAction, bulk_action_fragment, plan_chunks, refused_id, render_document};
@@ -38,7 +38,7 @@ impl Sink for OpensearchSink {
     ///   a "rebuild this index on the next start" signal, never a way to end up
     ///   serving an empty index that claims to be seeded.
     ///
-    /// The outcome also picks where [`apply`](Self::apply) writes: a seeded
+    /// The outcome also picks where [`write`](Self::write) writes: a seeded
     /// index through its hash alias, an unseeded one through its generation.
     ///
     /// Safe to run for several indexes at once: each has its own meta
@@ -77,7 +77,7 @@ impl Sink for OpensearchSink {
 
         if self.index_exists(&index).await? {
             debug!(index, "generation exists; leaving its mapping untouched");
-            // What an earlier run flushed without a refresh is remembered
+            // What an earlier run wrote without a refresh is remembered
             // nowhere. One refresh per start makes it searchable, so a run can
             // begin from "everything written so far is searchable".
             if seeded {
@@ -102,6 +102,17 @@ impl Sink for OpensearchSink {
                 .await?;
         }
 
+        // A caught-up write may skip refreshing an index only when its own
+        // `?refresh=true` bulk refreshed all of it: one primary shard. Unknown
+        // counts as several.
+        let single_shard = match self.primary_shards(&index).await {
+            Ok(shards) => shards == Some(1),
+            Err(error) => {
+                debug!(%error, index = %index, "could not read the shard count; a caught-up write will refresh it separately");
+                false
+            }
+        };
+
         // Point the aliases at this generation when it's the live seeded one, or
         // the first generation (nothing else serving yet). A reindex of an
         // already-served index leaves the aliases on the old generation until
@@ -120,63 +131,47 @@ impl Sink for OpensearchSink {
                 generation: index,
                 hash_alias,
                 seeded,
+                single_shard,
             },
         );
         Ok(())
     }
 
-    /// Buffer one envelope's bulk action, addressed by its index's write
-    /// target (see `IndexTarget::write_target`).
+    /// Write `envelopes` as one or more bulk requests.
     ///
-    /// A failure drops everything buffered since the last flush: the engine
-    /// abandons the batch and the lane redelivers it whole, so keeping what
-    /// was already applied would write those documents twice.
-    async fn apply(&self, envelope: &Envelope) -> Result<()> {
-        match self.bulk_action(envelope) {
-            Ok(action) => {
-                self.buffer.lock().await.push(action);
-                Ok(())
-            }
-            Err(error) => {
-                self.buffer.lock().await.clear();
-                Err(error)
-            }
-        }
-    }
-
-    /// Drain the buffer and send all buffered operations to OpenSearch.
+    /// Each envelope becomes one bulk action, addressed by its index's write
+    /// target (see `IndexTarget::write_target`). Nothing is kept between
+    /// calls, so concurrent writes share only the targets and the set of
+    /// indexes left unrefreshed, each behind its own lock. Caught-up writes
+    /// refresh one at a time: a later one waits for an earlier refresh. A write that fails
+    /// before sending (an upsert carrying no document) sends nothing.
     ///
-    /// The drained operations are split into bulk requests bounded by **both**
-    /// caps: at most `batch_size` documents *and* at most `max_bytes` serialized
-    /// bytes per request, so a few large documents can't push a request past
+    /// The actions are split into bulk requests bounded by **both** caps: at
+    /// most `batch_size` documents *and* at most `max_bytes` serialized bytes
+    /// per request, so a few large documents can't push a request past
     /// OpenSearch's `http.max_content_length`. A single document larger than
     /// `max_bytes` is sent on its own (it can't be split) with a warning.
     ///
-    /// Refresh is forced **only when `caught_up`**: if this flush drained the
-    /// queue (no backlog behind it), the bulk requests carry `?refresh=true` so
-    /// the just-written documents are searchable immediately — cheap precisely
-    /// because the pipeline is idle. While a backlog is draining (`!caught_up`)
-    /// no refresh is forced; visibility is left to the index's configured
-    /// `refresh_interval`, keeping bulk indexing fast so the backlog clears (see
-    /// the module docs).
+    /// **Refresh is forced only when `caught_up`**: the requests carry
+    /// `?refresh=true`, and every index an earlier write left unrefreshed is
+    /// refreshed after them, so everything written by the writes that returned
+    /// before this one is searchable when it returns (`Immediate`). A write
+    /// that isn't caught up forces nothing, keeping bulk indexing fast while a
+    /// backlog drains; it reports `Within(refresh_interval)`, or `Deferred`
+    /// with automatic refresh off (`refresh_interval = "-1"`), and its indexes
+    /// are remembered for the next caught-up write.
     ///
-    /// The report says when the flush's documents become searchable
-    /// ([`Visibility`]): at once for a caught-up flush, within
-    /// `refresh_interval` otherwise. With automatic refresh off
-    /// (`refresh_interval = "-1"`) nothing else would ever make an unforced
-    /// flush searchable, so those indexes are remembered and the next
-    /// caught-up flush refreshes them.
-    ///
-    /// A missing target fails the whole flush, not one document (see the
+    /// A missing target fails the whole write, not one document (see the
     /// `bulk` module docs). An id OpenSearch would refuse before running the
     /// request (empty, or an upsert's past 512 bytes) is one rejected
-    /// document: it is never sent, so the rest of the flush still lands.
-    #[tracing::instrument(name = "os.flush", skip_all, fields(caught_up), err)]
-    async fn flush(&self, caught_up: bool) -> Result<FlushReport> {
-        let mut actions = {
-            let mut buf = self.buffer.lock().await;
-            std::mem::take(&mut *buf)
-        };
+    /// document: it is never sent, so the rest of the write still lands.
+    #[tracing::instrument(name = "os.write", skip_all, fields(documents = envelopes.len(), caught_up), err)]
+    async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> Result<WriteReport> {
+        let sent_at = self.lock_unrefreshed().point();
+        let mut actions = Vec::with_capacity(envelopes.len());
+        for envelope in envelopes {
+            actions.push(self.bulk_action(envelope)?);
+        }
 
         let mut rejected: Vec<RejectedDocument> = Vec::new();
         actions.retain(|action| match refused_id(action) {
@@ -194,8 +189,8 @@ impl Sink for OpensearchSink {
         });
 
         if actions.is_empty() && rejected.is_empty() {
-            let visibility = self.settle_visibility(caught_up, &actions).await;
-            return Ok(FlushReport::clean().visible(visibility).sent(0));
+            let visibility = self.settle_visibility(caught_up, &actions, sent_at).await;
+            return Ok(WriteReport::clean().visible(visibility).sent(0));
         }
 
         let mut fragments = Vec::with_capacity(actions.len());
@@ -218,7 +213,7 @@ impl Sink for OpensearchSink {
             documents = actions.len(),
             requests = plan.len(),
             bytes = total_bytes,
-            "flushing buffered operations",
+            "writing",
         );
 
         let mut start = 0usize;
@@ -247,8 +242,8 @@ impl Sink for OpensearchSink {
             }
         }
 
-        let visibility = self.settle_visibility(caught_up, &actions).await;
-        Ok(FlushReport::clean()
+        let visibility = self.settle_visibility(caught_up, &actions, sent_at).await;
+        Ok(WriteReport::clean()
             .rejecting(rejected)
             .visible(visibility)
             .sent(total_bytes as u64))
@@ -360,45 +355,55 @@ impl Sink for OpensearchSink {
 }
 
 impl OpensearchSink {
-    /// When the flush that just wrote `written` becomes searchable, settling
-    /// what earlier flushes left behind.
+    /// When the write that just sent `written` becomes searchable.
     ///
-    /// A caught-up flush forced a refresh of what it wrote; it also refreshes
-    /// the indexes earlier flushes wrote with automatic refresh off, so
-    /// `Immediate` covers them as the port requires. If that refresh fails the
-    /// documents are still durable: the flush reports `Deferred` and the next
-    /// caught-up flush tries again.
-    async fn settle_visibility(&self, caught_up: bool, written: &[BulkAction]) -> Visibility {
+    /// A write that isn't caught up leaves its indexes to the next caught-up
+    /// write, and to the periodic refresh while one is set. A caught-up write
+    /// forced a refresh of what it sent; it also refreshes every index earlier
+    /// writes left, so `Immediate` covers every write that returned before it,
+    /// as the port requires. If that refresh fails the documents are still
+    /// durable: the indexes stay remembered for the next caught-up write, and
+    /// the write reports what the periodic refresh promises.
+    async fn settle_visibility(
+        &self,
+        caught_up: bool,
+        written: &[BulkAction],
+        sent_at: u64,
+    ) -> Visibility {
+        let unforced = match self.refresh_period() {
+            Some(period) => Visibility::Within(period),
+            None => Visibility::Deferred,
+        };
         if !caught_up {
-            return match self.refresh_period() {
-                Some(_) if written.is_empty() => Visibility::Immediate,
-                Some(period) => Visibility::Within(period),
-                None => {
-                    let mut unrefreshed = self.lock_unrefreshed();
-                    unrefreshed.extend(written.iter().map(|action| action.index().to_owned()));
-                    if unrefreshed.is_empty() {
-                        Visibility::Immediate
-                    } else {
-                        Visibility::Deferred
-                    }
-                }
-            };
+            if written.is_empty() {
+                return Visibility::Immediate;
+            }
+            self.lock_unrefreshed()
+                .mark(written.iter().map(|action| action.index().to_owned()));
+            return unforced;
         }
-        let pending = std::mem::take(&mut *self.lock_unrefreshed());
+        // One caught-up refresh at a time: a second one waits here, then sees
+        // what this one put back if it failed, so neither answers `Immediate`
+        // before a refresh covering the earlier writes succeeded.
+        let _refreshing = self.refreshing.lock().await;
+        let pending = self.lock_unrefreshed().take_uncovered(sent_at, |index| {
+            written.iter().any(|action| action.index() == index) && self.single_shard(index)
+        });
         if pending.is_empty() {
             return Visibility::Immediate;
         }
-        match self.refresh_indexes(&pending).await {
+        let names: BTreeSet<String> = pending.keys().cloned().collect();
+        match self.refresh_indexes(&names).await {
             Ok(()) => Visibility::Immediate,
             Err(error) => {
-                warn!(%error, "could not refresh indexes written without a refresh; retrying on the next caught-up flush");
-                self.lock_unrefreshed().extend(pending);
-                Visibility::Deferred
+                warn!(%error, "could not refresh indexes earlier writes left unrefreshed; retrying on the next caught-up write");
+                self.lock_unrefreshed().restore(pending);
+                unforced
             }
         }
     }
 
-    fn lock_unrefreshed(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
+    fn lock_unrefreshed(&self) -> std::sync::MutexGuard<'_, crate::refresh::Unrefreshed> {
         self.unrefreshed
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

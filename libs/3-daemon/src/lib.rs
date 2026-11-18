@@ -81,6 +81,21 @@ pub fn batch_policy(config: &Config) -> BatchPolicy {
     }
 }
 
+/// Lane items each sink writes at once when `[concurrency] writes` is unset.
+/// End to end on `reference` (#408) backfill ran about 1.4× one write at 2
+/// and 4, slower at 8; the 3× of ADR 0012 was raw OpenSearch bulk throughput
+/// in its prototype.
+pub const DEFAULT_WRITES: usize = 4;
+
+/// Lane items each sink writes at once: `[concurrency] writes`, else
+/// [`DEFAULT_WRITES`].
+pub fn writes(config: &Config) -> usize {
+    config
+        .concurrency
+        .writes
+        .map_or(DEFAULT_WRITES, NonZeroUsize::get)
+}
+
 /// A configured-but-not-yet-running deployment over one [`Config`].
 #[derive(Debug)]
 pub struct Daemon {
@@ -205,6 +220,7 @@ impl Daemon {
                     mappings.clone(),
                 )
                 .with_options(parts.options)
+                .with_writes(writes(&config))
                 .with_observer(Arc::clone(&observer))
                 .with_failure_policies(failure_policies.clone())
                 .skip_backfill(options.skip_backfill)

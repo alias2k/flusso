@@ -50,7 +50,7 @@ Per index, an `[[index]]` entry's `[index.sinks.<name>]` table takes `index_sett
   `{"type": "object", "enabled": false}`: kept in `_source`, nothing under it
   mapped or searchable.
 - **Refresh.** Off during seeding; flips to `refresh_interval` once seeded; an
-  immediate refresh on any caught-up flush.
+  immediate refresh on any caught-up write, covering every write before it.
 - **Seeding.** Persisted in a hidden `flusso_meta` index, so restarts skip a
   completed backfill. A marker whose generation index is gone is retracted, so
   deleting the generation means "rebuild it" — on the next start, or, while
@@ -97,25 +97,26 @@ fully-typed mapping ([`ensure_index`](OpensearchSink::ensure_index)).
 ## Refresh — adapts to backlog
 
 The index is created with auto-refresh disabled (`refresh_interval: -1`) for
-fast bulk seeding; writes during backfill accumulate without per-flush refresh
+fast bulk seeding; writes during backfill accumulate without per-write refresh
 churn. When seeding completes ([`mark_seeded`](OpensearchSink::mark_seeded)) the
 index is refreshed once and handed the configured `refresh_interval` (default
 `"10s"`) — the steady-state visibility ceiling. On top of that,
-[`flush`](OpensearchSink::flush) forces an immediate refresh whenever it's told
-the pipeline has *caught up* (no backlog behind the batch), so search is fresh
-when idle but indexing stays cheap while a backlog drains. The
-`refresh_interval` only bounds staleness during sustained backlog, when a
-caught-up flush never happens.
+[`write`](OpensearchSink::write) forces an immediate refresh whenever it's told
+the pipeline has *caught up* (nothing queued behind it), so search is fresh
+when idle but indexing stays cheap while a backlog drains. Every write that
+isn't caught up leaves the indexes it wrote to the next caught-up one, which
+refreshes them too: with several writes in flight, the last one granted isn't
+the last to finish, and the engine sends an empty caught-up write when it goes
+idle. The `refresh_interval` only bounds staleness during sustained backlog,
+when no write is caught up.
 
-Every flush reports when its documents become searchable
+Every write reports when its documents become searchable
 ([`Visibility`](sink::Visibility)): at once when caught up, within
-`refresh_interval` otherwise. That report is what a `searchable` fence waits
-on. With `refresh_interval = "-1"` nothing would ever refresh a flush made
-during a backlog, so the sink remembers the indexes it wrote and the next
-caught-up flush refreshes them.
+`refresh_interval` otherwise (`Deferred` with `refresh_interval = "-1"`). That
+report is what a `searchable` fence waits on.
 
-Operations are buffered in memory until `flush` is called. Large flushes are
-chunked by `batch_size` to stay within OpenSearch request limits. Seeding state
+Writes share no buffer, so several may run at once. A large write is chunked
+by `batch_size` and `max_bytes` to stay within OpenSearch request limits. Seeding state
 is persisted in a hidden `flusso_meta` index so restarts skip a completed
 backfill.
 
@@ -140,7 +141,7 @@ lives in the engine, not here; see the `flusso-engine` docs.
 - **A deleted generation fails the write.** A seeded index is written through
   its hash alias with `require_alias`, so a deleted generation can't be
   auto-created with a dynamic mapping. The `index_not_found_exception` fails the
-  whole [`flush`](OpensearchSink::flush), and the sink engine's restart
+  whole [`write`](OpensearchSink::write), and the sink engine's restart
   rebuilds the generation through `ensure_index`. An unseeded generation is
   still written by its concrete name. The gap and the recommended
   `action.auto_create_index` setting are in the

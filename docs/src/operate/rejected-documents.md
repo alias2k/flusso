@@ -4,11 +4,11 @@ Decide what a single bad document does to the pipeline, find the ones that were 
 
 ## When to use this
 
-OpenSearch accepted a bulk request but refused one document: a value that doesn't fit the mapping, a string too long for a keyword, a malformed date. This is an **item-level rejection**. A flush-wide failure (cluster down, request refused) is different and always stops the run until it recovers. So is a document refused because the cluster is busy (HTTP 429 or 503): it is [resent](../reference/sink-opensearch.md#retries), never quarantined.
+OpenSearch accepted a bulk request but refused one document: a value that doesn't fit the mapping, a string too long for a keyword, a malformed date. This is an **item-level rejection**. A write-wide failure (cluster down, request refused) is different and always stops the run until it recovers. So is a document refused because the cluster is busy (HTTP 429 or 503): it is [resent](../reference/sink-opensearch.md#retries), never quarantined.
 
 ## Steps
 
-1. **Know your policy.** The default `on_error = "stop"` halts the run on the first rejection and leaves the batch unconfirmed, so it's redelivered on restart and the same document stops it again. That's deliberate: dropping data is opt-in.
+1. **Know your policy.** The default `on_error = "stop"` halts the run on the first rejection and leaves the batch unconfirmed, so it's redelivered on restart and the same document stops it again. That's deliberate: dropping data is opt-in. With several [writes](../reference/config-toml.md#concurrency) per sink, batches for other documents that were written beside the rejected one, or started while its write was in flight, can land before the sink stops; the position stays before the rejected batch. After that every restart retries the rejected batch alone, so nothing further lands until it's fixed. A start of flusso retries its oldest unconfirmed batch alone: when that is an older batch already written, some batches past the rejected one can land again before it stops; nothing is lost.
 
 2. **Read the error.** With `stop`, the log names the index, the document id, and OpenSearch's reason. `/status` shows `phase: stopped` and `last_error`. Fix the source row or the schema (a `custom` type, a `default`, a wider type), then restart. A `Limit of total fields … exceeded` reason is fixed in config instead: raise the limit with [`index_settings`](../reference/sink-opensearch.md#index-settings), restart, and [reindex](reindex.md).
 

@@ -104,8 +104,11 @@ pub trait Stream: std::fmt::Debug + Send + Sync {
     /// The request lane.
     fn requests(&self) -> crate::Result<RequestLane>;
 
-    /// The lowest position every lane has acknowledged: what the source may
-    /// confirm. `None` until every lane has acknowledged a positioned batch.
+    /// What the source may confirm: the lowest, over every lane, of the last
+    /// position before that lane's oldest unacknowledged positioned item (a
+    /// lane with nothing unacknowledged counts its last delivered position).
+    /// Items are acknowledged in any order, so it is never simply the highest
+    /// acknowledgement. `None` until every lane has a position behind it.
     fn watermark(&self) -> Option<Position>;
 
     /// Whether every lane is drained: nothing queued and nothing delivered but

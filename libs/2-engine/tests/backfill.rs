@@ -62,23 +62,25 @@ impl RecordingSink {
 
 #[async_trait]
 impl Sink for RecordingSink {
-    async fn apply(&self, envelope: &Envelope) -> SinkResult<()> {
-        let document = envelope
-            .document
-            .as_ref()
-            .map(|document| sink::to_json(document).to_string())
-            .unwrap_or_default();
-        self.applied.lock().unwrap().push(format!(
-            "{} {} {} {document}",
-            envelope.op,
-            envelope.index.as_ref(),
-            envelope.id
-        ));
-        Ok(())
-    }
-
-    async fn flush(&self, _caught_up: bool) -> SinkResult<sink::FlushReport> {
-        Ok(sink::FlushReport::clean())
+    async fn write(
+        &self,
+        envelopes: &[Envelope],
+        _caught_up: bool,
+    ) -> SinkResult<sink::WriteReport> {
+        for envelope in envelopes {
+            let document = envelope
+                .document
+                .as_ref()
+                .map(|document| sink::to_json(document).to_string())
+                .unwrap_or_default();
+            self.applied.lock().unwrap().push(format!(
+                "{} {} {} {document}",
+                envelope.op,
+                envelope.index.as_ref(),
+                envelope.id
+            ));
+        }
+        Ok(sink::WriteReport::clean())
     }
 
     async fn is_seeded(&self, index: &IndexName) -> SinkResult<bool> {

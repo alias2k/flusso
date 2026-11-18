@@ -518,17 +518,19 @@ impl RecordingSink {
 
 #[async_trait]
 impl Sink for RecordingSink {
-    async fn apply(&self, envelope: &Envelope) -> SinkResult<()> {
-        self.applied.lock().unwrap().push(format!(
-            "{} {} {}",
-            envelope.op,
-            envelope.index.as_ref(),
-            envelope.id
-        ));
-        Ok(())
-    }
-
-    async fn flush(&self, _caught_up: bool) -> SinkResult<sink::FlushReport> {
+    async fn write(
+        &self,
+        envelopes: &[Envelope],
+        _caught_up: bool,
+    ) -> SinkResult<sink::WriteReport> {
+        for envelope in envelopes {
+            self.applied.lock().unwrap().push(format!(
+                "{} {} {}",
+                envelope.op,
+                envelope.index.as_ref(),
+                envelope.id
+            ));
+        }
         if let Some(open) = &self.open {
             while !open.load(Ordering::Acquire) {
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -539,7 +541,7 @@ impl Sink for RecordingSink {
             *self.last_flush.lock().unwrap() = Some(Instant::now());
             self.flushed.lock().unwrap().extend(applied);
         }
-        Ok(sink::FlushReport::clean())
+        Ok(sink::WriteReport::clean())
     }
 
     async fn mark_seeded(&self, _: &IndexName) -> SinkResult<()> {

@@ -294,21 +294,23 @@ fn mapping() -> IndexMapping {
 
 async fn load(sink: &OpensearchSink, mapping: &IndexMapping, seeds: &[Seed]) {
     sink.ensure_index(mapping).await.unwrap();
-    for (count, seed) in seeds.iter().enumerate() {
-        sink.apply(&Envelope::upsert(
-            mapping.index.clone(),
-            seed.id.as_str(),
-            doc(seed),
-            Some(Position(0)),
-            Utc::now(),
-        ))
-        .await
-        .unwrap();
-        if count % 5_000 == 4_999 {
-            sink.flush(false).await.unwrap();
-        }
+    let envelopes: Vec<Envelope> = seeds
+        .iter()
+        .map(|seed| {
+            Envelope::upsert(
+                mapping.index.clone(),
+                seed.id.as_str(),
+                doc(seed),
+                Some(Position(0)),
+                Utc::now(),
+            )
+        })
+        .collect();
+    let chunks = envelopes.chunks(5_000);
+    let last = chunks.len().saturating_sub(1);
+    for (i, chunk) in chunks.enumerate() {
+        sink.write(chunk, i == last).await.unwrap();
     }
-    sink.flush(true).await.unwrap();
     sink.mark_seeded(&mapping.index).await.unwrap();
 }
 

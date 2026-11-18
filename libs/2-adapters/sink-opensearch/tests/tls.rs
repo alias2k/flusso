@@ -57,6 +57,10 @@ use kernel::{
 use serde_json::Value;
 use sink::Sink;
 use sink_opensearch::{OpensearchConfig, OpensearchSink, TextAnalysis};
+
+#[path = "support/buffered.rs"]
+mod buffered;
+use buffered::Buffered;
 use testcontainers_modules::testcontainers::core::{ExecCommand, IntoContainerPort, WaitFor};
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::testcontainers::{ContainerAsync, GenericImage, ImageExt};
@@ -136,7 +140,7 @@ async fn wait_until_healthy(base: &str) {
     }
 }
 
-fn sink(base: &str, trust: Trust<'_>) -> OpensearchSink {
+fn sink(base: &str, trust: Trust<'_>) -> Buffered {
     let config = OpensearchConfig {
         url: Secret::Value(base.to_owned()),
         username: Some(Secret::Value("admin".to_owned())),
@@ -158,7 +162,9 @@ fn sink(base: &str, trust: Trust<'_>) -> OpensearchSink {
         auto_subfields: true,
         index_settings: Default::default(),
     };
-    OpensearchSink::from_config(&SinkName::try_new("secure").unwrap(), &config).unwrap()
+    Buffered::new(
+        OpensearchSink::from_config(&SinkName::try_new("secure").unwrap(), &config).unwrap(),
+    )
 }
 
 fn mapping(logical: &str) -> IndexMapping {

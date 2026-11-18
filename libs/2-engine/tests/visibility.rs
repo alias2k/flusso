@@ -768,17 +768,19 @@ impl Sink for DocumentSink {
         Ok(())
     }
 
-    async fn apply(&self, envelope: &Envelope) -> SinkResult<()> {
-        let key = format!("{} {}", envelope.index.as_ref(), envelope.id);
-        self.applied.lock().unwrap().push((
-            format!("{} {key}", envelope.op),
-            key,
-            envelope.document.as_ref().map(sink::to_json),
-        ));
-        Ok(())
-    }
-
-    async fn flush(&self, _caught_up: bool) -> SinkResult<sink::FlushReport> {
+    async fn write(
+        &self,
+        envelopes: &[Envelope],
+        _caught_up: bool,
+    ) -> SinkResult<sink::WriteReport> {
+        for envelope in envelopes {
+            let key = format!("{} {}", envelope.index.as_ref(), envelope.id);
+            self.applied.lock().unwrap().push((
+                format!("{} {key}", envelope.op),
+                key,
+                envelope.document.as_ref().map(sink::to_json),
+            ));
+        }
         let applied = std::mem::take(&mut *self.applied.lock().unwrap());
         let mut ops = self.ops.lock().unwrap();
         let mut documents = self.documents.lock().unwrap();
@@ -786,7 +788,7 @@ impl Sink for DocumentSink {
             ops.push(op);
             documents.insert(key, document);
         }
-        Ok(sink::FlushReport::clean())
+        Ok(sink::WriteReport::clean())
     }
 }
 

@@ -37,6 +37,7 @@ webpki-root-certs.workspace = true
 rustls.workspace = true
 
 [dev-dependencies]
+futures.workspace = true
 chrono = { workspace = true, features = ["clock"] }
 toml.workspace = true
 kernel.workspace = true

@@ -12,7 +12,7 @@ use kernel::{
     ColumnName, ContentHash, DatabaseSchema, Envelope, GenericValue, IndexMapping, IndexName,
     Position, SinkName, TableName,
 };
-use sink::{FlushReport, Sink};
+use sink::{Sink, WriteReport};
 use source::cdc::{ChangeCapture, ChangeEvent, Continuity, LiveChange};
 use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
 use source::{RowImage, RowKey, SnapshotTable};
@@ -212,16 +212,15 @@ impl IndexSink {
 
 #[async_trait]
 impl Sink for IndexSink {
-    async fn apply(&self, envelope: &Envelope) -> sink::Result<()> {
-        self.applied
-            .lock()
-            .unwrap()
-            .push(format!("{} {}", envelope.index.as_ref(), envelope.id));
-        Ok(())
-    }
-
-    async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
-        Ok(FlushReport::clean())
+    async fn write(&self, envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
+        for envelope in envelopes {
+            self.applied.lock().unwrap().push(format!(
+                "{} {}",
+                envelope.index.as_ref(),
+                envelope.id
+            ));
+        }
+        Ok(WriteReport::clean())
     }
 
     async fn is_seeded(&self, index: &IndexName) -> sink::Result<bool> {

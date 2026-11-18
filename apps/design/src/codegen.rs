@@ -698,6 +698,25 @@ mod tests {
     }
 
     #[test]
+    fn roundtrips_the_batch_and_concurrency_tables() {
+        let raw = r#"
+            [source]
+            type = "postgres"
+
+            [batch]
+            max_changes = 64
+
+            [concurrency]
+            writes = 8
+        "#;
+        let config = ConfigToml::try_parse(raw).unwrap();
+        let regenerated = config_to_toml(&config).unwrap();
+        let reparsed = ConfigToml::try_parse(&regenerated).unwrap();
+        assert_eq!(reparsed.concurrency.writes, std::num::NonZeroUsize::new(8));
+        assert!(regenerated.contains("[concurrency]"), "{regenerated}");
+    }
+
+    #[test]
     fn roundtrips_per_index_sink_options() {
         let raw = r#"
             [source]

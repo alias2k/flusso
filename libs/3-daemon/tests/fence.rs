@@ -44,7 +44,7 @@ use kernel::{
     Column, ColumnName, DatabaseSchema, Envelope, Field, FieldName, FieldSource, FlussoType,
     IndexName, IndexSchema, PortEntry, Secret, SinkName, TableName,
 };
-use sink::{FlushReport, Sink, SinkOptions};
+use sink::{Sink, SinkOptions, WriteReport};
 use sink_opensearch::OpensearchSink;
 use source::SourceSpec;
 use source_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
@@ -771,6 +771,7 @@ fn config() -> Config {
         )]),
         on_error: Default::default(),
         batch: Default::default(),
+        concurrency: Default::default(),
         server: Default::default(),
         prefix: String::new(),
     };
@@ -869,13 +870,9 @@ struct GatedSink {
 
 #[async_trait]
 impl Sink for GatedSink {
-    async fn apply(&self, _: &Envelope) -> sink::Result<()> {
-        Ok(())
-    }
-
-    async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
+    async fn write(&self, _envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
         let mut open = self.open.clone();
         let _ = open.wait_for(|open| *open).await;
-        Ok(FlushReport::clean())
+        Ok(WriteReport::clean())
     }
 }

@@ -1249,17 +1249,19 @@ struct DocumentSink(Arc<Mutex<Vec<(String, Value)>>>);
 
 #[async_trait]
 impl Sink for DocumentSink {
-    async fn apply(&self, envelope: &Envelope) -> SinkResult<()> {
-        let document = envelope
-            .document
-            .as_ref()
-            .map_or(Value::Null, sink::to_json);
-        self.0.lock().unwrap().push((envelope.id.clone(), document));
-        Ok(())
-    }
-
-    async fn flush(&self, _caught_up: bool) -> SinkResult<sink::FlushReport> {
-        Ok(sink::FlushReport::clean())
+    async fn write(
+        &self,
+        envelopes: &[Envelope],
+        _caught_up: bool,
+    ) -> SinkResult<sink::WriteReport> {
+        for envelope in envelopes {
+            let document = envelope
+                .document
+                .as_ref()
+                .map_or(Value::Null, sink::to_json);
+            self.0.lock().unwrap().push((envelope.id.clone(), document));
+        }
+        Ok(sink::WriteReport::clean())
     }
 }
 

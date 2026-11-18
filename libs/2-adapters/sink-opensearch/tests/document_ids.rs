@@ -41,6 +41,10 @@ use kernel::{
 use serde_json::{Value, json};
 use sink::{RejectedDocument, Sink};
 use sink_opensearch::OpensearchSink;
+
+#[path = "support/buffered.rs"]
+mod buffered;
+use buffered::Buffered;
 use testcontainers_modules::testcontainers::core::wait::HttpWaitStrategy;
 use testcontainers_modules::testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
@@ -68,7 +72,7 @@ async fn start_opensearch() -> (ContainerAsync<GenericImage>, String) {
 }
 
 /// A sink with no bulk retries, so a request-wide failure fails the flush at once.
-fn sink(base_url: &str) -> OpensearchSink {
+fn sink(base_url: &str) -> Buffered {
     let config = sink_opensearch::OpensearchConfig {
         url: kernel::Secret::Value(base_url.to_owned()),
         username: None,
@@ -87,7 +91,9 @@ fn sink(base_url: &str) -> OpensearchSink {
         auto_subfields: true,
         index_settings: Default::default(),
     };
-    OpensearchSink::from_config(&kernel::SinkName::try_new("test").unwrap(), &config).unwrap()
+    Buffered::new(
+        OpensearchSink::from_config(&kernel::SinkName::try_new("test").unwrap(), &config).unwrap(),
+    )
 }
 
 fn mapping(logical: &str) -> IndexMapping {
@@ -150,7 +156,7 @@ async fn existing(base: &str, target: &str, ids: &[&str]) -> BTreeSet<String> {
 }
 
 /// A logical index set up as the seeded (alias) or unseeded (generation) target.
-async fn prepare(base: &str, logical: &str, seeded: bool) -> (OpensearchSink, IndexName, String) {
+async fn prepare(base: &str, logical: &str, seeded: bool) -> (Buffered, IndexName, String) {
     let index = IndexName::try_new(logical).unwrap();
     let mapping = mapping(logical);
     let hash_alias = format!("{logical}_{}", mapping.hash);

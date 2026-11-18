@@ -11,28 +11,32 @@ The in-process stream adapter: one bounded `tokio` mpsc channel per sink lane pl
 | **Requests** | [`requests`](stream::Stream::requests): the upward lane sink engines put `Backfill` requests on |
 | **Backpressure** | `publish` waits when a lane is full — the slowest sink paces ingest |
 | **Redelivery** | every delivered item stays in an in-flight ledger until acked; nacked or dropped unacked → that delivery alone redelivered, in lane order |
-| **Watermark** | [`watermark`](stream::Stream::watermark) = the lowest position every lane has acked |
+| **Watermark** | [`watermark`](stream::Stream::watermark) = over every lane, the last position before its oldest unacknowledged positioned item |
 
 ## How it works
 
 Each lane is a bounded channel with a small ledger beside it: the items
 delivered but not yet acknowledged, in order, each under a ticket its ack
 handle carries. Several deliveries can be outstanding at once — the ingest
-engine holds every coalesced backfill request until the snapshot is published
-— and each acknowledges on its own. Acking removes the item and, for a lane
-batch, records its position; nacking a delivery, or dropping its handle
-unacked (an engine that died holding it), marks that delivery alone due: the
-next `recv` serves the earliest due one again before pulling anything new,
-and the deliveries still in flight are left alone. A released delivery can
-therefore come back after later ones were acknowledged, so a lane's order is
-the order of its documents only while its consumer keeps one delivery in
-flight, as the sink engine does. A restarted
-engine gets a fresh consumer over the same channel and is redelivered what
-its predecessor left.
+engine holds every coalesced backfill request until the snapshot is
+published, and a sink engine writes several lane items at once — and each
+acknowledges on its own, in any order. Acking removes the item; nacking a
+delivery, or dropping its handle unacked (an engine that died holding it),
+marks that delivery alone due: the next `recv` serves the earliest due one
+again before pulling anything new, and the deliveries still in flight are
+left alone. A released delivery can therefore come back after later ones were
+acknowledged: the channel keeps lane order, and the sink engine keeps the
+order of each document by never writing two items sharing one at once. A
+restarted engine gets a fresh consumer over the same channel and is
+redelivered what its predecessor left.
 
 The stream's [`watermark`](stream::Stream::watermark) is the minimum over
-lanes of each lane's last acknowledged position; snapshot batches carry no
-position and never move it. The ingest engine hands the watermark to the
+lanes of the last position each lane has behind its oldest unacknowledged
+positioned item: every entry records, when it is first delivered, the position
+delivered before it. Items are acknowledged in any order (the sink engine
+writes several at once), so the highest acknowledgement would pass an earlier
+item still being written. Snapshot batches carry no position and never move
+it. The ingest engine hands the watermark to the
 source as its confirmation, which is what ties every sink's durability into
 one resume point.
 

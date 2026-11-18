@@ -3,71 +3,71 @@ use kernel::{Envelope, IndexMapping, IndexName};
 
 use crate::Result;
 
-/// The outcome of a [`flush`](Sink::flush): which buffered documents the
-/// destination **rejected at the item level**.
+/// The outcome of a [`write`](Sink::write): which documents the destination
+/// **rejected at the item level**, and when the written ones become searchable.
 ///
-/// This is distinct from a flush returning `Err`. An `Err` is a flush-wide
-/// failure (transport down, the whole request refused) — nothing in the batch
-/// is known durable, so the sink engine stops and the batch is redelivered. A
-/// `FlushReport` instead means the flush *succeeded* and the destination applied
-/// the batch, but rejected specific documents (a mapping conflict, a malformed
+/// This is distinct from a write returning `Err`. An `Err` is a write-wide
+/// failure (transport down, the whole request refused) — nothing in the write
+/// is known durable, so the sink engine stops and the lane redelivers it. A
+/// `WriteReport` instead means the write *succeeded* and the destination applied
+/// it, but rejected specific documents (a mapping conflict, a malformed
 /// value) while accepting the rest. Those rejections are the document's fault,
 /// not the destination's, so retrying redelivers the same poison — the engine
 /// handles them per its failure policy (stop, or quarantine and continue)
-/// instead of looping. An empty report means everything flushed cleanly.
-/// Built with [`FlushReport::clean`] and its builders; more fields may come.
+/// instead of looping. An empty report means everything was written cleanly.
+/// Built with [`WriteReport::clean`] and its builders; more fields may come.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
-pub struct FlushReport {
-    /// Documents the destination accepted the batch but rejected individually.
+pub struct WriteReport {
+    /// Documents the destination accepted the write but rejected individually.
     pub rejected: Vec<RejectedDocument>,
-    /// When what this flush wrote can be *searched*, as opposed to fetched by
-    /// id. The sink only reports what its flush did; the sink engine turns the
+    /// When what this write wrote can be *searched*, as opposed to fetched by
+    /// id. The sink only reports what its write did; the sink engine turns the
     /// reports into the sink's searchable position.
     pub visibility: Visibility,
-    /// Bytes the flush sent to the destination, when the sink counts them
+    /// Bytes the write sent to the destination, when the sink counts them
     /// (the OpenSearch sink: its `_bulk` bodies). Reported as a metric only.
     pub bytes: Option<u64>,
 }
 
-/// When the documents of one [`flush`](Sink::flush) become searchable.
+/// When the documents of one [`write`](Sink::write) become searchable.
 ///
 /// Applied and searchable are different moments for a destination that
-/// refreshes on a schedule: a flushed document is fetched by id at once but
+/// refreshes on a schedule: a written document is fetched by id at once but
 /// matched by a search only after the next refresh. A sink reports which of
-/// the three applies to the flush it just did; it never refreshes because
+/// the three applies to the write it just did; it never refreshes because
 /// somebody is waiting.
 ///
 /// ```
-/// use sink::{FlushReport, Visibility};
+/// use sink::{Visibility, WriteReport};
 /// use std::time::Duration;
 ///
-/// assert_eq!(FlushReport::clean().visibility, Visibility::Immediate);
-/// let lagging = FlushReport::clean().visible(Visibility::Within(Duration::from_secs(10)));
+/// assert_eq!(WriteReport::clean().visibility, Visibility::Immediate);
+/// let lagging = WriteReport::clean().visible(Visibility::Within(Duration::from_secs(10)));
 /// assert_eq!(lagging.visibility, Visibility::Within(Duration::from_secs(10)));
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Visibility {
-    /// Searchable as the flush returned. The default: right for a destination
-    /// with no such distinction, and for a flush that wrote nothing.
+    /// Searchable as the write returned. The default: right for a destination
+    /// with no such distinction, and for a write that wrote nothing.
     #[default]
     Immediate,
-    /// Searchable within this long of the flush returning (the destination's
+    /// Searchable within this long of the write returning (the destination's
     /// own periodic refresh).
     Within(std::time::Duration),
-    /// Not searchable until a later flush of this sink reports
-    /// [`Immediate`](Self::Immediate), which then covers this one too. A sink
-    /// that reports this must make that true.
+    /// Not searchable until a later *caught-up* write of this sink returns
+    /// (see [`Sink::write`]), which then covers this one too. A sink that
+    /// reports this must make that true.
     Deferred,
 }
 
-impl FlushReport {
-    /// A report with no rejections — everything in the flush was applied.
+impl WriteReport {
+    /// A report with no rejections — everything in the write was applied.
     pub fn clean() -> Self {
         Self::default()
     }
 
-    /// Set when the flush's documents become searchable.
+    /// Set when the write's documents become searchable.
     #[must_use]
     pub fn visible(mut self, visibility: Visibility) -> Self {
         self.visibility = visibility;
@@ -81,21 +81,20 @@ impl FlushReport {
         self
     }
 
-    /// Set how many bytes the flush sent.
+    /// Set how many bytes the write sent.
     #[must_use]
     pub fn sent(mut self, bytes: u64) -> Self {
         self.bytes = Some(bytes);
         self
     }
 
-    /// Whether the flush applied every buffered document (no item-level
-    /// rejections).
+    /// Whether the write applied every document (no item-level rejections).
     pub fn is_clean(&self) -> bool {
         self.rejected.is_empty()
     }
 }
 
-/// One document a sink rejected at the item level during a [`flush`](Sink::flush).
+/// One document a sink rejected at the item level during a [`write`](Sink::write).
 /// The names are the destination's own (e.g. an OpenSearch physical index), for
 /// diagnostics and quarantine records.
 #[derive(Debug, Clone)]
@@ -126,20 +125,21 @@ impl Default for SinkOptions {
 
 /// A destination for built documents.
 ///
-/// A sink engine calls [`apply`](Self::apply) for each envelope of a batch,
-/// then [`flush`](Self::flush) once at the batch boundary — so a buffering sink
-/// (e.g. OpenSearch bulk) can hold writes until then, while a streaming sink
-/// can write immediately and flush cheaply. Sinks never build a document: the
-/// envelope carries the built document, its id, and its position.
+/// A sink engine hands each lane item's envelopes to [`write`](Self::write),
+/// with several writes in flight at once: the engine never runs two writes
+/// holding the same document at the same time, so a sink needs no ordering of
+/// its own, only state that is safe to share between concurrent calls. Sinks
+/// never build a document: the envelope carries the built document, its id,
+/// and its position.
 ///
 /// **Staging is concurrent across indexes.** The sink engine stages a sink's
 /// indexes several at a time: [`ensure_index`](Self::ensure_index),
 /// [`is_seeded`](Self::is_seeded) and [`reindex`](Self::reindex) may run at
 /// once for *different* indexes, never two at once for the same index, and
-/// never beside [`apply`](Self::apply), [`flush`](Self::flush) or
-/// [`mark_seeded`](Self::mark_seeded) (staging happens before the first batch
-/// and between two batches). State a sink shares between indexes, such as one
-/// metadata store, must take concurrent writes for different indexes.
+/// never beside [`write`](Self::write) or [`mark_seeded`](Self::mark_seeded)
+/// (staging happens before the first write and once the writes in flight have
+/// returned). State a sink shares between indexes, such as one metadata store,
+/// must take concurrent writes for different indexes.
 #[async_trait]
 pub trait Sink: std::fmt::Debug + Send + Sync {
     /// Ensure the destination index exists, creating it from `mapping` if it is
@@ -159,34 +159,35 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
         Ok(())
     }
 
-    /// Apply one envelope: index the document on an upsert, remove it on a
-    /// delete. An emitting sink forwards the envelope as-is.
+    /// Write `envelopes`: index each upserted document, remove each deleted
+    /// one, or forward them for an emitting sink. Several calls may run at
+    /// once; no two of them hold the same document.
     ///
-    /// An `Err` abandons the batch: the engine stops and the lane redelivers
-    /// the batch whole, to this same sink. A sink that buffers until
-    /// [`flush`](Self::flush) drops what the batch buffered before the error,
-    /// or the redelivered batch writes it twice.
-    async fn apply(&self, envelope: &Envelope) -> Result<()>;
-
-    /// Flush any buffered writes so everything applied so far is durable.
+    /// `caught_up` tells the sink the engine has nothing else queued behind
+    /// this write. A sink whose destination has a cost to making writes
+    /// *searchable* (distinct from durable) pays it only then: a caught-up
+    /// write makes searchable everything written by every write that
+    /// **returned before this call**, as well as its own documents, and
+    /// reports [`Visibility::Immediate`]. The engine sends an empty caught-up
+    /// write when it goes idle with written documents not yet searchable, so
+    /// the last writes of a burst, which may finish after the last caught-up
+    /// one, don't wait for the next traffic. Sinks with no such distinction
+    /// ignore it. See the OpenSearch sink.
     ///
-    /// `caught_up` tells the sink the engine has drained its lane with this
-    /// batch — there is no backlog waiting behind it. A sink whose destination
-    /// has a cost to making writes *visible* (distinct from durable) can use
-    /// this to take that cost only when it's cheap: do it on a caught-up flush
-    /// (the lane is idle), skip it while a backlog is draining. Sinks with no
-    /// such distinction ignore it. See the OpenSearch sink, which forces an
-    /// index refresh only when `caught_up`.
-    ///
-    /// Returns a [`FlushReport`]: `Ok` with an empty report means every buffered
-    /// document was applied; `Ok` with rejections means the flush succeeded but
-    /// the destination refused specific documents (see [`FlushReport`] for why
-    /// that differs from an `Err`). `Err` is a flush-wide failure. A write whose
-    /// *target* is gone (the destination index was deleted under the sink) is
-    /// flush-wide too: every document bound for it would fail the same way, and
-    /// the engine's restart re-runs [`ensure_index`](Self::ensure_index), which
-    /// is where the target is rebuilt.
-    async fn flush(&self, caught_up: bool) -> Result<FlushReport>;
+    /// Returns a [`WriteReport`]: `Ok` with an empty report means every
+    /// document was applied; `Ok` with rejections means the write succeeded
+    /// but the destination refused specific documents (see [`WriteReport`] for
+    /// why that differs from an `Err`). A document the destination refuses for
+    /// now (busy) is retried inside the write and never reported; still
+    /// refused after the sink's retries, it fails the write. `Err` is
+    /// write-wide: nothing in the write is known applied, and the lane
+    /// redelivers it to the restarted engine, which writes it again whole. A
+    /// write whose *target* is gone (the destination index was deleted under
+    /// the sink) is write-wide too: every document bound for it would fail the
+    /// same way, and the engine's restart re-runs
+    /// [`ensure_index`](Self::ensure_index), which is where the target is
+    /// rebuilt.
+    async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> Result<WriteReport>;
 
     /// Whether `index` has already been seeded — its initial backfill completed
     /// and durably applied here. The sink engine asks this at startup, after
@@ -234,5 +235,16 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// the index, not the running engine's state.
     async fn reindex(&self, _: &IndexMapping) -> Result<()> {
         Ok(())
+    }
+
+    /// Whether the destination is a stream its readers consume in order (an
+    /// emitting sink, such as stdout): the engine then hands it lane items in
+    /// exact lane order, one write at a time, whatever `[concurrency] writes`
+    /// says, with no live item overtaking an earlier backfill page. The
+    /// default `false` lets the engine write several items at once and order
+    /// them per document only, which a destination keyed by document id (a
+    /// search index) is indifferent to.
+    fn ordered(&self) -> bool {
+        false
     }
 }

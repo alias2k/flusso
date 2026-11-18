@@ -166,7 +166,11 @@ async fn several_deliveries_can_be_outstanding_and_ack_independently() {
     assert!(!stream.is_idle(), "but three are unacknowledged");
 
     second_handle.ack().await.unwrap();
-    assert_eq!(stream.watermark(), Some(Position(2)));
+    assert_eq!(
+        stream.watermark(),
+        None,
+        "2 is acknowledged, but 1 before it is not"
+    );
     first_handle.nack().await.unwrap();
     drop(third_handle);
 
@@ -178,6 +182,40 @@ async fn several_deliveries_can_be_outstanding_and_ack_independently() {
     handle.ack().await.unwrap();
     assert!(stream.is_idle());
     assert_eq!(stream.watermark(), Some(Position(3)));
+}
+
+/// A handle dropped without an ack makes its delivery due: the lane is not
+/// empty, and the next `recv` hands it back before anything newer. An acked
+/// handle dropped afterwards leaves nothing behind: no redelivery, and the
+/// lane reads empty and idle.
+#[tokio::test]
+async fn only_a_handle_dropped_unacked_is_redelivered() {
+    let stream = ChannelStream::new(8, [sink("a")]);
+    let lane = stream.lane(&sink("a")).unwrap();
+    lane.producer.publish(batch(1)).await.unwrap();
+    lane.producer.publish(batch(2)).await.unwrap();
+    let mut consumer = lane.consumer;
+
+    let (_, acked) = consumer.recv().await.unwrap().unwrap().into_parts();
+    acked.ack().await.unwrap();
+    let (_, dropped) = consumer.recv().await.unwrap().unwrap().into_parts();
+    assert!(consumer.is_empty(), "nothing queued, nothing due");
+    drop(dropped);
+    assert!(!consumer.is_empty(), "the dropped delivery is due");
+
+    let (again, handle) = consumer.recv().await.unwrap().unwrap().into_parts();
+    assert_eq!(again.position(), Some(Position(2)), "it comes back");
+    handle.ack().await.unwrap();
+    assert!(consumer.is_empty());
+    assert!(stream.is_idle());
+    let mut next = consumer.recv();
+    let polled = next
+        .as_mut()
+        .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()));
+    assert!(
+        polled.is_pending(),
+        "nothing is redelivered for the acked handles"
+    );
 }
 
 /// The caught-up hint is about what waits *behind* the current delivery: true
@@ -274,5 +312,60 @@ async fn released_deliveries_come_back_in_lane_order() {
     first.ack().await.unwrap();
     third.ack().await.unwrap();
     assert!(stream.is_idle());
+    assert_eq!(stream.watermark(), Some(Position(3)));
+}
+
+/// Deliveries acknowledged out of order (several writes in flight) never move
+/// the watermark past an earlier one still unacknowledged: it stays at the
+/// last positioned item before the oldest unacknowledged one.
+#[tokio::test]
+async fn a_later_ack_never_moves_the_watermark_past_an_earlier_unacked_item() {
+    let stream = ChannelStream::new(8, [sink("a")]);
+    let lane = stream.lane(&sink("a")).unwrap();
+    for position in 1..=4 {
+        lane.producer.publish(batch(position)).await.unwrap();
+    }
+    let mut consumer = lane.consumer;
+    let (_, first) = consumer.recv().await.unwrap().unwrap().into_parts();
+    let (_, second) = consumer.recv().await.unwrap().unwrap().into_parts();
+    let (_, third) = consumer.recv().await.unwrap().unwrap().into_parts();
+    let (_, fourth) = consumer.recv().await.unwrap().unwrap().into_parts();
+
+    fourth.ack().await.unwrap();
+    third.ack().await.unwrap();
+    assert_eq!(stream.watermark(), None, "1 and 2 are unacknowledged");
+
+    first.ack().await.unwrap();
+    assert_eq!(stream.watermark(), Some(Position(1)), "2 is unacknowledged");
+
+    second.ack().await.unwrap();
+    assert_eq!(stream.watermark(), Some(Position(4)));
+}
+
+/// A released delivery holds the watermark back until it is acknowledged on
+/// redelivery, even when later ones were acknowledged meanwhile; snapshot
+/// batches between them hold nothing back.
+#[tokio::test]
+async fn a_released_delivery_holds_the_watermark_until_it_is_acked() {
+    let stream = ChannelStream::new(8, [sink("a")]);
+    let lane = stream.lane(&sink("a")).unwrap();
+    lane.producer.publish(batch(1)).await.unwrap();
+    lane.producer.publish(snapshot_batch()).await.unwrap();
+    lane.producer.publish(batch(2)).await.unwrap();
+    lane.producer.publish(batch(3)).await.unwrap();
+    let mut consumer = lane.consumer;
+    let (_, first) = consumer.recv().await.unwrap().unwrap().into_parts();
+    let (_, page) = consumer.recv().await.unwrap().unwrap().into_parts();
+    let (_, second) = consumer.recv().await.unwrap().unwrap().into_parts();
+    let (_, third) = consumer.recv().await.unwrap().unwrap().into_parts();
+    first.ack().await.unwrap();
+    page.ack().await.unwrap();
+    third.ack().await.unwrap();
+    second.nack().await.unwrap();
+    assert_eq!(stream.watermark(), Some(Position(1)));
+
+    let (again, handle) = consumer.recv().await.unwrap().unwrap().into_parts();
+    assert_eq!(again.position(), Some(Position(2)));
+    handle.ack().await.unwrap();
     assert_eq!(stream.watermark(), Some(Position(3)));
 }

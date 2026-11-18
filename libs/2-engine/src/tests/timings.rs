@@ -129,16 +129,14 @@ impl SlowSink {
 
 #[async_trait]
 impl Sink for SlowSink {
-    async fn apply(&self, _: &Envelope) -> sink::Result<()> {
-        tokio::time::sleep(APPLY).await;
-        self.pending.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-
-    async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
+    async fn write(&self, envelopes: &[Envelope], _: bool) -> sink::Result<WriteReport> {
+        for _ in envelopes {
+            tokio::time::sleep(APPLY).await;
+            self.pending.fetch_add(1, Ordering::SeqCst);
+        }
         tokio::time::sleep(FLUSH).await;
         let documents = self.pending.swap(0, Ordering::SeqCst);
-        Ok(FlushReport::clean().sent(documents as u64 * 100))
+        Ok(WriteReport::clean().sent(documents as u64 * 100))
     }
 
     async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
@@ -266,7 +264,7 @@ async fn a_live_batch_reports_each_stage_once_with_the_time_it_took() {
     assert_eq!(
         timings.of(Stage::Write),
         vec![(Stage::Write, live, primary.clone(), APPLY * 3 + FLUSH)],
-        "a write is the item's apply and flush together"
+        "a write is one Sink::write of the item"
     );
     let sink_idle: Vec<Timing> = timings
         .of(Stage::Idle)
@@ -293,14 +291,17 @@ async fn a_live_batch_reports_each_stage_once_with_the_time_it_took() {
 
 #[tokio::test(start_paused = true)]
 async fn a_full_lane_shows_as_time_waiting_to_publish() {
-    let changes: Vec<ChangeEvent> = (1..=6).map(upsert).collect();
+    // The sink engine takes an item only for a free write slot, so with one
+    // write at a time the lane fills as soon as a write outlasts a build.
+    const CHANGES: u32 = 6;
+    let changes: Vec<ChangeEvent> = (1..=CHANGES as i64).map(upsert).collect();
     let source = Arc::new(MockSource::new(changes));
     let timings = run(source, SlowSink::new(true), 1, batch(1)).await;
 
     let lane_wait = timings.of(Stage::LaneWait);
     let publish = timings.of(Stage::Publish);
-    assert_eq!(lane_wait.len(), 6);
-    assert_eq!(publish.len(), 6);
+    assert_eq!(lane_wait.len(), CHANGES as usize);
+    assert_eq!(publish.len(), CHANGES as usize);
     assert!(
         publish.iter().map(|t| t.3).max().unwrap() >= FLUSH - BUILD - RESOLVE,
         "a batch built while the lane is full waits for the sink's flush: {publish:?}"
@@ -311,7 +312,7 @@ async fn a_full_lane_shows_as_time_waiting_to_publish() {
             "a lane never waits longer than the publish"
         );
     }
-    assert_eq!(timings.total(Stage::Write), (APPLY + FLUSH) * 6);
+    assert_eq!(timings.total(Stage::Write), (APPLY + FLUSH) * CHANGES);
     assert!(
         timings.total(Stage::Publish) > Duration::ZERO,
         "the ingest side was blocked on the lane"

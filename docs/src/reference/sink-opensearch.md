@@ -8,21 +8,21 @@ A `[sinks.<name>]` table with `type = "opensearch"`: the connection and bulk opt
 
 ## Retries
 
-A flush sends its documents in bulk requests and retries what can succeed on a second try, up to `max_retries` times, waiting 200 ms and doubling:
+A write sends its documents in bulk requests and retries what can succeed on a second try, up to `max_retries` times, waiting 200 ms and doubling:
 
 | What failed | Retried | After the last retry |
 | --- | --- | --- |
-| The whole request: no response, or a non-2xx status | the whole request | the flush fails |
-| Single documents refused as **busy**: HTTP 429 (a full write queue, a circuit breaker, a flood-stage disk block) or 503 (a shard unavailable or timed out) | only those documents; the rest of the request is already written | the flush fails |
+| The whole request: no response, or a non-2xx status | the whole request | the write fails |
+| Single documents refused as **busy**: HTTP 429 (a full write queue, a circuit breaker, a flood-stage disk block) or 503 (a shard unavailable or timed out) | only those documents; the rest of the request is already written | the write fails |
 | Single documents refused for any other reason (a mapping conflict, a malformed value, a version conflict) | never: the same document is refused again | n/a: each is an [item-level rejection](index-and-on-error.md#on_error), reported once |
-| The server's certificate | never | the flush fails at once (see below) |
+| The server's certificate | never | the write fails at once (see below) |
 
-A busy document never reaches [`on_error`](index-and-on-error.md#on_error): under `skip` it is not quarantined, and under `stop` it doesn't stop the sink. When the flush fails, the sink engine restarts with backoff (one second, doubling to 60 s while it keeps failing, back to one second once a restart writes a batch) and the batch it held comes back, so nothing it carried is confirmed or lost.
+A busy document never reaches [`on_error`](index-and-on-error.md#on_error): under `skip` it is not quarantined, and under `stop` it doesn't stop the sink. When the write fails, the sink engine restarts with backoff (one second, doubling to 60 s while it keeps failing, back to one second once a restart writes a batch) and the batch it held comes back, so nothing it carried is confirmed or lost.
 
 What a long busy spell costs:
 
 - **The sink falls behind.** While it retries (a full disk, a cluster refusing work for minutes) its lane fills, the ingest engine is paced to it, and the replication slot keeps WAL on the Postgres server until the sink catches up. Watch the sink's lag and the slot's retained WAL; see [Watch it run](../operate/watch-it-run.md).
-- **A redelivered batch is written again in full.** The documents OpenSearch accepted before the flush failed are rewritten, with `refresh=true` when the sink is caught up: more load on a cluster that is already refusing work. Each resend logs `OpenSearch refused documents as busy; resending them` with the count and OpenSearch's reason; a flush that runs out of retries fails with `… still refused as busy after <n> retries`.
+- **A redelivered batch is written again in full.** The documents OpenSearch accepted before the write failed are rewritten, with `refresh=true` when the sink is caught up: more load on a cluster that is already refusing work. Each resend logs `OpenSearch refused documents as busy; resending them` with the count and OpenSearch's reason; a write that runs out of retries fails with `… still refused as busy after <n> retries`.
 
 ## TLS and transport errors
 
@@ -37,7 +37,7 @@ ca_file = "/etc/flusso/opensearch-ca.pem"
 
 The file is read when the sink starts: a missing file, or one with no `-----BEGIN CERTIFICATE-----` block, stops the start with the path in the message. `flusso check` and `flusso build` don't read it, so the file only has to exist where flusso runs. To trust the OS store's CAs as well, point `ca_file` at its bundle (`/etc/ssl/certs/ca-certificates.crt` on Debian). `tls_verify = false` skips verification altogether, `ca_file` included (flusso warns at start when both are set); keep it for a local cluster.
 
-A refused certificate is configuration, not a network blip, so a bulk request it fails is **not** retried: the flush fails at once, whatever `max_retries` says, and the sink engine restarts with backoff until the certificate is trusted.
+A refused certificate is configuration, not a network blip, so a bulk request it fails is **not** retried: the write fails at once, whatever `max_retries` says, and the sink engine restarts with backoff until the certificate is trusted.
 
 A request that gets no HTTP response is reported, in the log and in [`/status`](http.md#get-status), with its cause. A refused certificate reads:
 
@@ -78,7 +78,7 @@ Each index is created up front from the resolved schema mapping with `dynamic: s
 
 A document's `_id` is its root key as a string. OpenSearch caps an `_id` at **512 bytes** of UTF-8, not characters: 512 ASCII characters fit, 257 two-byte characters (`é`) don't. A long `text` key can go over, and so can a `bytea` key past 255 bytes, since its id is the `\x…` hex text.
 
-OpenSearch checks ids before it runs a bulk request, and one bad id refuses the whole request. So the sink checks first: a document it would refuse is **rejected on its own**, never sent, and the rest of the flush lands. The id is never truncated or hashed, since that would point the row at a different document.
+OpenSearch checks ids before it runs a bulk request, and one bad id refuses the whole request. So the sink checks first: a document it would refuse is **rejected on its own**, never sent, and the rest of the write lands. The id is never truncated or hashed, since that would point the row at a different document.
 
 | Operation | Id | Outcome |
 | --- | --- | --- |
@@ -138,13 +138,15 @@ index_settings = { "mapping.total_fields.limit" = 5000, "mapping.nested_objects.
 
 | Phase | `refresh_interval` | Why |
 | --- | --- | --- |
-| Backfill | `-1` | Bulk seeding without per-flush refresh churn. |
+| Backfill | `-1` | Bulk seeding without per-write refresh churn. |
 | Seeded, backlog draining | the configured value | Bounds staleness under sustained load. |
-| Seeded, caught up | immediate refresh on each flush | Search is fresh when traffic is light. |
+| Seeded, caught up | immediate refresh on each caught-up write | Search is fresh when traffic is light. |
 
 The configured value therefore only matters while a backlog is draining. Raise it for throughput under load; lower it toward `1s` for fresher reads while behind.
 
-Each flush also reports when its documents become searchable, which is what a [`searchable` fence](http.md#get-waitpositionposition) waits on: at once for a caught-up flush, within `refresh_interval` otherwise. With `refresh_interval = "-1"` nothing refreshes a flush made during a backlog, so the next caught-up flush refreshes the indexes the backlog wrote. flusso never refreshes because a reader is waiting.
+A write is **caught up** when nothing else is queued behind it. It carries `refresh=true`, and refreshes every index the writes before it left unrefreshed, so everything written before it is searchable when it returns. Several writes run at once ([`[concurrency] writes`](config-toml.md#concurrency)), so the last ones of a burst can finish after the caught-up one; when the sink goes idle with something not yet searchable, flusso sends it an empty caught-up write, which refreshes what is left. So a burst is searchable as it ends, not `refresh_interval` later.
+
+Each write also reports when its documents become searchable, which is what a [`searchable` fence](http.md#get-waitpositionposition) waits on: at once for a caught-up write, within `refresh_interval` otherwise, or at the next caught-up write with `refresh_interval = "-1"`. flusso never refreshes because a reader is waiting.
 
 ## Seeding
 

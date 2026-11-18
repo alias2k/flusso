@@ -129,7 +129,7 @@ After an ordinary restart the new process answers the same question the old one 
 
 > ⚠️ **Warning** — A fence doesn't vouch for an index a sink is rebuilding: a first backfill, a rebuild after the slot was lost (see [Recover from a dropped slot](../operate/dropped-slot.md)), or a [reindex](../operate/reindex.md). Today the daemon can answer `200` there while the document isn't readable yet ([#379](https://github.com/alias2k/flusso/issues/379)). Once that's fixed it answers `503` with the reason `rebuilding`, which the fence retries like any other unavailable answer.
 
-> ℹ️ **Info** — When flusso is caught up, both levels are reached within one flush of the commit. While a backlog drains, `searchable` trails `applied` by up to the sink's `refresh_interval`, because flusso never refreshes on a reader's behalf.
+> ℹ️ **Info** — When flusso is caught up, both levels are reached within one write of the commit. While a backlog drains, `searchable` trails `applied` by up to the sink's `refresh_interval`, because flusso never refreshes on a reader's behalf.
 
 ## Related
 

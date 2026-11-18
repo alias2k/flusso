@@ -6,6 +6,7 @@ mod config;
 pub use config::ChannelConfig;
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
@@ -122,6 +123,10 @@ struct Channel<T> {
     tx: mpsc::Sender<T>,
     rx: tokio::sync::Mutex<mpsc::Receiver<T>>,
     state: Mutex<Ledger<T>>,
+    /// The ledger's `due` count, written under its lock, so `is_caught_up`
+    /// reads it without taking the lock the ingest engine shares (a sink
+    /// asks once or twice per lane item).
+    due: AtomicUsize,
 }
 
 /// Delivered, not yet acknowledged items in lane order, each under a ticket
@@ -130,16 +135,20 @@ struct Channel<T> {
 /// earliest first, before anything new is pulled off the channel. Releasing
 /// one ticket leaves every other delivery in flight alone.
 ///
-/// So a released delivery can come back after later ones were acknowledged.
-/// "A later message on a lane is the newer state" therefore holds only while
-/// a consumer keeps one delivery of a sink lane in flight, as the sink engine
-/// does today (ADR 0012's stage 2 replaces that with per-document admission).
+/// So a released delivery can come back after later ones were acknowledged,
+/// and deliveries are acknowledged in any order: the sink engine writes
+/// several at once and keeps per-document order itself (ADR 0012). The
+/// lane's watermark is therefore not the highest acknowledgement but the last
+/// positioned item delivered before the oldest unacknowledged positioned one,
+/// which each entry records when it is first delivered.
 #[derive(Debug)]
 struct Ledger<T> {
     in_flight: Vec<InFlight<T>>,
     next_ticket: Ticket,
-    /// The last position acknowledged on this lane.
-    acked: Option<Position>,
+    /// The position of the last positioned item first delivered on this lane.
+    delivered: Option<Position>,
+    /// How many entries are marked `due`.
+    due: usize,
 }
 
 #[derive(Debug)]
@@ -147,6 +156,9 @@ struct InFlight<T> {
     ticket: Ticket,
     item: T,
     due: bool,
+    /// The position of the last positioned item delivered before this one:
+    /// what the lane may confirm while this one is unacknowledged.
+    before: Option<Position>,
 }
 
 type Ticket = u64;
@@ -154,9 +166,14 @@ type Ticket = u64;
 impl<T: Clone> Ledger<T> {
     /// Hand out the earliest due entry again, if any.
     fn take_due(&mut self) -> Option<(Ticket, T)> {
+        if self.due == 0 {
+            return None;
+        }
         let entry = self.in_flight.iter_mut().find(|entry| entry.due)?;
         entry.due = false;
-        Some((entry.ticket, entry.item.clone()))
+        let taken = Some((entry.ticket, entry.item.clone()));
+        self.due -= 1;
+        taken
     }
 }
 
@@ -165,25 +182,25 @@ impl<T> Channel<T> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn acked(&self) -> Option<Position> {
-        self.lock().acked
-    }
-
     /// Mark `tickets` due for redelivery. Only they come back, in lane order;
     /// a ticket already acknowledged is ignored.
     fn release(&self, tickets: &[Ticket]) {
         let mut ledger = self.lock();
+        let mut released = 0;
         for entry in &mut ledger.in_flight {
-            if tickets.contains(&entry.ticket) {
+            if tickets.contains(&entry.ticket) && !entry.due {
                 entry.due = true;
+                released += 1;
             }
         }
+        ledger.due += released;
+        self.due.store(ledger.due, Ordering::Release);
     }
 
-    /// Nothing queued behind the deliveries already handed out.
+    /// Nothing queued behind the deliveries already handed out. A hint read
+    /// without the ledger's lock: the lane can change the moment after.
     fn is_caught_up(&self) -> bool {
-        let ledger = self.lock();
-        !ledger.in_flight.iter().any(|entry| entry.due) && self.queue_is_empty()
+        self.due.load(Ordering::Acquire) == 0 && self.queue_is_empty()
     }
 
     /// Nothing queued and nothing delivered but unacknowledged.
@@ -205,19 +222,45 @@ impl<T: Positioned + Clone + Send + 'static> Channel<T> {
             state: Mutex::new(Ledger {
                 in_flight: Vec::new(),
                 next_ticket: 0,
-                acked: None,
+                delivered: None,
+                due: 0,
             }),
+            due: AtomicUsize::new(0),
+        }
+    }
+
+    /// The last positioned item delivered before the oldest unacknowledged
+    /// positioned one; with none unacknowledged, the last positioned item
+    /// delivered. Items still queued are newer than every delivered one, so
+    /// they never lower it.
+    fn acked(&self) -> Option<Position> {
+        let ledger = self.lock();
+        match ledger
+            .in_flight
+            .iter()
+            .find(|entry| entry.item.position().is_some())
+        {
+            Some(oldest) => oldest.before,
+            None => ledger.delivered,
         }
     }
 
     async fn recv(&self) -> Option<(Ticket, T)> {
-        if let Some(redelivery) = self.lock().take_due() {
-            return Some(redelivery);
+        if self.due.load(Ordering::Acquire) > 0 {
+            let mut ledger = self.lock();
+            if let Some(redelivery) = ledger.take_due() {
+                self.due.store(ledger.due, Ordering::Release);
+                return Some(redelivery);
+            }
         }
         let item = self.rx.lock().await.recv().await?;
         let mut ledger = self.lock();
         let ticket = ledger.next_ticket;
         ledger.next_ticket += 1;
+        let before = ledger.delivered;
+        if let Some(position) = item.position() {
+            ledger.delivered = Some(position);
+        }
         // A release that landed while awaiting the channel made an earlier
         // entry due: serve it first and leave the new item due behind it, so
         // nothing is delivered twice or out of order.
@@ -225,8 +268,12 @@ impl<T: Positioned + Clone + Send + 'static> Channel<T> {
             ticket,
             item,
             due: true,
+            before,
         });
-        ledger.take_due()
+        ledger.due += 1;
+        let taken = ledger.take_due();
+        self.due.store(ledger.due, Ordering::Release);
+        taken
     }
 
     fn ack(&self, ticket: Ticket) {
@@ -238,9 +285,9 @@ impl<T: Positioned + Clone + Send + 'static> Channel<T> {
         else {
             return;
         };
-        let entry = ledger.in_flight.remove(index);
-        if let Some(position) = entry.item.position() {
-            ledger.acked = Some(ledger.acked.map_or(position, |p| p.max(position)));
+        if ledger.in_flight.remove(index).due {
+            ledger.due -= 1;
+            self.due.store(ledger.due, Ordering::Release);
         }
     }
 }
@@ -287,6 +334,7 @@ impl<T: Positioned + Clone + Send + Sync + 'static> Consumer<T> for ChannelConsu
                 Box::new(ChannelAck {
                     channel: Arc::clone(&self.channel),
                     ticket,
+                    acked: false,
                 }),
             )
         }))
@@ -297,12 +345,14 @@ impl<T: Positioned + Clone + Send + Sync + 'static> Consumer<T> for ChannelConsu
     }
 }
 
-/// Acking removes the item from the ledger and records its position. Nacking,
+/// Acking removes the item from the ledger (the watermark is read from what
+/// remains: see `Channel::acked`). Nacking,
 /// or dropping the handle unacked (an engine that died holding it), marks the
 /// item for redelivery on the next `recv`.
 struct ChannelAck<T> {
     channel: Arc<Channel<T>>,
     ticket: Ticket,
+    acked: bool,
 }
 
 impl<T> std::fmt::Debug for ChannelAck<T> {
@@ -315,16 +365,19 @@ impl<T> std::fmt::Debug for ChannelAck<T> {
 
 impl<T> Drop for ChannelAck<T> {
     fn drop(&mut self) {
-        // A no-op after `ack` (the ticket is gone from the ledger); the
-        // redelivery path for a handle dropped unacked.
-        self.channel.release(&[self.ticket]);
+        // The redelivery path for a handle dropped unacked. After `ack` the
+        // ticket is gone from the ledger, so its lock isn't taken again.
+        if !self.acked {
+            self.channel.release(&[self.ticket]);
+        }
     }
 }
 
 #[async_trait]
 impl<T: Positioned + Clone + Send + Sync + 'static> AckHandle for ChannelAck<T> {
-    async fn ack(self: Box<Self>) -> Result<()> {
+    async fn ack(mut self: Box<Self>) -> Result<()> {
         self.channel.ack(self.ticket);
+        self.acked = true;
         Ok(())
     }
 

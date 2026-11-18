@@ -198,6 +198,17 @@ export function ConfigPanel({
             />
           </Field>
         </div>
+        <div className="w-28">
+          <Field label="concurrency.writes">
+            <Num
+              value={config.concurrency?.writes}
+              onChange={(v) => onChange({ ...config, concurrency: { ...config.concurrency, writes: v } })}
+              placeholder="4"
+              min={1}
+              max={64}
+            />
+          </Field>
+        </div>
         <div className="w-44">
           <Field label="public_address">
             <Text

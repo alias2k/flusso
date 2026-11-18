@@ -148,6 +148,13 @@ pub(crate) struct RunArgs {
     #[arg(long, env = "FLUSSO_BATCH_MAX_DELAY_MS")]
     batch_max_delay_ms: Option<u64>,
 
+    /// Bulk writes each sink runs at once. Overrides `[concurrency].writes`
+    /// from config; defaults to 4. Two writes never hold the same document,
+    /// and live changes go before backfill pages. At most 64. Never written
+    /// into the lock.
+    #[arg(long, env = "FLUSSO_WRITES", value_parser = config::parse_writes)]
+    writes: Option<std::num::NonZeroUsize>,
+
     /// How long a stop may take, in seconds, from the first signal to exit.
     /// A stop drains: nothing new is read, what is in flight lands on every
     /// sink and is confirmed to Postgres, then the HTTP surfaces close and
@@ -191,6 +198,9 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     }
     if let Some(max_delay_ms) = args.batch_max_delay_ms {
         config.batch.max_delay_ms = Some(max_delay_ms);
+    }
+    if let Some(writes) = args.writes {
+        config.concurrency.writes = Some(writes);
     }
 
     // Adapter knobs given as flags/env are laid over the file's entries, then

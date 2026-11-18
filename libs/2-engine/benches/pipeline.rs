@@ -126,11 +126,12 @@ impl Sink for AlwaysUnseeded {
     async fn ensure_index(&self, mapping: &IndexMapping) -> SinkResult<()> {
         self.inner.ensure_index(mapping).await
     }
-    async fn apply(&self, envelope: &Envelope) -> SinkResult<()> {
-        self.inner.apply(envelope).await
-    }
-    async fn flush(&self, caught_up: bool) -> SinkResult<sink::FlushReport> {
-        self.inner.flush(caught_up).await
+    async fn write(
+        &self,
+        envelopes: &[Envelope],
+        caught_up: bool,
+    ) -> SinkResult<sink::WriteReport> {
+        self.inner.write(envelopes, caught_up).await
     }
 }
 
@@ -427,9 +428,9 @@ async fn setup() -> Services {
     }
 }
 
-/// Resolve a changed row to its documents, assemble each, and apply it to the
-/// sink — the two engines' per-change inner loop, composed by hand. Returns
-/// without flushing.
+/// Resolve a changed row to its documents, assemble each, and write them to
+/// the sink as one caught-up write — the two engines' per-change inner loop,
+/// composed by hand.
 async fn propagate(services: &Services, table: &TableName, key: &RowKey) {
     let ids = services
         .documents
@@ -437,6 +438,7 @@ async fn propagate(services: &Services, table: &TableName, key: &RowKey) {
         .await
         .unwrap();
     let ts = chrono::Utc::now();
+    let mut envelopes = Vec::with_capacity(ids.len());
     for id in &ids {
         let envelope = match services.documents.build(id).await.unwrap() {
             Document::Upsert { id, body } => {
@@ -447,8 +449,9 @@ async fn propagate(services: &Services, table: &TableName, key: &RowKey) {
             }
             Document::Failed { failure, .. } => panic!("the bench schema has no script: {failure}"),
         };
-        services.sink.apply(&envelope).await.unwrap();
+        envelopes.push(envelope);
     }
+    services.sink.write(&envelopes, true).await.unwrap();
 }
 
 /// Every change of the burst builds its user's document: a key of another
@@ -502,8 +505,7 @@ fn bench(c: &mut Criterion) {
                 None,
                 chrono::Utc::now(),
             );
-            services.sink.apply(&envelope).await.unwrap();
-            services.sink.flush(true).await.unwrap();
+            services.sink.write(&[envelope], true).await.unwrap();
         });
     });
     group.finish();
@@ -515,7 +517,6 @@ fn bench(c: &mut Criterion) {
         let key = row_key(CHANGED_ITEM_ID);
         b.to_async(&rt).iter(|| async {
             propagate(&services, &table("order_items"), &key).await;
-            services.sink.flush(true).await.unwrap();
         });
     });
     group.finish();

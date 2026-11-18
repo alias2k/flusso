@@ -3,7 +3,7 @@
 //!
 //! This isolates the engines' own cost: batching, resolve/dedup, the one
 //! `build_many` per batch, publishing an `Arc<[Envelope]>` to every lane, the
-//! sink engine's recv → apply → flush → ack loop, and the channel's ticketed
+//! sink engine's recv → write → ack loop, and the channel's ticketed
 //! in-flight ledger. Every mock answers at once, so a movement here is a
 //! movement in the engines, not in Postgres or OpenSearch.
 //!
@@ -55,7 +55,7 @@ use kernel::{
     ColumnName, ContentHash, DatabaseSchema, Envelope, FieldName, GenericValue, IndexMapping,
     IndexName, Mapping, MappingType, Position, ResolvedField, SinkName, TableName,
 };
-use sink::{FlushReport, Sink};
+use sink::{Sink, WriteReport};
 use source::cdc::{ChangeCapture, ChangeEvent, Continuity, LiveChange};
 use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
 use source::{Result as SourceResult, RowImage, RowKey, SnapshotTable};
@@ -280,33 +280,29 @@ impl DocumentBuilder for MockDocuments {
     }
 }
 
-/// Counts applied envelopes and flushes; reports `seeded` as configured so the
+/// Counts written envelopes and writes; reports `seeded` as configured so the
 /// live benches skip the backfill and the snapshot bench requests one. With
-/// a [`Pace`], each flush of documents waits until the ingest engine is past
+/// a [`Pace`], each write of documents waits until the ingest engine is past
 /// that batch.
 #[derive(Debug)]
 struct CountingSink {
     seeded: bool,
     applied: AtomicUsize,
-    flushes: AtomicUsize,
+    writes: AtomicUsize,
     pace: Option<Arc<Pace>>,
 }
 
 #[async_trait]
 impl Sink for CountingSink {
-    async fn apply(&self, _envelope: &Envelope) -> sink::Result<()> {
-        self.applied.fetch_add(1, Ordering::Relaxed);
-        Ok(())
-    }
-
-    async fn flush(&self, _caught_up: bool) -> sink::Result<FlushReport> {
-        if self.applied.swap(0, Ordering::Relaxed) > 0 {
-            let batch = self.flushes.fetch_add(1, Ordering::Relaxed) + 1;
+    async fn write(&self, envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
+        if !envelopes.is_empty() {
+            self.applied.fetch_add(envelopes.len(), Ordering::Relaxed);
+            let batch = self.writes.fetch_add(1, Ordering::Relaxed) + 1;
             if let Some(pace) = &self.pace {
                 pace.past(batch).await;
             }
         }
-        Ok(FlushReport::clean())
+        Ok(WriteReport::clean())
     }
 
     async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
@@ -338,7 +334,7 @@ async fn run_deployment(capture: MockCapture, sinks: usize, batch: BatchPolicy) 
         let sink: Arc<dyn Sink> = Arc::new(CountingSink {
             seeded,
             applied: AtomicUsize::new(0),
-            flushes: AtomicUsize::new(0),
+            writes: AtomicUsize::new(0),
             pace: seeded.then(|| Arc::clone(&pace)),
         });
         let engine = SinkEngine::new(

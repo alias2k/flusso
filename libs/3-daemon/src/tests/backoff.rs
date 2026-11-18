@@ -12,7 +12,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
 use kernel::{Envelope, IndexName, Position};
-use sink::{FlushReport, Sink, SinkError, SinkOptions};
+use sink::{Sink, SinkError, SinkOptions, WriteReport};
 use source::cdc::{ChangeCapture, Continuity, LiveChange};
 use tokio::time::Instant;
 
@@ -55,16 +55,12 @@ impl ScriptedFlushes {
 
 #[async_trait]
 impl Sink for ScriptedFlushes {
-    async fn apply(&self, _: &Envelope) -> sink::Result<()> {
-        Ok(())
-    }
-
-    async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
+    async fn write(&self, _envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
         self.flushed_at.lock().unwrap().push(Instant::now());
         if self.script.lock().unwrap().pop() == Some(false) {
             return Err(SinkError::Write("simulated outage".to_owned()));
         }
-        Ok(FlushReport::clean())
+        Ok(WriteReport::clean())
     }
 
     async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
@@ -259,11 +255,7 @@ struct NeverFlushes;
 
 #[async_trait]
 impl Sink for NeverFlushes {
-    async fn apply(&self, _: &Envelope) -> sink::Result<()> {
-        Ok(())
-    }
-
-    async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
+    async fn write(&self, _envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
         std::future::pending().await
     }
 
@@ -426,4 +418,108 @@ async fn a_split_transaction_replayed_under_new_positions_doubles_its_backoff() 
     .await;
 
     assert_eq!(times.waits(), [1, 2, 4, 8]);
+}
+
+/// A sink that rejects document `1` every time (the `stop` policy, the
+/// default, fails the write) and writes every other document. Records each
+/// write's time and documents.
+#[derive(Debug, Default)]
+struct RejectsOne {
+    writes: Mutex<Vec<(Instant, Vec<String>)>>,
+}
+
+impl RejectsOne {
+    fn attempts_at_the_poison(&self) -> Vec<Instant> {
+        self.writes
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, ids)| ids.iter().any(|id| id == "1"))
+            .map(|(at, _)| *at)
+            .collect()
+    }
+
+    fn written_besides_the_poison(&self) -> Vec<String> {
+        self.writes
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|(_, ids)| ids.iter().filter(|id| *id != "1").cloned())
+            .collect()
+    }
+}
+
+#[async_trait]
+impl Sink for RejectsOne {
+    async fn write(&self, envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
+        let ids: Vec<String> = envelopes.iter().map(|e| e.id.clone()).collect();
+        self.writes
+            .lock()
+            .unwrap()
+            .push((Instant::now(), ids.clone()));
+        let rejected = envelopes
+            .iter()
+            .filter(|e| e.id == "1")
+            .map(|e| sink::RejectedDocument {
+                index: e.index.to_string(),
+                id: e.id.clone(),
+                reason: "simulated mapping conflict".to_owned(),
+            });
+        Ok(WriteReport::clean().rejecting(rejected))
+    }
+
+    async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
+        Ok(true)
+    }
+
+    async fn mark_seeded(&self, _: &IndexName) -> sink::Result<()> {
+        Ok(())
+    }
+}
+
+/// With four writes per sink, a document the destination rejects under the
+/// `stop` policy still halts the sink: after the first rejection only that
+/// item is written, alone, on every restart, nothing behind it lands or is
+/// acknowledged, and the backoff keeps doubling because no run made progress.
+#[tokio::test(start_paused = true)]
+async fn a_stop_rejection_halts_a_sink_writing_several_items_at_once() {
+    let sink = Arc::new(RejectsOne::default());
+    let (source, feed) = FedSource::new(ScriptedSource::new(Vec::new()));
+    let backends = backends_for(
+        Arc::new(source),
+        vec![(
+            primary(),
+            Arc::clone(&sink) as Arc<dyn Sink>,
+            SinkOptions::default(),
+        )],
+    );
+    let mut config = backendless_config();
+    config.batch.max_changes = std::num::NonZeroUsize::new(1);
+    let running = Daemon::new(config, backends).start().await.unwrap();
+    // A graceful stop would drain, which waits for the rejected item forever:
+    // the test aborts the run once it has seen enough.
+    let run = tokio::spawn(running.run(std::future::pending()));
+
+    feed.send(row_event(false, 1)).await.unwrap();
+    while sink.attempts_at_the_poison().is_empty() {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    for id in [3, 4, 5] {
+        feed.send(row_event(false, id)).await.unwrap();
+    }
+    while sink.attempts_at_the_poison().len() < 4 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    run.abort();
+
+    assert_eq!(
+        sink.written_besides_the_poison(),
+        Vec::<String>::new(),
+        "nothing behind the rejected item is written"
+    );
+    assert_eq!(
+        seconds(&gaps(&sink.attempts_at_the_poison())),
+        [1, 2, 4],
+        "no run made progress, so the backoff doubles"
+    );
 }

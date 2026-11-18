@@ -1,6 +1,6 @@
 //! The OpenSearch bulk wire format: the buffered [`BulkAction`], its NDJSON
 //! encoding, the byte/count-aware request chunking, and item-level rejection
-//! parsing — the low-level pieces `flush` and
+//! parsing — the low-level pieces `write` and
 //! `send_bulk_chunk` are built from.
 //!
 //! An index action addressed to a hash alias carries `require_alias: true`
@@ -17,7 +17,7 @@
 //!
 //! A response item reporting `index_not_found_exception` means the target is
 //! gone, which is the sink's problem rather than the document's: it fails the
-//! whole flush (see [`read_bulk_response`]).
+//! whole write (see [`read_bulk_response`]).
 //!
 //! A response item refused with 429 or 503 is **busy**, not rejected: a full
 //! write queue, a tripped circuit breaker, a primary shard not yet active. The
@@ -32,7 +32,7 @@
 //! Some ids OpenSearch refuses before it runs the request at all, and one of
 //! them fails the **whole** request with HTTP 400: an index action whose `_id`
 //! is empty or longer than [`MAX_ID_BYTES`] UTF-8 bytes, and a delete whose
-//! `_id` is empty. [`refused_id`] finds those, so `flush` never sends them and
+//! `_id` is empty. [`refused_id`] finds those, so `write` never sends them and
 //! sends the rest: an index action is rejected alone, a delete is dropped,
 //! since no document can have an empty id. A delete with an over-long id is
 //! sent: OpenSearch accepts it and answers `not_found`.
@@ -45,7 +45,7 @@ use kernel::GenericValue;
 use serde_json::Value;
 use sink::{Json, RejectedDocument, Result, SinkError};
 
-/// A buffered write destined for OpenSearch.
+/// One document's bulk action, destined for OpenSearch.
 #[derive(Debug)]
 pub(crate) enum BulkAction {
     Index {
@@ -118,7 +118,7 @@ pub(crate) fn build_bulk_url(base_url: &str, pipeline: Option<&str>, refresh: bo
 }
 
 /// Serialize a slice of [`BulkAction`]s into one NDJSON bulk body. Production
-/// code builds bodies fragment-by-fragment in `flush`
+/// code builds bodies fragment-by-fragment in `write`
 /// (to honor the byte cap), so this whole-slice form is now a test convenience.
 #[cfg(test)]
 pub(crate) fn build_bulk_body(actions: &[BulkAction]) -> Result<String> {
@@ -132,7 +132,7 @@ pub(crate) fn build_bulk_body(actions: &[BulkAction]) -> Result<String> {
 /// Serialize one [`BulkAction`] into its NDJSON fragment — the metadata line
 /// and, for an index op, the source line, each newline-terminated. This is the
 /// single place the bulk wire format is produced; the crate-private `build_bulk_body`
-/// and the byte-aware chunking in `flush` both go through it.
+/// and the byte-aware chunking in `write` both go through it.
 pub(crate) fn bulk_action_fragment(action: &BulkAction) -> Result<String> {
     match action {
         BulkAction::Index {
@@ -236,7 +236,7 @@ pub(crate) fn is_busy(status: u64) -> bool {
 ///
 /// An item failing with `index_not_found_exception` is neither: the target
 /// index or alias is gone (deleted while running), so every document bound
-/// for it would fail the same way. That returns a flush-wide `Err`, which
+/// for it would fail the same way. That returns a write-wide `Err`, which
 /// stops the sink engine; its restart re-runs `ensure_index`, which recreates
 /// the generation and reseeds it. So does a busy item past the end of
 /// `actions`, which can't be resent.
@@ -283,7 +283,7 @@ pub(crate) fn read_bulk_response(
             if action.is_none() {
                 return Err(SinkError::Write(format!(
                     "bulk response item {i} was refused as busy (HTTP {status}) but the request \
-                     had only {} actions; failing the flush so the batch is redelivered",
+                     had only {} actions; failing the write so the batch is redelivered",
                     actions.len()
                 )));
             }
@@ -311,7 +311,7 @@ pub(crate) fn read_bulk_response(
         if kind == Some("index_not_found_exception") {
             return Err(SinkError::Write(format!(
                 "bulk write target {index} is missing (deleted while running?); \
-                 failing the flush so a restart recreates it: {reason}"
+                 failing the write so a restart recreates it: {reason}"
             )));
         }
         read.rejected.push(RejectedDocument { index, id, reason });

@@ -28,16 +28,18 @@ pub(crate) async fn seed(
 ) {
     let index = mapping.index.clone();
     sink.ensure_index(&mapping).await.unwrap();
-    sink.apply(&Envelope::upsert(
-        index.clone(),
-        id,
-        doc,
-        Some(Position(0)),
-        chrono::Utc::now(),
-    ))
+    sink.write(
+        &[Envelope::upsert(
+            index.clone(),
+            id,
+            doc,
+            Some(Position(0)),
+            chrono::Utc::now(),
+        )],
+        true,
+    )
     .await
     .unwrap();
-    sink.flush(true).await.unwrap();
     sink.mark_seeded(&index).await.unwrap();
 }
 
@@ -139,18 +141,20 @@ pub(crate) async fn seed_many(
     sink.mark_seeded(&mapping.index).await.unwrap();
 }
 
-/// Upsert one document through the sink and flush it.
+/// Upsert one document through the sink as one caught-up write.
 pub(crate) async fn write(sink: &OpensearchSink, index: &IndexName, id: &str, doc: GenericValue) {
-    sink.apply(&Envelope::upsert(
-        index.clone(),
-        id,
-        doc,
-        Some(Position(0)),
-        chrono::Utc::now(),
-    ))
+    sink.write(
+        &[Envelope::upsert(
+            index.clone(),
+            id,
+            doc,
+            Some(Position(0)),
+            chrono::Utc::now(),
+        )],
+        true,
+    )
     .await
     .unwrap();
-    sink.flush(true).await.unwrap();
 }
 
 /// Make every write so far searchable on `path` (an index, alias, or list).

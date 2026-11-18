@@ -8,7 +8,7 @@ use std::io::Write;
 
 use async_trait::async_trait;
 use kernel::{Envelope, EnvelopeMeta, GenericValue, Op, SinkName};
-use sink::{FlushReport, Json, Result, Sink, SinkError};
+use sink::{Json, Result, Sink, SinkError, WriteReport};
 
 /// Writes each document operation to stdout as a JSON envelope, stamped with
 /// this sink's configured name.
@@ -16,13 +16,26 @@ use sink::{FlushReport, Json, Result, Sink, SinkError};
 pub struct StdoutSink {
     name: SinkName,
     pretty: bool,
+    out: Output,
+}
+
+/// Where the lines go: stdout, or a buffer a test reads back.
+#[derive(Debug, Clone)]
+enum Output {
+    Stdout,
+    #[cfg(test)]
+    Buffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>),
 }
 
 impl StdoutSink {
     /// Create a sink emitting as `name`. `pretty` selects pretty-printed JSON
     /// over compact NDJSON.
     pub fn new(name: SinkName, pretty: bool) -> Self {
-        Self { name, pretty }
+        Self {
+            name,
+            pretty,
+            out: Output::Stdout,
+        }
     }
 
     pub fn from_config(name: &SinkName, config: &StdoutConfig) -> Self {
@@ -36,17 +49,6 @@ impl StdoutSink {
             serde_json::to_string(envelope)
         };
         json.map_err(|e| SinkError::Serialize(e.to_string()))
-    }
-
-    /// Write a rendered line to stdout. Uses the stdout handle directly (not the
-    /// `print!` family) so it stays a real data sink, not logging.
-    fn write_line(&self, line: &str) -> Result<()> {
-        let stdout = std::io::stdout();
-        let mut handle = stdout.lock();
-        handle
-            .write_all(line.as_bytes())
-            .and_then(|()| handle.write_all(b"\n"))
-            .map_err(|e| SinkError::Write(e.to_string()))
     }
 
     /// The kernel envelope as this sink writes it: the same shape, stamped with
@@ -73,20 +75,42 @@ impl StdoutSink {
 
 #[async_trait]
 impl Sink for StdoutSink {
-    async fn apply(&self, envelope: &Envelope) -> Result<()> {
-        let line = self.render(&self.wire_envelope(envelope)?)?;
-        self.write_line(&line)
+    /// Render every envelope, then write them as one run of lines under the
+    /// stdout lock, so the lines of two concurrent writes never interleave.
+    /// Uses the stdout handle directly (not the `print!` family) so it stays a
+    /// real data sink, not logging. It never rejects a document: a write either
+    /// lands whole or errors.
+    async fn write(&self, envelopes: &[Envelope], _caught_up: bool) -> Result<WriteReport> {
+        let mut text = String::new();
+        for envelope in envelopes {
+            text.push_str(&self.render(&self.wire_envelope(envelope)?)?);
+            text.push('\n');
+        }
+        let written = match &self.out {
+            Output::Stdout => {
+                let stdout = std::io::stdout();
+                let mut handle = stdout.lock();
+                handle
+                    .write_all(text.as_bytes())
+                    .and_then(|()| handle.flush())
+            }
+            #[cfg(test)]
+            Output::Buffer(buffer) => {
+                buffer
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend_from_slice(text.as_bytes());
+                Ok(())
+            }
+        };
+        written.map_err(|e| SinkError::Write(e.to_string()))?;
+        Ok(WriteReport::clean())
     }
 
-    async fn flush(&self, _caught_up: bool) -> Result<FlushReport> {
-        // stdout has no visibility/durability split, so the caught-up hint is
-        // irrelevant — just flush the writer. It never rejects a document: a
-        // line either writes or the whole flush errors.
-        std::io::stdout()
-            .lock()
-            .flush()
-            .map_err(|e| SinkError::Write(e.to_string()))?;
-        Ok(FlushReport::clean())
+    /// Its output is a stream read in order: lines come in lane order, one
+    /// write at a time, whatever `[concurrency] writes` says.
+    fn ordered(&self) -> bool {
+        true
     }
 }
 

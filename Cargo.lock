@@ -1445,6 +1445,7 @@ dependencies = [
  "criterion",
  "flusso-kernel",
  "flusso-sink",
+ "futures",
  "reqwest",
  "rustls",
  "schemars 1.2.3",

@@ -31,19 +31,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
     ]));
 
-    futures::executor::block_on(async {
-        sink.apply(&Envelope::upsert(
-            index.clone(),
-            "42",
-            document,
-            Some(Position(1)),
-            Utc::now(),
-        ))
-        .await?;
-        sink.apply(&Envelope::delete(index, "7", Some(Position(2)), Utc::now()))
-            .await?;
-        sink.flush(true).await
-    })?;
+    futures::executor::block_on(sink.write(
+        &[
+            Envelope::upsert(index.clone(), "42", document, Some(Position(1)), Utc::now()),
+            Envelope::delete(index, "7", Some(Position(2)), Utc::now()),
+        ],
+        true,
+    ))?;
 
     Ok(())
 }

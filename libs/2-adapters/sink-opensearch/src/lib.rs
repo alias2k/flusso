@@ -8,6 +8,7 @@ mod bulk;
 mod config;
 mod generations;
 mod mapping;
+mod refresh;
 mod settings;
 mod sink_impl;
 mod transport;
@@ -16,7 +17,7 @@ pub use config::{OpensearchConfig, OpensearchIndexConfig, TextAnalysis};
 pub use settings::IndexSettings;
 
 /// Benchmark entry point: render `envelopes` into the NDJSON bulk body exactly
-/// as `apply` (document → JSON) and `flush` (action → fragment) would, without
+/// as `write` does (document → JSON → action fragment), without
 /// a cluster. Used by the `render` bench; gated behind the `bench` feature and
 /// not part of the stable API.
 #[cfg(feature = "bench")]
@@ -24,7 +25,7 @@ pub fn bench_render_bulk(envelopes: &[kernel::Envelope]) -> Result<String> {
     let mut body = String::new();
     for envelope in envelopes {
         let action = match (envelope.op, &envelope.document) {
-            (kernel::Op::Upsert, Some(document)) => BulkAction::Index {
+            (kernel::Op::Upsert, Some(document)) => bulk::BulkAction::Index {
                 index: envelope.index.to_string(),
                 id: envelope.id.clone(),
                 doc: bulk::render_document(document)?,
@@ -36,7 +37,7 @@ pub fn bench_render_bulk(envelopes: &[kernel::Envelope]) -> Result<String> {
                     envelope.index, envelope.id
                 )));
             }
-            (kernel::Op::Delete, _) => BulkAction::Delete {
+            (kernel::Op::Delete, _) => bulk::BulkAction::Delete {
                 index: envelope.index.to_string(),
                 id: envelope.id.clone(),
             },
@@ -49,20 +50,18 @@ pub fn bench_render_bulk(envelopes: &[kernel::Envelope]) -> Result<String> {
     Ok(body)
 }
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex as SyncMutex, PoisonError};
 use std::time::Duration;
 
 use kernel::SinkName;
 use sink::{Result, SinkError};
-use tokio::sync::Mutex;
 
-use crate::bulk::BulkAction;
 use crate::mapping::IndexOptions;
 
 // In scope only so the rustdoc links below to `Sink`'s methods (`ensure_index`,
-// `flush`, `upsert`, …) resolve — the trait is implemented over in `sink_impl`, not
+// `write`, …) resolve — the trait is implemented over in `sink_impl`, not
 // used by name in this file.
 #[allow(unused_imports)]
 use sink::Sink;
@@ -72,9 +71,8 @@ pub(crate) const META_INDEX: &str = "flusso_meta";
 
 /// Writes document operations to an OpenSearch cluster using the bulk API.
 ///
-/// Each [`apply`](OpensearchSink::apply) appends the envelope's operation to an
-/// in-memory buffer; [`flush`](OpensearchSink::flush) drains it as one or more bulk
-/// requests. Every index is addressed by its schema hash, learned at
+/// Each [`write`](OpensearchSink::write) sends its envelopes as one or more bulk
+/// requests; several writes may run at once. Every index is addressed by its schema hash, learned at
 /// [`ensure_index`](OpensearchSink::ensure_index), so a structural schema
 /// change writes to a fresh index instead of the old one. A seeded index is
 /// written through its hash alias (with `require_alias`), an unseeded one
@@ -85,14 +83,14 @@ pub struct OpensearchSink {
     pub(crate) base_url: String,
     pub(crate) auth: Option<(String, String)>,
     pub(crate) batch_size: usize,
-    /// Maximum serialized bytes per bulk request — a flush is split so no
+    /// Maximum serialized bytes per bulk request — a write is split so no
     /// request exceeds this, keeping it under OpenSearch's
     /// `http.max_content_length`.
     pub(crate) max_bytes: usize,
     pub(crate) max_retries: u32,
     pub(crate) pipeline: Option<String>,
     /// `refresh_interval` handed to each index once seeded — the steady-state
-    /// visibility ceiling (see [`flush`](OpensearchSink::flush) for how a caught-up flush
+    /// visibility ceiling (see [`write`](OpensearchSink::write) for how a caught-up write
     /// forces an immediate refresh on top of this).
     pub(crate) refresh_interval: String,
     /// Settings that shape every index this sink creates: shard counts, the
@@ -107,13 +105,14 @@ pub struct OpensearchSink {
     /// so several deployments can share one cluster without colliding. Empty by
     /// default (no prefix). Set with [`with_index_prefix`](OpensearchSink::with_index_prefix).
     pub(crate) index_prefix: String,
-    /// In-flight operations, shared across clones.
-    pub(crate) buffer: Arc<Mutex<Vec<BulkAction>>>,
-    /// Indexes written by a flush that forced no refresh while automatic
-    /// refresh is off (`refresh_interval = "-1"`): nothing else will make them
-    /// searchable, so the next caught-up flush refreshes them. Empty whenever a
-    /// refresh interval is set. Shared across clones.
-    pub(crate) unrefreshed: Arc<SyncMutex<BTreeSet<String>>>,
+    /// Indexes written by a write that forced no refresh, which the next
+    /// caught-up write refreshes (see [`write`](OpensearchSink::write)).
+    /// Shared across clones and concurrent writes.
+    pub(crate) unrefreshed: Arc<SyncMutex<refresh::Unrefreshed>>,
+    /// Held by a caught-up write from taking `unrefreshed` until its refresh
+    /// returned (or the set was put back), so a later caught-up write waits
+    /// and never answers `Immediate` over a refresh still running or failed.
+    pub(crate) refreshing: Arc<tokio::sync::Mutex<()>>,
     /// Logical index name → where it lives and where its writes go, learned
     /// from [`ensure_index`](OpensearchSink::ensure_index) and updated by
     /// [`mark_seeded`](OpensearchSink::mark_seeded). Shared across clones.
@@ -129,6 +128,11 @@ pub(crate) struct IndexTarget {
     pub(crate) hash_alias: String,
     /// Whether the active generation is seeded.
     pub(crate) seeded: bool,
+    /// Whether the active generation has one primary shard, read from the
+    /// cluster when the target was learned (`false` when it couldn't be): a
+    /// bulk sent with `?refresh=true` refreshes only the shards it touched,
+    /// so only then does it refresh the whole index.
+    pub(crate) single_shard: bool,
 }
 
 impl IndexTarget {
@@ -223,9 +227,9 @@ impl OpensearchSink {
             base_url: url.as_ref().trim_end_matches('/').to_owned(),
             auth,
             // `chunks(0)` panics, so a zero batch size would crash the first
-            // non-empty flush; clamp it to at least one document per request.
+            // non-empty write; clamp it to at least one document per request.
             batch_size: (config.batch_size as usize).max(1),
-            // At least one byte so the byte cap can never wedge a flush; a doc
+            // At least one byte so the byte cap can never wedge a write; a doc
             // larger than the cap is still sent (alone, with a warning).
             max_bytes: (config.max_bytes as usize).max(1),
             max_retries: config.max_retries,
@@ -241,8 +245,8 @@ impl OpensearchSink {
             },
             per_index_settings: Arc::new(HashMap::new()),
             index_prefix: String::new(),
-            buffer: Arc::new(Mutex::new(Vec::new())),
-            unrefreshed: Arc::new(SyncMutex::new(BTreeSet::new())),
+            unrefreshed: Arc::new(SyncMutex::new(refresh::Unrefreshed::default())),
+            refreshing: Arc::new(tokio::sync::Mutex::new(())),
             targets: Arc::new(SyncMutex::new(HashMap::new())),
         })
     }
@@ -338,6 +342,19 @@ impl OpensearchSink {
                 ]
             })
             .collect()
+    }
+
+    /// Whether the physical index (a generation or a hash alias) a bulk
+    /// action names has one primary shard, as far as the sink knows.
+    pub(crate) fn single_shard(&self, physical: &str) -> bool {
+        self.targets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .any(|target| {
+                target.single_shard
+                    && (target.generation == physical || target.hash_alias == physical)
+            })
     }
 
     /// Record what is known about a logical index.

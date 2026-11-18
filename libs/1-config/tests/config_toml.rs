@@ -253,6 +253,33 @@ fn server_section_is_optional_and_strict() {
 }
 
 #[test]
+fn concurrency_section_converts_and_is_optional_and_strict() {
+    let config = convert("[source]\ntype = \"postgres\"\n");
+    assert_eq!(
+        config.concurrency.writes, None,
+        "no [concurrency] means the defaults"
+    );
+    let config = convert(
+        r#"
+        [source]
+        type = "postgres"
+
+        [concurrency]
+        writes = 8
+        "#,
+    );
+    assert_eq!(config.concurrency.writes, std::num::NonZeroUsize::new(8));
+    for (table, refused) in [("writes = 0", "writes"), ("builds = 4", "builds")] {
+        let error = parse(&format!(
+            "[source]\ntype = \"postgres\"\n\n[concurrency]\n{table}\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(refused) || error.contains("zero"), "{error}");
+    }
+}
+
+#[test]
 fn batch_section_converts_and_is_optional_and_strict() {
     let config = convert("[source]\ntype = \"postgres\"\n");
     assert!(config.batch.is_empty(), "no [batch] means engine defaults");
@@ -427,4 +454,24 @@ fn an_index_without_sink_options_serializes_without_the_table() {
     let written = toml::to_string(&config).unwrap();
     let index = written.split("[[index]]").nth(1).unwrap();
     assert!(!index.contains("sinks"), "{written}");
+}
+
+#[test]
+fn writes_past_the_cap_are_refused_naming_it() {
+    let error = parse("[source]\ntype = \"postgres\"\n\n[concurrency]\nwrites = 65\n")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("64"), "{error}");
+    let config = convert("[source]\ntype = \"postgres\"\n\n[concurrency]\nwrites = 64\n");
+    assert_eq!(config.concurrency.writes, std::num::NonZeroUsize::new(64));
+}
+
+#[test]
+fn the_writes_flag_takes_the_same_cap() {
+    assert_eq!(
+        config::parse_writes("4"),
+        Ok(std::num::NonZeroUsize::new(4).unwrap())
+    );
+    assert!(config::parse_writes("65").unwrap_err().contains("64"));
+    assert!(config::parse_writes("0").is_err());
 }

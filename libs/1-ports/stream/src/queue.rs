@@ -18,10 +18,10 @@ pub trait Consumer<T: Send>: std::fmt::Debug + Send {
     /// The next delivery, or `None` once the lane is closed and drained.
     async fn recv(&mut self) -> Result<Option<Delivery<T>>>;
 
-    /// Whether nothing is waiting behind the last delivery — the sink engine's
-    /// *caught-up* hint, read at a batch boundary and forwarded to the sink's
-    /// flush so a destination with a cost to making writes visible can pay it
-    /// only when idle. A point-in-time snapshot; an adapter that cannot tell
+    /// Whether nothing is waiting behind the deliveries handed out — part of
+    /// the sink engine's *caught-up* hint, forwarded to the sink's write so a
+    /// destination with a cost to making writes searchable can pay it only
+    /// when idle. A point-in-time snapshot; an adapter that cannot tell
     /// returns `false`.
     fn is_empty(&self) -> bool;
 }

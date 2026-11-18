@@ -10,7 +10,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use kernel::{Envelope, IndexMapping, IndexName, Position};
-use sink::{FlushReport, Sink, SinkOptions, Visibility};
+use sink::{Sink, SinkOptions, Visibility, WriteReport};
 use source::cdc::{ChangeCapture, Continuity, LiveChange, SourcePosition};
 use tokio::sync::{Notify, oneshot};
 
@@ -43,17 +43,17 @@ impl HeldSink {
 
 #[async_trait]
 impl Sink for HeldSink {
-    async fn apply(&self, _: &Envelope) -> sink::Result<()> {
-        Ok(())
-    }
-
-    async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
-        if self.held.load(Ordering::SeqCst) {
-            self.flushing.notify_one();
-            self.release.notified().await;
+    async fn write(&self, envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
+        // An empty write is the engine asking an idle sink to refresh: held
+        // and counted are the writes of documents.
+        if !envelopes.is_empty() {
+            if self.held.load(Ordering::SeqCst) {
+                self.flushing.notify_one();
+                self.release.notified().await;
+            }
+            *self.flushed.lock().unwrap() += 1;
         }
-        *self.flushed.lock().unwrap() += 1;
-        Ok(FlushReport::clean().visible(self.visibility))
+        Ok(WriteReport::clean().visible(self.visibility))
     }
 
     async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
@@ -71,12 +71,8 @@ impl Sink for UnstageableSink {
         Err(sink::SinkError::Write("destination unreachable".to_owned()))
     }
 
-    async fn apply(&self, _: &Envelope) -> sink::Result<()> {
-        Ok(())
-    }
-
-    async fn flush(&self, _: bool) -> sink::Result<FlushReport> {
-        Ok(FlushReport::clean())
+    async fn write(&self, _envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
+        Ok(WriteReport::clean())
     }
 }
 

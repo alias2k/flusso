@@ -56,6 +56,12 @@ pub struct Config {
     /// `--batch-*` flags / `FLUSSO_BATCH_*` env vars on top (which win).
     #[serde(default, skip_serializing_if = "BatchConfig::is_empty")]
     pub batch: BatchConfig,
+    /// How much the pipeline does at once (`[concurrency]`). Never written
+    /// into the lock, and read back from one as unset: it belongs to the
+    /// machine that runs flusso, which sets it with `--writes` /
+    /// `FLUSSO_WRITES` (which win over the file).
+    #[serde(skip)]
+    pub concurrency: ConcurrencyConfig,
     /// Bind addresses for the operational HTTP surfaces. Read by the binary, not
     /// the daemon — transport is the binary's concern. Env/flag overrides win;
     /// see [`ServerConfig`].
@@ -112,6 +118,14 @@ impl BatchConfig {
     pub fn is_empty(&self) -> bool {
         self.max_changes.is_none() && self.max_delay_ms.is_none()
     }
+}
+
+/// The `[concurrency]` knobs from `flusso.toml`. An unset key keeps the
+/// daemon's default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConcurrencyConfig {
+    /// Lane items each sink writes at once.
+    pub writes: Option<NonZeroUsize>,
 }
 
 /// One index in a [`Config`], paired with whether it is built on this run.

@@ -46,6 +46,7 @@ Like `cargo run`, it compiles first. With a `flusso.toml` present (the default p
 | `--index-prefix <prefix>` | `prefix` from config, else none | Prefix every owned index name. |
 | `--batch-max-changes <n>` | `[batch] max_changes`, else `256` | Commit a batch once this many live changes have accumulated. |
 | `--batch-max-delay-ms <ms>` | `[batch] max_delay_ms`, else `50` | The longest a batch stays open while changes keep arriving. |
+| `--writes <n>` | `[concurrency] writes`, else `4` | Bulk writes each sink runs at once; never two holding the same document. Never written into the lock. |
 | `--shutdown-timeout-secs <n>` | `30` | How long a [stop](#stopping) may take, from the first signal to exit. Past it flusso gives up on what is left and exits `1`. `0` doesn't drain: it stops reading, abandons what is in flight (read again on the next start) and exits `0`. |
 | `--exit-with-parent` | off | Stop when the process that started flusso exits, as if it had sent `SIGTERM`. As an env var, `FLUSSO_EXIT_WITH_PARENT=true` (like every boolean flag, `1` is refused). See [Stopping](#stopping). |
 
@@ -95,7 +96,7 @@ The drain, in order:
 
 1. **Stop taking in work.** The phase turns `stopping`: [`/readyz`](http.md#get-readyz) answers `503`, a new [`/reindex`](http.md#post-reindexindexnamesinkname) is refused with `503`. No further change is read from the replication stream and no new backfill is served.
 2. **Finish the batch in flight.** What was being built is published to every sink, as any commit. A backfill in progress is abandoned at a row boundary, and its batches already queued for a sink are acknowledged without being written: its index stays unseeded, so the next start backfills it again (a backfill writes deterministic ids; what it wrote so far is overwritten). The abandoned backfill costs the stop nothing; the live changes already read still land, so under write load the stop takes as long as they do.
-3. **Every sink lands its lane**: apply, flush, acknowledge, sink by sink, until nothing is left. A stalled or unreachable sink doesn't slow the others; it is what the deadline is for.
+3. **Every sink lands its lane**: the writes in flight return, the rest are written (several at once, as always), each acknowledged, until nothing is left; an idle sink then makes what it wrote searchable. A stalled or unreachable sink doesn't slow the others; it is what the deadline is for.
 4. **Confirm and close the stream.** The position every sink acknowledged is confirmed to the slot, flusso waits until Postgres was sent it, then ends replication. The next start resumes there and reads nothing already indexed again.
 5. **Answer the fences.** An open [`/wait`](http.md#get-waitpositionposition) on `searchable` is held while a sink's refresh interval would still answer it within the deadline; then every wait still open is answered `503` "stopping".
 6. **Close**: the HTTP surfaces, then the telemetry flush, each given at most 5 s of what is left.
