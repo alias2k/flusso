@@ -166,9 +166,9 @@ Postgres 16, `jit = off`, `PREPARE`d with the page's real select list (`format('
 - A stored key whose `key_type` or hash no longer matches is ignored, and the backfill starts over.
 - Why it is safe:
   - every key at or below the stored one was built after the slot existed, and has been written;
-  - every later change to it is in the WAL that the slot still holds, because the watermark only passes positions every sink has written.
+  - every later change to it is in the WAL that the slot still holds, because confirmation (`Progress::landed`) only passes positions every lane has landed.
 
-**What this stage does for it.** The engine owns the cursor: it calls `keys(index, after, limit)` with the last key it buffered. So 8b only has to store that key and pass it back.
+**What this stage does for it.** The engine owns the cursor: it calls `keys(index, after, through, limit)` with the last key it buffered. So 8b only has to store that key and pass it back.
 
 ## 7. Stop, reindex, coalescing, `SnapshotComplete`
 
