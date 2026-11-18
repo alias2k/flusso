@@ -113,6 +113,7 @@ use tokio::time::Instant;
 use tracing::Instrument;
 
 use super::flights::Flights;
+use super::walked::Walked;
 use super::{Blame, IDLE_TICK, SinkControl, SinkEngine, shown_id, until};
 use crate::error::{EngineError, Result};
 use crate::observer::{CommitStats, Stage, StageTiming, Work};
@@ -145,6 +146,8 @@ struct LaneRun {
     counts: bool,
     live_waiting: usize,
     backfill_waiting: usize,
+    /// How far its backfill has durably got, and when to record it.
+    walked: Walked,
 }
 
 impl LaneRun {
@@ -224,6 +227,7 @@ struct Seeding {
 enum Outcome {
     Write(sink::Result<WriteReport>),
     Seed(sink::Result<()>),
+    Record(sink::Result<()>),
 }
 
 /// A flight that returned.
@@ -241,6 +245,8 @@ pub(super) struct Run<'a> {
     flights: Flights<'a, Landed>,
     flying: Vec<(u64, Flight)>,
     seeding: Vec<(u64, Seeding)>,
+    /// Backfill checkpoints in flight, by lane: they hold no write slot.
+    recording: Vec<(u64, usize)>,
     next_flight: u64,
     /// The lane-order number the next delivered item gets.
     next_seq: u64,
@@ -284,6 +290,7 @@ impl<'a> Run<'a> {
                     closed: false,
                     live_waiting: 0,
                     backfill_waiting: 0,
+                    walked: Walked::default(),
                 }
             })
             .collect();
@@ -294,6 +301,7 @@ impl<'a> Run<'a> {
             flights: Flights::new(),
             flying: Vec::new(),
             seeding: Vec::new(),
+            recording: Vec::new(),
             next_flight: 0,
             next_seq: 0,
             contested: 0,
@@ -530,16 +538,22 @@ impl<'a> Run<'a> {
             return true;
         }
         run.waiting() < LOOKAHEAD
-            && (self.flights.len() < self.slots()
+            && (self.writing() < self.slots()
                 || (run.live_waiting == 0 && run.backfill_waiting > 0))
     }
 
-    /// Whether a write or the seed of `lane` is in flight.
+    /// Whether a write, the seed or a checkpoint of `lane` is in flight.
     fn lane_in_flight(&self, lane: usize) -> bool {
         self.flying
             .iter()
             .any(|(_, flight)| flight.lanes().any(|at| at == lane))
             || self.lane_seeding(lane)
+            || self.recording.iter().any(|(_, at)| *at == lane)
+    }
+
+    /// The flights holding a write slot: writes and seeds, not checkpoints.
+    fn writing(&self) -> usize {
+        self.flights.len() - self.recording.len()
     }
 
     /// Whether `lane`'s seed is in flight: nothing after it on the lane
@@ -644,6 +658,13 @@ impl<'a> Run<'a> {
         };
         let seq = self.next_seq;
         self.next_seq += 1;
+        if let Queue::Batch { batch, .. } = &item
+            && batch.position.is_none()
+            && let Some(run) = self.lanes.get_mut(lane)
+        {
+            run.walked
+                .received(seq, batch.walked.clone(), Instant::now());
+        }
         self.count(lane, &item, 1);
         self.window.push_back(Queued {
             item,
@@ -679,6 +700,9 @@ impl<'a> Run<'a> {
             self.engine
                 .lock_skipped()
                 .extend(batch.envelopes.iter().map(|e| e.index.clone()));
+            if let Some(run) = self.lanes.get_mut(lane) {
+                run.walked.hold();
+            }
             let oldest = self.is_oldest(lane, seq);
             self.acknowledge(handle, lane, oldest, None).await?;
         }
@@ -693,7 +717,7 @@ impl<'a> Run<'a> {
         // A write handled at its first poll may have failed the run: from
         // then on nothing new starts.
         while self.failure.is_none() {
-            if self.flights.len() >= slots {
+            if self.writing() >= slots {
                 return Ok(());
             }
             if let Some(at) = self.runnable_complete() {
@@ -704,6 +728,9 @@ impl<'a> Run<'a> {
                     seq,
                 }) = self.take_from_window(at)
                 {
+                    if let Some(run) = self.lanes.get_mut(lane) {
+                        run.walked.reset();
+                    }
                     if self.engine.cut_short(&index) {
                         self.acknowledge(handle, lane, true, None).await?;
                     } else if let Some(landed) = self.seed(index, handle, lane, seq) {
@@ -1117,6 +1144,10 @@ impl<'a> Run<'a> {
             Outcome::Seed(result) => {
                 return self.seed_returned(landed.flight, result, landed.took).await;
             }
+            Outcome::Record(result) => {
+                self.record_returned(landed.flight, result);
+                return Ok(());
+            }
         };
         let Some(index) = self.flying.iter().position(|(id, _)| *id == landed.flight) else {
             return Ok(());
@@ -1131,6 +1162,7 @@ impl<'a> Run<'a> {
             Ok(report) => report,
             Err(error) => {
                 let lanes: Vec<usize> = flight.lanes().collect();
+                self.hold_walks(&lanes);
                 self.fail(error.into(), &lanes);
                 return Ok(());
             }
@@ -1193,6 +1225,17 @@ impl<'a> Run<'a> {
                     .any(|later| later.lane == part.lane)
             })
             .collect();
+        let mut walked: Vec<usize> = Vec::new();
+        for part in &landed_parts {
+            if part.position.is_none()
+                && let Some(run) = self.lanes.get_mut(part.lane)
+            {
+                run.walked.landed(part.seq);
+                if !walked.contains(&part.lane) {
+                    walked.push(part.lane);
+                }
+            }
+        }
         for (part, last) in landed_parts.into_iter().zip(last_of_lane) {
             // Let go of the batch before acknowledging it, so the lane frees it
             // as the acknowledgement lands, as it did with one write at a time.
@@ -1214,9 +1257,66 @@ impl<'a> Run<'a> {
         }
         if let Some((_, error)) = stopped {
             let lanes: Vec<usize> = failed.iter().map(|part| part.lane).collect();
+            self.hold_walks(&lanes);
             self.fail(error, &lanes);
         }
+        for lane in walked {
+            if let Some(landed) = self.record_walked(lane) {
+                Box::pin(self.landed(landed)).await?;
+            }
+        }
         Ok(())
+    }
+
+    /// Items of `lanes` go back unlanded: their walks' marks move no further.
+    fn hold_walks(&mut self, lanes: &[usize]) {
+        for lane in lanes {
+            if let Some(run) = self.lanes.get_mut(*lane) {
+                run.walked.hold();
+            }
+        }
+    }
+
+    /// Record how far `lane`'s backfill got, when a record is due, as a
+    /// flight beside the writes, holding no slot. Like a write, it starts now,
+    /// and one that completes on its first poll is handed back.
+    fn record_walked(&mut self, lane: usize) -> Option<Landed> {
+        let run = self.lanes.get_mut(lane)?;
+        let mark = run.walked.due(Instant::now())?;
+        let index = run.key.index.clone();
+        let flight = self.next_flight;
+        self.next_flight += 1;
+        self.recording.push((flight, lane));
+        let sink = &self.engine.sink;
+        let record = async move {
+            let started = Instant::now();
+            let result = sink.record_walked(&index, mark.as_str()).await;
+            Landed {
+                flight,
+                outcome: Outcome::Record(result),
+                took: started.elapsed(),
+            }
+        };
+        self.flights.start(record.boxed())
+    }
+
+    /// A checkpoint returned. A failed one costs only redone work after a
+    /// restart: it is logged and tried again when the next is due.
+    fn record_returned(&mut self, flight: u64, result: sink::Result<()>) {
+        let Some(at) = self.recording.iter().position(|(id, _)| *id == flight) else {
+            return;
+        };
+        let (_, lane) = self.recording.swap_remove(at);
+        let Some(run) = self.lanes.get_mut(lane) else {
+            return;
+        };
+        run.walked.record_returned(result.is_ok());
+        match result {
+            Ok(()) => self.engine.observer.on_walk_recorded(&run.key),
+            Err(error) => {
+                tracing::warn!(lane = %run.key, %error, "could not record how far the backfill got; it is tried again in a while")
+            }
+        }
     }
 
     /// Record the run's first failure, blamed on `lanes` when they caused it

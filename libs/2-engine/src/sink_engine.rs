@@ -46,7 +46,7 @@ use futures::stream::FuturesUnordered;
 use kernel::{IndexMapping, IndexName, SinkName};
 use sink::{Sink, SinkOptions};
 use source::cdc::Continuity;
-use stream::{LaneKey, Request, Stream};
+use stream::{LaneKey, Request, Stream, WalkMark};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant, sleep_until};
 
@@ -73,6 +73,7 @@ const IDLE_TICK: Duration = Duration::from_secs(1);
 
 mod fences;
 pub(crate) mod flights;
+mod walked;
 mod writes;
 
 /// Which lanes a failed run is blamed on.
@@ -297,18 +298,22 @@ impl SinkEngine {
 
         if continuity == Continuity::Fresh {
             self.rebuild_stale_seeds(&mut seeded).await?;
+            self.forget_walks(&mut seeded).await?;
         }
 
         let already_requested = self.outstanding();
-        let unseeded: Vec<IndexName> = seeded
+        let unseeded: Vec<(IndexName, Option<WalkMark>)> = seeded
             .into_iter()
-            .filter(|(mapping, seeded)| !seeded && !already_requested.contains(&mapping.index))
-            .map(|(mapping, _)| mapping.index.clone())
+            .filter(|(mapping, _)| !already_requested.contains(&mapping.index))
+            .filter_map(|(mapping, staged)| match staged {
+                Staged::Seeded => None,
+                Staged::Unseeded(walked) => Some((mapping.index.clone(), walked)),
+            })
             .collect();
         if self.skip_backfill {
             if !unseeded.is_empty() {
                 tracing::warn!(
-                    indexes = ?unseeded.iter().map(|i| i.as_ref()).collect::<Vec<_>>(),
+                    indexes = ?unseeded.iter().map(|(i, _)| i.as_ref()).collect::<Vec<_>>(),
                     "skipping backfill (skip_backfill set); these indexes stay unseeded"
                 );
             }
@@ -340,10 +345,10 @@ impl SinkEngine {
     ///
     /// `seeded` is each index with whether it is seeded; a rebuilt index's
     /// answer is asked again.
-    async fn rebuild_stale_seeds(&self, seeded: &mut [(&IndexMapping, bool)]) -> Result<()> {
+    async fn rebuild_stale_seeds(&self, seeded: &mut [(&IndexMapping, Staged)]) -> Result<()> {
         let stale: Vec<&IndexMapping> = seeded
             .iter()
-            .filter(|(_, seeded)| *seeded)
+            .filter(|(_, staged)| *staged == Staged::Seeded)
             .map(|(mapping, _)| *mapping)
             .collect();
         if stale.is_empty() {
@@ -370,9 +375,29 @@ impl SinkEngine {
         Ok(())
     }
 
+    /// The source has no resume point, so where an unseeded index's last
+    /// backfill got means nothing any more: the changes since are lost. Forget
+    /// it before the source prepares (the daemon's order), so that a crash
+    /// before the new walk records anything never resumes the old one.
+    async fn forget_walks(&self, staged: &mut [(&IndexMapping, Staged)]) -> Result<()> {
+        for (mapping, state) in staged.iter_mut() {
+            if let Staged::Unseeded(walked @ Some(_)) = state {
+                tracing::warn!(index = %mapping.index, "the source has no resume point, so this index's unfinished backfill starts again from the first key");
+                self.sink
+                    .forget_walked(&mapping.index)
+                    .await
+                    .map_err(|error| {
+                        EngineError::Staging(StagingFailures(vec![(mapping.index.clone(), error)]))
+                    })?;
+                *walked = None;
+            }
+        }
+        Ok(())
+    }
+
     /// Run `step` for each of `mappings`, at most [`STAGE_CONCURRENCY`] at
-    /// once, and return each mapping with whether it is seeded (`false` when
-    /// not asked), in the order given.
+    /// once, and return each mapping with what staging learned of it
+    /// (unseeded with no checkpoint when not asked), in the order given.
     ///
     /// After a failure no further index is started: a destination that is
     /// down or never answers fails every index alike, and each wave would cost
@@ -383,7 +408,7 @@ impl SinkEngine {
         &self,
         mappings: impl IntoIterator<Item = &'a IndexMapping>,
         step: Step,
-    ) -> Result<Vec<(&'a IndexMapping, bool)>> {
+    ) -> Result<Vec<(&'a IndexMapping, Staged)>> {
         let mut waiting = mappings.into_iter().enumerate();
         let mut running = FuturesUnordered::new();
         let mut outcomes = Vec::new();
@@ -418,7 +443,7 @@ impl SinkEngine {
     }
 
     /// One index's staging steps, in order.
-    async fn step(&self, step: Step, mapping: &IndexMapping) -> sink::Result<bool> {
+    async fn step(&self, step: Step, mapping: &IndexMapping) -> sink::Result<Staged> {
         let ask_seeded = match step {
             Step::Ensure { ask_seeded } => ask_seeded,
             Step::Rebuild { ask_seeded } => {
@@ -431,25 +456,34 @@ impl SinkEngine {
             }
         };
         self.sink.ensure_index(mapping).await?;
-        if ask_seeded {
-            self.sink.is_seeded(&mapping.index).await
-        } else {
-            Ok(false)
+        if !ask_seeded {
+            return Ok(Staged::Unseeded(None));
         }
+        Ok(match self.sink.seeding(&mapping.index).await? {
+            sink::Seeding::Seeded => Staged::Seeded,
+            sink::Seeding::Unseeded { walked } => Staged::Unseeded(walked.map(WalkMark::new)),
+            _ => Staged::Unseeded(None),
+        })
     }
 
-    async fn request_backfill(&self, indexes: Vec<IndexName>) -> Result<()> {
-        tracing::info!(indexes = indexes.len(), "requesting backfill");
+    /// Ask for a backfill of each index, after where its last one durably
+    /// got, if anywhere.
+    async fn request_backfill(&self, requests: Vec<(IndexName, Option<WalkMark>)>) -> Result<()> {
+        tracing::info!(indexes = requests.len(), "requesting backfill");
         let producer = self.stream.requests()?.producer;
-        for index in &indexes {
+        for (index, after) in &requests {
+            if after.is_some() {
+                tracing::info!(%index, sink = %self.name, "requesting a resumed backfill: its last walk recorded how far it got");
+            }
             producer
                 .publish(Request::Backfill {
                     index: index.clone(),
                     sink: self.name.clone(),
-                    after: None,
+                    after: after.clone(),
                 })
                 .await?;
         }
+        let indexes: Vec<IndexName> = requests.into_iter().map(|(index, _)| index).collect();
         self.lock_outstanding().extend(indexes.iter().cloned());
         self.observer.on_backfill_requested(&self.name, &indexes);
         Ok(())
@@ -589,17 +623,25 @@ impl SinkEngine {
             tracing::info!(%index, "reindex requested; staging a fresh generation");
             chosen.push(mapping);
         }
-        let staged: Vec<IndexName> = self
+        let staged: Vec<(IndexName, Option<WalkMark>)> = self
             .each_index(chosen, Step::Rebuild { ask_seeded: false })
             .await?
             .into_iter()
-            .map(|(mapping, _)| mapping.index.clone())
+            .map(|(mapping, _)| (mapping.index.clone(), None))
             .collect();
         if !staged.is_empty() {
             self.request_backfill(staged).await?;
         }
         Ok(())
     }
+}
+
+/// What staging learned of an index.
+#[derive(Debug, Clone, PartialEq)]
+enum Staged {
+    Seeded,
+    /// Unseeded, with where its last backfill durably got, if recorded.
+    Unseeded(Option<WalkMark>),
 }
 
 /// Sleep until `at`; never, when nothing is waiting on time. Keeps the loop

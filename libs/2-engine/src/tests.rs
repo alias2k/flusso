@@ -1579,6 +1579,7 @@ mod busy;
 mod concurrent;
 mod lanes;
 mod merge;
+mod resume;
 mod seeding;
 mod snapshot;
 mod staging;

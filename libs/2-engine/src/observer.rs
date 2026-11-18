@@ -356,6 +356,12 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
         let _ = (sink, index);
     }
 
+    /// A sink recorded how far a lane's backfill durably got, so a restart
+    /// resumes after it.
+    fn on_walk_recorded(&self, lane: &stream::LaneKey) {
+        let _ = lane;
+    }
+
     /// A sink engine finished staging and is following its lane.
     fn on_sink_started(&self, sink: &SinkName) {
         let _ = sink;
@@ -516,6 +522,12 @@ impl Observer for FanOut {
     fn on_index_seeded(&self, sink: &SinkName, index: &IndexName) {
         for observer in &self.observers {
             observer.on_index_seeded(sink, index);
+        }
+    }
+
+    fn on_walk_recorded(&self, lane: &stream::LaneKey) {
+        for observer in &self.observers {
+            observer.on_walk_recorded(lane);
         }
     }
 
