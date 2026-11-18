@@ -133,3 +133,33 @@ It goes on the upgrade page under breaking changes. ADR 0009 gets an amendment: 
 - `sdk/query/src/{fence.rs,error.rs}`.
 - `libs/3-daemon/tests/fence.rs`.
 - The docs above.
+
+## As built
+
+- **As designed, with two findings from the tests:**
+  - **During a first seed a get by id already finds a live write.** The index exists and is just partial: `ensure_index` makes it reachable before the seed. The fence still answers `503 backfilling`: a read by id would be right, but a search would see a partial index, and the fence can't tell which read follows. The e2e asserts the answer, not the absence of the document.
+  - **Only the rebuilding event reads the lane's positions** (to freeze `through`). The other events only set the state: reading positions there filled `Furthest` before the source was live, and a wait then answered from it instead of `503 starting` (caught by `http::tests` and `fence::tests`).
+- **The client's `UnavailableCause::Backfilling`** is the only change to `sdk/query`.
+
+| piece | commit | what was run | result |
+| --- | --- | --- | --- |
+| design | `e13fdaf7` | n/a | n/a |
+| `Observer::on_index_rebuilding`, emitted before `Sink::reindex` | `6dbc91de` | `cargo nextest run -p flusso-engine -E 'test(an_index_is_announced_rebuilding)'` | 1 passed |
+| the fence's per-lane state and `Unserved` | `76940d45` | `cargo nextest run -p flusso-daemon` (9 new `fence::tests`) | in the 634 below |
+| `/wait` `503` with reason and lanes | `16daeb0a` | `http::tests` | in the 634 below |
+| `UnavailableCause::Backfilling` | `e5c55c6a` | `flusso-query` stub tests | in the 634 below |
+| e2e | `4f83d964`, `9afbc1ec` | `cargo nextest run --profile ci --run-ignored all -E 'binary(fence)'` | 3 passed |
+| docs | `46ba4c54` | `mdbook build docs` | builds |
+
+**Whole packages:** `cargo nextest run -p flusso-daemon -p flusso-cli -p flusso-query -p flusso-engine`, 634 passed.
+
+**e2e from one archive** (`--profile ci --run-ignored all`):
+
+| binary | passed |
+| --- | --- |
+| `fence` | 3 |
+| `fence_restart` | 2 |
+| `shutdown` | 13 |
+| `pipeline` | 17 |
+| `sink-opensearch` `reindex` | 9 |
+| `flusso-query-e2e` | 16 (`array_columns` 2, `combined_search` 1, `cursor_paging` 4, `geo_points` 1, `map_keys` 3, `read_time` 4, `tls` 1) |
