@@ -606,14 +606,14 @@ impl<T> Search<T> {
         Ok(ids)
     }
 
-    /// The physical index this query addresses (`{index}_{hash}` — exactly
-    /// what the sink writes). Crate-internal: [`Client::msearch`] renders it
-    /// into each NDJSON header line.
     /// The logical index this query reads: what a fence waits on.
     pub(crate) fn index(&self) -> &str {
         &self.index
     }
 
+    /// The physical index this query addresses (`{index}_{hash}` — exactly
+    /// what the sink writes). Crate-internal: [`Client::msearch`] renders it
+    /// into each NDJSON header line.
     pub(crate) fn physical_index(&self) -> String {
         format!("{}_{}", self.index, self.hash)
     }

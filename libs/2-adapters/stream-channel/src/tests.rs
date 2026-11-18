@@ -331,3 +331,24 @@ async fn a_release_on_one_lane_leaves_the_others_alone() {
     handle.ack().await.unwrap();
     assert!(stream.is_idle());
 }
+
+/// Each lane built from configuration holds the backstop, whatever the
+/// number of sinks and indexes (the request lane too).
+#[test]
+fn every_configured_lane_holds_the_backstop() {
+    let sinks = ["audit", "primary"].map(|name| kernel::SinkName::try_new(name).unwrap());
+    let indexes = ["orders", "users"].map(|name| kernel::IndexName::try_new(name).unwrap());
+    let lanes: Vec<LaneKey> = indexes
+        .iter()
+        .flat_map(|index| {
+            sinks
+                .iter()
+                .map(move |sink| LaneKey::new(index.clone(), sink.clone()))
+        })
+        .collect();
+    let stream = ChannelStream::from_config(&ChannelConfig::default(), lanes);
+    for channel in stream.lanes.values() {
+        assert_eq!(channel.tx.max_capacity(), LANE_BACKSTOP);
+    }
+    assert_eq!(stream.requests.tx.max_capacity(), LANE_BACKSTOP);
+}

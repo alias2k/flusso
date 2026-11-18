@@ -76,9 +76,20 @@ impl ChannelStream {
                  [concurrency] max_built_mib bounds what the lanes hold"
             );
         }
-        let lanes: Vec<LaneKey> = lanes.into_iter().collect();
-        let per_sink = lanes.len().max(1);
-        Self::new(LANE_BACKSTOP.saturating_mul(per_sink), lanes)
+        Self::bounded_per_lane(LANE_BACKSTOP, lanes)
+    }
+
+    /// A stream whose every lane, and the request lane, holds `bound` items,
+    /// however many lanes a sink has.
+    fn bounded_per_lane(bound: usize, lanes: impl IntoIterator<Item = LaneKey>) -> Self {
+        let bound = bound.max(1);
+        Self {
+            lanes: lanes
+                .into_iter()
+                .map(|key| (key, Arc::new(Channel::new(bound))))
+                .collect(),
+            requests: Arc::new(Channel::new(bound)),
+        }
     }
 
     /// A stream with one lane per pair of `indexes` and `sinks`.
