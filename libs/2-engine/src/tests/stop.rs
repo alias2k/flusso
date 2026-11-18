@@ -1,6 +1,7 @@
 //! A requested [`Stop`]: the ingest engine reads nothing more, publishes what
 //! it was building, waits until every sink flushed and acknowledged it, hands
-//! the final watermark to the source, and only then closes the live stream.
+//! how far every lane landed to the source, and only then closes the live
+//! stream.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,7 +19,7 @@ use stream_channel::ChannelStream;
 use tokio::sync::{Notify, mpsc};
 
 use super::{MockDocuments, RecordingSink, mapping, sink_name, upsert};
-use crate::{IngestEngine, SinkControl, SinkEngine, Stop};
+use crate::{IngestEngine, Progress, SinkControl, SinkEngine, Stop};
 
 /// A live stream fed through a channel that counts every change it hands
 /// out, and can be closed: `close_live` ends the stream the way the Postgres
@@ -253,9 +254,15 @@ impl Sink for StalledSink {
     }
 }
 
+/// The lanes of `stream`, for a `Progress` over them.
+fn stream_sinks(stream: &ChannelStream) -> Vec<SinkName> {
+    stream.sinks().cloned().collect()
+}
+
 /// Stage and spawn one sink engine per sink; returns their tasks.
 async fn spawn_sinks(
     stream: &Arc<ChannelStream>,
+    progress: &Arc<Progress>,
     sinks: Vec<(SinkName, Arc<dyn Sink>)>,
 ) -> Vec<tokio::task::JoinHandle<crate::Result<()>>> {
     let mut tasks = Vec::new();
@@ -265,7 +272,8 @@ async fn spawn_sinks(
             sink,
             Arc::clone(stream) as Arc<dyn Stream>,
             vec![mapping()],
-        );
+        )
+        .with_progress(Arc::clone(progress));
         engine.stage(Continuity::Resumed).await.unwrap();
         tasks.push(tokio::spawn(async move {
             let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
@@ -279,6 +287,7 @@ fn ingest(
     source: &Arc<ClosableSource>,
     documents: Arc<dyn DocumentBuilder>,
     stream: &Arc<ChannelStream>,
+    progress: &Arc<Progress>,
     sinks: &[&str],
     stop: &Stop,
 ) -> IngestEngine {
@@ -288,6 +297,7 @@ fn ingest(
         Arc::clone(stream) as Arc<dyn Stream>,
         sinks.iter().map(|sink| sink_name(sink)).collect(),
     )
+    .with_progress(Arc::clone(progress))
     .with_stop(stop.clone())
 }
 
@@ -298,12 +308,14 @@ async fn a_stop_during_a_build_publishes_the_batch_and_every_sink_lands_it_befor
     let documents = Arc::new(GatedDocuments::default());
     documents.gated.store(true, Ordering::SeqCst);
     let stream = Arc::new(ChannelStream::new(64, [sink_name("a"), sink_name("b")]));
+    let progress = Arc::new(Progress::new(stream_sinks(&stream)));
     let a = Arc::new(RecordingSink::seeded(true));
     let b = Arc::new(RecordingSink::seeded(true));
     let (a_ops, b_ops) = (Arc::clone(&a.ops), Arc::clone(&b.ops));
     let (a_flushes, b_flushes) = (Arc::clone(&a.flushes), Arc::clone(&b.flushes));
     let sinks = spawn_sinks(
         &stream,
+        &progress,
         vec![(sink_name("a"), a as Arc<dyn Sink>), (sink_name("b"), b)],
     )
     .await;
@@ -312,6 +324,7 @@ async fn a_stop_during_a_build_publishes_the_batch_and_every_sink_lands_it_befor
         &source,
         Arc::clone(&documents) as _,
         &stream,
+        &progress,
         &["a", "b"],
         &stop,
     );
@@ -341,7 +354,7 @@ async fn a_stop_during_a_build_publishes_the_batch_and_every_sink_lands_it_befor
     assert_eq!(
         *source.log.lock().unwrap(),
         vec!["confirm 0".to_owned(), "close".to_owned()],
-        "the final watermark reached the source before the live stream was closed"
+        "the final confirmation reached the source before the live stream was closed"
     );
     for task in sinks {
         task.abort();
@@ -353,14 +366,21 @@ async fn nothing_is_read_from_the_live_stream_once_the_stop_is_requested() {
     let (source, feed) = ClosableSource::new();
     let source = Arc::new(source);
     let stream = Arc::new(ChannelStream::new(64, [sink_name("primary")]));
+    let progress = Arc::new(Progress::new(stream_sinks(&stream)));
     let sink = Arc::new(RecordingSink::seeded(true));
     let ops = Arc::clone(&sink.ops);
-    let sinks = spawn_sinks(&stream, vec![(sink_name("primary"), sink as Arc<dyn Sink>)]).await;
+    let sinks = spawn_sinks(
+        &stream,
+        &progress,
+        vec![(sink_name("primary"), sink as Arc<dyn Sink>)],
+    )
+    .await;
     let stop = Stop::new();
     let engine = ingest(
         &source,
         Arc::new(MockDocuments::default()),
         &stream,
+        &progress,
         &["primary"],
         &stop,
     );
@@ -392,14 +412,21 @@ async fn a_snapshot_waiting_on_a_page_is_abandoned_and_its_request_served_again_
     let source = Arc::new(source);
     let hanging = Arc::new(HangingKeys::default());
     let stream = Arc::new(ChannelStream::new(64, [sink_name("primary")]));
+    let progress = Arc::new(Progress::new(stream_sinks(&stream)));
     let sink = Arc::new(RecordingSink::seeded(false));
     let marked = Arc::clone(&sink.marked);
-    let sinks = spawn_sinks(&stream, vec![(sink_name("primary"), sink as Arc<dyn Sink>)]).await;
+    let sinks = spawn_sinks(
+        &stream,
+        &progress,
+        vec![(sink_name("primary"), sink as Arc<dyn Sink>)],
+    )
+    .await;
     let stop = Stop::new();
     let engine = ingest(
         &source,
         Arc::clone(&hanging) as Arc<dyn DocumentBuilder>,
         &stream,
+        &progress,
         &["primary"],
         &stop,
     );
@@ -423,6 +450,7 @@ async fn a_snapshot_waiting_on_a_page_is_abandoned_and_its_request_served_again_
         &next_source,
         paging([10]),
         &stream,
+        &progress,
         &["primary"],
         &Stop::new(),
     );
@@ -443,10 +471,12 @@ async fn a_stalled_sink_does_not_keep_the_other_from_landing_its_lane_and_holds_
         64,
         [sink_name("healthy"), sink_name("stalled")],
     ));
+    let progress = Arc::new(Progress::new(stream_sinks(&stream)));
     let healthy = Arc::new(RecordingSink::seeded(true));
     let flushes = Arc::clone(&healthy.flushes);
     let sinks = spawn_sinks(
         &stream,
+        &progress,
         vec![
             (sink_name("healthy"), healthy as Arc<dyn Sink>),
             (sink_name("stalled"), Arc::new(StalledSink)),
@@ -458,6 +488,7 @@ async fn a_stalled_sink_does_not_keep_the_other_from_landing_its_lane_and_holds_
         &source,
         Arc::new(MockDocuments::default()),
         &stream,
+        &progress,
         &["healthy", "stalled"],
         &stop,
     );
@@ -475,7 +506,7 @@ async fn a_stalled_sink_does_not_keep_the_other_from_landing_its_lane_and_holds_
     assert_eq!(*flushes.lock().unwrap(), vec![(1, true)]);
     assert!(
         source.confirmed().is_empty(),
-        "the watermark is the slowest lane's: nothing the stalled sink holds is confirmed"
+        "confirmation follows the slowest lane: nothing the stalled sink holds is confirmed"
     );
     assert!(!source.closed.load(Ordering::SeqCst));
     run.abort();
@@ -489,6 +520,7 @@ async fn a_stop_requested_before_the_run_reads_nothing() {
     let (source, feed) = ClosableSource::new();
     let source = Arc::new(source);
     let stream = Arc::new(ChannelStream::new(64, [sink_name("primary")]));
+    let progress = Arc::new(Progress::new(stream_sinks(&stream)));
     feed.send(upsert(1)).await.unwrap();
     let stop = Stop::new();
     stop.request();
@@ -496,6 +528,7 @@ async fn a_stop_requested_before_the_run_reads_nothing() {
         &source,
         Arc::new(MockDocuments::default()),
         &stream,
+        &progress,
         &["primary"],
         &stop,
     );
@@ -514,6 +547,7 @@ async fn a_stopping_sink_skips_queued_snapshot_batches_and_leaves_their_index_un
     let (source, _feed) = ClosableSource::new();
     let source = Arc::new(source);
     let stream = Arc::new(ChannelStream::new(64, [sink_name("primary")]));
+    let progress = Arc::new(Progress::new(stream_sinks(&stream)));
     let sink = Arc::new(RecordingSink::seeded(false));
     let (ops, marked) = (Arc::clone(&sink.ops), Arc::clone(&sink.marked));
     let engine = SinkEngine::new(
@@ -521,12 +555,20 @@ async fn a_stopping_sink_skips_queued_snapshot_batches_and_leaves_their_index_un
         sink,
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![mapping()],
-    );
+    )
+    .with_progress(Arc::clone(&progress));
     engine.stage(Continuity::Resumed).await.unwrap();
     let stop = Stop::new();
-    let ingest_engine = ingest(&source, paging(1..=600), &stream, &["primary"], &stop);
+    let ingest_engine = ingest(
+        &source,
+        paging(1..=600),
+        &stream,
+        &progress,
+        &["primary"],
+        &stop,
+    );
     let ingest_run = tokio::spawn(async move { ingest_engine.run().await });
-    super::wait_for(|| !stream.is_idle() && stream.watermark().is_none()).await;
+    super::wait_for(|| !stream.is_idle() && super::covered(&progress).is_none()).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     stop.request();
@@ -591,9 +633,15 @@ async fn a_stop_whose_final_position_never_reaches_the_source_fails_the_run() {
     let (source, feed) = ClosableSource::new();
     let source = Arc::new(UnconfirmedClose(source));
     let stream = Arc::new(ChannelStream::new(64, [sink_name("primary")]));
+    let progress = Arc::new(Progress::new(stream_sinks(&stream)));
     let sink = Arc::new(RecordingSink::seeded(true));
     let ops = Arc::clone(&sink.ops);
-    let sinks = spawn_sinks(&stream, vec![(sink_name("primary"), sink as Arc<dyn Sink>)]).await;
+    let sinks = spawn_sinks(
+        &stream,
+        &progress,
+        vec![(sink_name("primary"), sink as Arc<dyn Sink>)],
+    )
+    .await;
     let stop = Stop::new();
     let engine = IngestEngine::new(
         Arc::clone(&source) as Arc<dyn ChangeCapture>,
@@ -601,6 +649,7 @@ async fn a_stop_whose_final_position_never_reaches_the_source_fails_the_run() {
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![sink_name("primary")],
     )
+    .with_progress(Arc::clone(&progress))
     .with_stop(stop.clone());
     let run = tokio::spawn(async move { engine.run().await });
 
@@ -762,16 +811,22 @@ async fn a_stop_raised_mid_burst_ends_the_batch_there_and_lands_what_was_read() 
         feed.send(upsert(id)).await.unwrap();
     }
     let stream = Arc::new(ChannelStream::new(64, [sink_name("primary")]));
+    let progress = Arc::new(Progress::new(stream_sinks(&stream)));
     let sink = Arc::new(RecordingSink::seeded(true));
     let (ops, flushes) = (Arc::clone(&sink.ops), Arc::clone(&sink.flushes));
-    let sinks = spawn_sinks(&stream, vec![(sink_name("primary"), sink as Arc<dyn Sink>)]).await;
+    let sinks = spawn_sinks(
+        &stream,
+        &progress,
+        vec![(sink_name("primary"), sink as Arc<dyn Sink>)],
+    )
+    .await;
     let stop = Stop::new();
     let documents = Arc::new(StopsWhileResolving {
         inner: MockDocuments::default(),
         stop: stop.clone(),
         at: 3,
     });
-    let engine = ingest(&source, documents, &stream, &["primary"], &stop);
+    let engine = ingest(&source, documents, &stream, &progress, &["primary"], &stop);
 
     tokio::time::timeout(Duration::from_secs(5), engine.run())
         .await

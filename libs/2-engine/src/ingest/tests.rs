@@ -570,7 +570,8 @@ impl Deployment {
             Arc::clone(&recorder) as Arc<dyn Sink>,
             Arc::clone(&stream) as Arc<dyn Stream>,
             vec![mapping()],
-        );
+        )
+        .with_progress(ingest.progress());
         Self {
             stream,
             feed,
@@ -624,7 +625,9 @@ impl Deployment {
                         "the ingest engine failed {failed} times; the last: {error}"
                     );
                     self.drained().await;
-                    self.feed.resume_after(self.stream.watermark());
+                    let landed = self.ingest.progress().landed();
+                    self.feed
+                        .resume_after(landed.covered_seq().map(Position::new));
                 }
             }
         }

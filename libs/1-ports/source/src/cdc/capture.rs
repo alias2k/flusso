@@ -42,8 +42,10 @@ pub enum Landed {
 }
 
 impl Landed {
-    /// The `seq` of the newest position every lane has landed, with all
-    /// before it: what a position-only view (a mock, a log line) can say.
+    /// For a position-only view (a mock, a log line): the `seq` up to which
+    /// nothing routed is outstanding. For `Before(o)` that is `o.seq - 1`,
+    /// which says nothing of a position there that was emitted but never
+    /// routed: only the source knows of those.
     pub fn covered_seq(self) -> Option<u64> {
         match self {
             Landed::Before(oldest) => oldest.seq.checked_sub(1),

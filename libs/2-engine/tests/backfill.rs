@@ -318,17 +318,20 @@ async fn backfill(port: u16, url: &str, sink: Arc<RecordingSink>) -> Vec<String>
     let stream: Arc<dyn Stream> = Arc::new(ChannelStream::new(1024, [name.clone()]));
     let continuity = capture.continuity().await.unwrap();
     let mappings = documents.index_mappings().await.unwrap();
+    let progress = Arc::new(engine::Progress::new([name.clone()]));
     let sink_engine = SinkEngine::new(
         name.clone(),
         Arc::clone(&sink) as Arc<dyn Sink>,
         Arc::clone(&stream),
         mappings,
-    );
+    )
+    .with_progress(Arc::clone(&progress));
     sink_engine.stage(continuity).await.unwrap();
     // Small batches: a document built from a related row in one batch and
     // from its own root row in another is built twice.
-    let ingest =
-        IngestEngine::new(capture, documents, stream, vec![name]).with_batch(BatchPolicy {
+    let ingest = IngestEngine::new(capture, documents, stream, vec![name])
+        .with_progress(progress)
+        .with_batch(BatchPolicy {
             max_changes: 4,
             max_delay: Duration::from_millis(10),
         });

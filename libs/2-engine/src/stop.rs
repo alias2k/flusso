@@ -31,10 +31,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use kernel::Position;
-use source::cdc::ChangeCapture;
+use source::cdc::{ChangeCapture, Landed};
 use stream::Stream;
 use tokio::sync::Notify;
+
+use crate::progress::Progress;
 
 /// How often [`drain_lanes`] looks at the lanes.
 const DRAIN_POLL: Duration = Duration::from_millis(10);
@@ -99,21 +100,22 @@ impl Stop {
     }
 }
 
-/// Wait until every lane of `stream` is acknowledged, handing the watermark
-/// to `source` each time it moves, the last time once the lanes are idle.
-/// `last` is the position last handed over, kept across calls.
+/// Wait until every lane of `stream` is acknowledged, handing how far the
+/// lanes landed (`progress`) to `source` each time it changes, and once more
+/// once the lanes are idle. `last` is the answer last handed over, kept
+/// across calls.
 pub async fn drain_lanes(
     stream: &dyn Stream,
     source: &dyn ChangeCapture,
-    last: &mut Option<Position>,
+    progress: &Progress,
+    last: &mut Option<Landed>,
 ) {
     loop {
         let idle = stream.is_idle();
-        if let Some(watermark) = stream.watermark()
-            && *last != Some(watermark)
-        {
-            source.confirm(source::cdc::Landed::Through(watermark));
-            *last = Some(watermark);
+        let landed = progress.landed();
+        if idle || *last != Some(landed) {
+            source.confirm(landed);
+            *last = Some(landed);
         }
         if idle {
             return;

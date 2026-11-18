@@ -1,6 +1,6 @@
 //! What travels on the stream: [`LaneItem`]s down each sink's lane,
 //! [`Request`]s up the request lane, and the [`Stream`] port that hands out
-//! their ends and owns the watermark.
+//! their ends.
 //!
 //! ```
 //! use kernel::Position;
@@ -9,7 +9,7 @@
 //! let live = LaneItem::Batch(Batch { position: Some(Position::new(7)), changes: 3, envelopes: Vec::new().into() });
 //! let snapshot = LaneItem::Batch(Batch { position: None, changes: 0, envelopes: Vec::new().into() });
 //! assert_eq!(live.position(), Some(Position::new(7)));
-//! assert_eq!(snapshot.position(), None, "snapshot rows never move the watermark");
+//! assert_eq!(snapshot.position(), None, "snapshot rows carry no position");
 //! ```
 
 use std::sync::Arc;
@@ -31,7 +31,8 @@ pub enum LaneItem {
 /// The envelopes one ingest commit built, in build order, with the position of
 /// the last change the batch covers. A live batch with no envelopes (every
 /// change resolved to nothing this sink indexes) still carries its position,
-/// so acknowledging it moves the watermark. A snapshot batch carries none.
+/// so the engine can tell when every lane landed it. A snapshot batch
+/// carries none.
 ///
 /// The envelopes are shared, not owned: one build is published to every lane
 /// and held for redelivery without copying the documents, so a batch is
@@ -91,7 +92,7 @@ pub struct RequestLane {
 }
 
 /// The stream port: one lane per sink downward, one request lane upward, and
-/// the watermark that ties every lane's acknowledgements together.
+/// nothing else: how far each lane has landed is the engine's `Progress`.
 ///
 /// `lane` and `requests` are idempotent: calling them again returns fresh ends
 /// over the *same* lane, which is how the daemon re-attaches a restarted engine
@@ -103,13 +104,6 @@ pub trait Stream: std::fmt::Debug + Send + Sync {
 
     /// The request lane.
     fn requests(&self) -> crate::Result<RequestLane>;
-
-    /// What the source may confirm: the lowest, over every lane, of the last
-    /// position before that lane's oldest unacknowledged positioned item (a
-    /// lane with nothing unacknowledged counts its last delivered position).
-    /// Items are acknowledged in any order, so it is never simply the highest
-    /// acknowledgement. `None` until every lane has a position behind it.
-    fn watermark(&self) -> Option<Position>;
 
     /// Whether every lane is drained: nothing queued and nothing delivered but
     /// unacknowledged. The daemon waits for this before it stops the sink

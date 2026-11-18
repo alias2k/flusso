@@ -55,6 +55,7 @@ use self::fences::Fences;
 use crate::error::{EngineError, Result, StagingFailures};
 use crate::observer::{EngineId, NoopObserver, Observer, Stage, StageTiming, StartupStep};
 use crate::policy::FailurePolicies;
+use crate::progress::Progress;
 use crate::stop::Stop;
 
 /// How many of a sink's indexes are staged at once.
@@ -111,6 +112,9 @@ pub struct SinkEngine {
     /// its place and a position written before a failure is still reported
     /// once its time comes.
     fences: Mutex<Fences>,
+    /// Where landings and searchable positions are reported, for
+    /// confirmation and fences.
+    progress: Option<Arc<Progress>>,
     stop: Stop,
     /// Indexes whose snapshot batches were acknowledged unapplied during a
     /// stop: their `SnapshotComplete` must not mark them seeded.
@@ -157,6 +161,7 @@ impl SinkEngine {
             skip_backfill: false,
             outstanding: Mutex::new(BTreeSet::new()),
             fences: Mutex::new(Fences::default()),
+            progress: None,
             stop: Stop::new(),
             skipped: Mutex::new(BTreeSet::new()),
             advanced: AtomicU64::new(0),
@@ -173,6 +178,14 @@ impl SinkEngine {
     /// the next start, so writing it now would only hold the drain up.
     pub fn with_stop(mut self, stop: Stop) -> Self {
         self.stop = stop;
+        self
+    }
+
+    /// Report each lane item that lands, and how far this sink is
+    /// searchable, to `progress`: the deployment's one, shared with the
+    /// ingest engine.
+    pub fn with_progress(mut self, progress: Arc<Progress>) -> Self {
+        self.progress = Some(progress);
         self
     }
 

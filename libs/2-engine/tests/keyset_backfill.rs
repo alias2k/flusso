@@ -447,15 +447,18 @@ async fn run(
     let stream: Arc<dyn Stream> = Arc::new(ChannelStream::new(64, [name.clone()]));
     let continuity = capture.continuity().await.unwrap();
     let mappings = documents.index_mappings().await.unwrap();
+    let progress = Arc::new(engine::Progress::new([name.clone()]));
     let sink_engine = SinkEngine::new(
         name.clone(),
         Arc::clone(sink) as Arc<dyn Sink>,
         Arc::clone(&stream),
         mappings,
     )
+    .with_progress(Arc::clone(&progress))
     .with_stop(stop.clone());
     sink_engine.stage(continuity).await.unwrap();
     let ingest = IngestEngine::new(capture, documents, stream, vec![name])
+        .with_progress(progress)
         .with_batch(BatchPolicy {
             max_changes: 64,
             max_delay: Duration::from_millis(10),

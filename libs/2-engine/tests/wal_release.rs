@@ -599,11 +599,13 @@ async fn deploy(url: &str, spec: SourceSpec, sinks: Vec<SinkSpec>, tuning: Tunin
     let mappings = documents.index_mappings().await.unwrap();
 
     let mut engines: Vec<BoxFuture<'static, engine::Result<()>>> = Vec::new();
+    let progress = Arc::new(engine::Progress::new(names.iter().cloned()));
     for spec in sinks {
         let engine = SinkEngine::new(spec.name, spec.sink, Arc::clone(&stream), mappings.clone())
             .with_options(SinkOptions {
                 backfill: spec.backfill,
-            });
+            })
+            .with_progress(Arc::clone(&progress));
         engine.stage(continuity).await.unwrap();
         engines.push(
             async move {
@@ -613,7 +615,9 @@ async fn deploy(url: &str, spec: SourceSpec, sinks: Vec<SinkSpec>, tuning: Tunin
             .boxed(),
         );
     }
-    let ingest = IngestEngine::new(capture, documents, stream, names).with_batch(tuning.batch);
+    let ingest = IngestEngine::new(capture, documents, stream, names)
+        .with_batch(tuning.batch)
+        .with_progress(progress);
     engines.push(async move { ingest.run().await }.boxed());
     let stopped = Arc::new(Mutex::new(None));
     let outcome = Arc::clone(&stopped);

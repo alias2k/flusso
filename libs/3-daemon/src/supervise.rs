@@ -154,6 +154,7 @@ pub(crate) async fn run_all(
     fence: &Fence,
 ) -> anyhow::Result<()> {
     let max_backoff = options.max_restart_backoff;
+    let progress = ingest.progress();
 
     // First staging, every sink, retried until it succeeds: the ingest engine
     // must not create the resume point before every rebuild is staged. A stop
@@ -242,7 +243,7 @@ pub(crate) async fn run_all(
                 let mut confirmed = None;
                 let drained = tokio::time::timeout(
                     DRAIN_TIMEOUT,
-                    drain_lanes(&**stream, &**source, &mut confirmed),
+                    drain_lanes(&**stream, &**source, &progress, &mut confirmed),
                 )
                 .await;
                 if drained.is_err() {

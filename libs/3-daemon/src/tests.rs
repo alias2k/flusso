@@ -460,7 +460,7 @@ impl ChangeCapture for ScriptedSource {
 #[derive(Debug)]
 struct FlakySource {
     opened: AtomicU64,
-    confirmed: Arc<Mutex<Vec<Position>>>,
+    confirmed: Arc<Mutex<Vec<source::cdc::Landed>>>,
 }
 
 #[async_trait]
@@ -489,12 +489,7 @@ impl ChangeCapture for FlakySource {
     }
 
     fn confirm(&self, landed: source::cdc::Landed) {
-        let mut confirmed = self.confirmed.lock().unwrap();
-        if let Some(seq) = landed.covered_seq()
-            && confirmed.last().is_none_or(|last| last.seq != seq)
-        {
-            confirmed.push(Position::new(seq));
-        }
+        self.confirmed.lock().unwrap().push(landed);
     }
 }
 
@@ -1048,10 +1043,16 @@ async fn failed_ingest_engine_restarts_and_resumes_the_stream() {
         vec!["upsert users 1".to_owned(), "upsert users 3".to_owned()]
     );
     let confirmed = confirmed.lock().unwrap();
-    assert_eq!(confirmed.last(), Some(&Position::new(2)));
+    assert_eq!(
+        confirmed.last(),
+        Some(&source::cdc::Landed::Through(Position::new(2)))
+    );
     assert!(
-        !confirmed.contains(&Position::new(0)),
-        "the change the failed stream never committed is not confirmed"
+        !confirmed.iter().any(|landed| matches!(
+            landed,
+            source::cdc::Landed::Through(p) if p.seq == 0
+        )),
+        "the change the failed stream never committed is not confirmed: it was never routed"
     );
     let snap = status.snapshot();
     assert_eq!(snap.errors, 1);

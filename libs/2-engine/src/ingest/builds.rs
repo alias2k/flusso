@@ -56,6 +56,7 @@ const BACKFILL_EVERY: u64 = 4;
 pub(super) enum Job {
     /// A live batch, to every lane, with the position of its last change.
     Live {
+        oldest: Option<Position>,
         position: Option<Position>,
         changes: usize,
     },

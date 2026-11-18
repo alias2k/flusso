@@ -788,11 +788,11 @@ impl SinkEngine {
         Ok(())
     }
 
-    /// A write returned: record it, and report what became applied and
-    /// searchable, applied first. Applied is reported here, before the caller
-    /// acknowledges: the source forgets a position once every sink confirmed
-    /// it, so a listener must hear of it first. One lock for all of it: a
-    /// write returns once per lane item.
+    /// A write returned: record it, report the item landed and how far the
+    /// sink is searchable to the progress (before the caller acknowledges it,
+    /// so a fence never waits on an acknowledgement), and tell observers what
+    /// became applied and searchable, applied first. One fences lock and one
+    /// progress lock: a write returns once per lane item.
     fn write_returned(
         &self,
         position: Option<Position>,
@@ -811,6 +811,9 @@ impl SinkEngine {
             };
             (applied, searchable, returned)
         };
+        if let Some(progress) = &self.progress {
+            progress.wrote(&self.name, position, searchable);
+        }
         if let Some(position) = applied {
             self.observer.on_position_applied(&self.name, position);
         }
@@ -824,6 +827,9 @@ impl SinkEngine {
     pub(super) fn report_searchable(&self) {
         let reached = self.lock_fences().advance_searchable(Instant::now());
         if let Some(position) = reached {
+            if let Some(progress) = &self.progress {
+                progress.wrote(&self.name, None, Some(position));
+            }
             self.observer.on_position_searchable(&self.name, position);
         }
     }

@@ -106,6 +106,7 @@ impl IngestEngine {
     async fn start_live(&self, pending: &mut PendingBatch, builds: &mut Builds) {
         let ids = std::mem::replace(&mut pending.ids, builds.spare(self.batch.max_changes));
         let job = Job::Live {
+            oldest: pending.oldest,
             position: pending.position,
             changes: pending.count,
         };
@@ -169,8 +170,16 @@ impl IngestEngine {
                         StageTiming::new(Stage::Snapshot, started.elapsed()).work(Work::Backfill),
                     );
                 }
-                (Job::Live { position, changes }, Some(built)) => {
-                    self.publish_live(built, position, changes, lanes).await?;
+                (
+                    Job::Live {
+                        oldest,
+                        position,
+                        changes,
+                    },
+                    Some(built),
+                ) => {
+                    self.publish_live(built, oldest, position, changes, lanes)
+                        .await?;
                 }
                 (Job::Backfill { requested }, Some(built)) => {
                     self.publish_backfill(built, &requested, lanes).await?;
@@ -189,6 +198,7 @@ impl IngestEngine {
     async fn publish_live(
         &self,
         built: Built,
+        oldest: Option<Position>,
         position: Option<Position>,
         changes: usize,
         lanes: &Lanes,
@@ -216,6 +226,12 @@ impl IngestEngine {
             started,
         )
         .await?;
+        // After every lane has the item: until then the source's own test
+        // keeps the older routed position short of these changes, and a lane
+        // that lands the item first leaves its report for this to find.
+        if let (Some(oldest), Some(last)) = (oldest, position) {
+            self.progress.published(lanes.keys(), oldest, last);
+        }
         self.observer.on_batch_built(stats);
         tracing::debug!("batch built and published");
         Ok(())

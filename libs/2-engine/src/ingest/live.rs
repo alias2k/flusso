@@ -54,6 +54,7 @@ impl IngestEngine {
             .await?;
         tracing::trace!(documents = affected.len(), "change resolved to documents");
         pending.add(affected);
+        pending.oldest.get_or_insert(position);
         pending.position = Some(position);
         if pending.deadline.is_none() {
             pending.deadline = Some(Instant::now() + self.batch.max_delay);
@@ -100,6 +101,9 @@ pub(super) struct PendingBatch {
     pub(super) seen: HashSet<DocumentId>,
     pub(super) count: usize,
     pub(super) position: Option<Position>,
+    /// The batch's first position: what holds confirmation back while the
+    /// batch is outstanding on a lane.
+    pub(super) oldest: Option<Position>,
     pub(super) deadline: Option<Instant>,
     pub(super) capacity: usize,
 }
@@ -111,6 +115,7 @@ impl PendingBatch {
             seen: HashSet::with_capacity(capacity),
             count: 0,
             position: None,
+            oldest: None,
             deadline: None,
             capacity,
         }
@@ -143,6 +148,7 @@ impl PendingBatch {
         self.seen.clear();
         self.count = 0;
         self.position = None;
+        self.oldest = None;
         self.deadline = None;
     }
 }

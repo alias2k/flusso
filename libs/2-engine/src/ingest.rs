@@ -55,9 +55,9 @@ use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use kernel::{IndexName, Position, SinkName};
+use kernel::{IndexName, SinkName};
 use source::SourceError;
-use source::cdc::{ChangeCapture, LiveChange};
+use source::cdc::{ChangeCapture, Landed, LiveChange};
 use source::document::{DocumentBuilder, DocumentId};
 use stream::{Consumer, LaneItem, Producer, Request, Stream};
 use tokio::time::{Duration, Instant, timeout_at};
@@ -65,6 +65,7 @@ use tokio::time::{Duration, Instant, timeout_at};
 use crate::error::{EngineError, Result};
 use crate::observer::{EngineId, NoopObserver, Observer, Stage, StageTiming, StartupStep, Work};
 use crate::policy::{BatchPolicy, FailurePolicies};
+use crate::progress::Progress;
 use crate::stop::{Stop, drain_lanes};
 
 use builds::Builds;
@@ -104,6 +105,9 @@ pub struct IngestEngine {
     /// The furthest this engine has confirmed, and the furthest its source
     /// reported reaching, across restarts of its run.
     furthest: Mutex<Furthest>,
+    /// How far each lane has landed what this engine routed: registered at
+    /// publish, read to confirm.
+    progress: Arc<Progress>,
 }
 
 /// How the engine's run ended without an error.
@@ -125,7 +129,6 @@ impl IngestEngine {
             source,
             documents,
             stream,
-            sinks,
             observer: Arc::new(NoopObserver),
             batch: BatchPolicy::default(),
             builds: 1,
@@ -133,6 +136,8 @@ impl IngestEngine {
             stop: Stop::new(),
             advances: AtomicU64::new(0),
             furthest: Mutex::new(Furthest::default()),
+            progress: Arc::new(Progress::new(sinks.iter().cloned())),
+            sinks,
         }
     }
 
@@ -154,6 +159,19 @@ impl IngestEngine {
     /// that failed where the last one did.
     pub fn advances(&self) -> u64 {
         self.advances.load(Ordering::Relaxed)
+    }
+
+    /// Register routed batches on `progress` and confirm from it: the
+    /// deployment's one, shared with every sink engine and the fence. By
+    /// default the engine has its own over its sinks.
+    pub fn with_progress(mut self, progress: Arc<Progress>) -> Self {
+        self.progress = progress;
+        self
+    }
+
+    /// How far each lane has landed what this engine routed.
+    pub fn progress(&self) -> Arc<Progress> {
+        Arc::clone(&self.progress)
     }
 
     /// Report lifecycle and progress to `observer`.
@@ -253,7 +271,7 @@ impl IngestEngine {
     ) -> Result<Ended> {
         let mut pending = PendingBatch::new(self.batch.max_changes);
         let mut snapshot: Option<Snapshot> = None;
-        let mut last_confirmed: Option<Position> = None;
+        let mut last_confirmed: Option<Landed> = None;
         let mut confirm_tick = tokio::time::interval(CONFIRM_TICK);
         let mut live_ended = false;
         // Where the last arm's work ended: every arm times its wait from here,
@@ -266,7 +284,7 @@ impl IngestEngine {
             // gets those served; the run ends once nothing is left to do.
             if live_ended && snapshot.is_none() && requests.is_empty() {
                 self.settle(&mut pending, builds, lanes).await?;
-                self.confirm(&mut last_confirmed);
+                self.confirm(&mut last_confirmed, false);
                 return Ok(Ended::LiveEnded);
             }
             if self.stop.is_requested() {
@@ -315,13 +333,13 @@ impl IngestEngine {
                             StageTiming::new(Stage::Resolve, started.elapsed()).work(Work::Live),
                         );
                         self.grant(&mut pending, &mut snapshot, builds, lanes).await?;
-                        self.confirm(&mut last_confirmed);
+                        self.confirm(&mut last_confirmed, false);
                         mark = Instant::now();
                     }
                 },
                 landed = builds.next(), if building => {
                     self.landed(landed, &mut pending, &mut snapshot, builds, lanes).await?;
-                    self.confirm(&mut last_confirmed);
+                    self.confirm(&mut last_confirmed, false);
                     mark = Instant::now();
                 }
                 step = next_snapshot_step(&mut snapshot),
@@ -359,7 +377,7 @@ impl IngestEngine {
                 },
                 _ = confirm_tick.tick() => {
                     mark = self.waited(mark, &mut snapshot, building);
-                    self.confirm(&mut last_confirmed);
+                    self.confirm(&mut last_confirmed, true);
                 }
             }
         }
@@ -396,14 +414,14 @@ impl IngestEngine {
         lanes: &Lanes,
         mut live: LiveStream,
         live_ended: bool,
-        last_confirmed: &mut Option<Position>,
+        last_confirmed: &mut Option<Landed>,
     ) -> Result<()> {
         tracing::info!(
             buffered = pending.count,
             "stop requested: reading no further changes; landing what is in flight"
         );
         self.settle(pending, builds, lanes).await?;
-        drain_lanes(&*self.stream, &*self.source, last_confirmed).await;
+        drain_lanes(&*self.stream, &*self.source, &self.progress, last_confirmed).await;
         tracing::info!(position = ?last_confirmed, "every sink acknowledged; closing the live stream");
         if live_ended || !self.source.close_live() {
             return Ok(());

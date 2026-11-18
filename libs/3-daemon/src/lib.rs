@@ -18,6 +18,7 @@ pub use status::{
     IndexState, LastScriptFailure, Phase, ScriptFailures, SinkPhase, SinkSnapshot, Status,
     StatusSnapshot,
 };
+pub use engine::Progress;
 pub use supervise::{ControlError, DaemonControl};
 
 use supervise::ControlReceivers;
@@ -182,7 +183,12 @@ impl Daemon {
             .await
             .context("resolving the index mappings")?;
 
-        let fence = Fence::new(Arc::clone(&capture), sink_names.iter().cloned());
+        let progress = Arc::new(Progress::new(sink_names.iter().cloned()));
+        let fence = Fence::new(
+            Arc::clone(&capture),
+            Arc::clone(&progress),
+            sink_names.iter().cloned(),
+        );
         let status = Arc::new(
             Status::new(
                 config.indexes.keys().cloned(),
@@ -223,6 +229,7 @@ impl Daemon {
         .with_builds(builds(&config))
         .with_observer(Arc::clone(&observer))
         .with_failure_policies(failure_policies.clone())
+        .with_progress(Arc::clone(&progress))
         .with_stop(stop.clone());
 
         let sink_engines: Vec<SinkEngine> = sinks
@@ -239,6 +246,7 @@ impl Daemon {
                 .with_observer(Arc::clone(&observer))
                 .with_failure_policies(failure_policies.clone())
                 .skip_backfill(options.skip_backfill)
+                .with_progress(Arc::clone(&progress))
                 .with_stop(stop.clone())
             })
             .collect();

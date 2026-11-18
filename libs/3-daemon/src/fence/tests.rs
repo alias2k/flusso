@@ -3,14 +3,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use source::SourceError;
-use source::cdc::{AdvanceListener, Continuity, LiveChange};
+use source::cdc::{AdvanceListener, Continuity, Landed, LiveChange};
 
 use super::*;
 
 /// A source whose positions are plain numbers. It mirrors the Postgres
-/// bookkeeping in miniature: `emit` registers a change at a source position,
-/// `confirm` forgets the changes at or before a stream position, and `reached`
-/// answers the horizon once nothing is outstanding past the asked position.
+/// bookkeeping in miniature: `emit` stamps a single-change commit at a source
+/// position, and `reached` reads the answer off the stamps and the horizon.
 #[derive(Default)]
 struct NumberedSource {
     state: Mutex<Numbered>,
@@ -28,17 +27,19 @@ impl std::fmt::Debug for NumberedSource {
 
 #[derive(Debug, Default)]
 struct Numbered {
-    entries: BTreeMap<u64, u64>,
+    next_seq: u64,
     horizon: u64,
-    floor: u64,
 }
 
 impl NumberedSource {
-    /// A change at stream position `seq`, committed at source position `at`.
-    fn emit(&self, seq: u64, at: u64) {
+    /// A single-change commit at source position `at`.
+    fn emit(&self, at: u64) -> Position {
         let mut state = self.state.lock().unwrap();
-        state.entries.insert(seq, at);
+        let seq = state.next_seq;
+        state.next_seq += 1;
+        let position = Position::stamped(seq, at - 1, state.horizon, at);
         state.horizon = state.horizon.max(at);
+        position
     }
 
     /// The source read on to `at` with nothing new to deliver.
@@ -68,15 +69,7 @@ impl ChangeCapture for NumberedSource {
         Ok(Box::pin(futures::stream::empty()))
     }
 
-    fn confirm(&self, landed: source::cdc::Landed) {
-        let Some(seq) = landed.covered_seq() else {
-            return;
-        };
-        let mut state = self.state.lock().unwrap();
-        let reached = reach(&state, Some(seq));
-        state.floor = state.floor.max(reached);
-        state.entries = state.entries.split_off(&(seq + 1));
-    }
+    fn confirm(&self, _: Landed) {}
 
     fn parse_position(&self, text: &str) -> source::Result<SourcePosition> {
         text.parse()
@@ -84,12 +77,18 @@ impl ChangeCapture for NumberedSource {
             .map_err(|_| SourceError::Decode(format!("`{text}` is not a number")))
     }
 
-    fn reached(&self, landed: source::cdc::Landed) -> Option<SourcePosition> {
+    fn reached(&self, landed: Landed) -> Option<SourcePosition> {
         if self.closed.load(Ordering::SeqCst) {
             return None;
         }
         let state = self.state.lock().unwrap();
-        Some(SourcePosition(reach(&state, landed.covered_seq())))
+        Some(SourcePosition(match landed {
+            Landed::Before(oldest) => oldest.fence_before,
+            Landed::Through(last) if last.seq + 1 == state.next_seq => state.horizon,
+            Landed::Through(last) => last.confirm_through,
+            Landed::Idle if state.next_seq == 0 => state.horizon,
+            Landed::Idle => 0,
+        }))
     }
 
     fn on_advance(&self, listener: AdvanceListener) {
@@ -97,33 +96,55 @@ impl ChangeCapture for NumberedSource {
     }
 }
 
-fn reach(state: &Numbered, seq: Option<u64>) -> u64 {
-    let next = match seq {
-        Some(seq) => state.entries.range(seq + 1..).next(),
-        None => state.entries.iter().next(),
-    };
-    match next {
-        None => state.horizon.max(state.floor),
-        Some((_, &next)) => seq
-            .and_then(|seq| state.entries.range(..=seq).next_back().map(|(_, at)| *at))
-            .unwrap_or(0)
-            .max(state.floor)
-            .min(next - 1),
-    }
-}
-
 fn sink(name: &str) -> SinkName {
     SinkName::try_new(name).unwrap()
 }
 
-fn fence(sinks: &[&str]) -> (Fence, Arc<NumberedSource>, FenceObserver) {
+/// A fence over a numbered source, with the progress the engines would feed.
+struct Rig {
+    fence: Fence,
+    source: Arc<NumberedSource>,
+    progress: Arc<Progress>,
+    observer: FenceObserver,
+    sinks: Vec<SinkName>,
+}
+
+impl Rig {
+    /// The ingest engine published a batch of `position` to every lane.
+    fn route(&self, position: Position) {
+        self.progress.published(&self.sinks, position, position);
+    }
+
+    /// `on` landed the item of `position`.
+    fn applied(&self, on: &str, position: Position) {
+        self.progress.wrote(&sink(on), Some(position), None);
+        self.observer.on_position_applied(&sink(on), position);
+    }
+
+    /// `on` made everything through `position` searchable.
+    fn searchable(&self, on: &str, position: Position) {
+        self.progress.wrote(&sink(on), None, Some(position));
+        self.observer.on_position_searchable(&sink(on), position);
+    }
+}
+
+fn fence(sinks: &[&str]) -> Rig {
     let source = Arc::new(NumberedSource::default());
+    let names: Vec<SinkName> = sinks.iter().map(|name| sink(name)).collect();
+    let progress = Arc::new(Progress::new(names.iter().cloned()));
     let fence = Fence::new(
         Arc::clone(&source) as Arc<dyn ChangeCapture>,
-        sinks.iter().map(|name| sink(name)),
+        Arc::clone(&progress),
+        names.iter().cloned(),
     );
     let observer = FenceObserver::new(fence.clone());
-    (fence, source, observer)
+    Rig {
+        fence,
+        source,
+        progress,
+        observer,
+        sinks: names,
+    }
 }
 
 fn request(position: &str, level: FenceLevel, on: Option<&str>) -> FenceRequest {
@@ -149,26 +170,27 @@ fn timed_out(position: &str) -> Result<FenceOutcome, FenceError> {
 
 #[tokio::test(start_paused = true)]
 async fn a_fence_passes_once_the_sink_applied_the_position() {
-    let (fence, source, observer) = fence(&["primary"]);
-    source.emit(0, 20);
+    let rig = fence(&["primary"]);
+    let change = rig.source.emit(20);
+    rig.route(change);
 
     let waiting = tokio::spawn({
-        let fence = fence.clone();
+        let fence = rig.fence.clone();
         async move { fence.wait(&request("20", FenceLevel::Applied, None)).await }
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!waiting.is_finished(), "the change is not applied yet");
 
-    observer.on_position_applied(&sink("primary"), Position::new(0));
+    rig.applied("primary", change);
     assert_eq!(waiting.await.unwrap(), reached("20"));
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_position_already_reached_returns_at_once() {
-    let (fence, source, _) = fence(&["primary"]);
-    source.idle_to(40);
+    let rig = fence(&["primary"]);
+    rig.source.idle_to(40);
     assert_eq!(
-        fence
+        rig.fence
             .wait(&request("35", FenceLevel::Searchable, None))
             .await,
         reached("40"),
@@ -178,45 +200,50 @@ async fn a_position_already_reached_returns_at_once() {
 
 #[tokio::test(start_paused = true)]
 async fn a_fence_times_out_reporting_how_far_it_got() {
-    let (fence, source, observer) = fence(&["primary"]);
-    source.emit(0, 10);
-    source.emit(1, 20);
-    observer.on_position_applied(&sink("primary"), Position::new(0));
+    let rig = fence(&["primary"]);
+    let first = rig.source.emit(10);
+    let second = rig.source.emit(20);
+    rig.route(first);
+    rig.route(second);
+    rig.applied("primary", first);
 
     let started = Instant::now();
     assert_eq!(
-        fence.wait(&request("20", FenceLevel::Applied, None)).await,
-        timed_out("10")
+        rig.fence
+            .wait(&request("20", FenceLevel::Applied, None))
+            .await,
+        timed_out("19"),
+        "everything short of the second commit"
     );
     assert_eq!(started.elapsed(), Duration::from_secs(5));
 }
 
 #[tokio::test(start_paused = true)]
 async fn searchable_trails_applied_until_the_engine_reports_it() {
-    let (fence, source, observer) = fence(&["primary"]);
-    source.emit(0, 20);
-    observer.on_position_applied(&sink("primary"), Position::new(0));
-    // Every sink acknowledged, so the source forgets the change: the fence
-    // must not take "nothing outstanding" for "searchable".
-    source.confirm(source::cdc::Landed::Through(Position::new(0)));
+    let rig = fence(&["primary"]);
+    let change = rig.source.emit(20);
+    rig.route(change);
+    rig.applied("primary", change);
 
     assert_eq!(
-        fence.wait(&request("20", FenceLevel::Applied, None)).await,
+        rig.fence
+            .wait(&request("20", FenceLevel::Applied, None))
+            .await,
         reached("20")
     );
     assert_eq!(
-        fence
+        rig.fence
             .wait(&FenceRequest {
                 timeout: Duration::from_millis(100),
                 ..request("20", FenceLevel::Searchable, None)
             })
             .await,
-        timed_out("0"),
+        timed_out("19"),
     );
 
-    observer.on_position_searchable(&sink("primary"), Position::new(0));
+    rig.searchable("primary", change);
     assert_eq!(
-        fence
+        rig.fence
             .wait(&request("20", FenceLevel::Searchable, None))
             .await,
         reached("20")
@@ -225,34 +252,38 @@ async fn searchable_trails_applied_until_the_engine_reports_it() {
 
 #[tokio::test(start_paused = true)]
 async fn a_stalled_sibling_blocks_an_all_sinks_fence_but_not_one_on_the_healthy_sink() {
-    let (fence, source, observer) = fence(&["audit", "primary"]);
-    source.emit(0, 20);
-    observer.on_position_applied(&sink("primary"), Position::new(0));
-    observer.on_position_searchable(&sink("primary"), Position::new(0));
+    let rig = fence(&["audit", "primary"]);
+    let change = rig.source.emit(20);
+    rig.route(change);
+    rig.applied("primary", change);
+    rig.searchable("primary", change);
 
     assert_eq!(
-        fence
+        rig.fence
             .wait(&request("20", FenceLevel::Searchable, Some("primary")))
             .await,
         reached("20")
     );
     assert_eq!(
-        fence.wait(&request("20", FenceLevel::Applied, None)).await,
-        timed_out("0"),
+        rig.fence
+            .wait(&request("20", FenceLevel::Applied, None))
+            .await,
+        timed_out("19"),
         "an all-sinks fence waits for the slowest sink"
     );
 }
 
 #[tokio::test(start_paused = true)]
 async fn idle_source_progress_wakes_a_waiter() {
-    let (fence, source, observer) = fence(&["primary"]);
-    source.emit(0, 20);
-    observer.on_position_applied(&sink("primary"), Position::new(0));
-    observer.on_position_searchable(&sink("primary"), Position::new(0));
+    let rig = fence(&["primary"]);
+    let change = rig.source.emit(20);
+    rig.route(change);
+    rig.applied("primary", change);
+    rig.searchable("primary", change);
 
     // The client's position lies past its commit: unrelated WAL followed it.
     let waiting = tokio::spawn({
-        let fence = fence.clone();
+        let fence = rig.fence.clone();
         async move {
             fence
                 .wait(&request("25", FenceLevel::Searchable, None))
@@ -262,24 +293,30 @@ async fn idle_source_progress_wakes_a_waiter() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!waiting.is_finished());
 
-    source.idle_to(30);
+    rig.source.idle_to(30);
     assert_eq!(waiting.await.unwrap(), reached("30"));
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_reopened_source_stream_never_walks_a_sink_back() {
-    let (fence, source, observer) = fence(&["primary"]);
-    source.emit(0, 20);
-    observer.on_position_applied(&sink("primary"), Position::new(0));
+    let rig = fence(&["primary"]);
+    let change = rig.source.emit(20);
+    rig.route(change);
+    rig.applied("primary", change);
     assert_eq!(
-        fence.wait(&request("20", FenceLevel::Applied, None)).await,
+        rig.fence
+            .wait(&request("20", FenceLevel::Applied, None))
+            .await,
         reached("20")
     );
 
     // The stream reopens and redelivers the change under a new position.
-    source.emit(1, 20);
+    let replayed = rig.source.emit(20);
+    rig.route(replayed);
     assert_eq!(
-        fence.wait(&request("20", FenceLevel::Applied, None)).await,
+        rig.fence
+            .wait(&request("20", FenceLevel::Applied, None))
+            .await,
         reached("20"),
         "the sink applied it once already"
     );
@@ -287,62 +324,68 @@ async fn a_reopened_source_stream_never_walks_a_sink_back() {
 
 #[tokio::test]
 async fn a_wait_that_cannot_start_says_why() {
-    let (fence, source, _) = fence(&["primary"]);
+    let rig = fence(&["primary"]);
     assert!(matches!(
-        fence
+        rig.fence
             .wait(&request("soon", FenceLevel::Applied, None))
             .await,
         Err(FenceError::InvalidPosition(_))
     ));
     assert_eq!(
-        fence
+        rig.fence
             .wait(&request("1", FenceLevel::Applied, Some("audit")))
             .await,
         Err(FenceError::UnknownSink("audit".to_owned()))
     );
-    source.close();
+    rig.source.close();
     assert!(matches!(
-        fence.wait(&request("1", FenceLevel::Applied, None)).await,
+        rig.fence
+            .wait(&request("1", FenceLevel::Applied, None))
+            .await,
         Err(FenceError::Unavailable(_))
     ));
 }
 
 #[test]
 fn positions_report_each_sink_and_the_slowest() {
-    let (fence, source, observer) = fence(&["audit", "primary"]);
-    source.emit(0, 20);
-    source.emit(1, 30);
-    observer.on_position_applied(&sink("primary"), Position::new(1));
-    observer.on_position_applied(&sink("audit"), Position::new(0));
-    observer.on_position_searchable(&sink("audit"), Position::new(0));
+    let rig = fence(&["audit", "primary"]);
+    let first = rig.source.emit(20);
+    let second = rig.source.emit(30);
+    rig.route(first);
+    rig.route(second);
+    rig.applied("primary", first);
+    rig.applied("primary", second);
+    rig.applied("audit", first);
+    rig.searchable("audit", first);
 
-    let positions = fence.positions();
-    assert_eq!(positions.applied.as_deref(), Some("20"));
-    assert_eq!(positions.searchable.as_deref(), Some("0"));
+    let positions = rig.fence.positions();
+    assert_eq!(positions.applied.as_deref(), Some("29"));
+    assert_eq!(positions.searchable.as_deref(), Some("19"));
     let primary = &positions.sinks[&sink("primary")];
     assert_eq!(primary.applied.as_deref(), Some("30"));
-    assert_eq!(primary.searchable.as_deref(), Some("0"));
+    assert_eq!(primary.searchable.as_deref(), Some("19"));
     let audit = &positions.sinks[&sink("audit")];
-    assert_eq!(audit.applied.as_deref(), Some("20"));
-    assert_eq!(audit.searchable.as_deref(), Some("20"));
+    assert_eq!(audit.applied.as_deref(), Some("29"));
+    assert_eq!(audit.searchable.as_deref(), Some("29"));
 }
 
 #[test]
 fn the_status_document_carries_the_positions() {
-    let (fence, source, observer) = fence(&["primary"]);
+    let rig = fence(&["primary"]);
     let status = crate::Status::new(
         [kernel::IndexName::try_new("users").unwrap()],
         [sink("primary")],
         std::time::Instant::now(),
     )
-    .with_fence(fence);
+    .with_fence(rig.fence.clone());
 
-    source.emit(0, 20);
-    observer.on_position_applied(&sink("primary"), Position::new(0));
+    let change = rig.source.emit(20);
+    rig.route(change);
+    rig.applied("primary", change);
 
     let json = serde_json::to_value(status.snapshot()).unwrap();
     assert_eq!(json["applied_position"], "20");
-    assert_eq!(json["searchable_position"], "0");
+    assert_eq!(json["searchable_position"], "19");
     assert_eq!(json["sinks"]["primary"]["applied_position"], "20");
-    assert_eq!(json["sinks"]["primary"]["searchable_position"], "0");
+    assert_eq!(json["sinks"]["primary"]["searchable_position"], "19");
 }

@@ -188,13 +188,15 @@ async fn run_deployment(
     let name = SinkName::try_new("bench").unwrap();
     let stream = Arc::new(ChannelStream::new(1024, [name.clone()]));
     let mappings = documents.index_mappings().await.unwrap();
+    let progress = Arc::new(engine::Progress::new([name.clone()]));
     let sink_engine = SinkEngine::new(
         name.clone(),
         sink,
         Arc::clone(&stream) as Arc<dyn Stream>,
         mappings,
     )
-    .skip_backfill(true);
+    .skip_backfill(true)
+    .with_progress(Arc::clone(&progress));
     sink_engine.stage(Continuity::Resumed).await.unwrap();
     let (_control, mut control_rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
     let sink_task = tokio::spawn(async move { sink_engine.run(&mut control_rx).await });
@@ -205,6 +207,7 @@ async fn run_deployment(
         vec![name],
     )
     .with_batch(batch)
+    .with_progress(progress)
     .run()
     .await
     .unwrap();

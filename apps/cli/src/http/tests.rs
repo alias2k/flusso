@@ -83,7 +83,11 @@ async fn serve_stoppable(at: u64) -> (String, Arc<SteadySource>, Waits) {
     let state = PublicState {
         status: Arc::new(Status::new([], [primary.clone()], Instant::now())),
         registry: None,
-        fence: Fence::new(Arc::clone(&source) as Arc<dyn ChangeCapture>, [primary]),
+        fence: Fence::new(
+            Arc::clone(&source) as Arc<dyn ChangeCapture>,
+            Arc::new(daemon::Progress::new([primary.clone()])),
+            [primary],
+        ),
         waits: waits.clone(),
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -8,11 +8,12 @@
 //! fetch by id sees it) or **searchable** (a refresh covered
 //! it: a search sees it). See [`FenceLevel`].
 //!
-//! It only ever *observes*. The sink engines report the stream position each
-//! sink has applied and made searchable ([`FenceObserver`]); the source
-//! translates a stream position into its own terms
-//! ([`ChangeCapture::reached`]) and wakes the fence when that answer moves
-//! with no new change (idle WAL). Nothing here refreshes a destination or
+//! It only ever *observes*. The engines record in the deployment's
+//! [`Progress`] how far each sink's lane has landed and made searchable what
+//! was routed to it (a [`FenceObserver`] wakes waiters when a sink reports);
+//! the source turns that into its own terms ([`ChangeCapture::reached`], off
+//! the positions' own stamps) and wakes the fence when the answer moves with
+//! no new change (idle WAL). Nothing here refreshes a destination or
 //! hurries a flush because a client is waiting, and a backfill is not part of
 //! it: seeding is reported by the status, not fenced.
 //!
@@ -34,15 +35,15 @@
 //! assert!("visible".parse::<FenceLevel>().is_err());
 //! ```
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
-use engine::Observer;
+use engine::{Level, Observer, Progress};
 use kernel::{Position, SinkName};
 use serde::Serialize;
-use source::cdc::{ChangeCapture, Landed, SourcePosition};
+use source::cdc::{ChangeCapture, SourcePosition};
 use tokio::sync::Notify;
 use tokio::time::{Instant, timeout_at};
 
@@ -155,7 +156,8 @@ pub struct Fence {
 #[derive(Debug)]
 struct Inner {
     source: Arc<dyn ChangeCapture>,
-    sinks: BTreeMap<SinkName, Mutex<Progress>>,
+    progress: Arc<Progress>,
+    sinks: BTreeMap<SinkName, Mutex<Furthest>>,
     /// Woken whenever any sink's position or the source's answer may have
     /// moved; every waiter re-checks.
     moved: Notify,
@@ -174,31 +176,30 @@ impl Drop for SearchableWait<'_> {
     }
 }
 
-/// What one sink has reported, and the furthest source position each level
-/// has been seen to stand for. Those only grow, so a reopened source stream
-/// (which restarts from what *every* sink confirmed) never walks a sink back
-/// from what it already applied.
+/// The furthest source position each level of one sink has been seen to
+/// stand for. They only grow, so a reopened source stream (which restarts
+/// from what *every* sink confirmed) never walks a sink back from what it
+/// already reached.
 #[derive(Debug, Default)]
-struct Progress {
-    /// The highest stream position reported applied.
-    applied: Option<Position>,
-    applied_reached: Option<SourcePosition>,
-    searchable_reached: Option<SourcePosition>,
-    /// Applied positions not yet reported searchable, oldest first, each with
-    /// the source position it stood for when it was applied. The source
-    /// forgets a position once every sink confirmed it, which can be before it
-    /// is searchable, so the translation is taken while it is still exact.
-    unsearchable: VecDeque<(Position, SourcePosition)>,
+struct Furthest {
+    applied: Option<SourcePosition>,
+    searchable: Option<SourcePosition>,
 }
 
 impl Fence {
-    /// A fence over `source` for `sinks`, nothing reached yet.
-    pub fn new(source: Arc<dyn ChangeCapture>, sinks: impl IntoIterator<Item = SinkName>) -> Self {
+    /// A fence over `source` for `sinks`, reading how far each sink's lane
+    /// landed from `progress`.
+    pub fn new(
+        source: Arc<dyn ChangeCapture>,
+        progress: Arc<Progress>,
+        sinks: impl IntoIterator<Item = SinkName>,
+    ) -> Self {
         let inner = Arc::new(Inner {
             source: Arc::clone(&source),
+            progress,
             sinks: sinks
                 .into_iter()
-                .map(|sink| (sink, Mutex::new(Progress::default())))
+                .map(|sink| (sink, Mutex::new(Furthest::default())))
                 .collect(),
             moved: Notify::new(),
             searchable_waits: AtomicUsize::new(0),
@@ -214,61 +215,34 @@ impl Fence {
         Self { inner }
     }
 
-    /// `sink` applied everything through `position`.
-    fn record_applied(&self, sink: &SinkName, position: Position) {
-        if let Some(progress) = self.inner.sinks.get(sink) {
-            let mut progress = lock(progress);
-            // With nothing waiting for a refresh, everything before this
-            // position is searchable. Taken now, while the source still holds
-            // this position: it bounds the answer just below it.
-            if progress.unsearchable.is_empty()
-                && let Some(before) = self.inner.source.reached(landed(progress.applied))
-            {
-                progress.searchable_reached = progress.searchable_reached.max(Some(before));
-            }
-            progress.applied = Some(progress.applied.map_or(position, |p| p.max(position)));
-            if let Some(reached) = self.inner.source.reached(Landed::Through(position)) {
-                progress.applied_reached = progress.applied_reached.max(Some(reached));
-                progress.unsearchable.push_back((position, reached));
-            }
-        }
-        self.inner.moved.notify_waiters();
-    }
-
-    /// Everything `sink` applied through `position` is now searchable.
-    fn record_searchable(&self, sink: &SinkName, position: Position) {
-        if let Some(progress) = self.inner.sinks.get(sink) {
-            let mut progress = lock(progress);
-            while let Some((applied, reached)) = progress.unsearchable.front().copied() {
-                if applied > position {
-                    break;
-                }
-                progress.searchable_reached = progress.searchable_reached.max(Some(reached));
-                progress.unsearchable.pop_front();
-            }
-        }
+    /// A sink reported progress: every waiter checks again.
+    fn moved(&self) {
         self.inner.moved.notify_waiters();
     }
 
     /// How far `sink` is for `level`, in the source's terms. `None` while the
     /// source cannot say.
     ///
-    /// Applied follows the source live, so it keeps moving over idle WAL.
-    /// Searchable does the same while nothing applied is still waiting for a
-    /// refresh; otherwise it stands at the last position reported searchable.
+    /// Read off what the sink's lane landed (or made searchable), so it keeps
+    /// moving over idle WAL. Searchable never runs ahead of applied.
     fn reached(&self, sink: &SinkName, level: FenceLevel) -> Option<SourcePosition> {
-        let mut progress = lock(self.inner.sinks.get(sink)?);
-        if let Some(now) = self.inner.source.reached(landed(progress.applied)) {
-            progress.applied_reached = progress.applied_reached.max(Some(now));
-        }
+        let mut furthest = lock(self.inner.sinks.get(sink)?);
+        let applied = self
+            .inner
+            .progress
+            .lane(sink, Level::Applied)
+            .and_then(|landed| self.inner.source.reached(landed));
+        furthest.applied = furthest.applied.max(applied);
         match level {
-            FenceLevel::Applied => progress.applied_reached,
+            FenceLevel::Applied => furthest.applied,
             FenceLevel::Searchable => {
-                if progress.unsearchable.is_empty() {
-                    progress.searchable_reached =
-                        progress.searchable_reached.max(progress.applied_reached);
-                }
-                progress.searchable_reached
+                let searchable = self
+                    .inner
+                    .progress
+                    .lane(sink, Level::Searchable)
+                    .and_then(|landed| self.inner.source.reached(landed));
+                furthest.searchable = furthest.searchable.max(searchable.min(furthest.applied));
+                furthest.searchable
             }
         }
     }
@@ -348,11 +322,10 @@ impl Fence {
             tokio::pin!(moved);
             moved.as_mut().enable();
             if self.inner.searchable_waits.load(Ordering::SeqCst) == 0
-                || self
-                    .inner
-                    .sinks
-                    .values()
-                    .all(|progress| lock(progress).unsearchable.is_empty())
+                || self.inner.sinks.keys().all(|sink| {
+                    self.inner.progress.lane(sink, Level::Searchable)
+                        == self.inner.progress.lane(sink, Level::Applied)
+                })
             {
                 return;
             }
@@ -384,11 +357,12 @@ impl Fence {
     }
 }
 
-fn lock(progress: &Mutex<Progress>) -> std::sync::MutexGuard<'_, Progress> {
-    progress.lock().unwrap_or_else(PoisonError::into_inner)
+fn lock(furthest: &Mutex<Furthest>) -> std::sync::MutexGuard<'_, Furthest> {
+    furthest.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Feeds a [`Fence`] from the sink engines' position events.
+/// Wakes a [`Fence`]'s waiters on the sink engines' position events. What a
+/// sink reached is read from the deployment's `Progress`, not from the event.
 #[derive(Debug)]
 pub struct FenceObserver {
     fence: Fence,
@@ -402,20 +376,15 @@ impl FenceObserver {
 }
 
 impl Observer for FenceObserver {
-    fn on_position_applied(&self, sink: &SinkName, position: Position) {
-        self.fence.record_applied(sink, position);
+    fn on_position_applied(&self, _: &SinkName, _: Position) {
+        self.fence.moved();
     }
 
-    fn on_position_searchable(&self, sink: &SinkName, position: Position) {
-        self.fence.record_searchable(sink, position);
+    fn on_position_searchable(&self, _: &SinkName, _: Position) {
+        self.fence.moved();
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests;
-
-/// A sink that applied through `applied` has landed everything up to it.
-fn landed(applied: Option<Position>) -> Landed {
-    applied.map_or(Landed::Idle, Landed::Through)
-}

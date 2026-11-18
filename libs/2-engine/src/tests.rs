@@ -319,6 +319,11 @@ impl Sink for RecordingSink {
     }
 }
 
+/// The newest position every lane has landed, with all before it.
+fn covered(progress: &Progress) -> Option<Position> {
+    progress.landed().covered_seq().map(Position::new)
+}
+
 /// One deployment in a test: a stream with one lane per sink, the ingest
 /// engine, and one sink engine per sink, run the way the daemon runs them.
 struct Harness {
@@ -327,6 +332,7 @@ struct Harness {
     documents: Arc<MockDocuments>,
     ingest: IngestEngine,
     sinks: Vec<SinkEngine>,
+    progress: Arc<Progress>,
 }
 
 impl Harness {
@@ -341,6 +347,7 @@ impl Harness {
             Arc::clone(&stream) as Arc<dyn Stream>,
             names,
         );
+        let progress = ingest.progress();
         let sinks = sinks
             .into_iter()
             .map(|(name, sink)| {
@@ -350,6 +357,7 @@ impl Harness {
                     Arc::clone(&stream) as Arc<dyn Stream>,
                     vec![mapping()],
                 )
+                .with_progress(Arc::clone(&progress))
             })
             .collect();
         Self {
@@ -358,6 +366,7 @@ impl Harness {
             documents,
             ingest,
             sinks,
+            progress,
         }
     }
 
@@ -409,9 +418,7 @@ impl Harness {
                 Err(_) => Ok(()),
             });
         }
-        if let Some(watermark) = stream.watermark() {
-            self.source.confirm(source::cdc::Landed::Through(watermark));
-        }
+        self.source.confirm(self.progress.landed());
         drop(controls);
         outcomes
     }
@@ -587,20 +594,20 @@ async fn confirms_no_position_before_its_flush() {
         MockSource::new(vec![upsert(1)]),
         vec![(sink_name("primary"), sink)],
     );
-    let stream = Arc::clone(&harness.stream);
+    let progress = Arc::clone(&harness.progress);
     let source = Arc::clone(&harness.source);
 
     let run = tokio::spawn(harness.run(Continuity::Resumed));
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
-        stream.watermark(),
+        covered(&progress),
         None,
         "the batch is applied but its flush has not returned: nothing is confirmed"
     );
     assert!(source.confirmed.lock().unwrap().is_empty());
     release.notify_one();
     run.await.unwrap();
-    assert_eq!(stream.watermark(), Some(Position::new(0)));
+    assert_eq!(covered(&progress), Some(Position::new(0)));
     assert_eq!(*source.confirmed.lock().unwrap(), vec![Position::new(0)]);
 }
 
@@ -903,6 +910,7 @@ async fn redelivers_the_unacked_batch_to_a_restarted_sink_engine() {
         max_delay: Duration::from_secs(5),
     });
     let stream = Arc::clone(&harness.stream);
+    let progress = Arc::clone(&harness.progress);
     let source = Arc::clone(&harness.source);
     let outcomes = harness.run(Continuity::Resumed).await;
 
@@ -912,7 +920,7 @@ async fn redelivers_the_unacked_batch_to_a_restarted_sink_engine() {
     );
     assert!(store.lock().unwrap().is_empty());
     assert_eq!(
-        stream.watermark(),
+        covered(&progress),
         None,
         "nothing acknowledged, nothing confirmed"
     );
@@ -925,7 +933,8 @@ async fn redelivers_the_unacked_batch_to_a_restarted_sink_engine() {
         Arc::clone(&crashing) as Arc<dyn Sink>,
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![mapping()],
-    );
+    )
+    .with_progress(Arc::clone(&progress));
     let (_tx, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
     let task = tokio::spawn(async move { restarted.run(&mut rx).await });
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -940,7 +949,7 @@ async fn redelivers_the_unacked_batch_to_a_restarted_sink_engine() {
         store.lock().unwrap().keys().cloned().collect::<Vec<_>>(),
         vec!["users/1".to_owned(), "users/3".to_owned()]
     );
-    assert_eq!(stream.watermark(), Some(Position::new(1)));
+    assert_eq!(covered(&progress), Some(Position::new(1)));
 }
 
 #[tokio::test]
@@ -1034,7 +1043,7 @@ async fn skip_policy_quarantines_rejected_documents_and_acks_the_batch() {
             .with_observer(Arc::clone(&observer_dyn))
             .with_failure_policies(FailurePolicies::new(FailurePolicy::Skip))
     });
-    let stream = Arc::clone(&harness.stream);
+    let progress = Arc::clone(&harness.progress);
     let outcomes = harness.run(Continuity::Resumed).await;
     assert!(outcomes[0].is_ok());
     let quarantined = observer.quarantined.lock().unwrap();
@@ -1045,7 +1054,7 @@ async fn skip_policy_quarantines_rejected_documents_and_acks_the_batch() {
             .all(|(sink, index, _)| sink == "primary" && index == "users")
     );
     assert_eq!(
-        stream.watermark(),
+        covered(&progress),
         Some(Position::new(1)),
         "the batch is acked despite rejections"
     );
@@ -1057,14 +1066,14 @@ async fn stop_policy_errors_and_leaves_the_batch_unacked() {
         MockSource::new(vec![upsert(1)]),
         vec![(sink_name("primary"), Arc::new(RejectingSink::default()))],
     );
-    let stream = Arc::clone(&harness.stream);
+    let progress = Arc::clone(&harness.progress);
     let outcomes = harness.run(Continuity::Resumed).await;
     assert!(matches!(
         outcomes[0],
         Err(EngineError::DocumentsRejected(1, _))
     ));
     assert_eq!(
-        stream.watermark(),
+        covered(&progress),
         None,
         "nothing acked when the engine stops"
     );

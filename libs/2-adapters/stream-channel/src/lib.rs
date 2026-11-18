@@ -10,15 +10,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
-use kernel::{Position, SinkName};
+use kernel::SinkName;
 use stream::{
     AckHandle, Consumer, Delivery, Lane, LaneItem, Producer, QueueError, Request, RequestLane,
     Result, Stream,
 };
 use tokio::sync::mpsc;
 
-/// The in-process stream: one bounded channel per sink lane, one for requests,
-/// and the watermark over the lanes' acknowledgements.
+/// The in-process stream: one bounded channel per sink lane and one for
+/// requests.
 ///
 /// Built once by the daemon with the full sink set; every [`Stream::lane`] and
 /// [`Stream::requests`] call hands out fresh ends over the same channels, so a
@@ -84,34 +84,8 @@ impl Stream for ChannelStream {
         })
     }
 
-    fn watermark(&self) -> Option<Position> {
-        let mut lowest: Option<Position> = None;
-        for channel in self.lanes.values() {
-            let acked = channel.acked()?;
-            lowest = Some(lowest.map_or(acked, |low| low.min(acked)));
-        }
-        lowest
-    }
-
     fn is_idle(&self) -> bool {
         self.lanes.values().all(|channel| channel.is_idle())
-    }
-}
-
-/// What acknowledging an item confirms for its lane's watermark.
-trait Positioned {
-    fn position(&self) -> Option<Position>;
-}
-
-impl Positioned for LaneItem {
-    fn position(&self) -> Option<Position> {
-        LaneItem::position(self)
-    }
-}
-
-impl Positioned for Request {
-    fn position(&self) -> Option<Position> {
-        None
     }
 }
 
@@ -137,16 +111,13 @@ struct Channel<T> {
 ///
 /// So a released delivery can come back after later ones were acknowledged,
 /// and deliveries are acknowledged in any order: the sink engine writes
-/// several at once and keeps per-document order itself (ADR 0012). The
-/// lane's watermark is therefore not the highest acknowledgement but the last
-/// positioned item delivered before the oldest unacknowledged positioned one,
-/// which each entry records when it is first delivered.
+/// several at once and keeps per-document order itself (ADR 0012). How far a
+/// lane has landed is not the stream's to say: the engine's `Progress` keeps
+/// it.
 #[derive(Debug)]
 struct Ledger<T> {
     in_flight: Vec<InFlight<T>>,
     next_ticket: Ticket,
-    /// The position of the last positioned item first delivered on this lane.
-    delivered: Option<Position>,
     /// How many entries are marked `due`.
     due: usize,
 }
@@ -156,9 +127,6 @@ struct InFlight<T> {
     ticket: Ticket,
     item: T,
     due: bool,
-    /// The position of the last positioned item delivered before this one:
-    /// what the lane may confirm while this one is unacknowledged.
-    before: Option<Position>,
 }
 
 type Ticket = u64;
@@ -213,7 +181,7 @@ impl<T> Channel<T> {
     }
 }
 
-impl<T: Positioned + Clone + Send + 'static> Channel<T> {
+impl<T: Clone + Send + 'static> Channel<T> {
     fn new(capacity: usize) -> Self {
         let (tx, rx) = mpsc::channel(capacity);
         Self {
@@ -222,26 +190,9 @@ impl<T: Positioned + Clone + Send + 'static> Channel<T> {
             state: Mutex::new(Ledger {
                 in_flight: Vec::new(),
                 next_ticket: 0,
-                delivered: None,
                 due: 0,
             }),
             due: AtomicUsize::new(0),
-        }
-    }
-
-    /// The last positioned item delivered before the oldest unacknowledged
-    /// positioned one; with none unacknowledged, the last positioned item
-    /// delivered. Items still queued are newer than every delivered one, so
-    /// they never lower it.
-    fn acked(&self) -> Option<Position> {
-        let ledger = self.lock();
-        match ledger
-            .in_flight
-            .iter()
-            .find(|entry| entry.item.position().is_some())
-        {
-            Some(oldest) => oldest.before,
-            None => ledger.delivered,
         }
     }
 
@@ -257,10 +208,6 @@ impl<T: Positioned + Clone + Send + 'static> Channel<T> {
         let mut ledger = self.lock();
         let ticket = ledger.next_ticket;
         ledger.next_ticket += 1;
-        let before = ledger.delivered;
-        if let Some(position) = item.position() {
-            ledger.delivered = Some(position);
-        }
         // A release that landed while awaiting the channel made an earlier
         // entry due: serve it first and leave the new item due behind it, so
         // nothing is delivered twice or out of order.
@@ -268,7 +215,6 @@ impl<T: Positioned + Clone + Send + 'static> Channel<T> {
             ticket,
             item,
             due: true,
-            before,
         });
         ledger.due += 1;
         let taken = ledger.take_due();
@@ -304,7 +250,7 @@ impl<T> std::fmt::Debug for ChannelProducer<T> {
 }
 
 #[async_trait]
-impl<T: Positioned + Clone + Send + Sync + 'static> Producer<T> for ChannelProducer<T> {
+impl<T: Clone + Send + Sync + 'static> Producer<T> for ChannelProducer<T> {
     async fn publish(&self, item: T) -> Result<()> {
         self.channel
             .tx
@@ -326,7 +272,7 @@ impl<T> std::fmt::Debug for ChannelConsumer<T> {
 }
 
 #[async_trait]
-impl<T: Positioned + Clone + Send + Sync + 'static> Consumer<T> for ChannelConsumer<T> {
+impl<T: Clone + Send + Sync + 'static> Consumer<T> for ChannelConsumer<T> {
     async fn recv(&mut self) -> Result<Option<Delivery<T>>> {
         Ok(self.channel.recv().await.map(|(ticket, item)| {
             Delivery::new(
@@ -345,8 +291,7 @@ impl<T: Positioned + Clone + Send + Sync + 'static> Consumer<T> for ChannelConsu
     }
 }
 
-/// Acking removes the item from the ledger (the watermark is read from what
-/// remains: see `Channel::acked`). Nacking,
+/// Acking removes the item from the ledger. Nacking,
 /// or dropping the handle unacked (an engine that died holding it), marks the
 /// item for redelivery on the next `recv`.
 struct ChannelAck<T> {
@@ -374,7 +319,7 @@ impl<T> Drop for ChannelAck<T> {
 }
 
 #[async_trait]
-impl<T: Positioned + Clone + Send + Sync + 'static> AckHandle for ChannelAck<T> {
+impl<T: Clone + Send + Sync + 'static> AckHandle for ChannelAck<T> {
     async fn ack(mut self: Box<Self>) -> Result<()> {
         self.channel.ack(self.ticket);
         self.acked = true;

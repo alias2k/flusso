@@ -327,6 +327,7 @@ async fn run_deployment(capture: MockCapture, sinks: usize, batch: BatchPolicy) 
 
     let mut tasks = Vec::new();
     let mut controls = Vec::new();
+    let progress = Arc::new(engine::Progress::new(names.iter().cloned()));
     for name in &names {
         let sink: Arc<dyn Sink> = Arc::new(CountingSink {
             seeded,
@@ -339,7 +340,8 @@ async fn run_deployment(capture: MockCapture, sinks: usize, batch: BatchPolicy) 
             sink,
             Arc::clone(&stream) as Arc<dyn Stream>,
             mappings.clone(),
-        );
+        )
+        .with_progress(Arc::clone(&progress));
         engine.stage(Continuity::Resumed).await.unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
         controls.push(tx);
@@ -353,6 +355,7 @@ async fn run_deployment(capture: MockCapture, sinks: usize, batch: BatchPolicy) 
         names,
     )
     .with_batch(batch)
+    .with_progress(progress)
     .run()
     .await
     .unwrap();
