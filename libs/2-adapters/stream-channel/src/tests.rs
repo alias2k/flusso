@@ -184,6 +184,40 @@ async fn several_deliveries_can_be_outstanding_and_ack_independently() {
     assert_eq!(stream.watermark(), Some(Position(3)));
 }
 
+/// A handle dropped without an ack makes its delivery due: the lane is not
+/// empty, and the next `recv` hands it back before anything newer. An acked
+/// handle dropped afterwards leaves nothing behind: no redelivery, and the
+/// lane reads empty and idle.
+#[tokio::test]
+async fn only_a_handle_dropped_unacked_is_redelivered() {
+    let stream = ChannelStream::new(8, [sink("a")]);
+    let lane = stream.lane(&sink("a")).unwrap();
+    lane.producer.publish(batch(1)).await.unwrap();
+    lane.producer.publish(batch(2)).await.unwrap();
+    let mut consumer = lane.consumer;
+
+    let (_, acked) = consumer.recv().await.unwrap().unwrap().into_parts();
+    acked.ack().await.unwrap();
+    let (_, dropped) = consumer.recv().await.unwrap().unwrap().into_parts();
+    assert!(consumer.is_empty(), "nothing queued, nothing due");
+    drop(dropped);
+    assert!(!consumer.is_empty(), "the dropped delivery is due");
+
+    let (again, handle) = consumer.recv().await.unwrap().unwrap().into_parts();
+    assert_eq!(again.position(), Some(Position(2)), "it comes back");
+    handle.ack().await.unwrap();
+    assert!(consumer.is_empty());
+    assert!(stream.is_idle());
+    let mut next = consumer.recv();
+    let polled = next
+        .as_mut()
+        .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()));
+    assert!(
+        polled.is_pending(),
+        "nothing is redelivered for the acked handles"
+    );
+}
+
 /// The caught-up hint is about what waits *behind* the current delivery: true
 /// while the batch being committed is the only thing in flight, false while a
 /// backlog is queued.
