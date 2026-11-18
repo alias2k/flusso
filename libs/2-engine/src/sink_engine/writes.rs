@@ -33,8 +33,26 @@
 //! the lane starts until it is done; other lanes go on. A reindex waits for
 //! the writes in flight, then is staged.
 //!
-//! **Caught up.** A write is granted as caught up when nothing else of its
-//! lane is queued or waiting in the window. Its refresh can't cover a write in
+//! **Merging.** A write holds every admissible item of the chosen kind that
+//! is ready, live with live and backfill with backfill, the first item as
+//! above, then the others a lane at a time from its lane on, up to the merge
+//! limit in documents (`[batch] max_changes`, and the sink's
+//! [`write_limit`](sink::Sink::write_limit)), never splitting an item. So a
+//! burst over many indexes goes out in writes of about a batch, as with one
+//! lane per sink, and several small items of one lane go out together
+//! (#397). It takes what is ready and never waits for more: a lone item is
+//! written at once. An item behind a `SnapshotComplete` of its lane is not
+//! admissible; a lane behind a failed run's barrier, and an ordered sink,
+//! write one item alone. Two items of one lane in a write share no document
+//! (each is admissible against every earlier item of its lane). The write
+//! takes one slot; when it returns each part is decided on its own: a part
+//! whose index decides a rejection `stop` stays unacknowledged and the run
+//! fails blamed on its lane, the other parts land, move their lanes' fences
+//! and are acknowledged in lane order. A write that fails fails every part,
+//! blamed on all their lanes.
+//!
+//! **Caught up.** A write is granted as caught up when some lane of it has
+//! nothing else queued or waiting in the window. Its refresh can't cover a write in
 //! flight beside it that returns later, so before the acknowledgement that
 //! leaves the engine idle, a position not yet searchable gets an empty
 //! caught-up write.
@@ -166,18 +184,28 @@ impl Documents {
     }
 }
 
-/// A write in flight.
+/// A write in flight: one or more lane items, sent as one write.
 struct Flight {
+    parts: Vec<Part>,
+    work: Work,
+    /// For a caught-up write, how many writes had returned at its grant.
+    caught_up: Option<u64>,
+}
+
+/// One lane item of a write.
+struct Part {
     handle: Box<dyn AckHandle>,
     lane: usize,
     position: Option<Position>,
-    envelopes: usize,
     changes: usize,
-    work: Work,
     documents: Documents,
     seq: u64,
-    /// For a caught-up write, how many writes had returned at its grant.
-    caught_up: Option<u64>,
+}
+
+impl Flight {
+    fn lanes(&self) -> impl Iterator<Item = usize> + '_ {
+        self.parts.iter().map(|part| part.lane)
+    }
 }
 
 /// A write that returned.
@@ -202,8 +230,8 @@ pub(super) struct Run<'a> {
     /// The lane whose turn is next among lanes with a candidate.
     turn: usize,
     failure: Option<EngineError>,
-    /// The lane the failure is blamed on, `None` for one no lane caused.
-    failed_lane: Option<usize>,
+    /// The lanes the failure is blamed on, none for one no lane caused.
+    failed_lanes: Vec<usize>,
     /// Live (positioned) and backfill batches waiting in the window, over
     /// every lane.
     live_waiting: usize,
@@ -251,7 +279,7 @@ impl<'a> Run<'a> {
             contested: 0,
             turn: 0,
             failure: None,
-            failed_lane: None,
+            failed_lanes: Vec::new(),
             live_waiting: 0,
             backfill_waiting: 0,
             next_due: None,
@@ -270,15 +298,20 @@ impl<'a> Run<'a> {
             if self.failure.is_none()
                 && let Err(error) = self.advance().await
             {
-                self.fail(error, None);
+                self.fail(error, &[]);
             }
             if self.flights.is_empty() {
                 if let Some(failure) = self.failure.take() {
-                    let blame = match self.failed_lane.and_then(|lane| self.lanes.get(lane)) {
-                        Some(run) => {
-                            Blame::Lanes(std::collections::BTreeSet::from([run.key.clone()]))
-                        }
-                        None => Blame::Everyone,
+                    let blamed: std::collections::BTreeSet<LaneKey> = self
+                        .failed_lanes
+                        .iter()
+                        .filter_map(|lane| self.lanes.get(*lane))
+                        .map(|run| run.key.clone())
+                        .collect();
+                    let blame = if blamed.is_empty() {
+                        Blame::Everyone
+                    } else {
+                        Blame::Lanes(blamed)
                     };
                     self.engine.set_blame(blame);
                     return Err(failure);
@@ -326,7 +359,7 @@ impl<'a> Run<'a> {
                         if let Some(landed) = landed
                             && let Err(error) = self.landed(landed).await
                         {
-                            self.fail(error, None);
+                            self.fail(error, &[]);
                         }
                     }
                     () = until(next_due) => {
@@ -342,13 +375,13 @@ impl<'a> Run<'a> {
                     if let Some(landed) = landed
                         && let Err(error) = self.landed(landed).await
                     {
-                        self.fail(error, None);
+                        self.fail(error, &[]);
                     }
                 }
                 (lane, delivery) = next_delivery(&mut self.lanes, &wanting), if room => {
                     self.close_idle();
                     match delivery {
-                        Err(error) => self.fail(error.into(), Some(lane)),
+                        Err(error) => self.fail(error.into(), &[lane]),
                         Ok(None) => {
                             if let Some(run) = self.lanes.get_mut(lane) {
                                 run.closed = true;
@@ -470,7 +503,29 @@ impl<'a> Run<'a> {
 
     /// Whether a write of `lane` is in flight.
     fn lane_in_flight(&self, lane: usize) -> bool {
-        self.flying.iter().any(|(_, flight)| flight.lane == lane)
+        self.flying
+            .iter()
+            .any(|(_, flight)| flight.lanes().any(|at| at == lane))
+    }
+
+    /// The parts of `lane` being written.
+    fn parts_in_flight(&self, lane: usize) -> impl Iterator<Item = &Part> {
+        self.flying
+            .iter()
+            .flat_map(|(_, flight)| &flight.parts)
+            .filter(move |part| part.lane == lane)
+    }
+
+    /// The most documents one write may hold: the engine's own limit, and the
+    /// sink's, whichever is lower.
+    fn merge_limit(&self) -> usize {
+        self.engine
+            .sink
+            .write_limit()
+            .map_or(self.engine.write_documents, |limit| {
+                limit.min(self.engine.write_documents)
+            })
+            .max(1)
     }
 
     /// Take whatever the lanes have ready, while it is wanted, the lanes in
@@ -589,24 +644,51 @@ impl<'a> Run<'a> {
             if self.flights.len() >= slots {
                 return Ok(());
             }
-            let Some(at) = self.pick() else {
+            let mut picked = self.pick();
+            if picked.is_empty() {
+                return Ok(());
+            }
+            // Taken from the back, so the earlier indexes stay where they are;
+            // then put back in window (lane) order.
+            picked.sort_unstable_by(|a, b| b.cmp(a));
+            let mut parts = Vec::with_capacity(picked.len());
+            let mut envelopes = Vec::with_capacity(picked.len());
+            for at in picked {
+                if let Some(Queued {
+                    item: Queue::Batch { batch, documents },
+                    handle,
+                    lane,
+                    seq,
+                }) = self.take_from_window(at)
+                {
+                    envelopes.push(Arc::clone(&batch.envelopes));
+                    parts.push(Part {
+                        handle,
+                        lane,
+                        position: batch.position,
+                        changes: batch.changes,
+                        documents,
+                        seq,
+                    });
+                }
+            }
+            parts.reverse();
+            envelopes.reverse();
+            let Some(first) = parts.first() else {
                 return Ok(());
             };
-            let Some(Queued {
-                item: Queue::Batch { batch, documents },
-                handle,
-                lane,
-                seq,
-            }) = self.take_from_window(at)
-            else {
-                return Ok(());
-            };
-            let caught_up = !self.window.iter().any(|queued| queued.lane == lane)
-                && self
-                    .lanes
-                    .get(lane)
-                    .is_some_and(|run| run.consumer.is_empty());
-            if let Some(landed) = self.launch(lane, batch, documents, handle, seq, caught_up) {
+            let work = work_of(first.position);
+            // Caught up when some lane of the write has nothing else queued or
+            // waiting: as with one item per write, that lane's position need
+            // not wait out a refresh.
+            let caught_up = parts.iter().any(|part| {
+                !self.window.iter().any(|queued| queued.lane == part.lane)
+                    && self
+                        .lanes
+                        .get(part.lane)
+                        .is_some_and(|run| run.consumer.is_empty())
+            });
+            if let Some(landed) = self.launch(parts, envelopes, work, caught_up) {
                 self.landed(landed).await?;
             }
         }
@@ -629,16 +711,17 @@ impl<'a> Run<'a> {
         None
     }
 
-    /// The window index of the next item to write, if one is admissible.
-    fn pick(&mut self) -> Option<usize> {
-        let live_waiting = self.live_waiting > 0;
-        let backfill_waiting = self.backfill_waiting > 0;
-        // One lane, nothing unfinished before the front item, one kind
-        // waiting: no contest, no turn to take, so the front is the pick,
-        // with no hashing.
-        if self.lanes.len() == 1
+    /// The window indexes of the next write, in window order, if one item is
+    /// admissible: the item lanes' turns and live-first choose, then every
+    /// other admissible item of the same kind that fits, lanes in turn, up to
+    /// the merge limit in documents. Merging takes what is ready and never
+    /// waits for more. An ordered sink, and a lane behind a failed run's
+    /// barrier, write one item alone.
+    fn pick(&mut self) -> Vec<usize> {
+        // One item waiting, nothing in flight: no contest, nothing to merge,
+        // so it is the pick, with no hashing.
+        if self.window.len() == 1
             && self.flying.is_empty()
-            && !(live_waiting && backfill_waiting)
             && matches!(
                 self.window.front(),
                 Some(Queued {
@@ -647,14 +730,16 @@ impl<'a> Run<'a> {
                 })
             )
         {
-            return Some(0);
+            return vec![0];
         }
-        // The first admissible live and backfill item of each lane. Two lanes
-        // never share a document, so only a lane's own earlier items and
-        // writes count.
+        // Every admissible live and backfill item of each lane, in window
+        // order. Two lanes never share a document, so only a lane's own earlier
+        // items and writes count; an item admissible here shares no document
+        // with any earlier item of its lane, admissible ones included, so
+        // admissible items of one lane can go out together.
         let lanes = self.lanes.len();
-        let mut live: Vec<Option<usize>> = vec![None; lanes];
-        let mut backfill: Vec<Option<usize>> = vec![None; lanes];
+        let mut live: Vec<Vec<usize>> = vec![Vec::new(); lanes];
+        let mut backfill: Vec<Vec<usize>> = vec![Vec::new(); lanes];
         let mut blocked = vec![false; lanes];
         let mut earlier: Vec<HashSet<u64>> = vec![HashSet::new(); lanes];
         let ordered = self.ordered();
@@ -677,23 +762,21 @@ impl<'a> Run<'a> {
                 !self.lane_in_flight(lane)
             } else {
                 let seen = earlier.get(lane);
-                self.flying
-                    .iter()
-                    .filter(|(_, flight)| flight.lane == lane)
-                    .all(|(_, flight)| documents.share_none_with(&flight.documents))
+                self.parts_in_flight(lane)
+                    .all(|part| documents.share_none_with(&part.documents))
                     && documents
                         .hashes()
                         .iter()
                         .all(|hash| seen.is_none_or(|seen| !seen.contains(hash)))
             };
             if admissible {
-                let slot = if batch.position.is_some() {
+                let list = if batch.position.is_some() {
                     live.get_mut(lane)
                 } else {
                     backfill.get_mut(lane)
                 };
-                if let Some(slot) = slot {
-                    slot.get_or_insert(at);
+                if let Some(list) = list {
+                    list.push(at);
                 }
             }
             if lane_order {
@@ -706,8 +789,8 @@ impl<'a> Run<'a> {
                 seen.extend(documents.hashes().iter().copied());
             }
         }
-        let any_live = live.iter().any(Option::is_some);
-        let any_backfill = backfill.iter().any(Option::is_some);
+        let any_live = live.iter().any(|list| !list.is_empty());
+        let any_backfill = backfill.iter().any(|list| !list.is_empty());
         let candidates = match (any_live, any_backfill) {
             (true, true) => {
                 self.contested += 1;
@@ -719,14 +802,14 @@ impl<'a> Run<'a> {
             }
             (true, false) => &live,
             (false, true) => &backfill,
-            (false, false) => return None,
+            (false, false) => return Vec::new(),
         };
-        let chosen = if ordered {
+        let first = if ordered {
             // The live front with the lowest position; a backfill front in
             // lane order.
             candidates
                 .iter()
-                .flatten()
+                .filter_map(|list| list.first())
                 .copied()
                 .min_by_key(|at| match self.window.get(*at) {
                     Some(Queued {
@@ -741,23 +824,56 @@ impl<'a> Run<'a> {
             // the one whose turn it is.
             (0..lanes)
                 .map(|offset| (self.turn + offset) % lanes)
-                .find_map(|lane| candidates.get(lane).copied().flatten())
+                .find_map(|lane| candidates.get(lane).and_then(|list| list.first()).copied())
         };
-        if let Some(at) = chosen
-            && let Some(queued) = self.window.get(at)
-        {
-            self.turn = (queued.lane + 1) % lanes.max(1);
+        let Some(first) = first else {
+            return Vec::new();
+        };
+        let Some(first_lane) = self.window.get(first).map(|queued| queued.lane) else {
+            return Vec::new();
+        };
+        self.turn = (first_lane + 1) % lanes.max(1);
+        if ordered || self.in_lane_order(first_lane) {
+            return vec![first];
         }
-        chosen
+        let limit = self.merge_limit();
+        let size = |at: usize| match self.window.get(at) {
+            Some(Queued {
+                item: Queue::Batch { batch, .. },
+                ..
+            }) => batch.envelopes.len(),
+            _ => 0,
+        };
+        let mut picked = vec![first];
+        let mut documents = size(first);
+        // The other candidates, a lane at a time from the first's lane on,
+        // one item per lane per round, each lane in window order.
+        let mut queues: Vec<std::collections::VecDeque<usize>> = (0..lanes)
+            .map(|offset| (first_lane + offset) % lanes)
+            .filter(|lane| !self.in_lane_order(*lane))
+            .filter_map(|lane| candidates.get(lane))
+            .map(|list| list.iter().copied().filter(|at| *at != first).collect())
+            .collect();
+        while documents < limit && queues.iter().any(|queue| !queue.is_empty()) {
+            for queue in &mut queues {
+                let Some(at) = queue.pop_front() else {
+                    continue;
+                };
+                let more = size(at);
+                if documents + more <= limit {
+                    documents += more;
+                    picked.push(at);
+                }
+            }
+        }
+        picked
     }
 
     fn launch(
         &mut self,
-        lane: usize,
-        batch: Batch,
-        documents: Documents,
-        handle: Box<dyn AckHandle>,
-        seq: u64,
+        parts: Vec<Part>,
+        envelopes: Vec<Arc<[Envelope]>>,
+        work: Work,
         caught_up: bool,
     ) -> Option<Landed> {
         let flight = self.next_flight;
@@ -766,23 +882,23 @@ impl<'a> Run<'a> {
         self.flying.push((
             flight,
             Flight {
-                handle,
-                lane,
-                position: batch.position,
-                envelopes: batch.envelopes.len(),
-                changes: batch.changes,
-                work: work_of(batch.position),
-                documents,
-                seq,
+                parts,
+                work,
                 caught_up: covers_below,
             },
         ));
         let sink = &self.engine.sink;
-        let envelopes = batch.envelopes;
-        let span = tracing::debug_span!("sink.write", envelopes = envelopes.len(), caught_up);
+        let documents: usize = envelopes.iter().map(|part| part.len()).sum();
+        let span = tracing::debug_span!(
+            "sink.write",
+            envelopes = documents,
+            parts = envelopes.len(),
+            caught_up
+        );
         let write = async move {
             let started = Instant::now();
-            let result = sink.write(&envelopes, caught_up).await;
+            let slices: Vec<&[Envelope]> = envelopes.iter().map(|part| &part[..]).collect();
+            let result = sink.write_parts(&slices, caught_up).await;
             Landed {
                 flight,
                 result,
@@ -801,8 +917,11 @@ impl<'a> Run<'a> {
         self.flights.start(write)
     }
 
-    /// A write returned: decide its rejections, move the fences, and
-    /// acknowledge it, or record the failure that ends the run.
+    /// A write returned: decide its rejections per part, move the fences, and
+    /// acknowledge every part that landed. A part with a rejection its index
+    /// decides `stop` stays unacknowledged and the run fails, blamed on its
+    /// lane; the other parts landed and are acknowledged. A write that failed
+    /// fails every part, blamed on all their lanes.
     async fn landed(&mut self, landed: Landed) -> Result<()> {
         let Some(index) = self.flying.iter().position(|(id, _)| *id == landed.flight) else {
             return Ok(());
@@ -816,51 +935,87 @@ impl<'a> Run<'a> {
         let report = match landed.result {
             Ok(report) => report,
             Err(error) => {
-                self.fail(error.into(), Some(flight.lane));
+                let lanes: Vec<usize> = flight.lanes().collect();
+                self.fail(error.into(), &lanes);
                 return Ok(());
             }
         };
-        if let Err(error) = self.engine.decide_rejections(&report) {
-            self.fail(error, Some(flight.lane));
-            return Ok(());
+        let stopped = self.engine.stopping_rejections(&report);
+        let (failed, landed_parts): (Vec<Part>, Vec<Part>) =
+            flight.parts.into_iter().partition(|part| {
+                stopped.as_ref().is_some_and(|(indexes, _)| {
+                    self.lanes
+                        .get(part.lane)
+                        .is_some_and(|run| indexes.contains(run.key.index.as_ref()))
+                })
+            });
+        self.engine.quarantine(&report, |index| {
+            stopped
+                .as_ref()
+                .is_none_or(|(indexes, _)| !indexes.contains(index))
+        });
+        if !landed_parts.is_empty() {
+            let envelopes = landed_parts
+                .iter()
+                .map(|part| part.documents.envelopes.len())
+                .sum();
+            let changes = landed_parts.iter().map(|part| part.changes).sum();
+            self.engine.observer.on_batch_committed(
+                &self.engine.name,
+                CommitStats::new(envelopes, changes, landed.took, flight.work).sent(report.bytes),
+            );
         }
-        self.engine.observer.on_batch_committed(
-            &self.engine.name,
-            CommitStats::new(flight.envelopes, flight.changes, landed.took, flight.work)
-                .sent(report.bytes),
-        );
-        let key = self.lanes.get(flight.lane).map(|run| &run.key);
-        let returned =
-            self.engine
-                .write_returned(key, flight.position, report.visibility, flight.caught_up);
+        let written: Vec<(LaneKey, Position)> = landed_parts
+            .iter()
+            .filter_map(|part| {
+                let key = self.lanes.get(part.lane)?.key.clone();
+                Some((key, part.position?))
+            })
+            .collect();
+        let returned = self
+            .engine
+            .write_returned(&written, report.visibility, flight.caught_up);
         self.next_due = returned.next_due;
-        // Let go of the batch before acknowledging it, so the lane frees it
-        // as the acknowledgement lands, as it did with one write at a time.
-        // Freeing it here after the acknowledgement made the pre-#417
-        // `live_drain` bench (an instant sink, where who frees a batch decided
-        // its time) at 64 changes per batch half again slower.
-        drop(flight.documents);
-        let oldest = self.is_oldest(flight.lane, flight.seq);
-        self.acknowledge(
-            flight.handle,
-            flight.lane,
-            oldest,
-            Some(returned.wants_a_caught_up_write),
-        )
-        .await?;
-        if let Some(run) = self.lanes.get_mut(flight.lane) {
-            run.barrier = false;
+        let count = landed_parts.len();
+        for (at, part) in landed_parts.into_iter().enumerate() {
+            // Let go of the batch before acknowledging it, so the lane frees it
+            // as the acknowledgement lands, as it did with one write at a time.
+            // Freeing it here after the acknowledgement made the pre-#417
+            // `live_drain` bench (an instant sink, where who frees a batch
+            // decided its time) at 64 changes per batch half again slower.
+            drop(part.documents);
+            let oldest = self.is_oldest(part.lane, part.seq);
+            let wants = if at + 1 == count {
+                returned.wants_a_caught_up_write
+            } else {
+                false
+            };
+            self.acknowledge(part.handle, part.lane, oldest, Some(wants))
+                .await?;
+            if let Some(run) = self.lanes.get_mut(part.lane) {
+                run.barrier = false;
+            }
+        }
+        if let Some((_, error)) = stopped {
+            let lanes: Vec<usize> = failed.iter().map(|part| part.lane).collect();
+            self.fail(error, &lanes);
         }
         Ok(())
     }
 
-    /// Record the run's first failure, blamed on `lane` when one lane caused
-    /// it: the next run puts a barrier on that lane only.
-    fn fail(&mut self, error: EngineError, lane: Option<usize>) {
+    /// Record the run's first failure, blamed on `lanes` when they caused it
+    /// (none: a failure no lane caused): the next run puts a barrier on those
+    /// lanes only.
+    fn fail(&mut self, error: EngineError, lanes: &[usize]) {
         if self.failure.is_none() {
-            tracing::error!(%error, lane = ?lane.and_then(|lane| self.lanes.get(lane)).map(|lane| lane.key.to_string()), writes_in_flight = self.flights.len(), "the sink engine's run failed; waiting for the writes in flight");
+            let names: Vec<String> = lanes
+                .iter()
+                .filter_map(|lane| self.lanes.get(*lane))
+                .map(|lane| lane.key.to_string())
+                .collect();
+            tracing::error!(%error, lanes = ?names, writes_in_flight = self.flights.len(), "the sink engine's run failed; waiting for the writes in flight");
             self.failure = Some(error);
-            self.failed_lane = lane;
+            self.failed_lanes = lanes.to_vec();
         }
     }
 
@@ -904,9 +1059,9 @@ impl<'a> Run<'a> {
                     .work(Work::Live)
                     .sink(&self.engine.name),
             );
-            let returned =
-                self.engine
-                    .write_returned(None, None, report.visibility, Some(covers_below));
+            let returned = self
+                .engine
+                .write_returned(&[], report.visibility, Some(covers_below));
             self.next_due = returned.next_due;
         }
         handle.ack().await?;
@@ -951,23 +1106,20 @@ impl<'a> Run<'a> {
             .iter()
             .filter(|queued| queued.lane == lane)
             .all(|queued| queued.seq > seq)
-            && self
-                .flying
-                .iter()
-                .filter(|(_, flight)| flight.lane == lane)
-                .all(|(_, flight)| flight.seq > seq)
+            && self.parts_in_flight(lane).all(|part| part.seq > seq)
     }
 }
 
 impl SinkEngine {
-    /// Decide item-level rejections by policy. A single `stop` rejection
-    /// fails the write, decided *before* any quarantine event is emitted, so a
-    /// `skip` document in the same item isn't counted twice when the
-    /// unacknowledged item is redelivered.
-    fn decide_rejections(&self, report: &WriteReport) -> Result<()> {
-        if report.is_clean() {
-            return Ok(());
-        }
+    /// The indexes whose rejections in `report` their policy decides `stop`,
+    /// with the error that ends the run; `None` when there is none. Decided
+    /// before any quarantine event is emitted, so a `skip` document beside
+    /// them isn't counted twice when the unacknowledged part is redelivered.
+    fn stopping_rejections(
+        &self,
+        report: &WriteReport,
+    ) -> Option<(std::collections::BTreeSet<String>, EngineError)> {
+        let mut indexes = std::collections::BTreeSet::new();
         let mut stop_count = 0usize;
         let mut stop_example = String::new();
         for doc in &report.rejected {
@@ -976,12 +1128,19 @@ impl SinkEngine {
                     stop_example = format!("{}/{}: {}", doc.index, shown_id(&doc.id), doc.reason);
                 }
                 stop_count += 1;
+                indexes.insert(doc.index.clone());
             }
         }
-        if stop_count > 0 {
-            return Err(EngineError::DocumentsRejected(stop_count, stop_example));
-        }
-        for doc in &report.rejected {
+        (stop_count > 0).then_some((
+            indexes,
+            EngineError::DocumentsRejected(stop_count, stop_example),
+        ))
+    }
+
+    /// Quarantine the rejections of the indexes `landed` accepts (the parts
+    /// acknowledged), under their `skip` policy.
+    fn quarantine(&self, report: &WriteReport, landed: impl Fn(&str) -> bool) {
+        for doc in report.rejected.iter().filter(|doc| landed(&doc.index)) {
             tracing::warn!(
                 index = %doc.index,
                 id = %shown_id(&doc.id),
@@ -991,26 +1150,32 @@ impl SinkEngine {
             self.observer
                 .on_document_quarantined(&self.name, &doc.index, &doc.id, &doc.reason);
         }
-        Ok(())
     }
 
-    /// A write returned: record it, raise the lane's marks in the progress
-    /// (before the caller acknowledges it, so a fence never waits on an
-    /// acknowledgement), and tell observers what became applied and
+    /// A write returned: record it, raise each written lane's marks in the
+    /// progress (before the caller acknowledges it, so a fence never waits on
+    /// an acknowledgement), and tell observers what became applied and
     /// searchable, applied first. One fences lock, and an atomic per mark
-    /// that moved: a write returns once per lane item.
+    /// that moved.
     fn write_returned(
         &self,
-        lane: Option<&LaneKey>,
-        position: Option<Position>,
+        written: &[(LaneKey, Position)],
         visibility: Visibility,
         caught_up: Option<u64>,
     ) -> Returned {
         let now = Instant::now();
         let (applied, searchable, returned) = {
             let mut fences = self.lock_fences();
-            fences.write_returned(lane, position, visibility, caught_up, now);
-            let applied = lane.and_then(|lane| Some((lane.clone(), fences.advance_applied(lane)?)));
+            fences.write_returned(written, visibility, caught_up, now);
+            let mut applied: Vec<(LaneKey, Position)> = Vec::new();
+            for (lane, _) in written {
+                if applied.iter().any(|(seen, _)| seen == lane) {
+                    continue;
+                }
+                if let Some(position) = fences.advance_applied(lane) {
+                    applied.push((lane.clone(), position));
+                }
+            }
             let searchable = fences.advance_searchable(now);
             let returned = Returned {
                 next_due: fences.next_due(),
@@ -1018,7 +1183,7 @@ impl SinkEngine {
             };
             (applied, searchable, returned)
         };
-        if let Some((lane, position)) = &applied {
+        for (lane, position) in &applied {
             self.progress.applied(lane, *position);
             self.observer.on_position_applied(lane, *position);
         }

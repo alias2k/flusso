@@ -307,11 +307,32 @@ struct Rig {
 }
 
 impl Rig {
+    /// One lane item per write: what these tests were written for. Merging
+    /// ready items is `tests::merge`'s, and the schedule test runs both.
     fn new(probe: Probe, writes: usize) -> Self {
         Self::with_policies(probe, writes, FailurePolicies::default())
     }
 
     fn with_policies(probe: Probe, writes: usize, policies: FailurePolicies) -> Self {
+        Self::built(probe, writes, policies, 1)
+    }
+
+    /// Ready items merged into one write, up to the default limit.
+    fn merging(probe: Probe, writes: usize) -> Self {
+        Self::built(
+            probe,
+            writes,
+            FailurePolicies::default(),
+            crate::BatchPolicy::default().max_changes,
+        )
+    }
+
+    fn built(
+        probe: Probe,
+        writes: usize,
+        policies: FailurePolicies,
+        write_documents: usize,
+    ) -> Self {
         let name = sink_name("primary");
         let stream = Arc::new(ChannelStream::over(1024, [users()], [name.clone()]));
         let lane = stream
@@ -332,6 +353,7 @@ impl Rig {
                 Arc::clone(&progress),
             )
             .with_writes(writes)
+            .with_write_documents(write_documents)
             .with_failure_policies(policies)
             .with_stop(stop.clone())
             .with_observer(Arc::clone(&observer) as Arc<dyn Observer>),
@@ -503,11 +525,14 @@ fn seeds() -> Vec<u64> {
 fn a_document_is_never_written_twice_at_once_and_its_versions_never_go_down() {
     let mut concurrent = false;
     let mut restarted = false;
-    for writes in [1, 2, 4] {
-        for seed in seeds() {
-            let (at_once, failed) = super::paused_runtime().block_on(one_schedule(seed, writes));
-            concurrent |= at_once;
-            restarted |= failed;
+    for merge in [false, true] {
+        for writes in [1, 2, 4] {
+            for seed in seeds() {
+                let (at_once, failed) =
+                    super::paused_runtime().block_on(one_schedule(seed, writes, merge));
+                concurrent |= at_once;
+                restarted |= failed;
+            }
         }
     }
     assert!(concurrent, "some schedule wrote several items at once");
@@ -516,11 +541,17 @@ fn a_document_is_never_written_twice_at_once_and_its_versions_never_go_down() {
 
 /// One schedule of the test above, on its own runtime so a seed replays
 /// alone: whether it wrote several items at once, and whether it restarted.
-async fn one_schedule(seed: u64, writes: usize) -> (bool, bool) {
+async fn one_schedule(seed: u64, writes: usize, merge: bool) -> (bool, bool) {
     const IDS: [&str; 6] = ["a", "b", "c", "d", "e", "f"];
     let mut restarted = false;
     let mut rng = Rng(seed * 7919 + writes as u64);
-    let mut rig = Rig::new(Probe::new().with_delays(seed).failing_at_random(3), writes).start();
+    let probe = Probe::new().with_delays(seed).failing_at_random(3);
+    let mut rig = if merge {
+        Rig::merging(probe, writes)
+    } else {
+        Rig::new(probe, writes)
+    }
+    .start();
     let mut last: HashMap<&str, i64> = HashMap::new();
     let mut position = 0;
     for _ in 0..60 {
@@ -554,24 +585,24 @@ async fn one_schedule(seed: u64, writes: usize) -> (bool, bool) {
     }
     assert!(
         rig.stream.is_idle(),
-        "seed {seed}, writes {writes}: the lane drains"
+        "seed {seed}, writes {writes}, merge {merge}: the lane drains"
     );
 
     let probe = &rig.probe;
     assert!(
         !probe.overlapped.load(Ordering::SeqCst),
-        "seed {seed}, writes {writes}: a document was written twice at once"
+        "seed {seed}, writes {writes}, merge {merge}: a document was written twice at once"
     );
     assert!(
         !probe.regressed.load(Ordering::SeqCst),
-        "seed {seed}, writes {writes}: a document's version went down"
+        "seed {seed}, writes {writes}, merge {merge}: a document's version went down"
     );
     let written = probe.versions.lock().unwrap().clone();
     for (id, version) in &last {
         assert_eq!(
             written.get(*id),
             Some(version),
-            "seed {seed}, writes {writes}: {id} ends at its last version"
+            "seed {seed}, writes {writes}, merge {merge}: {id} ends at its last version"
         );
     }
     assert_eq!(super::covered(&rig.progress), Some(Position::new(position)));

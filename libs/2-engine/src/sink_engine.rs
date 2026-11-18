@@ -147,6 +147,8 @@ pub struct SinkEngine {
     advanced: AtomicU64,
     /// Lane items written at once.
     writes: usize,
+    /// The most documents one write holds when ready items are merged.
+    write_documents: usize,
     /// A reindex taken off the control channel and not yet staged. It
     /// outlives a run, so a run failing with writes in flight doesn't lose a
     /// reindex the daemon already accepted; the next run stages it once its
@@ -191,6 +193,7 @@ impl SinkEngine {
             skipped: Mutex::new(BTreeSet::new()),
             advanced: AtomicU64::new(0),
             writes: 1,
+            write_documents: crate::BatchPolicy::default().max_changes,
             blame: Mutex::new(Blame::Everyone),
             pending_reindex: Mutex::new(None),
             reindex_waiting: AtomicBool::new(false),
@@ -216,6 +219,18 @@ impl SinkEngine {
     /// is the default. The daemon sets `[concurrency] writes`.
     pub fn with_writes(mut self, writes: usize) -> Self {
         self.writes = writes.max(1);
+        self
+    }
+
+    /// The most documents one write holds: items ready at once (across lanes,
+    /// and several of one lane) are merged into one write up to it, never
+    /// splitting an item, and below the sink's own
+    /// [`write_limit`](sink::Sink::write_limit). The default is
+    /// [`BatchPolicy`](crate::BatchPolicy)'s `max_changes`; the daemon sets
+    /// `[batch] max_changes`, so a write holds about one batch, as with one
+    /// lane per sink.
+    pub fn with_write_documents(mut self, documents: usize) -> Self {
+        self.write_documents = documents.max(1);
         self
     }
 

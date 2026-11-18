@@ -221,14 +221,18 @@ impl Rig {
             .unwrap();
     }
 
+    /// An engine past its first landing: a fresh one writes each lane's
+    /// first item alone (a previous process may have stopped on it).
     fn engine(&self, sink: Arc<Parts>) -> SinkEngine {
-        SinkEngine::new(
+        let engine = SinkEngine::new(
             sink_name("primary"),
             sink as Arc<dyn Sink>,
             Arc::clone(&self.stream) as Arc<dyn Stream>,
             mappings(),
             Arc::clone(&self.progress),
-        )
+        );
+        engine.set_blame(Blame::Nobody);
+        engine
     }
 }
 

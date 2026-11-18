@@ -87,26 +87,28 @@ impl Fences {
         self.returned
     }
 
-    /// A write on `lane` returned. Its position, if it has one, is written,
-    /// due by the write's `visibility`. A caught-up write reporting
+    /// A write returned, holding the items at `written` (each lane's
+    /// position; one write may hold several lanes' items, merged). Each is
+    /// written, due by the write's `visibility`. A caught-up write reporting
     /// `Immediate` makes every write that returned before `covers_below`
     /// searchable now, on every lane.
     pub(super) fn write_returned(
         &mut self,
-        lane: Option<&LaneKey>,
-        position: Option<Position>,
+        written: &[(LaneKey, Position)],
         visibility: Visibility,
         caught_up: Option<u64>,
         now: Instant,
     ) {
         let seq = self.returned;
         self.returned += 1;
-        if let (Some(lane), Some(position)) = (lane, position)
-            && let Some(entry) = self
+        for (lane, position) in written {
+            let Some(entry) = self
                 .lanes
                 .get_mut(lane)
-                .and_then(|fences| fences.entries.get_mut(&position))
-        {
+                .and_then(|fences| fences.entries.get_mut(position))
+            else {
+                continue;
+            };
             let due = match visibility {
                 Visibility::Immediate => Due::At(now),
                 Visibility::Within(delay) => Due::At(now + delay),
@@ -253,15 +255,13 @@ mod tests {
             fences.received(&users, Position::new(position));
         }
         fences.write_returned(
-            Some(&users),
-            Some(Position::new(3)),
+            &[(users.clone(), Position::new(3))],
             Visibility::Immediate,
             None,
             now,
         );
         fences.write_returned(
-            Some(&users),
-            Some(Position::new(2)),
+            &[(users.clone(), Position::new(2))],
             Visibility::Within(Duration::from_secs(5)),
             None,
             now,
@@ -270,8 +270,7 @@ mod tests {
         assert!(fences.advance_searchable(now).is_empty());
 
         fences.write_returned(
-            Some(&users),
-            Some(Position::new(1)),
+            &[(users.clone(), Position::new(1))],
             Visibility::Immediate,
             None,
             now,
@@ -297,23 +296,21 @@ mod tests {
         fences.received(&users, Position::new(1));
         fences.received(&users, Position::new(2));
         fences.write_returned(
-            Some(&users),
-            Some(Position::new(1)),
+            &[(users.clone(), Position::new(1))],
             Visibility::Deferred,
             None,
             now,
         );
         let covers_below = fences.returned();
         fences.write_returned(
-            Some(&users),
-            Some(Position::new(2)),
+            &[(users.clone(), Position::new(2))],
             Visibility::Deferred,
             None,
             now,
         );
         assert!(fences.wants_a_caught_up_write(now));
 
-        fences.write_returned(None, None, Visibility::Immediate, Some(covers_below), now);
+        fences.write_returned(&[], Visibility::Immediate, Some(covers_below), now);
         assert_eq!(fences.advance_applied(&users), Some(Position::new(2)));
         assert_eq!(fences.advance_searchable(now), [(users, Position::new(1))]);
         assert!(
@@ -330,8 +327,7 @@ mod tests {
         fences.received(&users, Position::new(1));
         fences.received(&users, Position::new(2));
         fences.write_returned(
-            Some(&users),
-            Some(Position::new(2)),
+            &[(users.clone(), Position::new(2))],
             Visibility::Immediate,
             None,
             now,
@@ -339,8 +335,7 @@ mod tests {
         fences.received(&users, Position::new(1));
         assert_eq!(fences.advance_applied(&users), None);
         fences.write_returned(
-            Some(&users),
-            Some(Position::new(1)),
+            &[(users.clone(), Position::new(1))],
             Visibility::Immediate,
             None,
             now,
@@ -358,8 +353,7 @@ mod tests {
         fences.received(&users, Position::new(1));
         fences.received(&orders, Position::new(2));
         fences.write_returned(
-            Some(&orders),
-            Some(Position::new(2)),
+            &[(orders.clone(), Position::new(2))],
             Visibility::Immediate,
             None,
             now,

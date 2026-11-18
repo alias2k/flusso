@@ -207,11 +207,25 @@ impl Sink for OpensearchSink {
     /// `bulk` module docs). An id OpenSearch would refuse before running the
     /// request (empty, or an upsert's past 512 bytes) is one rejected
     /// document: it is never sent, so the rest of the write still lands.
-    #[tracing::instrument(name = "os.write", skip_all, fields(documents = envelopes.len(), caught_up), err)]
     async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> Result<WriteReport> {
+        self.write_parts(&[envelopes], caught_up).await
+    }
+
+    /// Several lane items as one write: their documents go out in the same
+    /// `_bulk` requests, chunked as one write's are (`batch_size`,
+    /// `max_bytes`), so a merged write of up to `batch_size` documents is one
+    /// request. Everything [`write`](Self::write) says holds for the whole
+    /// call.
+    #[tracing::instrument(
+        name = "os.write",
+        skip_all,
+        fields(documents = parts.iter().map(|part| part.len()).sum::<usize>(), parts = parts.len(), caught_up),
+        err
+    )]
+    async fn write_parts(&self, parts: &[&[Envelope]], caught_up: bool) -> Result<WriteReport> {
         let sent_at = self.lock_unrefreshed().point();
-        let mut actions = Vec::with_capacity(envelopes.len());
-        for envelope in envelopes {
+        let mut actions = Vec::with_capacity(parts.iter().map(|part| part.len()).sum());
+        for envelope in parts.iter().flat_map(|part| part.iter()) {
             actions.push(self.bulk_action(envelope)?);
         }
 
@@ -289,6 +303,12 @@ impl Sink for OpensearchSink {
             .rejecting(rejected)
             .visible(visibility)
             .sent(total_bytes as u64))
+    }
+
+    /// `batch_size`: the engine merges ready items up to it, so a merged
+    /// write is not then split into a full request and a small one.
+    fn write_limit(&self) -> Option<usize> {
+        Some(self.batch_size)
     }
 
     async fn is_seeded(&self, index: &IndexName) -> Result<bool> {
