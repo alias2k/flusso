@@ -1193,3 +1193,64 @@ async fn changes_are_resolved_by_the_resolver() {
     task.abort();
     assert_eq!(sink.writes(), [("users".to_owned(), vec!["1".to_owned()])]);
 }
+
+/// A lane whose live item is still waiting for room is not answered past
+/// it: only a lane the batch has nothing for is told it was skipped, and a
+/// lane with an item registers as its own send returns. (Calling `skipped`
+/// for every lane would let a fence on this lane pass, and the source
+/// confirm, past a batch not written.)
+#[tokio::test]
+async fn a_lane_whose_live_item_is_blocked_answers_no_further_than_before() {
+    let primary = sink_name("primary");
+    let indexes = [orders(), users()];
+    let stream = Arc::new(ChannelStream::over(2, indexes.clone(), [primary.clone()]));
+    let progress = Arc::new(crate::Progress::of(indexes, [primary.clone()]));
+    let users_lane = LaneKey::new(users(), primary.clone());
+    // The users lane holds one item and nothing reads it: the live batch's
+    // send waits for room.
+    stream
+        .lane(&users_lane)
+        .unwrap()
+        .producer
+        .publish(LaneItem::Batch(Batch {
+            position: None,
+            changes: 0,
+            envelopes: Vec::new().into(),
+            hold: Default::default(),
+            walked: None,
+        }))
+        .await
+        .unwrap();
+    let before = progress.lane(&users_lane, Level::Applied);
+    let ingest = IngestEngine::new(
+        Arc::new(MockSource::new(vec![change("users", 1)])) as Arc<dyn ChangeCapture>,
+        Arc::new(TwoIndexes) as Arc<dyn DocumentBuilder>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![primary.clone()],
+        Arc::clone(&progress),
+    );
+    let run = tokio::spawn(async move { ingest.run().await });
+    // The orders lane is told it was skipped once the batch is built: wait
+    // for that, so the users lane's send is the one still waiting.
+    let orders_lane = LaneKey::new(orders(), primary);
+    wait_for(|| {
+        matches!(
+            progress.lane(&orders_lane, Level::Applied),
+            Some(Landed::Through(_))
+        )
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!run.is_finished(), "the users lane's send waits for room");
+    assert_eq!(
+        progress.lane(&users_lane, Level::Applied),
+        before,
+        "the blocked lane answers what it did before the batch"
+    );
+    assert!(
+        !matches!(progress.landed(), Landed::Through(_)),
+        "confirmation doesn't pass the blocked batch: {:?}",
+        progress.landed()
+    );
+    run.abort();
+}
