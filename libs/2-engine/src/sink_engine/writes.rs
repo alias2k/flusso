@@ -7,7 +7,10 @@
 //! waiting. A delivered item leaves the lane's bound and is acknowledged only
 //! once written, so each sink holds at most `writes + LOOKAHEAD` delivered
 //! items beside the lane's own `capacity`, and with live traffic alone about
-//! `writes`. The lane is read only when it reports something waiting.
+//! `writes`. While there is room, the run waits on the lane's `recv` (what
+//! wakes it for the next item); between waits it takes what is already
+//! queued only when the lane's `is_empty` says something is, and the `recv`
+//! future is made only when that wait is polled.
 //!
 //! **Admission.** An item starts only when no earlier unfinished item shares
 //! a document with it, so a document is never written twice at once and a
@@ -231,7 +234,7 @@ impl<'a> Run<'a> {
                         self.fail(error);
                     }
                 }
-                delivery = self.lane.recv(), if room => {
+                delivery = next_delivery(&mut self.lane), if room => {
                     self.close_idle();
                     match delivery {
                         Err(error) => self.fail(error.into()),
@@ -810,6 +813,15 @@ fn disjoint(a: &[u64], b: &[u64]) -> bool {
         }
     }
     true
+}
+
+/// The lane's next delivery. The `recv` future (boxed by the port's
+/// `async_trait`) is made only when this is first polled, so a `select!`
+/// branch disabled for want of room builds nothing on that turn.
+async fn next_delivery(
+    lane: &mut Box<dyn Consumer<LaneItem>>,
+) -> stream::Result<Option<Delivery<LaneItem>>> {
+    lane.recv().await
 }
 
 /// A document's admission key: a hash of its index and id.
