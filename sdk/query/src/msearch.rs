@@ -41,7 +41,9 @@ impl Client {
         err,
     )]
     pub async fn msearch<B: MsearchBundle>(&self, bundle: B) -> Result<B::Output> {
-        let envelope = self.msearch_raw(bundle.ndjson(&self.index_prefix)?).await?;
+        let envelope = self
+            .msearch_raw(&bundle.indexes(), bundle.ndjson(&self.index_prefix)?)
+            .await?;
         let raw: RawMsearchResponse = serde_json::from_value(envelope)?;
         bundle.decode(raw.responses)
     }
@@ -66,7 +68,8 @@ impl Client {
         for search in searches {
             append_lines(search, &self.index_prefix, &mut lines)?;
         }
-        let envelope = self.msearch_raw(lines).await?;
+        let indexes: Vec<&str> = searches.iter().map(Search::index).collect();
+        let envelope = self.msearch_raw(&indexes, lines).await?;
         let raw: RawMsearchResponse = serde_json::from_value(envelope)?;
         let mut entries = raw.responses.into_iter();
         searches
@@ -94,6 +97,13 @@ pub trait MsearchBundle {
 
     /// Decode the envelope's `responses` entries, in slot order.
     fn decode(&self, responses: Vec<Value>) -> Result<Self::Output>;
+
+    /// The logical indexes the slots read, which a fenced client waits on
+    /// before sending. The default names none: a fence then waits on every
+    /// index of the deployment, which is correct, only slower to pass.
+    fn indexes(&self) -> Vec<&str> {
+        Vec::new()
+    }
 }
 
 /// Append one search's two NDJSON lines: the `{"index": …}` header (the
@@ -196,6 +206,10 @@ macro_rules! impl_msearch_bundle {
             fn decode(&self, responses: Vec<Value>) -> Result<Self::Output> {
                 let mut entries = responses.into_iter();
                 Ok(( $( decode_slot(self.$idx, $idx, entries.next())?, )+ ))
+            }
+
+            fn indexes(&self) -> Vec<&str> {
+                vec![$( self.$idx.index(), )+]
             }
         }
     };

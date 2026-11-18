@@ -62,10 +62,11 @@
 //! waiting on the position, [`Error::FenceUnavailable`] if it could not be
 //! asked.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::hash::{BuildHasher, RandomState};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use reqwest::StatusCode;
@@ -130,11 +131,46 @@ impl Level {
 }
 
 /// The position a fenced client reads after, and the highest level already
-/// waited for (shared by its clones, so several reads wait once).
+/// waited for on every index and on each index (shared by its clones, so
+/// several reads wait once per level and index).
 #[derive(Debug)]
 pub(crate) struct After {
     position: String,
-    passed: AtomicU8,
+    /// A fence that named no index passed this level: every index has it.
+    every: AtomicU8,
+    /// Per logical index, the highest level a fence naming it passed.
+    each: Mutex<HashMap<String, u8>>,
+}
+
+impl After {
+    /// Whether a fence on `indexes` (none: every index) passed `level`.
+    fn has_passed(&self, level: Level, indexes: &[&str]) -> bool {
+        let level = level as u8;
+        if self.every.load(Ordering::Acquire) >= level {
+            return true;
+        }
+        if indexes.is_empty() {
+            return false;
+        }
+        let each = self.each.lock().unwrap_or_else(PoisonError::into_inner);
+        indexes
+            .iter()
+            .all(|index| each.get(*index).is_some_and(|passed| *passed >= level))
+    }
+
+    /// A fence on `indexes` (none: every index) passed `level`.
+    fn passed(&self, level: Level, indexes: &[&str]) {
+        let level = level as u8;
+        if indexes.is_empty() {
+            self.every.fetch_max(level, Ordering::AcqRel);
+            return;
+        }
+        let mut each = self.each.lock().unwrap_or_else(PoisonError::into_inner);
+        for index in indexes {
+            let passed = each.entry((*index).to_owned()).or_default();
+            *passed = (*passed).max(level);
+        }
+    }
 }
 
 /// What one `/wait` request came back with, short of an error that ends the
@@ -212,41 +248,56 @@ impl Client {
     /// until it is applied, a search until it is searchable. `position` is
     /// what the source reported after the commit (see [`crate::position`]).
     ///
+    /// Each read waits only on the indexes it reads: a root's search or get on
+    /// its root's index, a combined search, a cursor walk or `_msearch` on
+    /// every index it names. A stalled index then holds up only its own
+    /// reads.
+    ///
     /// The returned client shares this one's connection pool. Reads through it
-    /// (or its clones) wait once per level, not once per request.
+    /// (or its clones) wait once per level and index, not once per request.
     #[must_use]
     pub fn after(&self, position: impl Into<String>) -> Client {
         let mut fenced = self.clone();
         fenced.after = Some(Arc::new(After {
             position: position.into(),
-            passed: AtomicU8::new(0),
+            every: AtomicU8::new(0),
+            each: Mutex::default(),
         }));
         fenced
     }
 
-    /// Wait until `position` is searchable: every read sees the commit.
+    /// Wait until `position` is searchable on every index: every read sees
+    /// the commit.
     pub async fn wait(&self, position: &str) -> Result<()> {
-        self.wait_for(position, Level::Searchable).await
+        self.wait_for(position, Level::Searchable, &[]).await
+    }
+
+    /// Wait until `position` is searchable on `indexes` (logical names, as in
+    /// `flusso.toml`): a read of those indexes sees the commit. An index no
+    /// sink of the deployment holds is [`Error::FenceRefused`].
+    pub async fn wait_on(&self, position: &str, indexes: &[&str]) -> Result<()> {
+        self.wait_for(position, Level::Searchable, indexes).await
     }
 
     /// Wait until `position` is applied: a fetch by id sees the commit, a
     /// search may not yet. Returns sooner than [`wait`](Self::wait) while the
     /// index has a backlog.
     pub async fn wait_applied(&self, position: &str) -> Result<()> {
-        self.wait_for(position, Level::Applied).await
+        self.wait_for(position, Level::Applied, &[]).await
     }
 
-    /// Before a read: if this client reads after a position, wait for the
-    /// level the read needs, unless this client already did.
-    pub(crate) async fn fence_before(&self, level: Level) -> Result<()> {
+    /// Before a read of `indexes` (logical names; none: every index): if this
+    /// client reads after a position, wait for the level the read needs on
+    /// them, unless this client already did.
+    pub(crate) async fn fence_before(&self, level: Level, indexes: &[&str]) -> Result<()> {
         let Some(after) = &self.after else {
             return Ok(());
         };
-        if after.passed.load(Ordering::Acquire) >= level as u8 {
+        if after.has_passed(level, indexes) {
             return Ok(());
         }
-        self.wait_for(&after.position, level).await?;
-        after.passed.fetch_max(level as u8, Ordering::AcqRel);
+        self.wait_for(&after.position, level, indexes).await?;
+        after.passed(level, indexes);
         Ok(())
     }
 
@@ -257,21 +308,28 @@ impl Client {
         fields(position, until = level.as_str()),
         err,
     )]
-    async fn wait_for(&self, position: &str, level: Level) -> Result<()> {
+    async fn wait_for(&self, position: &str, level: Level, indexes: &[&str]) -> Result<()> {
         let Some(endpoint) = &self.fence.endpoint else {
             return Err(Error::FenceMisconfigured(
                 "no flusso endpoint configured; call Client::flusso(url) first".to_owned(),
             ));
         };
         run(self.fence.timeout, Some(random_seed()), |ask| {
-            self.ask(endpoint, position, level, ask)
+            self.ask(endpoint, position, level, indexes, ask)
         })
         .await
     }
 
     /// One `GET /wait`. An error that ends the fence at once is the `Err`;
     /// everything else is for [`run`] to decide.
-    async fn ask(&self, endpoint: &str, position: &str, level: Level, ask: Ask) -> Result<Attempt> {
+    async fn ask(
+        &self,
+        endpoint: &str,
+        position: &str,
+        level: Level,
+        indexes: &[&str],
+        ask: Ask,
+    ) -> Result<Attempt> {
         let mut url = Url::parse(&format!("{endpoint}/wait"))
             .map_err(|error| Error::FenceMisconfigured(format!("{endpoint}: {error}")))?;
         {
@@ -282,6 +340,9 @@ impl Client {
                 .append_pair("timeout_ms", &ceil_millis(ask.wait).to_string());
             if let Some(sink) = &self.fence.sink {
                 query.append_pair("sink", sink);
+            }
+            for index in indexes {
+                query.append_pair("index", index);
             }
         }
         tracing::debug!(%url, "GET /wait");
@@ -526,4 +587,40 @@ fn chain(error: &dyn std::error::Error) -> String {
         source = cause.source();
     }
     text
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod after_tests {
+    use super::*;
+
+    fn after() -> After {
+        After {
+            position: "0/10".to_owned(),
+            every: AtomicU8::new(0),
+            each: Mutex::default(),
+        }
+    }
+
+    #[test]
+    fn a_pass_on_every_index_covers_each_index() {
+        let after = after();
+        after.passed(Level::Applied, &[]);
+        assert!(after.has_passed(Level::Applied, &["users", "orders"]));
+        assert!(after.has_passed(Level::Applied, &[]));
+        assert!(!after.has_passed(Level::Searchable, &["users"]));
+    }
+
+    #[test]
+    fn a_pass_on_some_indexes_covers_only_them() {
+        let after = after();
+        after.passed(Level::Searchable, &["users", "orders"]);
+        assert!(after.has_passed(Level::Applied, &["users"]));
+        assert!(after.has_passed(Level::Searchable, &["orders", "users"]));
+        assert!(!after.has_passed(Level::Applied, &["users", "tags"]));
+        assert!(
+            !after.has_passed(Level::Applied, &[]),
+            "every index includes ones never waited on"
+        );
+    }
 }

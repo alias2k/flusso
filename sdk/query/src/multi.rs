@@ -324,7 +324,7 @@ impl<U: FlussoMultiDocument> MultiSearch<U> {
     )]
     pub async fn send(&self, client: &Client) -> Result<SearchResponse<U>> {
         let body = self.body();
-        let response = client.search_at(&self.path, &body).await?;
+        let response = client.search_at(&self.path, &indexes::<U>(), &body).await?;
         let page = decode_response::<U>(response, &client.index_prefix)?;
         let span = tracing::Span::current();
         span.record("total", page.total);
@@ -356,7 +356,7 @@ impl<U: FlussoMultiDocument> MultiSearch<U> {
     )]
     pub async fn count(&self, client: &Client) -> Result<u64> {
         let body = self.count_body();
-        let response = client.count_at(&self.path, &body).await?;
+        let response = client.count_at(&self.path, &indexes::<U>(), &body).await?;
         let raw: RawCount = serde_json::from_value(response)?;
         tracing::Span::current().record("count", raw.count);
         tracing::debug!(count = raw.count, "combined count completed");
@@ -420,6 +420,7 @@ impl<U: FlussoMultiDocument> MultiCursorSearch<U> {
                 .iter()
                 .map(|(index, hash)| format!("{index}_{hash}"))
                 .collect(),
+            indexes: indexes::<U>(),
             cursor,
             pin: self.pin,
         })
@@ -619,4 +620,9 @@ struct RawMultiHit {
     sort: Vec<Value>,
     #[serde(rename = "_source")]
     source: Value,
+}
+
+/// The logical indexes of a union: what a fence on it waits on.
+fn indexes<U: FlussoMultiDocument>() -> Vec<&'static str> {
+    U::TARGETS.iter().map(|(index, _)| *index).collect()
 }

@@ -248,6 +248,8 @@ pub(crate) struct PageRequest<'a> {
     /// (`{INDEX}_{SCHEMA_HASH}`), for rewriting `_index` sort values to the
     /// current generation on a live resume.
     pub(crate) targets: Vec<String>,
+    /// The logical index of every target: what a fence waits on.
+    pub(crate) indexes: Vec<&'a str>,
     pub(crate) cursor: Option<&'a PageCursor>,
     /// Open a point-in-time with this keep-alive on the first page. A resumed
     /// walk follows its cursor instead.
@@ -408,7 +410,9 @@ pub(crate) async fn fetch_page(client: &Client, request: PageRequest<'_>) -> Res
     let (pinned, opened) = match (request.cursor, request.pin) {
         (Some(cursor), _) => (cursor.pinned.clone(), false),
         (None, Some(keep_alive)) => {
-            let id = client.open_pit(request.path, keep_alive).await?;
+            let id = client
+                .open_pit(request.path, &request.indexes, keep_alive)
+                .await?;
             (Some(PinnedView { id, keep_alive }), true)
         }
         (None, None) => (None, false),
@@ -442,8 +446,12 @@ pub(crate) async fn fetch_page(client: &Client, request: PageRequest<'_>) -> Res
         .and_then(Value::as_u64)
         .unwrap_or(DEFAULT_SIZE);
     let searched = match &pinned {
-        Some(_) => client.search_pit(&body).await,
-        None => client.search_at(request.path, &body).await,
+        Some(_) => client.search_pit(&request.indexes, &body).await,
+        None => {
+            client
+                .search_at(request.path, &request.indexes, &body)
+                .await
+        }
     };
     let response = match searched {
         Ok(response) => response,
