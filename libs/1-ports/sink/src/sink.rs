@@ -61,6 +61,34 @@ pub enum Visibility {
     Deferred,
 }
 
+/// What a caught-up write must make searchable beyond its own documents
+/// (see [`Sink::write_parts`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaughtUp<'a> {
+    /// Nothing: the write forces no refresh.
+    No,
+    /// Every write of these (logical) indexes that returned before it.
+    Indexes(&'a [IndexName]),
+    /// Every write of every index that returned before it.
+    All,
+}
+
+impl CaughtUp<'_> {
+    /// Whether the write is caught up at all.
+    pub fn is_caught_up(&self) -> bool {
+        !matches!(self, CaughtUp::No)
+    }
+
+    /// Whether the write must cover earlier writes of the logical `index`.
+    pub fn covers(&self, index: &str) -> bool {
+        match self {
+            CaughtUp::No => false,
+            CaughtUp::Indexes(indexes) => indexes.iter().any(|named| named.as_ref() == index),
+            CaughtUp::All => true,
+        }
+    }
+}
+
 impl Visibility {
     /// The later of two: what a write holding both parts reports.
     #[must_use]
@@ -222,16 +250,30 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// items' envelopes, each part in its own order; parts never share a
     /// document. Everything [`write`](Self::write) promises holds for the whole
     /// call, as one write: a rejection names its document's index, an `Err`
-    /// fails every part, `caught_up` covers what returned before the call.
+    /// fails every part.
+    ///
+    /// `caught_up` says what the write must make searchable beyond its own
+    /// documents, when it returns `Immediate`: every write of the indexes it
+    /// names that returned before the call ([`CaughtUp::Indexes`]: the
+    /// engine's lanes with nothing else waiting, one index each), of every
+    /// index ([`CaughtUp::All`], what [`write`](Self::write)'s `true` means),
+    /// or nothing ([`CaughtUp::No`]). So a trickle on one index refreshes
+    /// that index, not another index's backlog.
     ///
     /// The default writes each part with [`write`](Self::write), in order,
-    /// passing `caught_up` to the last only (the earlier ones have returned
-    /// before it, so it covers them), and folds the reports: rejections
-    /// together, bytes summed, visibility the latest of them, or `Immediate`
-    /// when the caught-up last part reported it. Correct for any sink; a sink
-    /// that can send several parts in one request (OpenSearch's `_bulk`)
-    /// overrides it.
-    async fn write_parts(&self, parts: &[&[Envelope]], caught_up: bool) -> Result<WriteReport> {
+    /// passing whether it is caught up to the last only (the earlier ones have
+    /// returned before it, so it covers them; a scope is widened to every
+    /// index, which covers more than asked), and folds the reports:
+    /// rejections together, bytes summed, visibility the latest of them, or
+    /// `Immediate` when the caught-up last part reported it. Correct for any
+    /// sink; a sink that can send several parts in one request (OpenSearch's
+    /// `_bulk`), or refresh one index, overrides it.
+    async fn write_parts(
+        &self,
+        parts: &[&[Envelope]],
+        caught_up: CaughtUp<'_>,
+    ) -> Result<WriteReport> {
+        let caught_up = caught_up.is_caught_up();
         let Some((last, earlier)) = parts.split_last() else {
             return self.write(&[], caught_up).await;
         };

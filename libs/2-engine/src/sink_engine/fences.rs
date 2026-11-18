@@ -35,9 +35,10 @@ pub(super) struct Fences {
     lanes: BTreeMap<LaneKey, LaneFences>,
     /// Writes returned so far; the next one's sequence number.
     returned: u64,
-    /// Writes that returned before this sequence number were covered by a
-    /// caught-up write that returned: an idle refresh would add nothing.
-    covered_below: u64,
+    /// Per lane, its writes that returned before this sequence number were
+    /// covered by a caught-up write of the lane that returned: an idle
+    /// refresh of the lane would add nothing.
+    covered_below: BTreeMap<LaneKey, u64>,
     /// The latest time any written position was due at. It never moves back,
     /// so once it has passed no entry waits on a time.
     latest_due: Option<Instant>,
@@ -91,12 +92,13 @@ impl Fences {
     /// position; one write may hold several lanes' items, merged). Each is
     /// written, due by the write's `visibility`. A caught-up write reporting
     /// `Immediate` makes every write that returned before `covers_below`
-    /// searchable now, on every lane.
+    /// searchable now, on the lanes it was caught up for (the `Sink::write`
+    /// contract, scoped by `CaughtUp::Indexes`).
     pub(super) fn write_returned(
         &mut self,
         written: &[(LaneKey, Position)],
         visibility: Visibility,
-        caught_up: Option<u64>,
+        caught_up: Option<(u64, &[LaneKey])>,
         now: Instant,
     ) {
         let seq = self.returned;
@@ -120,10 +122,18 @@ impl Fences {
             }
             *entry = Entry::Written { seq, due };
         }
-        if let Some(covers_below) = caught_up {
-            self.covered_below = self.covered_below.max(covers_below);
+        if let Some((covers_below, lanes)) = caught_up {
+            for lane in lanes {
+                let covered = self.covered_below.entry(lane.clone()).or_default();
+                *covered = (*covered).max(covers_below);
+            }
             if visibility == Visibility::Immediate && self.some_may_wait(now) {
-                for fences in self.lanes.values_mut() {
+                for fences in self
+                    .lanes
+                    .iter_mut()
+                    .filter(|(lane, _)| lanes.contains(lane))
+                    .map(|(_, fences)| fences)
+                {
                     for entry in fences.entries.values_mut() {
                         if let Entry::Written { seq, due } = entry
                             && *seq < covers_below
@@ -208,25 +218,26 @@ impl Fences {
             .min()
     }
 
-    /// Whether a written position isn't searchable yet and no caught-up
-    /// write that returned after it covered it: an idle engine sends an empty
-    /// caught-up write.
-    pub(super) fn wants_a_caught_up_write(&self, now: Instant) -> bool {
-        self.some_may_wait(now)
-            && self
-                .lanes
-                .values()
-                .flat_map(|fences| fences.entries.values())
-                .any(|entry| match entry {
-                    Entry::Written { seq, due } => {
-                        *seq >= self.covered_below
-                            && match due {
-                                Due::At(at) => *at > now,
-                                Due::WithACaughtUpWrite => true,
-                            }
-                    }
-                    Entry::Writing => false,
-                })
+    /// Whether a written position of `lane` isn't searchable yet and no
+    /// caught-up write of the lane that returned after it covered it: a lane
+    /// going quiet sends an empty caught-up write for its index.
+    pub(super) fn wants_a_caught_up_write(&self, lane: &LaneKey, now: Instant) -> bool {
+        if !self.some_may_wait(now) {
+            return false;
+        }
+        let covered = self.covered_below.get(lane).copied().unwrap_or(0);
+        self.lanes.get(lane).is_some_and(|fences| {
+            fences.entries.values().any(|entry| match entry {
+                Entry::Written { seq, due } => {
+                    *seq >= covered
+                        && match due {
+                            Due::At(at) => *at > now,
+                            Due::WithACaughtUpWrite => true,
+                        }
+                }
+                Entry::Writing => false,
+            })
+        })
     }
 }
 
@@ -308,15 +319,59 @@ mod tests {
             None,
             now,
         );
-        assert!(fences.wants_a_caught_up_write(now));
+        assert!(fences.wants_a_caught_up_write(&users, now));
 
-        fences.write_returned(&[], Visibility::Immediate, Some(covers_below), now);
+        fences.write_returned(
+            &[],
+            Visibility::Immediate,
+            Some((covers_below, std::slice::from_ref(&users))),
+            now,
+        );
         assert_eq!(fences.advance_applied(&users), Some(Position::new(2)));
-        assert_eq!(fences.advance_searchable(now), [(users, Position::new(1))]);
+        assert_eq!(
+            fences.advance_searchable(now),
+            [(users.clone(), Position::new(1))]
+        );
         assert!(
-            fences.wants_a_caught_up_write(now),
+            fences.wants_a_caught_up_write(&users, now),
             "2 returned after the caught-up write was granted"
         );
+    }
+
+    /// A caught-up write covers only the lanes it was caught up for: the
+    /// other lane's deferred write still waits for one of its own.
+    #[test]
+    fn a_caught_up_write_covers_only_its_own_lanes() {
+        let now = Instant::now();
+        let (users, orders) = (lane("users"), lane("orders"));
+        let mut fences = Fences::default();
+        fences.received(&users, Position::new(1));
+        fences.received(&orders, Position::new(2));
+        fences.write_returned(
+            &[(users.clone(), Position::new(1))],
+            Visibility::Deferred,
+            None,
+            now,
+        );
+        fences.write_returned(
+            &[(orders.clone(), Position::new(2))],
+            Visibility::Deferred,
+            None,
+            now,
+        );
+        let covers_below = fences.returned();
+        fences.write_returned(
+            &[],
+            Visibility::Immediate,
+            Some((covers_below, std::slice::from_ref(&users))),
+            now,
+        );
+        assert_eq!(
+            fences.advance_searchable(now),
+            [(users.clone(), Position::new(1))]
+        );
+        assert!(!fences.wants_a_caught_up_write(&users, now));
+        assert!(fences.wants_a_caught_up_write(&orders, now));
     }
 
     #[test]

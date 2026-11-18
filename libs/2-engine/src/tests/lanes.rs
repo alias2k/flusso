@@ -992,3 +992,117 @@ async fn a_quiet_lane_makes_its_last_writes_searchable_beside_a_stalled_lane() {
     .await;
     task.abort();
 }
+
+/// Records each write's parts' indexes and the indexes it was caught up for.
+#[derive(Debug, Default)]
+struct Scopes {
+    writes: Mutex<Vec<(Vec<String>, Vec<String>)>>,
+}
+
+#[async_trait]
+impl Sink for Scopes {
+    async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> sink::Result<WriteReport> {
+        let scope = if caught_up {
+            sink::CaughtUp::All
+        } else {
+            sink::CaughtUp::No
+        };
+        self.write_parts(&[envelopes], scope).await
+    }
+
+    async fn write_parts(
+        &self,
+        parts: &[&[Envelope]],
+        caught_up: sink::CaughtUp<'_>,
+    ) -> sink::Result<WriteReport> {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let indexes = parts
+            .iter()
+            .filter_map(|part| part.first())
+            .map(|envelope| envelope.index.to_string())
+            .collect();
+        let scope = match caught_up {
+            sink::CaughtUp::No => Vec::new(),
+            sink::CaughtUp::Indexes(indexes) => indexes.iter().map(ToString::to_string).collect(),
+            sink::CaughtUp::All => vec!["*".to_owned()],
+        };
+        self.writes.lock().unwrap().push((indexes, scope));
+        Ok(WriteReport::clean())
+    }
+
+    async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
+        Ok(true)
+    }
+}
+
+/// A trickle on one index while another drains a backlog: the trickle's
+/// writes are caught up for their own index only, so they refresh nothing
+/// of the backlog's index, and no write is caught up for the whole sink.
+#[tokio::test]
+async fn a_caught_up_write_names_only_its_own_quiet_lanes() {
+    let sink = Arc::new(Scopes::default());
+    let primary = sink_name("primary");
+    let indexes = [orders(), users()];
+    let stream = Arc::new(ChannelStream::over(256, indexes.clone(), [primary.clone()]));
+    let progress = Arc::new(crate::Progress::of(indexes, [primary.clone()]));
+    let item = |index: IndexName, position: u64| {
+        LaneItem::Batch(Batch {
+            position: Some(Position::new(position)),
+            changes: 1,
+            envelopes: vec![Envelope::upsert(
+                index,
+                position.to_string(),
+                GenericValue::Map(BTreeMap::new()),
+                Some(Position::new(position)),
+                chrono::Utc::now(),
+            )]
+            .into(),
+            hold: Default::default(),
+        })
+    };
+    let lane = |index: IndexName| {
+        stream
+            .lane(&LaneKey::new(index, primary.clone()))
+            .unwrap()
+            .producer
+    };
+    let (orders_lane, users_lane) = (lane(orders()), lane(users()));
+    for position in 0..40 {
+        orders_lane.publish(item(orders(), position)).await.unwrap();
+    }
+    let engine = SinkEngine::new(
+        primary,
+        Arc::clone(&sink) as Arc<dyn Sink>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![index_mapping(orders()), index_mapping(users())],
+        progress,
+    )
+    .with_writes(2)
+    .with_write_documents(1);
+    engine.set_blame(crate::sink_engine::Blame::Nobody);
+    let task = tokio::spawn(async move {
+        let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
+        engine.run(&mut control).await
+    });
+    for position in 100..103 {
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        users_lane.publish(item(users(), position)).await.unwrap();
+    }
+    wait_for(|| stream.is_idle()).await;
+    task.abort();
+    let writes = sink.writes.lock().unwrap().clone();
+    let users_writes: Vec<_> = writes
+        .iter()
+        .filter(|(indexes, _)| indexes == &["users".to_owned()])
+        .collect();
+    assert_eq!(users_writes.len(), 3, "{writes:?}");
+    for (_, scope) in &users_writes {
+        assert_eq!(scope, &["users".to_owned()], "{writes:?}");
+    }
+    assert!(
+        writes
+            .iter()
+            .all(|(_, scope)| !scope.contains(&"*".to_owned())),
+        "{writes:?}"
+    );
+}

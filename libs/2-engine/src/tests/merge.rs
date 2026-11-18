@@ -133,10 +133,19 @@ impl Parts {
 #[async_trait]
 impl Sink for Parts {
     async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> sink::Result<WriteReport> {
+        let caught_up = if caught_up {
+            sink::CaughtUp::All
+        } else {
+            sink::CaughtUp::No
+        };
         self.write_parts(&[envelopes], caught_up).await
     }
 
-    async fn write_parts(&self, parts: &[&[Envelope]], _: bool) -> sink::Result<WriteReport> {
+    async fn write_parts(
+        &self,
+        parts: &[&[Envelope]],
+        _: sink::CaughtUp<'_>,
+    ) -> sink::Result<WriteReport> {
         if parts.iter().all(|part| part.is_empty()) {
             return Ok(WriteReport::clean());
         }

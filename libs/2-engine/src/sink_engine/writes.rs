@@ -106,7 +106,7 @@ use std::time::Duration;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use kernel::{Envelope, IndexName, Position};
-use sink::{Visibility, WriteReport};
+use sink::{CaughtUp, Visibility, WriteReport};
 use stream::{AckHandle, Batch, Consumer, Delivery, LaneItem, LaneKey};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -191,8 +191,9 @@ impl Documents {
 struct Flight {
     parts: Vec<Part>,
     work: Work,
-    /// For a caught-up write, how many writes had returned at its grant.
-    caught_up: Option<u64>,
+    /// For a caught-up write, how many writes had returned at its grant, and
+    /// the lanes it is caught up for.
+    caught_up: Option<(u64, Vec<LaneKey>)>,
 }
 
 /// One lane item of a write.
@@ -745,16 +746,21 @@ impl<'a> Run<'a> {
                 return Ok(());
             };
             let work = work_of(first.position);
-            // Caught up when some lane of the write has nothing else queued or
+            // Caught up for each lane of the write with nothing else queued or
             // waiting: as with one item per write, that lane's position need
-            // not wait out a refresh.
-            let caught_up = parts.iter().any(|part| {
-                !self.window.iter().any(|queued| queued.lane == part.lane)
-                    && self
-                        .lanes
-                        .get(part.lane)
-                        .is_some_and(|run| run.consumer.is_empty())
-            });
+            // not wait out a refresh. Only those lanes' indexes are refreshed.
+            let mut caught_up: Vec<usize> = parts
+                .iter()
+                .map(|part| part.lane)
+                .filter(|lane| {
+                    !self.window.iter().any(|queued| queued.lane == *lane)
+                        && self
+                            .lanes
+                            .get(*lane)
+                            .is_some_and(|run| run.consumer.is_empty())
+                })
+                .collect();
+            caught_up.dedup();
             if let Some(landed) = self.launch(parts, envelopes, work, caught_up) {
                 self.landed(landed).await?;
             }
@@ -983,11 +989,18 @@ impl<'a> Run<'a> {
         parts: Vec<Part>,
         envelopes: Vec<Arc<[Envelope]>>,
         work: Work,
-        caught_up: bool,
+        caught_up: Vec<usize>,
     ) -> Option<Landed> {
         let flight = self.next_flight;
         self.next_flight += 1;
-        let covers_below = caught_up.then(|| self.engine.lock_fences().returned());
+        let lanes: Vec<LaneKey> = caught_up
+            .iter()
+            .filter_map(|lane| self.lanes.get(*lane))
+            .map(|run| run.key.clone())
+            .collect();
+        let indexes: Vec<IndexName> = lanes.iter().map(|lane| lane.index.clone()).collect();
+        let caught_up = !lanes.is_empty();
+        let covers_below = caught_up.then(|| (self.engine.lock_fences().returned(), lanes));
         self.flying.push((
             flight,
             Flight {
@@ -1007,7 +1020,12 @@ impl<'a> Run<'a> {
         let write = async move {
             let started = Instant::now();
             let slices: Vec<&[Envelope]> = envelopes.iter().map(|part| &part[..]).collect();
-            let result = sink.write_parts(&slices, caught_up).await;
+            let scope = if indexes.is_empty() {
+                CaughtUp::No
+            } else {
+                CaughtUp::Indexes(&indexes)
+            };
+            let result = sink.write_parts(&slices, scope).await;
             Landed {
                 flight,
                 outcome: Outcome::Write(result),
@@ -1149,12 +1167,28 @@ impl<'a> Run<'a> {
                 Some((key, part.position?))
             })
             .collect();
-        let returned = self
-            .engine
-            .write_returned(&written, report.visibility, flight.caught_up);
+        let returned = self.engine.write_returned(
+            &written,
+            report.visibility,
+            flight
+                .caught_up
+                .as_ref()
+                .map(|(covers_below, lanes)| (*covers_below, lanes.as_slice())),
+        );
         self.next_due = returned.next_due;
-        let count = landed_parts.len();
-        for (at, part) in landed_parts.into_iter().enumerate() {
+        // A lane's last part of the write is the one whose acknowledgement may
+        // leave the lane quiet.
+        let last_of_lane: Vec<bool> = landed_parts
+            .iter()
+            .enumerate()
+            .map(|(at, part)| {
+                !landed_parts
+                    .iter()
+                    .skip(at + 1)
+                    .any(|later| later.lane == part.lane)
+            })
+            .collect();
+        for (part, last) in landed_parts.into_iter().zip(last_of_lane) {
             // Let go of the batch before acknowledging it, so the lane frees it
             // as the acknowledgement lands, as it did with one write at a time.
             // Freeing it here after the acknowledgement made the pre-#417
@@ -1162,11 +1196,11 @@ impl<'a> Run<'a> {
             // decided its time) at 64 changes per batch half again slower.
             drop(part.documents);
             let oldest = self.is_oldest(part.lane, part.seq);
-            let wants = if at + 1 == count {
-                returned.wants_a_caught_up_write
-            } else {
-                false
-            };
+            let wants = last
+                && self
+                    .lanes
+                    .get(part.lane)
+                    .is_some_and(|run| returned.wanting.contains(&run.key));
             self.acknowledge(part.handle, part.lane, oldest, Some(wants))
                 .await?;
             if let Some(run) = self.lanes.get_mut(part.lane) {
@@ -1196,11 +1230,13 @@ impl<'a> Run<'a> {
         }
     }
 
-    /// Acknowledge an item. Before the acknowledgement that leaves the engine
-    /// idle, a written position not yet searchable gets an empty caught-up
-    /// write, so the last writes of a burst don't wait out the refresh
+    /// Acknowledge an item. Before the acknowledgement that leaves its lane
+    /// quiet (nothing of it waiting, in flight or queued), a written position
+    /// of the lane not yet searchable gets an empty caught-up write for the
+    /// lane's index, so the last writes of a burst don't wait out the refresh
     /// interval (or, with automatic refresh off, for traffic that may not
-    /// come). It runs before the acknowledgement so a drain waits for it.
+    /// come), whatever other lanes are doing. It runs before the
+    /// acknowledgement so a drain waits for it.
     ///
     /// `oldest`: the item was the oldest unfinished one of its lane, so the
     /// sink moved forward (the supervisor's measure of progress), unless the
@@ -1219,26 +1255,39 @@ impl<'a> Run<'a> {
         oldest: bool,
         wants: Option<bool>,
     ) -> Result<()> {
-        let quiet = self.window.is_empty() && self.flights.is_empty() && self.failure.is_none();
-        if quiet
+        let key = self.lanes.get(lane).map(|run| run.key.clone());
+        let quiet = self.failure.is_none()
+            && !self.window.iter().any(|queued| queued.lane == lane)
+            && !self.lane_in_flight(lane);
+        if let Some(key) = key
+            && quiet
             && wants.unwrap_or_else(|| {
                 self.engine
                     .lock_fences()
-                    .wants_a_caught_up_write(Instant::now())
+                    .wants_a_caught_up_write(&key, Instant::now())
             })
-            && self.lanes.iter().all(|run| run.consumer.is_empty())
+            && self
+                .lanes
+                .get(lane)
+                .is_some_and(|run| run.consumer.is_empty())
         {
             let covers_below = self.engine.lock_fences().returned();
             let started = Instant::now();
-            let report = self.engine.sink.write(&[], true).await?;
+            let report = self
+                .engine
+                .sink
+                .write_parts(&[], CaughtUp::Indexes(std::slice::from_ref(&key.index)))
+                .await?;
             self.engine.observer.on_stage(
                 StageTiming::new(Stage::Write, started.elapsed())
                     .work(Work::Live)
                     .sink(&self.engine.name),
             );
-            let returned = self
-                .engine
-                .write_returned(&[], report.visibility, Some(covers_below));
+            let returned = self.engine.write_returned(
+                &[],
+                report.visibility,
+                Some((covers_below, std::slice::from_ref(&key))),
+            );
             self.next_due = returned.next_due;
         }
         handle.ack().await?;
@@ -1343,7 +1392,7 @@ impl SinkEngine {
         &self,
         written: &[(LaneKey, Position)],
         visibility: Visibility,
-        caught_up: Option<u64>,
+        caught_up: Option<(u64, &[LaneKey])>,
     ) -> Returned {
         let now = Instant::now();
         let (applied, searchable, returned) = {
@@ -1361,7 +1410,12 @@ impl SinkEngine {
             let searchable = fences.advance_searchable(now);
             let returned = Returned {
                 next_due: fences.next_due(),
-                wants_a_caught_up_write: fences.wants_a_caught_up_write(now),
+                wanting: written
+                    .iter()
+                    .map(|(lane, _)| lane)
+                    .filter(|lane| fences.wants_a_caught_up_write(lane, now))
+                    .cloned()
+                    .collect(),
             };
             (applied, searchable, returned)
         };
@@ -1417,8 +1471,8 @@ impl SinkEngine {
 struct Returned {
     /// When the oldest position comes due, if that is a matter of time.
     next_due: Option<Instant>,
-    /// Whether an idle engine should send an empty caught-up write.
-    wants_a_caught_up_write: bool,
+    /// The written lanes that want an empty caught-up write once quiet.
+    wanting: Vec<LaneKey>,
 }
 
 /// Live changes carry a position; a backfill batch has none.

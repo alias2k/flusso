@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 use async_trait::async_trait;
 use kernel::{Envelope, IndexMapping, IndexName, Op};
-use sink::{RejectedDocument, Result, Sink, SinkError, Visibility, WriteReport};
+use sink::{CaughtUp, RejectedDocument, Result, Sink, SinkError, Visibility, WriteReport};
 use tracing::{debug, info, warn};
 
 use crate::bulk::{BulkAction, bulk_action_fragment, plan_chunks, refused_id, render_document};
@@ -208,6 +208,11 @@ impl Sink for OpensearchSink {
     /// request (empty, or an upsert's past 512 bytes) is one rejected
     /// document: it is never sent, so the rest of the write still lands.
     async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> Result<WriteReport> {
+        let caught_up = if caught_up {
+            CaughtUp::All
+        } else {
+            CaughtUp::No
+        };
         self.write_parts(&[envelopes], caught_up).await
     }
 
@@ -219,10 +224,14 @@ impl Sink for OpensearchSink {
     #[tracing::instrument(
         name = "os.write",
         skip_all,
-        fields(documents = parts.iter().map(|part| part.len()).sum::<usize>(), parts = parts.len(), caught_up),
+        fields(documents = parts.iter().map(|part| part.len()).sum::<usize>(), parts = parts.len(), caught_up = caught_up.is_caught_up()),
         err
     )]
-    async fn write_parts(&self, parts: &[&[Envelope]], caught_up: bool) -> Result<WriteReport> {
+    async fn write_parts(
+        &self,
+        parts: &[&[Envelope]],
+        caught_up: CaughtUp<'_>,
+    ) -> Result<WriteReport> {
         let sent_at = self.lock_unrefreshed().point();
         let mut actions = Vec::with_capacity(parts.iter().map(|part| part.len()).sum());
         for envelope in parts.iter().flat_map(|part| part.iter()) {
@@ -282,7 +291,7 @@ impl Sink for OpensearchSink {
                 body.push_str(fragment);
             }
             rejected.extend(
-                self.send_bulk_chunk(&body, chunk_actions, caught_up)
+                self.send_bulk_chunk(&body, chunk_actions, caught_up.is_caught_up())
                     .await?,
             );
             start = end;
@@ -474,7 +483,7 @@ impl OpensearchSink {
     /// the write reports what the periodic refresh promises.
     async fn settle_visibility(
         &self,
-        caught_up: bool,
+        caught_up: CaughtUp<'_>,
         written: &[BulkAction],
         sent_at: u64,
     ) -> Visibility {
@@ -482,7 +491,7 @@ impl OpensearchSink {
             Some(period) => Visibility::Within(period),
             None => Visibility::Deferred,
         };
-        if !caught_up {
+        if !caught_up.is_caught_up() {
             if written.is_empty() {
                 return Visibility::Immediate;
             }
@@ -494,9 +503,16 @@ impl OpensearchSink {
         // what this one put back if it failed, so neither answers `Immediate`
         // before a refresh covering the earlier writes succeeded.
         let _refreshing = self.refreshing.lock().await;
-        let pending = self.lock_unrefreshed().take_uncovered(sent_at, |index| {
-            written.iter().any(|action| action.index() == index) && self.single_shard(index)
-        });
+        // Only the marks of the indexes the write is caught up for: a trickle
+        // on one index doesn't refresh another index's backlog. A mark whose
+        // index the sink can't name is refreshed (more than asked, never less).
+        let logical = self.logical_names();
+        let in_scope = |index: &str| logical.get(index).is_none_or(|name| caught_up.covers(name));
+        let pending = self
+            .lock_unrefreshed()
+            .take_uncovered(sent_at, in_scope, |index| {
+                written.iter().any(|action| action.index() == index) && self.single_shard(index)
+            });
         if pending.is_empty() {
             return Visibility::Immediate;
         }
