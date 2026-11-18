@@ -224,7 +224,9 @@ indexed; a restart converges) still holds; a stop indexes slightly less before e
 
 Read-after-visible (the hold stays in the capture), `--skip-backfill`, `backfill = false`, staging
 order (`continuity`, stage, `prepare`, then the reader and index tasks), the request lane's
-at-least-once acks, the sink side.
+at-least-once acks, the sink side (including track A's concurrent seeding: a lane's `SnapshotComplete`
+runs `mark_seeded` as a flight holding one `writes` slot; nothing here depends on how the sink side
+seeds, only on `SnapshotComplete { index }` arriving after the index's last snapshot item).
 
 ## 7. Observability
 
