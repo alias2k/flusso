@@ -242,20 +242,23 @@ impl<'a> Run<'a> {
             // change per batch.
             if !room && !watch_stop && self.window.is_empty() && !self.flights.is_empty() {
                 tokio::select! {
+                    // Control first: under a backlog a landed write is ready
+                    // on every turn, and a reindex polled after it would wait
+                    // until traffic thins. Taking one closes this arm.
                     biased;
-                    landed = self.flights.next() => {
-                        if let Some(landed) = landed
-                            && let Err(error) = self.landed(landed).await
-                        {
-                            self.fail(error);
-                        }
-                    }
                     message = control.recv(), if control_open && !self.engine.reindex_pending() && self.failure.is_none() => {
                         match message {
                             None => control_open = false,
                             Some(SinkControl::Reindex { indexes }) => {
                                 self.engine.set_pending_reindex(indexes);
                             }
+                        }
+                    }
+                    landed = self.flights.next() => {
+                        if let Some(landed) = landed
+                            && let Err(error) = self.landed(landed).await
+                        {
+                            self.fail(error);
                         }
                     }
                     () = until(next_due) => {
