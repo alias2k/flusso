@@ -48,6 +48,15 @@ secrets:
 
 A pod stop is a graceful drain: flusso lands what is in flight, confirms it to Postgres, then exits, within `run.shutdownTimeoutSecs` (30 s). The pod's `terminationGracePeriodSeconds` is 45 s so Kubernetes doesn't kill the drain; raise both together, the grace period always above the timeout (the chart refuses otherwise). What a stop does is in the manual's [Stopping](https://alias2k.github.io/flusso/reference/cli.html#stopping).
 
+## Alerts
+
+With the Prometheus Operator installed, `prometheusRule.enabled: true` creates a `PrometheusRule` with flusso's alerts, the same rules as the dev stack's `dev/prometheus/rules/flusso.rules.yml`:
+
+- `FlussoLaneStalled`: a lane (one index into one sink) has landed nothing for `laneStallSeconds` (600), or the slot keeps more than `laneWalBehindBytes` (1 GiB) of WAL behind a lane that has landed nothing for `laneWalStallSeconds` (60), for `for` (5m). Runbook: [A lane is stalled](https://alias2k.github.io/flusso/operate/stalled-lane.html).
+- `FlussoVisibilityWait`: a commit held invisible for over 30 s (a synchronous standby not answering).
+
+`prometheusRule.labels` adds labels to match your Prometheus's `ruleSelector`. A process that crash-loops never ages a lane into `FlussoLaneStalled` (the age starts at 0 in each process): alert on the pod's restarts in your own rules.
+
 ## Values
 
 `values.yaml` documents every key. The manual lists them with defaults in [Helm chart values](https://alias2k.github.io/flusso/reference/helm-values.html); the walkthrough, including how config and secrets flow and how to reach the private surface, is [Deploy with Helm](https://alias2k.github.io/flusso/deploy/helm.html).

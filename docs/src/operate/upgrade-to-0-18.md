@@ -377,6 +377,16 @@ Each `(index, sink)` pair now has its own lane, its own progress and its own fen
 - **A custom `Sink`** inherits defaults that record nothing, so its backfills start from the first key as before. A custom `DocumentBuilder` (or a decorator) gets `walk_mark`, `resume_after` and `compare_keys`, whose defaults resume nothing; a decorator must forward them.
 - **`/status`** gains `sinks.<name>.lanes.<index>.backfill_checkpoints`, and `/metrics` gains `flusso.backfill.checkpoints`.
 
+## A stalled lane is named, measured and alerted on
+
+A lane that lands nothing pins the replication slot for every index. 0.18 says which lane, for how long, and how much WAL it holds (see [A lane is stalled](stalled-lane.md)). Nothing to do; new fields and series only:
+
+- **`/status`:** `pinned_by` at the top level (`{ "index", "sink" }` of the lane holding the slot back, or `null`); under each `sinks.<sink>.lanes.<index>`, `stall_seconds` (how long its oldest outstanding change has stayed its oldest) and `wal_behind_bytes` (WAL the slot keeps behind it, WAL not read yet included). See [HTTP endpoints](../reference/http.md#get-status).
+- **Metrics:** `flusso.lane.stall_age{index,sink}`, `flusso.lane.wal_behind{index,sink}` and `flusso.slot.pinned_by{index,sink}` ([Metrics](../reference/metrics.md)).
+- **The alert `FlussoLaneStalled`** in `dev/prometheus/rules/flusso.rules.yml`: 10 minutes without landing, or 1 GiB of WAL behind a lane silent for a minute, for 5 minutes. Copy it into your own rules.
+- **Helm:** `prometheusRule.enabled` creates a Prometheus Operator `PrometheusRule` with the same alerts (off by default; [Helm chart values](../reference/helm-values.md)).
+- **Logs:** a warning once a lane has landed nothing for 10 minutes and every 10 minutes after; an info line when it lands again.
+
 ## Related
 
 - [Field types](../reference/field-types.md) for what a `binary` field, a `constant`, a `timestamp` and a [`decimal`](../reference/field-types.md#numbers) index.

@@ -76,6 +76,7 @@ A source position is in the source's own text form: for Postgres, a WAL LSN such
   "searchable_position": "0/16B3748",
   "errors": 0,
   "last_error": null,
+  "pinned_by": null,
   "sinks": {
     "primary": {
       "phase": "live",
@@ -91,7 +92,7 @@ A source position is in the source's own text form: for Postgres, a WAL LSN such
       "lanes": {
         "orders": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0 },
         "products": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0 },
-        "users": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0, "stall_seconds": 0.0 }
+        "users": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0, "stall_seconds": 0.0, "wal_behind_bytes": 0 }
       }
     }
   }
