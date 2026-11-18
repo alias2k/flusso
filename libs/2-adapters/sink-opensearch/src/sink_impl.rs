@@ -430,10 +430,8 @@ impl OpensearchSink {
         generation: &str,
     ) -> Result<(Vec<String>, Vec<String>, BTreeSet<String>)> {
         let aliases = [hash_alias, convenience];
-        let (mut holders, generations) = tokio::try_join!(
-            self.alias_map(&aliases),
-            self.list_generations(hash_alias),
-        )?;
+        let (mut holders, generations) =
+            tokio::try_join!(self.alias_map(&aliases), self.list_generations(hash_alias),)?;
         let serving = holders.remove(hash_alias).unwrap_or_default();
         let named = holders.remove(convenience).unwrap_or_default();
         let stale = serving
