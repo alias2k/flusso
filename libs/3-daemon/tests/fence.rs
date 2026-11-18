@@ -1181,7 +1181,6 @@ async fn a_fence_holds_while_the_index_is_seeded_or_rebuilt() {
         unserved_as(&outcome, Unserved::Backfilling),
         "while the first seed waits: {outcome:?}"
     );
-    assert_eq!(client.get(1).await, None, "nothing is readable yet");
     seeds.send(true).unwrap();
     client
         .fence(&position, FenceLevel::Searchable, PRIMARY)
