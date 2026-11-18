@@ -106,22 +106,41 @@ async fn a_read_after_a_fence_sees_the_commit() {
     );
 
     exec(&pool, "CREATE TABLE things (id int PRIMARY KEY, name text)").await;
+    exec(&pool, "CREATE TABLE others (id int PRIMARY KEY, name text)").await;
     exec(&pool, "CREATE TABLE noise (id serial PRIMARY KEY, v text)").await;
     exec(
         &pool,
         "INSERT INTO things SELECT n, 'seed' FROM generate_series(1, 40) n",
     )
     .await;
-    exec(&pool, "CREATE PUBLICATION flusso FOR TABLE things").await;
+    exec(&pool, "INSERT INTO others VALUES (1, 'seed')").await;
+    exec(&pool, "CREATE PUBLICATION flusso FOR TABLE things, others").await;
 
     let (gate, gated) = watch::channel(true);
+    let (others_gate, others_gated) = watch::channel(true);
     let backends = Arc::new(RealBackends {
         pg_url: pg_url.clone(),
         pg_port,
         os_url: os_url.clone(),
-        audit: Arc::new(GatedSink { open: gated }),
+        audit: Arc::new(GatedSink {
+            open: gated,
+            others_open: others_gated,
+        }),
     });
-    let running = Daemon::new(config(), backends)
+    let mut config = config();
+    config.indexes.insert(
+        others(),
+        config::Index {
+            enabled: true,
+            schema: IndexSchema {
+                table: TableName::try_new("others").unwrap(),
+                ..schema()
+            },
+            on_error: None,
+            sinks: BTreeMap::new(),
+        },
+    );
+    let running = Daemon::new(config, backends)
         .with_options(DaemonOptions::default())
         .start()
         .await
@@ -231,6 +250,47 @@ async fn a_read_after_a_fence_sees_the_commit() {
     gate.send(true).unwrap();
     client.fence(&position, FenceLevel::Applied, None).await;
 
+    // ── a stalled index on a sink blocks only the fences that include it ─────
+    others_gate.send(false).unwrap();
+    exec(&pool, "UPDATE others SET name = 'stalled' WHERE id = 1").await;
+    let position = client.rename(6, "beside a stalled index").await;
+    let on = |indexes: Vec<IndexName>| FenceRequest {
+        position: position.clone(),
+        level: FenceLevel::Applied,
+        sink: Some(SinkName::try_new("audit").unwrap()),
+        indexes,
+        timeout: Duration::from_millis(500),
+    };
+    let healthy = fence.wait(&on(vec![things()])).await.unwrap();
+    assert!(
+        matches!(healthy, FenceOutcome::Reached { .. }),
+        "the things lane of audit landed: {healthy:?}"
+    );
+    for indexes in [vec![others()], vec![things(), others()], Vec::new()] {
+        let outcome = fence.wait(&on(indexes.clone())).await.unwrap();
+        assert!(
+            matches!(outcome, FenceOutcome::TimedOut { .. }),
+            "{indexes:?} includes the stalled others lane: {outcome:?}"
+        );
+    }
+    let snapshot = serde_json::to_value(status.snapshot()).unwrap();
+    assert_eq!(
+        snapshot["sinks"]["audit"]["lanes"]["others"]["outstanding"], 1,
+        "{snapshot}"
+    );
+    others_gate.send(true).unwrap();
+    let reached = fence
+        .wait(&FenceRequest {
+            timeout: WAIT,
+            ..on(Vec::new())
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(reached, FenceOutcome::Reached { .. }),
+        "{reached:?}"
+    );
+
     let snapshot = serde_json::to_value(status.snapshot()).unwrap();
     assert!(snapshot["applied_position"].is_string(), "{snapshot}");
     assert!(
@@ -278,7 +338,10 @@ async fn a_fence_never_covers_a_commit_read_before_it_was_visible() {
             pg_url: pg_url.clone(),
             pg_port,
             os_url: os_url.clone(),
-            audit: Arc::new(GatedSink { open: gated }),
+            audit: Arc::new(GatedSink {
+                open: gated.clone(),
+                others_open: gated,
+            }),
         }),
     )
     .start()
@@ -728,6 +791,10 @@ fn things() -> IndexName {
     IndexName::try_new("things").unwrap()
 }
 
+fn others() -> IndexName {
+    IndexName::try_new("others").unwrap()
+}
+
 fn schema() -> IndexSchema {
     let keyword = |name: &str| Field {
         field: FieldName::try_new(name).unwrap(),
@@ -864,18 +931,24 @@ impl Backends for RealBackends {
     }
 }
 
-/// A sink whose flush waits while its gate is closed: a destination that
-/// stopped answering.
+/// A sink whose writes wait while its gate is closed: a destination that
+/// stopped answering. Writes of the `others` index also wait on their own
+/// gate: one index stuck while the sink's others go on.
 #[derive(Debug)]
 struct GatedSink {
     open: watch::Receiver<bool>,
+    others_open: watch::Receiver<bool>,
 }
 
 #[async_trait]
 impl Sink for GatedSink {
-    async fn write(&self, _envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
+    async fn write(&self, envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
         let mut open = self.open.clone();
         let _ = open.wait_for(|open| *open).await;
+        if envelopes.first().is_some_and(|e| e.index == others()) {
+            let mut open = self.others_open.clone();
+            let _ = open.wait_for(|open| *open).await;
+        }
         Ok(WriteReport::clean())
     }
 }
