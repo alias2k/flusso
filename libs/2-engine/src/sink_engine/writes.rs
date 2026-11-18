@@ -412,7 +412,7 @@ impl<'a> Run<'a> {
                 .lock_skipped()
                 .extend(batch.envelopes.iter().map(|e| e.index.clone()));
             let oldest = self.is_oldest(seq);
-            self.acknowledge(handle, oldest).await?;
+            self.acknowledge(handle, oldest, None).await?;
         }
         Ok(())
     }
@@ -442,7 +442,7 @@ impl<'a> Run<'a> {
                 }) = self.take_from_window(0)
                 {
                     self.engine.complete_snapshot(indexes).await?;
-                    self.acknowledge(handle, true).await?;
+                    self.acknowledge(handle, true, None).await?;
                 }
                 continue;
             }
@@ -542,7 +542,7 @@ impl<'a> Run<'a> {
     ) -> Option<Landed> {
         let flight = self.next_flight;
         self.next_flight += 1;
-        let covers_below = self.engine.lock_fences().returned();
+        let covers_below = caught_up.then(|| self.engine.lock_fences().returned());
         self.flying.insert(
             flight,
             Flight {
@@ -553,7 +553,7 @@ impl<'a> Run<'a> {
                 work: work_of(batch.position),
                 documents,
                 seq,
-                caught_up: caught_up.then_some(covers_below),
+                caught_up: covers_below,
             },
         );
         let sink = &self.engine.sink;
@@ -610,16 +610,22 @@ impl<'a> Run<'a> {
             CommitStats::new(flight.envelopes, flight.changes, landed.took, flight.work)
                 .sent(report.bytes),
         );
-        self.engine
-            .write_returned(flight.position, report.visibility, flight.caught_up);
-        self.refresh_due();
+        let returned =
+            self.engine
+                .write_returned(flight.position, report.visibility, flight.caught_up);
+        self.next_due = returned.next_due;
         // Let go of the batch before acknowledging it, so the lane frees it
         // as the acknowledgement lands, as it did with one write at a time.
         // Freeing it here after the acknowledgement made `live_drain` at 64
         // changes per batch half again slower (glibc, pinned bench).
         drop(flight.documents);
         let oldest = self.is_oldest(flight.seq);
-        self.acknowledge(flight.handle, oldest).await?;
+        self.acknowledge(
+            flight.handle,
+            oldest,
+            Some(returned.wants_a_caught_up_write),
+        )
+        .await?;
         self.barrier = false;
         Ok(())
     }
@@ -640,14 +646,24 @@ impl<'a> Run<'a> {
     /// `oldest`: the item was the oldest unfinished one in lane order, so the
     /// sink moved forward (the supervisor's measure of progress), unless the
     /// run already failed: an older item then failed and comes back first.
-    async fn acknowledge(&mut self, handle: Box<dyn AckHandle>, oldest: bool) -> Result<()> {
-        let idle = self.window.is_empty() && self.flights.is_empty() && self.lane.is_empty();
-        if idle
-            && self.failure.is_none()
-            && self
-                .engine
-                .lock_fences()
-                .wants_a_caught_up_write(Instant::now())
+    ///
+    /// `wants`: whether a caught-up write is wanted, when the caller already
+    /// read it from the fences. The lane is asked last: its ledger lock is
+    /// shared with the ingest engine.
+    async fn acknowledge(
+        &mut self,
+        handle: Box<dyn AckHandle>,
+        oldest: bool,
+        wants: Option<bool>,
+    ) -> Result<()> {
+        let quiet = self.window.is_empty() && self.flights.is_empty() && self.failure.is_none();
+        if quiet
+            && wants.unwrap_or_else(|| {
+                self.engine
+                    .lock_fences()
+                    .wants_a_caught_up_write(Instant::now())
+            })
+            && self.lane.is_empty()
         {
             let covers_below = self.engine.lock_fences().returned();
             let started = Instant::now();
@@ -657,9 +673,10 @@ impl<'a> Run<'a> {
                     .work(Work::Live)
                     .sink(&self.engine.name),
             );
-            self.engine
+            let returned = self
+                .engine
                 .write_returned(None, report.visibility, Some(covers_below));
-            self.refresh_due();
+            self.next_due = returned.next_due;
         }
         handle.ack().await?;
         if oldest && self.failure.is_none() {
@@ -732,24 +749,36 @@ impl SinkEngine {
     }
 
     /// Move the fences for a write that returned and report what moved.
-    /// Applied is reported here, before the caller acknowledges: the source
-    /// forgets a position once every sink confirmed it, so a listener must
-    /// hear of it first.
+    /// A write returned: record it, and report what became applied and
+    /// searchable, applied first. Applied is reported here, before the caller
+    /// acknowledges: the source forgets a position once every sink confirmed
+    /// it, so a listener must hear of it first. One lock for all of it: a
+    /// write returns once per lane item.
     fn write_returned(
         &self,
         position: Option<Position>,
         visibility: Visibility,
         caught_up: Option<u64>,
-    ) {
-        let applied = {
+    ) -> Returned {
+        let now = Instant::now();
+        let (applied, searchable, returned) = {
             let mut fences = self.lock_fences();
-            fences.write_returned(position, visibility, caught_up, Instant::now());
-            fences.advance_applied()
+            fences.write_returned(position, visibility, caught_up, now);
+            let applied = fences.advance_applied();
+            let searchable = fences.advance_searchable(now);
+            let returned = Returned {
+                next_due: fences.next_due(),
+                wants_a_caught_up_write: fences.wants_a_caught_up_write(now),
+            };
+            (applied, searchable, returned)
         };
         if let Some(position) = applied {
             self.observer.on_position_applied(&self.name, position);
         }
-        self.report_searchable();
+        if let Some(position) = searchable {
+            self.observer.on_position_searchable(&self.name, position);
+        }
+        returned
     }
 
     /// Report the last position whose time to be searchable has come.
@@ -794,6 +823,14 @@ impl SinkEngine {
 }
 
 /// Live changes carry a position; a backfill batch has none.
+/// What a returned write left in the fences.
+struct Returned {
+    /// When the oldest position comes due, if that is a matter of time.
+    next_due: Option<Instant>,
+    /// Whether an idle engine should send an empty caught-up write.
+    wants_a_caught_up_write: bool,
+}
+
 fn work_of(position: Option<Position>) -> Work {
     if position.is_some() {
         Work::Live

@@ -36,6 +36,13 @@ pub(super) struct Fences {
     /// Writes that returned before this sequence number were covered by a
     /// caught-up write that returned: an idle refresh would add nothing.
     covered_below: u64,
+    /// The latest time any written position was due at. It never moves back,
+    /// so once it has passed no entry waits on a time.
+    latest_due: Option<Instant>,
+    /// Written positions waiting on a caught-up write (never fewer than there
+    /// are). With none, and `latest_due` passed, no entry waits at all and the
+    /// scans below are skipped: what one write at a time cost per item.
+    deferred: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -84,18 +91,20 @@ impl Fences {
         if let Some(position) = position
             && let Some(entry) = self.entries.get_mut(&position)
         {
-            *entry = Entry::Written {
-                seq,
-                due: match visibility {
-                    Visibility::Immediate => Due::At(now),
-                    Visibility::Within(delay) => Due::At(now + delay),
-                    Visibility::Deferred => Due::WithACaughtUpWrite,
-                },
+            let due = match visibility {
+                Visibility::Immediate => Due::At(now),
+                Visibility::Within(delay) => Due::At(now + delay),
+                Visibility::Deferred => Due::WithACaughtUpWrite,
             };
+            match due {
+                Due::At(at) => self.latest_due = self.latest_due.max(Some(at)),
+                Due::WithACaughtUpWrite => self.deferred += 1,
+            }
+            *entry = Entry::Written { seq, due };
         }
         if let Some(covers_below) = caught_up {
             self.covered_below = self.covered_below.max(covers_below);
-            if visibility == Visibility::Immediate {
+            if visibility == Visibility::Immediate && self.some_may_wait(now) {
                 for entry in self.entries.values_mut() {
                     if let Entry::Written { seq, due } = entry
                         && *seq < covers_below
@@ -104,11 +113,20 @@ impl Fences {
                             Due::WithACaughtUpWrite => true,
                         }
                     {
+                        if *due == Due::WithACaughtUpWrite {
+                            self.deferred = self.deferred.saturating_sub(1);
+                        }
                         *due = Due::At(now);
                     }
                 }
             }
         }
+    }
+
+    /// Whether some written position may still wait to be searchable: false
+    /// only when none can.
+    fn some_may_wait(&self, now: Instant) -> bool {
+        self.deferred > 0 || self.latest_due.is_some_and(|at| at > now)
     }
 
     /// The new applied position, if the written run from the front moved.
@@ -163,16 +181,17 @@ impl Fences {
     /// write that returned after it covered it: an idle engine sends an empty
     /// caught-up write.
     pub(super) fn wants_a_caught_up_write(&self, now: Instant) -> bool {
-        self.entries.values().any(|entry| match entry {
-            Entry::Written { seq, due } => {
-                *seq >= self.covered_below
-                    && match due {
-                        Due::At(at) => *at > now,
-                        Due::WithACaughtUpWrite => true,
-                    }
-            }
-            Entry::Writing => false,
-        })
+        self.some_may_wait(now)
+            && self.entries.values().any(|entry| match entry {
+                Entry::Written { seq, due } => {
+                    *seq >= self.covered_below
+                        && match due {
+                            Due::At(at) => *at > now,
+                            Due::WithACaughtUpWrite => true,
+                        }
+                }
+                Entry::Writing => false,
+            })
     }
 }
 
