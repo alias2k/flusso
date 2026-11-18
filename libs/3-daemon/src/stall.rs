@@ -20,8 +20,9 @@
 //! ([`Progress::landed`]), and the source reports how far behind the
 //! server's WAL that is (the slot lag). A lane holds WAL from its own
 //! position ([`ChangeCapture::reached`]), so its share is the lag less how
-//! far it is ahead of the least; the lane with the least position, among the
-//! lanes with something outstanding, **pins the slot**.
+//! far it is ahead of the least. The lane `landed` is decided by
+//! ([`Progress::pinned_by`]) **pins the slot**: one computation, so a tie at
+//! one source position names the lane holding the slot back.
 //!
 //! ```
 //! use std::time::Duration;
@@ -154,7 +155,6 @@ impl Stalls {
         let least = source.reached(progress.landed()).map(|at| at.0);
         let mut events = Vec::new();
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut pinned: Option<(LaneKey, u64)> = None;
         for (lane, tracked) in &mut state.lanes {
             let landed = progress.lane(lane, Level::Applied).unwrap_or(Landed::Idle);
             let oldest = match landed {
@@ -171,17 +171,11 @@ impl Stalls {
                 tracked.oldest = oldest;
                 tracked.since = now;
             }
-            let Some(oldest) = oldest else {
+            if oldest.is_none() {
                 tracked.stall = LaneStall::default();
                 continue;
-            };
-            let at = source.reached(landed).map(|at| at.0);
-            // The least position among lanes with something outstanding
-            // pins the slot; without positions, the oldest change does.
-            let rank = at.unwrap_or(oldest);
-            if pinned.as_ref().is_none_or(|(_, least)| rank < *least) {
-                pinned = Some((lane.clone(), rank));
             }
+            let at = source.reached(landed).map(|at| at.0);
             let wal_behind = slot_lag.map(|lag| match (at, least) {
                 (Some(at), Some(least)) => lag.saturating_sub(at.saturating_sub(least)),
                 _ => lag,
@@ -203,7 +197,10 @@ impl Stalls {
                 });
             }
         }
-        state.pinned_by = pinned.map(|(lane, _)| lane);
+        // The lane `landed` itself is decided by: one computation, so a tie
+        // (two lanes at one source position) names the lane that holds the
+        // slot back, never its neighbour.
+        state.pinned_by = progress.pinned_by();
         events
     }
 
@@ -392,6 +389,49 @@ mod tests {
             Some(600),
             "users is 400 bytes ahead of the least lane"
         );
+    }
+
+    /// A source where every outstanding change is in one commit: every lane
+    /// with one is at the same position.
+    #[derive(Debug)]
+    struct OneCommit;
+
+    #[async_trait::async_trait]
+    impl ChangeCapture for OneCommit {
+        async fn continuity(&self) -> source::Result<source::cdc::Continuity> {
+            Ok(source::cdc::Continuity::Resumed)
+        }
+        async fn prepare(&self) -> source::Result<()> {
+            Ok(())
+        }
+        async fn live(
+            &self,
+        ) -> source::Result<
+            futures::stream::BoxStream<'static, source::Result<source::cdc::LiveChange>>,
+        > {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+        fn confirm(&self, _: Landed) {}
+        fn reached(&self, _: Landed) -> Option<SourcePosition> {
+            Some(SourcePosition(500))
+        }
+    }
+
+    /// Stage-8c review: two lanes at one source position (one commit, two
+    /// changes); `pinned_by` names the lane `Progress::landed` is decided by,
+    /// the one with the older change, not the first by name.
+    #[test]
+    fn a_tie_at_one_source_position_names_the_lane_landed_is_decided_by() {
+        let aaa = lane("aaa");
+        let zzz = lane("zzz");
+        let progress = Progress::new([aaa.clone(), zzz.clone()]);
+        let stalls = Stalls::new([aaa.clone(), zzz.clone()]);
+        progress.published(&zzz, Position::new(5), Position::new(5));
+        progress.published(&aaa, Position::new(9), Position::new(9));
+        stalls.sample(Instant::now(), &progress, &OneCommit, Some(1_000));
+        assert_eq!(progress.landed(), Landed::Before(Position::new(5)));
+        assert_eq!(stalls.pinned_by(), Some(zzz));
+        assert_eq!(progress.pinned_by(), stalls.pinned_by());
     }
 
     #[test]
