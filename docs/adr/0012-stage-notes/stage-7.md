@@ -260,3 +260,32 @@ Guards: `tests::merge` (`a_burst_over_three_indexes_is_written_in_writes_of_abou
 `a_skip_rejection_in_a_merged_write_acknowledges_every_part`); the seeded schedule
 (`a_document_is_never_written_twice_at_once_and_its_versions_never_go_down`) runs with merging off and
 on; the ingest-side seeded schedule runs with the default limit, so merging is on there.
+
+## 13. After review (stage 7)
+
+- **Slots per lane (review 1).** With several lanes and `writes > 1`, a lane holds at most `writes − 1`
+  slots (writes and seeds), so one index whose writes hang can't take every slot. At `writes = 1`, on
+  an ordered sink, and with two or more stalled indexes, isolation needs stage 9's parking. The cost is
+  one slot while a single index has the sink to itself (a backfill walking one index at a time):
+  measured in the report.
+- **A quiet lane takes one item (review 2).** With several lanes, a lane with nothing waiting always
+  takes one delivered item, so live-first and the turns see it: at most one more delivered item per lane.
+- **Merging across lanes only among lanes with no write out.** A write is as slow as its slowest part
+  (an item answered 429 forever is retried inside the write); merging a lane with a write out, which may
+  be stuck, would tie the other lanes' items, applied positions and fences to it. A lane with a write in
+  flight writes alone, merging only its own items.
+- **Caught up per lane (review 4, 5).** `Sink::write_parts` takes `CaughtUp::{No, Indexes, All}`; a
+  write is caught up for its lanes with nothing else waiting and the OpenSearch sink refreshes only
+  those indexes' marks; `Fences` keep coverage per lane; the idle caught-up write is per lane.
+- **The reindex stays sink-wide (review 7).** Per lane would break the port's "`reindex` never runs
+  beside `write`" contract, which the OpenSearch sink relies on (its targets and aliases change under a
+  write); changing it is OpenSearch sink work best done with stage 9's per-lane re-staging. Effect,
+  stated on the upgrade page: a pending reindex waits for every write in flight, so while one index has
+  a hung write a reindex of another freezes the sink's writes.
+- **Requests acknowledged after the whole coalesced walk (review 12),** as on `main`, not per lane as
+  §6 said: a walk over several indexes acknowledges every request when the last index is complete,
+  while each index is already seeded when its own `SnapshotComplete` lands (track A's seeds as
+  flights). Per-index acknowledgement comes with 8a, where each index task walks its own index.
+- **An unknown lane is refused (review 10):** `EngineError::LaneNotInProgress` at the start of either
+  engine's run.
+- **Ordered sinks (review 8):** an ordered sink takes every lane's front before picking by position.

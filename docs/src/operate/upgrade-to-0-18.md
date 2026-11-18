@@ -330,7 +330,7 @@ Each `(index, sink)` pair now has its own lane, its own progress and its own fen
 - **`flusso-query` waits on the indexes a read touches**, and once per level and index. A root's `get` or search waits on its index, a combined search, cursor walk or `msearch` on each index it names. `Client::wait_on(position, indexes)` is the explicit form. An older flusso ignores `index` and waits on every index: still correct, only slower to pass.
 - **`/status` reports each lane** under `sinks.<sink>.lanes.<index>`: `applied_position`, `searchable_position`, `outstanding`. The new gauge [`flusso.lane.outstanding{index,sink}`](../reference/metrics.md) names the lane holding back the slot.
 - **The replication slot still waits for every lane**: confirmation is the lowest lane's.
-- **Still sink-wide:** a failed write stops the sink's engine, which restarts with backoff; on restart only the lanes that failed write one item at a time until one lands. A reindex is staged between the sink's writes. Parking one index while the rest of the sink goes on is a later change.
+- **Still sink-wide:** a failed write stops the sink's engine, which restarts with backoff; on restart only the lanes that failed write one item at a time until one lands. A reindex is staged once the sink has no write in flight, so while one index has a write that never returns, a reindex of another index waits, and every index of that sink stops writing until it can be staged. Parking one index, and reindexing one index while the others write, are a later change.
 
 **Embedding the crates.**
 
