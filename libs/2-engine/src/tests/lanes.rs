@@ -795,3 +795,101 @@ async fn a_lane_missing_from_the_progress_is_refused() {
         Err(crate::EngineError::LaneNotInProgress(_))
     ));
 }
+
+/// An ordered sink (stdout) whose writes wait for a release, recording each
+/// write's index and position.
+#[derive(Debug)]
+struct OrderedGate {
+    open: tokio::sync::Semaphore,
+    writes: Mutex<Vec<(String, u64)>>,
+}
+
+#[async_trait]
+impl Sink for OrderedGate {
+    async fn write(&self, envelopes: &[Envelope], _: bool) -> sink::Result<WriteReport> {
+        let Some(first) = envelopes.first() else {
+            return Ok(WriteReport::clean());
+        };
+        self.open.acquire().await.unwrap().forget();
+        self.writes.lock().unwrap().push((
+            first.index.to_string(),
+            first.position.map_or(u64::MAX, |position| position.seq),
+        ));
+        Ok(WriteReport::clean())
+    }
+
+    async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
+        Ok(true)
+    }
+
+    fn ordered(&self) -> bool {
+        true
+    }
+}
+
+/// An ordered sink gets live changes across indexes in position order: an
+/// item queued on a lane whose write was in flight is not passed by a later
+/// item another lane delivered meanwhile.
+#[tokio::test]
+async fn an_ordered_sink_writes_live_items_across_lanes_in_position_order() {
+    let sink = Arc::new(OrderedGate {
+        open: tokio::sync::Semaphore::new(0),
+        writes: Mutex::default(),
+    });
+    let primary = sink_name("primary");
+    let indexes = [orders(), users()];
+    let stream = Arc::new(ChannelStream::over(64, indexes.clone(), [primary.clone()]));
+    let progress = Arc::new(crate::Progress::of(indexes, [primary.clone()]));
+    let item = |index: IndexName, position: u64| {
+        LaneItem::Batch(Batch {
+            position: Some(Position::new(position)),
+            changes: 1,
+            envelopes: vec![Envelope::upsert(
+                index,
+                position.to_string(),
+                GenericValue::Map(BTreeMap::new()),
+                Some(Position::new(position)),
+                chrono::Utc::now(),
+            )]
+            .into(),
+            hold: Default::default(),
+        })
+    };
+    let lane = |index: IndexName| {
+        stream
+            .lane(&LaneKey::new(index, primary.clone()))
+            .unwrap()
+            .producer
+    };
+    let (orders_lane, users_lane) = (lane(orders()), lane(users()));
+    let engine = SinkEngine::new(
+        primary,
+        Arc::clone(&sink) as Arc<dyn Sink>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![index_mapping(orders()), index_mapping(users())],
+        progress,
+    );
+    engine.set_blame(crate::sink_engine::Blame::Nobody);
+    let task = tokio::spawn(async move {
+        let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
+        engine.run(&mut control).await
+    });
+    // orders 0 is being written; orders 1 waits behind it on its lane, and
+    // users 2 arrives on a lane with nothing in flight.
+    orders_lane.publish(item(orders(), 0)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    orders_lane.publish(item(orders(), 1)).await.unwrap();
+    users_lane.publish(item(users(), 2)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    sink.open.add_permits(3);
+    wait_for(|| sink.writes.lock().unwrap().len() == 3).await;
+    task.abort();
+    let positions: Vec<u64> = sink
+        .writes
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, position)| *position)
+        .collect();
+    assert_eq!(positions, [0, 1, 2]);
+}
