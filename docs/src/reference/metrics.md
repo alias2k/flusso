@@ -42,6 +42,8 @@ The Prometheus reader applies the usual conventions: dots become underscores, co
 | `flusso.lane.wal_behind` | `flusso_lane_wal_behind_bytes{index,sink}` |
 | `flusso.slot.pinned_by` | `flusso_slot_pinned_by{index,sink}` |
 | `flusso.documents.built` | `flusso_documents_built_total{index}` |
+| `flusso.memory.built` | `flusso_memory_built_bytes{work}` |
+| `flusso.memory.refused` | `flusso_memory_refused_total{work}` |
 | `flusso.documents.quarantined` | `flusso_documents_quarantined_total{sink,index}` |
 | `flusso.script.failures` | `flusso_script_failures_total{index,field,policy}` |
 | `flusso.batches` | `flusso_batches_total{sink}` |

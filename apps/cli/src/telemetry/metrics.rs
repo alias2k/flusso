@@ -294,7 +294,13 @@ pub(crate) fn register_visibility_wait_gauge(status: Arc<Status>) -> ObservableG
 pub(crate) fn register_memory_instruments(
     budget: Arc<daemon::Budget>,
 ) -> (ObservableGauge<u64>, ObservableCounter<u64>) {
-    let meter = global::meter("flusso");
+    memory_instruments(&global::meter("flusso"), budget)
+}
+
+fn memory_instruments(
+    meter: &opentelemetry::metrics::Meter,
+    budget: Arc<daemon::Budget>,
+) -> (ObservableGauge<u64>, ObservableCounter<u64>) {
     let held = Arc::clone(&budget);
     let built = meter
         .u64_observable_gauge("flusso.memory.built")
@@ -429,6 +435,40 @@ mod tests {
             r#"flusso_lane_stall_age_seconds{index="users",sink="primary"} 30"#,
             r#"flusso_lane_wal_behind_bytes{index="users",sink="primary"} 2048"#,
             r#"flusso_slot_pinned_by{index="users",sink="primary"} 1"#,
+        ] {
+            assert!(text.contains(line), "no `{line}` in:\n{text}");
+        }
+    }
+
+    #[test]
+    fn the_memory_budget_is_exported_by_work() {
+        let budget = Arc::new(daemon::Budget::new(1 << 20));
+        let _live = budget
+            .try_reserve(daemon::Work::Live, 3 * 1024)
+            .unwrap()
+            .settle(3 * 1024);
+        let _backfill = budget
+            .try_reserve(daemon::Work::Backfill, 2 * 1024)
+            .unwrap()
+            .settle(2 * 1024);
+        budget.note_refused(daemon::Work::Backfill);
+
+        let registry = Registry::new();
+        let exporter = opentelemetry_prometheus::exporter()
+            .with_registry(registry.clone())
+            .scope_info_enabled(false)
+            .build()
+            .unwrap();
+        let provider = provider_builder().with_reader(exporter).build();
+        let _instruments = memory_instruments(&provider.meter("flusso"), budget);
+        let text = TextEncoder::new()
+            .encode_to_string(&registry.gather())
+            .unwrap();
+        for line in [
+            r#"flusso_memory_built_bytes{work="live"} 3072"#,
+            r#"flusso_memory_built_bytes{work="backfill"} 2048"#,
+            r#"flusso_memory_refused_total{work="backfill"} 1"#,
+            r#"flusso_memory_refused_total{work="live"} 0"#,
         ] {
             assert!(text.contains(line), "no `{line}` in:\n{text}");
         }
