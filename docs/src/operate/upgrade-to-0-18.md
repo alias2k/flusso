@@ -266,8 +266,9 @@ A comparison with a string, a number or another kind fails rather than answering
 
 ## Several batches build at once
 
-0.17 built one batch of documents at a time, and nothing else moved while it ran. 0.18 builds up to [`[concurrency] builds`](../reference/config-toml.md#concurrency) batches at once (default 4, at most 32), and each sink still receives them in the order they started. A backfill gains the most: its batches build side by side. What changes:
+0.17 built one batch of documents at a time, and nothing else moved while it ran. 0.18 builds up to [`[concurrency] builds`](../reference/config-toml.md#concurrency) batches at once (default 4, at most 32), and each sink still receives them in the order they started. On the `reference` benchmark a backfill ran about 15% faster at 2 or 4 builds; the sink's writes then bound it. What changes:
 
+- **More memory during a backfill.** Built batches can now outrun the sink and wait in its lane: peak RSS on `reference` went from about 120 MiB to 300–400 MiB. Under a tight memory limit, lower `builds` or the lane's [`capacity`](../reference/stream-channel.md).
 - **More Postgres connections.** The document builder keeps up to `builds` + 2 connections (0.17: up to ten, opened as needed). A role with a tight `CONNECTION LIMIT`, or a small PgBouncer pool, needs room for them; `builds = 1` builds one batch at a time, as 0.17 did, on 3.
 - **Order holds per document.** Two batches holding the same document are never built at once, and a later build reaches every sink after an earlier one.
 - **Changes are read and resolved while a batch builds.** A burst no longer waits for each build before reading the next changes.

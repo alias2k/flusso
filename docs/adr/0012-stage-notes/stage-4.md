@@ -186,3 +186,78 @@ stage 2's `next_delivery` is. Counted in-process against `main` at the end of th
 
 `FuturesUnordered` is not used. Spawned builds are awaited through `Flights`
 (`sink_engine/flights.rs`, reused), whose per-flight waker polls only the builds that woke.
+
+## Measured
+
+`flusso-bench`, scenario `reference`, scale `default`, release build of `532308cc`, `writes = 4`.
+Two interleaved rounds of builds 1, 2, 4, 8, `flusso-bench` and flusso pinned to CPUs 0-3,12-15;
+Postgres and OpenSearch unpinned. Other agents were building and testing on the machine: load
+average 5–11 in round 1 and 9–27 in round 2.
+
+| builds | backfill docs/s | burst changes/s | latency p50 / p99 ms | peak RSS MiB |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 10,312 · 9,881 | 2,131 · 1,853 | 5.0 / 30.0 · 12.9 / 32.3 | 124 · 97 |
+| 2 | 11,662 · 11,671 | 2,321 · 1,588 | 12.7 / 33.5 · 13.9 / 41.5 | 300 · 209 |
+| 4 | 11,811 · 10,048 | 1,747 · 942 | 13.2 / 38.5 · 14.7 / 72.7 | 329 · 345 |
+| 8 | 11,288 · 9,385 | 1,802 · 823 | 12.8 / 37.4 · 15.6 / 68.3 | 389 · 417 |
+
+**Where the backfill's time went** (round 1; busy/wall, ms per batch):
+
+| builds | wall s | ingest `build` | ingest `idle` | sink `write` (writes = 4) |
+| ---: | ---: | --- | --- | --- |
+| 1 | 6.01 | 0.88 (21.7) | 0.00 | 3.29 (81.4) |
+| 4 | 5.25 | 1.27 (27.4) | 0.39 | 2.24 (48.5) |
+| 8 | 5.49 | 1.41 (31.8) | 0.60 | 2.37 (53.5) |
+
+**What it says:**
+
+- **The backfill is sink-bound once builds overlap.** At `builds = 4` the ingest task builds 1.27
+  deep, then sits `idle` 0.39 of the wall while the sink drains the backlog. The sink writes about
+  2.3 deep with `idle` near 0. That is about +15% backfill throughput at 2 and 4 builds, not the
+  prototype's 3×: the prototype built with no sink behind it.
+- **A build gets slower under concurrency.** Per batch it went from 21.7 to 27.4 ms (4 builds) and
+  31.8 ms (8). Postgres, OpenSearch and flusso share the 8 pinned threads plus the rest of a loaded
+  machine.
+- **Peak RSS rises:** 124 → 300–417 MiB. Built batches outrun the sink and wait in its lane, up to
+  the lane's `capacity`, because nothing yet bounds built bytes. Stage 5's budget is what caps this.
+- **Burst and latency.** The burst stays resolve-bound: ingest `resolve` is 0.97 of the wall at every
+  setting. Its round-2 drops (942 and 823 changes/s) ran at load 21–27. Latency p50 at `builds = 1`
+  was 5.0 then 12.9 ms across the two rounds, so the p50 spread here is noise, not the setting.
+
+**Per-item cost at `builds = 1`**, counted in-process: 20,000 changes, `max_changes = 1`, one
+sink, instant mocks, a counting global allocator and a poll-counting wrapper on the ingest run.
+
+| | `origin/main` (`ffd54d22`) | branch (`532308cc`) |
+| --- | ---: | ---: |
+| allocations per change | 41.16 | 42.16 |
+| ingest polls per change | 0.016 | 0.016 |
+
+The one extra allocation per batch is the boxed build future, as designed. There is no spawn, no
+extra poll and no hashing at `builds = 1`. Locks were not counted. The CI gate's timing is the
+verdict.
+
+## Found while measuring
+
+The first scenario run failed its latency phase. At `builds = 1` a spawned live build was never
+counted as landed, so after the first one no partial live batch was granted again on an open
+stream. Unit tests missed it twice over: their mocks finish inline, and their streams end, where
+`settle` grants anyway. Fixed in `6c271ed5`, with the red test
+`changes_apart_on_an_open_stream_each_land_after_a_spawned_build` first.
+
+## For the next stages
+
+**Stage 5 (memory budget).**
+
+- Concurrent builds turn a sink-bound backfill into built batches waiting in the lane: peak RSS
+  roughly tripled at the default `builds = 4`.
+- The reorder buffer adds at most `2 × builds` built batches. The lane's `capacity` is the real
+  holder.
+- The grant is the natural place for the budget check: `Builds::choose`, beside `has_room`.
+
+**Stage 8a (index tasks).**
+
+- `Builds` is per engine today; per index it moves into each index task.
+- Admission (sorted id hashes per running build) and the grant-order queue carry over unchanged.
+- The live-first rule and its every-fourth counter are per gate. A deployment-wide gate across
+  index tasks needs the counter shared.
+- The `2 × builds` bound becomes per index.

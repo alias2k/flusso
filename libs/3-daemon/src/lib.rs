@@ -98,8 +98,9 @@ pub fn writes(config: &Config) -> usize {
 }
 
 /// Document builds the ingest engine runs at once when `[concurrency] builds`
-/// is unset. ADR 0012's prototype measured 3.0× one build at 4 and 5× at 8 on
-/// a backfill.
+/// is unset. End to end on `reference` (ADR 0012 stage 4) a backfill ran about
+/// 15% faster at 2 and 4 than at 1, then the sink's writes bound it; the
+/// prototype's 3× at 4 built with no sink behind it.
 pub const DEFAULT_BUILDS: usize = 4;
 
 /// Document builds the ingest engine runs at once: `[concurrency] builds`,
