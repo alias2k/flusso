@@ -1357,8 +1357,7 @@ fn insert_child(id: u32) -> ReplicationEvent {
     }
 }
 
-/// Item 1 of the review of #343: the snapshot task must never stop just as a
-/// new commit needs it. Lone commits, each sent 0.7–1.9 ms after the previous
+/// The snapshot task must never stop just as a new commit needs it. Lone commits, each sent 0.7–1.9 ms after the previous
 /// one was emitted (around the task's pause between reads), on a
 /// multi-threaded runtime: every one must be emitted, promptly. The task that
 /// exited after reading `wanted == false` while the stream, seeing it not yet

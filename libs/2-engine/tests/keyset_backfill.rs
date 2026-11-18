@@ -692,7 +692,7 @@ async fn a_backfill_stopped_mid_walk_is_walked_again_and_lands_every_row() {
 }
 
 /// A writer adding a full page of new greatest keys after every page read
-/// doesn't keep the walk going (review of #386 stage 3): the walk ends at the
+/// doesn't keep the walk going: the walk ends at the
 /// greatest key it found when it started, and the rows added during it reach
 /// the index through the live stream alone. Every `items` document is built
 /// once: a row there at the walk's start by its page, a row added during it

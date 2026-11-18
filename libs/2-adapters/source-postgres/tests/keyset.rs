@@ -520,9 +520,8 @@ fn index_name(name: &str) -> IndexName {
     IndexName::try_new(name).unwrap()
 }
 
-/// The walk ends at the greatest key it found when it started (review of
-/// #386 stage 3): a writer adding a page of greater keys after every page
-/// read, and the bound's own row deleted mid-walk, both end it where it
+/// The walk ends at the greatest key it found when it started: a writer
+/// adding a page of greater keys after every page read, and the bound's own row deleted mid-walk, both end it where it
 /// began, with every row that was there and is still there.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires docker"]

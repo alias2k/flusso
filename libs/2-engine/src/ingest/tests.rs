@@ -1445,7 +1445,7 @@ async fn a_stop_finishes_the_builds_in_flight_and_starts_no_other() {
 }
 
 /// A recorded run at `builds = 1`: the batches built and the items published,
-/// as the engine produced them before stage 4. Live changes alone (the
+/// as the engine produces them one build at a time. Live changes alone (the
 /// stream yields with gaps), then a backfill alone, so no race between the
 /// two decides the order.
 #[tokio::test(start_paused = true)]

@@ -522,7 +522,7 @@ mod tests {
     use super::*;
     use crate::ingest::confirm::CONFIRM_TICK;
 
-    /// Stage-5 review: a release landing right after the budget refused a
+    /// A release landing right after the budget refused a
     /// batch, before anything else, still wakes the engine at once; the wake
     /// isn't left to the confirm tick's backstop.
     #[tokio::test(start_paused = true)]

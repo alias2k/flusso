@@ -198,8 +198,7 @@ fn a_mark_never_moves_back() {
     assert_eq!(progress.landed(), Landed::Before(p(5)));
 }
 
-/// Several lanes take the least answer (what the stream's watermark, the
-/// minimum over lanes, used to be).
+/// Several lanes take the least answer.
 #[test]
 fn several_lanes_answer_their_least_and_an_unknown_lane_none() {
     let (a, b) = (sink("a"), sink("b"));

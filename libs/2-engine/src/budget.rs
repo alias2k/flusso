@@ -496,7 +496,7 @@ mod tests {
             .unwrap();
     }
 
-    /// (Review of stage 5.) The wish comes before the check: a release on
+    /// The wish comes before the check: a release on
     /// another thread between the two then still wakes the engine (the
     /// notification is kept as a permit), where the other order lost it and
     /// left ingest waiting for ever.

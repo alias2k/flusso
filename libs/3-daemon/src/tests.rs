@@ -990,7 +990,7 @@ async fn failed_sink_engine_restarts_and_redelivers() {
     assert_eq!(snap.sinks["primary"].batches, 1);
 }
 
-/// Stage-8c review: a sink engine failing and restarting with backoff over
+/// A sink engine failing and restarting with backoff over
 /// the item it never lands keeps the lane's stall age: the age is the
 /// lane's, read off the deployment's `Progress`, not the engine run's. Once
 /// the sink writes again the lane lands and the age clears.

@@ -253,9 +253,8 @@ fn spawn(engine: SinkEngine) -> tokio::task::JoinHandle<crate::Result<()>> {
     })
 }
 
-/// A burst over three indexes is written in writes of about a batch, as one
-/// lane per sink wrote it, not one per index: `main` wrote ~129 documents per
-/// write on `reference`; one item per index (stage 7 before merging) ~35.
+/// A burst over three indexes is written in writes of about a batch, not one
+/// write per index.
 #[tokio::test]
 async fn a_burst_over_three_indexes_is_written_in_writes_of_about_a_batch() {
     for writes in [1, 4] {

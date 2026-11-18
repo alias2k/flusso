@@ -880,8 +880,8 @@ mod tests {
         );
     }
 
-    /// Review of #343, item 8: a standby is refused, whatever its standby
-    /// names, and the message points at the primary.
+    /// A standby is refused, whatever its standby names, and the message
+    /// points at the primary.
     #[test]
     fn a_standby_is_refused() {
         let refusal = WalChangeCapture::judged(true, "", "flusso").unwrap_err();

@@ -417,7 +417,7 @@ mod tests {
         }
     }
 
-    /// Stage-8c review: two lanes at one source position (one commit, two
+    /// Two lanes at one source position (one commit, two
     /// changes); `pinned_by` names the lane `Progress::landed` is decided by,
     /// the one with the older change, not the first by name.
     #[test]
