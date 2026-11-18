@@ -64,6 +64,10 @@ _Avoid_: chunk, bundle, message group
 What hands out the ingest engine's `builds` build slots: live batches first, except every fourth slot a live and a backfill batch both wait for. A batch is granted only when no running build holds one of its documents, and built batches are published in the order they were granted.
 _Avoid_: semaphore, permit pool, scheduler
 
+**Memory budget**:
+The heap built documents may hold until every lane has acknowledged them (`[concurrency] max_built_mib`). A build reserves its estimate when granted and settles to its measured size when it lands; the batch carries the charge until its last copy is dropped. Backfill holds at most half; a kind holding nothing is always granted one batch.
+_Avoid_: queue capacity, buffer size, memory limit (the process limit is the deployment's)
+
 **Snapshot complete**:
 The lane marker that follows the last batch of a snapshot, telling the sink engine it may record the index as seeded.
 _Avoid_: end marker, EOF, sentinel

@@ -19,7 +19,7 @@ Every value the chart at `deploy/helm/flusso/` accepts, with its default. `value
 | `run.slot` | `flusso` | Passed as `--slot`. |
 | `run.publication` | `flusso` | Passed as `--publication`. |
 | `run.skipBackfill` | `false` | Passed as `--skip-backfill`. |
-| `run.queueCapacity` | `1024` | Passed as `--queue-capacity`. |
+| `run.queueCapacity` | `null` | Deprecated and ignored: passed as `--queue-capacity` only when set, which flusso warns about. `[concurrency] max_built_mib` bounds what the lanes hold. |
 | `run.lagPollSecs` | `15` | Passed as `--lag-poll-secs`. |
 | `run.shutdownTimeoutSecs` | `30` | Passed as `--shutdown-timeout-secs`: how long a [stop](cli.md#stopping) may drain. |
 | `terminationGracePeriodSeconds` | `45` | How long Kubernetes waits after `SIGTERM` before `SIGKILL`. Must exceed `run.shutdownTimeoutSecs`; the chart fails otherwise. |

@@ -15,6 +15,8 @@ flusso records OpenTelemetry instruments and exposes them two ways: a Prometheus
 | `flusso.flush.documents` | histogram | | `sink`, `work` | Documents per write at that sink. A write of nothing (a live batch that resolved to no document) isn't counted. Buckets from 1 to 10,000. |
 | `flusso.flush.size` | histogram | By | `sink`, `work` | Bytes per write, where the sink counts them (OpenSearch: the `_bulk` bodies; stdout: none). Same writes as `flusso.flush.documents`. Buckets from 1 KiB to 64 MiB. |
 | `flusso.stage.duration` | histogram | s | `stage`, `work`, `sink`, `index` | Time each pipeline stage took, once per batch, lane item, idle stretch or operation. See [Where the time goes](#where-the-time-goes). Buckets from 100 µs to 30 s. |
+| `flusso.memory.built` | gauge | By | `work` | Bytes of built documents not yet acknowledged by every sink, builds in flight included, by `live` and `backfill`. Their sum stays near `[concurrency] max_built_mib`'s budget at most; `backfill` at most half of it. Flat at the budget means a sink isn't acknowledging and ingest is paced. |
+| `flusso.memory.refused` | counter | | `work` | Times a batch waited for the memory budget before it could be built, once per wait. Steady growth means the budget, or a sink behind it, sets the pace. |
 | `flusso.startup.duration` | gauge | s | `step`, `sink` | Time a start spent in each step. See [Start-up](#start-up). |
 | `flusso.indexes` | gauge | | `sink` | Indexes ensured at that sink this run. |
 | `flusso.indexes.seeded` | counter | | `sink`, `index` | Indexes whose backfill completed at that sink this run. |

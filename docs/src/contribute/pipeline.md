@@ -33,6 +33,18 @@ The ingest engine runs up to `builds` `build_many` calls at once (`[concurrency]
 
 Guards: the engine's `ingest::tests` (`random_schedules_keep_every_document_in_order`, a seeded random schedule with failures and restarts that `FLUSSO_BUILD_SCHEDULE_SEED` replays; `builds_run_at_once_up_to_the_setting`; `a_document_is_never_built_twice_at_once`; `every_fourth_contested_grant_goes_to_the_backfill`; `a_failed_build_publishes_nothing_after_it`; `a_document_failed_under_stop_publishes_nothing_after_it_and_skip_goes_on`; `a_stop_finishes_the_builds_in_flight_and_starts_no_other`; `a_lone_change_on_a_quiet_stream_still_commits_at_once`; `one_build_at_a_time_builds_and_publishes_as_before`, recorded from the serial engine).
 
+## Built documents within a byte budget
+
+The ingest engine holds built documents within `[concurrency] max_built_mib` (default 512 MiB; ADR 0012 stage 5, `engine::Budget` in `libs/2-engine/src/budget.rs`), from their build until every lane acknowledged them.
+
+- **Counted.** A build's documents are measured by a walk of their trees on the build's own task (`document_bytes`: strings, byte arrays, arrays, B-tree nodes; held to a counting allocator within 0.8–1.2 by `tests/heap_walk.rs`), at least 1 KiB a batch.
+- **Reserved, then settled.** A grant reserves an estimate (the batch's ids × a running average per document of its kind) in `Builds::choose`; the build settles it to the measured size when it lands. A candidate the budget can't fit is simply not admissible: the gate's every-fourth counter doesn't move, and the loop waits for a release.
+- **Released by the last copy.** The settled `Arc<Charge>` rides every lane's piece of the batch as `stream::Batch.hold`. The channel's ledger keeps a copy until the acknowledgement, so the bytes come back exactly when every lane acknowledged the piece and nothing can redeliver it. No lock: one atomic subtraction per drop.
+- **Rules.** Total within the limit; backfill within half, so live keeps room; a kind holding nothing is always granted one batch, so a batch larger than the budget still builds, alone. Held stays within the limit plus one estimate per build in flight.
+- **Lanes.** `[stream] capacity` is deprecated: lanes built from configuration keep a backstop of 1,048,576 items, which the 1 KiB floor keeps from binding before the budget. With lanes that don't fill, `publish` doesn't block the loop; a stalled sink is felt as the budget filling, while the loop goes on landing builds and serving what has room.
+
+Guards: `budget::tests`, `heap_walk`, and `ingest::tests`' `random_schedules_under_a_tiny_budget_stay_within_it_and_finish`, `a_stalled_sink_paces_builds_and_they_resume_when_it_does`, `live_keeps_room_beside_a_backfill_holding_its_half`, `a_batch_bigger_than_the_budget_still_builds`, `a_batch_redelivered_after_a_failed_write_gives_its_bytes_back_once_written`.
+
 ## Several writes per sink, one document at a time
 
 A sink engine writes up to `writes` lane items at once (`[concurrency] writes`, default 4; ADR 0012 stage 2). Writing is the measured bottleneck: OpenSearch takes overlapping bulk requests about as well on one index as across several.

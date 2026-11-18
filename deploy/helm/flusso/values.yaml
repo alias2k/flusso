@@ -59,7 +59,9 @@ run:
   slot: flusso
   publication: flusso
   skipBackfill: false
-  queueCapacity: 1024
+  # Deprecated and ignored (flusso warns): [concurrency] max_built_mib bounds
+  # what the lanes hold. Passed as --queue-capacity only when set.
+  queueCapacity: null
   lagPollSecs: 15
   # Passed as --shutdown-timeout-secs: how long a stop may drain what is in
   # flight before flusso gives up and exits 1. Keep it below

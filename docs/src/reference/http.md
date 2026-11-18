@@ -34,6 +34,9 @@ The live status document as JSON: the deployment, then one block per sink.
 | `visibility_wait_seconds` | number or null | How long the source has held a committed transaction that isn't visible yet; every later change waits behind it. Timed from when that transaction was first found invisible, so an ingest engine restart doesn't reset it. Null while nothing waits, and once the source server is refused. See [Behind a synchronous standby](source-postgres.md#behind-a-synchronous-standby). |
 | `applied_position` | string or null | The source position every sink has applied: a fetch by id sees every commit at or before it. The slowest sink's. Null until the source follows live changes. |
 | `searchable_position` | string or null | The source position every sink can search. The slowest sink's. |
+| `memory.limit_bytes` | int | `[concurrency] max_built_mib` in bytes. |
+| `memory.built_bytes` | int | Built documents not yet acknowledged by every sink, builds in flight included. See [config.toml](config-toml.md#concurrency). |
+| `memory.backfill_bytes` | int | The backfill's share of `built_bytes`: at most half the limit. |
 | `errors` | int | Engine errors, ingest and sink. |
 | `last_error` | string or null | |
 | `script_failures.<index>.count` | int | Documents of that index that failed to build: a [script failed](scripts.md#failures), or an [`array: true`](field-types.md#array) column held an object. Under either `on_error` policy (a `stop` index counts each retry). The key is absent until one fails. |

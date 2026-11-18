@@ -37,7 +37,7 @@ Like `cargo run`, it compiles first. With a `flusso.toml` present (the default p
 | `--manage-replica-identity <bool>` | `[source] manage_replica_identity`, else `true` | Whether flusso may set `REPLICA IDENTITY FULL` on every table an index reads (a `USING INDEX` identity carrying the primary key and every parent link is kept). |
 | `--skip-backfill` | off | Resume live capture only. A fresh slot then only warns instead of rebuilding. |
 | `--pretty` | off | Pretty-print every stdout sink's output (the default sink included). |
-| `--queue-capacity <n>` | `[stream] capacity`, else `1024` | Changes buffered between capture and processing. |
+| `--queue-capacity <n>` | `[stream] capacity` | Deprecated and ignored, with a warning: `--max-built-mib` bounds what the lanes hold. |
 | `--public-address <host:port>` | `[server] public_address`, else `127.0.0.1:9464` | Bind the public surface. |
 | `--private-address <host:port>` | `[server] private_address`, else `127.0.0.1:9465` | Bind the private surface. |
 | `--admin-user <user>` | `admin` | Basic-auth user for the private surface. |
@@ -47,6 +47,7 @@ Like `cargo run`, it compiles first. With a `flusso.toml` present (the default p
 | `--batch-max-changes <n>` | `[batch] max_changes`, else `256` | Commit a batch once this many live changes have accumulated. |
 | `--batch-max-delay-ms <ms>` | `[batch] max_delay_ms`, else `50` | The longest a batch stays open while changes keep arriving. |
 | `--writes <n>` | `[concurrency] writes`, else `4` | Bulk writes each sink runs at once; never two holding the same document. Never written into the lock. |
+| `--max-built-mib <n>` | `[concurrency] max_built_mib`, else `512` | MiB of built documents held until every sink acknowledges them; past it the ingest engine waits. 16 to 1,048,576. Never written into the lock. |
 | `--builds <n>` | `[concurrency] builds`, else `4` | Batches of documents built at once; never two holding the same document, published in the order they started. At most 32. Never written into the lock. |
 | `--shutdown-timeout-secs <n>` | `30` | How long a [stop](#stopping) may take, from the first signal to exit. Past it flusso gives up on what is left and exits `1`. `0` doesn't drain: it stops reading, abandons what is in flight (read again on the next start) and exits `0`. |
 | `--exit-with-parent` | off | Stop when the process that started flusso exits, as if it had sent `SIGTERM`. As an env var, `FLUSSO_EXIT_WITH_PARENT=true` (like every boolean flag, `1` is refused). See [Stopping](#stopping). |

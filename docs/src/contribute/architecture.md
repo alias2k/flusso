@@ -43,7 +43,7 @@ Secrets are `Secret` values, resolved by the adapter in the running environment 
 
 The daemon assembles the pipeline from a `Config`, but adapter construction is a seam: the `Backends` trait is supplied to `Daemon::new`, so the daemon depends only on the `source` and `sink` ports. `Backends::validate` runs first, so a bad option fails before any connection. The daemon reports progress through the engine's `Observer` trait into a shared `Status`, and owns no HTTP server, no metrics exporter, no signals.
 
-The CLI is the **composition root**. It holds the adapter registry, implements `Backends`, lays the adapter-specific flags (`--slot`, `--queue-capacity`, `--pretty`) over the file's entries as overrides, installs the OpenTelemetry meter provider, records metrics from `Observer` events, serves the two HTTP surfaces, and handles the process signals ([Stopping](../reference/cli.md#stopping)).
+The CLI is the **composition root**. It holds the adapter registry, implements `Backends`, lays the adapter-specific flags (`--slot`, `--pretty`; `--queue-capacity` still parses, deprecated) over the file's entries as overrides, installs the OpenTelemetry meter provider, records metrics from `Observer` events, serves the two HTTP surfaces, and handles the process signals ([Stopping](../reference/cli.md#stopping)).
 
 ## Package name versus extern name
 
