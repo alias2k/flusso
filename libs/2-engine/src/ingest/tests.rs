@@ -778,6 +778,52 @@ impl Deployment {
         }
     }
 
+    /// Run the ingest engine on a stream that stays open until every change
+    /// of `db` has landed, then stop it, restarting it after a failed run as
+    /// [`run_to_end`](Self::run_to_end) does.
+    async fn run_until_landed(&mut self, db: &Arc<Database>, stop: &Stop, most_restarts: usize) {
+        let sink = self.start_sink().await;
+        let watcher = {
+            let db = Arc::clone(db);
+            let stop = stop.clone();
+            let recorder = Arc::clone(&self.recorder);
+            let stream = Arc::clone(&self.stream);
+            tokio::spawn(async move {
+                loop {
+                    if db.visible.load(Ordering::SeqCst) == db.log.len()
+                        && stream.is_idle()
+                        && recorder.state() == db.expected()
+                    {
+                        stop.request();
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+        };
+        let mut failed = 0;
+        loop {
+            match self.ingest.run().await {
+                Ok(()) => break,
+                Err(error) => {
+                    failed += 1;
+                    assert!(
+                        failed <= most_restarts,
+                        "the ingest engine failed {failed} times; the last: {error}"
+                    );
+                    self.drained().await;
+                    let landed = self.ingest.progress().landed();
+                    self.feed
+                        .resume_after(landed.covered_seq().map(Position::new));
+                }
+            }
+        }
+        watcher.await.unwrap();
+        self.drained().await;
+        self.assert_released().await;
+        sink.abort();
+    }
+
     /// Run the ingest engine until its live stream ends, restarting it after
     /// a failed run the way the daemon does: the stream resumes after what
     /// every lane acknowledged. Returns how many runs failed.
@@ -820,7 +866,7 @@ fn batch(max_changes: usize) -> BatchPolicy {
 
 /// One random schedule: changes over a few ids, random gaps, build delays and
 /// failures, maybe a backfill. Panics on the first broken guarantee.
-async fn schedule(seed: u64, builds: usize) {
+async fn schedule(seed: u64, builds: usize, open: bool) {
     let mut random = Rng::new(seed);
     let ids = 2 + random.below(7) as i64;
     let rows = if random.below(2) == 0 {
@@ -849,13 +895,21 @@ async fn schedule(seed: u64, builds: usize) {
             ..Behaviour::default()
         },
     );
-    let mut deployment = Deployment::new(
-        Feed::new(&db).with_gaps(seed.wrapping_mul(17)),
-        Arc::clone(&builder),
-        Recorder::seeded(rows == 0),
-    )
-    .ingest(|ingest| ingest.with_batch(batch(max_changes)).with_builds(builds));
-    deployment.run_to_end(8).await;
+    let feed = Feed::new(&db).with_gaps(seed.wrapping_mul(17));
+    let feed = if open { feed.open() } else { feed };
+    let stop = Stop::new();
+    let mut deployment = Deployment::new(feed, Arc::clone(&builder), Recorder::seeded(rows == 0))
+        .ingest(|ingest| {
+            ingest
+                .with_batch(batch(max_changes))
+                .with_builds(builds)
+                .with_stop(stop.clone())
+        });
+    if open {
+        deployment.run_until_landed(&db, &stop, 8).await;
+    } else {
+        deployment.run_to_end(8).await;
+    }
 
     let context = format!(
         "seed {seed}, builds {builds}, {changes} changes over {ids} ids, {rows} rows, max_changes {max_changes}"
@@ -898,7 +952,18 @@ fn seeds(count: u64) -> Vec<u64> {
 fn random_schedules_keep_every_document_in_order() {
     for seed in seeds(500) {
         for builds in [1, 2, 4] {
-            crate::tests::paused_runtime().block_on(schedule(seed, builds));
+            crate::tests::paused_runtime().block_on(schedule(seed, builds, false));
+        }
+    }
+}
+
+/// The same schedules on a stream that stays open, as a deployment's does:
+/// nothing ends the run but a stop, requested once every change has landed.
+#[test]
+fn random_schedules_on_an_open_stream_keep_every_document_in_order() {
+    for seed in seeds(200) {
+        for builds in [1, 4] {
+            crate::tests::paused_runtime().block_on(schedule(seed, builds, true));
         }
     }
 }
@@ -1524,4 +1589,59 @@ async fn a_dropped_engine_aborts_its_running_builds() {
         "every held build is dropped with the engine"
     );
     sink.abort();
+}
+
+/// A batch that can take no more changes and waits for a build stops the
+/// reading, and a stop is still noticed then: the buffered batch is built
+/// and published once the build before it lands, and nothing more is read.
+#[tokio::test(start_paused = true)]
+async fn a_stop_while_a_closed_batch_waits_for_a_build_ends_the_run() {
+    let db = Database::new(0, (0..5).map(Change::upsert).collect());
+    let builder = Builder::new(
+        &db,
+        Behaviour {
+            held: Mutex::new(HashSet::from([0])),
+            ..Behaviour::default()
+        },
+    );
+    let stop = Stop::new();
+    let mut deployment = Deployment::new(
+        Feed::new(&db).open(),
+        Arc::clone(&builder),
+        Recorder::seeded(true),
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(1))
+            .with_builds(1)
+            .with_stop(stop.clone())
+    });
+    let sink = deployment.start_sink().await;
+    let driver = {
+        let builder = Arc::clone(&builder);
+        let db = Arc::clone(&db);
+        tokio::spawn(async move {
+            // Change 1 is buffered behind the held build of 0, its batch full.
+            while db.visible.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            stop.request();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            builder.release(0);
+        })
+    };
+    let result = deployment.ingest.run().await;
+    driver.await.unwrap();
+    deployment.drained().await;
+    sink.abort();
+
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(builder.grants(), vec![vec![0], vec![1]]);
+    assert_eq!(deployment.published.lock().unwrap().clone(), vec![0, 1]);
+    assert_eq!(
+        db.visible.load(Ordering::SeqCst),
+        2,
+        "nothing is read after the stop"
+    );
 }
