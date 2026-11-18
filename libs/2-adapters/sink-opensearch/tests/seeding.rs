@@ -10,6 +10,10 @@
 //!   exactly one whole generation, and the convenience alias at most one
 //!   index. A restart (a new sink: `ensure_index`, the backfill again,
 //!   `mark_seeded`) ends with the new generation alone, serving, seeded.
+//!   The same for a first seed, and for each request of the first round (the
+//!   refresh, the settings, the two lookups, run at once) failing alone: no
+//!   alias moves until all of them succeeded, so an alias never names a
+//!   generation that was not refreshed.
 //! - **A generation is created with the aliases it may carry** (#403): the
 //!   first one with both aliases in its create request, a rebuild's with
 //!   none (the old generation serves until the swap), and never the
@@ -225,6 +229,33 @@ async fn marker(client: &reqwest::Client, base: &str, hash_alias: &str) -> (u64,
     )
 }
 
+/// The `refresh_interval` set on `index`, if any.
+async fn refresh_interval(client: &reqwest::Client, base: &str, index: &str) -> Option<String> {
+    let body: Value = client
+        .get(format!("{base}/{index}/_settings"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    body[index]["settings"]["index"]["refresh_interval"]
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// The requests of `mark_seeded`'s first round, which run at once: each is
+/// failed alone by `the_first_round_moves_no_alias_until_every_request_succeeded`.
+fn first_round(seen: &Seen, kind: &str) -> bool {
+    match kind {
+        "refresh" => seen.method == "POST" && seen.path.ends_with("/_refresh"),
+        "settings" => seen.method == "PUT" && seen.path.ends_with("/_settings"),
+        "holders" => seen.method == "GET" && seen.path.starts_with("/_alias/"),
+        "generations" => seen.method == "GET" && seen.path.starts_with("/_cat/indices/"),
+        _ => unreachable!("{kind}"),
+    }
+}
+
 /// Whether a request takes generation `generation` away: a delete of it, or
 /// an `_aliases` call removing it.
 fn removes(seen: &Seen, generation: &str) -> bool {
@@ -332,10 +363,18 @@ async fn a_crash_after_any_request_of_mark_seeded_recovers_on_restart() {
             whole,
             "after {n} requests the hash alias serves a whole generation ({serving:?})"
         );
+        let named = alias_targets(&client, &base, &logical).await;
         assert!(
-            alias_targets(&client, &base, &logical).await.len() <= 1,
+            named.len() <= 1,
             "after {n} requests the convenience alias names one index at most"
         );
+        if named == [gen2.clone()] {
+            assert_eq!(
+                searchable(&client, &base, &logical).await,
+                ["1", "2"],
+                "after {n} requests the convenience alias serves a refreshed generation"
+            );
+        }
         if !finished {
             assert!(
                 !marker(&client, &base, &hash_alias).await.1,
@@ -622,5 +661,130 @@ async fn several_indexes_seed_at_once_beside_writes_to_others() {
         let mut expected: Vec<String> = (0..=20).map(|i| i.to_string()).collect();
         expected.sort();
         assert_eq!(searchable(&client, &base, &hash_alias).await, expected);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn the_first_round_moves_no_alias_until_every_request_succeeded() {
+    let (_container, base) = start_opensearch().await;
+    let proxy = FaultProxy::start(&base).await;
+    let client = reqwest::Client::new();
+    for kind in ["refresh", "settings", "holders", "generations"] {
+        let logical = format!("users_{kind}");
+        let mapping = mapping(&logical, 1);
+        let index = mapping.index.clone();
+        let hash_alias = format!("{logical}_{}", mapping.hash);
+        let gen1 = format!("{hash_alias}_1");
+        let gen2 = format!("{hash_alias}_2");
+
+        let run = sink(&proxy.url);
+        proxy.heal();
+        rebuilt(&sink(&base), &run, &mapping).await;
+        proxy.refuse(move |seen, _| first_round(seen, kind));
+        run.mark_seeded(&index)
+            .await
+            .expect_err("one request of the first round was refused");
+        let refused: Vec<String> = proxy
+            .take()
+            .iter()
+            .filter(|seen| seen.refused)
+            .map(Seen::line)
+            .collect();
+        assert!(!refused.is_empty(), "{kind}: nothing was refused");
+        proxy.heal();
+
+        for alias in [hash_alias.as_str(), logical.as_str()] {
+            assert_eq!(
+                alias_targets(&client, &base, alias).await,
+                [gen1.clone()],
+                "{kind} refused: {alias} still serves the old generation"
+            );
+            assert_eq!(
+                searchable(&client, &base, alias).await,
+                ["1", "2", "3"],
+                "{kind} refused: {alias} serves the whole old generation"
+            );
+        }
+        assert_eq!(marker(&client, &base, &hash_alias).await, (2, false));
+
+        let restarted = sink(&base);
+        restarted.ensure_index(&mapping).await.unwrap();
+        assert!(!restarted.is_seeded(&index).await.unwrap());
+        write(&restarted, &index, &[1, 2]).await;
+        restarted.mark_seeded(&index).await.unwrap();
+        assert_eq!(marker(&client, &base, &hash_alias).await, (2, true));
+        assert_eq!(
+            generations(&client, &base, &hash_alias).await,
+            [gen2.clone()]
+        );
+        assert_eq!(
+            alias_targets(&client, &base, &logical).await,
+            [gen2.clone()]
+        );
+        assert_eq!(searchable(&client, &base, &logical).await, ["1", "2"]);
+        assert_eq!(
+            refresh_interval(&client, &base, &gen2).await.as_deref(),
+            Some("10s"),
+            "{kind}: the steady refresh interval is restored"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_crash_after_any_request_of_a_first_seed_recovers_on_restart() {
+    let (_container, base) = start_opensearch().await;
+    let proxy = FaultProxy::start(&base).await;
+    let client = reqwest::Client::new();
+    for n in 0.. {
+        let logical = format!("first{n}");
+        let mapping = mapping(&logical, 1);
+        let index = mapping.index.clone();
+        let hash_alias = format!("{logical}_{}", mapping.hash);
+        let gen1 = format!("{hash_alias}_1");
+
+        let run = sink(&proxy.url);
+        proxy.heal();
+        run.ensure_index(&mapping).await.unwrap();
+        write(&run, &index, &[1, 2]).await;
+        proxy.take();
+        proxy.crash_after(n);
+        let finished = run.mark_seeded(&index).await.is_ok();
+        proxy.take();
+        proxy.heal();
+
+        for alias in [hash_alias.as_str(), logical.as_str()] {
+            assert_eq!(
+                alias_targets(&client, &base, alias).await,
+                [gen1.clone()],
+                "after {n} requests {alias} serves the first generation"
+            );
+        }
+        if !finished {
+            assert!(
+                !marker(&client, &base, &hash_alias).await.1,
+                "a mark_seeded cut short after {n} requests left the marker unseeded"
+            );
+            let restarted = sink(&base);
+            restarted.ensure_index(&mapping).await.unwrap();
+            assert!(!restarted.is_seeded(&index).await.unwrap());
+            write(&restarted, &index, &[1, 2]).await;
+            restarted.mark_seeded(&index).await.unwrap();
+        }
+        assert_eq!(marker(&client, &base, &hash_alias).await, (1, true));
+        assert_eq!(
+            generations(&client, &base, &hash_alias).await,
+            [gen1.clone()]
+        );
+        assert_eq!(searchable(&client, &base, &logical).await, ["1", "2"]);
+        assert_eq!(
+            refresh_interval(&client, &base, &gen1).await.as_deref(),
+            Some("10s")
+        );
+        if finished {
+            assert!(n > 0);
+            return;
+        }
     }
 }
