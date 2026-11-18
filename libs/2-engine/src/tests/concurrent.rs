@@ -1079,6 +1079,34 @@ async fn a_stop_rejection_still_in_flight_lets_disjoint_writes_land_but_holds_th
     );
 }
 
+/// The oldest item fails first and a later one lands after it: the later one
+/// landing is no progress, since the failed item comes back first.
+#[tokio::test(start_paused = true)]
+async fn a_write_landing_after_an_older_one_failed_is_no_progress() {
+    let mut rig = Rig::new(Probe::new().holding(&["a", "b"]).failing_once(&["a"]), 4).start();
+    warm_up(&mut rig).await;
+    let before = rig.sink_engine.advanced();
+    rig.live(2, &["a"]).await;
+    rig.live(3, &["b"]).await;
+    until("a and b in flight", || {
+        let starts = rig.probe.starts();
+        starts.contains(&"a".to_owned()) && starts.contains(&"b".to_owned())
+    })
+    .await;
+    rig.probe.release("a");
+    until("a to fail", || {
+        rig.probe.log().contains(&"failed a".to_owned())
+    })
+    .await;
+    rig.probe.release("b");
+    assert!(rig.ended().await.is_err());
+    assert_eq!(
+        rig.sink_engine.advanced(),
+        before,
+        "b landing behind a failure is no progress"
+    );
+}
+
 /// A write that fails at its first poll, with a later item sharing its
 /// document waiting: the later item never starts before the failed one is
 /// written again, so the document's version never goes down.
