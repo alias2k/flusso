@@ -6,7 +6,7 @@ The project's nouns, each with a pointer to the page that owns it.
 | --- | --- | --- |
 | **backfill** | Seeding an unseeded index by reading its root keys, a page at a time, and building each through the normal pipeline beside live capture. | [How flusso works](../start/how-it-works.md#seeding-and-continuity) |
 | **applied** | A fence level: the sink's write for a change, and every earlier one, has returned, so a fetch by id sees it. | [HTTP endpoints](http.md#get-waitpositionposition) |
-| **batch** | The changes grouped into one build and one write per sink: everything the stream has ready, committed the moment it would block, capped at `max_changes` / `max_delay_ms`. | [batch](config-toml.md#batch) |
+| **batch** | The changes grouped into one build: everything the stream has ready, committed the moment it would block, capped at `max_changes` / `max_delay_ms`. A sink may merge several ready batches (of several indexes) into one write. | [batch](config-toml.md#batch) |
 | **computed field** | A read-time field given by a Rust function over the document and the context. Value only. | [Read-time fields](../query/read-time-fields.md#computed-fields) |
 | **context** | The request-time values a root's read-time fields are decided from (the clock, the caller), in one consumer-defined type. | [Read-time fields](../query/read-time-fields.md#the-context) |
 | **convenience alias** | The bare logical name (`users`) kept as an alias on the current generation, for humans and dashboards. Best-effort. | [Sink: OpenSearch](sink-opensearch.md#index-naming) |
@@ -32,7 +32,7 @@ The project's nouns, each with a pointer to the page that owns it.
 | **script field** | A leaf computed by a Rhai script from the built document (`this` and `root`), typed by its type key like any field. | [Script fields](scripts.md) |
 | **searchable** | A fence level: a search at the destination sees the change. Trails applied by the destination's refresh while a backlog drains. | [HTTP endpoints](http.md#get-waitpositionposition) |
 | **seed marker** | The `flusso_meta` record saying an index's generation is fully backfilled. | [Sink: OpenSearch](sink-opensearch.md#seeding) |
-| **sink** | A destination: OpenSearch or stdout. Each runs its own engine over its own lane; `backfill = false` opts a stateless one out of seeding. | [flusso.toml top level](config-toml.md#several-sinks) |
+| **sink** | A destination: OpenSearch or stdout. Each runs its own engine over its own lanes, one per index; `backfill = false` opts a stateless one out of seeding. | [flusso.toml top level](config-toml.md#several-sinks) |
 | **slot** | The Postgres logical replication slot flusso consumes. Its confirmed position is the resume point. | [Source: Postgres](source-postgres.md#capture) |
 | **slot lag** | Bytes between the WAL head and the slot's confirmed position. | [Metrics](metrics.md) |
 | **soft-delete** | A row marked deleted by a column or field rather than a `DELETE`; emits a tombstone. | [Filters and soft_delete](filters-and-soft-delete.md#soft_delete) |

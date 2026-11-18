@@ -299,7 +299,15 @@ A comparison with a string, a number or another kind fails rather than answering
 - **A stalled sink paces ingest by bytes.** Once built documents waiting for it reach the budget, the ingest engine builds nothing more until it acknowledges some, as a full queue did. A backfill holds at most half the budget, so live changes keep room.
 - **Size memory from the budget.** Plan from the formula in [config.toml](../reference/config-toml.md#concurrency): `max_built_mib`, the batches in flight past it, request bodies and the source's read-ahead, about 100 MiB, plus 10–20% for the allocator. The Helm chart now requests 512 MiB of memory and sets no limit; its `values.yaml` gives the formula for one.
 - **New in `/status` and `/metrics`:** `memory` (`limit_bytes`, `built_bytes`, `backfill_bytes`), `flusso.memory.built` and `flusso.memory.refused`.
+- **A warning at start** when `max_built_mib` alone reaches the cgroup's memory limit, or the host's memory without one (Linux): lower it, or raise the limit.
 - **Embedding the crates.** `IngestEngine::with_budget(Arc<Budget>)` counts built documents (without it, nothing is counted, as before). `stream::Batch` gains `hold: Hold`; a `Batch` written by hand sets `hold: Default::default()`. `ChannelConfig::capacity` is now `Option<usize>` and is ignored by `ChannelStream::from_config`.
+
+## Seeding and index creation take fewer requests
+
+A deployment needs nothing; readers see what they saw in 0.17.
+
+- **A first generation is created with its aliases** in the create request (the `{logical}` alias only when no index holds that name), where 0.17 created it, then added each alias. As before, a reader of a first backfill sees the index filling. Wait for `seeded` in `/status` before sending readers to it; a fenced read waits on its own (`503 backfilling`, see [A fence holds while an index is seeded or rebuilt](#a-fence-holds-while-an-index-is-seeded-or-rebuilt)). A rebuild's generation is created bare, and readers stay on the old one until the swap.
+- **A seed runs its refresh, the steady-state settings and the alias lookups at once**, then moves both aliases and drops the old generations in one atomic `_aliases` call, then writes the marker (see [OpenSearch sink](../reference/sink-opensearch.md)).
 
 ## Indexes are staged at once at start
 
@@ -310,7 +318,7 @@ A comparison with a string, a number or another kind fails rather than answering
 
 ## Stage timings in /metrics
 
-0.18 records where the pipeline's time goes: [`flusso.stage.duration`](../reference/metrics.md#where-the-time-goes) per stage, `flusso.flush.documents` and `flusso.flush.size` per flush, and [`flusso.startup.duration`](../reference/metrics.md#start-up) per start-up step. Existing series are unchanged. A deployment needs nothing.
+0.18 records where the pipeline's time goes: [`flusso.stage.duration`](../reference/metrics.md#where-the-time-goes) per stage, `flusso.flush.documents` and `flusso.flush.size` per flush, and [`flusso.startup.duration`](../reference/metrics.md#start-up) per start-up step, and `flusso.sink.refreshes{sink}`, the refresh requests each sink sent. Existing series are unchanged. A deployment needs nothing.
 
 - **Embedding the crates.** `Observer` gains `on_stage` and `on_startup_step` (both default to nothing). `sink::FlushReport` and `engine::CommitStats` are `#[non_exhaustive]` and gain `bytes` (and `CommitStats` `work`): build them with `FlushReport::clean()` and its builders (`visible`, `rejecting`, `sent`) and `CommitStats::new(…).sent(…)`, not a struct literal. A sink that counts the bytes it sends reports them with `sent`; it is a metric only.
 

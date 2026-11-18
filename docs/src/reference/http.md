@@ -37,7 +37,7 @@ The live status document as JSON: the deployment, then one block per sink.
 | `searchable_position` | string or null | The source position every sink can search. The slowest sink's. |
 | `memory.limit_bytes` | int | `[concurrency] max_built_mib` in bytes. |
 | `memory.built_bytes` | int | Built documents not yet acknowledged by every sink, builds in flight included. See [config.toml](config-toml.md#concurrency). |
-| `memory.backfill_bytes` | int | The backfill's share of `built_bytes`: at most half the limit. |
+| `memory.backfill_bytes` | int | The backfill's share of `built_bytes`: at most half the limit, past the one batch a backfill holding nothing is always granted. |
 | `errors` | int | Engine errors, ingest and sink. |
 | `last_error` | string or null | |
 | `script_failures.<index>.count` | int | Documents of that index that failed to build: a [script failed](scripts.md#failures), or an [`array: true`](field-types.md#array) column held an object. Under either `on_error` policy (a `stop` index counts each retry). The key is absent until one fails. |
@@ -55,7 +55,7 @@ The live status document as JSON: the deployment, then one block per sink.
 | `sinks.<name>.lanes.<index>.applied_position` | string or null | How far this sink has applied that index: its `(index, sink)` lane. A stalled index holds back only its own lane here. |
 | `sinks.<name>.lanes.<index>.searchable_position` | string or null | How far this sink can search that index. |
 | `sinks.<name>.lanes.<index>.outstanding` | int | Items routed to the lane and not written yet. A lane that stays high is the one holding back the slot. |
-| `sinks.<name>.lanes.<index>.stall_seconds` | number | How long the lane's oldest outstanding change has stayed its oldest: the lane has written nothing for that long. 0 while nothing is outstanding, and while it lands steadily. Sampled every second. Backfill rows aren't counted: they carry no position. See [A lane is stalled](../operate/stalled-lane.md). |
+| `sinks.<name>.lanes.<index>.stall_seconds` | number, absent | How long the lane's oldest outstanding change has stayed its oldest: the lane has written nothing for that long. 0 while nothing is outstanding, and while it lands steadily. Sampled every second. Backfill rows aren't counted: they carry no position. See [A lane is stalled](../operate/stalled-lane.md). |
 | `sinks.<name>.lanes.<index>.wal_behind_bytes` | int, absent | Bytes of WAL the replication slot keeps behind this lane: the slot lag less how far the lane is ahead of the lane that pins it. It counts WAL flusso hasn't read yet as well as what it read and hasn't landed (a stalled lane pins both), so a healthy catch-up shows a large value on lanes that land every second: read it with the stall age. It is computed from the slot lag, polled every `--lag-poll-secs` (15 s by default); a failed poll keeps the last value. Absent while nothing is outstanding, or before the first lag sample. |
 | `sinks.<name>.lanes.<index>.backfill_checkpoints` | int, absent | Times this run recorded how far the lane's backfill got, so a restart resumes after it (about one every 10 s while a backfill lands); absent while 0. Staying absent through a long backfill means nothing lands. See [Postgres source](source-postgres.md), "An interrupted backfill resumes". |
 
@@ -77,6 +77,7 @@ A source position is in the source's own text form: for Postgres, a WAL LSN such
   "errors": 0,
   "last_error": null,
   "pinned_by": null,
+  "memory": { "limit_bytes": 536870912, "built_bytes": 1048576, "backfill_bytes": 0 },
   "sinks": {
     "primary": {
       "phase": "live",
@@ -90,8 +91,8 @@ A source position is in the source's own text form: for Postgres, a WAL LSN such
       "applied_position": "0/16B3748",
       "searchable_position": "0/16B3748",
       "lanes": {
-        "orders": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0 },
-        "products": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0 },
+        "orders": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0, "stall_seconds": 0.0 },
+        "products": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0, "stall_seconds": 0.0 },
         "users": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0, "stall_seconds": 0.0, "wal_behind_bytes": 0 }
       }
     }

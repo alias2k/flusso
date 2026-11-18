@@ -131,7 +131,7 @@ A point in the source's own change order, as a client can read it from the sourc
 _Avoid_: token, LSN (outside the Postgres adapter), cursor, checkpoint, offset
 
 **Fence**:
-A wait until the lanes of the named indexes (or every index) on a sink (or every sink) have reached a caller-supplied source position at a chosen level, applied or searchable, related-table rebuilds included. It only observes: nothing is flushed or refreshed because a client waits. Covers live changes only, not a backfill. What a client uses to read its own writes.
+A wait until the lanes of the named indexes (or every index) on a sink (or every sink) have reached a caller-supplied source position at a chosen level, applied or searchable, related-table rebuilds included. It only observes: nothing is flushed or refreshed because a client waits. It vouches only for what reads of a lane's index see: while a sink seeds that index or rebuilds it beside the generation readers use, the fence holds, and past its timeout it answers that it can't vouch (backfilling or rebuilding) rather than pass. What a client uses to read its own writes.
 _Avoid_: barrier, sync point, flush wait
 
 **Applied**:
@@ -202,6 +202,14 @@ _Avoid_: dynamic field, sub-key, map entry
 **Generation**:
 One physical copy of an index in a destination. A reindex builds a fresh generation and swaps it in.
 _Avoid_: version, revision, copy
+
+**Stall age**:
+How long a lane's oldest outstanding position has stayed its oldest: how long the lane has landed nothing. Zero while it has nothing outstanding, or lands steadily; a busy lane is not stalled. Kept per process.
+_Avoid_: lag, backlog (that is how much waits, not how long nothing moved)
+
+**Pinned by**:
+The lane that decides how far the slot can be confirmed (the one `Progress`'s landed answer comes from), while it holds something back. A stalled lane pins the slot, and with it the WAL of every index.
+_Avoid_: blocking lane, slowest sink
 
 **Seeded**:
 A sink's own record that it holds a complete snapshot of an index for the current schema. Decided per sink, never for the deployment.
