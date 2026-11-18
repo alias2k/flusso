@@ -1079,6 +1079,25 @@ async fn a_stop_rejection_still_in_flight_lets_disjoint_writes_land_but_holds_th
     );
 }
 
+/// A fresh engine writes its first item alone: a sink that stopped the
+/// previous process on a `stop` rejection writes nothing past it on the next
+/// start either, even while the rejected write is still in flight (it awaits
+/// here, so the rejection isn't known when the next grant could start).
+#[tokio::test(start_paused = true)]
+async fn a_fresh_engine_writes_nothing_past_a_persistent_stop_rejection() {
+    let mut rig = Rig::new(Probe::new().holding(&["a"]).rejecting(&["a"]), 4);
+    rig.live(1, &["a"]).await;
+    rig.live(2, &["b"]).await;
+    rig.live(3, &["c"]).await;
+    let mut rig = rig.start();
+    settle().await;
+    assert_eq!(rig.probe.starts(), ["a"], "nothing starts beside a");
+    rig.probe.release("a");
+    assert!(rig.ended().await.is_err());
+    assert_eq!(rig.probe.starts(), ["a"], "nothing past the rejected item");
+    assert_eq!(rig.stream.watermark(), None);
+}
+
 /// The oldest item fails first and a later one lands after it: the later one
 /// landing is no progress, since the failed item comes back first.
 #[tokio::test(start_paused = true)]
