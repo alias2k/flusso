@@ -849,3 +849,65 @@ async fn a_mark_from_another_order_is_never_resumed() {
         );
     }
 }
+
+/// A mark records the `<` the pages compared with (review of #386 stage 8b):
+/// a key that is a domain over `ext.citext`, walked by a role without USAGE
+/// on `ext`, compares with the bare `<` the search path finds (`text`'s);
+/// once the role is granted USAGE the walk compares with `citext`'s own, an
+/// order in which rows the first walk passed come after its mark, so the
+/// mark is refused and the walk starts from the first key. Without the
+/// grant, the same role resumes its mark.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_mark_taken_under_other_comparison_operators_is_never_resumed() {
+    let container = test_postgres::image().start().await.unwrap();
+    let url = url(&container).await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE SCHEMA ext",
+        "CREATE EXTENSION citext SCHEMA ext",
+        "CREATE SCHEMA app",
+        "CREATE DOMAIN app.dcit AS ext.citext",
+        "CREATE TABLE off_path_domain (id app.dcit PRIMARY KEY, name text)",
+        "INSERT INTO off_path_domain SELECT k, k FROM unnest(ARRAY['a', 'B', 'c', 'D', 'Z', '_', '0']) k",
+        "CREATE ROLE limited LOGIN PASSWORD 'limited'",
+        "GRANT USAGE ON SCHEMA app TO limited",
+        "GRANT SELECT ON ALL TABLES IN SCHEMA public TO limited",
+    ] {
+        execute(&pool, statement).await.unwrap();
+    }
+    let limited = url.replace("postgres:postgres@", "limited:limited@");
+    let tables = ["off_path_domain"];
+    let index = index_name("off_path_domain");
+    let connect = || async {
+        PgDocumentBuilder::connect(&limited, Arc::new(spec(&tables)))
+            .await
+            .unwrap()
+    };
+
+    let bare = connect().await;
+    let keys = walk(&bare, "off_path_domain", 1024).await;
+    let mark = bare.walk_mark(&index, &keys[2]).await.unwrap().unwrap();
+    assert_eq!(
+        connect().await.resume_after(&index, &mark).await.unwrap(),
+        Some(keys[2].clone()),
+        "the same operators: the mark is resumed"
+    );
+
+    execute(&pool, "GRANT USAGE ON SCHEMA ext TO limited")
+        .await
+        .unwrap();
+    let qualified = connect().await;
+    assert_eq!(
+        qualified.resume_after(&index, &mark).await.unwrap(),
+        None,
+        "a mark taken with the bare `<` is not resumed with `ext`'s"
+    );
+    let now = qualified
+        .walk_mark(&index, &keys[2])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(mark.contains("bare<search_path="), "{mark}");
+    assert!(now.contains("OPERATOR(ext.<)"), "{now}");
+}

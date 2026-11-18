@@ -58,14 +58,16 @@
 //! - **A resumable mark** (ADR 0012 stage 8b) is JSON: the key (a float as
 //!   its bits, since JSON has no `NaN` or infinity), and the
 //!   order it was walked in: the key column's type (a domain by its own
-//!   name), the key index's operator class and its collation. A walk resumes
-//!   after a mark only while all three are what the key index has now: a key
-//!   walked in another order would leave rows neither walk read. Two marks
+//!   name), the key index's operator class and its collation, and the `<`
+//!   the pages compare with: the qualified operator, or bare with the search
+//!   path it resolved through. A walk resumes after a mark only while all of
+//!   it is what the walk would use now: a key walked in another order would
+//!   leave rows neither walk read. Two marks
 //!   compare with the walk's own `<`, so their order is Postgres's
 //!   (`citext`, a collation), never Rust's.
 //!
 //! ```text
-//! {"v":1,"key":[["id",{"Value":{"BigInt":42}}]],"order":"bigint|pg_catalog.int8_ops|"}
+//! {"v":1,"key":[["id",{"Value":{"BigInt":42}}]],"order":"bigint|pg_catalog.int8_ops||OPERATOR(pg_catalog.<)"}
 //! ```
 
 use std::cmp::Ordering;
@@ -208,7 +210,7 @@ impl PgDocumentBuilder {
             return Ok(None);
         };
         walked_value(key, &column)?;
-        let Some(order) = self.walk_order_of(schema, &column).await? else {
+        let Some(order) = self.walk_order_of(index, schema, &column).await? else {
             return Ok(None);
         };
         serde_json::to_string(&Mark::new(key, order.text))
@@ -242,7 +244,7 @@ impl PgDocumentBuilder {
         if walked_value(&key, &column).is_err() {
             return discard("its key column is not the root's key any more");
         }
-        match self.walk_order_of(schema, &column).await? {
+        match self.walk_order_of(index, schema, &column).await? {
             Some(now) if now.text == order => Ok(Some(key)),
             _ => discard("the key's type, operator class or collation changed"),
         }
@@ -264,7 +266,7 @@ impl PgDocumentBuilder {
             .column_meta(&schema.db_schema, &schema.table, &column)
             .await?;
         let operators = self.walk_operators(index, schema, &column).await?;
-        let Some(order) = self.walk_order_of(schema, &column).await? else {
+        let Some(order) = self.walk_order_of(index, schema, &column).await? else {
             return Ok(None);
         };
         let walk = WalkKey {
@@ -294,6 +296,7 @@ impl PgDocumentBuilder {
     /// index.
     async fn walk_order_of(
         &self,
+        index: &IndexName,
         schema: &IndexSchema,
         key: &ColumnName,
     ) -> Result<Option<WalkOrder>> {
@@ -311,8 +314,21 @@ impl PgDocumentBuilder {
         let Some(row) = row else {
             return Ok(None);
         };
+        let catalog: String = row.try_get(0).map_err(super::query_err)?;
+        let search_path: String = row.try_get(2).map_err(super::query_err)?;
+        // The operators the pages compare with decide the order as much as
+        // the opclass: bare ones resolve through the search path, and a
+        // grant of USAGE on their schema switches the walk to the
+        // qualified ones, which can order differently (`citext` against
+        // `text`).
+        let operators = self.walk_operators(index, schema, key).await?;
+        let used = if operators == query::WalkOperators::bare() {
+            format!("bare<search_path={search_path}>")
+        } else {
+            operators.less.clone()
+        };
         let order = WalkOrder {
-            text: row.try_get(0).map_err(super::query_err)?,
+            text: format!("{catalog}|{used}"),
             collation: row.try_get(1).map_err(super::query_err)?,
         };
         self.lock_walk_orders().insert(cache_key, order.clone());
@@ -551,13 +567,16 @@ impl Mark {
     }
 }
 
-/// What the order of the root's primary key index depends on: the key
-/// column's type (a domain by its own name), the index's operator class and
-/// its collation, as one text. `$1` is the root table, `$2` its key column.
+/// What the order of the root's primary key index depends on in the
+/// catalog: the key column's type (a domain by its own name), the index's
+/// operator class and its collation, as one text; then the collation to
+/// compare under and the session's search path, which bare operators
+/// resolve through. `$1` is the root table, `$2` its key column.
 const WALK_ORDER_SQL: &str = "SELECT format_type(a.atttypid, NULL) || '|' || \
      quote_ident(cn.nspname) || '.' || quote_ident(c.opcname) || '|' || \
      coalesce(quote_ident(kn.nspname) || '.' || quote_ident(k.collname), ''), \
-     quote_ident(kn.nspname) || '.' || quote_ident(k.collname) \
+     quote_ident(kn.nspname) || '.' || quote_ident(k.collname), \
+     current_setting('search_path') \
      FROM pg_index i \
      JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0] \
      JOIN pg_opclass c ON c.oid = i.indclass[0] \

@@ -251,8 +251,8 @@ pub trait DocumentBuilder: std::fmt::Debug + Send + Sync {
     }
 
     /// How `a` compares with `b` in the order a walk of `index` reads its keys;
-    /// `None` when unknown (the default), and a walk then serves every lane
-    /// from the least of their points.
+    /// `None` when unknown (the default), and a lane whose point can't be
+    /// placed among the others' is then served from the first key.
     async fn compare_keys(
         &self,
         _index: &IndexName,
