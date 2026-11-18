@@ -233,8 +233,8 @@ Seed time is summed per index. "Seed wall" is the time some seed was running: th
 - **An early seed no longer stalls the sink**, but that bought nothing visible. The sink was not on the critical path: while it stalled, the ingest kept building into the memory budget, and the sink caught up after.
 - **What remains is the last index's refresh**, after its last write: 150–580 ms, almost all of each `refresh+settings+lookup` step. It is serial by nature: a rebuild's aliases may not move before it, and it can only start after the last write. `complex` has one index, so nothing there could overlap at all.
 
-**What would cut it** (not done; for the coordinator to place):
+**What would cut it** (coordinator's placement: 1 is stage 8a; 2 and 3 stay open until 8a's numbers show the tail):
 
 1. **Walks running at once** (stage 8a's per-index ingest tasks). The indexes then finish together, the seeds overlap for real, and the seed wall becomes the longest refresh instead of the sum.
-2. **Not waiting for the refresh on a first seed.** The aliases are already on the generation, so the refresh only makes the backfill searchable sooner. The marker could be written without it, and the refresh left to the steady `refresh_interval` or the next caught-up write. A rebuild must still wait for it before its aliases move.
-3. **A smaller final refresh.** Refreshing now and then during the backfill, rather than holding `refresh_interval = -1` throughout, would spread that cost across the backfill. That is a trade against bulk speed, to be measured.
+2. **Open: not waiting for the refresh on a first seed.** The aliases are already on the generation, so the refresh only makes the backfill searchable sooner. The marker could be written without it, and the refresh left to the steady `refresh_interval` or the next caught-up write. A rebuild must still wait for it before its aliases move.
+3. **Open: a smaller final refresh.** Refreshing now and then during the backfill, rather than holding `refresh_interval = -1` throughout, would spread that cost across the backfill. That is a trade against bulk speed, to be measured.
