@@ -150,18 +150,37 @@ impl OpensearchSink {
     /// generation number and whether it has been seeded. `None` if absent (or a
     /// legacy doc with no generation).
     pub(crate) async fn read_index_meta(&self, hash_alias: &str) -> Result<Option<(u64, bool)>> {
-        let Some(doc) = self.get_meta(hash_alias).await? else {
-            return Ok(None);
-        };
-        let source = doc.get("_source");
-        let generation = source
-            .and_then(|s| s.get("active_generation"))
-            .and_then(Value::as_u64);
-        let seeded = source
-            .and_then(|s| s.get("seeded"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        Ok(generation.map(|g| (g, seeded)))
+        Ok(self
+            .read_meta(hash_alias)
+            .await?
+            .map(|meta| (meta.generation, meta.seeded)))
+    }
+
+    /// The whole meta doc of an index, `walked` included. `None` if absent (or
+    /// a legacy doc with no generation).
+    pub(crate) async fn read_meta(&self, hash_alias: &str) -> Result<Option<Meta>> {
+        Ok(self
+            .get_meta(hash_alias)
+            .await?
+            .and_then(|doc| Meta::read(doc.get("_source")?)))
+    }
+
+    /// Store how far the active generation's backfill got: a partial update
+    /// that touches nothing else, and creates no document (a missing one is an
+    /// error the caller logs).
+    pub(crate) async fn update_walked(&self, hash_alias: &str, walked: Value) -> Result<()> {
+        let url = format!(
+            "{}/{}/_update/{hash_alias}",
+            self.base_url,
+            self.meta_index()
+        );
+        let req = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&json!({ "doc": { "walked": walked } }));
+        self.send_ok(req, "meta update failed").await?;
+        Ok(())
     }
 
     /// Write an index's meta doc: its active generation and seeded-state.
@@ -192,6 +211,43 @@ impl OpensearchSink {
             .await?
             .iter()
             .any(|found| found == name))
+    }
+}
+
+/// An index's meta doc as read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Meta {
+    pub(crate) generation: u64,
+    pub(crate) seeded: bool,
+    /// Where the active generation's backfill durably got: only from an
+    /// unseeded doc whose `walked` names the active generation, so a stray
+    /// record (on a seeded doc, or of a generation since replaced) reads as
+    /// none.
+    pub(crate) walked: Option<String>,
+}
+
+impl Meta {
+    pub(crate) fn read(source: &Value) -> Option<Self> {
+        let generation = source.get("active_generation").and_then(Value::as_u64)?;
+        let seeded = source
+            .get("seeded")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let walked = source.get("walked").filter(|_| !seeded).and_then(|walked| {
+            (walked.get("generation").and_then(Value::as_u64) == Some(generation))
+                .then(|| {
+                    walked
+                        .get("mark")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .flatten()
+        });
+        Some(Self {
+            generation,
+            seeded,
+            walked,
+        })
     }
 }
 

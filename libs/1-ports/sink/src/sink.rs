@@ -173,6 +173,17 @@ impl Default for SinkOptions {
     }
 }
 
+/// What [`Sink::seeding`] answers for an index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Seeding {
+    /// Its backfill completed; a start skips it.
+    Seeded,
+    /// It needs a backfill; `walked` is where the last one durably got, as
+    /// the source wrote it, if the sink recorded one.
+    Unseeded { walked: Option<String> },
+}
+
 /// A destination for built documents.
 ///
 /// A sink engine hands each lane item's envelopes to [`write`](Self::write),
@@ -324,6 +335,37 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// stale and calls [`reindex`](Self::reindex) on it.
     async fn is_seeded(&self, _: &IndexName) -> Result<bool> {
         Ok(false)
+    }
+
+    /// What staging needs of `index`: seeded, or, when not, where its last
+    /// backfill durably got, if this sink recorded it
+    /// ([`record_walked`](Self::record_walked)). The default reads
+    /// [`is_seeded`](Self::is_seeded) and records nothing, so a backfill
+    /// starts from the first key.
+    async fn seeding(&self, index: &IndexName) -> Result<Seeding> {
+        Ok(if self.is_seeded(index).await? {
+            Seeding::Seeded
+        } else {
+            Seeding::Unseeded { walked: None }
+        })
+    }
+
+    /// Remember that `index`'s backfill has landed every document up to
+    /// `mark` (opaque text the source wrote), so the next start resumes after
+    /// it. Only the index's current, unseeded target holds it: seeding it, a
+    /// reindex, or a target created anew forgets it. A failure costs only
+    /// redone work; the caller logs it and goes on. The default stores
+    /// nothing.
+    async fn record_walked(&self, _: &IndexName, _mark: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Forget where `index`'s backfill got, so the next one starts from the
+    /// first key: the source lost the changes since (a fresh replication
+    /// slot). Called while staging, before the source prepares. The default
+    /// has nothing to forget.
+    async fn forget_walked(&self, _: &IndexName) -> Result<()> {
+        Ok(())
     }
 
     /// Record that `index` has been seeded, so a later run skips its backfill.

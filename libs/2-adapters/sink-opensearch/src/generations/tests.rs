@@ -187,3 +187,56 @@ fn an_alias_lookup_lists_every_asked_alias_even_a_missing_one() {
     assert!(holders["missing"].is_empty());
     assert!(!holders.contains_key("orders"));
 }
+
+/// `walked` is read only from an unseeded doc, and only when it names the
+/// active generation: anything else is no checkpoint, never an error.
+#[test]
+fn a_backfill_checkpoint_is_read_only_for_the_unseeded_active_generation() {
+    let read = |source: serde_json::Value| Meta::read(&source).map(|meta| meta.walked);
+    assert_eq!(
+        read(
+            json!({ "active_generation": 2, "seeded": false, "walked": { "mark": "k", "generation": 2 } })
+        ),
+        Some(Some("k".to_owned()))
+    );
+    assert_eq!(
+        read(
+            json!({ "active_generation": 3, "seeded": false, "walked": { "mark": "k", "generation": 2 } })
+        ),
+        Some(None),
+        "a record of a generation since replaced"
+    );
+    assert_eq!(
+        read(
+            json!({ "active_generation": 2, "seeded": true, "walked": { "mark": "k", "generation": 2 } })
+        ),
+        Some(None),
+        "a stray record on a seeded doc"
+    );
+    assert_eq!(
+        read(json!({ "active_generation": 2, "seeded": false })),
+        Some(None)
+    );
+    assert_eq!(
+        read(json!({ "active_generation": 2, "seeded": false, "walked": null })),
+        Some(None),
+        "forgotten"
+    );
+    assert_eq!(
+        read(
+            json!({ "active_generation": 2, "seeded": false, "walked": { "mark": 7, "generation": 2 } })
+        ),
+        Some(None),
+        "malformed"
+    );
+    assert_eq!(
+        read(json!({ "active_generation": 2, "seeded": false, "walked": "k" })),
+        Some(None),
+        "malformed"
+    );
+    assert_eq!(
+        read(json!({ "seeded": false })),
+        None,
+        "a legacy doc with no generation"
+    );
+}

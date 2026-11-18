@@ -18,6 +18,10 @@
 //!   first one with both aliases in its create request, a rebuild's with
 //!   none (the old generation serves until the swap), and never the
 //!   convenience alias while another index holds it.
+//! - **A backfill checkpoint lives with its unseeded generation** (ADR 0012
+//!   stage 8b): kept across a start, forgotten on request, gone once the
+//!   generation is created anew, seeded or reindexed, and never written into
+//!   a missing meta doc.
 //! - **Indexes seed at once.** `mark_seeded` for several indexes, first seeds
 //!   and rebuilds alike, runs concurrently on one sink beside writes to other
 //!   indexes: each index ends on its own generation, alone, seeded, and no
@@ -787,4 +791,93 @@ async fn a_crash_after_any_request_of_a_first_seed_recovers_on_restart() {
             return;
         }
     }
+}
+
+/// What `seeding` answers for `index`: `None` when seeded, else the recorded
+/// checkpoint (`Some(None)` for none).
+async fn walked(sink: &Buffered, index: &IndexName) -> Option<Option<String>> {
+    match sink.seeding(index).await.unwrap() {
+        sink::Seeding::Seeded => None,
+        sink::Seeding::Unseeded { walked } => Some(walked),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_backfill_checkpoint_lives_with_its_unseeded_generation() {
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let mapping = mapping("users", 1);
+    let index = mapping.index.clone();
+    let hash_alias = format!("users_{}", mapping.hash);
+    let gen1 = format!("{hash_alias}_1");
+
+    let run = sink(&base);
+    run.ensure_index(&mapping).await.unwrap();
+    assert_eq!(walked(&run, &index).await, Some(None));
+    run.record_walked(&index, "k1").await.unwrap();
+    run.record_walked(&index, "k2").await.unwrap();
+    assert_eq!(walked(&run, &index).await, Some(Some("k2".to_owned())));
+
+    let restarted = sink(&base);
+    restarted.ensure_index(&mapping).await.unwrap();
+    assert_eq!(
+        walked(&restarted, &index).await,
+        Some(Some("k2".to_owned())),
+        "a start over the existing unseeded generation keeps it"
+    );
+
+    restarted.forget_walked(&index).await.unwrap();
+    assert_eq!(walked(&restarted, &index).await, Some(None), "forgotten");
+    restarted.record_walked(&index, "k3").await.unwrap();
+
+    client
+        .delete(format!("{base}/{gen1}"))
+        .send()
+        .await
+        .unwrap();
+    let recreated = sink(&base);
+    recreated.ensure_index(&mapping).await.unwrap();
+    assert_eq!(
+        walked(&recreated, &index).await,
+        Some(None),
+        "a generation created anew holds nothing, so neither does its checkpoint"
+    );
+
+    recreated.record_walked(&index, "k4").await.unwrap();
+    write(&recreated, &index, &[1]).await;
+    recreated.mark_seeded(&index).await.unwrap();
+    assert_eq!(walked(&recreated, &index).await, None, "seeded");
+    assert_eq!(marker(&client, &base, &hash_alias).await, (1, true));
+    recreated.record_walked(&index, "stray").await.unwrap();
+    assert_eq!(
+        walked(&recreated, &index).await,
+        None,
+        "a stray record never unseeds a seeded index"
+    );
+
+    recreated.reindex(&mapping).await.unwrap();
+    let rebuilding = sink(&base);
+    rebuilding.ensure_index(&mapping).await.unwrap();
+    assert_eq!(
+        walked(&rebuilding, &index).await,
+        Some(None),
+        "a reindex starts the new generation's walk from the first key"
+    );
+    rebuilding.record_walked(&index, "r1").await.unwrap();
+    assert_eq!(
+        walked(&rebuilding, &index).await,
+        Some(Some("r1".to_owned()))
+    );
+
+    client
+        .delete(format!("{base}/flusso_meta"))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        rebuilding.record_walked(&index, "r2").await.is_err(),
+        "a record creates no meta doc"
+    );
 }

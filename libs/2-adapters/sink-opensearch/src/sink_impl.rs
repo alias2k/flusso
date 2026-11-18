@@ -8,7 +8,8 @@ use std::collections::BTreeSet;
 
 use async_trait::async_trait;
 use kernel::{Envelope, IndexMapping, IndexName, Op};
-use sink::{CaughtUp, RejectedDocument, Result, Sink, SinkError, Visibility, WriteReport};
+use serde_json::{Value, json};
+use sink::{CaughtUp, RejectedDocument, Result, Seeding, Sink, SinkError, Visibility, WriteReport};
 use tracing::{debug, info, warn};
 
 use crate::bulk::{BulkAction, bulk_action_fragment, plan_chunks, refused_id, render_document};
@@ -67,7 +68,8 @@ impl Sink for OpensearchSink {
             )));
         }
 
-        let (generation, mut seeded) = match self.read_index_meta(&hash_alias).await? {
+        let meta = self.read_index_meta(&hash_alias).await?;
+        let (generation, mut seeded) = match meta {
             Some(state) => state,
             None => {
                 let generation =
@@ -107,6 +109,7 @@ impl Sink for OpensearchSink {
         // mark_seeded swaps them, so reads never hit a half-built index.
         let first = held(&holders, &hash_alias).is_empty();
 
+        let mut created = false;
         if !exists {
             // The aliases this generation takes anyway, attached at creation:
             // one cluster-state update instead of one per alias. Never the
@@ -119,7 +122,8 @@ impl Sink for OpensearchSink {
                     attached.push(&convenience);
                 }
             }
-            if self.create_index(&index, mapping, &attached).await? {
+            created = self.create_index(&index, mapping, &attached).await?;
+            if created {
                 for alias in attached {
                     holders.insert(alias.to_owned(), vec![index.clone()]);
                 }
@@ -131,8 +135,11 @@ impl Sink for OpensearchSink {
         }
 
         // Persist the active generation for an unseeded index, so a resumed run
-        // targets the same one. A seeded index already has correct meta.
-        if !seeded {
+        // targets the same one. A seeded index already has correct meta. An
+        // unseeded generation that already existed keeps its doc as it is, so
+        // its backfill checkpoint (`walked`) survives the start; one created
+        // now holds nothing, so its doc is rewritten without one.
+        if !seeded && (meta.is_none() || created || meta.is_some_and(|(_, was)| was)) {
             self.write_index_meta(&hash_alias, generation, false)
                 .await?;
         }
@@ -328,6 +335,47 @@ impl Sink for OpensearchSink {
             .read_index_meta(&target.hash_alias)
             .await?
             .is_some_and(|(_, seeded)| seeded))
+    }
+
+    async fn seeding(&self, index: &IndexName) -> Result<Seeding> {
+        let Some(target) = self.target(index.as_ref()) else {
+            return Ok(Seeding::Unseeded { walked: None });
+        };
+        Ok(match self.read_meta(&target.hash_alias).await? {
+            Some(meta) if meta.seeded => Seeding::Seeded,
+            Some(meta) => Seeding::Unseeded {
+                walked: meta.walked,
+            },
+            None => Seeding::Unseeded { walked: None },
+        })
+    }
+
+    /// A partial update of the index's meta doc, naming the active
+    /// generation, so a later reindex (a new generation) or seed (whose
+    /// read ignores it) leaves it unread.
+    async fn record_walked(&self, index: &IndexName, mark: &str) -> Result<()> {
+        let logical = index.as_ref();
+        let Some(target) = self.target(logical) else {
+            return Err(SinkError::Write(format!(
+                "cannot record how far {logical}'s backfill got: it has no active generation"
+            )));
+        };
+        let generation = parse_generation(&target.hash_alias, &target.generation).unwrap_or(1);
+        self.update_walked(
+            &target.hash_alias,
+            json!({ "mark": mark, "generation": generation }),
+        )
+        .await
+    }
+
+    async fn forget_walked(&self, index: &IndexName) -> Result<()> {
+        let Some(target) = self.target(index.as_ref()) else {
+            return Ok(());
+        };
+        if self.read_meta(&target.hash_alias).await?.is_none() {
+            return Ok(());
+        }
+        self.update_walked(&target.hash_alias, Value::Null).await
     }
 
     /// Record that `index`'s active generation has been seeded, and make it the
