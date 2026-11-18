@@ -178,14 +178,18 @@ impl MockDocuments {
     }
 }
 
-/// The page of `rows` after `after` (by position: `rows` is in walk order).
-fn page_of(rows: &[RowKey], after: Option<&RowKey>, limit: usize) -> Vec<RowKey> {
-    let start = after.map_or(0, |after| {
-        rows.iter()
-            .position(|row| row == after)
-            .map_or(rows.len(), |at| at + 1)
-    });
-    rows.iter().skip(start).take(limit).cloned().collect()
+/// The page of `rows` after `after`, up to and including `through` (by
+/// position: `rows` is in walk order).
+fn page_of(rows: &[RowKey], after: Option<&RowKey>, through: &RowKey, limit: usize) -> Vec<RowKey> {
+    let position = |key: &RowKey| rows.iter().position(|row| row == key);
+    let start = after.map_or(0, |after| position(after).map_or(rows.len(), |at| at + 1));
+    let end = position(through).map_or(rows.len(), |at| at + 1);
+    rows.iter()
+        .take(end)
+        .skip(start)
+        .take(limit)
+        .cloned()
+        .collect()
 }
 
 #[async_trait]
@@ -240,16 +244,21 @@ impl DocumentBuilder for MockDocuments {
         vec![users()]
     }
 
+    async fn last_key(&self, _index: &IndexName) -> source::Result<Option<RowKey>> {
+        Ok(self.rows.last().cloned())
+    }
+
     async fn keys(
         &self,
         _index: &IndexName,
         after: Option<&RowKey>,
+        through: &RowKey,
         limit: usize,
     ) -> source::Result<Vec<RowKey>> {
         if after.is_none() {
             self.events.lock().unwrap().push("keys users".to_owned());
         }
-        Ok(page_of(&self.rows, after, limit))
+        Ok(page_of(&self.rows, after, through, limit))
     }
 
     async fn index_mappings(&self) -> source::Result<Vec<IndexMapping>> {

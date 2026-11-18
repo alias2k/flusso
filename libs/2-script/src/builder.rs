@@ -100,13 +100,18 @@ impl DocumentBuilder for ScriptedBuilder {
         self.inner.backfill_indexes()
     }
 
+    async fn last_key(&self, index: &IndexName) -> Result<Option<RowKey>> {
+        self.inner.last_key(index).await
+    }
+
     async fn keys(
         &self,
         index: &IndexName,
         after: Option<&RowKey>,
+        through: &RowKey,
         limit: usize,
     ) -> Result<Vec<RowKey>> {
-        self.inner.keys(index, after, limit).await
+        self.inner.keys(index, after, through, limit).await
     }
 
     async fn index_mappings(&self) -> Result<Vec<IndexMapping>> {

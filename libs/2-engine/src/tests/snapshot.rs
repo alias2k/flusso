@@ -104,16 +104,34 @@ impl ChangeCapture for QuietSource {
 /// the rows of each index's root table, recording every page asked for.
 #[derive(Debug, Default)]
 struct RelatedDocuments {
-    rows: Vec<ChangeEvent>,
+    rows: Mutex<Vec<ChangeEvent>>,
+    /// Users added past the greatest key after every page read: a writer
+    /// outrunning the walk.
+    grow: usize,
     resolved: Mutex<usize>,
     built: Mutex<Vec<DocumentId>>,
     pages: Mutex<Vec<(String, Option<i64>)>>,
 }
 
 impl RelatedDocuments {
+    /// Every key of `index_name`'s root table now, in walk order.
+    fn root_keys(&self, index_name: &IndexName) -> Vec<RowKey> {
+        let root = match index_name.as_ref() {
+            "users" | "accounts" => "users",
+            other => other,
+        };
+        self.rows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|row| row.table().as_ref() == root)
+            .map(|row| row.key().clone())
+            .collect()
+    }
+
     fn new(rows: Vec<ChangeEvent>) -> Self {
         Self {
-            rows,
+            rows: Mutex::new(rows),
             ..Self::default()
         }
     }
@@ -176,27 +194,33 @@ impl DocumentBuilder for RelatedDocuments {
             .collect()
     }
 
+    async fn last_key(&self, index_name: &IndexName) -> source::Result<Option<RowKey>> {
+        Ok(self.root_keys(index_name).last().cloned())
+    }
+
     async fn keys(
         &self,
         index_name: &IndexName,
         after: Option<&RowKey>,
+        through: &RowKey,
         limit: usize,
     ) -> source::Result<Vec<RowKey>> {
         self.pages
             .lock()
             .unwrap()
             .push((index_name.to_string(), after.map(id_of)));
-        let root = match index_name.as_ref() {
-            "users" | "accounts" => "users",
-            other => other,
-        };
-        let keys: Vec<RowKey> = self
-            .rows
+        let page = super::page_of(&self.root_keys(index_name), after, through, limit);
+        let mut rows = self.rows.lock().unwrap();
+        let next = rows
             .iter()
-            .filter(|row| row.table().as_ref() == root)
-            .map(|row| row.key().clone())
-            .collect();
-        Ok(super::page_of(&keys, after, limit))
+            .filter(|row| row.table().as_ref() == "users")
+            .map(|row| id_of(row.key()))
+            .max()
+            .unwrap_or(0);
+        for user in 1..=i64::try_from(self.grow).unwrap() {
+            rows.push(row("users", next + user));
+        }
+        Ok(page)
     }
 }
 
@@ -443,5 +467,37 @@ async fn indexes_are_walked_one_after_another_each_from_its_start() {
             ("orders".to_owned(), None),
             ("users".to_owned(), None),
         ]
+    );
+}
+
+#[tokio::test]
+async fn a_walk_ends_at_the_greatest_key_its_index_had_when_it_started() {
+    let total = i64::try_from(2 * KEY_PAGE + 100).unwrap();
+    let page = i64::try_from(KEY_PAGE).unwrap();
+    let documents = Arc::new(RelatedDocuments {
+        grow: KEY_PAGE,
+        ..RelatedDocuments::new(users(total))
+    });
+    let sinks = [(
+        sink_name("a"),
+        Arc::new(IndexSink::seeded(&["accounts", "orders"])),
+    )];
+    backfill(&documents, &sinks, 256).await;
+
+    assert_eq!(
+        *documents.pages.lock().unwrap(),
+        [
+            ("users".to_owned(), None),
+            ("users".to_owned(), Some(page)),
+            ("users".to_owned(), Some(2 * page)),
+        ],
+        "a full page of new greatest keys after every page doesn't keep the walk going"
+    );
+    let applied = sorted(sinks[0].1.applied.lock().unwrap().clone());
+    let expected: Vec<String> = (1..=total).map(|user| format!("users {user}")).collect();
+    assert_eq!(
+        applied,
+        sorted(expected),
+        "every row there at the start, once; none added during the walk"
     );
 }

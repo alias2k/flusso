@@ -313,7 +313,8 @@ async fn a_migration_between_two_pages_waits_for_nothing() {
         .await
         .unwrap();
     let index = index_name("migrated");
-    let first = builder.keys(&index, None, 10).await.unwrap();
+    let through = builder.last_key(&index).await.unwrap().unwrap();
+    let first = builder.keys(&index, None, &through, 10).await.unwrap();
     assert_eq!(first.len(), 10);
 
     let migrate = tokio::time::timeout(Duration::from_secs(5), async {
@@ -329,7 +330,10 @@ async fn a_migration_between_two_pages_waits_for_nothing() {
         "the migration waited on the backfill: {migrate:?}"
     );
 
-    let rest = builder.keys(&index, first.last(), 1024).await.unwrap();
+    let rest = builder
+        .keys(&index, first.last(), &through, 1024)
+        .await
+        .unwrap();
     assert_eq!(first.len() + rest.len(), 100);
 }
 
@@ -338,18 +342,36 @@ fn sorted(mut keys: Vec<RowKey>) -> Vec<RowKey> {
     keys
 }
 
-/// Every key of `table`'s index, `limit` at a time, as the engine walks them.
+/// Every key of `table`'s index, `limit` at a time, as the engine walks
+/// them: up to the greatest key when the walk starts.
 async fn walk(builder: &PgDocumentBuilder, table: &str, limit: usize) -> Vec<RowKey> {
+    walk_while(builder, table, limit, async |_: &[RowKey]| {}).await
+}
+
+/// [`walk`], running `between` after every page with the keys read so far.
+async fn walk_while(
+    builder: &PgDocumentBuilder,
+    table: &str,
+    limit: usize,
+    mut between: impl AsyncFnMut(&[RowKey]),
+) -> Vec<RowKey> {
     let index = index_name(table);
     let mut keys: Vec<RowKey> = Vec::new();
+    let Some(through) = builder.last_key(&index).await.unwrap() else {
+        return keys;
+    };
     loop {
-        let page = builder.keys(&index, keys.last(), limit).await.unwrap();
+        let page = builder
+            .keys(&index, keys.last(), &through, limit)
+            .await
+            .unwrap();
         assert!(page.len() <= limit, "a page of {limit} held {}", page.len());
         let last = page.len() < limit;
         keys.extend(page);
         if last {
             return keys;
         }
+        between(&keys).await;
     }
 }
 
@@ -496,4 +518,138 @@ fn column(name: &str) -> ColumnName {
 
 fn index_name(name: &str) -> IndexName {
     IndexName::try_new(name).unwrap()
+}
+
+/// The walk ends at the greatest key it found when it started (review of
+/// #386 stage 3): a writer adding a page of greater keys after every page
+/// read, and the bound's own row deleted mid-walk, both end it where it
+/// began, with every row that was there and is still there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_walk_ends_at_the_greatest_key_it_found_when_it_started() {
+    let container = test_postgres::image().start().await.unwrap();
+    let url = url(&container).await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for table in ["grows", "shrinks"] {
+        execute(
+            &pool,
+            &format!(
+                "CREATE TABLE {table} (id int8 PRIMARY KEY, name text); \
+                 INSERT INTO {table} SELECT g, g::text FROM generate_series(1, 10) g"
+            ),
+        )
+        .await
+        .unwrap();
+    }
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec(&["grows", "shrinks"])))
+        .await
+        .unwrap();
+
+    let mut added = 0;
+    let keys = walk_while(&builder, "grows", 2, async |_: &[RowKey]| {
+        for _ in 0..2 {
+            added += 1;
+            execute(
+                &pool,
+                &format!("INSERT INTO grows VALUES ({}, 'new')", 100 + added),
+            )
+            .await
+            .unwrap();
+        }
+    })
+    .await;
+    assert_eq!(names_of(&builder, "grows", &keys).await, names(1..=10));
+    assert_eq!(
+        added, 10,
+        "a page of greater keys after each of the five full pages"
+    );
+
+    let mut deleted = false;
+    let keys = walk_while(&builder, "shrinks", 3, async |_: &[RowKey]| {
+        if !deleted {
+            deleted = true;
+            execute(&pool, "DELETE FROM shrinks WHERE id = 10")
+                .await
+                .unwrap();
+        }
+    })
+    .await;
+    assert_eq!(names_of(&builder, "shrinks", &keys).await, names(1..=9));
+}
+
+fn names(range: std::ops::RangeInclusive<i64>) -> Vec<String> {
+    let mut names: Vec<String> = range.map(|n| n.to_string()).collect();
+    names.sort_by_key(|name| name.parse::<i64>().unwrap());
+    names
+}
+
+/// The walk reads a key whose operators sit off the search path through its
+/// primary key index, page after page: no page scans the table.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_key_whose_operators_are_off_the_search_path_is_walked_through_its_index() {
+    let container = test_postgres::image().start().await.unwrap();
+    let url = url(&container).await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE SCHEMA ext",
+        "CREATE EXTENSION citext SCHEMA ext",
+        "CREATE TABLE scanned (id ext.citext PRIMARY KEY, name text)",
+        "INSERT INTO scanned SELECT 'k' || g, g::text FROM generate_series(1, 5000) g",
+        "ANALYZE scanned",
+    ] {
+        execute(&pool, statement).await.unwrap();
+    }
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec(&["scanned"])))
+        .await
+        .unwrap();
+    let scans = async || -> (i64, i64) {
+        sqlx::query_as(
+            "SELECT coalesce(seq_scan, 0), coalesce(idx_scan, 0) FROM pg_stat_user_tables \
+             WHERE relname = 'scanned'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    // The setup's own counters (the primary key's build scans the table
+    // once) arrive when its session reports them: wait for its inserts.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let inserted: i64 = sqlx::query_scalar(
+            "SELECT coalesce(n_tup_ins, 0) FROM pg_stat_user_tables WHERE relname = 'scanned'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if inserted == 5000 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the setup's statistics never arrived"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let (seq_before, idx_before) = scans().await;
+    let keys = walk(&builder, "scanned", 100).await;
+    assert_eq!(keys.len(), 5000);
+    // A backend reports its table counters at the latest once idle for ten
+    // seconds; the walk's index scans showing up means its seq scans would.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let (seq_after, idx_after) = loop {
+        let (seq, idx) = scans().await;
+        if idx >= idx_before + 51 || std::time::Instant::now() > deadline {
+            break (seq, idx);
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    assert!(
+        idx_after >= idx_before + 51,
+        "the bound and every page read the index: {idx_before} → {idx_after}"
+    );
+    assert_eq!(
+        seq_after, seq_before,
+        "no page scanned the table (index scans {idx_before} → {idx_after})"
+    );
 }

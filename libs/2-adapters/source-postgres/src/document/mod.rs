@@ -361,6 +361,12 @@ pub struct PgDocumentBuilder {
     /// Indexes whose backfill was skipped (`keys`), so the warning is logged
     /// once per index.
     unwalked_warned: Arc<Mutex<HashSet<IndexName>>>,
+    /// Each walked root table's key operators (`keys.rs`), cached until a
+    /// page fails.
+    walk_operators: Arc<Mutex<HashMap<(String, String), query::WalkOperators>>>,
+    /// Indexes whose walk sorts every page (operators the role may not
+    /// name), so the warning is logged once per index.
+    sorting_warned: Arc<Mutex<HashSet<IndexName>>>,
 }
 
 /// Each root `(schema, table)`'s catalog facts.
@@ -407,6 +413,8 @@ impl PgDocumentBuilder {
             unread_warned: Arc::new(RwLock::new(HashSet::new())),
             keyless_warned: Arc::new(Mutex::new(HashSet::new())),
             unwalked_warned: Arc::new(Mutex::new(HashSet::new())),
+            walk_operators: Arc::default(),
+            sorting_warned: Arc::default(),
         }
     }
 
@@ -1561,14 +1569,20 @@ impl DocumentBuilder for PgDocumentBuilder {
         self.spec.indexes().map(|(name, _)| name.clone()).collect()
     }
 
+    #[tracing::instrument(name = "pg.last_key", level = "debug", skip_all, fields(%index))]
+    async fn last_key(&self, index: &IndexName) -> Result<Option<RowKey>> {
+        self.greatest_key(index).await
+    }
+
     #[tracing::instrument(name = "pg.keys", level = "debug", skip_all, fields(%index, limit))]
     async fn keys(
         &self,
         index: &IndexName,
         after: Option<&RowKey>,
+        through: &RowKey,
         limit: usize,
     ) -> Result<Vec<RowKey>> {
-        self.key_page(index, after, limit).await
+        self.key_page(index, after, through, limit).await
     }
 
     async fn index_mappings(&self) -> Result<Vec<IndexMapping>> {

@@ -290,14 +290,15 @@ async fn expected(url: &str, pool: &PgPool, indexes: &[&str]) -> Vec<String> {
 
 /// Reverse-resolution statements run since the last reset: a `SELECT` from a
 /// watched table that builds no document. Every document query selects
-/// `"document"`, and every key page orders `USING <`.
+/// `"document"`, and a backfill's key pages and its bound order `USING` the
+/// key's own operator.
 async fn reverse_lookups(pool: &PgPool) -> i64 {
     sqlx::query_scalar(
         "SELECT coalesce(sum(calls), 0)::int8 FROM pg_stat_statements \
          WHERE query LIKE 'SELECT %' \
            AND query ~ 'FROM \"public\"\\.\"(users|orders|categories)\"' \
            AND query NOT LIKE '%\"document\"%' \
-           AND query NOT LIKE '%USING <%'",
+           AND query NOT LIKE '%USING%'",
     )
     .fetch_one(pool)
     .await

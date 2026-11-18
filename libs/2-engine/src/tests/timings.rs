@@ -105,14 +105,19 @@ impl DocumentBuilder for SlowDocuments {
         self.0.backfill_indexes()
     }
 
+    async fn last_key(&self, index: &IndexName) -> source::Result<Option<RowKey>> {
+        self.0.last_key(index).await
+    }
+
     async fn keys(
         &self,
         index: &IndexName,
         after: Option<&RowKey>,
+        through: &RowKey,
         limit: usize,
     ) -> source::Result<Vec<RowKey>> {
         tokio::time::sleep(PAGE_FETCH).await;
-        self.0.keys(index, after, limit).await
+        self.0.keys(index, after, through, limit).await
     }
 
     async fn index_mappings(&self) -> source::Result<Vec<IndexMapping>> {

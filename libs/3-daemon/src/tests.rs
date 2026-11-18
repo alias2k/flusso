@@ -531,10 +531,15 @@ impl DocumentBuilder for ScriptedDocuments {
         vec![users()]
     }
 
+    async fn last_key(&self, _: &IndexName) -> source::Result<Option<RowKey>> {
+        Ok(Some(row_event(false, 11).key().clone()))
+    }
+
     async fn keys(
         &self,
         _: &IndexName,
         after: Option<&RowKey>,
+        _: &RowKey,
         _: usize,
     ) -> source::Result<Vec<RowKey>> {
         if after.is_some() {

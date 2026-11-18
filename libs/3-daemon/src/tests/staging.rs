@@ -51,10 +51,15 @@ impl DocumentBuilder for ManyIndexes {
         (0..INDEXES).map(index).collect()
     }
 
+    async fn last_key(&self, _: &IndexName) -> source::Result<Option<RowKey>> {
+        Ok(None)
+    }
+
     async fn keys(
         &self,
         _: &IndexName,
         _: Option<&RowKey>,
+        _: &RowKey,
         _: usize,
     ) -> source::Result<Vec<RowKey>> {
         Ok(Vec::new())

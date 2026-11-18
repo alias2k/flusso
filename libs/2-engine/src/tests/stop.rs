@@ -167,13 +167,18 @@ impl DocumentBuilder for GatedDocuments {
         self.inner.backfill_indexes()
     }
 
+    async fn last_key(&self, index: &kernel::IndexName) -> source::Result<Option<RowKey>> {
+        self.inner.last_key(index).await
+    }
+
     async fn keys(
         &self,
         index: &kernel::IndexName,
         after: Option<&RowKey>,
+        through: &RowKey,
         limit: usize,
     ) -> source::Result<Vec<RowKey>> {
-        self.inner.keys(index, after, limit).await
+        self.inner.keys(index, after, through, limit).await
     }
 
     async fn index_mappings(&self) -> source::Result<Vec<kernel::IndexMapping>> {
@@ -209,10 +214,16 @@ impl DocumentBuilder for HangingKeys {
         self.inner.backfill_indexes()
     }
 
+    async fn last_key(&self, _index: &kernel::IndexName) -> source::Result<Option<RowKey>> {
+        self.asked.store(true, Ordering::SeqCst);
+        std::future::pending().await
+    }
+
     async fn keys(
         &self,
         _index: &kernel::IndexName,
         _after: Option<&RowKey>,
+        _through: &RowKey,
         _limit: usize,
     ) -> source::Result<Vec<RowKey>> {
         self.asked.store(true, Ordering::SeqCst);
@@ -789,13 +800,18 @@ impl DocumentBuilder for StopsWhileResolving {
         self.inner.backfill_indexes()
     }
 
+    async fn last_key(&self, index: &kernel::IndexName) -> source::Result<Option<RowKey>> {
+        self.inner.last_key(index).await
+    }
+
     async fn keys(
         &self,
         index: &kernel::IndexName,
         after: Option<&RowKey>,
+        through: &RowKey,
         limit: usize,
     ) -> source::Result<Vec<RowKey>> {
-        self.inner.keys(index, after, limit).await
+        self.inner.keys(index, after, through, limit).await
     }
 
     async fn index_mappings(&self) -> source::Result<Vec<kernel::IndexMapping>> {

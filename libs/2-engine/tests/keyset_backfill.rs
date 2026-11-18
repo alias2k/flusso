@@ -55,6 +55,12 @@ const PARENTS: i64 = 50;
 struct LastWrite {
     state: Mutex<BTreeMap<(String, String), String>>,
     seeded: Mutex<BTreeSet<String>>,
+    /// How many upserts each `(index, id)` got.
+    upserts: Mutex<BTreeMap<(String, String), usize>>,
+    /// How long each write of backfill documents is held before it lands.
+    hold_backfill: Duration,
+    /// `(index, id, live, started, landed)` of every document written.
+    writes: Mutex<Vec<(String, String, bool, Instant, Instant)>>,
 }
 
 #[async_trait]
@@ -64,13 +70,25 @@ impl Sink for LastWrite {
         envelopes: &[Envelope],
         _caught_up: bool,
     ) -> SinkResult<sink::WriteReport> {
+        let started = Instant::now();
+        let live = envelopes.iter().any(|envelope| envelope.position.is_some());
+        if !live && !self.hold_backfill.is_zero() {
+            tokio::time::sleep(self.hold_backfill).await;
+        }
         let mut state = self.state.lock().unwrap();
+        let mut upserts = self.upserts.lock().unwrap();
+        let mut writes = self.writes.lock().unwrap();
         for envelope in envelopes {
+            let id = (envelope.index.to_string(), envelope.id.clone());
             let written = match &envelope.document {
-                Some(document) => format!("upsert {}", sink::to_json(document)),
+                Some(document) => {
+                    *upserts.entry(id.clone()).or_default() += 1;
+                    format!("upsert {}", sink::to_json(document))
+                }
                 None => "delete".to_owned(),
             };
-            state.insert((envelope.index.to_string(), envelope.id.clone()), written);
+            writes.push((id.0.clone(), id.1.clone(), live, started, Instant::now()));
+            state.insert(id, written);
         }
         Ok(sink::WriteReport::clean())
     }
@@ -92,8 +110,22 @@ impl Sink for LastWrite {
 struct WritesAfterEachPage {
     inner: PgDocumentBuilder,
     pool: PgPool,
-    pages: AtomicUsize,
+    pages: Arc<AtomicUsize>,
     stop: Option<(usize, Stop)>,
+    mode: Mode,
+    /// A row of `items` and a statement run once, right after the first
+    /// batch holding that row's document is built.
+    after_build: Mutex<Option<(i64, String)>>,
+}
+
+/// What [`WritesAfterEachPage`] writes after each full page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// [`writes`]: every kind of write around the cursor.
+    Around,
+    /// A full page of new greatest keys: a writer outrunning the walk.
+    Ahead,
+    Nothing,
 }
 
 #[async_trait]
@@ -113,24 +145,51 @@ impl DocumentBuilder for WritesAfterEachPage {
     }
 
     async fn build_many(&self, ids: &[DocumentId]) -> source::Result<Vec<Document>> {
-        self.inner.build_many(ids).await
+        let built = self.inner.build_many(ids).await?;
+        let fire = {
+            let mut armed = self.after_build.lock().unwrap();
+            let holds = |row: i64| {
+                ids.iter()
+                    .any(|id| id.index.as_ref() == "items" && id_of(&id.key) == row)
+            };
+            match armed.as_ref() {
+                Some((row, _)) if holds(*row) => armed.take(),
+                _ => None,
+            }
+        };
+        if let Some((_, statement)) = fire {
+            sqlx::query(sqlx::AssertSqlSafe(statement))
+                .execute(&self.pool)
+                .await
+                .unwrap();
+        }
+        Ok(built)
     }
 
     fn backfill_indexes(&self) -> Vec<IndexName> {
         self.inner.backfill_indexes()
     }
 
+    async fn last_key(&self, index: &IndexName) -> source::Result<Option<RowKey>> {
+        self.inner.last_key(index).await
+    }
+
     async fn keys(
         &self,
         index: &IndexName,
         after: Option<&RowKey>,
+        through: &RowKey,
         limit: usize,
     ) -> source::Result<Vec<RowKey>> {
-        let page = self.inner.keys(index, after, limit).await?;
+        let page = self.inner.keys(index, after, through, limit).await?;
         let walked_by_writes = matches!(index.as_ref(), "items" | "live_items");
         if let (true, true, Some(last)) = (walked_by_writes, page.len() == limit, page.last()) {
             let n = self.pages.fetch_add(1, Ordering::SeqCst);
-            writes(&self.pool, n, id_of(last)).await;
+            match self.mode {
+                Mode::Around => writes(&self.pool, n, id_of(last)).await,
+                Mode::Ahead => ahead(&self.pool, n, limit).await,
+                Mode::Nothing => {}
+            }
             if let Some((at, stop)) = &self.stop
                 && n + 1 == *at
             {
@@ -150,6 +209,19 @@ fn id_of(key: &RowKey) -> i64 {
         Some((_, kernel::GenericValue::BigInt(id))) => *id,
         other => panic!("not an int8 key: {other:?}"),
     }
+}
+
+/// The `n`th page of new greatest keys: `limit` rows past every key.
+async fn ahead(pool: &PgPool, n: usize, limit: usize) {
+    let first = 1_000_000 + n * limit;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO items (id, parent_id, label) \
+         SELECT g, g % {PARENTS} + 1, 'ahead' FROM generate_series({first}, {}) g",
+        first + limit - 1
+    )))
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 /// The `n`th set of writes, around `k`, the last key of the page just read.
@@ -431,6 +503,42 @@ async fn run(
     pages: &Arc<AtomicUsize>,
     stop_after: Option<usize>,
 ) -> Option<Engines> {
+    let plan = Plan {
+        stop_after,
+        ..Plan::default()
+    };
+    run_with(port, url, pool, sink, pages, plan).await
+}
+
+/// How a run writes during its walk and how its sink writes.
+struct Plan {
+    stop_after: Option<usize>,
+    mode: Mode,
+    after_build: Option<(i64, String)>,
+    /// Writes the sink engine keeps in flight.
+    writes: usize,
+}
+
+impl Default for Plan {
+    fn default() -> Self {
+        Self {
+            stop_after: None,
+            mode: Mode::Around,
+            after_build: None,
+            writes: 1,
+        }
+    }
+}
+
+async fn run_with(
+    port: u16,
+    url: &str,
+    pool: &PgPool,
+    sink: &Arc<LastWrite>,
+    pages: &Arc<AtomicUsize>,
+    plan: Plan,
+) -> Option<Engines> {
+    let stop_after = plan.stop_after;
     let stop = Stop::new();
     let inner = PgDocumentBuilder::connect(url, Arc::new(spec()))
         .await
@@ -438,8 +546,10 @@ async fn run(
     let documents: Arc<dyn DocumentBuilder> = Arc::new(WritesAfterEachPage {
         inner,
         pool: pool.clone(),
-        pages: AtomicUsize::new(pages.load(Ordering::SeqCst)),
+        pages: Arc::clone(pages),
         stop: stop_after.map(|at| (at, stop.clone())),
+        mode: plan.mode,
+        after_build: Mutex::new(plan.after_build),
     });
     let capture: Arc<dyn ChangeCapture> =
         Arc::new(WalChangeCapture::new(replication(port), url.to_owned()));
@@ -455,6 +565,7 @@ async fn run(
         mappings,
     )
     .with_progress(Arc::clone(&progress))
+    .with_writes(plan.writes)
     .with_stop(stop.clone());
     sink_engine.stage(continuity).await.unwrap();
     let ingest = IngestEngine::new(capture, documents, stream, vec![name])
@@ -570,4 +681,95 @@ async fn a_backfill_stopped_mid_walk_is_walked_again_and_lands_every_row() {
     let engines = run(port, &url, &pool, &sink, &pages, None).await.unwrap();
     settles(&url, &pool, &sink).await;
     engines.abort();
+}
+
+/// A writer adding a full page of new greatest keys after every page read
+/// doesn't keep the walk going (review of #386 stage 3): the walk ends at the
+/// greatest key it found when it started, and the rows added during it reach
+/// the index through the live stream alone. Every `items` document is built
+/// once: a row there at the walk's start by its page, a row added during it
+/// by its insert.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn rows_added_ahead_of_the_walk_end_it_where_it_began_and_are_built_once() {
+    let (_container, port, url, pool) = database(false).await;
+    let sink = Arc::new(LastWrite::default());
+    let pages = Arc::new(AtomicUsize::new(0));
+    let plan = Plan {
+        mode: Mode::Ahead,
+        ..Plan::default()
+    };
+    let engines = run_with(port, &url, &pool, &sink, &pages, plan)
+        .await
+        .unwrap();
+    settles(&url, &pool, &sink).await;
+    engines.abort();
+
+    // `items` is walked first: its 5,000 rows are 4 full pages and a short
+    // one. `live_items` starts after it and finds the 4 pages added meanwhile
+    // too: 9,096 rows, 8 full pages and a short one.
+    let page = engine::KEY_PAGE;
+    let items = usize::try_from(ITEMS).unwrap() / page;
+    let live_items = (usize::try_from(ITEMS).unwrap() + items * page) / page;
+    assert_eq!(
+        pages.load(Ordering::SeqCst),
+        items + live_items,
+        "each walk reads the rows it found at its start, not the pages added during it"
+    );
+    let twice: Vec<_> = sink
+        .upserts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|((index, _), count)| index == "items" && **count > 1)
+        .map(|(id, count)| format!("{id:?} ×{count}"))
+        .take(10)
+        .collect();
+    assert!(twice.is_empty(), "built more than once: {twice:?}");
+}
+
+/// A page's document built before a write to its row, written while a live
+/// rebuild of that row waits behind it: with four writes in flight and the
+/// backfill's writes held, the live document still lands last and stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_live_rebuild_lands_after_the_held_page_write_it_overtook() {
+    let (_container, port, url, pool) = database(false).await;
+    let sink = Arc::new(LastWrite {
+        hold_backfill: Duration::from_millis(500),
+        ..LastWrite::default()
+    });
+    let pages = Arc::new(AtomicUsize::new(0));
+    let plan = Plan {
+        mode: Mode::Nothing,
+        after_build: Some((5, "UPDATE items SET label = 'live' WHERE id = 5".to_owned())),
+        writes: 4,
+        ..Plan::default()
+    };
+    let engines = run_with(port, &url, &pool, &sink, &pages, plan)
+        .await
+        .unwrap();
+    settles(&url, &pool, &sink).await;
+    engines.abort();
+
+    let state = sink.state.lock().unwrap();
+    let five = state.get(&("items".to_owned(), "5".to_owned())).unwrap();
+    assert!(five.contains("\"live\""), "the live document stays: {five}");
+    let writes = sink.writes.lock().unwrap();
+    let of_five: Vec<_> = writes
+        .iter()
+        .filter(|(index, id, ..)| index == "items" && id == "5")
+        .collect();
+    let page = of_five
+        .iter()
+        .find(|(.., live, _, _)| !live)
+        .expect("the page wrote it");
+    let rebuilt = of_five
+        .iter()
+        .find(|(.., live, _, _)| *live)
+        .expect("the live change rebuilt it");
+    assert!(
+        rebuilt.3 >= page.4,
+        "the live write started only once the held page write had landed"
+    );
 }

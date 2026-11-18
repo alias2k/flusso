@@ -194,13 +194,24 @@ pub(super) struct Walk {
     pub(super) documents: Arc<dyn DocumentBuilder>,
     /// The indexes still to walk, the one being walked first.
     pub(super) indexes: VecDeque<IndexName>,
+    /// Where the index being walked ends: its greatest key when its walk
+    /// started (`DocumentBuilder::last_key`). `None` until read.
+    pub(super) through: Option<RowKey>,
     /// The last key read of the index being walked: the next page follows it.
     pub(super) after: Option<RowKey>,
     /// Keys read and not yet buffered.
     pub(super) keys: VecDeque<RowKey>,
     /// Whether the keys in hand are the index's last.
     pub(super) last: bool,
-    pub(super) page: Option<BoxFuture<'static, source::Result<Vec<RowKey>>>>,
+    /// The read in flight: the walk's bound, then its pages.
+    pub(super) fetch: Option<BoxFuture<'static, source::Result<Fetched>>>,
+}
+
+/// What a walk's read brings back.
+pub(super) enum Fetched {
+    /// The index's greatest key when its walk starts; `None` for none.
+    Through(Option<RowKey>),
+    Page(Vec<RowKey>),
 }
 
 /// What the walk has for the loop.
@@ -219,14 +230,16 @@ impl Walk {
         Self {
             documents,
             indexes: indexes.into_iter().collect(),
+            through: None,
             after: None,
             keys: VecDeque::new(),
             last: false,
-            page: None,
+            fetch: None,
         }
     }
 
-    /// The next step: keys in hand at once, else the next page read.
+    /// The next step: keys in hand at once, else the next read: the front
+    /// index's bound when its walk starts, then its pages up to that bound.
     pub(super) async fn step(&mut self) -> source::Result<Step> {
         loop {
             if !self.keys.is_empty() {
@@ -234,24 +247,43 @@ impl Walk {
             }
             if self.last {
                 self.indexes.pop_front();
+                self.through = None;
                 self.after = None;
                 self.last = false;
             }
             let Some(index) = self.indexes.front() else {
                 return Ok(Step::Done);
             };
-            let page = self.page.get_or_insert_with(|| {
-                let documents = Arc::clone(&self.documents);
-                let index = index.clone();
-                let after = self.after.clone();
-                Box::pin(async move { documents.keys(&index, after.as_ref(), KEY_PAGE).await })
-            });
-            let keys = page.await;
-            self.page = None;
-            let keys = keys?;
-            self.last = keys.len() < KEY_PAGE;
-            self.after = keys.last().cloned().or(self.after.take());
-            self.keys.extend(keys);
+            let fetch =
+                self.fetch.get_or_insert_with(|| {
+                    let documents = Arc::clone(&self.documents);
+                    let index = index.clone();
+                    match &self.through {
+                        None => Box::pin(async move {
+                            documents.last_key(&index).await.map(Fetched::Through)
+                        }),
+                        Some(through) => {
+                            let (after, through) = (self.after.clone(), through.clone());
+                            Box::pin(async move {
+                                documents
+                                    .keys(&index, after.as_ref(), &through, KEY_PAGE)
+                                    .await
+                                    .map(Fetched::Page)
+                            })
+                        }
+                    }
+                });
+            let fetched = fetch.await;
+            self.fetch = None;
+            match fetched? {
+                Fetched::Through(None) => self.last = true,
+                Fetched::Through(Some(through)) => self.through = Some(through),
+                Fetched::Page(keys) => {
+                    self.last = keys.len() < KEY_PAGE;
+                    self.after = keys.last().cloned().or(self.after.take());
+                    self.keys.extend(keys);
+                }
+            }
         }
     }
 }

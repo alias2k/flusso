@@ -120,9 +120,18 @@ async fn changes_on_partitions_resolve_to_the_partitioned_tables_documents() {
     let builder = PgDocumentBuilder::connect(&url, Arc::clone(&spec))
         .await
         .unwrap();
-    let first = builder.keys(&index_name("events"), None, 1).await.unwrap();
+    let through = builder
+        .last_key(&index_name("events"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(through, row_key(1500), "the greatest key across partitions");
+    let first = builder
+        .keys(&index_name("events"), None, &through, 1)
+        .await
+        .unwrap();
     let rest = builder
-        .keys(&index_name("events"), first.last(), 1024)
+        .keys(&index_name("events"), first.last(), &through, 1024)
         .await
         .unwrap();
     assert_eq!(first, [row_key(1)]);

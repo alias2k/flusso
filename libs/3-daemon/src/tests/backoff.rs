@@ -399,10 +399,15 @@ impl DocumentBuilder for BackfillFailingAtOnePage {
         }])
     }
 
+    async fn last_key(&self, _: &IndexName) -> source::Result<Option<RowKey>> {
+        Ok(Some(row_event(false, i64::MAX).key().clone()))
+    }
+
     async fn keys(
         &self,
         _: &IndexName,
         after: Option<&RowKey>,
+        _through: &RowKey,
         limit: usize,
     ) -> source::Result<Vec<RowKey>> {
         if after.is_some() {

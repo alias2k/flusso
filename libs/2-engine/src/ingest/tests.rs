@@ -453,17 +453,23 @@ impl DocumentBuilder for Builder {
         vec![users()]
     }
 
+    async fn last_key(&self, _index: &IndexName) -> source::Result<Option<RowKey>> {
+        Ok(self.db.rows.checked_sub(1).map(key))
+    }
+
     async fn keys(
         &self,
         _index: &IndexName,
         after: Option<&RowKey>,
+        through: &RowKey,
         limit: usize,
     ) -> source::Result<Vec<RowKey>> {
         if let Some(delay) = self.behaviour.keys_delay {
             tokio::time::sleep(delay).await;
         }
         let start = after.map_or(0, |after| id_of(after) + 1);
-        Ok((start..self.db.rows).take(limit).map(key).collect())
+        let end = self.db.rows.min(id_of(through) + 1);
+        Ok((start..end).take(limit).map(key).collect())
     }
 
     async fn index_mappings(&self) -> source::Result<Vec<IndexMapping>> {

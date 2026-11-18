@@ -200,11 +200,23 @@ pub trait DocumentBuilder: std::fmt::Debug + Send + Sync {
     /// index with nothing.
     fn backfill_indexes(&self) -> Vec<IndexName>;
 
+    /// The greatest of `index`'s root keys now, in the order the pages walk;
+    /// `None` when it has none, or the source can't walk it.
+    ///
+    /// A walk reads it once, at its start, and ends there
+    /// ([`keys`](Self::keys)' `through`). That bounds it: a row whose key
+    /// is past it got that key after the walk started, which is after the
+    /// source's resume point existed, so the live stream delivers it. Without
+    /// a bound, writers adding keys ahead of the cursor keep the walk going,
+    /// and every such row is built twice.
+    async fn last_key(&self, index: &IndexName) -> Result<Option<RowKey>>;
+
     /// One page of `index`'s root keys for a backfill: up to `limit` keys,
     /// each the key of one document of `index`, from the start with `after`
     /// `None`, else the keys that follow `after` (the last key of the
-    /// previous page) in the order the pages walk. A page with fewer than
-    /// `limit` keys is the last.
+    /// previous page), never past `through` (the walk's [`last_key`](Self::last_key)),
+    /// in the order the pages walk. A page with fewer than `limit` keys is
+    /// the last.
     ///
     /// The engine builds each key as its own document, with no
     /// [`resolve`](Self::resolve). A key is read when its page is: a row that
@@ -216,6 +228,7 @@ pub trait DocumentBuilder: std::fmt::Debug + Send + Sync {
         &self,
         index: &IndexName,
         after: Option<&RowKey>,
+        through: &RowKey,
         limit: usize,
     ) -> Result<Vec<RowKey>>;
 

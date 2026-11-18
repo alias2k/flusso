@@ -238,17 +238,24 @@ impl DocumentBuilder for MockDocuments {
         vec![index()]
     }
 
+    async fn last_key(&self, _index: &IndexName) -> SourceResult<Option<RowKey>> {
+        Ok(self.rows.checked_sub(1).map(|last| key(last as i64)))
+    }
+
     async fn keys(
         &self,
         _index: &IndexName,
         after: Option<&RowKey>,
+        through: &RowKey,
         limit: usize,
     ) -> SourceResult<Vec<RowKey>> {
-        let start = after.map_or(0, |after| match after.0.first() {
-            Some((_, GenericValue::BigInt(id))) => usize::try_from(*id).unwrap() + 1,
+        let id = |key: &RowKey| match key.0.first() {
+            Some((_, GenericValue::BigInt(id))) => usize::try_from(*id).unwrap(),
             _ => self.rows,
-        });
-        Ok((start..self.rows.min(start + limit))
+        };
+        let start = after.map_or(0, |after| id(after) + 1);
+        let end = self.rows.min(id(through) + 1);
+        Ok((start..end.min(start + limit))
             .map(|i| key(i as i64))
             .collect())
     }
