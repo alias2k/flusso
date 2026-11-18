@@ -141,13 +141,16 @@ readinessProbe:
   periodSeconds: 10
   failureThreshold: 30
 
-resources: {}
+# Memory: built documents are held within `[concurrency] max_built_mib`
+# (default 512 MiB) until every sink acknowledges them. A limit, if you set
+# one, needs room for max_built_mib + `builds` batches (one batch of 256
+# documents is a few MiB) + about 100 MiB baseline, plus 10-20% for the
+# allocator. A limit below that can OOM-kill a deployment that runs today.
+resources:
+  requests:
+    memory: 512Mi
   # limits:
-  #   cpu: 500m
-  #   memory: 512Mi
-  # requests:
-  #   cpu: 100m
-  #   memory: 128Mi
+  #   memory: 768Mi
 
 podAnnotations: {}
 podLabels: {}

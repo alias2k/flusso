@@ -375,6 +375,40 @@
           "refId": "B"
         }
       ]
+    },
+    {
+      "id": 15,
+      "title": "Built documents held (bytes; the budget is [concurrency] max_built_mib)",
+      "description": "Heap of built documents not yet acknowledged by every sink, by work. Backfill holds at most half of the budget. A flat line at the budget means a sink isn't acknowledging and ingest is paced; the waits are batches that waited for room.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 52 },
+      "fieldConfig": {
+        "defaults": { "unit": "bytes" },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "B" },
+            "properties": [
+              { "id": "unit", "value": "short" },
+              { "id": "custom.axisPlacement", "value": "right" }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (work) (flusso_memory_built_bytes)",
+          "legendFormat": "{{work}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (work) (rate(flusso_memory_refused_total[5m]))",
+          "legendFormat": "{{work}} waits/s",
+          "refId": "B"
+        }
+      ]
     }
   ]
 }
