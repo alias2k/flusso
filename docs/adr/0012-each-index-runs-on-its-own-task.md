@@ -236,8 +236,9 @@ Chosen: **once, on the reader.** The alternative is to publish the row change an
 
 **Keyset backfill.**
 
-- `WHERE key > $last ORDER BY key LIMIT 1024`, with `$last` bound through `sql::key_cast`, and root filters and soft-delete on the page.
-- No shared snapshot is needed: the slot predates the backfill (#120), so every change made during it is in the WAL and rebuilt live.
+- `WHERE key > $last ORDER BY key LIMIT 1024`, with `$last` bound through `sql::key_cast`, one page of an index's root keys at a time.
+- The page reads the bare key. Root filters and soft-delete stay in the build, which turns a filtered-out row into a tombstone, as the cursor did. A filter on the page would make the page's plan depend on the filter, and a raw filter can read anything (#386 stage 3).
+- No shared snapshot is needed: the slot predates the backfill (#120), so every change made during it is in the WAL and rebuilt live. A page gives only ids: the document is read when it is built, and per document build order is lane order (section 2).
 
 **Memory: four rules** over heap bytes of built documents not yet acknowledged by every lane:
 
