@@ -417,6 +417,7 @@ async fn lanes_take_turns_so_a_backlog_on_one_index_does_not_starve_another() {
                 chrono::Utc::now(),
             )]
             .into(),
+            hold: Default::default(),
         })
     };
     let orders_lane = stream
@@ -490,6 +491,7 @@ async fn a_snapshot_complete_waits_only_for_its_own_lane() {
                 chrono::Utc::now(),
             )]
             .into(),
+            hold: Default::default(),
         })
     };
     let lane = |index: IndexName| {

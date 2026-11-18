@@ -510,6 +510,8 @@ struct Recorder {
     /// A budget and the most it may hold, checked at every write.
     watch: Mutex<Option<(Arc<Budget>, usize)>>,
     overdrawn: Mutex<Vec<usize>>,
+    /// The next write fails, once.
+    fail_next: AtomicBool,
 }
 
 impl Recorder {
@@ -568,6 +570,9 @@ impl Sink for Recorder {
                 break;
             }
             resumed.await;
+        }
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            return Err(sink::SinkError::Write("the write failed".to_owned()));
         }
         if let Some((budget, most)) = &*self.watch.lock().unwrap() {
             let held = budget.held().total;
@@ -760,13 +765,18 @@ impl Deployment {
     }
 
     /// Stage the sink (asking for a backfill when it is unseeded) and start
-    /// its engine.
+    /// its engine, run again after a failed run as the daemon runs it.
     async fn start_sink(&mut self) -> tokio::task::JoinHandle<crate::Result<()>> {
         let sink = self.sink.take().unwrap();
         sink.stage(Continuity::Resumed).await.unwrap();
         tokio::spawn(async move {
             let (_control, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
-            sink.run(&mut rx).await
+            loop {
+                match sink.run(&mut rx).await {
+                    Ok(()) => return Ok(()),
+                    Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                }
+            }
         })
     }
 
@@ -1478,7 +1488,6 @@ async fn tiny_budget_schedule(seed: u64, builds: usize) {
 /// once it is full; when the sink resumes, every batch lands and every byte
 /// comes back.
 #[tokio::test(start_paused = true)]
-#[ignore = "red until the published batch carries its charge (stage 5, after stage 7's items.rs)"]
 async fn a_stalled_sink_paces_builds_and_they_resume_when_it_does() {
     let db = Database::new(200, Vec::new());
     let builder = instant(&db);
@@ -1648,4 +1657,19 @@ async fn a_stop_while_a_closed_batch_waits_for_a_build_ends_the_run() {
         2,
         "nothing is read after the stop"
     );
+}
+
+/// A write that fails leaves its batch on the lane; the restarted sink
+/// engine writes it again, and its bytes come back only then.
+#[tokio::test(start_paused = true)]
+async fn a_batch_redelivered_after_a_failed_write_gives_its_bytes_back_once_written() {
+    let db = Database::new(40, (0..10).map(Change::upsert).collect());
+    let recorder = Recorder::seeded(false);
+    recorder.fail_next.store(true, Ordering::SeqCst);
+    let mut deployment = Deployment::new(Feed::new(&db), instant(&db), Arc::clone(&recorder))
+        .ingest(|ingest| ingest.with_batch(batch(4)).with_builds(4))
+        .with_budget(64 * KIB, usize::MAX);
+    deployment.run_to_end(0).await;
+    assert!(!recorder.fail_next.load(Ordering::SeqCst), "a write failed");
+    assert_eq!(deployment.recorder.state(), db.expected());
 }

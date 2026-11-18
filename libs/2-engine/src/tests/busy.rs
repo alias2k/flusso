@@ -217,6 +217,7 @@ fn item(position: u64, ids: &[&str]) -> stream::LaneItem {
         position: Some(Position::new(position)),
         changes: 1,
         envelopes: envelopes.into(),
+        hold: Default::default(),
     })
 }
 

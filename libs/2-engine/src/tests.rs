@@ -1366,6 +1366,7 @@ impl PositionRig {
                 position: position.map(Position::new),
                 changes: 1,
                 envelopes: Vec::new().into(),
+                hold: Default::default(),
             }))
             .await
             .unwrap();

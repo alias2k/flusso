@@ -6,8 +6,8 @@
 //! use kernel::Position;
 //! use stream::{Batch, LaneItem};
 //!
-//! let live = LaneItem::Batch(Batch { position: Some(Position::new(7)), changes: 3, envelopes: Vec::new().into() });
-//! let snapshot = LaneItem::Batch(Batch { position: None, changes: 0, envelopes: Vec::new().into() });
+//! let live = LaneItem::Batch(Batch { position: Some(Position::new(7)), changes: 3, envelopes: Vec::new().into(), hold: Default::default() });
+//! let snapshot = LaneItem::Batch(Batch { position: None, changes: 0, envelopes: Vec::new().into(), hold: Default::default() });
 //! assert_eq!(live.position(), Some(Position::new(7)));
 //! assert_eq!(snapshot.position(), None, "snapshot rows carry no position");
 //! ```
@@ -70,6 +70,41 @@ pub struct Batch {
     pub changes: usize,
     /// The documents, in build order.
     pub envelopes: Arc<[Envelope]>,
+    /// What keeps the batch's documents counted against the producer's
+    /// memory budget: released when the last copy of the batch is dropped,
+    /// every lane and redelivery ledger included. Never serialized.
+    #[serde(skip)]
+    pub hold: Hold,
+}
+
+/// An opaque guard a [`Batch`] carries while any copy of it lives, shared by
+/// every copy: the producer counts the batch's bytes until its last copy is
+/// dropped. Equal to any other, so it never changes a batch's equality.
+#[derive(Clone, Default)]
+pub struct Hold(Option<Arc<dyn std::any::Any + Send + Sync>>);
+
+impl Hold {
+    /// Keep `guard` alive as long as any copy of the batch.
+    pub fn new(guard: Arc<dyn std::any::Any + Send + Sync>) -> Self {
+        Self(Some(guard))
+    }
+
+    /// Whether it keeps a guard.
+    pub fn is_held(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
+impl std::fmt::Debug for Hold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.is_held() { "Hold" } else { "Hold(none)" })
+    }
+}
+
+impl PartialEq for Hold {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 impl LaneItem {

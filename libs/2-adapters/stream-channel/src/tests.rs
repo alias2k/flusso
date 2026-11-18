@@ -20,6 +20,7 @@ fn batch(position: u64) -> LaneItem {
         position: Some(Position::new(position)),
         changes: 1,
         envelopes: Vec::new().into(),
+        hold: Default::default(),
     })
 }
 

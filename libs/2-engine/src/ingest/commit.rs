@@ -14,7 +14,7 @@ use chrono::Utc;
 use futures::future::try_join_all;
 use kernel::{Envelope, IndexName, Position, SinkName};
 use source::document::{BuildFailure, Document, DocumentId};
-use stream::{Batch, LaneItem, LaneKey, Producer};
+use stream::{Batch, Hold, LaneItem, LaneKey, Producer};
 use tokio::time::Instant;
 
 use super::builds::{Builds, Built, Grant, Job};
@@ -174,9 +174,10 @@ impl IngestEngine {
         let mut published = false;
         while let Some((job, built, charge)) = builds.pop_ready() {
             published = true;
-            // Until the published batch carries its charge, it is released
-            // once every lane has taken the batch.
-            let _charge = charge;
+            // Every lane's item of the batch shares the one charge: its bytes
+            // come back when the last copy is dropped (every lane acknowledged
+            // it, and no ledger can redeliver it).
+            let hold = charge.map_or_else(Hold::default, |charge| Hold::new(charge));
             match (job, built) {
                 (Job::Complete(mut finished), _) => {
                     let started = Instant::now();
@@ -193,11 +194,12 @@ impl IngestEngine {
                     },
                     Some(built),
                 ) => {
-                    self.publish_live(built, oldest, position, changes, lanes)
+                    self.publish_live(built, oldest, position, changes, &hold, lanes)
                         .await?;
                 }
                 (Job::Backfill { requested }, Some(built)) => {
-                    self.publish_backfill(built, &requested, lanes).await?;
+                    self.publish_backfill(built, &requested, &hold, lanes)
+                        .await?;
                 }
                 (_, None) => {}
             }
@@ -216,6 +218,7 @@ impl IngestEngine {
         oldest: Option<Position>,
         position: Option<Position>,
         changes: usize,
+        hold: &Hold,
         lanes: &Lanes,
     ) -> Result<()> {
         let (envelopes, by_index) = self.envelopes(built.documents?, position)?;
@@ -249,6 +252,7 @@ impl IngestEngine {
                             position,
                             changes: if first { changes } else { 0 },
                             envelopes: Arc::clone(envelopes),
+                            hold: hold.clone(),
                         }),
                     ));
                 }
@@ -283,6 +287,7 @@ impl IngestEngine {
         &self,
         built: Built,
         requested: &BTreeMap<SinkName, std::collections::BTreeSet<IndexName>>,
+        hold: &Hold,
         lanes: &Lanes,
     ) -> Result<()> {
         let (envelopes, by_index) = self.envelopes(built.documents?, None)?;
@@ -309,6 +314,7 @@ impl IngestEngine {
                         position: None,
                         changes: 0,
                         envelopes: Arc::clone(envelopes),
+                        hold: hold.clone(),
                     }),
                 ));
             }
