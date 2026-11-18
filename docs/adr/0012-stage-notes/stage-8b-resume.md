@@ -296,3 +296,33 @@ Accepted as designed: the correctness argument, a fresh read of the upper bound,
 1. `RECORD_EVERY` fixed at 10 s, or an option? I'd keep it fixed until someone needs it.
 2. The tracker needs no state across runs (section 1). Correct only while an item is released only on a failure that ends the run. True today (`writes.rs`'s failure path); a future partial release would need the tracker on `SinkEngine`.
 3. Segments need `order_keys` only with two or more marked requesters. The alternative is separate walks per distinct mark: simpler, but it builds the overlap once per sink.
+
+## As built
+
+Commits:
+
+| Commit | What |
+| --- | --- |
+| `73cfe0d7` | The port: `Batch.walked`, `Request::Backfill.after`. |
+| `20d74033` | The sink: `Sink::seeding`, `record_walked`, `forget_walked`; the meta doc's `walked`; `ensure_index` keeps it. |
+| `a3de08b3` | The engine: the `Walked` tracker and staging. |
+| `25fdb53d` | The source: `walk_mark`, `resume_after`, `compare_keys`. |
+| `82488d1f` | The engine: the walk's segments. |
+| `12f3c3aa` | `/status`, the metric and the docs. |
+
+What changed from the design while building it:
+
+- **A float key is kept as its bits.** JSON has no `NaN` or infinity: `serde_json` writes them as `null`, so a mark at `-Infinity` read back as no value. The `keyset` e2e caught it on `real` keys, and `keys::tests`' `a_mark_keeps_every_float_key_exactly` pins it.
+- **The order text leaves out the type modifier.** A `varchar(5)` resized to `varchar(10)` sorts the same, so a resize keeps the mark.
+- **Two keys are compared under the key index's collation** (`COLLATE` from `pg_index.indcollation`). A bare cast compares under the database's default collation, and under the nondeterministic `ci` collation it ordered `\xff` and `0` the other way round from the pages. The `keyset` e2e caught it.
+- **A lane joins once the keys still in hand are taken**, not when the page that reaches its point is read. That page's keys were still buffered, so the lane would have been sent its whole segment again. `lanes_at_different_points_each_get_only_what_they_lack` caught it.
+- **`/status`'s `backfill_checkpoints` is absent while 0**, as `stall_seconds` keeps the document small.
+
+**Proven in tests, as the review asked:**
+
+- **A mark in Postgres's order** (`citext`, the nondeterministic `ci` collation, `C`, and every other key type): `keyset`'s `a_walk_resumed_after_its_mark_misses_no_row_and_repeats_none` resumes after the first, the middle and the last key. The rows read before plus the rows read after equal one whole walk, row for row and in order, so no row is missed and none repeated. `compare_keys` agrees with the pages on every adjacent pair, both ways.
+- **A checkpoint from another schema hash or generation is never used.**
+  - The meta doc's id is the hash alias, so another hash finds none.
+  - `generations::tests`' `a_backfill_checkpoint_is_read_only_for_the_unseeded_active_generation` reads none from another generation or a seeded doc.
+  - The `seeding` e2e `a_backfill_checkpoint_lives_with_its_unseeded_generation` covers reindex, recreated generation, seeded and stray records on a live OpenSearch.
+  - On the source side, `a_mark_from_another_order_is_never_resumed` refuses a changed type (`int8` → `numeric`, `citext` → `text`), a changed collation (`C` → `POSIX`), another key type's mark, and text that is not a mark.
