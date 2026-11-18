@@ -452,6 +452,12 @@ impl<'a> Run<'a> {
             );
         }
         if !self.engine.reindex_pending() {
+            // An ordered sink first takes every lane's front, so the pick by
+            // position sees an earlier item a lane held back while its write
+            // was in flight.
+            if self.ordered() && self.wants_more() {
+                self.fill()?;
+            }
             // Grant what is already waiting first, so an item just received
             // starts without another trip to the lane; read more only for a
             // slot still free, then grant what it brought.
