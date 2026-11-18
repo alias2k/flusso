@@ -333,6 +333,16 @@ impl Progress {
             .unwrap_or(Landed::Idle)
     }
 
+    /// The lane whose answer [`landed`](Self::landed) is, while that answer
+    /// holds something back (`Before`): the lane pinning the source's resume
+    /// point. `None` when everything routed has landed.
+    pub fn pinned_by(&self) -> Option<LaneKey> {
+        match self.least_of(self.marks.keys(), Level::Applied) {
+            Some((lane, Landed::Before(_))) => Some(lane.clone()),
+            _ => None,
+        }
+    }
+
     /// What `lane` has reached at `level`; `None` for a lane this progress
     /// doesn't know.
     pub fn lane(&self, lane: &LaneKey, level: Level) -> Option<Landed> {
@@ -351,6 +361,16 @@ impl Progress {
         lanes: impl IntoIterator<Item = &'a LaneKey>,
         level: Level,
     ) -> Option<Landed> {
+        self.least_of(lanes, level).map(|(_, landed)| landed)
+    }
+
+    /// [`over`](Self::over), with the lane whose answer it is (on a tie, the
+    /// first of `lanes`).
+    fn least_of<'a>(
+        &self,
+        lanes: impl IntoIterator<Item = &'a LaneKey>,
+        level: Level,
+    ) -> Option<(&'a LaneKey, Landed)> {
         // Routed, then the floors, then the lanes: a build is registered on
         // its lanes before it leaves its index's floor, so a position routed
         // by the copy below is in one of the two whenever it is read.
@@ -364,7 +384,7 @@ impl Progress {
             }
         }
         let mut registry = lock(&self.registry);
-        let mut least: Option<Landed> = None;
+        let mut least: Option<(&'a LaneKey, Landed)> = None;
         for lane in lanes {
             let marks = self.marks.get(lane)?;
             let registered = registry.lanes.get_mut(lane)?;
@@ -383,8 +403,8 @@ impl Progress {
                 None => newest.map_or(Landed::Idle, Landed::Through),
             };
             least = Some(match least {
-                Some(least) if bound(least) <= bound(answer) => least,
-                _ => answer,
+                Some(least) if bound(least.1) <= bound(answer) => least,
+                _ => (lane, answer),
             });
         }
         least
