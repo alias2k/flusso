@@ -21,6 +21,7 @@ fn batch(position: u64) -> LaneItem {
         changes: 1,
         envelopes: Vec::new().into(),
         hold: Default::default(),
+        walked: None,
     })
 }
 
@@ -95,6 +96,7 @@ async fn requests_travel_up_and_are_redelivered_until_acked() {
     let request = Request::Backfill {
         index: index("users"),
         sink: sink("a"),
+        after: None,
     };
     requests.producer.publish(request.clone()).await.unwrap();
     let mut consumer = requests.consumer;

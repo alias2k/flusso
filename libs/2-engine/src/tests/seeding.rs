@@ -301,6 +301,7 @@ fn batch(lane: &str, id: &str, position: Option<Position>) -> LaneItem {
         )]
         .into(),
         hold: Default::default(),
+        walked: None,
     })
 }
 

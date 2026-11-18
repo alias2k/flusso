@@ -442,6 +442,7 @@ impl SinkEngine {
                 .publish(Request::Backfill {
                     index: index.clone(),
                     sink: self.name.clone(),
+                    after: None,
                 })
                 .await?;
         }

@@ -256,6 +256,7 @@ impl IngestEngine {
                             changes: if first { changes } else { 0 },
                             envelopes: Arc::clone(envelopes),
                             hold: hold.clone(),
+                            walked: None,
                         }),
                     ));
                 }
@@ -318,6 +319,7 @@ impl IngestEngine {
                         changes: 0,
                         envelopes: Arc::clone(envelopes),
                         hold: hold.clone(),
+                        walked: None,
                     }),
                 ));
             }

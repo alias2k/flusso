@@ -80,7 +80,7 @@ impl IngestEngine {
         let mut handles = Vec::with_capacity(deliveries.len());
         for delivery in deliveries {
             let (request, handle) = delivery.into_parts();
-            let Request::Backfill { index, sink } = request;
+            let Request::Backfill { index, sink, .. } = request;
             if scopes.contains(&index) {
                 requested.entry(sink).or_default().insert(index);
             } else {

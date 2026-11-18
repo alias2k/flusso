@@ -520,6 +520,7 @@ impl Rig {
                     changes: 1,
                     envelopes,
                     hold: Default::default(),
+                    walked: None,
                 }))
                 .await
                 .unwrap();
@@ -548,6 +549,7 @@ impl Rig {
                     changes: 0,
                     envelopes,
                     hold: Default::default(),
+                    walked: None,
                 }))
                 .await
                 .unwrap();
@@ -1162,6 +1164,7 @@ async fn a_failed_acknowledgement_still_waits_for_the_writes_in_flight() {
             changes: 1,
             envelopes,
             hold: Default::default(),
+            walked: None,
         }))
         .await
         .unwrap();

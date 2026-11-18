@@ -6,8 +6,8 @@
 //! use kernel::Position;
 //! use stream::{Batch, LaneItem};
 //!
-//! let live = LaneItem::Batch(Batch { position: Some(Position::new(7)), changes: 3, envelopes: Vec::new().into(), hold: Default::default() });
-//! let snapshot = LaneItem::Batch(Batch { position: None, changes: 0, envelopes: Vec::new().into(), hold: Default::default() });
+//! let live = LaneItem::Batch(Batch { position: Some(Position::new(7)), changes: 3, envelopes: Vec::new().into(), hold: Default::default(), walked: None });
+//! let snapshot = LaneItem::Batch(Batch { position: None, changes: 0, envelopes: Vec::new().into(), hold: Default::default(), walked: None });
 //! assert_eq!(live.position(), Some(Position::new(7)));
 //! assert_eq!(snapshot.position(), None, "snapshot rows carry no position");
 //! ```
@@ -75,6 +75,29 @@ pub struct Batch {
     /// every lane and redelivery ledger included. Never serialized.
     #[serde(skip)]
     pub hold: Hold,
+    /// On a snapshot batch, how far its index's walk got: the greatest key
+    /// of the batch's documents. `None` on a live batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub walked: Option<WalkMark>,
+}
+
+/// A point in a backfill's walk over an index's root keys: opaque to the
+/// stream and the sink, written and read back only by the source, which
+/// checks it still fits the index's key before resuming after it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WalkMark(Arc<str>);
+
+impl WalkMark {
+    /// A mark holding `text`, as the source wrote it.
+    pub fn new(text: impl Into<Arc<str>>) -> Self {
+        Self(text.into())
+    }
+
+    /// The text the source wrote.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// An opaque guard a [`Batch`] carries while any copy of it lives, shared by
@@ -124,7 +147,14 @@ pub enum Request {
     /// Snapshot `index` into its lane to `sink`, ending with a
     /// [`LaneItem::SnapshotComplete`]. Acknowledged by the ingest engine only
     /// after that marker is published, so a crash mid-snapshot redelivers it.
-    Backfill { index: IndexName, sink: SinkName },
+    /// `after`: where the sink's last walk of the index durably got, if it
+    /// recorded one; the snapshot resumes after it.
+    Backfill {
+        index: IndexName,
+        sink: SinkName,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<WalkMark>,
+    },
 }
 
 /// The two ends of one `(index, sink)` lane.

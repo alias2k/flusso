@@ -1390,6 +1390,7 @@ impl PositionRig {
                 changes: 1,
                 envelopes: Vec::new().into(),
                 hold: Default::default(),
+                walked: None,
             }))
             .await
             .unwrap();
