@@ -14,6 +14,28 @@ The vocabulary (benchmark, component bench, scenario, headline metric, baseline,
 
 The scenario numbers are what gets watched. The component benches exist so that when a headline metric moves, the stage that moved is already on record for the same commit.
 
+### Why the engine bench holds each sink write
+
+`benches/engine.rs`'s `live_drain_held` drains a burst through both engines with an instant mock source, builder and sink. Each sink holds its write of batch *n* until the ingest engine has started building batch *n + 1*, or has ended. That fixes **which side frees each batch**: the sink, as in production, where a write takes far longer than the ingest engine takes to drop its own copy.
+
+The rule is an order, not a timing margin, so a slower runner can't flip it. The ingest engine drops its copy of a batch at the end of that batch's commit, before it builds the next one.
+
+The old `live_drain` (the same bench without the hold) measured a coin flip:
+- whichever side dropped the last reference to a batch, the ingest engine after publishing or the sink as it acknowledged, freed its documents, and with an instant sink the two raced within about a microsecond;
+- when the sink lost the race, it freed the batch while the ingest engine built the next one, and both slowed down on the allocator;
+- forcing either outcome on `main` gave about 33 ms (the ingest engine frees) against about 80 ms (the sink frees) for `sinks2/64`, an exact match between `main` and a branch in each regime, so the series' swings on `main` were that race, not the engines.
+
+Holding a write costs the engines nothing measurable: forcing the ingest engine to free while the sink also busy-waited 50 µs per write measured 31–32 ms, the ingest-frees figure. Spread over six runs on `main`, pinned to 4 CPUs:
+
+| case | `live_drain` (race) | `live_drain_held` |
+| --- | ---: | ---: |
+| `sinks1/64` | 43–63 ms (41%) | 75–78 ms (4%) |
+| `sinks2/64` | 60–76 ms (26%) | 75–79 ms (5%) |
+| `sinks1/256` | 32–68 ms (91%) | 74–78 ms (5%) |
+| `sinks2/256` | 29–52 ms (72%) | 73–75 ms (3%) |
+
+The `/1` cases still show an occasional slow run on either version. The rename restarted the history's `inprocess/live_drain/*` series as `inprocess/live_drain_held/*`: the old points measured the race, and the new ones would have read as a step up.
+
 The scenarios and the Docker-backed component benches start the same Postgres image as the e2e suites; see [Which Postgres](testing.md#which-postgres).
 
 ## Headline metrics
@@ -284,7 +306,7 @@ What it can't see: the plan on other data sizes and statistics than the `cases` 
   - A Criterion id belongs to the executable that lists it (`--list`, recorded per bench at build time). An id no executable lists, or one a differing executable also lists, is compared: what can't be proven identical is never skipped.
   - A base with none of the in-process benches only warns: there is nothing to gate against yet. Any other failure on the base fails the job, and so does a comparison that finds no bench measured on both sides, unless every bench present on both sides is identical.
   - A bench whose median is more than 10% slower is a **breach**, not yet a failure. A shared runner still has noisy moments, and one sample past 10% is often just that.
-  - `.github/scripts/bench-gate.sh` re-measures each breach on its own (Criterion's `--exact` filter on its full id, so `live_drain/sinks1/6` never runs `…/64`), base then PR, one bench at a time, saved as `base-confirm` and `pr-confirm`. Both trees and both target directories are kept, so cargo finds both builds fresh, and the provenance check proves each re-run executed the same binary as its first pass.
+  - `.github/scripts/bench-gate.sh` re-measures each breach on its own (Criterion's `--exact` filter on its full id, so `live_drain_held/sinks1/6` never runs `…/64`), base then PR, one bench at a time, saved as `base-confirm` and `pr-confirm`. Both trees and both target directories are kept, so cargo finds both builds fresh, and the provenance check proves each re-run executed the same binary as its first pass.
   - A breach is confirmed, and fails the job, when the re-run is past 10% or the mean of the first-pass and re-run changes is; it clears only when both are within 10%. A breach left unmeasured, because a re-run failed or the 600 s budget (`BENCH_CONFIRM_BUDGET_SECS`, checked before each benchmark) ran out, counts as confirmed: if most of the suite breaches, the gate re-measures it all and a broken runner still goes red.
   - The log and the step summary show the first-pass table, then one row per re-measured bench with the first-pass change, both re-run medians, the re-run change, the mean and the verdict.
 - **On a push to `main`**, `scenarios` runs the in-process benches, the Docker-backed component benches, and both scenarios at `ci` scale, converts everything to one list of data points, and stores them with `github-action-benchmark` on the `benchmarks` data branch. The Pages workflow folds that branch into the site at [`/bench/`](https://alias2k.github.io/flusso/bench/).

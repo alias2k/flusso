@@ -132,7 +132,9 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   Append), and `no plan` for a case with no logged plan on a side; a log with no plan for a whole side and
   `plan_cache_mode` exits 2. A mode exits 0/1
   (flagged)/2 (setup). Tests: `test_review_modes.py`. (3) **In-process benches**, no Docker, the PR gate: `engine`'s `engine` (both engines
-  over the channel stream with mocks), `source-postgres`'s `pgoutput` (the decoder over the recorded
+  over the channel stream with mocks; `live_drain_held` holds each sink write until the ingest engine
+  has begun its next build, so the sink always frees the batch as a real sink does: with an instant
+  sink who freed it was a microsecond race worth ~2.4× on `main`), `source-postgres`'s `pgoutput` (the decoder over the recorded
   `benches/fixtures/pgoutput.bin`; `tests/record_pgoutput.rs`, an `#[ignore]`d Docker test in the
   nextest `docker` group, re-records it), `source-postgres`'s `resolve` (`PgDocumentBuilder::resolve`
   for the changes that need no query — root table, unread table, update of unread columns, a path walked

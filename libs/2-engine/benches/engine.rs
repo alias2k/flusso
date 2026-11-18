@@ -4,13 +4,23 @@
 //! This isolates the engines' own cost: batching, resolve/dedup, the one
 //! `build_many` per batch, publishing an `Arc<[Envelope]>` to every lane, the
 //! sink engine's recv → apply → flush → ack loop, and the channel's ticketed
-//! in-flight ledger. Every mock answers instantly, so a movement here is a
+//! in-flight ledger. Every mock answers at once, so a movement here is a
 //! movement in the engines, not in Postgres or OpenSearch.
 //!
 //! Measured:
 //!
-//! - `live_drain`: a burst of `CHANGES` live changes drained end to end at
-//!   several `max_changes`, with one sink and with two (the fan-out cost).
+//! - `live_drain_held`: a burst of `CHANGES` live changes drained end to end
+//!   at several `max_changes`, with one sink and with two (the fan-out cost).
+//!   Each sink holds its write of batch *n* until the ingest engine has
+//!   started building batch *n + 1* (or has ended), so the sink always holds
+//!   the batch's last reference and frees it, as every real sink does: a real
+//!   write takes far longer than the ingest engine takes to drop its copy.
+//!   With an instant sink, which side freed the batch was a race of about a
+//!   microsecond, and the two outcomes differ about 2.4× (the freeing thread
+//!   contends with the ingest engine's next build on the allocator), so the
+//!   old `live_drain` measured that coin flip. The hold is an order, not a
+//!   timing margin: the ingest engine drops its copy at the end of the batch's
+//!   commit, before it builds the next one.
 //! - `snapshot`: a backfill of `ROWS` rows through the same path.
 //!
 //! Run with:
@@ -122,9 +132,49 @@ impl ChangeCapture for MockCapture {
 }
 
 /// Resolves every change to one document and builds a realistic mid-size body
-/// (a dozen scalars, an object, a nested array) with no I/O.
+/// (a dozen scalars, an object, a nested array) with no I/O. Counts its
+/// batches for the sinks' [`Pace`].
 #[derive(Debug)]
-struct MockDocuments;
+struct MockDocuments {
+    pace: Arc<Pace>,
+}
+
+/// How far the ingest engine has got: batches it started building, and
+/// whether it ended. A sink holds its write of batch *n* until batch *n + 1*
+/// is being built, after the ingest engine dropped its copy of batch *n*.
+#[derive(Debug, Default)]
+struct Pace {
+    builds: AtomicUsize,
+    ingest_ended: std::sync::atomic::AtomicBool,
+    moved: tokio::sync::Notify,
+}
+
+impl Pace {
+    fn build_started(&self) {
+        self.builds.fetch_add(1, Ordering::SeqCst);
+        self.moved.notify_waiters();
+    }
+
+    fn ingest_ended(&self) {
+        self.ingest_ended.store(true, Ordering::SeqCst);
+        self.moved.notify_waiters();
+    }
+
+    /// Wait until the ingest engine is past batch `batch` (counted from 1).
+    async fn past(&self, batch: usize) {
+        loop {
+            let moved = self.moved.notified();
+            tokio::pin!(moved);
+            moved.as_mut().enable();
+            if self.builds.load(Ordering::SeqCst) > batch
+                || self.ingest_ended.load(Ordering::SeqCst)
+            {
+                return;
+            }
+            moved.await;
+        }
+    }
+}
 
 fn body(id: i64) -> GenericValue {
     let mut orders = Vec::new();
@@ -169,6 +219,15 @@ impl DocumentBuilder for MockDocuments {
             index: index(),
             key: key.clone(),
         }])
+    }
+
+    async fn build_many(&self, ids: &[DocumentId]) -> SourceResult<Vec<Document>> {
+        self.pace.build_started();
+        let mut documents = Vec::with_capacity(ids.len());
+        for id in ids {
+            documents.push(self.build(id).await?);
+        }
+        Ok(documents)
     }
 
     async fn build(&self, id: &DocumentId) -> SourceResult<Document> {
@@ -216,12 +275,15 @@ impl DocumentBuilder for MockDocuments {
 }
 
 /// Counts applied envelopes and flushes; reports `seeded` as configured so the
-/// live benches skip the backfill and the snapshot bench requests one.
+/// live benches skip the backfill and the snapshot bench requests one. With
+/// a [`Pace`], each flush of documents waits until the ingest engine is past
+/// that batch.
 #[derive(Debug)]
 struct CountingSink {
     seeded: bool,
     applied: AtomicUsize,
     flushes: AtomicUsize,
+    pace: Option<Arc<Pace>>,
 }
 
 #[async_trait]
@@ -232,7 +294,12 @@ impl Sink for CountingSink {
     }
 
     async fn flush(&self, _caught_up: bool) -> sink::Result<FlushReport> {
-        self.flushes.fetch_add(1, Ordering::Relaxed);
+        if self.applied.swap(0, Ordering::Relaxed) > 0 {
+            let batch = self.flushes.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Some(pace) = &self.pace {
+                pace.past(batch).await;
+            }
+        }
         Ok(FlushReport::clean())
     }
 
@@ -252,7 +319,10 @@ async fn run_deployment(capture: MockCapture, sinks: usize, batch: BatchPolicy) 
         .map(|i| SinkName::try_new(format!("sink{i}")).unwrap())
         .collect();
     let stream = Arc::new(ChannelStream::new(1024, names.clone()));
-    let documents: Arc<dyn DocumentBuilder> = Arc::new(MockDocuments);
+    let pace = Arc::new(Pace::default());
+    let documents: Arc<dyn DocumentBuilder> = Arc::new(MockDocuments {
+        pace: Arc::clone(&pace),
+    });
     let mappings = documents.index_mappings().await.unwrap();
     let seeded = capture.rows == 0;
 
@@ -263,6 +333,7 @@ async fn run_deployment(capture: MockCapture, sinks: usize, batch: BatchPolicy) 
             seeded,
             applied: AtomicUsize::new(0),
             flushes: AtomicUsize::new(0),
+            pace: seeded.then(|| Arc::clone(&pace)),
         });
         let engine = SinkEngine::new(
             name.clone(),
@@ -286,6 +357,7 @@ async fn run_deployment(capture: MockCapture, sinks: usize, batch: BatchPolicy) 
     .run()
     .await
     .unwrap();
+    pace.ingest_ended();
 
     while !stream.is_idle() {
         assert!(
@@ -311,7 +383,7 @@ fn runtime() -> Runtime {
 fn bench(c: &mut Criterion) {
     let rt = runtime();
 
-    let mut group = c.benchmark_group("live_drain");
+    let mut group = c.benchmark_group("live_drain_held");
     group.sample_size(10);
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(5));
