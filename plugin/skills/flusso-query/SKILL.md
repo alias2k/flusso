@@ -405,10 +405,13 @@ let page = User::query().filter(..).send(&fresh).await?;   // waits until search
   passes too early, with no error. This is the one way to get it wrong, so check it in review.
 - **Two levels, chosen by the read.** `get` waits until the write is *applied*; `send` / `ids` /
   `count` / cursors / walks / `msearch` / combined search wait until it is *searchable*, which can
-  trail by the sink's `refresh_interval` while flusso drains a backlog. A fenced client waits once
-  per level and its clones share that.
-- `client.wait(&position).await?` (searchable) and `client.wait_applied(&position).await?` wait
-  explicitly, for reads made elsewhere.
+  trail by the sink's `refresh_interval` while flusso drains a backlog. Each read waits only on the
+  indexes it reads (its root's; a combined search, walk or `msearch` every one it names), so a stalled
+  index blocks only its own reads. A fenced client waits once per level and index, and its clones
+  share that.
+- `client.wait(&position).await?` (searchable, every index), `client.wait_on(&position, &["users"])`
+  (searchable, those indexes) and `client.wait_applied(&position).await?` wait explicitly, for reads
+  made elsewhere.
 - **A fence never reads stale, and rides out a restart.** One deadline, `.fence_timeout(d)` (default
   20 s; keep it below the caller's own request timeout), across every request: a refused connection,
   `503`, `502`, `504` or `429` is retried with jittered backoff honouring `Retry-After`, a `408` past
@@ -416,7 +419,7 @@ let page = User::query().filter(..).send(&fresh).await?;   // waits until search
   waiting on the position), `Error::FenceUnavailable { cause, reason }` (flusso couldn't be asked;
   `cause` is an `UnavailableCause`: `Stopping`/`Starting`/`Rebuilding`/`Unreachable`/`Throttled`/
   `Unusable`). `Error::FenceMisconfigured` (no `.flusso(url)`, refused certificate, redirect loop)
-  and `Error::FenceRefused` (bad position, unknown sink) fail at once. Decide per endpoint what a
+  and `Error::FenceRefused` (bad position, unknown sink or index) fail at once. Decide per endpoint what a
   timeout means: usually "saved, not indexed yet", not a 500. Do not wrap a fenced read in a retry
   loop of your own.
 - Concurrent writers need no coordination: each fences on the position it read after its own commit.

@@ -318,7 +318,34 @@ The Postgres source no longer keeps a map of every change it emitted until every
 | `Stream::watermark()` | removed; `engine::Progress` keeps what each lane landed |
 | `engine::drain_lanes(stream, source, &mut Option<Position>)` | `drain_lanes(stream, source, &Progress, &mut Option<Landed>)` |
 | `Fence::new(source, sinks)` | `Fence::new(source, progress, sinks)` |
-| `IngestEngine::new(source, documents, stream, sinks)`, `SinkEngine::new(name, sink, stream, mappings)` | each takes the deployment's `Arc<Progress>` last: the one both engines over a stream share (`Progress::new(sinks)`) |
+| `IngestEngine::new(source, documents, stream, sinks)`, `SinkEngine::new(name, sink, stream, mappings)` | each takes the deployment's `Arc<Progress>` last: the one both engines over a stream share (`Progress::of(indexes, sinks)`, see below) |
+
+## One lane per index and sink
+
+Each `(index, sink)` pair now has its own lane, its own progress and its own fence. A sink is still one engine, writing all its indexes, but one index whose writes are stuck (a refused document under `on_error = "stop"`, a missing index) no longer holds up the sink's other indexes, nor a reader waiting on them. A deployment needs nothing; nothing is rebuilt.
+
+- **`/wait` takes `index`, repeatable.** `index=users&index=orders` waits on those indexes only; without it the wait covers every index, as before. An index that is not enabled is a `404`. The answer echoes `indexes`. See [HTTP endpoints](../reference/http.md#get-waitpositionposition).
+- **`flusso-query` waits on the indexes a read touches**, and once per level and index. A root's `get` or search waits on its index, a combined search, cursor walk or `msearch` on each index it names. `Client::wait_on(position, indexes)` is the explicit form. An older flusso ignores `index` and waits on every index: still correct, only slower to pass.
+- **`/status` reports each lane** under `sinks.<sink>.lanes.<index>`: `applied_position`, `searchable_position`, `outstanding`. The new gauge [`flusso.lane.outstanding{index,sink}`](../reference/metrics.md) names the lane holding back the slot.
+- **The replication slot still waits for every lane**: confirmation is the lowest lane's.
+- **Still sink-wide:** a failed write stops the sink's engine, which restarts with backoff; on restart only the lanes that failed write one item at a time until one lands. A reindex is staged between the sink's writes. Parking one index while the rest of the sink goes on is a later change.
+
+**Embedding the crates.**
+
+| 0.17 | 0.18 |
+| --- | --- |
+| `Stream::lane(&SinkName)` | `Stream::lane(&LaneKey)` (`LaneKey { index, sink }`), plus `Stream::lanes(&SinkName)`: a sink engine's lanes |
+| `ChannelStream::new(capacity, sinks)` | `ChannelStream::new(capacity, lanes)` or `ChannelStream::over(capacity, indexes, sinks)` |
+| `LaneItem::SnapshotComplete` | `LaneItem::SnapshotComplete { index }` |
+| `Request::Backfill { sink, indexes }` | `Request::Backfill { index, sink }`: one request per index |
+| `Progress::new(sinks)` | `Progress::new(lanes)` or `Progress::of(indexes, sinks)` |
+| `Fence::new(source, progress, sinks)` | `Fence::new(source, progress, lanes)` |
+| `FenceRequest { position, level, sink, timeout }` | gains `indexes: Vec<IndexName>`; empty waits on every index. `FenceError::UnknownIndex` is new |
+| `Observer::on_position_applied(&SinkName, …)`, `on_position_searchable` | take the `&LaneKey`; `on_changes_settled(sink, changes)` is new (a batch that gave a sink no item) |
+| `Backends::stream(config)` | `Backends::stream(config, &[LaneKey])` |
+| `MsearchBundle` (`flusso-query`) | gains `indexes()`, defaulting to none (a fence on every index); the tuple bundles name their slots' indexes |
+
+`Sink::write` is unchanged: every item now holds one index's documents, read it off the envelopes when a sink needs it.
 
 ## Related
 

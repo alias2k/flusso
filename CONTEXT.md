@@ -53,11 +53,11 @@ The port in the middle: it carries envelopes from the ingest engine down to each
 _Avoid_: queue, bus, broker, channel (as the port name)
 
 **Lane**:
-One sink's ordered feed inside the stream. A stacked sink's lane is fed by the sink engine ahead of it instead of by the ingest engine.
+One `(index, sink)` pair's ordered feed inside the stream: the documents of one index for one sink. A sink engine reads all its sink's lanes. A stacked sink's lane is fed by the sink engine ahead of it instead of by the ingest engine.
 _Avoid_: channel, topic, subject, partition
 
 **Batch**:
-The unit a lane carries and a sink engine acknowledges: the envelopes one ingest commit built, in build order, with the position of the last change it covers (its key in the progress). A batch with no envelopes still carries its position.
+The unit a lane carries and a sink engine acknowledges: the envelopes of the lane's index that one ingest commit built, in build order, with the position of the last change the commit covers (its key in the progress, the same on every lane). A commit that built nothing for an index publishes nothing to its lanes.
 _Avoid_: chunk, bundle, message group
 
 **Build gate**:
@@ -77,7 +77,7 @@ The stream's upward feed. It carries backfill and reindex requests from sink eng
 _Avoid_: control channel, command bus, callback
 
 **Request**:
-What travels up the request lane: a sink engine asking for a snapshot of one or more indexes into its own lane, for a first seed or a reindex. Acknowledged only once the snapshot is fully published.
+What travels up the request lane: a sink engine asking for a snapshot of one index into that index's lane, for a first seed or a reindex. Acknowledged only once the snapshot is fully published.
 _Avoid_: command, job, ticket
 
 **Sink**:
@@ -131,7 +131,7 @@ A point in the source's own change order, as a client can read it from the sourc
 _Avoid_: token, LSN (outside the Postgres adapter), cursor, checkpoint, offset
 
 **Fence**:
-A wait until a sink, or every sink, has reached a caller-supplied source position at a chosen level, applied or searchable, related-table rebuilds included. It only observes: nothing is flushed or refreshed because a client waits. Covers live changes only, not a backfill. What a client uses to read its own writes.
+A wait until the lanes of the named indexes (or every index) on a sink (or every sink) have reached a caller-supplied source position at a chosen level, applied or searchable, related-table rebuilds included. It only observes: nothing is flushed or refreshed because a client waits. Covers live changes only, not a backfill. What a client uses to read its own writes.
 _Avoid_: barrier, sync point, flush wait
 
 **Applied**:

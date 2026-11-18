@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- *(query)* a fenced read waits on the indexes it reads (`/wait?index=…`), once per level and index; `Client::wait_on` waits on named indexes; `MsearchBundle::indexes` (default none: every index)
+
 ## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-query-v0.16.0...flusso-query-v0.17.0) - 2026-11-12
 
 ### Added

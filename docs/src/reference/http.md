@@ -50,7 +50,10 @@ The live status document as JSON: the deployment, then one block per sink.
 | `sinks.<name>.documents_quarantined` | int | Non-zero means data is being dropped under `on_error = "skip"`. |
 | `sinks.<name>.last_flush_micros` | int | Duration of this sink's most recently finished write. |
 | `sinks.<name>.applied_position` | string or null | The source position this sink has applied. |
-| `sinks.<name>.searchable_position` | string or null | The source position this sink can search. Trails `applied_position` by the destination's refresh while a backlog drains. |
+| `sinks.<name>.searchable_position` | string or null | The source position this sink can search. Trails `applied_position` by the destination's refresh while a backlog drains. The slowest of its lanes. |
+| `sinks.<name>.lanes.<index>.applied_position` | string or null | How far this sink has applied that index: its `(index, sink)` lane. A stalled index holds back only its own lane here. |
+| `sinks.<name>.lanes.<index>.searchable_position` | string or null | How far this sink can search that index. |
+| `sinks.<name>.lanes.<index>.outstanding` | int | Items routed to the lane and not written yet. A lane that stays high is the one holding back the slot. |
 
 A source position is in the source's own text form: for Postgres, a WAL LSN such as `0/16B3748`, comparable with `pg_current_wal_lsn()`. Both positions keep moving while the watched tables are idle, because the source follows unrelated WAL too.
 
@@ -80,7 +83,12 @@ A source position is in the source's own text form: for Postgres, a WAL LSN such
       "documents_quarantined": 0,
       "last_flush_micros": 14210,
       "applied_position": "0/16B3748",
-      "searchable_position": "0/16B3748"
+      "searchable_position": "0/16B3748",
+      "lanes": {
+        "orders": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0 },
+        "products": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0 },
+        "users": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0 }
+      }
     }
   }
 }
@@ -99,23 +107,24 @@ Hold the request until a commit is readable: a fence. `position` is what the cli
 | `position` | string | — | The source position to wait for, in the source's own text form. |
 | `until` | `applied` \| `searchable` | `searchable` | `applied`: the sink's writes up to it returned, so a fetch by id sees the commit. `searchable`: a search sees it too. |
 | `sink` | string | none | Wait for this sink only. Omitted, the wait covers every sink, so the slowest one decides. |
+| `index` | string, repeatable | none | Wait for these indexes only (`index=users&index=orders`). Omitted, the wait covers every index. A read needs only the indexes it reads, so a stalled index doesn't hold up reads of the others. |
 | `timeout_ms` | int | `5000` | How long to hold the request. Values above `60000` are cut to `60000`. |
 
 | Response | When |
 | --- | --- |
 | `200` | Reached. |
 | `408` | The timeout passed first. Nothing is wrong with the request; ask again or give up. |
-| `400` | `position` is missing or not a position the source can read, or `until`, `sink`, or `timeout_ms` is malformed. |
-| `404` | `sink` is not a configured sink. |
+| `400` | `position` is missing or not a position the source can read, or `until`, `sink`, `index`, or `timeout_ms` is malformed. |
+| `404` | `sink` is not a configured sink, or an `index` is not an enabled index. |
 | `503` | This process can't answer now. `Retry-After: 1`, and `reason` says why: `starting` (the source isn't following live changes yet: startup, or the ingest engine is restarting) or `stopping` (the [stop](cli.md#stopping)'s drain is over). |
 
 `200` and `408` share a body; errors carry `{"error": "…"}`, a `503` also `"reason"`.
 
 ```json
-{ "reached": true, "position": "0/16B3780", "until": "searchable", "sink": "primary" }
+{ "reached": true, "position": "0/16B3780", "until": "searchable", "sink": "primary", "indexes": ["users"] }
 ```
 
-`position` is how far the sink has got (the slowest one, without `sink`): at or past the one asked for on `200`, short of it on `408`.
+`position` is how far the lanes waited on have got (the slowest one): at or past the one asked for on `200`, short of it on `408`. `indexes` echoes the `index` parameters, empty when none was given.
 
 - **It only waits.** Nothing is flushed or refreshed on a caller's behalf. Under a draining backlog `searchable` trails `applied` by up to the sink's [`refresh_interval`](sink-opensearch.md#refresh).
 - **A backfill isn't covered, nor an index mid-reindex.** Positions belong to live changes; an index that is still seeding, or being rebuilt behind its alias, is reported by `/status`.

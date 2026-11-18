@@ -599,22 +599,49 @@ arm in `apps/cli/src/backends.rs`. See "Config layer" below.
 ### The pipeline (`libs/2-engine/src/ingest.rs` + `sink_engine.rs`)
 
 ```text
-                 ┌─ lane ─▶ SinkEngine(primary) ─▶ write ×writes ─▶ ack ─┐
-ChangeCapture ─▶ IngestEngine ─┤                                            ├─▶ Progress ─▶ confirm
-  resolve · build once · publish└─ lane ─▶ SinkEngine(audit)   ─▶ write ×writes ─▶ ack ─┘
-                 ◀─ request lane ─ Backfill { sink, indexes } ─────────────────────
+                 ┌─ lanes (users,primary) (orders,primary) ─▶ SinkEngine(primary) ─▶ write ×writes ─▶ ack ─┐
+ChangeCapture ─▶ IngestEngine ─┤                                                                          ├─▶ Progress ─▶ confirm
+  resolve · build once · publish└─ lanes (users,audit)   (orders,audit)   ─▶ SinkEngine(audit)   ─▶ write ×writes ─▶ ack ─┘
+                 ◀─ request lane ─ Backfill { index, sink } ─────────────────────
 ```
 
 Two generic engines, backend-neutral (ADR 0002/0003, issue #130). The **ingest engine**
 (`IngestEngine`) owns the source side: capture → batch → resolve → dedup → `build_many` once →
-publish one `LaneItem::Batch` of kernel `Envelope`s to every sink's lane; it also drains the
-**request lane** and serves `Request::Backfill { sink, indexes }` as snapshots. One **sink
-engine** per sink (`SinkEngine`): `stage` (ensure indexes, retire stale seeds, request its
+publish one `LaneItem::Batch` of kernel `Envelope`s per index to that index's lane of every sink; it also drains the
+**request lane** and serves `Request::Backfill { index, sink }` as snapshots. One **sink
+engine** per sink (`SinkEngine`), reading all its sink's lanes: `stage` (ensure indexes, retire stale seeds, request its
 backfill) then recv → `write` (up to `writes` at once) → ack. Everything they drive — `ChangeCapture`,
 `DocumentBuilder`, `Stream` (lanes + request lane), `Sink` — is a **trait object**; the engine's
 `Progress` (`libs/2-engine/src/progress.rs`, one per deployment, shared by both engines and the fence)
 is the one concrete piece.
 `FanOutSink` is gone; sinks are independent. Key invariants to preserve when editing the engines:
+
+- **One lane per `(index, sink)` (ADR 0012 stage 7).** `stream::LaneKey { index, sink }`; the daemon
+  builds every enabled index × every sink (`Backends::stream(config, &[LaneKey])`), `Stream::lanes(sink)`
+  is a sink engine's set. Publish (`ingest/commit.rs`) groups a built batch by index (`group_by_index`, one
+  `Arc<[Envelope]>` per index, the documents moved, each piece carrying the build's `Hold`): one item per
+  `(index, sink)` lane, keyed by the batch's last position on every lane; a lane with no item is
+  `Progress::skipped`, so a quiet index pins nothing; `changes` rides on each sink's first item and a sink
+  with no item hears `Observer::on_changes_settled`. Snapshots and `SnapshotComplete { index }` go to
+  `(index, s)` of each requesting sink; requests are one per index and coalesce by sink set. The sink
+  engine (`writes.rs`'s `Run`) keeps per lane a consumer, its window, counts and barrier; admission is per
+  lane (two lanes never share a document); `pick` takes live first, every fourth contested grant to
+  backfill, lanes taking turns (`turn`); an ordered sink writes the live front with the lowest position;
+  `SnapshotComplete` is a barrier on its own lane only; after a failed run only the failed lanes
+  (`Blame::Lanes`) write their front alone; a reindex is still staged sink-wide between writes. `Fences`
+  and caught-up are per lane (a write is caught up when nothing else of its lane waits). The fence takes
+  `indexes` (`/wait?index=…`, repeatable, `UnknownIndex` → 404); `/status` has `sinks.<s>.lanes.<index>`;
+  `flusso.lane.outstanding{index,sink}`; `flusso-query` fences on the indexes a read reads, cached per
+  `(level, index)` (`fence.rs`'s `After`). Guards: `engine` `tests::lanes`
+  (`a_batch_is_split_by_index_and_a_quiet_index_pins_nothing`,
+  `a_stalled_index_holds_back_neither_its_siblings_writes_nor_its_progress`,
+  `lanes_take_turns_so_a_backlog_on_one_index_does_not_starve_another`,
+  `a_snapshot_complete_waits_only_for_its_own_lane`), the channel's
+  `a_release_on_one_lane_leaves_the_others_alone`, the daemon's
+  `a_stalled_sibling_index_blocks_no_fence_on_the_healthy_index`, `positions_report_each_lane`, the CLI's
+  `a_wait_on_named_indexes_echoes_them` / `an_unknown_or_invalid_index_is_refused`, `flusso-query`'s
+  `a_fenced_client_waits_once_per_level_and_index`,
+  `a_combined_search_and_a_multi_search_wait_on_every_index_they_read`.
 
 - **At-least-once via write-then-ack and `Progress` (ADR 0012 stage 6).** A position describes
   itself: `kernel::Position { seq, fence_before, confirm_before, confirm_through }`, the stamps the

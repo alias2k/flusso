@@ -67,7 +67,7 @@ self.progress.published(keys_published, oldest, last);           // also when ke
 
 ## 3. Lane bound (`[stream] capacity`)
 
-Each lane holds `max(1, capacity / indexes)` items, so a sink's lanes hold about `capacity` items
+Each lane holds `max(1, capacity / indexes)` items (superseded: see §10), so a sink's lanes hold about `capacity` items
 together, as its one lane did. `capacity` keeps its meaning ("items waiting per sink"), is deprecated
 by the ADR (the byte budget of stage 5 replaces it) and still loads; `config-toml.md` and
 `reference/stream-channel.md` say so. The sink engine's delivered items stay outside the bound
@@ -178,3 +178,34 @@ a stalled index doesn't stall its sibling's writes or fences, `SnapshotComplete`
 seeded schedule test over several indexes, fence unit tests per index, HTTP, client (stub daemon); e2e
 `daemon` `fence` (a per-index case), `flusso-cli` `fence_restart`/`shutdown`, `engine`
 `pipeline`/`wal_release`/`backfill`/`keyset_backfill`, `dev/query-e2e`.
+
+## 10. As built (where it differs from the design above)
+
+- **Reindex stays sink-wide** (§4): staged once the sink has no write in flight, as before. Per lane
+  needs a lane to hold back while the others write, which is stage 9's parking; doing it here would
+  build half of that.
+- **Look-ahead is 32 per lane**, not 8 (§4): the stage-4 value per lane, so a single-index deployment
+  behaves as before. Delivered items per sink: at most `writes + 32 × lanes`.
+- **Capacity** (§3): each lane holds `max(1, capacity / the sink's lanes)` items. Track C then
+  deprecated `[stream] capacity` (f7863ce3): ignored with a warning, every lane bounded by a
+  1,048,576-item backstop; memory is bounded by the stage-5 budget.
+- **`/status`** (§8): the per-lane block is `sinks.<sink>.lanes.<index>` (`applied_position`,
+  `searchable_position`, `outstanding`), beside the unchanged `sinks.<sink>.indexes.<index>` state
+  string, so no existing field changes type.
+- **Metrics** (§8): `flusso.lane.outstanding{index,sink}` is in. The write timings keep `sink` only;
+  an `index` label is deferred (a write is one lane's, so it can be added in the sink engine's
+  observer calls when needed).
+- **Client** (§7): `Client::wait_on(position, indexes)` added; `MsearchBundle::indexes` with a default
+  of none (a fence on every index), so a hand-written bundle stays correct.
+
+## 11. For stage 8a and stage 9
+
+- **8a (an ingest task per index):** `Progress::published` / `skipped` are already per lane and
+  per call, so per-index ingest tasks each register their own lanes. The only cross-index piece left
+  is `routed` (the newest position routed, one `Mutex<Option<Position>>`) and confirmation's minimum
+  over lanes: two tasks registering out of seq order is fine for marks (each lane's own order holds)
+  but `routed` must stay the max. A batch's `oldest` is still the batch's, conservative per index.
+- **9 (park a lane):** `Blame::Lanes` already names the failed lanes and the barrier is per lane;
+  parking = keep the run alive and stop granting that lane, instead of ending the run. A parked
+  lane's unlanded items pin confirmation (the slot) and its own fences only. Reindex per lane can
+  come with it.

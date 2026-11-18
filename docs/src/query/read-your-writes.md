@@ -65,12 +65,15 @@ let page = User::query()
 | `get` | applied |
 | `send`, `ids`, `count`, cursors, walks, `msearch`, combined search | searchable |
 
-A fenced client waits **once per level**, not once per request, and its clones share that. Three searches through `fresh` cost one wait. Searchable covers applied, so a `get` after a search costs nothing.
+Each read waits only on the **indexes it reads**: a root's `get` or search on its root's index, a combined search, cursor walk or `msearch` on every index it names. One index stuck behind a refused document then holds up only its own reads.
+
+A fenced client waits **once per level and index**, not once per request, and its clones share that. Three searches of `users` through `fresh` cost one wait; a search of `orders` after them costs one more. Searchable covers applied, so a `get` after a search of the same index costs nothing.
 
 To wait explicitly, for instance before reads made elsewhere:
 
 ```rust
-client.wait(&position).await?;           // searchable: every read sees the commit
+client.wait(&position).await?;           // searchable on every index: every read sees the commit
+client.wait_on(&position, &["users"]).await?;  // searchable on these indexes only
 client.wait_applied(&position).await?;   // applied: a get sees it; returns sooner under a backlog
 ```
 

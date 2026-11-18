@@ -25,11 +25,11 @@ From Rust, `flusso-query` runs the steps below itself: see [Reading your own wri
 3. **Wait.**
 
    ```sh
-   curl -s 'http://flusso:9464/wait?position=0/16B3748&until=applied&sink=primary'
+   curl -s 'http://flusso:9464/wait?position=0/16B3748&until=applied&sink=primary&index=users'
    ```
 
    ```json
-   { "reached": true, "position": "0/16B3780", "until": "applied", "sink": "primary" }
+   { "reached": true, "position": "0/16B3780", "until": "applied", "sink": "primary", "indexes": ["users"] }
    ```
 
    `200` means every commit at or before the position is in the sink. Pick the level by what the next read is:
@@ -46,9 +46,10 @@ From Rust, `flusso-query` runs the steps below itself: see [Reading your own wri
 ## Options and variations
 
 - **Name the sink the reader uses.** Without `sink`, the wait covers every sink, so a second sink that has stalled holds up readers of a healthy one. All parameters are in [HTTP endpoints](../reference/http.md#get-waitpositionposition).
+- **Name the indexes the read touches.** Each `(index, sink)` pair is its own lane, so without `index` the wait covers every index, and one index stuck on a refused document holds up reads of all the others. With `index=users` only the `users` lane decides. `flusso-query` sends the read's own indexes.
 - **Related tables are covered.** A write to a table an index only joins rebuilds the parent documents; the fence passes once those are in.
 - **Several writes, one wait.** Read the position once after the last commit. It covers everything before it.
-- **Watch the positions.** `/status` reports `applied_position` and `searchable_position` per sink, comparable with `pg_current_wal_lsn()`.
+- **Watch the positions.** `/status` reports `applied_position` and `searchable_position` per sink and per lane (`sinks.<sink>.lanes.<index>`), comparable with `pg_current_wal_lsn()`.
 - **Behind a synchronous standby too.** A commit returns to the writer only once it is visible, and flusso indexes it only then, so the position read after it covers the committed state. A fence on a position another session read while a commit still waited on the standby doesn't pass until that commit is visible and indexed. See [Behind a synchronous standby](../reference/source-postgres.md#behind-a-synchronous-standby).
 - **During a deploy.** flusso is one process with one replication slot, so a deploy always has a gap: the old process stops, the new one starts following the source. The old process [drains](../reference/cli.md#stopping): a wait open then stays open and is answered `200` if its position lands during the drain, which is when in-flight commits reach the sinks; once the drain is over, every wait still open gets `503` with `Retry-After` and the reason `stopping` ([the reasons](../query/read-your-writes.md#when-the-wait-fails)). Until the new process is live, `/wait` refuses connections or answers `503` with the reason `starting`. The new process answers the same question, since the position is Postgres's own, and after a graceful stop it starts from everything the old one indexed; a client that retries until its deadline sees a slow read instead of an error. Size that deadline above a typical gap (the old process's [stop](../reference/cli.md#stopping), plus the new one's start until `/readyz` answers) and below the caller's own request timeout. `flusso-query` waits twenty seconds by default; the worst restart can outlast that, and the read then fails rather than read stale.
 - **A rebuilding index isn't vouched for.** While a sink rebuilds an index (a first backfill, a rebuild after the slot was lost, a reindex), a fence can pass before the document is readable ([#379](https://github.com/alias2k/flusso/issues/379)). Once that's fixed, `/wait` answers `503` with the reason `rebuilding` there instead.
