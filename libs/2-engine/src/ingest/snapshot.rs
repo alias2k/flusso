@@ -99,6 +99,7 @@ impl IngestEngine {
             handles,
             batch: PendingBatch::new(self.batch.max_changes),
             page_wait: Duration::ZERO,
+            done: false,
         };
         if indexes.is_empty() {
             self.finish_snapshot(&mut snapshot, lanes).await?;
@@ -151,9 +152,18 @@ pub(super) struct Snapshot {
     /// Time spent getting keys since the last batch: waiting for pages and
     /// buffering keys.
     pub(super) page_wait: Duration,
+    /// The walk has read every index's keys; what is left is to build the
+    /// batch in hand and complete.
+    pub(super) done: bool,
 }
 
 impl Snapshot {
+    /// Whether the loop should read keys for it: its walk goes on and its
+    /// batch has room. A full batch waits for a build slot.
+    pub(super) fn wants_keys(&self) -> bool {
+        !self.done && !self.batch.is_full()
+    }
+
     /// Buffer the keys in hand as their index's documents, until the batch is
     /// full. A key with a null part addresses no document.
     pub(super) fn take_keys(&mut self) {

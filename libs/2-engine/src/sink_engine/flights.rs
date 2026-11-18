@@ -29,7 +29,7 @@ use futures::future::BoxFuture;
 use futures::task::{ArcWake, AtomicWaker, waker_ref};
 
 /// Futures in flight, polled when woken, finishing in any order.
-pub(super) struct Flights<'a, T> {
+pub(crate) struct Flights<'a, T> {
     flights: Vec<Flight<'a, T>>,
     run: Arc<AtomicWaker>,
 }
@@ -61,24 +61,24 @@ impl<T> std::fmt::Debug for Flights<'_, T> {
 }
 
 impl<'a, T> Flights<'a, T> {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             flights: Vec::new(),
             run: Arc::new(AtomicWaker::new()),
         }
     }
 
-    pub(super) fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.flights.len()
     }
 
-    pub(super) fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.flights.is_empty()
     }
 
     /// Poll `future` once with its own waker: its output if that finished
     /// it, else it is kept until [`next`](Self::next) hands it out.
-    pub(super) fn start(&mut self, mut future: BoxFuture<'a, T>) -> Option<T> {
+    pub(crate) fn start(&mut self, mut future: BoxFuture<'a, T>) -> Option<T> {
         let woken = Arc::new(Woken {
             marked: AtomicBool::new(false),
             run: Arc::clone(&self.run),
@@ -94,7 +94,7 @@ impl<'a, T> Flights<'a, T> {
     }
 
     /// The next future to finish; `None` when none is in flight.
-    pub(super) async fn next(&mut self) -> Option<T> {
+    pub(crate) async fn next(&mut self) -> Option<T> {
         std::future::poll_fn(|cx| self.poll_next(cx)).await
     }
 

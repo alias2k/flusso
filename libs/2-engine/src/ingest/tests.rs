@@ -1060,12 +1060,15 @@ async fn one_build_at_a_time_builds_and_publishes_as_before() {
 
     assert_eq!(
         format!("{live:?}"),
-        "RECORD",
+        "([[1, 2], [1], [3], [4], [4], [5, 1], [6], [7], [2], [8, 9], [9], [9, 10]], \
+         [[1, 2], [1], [3], [4], [4], [5, 1], [6], [7], [2], [8, 9], [9], [9, 10]], \
+         [1, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13, 15])",
         "live batches built and published as before"
     );
     assert_eq!(
         format!("{backfill:?}"),
-        "RECORD",
+        "([[0, 1, 2, 3, 4], [5, 6, 7, 8, 9], [10, 11, 12, 13, 14], [15, 16, 17, 18, 19], [20, 21, 22]], \
+         [[0, 1, 2, 3, 4], [5, 6, 7, 8, 9], [10, 11, 12, 13, 14], [15, 16, 17, 18, 19], [20, 21, 22]])",
         "backfill batches built and published as before"
     );
 }

@@ -41,6 +41,7 @@
 //! live stream closed once the source has the final position. See
 //! [`Stop`] for the sequence.
 
+mod builds;
 mod commit;
 mod confirm;
 mod live;
@@ -58,14 +59,15 @@ use kernel::{IndexName, Position, SinkName};
 use source::SourceError;
 use source::cdc::{ChangeCapture, LiveChange};
 use source::document::{DocumentBuilder, DocumentId};
-use stream::{LaneItem, Producer, Stream};
-use tokio::time::{Duration, Instant, sleep_until, timeout_at};
+use stream::{Consumer, LaneItem, Producer, Request, Stream};
+use tokio::time::{Duration, Instant, timeout_at};
 
 use crate::error::{EngineError, Result};
 use crate::observer::{EngineId, NoopObserver, Observer, Stage, StageTiming, StartupStep, Work};
 use crate::policy::{BatchPolicy, FailurePolicies};
 use crate::stop::{Stop, drain_lanes};
 
+use builds::Builds;
 use confirm::{CONFIRM_TICK, Furthest};
 use live::{Next, PendingBatch, next_live};
 pub use snapshot::KEY_PAGE;
@@ -220,16 +222,35 @@ impl IngestEngine {
             .iter()
             .map(|sink| Ok((sink.clone(), self.stream.lane(sink)?.producer)))
             .collect::<Result<_>>()?;
-        let mut requests = self.stream.requests()?.consumer;
+        let requests = self.stream.requests()?.consumer;
         let scopes: HashSet<IndexName> = self.documents.backfill_indexes().into_iter().collect();
 
         let started = Instant::now();
-        let mut live: LiveStream = self.source.live().await?;
+        let live: LiveStream = self.source.live().await?;
         self.observer
             .on_startup_step(StartupStep::OpenLive, None, started.elapsed());
         tracing::info!("following live changes");
         self.observer.on_live_started();
 
+        let mut builds = Builds::new(self.builds);
+        let ended = self
+            .follow(&lanes, requests, &scopes, live, &mut builds)
+            .await;
+        if ended.is_err() {
+            builds.abandon().await;
+        }
+        ended
+    }
+
+    /// The run's loop, from an open live stream to its end or a stop.
+    async fn follow(
+        &self,
+        lanes: &Lanes,
+        mut requests: Box<dyn Consumer<Request>>,
+        scopes: &HashSet<IndexName>,
+        mut live: LiveStream,
+        builds: &mut Builds,
+    ) -> Result<Ended> {
         let mut pending = PendingBatch::new(self.batch.max_changes);
         let mut snapshot: Option<Snapshot> = None;
         let mut last_confirmed: Option<Position> = None;
@@ -244,7 +265,7 @@ impl IngestEngine {
             // (a sink staged its backfill before this engine started) still
             // gets those served; the run ends once nothing is left to do.
             if live_ended && snapshot.is_none() && requests.is_empty() {
-                self.commit_live(&mut pending, &lanes).await?;
+                self.settle(&mut pending, builds, lanes).await?;
                 self.confirm(&mut last_confirmed);
                 return Ok(Ended::LiveEnded);
             }
@@ -256,81 +277,80 @@ impl IngestEngine {
                          served again on the next start"
                     );
                 }
-                self.wind_down(&mut pending, &lanes, live, live_ended, &mut last_confirmed)
-                    .await?;
+                self.wind_down(
+                    &mut pending,
+                    builds,
+                    lanes,
+                    live,
+                    live_ended,
+                    &mut last_confirmed,
+                )
+                .await?;
                 return Ok(Ended::Stopped);
             }
-            let deadline = pending.deadline.unwrap_or_else(far_future);
+            // A batch that can't take more changes (full, or past its
+            // deadline) and waits for a build stops the reading: the stream
+            // waits, as it did while a build ran.
+            let open = pending.is_open();
+            let building = builds.running() > 0;
             tokio::select! {
-                // While the live stream is open, `next_live` watches the stop.
-                () = self.stop.requested(), if live_ended => {
-                    mark = self.waited(mark, &mut snapshot);
+                // While the live stream is read, `next_live` watches the stop.
+                () = self.stop.requested(), if live_ended || !open => {
+                    mark = self.waited(mark, &mut snapshot, building);
                 }
-                change = next_live(&mut live, &self.stop), if !live_ended => match change {
+                change = next_live(&mut live, &self.stop), if !live_ended && open => match change {
                     Next::Stopped => {
-                        mark = self.waited(mark, &mut snapshot);
+                        mark = self.waited(mark, &mut snapshot, building);
                     }
                     Next::Change(None) => {
-                        mark = self.waited(mark, &mut snapshot);
+                        mark = self.waited(mark, &mut snapshot, building);
                         live_ended = true;
                     }
                     Next::Change(Some(Err(error))) => return Err(error.into()),
                     Next::Change(Some(Ok((position, event)))) => {
-                        let started = self.waited(mark, &mut snapshot);
+                        let started = self.waited(mark, &mut snapshot, building);
                         self.buffer_live(&mut pending, position, event).await?;
                         live_ended = self.drain_ready(&mut live, &mut pending).await?;
                         self.observer.on_stage(
                             StageTiming::new(Stage::Resolve, started.elapsed()).work(Work::Live),
                         );
-                        self.commit_live(&mut pending, &lanes).await?;
+                        self.grant(&mut pending, &mut snapshot, builds, lanes).await?;
                         self.confirm(&mut last_confirmed);
                         mark = Instant::now();
                     }
                 },
-                () = sleep_until(deadline), if pending.deadline.is_some() => {
-                    self.waited(mark, &mut snapshot);
-                    self.commit_live(&mut pending, &lanes).await?;
+                landed = builds.next(), if building => {
+                    self.landed(landed, &mut pending, &mut snapshot, builds, lanes).await?;
                     self.confirm(&mut last_confirmed);
                     mark = Instant::now();
                 }
-                step = next_snapshot_step(&mut snapshot), if snapshot.is_some() => {
+                step = next_snapshot_step(&mut snapshot),
+                    if snapshot.as_ref().is_some_and(Snapshot::wants_keys) =>
+                {
                     let Some(active) = snapshot.as_mut() else { continue };
-                    // The wait for a page, if any, is `Page`.
-                    let now = Instant::now();
-                    active.page_wait += now - mark;
-                    mark = now;
+                    // The wait for a page, if any, is `Page`, unless builds
+                    // ran meanwhile: then the loop was waiting on them too.
+                    if !building {
+                        active.page_wait += mark.elapsed();
+                    }
                     match step {
                         Err(error) => return Err(error.into()),
-                        Ok(Step::Keys) => {
-                            active.take_keys();
-                            if active.batch.is_full() {
-                                self.commit_snapshot(active, &lanes).await?;
-                                mark = Instant::now();
-                            }
-                        }
-                        Ok(Step::Done) => {
-                            self.commit_snapshot(active, &lanes).await?;
-                            let started = Instant::now();
-                            self.finish_snapshot(active, &lanes).await?;
-                            self.observer.on_stage(
-                                StageTiming::new(Stage::Snapshot, started.elapsed())
-                                    .work(Work::Backfill),
-                            );
-                            snapshot = None;
-                            mark = Instant::now();
-                        }
+                        Ok(Step::Keys) => active.take_keys(),
+                        Ok(Step::Done) => active.done = true,
                     }
+                    self.grant(&mut pending, &mut snapshot, builds, lanes).await?;
+                    mark = Instant::now();
                 },
                 request = requests.recv(), if snapshot.is_none() => match request? {
                     None => {
-                        mark = self.waited(mark, &mut snapshot);
+                        mark = self.waited(mark, &mut snapshot, building);
                         tracing::warn!("request lane closed; no further backfills can be served");
                         requests = Box::new(ClosedConsumer);
                     }
                     Some(first) => {
-                        let started = self.waited(mark, &mut snapshot);
-                        let deliveries = self.collect_requests(first, &mut requests, &lanes).await?;
-                        snapshot = self.start_snapshot(deliveries, &scopes, &lanes).await?;
+                        let started = self.waited(mark, &mut snapshot, building);
+                        let deliveries = self.collect_requests(first, &mut requests, lanes).await?;
+                        snapshot = self.start_snapshot(deliveries, scopes, lanes).await?;
                         mark = Instant::now();
                         self.observer.on_stage(
                             StageTiming::new(Stage::Snapshot, mark - started).work(Work::Backfill),
@@ -338,7 +358,7 @@ impl IngestEngine {
                     }
                 },
                 _ = confirm_tick.tick() => {
-                    mark = self.waited(mark, &mut snapshot);
+                    mark = self.waited(mark, &mut snapshot, building);
                     self.confirm(&mut last_confirmed);
                 }
             }
@@ -346,12 +366,16 @@ impl IngestEngine {
     }
 
     /// Close the wait since `since` as the loop wakes, and return the moment,
-    /// so the work that follows times from it. With no snapshot running the
-    /// wait is [`Stage::Idle`]; with one, the loop was waiting on its rows
-    /// too, so it is the snapshot's [`Stage::Page`] (reported with its next
-    /// batch).
-    fn waited(&self, since: Instant, snapshot: &mut Option<Snapshot>) -> Instant {
+    /// so the work that follows times from it. While builds run, the loop was
+    /// waiting on them, which their [`Stage::Build`] covers. Otherwise, with
+    /// no snapshot running the wait is [`Stage::Idle`]; with one, the loop
+    /// was waiting on its rows too, so it is the snapshot's [`Stage::Page`]
+    /// (reported with its next batch).
+    fn waited(&self, since: Instant, snapshot: &mut Option<Snapshot>, building: bool) -> Instant {
         let now = Instant::now();
+        if building {
+            return now;
+        }
         match snapshot {
             Some(active) => active.page_wait += now - since,
             None => self
@@ -361,12 +385,14 @@ impl IngestEngine {
         now
     }
 
-    /// The rest of a stop: publish the buffered batch, wait until every lane
+    /// The rest of a stop: finish the builds running, build and publish the
+    /// buffered batch, wait until every lane
     /// acknowledged it (confirming as the watermark moves), then close the
     /// live stream so the final position reaches the source.
     async fn wind_down(
         &self,
         pending: &mut PendingBatch,
+        builds: &mut Builds,
         lanes: &Lanes,
         mut live: LiveStream,
         live_ended: bool,
@@ -376,7 +402,7 @@ impl IngestEngine {
             buffered = pending.count,
             "stop requested: reading no further changes; landing what is in flight"
         );
-        self.commit_live(pending, lanes).await?;
+        self.settle(pending, builds, lanes).await?;
         drain_lanes(&*self.stream, &*self.source, last_confirmed).await;
         tracing::info!(position = ?last_confirmed, "every sink acknowledged; closing the live stream");
         if live_ended || !self.source.close_live() {
@@ -415,10 +441,6 @@ impl IngestEngine {
             .into()),
         }
     }
-}
-
-fn far_future() -> Instant {
-    Instant::now() + Duration::from_secs(60 * 60 * 24 * 365)
 }
 
 /// The sink's document `_id`, derived from the document key (the root primary
