@@ -14,8 +14,17 @@
 //! the source turns that into its own terms ([`ChangeCapture::reached`], off
 //! the positions' own stamps) and wakes the fence when the answer moves with
 //! no new change (idle WAL). Nothing here refreshes a destination or
-//! hurries a flush because a client is waiting, and a backfill is not part of
-//! it: seeding is reported by the status, not fenced.
+//! hurries a flush because a client is waiting.
+//!
+//! **A fence vouches only for what reads see (#379).** Each lane also tracks
+//! whether reads through the sink's alias see what the lane writes: not while
+//! an index is seeded for the first time (`backfilling`), nor while a fresh
+//! generation is built beside the one serving (`rebuilding`: a reindex, or
+//! every seeded index after a `Fresh` source). A lane mid-reindex still
+//! vouches for what the serving generation held when the rebuild began. A
+//! wait that needs more answers [`FenceOutcome::Unserved`] at its timeout,
+//! unless the seed lands first. The sink engines' events set the state
+//! ([`FenceObserver`]); they are a few per index per run.
 //!
 //! The daemon owns the wait; putting it on a wire is the transport's job
 //! (the CLI serves it as `GET /wait`).
@@ -114,6 +123,37 @@ pub enum FenceOutcome {
     Reached { position: String },
     /// The timeout passed first. `position` is how far it got.
     TimedOut { position: String },
+    /// The timeout passed while some lane the wait needs serves reads from
+    /// elsewhere than it writes: it can't be vouched for until it is seeded.
+    /// `lanes` are those lanes; `position` is how far the wait got.
+    Unserved {
+        position: String,
+        lanes: Vec<(LaneKey, Unserved)>,
+    },
+}
+
+/// Why a lane can't vouch for its writes yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Unserved {
+    /// Its sink engine hasn't staged it yet.
+    Starting,
+    /// It is being seeded for the first time (or its index was recreated
+    /// empty): reads see it filling.
+    Backfilling,
+    /// A fresh generation is being built while reads see the old one.
+    Rebuilding,
+}
+
+impl Unserved {
+    /// The reason on the wire.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Unserved::Starting => "starting",
+            Unserved::Backfilling => "backfilling",
+            Unserved::Rebuilding => "rebuilding",
+        }
+    }
 }
 
 /// Why a wait could not start.
@@ -218,11 +258,52 @@ impl Drop for SearchableWait<'_> {
 /// The furthest source position each level of one lane has been seen to
 /// stand for. They only grow, so a reopened source stream (which restarts
 /// from what *every* sink confirmed) never walks a sink back from what it
-/// already reached.
+/// already reached. Beside them, what reads of the lane's index see.
 #[derive(Debug, Default)]
 struct Furthest {
     applied: Option<SourcePosition>,
     searchable: Option<SourcePosition>,
+    serving: Serving,
+}
+
+/// What reads of a lane's index see, set by the sink engine's events.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Serving {
+    /// Not staged yet.
+    #[default]
+    Pending,
+    /// Every write the lane applied.
+    Writes,
+    /// A partial index, being seeded.
+    Backfilling,
+    /// The old generation, exactly as it stood at `through` (applied,
+    /// searchable), or nothing to vouch for.
+    Rebuilding {
+        through: (Option<SourcePosition>, Option<SourcePosition>),
+    },
+}
+
+impl Serving {
+    /// How far reads vouch at `level`, given how far the lane `reached`.
+    fn vouches(self, level: FenceLevel, reached: Option<SourcePosition>) -> Option<SourcePosition> {
+        match self {
+            Serving::Writes => reached,
+            Serving::Rebuilding { through } => match level {
+                FenceLevel::Applied => through.0,
+                FenceLevel::Searchable => through.1,
+            },
+            Serving::Pending | Serving::Backfilling => None,
+        }
+    }
+
+    fn unserved(self) -> Option<Unserved> {
+        match self {
+            Serving::Writes => None,
+            Serving::Pending => Some(Unserved::Starting),
+            Serving::Backfilling => Some(Unserved::Backfilling),
+            Serving::Rebuilding { .. } => Some(Unserved::Rebuilding),
+        }
+    }
 }
 
 impl Fence {
@@ -270,6 +351,78 @@ impl Fence {
     /// A sink reported progress: every waiter checks again.
     fn moved(&self) {
         self.inner.moved.notify_waiters();
+    }
+
+    /// Set what reads of `lane` see, from what they saw, and wake the waiters.
+    fn serve(&self, lane: &LaneKey, next: impl FnOnce(&Furthest) -> Serving) {
+        let Some(furthest) = self.inner.lanes.get(lane) else {
+            return;
+        };
+        {
+            let mut furthest = lock(furthest);
+            furthest.serving = next(&furthest);
+        }
+        self.moved();
+    }
+
+    /// `lane`'s sink is about to build a fresh generation of its index. A
+    /// lane that served its writes keeps vouching for what it had reached:
+    /// the serving generation gets nothing new from here on.
+    fn rebuilding(&self, lane: &LaneKey) {
+        // Both levels brought up to date first, so the frozen `through` is
+        // what the lane had reached when the rebuild began.
+        self.reached(lane, FenceLevel::Searchable);
+        self.serve(lane, |furthest| Serving::Rebuilding {
+            through: match furthest.serving {
+                Serving::Writes => (furthest.applied, furthest.searchable),
+                Serving::Rebuilding { through } => through,
+                Serving::Pending | Serving::Backfilling => (None, None),
+            },
+        });
+    }
+
+    /// A snapshot was requested for `lane`: a rebuild stays one; anything else
+    /// is a seed of an index that reads see filling.
+    fn backfilling(&self, lane: &LaneKey) {
+        self.serve(lane, |furthest| match furthest.serving {
+            rebuilding @ Serving::Rebuilding { .. } => rebuilding,
+            _ => Serving::Backfilling,
+        });
+    }
+
+    /// `lane`'s index is seeded: reads see every write it applied.
+    fn seeded(&self, lane: &LaneKey) {
+        self.serve(lane, |_| Serving::Writes);
+    }
+
+    /// `sink` finished staging: its lanes not seeding serve their writes.
+    fn started(&self, sink: &SinkName) {
+        for lane in self.inner.lanes.keys().filter(|lane| &lane.sink == sink) {
+            self.serve(lane, |furthest| match furthest.serving {
+                Serving::Pending => Serving::Writes,
+                other => other,
+            });
+        }
+    }
+
+    /// How far reads of `lane` vouch at `level`, with why they don't when
+    /// they can't; `reached` is how far the lane got.
+    fn vouched(
+        &self,
+        lane: &LaneKey,
+        level: FenceLevel,
+    ) -> (
+        Option<SourcePosition>,
+        Option<SourcePosition>,
+        Option<Unserved>,
+    ) {
+        let reached = self.reached(lane, level);
+        let serving = self
+            .inner
+            .lanes
+            .get(lane)
+            .map_or(Serving::Pending, |furthest| lock(furthest).serving);
+        (reached, serving.vouches(level, reached), serving.unserved())
     }
 
     /// How far `lane` is for `level`, in the source's terms. `None` while the
@@ -341,17 +494,49 @@ impl Fence {
             tokio::pin!(moved);
             moved.as_mut().enable();
 
-            let Some(reached) = self.slowest(lanes.iter().copied(), request.level) else {
+            let mut slowest: Option<SourcePosition> = None;
+            let mut vouched: Option<SourcePosition> = None;
+            let mut short = false;
+            let mut unserved = Vec::new();
+            for lane in lanes.iter().copied() {
+                let (reached, vouches, why) = self.vouched(lane, request.level);
+                let Some(reached) = reached else {
+                    return Err(FenceError::Unavailable(
+                        "the source is not following live changes yet".to_owned(),
+                    ));
+                };
+                slowest = Some(slowest.map_or(reached, |low| low.min(reached)));
+                match vouches.filter(|vouches| *vouches >= target) {
+                    Some(vouches) => {
+                        vouched = Some(vouched.map_or(vouches, |low| low.min(vouches)));
+                    }
+                    None => {
+                        short = true;
+                        if let Some(why) = why {
+                            unserved.push((lane.clone(), why));
+                        }
+                    }
+                }
+            }
+            let Some(slowest) = slowest else {
                 return Err(FenceError::Unavailable(
                     "the source is not following live changes yet".to_owned(),
                 ));
             };
-            let position = source.format_position(reached);
-            if reached >= target {
+            if !short && let Some(vouched) = vouched {
+                let position = source.format_position(vouched);
                 return Ok(FenceOutcome::Reached { position });
             }
             if timeout_at(deadline, moved).await.is_err() {
-                return Ok(FenceOutcome::TimedOut { position });
+                let position = source.format_position(slowest);
+                return Ok(if unserved.is_empty() {
+                    FenceOutcome::TimedOut { position }
+                } else {
+                    FenceOutcome::Unserved {
+                        position,
+                        lanes: unserved,
+                    }
+                });
             }
         }
     }
@@ -447,8 +632,10 @@ fn lock(furthest: &Mutex<Furthest>) -> std::sync::MutexGuard<'_, Furthest> {
     furthest.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Wakes a [`Fence`]'s waiters on the sink engines' position events. What a
-/// sink reached is read from the deployment's `Progress`, not from the event.
+/// Wakes a [`Fence`]'s waiters on the sink engines' position events, and
+/// tells it what reads of each lane see from their staging, rebuild and seed
+/// events. What a sink reached is read from the deployment's `Progress`, not
+/// from the event.
 #[derive(Debug)]
 pub struct FenceObserver {
     fence: Fence,
@@ -468,6 +655,27 @@ impl Observer for FenceObserver {
 
     fn on_position_searchable(&self, _: &LaneKey, _: Position) {
         self.fence.moved();
+    }
+
+    fn on_index_rebuilding(&self, sink: &SinkName, index: &IndexName) {
+        self.fence
+            .rebuilding(&LaneKey::new(index.clone(), sink.clone()));
+    }
+
+    fn on_backfill_requested(&self, sink: &SinkName, indexes: &[IndexName]) {
+        for index in indexes {
+            self.fence
+                .backfilling(&LaneKey::new(index.clone(), sink.clone()));
+        }
+    }
+
+    fn on_index_seeded(&self, sink: &SinkName, index: &IndexName) {
+        self.fence
+            .seeded(&LaneKey::new(index.clone(), sink.clone()));
+    }
+
+    fn on_sink_started(&self, sink: &SinkName) {
+        self.fence.started(sink);
     }
 }
 

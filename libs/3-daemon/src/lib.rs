@@ -13,7 +13,7 @@ pub use backends::{Backends, SinkParts, SourceParts};
 pub use engine::{Budget, Held, Progress};
 pub use fence::{
     Fence, FenceError, FenceLevel, FenceObserver, FenceOutcome, FencePositions, FenceRequest,
-    LanePositions, SinkPositions,
+    LanePositions, SinkPositions, Unserved,
 };
 pub use observer::StatusObserver;
 pub use stall::{LaneStall, SAMPLE_EVERY, STALL_WARN, StallEvent, Stalls};

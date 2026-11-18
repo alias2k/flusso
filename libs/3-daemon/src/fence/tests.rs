@@ -152,7 +152,7 @@ impl Rig {
     }
 }
 
-/// A fence over the `users` index of `sinks`.
+/// A fence over the `users` index of `sinks`, every sink staged.
 fn fence(sinks: &[&str]) -> Rig {
     fence_over(&["users"], sinks)
 }
@@ -171,6 +171,9 @@ fn fence_over(indexes: &[&str], sinks: &[&str]) -> Rig {
         lanes.iter().cloned(),
     );
     let observer = FenceObserver::new(fence.clone());
+    for on in sinks {
+        observer.on_sink_started(&sink(on));
+    }
     Rig {
         fence,
         source,
@@ -597,5 +600,270 @@ fn positions_report_each_lane() {
             (LaneKey::new(index("orders"), sink("primary")), 2),
             (users, 0),
         ]
+    );
+}
+
+/// The answer a wait gets when `lanes` can't vouch for it.
+fn unserved(position: &str, lanes: &[(&str, &str, Unserved)]) -> Result<FenceOutcome, FenceError> {
+    Ok(FenceOutcome::Unserved {
+        position: position.to_owned(),
+        lanes: lanes
+            .iter()
+            .map(|(i, s, why)| (LaneKey::new(index(i), sink(s)), *why))
+            .collect(),
+    })
+}
+
+/// A first seed: the lane applied the change, but reads see a filling index.
+/// The wait holds; the seed passes it at once.
+#[tokio::test(start_paused = true)]
+async fn a_backfilling_index_is_vouched_for_once_seeded() {
+    let rig = fence(&["primary"]);
+    rig.observer
+        .on_backfill_requested(&sink("primary"), &[index("users")]);
+    let change = rig.source.emit(20);
+    rig.route(change);
+    rig.applied("primary", change);
+    rig.searchable("primary", change);
+
+    let waiting = tokio::spawn({
+        let fence = rig.fence.clone();
+        async move {
+            fence
+                .wait(&request("20", FenceLevel::Searchable, None))
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        !waiting.is_finished(),
+        "applied, but the index is still filling"
+    );
+    rig.observer
+        .on_index_seeded(&sink("primary"), &index("users"));
+    assert_eq!(waiting.await.unwrap(), reached("20"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wait_on_a_backfilling_index_answers_unserved_at_its_timeout() {
+    let rig = fence(&["primary"]);
+    rig.observer
+        .on_backfill_requested(&sink("primary"), &[index("users")]);
+    let change = rig.source.emit(20);
+    rig.route(change);
+    rig.applied("primary", change);
+
+    let started = Instant::now();
+    assert_eq!(
+        rig.fence
+            .wait(&request("20", FenceLevel::Applied, None))
+            .await,
+        unserved("20", &[("users", "primary", Unserved::Backfilling)]),
+    );
+    assert_eq!(started.elapsed(), Duration::from_secs(5));
+}
+
+/// A reindex of a serving index: the old generation keeps what the lane had
+/// applied when the rebuild began, and gets nothing after.
+#[tokio::test(start_paused = true)]
+async fn a_reindex_vouches_for_what_the_old_generation_holds_and_no_more() {
+    let rig = fence(&["primary"]);
+    let before = rig.source.emit(10);
+    rig.route(before);
+    rig.applied("primary", before);
+    rig.searchable("primary", before);
+    rig.observer
+        .on_index_rebuilding(&sink("primary"), &index("users"));
+    rig.observer
+        .on_backfill_requested(&sink("primary"), &[index("users")]);
+    let after = rig.source.emit(20);
+    rig.route(after);
+    rig.applied("primary", after);
+    rig.searchable("primary", after);
+
+    for level in [FenceLevel::Applied, FenceLevel::Searchable] {
+        assert_eq!(
+            rig.fence.wait(&request("10", level, None)).await,
+            reached("10"),
+            "{level}: the serving generation holds the change"
+        );
+        assert_eq!(
+            rig.fence.wait(&request("20", level, None)).await,
+            unserved("20", &[("users", "primary", Unserved::Rebuilding)]),
+            "{level}: the change went to the generation being built"
+        );
+    }
+    rig.observer
+        .on_index_seeded(&sink("primary"), &index("users"));
+    assert_eq!(
+        rig.fence
+            .wait(&request("20", FenceLevel::Searchable, None))
+            .await,
+        reached("20")
+    );
+}
+
+/// The old generation's searchable mark is its own: a reindex never vouches
+/// for a search past what a refresh had covered.
+#[tokio::test(start_paused = true)]
+async fn a_reindex_keeps_the_searchable_mark_it_had() {
+    let rig = fence(&["primary"]);
+    let first = rig.source.emit(10);
+    let second = rig.source.emit(20);
+    rig.route(first);
+    rig.route(second);
+    rig.applied("primary", second);
+    rig.searchable("primary", first);
+    rig.observer
+        .on_index_rebuilding(&sink("primary"), &index("users"));
+
+    assert_eq!(
+        rig.fence
+            .wait(&request("20", FenceLevel::Applied, None))
+            .await,
+        reached("20")
+    );
+    let answer = rig
+        .fence
+        .wait(&request("20", FenceLevel::Searchable, None))
+        .await;
+    assert!(
+        matches!(answer, Ok(FenceOutcome::Unserved { .. })),
+        "{answer:?}"
+    );
+}
+
+/// After a `Fresh` source the old generation misses changes no one saw:
+/// nothing is vouched for until the rebuild is seeded.
+#[tokio::test(start_paused = true)]
+async fn a_rebuild_after_a_fresh_source_vouches_for_nothing() {
+    let source = Arc::new(NumberedSource::default());
+    let lane = lane("primary");
+    let progress = Arc::new(Progress::new([lane.clone()]));
+    let fence = Fence::new(
+        Arc::clone(&source) as Arc<dyn ChangeCapture>,
+        Arc::clone(&progress),
+        [lane.clone()],
+    );
+    let observer = FenceObserver::new(fence.clone());
+    observer.on_index_rebuilding(&sink("primary"), &index("users"));
+    observer.on_backfill_requested(&sink("primary"), &[index("users")]);
+    observer.on_sink_started(&sink("primary"));
+    source.idle_to(40);
+
+    assert_eq!(
+        fence.wait(&request("30", FenceLevel::Applied, None)).await,
+        unserved("40", &[("users", "primary", Unserved::Rebuilding)]),
+        "a commit made while flusso was away is not in the old generation"
+    );
+    observer.on_index_seeded(&sink("primary"), &index("users"));
+    assert_eq!(
+        fence.wait(&request("30", FenceLevel::Applied, None)).await,
+        reached("40")
+    );
+}
+
+/// A sink that finds its generation gone recreates it empty and asks for a
+/// snapshot, with no rebuild: nothing of the old one is left to vouch for.
+#[tokio::test(start_paused = true)]
+async fn a_recreated_index_vouches_for_nothing_it_had() {
+    let rig = fence(&["primary"]);
+    let before = rig.source.emit(10);
+    rig.route(before);
+    rig.applied("primary", before);
+    rig.observer
+        .on_backfill_requested(&sink("primary"), &[index("users")]);
+    assert_eq!(
+        rig.fence
+            .wait(&request("10", FenceLevel::Applied, None))
+            .await,
+        unserved("10", &[("users", "primary", Unserved::Backfilling)]),
+    );
+}
+
+/// Per-index fences: a wait naming only the healthy index passes while its
+/// sibling rebuilds; the wait over every index doesn't.
+#[tokio::test(start_paused = true)]
+async fn a_wait_naming_only_healthy_indexes_passes_beside_a_rebuild() {
+    let rig = fence_over(&["orders", "users"], &["primary"]);
+    rig.observer
+        .on_index_rebuilding(&sink("primary"), &index("orders"));
+    rig.source.idle_to(40);
+
+    assert_eq!(
+        rig.fence
+            .wait(&on_indexes("30", FenceLevel::Applied, &["users"]))
+            .await,
+        reached("40")
+    );
+    assert_eq!(
+        rig.fence
+            .wait(&request("30", FenceLevel::Applied, None))
+            .await,
+        unserved("40", &[("orders", "primary", Unserved::Rebuilding)]),
+    );
+}
+
+/// A wait on a healthy sink never looks at a sibling sink's backfill; a wait
+/// on every sink does.
+#[tokio::test(start_paused = true)]
+async fn a_backfilling_sibling_sink_blocks_only_a_wait_on_every_sink() {
+    let rig = fence(&["audit", "primary"]);
+    rig.observer
+        .on_backfill_requested(&sink("audit"), &[index("users")]);
+    rig.source.idle_to(40);
+
+    assert_eq!(
+        rig.fence
+            .wait(&request("30", FenceLevel::Searchable, Some("primary")))
+            .await,
+        reached("40")
+    );
+    assert_eq!(
+        rig.fence
+            .wait(&request("30", FenceLevel::Searchable, None))
+            .await,
+        unserved("40", &[("users", "audit", Unserved::Backfilling)]),
+    );
+}
+
+/// Before its sink engine staged, a lane vouches for nothing; staging serves
+/// the lanes it didn't send to a snapshot.
+#[tokio::test(start_paused = true)]
+async fn a_lane_is_vouched_for_once_its_sink_staged_it() {
+    let source = Arc::new(NumberedSource::default());
+    let lanes = [
+        lane("primary"),
+        LaneKey::new(index("orders"), sink("primary")),
+    ];
+    let fence = Fence::new(
+        Arc::clone(&source) as Arc<dyn ChangeCapture>,
+        Arc::new(Progress::new(lanes.iter().cloned())),
+        lanes.iter().cloned(),
+    );
+    let observer = FenceObserver::new(fence.clone());
+    source.idle_to(40);
+    assert_eq!(
+        fence.wait(&request("30", FenceLevel::Applied, None)).await,
+        unserved(
+            "40",
+            &[
+                ("orders", "primary", Unserved::Starting),
+                ("users", "primary", Unserved::Starting)
+            ]
+        ),
+    );
+
+    observer.on_backfill_requested(&sink("primary"), &[index("orders")]);
+    observer.on_sink_started(&sink("primary"));
+    assert_eq!(
+        fence
+            .wait(&on_indexes("30", FenceLevel::Applied, &["users"]))
+            .await,
+        reached("40")
+    );
+    assert_eq!(
+        fence.wait(&request("30", FenceLevel::Applied, None)).await,
+        unserved("40", &[("orders", "primary", Unserved::Backfilling)]),
     );
 }
