@@ -961,7 +961,14 @@ is the one concrete piece.
   `ensure_index` retracts a seeded marker whose generation index is missing; while running,
   seeded writes go through the hash alias with `require_alias`, so a deleted generation is a
   write-wide `Err` and the restart re-stages it (#123). Its `reindex` no-ops while unseeded and
-  `mark_seeded` drops every non-active generation (#121). Guarded by the
+  `mark_seeded` drops every non-active generation (#121): refresh, `refresh_interval` restore and
+  the holder/generation lookups run at once, then one atomic `_aliases` call moves both aliases
+  and `remove_index`es the stale generations (refused: re-read, hash alias alone), then the marker,
+  last (#354, #410). `ensure_index` creates a first generation with its aliases in the create
+  request, a rebuild's bare (#403). `mark_seeded` is safe for several indexes at once beside other
+  indexes' writes (one meta doc per index, disjoint aliases). Guards: `seeding` e2e (behind a
+  fault proxy: request order, a crash after every request, `several_indexes_seed_at_once_*`;
+  `docs/adr/0012-stage-notes/seed.md`). Guarded by the
   engine's `fresh_source_*`/`skip_backfill_with_a_fresh_source_*` unit tests, the daemon's
   `fresh_source_rebuilds_seeded_sinks_before_preparing`, the sink's
   `deleted_generation_is_recreated_and_reported_unseeded`,

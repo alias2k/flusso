@@ -14,6 +14,10 @@
 //!   first one with both aliases in its create request, a rebuild's with
 //!   none (the old generation serves until the swap), and never the
 //!   convenience alias while another index holds it.
+//! - **Indexes seed at once.** `mark_seeded` for several indexes, first seeds
+//!   and rebuilds alike, runs concurrently on one sink beside writes to other
+//!   indexes: each index ends on its own generation, alone, seeded, and no
+//!   write is lost (ADR 0012, seeding the indexes of a sink concurrently).
 //!
 //! Requires Docker. Ignored by default; run with:
 //!
@@ -522,4 +526,101 @@ async fn a_rebuild_swaps_both_aliases_and_drops_the_old_generation_in_one_reques
         [format!("{h1}_2")]
     );
     assert_eq!(searchable(&client, &base, h1.as_str()).await, ["1", "2"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn several_indexes_seed_at_once_beside_writes_to_others() {
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let rebuilds: Vec<IndexMapping> = (0..4)
+        .map(|i| mapping(&format!("rebuilt{i}"), 10 + i))
+        .collect();
+    let fresh: Vec<IndexMapping> = (0..4)
+        .map(|i| mapping(&format!("fresh{i}"), 20 + i))
+        .collect();
+    let busy: Vec<IndexMapping> = (0..2)
+        .map(|i| mapping(&format!("busy{i}"), 30 + i))
+        .collect();
+
+    let before = sink(&base);
+    for mapping in &rebuilds {
+        before.ensure_index(mapping).await.unwrap();
+        write(&before, &mapping.index, &[1, 2, 3]).await;
+        before.mark_seeded(&mapping.index).await.unwrap();
+        before.reindex(mapping).await.unwrap();
+    }
+    let run = std::sync::Arc::new(sink(&base));
+    for mapping in rebuilds.iter().chain(&fresh).chain(&busy) {
+        run.ensure_index(mapping).await.unwrap();
+    }
+    for mapping in rebuilds.iter().chain(&fresh) {
+        write(&run, &mapping.index, &[1, 2]).await;
+    }
+    for mapping in &busy {
+        write(&run, &mapping.index, &[0]).await;
+        run.mark_seeded(&mapping.index).await.unwrap();
+    }
+
+    let mut tasks = tokio::task::JoinSet::new();
+    for mapping in rebuilds.iter().chain(&fresh) {
+        let run = std::sync::Arc::clone(&run);
+        let index = mapping.index.clone();
+        tasks.spawn(async move { run.mark_seeded(&index).await.unwrap() });
+    }
+    for mapping in &busy {
+        let run = std::sync::Arc::clone(&run);
+        let index = mapping.index.clone();
+        tasks.spawn(async move {
+            for i in 1..=20 {
+                let envelopes = [upsert(&index, i)];
+                let report = run.write(&envelopes, i == 20).await.unwrap();
+                assert!(report.rejected.is_empty(), "{report:?}");
+            }
+        });
+    }
+    while let Some(done) = tasks.join_next().await {
+        done.unwrap();
+    }
+
+    for (mapping, generation) in rebuilds
+        .iter()
+        .map(|m| (m, 2))
+        .chain(fresh.iter().map(|m| (m, 1)))
+    {
+        let logical = mapping.index.as_ref();
+        let hash_alias = format!("{logical}_{}", mapping.hash);
+        let serving = format!("{hash_alias}_{generation}");
+        assert_eq!(
+            generations(&client, &base, &hash_alias).await,
+            [serving.clone()],
+            "{logical}"
+        );
+        assert_eq!(
+            alias_targets(&client, &base, &hash_alias).await,
+            [serving.clone()],
+            "{logical}"
+        );
+        assert_eq!(
+            alias_targets(&client, &base, logical).await,
+            [serving],
+            "{logical}"
+        );
+        assert_eq!(
+            marker(&client, &base, &hash_alias).await,
+            (generation, true),
+            "{logical}"
+        );
+        assert_eq!(
+            searchable(&client, &base, &hash_alias).await,
+            ["1", "2"],
+            "{logical}"
+        );
+    }
+    for mapping in &busy {
+        let hash_alias = format!("{}_{}", mapping.index.as_ref(), mapping.hash);
+        let mut expected: Vec<String> = (0..=20).map(|i| i.to_string()).collect();
+        expected.sort();
+        assert_eq!(searchable(&client, &base, &hash_alias).await, expected);
+    }
 }

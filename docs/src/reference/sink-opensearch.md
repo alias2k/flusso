@@ -150,6 +150,14 @@ Each write also reports when its documents become searchable, which is what a [`
 
 ## Seeding
 
+A generation is created with the aliases it may carry. The first generation of a hash alias gets the hash alias and the convenience alias in its create request; the convenience alias is left out while an index holds that name. A rebuild's generation is created with none, because the old generation keeps serving until the swap.
+
+When a backfill completes, the sink seeds the index in this order:
+
+1. Refresh the generation, restore its `refresh_interval`, and read the alias holders and the other generations, all at once.
+2. Move both aliases onto the generation and drop every other generation of the hash alias, in one atomic `_aliases` call. Readers see the old generation or the new one, never neither. If OpenSearch refuses that call, the hash alias is moved alone and the convenience alias stays best-effort.
+3. Write the marker in `flusso_meta`, last. If anything before it fails, the index stays unseeded, and the next start runs the backfill again. The backfill is idempotent.
+
 Seeded state is recorded in `flusso_meta`, so a restart skips a completed backfill. On every start the marker is checked against the generation it names: if that index is gone, the marker is retracted with a warning, the generation is recreated empty, and the backfill refills it. Deleting `{logical}_{hash}_{n}` between runs is the supported way to force a rebuild of one index. A missing replication slot overrides every marker; see [Recover from a dropped slot](../operate/dropped-slot.md).
 
 Deleting a seeded generation **while flusso runs** is caught on the next write to that index: the alias is gone with it, so the write fails with `index_not_found_exception` instead of OpenSearch auto-creating a dynamically mapped index. That fails the whole flush, not one document. The sink's engine restarts with backoff, the batch is redelivered, and the restart's marker check rebuilds the generation as above. Until that next write, reads through the alias return 404.
