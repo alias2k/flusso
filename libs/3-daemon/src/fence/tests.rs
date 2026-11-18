@@ -422,4 +422,119 @@ fn the_status_document_carries_the_positions() {
     assert_eq!(json["searchable_position"], "19");
     assert_eq!(json["sinks"]["primary"]["applied_position"], "20");
     assert_eq!(json["sinks"]["primary"]["searchable_position"], "19");
+    assert_eq!(
+        json["sinks"]["primary"]["lanes"]["users"],
+        serde_json::json!({
+            "applied_position": "20",
+            "searchable_position": "19",
+            "outstanding": 0,
+        })
+    );
+}
+
+fn on_indexes(position: &str, level: FenceLevel, indexes: &[&str]) -> FenceRequest {
+    FenceRequest {
+        indexes: indexes.iter().map(|name| index(name)).collect(),
+        ..request(position, level, Some("primary"))
+    }
+}
+
+/// Two indexes on one sink: the `orders` lane never lands, the `users` lane
+/// does. A fence on `users` passes; one on `orders`, on both, or on every
+/// index waits for `orders`.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_sibling_index_blocks_no_fence_on_the_healthy_index() {
+    let rig = fence_over(&["orders", "users"], &["primary"]);
+    let change = rig.source.emit(20);
+    rig.route(change);
+    let users = LaneKey::new(index("users"), sink("primary"));
+    rig.applied_on(&users, change);
+    rig.searchable_on(&users, change);
+
+    for level in [FenceLevel::Applied, FenceLevel::Searchable] {
+        assert_eq!(
+            rig.fence.wait(&on_indexes("20", level, &["users"])).await,
+            reached("20"),
+            "{level:?}"
+        );
+    }
+    for indexes in [&["orders"][..], &["orders", "users"], &[]] {
+        assert_eq!(
+            rig.fence
+                .wait(&FenceRequest {
+                    timeout: Duration::from_millis(100),
+                    ..on_indexes("20", FenceLevel::Applied, indexes)
+                })
+                .await,
+            timed_out("19"),
+            "{indexes:?} waits for the stalled orders lane"
+        );
+    }
+}
+
+/// A fence on one index wakes when that index's lane lands, whatever its
+/// sibling does.
+#[tokio::test(start_paused = true)]
+async fn an_index_fence_wakes_when_its_lane_lands() {
+    let rig = fence_over(&["orders", "users"], &["primary"]);
+    let change = rig.source.emit(20);
+    rig.route(change);
+    let waiting = tokio::spawn({
+        let fence = rig.fence.clone();
+        async move {
+            fence
+                .wait(&on_indexes("20", FenceLevel::Applied, &["orders"]))
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    rig.applied_on(&LaneKey::new(index("users"), sink("primary")), change);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!waiting.is_finished(), "users landing doesn't pass orders");
+
+    rig.applied_on(&LaneKey::new(index("orders"), sink("primary")), change);
+    assert_eq!(waiting.await.unwrap(), reached("20"));
+}
+
+#[tokio::test]
+async fn a_fence_on_an_index_with_no_lane_is_refused() {
+    let rig = fence_over(&["users"], &["primary"]);
+    assert_eq!(
+        rig.fence
+            .wait(&on_indexes("1", FenceLevel::Applied, &["users", "orders"]))
+            .await,
+        Err(FenceError::UnknownIndex("orders".to_owned()))
+    );
+}
+
+#[test]
+fn positions_report_each_lane() {
+    let rig = fence_over(&["orders", "users"], &["primary"]);
+    let first = rig.source.emit(20);
+    let second = rig.source.emit(30);
+    rig.route(first);
+    rig.route(second);
+    let users = LaneKey::new(index("users"), sink("primary"));
+    rig.applied_on(&users, first);
+    rig.applied_on(&users, second);
+
+    let positions = rig.fence.positions();
+    let primary = &positions.sinks[&sink("primary")];
+    assert_eq!(primary.applied.as_deref(), Some("19"), "its slowest lane");
+    assert_eq!(
+        primary.indexes[&index("users")],
+        LanePositions {
+            applied: Some("30".to_owned()),
+            searchable: Some("19".to_owned()),
+            outstanding: 0,
+        }
+    );
+    assert_eq!(
+        primary.indexes[&index("orders")],
+        LanePositions {
+            applied: Some("19".to_owned()),
+            searchable: Some("19".to_owned()),
+            outstanding: 2,
+        }
+    );
 }

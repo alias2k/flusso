@@ -162,6 +162,27 @@ async fn an_unknown_sink_answers_404() {
 }
 
 #[tokio::test]
+async fn a_wait_on_named_indexes_echoes_them() {
+    let (base, _source) = serve_public(40).await;
+    let (status, body) = get_wait(&base, "position=35&index=users&until=applied").await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body,
+        json!({ "reached": true, "position": "40", "until": "applied", "sink": null, "indexes": ["users"] })
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_or_invalid_index_is_refused() {
+    let (base, _source) = serve_public(40).await;
+    let (status, body) = get_wait(&base, "position=1&index=users&index=orders").await;
+    assert_eq!(status, 404);
+    assert_eq!(body["error"], "unknown index `orders`");
+    let (status, body) = get_wait(&base, "position=1&index=").await;
+    assert_eq!(status, 400, "{body}");
+}
+
+#[tokio::test]
 async fn a_source_that_is_not_live_yet_answers_503() {
     let (base, source) = serve_public(40).await;
     source.closed.store(true, Ordering::SeqCst);

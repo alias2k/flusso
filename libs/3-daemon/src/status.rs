@@ -128,6 +128,20 @@ impl SinkStatus {
         SinkSnapshot {
             applied_position: positions.applied,
             searchable_position: positions.searchable,
+            lanes: positions
+                .indexes
+                .into_iter()
+                .map(|(index, lane)| {
+                    (
+                        index.as_ref().to_owned(),
+                        LaneSnapshot {
+                            applied_position: lane.applied,
+                            searchable_position: lane.searchable,
+                            outstanding: lane.outstanding,
+                        },
+                    )
+                })
+                .collect(),
             phase: *lock(&self.phase),
             indexes: lock(&self.indexes)
                 .iter()
@@ -591,4 +605,20 @@ pub struct SinkSnapshot {
     pub applied_position: Option<String>,
     /// The source position this sink can search.
     pub searchable_position: Option<String>,
+    /// Each of this sink's `(index, sink)` lanes, by index: how far it has
+    /// applied and can search, and what it holds outstanding. Empty when the
+    /// status has no fence.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub lanes: BTreeMap<String, LaneSnapshot>,
+}
+
+/// One `(index, sink)` lane in `/status`.
+#[derive(Debug, Clone, Serialize)]
+pub struct LaneSnapshot {
+    /// The source position this lane has applied.
+    pub applied_position: Option<String>,
+    /// The source position this lane can search.
+    pub searchable_position: Option<String>,
+    /// Items routed to this lane and not landed yet.
+    pub outstanding: usize,
 }
