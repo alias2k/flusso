@@ -404,6 +404,15 @@ impl Fence {
             .collect())
     }
 
+    /// Each lane and the items routed to it it hasn't landed, for a metric.
+    pub fn outstanding(&self) -> Vec<(LaneKey, usize)> {
+        self.inner
+            .lanes
+            .keys()
+            .map(|lane| (lane.clone(), self.inner.progress.outstanding(lane)))
+            .collect()
+    }
+
     /// Where every sink and lane is right now, for a status surface.
     pub fn positions(&self) -> FencePositions {
         let format = |position: Option<SourcePosition>| {

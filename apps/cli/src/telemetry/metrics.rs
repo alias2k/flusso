@@ -176,6 +176,28 @@ pub(crate) fn register_in_flight_gauge(status: Arc<Status>) -> ObservableGauge<u
         .build()
 }
 
+/// Register `flusso.lane.outstanding` as an observable gauge read from the
+/// daemon's [`Status`] at collection: per `(index, sink)` lane, the items
+/// routed to it and not landed. A lane that stays high is the one holding
+/// back confirmation.
+pub(crate) fn register_lane_outstanding_gauge(status: Arc<Status>) -> ObservableGauge<u64> {
+    global::meter("flusso")
+        .u64_observable_gauge("flusso.lane.outstanding")
+        .with_description("Items routed to an (index, sink) lane and not landed yet")
+        .with_callback(move |observer| {
+            for (lane, outstanding) in status.lanes_outstanding() {
+                observer.observe(
+                    u64::try_from(outstanding).unwrap_or(u64::MAX),
+                    &[
+                        KeyValue::new("index", lane.index.as_ref().to_owned()),
+                        KeyValue::new("sink", lane.sink.as_ref().to_owned()),
+                    ],
+                );
+            }
+        })
+        .build()
+}
+
 /// Register `flusso.replication.visibility_wait` as an observable gauge that reads
 /// the daemon's [`Status`] at collection time: seconds the source has held a
 /// committed change it can't read back yet, `0` while nothing waits.

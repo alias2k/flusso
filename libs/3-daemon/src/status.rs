@@ -208,6 +208,15 @@ impl Status {
             .and_then(|source| source.readable_wait())
     }
 
+    /// Each `(index, sink)` lane and the items routed to it it hasn't
+    /// landed; empty without a fence. Read live, not sampled.
+    pub fn lanes_outstanding(&self) -> Vec<(stream::LaneKey, usize)> {
+        self.fence
+            .as_ref()
+            .map(Fence::outstanding)
+            .unwrap_or_default()
+    }
+
     /// Report the fence's positions in the snapshot.
     pub fn with_fence(mut self, fence: Fence) -> Self {
         self.fence = Some(fence);

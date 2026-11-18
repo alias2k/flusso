@@ -537,4 +537,11 @@ fn positions_report_each_lane() {
             outstanding: 2,
         }
     );
+    assert_eq!(
+        rig.fence.outstanding(),
+        [
+            (LaneKey::new(index("orders"), sink("primary")), 2),
+            (users, 0),
+        ]
+    );
 }
