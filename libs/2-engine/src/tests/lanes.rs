@@ -893,3 +893,102 @@ async fn an_ordered_sink_writes_live_items_across_lanes_in_position_order() {
         .collect();
     assert_eq!(positions, [0, 1, 2]);
 }
+
+/// A sink with refresh off (`refresh_interval = "-1"`): a write that isn't
+/// caught up is searchable only once a later caught-up write covers it.
+/// `orders` writes never return; `users` write `1` returns after write `2`.
+#[derive(Debug, Default)]
+struct DeferredRefresh {
+    caught_up: Mutex<Vec<bool>>,
+}
+
+#[async_trait]
+impl Sink for DeferredRefresh {
+    async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> sink::Result<WriteReport> {
+        self.caught_up.lock().unwrap().push(caught_up);
+        if let Some(first) = envelopes.first() {
+            if first.index == orders() {
+                std::future::pending::<()>().await;
+            }
+            if first.id == "1" {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        }
+        Ok(WriteReport::clean().visible(if caught_up {
+            sink::Visibility::Immediate
+        } else {
+            sink::Visibility::Deferred
+        }))
+    }
+
+    async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
+        Ok(true)
+    }
+}
+
+/// A lane that goes quiet makes its own last writes searchable, even while
+/// another lane's write never returns: write `1` of users came back after
+/// the caught-up write `2` was granted, so only a caught-up write after it
+/// covers it.
+#[tokio::test]
+async fn a_quiet_lane_makes_its_last_writes_searchable_beside_a_stalled_lane() {
+    let sink = Arc::new(DeferredRefresh::default());
+    let primary = sink_name("primary");
+    let indexes = [orders(), users()];
+    let stream = Arc::new(ChannelStream::over(64, indexes.clone(), [primary.clone()]));
+    let progress = Arc::new(crate::Progress::of(indexes, [primary.clone()]));
+    let item = |index: IndexName, position: u64| {
+        LaneItem::Batch(Batch {
+            position: Some(Position::new(position)),
+            changes: 1,
+            envelopes: vec![Envelope::upsert(
+                index,
+                position.to_string(),
+                GenericValue::Map(BTreeMap::new()),
+                Some(Position::new(position)),
+                chrono::Utc::now(),
+            )]
+            .into(),
+            hold: Default::default(),
+        })
+    };
+    let publish = |index: IndexName, position: u64| {
+        let stream = Arc::clone(&stream);
+        let progress = Arc::clone(&progress);
+        let primary = primary.clone();
+        async move {
+            let lane = LaneKey::new(index.clone(), primary);
+            stream
+                .lane(&lane)
+                .unwrap()
+                .producer
+                .publish(item(index, position))
+                .await
+                .unwrap();
+            progress.published(&lane, Position::new(position), Position::new(position));
+        }
+    };
+    publish(orders(), 0).await;
+    publish(users(), 1).await;
+    publish(users(), 2).await;
+    let engine = SinkEngine::new(
+        primary.clone(),
+        Arc::clone(&sink) as Arc<dyn Sink>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![index_mapping(orders()), index_mapping(users())],
+        Arc::clone(&progress),
+    )
+    .with_writes(4)
+    .with_write_documents(1);
+    engine.set_blame(crate::sink_engine::Blame::Nobody);
+    let task = tokio::spawn(async move {
+        let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
+        engine.run(&mut control).await
+    });
+    let users_lane = LaneKey::new(users(), primary);
+    wait_for(|| {
+        progress.lane(&users_lane, Level::Searchable) == Some(Landed::Through(Position::new(2)))
+    })
+    .await;
+    task.abort();
+}
