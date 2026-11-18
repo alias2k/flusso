@@ -461,6 +461,7 @@ fn classify(
                     Some("stopping") => UnavailableCause::Stopping,
                     Some("starting") | None => UnavailableCause::Starting,
                     Some("rebuilding") => UnavailableCause::Rebuilding,
+                    Some("backfilling") => UnavailableCause::Backfilling,
                     Some(_) => UnavailableCause::Unusable,
                 };
                 unavailable(cause, error)

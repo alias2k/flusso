@@ -3511,6 +3511,23 @@ mod fence {
         Ok(())
     }
 
+    /// A daemon still seeding or rebuilding the index answers `503` with the
+    /// reason (#379): the fence asks again and passes once it is seeded.
+    #[tokio::test]
+    async fn a_rebuild_is_waited_out_and_never_read_as_reached() -> Result {
+        const REBUILDING: Reply = Reply::Answer(
+            503,
+            "retry-after: 1\r\n",
+            r#"{"error":"users on primary (rebuilding)","reason":"rebuilding","position":"0/20"}"#,
+        );
+        let (base, seen) = stub(&[REBUILDING, REACHED]).await?;
+        fenced(&base, &base, Duration::from_secs(5))?
+            .wait("0/10")
+            .await?;
+        assert_eq!(waits(&seen).len(), 2, "{:?}", requests(&seen));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn a_connection_dropped_mid_wait_is_asked_again() -> Result {
         let (base, seen) = stub(&[Reply::DropAfter(Duration::from_millis(200)), REACHED]).await?;
@@ -3598,6 +3615,15 @@ mod fence {
                 ),
                 UnavailableCause::Rebuilding,
                 "index t is rebuilding",
+            ),
+            (
+                Reply::Answer(
+                    503,
+                    "retry-after: 1\r\n",
+                    r#"{"error":"users on primary (backfilling)","reason":"backfilling"}"#,
+                ),
+                UnavailableCause::Backfilling,
+                "users on primary (backfilling)",
             ),
             (
                 Reply::Answer(503, "", r#"{"error":"busy","reason":"moon phase"}"#),

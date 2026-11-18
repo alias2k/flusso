@@ -134,9 +134,13 @@ pub enum UnavailableCause {
     /// flusso is not following the source yet: it is starting, or its ingest
     /// engine is restarting. A daemon that names no reason (0.17) means this.
     Starting,
-    /// A sink is rebuilding the index the fence covers, so flusso cannot vouch
-    /// for it yet.
+    /// A sink is rebuilding the index the fence covers (a reindex, or a
+    /// rebuild after flusso lost its replication slot) and reads still see the
+    /// old copy, so flusso cannot vouch for the position yet.
     Rebuilding,
+    /// A sink is seeding the index the fence covers for the first time: reads
+    /// see it filling, so flusso cannot vouch for the position yet.
+    Backfilling,
     /// flusso could not be reached: refused, reset or dropped connection, no
     /// answer in time, or a gateway in front of it answering `502`/`503`/`504`.
     Unreachable,
@@ -152,6 +156,7 @@ impl std::fmt::Display for UnavailableCause {
             UnavailableCause::Stopping => "stopping",
             UnavailableCause::Starting => "starting",
             UnavailableCause::Rebuilding => "rebuilding",
+            UnavailableCause::Backfilling => "backfilling",
             UnavailableCause::Unreachable => "unreachable",
             UnavailableCause::Throttled => "throttled",
             UnavailableCause::Unusable => "unusable answer",
