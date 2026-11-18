@@ -236,7 +236,7 @@ Chosen: **once, on the reader.** The alternative is to publish the row change an
 
 **Keyset backfill.**
 
-- `WHERE key > $last ORDER BY key LIMIT 1024`, with `$last` bound through `sql::key_cast`, one page of an index's root keys at a time.
+- `WHERE key > $last ORDER BY key LIMIT 1024`, with `$last` bound through `sql::key_cast`, one page of an index's root keys at a time, up to the greatest key the walk read when it started.
 - The page reads the bare key. Root filters and soft-delete stay in the build, which turns a filtered-out row into a tombstone, as the cursor did. A filter on the page would make the page's plan depend on the filter, and a raw filter can read anything (#386 stage 3).
 - No shared snapshot is needed: the slot predates the backfill (#120), so every change made during it is in the WAL and rebuilt live. A page gives only ids: the document is read when it is built, and per document build order is lane order (section 2).
 
@@ -410,6 +410,9 @@ Each stage leaves `main` correct and is measured on `reference` before and after
    - **`ORDER BY key USING <`**, not a plain `ORDER BY`. The `>` of the next page resolves its operator through the search path, the index's order doesn't: for a type whose operators are off the path (`citext` in `ext`), a plain `ORDER BY` walked in `citext` order and compared as `text`, and skipped rows. `USING <` makes both the same operator; where it is the index's own (every other case) the plan is unchanged.
    - **The bare key on the page.** Filters and soft-delete stay in the build (section 5).
    - **The same roots as the cursor read:** a single-column catalog primary key that is the declared one. #391's roots still get nothing.
+   - **A walk is bounded** (review of stage 3). It reads the index's greatest key once when it starts (`DocumentBuilder::last_key`) and pages up to it (`keys`' `through`). A row whose key is past the bound got that key after the walk started, so after the slot existed: an insert, or a key changed to past it, reaches the live stream. A row at or below it is paged, or changed later and delivered live. The bound is compared by value, so deleting its row mid-walk still ends the walk. Unbounded, writers inserting greater keys kept the walk going for N/(B − R) pages, never ending when they kept pace, and built every row they added twice.
+   - **The bound sits in the select list** (`(key <= $2) AS within`), not the `WHERE`: as a second range condition, a generic plan took `key > $1 AND key <= $2` for a small range and switched to a bitmap scan and a sort on every page.
+   - **The key index's own operators.** `<`, `>` and `<=` are read from the primary key index's opclass and written schema-qualified (`OPERATOR(ext.<)`), so the index serves the order whatever the search path. A role that may not use their schema gets the bare names with `USING <`: correct, but every page sorts the rest of the table, and a warning says so once per index.
 4. **The build gate and concurrent builds on the one ingest task.** Builds are published in position order (a small reorder buffer), because stage 2's watermark still trusts lane order.
 5. **The memory budget:** the global limit, the backfill half and the one-batch grant. The per-index half lands with stage 8a.
 6. **Self-describing positions and `Progress`,** still with one lane per sink. `entries` goes; the tick always confirms.

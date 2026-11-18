@@ -774,13 +774,24 @@ is the one concrete piece.
   resolves each to `DocumentId`s, dedups, then `build_many` assembles each touched document
   **once** for all sinks. A backfill (a *snapshot*) goes through the same build but is **never
   resolved** (issue #385): it walks each requested index's root keys in pages
-  (`DocumentBuilder::keys(index, after, limit)`, `engine::KEY_PAGE` = 1,024, the engine holding the
-  last key read; issue #386 stage 3), each key its own document of that index (a key with a null
-  part addresses nothing), and each document is built once per snapshot. The Postgres page is
-  `WHERE key > $1::<bound>::<key type> ORDER BY key USING < LIMIT n` on the builder's pool, one
-  statement, no transaction (`document/keys.rs`, `query::key_page_query`): `USING <` resolves its
-  operator as the `>` does, so a type whose operators are off the search path still orders and
-  compares alike (guard: `keyset`'s `a_key_whose_operators_are_off_the_search_path_is_paged_once`).
+  (`DocumentBuilder::keys(index, after, through, limit)`, `engine::KEY_PAGE` = 1,024, the engine
+  holding the last key read; issue #386 stage 3) up to `through`, the index's greatest key read
+  once when its walk starts (`DocumentBuilder::last_key`): a row past it got its key after the slot
+  existed, so the live stream delivers it, and writers inserting greater keys can't keep a walk going
+  (guards: `tests::snapshot`'s `a_walk_ends_at_the_greatest_key_its_index_had_when_it_started`,
+  `keyset`'s `a_walk_ends_at_the_greatest_key_it_found_when_it_started`, `keyset_backfill`'s
+  `rows_added_ahead_of_the_walk_end_it_where_it_began_and_are_built_once`). Each key is its own
+  document of that index (a key with a null part addresses nothing), built once per snapshot. The
+  Postgres page is `WHERE key OPERATOR(s.>) $1::<bound>::<key type> ORDER BY key USING OPERATOR(s.<)
+  LIMIT n` with `(key OPERATOR(s.<=) $2…) AS within` in the select list (a second range condition in
+  the `WHERE` made a generic plan sort every page), on the builder's pool, one statement, no
+  transaction (`document/keys.rs`, `query::key_page_query`/`last_key_query`). The operators are the
+  primary key index's own btree operators, read from its opclass and written schema-qualified, so the
+  index serves the order whatever the search path (a `citext` in `ext` compared as `text` would skip
+  rows); a role that may not use their schema gets the bare names and `USING <`, correct but sorting
+  each page, warned once per index (guards: `keyset`'s
+  `a_key_whose_operators_are_off_the_search_path_is_paged_once` and
+  `…_is_walked_through_its_index`, by `pg_stat_user_tables`).
   No snapshot spans pages: `prepare` made the slot first, and a page names ids only, each document
   read when it is built. Only a root whose single-column catalog primary key is the declared one is
   paged; any other answers an empty page with a warning (#391). The page future lives in
