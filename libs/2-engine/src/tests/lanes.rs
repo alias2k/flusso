@@ -1113,3 +1113,83 @@ async fn a_caught_up_write_names_only_its_own_quiet_lanes() {
         "{writes:?}"
     );
 }
+
+/// Resolves every change to nothing: a builder the reader must not resolve
+/// with once it has a resolver of its own.
+#[derive(Debug)]
+struct ResolvesNothing;
+
+#[async_trait]
+impl DocumentBuilder for ResolvesNothing {
+    async fn resolve(
+        &self,
+        _: &TableName,
+        _: &RowKey,
+        _: Option<&source::RowImage>,
+        _: Option<&source::RowImage>,
+    ) -> source::Result<Vec<DocumentId>> {
+        Ok(Vec::new())
+    }
+
+    async fn build(&self, id: &DocumentId) -> source::Result<Document> {
+        TwoIndexes.build(id).await
+    }
+
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        TwoIndexes.backfill_indexes()
+    }
+
+    async fn last_key(&self, _: &IndexName) -> source::Result<Option<RowKey>> {
+        Ok(None)
+    }
+
+    async fn keys(
+        &self,
+        _: &IndexName,
+        _: Option<&RowKey>,
+        _: &RowKey,
+        _: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        Ok(Vec::new())
+    }
+}
+
+/// Changes are resolved by the resolver (its own connection), documents
+/// built by the document builder.
+#[tokio::test]
+async fn changes_are_resolved_by_the_resolver() {
+    let sink = Arc::new(ByIndex::default());
+    let primary = sink_name("primary");
+    let indexes = [orders(), users()];
+    let stream = Arc::new(ChannelStream::over(64, indexes.clone(), [primary.clone()]));
+    let progress = Arc::new(crate::Progress::of(indexes, [primary.clone()]));
+    let engine = SinkEngine::new(
+        primary.clone(),
+        Arc::clone(&sink) as Arc<dyn Sink>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![index_mapping(orders()), index_mapping(users())],
+        Arc::clone(&progress),
+    );
+    engine
+        .stage(source::cdc::Continuity::Resumed)
+        .await
+        .unwrap();
+    let task = tokio::spawn(async move {
+        let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
+        engine.run(&mut control).await
+    });
+    IngestEngine::new(
+        Arc::new(MockSource::new(vec![change("users", 1)])) as Arc<dyn ChangeCapture>,
+        Arc::new(ResolvesNothing) as Arc<dyn DocumentBuilder>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![primary],
+        progress,
+    )
+    .with_resolver(Some(Arc::new(TwoIndexes) as Arc<dyn DocumentBuilder>))
+    .run()
+    .await
+    .unwrap();
+    wait_for(|| stream.is_idle()).await;
+    task.abort();
+    assert_eq!(sink.writes(), [("users".to_owned(), vec!["1".to_owned()])]);
+}

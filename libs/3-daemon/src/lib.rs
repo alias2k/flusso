@@ -189,8 +189,11 @@ impl Daemon {
 
         let config = Arc::new(config);
         let source_started = Instant::now();
-        let SourceParts { capture, documents } =
-            backends.source(Arc::clone(&config), &options).await?;
+        let SourceParts {
+            capture,
+            documents,
+            resolver,
+        } = backends.source(Arc::clone(&config), &options).await?;
         let source_took = source_started.elapsed();
         let sinks = backends.sinks(&config).await?;
         let sink_names: Vec<SinkName> = sinks.iter().map(|s| s.name.clone()).collect();
@@ -256,6 +259,7 @@ impl Daemon {
             sink_names.clone(),
             Arc::clone(&progress),
         )
+        .with_resolver(resolver)
         .with_batch(batch_policy(&config))
         .with_builds(builds(&config))
         .with_budget(Arc::clone(&budget))

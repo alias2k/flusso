@@ -11,7 +11,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 pub const MAX_WRITES: usize = 64;
 
 /// The most document builds the ingest engine may run at once. Each holds a
-/// Postgres connection (the builder's pool is `builds + 2`), so the cap keeps
+/// Postgres connection (the source keeps `builds + 2`: `builds + 1` building,
+/// one resolving changes), so the cap keeps
 /// a typo from opening hundreds.
 pub const MAX_BUILDS: usize = 32;
 
@@ -43,8 +44,8 @@ pub struct Concurrency {
     /// Document builds the ingest engine runs at once (default 4). A document
     /// is never built twice at once, and each lane still gets batches in the
     /// order they were started. Live batches go before backfill pages. `1`
-    /// builds one batch at a time. At most 32; the source's builder pool
-    /// holds `builds + 2` connections.
+    /// builds one batch at a time. At most 32; the source holds `builds + 2`
+    /// connections (`builds + 1` building, one resolving changes).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

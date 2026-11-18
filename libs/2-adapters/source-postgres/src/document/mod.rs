@@ -500,6 +500,20 @@ impl PgDocumentBuilder {
         Self::connect_pool(connection_url, spec, options).await
     }
 
+    /// This builder on a pool of its own of `max_connections`, sharing every
+    /// cache (column types, keys, plans): the reader resolves changes on one
+    /// connection while builds use the others (ADR 0012 stage 8a), and a
+    /// `Relation` message still reaches both.
+    #[tracing::instrument(name = "pg.connect", skip_all, err)]
+    pub async fn on_own_pool(&self, connection_url: &str, max_connections: u32) -> Result<Self> {
+        let options = sqlx::postgres::PgPoolOptions::new().max_connections(max_connections);
+        let pool = Self::open_pool(connection_url, options).await?;
+        Ok(Self {
+            pool,
+            ..self.clone()
+        })
+    }
+
     async fn connect_pool(
         connection_url: &str,
         spec: Arc<SourceSpec>,
@@ -510,7 +524,16 @@ impl PgDocumentBuilder {
         // builds is rendered by the session's `bytea_output`, which this sets
         // on every connection a direct link keeps. A transaction-mode pooler
         // may not.
-        let pool = options
+        let pool = Self::open_pool(connection_url, options).await?;
+        tracing::info!(indexes = spec.indexes().count(), "connected to Postgres");
+        Ok(Self::new(pool, spec))
+    }
+
+    async fn open_pool(
+        connection_url: &str,
+        options: sqlx::postgres::PgPoolOptions,
+    ) -> Result<PgPool> {
+        options
             .after_connect(|connection, _| {
                 Box::pin(async move {
                     sqlx::Executor::execute(&mut *connection, "SET bytea_output = 'hex'").await?;
@@ -520,9 +543,7 @@ impl PgDocumentBuilder {
             })
             .connect(connection_url)
             .await
-            .map_err(|e| SourceError::Connection(e.to_string()))?;
-        tracing::info!(indexes = spec.indexes().count(), "connected to Postgres");
-        Ok(Self::new(pool, spec))
+            .map_err(|e| SourceError::Connection(e.to_string()))
     }
 
     /// Build the document of the root row whose primary key reads as `id` (typed

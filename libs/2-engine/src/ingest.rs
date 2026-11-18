@@ -93,6 +93,8 @@ type LiveStream = BoxStream<'static, source::Result<LiveChange>>;
 pub struct IngestEngine {
     source: Arc<dyn ChangeCapture>,
     documents: Arc<dyn DocumentBuilder>,
+    /// Resolves live changes; `documents` when none was given.
+    resolver: Arc<dyn DocumentBuilder>,
     stream: Arc<dyn Stream>,
     sinks: Vec<SinkName>,
     observer: Arc<dyn Observer>,
@@ -132,6 +134,7 @@ impl IngestEngine {
     ) -> Self {
         Self {
             source,
+            resolver: Arc::clone(&documents),
             documents,
             stream,
             observer: Arc::new(NoopObserver),
@@ -170,6 +173,16 @@ impl IngestEngine {
     /// How far each lane has landed what this engine routed.
     pub fn progress(&self) -> Arc<Progress> {
         Arc::clone(&self.progress)
+    }
+
+    /// Resolve live changes with `resolver` (a builder on a connection of its
+    /// own, so resolving never waits for a build's connection); `None` keeps
+    /// the document builder.
+    pub fn with_resolver(mut self, resolver: Option<Arc<dyn DocumentBuilder>>) -> Self {
+        if let Some(resolver) = resolver {
+            self.resolver = resolver;
+        }
+        self
     }
 
     /// Report lifecycle and progress to `observer`.

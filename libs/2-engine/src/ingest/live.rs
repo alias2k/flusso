@@ -49,7 +49,7 @@ impl IngestEngine {
     ) -> Result<()> {
         self.observer.on_change_captured();
         let affected = self
-            .documents
+            .resolver
             .resolve(event.table(), event.key(), event.before(), event.after())
             .await?;
         tracing::trace!(documents = affected.len(), "change resolved to documents");

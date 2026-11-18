@@ -911,6 +911,7 @@ impl Backends for RealBackends {
         Ok(SourceParts {
             capture: Arc::new(WalChangeCapture::new(replication, self.pg_url.clone())),
             documents: Arc::new(PgDocumentBuilder::connect(&self.pg_url, spec).await?),
+            resolver: None,
         })
     }
 

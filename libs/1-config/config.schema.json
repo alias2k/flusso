@@ -162,7 +162,7 @@
           ],
           "format": "uint",
           "minimum": 1,
-          "description": "Document builds the ingest engine runs at once (default 4). A document\nis never built twice at once, and each lane still gets batches in the\norder they were started. Live batches go before backfill pages. `1`\nbuilds one batch at a time. At most 32; the source's builder pool\nholds `builds + 2` connections.",
+          "description": "Document builds the ingest engine runs at once (default 4). A document\nis never built twice at once, and each lane still gets batches in the\norder they were started. Live batches go before backfill pages. `1`\nbuilds one batch at a time. At most 32; the source holds `builds + 2`\nconnections (`builds + 1` building, one resolving changes).",
           "maximum": 32
         },
         "max_built_mib": {

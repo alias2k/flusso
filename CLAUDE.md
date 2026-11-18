@@ -869,8 +869,10 @@ is the one concrete piece.
   are awaited through `Flights`. A failed build (or a `Document::Failed` under `stop`) stops
   grants; slots before it are published, nothing from it on, and the run awaits every running build
   before returning the error. The stop and the stream's end `settle`: the buffered live batch once
-  its ids are free, then every build, in order. The builder's pool is `builds + 2`
-  (`backends.rs`); `resolve` and key pages run beside the builds. The sink engine keeps that order
+  its ids are free, then every build, in order. The builder's pool is `builds + 1`
+  (`backends.rs`: key pages run beside the builds); changes are resolved on a pool of their own, one
+  connection sharing the builder's caches (`PgDocumentBuilder::on_own_pool`, `SourceParts.resolver`,
+  `IngestEngine::with_resolver`; ADR 0012 stage 8a). The sink engine keeps that order
   **per document** while it writes several items at once (admission, below), so sinks need no
   versioning. Guards: `ingest::tests` (`random_schedules_keep_every_document_in_order`, seeded,
   `FLUSSO_BUILD_SCHEDULE_SEED` replays; `builds_run_at_once_up_to_the_setting`;

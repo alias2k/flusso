@@ -61,7 +61,7 @@ impl Backends for FlussoBackends {
             .context("applying the source TLS settings to the connection URL")?;
 
         let spec = source_spec(&config);
-        let (documents, column_types) = build_documents(&sql_url, &config).await?;
+        let (documents, resolver, column_types) = build_documents(&sql_url, &config).await?;
         let capture = WalChangeCapture::new(replication, sql_url.clone())
             .with_publication_management(spec.all_tables(), postgres.manage_publication)
             .with_pre_image_management(spec.pre_images(), postgres.manage_replica_identity)
@@ -73,7 +73,11 @@ impl Backends for FlussoBackends {
             .context("checking the source server")?;
         let capture: Arc<dyn ChangeCapture> = Arc::new(capture);
 
-        Ok(SourceParts { capture, documents })
+        Ok(SourceParts {
+            capture,
+            documents,
+            resolver: Some(resolver),
+        })
     }
 
     fn stream(&self, config: &Config, lanes: &[LaneKey]) -> anyhow::Result<Arc<dyn Stream>> {
@@ -150,12 +154,17 @@ fn resolve_connection_url(postgres: &PostgresConfig) -> anyhow::Result<String> {
 async fn build_documents(
     connection_url: &str,
     config: &Config,
-) -> anyhow::Result<(Arc<dyn DocumentBuilder>, ColumnTypes)> {
+) -> anyhow::Result<(
+    Arc<dyn DocumentBuilder>,
+    Arc<dyn DocumentBuilder>,
+    ColumnTypes,
+)> {
     let scripts = compile_scripts(config)?;
     let spec = Arc::new(source_spec(config));
     // Every build the ingest engine runs at once holds a connection, beside
-    // one change being resolved and one backfill page being read.
-    let connections = u32::try_from(daemon::builds(config) + 2).unwrap_or(u32::MAX);
+    // one backfill page being read; changes are resolved on a pool of their
+    // own, one connection, sharing the builder's caches.
+    let connections = u32::try_from(daemon::builds(config) + 1).unwrap_or(u32::MAX);
     let builder = PgDocumentBuilder::connect_with_max_connections(
         connection_url,
         Arc::clone(&spec),
@@ -165,8 +174,13 @@ async fn build_documents(
     .context("connecting to Postgres")?;
     validate_at_start(&spec, &builder, config).await?;
     let column_types = builder.column_types();
+    let resolver = builder
+        .on_own_pool(connection_url, 1)
+        .await
+        .context("connecting to Postgres for resolving changes")?;
     Ok((
         ScriptedBuilder::wrap(Arc::new(builder), scripts),
+        Arc::new(resolver),
         column_types,
     ))
 }

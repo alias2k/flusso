@@ -353,6 +353,7 @@ impl Backends for MockBackends {
         Ok(SourceParts {
             capture: Arc::clone(&self.capture),
             documents: Arc::clone(&self.documents),
+            resolver: None,
         })
     }
 

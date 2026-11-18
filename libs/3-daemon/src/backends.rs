@@ -33,6 +33,10 @@ pub struct SourceParts {
     /// Resolves changed rows to [`DocumentId`](source::document)s and
     /// assembles the documents.
     pub documents: Arc<dyn DocumentBuilder>,
+    /// Resolves live changes on a connection of its own, so the reader never
+    /// waits for a build's connection (ADR 0012 stage 8a); `None` resolves
+    /// with `documents`.
+    pub resolver: Option<Arc<dyn DocumentBuilder>>,
 }
 
 /// One configured sink: its name, the adapter instance, and the universal
