@@ -207,6 +207,18 @@ jobs:
       - name: Test the CI scripts
         run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
 
+  # flusso's alert rules and the Helm chart, with promtool and helm from
+  # their Docker images (Docker is on the runner; nothing to install): the
+  # dev Prometheus config as compose mounts it, the rule unit tests, `helm
+  # lint`, and the chart's rendered PrometheusRule. Not a required check.
+  alerts:
+    name: alert rules + chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check the alert rules and the chart
+        run: bash .github/scripts/check-alerts.sh
+
   fuzz:
     name: fuzz (pgoutput decoder)
     runs-on: ubuntu-latest

@@ -392,7 +392,10 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   runs everything.
   A `docs` job builds the mdBook (`mdbook build docs`), link-checks it (`lychee --offline
   --include-fragments --root-dir docs/book 'docs/book/**/*.html'`), and runs
-  `.github/scripts/check-manual-links.sh`. A separate `fuzz` job runs a 60-second
+  `.github/scripts/check-manual-links.sh`. An `alerts` job (not a required check) runs
+  `.github/scripts/check-alerts.sh`: promtool and helm from their Docker images over
+  `dev/prometheus/` (config as compose mounts it, the rule tests in `dev/prometheus/tests/`) and the
+  chart's `PrometheusRule`. A separate `fuzz` job runs a 60-second
   `pgoutput_decode` smoke fuzz on nightly (see below); a separate workflow, `postgres-matrix.yml`
   (issue #348, **not** a required check), runs `-E 'rdeps(flusso-test-postgres)'` under the `ci`
   profile once per tested major other than the default (`TESTED_TAGS` in `dev/test-postgres`, their

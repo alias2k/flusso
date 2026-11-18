@@ -141,30 +141,13 @@ git checkout libs/2-adapters/source-postgres/benches/fixtures/pgoutput.bin   # r
 
 ## Alert rules and the chart
 
-Not in CI yet. Run them by hand when you touch `dev/prometheus/rules/` or `deploy/helm/flusso/`; neither tool needs installing, the images carry them.
+CI's `alerts` job (not a required check) runs them; run them by hand when you touch `dev/prometheus/` or `deploy/helm/flusso/`. Nothing to install, the tools come from their Docker images:
 
 ```sh
-# The dev Prometheus as compose mounts it: its config and every file under
-# rules/, then the server itself starting on them.
-P="$PWD/dev/prometheus"
-docker run --rm --entrypoint promtool \
-  -v "$P/prometheus.yml:/etc/prometheus/prometheus.yml:ro" -v "$P/rules:/etc/prometheus/rules:ro" \
-  prom/prometheus:v3.5.0 check config /etc/prometheus/prometheus.yml
-
-# The rule unit tests (dev/prometheus/tests/, outside the rules/ the server loads).
-docker run --rm --entrypoint promtool -v "$P:/p:ro" \
-  prom/prometheus:v3.5.0 test rules /p/tests/flusso.rules.test.yml
-
-# The chart, with the PrometheusRule on; then its rendered rules through promtool.
-docker run --rm -v "$PWD/deploy/helm/flusso:/chart:ro" alpine/helm:3.16.4 \
-  lint /chart --set prometheusRule.enabled=true
-docker run --rm -v "$PWD/deploy/helm/flusso:/chart:ro" alpine/helm:3.16.4 \
-  template flusso /chart --set prometheusRule.enabled=true \
-  --show-only templates/prometheusrule.yaml \
-  | sed '1,/^spec:$/d; s/^  //' \
-  | docker run --rm -i --entrypoint sh prom/prometheus:v3.5.0 \
-      -c 'cat > /tmp/rules.yml && promtool check rules /tmp/rules.yml'
+bash .github/scripts/check-alerts.sh
 ```
+
+It checks the dev Prometheus config as compose mounts it (every file under `rules/` is loaded, so the rule tests live in `dev/prometheus/tests/`), runs the rule unit tests, `helm lint`s the chart with the `PrometheusRule` on, and puts the chart's rendered rules through `promtool check rules`.
 
 `flusso.rules.test.yml` holds the alert's cases: a stalled lane fires 5 minutes after passing 10, a sibling that keeps landing doesn't, a catch-up with 2 GiB of slot lag and lanes that keep landing doesn't, and the same lag behind a lane silent for over a minute fires on WAL. The two copies of the alerts (the dev rules and the chart's template) are kept equal by `.github/scripts/test_alert_rule_copies.py`, in the `scripts` job.
 
