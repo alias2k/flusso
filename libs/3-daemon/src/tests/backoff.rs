@@ -270,6 +270,21 @@ impl Sink for NeverFlushes {
 /// Run `capture` with `sink` until `capture` was opened `opened` times, then
 /// abort the deployment: a sink that never acknowledges would hold a graceful
 /// stop's drain for ever.
+/// Wait until the source was opened `count` times, failing after ten
+/// minutes of (paused) time: a run that never opens it fails instead of
+/// spinning.
+async fn opened(times: &RunTimes, count: usize) {
+    let deadline = Instant::now() + Duration::from_secs(600);
+    while times.opened() < count {
+        assert!(
+            Instant::now() < deadline,
+            "opened {} of {count} times",
+            times.opened()
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 async fn run_until_opened(
     capture: Arc<dyn ChangeCapture>,
     times: &Arc<RunTimes>,
@@ -280,9 +295,7 @@ async fn run_until_opened(
     let backends = backends_for(capture, vec![(primary(), sink, SinkOptions::default())]);
     let running = Daemon::new(config, backends).start().await.unwrap();
     let run = tokio::spawn(running.run(std::future::pending::<()>()));
-    while times.opened() < opened {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    self::opened(&times, opened).await;
     run.abort();
 }
 
@@ -378,6 +391,14 @@ impl DocumentBuilder for BackfillFailingAtOnePage {
         vec![IndexName::try_new("users").unwrap()]
     }
 
+    async fn index_mappings(&self) -> source::Result<Vec<kernel::IndexMapping>> {
+        Ok(vec![kernel::IndexMapping {
+            index: IndexName::try_new("users").unwrap(),
+            hash: kernel::ContentHash::new(1),
+            fields: Vec::new(),
+        }])
+    }
+
     async fn keys(
         &self,
         _: &IndexName,
@@ -413,9 +434,7 @@ async fn a_backfill_failing_at_the_same_page_doubles_its_backoff() {
         .await
         .unwrap();
     let run = tokio::spawn(running.run(std::future::pending::<()>()));
-    while times.opened() < 5 {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    opened(&times, 5).await;
     run.abort();
 
     assert_eq!(times.waits(), [1, 2, 4, 8]);
