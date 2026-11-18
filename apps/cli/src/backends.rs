@@ -949,6 +949,7 @@ mod tests {
                     changes: 1,
                     envelopes: Vec::new().into(),
                     hold: Default::default(),
+                    walked: None,
                 });
                 tokio::time::timeout(
                     std::time::Duration::from_secs(5),
