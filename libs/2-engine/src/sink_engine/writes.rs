@@ -612,8 +612,9 @@ impl<'a> Run<'a> {
         self.next_due = returned.next_due;
         // Let go of the batch before acknowledging it, so the lane frees it
         // as the acknowledgement lands, as it did with one write at a time.
-        // Freeing it here after the acknowledgement made `live_drain` at 64
-        // changes per batch half again slower (glibc, pinned bench).
+        // Freeing it here after the acknowledgement made the pre-#417
+        // `live_drain` bench (an instant sink, where who frees a batch decided
+        // its time) at 64 changes per batch half again slower.
         drop(flight.documents);
         let oldest = self.is_oldest(flight.seq);
         self.acknowledge(
@@ -641,7 +642,8 @@ impl<'a> Run<'a> {
     ///
     /// `oldest`: the item was the oldest unfinished one in lane order, so the
     /// sink moved forward (the supervisor's measure of progress), unless the
-    /// run already failed: an older item then failed and comes back first.
+    /// run has already failed. Any failure counts, an older or a younger
+    /// item's: the run is ending, and an older failed item comes back first.
     ///
     /// `wants`: whether a caught-up write is wanted, when the caller already
     /// read it from the fences. The lane is asked last: its ledger lock is
