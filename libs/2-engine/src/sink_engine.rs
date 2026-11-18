@@ -487,6 +487,7 @@ impl SinkEngine {
     }
 
     async fn run_inner(&self, control: &mut mpsc::Receiver<SinkControl>) -> Result<()> {
+        self.progress.check_lanes(self.lane_keys().iter())?;
         let lanes = self
             .lane_keys()
             .into_iter()

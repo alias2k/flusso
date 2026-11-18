@@ -250,6 +250,7 @@ impl IngestEngine {
                 Ok((key, producer))
             })
             .collect::<Result<_>>()?;
+        self.progress.check_lanes(lanes.keys())?;
         let requests = self.stream.requests()?.consumer;
         let scopes: HashSet<IndexName> = self.documents.backfill_indexes().into_iter().collect();
 

@@ -158,6 +158,27 @@ impl Progress {
         }))
     }
 
+    /// Whether `lane` is one this progress keeps.
+    pub fn knows(&self, lane: &LaneKey) -> bool {
+        lock(&self.registry).lanes.contains_key(lane)
+    }
+
+    /// Fail unless every lane in `lanes` is one this progress keeps: an engine
+    /// publishing to a lane it doesn't would confirm past that lane's items.
+    pub(crate) fn check_lanes<'a>(
+        &self,
+        lanes: impl IntoIterator<Item = &'a LaneKey>,
+    ) -> crate::Result<()> {
+        let registry = lock(&self.registry);
+        match lanes
+            .into_iter()
+            .find(|lane| !registry.lanes.contains_key(*lane))
+        {
+            Some(lane) => Err(crate::EngineError::LaneNotInProgress(lane.to_string())),
+            None => Ok(()),
+        }
+    }
+
     /// Call `listener` after every registration (one listener: the fence's).
     pub fn on_registered(&self, listener: Listener) {
         let _ = self.listener.set(listener);

@@ -533,3 +533,260 @@ async fn a_snapshot_complete_waits_only_for_its_own_lane() {
     assert_eq!(sink.writes(), [("users".to_owned(), vec!["u".to_owned()])]);
     task.abort();
 }
+
+/// A sink whose every write takes a few milliseconds.
+#[derive(Debug, Default)]
+struct Slow {
+    writes: Mutex<Vec<(String, Vec<String>)>>,
+}
+
+#[async_trait]
+impl Sink for Slow {
+    async fn write(&self, envelopes: &[Envelope], _: bool) -> sink::Result<WriteReport> {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        if let Some(first) = envelopes.first() {
+            self.writes.lock().unwrap().push((
+                first.index.to_string(),
+                envelopes.iter().map(|e| e.id.clone()).collect(),
+            ));
+        }
+        Ok(WriteReport::clean())
+    }
+
+    async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
+        Ok(true)
+    }
+}
+
+/// A live item arriving on a quiet lane while another lane has a
+/// backlog in the window is written within a write or two, not after the
+/// backlog's whole look-ahead.
+async fn a_late_live_item_on_a_quiet_lane(backlog_live: bool) -> usize {
+    let sink = Arc::new(Slow::default());
+    let primary = sink_name("primary");
+    let indexes = [orders(), users()];
+    let stream = Arc::new(ChannelStream::over(256, indexes.clone(), [primary.clone()]));
+    let progress = Arc::new(crate::Progress::of(indexes, [primary.clone()]));
+    let item = |index: IndexName, id: u64, position: Option<u64>| {
+        LaneItem::Batch(Batch {
+            position: position.map(Position::new),
+            changes: usize::from(position.is_some()),
+            envelopes: vec![Envelope::upsert(
+                index,
+                id.to_string(),
+                GenericValue::Map(BTreeMap::new()),
+                position.map(Position::new),
+                chrono::Utc::now(),
+            )]
+            .into(),
+            hold: Default::default(),
+        })
+    };
+    let orders_lane = stream
+        .lane(&LaneKey::new(orders(), primary.clone()))
+        .unwrap()
+        .producer;
+    let users_lane = stream
+        .lane(&LaneKey::new(users(), primary.clone()))
+        .unwrap()
+        .producer;
+    users_lane
+        .publish(item(users(), 500, Some(500)))
+        .await
+        .unwrap();
+    for id in 0..60 {
+        orders_lane
+            .publish(item(orders(), id, backlog_live.then_some(id)))
+            .await
+            .unwrap();
+    }
+    let engine = SinkEngine::new(
+        primary,
+        Arc::clone(&sink) as Arc<dyn Sink>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![index_mapping(orders()), index_mapping(users())],
+        progress,
+    )
+    .with_write_documents(1);
+    let task = tokio::spawn(async move {
+        let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
+        engine.run(&mut control).await
+    });
+    wait_for(|| sink.writes.lock().unwrap().len() >= 3).await;
+    assert!(
+        sink.writes
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(i, _)| i == "users"),
+        "users landed once"
+    );
+    let before = sink.writes.lock().unwrap().len();
+    users_lane
+        .publish(item(users(), 1000, Some(1000)))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !sink
+            .writes
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, ids)| ids == &["1000".to_owned()])
+        {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap();
+    task.abort();
+    let at = sink
+        .writes
+        .lock()
+        .unwrap()
+        .iter()
+        .position(|(_, ids)| ids == &["1000".to_owned()])
+        .unwrap();
+    at - before
+}
+
+#[tokio::test]
+async fn a_late_live_item_is_not_left_behind_another_lanes_backfill() {
+    let waited = a_late_live_item_on_a_quiet_lane(false).await;
+    assert!(
+        waited <= 2,
+        "the live users item waited behind {waited} orders backfill writes"
+    );
+}
+
+#[tokio::test]
+async fn a_late_live_item_is_not_left_behind_another_lanes_live_backlog() {
+    let waited = a_late_live_item_on_a_quiet_lane(true).await;
+    assert!(
+        waited <= 2,
+        "the live users item waited behind {waited} orders live writes"
+    );
+}
+
+/// Orders' first write lands (the fresh engine's barrier opens),
+/// every later orders write never returns.
+#[derive(Debug, Default)]
+struct StallsAfterFirst {
+    writes: Mutex<Vec<(String, Vec<String>)>>,
+}
+
+impl StallsAfterFirst {
+    fn writes(&self) -> Vec<(String, Vec<String>)> {
+        self.writes.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl Sink for StallsAfterFirst {
+    async fn write(&self, envelopes: &[Envelope], _: bool) -> sink::Result<WriteReport> {
+        let Some(first) = envelopes.first() else {
+            return Ok(WriteReport::clean());
+        };
+        if first.index == orders() && first.id != "0" {
+            std::future::pending::<()>().await;
+        }
+        self.writes.lock().unwrap().push((
+            first.index.to_string(),
+            envelopes.iter().map(|e| e.id.clone()).collect(),
+        ));
+        Ok(WriteReport::clean())
+    }
+
+    async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
+        Ok(true)
+    }
+}
+
+/// An index whose writes never return, with more items than the
+/// sink has write slots, must still leave its sibling index a slot.
+#[tokio::test]
+async fn a_stalled_index_with_a_backlog_leaves_its_sibling_a_slot() {
+    let sink = Arc::new(StallsAfterFirst::default());
+    let primary = sink_name("primary");
+    let indexes = [orders(), users()];
+    let stream = Arc::new(ChannelStream::over(64, indexes.clone(), [primary.clone()]));
+    let progress = Arc::new(crate::Progress::of(indexes, [primary.clone()]));
+    let item = |index: IndexName, position: u64| {
+        LaneItem::Batch(Batch {
+            position: Some(Position::new(position)),
+            changes: 1,
+            envelopes: vec![Envelope::upsert(
+                index,
+                position.to_string(),
+                GenericValue::Map(BTreeMap::new()),
+                Some(Position::new(position)),
+                chrono::Utc::now(),
+            )]
+            .into(),
+            hold: Default::default(),
+        })
+    };
+    let lane = |index: IndexName| {
+        stream
+            .lane(&LaneKey::new(index, primary.clone()))
+            .unwrap()
+            .producer
+    };
+    let (orders_lane, users_lane) = (lane(orders()), lane(users()));
+    for position in 0..6 {
+        orders_lane.publish(item(orders(), position)).await.unwrap();
+    }
+    let engine = SinkEngine::new(
+        primary.clone(),
+        Arc::clone(&sink) as Arc<dyn Sink>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![index_mapping(orders()), index_mapping(users())],
+        progress,
+    )
+    .with_writes(4)
+    .with_write_documents(1);
+    let task = tokio::spawn(async move {
+        let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
+        engine.run(&mut control).await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    users_lane.publish(item(users(), 10)).await.unwrap();
+    wait_for(|| sink.writes().iter().any(|(index, _)| index == "users")).await;
+    task.abort();
+}
+
+/// An engine whose stream has a lane its `Progress` doesn't keep refuses to
+/// run: what it routed there could never hold confirmation back.
+#[tokio::test]
+async fn a_lane_missing_from_the_progress_is_refused() {
+    let primary = sink_name("primary");
+    let stream = Arc::new(ChannelStream::over(
+        64,
+        [orders(), users()],
+        [primary.clone()],
+    ));
+    let progress = Arc::new(crate::Progress::of([users()], [primary.clone()]));
+    let ingest = IngestEngine::new(
+        Arc::new(MockSource::new(Vec::new())) as Arc<dyn ChangeCapture>,
+        Arc::new(TwoIndexes) as Arc<dyn DocumentBuilder>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![primary.clone()],
+        Arc::clone(&progress),
+    );
+    assert!(matches!(
+        ingest.run().await,
+        Err(crate::EngineError::LaneNotInProgress(lane)) if lane == "orders/primary"
+    ));
+    let sink = SinkEngine::new(
+        primary,
+        Arc::new(ByIndex::default()) as Arc<dyn Sink>,
+        stream as Arc<dyn Stream>,
+        vec![index_mapping(orders()), index_mapping(users())],
+        progress,
+    );
+    let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
+    assert!(matches!(
+        sink.run(&mut control).await,
+        Err(crate::EngineError::LaneNotInProgress(_))
+    ));
+}
