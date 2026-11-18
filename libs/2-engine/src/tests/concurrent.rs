@@ -999,15 +999,29 @@ async fn a_failed_acknowledgement_still_waits_for_the_writes_in_flight() {
     assert!(probe.log().contains(&"end a".to_owned()));
 }
 
-/// Under `stop`, a document rejected in one write while others are in flight
-/// beside it fails the run once they returned: they are acknowledged, the
-/// rejected item is not, and the watermark stops before it.
+/// Lands `z` first: a fresh engine writes its first item alone (a previous
+/// process may have stopped on it), so a test of several writes at once
+/// starts after one has landed.
+async fn warm_up(rig: &mut Rig) {
+    rig.live(1, &["z"]).await;
+    until("the warm-up write", || {
+        rig.probe.log().contains(&"end z".to_owned())
+    })
+    .await;
+}
+
+/// Under `stop`, a rejection the sink reports at its write's first poll
+/// fails the run at once: nothing granted after it starts, the write still
+/// in flight beside it (`a`) lands, and the watermark stops before the
+/// rejected item. The probe answers `b` on its first poll: that is the
+/// precondition of "nothing after it starts".
 #[tokio::test(start_paused = true)]
-async fn a_stop_rejection_beside_writes_in_flight_lets_them_land_and_holds_the_watermark() {
+async fn a_stop_rejection_seen_at_its_first_poll_starts_nothing_after_it() {
     let mut rig = Rig::new(Probe::new().holding(&["a"]).rejecting(&["b"]), 4).start();
-    rig.live(1, &["a"]).await;
-    rig.live(2, &["b"]).await;
-    rig.live(3, &["c"]).await;
+    warm_up(&mut rig).await;
+    rig.live(2, &["a"]).await;
+    rig.live(3, &["b"]).await;
+    rig.live(4, &["c"]).await;
     until("b to be written", || {
         rig.probe.log().contains(&"end b".to_owned())
     })
@@ -1028,9 +1042,92 @@ async fn a_stop_rejection_beside_writes_in_flight_lets_them_land_and_holds_the_w
     );
     assert_eq!(
         rig.stream.watermark(),
-        Some(Position(1)),
-        "a landed; b is unacknowledged, so the lane confirms nothing past 1"
+        Some(Position(2)),
+        "a landed; b is unacknowledged, so the lane confirms nothing past 2"
     );
+}
+
+/// Under `stop`, while the rejected write is still in flight the run doesn't
+/// know yet: disjoint items behind it start and land. What is promised is
+/// that the lane's watermark stays before the rejected item, and the next
+/// run writes it alone (the barrier).
+#[tokio::test(start_paused = true)]
+async fn a_stop_rejection_still_in_flight_lets_disjoint_writes_land_but_holds_the_watermark() {
+    let mut rig = Rig::new(Probe::new().holding(&["b"]).rejecting(&["b"]), 4).start();
+    warm_up(&mut rig).await;
+    rig.live(2, &["b"]).await;
+    rig.live(3, &["c"]).await;
+    until("c to be written while b is in flight", || {
+        rig.probe.log().contains(&"end c".to_owned())
+    })
+    .await;
+    assert_eq!(
+        rig.stream.watermark(),
+        Some(Position(1)),
+        "c landed, but b before it is still unacknowledged"
+    );
+    rig.probe.release("b");
+    assert!(rig.ended().await.is_err());
+    assert_eq!(rig.stream.watermark(), Some(Position(1)));
+
+    let rig = rig.start();
+    settle().await;
+    assert_eq!(
+        rig.probe.starts(),
+        ["z", "b", "c", "b"],
+        "the restarted run writes b alone, and nothing behind it"
+    );
+}
+
+/// A write that fails at its first poll, with a later item sharing its
+/// document waiting: the later item never starts before the failed one is
+/// written again, so the document's version never goes down.
+#[tokio::test(start_paused = true)]
+async fn a_write_failing_at_its_first_poll_holds_back_a_later_item_sharing_its_document() {
+    let mut rig = Rig::new(Probe::new().failing_once(&["x"]), 4).start();
+    warm_up(&mut rig).await;
+    rig.live(2, &["x"]).await;
+    rig.live(3, &["x"]).await;
+    assert!(rig.ended().await.is_err());
+    assert_eq!(
+        rig.probe.starts(),
+        ["z", "x"],
+        "the later x waits for the failed one"
+    );
+
+    let rig = rig.start();
+    until("the lane to drain", || rig.stream.is_idle()).await;
+    assert_eq!(rig.probe.starts(), ["z", "x", "x", "x"]);
+    assert!(!rig.probe.regressed.load(Ordering::SeqCst));
+    assert_eq!(rig.stream.watermark(), Some(Position(3)));
+}
+
+/// A stop with backfill still on the lane and every write slot busy: the
+/// writes in flight land, the backfill is acknowledged unwritten as it is
+/// taken, and its index isn't marked seeded.
+#[tokio::test(start_paused = true)]
+async fn a_stop_with_backfill_on_the_lane_and_every_slot_busy_writes_none_of_it() {
+    let mut rig = Rig::new(Probe::new().holding(&["a", "b"]), 2).start();
+    warm_up(&mut rig).await;
+    rig.live(2, &["a"]).await;
+    rig.live(3, &["b"]).await;
+    rig.backfill(&["p"]).await;
+    rig.backfill(&["q"]).await;
+    rig.complete().await;
+    settle().await;
+    assert_eq!(rig.probe.starts(), ["z", "a", "b"]);
+
+    rig.stop.request();
+    rig.probe.release("a");
+    rig.probe.release("b");
+    until("the lane to drain", || rig.stream.is_idle()).await;
+    assert_eq!(
+        rig.probe.starts(),
+        ["z", "a", "b"],
+        "no backfill page is written"
+    );
+    assert!(!rig.probe.log().contains(&"seeded users".to_owned()));
+    assert_eq!(rig.stream.watermark(), Some(Position(3)));
 }
 
 /// Under `skip`, a rejected document is quarantined and its write
