@@ -189,7 +189,9 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   pages; `tls` boots a hostssl-only Postgres with a committed throwaway self-signed cert and
   proves the replication stream + SQL pool honor `sslmode`; `wal_idle`: the slot keeps
   advancing from keepalives/filtered commits while watched tables are idle, so unrelated
-  writes don't pin WAL retention — issue #111; `continuity`: `continuity()` is read-only and
+  writes don't pin WAL retention — issue #111 (the capture's half: the test confirms `Idle` itself; the
+  engine's half, the tick confirming with nothing new landed, is `wal_release`'s
+  `idle_after_a_burst_the_slot_reaches_the_current_wal_position`); `continuity`: `continuity()` is read-only and
   reports `Fresh` exactly while the slot is missing, `prepare()` creates it — issue #120;
   `partitions`: a range-partitioned root and child stream under the parent's name via
   `publish_via_partition_root`, resolve, and backfill through the parent — issue #143) plus
@@ -620,22 +622,30 @@ is the one concrete piece.
   `fence_before` = commit LSN − 1, `confirm_before` = the **horizon** before it, `confirm_through` =
   the commit LSN if it is its commit's last change, else `confirm_before`), so the capture keeps
   only `next_seq`, the horizon and the confirmed LSN, no map. The ingest engine **routes** a live
-  batch: after every lane accepted it (`commit.rs`'s `publish_live`), `Progress::published(lanes,
-  oldest, last)` registers it on every lane it went to and moves `routed`, under one lock. A sink
+  batch (`commit.rs`'s `publish`): `Progress::published(lane, oldest, last)` registers it on each lane
+  **as that lane's own send succeeds** (one lane per call;
+  `skipped(lane, last)` for a lane a batch has nothing for), so a full lane holds back only itself. A sink
   engine raises its lane's **marks** (`Progress::applied` / `searchable`, in `writes.rs`'s
   `write_returned`, before the ack): the last item written, and made searchable, with every item
   before it in lane order (`Fences`' in-order answers); lane order is registration order, so a mark
-  covers every registered item up to it, and one that runs ahead covers an item registered later. `Progress::landed()` is `Before(oldest unlanded)` / `Through(routed)` / `Idle`
-  (`source::cdc::Landed`); the ingest engine hands it to `ChangeCapture::confirm` after a commit when
+  covers every registered item up to it, and one that runs ahead covers an item registered later.
+  Each lane answers `Before(oldest unlanded)` / `Through(the newest position routed to it)` / `Idle`
+  (`source::cdc::Landed`), and several lanes (`landed()`, `over`) answer as the lane that covers least,
+  so a lane that hasn't taken a batch yet holds the others back and a fence on a healthy lane isn't
+  held back by a full sibling. Both engines take the one `Arc<Progress>` in their constructors
+  (`IngestEngine::new`, `SinkEngine::new`): none is built without it. The ingest engine hands it to `ChangeCapture::confirm` after a commit when
   it changed and on the 1 s tick **always**, since the source's answer moves with idle WAL while
   the case stays put; `drain_lanes` the same. The source decides what an emitted-but-unrouted change
   means: `Through(p)` follows the horizon only while `p.seq + 1 == next_seq`, else `p.confirm_through`;
   `Idle` follows it only while nothing was ever emitted (`FIRST_SEQ`), else nothing moves. Confirmation
-  is monotonic. **Locks:** the registrations and `routed` sit under one lock that only the ingest
-  engine (once per publish and per confirmation) and a fence reader take; a sink engine never does.
-  Each mark is one `AtomicU64` with one writer (its lane's sink engine), raised by a plain load and
-  store. Per run of `live_drain_held/sinks2/1` (20,000 lane items), counted in the bench: lane ledger
-  locks 60,030 → 40,067, plus 20,002 registry locks and 40,000 mark stores.
+  is monotonic. **Locks:** the registrations sit under one lock that only the ingest engine (once per
+  lane per batch, and per confirmation) and a fence reader take; a sink engine never does. A reader
+  reads every lane under it, so no registration falls between two lanes' answers (marks only grow: a
+  mark read early makes its lane's answer older, never wider). Each mark is one `AtomicU64` with one
+  writer (its lane's sink engine), raised by a plain load and store. A registration calls the fence's
+  listener, which wakes waiters only while one is open. Per run of `live_drain_held/sinks2/1`
+  (20,000 lane items), counted in the bench: lane ledger locks 60,030 → about 40,000–46,500 (timing),
+  plus 30,002 registry locks and 40,000 mark stores.
   The Postgres capture confirms within ~1 s of the last flush (issue #205): `Positions::confirm` wakes
   the stream loop (`confirmed_moved`), which hands `confirmed_lsn()` to the replication client at once
   instead of at the next replication event, and `WalChangeCapture::new` sets the client's status and
@@ -649,8 +659,12 @@ is the one concrete piece.
   first_seq)` continues `next_seq`), so the `next_seq` test stays exact across an ingest restart.
   Guards: `progress::tests` (`every_interleaving_answers_as_the_model_does`, 300 seeded interleavings
   against a model; `a_stalled_lane_pins_confirmation_and_its_own_fence_only`,
-  `a_lane_with_nothing_routed_to_it_pins_nothing`, `a_landing_reported_before_its_registration_still_counts`,
-  `a_mark_never_moves_back`), `confirms_no_position_before_its_flush`,
+  `a_skipped_lane_pins_nothing`, `a_landing_reported_before_its_registration_still_counts`,
+  `a_mark_never_moves_back`, `a_healthy_lane_reaches_what_it_landed_while_a_sibling_lane_is_full`,
+  `several_lanes_answer_their_least_and_an_unknown_lane_none` (successor of the channel's
+  `watermark_is_the_minimum_over_lanes`), `concurrent_registration_and_landing_never_answer_past_a_lane`,
+  threads against an oracle), `tests::lanes`' `a_healthy_lane_reaches_what_it_landed_while_a_sibling_lane_is_full`
+  (engine) and the daemon's `tests::lanes` `a_fence_on_a_healthy_sink_passes_while_a_sibling_lane_is_full`, `confirms_no_position_before_its_flush`,
   `redelivers_the_unacked_batch_to_a_restarted_sink_engine`, the channel adapter's
   `several_deliveries_can_be_outstanding_and_ack_independently`, the daemon's
   `failed_sink_engine_restarts_and_redelivers` / `failed_ingest_engine_restarts_and_resumes_the_stream`,

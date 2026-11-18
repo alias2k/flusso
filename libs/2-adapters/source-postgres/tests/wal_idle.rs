@@ -4,6 +4,11 @@
 //! the horizon; the engine's once-a-second confirmation, here `Idle` since
 //! nothing is routed, hands it to the slot.
 //!
+//! This is the capture's half only: the test confirms by itself, standing in
+//! for the engine's tick. The engine's half (the tick confirms with nothing
+//! new landed) is `engine`'s `wal_release`
+//! `idle_after_a_burst_the_slot_reaches_the_current_wal_position`.
+//!
 //! Requires Docker. Ignored by default; run with:
 //!
 //! ```text
@@ -75,7 +80,7 @@ async fn slot_advances_while_watched_tables_are_idle() {
     );
 
     // `live` creates the slot and the publication (covering only `users`). The
-    // stream must be driven for keepalives to reach the watermark, so poll it
+    // stream must be driven for keepalives to move the horizon, so poll it
     // from a task; no change should ever arrive.
     let mut stream = capture.live().await.unwrap();
     let driver = tokio::spawn(async move {

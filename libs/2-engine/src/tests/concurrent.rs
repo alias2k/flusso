@@ -3,7 +3,7 @@
 //!
 //! - **per document**: never two writes of one document at once, and the
 //!   versions written never go down (a later build lands after an earlier one);
-//! - **per lane**: the watermark and the fence never pass an earlier item that
+//! - **per lane**: confirmation and the fence never pass an earlier item that
 //!   is still being written, whatever finishes first;
 //! - **selection**: live items before backfill, except every fourth contested
 //!   grant; `SnapshotComplete` and a reindex are barriers;
@@ -490,7 +490,7 @@ fn seeds() -> Vec<u64> {
 /// lane order (the version), as the one ingest task builds them. Whatever the
 /// schedule, no document is written twice at once, its versions never go
 /// down, every document ends at its last version, and the lane drains with
-/// the watermark at the last position.
+/// the confirmation at the last position.
 #[tokio::test(start_paused = true)]
 async fn a_document_is_never_written_twice_at_once_and_its_versions_never_go_down() {
     const IDS: [&str; 6] = ["a", "b", "c", "d", "e", "f"];
@@ -605,7 +605,7 @@ async fn an_item_waits_for_an_earlier_one_sharing_a_document() {
 }
 
 /// Item 3 and 2 finish while item 1 is still being written: the lane's
-/// watermark and the sink's applied fence stay before 1, then move to 3 once
+/// confirmation and the sink's applied fence stay before 1, then move to 3 once
 /// it lands.
 #[tokio::test(start_paused = true)]
 async fn a_later_write_finishing_first_moves_neither_confirmation_nor_the_fence() {
@@ -1040,7 +1040,7 @@ async fn warm_up(rig: &mut Rig) {
 
 /// Under `stop`, a rejection the sink reports at its write's first poll
 /// fails the run at once: nothing granted after it starts, the write still
-/// in flight beside it (`a`) lands, and the watermark stops before the
+/// in flight beside it (`a`) lands, and the confirmation stops before the
 /// rejected item. The probe answers `b` on its first poll: that is the
 /// precondition of "nothing after it starts".
 #[tokio::test(start_paused = true)]
@@ -1077,10 +1077,10 @@ async fn a_stop_rejection_seen_at_its_first_poll_starts_nothing_after_it() {
 
 /// Under `stop`, while the rejected write is still in flight the run doesn't
 /// know yet: disjoint items behind it start and land. What is promised is
-/// that the lane's watermark stays before the rejected item, and the next
+/// that the lane's confirmation stays before the rejected item, and the next
 /// run writes it alone (the barrier).
 #[tokio::test(start_paused = true)]
-async fn a_stop_rejection_still_in_flight_lets_disjoint_writes_land_but_holds_the_watermark() {
+async fn a_stop_rejection_still_in_flight_lets_disjoint_writes_land_but_holds_confirmation() {
     let mut rig = Rig::new(Probe::new().holding(&["b"]).rejecting(&["b"]), 4).start();
     warm_up(&mut rig).await;
     rig.live(2, &["b"]).await;

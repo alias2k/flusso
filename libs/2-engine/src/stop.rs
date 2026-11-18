@@ -9,8 +9,8 @@
 //!    (a snapshot in progress is abandoned at a row boundary, its request left
 //!    unacknowledged, so the sink asks again on the next start);
 //! 2. publishes the batch it was buffering, exactly as a normal commit;
-//! 3. waits until every lane is acknowledged ([`drain_lanes`]), handing the
-//!    watermark to the source as it moves;
+//! 3. waits until every lane is acknowledged ([`drain_lanes`]), handing what
+//!    landed to the source as it moves;
 //! 4. asks the source to close its live stream once that final position
 //!    reached it ([`ChangeCapture::close_live`]), and returns `Ok`.
 //!

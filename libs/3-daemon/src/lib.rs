@@ -315,7 +315,7 @@ impl RunningDaemon {
     /// The stop: the phase turns `stopping` (not ready, no new operation);
     /// the ingest engine reads nothing more, publishes the batch it was
     /// buffering, waits until every sink flushed and acknowledged its lane,
-    /// hands the final watermark to the source and closes the live stream.
+    /// hands what every lane landed to the source and closes the live stream.
     /// A snapshot in progress is abandoned; its sink asks again on the next
     /// start. Nothing here bounds the stop: a stalled sink holds it, so the
     /// caller owns the deadline, and dropping this future past it is safe

@@ -220,3 +220,55 @@ Counted inside the bench, per run (one iteration, Criterion `--test`), `ffd54d22
 | `sinks2`, now | 40,067 | 20,002 | 40,000 | 10,002 |
 
 Lane ledger locks are shared by the ingest engine (publish) and a sink engine (receive, acknowledge); the confirmation used to take one per lane. Registry locks are uncontended in the bench (no fence). The mark stores are plain stores on x86 (a mark moves once per item at one change per batch); the sink engine's own `Fences` lock is unchanged.
+
+## 10. After review: each lane registered on its own
+
+The review found a stalled sibling sink blocking fences on a healthy one: a batch was registered only
+after every lane took it, and a lane's `Through` came from one global `routed`. Now:
+
+- **Registration per lane.** `IngestEngine::publish` registers an item on its lane
+  (`Progress::published(lane, oldest, last)`) as soon as that lane's own send returns; a lane a
+  batch has nothing for is told `Progress::skipped(lane, last)` (stage 7 needs it; in stage 6 every
+  lane gets every live batch).
+- **A lane's answer** is `Before(its oldest unlanded)`, else `Through(the newest position registered
+  on it, item or skip)`, else `Idle`. **Several lanes** (confirmation, an all-sinks fence) answer as the
+  lane whose answer covers least: `Before(o)` covers seqs below `o`, `Through(p)` through `p`,
+  `Idle` nothing.
+- **A registration wakes fence waiters** through one listener (`Progress::on_registered`), which reads
+  the fence's open-wait counter first and does nothing while none is open.
+
+**Why nothing is confirmed or fenced too far.** Take any answer `A` and any change `c` it covers.
+
+1. *On one lane `L`.* `A` covers `c` only from what is registered on `L`. If `A = Before(o)`, every
+   item registered on `L` before `o`'s item is covered by `L`'s mark, which its sink raised only after
+   that item's write returned; an item of `L` holding `c` was registered before `o`'s (registration is
+   in batch order per lane, since batches are published one after another), so it landed. If
+   `A = Through(p)`, every item registered on `L` through `p` is landed, and `L` had every batch through
+   `p` registered (an item or a skip): `c ≤ p` was either in an item that landed or in a batch `L`
+   needs nothing of.
+2. *The gap: an item sent but not yet registered*, or landed before it is registered. `L` answers
+   from its previous registration: `Through(p_prev)` or `Before(o_prev)`, or `Idle` if it never had
+   one. The new batch's changes are already emitted, so `p_prev.seq + 1 < next_seq`: the source
+   answers `p_prev.confirm_through`, never its horizon, and stays short of the new batch. `Idle` after
+   any emission moves nothing (the capture's `FIRST_SEQ` test). A mark raised past the unregistered item
+   is kept, and covers it once registered.
+3. *Several lanes.* The least answer is one some lane gave, so by (1) and (2) every lane covers at
+   least as much as it claims; and every lane is read under the one registry lock, so no registration
+   falls between two lanes' answers. A mark read early only makes that lane's answer older.
+4. *The `next_seq` test* is the source's (`ack.rs`): `Through(p)` follows the horizon only while `p`
+   is the last change emitted. A lane's `p` is its own newest registration; another lane that hasn't
+   registered the same batch answers less, so the least answer is never a `Through` past an
+   unregistered change.
+
+Guards: `progress::tests` (`every_interleaving_answers_as_the_model_does`: registrations per lane,
+skips, marks running ahead, 300 seeds against a model; `concurrent_registration_and_landing_never_answer_past_a_lane`:
+an ingest thread registering in random lane order, one sink thread per lane, two reader threads
+checking every answer against what each sink landed), the engine's `tests::lanes`, the daemon's
+`tests::lanes`.
+
+**Counts after this change** (same bench, same method): per run of `live_drain_held/sinks2/1`,
+registry locks 30,002 (one per lane per batch, one per confirmation), mark stores 40,000, lane ledger
+locks 40,000–46,500 (it varies with timing from run to run); `sinks1/1`: 20,002, 20,000 and about
+25,000. Registration is one uncontended lock per lane per batch: the readers (the ingest engine's own
+confirmation, a fence) need every lane's registrations consistently, and a lock-free version would be
+a hand-written multi-reader queue or a new dependency. Not done.

@@ -748,7 +748,7 @@ async fn start_builds_backends_through_the_seam() {
 
 /// A run over a non-empty live stream drives changes through the injected
 /// builder to **every** sink — capture, build once, publish, apply, flush, ack
-/// — confirms the watermark to the source, and the status reflects it.
+/// — confirms what landed to the source, and the status reflects it.
 #[tokio::test]
 async fn drives_changes_through_injected_backends() {
     let primary_sink = Arc::new(RecordingSink::seeded());

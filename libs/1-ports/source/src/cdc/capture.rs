@@ -99,11 +99,9 @@ pub enum Continuity {
 ///   point that far and no further. The mechanism reads the answer off the
 ///   positions' own stamps and what it knows it emitted, so delivery stays
 ///   at-least-once across restarts with no map of every change.
-/// - [`snapshot`](Self::snapshot) reads the *current* rows of a set of tables as
-///   a finite stream — the data a backfill needs. Whether a backfill is
-///   *needed* is not the mechanism's call: each sink engine asks its **sink**
-///   whether an index is seeded and requests a snapshot only then. A mechanism
-///   that cannot snapshot keeps the default (an empty stream).
+///
+/// A backfill is not the mechanism's: it reads root keys through the document
+/// builder ([`DocumentBuilder::keys`](crate::document::DocumentBuilder::keys)).
 ///
 /// - [`reached`](Self::reached) translates progress back into the source's own
 ///   terms: given how far a sink's lanes have landed, the [`SourcePosition`]

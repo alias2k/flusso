@@ -22,17 +22,17 @@
 //! one [`Sink::write`], several at once but never two holding the same
 //! document, decides item-level rejections by the failure policies, and
 //! acknowledges: write-then-ack is what makes delivery at-least-once, because
-//! the acknowledgement is what moves this lane's watermark, and the lane's
-//! watermark never passes an item still being written. A `SnapshotComplete`
+//! an item counts as landed in the engine's [`Progress`] only once its write
+//! returned, and an item not acknowledged is delivered again. A `SnapshotComplete`
 //! marker records its indexes as seeded once everything before it is written.
 //! A reindex arrives as a control message and is staged once the writes in
 //! flight returned: `reindex` + `ensure_index` on the sink, then a fresh
 //! `Backfill` request.
 //!
-//! The loop also reports the sink's two **fence levels** to the observer, in
-//! position order whatever order the writes finish in (`fences`). *Applied* is
-//! the last position before the oldest one still being written, reported
-//! before the acknowledgement that lets the watermark pass it. *Searchable*
+//! The loop also reports the sink's two **fence levels** to the progress and
+//! the observer, in position order whatever order the writes finish in
+//! (`fences`). *Applied* is the last position before the oldest one still
+//! being written, reported before the item's acknowledgement. *Searchable*
 //! trails it by what each write reported ([`Visibility`](sink::Visibility)), so a searchable
 //! position always means "this and everything before it". The engine only
 //! observes; nothing here asks the sink to refresh because a reader waits.

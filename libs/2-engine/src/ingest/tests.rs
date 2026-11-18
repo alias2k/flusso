@@ -209,9 +209,9 @@ impl Feed {
         self
     }
 
-    /// The next run's stream starts after `watermark`.
-    fn resume_after(&self, watermark: Option<Position>) {
-        let from = watermark.map_or(0, |position| position.seq as usize + 1);
+    /// The next run's stream starts after `landed`, what every lane landed.
+    fn resume_after(&self, landed: Option<Position>) {
+        let from = landed.map_or(0, |position| position.seq as usize + 1);
         self.from.store(from, Ordering::SeqCst);
     }
 }

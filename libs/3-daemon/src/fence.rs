@@ -163,8 +163,9 @@ struct Inner {
     moved: Notify,
     /// How many waits on `searchable` are open.
     searchable_waits: AtomicUsize,
-    /// How many waits are open: a registration wakes them only then.
-    waits: AtomicUsize,
+    /// How many waits are open: a registration wakes them only then. Its own
+    /// `Arc`, so the registration listener reads it without upgrading.
+    waits: Arc<AtomicUsize>,
 }
 
 /// Counts one open wait, so registrations know to wake it.
@@ -221,7 +222,7 @@ impl Fence {
                 .collect(),
             moved: Notify::new(),
             searchable_waits: AtomicUsize::new(0),
-            waits: AtomicUsize::new(0),
+            waits: Arc::new(AtomicUsize::new(0)),
         });
         // Weak: the source keeps its listeners for life, and must not keep the
         // fence (and through it, itself) alive.
@@ -235,9 +236,10 @@ impl Fence {
         // pass: wake them, and only when some wait (registration is on the
         // ingest engine's path for every batch).
         let registrations: Weak<Inner> = Arc::downgrade(&inner);
+        let waits = Arc::clone(&inner.waits);
         inner.progress.on_registered(Arc::new(move || {
-            if let Some(inner) = registrations.upgrade()
-                && inner.waits.load(Ordering::Acquire) > 0
+            if waits.load(Ordering::Acquire) > 0
+                && let Some(inner) = registrations.upgrade()
             {
                 inner.moved.notify_waiters();
             }

@@ -51,8 +51,8 @@
 //! refusing it) halts the sink after its first run: on every restart of the
 //! engine nothing behind it lands, no progress resets the backoff, and the
 //! lane fills. In the run that first meets it, writes already granted beside
-//! it, and disjoint ones granted while it is in flight, can land; the lane's
-//! watermark stays before it. A new process writes its oldest *unconfirmed*
+//! it, and disjoint ones granted while it is in flight, can land;
+//! confirmation stays before it. A new process writes its oldest *unconfirmed*
 //! item alone: when that is an older item already written (a sibling sink
 //! lags, or the confirmation never reached the source), it lands, the window
 //! opens, and disjoint items past the failing one land again before it fails.

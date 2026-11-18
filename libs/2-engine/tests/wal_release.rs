@@ -342,7 +342,7 @@ async fn a_stalled_sink_pins_the_slot_until_it_catches_up() {
     wait_until_live(&run, &pool, &stalled, 0).await;
 
     // Every lane, the stalled one included, acks a positioned batch first, so
-    // the watermark is a real minimum over lanes rather than "no position yet".
+    // confirmation is a real minimum over lanes rather than "no position yet".
     exec(&pool, "INSERT INTO users (id, email) VALUES (0, 'a')").await;
     let before_stall = current_lsn(&pool).await;
     for sink in [&fast, &stalled, &live_only] {

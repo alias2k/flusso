@@ -435,7 +435,7 @@ impl Harness {
 }
 
 #[tokio::test]
-async fn drives_live_changes_to_the_sink_and_confirms_the_watermark() {
+async fn drives_live_changes_to_the_sink_and_confirms_what_landed() {
     let sink = Arc::new(RecordingSink::seeded(true));
     let ops = Arc::clone(&sink.ops);
     let harness = Harness::new(
@@ -572,7 +572,7 @@ async fn builds_a_repeatedly_touched_document_once_per_batch() {
 }
 
 /// A sink whose flush blocks until released, so a test can look at the
-/// watermark while a batch is applied-but-not-flushed.
+/// confirmation while a batch is applied-but-not-flushed.
 #[derive(Debug)]
 struct GatedSink {
     release: Arc<Notify>,

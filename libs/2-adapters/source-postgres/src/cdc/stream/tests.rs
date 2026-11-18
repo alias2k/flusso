@@ -63,7 +63,7 @@ fn upsert() -> ChangeEvent {
 }
 
 #[test]
-fn keepalive_advances_the_watermark_when_idle() {
+fn keepalive_moves_the_horizon_when_idle() {
     let (mut decode, ack) = state();
     handle(&mut decode, keepalive(100)).unwrap();
     assert_eq!(released(&ack), 100);
@@ -155,7 +155,7 @@ fn a_commit_behind_another_keeps_the_horizon_at_the_emitted_one() {
 }
 
 #[test]
-fn empty_commit_advances_the_watermark() {
+fn empty_commit_moves_the_horizon() {
     let (mut decode, ack) = state();
     handle(&mut decode, commit(100)).unwrap();
     assert_eq!(released(&ack), 100);

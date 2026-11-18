@@ -22,10 +22,10 @@
 //! a document's later message is always the newer state: a page only names
 //! ids, and its documents are read when they are built.
 //!
-//! After every commit the engine reads the stream's watermark — the lowest
-//! position every lane has acknowledged — and hands it to the source as
-//! confirmation. That is the at-least-once guarantee: the resume point advances
-//! only past what *every* sink has made durable.
+//! After every commit, and once a second, the engine reads how far every lane
+//! has landed ([`Progress`]) and hands it to the source as confirmation. That
+//! is the at-least-once guarantee: the resume point advances only past what
+//! *every* sink has made durable.
 //!
 //! Requests are at-least-once too: a `Backfill` is acknowledged only after its
 //! `SnapshotComplete` is published, and concurrent requests for the same index
@@ -400,7 +400,7 @@ impl IngestEngine {
 
     /// The rest of a stop: finish the builds running, build and publish the
     /// buffered batch, wait until every lane
-    /// acknowledged it (confirming as the watermark moves), then close the
+    /// acknowledged it (confirming what landed as it moves), then close the
     /// live stream so the final position reaches the source.
     async fn wind_down(
         &self,

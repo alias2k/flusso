@@ -25,12 +25,12 @@ The reverse direction is what makes sync possible. When a row changes, flusso re
 
 ```text
 ChangeCapture ─▶ ingest engine ─▶ lane per sink ─▶ sink engine ─▶ write ×4 ─▶ ack
-                 resolve · build once · publish                                     └▶ watermark ─▶ slot
+                 resolve · build once · publish                                     └▶ progress ─▶ slot
 ```
 
 An **ingest engine** follows Postgres logical replication, resolves each change to the document ids it affects, deduplicates them, builds each document **once** per batch (several batches at once, never two holding the same document), and publishes the batches onto one lane per sink in the order they started. A **sink engine** per sink pulls from its lane and writes several batches at once as bulk requests (never two holding the same document, live changes before backfill pages), acknowledging each as it lands. Sinks are independent: each seeds itself, a reindex targets one sink, and one sink's outage stops only that sink.
 
-Delivery is **at-least-once**. Each lane's acknowledgements feed a watermark, and the replication slot advances only to the lowest position **every** sink has written, everything before it included. A crash before a write returns redelivers that sink's batch; the rebuild is idempotent, so redelivery is harmless.
+Delivery is **at-least-once**. The engine records what each lane has been sent and what its sink has written, and the replication slot advances only past changes **every** sink has written, everything before them included. A crash before a write returns redelivers that sink's batch; the rebuild is idempotent, so redelivery is harmless.
 
 ## flusso owns the index
 

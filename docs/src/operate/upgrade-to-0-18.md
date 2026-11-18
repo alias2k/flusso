@@ -302,12 +302,13 @@ The Postgres source no longer keeps a map of every change it emitted until every
 | 0.17 | 0.18 |
 | --- | --- |
 | `kernel::Position(n)`, `position.0` | `Position::new(n)`, `position.seq`; a source stamps its own with `Position::stamped(seq, fence_before, confirm_before, confirm_through)` |
+| a `Position` serialized on its own: a bare number (`42`) | a struct, `{"seq":42,"fence_before":…,"confirm_before":…,"confirm_through":…}`, and a bare number no longer reads back. An `Envelope` still writes its position as the `seq` string |
 | `ChangeCapture::confirm(&self, Position)` | `confirm(&self, Landed)`: `Before(oldest)`, `Through(newest routed)` or `Idle`. Called after each commit and once a second whatever changed; keep it monotonic |
 | `ChangeCapture::reached(&self, Option<Position>)` | `reached(&self, Landed)` |
 | `Stream::watermark()` | removed; `engine::Progress` keeps what each lane landed |
 | `engine::drain_lanes(stream, source, &mut Option<Position>)` | `drain_lanes(stream, source, &Progress, &mut Option<Landed>)` |
 | `Fence::new(source, sinks)` | `Fence::new(source, progress, sinks)` |
-| one `IngestEngine` and its `SinkEngine`s over a stream | the same, sharing one `Progress`: `IngestEngine::with_progress` and `SinkEngine::with_progress`. An ingest engine alone gets its own; a sink engine without one confirms nothing |
+| `IngestEngine::new(source, documents, stream, sinks)`, `SinkEngine::new(name, sink, stream, mappings)` | each takes the deployment's `Arc<Progress>` last: the one both engines over a stream share (`Progress::new(sinks)`) |
 
 ## Related
 
