@@ -27,11 +27,16 @@ pub(crate) fn e2e_builds() -> usize {
         .unwrap_or(4)
 }
 
-/// A memory budget for an e2e ingest engine: the daemon's default 512 MiB,
-/// so the e2e count what they build. Dropped with bytes still counted, it
-/// fails the test (in debug builds): the standing leak guard.
+/// A memory budget for an e2e ingest engine: `FLUSSO_E2E_BUDGET_KIB`, else
+/// the daemon's default 512 MiB, so the e2e count what they build (a tiny
+/// one makes the budget bind). Dropped with bytes still counted, it fails the
+/// test (in debug builds): the standing leak guard.
 pub(crate) fn e2e_budget() -> std::sync::Arc<engine::Budget> {
-    std::sync::Arc::new(engine::Budget::new(512 * 1024 * 1024))
+    let kib = std::env::var("FLUSSO_E2E_BUDGET_KIB")
+        .ok()
+        .and_then(|kib| kib.parse::<usize>().ok())
+        .unwrap_or(512 * 1024);
+    std::sync::Arc::new(engine::Budget::new(kib * 1024))
 }
 
 /// A PG 16 with logical replication, and its connection URL. PG 14+ is
