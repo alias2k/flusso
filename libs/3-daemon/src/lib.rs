@@ -9,6 +9,7 @@ pub mod status;
 mod supervise;
 
 pub use backends::{Backends, SinkParts, SourceParts};
+pub use engine::Progress;
 pub use fence::{
     Fence, FenceError, FenceLevel, FenceObserver, FenceOutcome, FencePositions, FenceRequest,
     SinkPositions,
@@ -18,7 +19,6 @@ pub use status::{
     IndexState, LastScriptFailure, Phase, ScriptFailures, SinkPhase, SinkSnapshot, Status,
     StatusSnapshot,
 };
-pub use engine::Progress;
 pub use supervise::{ControlError, DaemonControl};
 
 use supervise::ControlReceivers;

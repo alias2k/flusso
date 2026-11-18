@@ -33,7 +33,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     futures::executor::block_on(sink.write(
         &[
-            Envelope::upsert(index.clone(), "42", document, Some(Position::new(1)), Utc::now()),
+            Envelope::upsert(
+                index.clone(),
+                "42",
+                document,
+                Some(Position::new(1)),
+                Utc::now(),
+            ),
             Envelope::delete(index, "7", Some(Position::new(2)), Utc::now()),
         ],
         true,
