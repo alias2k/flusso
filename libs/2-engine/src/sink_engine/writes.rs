@@ -28,10 +28,13 @@
 //! on every lane, except every fourth grant both could take, which goes to
 //! backfill. Among the lanes with a candidate of the chosen kind, lanes take
 //! turns, so a busy index never starves another; within a lane, its earliest
-//! admissible item. A `SnapshotComplete` is a barrier on its lane: it runs
-//! once everything before it on the lane is written, and nothing after it on
-//! the lane starts until it is done; other lanes go on. A reindex waits for
-//! the writes in flight, then is staged.
+//! admissible item. A `SnapshotComplete` is a barrier on its lane: once
+//! everything before it on the lane is written, it seeds its index
+//! ([`mark_seeded`](sink::Sink::mark_seeded)) as a flight holding one write
+//! slot, and nothing after it on the lane starts until the seed returned;
+//! other lanes go on writing and seeding meanwhile, so the seeds at the end
+//! of a backfill run at once. A reindex waits for the writes and seeds in
+//! flight, then is staged.
 //!
 //! **Merging.** A write holds every admissible item of the chosen kind that
 //! is ready, live with live and backfill with backfill, the first item as
@@ -208,10 +211,24 @@ impl Flight {
     }
 }
 
-/// A write that returned.
+/// A seed in flight: a lane's `SnapshotComplete`, marking its index seeded.
+struct Seeding {
+    index: IndexName,
+    handle: Box<dyn AckHandle>,
+    lane: usize,
+    seq: u64,
+}
+
+/// What a flight returned.
+enum Outcome {
+    Write(sink::Result<WriteReport>),
+    Seed(sink::Result<()>),
+}
+
+/// A flight that returned.
 struct Landed {
     flight: u64,
-    result: sink::Result<WriteReport>,
+    outcome: Outcome,
     took: Duration,
 }
 
@@ -222,6 +239,7 @@ pub(super) struct Run<'a> {
     window: VecDeque<Queued>,
     flights: Flights<'a, Landed>,
     flying: Vec<(u64, Flight)>,
+    seeding: Vec<(u64, Seeding)>,
     next_flight: u64,
     /// The lane-order number the next delivered item gets.
     next_seq: u64,
@@ -274,6 +292,7 @@ impl<'a> Run<'a> {
             window: VecDeque::new(),
             flights: Flights::new(),
             flying: Vec::new(),
+            seeding: Vec::new(),
             next_flight: 0,
             next_seq: 0,
             contested: 0,
@@ -501,11 +520,18 @@ impl<'a> Run<'a> {
                 || (run.live_waiting == 0 && run.backfill_waiting > 0))
     }
 
-    /// Whether a write of `lane` is in flight.
+    /// Whether a write or the seed of `lane` is in flight.
     fn lane_in_flight(&self, lane: usize) -> bool {
         self.flying
             .iter()
             .any(|(_, flight)| flight.lanes().any(|at| at == lane))
+            || self.lane_seeding(lane)
+    }
+
+    /// Whether `lane`'s seed is in flight: nothing after it on the lane
+    /// starts until it returned.
+    fn lane_seeding(&self, lane: usize) -> bool {
+        self.seeding.iter().any(|(_, seeding)| seeding.lane == lane)
     }
 
     /// The parts of `lane` being written.
@@ -628,21 +654,24 @@ impl<'a> Run<'a> {
         // A write handled at its first poll may have failed the run: from
         // then on nothing new starts.
         while self.failure.is_none() {
+            if self.flights.len() >= slots {
+                return Ok(());
+            }
             if let Some(at) = self.runnable_complete() {
                 if let Some(Queued {
                     item: Queue::Complete { index },
                     handle,
                     lane,
-                    ..
+                    seq,
                 }) = self.take_from_window(at)
                 {
-                    self.engine.complete_snapshot(index).await?;
-                    self.acknowledge(handle, lane, true, None).await?;
+                    if self.engine.cut_short(&index) {
+                        self.acknowledge(handle, lane, true, None).await?;
+                    } else if let Some(landed) = self.seed(index, handle, lane, seq) {
+                        self.landed(landed).await?;
+                    }
                 }
                 continue;
-            }
-            if self.flights.len() >= slots {
-                return Ok(());
             }
             let mut picked = self.pick();
             if picked.is_empty() {
@@ -723,6 +752,7 @@ impl<'a> Run<'a> {
         // in the write, nothing needs hashing, as with one item per write.
         if self.lanes.len() == 1
             && self.flying.is_empty()
+            && self.seeding.is_empty()
             && !(self.live_waiting > 0 && self.backfill_waiting > 0)
             && matches!(
                 self.window.front(),
@@ -743,7 +773,7 @@ impl<'a> Run<'a> {
         let lanes = self.lanes.len();
         let mut live: Vec<Vec<usize>> = vec![Vec::new(); lanes];
         let mut backfill: Vec<Vec<usize>> = vec![Vec::new(); lanes];
-        let mut blocked = vec![false; lanes];
+        let mut blocked: Vec<bool> = (0..lanes).map(|lane| self.lane_seeding(lane)).collect();
         let mut earlier: Vec<HashSet<u64>> = vec![HashSet::new(); lanes];
         let ordered = self.ordered();
         for (at, queued) in self.window.iter().enumerate() {
@@ -932,7 +962,7 @@ impl<'a> Run<'a> {
             let result = sink.write_parts(&slices, caught_up).await;
             Landed {
                 flight,
-                result,
+                outcome: Outcome::Write(result),
                 took: started.elapsed(),
             }
         };
@@ -948,12 +978,80 @@ impl<'a> Run<'a> {
         self.flights.start(write)
     }
 
+    /// Seed `index` as a flight holding one write slot, its lane blocked
+    /// until it returns. Like a write, it starts now, and one that completes
+    /// on its first poll is handed back.
+    fn seed(
+        &mut self,
+        index: IndexName,
+        handle: Box<dyn AckHandle>,
+        lane: usize,
+        seq: u64,
+    ) -> Option<Landed> {
+        let flight = self.next_flight;
+        self.next_flight += 1;
+        let sink = &self.engine.sink;
+        let marking = index.clone();
+        self.seeding.push((
+            flight,
+            Seeding {
+                index,
+                handle,
+                lane,
+                seq,
+            },
+        ));
+        let seed = async move {
+            let started = Instant::now();
+            let result = sink.mark_seeded(&marking).await;
+            Landed {
+                flight,
+                outcome: Outcome::Seed(result),
+                took: started.elapsed(),
+            }
+        };
+        self.flights.start(seed.boxed())
+    }
+
+    /// A seed returned: once it succeeded the index is seeded and its
+    /// `SnapshotComplete` acknowledged; a failed one fails the run blamed on
+    /// its lane, and the lane hands the `SnapshotComplete` back.
+    async fn seed_returned(
+        &mut self,
+        flight: u64,
+        result: sink::Result<()>,
+        took: Duration,
+    ) -> Result<()> {
+        let Some(at) = self.seeding.iter().position(|(id, _)| *id == flight) else {
+            return Ok(());
+        };
+        let (_, seeding) = self.seeding.swap_remove(at);
+        if let Err(error) = result {
+            self.fail(error.into(), &[seeding.lane]);
+            return Ok(());
+        }
+        self.engine.seeded(&seeding.index, took);
+        let oldest = self.is_oldest(seeding.lane, seeding.seq);
+        self.acknowledge(seeding.handle, seeding.lane, oldest, None)
+            .await?;
+        if let Some(run) = self.lanes.get_mut(seeding.lane) {
+            run.barrier = false;
+        }
+        Ok(())
+    }
+
     /// A write returned: decide its rejections per part, move the fences, and
     /// acknowledge every part that landed. A part with a rejection its index
     /// decides `stop` stays unacknowledged and the run fails, blamed on its
     /// lane; the other parts landed and are acknowledged. A write that failed
     /// fails every part, blamed on all their lanes.
     async fn landed(&mut self, landed: Landed) -> Result<()> {
+        let result = match landed.outcome {
+            Outcome::Write(result) => result,
+            Outcome::Seed(result) => {
+                return self.seed_returned(landed.flight, result, landed.took).await;
+            }
+        };
         let Some(index) = self.flying.iter().position(|(id, _)| *id == landed.flight) else {
             return Ok(());
         };
@@ -963,7 +1061,7 @@ impl<'a> Run<'a> {
                 .work(flight.work)
                 .sink(&self.engine.name),
         );
-        let report = match landed.result {
+        let report = match result {
             Ok(report) => report,
             Err(error) => {
                 let lanes: Vec<usize> = flight.lanes().collect();
@@ -1138,6 +1236,11 @@ impl<'a> Run<'a> {
             .filter(|queued| queued.lane == lane)
             .all(|queued| queued.seq > seq)
             && self.parts_in_flight(lane).all(|part| part.seq > seq)
+            && self
+                .seeding
+                .iter()
+                .filter(|(_, seeding)| seeding.lane == lane)
+                .all(|(_, seeding)| seeding.seq > seq)
     }
 }
 
@@ -1237,37 +1340,28 @@ impl SinkEngine {
         }
     }
 
-    /// Record a finished snapshot's index as seeded, unless a stop cut its
-    /// backfill short.
-    async fn complete_snapshot(&self, index: IndexName) -> Result<()> {
-        let indexes = vec![index];
-        let skipped = self.lock_skipped().clone();
-        for index in indexes.iter().filter(|index| skipped.contains(*index)) {
+    /// Whether a stop cut `index`'s backfill short: its `SnapshotComplete`
+    /// then seeds nothing, and the index is backfilled on the next start.
+    fn cut_short(&self, index: &IndexName) -> bool {
+        let cut = self.lock_skipped().contains(index);
+        if cut {
             tracing::info!(%index, "stopping: its backfill was cut short, so it stays unseeded and is backfilled on the next start");
         }
-        let indexes: Vec<IndexName> = indexes
-            .into_iter()
-            .filter(|index| !skipped.contains(index))
-            .collect();
-        for index in &indexes {
-            let started = Instant::now();
-            self.sink.mark_seeded(index).await?;
-            self.observer.on_stage(
-                StageTiming::new(Stage::Seed, started.elapsed())
-                    .work(Work::Backfill)
-                    .sink(&self.name)
-                    .index(index),
-            );
-            self.observer.on_index_seeded(&self.name, index);
-        }
-        let mut outstanding = self.lock_outstanding();
-        for index in &indexes {
-            outstanding.remove(index);
-        }
-        if !indexes.is_empty() {
-            tracing::info!(indexes = indexes.len(), "backfill complete");
-        }
-        Ok(())
+        cut
+    }
+
+    /// Record that `index`'s seed returned: it is seeded, and no longer
+    /// waits for its backfill.
+    fn seeded(&self, index: &IndexName, took: Duration) {
+        self.observer.on_stage(
+            StageTiming::new(Stage::Seed, took)
+                .work(Work::Backfill)
+                .sink(&self.name)
+                .index(index),
+        );
+        self.observer.on_index_seeded(&self.name, index);
+        self.lock_outstanding().remove(index);
+        tracing::info!(%index, "backfill complete");
     }
 }
 

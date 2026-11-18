@@ -627,7 +627,9 @@ is the one concrete piece.
   engine (`writes.rs`'s `Run`) keeps per lane a consumer, its window, counts and barrier; admission is per
   lane (two lanes never share a document); `pick` takes live first, every fourth contested grant to
   backfill, lanes taking turns (`turn`); an ordered sink writes the live front with the lowest position;
-  `SnapshotComplete` is a barrier on its own lane only; after a failed run only the failed lanes
+  `SnapshotComplete` is a barrier on its own lane only, and its `mark_seeded` runs as a flight holding a
+  write slot (seeds of several lanes at once, beside other lanes' writes; the lane blocked until it
+  returns; a failed seed fails the run like a write; guards: `tests::seeding`); after a failed run only the failed lanes
   (`Blame::Lanes`) write their front alone; a reindex is still staged sink-wide between writes. `Fences`
   and caught-up are per lane (a write is caught up when nothing else of its lane waits). The fence takes
   `indexes` (`/wait?index=…`, repeatable, `UnknownIndex` → 404); `/status` has `sinks.<s>.lanes.<index>`;
@@ -1061,8 +1063,9 @@ is the one concrete piece.
   (`(index, id)` hashed to `u64`, only when a comparison is needed: nothing in flight and one kind
   waiting grants the front item unhashed; a collision only holds an item back). **Selection**: live
   (positioned) items first, every fourth *contested* grant (both kinds admissible) to the oldest
-  admissible backfill item; a `SnapshotComplete` starts once it is the window's front and nothing is
-  in flight, and nothing behind it starts until it is done; a reindex waits for the writes in flight.
+  admissible backfill item; a `SnapshotComplete` starts once nothing before it on its lane is waiting or
+  in flight, and nothing behind it on its lane starts until its seed returned; a reindex waits for the
+  writes and seeds in flight.
   A write is **caught up** when the window and the lane have nothing else. A **failure** (a write
   `Err`, a `stop` rejection) starts nothing new: the writes in flight are awaited and acked when they
   succeeded, then the run ends with the first error and the lane redelivers only what is unacked;

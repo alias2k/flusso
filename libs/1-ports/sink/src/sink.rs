@@ -159,9 +159,14 @@ impl Default for SinkOptions {
 /// [`is_seeded`](Self::is_seeded) and [`reindex`](Self::reindex) may run at
 /// once for *different* indexes, never two at once for the same index, and
 /// never beside [`write`](Self::write) or [`mark_seeded`](Self::mark_seeded)
-/// (staging happens before the first write and once the writes in flight have
-/// returned). State a sink shares between indexes, such as one metadata store,
-/// must take concurrent writes for different indexes.
+/// (staging happens before the first write and once the writes and seeds in
+/// flight have returned).
+///
+/// **Seeding is concurrent across indexes.** [`mark_seeded`](Self::mark_seeded)
+/// may run at once for different indexes, and beside `write` for other
+/// indexes; never beside a write, a `mark_seeded` or staging of the same
+/// index, and never beside staging. State a sink shares between indexes, such
+/// as one metadata store, must take concurrent calls for different indexes.
 #[async_trait]
 pub trait Sink: std::fmt::Debug + Send + Sync {
     /// Ensure the destination index exists, creating it from `mapping` if it is
@@ -281,6 +286,10 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
 
     /// Record that `index` has been seeded, so a later run skips its backfill.
     /// The default is a no-op (paired with `is_seeded` returning `false`).
+    ///
+    /// Called once the index's backfill is written, possibly while other
+    /// indexes are written or seeded (see the trait's doc on concurrency).
+    /// A failure is retried by calling it again, so it must be idempotent.
     async fn mark_seeded(&self, _: &IndexName) -> Result<()> {
         Ok(())
     }
