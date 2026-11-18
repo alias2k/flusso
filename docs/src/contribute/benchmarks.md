@@ -25,7 +25,7 @@ The old `live_drain` (the same bench without the hold) measured a coin flip:
 - when the sink lost the race, it freed the batch while the ingest engine built the next one, and both slowed down on the allocator;
 - forcing either outcome on `main` gave about 33 ms (the ingest engine frees) against about 80 ms (the sink frees) for `sinks2/64`, an exact match between `main` and a branch in each regime, so the series' swings on `main` were that race, not the engines.
 
-Holding a write costs the engines nothing measurable: forcing the ingest engine to free while the sink also busy-waited 50 µs per write measured 31–32 ms, the ingest-frees figure. Spread over six runs on `main`, pinned to 4 CPUs:
+Spread over six runs on `main`, pinned to 4 CPUs:
 
 | case | `live_drain` (race) | `live_drain_held` |
 | --- | ---: | ---: |
@@ -34,7 +34,29 @@ Holding a write costs the engines nothing measurable: forcing the ingest engine 
 | `sinks1/256` | 32–68 ms (91%) | 74–78 ms (5%) |
 | `sinks2/256` | 29–52 ms (72%) | 73–75 ms (3%) |
 
-The `/1` cases still show an occasional slow run on either version. The rename restarted the history's `inprocess/live_drain/*` series as `inprocess/live_drain_held/*`: the old points measured the race, and the new ones would have read as a step up.
+**What the figure means.** The hold releases the sink on the first line of build *n + 1*, so the free overlaps the next build on **every** batch. That is the contended upper bound, not what production does: production has the sink freeing too, but a real build mostly waits on Postgres. The sink-frees regime costs about 2.4× locally and about 3× on CI's runner against the ingest-frees one, and batch size now barely moves the figure: the held `/1`, `/64` and `/256` sit within about 15% of each other (CI, `sinks1`: 130.8 / 148.5 / 143.5 ms).
+
+- **Still caught:** allocation volume, and the ingest engine's work per batch.
+- **Not caught:** sink-side cost smaller than the ingest's per-batch work, and gains from larger batches.
+
+**What the hold itself costs.** With the ingest engine forced to free every batch (the hold then only adds its wake-up), `live_drain_held` against `main`'s `live_drain` measured, medians of six pinned to 4 CPUs: 1–3% at `/64` and `/256`, 3–6% at `/1` (one `Notify` wake-up per batch). An earlier check with a 50 µs busy-wait in place of the hold measured 31–32 ms, the ingest-frees figure.
+
+**Why the build-start point.** Two other release points were measured, six runs each, pinned to 4 CPUs:
+
+| case | build *n + 1* starts (shipped) | build *n + 1* finishes | the ingest engine ends |
+| --- | ---: | ---: | ---: |
+| `sinks1/1` | 67.5 ms (18%) | 68.4 ms (15%) | deadlocks |
+| `sinks1/64` | 77.0 ms (16%) | 46.5 ms (12%) | 38.2 ms (8%) |
+| `sinks1/256` | 75.1 ms (6%) | 35.4 ms (1%) | 37.8 ms (1%) |
+| `sinks2/64` | 76.5 ms (18%) | 42.4 ms (6%) | 38.3 ms (1%) |
+| `sinks2/256` | 74.4 ms (7%) | 34.8 ms (2%) | 37.8 ms (2%) |
+
+Medians, with the spread (max over min) in brackets. That session ran beside other load, so the shipped column's spread reads wider than in the table above.
+- **Releasing at the end** holds every batch in the lane until the ingest ends: at `/1` that is 10,000 batches against a lane of 1,024, so it deadlocks.
+- **Releasing when build *n + 1* finishes** separates the batch sizes again, but what the free overlaps then depends on its length against the ingest's publish and next resolve. `/256` lands on the ingest-frees figure (35 ms: the free is hidden). `/64` lands between the two regimes (42–47 ms) with the widest spread. A case sitting on that slope moves a lot when either side's timing changes, which is the regime flip this bench was fixed to remove.
+- **The build-start point** overlaps the free with the same work every time.
+
+The rename restarted the history's `inprocess/live_drain/*` series as `inprocess/live_drain_held/*`: the old points measured the race, and the new ones would have read as a step up.
 
 The scenarios and the Docker-backed component benches start the same Postgres image as the e2e suites; see [Which Postgres](testing.md#which-postgres).
 

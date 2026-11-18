@@ -13,14 +13,20 @@
 //!   at several `max_changes`, with one sink and with two (the fan-out cost).
 //!   Each sink holds its write of batch *n* until the ingest engine has
 //!   started building batch *n + 1* (or has ended), so the sink always holds
-//!   the batch's last reference and frees it, as every real sink does: a real
-//!   write takes far longer than the ingest engine takes to drop its copy.
-//!   With an instant sink, which side freed the batch was a race of about a
-//!   microsecond, and the two outcomes differ about 2.4× (the freeing thread
-//!   contends with the ingest engine's next build on the allocator), so the
-//!   old `live_drain` measured that coin flip. The hold is an order, not a
-//!   timing margin: the ingest engine drops its copy at the end of the batch's
-//!   commit, before it builds the next one.
+//!   the batch's last reference and frees it, as every real sink does. The
+//!   hold is an order, not a timing margin: the ingest engine drops its copy
+//!   at the end of the batch's commit, before it builds the next one.
+//!
+//!   The release lands on the first line of build *n + 1*, so the free
+//!   overlaps the next build on every batch: the contended upper bound, not
+//!   production's ratio (a real build mostly waits on Postgres). With an
+//!   instant sink, which side freed the batch was a race of about a
+//!   microsecond, worth about 2.4× locally and about 3× on CI's runner, so
+//!   the old `live_drain` measured that coin flip.
+//!
+//!   What it still catches: allocation volume, and the ingest engine's work
+//!   per batch. What it can't: sink-side cost smaller than that work, and
+//!   gains from larger batches (`/1`, `/64` and `/256` sit within about 15%).
 //! - `snapshot`: a backfill of `ROWS` rows through the same path.
 //!
 //! Run with:
@@ -57,7 +63,7 @@ use stream::Stream;
 use stream_channel::ChannelStream;
 use tokio::runtime::Runtime;
 
-/// Live changes per `live_drain` iteration.
+/// Live changes per `live_drain_held` iteration.
 const CHANGES: usize = 10_000;
 /// Rows per `snapshot` iteration.
 const ROWS: usize = 10_000;
