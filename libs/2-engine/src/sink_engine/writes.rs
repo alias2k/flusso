@@ -515,6 +515,13 @@ impl<'a> Run<'a> {
         if run.barrier || self.ordered() {
             return run.waiting() == 0 && !self.lane_in_flight(lane);
         }
+        // With several lanes, a lane with nothing waiting always takes one
+        // item, so a quiet index's next change is seen by live-first and the
+        // lanes' turns while a busy one keeps every slot: at most one more
+        // delivered item per lane.
+        if self.lanes.len() > 1 && run.waiting() == 0 {
+            return true;
+        }
         run.waiting() < LOOKAHEAD
             && (self.flights.len() < self.slots()
                 || (run.live_waiting == 0 && run.backfill_waiting > 0))
@@ -532,6 +539,31 @@ impl<'a> Run<'a> {
     /// starts until it returned.
     fn lane_seeding(&self, lane: usize) -> bool {
         self.seeding.iter().any(|(_, seeding)| seeding.lane == lane)
+    }
+
+    /// The writes (and the seed) of `lane` in flight: the slots it holds.
+    fn lane_writes(&self, lane: usize) -> usize {
+        self.flying
+            .iter()
+            .filter(|(_, flight)| flight.lanes().any(|at| at == lane))
+            .count()
+            + self
+                .seeding
+                .iter()
+                .filter(|(_, seeding)| seeding.lane == lane)
+                .count()
+    }
+
+    /// The most slots one lane may hold: with several lanes and several
+    /// slots, all but one, so an index whose writes never return can't take
+    /// every slot from its siblings. One slot, or one lane, can't be shared.
+    fn lane_cap(&self) -> usize {
+        let slots = self.slots();
+        if self.lanes.len() > 1 && slots > 1 {
+            slots - 1
+        } else {
+            slots
+        }
     }
 
     /// The parts of `lane` being written.
@@ -773,7 +805,12 @@ impl<'a> Run<'a> {
         let lanes = self.lanes.len();
         let mut live: Vec<Vec<usize>> = vec![Vec::new(); lanes];
         let mut backfill: Vec<Vec<usize>> = vec![Vec::new(); lanes];
-        let mut blocked: Vec<bool> = (0..lanes).map(|lane| self.lane_seeding(lane)).collect();
+        // A seeding lane starts nothing, nor does a lane holding its share of
+        // the slots.
+        let cap = self.lane_cap();
+        let mut blocked: Vec<bool> = (0..lanes)
+            .map(|lane| self.lane_seeding(lane) || self.lane_writes(lane) >= cap)
+            .collect();
         let mut earlier: Vec<HashSet<u64>> = vec![HashSet::new(); lanes];
         let ordered = self.ordered();
         for (at, queued) in self.window.iter().enumerate() {
@@ -880,9 +917,14 @@ impl<'a> Run<'a> {
         let mut picked = vec![first];
         let mut documents = size(first);
         // The other candidates, a lane at a time from the first's lane on,
-        // one item per lane per round, each lane in window order.
+        // one item per lane per round, each lane in window order. A write is
+        // as slow as its slowest part, so lanes merge only while none of them
+        // has a write out (it may be stuck): a lane with one writes alone,
+        // several of its own items at most.
+        let alone = self.lane_writes(first_lane) > 0;
         let mut queues: Vec<std::collections::VecDeque<usize>> = (0..lanes)
             .map(|offset| (first_lane + offset) % lanes)
+            .filter(|lane| *lane == first_lane || (!alone && self.lane_writes(*lane) == 0))
             .filter(|lane| !self.in_lane_order(*lane))
             .filter_map(|lane| candidates.get(lane))
             .map(|list| list.iter().copied().filter(|at| *at != first).collect())
