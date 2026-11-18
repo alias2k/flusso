@@ -245,7 +245,53 @@ Equal marks share a segment. A segment ends where a lane starts, so no item is c
   4. The engine side: segments and filter.
   5. The e2e.
 
-## Open points for the review
+## The review's decisions (coordinator, before coding)
+
+Accepted as designed: the correctness argument, a fresh read of the upper bound, validity per generation, the segment filter, and the `ensure_index` change. Folded in:
+
+1. **`RECORD_EVERY` is fixed at 10 s**, with no option.
+
+2. **The tracker doesn't rely on "a release ends the run".** Stage 9 parks a lane without ending the run, and the sink loop is changing.
+   - A lane's `Walked` queue is cleared whenever an item of that lane is released, nacked or redelivered. The prefix then starts again from what is delivered next, so a mark never passes an item that may come back.
+   - It is also cleared when the lane's `SnapshotComplete` runs, since a walk ends there.
+   - **The debug assertion checks delivery order, not mark values.** Mark values can't be compared in Rust: the order is Postgres's (collations, `citext`, the key index's opclass), and a Rust comparison would fire falsely. So the tracker asserts in debug that a walk's items enter it in increasing lane `seq`, and that nothing enters it after the lane's `SnapshotComplete` without a reset. The value order holds by construction: a walk publishes its batches in grant order.
+   - Test: `a_released_item_holds_the_mark_back_without_the_run_ending`.
+
+3. **Segment edge cases**, each with a test:
+
+   | Case | What happens |
+   | --- | --- |
+   | Two marks equal | `order_keys` answers ranks (`dense_rank`), so equal marks are one boundary and their lanes share a segment. |
+   | A mark equal to the current greatest key | That lane's remainder `(m, through]` is empty. It gets no items, then its `SnapshotComplete`, and is seeded. |
+   | A mark above the current greatest key (rows deleted since) | The same: an empty remainder, not an error. |
+   | A mark whose row no longer exists | The bound is a value, not a row. `key > $1` and `key <= $2` compare against the value whatever the table holds. |
+   | A straggler with a mark below the walk's start | It never joins a walk already running. Stragglers within `max_delay` are gathered before the walk starts (`collect_requests` runs before `start_snapshot`), so their marks are among the ones ordered. A request arriving after the walk started gets its own walk once this one ends (today's rule). No range is ever skipped silently. |
+
+4. **What counts as landed for the prefix:**
+
+   | Item | Landed? |
+   | --- | --- |
+   | A document quarantined under `on_error = skip` | Yes. Its item is acknowledged, and so is the policy's decision. |
+   | A part rejected under `stop` | No. It stays unacknowledged and comes back. |
+   | An item inside a merged write | Decided per part, as its acknowledgement is. |
+   | An item acknowledged unwritten by the stop's skip | No. |
+
+   **A batch that builds to no envelope for a lane** is never published, so the next item's mark covers its range. That is correct: nothing of it needed writing.
+   - A deleted, filtered or soft-deleted row builds a tombstone, so an envelope exists. Only a script failure under `skip` (#198) builds nothing.
+   - A long run of such rows only delays the next record, never makes it wrong.
+
+5. **A record against the other writers of the meta document:**
+   - **The record is a partial `_update` with no upsert.** On a missing document (`flusso_meta` deleted mid-run) it fails with a warning and creates nothing.
+   - **A record in flight when the run fails or the engine is dropped** is aborted mid-request, or lands. The stored value is then the earlier mark or this one. Both are at or below what landed, so either is safe.
+   - **A record that lands just after `seeded: true`** can't happen on the same index, because the lane's `SnapshotComplete` waits for it. And if it could (a future change), the read rule is enough: `walked` is read only from a document whose `seeded` is false and whose `generation` matches. A stray `walked` on a seeded document is ignored, and the next whole-document write (`reindex`) drops it. No version or `retry_on_conflict` is needed.
+
+6. **The budget:** a resumed walk builds its pages through the same granted, budgeted path as any walk (stage 5). Nothing is added and nothing bypassed.
+
+7. **Coordination:** the port commit is `73cfe0d7`. `writes.rs` is shared with B this week, so I pull before every edit and keep commits small.
+
+8. **The kill e2e** also has writers touching rows below and above the resume point between the kill and the restart, deletes below it included. "The final index equals the table" is then the check that a resume never leaves a hole.
+
+## Open points for the review (answered above)
 
 1. `RECORD_EVERY` fixed at 10 s, or an option? I'd keep it fixed until someone needs it.
 2. The tracker needs no state across runs (section 1). Correct only while an item is released only on a failure that ends the run. True today (`writes.rs`'s failure path); a future partial release would need the tracker on `SinkEngine`.
