@@ -344,7 +344,6 @@ impl OpensearchSink {
             .collect()
     }
 
-    /// Record what is known about a logical index.
     /// Whether the physical index (a generation or a hash alias) a bulk
     /// action names has one primary shard, as far as the sink knows.
     pub(crate) fn single_shard(&self, physical: &str) -> bool {
@@ -358,6 +357,7 @@ impl OpensearchSink {
             })
     }
 
+    /// Record what is known about a logical index.
     pub(crate) fn set_target(&self, logical: &str, target: IndexTarget) {
         self.targets
             .lock()

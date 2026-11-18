@@ -102,12 +102,9 @@ impl Sink for OpensearchSink {
                 .await?;
         }
 
-        // Point the aliases at this generation when it's the live seeded one, or
-        // the first generation (nothing else serving yet). A reindex of an
-        // already-served index leaves the aliases on the old generation until
-        // mark_seeded swaps them — so reads never hit a half-built index. The
-        // hash alias is load-bearing (the query client reads through it), so its
-        // failure propagates; the `{logical}` convenience alias stays best-effort.
+        // A caught-up write may skip refreshing an index only when its own
+        // `?refresh=true` bulk refreshed all of it: one primary shard. Unknown
+        // counts as several.
         let single_shard = match self.primary_shards(&index).await {
             Ok(shards) => shards == Some(1),
             Err(error) => {
@@ -115,6 +112,13 @@ impl Sink for OpensearchSink {
                 false
             }
         };
+
+        // Point the aliases at this generation when it's the live seeded one, or
+        // the first generation (nothing else serving yet). A reindex of an
+        // already-served index leaves the aliases on the old generation until
+        // mark_seeded swaps them — so reads never hit a half-built index. The
+        // hash alias is load-bearing (the query client reads through it), so its
+        // failure propagates; the `{logical}` convenience alias stays best-effort.
         let serving = self.alias_holders(&hash_alias).await?;
         if seeded || serving.is_empty() {
             self.try_ensure_alias(&hash_alias, &index).await?;

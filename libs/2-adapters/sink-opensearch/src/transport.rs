@@ -99,8 +99,10 @@ impl OpensearchSink {
     ///
     /// When `refresh` is `true`, appends `?refresh=true` to the URL so
     /// OpenSearch performs a segment refresh after the request completes and
-    /// all documents become immediately searchable. Pass `false` for
-    /// intermediate chunks; the final chunk in a write carries the refresh.
+    /// all documents become immediately searchable. A caught-up write passes
+    /// `true` for **every** chunk, not only the last: `refresh.rs` treats a
+    /// single-shard index a caught-up write wrote as refreshed by that write's
+    /// own bulk, which holds only because each chunk refreshed what it wrote.
     ///
     /// **Transport and request-wide failures** (connection error, a non-2xx
     /// status for the whole request) are transient and **retried** with
@@ -325,9 +327,6 @@ impl OpensearchSink {
         Ok(())
     }
 
-    /// Refresh several indexes in one request. A name that no longer exists (a
-    /// generation a reindex dropped) is skipped: there is nothing left of it
-    /// to make searchable.
     /// The number of primary shards `index` has, if the cluster says.
     pub(crate) async fn primary_shards(&self, index: &str) -> Result<Option<u32>> {
         let url = format!("{}/{index}/_settings/index.number_of_shards", self.base_url);
@@ -347,6 +346,9 @@ impl OpensearchSink {
             }))
     }
 
+    /// Refresh several indexes in one request. A name that no longer exists (a
+    /// generation a reindex dropped) is skipped: there is nothing left of it
+    /// to make searchable.
     pub(crate) async fn refresh_indexes(&self, indexes: &BTreeSet<String>) -> Result<()> {
         let names: Vec<&str> = indexes.iter().map(String::as_str).collect();
         let url = format!(
