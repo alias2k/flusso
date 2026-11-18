@@ -249,7 +249,7 @@ impl ChangeCapture for ScriptedStreams {
         })
     }
 
-    fn confirm(&self, _: Position) {}
+    fn confirm(&self, _: source::cdc::Landed) {}
 }
 
 /// A sink whose flush never returns: nothing it is handed is acknowledged.
@@ -345,7 +345,7 @@ impl ChangeCapture for OpenSource {
         Ok(Box::pin(stream::pending()))
     }
 
-    fn confirm(&self, _: Position) {}
+    fn confirm(&self, _: source::cdc::Landed) {}
 }
 
 /// A backfill that reads and publishes its first page, then fails at the
@@ -438,8 +438,8 @@ impl ChangeCapture for ReplaysUnderNewPositions {
     async fn live(&self) -> source::Result<BoxStream<'static, source::Result<LiveChange>>> {
         self.0.live().await
     }
-    fn confirm(&self, _: Position) {}
-    fn reached(&self, _: Option<Position>) -> Option<source::cdc::SourcePosition> {
+    fn confirm(&self, _: source::cdc::Landed) {}
+    fn reached(&self, _: source::cdc::Landed) -> Option<source::cdc::SourcePosition> {
         Some(source::cdc::SourcePosition(41))
     }
 }

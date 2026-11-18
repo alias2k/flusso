@@ -119,7 +119,7 @@ impl ChangeCapture for MockCapture {
         }))))
     }
 
-    fn confirm(&self, _position: Position) {}
+    fn confirm(&self, _: source::cdc::Landed) {}
 }
 
 /// Resolves every change to one document and builds a realistic mid-size body

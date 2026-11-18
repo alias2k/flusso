@@ -42,7 +42,7 @@ use std::time::Duration;
 use engine::Observer;
 use kernel::{Position, SinkName};
 use serde::Serialize;
-use source::cdc::{ChangeCapture, SourcePosition};
+use source::cdc::{ChangeCapture, Landed, SourcePosition};
 use tokio::sync::Notify;
 use tokio::time::{Instant, timeout_at};
 
@@ -222,12 +222,12 @@ impl Fence {
             // position is searchable. Taken now, while the source still holds
             // this position: it bounds the answer just below it.
             if progress.unsearchable.is_empty()
-                && let Some(before) = self.inner.source.reached(progress.applied)
+                && let Some(before) = self.inner.source.reached(landed(progress.applied))
             {
                 progress.searchable_reached = progress.searchable_reached.max(Some(before));
             }
             progress.applied = Some(progress.applied.map_or(position, |p| p.max(position)));
-            if let Some(reached) = self.inner.source.reached(Some(position)) {
+            if let Some(reached) = self.inner.source.reached(Landed::Through(position)) {
                 progress.applied_reached = progress.applied_reached.max(Some(reached));
                 progress.unsearchable.push_back((position, reached));
             }
@@ -258,7 +258,7 @@ impl Fence {
     /// refresh; otherwise it stands at the last position reported searchable.
     fn reached(&self, sink: &SinkName, level: FenceLevel) -> Option<SourcePosition> {
         let mut progress = lock(self.inner.sinks.get(sink)?);
-        if let Some(now) = self.inner.source.reached(progress.applied) {
+        if let Some(now) = self.inner.source.reached(landed(progress.applied)) {
             progress.applied_reached = progress.applied_reached.max(Some(now));
         }
         match level {
@@ -414,3 +414,8 @@ impl Observer for FenceObserver {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests;
+
+/// A sink that applied through `applied` has landed everything up to it.
+fn landed(applied: Option<Position>) -> Landed {
+    applied.map_or(Landed::Idle, Landed::Through)
+}

@@ -11,8 +11,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use kernel::{
-    ColumnName, ContentHash, Envelope, GenericValue, IndexMapping, IndexName, Position, SinkName,
-    TableName,
+    ColumnName, ContentHash, Envelope, GenericValue, IndexMapping, IndexName, SinkName, TableName,
 };
 use sink::{Sink, WriteReport};
 use source::cdc::{ChangeCapture, ChangeEvent, Continuity, LiveChange};
@@ -90,7 +89,7 @@ impl ChangeCapture for QuietSource {
         Ok(Box::pin(futures::stream::pending()))
     }
 
-    fn confirm(&self, _: Position) {}
+    fn confirm(&self, _: source::cdc::Landed) {}
 }
 
 /// Three indexes over two related tables:

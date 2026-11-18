@@ -95,8 +95,8 @@ impl ChangeCapture for Placed {
         self.0.live().await
     }
 
-    fn confirm(&self, position: Position) {
-        self.0.confirm(position);
+    fn confirm(&self, landed: source::cdc::Landed) {
+        self.0.confirm(landed);
     }
 
     fn parse_position(&self, text: &str) -> source::Result<SourcePosition> {
@@ -105,8 +105,10 @@ impl ChangeCapture for Placed {
             .map_err(|_| source::SourceError::Unsupported(text.to_owned()))
     }
 
-    fn reached(&self, position: Option<Position>) -> Option<SourcePosition> {
-        Some(SourcePosition(position.map_or(0, |p| p.seq + 1)))
+    fn reached(&self, landed: source::cdc::Landed) -> Option<SourcePosition> {
+        Some(SourcePosition(
+            landed.covered_seq().map_or(0, |seq| seq + 1),
+        ))
     }
 }
 

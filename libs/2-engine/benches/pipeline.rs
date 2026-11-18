@@ -173,7 +173,7 @@ impl ChangeCapture for BurstCapture {
     }
 
     /// The burst bench measures throughput, not durability.
-    fn confirm(&self, _position: Position) {}
+    fn confirm(&self, _: source::cdc::Landed) {}
 }
 
 /// One live-only deployment the way the daemon runs it: stage the sink engine

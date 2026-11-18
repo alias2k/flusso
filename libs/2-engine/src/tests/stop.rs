@@ -108,11 +108,16 @@ impl ChangeCapture for ClosableSource {
         )))
     }
 
-    fn confirm(&self, position: Position) {
-        self.log
-            .lock()
-            .unwrap()
-            .push(format!("confirm {}", position.seq));
+    fn confirm(&self, landed: source::cdc::Landed) {
+        let Some(seq) = landed.covered_seq() else {
+            return;
+        };
+        let line = format!("confirm {seq}");
+        let mut log = self.log.lock().unwrap();
+        let last = log.iter().rev().find(|line| line.starts_with("confirm "));
+        if last != Some(&line) {
+            log.push(line);
+        }
     }
 
     fn close_live(&self) -> bool {
@@ -572,8 +577,8 @@ impl ChangeCapture for UnconfirmedClose {
         )))
     }
 
-    fn confirm(&self, position: Position) {
-        self.0.confirm(position);
+    fn confirm(&self, landed: source::cdc::Landed) {
+        self.0.confirm(landed);
     }
 
     fn close_live(&self) -> bool {

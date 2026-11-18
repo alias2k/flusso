@@ -5,9 +5,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use kernel::Position;
 use pgwire_replication::{Lsn, ReplicationClient, ReplicationConfig};
-use source::cdc::{AdvanceListener, ChangeCapture, Continuity, LiveChange, SourcePosition};
+use source::cdc::{AdvanceListener, ChangeCapture, Continuity, Landed, LiveChange, SourcePosition};
 use source::{
     CaptureProvisioning, CoverageReport, PreImageColumns, PreImageReport, QualifiedTable, Result,
     SourceError,
@@ -551,9 +550,9 @@ impl ChangeCapture for WalChangeCapture {
         stream::held_for(&self.hold_clock)
     }
 
-    fn confirm(&self, position: Position) {
+    fn confirm(&self, landed: Landed) {
         if let Some(positions) = self.open_positions() {
-            positions.confirm(position.seq);
+            positions.confirm(landed);
         }
     }
 
@@ -571,11 +570,9 @@ impl ChangeCapture for WalChangeCapture {
         Lsn::from_u64(position.0).to_pg_string()
     }
 
-    fn reached(&self, position: Option<Position>) -> Option<SourcePosition> {
+    fn reached(&self, landed: Landed) -> Option<SourcePosition> {
         let positions = self.open_positions()?;
-        Some(SourcePosition(
-            positions.reached(position.map(|position| position.seq)),
-        ))
+        Some(SourcePosition(positions.reached(landed)))
     }
 
     fn on_advance(&self, listener: AdvanceListener) {

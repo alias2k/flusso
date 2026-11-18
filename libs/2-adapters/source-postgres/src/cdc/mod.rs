@@ -13,10 +13,11 @@
 //!   relation metadata so it can extract each changed row's key.
 //! - Buffers a transaction's changes and emits them on `Commit`, tagged with
 //!   the commit LSN, so acknowledgements map to clean commit boundaries.
-//! - Maps each [`Position`](kernel::Position) the engine
-//!   [`confirm`](source::cdc::ChangeCapture::confirm)s back to its commit LSN
-//!   and reports a contiguous watermark to the server, advancing the slot only
-//!   as far as every sink has durably confirmed (at-least-once).
+//! - Stamps each [`Position`](kernel::Position) with the LSNs it stands for,
+//!   and turns how far the engine's lanes landed
+//!   ([`confirm`](source::cdc::ChangeCapture::confirm)) into the LSN it
+//!   reports to the server, advancing the slot only as far as every sink has
+//!   durably landed (at-least-once).
 //!
 //! Configuration and prerequisites live on [`WalChangeCapture`]. The relevant
 //! `pgwire-replication` types are re-exported below for convenience.

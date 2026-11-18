@@ -112,7 +112,7 @@ pub async fn drain_lanes(
         if let Some(watermark) = stream.watermark()
             && *last != Some(watermark)
         {
-            source.confirm(watermark);
+            source.confirm(source::cdc::Landed::Through(watermark));
             *last = Some(watermark);
         }
         if idle {

@@ -68,11 +68,14 @@ impl ChangeCapture for NumberedSource {
         Ok(Box::pin(futures::stream::empty()))
     }
 
-    fn confirm(&self, position: Position) {
+    fn confirm(&self, landed: source::cdc::Landed) {
+        let Some(seq) = landed.covered_seq() else {
+            return;
+        };
         let mut state = self.state.lock().unwrap();
-        let reached = reach(&state, Some(position.seq));
+        let reached = reach(&state, Some(seq));
         state.floor = state.floor.max(reached);
-        state.entries = state.entries.split_off(&(position.seq + 1));
+        state.entries = state.entries.split_off(&(seq + 1));
     }
 
     fn parse_position(&self, text: &str) -> source::Result<SourcePosition> {
@@ -81,12 +84,12 @@ impl ChangeCapture for NumberedSource {
             .map_err(|_| SourceError::Decode(format!("`{text}` is not a number")))
     }
 
-    fn reached(&self, position: Option<Position>) -> Option<SourcePosition> {
+    fn reached(&self, landed: source::cdc::Landed) -> Option<SourcePosition> {
         if self.closed.load(Ordering::SeqCst) {
             return None;
         }
         let state = self.state.lock().unwrap();
-        Some(SourcePosition(reach(&state, position.map(|p| p.seq))))
+        Some(SourcePosition(reach(&state, landed.covered_seq())))
     }
 
     fn on_advance(&self, listener: AdvanceListener) {
@@ -195,7 +198,7 @@ async fn searchable_trails_applied_until_the_engine_reports_it() {
     observer.on_position_applied(&sink("primary"), Position::new(0));
     // Every sink acknowledged, so the source forgets the change: the fence
     // must not take "nothing outstanding" for "searchable".
-    source.confirm(Position::new(0));
+    source.confirm(source::cdc::Landed::Through(Position::new(0)));
 
     assert_eq!(
         fence.wait(&request("20", FenceLevel::Applied, None)).await,

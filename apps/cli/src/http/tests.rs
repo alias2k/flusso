@@ -5,7 +5,6 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use kernel::Position;
 use source::SourceError;
 use source::cdc::{ChangeCapture, Continuity, LiveChange, SourcePosition};
 
@@ -50,7 +49,7 @@ impl ChangeCapture for SteadySource {
         Ok(Box::pin(futures::stream::empty()))
     }
 
-    fn confirm(&self, _: Position) {}
+    fn confirm(&self, _: source::cdc::Landed) {}
 
     fn parse_position(&self, text: &str) -> source::Result<SourcePosition> {
         text.parse()
@@ -58,7 +57,7 @@ impl ChangeCapture for SteadySource {
             .map_err(|_| SourceError::Decode(format!("`{text}` is not a number")))
     }
 
-    fn reached(&self, _: Option<Position>) -> Option<SourcePosition> {
+    fn reached(&self, _: source::cdc::Landed) -> Option<SourcePosition> {
         (!self.closed.load(Ordering::SeqCst))
             .then(|| SourcePosition(self.at.load(Ordering::SeqCst)))
     }

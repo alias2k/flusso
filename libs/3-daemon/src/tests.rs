@@ -128,7 +128,7 @@ impl ChangeCapture for Holding {
         Ok(Box::pin(stream::empty()))
     }
 
-    fn confirm(&self, _: Position) {}
+    fn confirm(&self, _: source::cdc::Landed) {}
 
     fn readable_wait(&self) -> Option<Duration> {
         self.0
@@ -277,7 +277,7 @@ impl ChangeCapture for LaggySource {
         Ok(Box::pin(stream::empty()))
     }
 
-    fn confirm(&self, _: Position) {}
+    fn confirm(&self, _: source::cdc::Landed) {}
 
     async fn lag(&self) -> source::Result<Option<u64>> {
         Ok(self.0)
@@ -443,8 +443,13 @@ impl ChangeCapture for ScriptedSource {
         Ok(Box::pin(scripted.chain(tail)))
     }
 
-    fn confirm(&self, position: Position) {
-        self.confirmed.lock().unwrap().push(position);
+    fn confirm(&self, landed: source::cdc::Landed) {
+        let mut confirmed = self.confirmed.lock().unwrap();
+        if let Some(seq) = landed.covered_seq()
+            && confirmed.last().is_none_or(|last| last.seq != seq)
+        {
+            confirmed.push(Position::new(seq));
+        }
     }
 }
 
@@ -483,8 +488,13 @@ impl ChangeCapture for FlakySource {
         })
     }
 
-    fn confirm(&self, position: Position) {
-        self.confirmed.lock().unwrap().push(position);
+    fn confirm(&self, landed: source::cdc::Landed) {
+        let mut confirmed = self.confirmed.lock().unwrap();
+        if let Some(seq) = landed.covered_seq()
+            && confirmed.last().is_none_or(|last| last.seq != seq)
+        {
+            confirmed.push(Position::new(seq));
+        }
     }
 }
 
@@ -1125,16 +1135,16 @@ impl<C: ChangeCapture> ChangeCapture for FedSource<C> {
         )))
     }
 
-    fn confirm(&self, position: Position) {
-        self.inner.confirm(position);
+    fn confirm(&self, landed: source::cdc::Landed) {
+        self.inner.confirm(landed);
     }
 
     fn parse_position(&self, text: &str) -> source::Result<source::cdc::SourcePosition> {
         self.inner.parse_position(text)
     }
 
-    fn reached(&self, position: Option<Position>) -> Option<source::cdc::SourcePosition> {
-        self.inner.reached(position)
+    fn reached(&self, landed: source::cdc::Landed) -> Option<source::cdc::SourcePosition> {
+        self.inner.reached(landed)
     }
 }
 

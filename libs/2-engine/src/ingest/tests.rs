@@ -245,8 +245,13 @@ impl ChangeCapture for Feed {
         })))
     }
 
-    fn confirm(&self, position: Position) {
-        self.confirmed.lock().unwrap().push(position);
+    fn confirm(&self, landed: source::cdc::Landed) {
+        let mut confirmed = self.confirmed.lock().unwrap();
+        if let Some(seq) = landed.covered_seq()
+            && confirmed.last().is_none_or(|last| last.seq != seq)
+        {
+            confirmed.push(Position::new(seq));
+        }
     }
 }
 

@@ -4,7 +4,7 @@ use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
 
 use kernel::Position;
-use source::cdc::SourcePosition;
+use source::cdc::{Landed, SourcePosition};
 use tokio::time::Duration;
 
 use super::IngestEngine;
@@ -21,17 +21,16 @@ pub(super) struct Furthest {
 }
 
 impl IngestEngine {
-    /// Hand the stream's watermark to the source when it moved, and count an
+    /// Hand how far the lanes landed to the source, and count an
     /// advance past the furthest this engine ever got.
     pub(super) fn confirm(&self, last_confirmed: &mut Option<Position>) {
         let watermark = self.stream.watermark();
-        if let Some(watermark) = watermark
-            && *last_confirmed != Some(watermark)
-        {
-            self.source.confirm(watermark);
-            *last_confirmed = Some(watermark);
-        }
-        let reached = self.source.reached(watermark);
+        let landed = watermark.map_or(Landed::Idle, Landed::Through);
+        // Every time, not only when the watermark moved: with nothing new
+        // landed, the source's answer still follows idle WAL.
+        self.source.confirm(landed);
+        *last_confirmed = watermark.or(*last_confirmed);
+        let reached = self.source.reached(landed);
         let mut furthest = self.furthest.lock().unwrap_or_else(PoisonError::into_inner);
         // A reopened stream numbers a replayed change afresh, so the stream's
         // own position moves on every replay: the source's answer decides
