@@ -2,8 +2,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use source::cdc::{AdvanceListener, ChangeEvent, Continuity, LiveChange};
-use source::{SnapshotTable, SourceError};
+use source::SourceError;
+use source::cdc::{AdvanceListener, Continuity, LiveChange};
 
 use super::*;
 
@@ -73,13 +73,6 @@ impl ChangeCapture for NumberedSource {
         let reached = reach(&state, Some(position.0));
         state.floor = state.floor.max(reached);
         state.entries = state.entries.split_off(&(position.0 + 1));
-    }
-
-    async fn snapshot(
-        &self,
-        _: &[SnapshotTable],
-    ) -> source::Result<BoxStream<'static, source::Result<ChangeEvent>>> {
-        Ok(Box::pin(futures::stream::empty()))
     }
 
     fn parse_position(&self, text: &str) -> source::Result<SourcePosition> {

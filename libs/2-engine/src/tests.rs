@@ -12,8 +12,8 @@ use futures::stream::BoxStream;
 use kernel::{ColumnName, Envelope, IndexMapping, IndexName, Op, Position, SinkName, TableName};
 use sink::{Sink, SinkOptions, WriteReport};
 use source::cdc::{ChangeCapture, ChangeEvent, Continuity, LiveChange};
-use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
-use source::{RowImage, RowKey, SnapshotTable};
+use source::document::{Document, DocumentBuilder, DocumentId};
+use source::{RowImage, RowKey};
 use stream::Stream;
 use stream_channel::ChannelStream;
 use tokio::sync::Notify;
@@ -60,8 +60,10 @@ fn mapping() -> IndexMapping {
     }
 }
 
-/// A source that replays live changes (positions 0..n) once and snapshots a
-/// fixed set of rows, recording what it was asked and what was confirmed.
+/// A source that replays live changes (positions 0..n) once, recording what it
+/// was asked and what was confirmed. The rows a backfill reads
+/// ([`with_snapshot`](Self::with_snapshot)) are handed to the harness's
+/// builder, which pages them.
 ///
 /// [`MockSource::fed`] instead hands out a live stream fed through a channel:
 /// it stays open and pending while nothing is sent — a *quiet* stream — and
@@ -141,28 +143,44 @@ impl ChangeCapture for MockSource {
     fn confirm(&self, position: Position) {
         self.confirmed.lock().unwrap().push(position);
     }
-
-    async fn snapshot(
-        &self,
-        tables: &[SnapshotTable],
-    ) -> source::Result<BoxStream<'static, source::Result<ChangeEvent>>> {
-        self.events
-            .lock()
-            .unwrap()
-            .push(format!("snapshot {}", tables.len()));
-        Ok(Box::pin(futures::stream::iter(
-            self.snapshot_rows.clone().into_iter().map(Ok),
-        )))
-    }
 }
 
 /// Resolves every change to one `users` document; a delete builds a tombstone.
-/// Counts `build_many` calls and the ids handed to each.
+/// Counts `build_many` calls and the ids handed to each. Pages the keys of
+/// `rows` for a backfill, in order, recording `keys users` for each walk's
+/// first page.
 #[derive(Debug, Default)]
 struct MockDocuments {
     builds: Arc<Mutex<Vec<usize>>>,
     deleted: Mutex<Vec<i64>>,
     failing: Mutex<Vec<i64>>,
+    rows: Vec<RowKey>,
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+impl MockDocuments {
+    /// Paging `source`'s snapshot rows, recording into its events.
+    fn paging(source: &MockSource) -> Self {
+        Self {
+            rows: source
+                .snapshot_rows
+                .iter()
+                .map(|row| row.key().clone())
+                .collect(),
+            events: Arc::clone(&source.events),
+            ..Self::default()
+        }
+    }
+}
+
+/// The page of `rows` after `after` (by position: `rows` is in walk order).
+fn page_of(rows: &[RowKey], after: Option<&RowKey>, limit: usize) -> Vec<RowKey> {
+    let start = after.map_or(0, |after| {
+        rows.iter()
+            .position(|row| row == after)
+            .map_or(rows.len(), |at| at + 1)
+    });
+    rows.iter().skip(start).take(limit).cloned().collect()
 }
 
 #[async_trait]
@@ -213,14 +231,20 @@ impl DocumentBuilder for MockDocuments {
         Ok(out)
     }
 
-    fn backfill_scopes(&self) -> Vec<IndexScope> {
-        vec![IndexScope {
-            index: users(),
-            root: SnapshotTable {
-                db_schema: kernel::DatabaseSchema::try_new("public").unwrap(),
-                table: TableName::try_new("users").unwrap(),
-            },
-        }]
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        vec![users()]
+    }
+
+    async fn keys(
+        &self,
+        _index: &IndexName,
+        after: Option<&RowKey>,
+        limit: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        if after.is_none() {
+            self.events.lock().unwrap().push("keys users".to_owned());
+        }
+        Ok(page_of(&self.rows, after, limit))
     }
 
     async fn index_mappings(&self) -> source::Result<Vec<IndexMapping>> {
@@ -302,7 +326,7 @@ struct Harness {
 
 impl Harness {
     fn new(source: MockSource, sinks: Vec<(SinkName, Arc<dyn Sink>)>) -> Self {
-        let documents = Arc::new(MockDocuments::default());
+        let documents = Arc::new(MockDocuments::paging(&source));
         let names: Vec<SinkName> = sinks.iter().map(|(n, _)| n.clone()).collect();
         let stream = Arc::new(ChannelStream::new(64, names.clone()));
         let source = Arc::new(source);
@@ -587,7 +611,7 @@ async fn an_unseeded_sink_requests_a_snapshot_then_marks_seeded() {
     let events = Arc::clone(&harness.source.events);
     harness.run(Continuity::Resumed).await;
 
-    assert_eq!(*events.lock().unwrap(), vec!["prepare", "snapshot 1"]);
+    assert_eq!(*events.lock().unwrap(), vec!["prepare", "keys users"]);
     assert_eq!(
         *ops.lock().unwrap(),
         vec!["upsert users 10".to_owned(), "upsert users 11".to_owned()]
@@ -646,7 +670,7 @@ async fn concurrent_requests_for_the_same_index_coalesce_into_one_snapshot() {
 
     assert_eq!(
         *events.lock().unwrap(),
-        vec!["prepare", "snapshot 1"],
+        vec!["prepare", "keys users"],
         "two requests, one pass over the table"
     );
     assert_eq!(*a_marked.lock().unwrap(), vec!["users".to_owned()]);
@@ -710,7 +734,7 @@ async fn a_straggling_reindex_request_within_max_delay_joins_the_snapshot() {
     controls[0].send(reindex()).await.unwrap();
     let ingest = IngestEngine::new(
         Arc::clone(&source) as Arc<dyn ChangeCapture>,
-        Arc::new(MockDocuments::default()),
+        Arc::new(MockDocuments::paging(&source)),
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![sink_name("a"), sink_name("b")],
     )
@@ -736,7 +760,7 @@ async fn a_straggling_reindex_request_within_max_delay_joins_the_snapshot() {
 
     assert_eq!(
         *events.lock().unwrap(),
-        vec!["prepare", "snapshot 1"],
+        vec!["prepare", "keys users"],
         "the straggler joined the first request's snapshot"
     );
     assert_eq!(*a_marked.lock().unwrap(), vec!["users".to_owned()]);
@@ -759,7 +783,7 @@ async fn fresh_source_rebuilds_seeded_indexes_before_prepare_then_snapshots() {
     assert_eq!(*reindexed.lock().unwrap(), vec!["users".to_owned()]);
     assert_eq!(
         *events.lock().unwrap(),
-        vec!["reindex users", "prepare", "snapshot 1"],
+        vec!["reindex users", "prepare", "keys users"],
         "stage the rebuild, then establish the resume point, then snapshot"
     );
     assert_eq!(*marked.lock().unwrap(), vec!["users".to_owned()]);
@@ -1067,7 +1091,7 @@ async fn reindex_control_stages_and_requests_a_snapshot_without_restarting() {
     let ops = Arc::clone(&sink.ops);
     let stream = Arc::new(ChannelStream::new(64, [sink_name("primary")]));
     let source = Arc::new(MockSource::new(vec![]).with_snapshot(vec![upsert(10)]));
-    let documents = Arc::new(MockDocuments::default());
+    let documents = Arc::new(MockDocuments::paging(&source));
     let engine = SinkEngine::new(
         sink_name("primary"),
         sink,

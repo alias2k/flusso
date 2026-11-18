@@ -468,6 +468,29 @@ class Modes(unittest.TestCase):
         self.assertIn(f"which base {self.old} ({self.old[:12]}) predates", result.stderr)
         self.assertEqual(self.log_lines("build "), [])
 
+    def test_own_review_runs_the_bases_own_harness_and_skips_what_the_head_requires(self) -> None:
+        own = "// the base's own harness\n" + WITH_URL
+        (self.repo / REVIEW_RS).write_text(own)
+        self.git("add", "-A")
+        self.git("commit", "-qm", "a base with its own harness")
+        base = self.git("rev-parse", "HEAD")
+        (self.repo / REVIEW_RS).write_text("// review-ab requires: fn nothing_the_base_has\n" + WITH_URL)
+        result = self.review("--digest", base, "--own-review")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.home / "tree" / REVIEW_RS).read_text(), own)
+        self.assertEqual([line.split()[1:3] for line in self.log_lines("harness")], [["base", "digest"], ["head", "digest"]])
+
+    def test_own_review_refuses_a_base_without_the_harness(self) -> None:
+        result = self.review("--digest", self.base, "--own-review")
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("--own-review runs the base's own `review` harness", result.stderr)
+        self.assertEqual(self.log_lines("build "), [])
+
+    def test_own_review_is_refused_without_a_mode(self) -> None:
+        result = self.review(self.base, "--own-review")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--own-review picks the `review` harness", result.stderr)
+
     def test_bench_only_flags_are_refused(self) -> None:
         for flag in (("--bench", "cases"), ("--rounds", "2"), ("--limit", "3"), ("--own-benches",)):
             with self.subTest(flag=flag[0]):

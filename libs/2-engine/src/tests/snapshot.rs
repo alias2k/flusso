@@ -1,6 +1,8 @@
-//! A snapshot of several related indexes (issue #385): each snapshot row is
-//! its own document, once per index rooted at its table. Nothing is resolved
-//! and every document is built once, however the indexes read each other.
+//! A snapshot of several related indexes (issue #385): each key a page reads
+//! is its own document of the index walked. Nothing is resolved and every
+//! document is built once, however the indexes read each other. The walk
+//! reads each index's keys in pages, each following the last key read
+//! (issue #386 stage 3).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -9,18 +11,18 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use kernel::{
-    ColumnName, ContentHash, DatabaseSchema, Envelope, GenericValue, IndexMapping, IndexName,
-    Position, SinkName, TableName,
+    ColumnName, ContentHash, Envelope, GenericValue, IndexMapping, IndexName, Position, SinkName,
+    TableName,
 };
 use sink::{Sink, WriteReport};
 use source::cdc::{ChangeCapture, ChangeEvent, Continuity, LiveChange};
-use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
-use source::{RowImage, RowKey, SnapshotTable};
+use source::document::{Document, DocumentBuilder, DocumentId};
+use source::{RowImage, RowKey};
 use stream::Stream;
 use stream_channel::ChannelStream;
 
 use super::sink_name;
-use crate::{BatchPolicy, IngestEngine, SinkControl, SinkEngine};
+use crate::{BatchPolicy, IngestEngine, KEY_PAGE, SinkControl, SinkEngine};
 
 fn index(name: &str) -> IndexName {
     IndexName::try_new(name).unwrap()
@@ -70,24 +72,12 @@ fn rows() -> Vec<ChangeEvent> {
     rows
 }
 
-/// A source whose snapshot streams the rows of the tables it is asked for.
+/// A source with a live stream that never yields.
 #[derive(Debug)]
-struct TableSource {
-    rows: Vec<ChangeEvent>,
-    snapshots: Mutex<Vec<Vec<String>>>,
-}
-
-impl TableSource {
-    fn new(rows: Vec<ChangeEvent>) -> Self {
-        Self {
-            rows,
-            snapshots: Mutex::new(Vec::new()),
-        }
-    }
-}
+struct QuietSource;
 
 #[async_trait]
-impl ChangeCapture for TableSource {
+impl ChangeCapture for QuietSource {
     async fn continuity(&self) -> source::Result<Continuity> {
         Ok(Continuity::Resumed)
     }
@@ -101,22 +91,6 @@ impl ChangeCapture for TableSource {
     }
 
     fn confirm(&self, _: Position) {}
-
-    async fn snapshot(
-        &self,
-        tables: &[SnapshotTable],
-    ) -> source::Result<BoxStream<'static, source::Result<ChangeEvent>>> {
-        let names: Vec<String> = tables.iter().map(|t| t.table.to_string()).collect();
-        self.snapshots.lock().unwrap().push(names.clone());
-        let rows: Vec<_> = self
-            .rows
-            .iter()
-            .filter(|row| names.contains(&row.table().to_string()))
-            .cloned()
-            .map(Ok)
-            .collect();
-        Ok(Box::pin(futures::stream::iter(rows)))
-    }
 }
 
 /// Three indexes over two related tables:
@@ -127,14 +101,35 @@ impl ChangeCapture for TableSource {
 ///
 /// `resolve` answers as a source must for a live change: a user row reaches
 /// its own `users`/`accounts` documents and its orders' `orders` documents, an
-/// order row its own document and its user's `users` document.
+/// order row its own document and its user's `users` document. `keys` pages
+/// the rows of each index's root table, recording every page asked for.
 #[derive(Debug, Default)]
 struct RelatedDocuments {
+    rows: Vec<ChangeEvent>,
     resolved: Mutex<usize>,
     built: Mutex<Vec<DocumentId>>,
+    pages: Mutex<Vec<(String, Option<i64>)>>,
 }
 
 impl RelatedDocuments {
+    fn new(rows: Vec<ChangeEvent>) -> Self {
+        Self {
+            rows,
+            ..Self::default()
+        }
+    }
+
+    /// The indexes walked, in order: each first page's index.
+    fn walks(&self) -> Vec<String> {
+        self.pages
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, after)| after.is_none())
+            .map(|(index, _)| index.clone())
+            .collect()
+    }
+
     fn build_counts(&self) -> HashMap<DocumentId, usize> {
         let mut counts = HashMap::new();
         for id in self.built.lock().unwrap().iter() {
@@ -175,21 +170,34 @@ impl DocumentBuilder for RelatedDocuments {
         })
     }
 
-    fn backfill_scopes(&self) -> Vec<IndexScope> {
-        [
-            ("users", "users"),
-            ("accounts", "users"),
-            ("orders", "orders"),
-        ]
-        .into_iter()
-        .map(|(name, root)| IndexScope {
-            index: index(name),
-            root: SnapshotTable {
-                db_schema: DatabaseSchema::try_new("public").unwrap(),
-                table: table(root),
-            },
-        })
-        .collect()
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        ["users", "accounts", "orders"]
+            .into_iter()
+            .map(index)
+            .collect()
+    }
+
+    async fn keys(
+        &self,
+        index_name: &IndexName,
+        after: Option<&RowKey>,
+        limit: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        self.pages
+            .lock()
+            .unwrap()
+            .push((index_name.to_string(), after.map(id_of)));
+        let root = match index_name.as_ref() {
+            "users" | "accounts" => "users",
+            other => other,
+        };
+        let keys: Vec<RowKey> = self
+            .rows
+            .iter()
+            .filter(|row| row.table().as_ref() == root)
+            .map(|row| row.key().clone())
+            .collect();
+        Ok(super::page_of(&keys, after, limit))
     }
 }
 
@@ -250,7 +258,6 @@ fn mappings() -> Vec<IndexMapping> {
 /// Stage every sink, run the ingest engine and the sink engines until every
 /// sink has marked all three indexes seeded, then stop.
 async fn backfill(
-    source: &Arc<TableSource>,
     documents: &Arc<RelatedDocuments>,
     sinks: &[(SinkName, Arc<IndexSink>)],
     max_changes: usize,
@@ -272,7 +279,7 @@ async fn backfill(
         tasks.push(tokio::spawn(async move { engine.run(&mut rx).await }));
     }
     let ingest = IngestEngine::new(
-        Arc::clone(source) as Arc<dyn ChangeCapture>,
+        Arc::new(QuietSource) as Arc<dyn ChangeCapture>,
         Arc::clone(documents) as Arc<dyn DocumentBuilder>,
         Arc::clone(&stream) as Arc<dyn Stream>,
         names,
@@ -315,13 +322,12 @@ fn every_document() -> Vec<String> {
 #[tokio::test]
 async fn a_backfill_of_related_indexes_builds_each_document_once() {
     for max_changes in [1, 2, 256] {
-        let source = Arc::new(TableSource::new(rows()));
-        let documents = Arc::new(RelatedDocuments::default());
+        let documents = Arc::new(RelatedDocuments::new(rows()));
         let sinks = [
             (sink_name("a"), Arc::new(IndexSink::default())),
             (sink_name("b"), Arc::new(IndexSink::default())),
         ];
-        backfill(&source, &documents, &sinks, max_changes).await;
+        backfill(&documents, &sinks, max_changes).await;
 
         let counts = documents.build_counts();
         assert_eq!(counts.len(), 12, "{counts:?}");
@@ -339,25 +345,21 @@ async fn a_backfill_of_related_indexes_builds_each_document_once() {
         assert_eq!(
             *documents.resolved.lock().unwrap(),
             0,
-            "a snapshot row is its own document; nothing is resolved (batches of {max_changes})"
+            "a paged key is its own document; nothing is resolved (batches of {max_changes})"
         );
     }
 }
 
 #[tokio::test]
 async fn a_backfill_beside_seeded_related_indexes_writes_them_nothing() {
-    let source = Arc::new(TableSource::new(rows()));
-    let documents = Arc::new(RelatedDocuments::default());
+    let documents = Arc::new(RelatedDocuments::new(rows()));
     let sinks = [(
         sink_name("a"),
         Arc::new(IndexSink::seeded(&["users", "accounts"])),
     )];
-    backfill(&source, &documents, &sinks, 256).await;
+    backfill(&documents, &sinks, 256).await;
 
-    assert_eq!(
-        *source.snapshots.lock().unwrap(),
-        vec![vec!["orders".to_owned()]]
-    );
+    assert_eq!(documents.walks(), ["orders"]);
     let expected: Vec<String> = every_document()
         .into_iter()
         .filter(|doc| doc.starts_with("orders "))
@@ -368,16 +370,79 @@ async fn a_backfill_beside_seeded_related_indexes_writes_them_nothing() {
 
 #[tokio::test]
 async fn a_backfill_of_one_of_two_indexes_on_a_table_builds_only_that_one() {
-    let source = Arc::new(TableSource::new(rows()));
-    let documents = Arc::new(RelatedDocuments::default());
+    let documents = Arc::new(RelatedDocuments::new(rows()));
     let sinks = [(
         sink_name("a"),
         Arc::new(IndexSink::seeded(&["users", "orders"])),
     )];
-    backfill(&source, &documents, &sinks, 256).await;
+    backfill(&documents, &sinks, 256).await;
 
     assert_eq!(
         sorted(sinks[0].1.applied.lock().unwrap().clone()),
         vec!["accounts 1", "accounts 2", "accounts 3"]
+    );
+}
+
+/// Users `1..=n`, no orders.
+fn users(n: i64) -> Vec<ChangeEvent> {
+    (1..=n).map(|user| row("users", user)).collect()
+}
+
+#[tokio::test]
+async fn each_page_follows_the_last_key_the_walk_read() {
+    let total = i64::try_from(2 * KEY_PAGE + 100).unwrap();
+    let page = i64::try_from(KEY_PAGE).unwrap();
+    let documents = Arc::new(RelatedDocuments::new(users(total)));
+    let sinks = [(
+        sink_name("a"),
+        Arc::new(IndexSink::seeded(&["accounts", "orders"])),
+    )];
+    backfill(&documents, &sinks, 256).await;
+
+    assert_eq!(
+        *documents.pages.lock().unwrap(),
+        [
+            ("users".to_owned(), None),
+            ("users".to_owned(), Some(page)),
+            ("users".to_owned(), Some(2 * page)),
+        ],
+        "a page shorter than the limit ends the walk"
+    );
+    let applied = sinks[0].1.applied.lock().unwrap().clone();
+    assert_eq!(applied.len(), 2 * KEY_PAGE + 100);
+    let expected: Vec<String> = (1..=total).map(|user| format!("users {user}")).collect();
+    assert_eq!(sorted(applied), sorted(expected));
+}
+
+#[tokio::test]
+async fn a_walk_ending_on_a_full_page_reads_one_empty_page_then_ends() {
+    let page = i64::try_from(KEY_PAGE).unwrap();
+    let documents = Arc::new(RelatedDocuments::new(users(page)));
+    let sinks = [(
+        sink_name("a"),
+        Arc::new(IndexSink::seeded(&["accounts", "orders"])),
+    )];
+    backfill(&documents, &sinks, 256).await;
+
+    assert_eq!(
+        *documents.pages.lock().unwrap(),
+        [("users".to_owned(), None), ("users".to_owned(), Some(page))]
+    );
+    assert_eq!(sinks[0].1.applied.lock().unwrap().len(), KEY_PAGE);
+}
+
+#[tokio::test]
+async fn indexes_are_walked_one_after_another_each_from_its_start() {
+    let documents = Arc::new(RelatedDocuments::new(rows()));
+    let sinks = [(sink_name("a"), Arc::new(IndexSink::default()))];
+    backfill(&documents, &sinks, 256).await;
+
+    assert_eq!(
+        *documents.pages.lock().unwrap(),
+        [
+            ("accounts".to_owned(), None),
+            ("orders".to_owned(), None),
+            ("users".to_owned(), None),
+        ]
     );
 }

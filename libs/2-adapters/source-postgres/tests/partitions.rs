@@ -6,7 +6,7 @@
 //! arrives under the partitioned table's name and resolves to its document.
 //! `prepare` sets `REPLICA IDENTITY FULL` across the child's partition tree, so
 //! a deleted child row still reaches its old parent through the pre-image.
-//! Backfill reads the partitions through the parent.
+//! Backfill pages the partitions through the parent, in key order.
 //! A batched build over a hash-partitioned root runs without a JIT
 //! compilation (issue #335).
 //! A partition whose identity index leaves out the primary key (issue #224) is
@@ -34,7 +34,7 @@ use kernel::{
 };
 use source::cdc::{ChangeCapture, ChangeEvent};
 use source::document::{DocumentBuilder, DocumentId};
-use source::{CaptureProvisioning, RowKey, SnapshotTable, SourceSpec};
+use source::{CaptureProvisioning, RowKey, SourceSpec};
 use source_postgres::{PgDocumentBuilder, ReplicationConfig, WalChangeCapture};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -116,29 +116,17 @@ async fn changes_on_partitions_resolve_to_the_partitioned_tables_documents() {
         "the child's whole partition tree logs its parent link",
     );
 
-    // Backfill reads every partition through the parent.
-    let snapshot: Vec<ChangeEvent> = capture
-        .snapshot(&[SnapshotTable {
-            db_schema: DatabaseSchema::try_new("public").unwrap(),
-            table: table("events"),
-        }])
+    // Backfill pages every partition through the parent, in key order.
+    let builder = PgDocumentBuilder::connect(&url, Arc::clone(&spec))
         .await
-        .unwrap()
-        .map(Result::unwrap)
-        .collect()
-        .await;
-    let mut seeded: Vec<(String, RowKey)> = snapshot
-        .iter()
-        .map(|change| (change.table().to_string(), change.key().clone()))
-        .collect();
-    seeded.sort_by_key(|(_, key)| format!("{key:?}"));
-    assert_eq!(
-        seeded,
-        [
-            ("events".to_owned(), row_key(1)),
-            ("events".to_owned(), row_key(1500)),
-        ]
-    );
+        .unwrap();
+    let first = builder.keys(&index_name("events"), None, 1).await.unwrap();
+    let rest = builder
+        .keys(&index_name("events"), first.last(), 1024)
+        .await
+        .unwrap();
+    assert_eq!(first, [row_key(1)]);
+    assert_eq!(rest, [row_key(1500)]);
 
     let mut stream = capture.live().await.unwrap();
 
@@ -183,9 +171,6 @@ async fn changes_on_partitions_resolve_to_the_partitioned_tables_documents() {
         "every change arrives under the partitioned table's name",
     );
 
-    let builder = PgDocumentBuilder::connect(&url, Arc::clone(&spec))
-        .await
-        .unwrap();
     for (change, expected) in changes.iter().zip([
         document_id("events", 2),
         document_id("events", 1500),

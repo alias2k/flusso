@@ -222,6 +222,37 @@ impl sqlx::SqlSafeStr for SqlString {
     }
 }
 
+/// The alias a backfill page selects each key under.
+pub(super) const KEY_PAGE_KEY: &str = "key";
+
+/// A backfill's key page (see `keys.rs`): up to `limit` of the root's keys
+/// after `after`, in key order, compared and ordered by one operator. Only
+/// identifiers, the key type (from the catalog) and the limit are written
+/// into the text; the cursor is a parameter cast by [`sql::key_cast`].
+pub(super) fn key_page_query(
+    schema: &IndexSchema,
+    key: &ColumnName,
+    (key_type, base_name): (&str, &str),
+    after: Option<&GenericValue>,
+    limit: usize,
+) -> Result<SqlString> {
+    let column = qident(key.as_ref());
+    let select = super::value::key_select(&column, KEY_PAGE_KEY, key_type, base_name);
+    let table = qtable(&schema.db_schema, &schema.table);
+    let bound = match after {
+        None => String::new(),
+        Some(after) => {
+            let cast = sql::key_cast(after, key_type).ok_or_else(|| {
+                SourceError::Query(format!("a backfill page can't follow the key {after:?}"))
+            })?;
+            format!(" WHERE {column} > $1{cast}")
+        }
+    };
+    Ok(SqlString::new(format!(
+        "SELECT {select} FROM {table}{bound} ORDER BY {column} USING < LIMIT {limit}"
+    )))
+}
+
 /// Bind a scalar parameter onto a query, in `params` order.
 pub(super) fn bind_param<'q>(query: PgQuery<'q>, value: &GenericValue) -> Result<PgQuery<'q>> {
     Ok(match value {

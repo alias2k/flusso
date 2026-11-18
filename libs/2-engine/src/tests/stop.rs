@@ -11,8 +11,8 @@ use futures::stream::BoxStream;
 use kernel::{IndexName, Position, SinkName};
 use sink::{Sink, WriteReport};
 use source::cdc::{ChangeCapture, ChangeEvent, Continuity, LiveChange};
-use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
-use source::{RowImage, RowKey, SnapshotTable};
+use source::document::{Document, DocumentBuilder, DocumentId};
+use source::{RowImage, RowKey};
 use stream::Stream;
 use stream_channel::ChannelStream;
 use tokio::sync::{Notify, mpsc};
@@ -30,7 +30,6 @@ struct ClosableSource {
     closing: Arc<Notify>,
     closed: Arc<AtomicBool>,
     log: Arc<Mutex<Vec<String>>>,
-    snapshot: Mutex<Option<BoxStream<'static, source::Result<ChangeEvent>>>>,
 }
 
 impl std::fmt::Debug for ClosableSource {
@@ -49,16 +48,9 @@ impl ClosableSource {
                 closing: Arc::default(),
                 closed: Arc::default(),
                 log: Arc::default(),
-                snapshot: Mutex::new(None),
             },
             tx,
         )
-    }
-
-    /// The next snapshot is `rows`.
-    fn with_snapshot(self, rows: BoxStream<'static, source::Result<ChangeEvent>>) -> Self {
-        *self.snapshot.lock().unwrap() = Some(rows);
-        self
     }
 
     fn confirmed(&self) -> Vec<String> {
@@ -129,18 +121,6 @@ impl ChangeCapture for ClosableSource {
         self.closing.notify_one();
         true
     }
-
-    async fn snapshot(
-        &self,
-        _tables: &[SnapshotTable],
-    ) -> source::Result<BoxStream<'static, source::Result<ChangeEvent>>> {
-        Ok(self
-            .snapshot
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap_or_else(|| Box::pin(futures::stream::empty())))
-    }
 }
 
 /// [`MockDocuments`] whose `build_many` waits for `gate` once, so a test can
@@ -177,13 +157,76 @@ impl DocumentBuilder for GatedDocuments {
         self.inner.build_many(ids).await
     }
 
-    fn backfill_scopes(&self) -> Vec<IndexScope> {
-        self.inner.backfill_scopes()
+    fn backfill_indexes(&self) -> Vec<kernel::IndexName> {
+        self.inner.backfill_indexes()
+    }
+
+    async fn keys(
+        &self,
+        index: &kernel::IndexName,
+        after: Option<&RowKey>,
+        limit: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        self.inner.keys(index, after, limit).await
     }
 
     async fn index_mappings(&self) -> source::Result<Vec<kernel::IndexMapping>> {
         self.inner.index_mappings().await
     }
+}
+
+/// [`MockDocuments`] whose key pages never come back: a stop finds the
+/// snapshot waiting on a page.
+#[derive(Debug, Default)]
+struct HangingKeys {
+    inner: MockDocuments,
+    asked: AtomicBool,
+}
+
+#[async_trait]
+impl DocumentBuilder for HangingKeys {
+    async fn resolve(
+        &self,
+        table: &kernel::TableName,
+        key: &RowKey,
+        before: Option<&RowImage>,
+        after: Option<&RowImage>,
+    ) -> source::Result<Vec<DocumentId>> {
+        self.inner.resolve(table, key, before, after).await
+    }
+
+    async fn build(&self, id: &DocumentId) -> source::Result<Document> {
+        self.inner.build(id).await
+    }
+
+    fn backfill_indexes(&self) -> Vec<kernel::IndexName> {
+        self.inner.backfill_indexes()
+    }
+
+    async fn keys(
+        &self,
+        _index: &kernel::IndexName,
+        _after: Option<&RowKey>,
+        _limit: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        self.asked.store(true, Ordering::SeqCst);
+        std::future::pending().await
+    }
+
+    async fn index_mappings(&self) -> source::Result<Vec<kernel::IndexMapping>> {
+        self.inner.index_mappings().await
+    }
+}
+
+/// [`MockDocuments`] paging `rows`' keys.
+fn paging(rows: impl IntoIterator<Item = i64>) -> Arc<MockDocuments> {
+    Arc::new(MockDocuments {
+        rows: rows
+            .into_iter()
+            .map(|id| upsert(id).key().clone())
+            .collect(),
+        ..MockDocuments::default()
+    })
 }
 
 /// A sink whose flush never returns: down, or stalled.
@@ -339,15 +382,10 @@ async fn nothing_is_read_from_the_live_stream_once_the_stop_is_requested() {
 }
 
 #[tokio::test]
-async fn a_snapshot_in_progress_is_abandoned_and_its_request_served_again_on_the_next_run() {
-    let (rows_tx, rows_rx) = mpsc::channel::<source::Result<ChangeEvent>>(4);
-    rows_tx.send(Ok(upsert(10))).await.unwrap();
-    let slow_rows: BoxStream<'static, source::Result<ChangeEvent>> =
-        Box::pin(futures::stream::unfold(rows_rx, |mut rx| async move {
-            rx.recv().await.map(|row| (row, rx))
-        }));
+async fn a_snapshot_waiting_on_a_page_is_abandoned_and_its_request_served_again_on_the_next_run() {
     let (source, _feed) = ClosableSource::new();
-    let source = Arc::new(source.with_snapshot(slow_rows));
+    let source = Arc::new(source);
+    let hanging = Arc::new(HangingKeys::default());
     let stream = Arc::new(ChannelStream::new(64, [sink_name("primary")]));
     let sink = Arc::new(RecordingSink::seeded(false));
     let marked = Arc::clone(&sink.marked);
@@ -355,14 +393,14 @@ async fn a_snapshot_in_progress_is_abandoned_and_its_request_served_again_on_the
     let stop = Stop::new();
     let engine = ingest(
         &source,
-        Arc::new(MockDocuments::default()),
+        Arc::clone(&hanging) as Arc<dyn DocumentBuilder>,
         &stream,
         &["primary"],
         &stop,
     );
     let run = tokio::spawn(async move { engine.run().await });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    super::wait_for(|| hanging.asked.load(Ordering::SeqCst)).await;
     stop.request();
     tokio::time::timeout(Duration::from_secs(5), run)
         .await
@@ -375,11 +413,10 @@ async fn a_snapshot_in_progress_is_abandoned_and_its_request_served_again_on_the
     );
 
     let (next_source, _next_feed) = ClosableSource::new();
-    let next_source =
-        Arc::new(next_source.with_snapshot(Box::pin(futures::stream::iter([Ok(upsert(10))]))));
+    let next_source = Arc::new(next_source);
     let next = ingest(
         &next_source,
-        Arc::new(MockDocuments::default()),
+        paging([10]),
         &stream,
         &["primary"],
         &Stop::new(),
@@ -388,7 +425,6 @@ async fn a_snapshot_in_progress_is_abandoned_and_its_request_served_again_on_the
     super::wait_for(|| !marked.lock().unwrap().is_empty()).await;
     assert_eq!(*marked.lock().unwrap(), vec!["users".to_owned()]);
     next_run.abort();
-    drop(rows_tx);
     for task in sinks {
         task.abort();
     }
@@ -471,9 +507,7 @@ async fn a_stop_requested_before_the_run_reads_nothing() {
 #[tokio::test]
 async fn a_stopping_sink_skips_queued_snapshot_batches_and_leaves_their_index_unseeded() {
     let (source, _feed) = ClosableSource::new();
-    let source = Arc::new(source.with_snapshot(Box::pin(futures::stream::iter(
-        (1..=600).map(|id| Ok(upsert(id))),
-    ))));
+    let source = Arc::new(source);
     let stream = Arc::new(ChannelStream::new(64, [sink_name("primary")]));
     let sink = Arc::new(RecordingSink::seeded(false));
     let (ops, marked) = (Arc::clone(&sink.ops), Arc::clone(&sink.marked));
@@ -485,13 +519,7 @@ async fn a_stopping_sink_skips_queued_snapshot_batches_and_leaves_their_index_un
     );
     engine.stage(Continuity::Resumed).await.unwrap();
     let stop = Stop::new();
-    let ingest_engine = ingest(
-        &source,
-        Arc::new(MockDocuments::default()),
-        &stream,
-        &["primary"],
-        &stop,
-    );
+    let ingest_engine = ingest(&source, paging(1..=600), &stream, &["primary"], &stop);
     let ingest_run = tokio::spawn(async move { ingest_engine.run().await });
     super::wait_for(|| !stream.is_idle() && stream.watermark().is_none()).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -703,8 +731,17 @@ impl DocumentBuilder for StopsWhileResolving {
         self.inner.build_many(ids).await
     }
 
-    fn backfill_scopes(&self) -> Vec<IndexScope> {
-        self.inner.backfill_scopes()
+    fn backfill_indexes(&self) -> Vec<kernel::IndexName> {
+        self.inner.backfill_indexes()
+    }
+
+    async fn keys(
+        &self,
+        index: &kernel::IndexName,
+        after: Option<&RowKey>,
+        limit: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        self.inner.keys(index, after, limit).await
     }
 
     async fn index_mappings(&self) -> source::Result<Vec<kernel::IndexMapping>> {

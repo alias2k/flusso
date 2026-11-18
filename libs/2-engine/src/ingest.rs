@@ -7,18 +7,20 @@
 //! quiet stream never waits out [`BatchPolicy::max_delay`] — resolved to the
 //! documents they touch (deduplicated), built once with
 //! [`DocumentBuilder::build_many`], and published as one [`Batch`] to every
-//! lane, carrying the position of the last change. Snapshot rows for a
-//! backfill go through the same build path but are not resolved: a snapshot
-//! reads every row of each requested index's root table, so a row is its own
-//! document, once per requested index rooted at its table (see
-//! [`IndexScope`](source::document::IndexScope)), and every document is
-//! reached exactly once by its own root row. Resolving a row like a live
-//! change would cost a reverse query per related path and rebuild the parents
-//! of related indexes over and over (issue #385). Snapshot batches are
-//! published only to the lanes that requested them, without a position,
-//! followed by a [`LaneItem::SnapshotComplete`]. Both kinds interleave on this
-//! single task, so lane order is build order and a document's later message is
-//! always the newer state.
+//! lane, carrying the position of the last change. A backfill (a *snapshot*)
+//! walks each requested index's root keys in pages
+//! ([`DocumentBuilder::keys`], [`KEY_PAGE`] at a time, the engine holding the
+//! last key as the cursor), and each key is its own document, built through
+//! the same path but never resolved: resolving it like a live change would
+//! cost a reverse query per related path and rebuild the parents of related
+//! indexes over and over (issue #385). A page is read when it is needed, with
+//! no snapshot shared across pages: the source's resume point exists before
+//! any backfill, so a row that gets a key behind the walk reaches the live
+//! stream. Snapshot batches are published only to the lanes that requested
+//! them, without a position, followed by a [`LaneItem::SnapshotComplete`].
+//! Both kinds interleave on this single task, so lane order is build order and
+//! a document's later message is always the newer state: a page only names
+//! ids, and its documents are read when they are built.
 //!
 //! After every commit the engine reads the stream's watermark — the lowest
 //! position every lane has acknowledged — and hands it to the source as
@@ -39,18 +41,18 @@
 //! live stream closed once the source has the final position. See
 //! [`Stop`] for the sequence.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use chrono::Utc;
-use futures::future::try_join_all;
+use futures::future::{BoxFuture, try_join_all};
 use futures::stream::BoxStream;
 use futures::{FutureExt, StreamExt};
-use kernel::{Envelope, IndexName, Position, SinkName, TableName};
+use kernel::{Envelope, IndexName, Position, SinkName};
 use source::cdc::{ChangeCapture, ChangeEvent, LiveChange, SourcePosition};
 use source::document::{BuildFailure, Document, DocumentBuilder, DocumentId};
-use source::{SnapshotTable, SourceError};
+use source::{RowKey, SourceError};
 use stream::{AckHandle, Batch, Consumer, LaneItem, Producer, Request, Stream};
 use tokio::time::{Duration, Instant, sleep_until, timeout_at};
 
@@ -71,6 +73,10 @@ const CONFIRM_TICK: Duration = Duration::from_secs(1);
 /// the final position and 5 s to close), so a close that just fits is not
 /// reported as one that failed.
 const CLOSE_WAIT: Duration = Duration::from_secs(12);
+
+/// How many root keys a backfill reads per page. The keys are built in
+/// batches of [`BatchPolicy::max_changes`].
+pub const KEY_PAGE: usize = 1024;
 
 /// The producing end of every sink's lane, by sink name.
 type Lanes = BTreeMap<SinkName, Box<dyn Producer<LaneItem>>>;
@@ -213,12 +219,7 @@ impl IngestEngine {
             .map(|sink| Ok((sink.clone(), self.stream.lane(sink)?.producer)))
             .collect::<Result<_>>()?;
         let mut requests = self.stream.requests()?.consumer;
-        let scopes: HashMap<IndexName, SnapshotTable> = self
-            .documents
-            .backfill_scopes()
-            .into_iter()
-            .map(|scope| (scope.index, scope.root))
-            .collect();
+        let scopes: HashSet<IndexName> = self.documents.backfill_indexes().into_iter().collect();
 
         let started = Instant::now();
         let mut live: LiveStream = self.source.live().await?;
@@ -290,24 +291,22 @@ impl IngestEngine {
                     self.confirm(&mut last_confirmed);
                     mark = Instant::now();
                 }
-                row = next_snapshot_row(&mut snapshot), if snapshot.is_some() => {
+                step = next_snapshot_step(&mut snapshot), if snapshot.is_some() => {
                     let Some(active) = snapshot.as_mut() else { continue };
-                    match row {
-                        Some(Err(error)) => return Err(error.into()),
-                        Some(Ok(event)) => {
-                            active.buffer(&event);
-                            // The one clock read per row: the wait for it, if
-                            // any, its decoding and buffering, all `Page`.
-                            let now = Instant::now();
-                            active.page_wait += now - mark;
-                            mark = now;
+                    // The wait for a page, if any, is `Page`.
+                    let now = Instant::now();
+                    active.page_wait += now - mark;
+                    mark = now;
+                    match step {
+                        Err(error) => return Err(error.into()),
+                        Ok(Step::Keys) => {
+                            active.take_keys();
                             if active.batch.is_full() {
                                 self.commit_snapshot(active, &lanes).await?;
                                 mark = Instant::now();
                             }
                         }
-                        None => {
-                            active.page_wait += mark.elapsed();
+                        Ok(Step::Done) => {
                             self.commit_snapshot(active, &lanes).await?;
                             let started = Instant::now();
                             self.finish_snapshot(active, &lanes).await?;
@@ -636,13 +635,13 @@ impl IngestEngine {
     }
 
     /// Coalesce the delivered requests into one snapshot: the union of their
-    /// indexes' root tables, remembering which lane asked for which indexes.
+    /// indexes, each walked once, remembering which lane asked for which.
     /// Requests for indexes the builder knows nothing about are answered with
     /// an immediate `SnapshotComplete` for whatever *is* known.
     async fn start_snapshot(
         &self,
         deliveries: Vec<stream::Delivery<Request>>,
-        scopes: &HashMap<IndexName, SnapshotTable>,
+        scopes: &HashSet<IndexName>,
         lanes: &Lanes,
     ) -> Result<Option<Snapshot>> {
         let mut requested: BTreeMap<SinkName, BTreeSet<IndexName>> = BTreeMap::new();
@@ -653,7 +652,7 @@ impl IngestEngine {
             let known: BTreeSet<IndexName> = indexes
                 .into_iter()
                 .filter(|index| {
-                    let known = scopes.contains_key(index);
+                    let known = scopes.contains(index);
                     if !known {
                         tracing::warn!(index = %index, %sink, "backfill requested for an index the source does not build; ignoring");
                     }
@@ -664,41 +663,25 @@ impl IngestEngine {
             handles.push(handle);
         }
         let indexes: BTreeSet<IndexName> = requested.values().flatten().cloned().collect();
-        let mut tables: Vec<SnapshotTable> = Vec::new();
-        let mut roots: HashMap<TableName, Vec<IndexName>> = HashMap::new();
-        for index in &indexes {
-            if let Some(root) = scopes.get(index) {
-                roots
-                    .entry(root.table.clone())
-                    .or_default()
-                    .push(index.clone());
-                if !tables.contains(root) {
-                    tables.push(root.clone());
-                }
-            }
-        }
         let mut snapshot = Snapshot {
-            stream: Box::pin(futures::stream::empty()),
+            walk: Walk::new(Arc::clone(&self.documents), indexes.iter().cloned()),
             requested,
             indexes: indexes.iter().cloned().collect(),
-            roots,
             handles,
             batch: PendingBatch::new(self.batch.max_changes),
             page_wait: Duration::ZERO,
         };
-        if tables.is_empty() {
+        if indexes.is_empty() {
             self.finish_snapshot(&mut snapshot, lanes).await?;
             return Ok(None);
         }
         let ordered: Vec<IndexName> = indexes.into_iter().collect();
         tracing::info!(
             indexes = ordered.len(),
-            tables = tables.len(),
             lanes = snapshot.requested.len(),
             "starting snapshot"
         );
         self.observer.on_snapshot_started(&ordered);
-        snapshot.stream = self.source.snapshot(&tables).await?;
         Ok(Some(snapshot))
     }
 
@@ -863,44 +846,115 @@ impl PendingBatch {
     }
 }
 
-/// A running snapshot: its row stream, who asked for what, the requested
-/// indexes by root table, the request handles to acknowledge at the end, and
-/// the batch being filled.
+/// A running snapshot: the walk over its indexes' keys, who asked for what,
+/// the request handles to acknowledge at the end, and the batch being filled.
 struct Snapshot {
-    stream: BoxStream<'static, source::Result<ChangeEvent>>,
+    walk: Walk,
     requested: BTreeMap<SinkName, BTreeSet<IndexName>>,
     indexes: HashSet<IndexName>,
-    roots: HashMap<TableName, Vec<IndexName>>,
     handles: Vec<Box<dyn AckHandle>>,
     batch: PendingBatch,
-    /// Time spent getting rows since the last batch: waiting for key pages,
-    /// decoding and buffering rows.
+    /// Time spent getting keys since the last batch: waiting for pages and
+    /// buffering keys.
     page_wait: Duration,
 }
 
 impl Snapshot {
-    /// Buffer a snapshot row as its own document in every requested index
-    /// rooted at its table. Matched by table name, as
-    /// [`DocumentBuilder::resolve`] matches a change. A key with a null part
-    /// addresses no document.
-    fn buffer(&mut self, row: &ChangeEvent) {
-        let key = row.key();
-        let indexes = match self.roots.get(row.table()) {
-            Some(indexes) if !key.has_null() => indexes.as_slice(),
-            _ => &[],
+    /// Buffer the keys in hand as their index's documents, until the batch is
+    /// full. A key with a null part addresses no document.
+    fn take_keys(&mut self) {
+        let Some(index) = self.walk.indexes.front() else {
+            return;
         };
-        self.batch.add(indexes.iter().map(|index| DocumentId {
-            index: index.clone(),
-            key: key.clone(),
-        }));
+        while !self.batch.is_full() {
+            let Some(key) = self.walk.keys.pop_front() else {
+                break;
+            };
+            if key.has_null() {
+                self.batch.count += 1;
+                continue;
+            }
+            self.batch.add([DocumentId {
+                index: index.clone(),
+                key,
+            }]);
+        }
     }
 }
 
-async fn next_snapshot_row(
-    snapshot: &mut Option<Snapshot>,
-) -> Option<std::result::Result<ChangeEvent, SourceError>> {
+/// A snapshot's walk over its indexes' root keys, one index after another,
+/// one page at a time ([`DocumentBuilder::keys`]). The page being read is
+/// kept here, not in the `select!` that polls it, so a live change winning
+/// the `select!` doesn't drop a page half read.
+struct Walk {
+    documents: Arc<dyn DocumentBuilder>,
+    /// The indexes still to walk, the one being walked first.
+    indexes: VecDeque<IndexName>,
+    /// The last key read of the index being walked: the next page follows it.
+    after: Option<RowKey>,
+    /// Keys read and not yet buffered.
+    keys: VecDeque<RowKey>,
+    /// Whether the keys in hand are the index's last.
+    last: bool,
+    page: Option<BoxFuture<'static, source::Result<Vec<RowKey>>>>,
+}
+
+/// What the walk has for the loop.
+enum Step {
+    /// Keys in hand, from the front index.
+    Keys,
+    /// Every index walked.
+    Done,
+}
+
+impl Walk {
+    fn new(
+        documents: Arc<dyn DocumentBuilder>,
+        indexes: impl IntoIterator<Item = IndexName>,
+    ) -> Self {
+        Self {
+            documents,
+            indexes: indexes.into_iter().collect(),
+            after: None,
+            keys: VecDeque::new(),
+            last: false,
+            page: None,
+        }
+    }
+
+    /// The next step: keys in hand at once, else the next page read.
+    async fn step(&mut self) -> source::Result<Step> {
+        loop {
+            if !self.keys.is_empty() {
+                return Ok(Step::Keys);
+            }
+            if self.last {
+                self.indexes.pop_front();
+                self.after = None;
+                self.last = false;
+            }
+            let Some(index) = self.indexes.front() else {
+                return Ok(Step::Done);
+            };
+            let page = self.page.get_or_insert_with(|| {
+                let documents = Arc::clone(&self.documents);
+                let index = index.clone();
+                let after = self.after.clone();
+                Box::pin(async move { documents.keys(&index, after.as_ref(), KEY_PAGE).await })
+            });
+            let keys = page.await;
+            self.page = None;
+            let keys = keys?;
+            self.last = keys.len() < KEY_PAGE;
+            self.after = keys.last().cloned().or(self.after.take());
+            self.keys.extend(keys);
+        }
+    }
+}
+
+async fn next_snapshot_step(snapshot: &mut Option<Snapshot>) -> source::Result<Step> {
     match snapshot {
-        Some(active) => active.stream.next().await,
+        Some(active) => active.walk.step().await,
         None => std::future::pending().await,
     }
 }

@@ -6,8 +6,8 @@ use std::time::Instant;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use kernel::Position;
-use source::cdc::{ChangeCapture, ChangeEvent, Continuity, LiveChange, SourcePosition};
-use source::{SnapshotTable, SourceError};
+use source::SourceError;
+use source::cdc::{ChangeCapture, Continuity, LiveChange, SourcePosition};
 
 use super::*;
 
@@ -51,13 +51,6 @@ impl ChangeCapture for SteadySource {
     }
 
     fn confirm(&self, _: Position) {}
-
-    async fn snapshot(
-        &self,
-        _: &[SnapshotTable],
-    ) -> source::Result<BoxStream<'static, source::Result<ChangeEvent>>> {
-        Ok(Box::pin(futures::stream::empty()))
-    }
 
     fn parse_position(&self, text: &str) -> source::Result<SourcePosition> {
         text.parse()

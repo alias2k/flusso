@@ -20,12 +20,11 @@
 //!    resume point survived, because a seed a sink recorded earlier is only
 //!    valid while the point that fed it does; [`ChangeCapture::prepare`] then
 //!    establishes it before any snapshot.
-//! 2. **Live and snapshot are separate capabilities.**
-//!    [`ChangeCapture::live`] streams ongoing changes;
-//!    [`ChangeCapture::snapshot`] reads current rows for a backfill. Each sink
-//!    engine decides whether its sink needs a backfill and requests one; the
-//!    ingest engine runs the snapshot — the mechanism just exposes the
-//!    capabilities.
+//! 2. **Capture streams live changes only.** [`ChangeCapture::live`] streams
+//!    ongoing changes. A backfill reads current rows through the document
+//!    builder ([`DocumentBuilder::keys`](crate::document::DocumentBuilder::keys)),
+//!    which needs no snapshot shared with the stream: every change made after
+//!    [`prepare`](ChangeCapture::prepare) reaches the live stream.
 //! 3. **Events are thin.** A change names a row; it does not carry its data, so
 //!    every mechanism looks identical and nothing depends on `REPLICA IDENTITY`.
 

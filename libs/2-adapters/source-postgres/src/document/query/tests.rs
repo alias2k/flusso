@@ -1737,3 +1737,47 @@ fn a_large_batch_passes_its_keys_as_one_array_per_kind() {
     );
     assert_eq!(params.len(), 1);
 }
+
+fn key_page(after: Option<&GenericValue>) -> String {
+    let schema = IndexSchema {
+        version: 1,
+        table: TableName::try_new("users").unwrap(),
+        db_schema: DatabaseSchema::try_new("app").unwrap(),
+        primary_key: Some(ColumnName::try_new("id").unwrap()),
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields: Vec::new(),
+    };
+    key_page_query(
+        &schema,
+        &ColumnName::try_new("id").unwrap(),
+        ("pg_catalog.int8", "int8"),
+        after,
+        1024,
+    )
+    .unwrap()
+    .as_str()
+    .to_owned()
+}
+
+#[test]
+fn the_first_key_page_reads_from_the_start_in_key_order() {
+    assert_eq!(
+        key_page(None),
+        "SELECT format('%s', \"id\") AS \"key\", \"id\"::pg_catalog.int8 AS \"key:typed\" \
+         FROM \"app\".\"users\" ORDER BY \"id\" USING < LIMIT 1024"
+    );
+}
+
+#[test]
+fn a_later_key_page_binds_the_last_key_with_its_type_spelled_out() {
+    assert!(
+        key_page(Some(&GenericValue::BigInt(7)))
+            .contains("WHERE \"id\" > $1::int8::pg_catalog.int8 ORDER BY \"id\" USING <")
+    );
+    assert!(
+        key_page(Some(&GenericValue::String("infinity".to_owned())))
+            .contains("> $1::text::pg_catalog.int8")
+    );
+}

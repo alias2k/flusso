@@ -21,8 +21,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use kernel::{IndexMapping, TableName};
-use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
+use kernel::{IndexMapping, IndexName, TableName};
+use source::document::{Document, DocumentBuilder, DocumentId};
 use source::{Result, RowImage, RowKey};
 
 use crate::Scripts;
@@ -96,8 +96,17 @@ impl DocumentBuilder for ScriptedBuilder {
         Ok(documents.into_iter().map(|d| self.finish(d)).collect())
     }
 
-    fn backfill_scopes(&self) -> Vec<IndexScope> {
-        self.inner.backfill_scopes()
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        self.inner.backfill_indexes()
+    }
+
+    async fn keys(
+        &self,
+        index: &IndexName,
+        after: Option<&RowKey>,
+        limit: usize,
+    ) -> Result<Vec<RowKey>> {
+        self.inner.keys(index, after, limit).await
     }
 
     async fn index_mappings(&self) -> Result<Vec<IndexMapping>> {

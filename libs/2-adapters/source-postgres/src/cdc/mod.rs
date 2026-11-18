@@ -22,7 +22,6 @@
 //! `pgwire-replication` types are re-exported below for convenience.
 
 mod ack;
-mod backfill;
 mod capture;
 mod introspection;
 mod pgoutput;

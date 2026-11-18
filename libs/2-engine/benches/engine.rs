@@ -52,13 +52,13 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use engine::{BatchPolicy, IngestEngine, SinkControl, SinkEngine};
 use futures::stream::{self as fstream, BoxStream};
 use kernel::{
-    ColumnName, ContentHash, DatabaseSchema, Envelope, FieldName, GenericValue, IndexMapping,
-    IndexName, Mapping, MappingType, Position, ResolvedField, SinkName, TableName,
+    ColumnName, ContentHash, Envelope, FieldName, GenericValue, IndexMapping, IndexName, Mapping,
+    MappingType, Position, ResolvedField, SinkName, TableName,
 };
 use sink::{Sink, WriteReport};
 use source::cdc::{ChangeCapture, ChangeEvent, Continuity, LiveChange};
-use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
-use source::{Result as SourceResult, RowImage, RowKey, SnapshotTable};
+use source::document::{Document, DocumentBuilder, DocumentId};
+use source::{Result as SourceResult, RowImage, RowKey};
 use stream::Stream;
 use stream_channel::ChannelStream;
 use tokio::runtime::Runtime;
@@ -86,8 +86,8 @@ fn key(id: i64) -> RowKey {
     )])
 }
 
-/// A source whose live stream is a fixed burst of upserts, or a snapshot of a
-/// fixed row set; `confirm` is a no-op.
+/// A source whose live stream is a fixed burst of upserts; `rows` is how many
+/// root keys the builder pages for a backfill. `confirm` is a no-op.
 #[derive(Debug)]
 struct MockCapture {
     live: usize,
@@ -120,21 +120,6 @@ impl ChangeCapture for MockCapture {
     }
 
     fn confirm(&self, _position: Position) {}
-
-    async fn snapshot(
-        &self,
-        _tables: &[SnapshotTable],
-    ) -> SourceResult<BoxStream<'static, SourceResult<ChangeEvent>>> {
-        let n = self.rows;
-        Ok(Box::pin(fstream::iter((0..n).map(|i| {
-            Ok(ChangeEvent::Upsert {
-                table: table(),
-                key: key(i as i64),
-                before: None,
-                after: None,
-            })
-        }))))
-    }
 }
 
 /// Resolves every change to one document and builds a realistic mid-size body
@@ -143,6 +128,8 @@ impl ChangeCapture for MockCapture {
 #[derive(Debug)]
 struct MockDocuments {
     pace: Arc<Pace>,
+    /// Root keys a backfill pages: `0..rows`.
+    rows: usize,
 }
 
 /// How far the ingest engine has got: batches it started building, and
@@ -247,14 +234,23 @@ impl DocumentBuilder for MockDocuments {
         })
     }
 
-    fn backfill_scopes(&self) -> Vec<IndexScope> {
-        vec![IndexScope {
-            index: index(),
-            root: SnapshotTable {
-                db_schema: DatabaseSchema::try_new("public").unwrap(),
-                table: table(),
-            },
-        }]
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        vec![index()]
+    }
+
+    async fn keys(
+        &self,
+        _index: &IndexName,
+        after: Option<&RowKey>,
+        limit: usize,
+    ) -> SourceResult<Vec<RowKey>> {
+        let start = after.map_or(0, |after| match after.0.first() {
+            Some((_, GenericValue::BigInt(id))) => usize::try_from(*id).unwrap() + 1,
+            _ => self.rows,
+        });
+        Ok((start..self.rows.min(start + limit))
+            .map(|i| key(i as i64))
+            .collect())
     }
 
     async fn index_mappings(&self) -> SourceResult<Vec<IndexMapping>> {
@@ -324,6 +320,7 @@ async fn run_deployment(capture: MockCapture, sinks: usize, batch: BatchPolicy) 
     let pace = Arc::new(Pace::default());
     let documents: Arc<dyn DocumentBuilder> = Arc::new(MockDocuments {
         pace: Arc::clone(&pace),
+        rows: capture.rows,
     });
     let mappings = documents.index_mappings().await.unwrap();
     let seeded = capture.rows == 0;

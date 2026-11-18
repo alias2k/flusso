@@ -60,6 +60,7 @@
 //! Multi-hop reverse resolution issues one query per hop.
 
 mod fields;
+mod keys;
 mod matching;
 mod query;
 mod reads;
@@ -76,10 +77,8 @@ use kernel::{
     ColumnName, DatabaseSchema, Filter, IndexMapping, IndexName, IndexSchema, SoftDelete,
     TableName, Transform,
 };
-use source::document::{BuildFailure, Document, DocumentBuilder, DocumentId, IndexScope};
-use source::{
-    Catalog, ColumnInfo, Result, RowDiff, RowImage, RowKey, SnapshotTable, SourceError, SourceSpec,
-};
+use source::document::{BuildFailure, Document, DocumentBuilder, DocumentId};
+use source::{Catalog, ColumnInfo, Result, RowDiff, RowImage, RowKey, SourceError, SourceSpec};
 use sqlx::{PgPool, Row};
 
 use reads::ReadColumns;
@@ -359,6 +358,9 @@ pub struct PgDocumentBuilder {
     /// Root tables without a primary key already warned about for a key with
     /// a null part.
     keyless_warned: Arc<Mutex<HashSet<TableName>>>,
+    /// Indexes whose backfill was skipped (`keys`), so the warning is logged
+    /// once per index.
+    unwalked_warned: Arc<Mutex<HashSet<IndexName>>>,
 }
 
 /// Each root `(schema, table)`'s catalog facts.
@@ -404,6 +406,7 @@ impl PgDocumentBuilder {
             privilege_probe_refused: Arc::new(AtomicBool::new(false)),
             unread_warned: Arc::new(RwLock::new(HashSet::new())),
             keyless_warned: Arc::new(Mutex::new(HashSet::new())),
+            unwalked_warned: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -1554,19 +1557,18 @@ impl DocumentBuilder for PgDocumentBuilder {
         Ok(out)
     }
 
-    fn backfill_scopes(&self) -> Vec<IndexScope> {
-        // A document is keyed by its root row, so the root table alone seeds the
-        // whole index — `build` assembles the joins and aggregates per root row.
-        self.spec
-            .indexes()
-            .map(|(name, schema)| IndexScope {
-                index: name.clone(),
-                root: SnapshotTable {
-                    db_schema: schema.db_schema.clone(),
-                    table: schema.table.clone(),
-                },
-            })
-            .collect()
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        self.spec.indexes().map(|(name, _)| name.clone()).collect()
+    }
+
+    #[tracing::instrument(name = "pg.keys", level = "debug", skip_all, fields(%index, limit))]
+    async fn keys(
+        &self,
+        index: &IndexName,
+        after: Option<&RowKey>,
+        limit: usize,
+    ) -> Result<Vec<RowKey>> {
+        self.key_page(index, after, limit).await
     }
 
     async fn index_mappings(&self) -> Result<Vec<IndexMapping>> {

@@ -2,10 +2,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::stream::{self, BoxStream};
+use futures::stream::BoxStream;
 use kernel::Position;
 
-use crate::{Result, SnapshotTable, SourceError};
+use crate::{Result, SourceError};
 
 use super::ChangeEvent;
 
@@ -136,23 +136,6 @@ pub trait ChangeCapture: std::fmt::Debug + Send + Sync {
     /// delivery allows.
     fn close_live(&self) -> bool {
         false
-    }
-
-    /// Snapshot the current rows of `tables` as a finite stream of
-    /// [`Upsert`](super::ChangeEvent::Upsert) events — the rows to seed an
-    /// index with. The stream ends when the snapshot is complete; there is no
-    /// in-band boundary marker.
-    ///
-    /// Each event names its table as `tables` does: the engine routes a row to
-    /// its indexes by that name, so a partition's row carries the parent's.
-    ///
-    /// The default is an empty stream, for mechanisms that cannot snapshot.
-    async fn snapshot(
-        &self,
-        tables: &[SnapshotTable],
-    ) -> Result<BoxStream<'static, Result<ChangeEvent>>> {
-        let _ = tables;
-        Ok(Box::pin(stream::empty()))
     }
 
     /// How far the mechanism's durable resume point trails the source's latest

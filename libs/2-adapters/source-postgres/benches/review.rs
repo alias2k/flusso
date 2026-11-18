@@ -29,6 +29,7 @@
 //! ```
 
 // review-ab requires: fn connect_with_max_connections
+// review-ab requires: fn backfill_indexes
 
 #![allow(
     clippy::unwrap_used,
@@ -54,13 +55,11 @@ fn main() {
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use futures::StreamExt;
-use kernel::{DatabaseSchema, GenericValue};
+use kernel::GenericValue;
 use regex::Regex;
-use source::cdc::ChangeCapture;
+use source::RowKey;
 use source::document::{Document, DocumentBuilder, DocumentId};
-use source::{RowKey, SnapshotTable};
-use source_postgres::{PgDocumentBuilder, Tls, WalChangeCapture, replication_config};
+use source_postgres::PgDocumentBuilder;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{AssertSqlSafe, PgPool, Row};
 
@@ -73,6 +72,9 @@ const PLAN_BATCHES: &[usize] = &[1, 10, 100];
 const PLAN_CALLS: usize = 10;
 /// The backfill's build batch: the ingest engine's default `max_changes`.
 const BACKFILL_BATCH: usize = 256;
+/// The backfill's key page: the ingest engine's `KEY_PAGE` (a crate this one
+/// can't depend on).
+const KEY_PAGE: usize = 1024;
 
 struct Settings {
     url: String,
@@ -157,10 +159,6 @@ async fn digest(settings: &Settings) -> String {
     let builder = PgDocumentBuilder::connect(&settings.url, Arc::new(spec(&roots)))
         .await
         .unwrap();
-    let capture = WalChangeCapture::new(
-        replication_config(&settings.url, &Tls::default(), "unused", "unused").unwrap(),
-        settings.url.clone(),
-    );
     let mut out = String::new();
     for root in roots
         .iter()
@@ -187,11 +185,11 @@ async fn digest(settings: &Settings) -> String {
         forms.push(("build_many<16", builder.build_many(&small).await.unwrap()));
         let large = with_missing(root, &present, 5);
         forms.push(("build_many>=16", builder.build_many(&large).await.unwrap()));
-        let backfilled = backfill(&builder, &capture, root).await;
+        let backfilled = backfill(&builder, root).await;
         if backfilled.is_empty() {
             writeln!(
                 out,
-                "#note\t{}\tthe backfill built nothing: a snapshot skips a table without a single-column primary key",
+                "#note\t{}\tthe backfill built nothing: it skips a root without a single-column primary key",
                 root.table
             )
             .unwrap();
@@ -206,26 +204,29 @@ async fn digest(settings: &Settings) -> String {
     out
 }
 
-/// The root's documents as a backfill builds them: each snapshot row its own
-/// document, built in batches as the ingest engine does.
-async fn backfill(
-    builder: &PgDocumentBuilder,
-    capture: &WalChangeCapture,
-    root: &Root,
-) -> Vec<Document> {
-    let table = SnapshotTable {
-        db_schema: DatabaseSchema::try_new("public").unwrap(),
-        table: cases::table(root.table),
-    };
-    let mut rows = capture.snapshot(&[table]).await.unwrap();
-    let mut ids = Vec::new();
-    while let Some(event) = rows.next().await {
-        let event = event.unwrap();
-        ids.push(DocumentId {
-            index: kernel::IndexName::try_new(root.table).unwrap(),
-            key: event.key().clone(),
-        });
+/// The root's documents as a backfill builds them: each key a page reads its
+/// own document, built in batches as the ingest engine does.
+async fn backfill(builder: &PgDocumentBuilder, root: &Root) -> Vec<Document> {
+    let index = kernel::IndexName::try_new(root.table).unwrap();
+    let mut keys: Vec<RowKey> = Vec::new();
+    loop {
+        let page = builder
+            .keys(&index, keys.last(), KEY_PAGE)
+            .await
+            .unwrap();
+        let last = page.len() < KEY_PAGE;
+        keys.extend(page);
+        if last {
+            break;
+        }
     }
+    let ids: Vec<DocumentId> = keys
+        .into_iter()
+        .map(|key| DocumentId {
+            index: index.clone(),
+            key,
+        })
+        .collect();
     let mut documents = Vec::with_capacity(ids.len());
     for batch in ids.chunks(BACKFILL_BATCH) {
         documents.extend(builder.build_many(batch).await.unwrap());

@@ -7,12 +7,11 @@ The source abstractions for `flusso` — split into two independent halves, *wha
 | Item | Role |
 | --- | --- |
 | [`cdc`] | *What changed?* — pluggable change capture: a live stream of positioned [`ChangeEvent`](cdc::ChangeEvent)s, progress confirmed with [`confirm`](cdc::ChangeCapture::confirm) |
-| [`document`] | *What to build?* — turns a changed row (table + key) into the documents it affects, and assembles each |
+| [`document`] | *What to build?* — turns a changed row (table + key) into the documents it affects, assembles each, and pages an index's root keys for a backfill |
 | [`validate_indexes`] | Source-independent half of the schema/DB type check; a source supplies only a [`Catalog`] over its column types |
 | [`CaptureProvisioning`] | Reports whether a source can stream an index's tables and — when privileged — provisions the gap |
 | [`RowKey`] | A row's primary key as ordered column/value pairs |
 | [`ColumnUse`] | Which columns of a table a part of a document reads ([`root_columns`], [`relation_columns`]), and whether an update [touched](ColumnUse::touched_by) them |
-| [`SnapshotTable`] | A schema-qualified table to snapshot when seeding an index |
 | [`SourceSpec`] | The source's own view of what to build — the enabled indexes + their schemas, a subset of the top-level config |
 | [`SourceError`] / [`Result`] | The common error type |
 

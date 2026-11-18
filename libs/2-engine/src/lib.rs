@@ -12,7 +12,7 @@ mod stop;
 mod tests;
 
 pub use error::*;
-pub use ingest::{IngestEngine, document_id};
+pub use ingest::{IngestEngine, KEY_PAGE, document_id};
 pub use observer::*;
 pub use policy::{BatchPolicy, FailurePolicies, FailurePolicy};
 pub use sink_engine::{SinkControl, SinkEngine};

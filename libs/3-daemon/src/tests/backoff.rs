@@ -14,10 +14,13 @@ use futures::stream::{self, BoxStream, StreamExt};
 use kernel::{Envelope, IndexName, Position};
 use sink::{Sink, SinkError, SinkOptions, WriteReport};
 use source::cdc::{ChangeCapture, Continuity, LiveChange};
+use source::document::{Document, DocumentBuilder, DocumentId};
+use source::{RowImage, RowKey};
 use tokio::time::Instant;
 
 use super::{
-    FedSource, ScriptedSource, backendless_config, backends_for, primary, row_event, wait_until,
+    FedSource, ScriptedSource, backendless_config, backends_for, backends_with, primary, row_event,
+    wait_until,
 };
 use crate::Daemon;
 
@@ -324,15 +327,12 @@ async fn an_ingest_engine_replaying_an_unconfirmed_change_doubles_its_backoff() 
     assert_eq!(waits, [1, 2, 4, 8]);
 }
 
-/// A live stream that stays open, and a backfill that publishes its first
-/// page then fails at the same row every time it is served.
+/// A live stream that stays open.
 #[derive(Debug, Default)]
-struct BackfillFailingAtOneRow {
-    times: Arc<RunTimes>,
-}
+struct OpenSource;
 
 #[async_trait]
-impl ChangeCapture for BackfillFailingAtOneRow {
+impl ChangeCapture for OpenSource {
     async fn continuity(&self) -> source::Result<Continuity> {
         Ok(Continuity::Resumed)
     }
@@ -346,33 +346,77 @@ impl ChangeCapture for BackfillFailingAtOneRow {
     }
 
     fn confirm(&self, _: Position) {}
+}
 
-    async fn snapshot(
+/// A backfill that reads and publishes its first page, then fails at the
+/// second every time it is served.
+#[derive(Debug, Default)]
+struct BackfillFailingAtOnePage {
+    times: Arc<RunTimes>,
+}
+
+#[async_trait]
+impl DocumentBuilder for BackfillFailingAtOnePage {
+    async fn resolve(
         &self,
-        _: &[source::SnapshotTable],
-    ) -> source::Result<BoxStream<'static, source::Result<source::cdc::ChangeEvent>>> {
+        _: &kernel::TableName,
+        _: &RowKey,
+        _: Option<&RowImage>,
+        _: Option<&RowImage>,
+    ) -> source::Result<Vec<DocumentId>> {
+        Ok(Vec::new())
+    }
+
+    async fn build(&self, id: &DocumentId) -> source::Result<Document> {
+        Ok(Document::Upsert {
+            id: id.clone(),
+            body: kernel::GenericValue::Map(Default::default()),
+        })
+    }
+
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        vec![IndexName::try_new("users").unwrap()]
+    }
+
+    async fn keys(
+        &self,
+        _: &IndexName,
+        after: Option<&RowKey>,
+        limit: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        if after.is_some() {
+            self.times.failed.lock().unwrap().push(Instant::now());
+            return Err(source::SourceError::Connection(
+                "simulated failure at the second page".to_owned(),
+            ));
+        }
         self.times.opened.lock().unwrap().push(Instant::now());
-        let first_page = stream::iter([Ok(row_event(false, 10))]);
-        let times = Arc::clone(&self.times);
-        let failure = stream::once(async move {
-            times.failed.lock().unwrap().push(Instant::now());
-            Err(source::SourceError::Connection(
-                "simulated failure at row 11".to_owned(),
-            ))
-        });
-        Ok(Box::pin(first_page.chain(failure)))
+        let first = i64::try_from(limit).unwrap();
+        Ok((1..=first)
+            .map(|id| row_event(false, id).key().clone())
+            .collect())
     }
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_backfill_failing_at_the_same_row_doubles_its_backoff() {
-    let source = Arc::new(BackfillFailingAtOneRow::default());
-    let times = Arc::clone(&source.times);
-    let mut config = backendless_config();
-    config.batch.max_changes = std::num::NonZeroUsize::new(1);
+async fn a_backfill_failing_at_the_same_page_doubles_its_backoff() {
+    let documents = Arc::new(BackfillFailingAtOnePage::default());
+    let times = Arc::clone(&documents.times);
     let sink = Arc::new(ScriptedFlushes::new(&[]).unseeded());
-
-    run_until_opened(source, &times, 5, sink, config).await;
+    let backends = backends_with(
+        Arc::new(OpenSource),
+        documents,
+        vec![(primary(), sink, SinkOptions::default())],
+    );
+    let running = Daemon::new(backendless_config(), backends)
+        .start()
+        .await
+        .unwrap();
+    let run = tokio::spawn(running.run(std::future::pending::<()>()));
+    while times.opened() < 5 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    run.abort();
 
     assert_eq!(times.waits(), [1, 2, 4, 8]);
 }

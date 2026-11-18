@@ -15,8 +15,8 @@ use kernel::{
 };
 use sink::{Sink, SinkError, SinkOptions, WriteReport};
 use source::cdc::{ChangeEvent, LiveChange};
-use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
-use source::{RowImage, RowKey, SnapshotTable};
+use source::document::{Document, DocumentBuilder, DocumentId};
+use source::{RowImage, RowKey};
 use stream_channel::ChannelStream;
 use tokio::sync::{Notify, oneshot};
 
@@ -446,16 +446,6 @@ impl ChangeCapture for ScriptedSource {
     fn confirm(&self, position: Position) {
         self.confirmed.lock().unwrap().push(position);
     }
-
-    async fn snapshot(
-        &self,
-        _tables: &[SnapshotTable],
-    ) -> source::Result<BoxStream<'static, source::Result<ChangeEvent>>> {
-        self.events.lock().unwrap().push("snapshot".to_owned());
-        Ok(Box::pin(stream::iter(
-            [row_event(false, 10), row_event(false, 11)].map(Ok),
-        )))
-    }
 }
 
 /// A source whose first live stream yields one change and then fails. The
@@ -499,8 +489,11 @@ impl ChangeCapture for FlakySource {
 }
 
 /// Resolves each change to one `users` document; key value `2` is a delete.
-#[derive(Debug)]
-struct ScriptedDocuments;
+/// A backfill reads rows 10 and 11, recording `keys users` into `events`.
+#[derive(Debug, Default)]
+struct ScriptedDocuments {
+    events: Arc<Mutex<Vec<String>>>,
+}
 
 #[async_trait]
 impl DocumentBuilder for ScriptedDocuments {
@@ -529,14 +522,23 @@ impl DocumentBuilder for ScriptedDocuments {
         })
     }
 
-    fn backfill_scopes(&self) -> Vec<IndexScope> {
-        vec![IndexScope {
-            index: users(),
-            root: SnapshotTable {
-                db_schema: DatabaseSchema::try_new("public").unwrap(),
-                table: TableName::try_new("users").unwrap(),
-            },
-        }]
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        vec![users()]
+    }
+
+    async fn keys(
+        &self,
+        _: &IndexName,
+        after: Option<&RowKey>,
+        _: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        if after.is_some() {
+            return Ok(Vec::new());
+        }
+        self.events.lock().unwrap().push("keys users".to_owned());
+        Ok([10, 11]
+            .map(|id| row_event(false, id).key().clone())
+            .to_vec())
     }
 
     async fn index_mappings(&self) -> source::Result<Vec<IndexMapping>> {
@@ -671,9 +673,12 @@ fn backends(
     source: ScriptedSource,
     sinks: Vec<(SinkName, Arc<dyn Sink>, SinkOptions)>,
 ) -> Arc<MockBackends> {
+    let documents = Arc::new(ScriptedDocuments {
+        events: Arc::clone(&source.events),
+    });
     Arc::new(MockBackends {
         capture: Arc::new(source),
-        documents: Arc::new(ScriptedDocuments),
+        documents,
         sinks,
         built: Arc::new(Mutex::new(Vec::new())),
     })
@@ -859,7 +864,7 @@ async fn fresh_source_rebuilds_seeded_sinks_before_preparing() {
         vec![
             "reindex users".to_owned(),
             "prepare".to_owned(),
-            "snapshot".to_owned()
+            "keys users".to_owned()
         ]
     );
     assert_eq!(
@@ -1011,7 +1016,7 @@ async fn failed_ingest_engine_restarts_and_resumes_the_stream() {
             opened: AtomicU64::new(0),
             confirmed: Arc::clone(&confirmed),
         }),
-        documents: Arc::new(ScriptedDocuments),
+        documents: Arc::new(ScriptedDocuments::default()),
         sinks: vec![(
             primary(),
             Arc::clone(&sink) as Arc<dyn Sink>,
@@ -1138,9 +1143,17 @@ fn backends_for(
     capture: Arc<dyn ChangeCapture>,
     sinks: Vec<(SinkName, Arc<dyn Sink>, SinkOptions)>,
 ) -> Arc<MockBackends> {
+    backends_with(capture, Arc::new(ScriptedDocuments::default()), sinks)
+}
+
+fn backends_with(
+    capture: Arc<dyn ChangeCapture>,
+    documents: Arc<dyn DocumentBuilder>,
+    sinks: Vec<(SinkName, Arc<dyn Sink>, SinkOptions)>,
+) -> Arc<MockBackends> {
     Arc::new(MockBackends {
         capture,
-        documents: Arc::new(ScriptedDocuments),
+        documents,
         sinks,
         built: Arc::new(Mutex::new(Vec::new())),
     })

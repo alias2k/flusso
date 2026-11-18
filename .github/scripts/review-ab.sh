@@ -4,8 +4,8 @@
 #   review-ab.sh [<base>] [--pg 14,16,18] [--bench postgres,cases,pipeline]
 #                [--filter <criterion filter>] [--limit <percent>] [--rounds <n>]
 #                [--own-benches] [--bench-cpus LIST --server-cpus LIST | --no-pin]
-#   review-ab.sh --digest [<base>] [--pg …] [--filter <index regex>] [cpu flags]
-#   review-ab.sh --plans  [<base>] [--pg …] [--filter <case regex>]  [cpu flags]
+#   review-ab.sh --digest [<base>] [--pg …] [--filter <index regex>] [--own-review] [cpu flags]
+#   review-ab.sh --plans  [<base>] [--pg …] [--filter <case regex>]  [--own-review] [cpu flags]
 #   review-ab.sh --clean            # the warm cache (~/.cache/flusso/review-ab)
 #   review-ab.sh --clean-results    # the results under <head target>/review-ab
 #
@@ -53,7 +53,11 @@
 # base with cases.rs. Only a mode builds it, so the bench comparison never
 # needs a base that has what it uses; a mode refuses a base without one of
 # its `// review-ab requires:` lines, and --bench, --rounds, --limit and
-# --own-benches (exit 2):
+# --own-benches (exit 2). --own-review lays nothing over the base: each side
+# runs its own harness over its own cases.rs, so a change to what a form
+# calls (the backfill's key pages, #386) is compared against the base's own
+# way of doing it. The base must have the harness; the output format is the
+# same on both sides.
 #
 # - --digest: both sides build the `cases` roots' documents (`build`,
 #   `build_many` under 16 keys and 16+, a backfill); review-ab-digest.py
@@ -76,7 +80,7 @@ if [ -z "$pg_versions" ]; then
   echo "error: no \`pub const DEFAULT_TAG: &str = \"<major>-alpine\";\` in $test_postgres" >&2
   exit 2
 fi
-usage="usage: review-ab.sh [--digest | --plans] [<base>] [--pg $pg_versions] [--bench postgres,cases,pipeline] [--filter <f>] [--limit 5] [--rounds 3] [--own-benches] [--bench-cpus LIST --server-cpus LIST | --no-pin] | --clean | --clean-results"
+usage="usage: review-ab.sh [--digest | --plans [--own-review]] [<base>] [--pg $pg_versions] [--bench postgres,cases,pipeline] [--filter <f>] [--limit 5] [--rounds 3] [--own-benches] [--bench-cpus LIST --server-cpus LIST | --no-pin] | --clean | --clean-results"
 mode=bench
 bench_only_flags=()
 base=origin/main
@@ -85,6 +89,7 @@ filter=
 limit=5
 rounds=3
 own_benches=0
+own_review=0
 clean=0
 clean_results=0
 keep=5
@@ -100,6 +105,7 @@ while [ $# -gt 0 ]; do
     --limit) limit=${2:?$usage}; bench_only_flags+=(--limit); shift 2 ;;
     --rounds) rounds=${2:?$usage}; bench_only_flags+=(--rounds); shift 2 ;;
     --own-benches) own_benches=1; shift ;;
+    --own-review) own_review=1; shift ;;
     --bench-cpus) bench_cpus=${2:?$usage}; shift 2 ;;
     --server-cpus) server_cpus=${2:?$usage}; shift 2 ;;
     --no-pin) pin=0; shift ;;
@@ -127,6 +133,9 @@ if [ "$mode" != bench ]; then
     exit 2
   fi
   benches=review
+elif [ "$own_review" -eq 1 ]; then
+  echo "error: --own-review picks the \`review\` harness of --digest or --plans; the bench comparison has none" >&2
+  exit 2
 fi
 
 scripts=$(cd "$(dirname "$0")" && pwd)
@@ -210,10 +219,15 @@ done
 in_base() { git cat-file -e "$base_sha:$1" 2>/dev/null; }
 
 overlay=()
-if [ "$own_benches" -eq 0 ]; then
+if [ "$own_benches" -eq 0 ] && [ "$own_review" -eq 0 ]; then
   overlay=("${bench_file[postgres]}" "${bench_file[cases]}" "${bench_file[pipeline]}")
 fi
-if [ "$mode" != bench ]; then
+if [ "$own_review" -eq 1 ]; then
+  if ! in_base "$review_file"; then
+    echo "error: --own-review runs the base's own \`review\` harness, which base $base (${base_sha:0:12}) predates; drop --own-review" >&2
+    exit 2
+  fi
+elif [ "$mode" != bench ]; then
   overlay+=("$review_file")
   # Each `// review-ab requires: <text>` line of the harness names what it
   # needs from the crate's source; a base without it can't build the harness.
