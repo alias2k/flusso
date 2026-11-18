@@ -286,9 +286,10 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   stream keys its `Relation` (`stream.rs`'s `retype_domains`). A value the parser can't hold
   (`infinity`, numeric `NaN`) stays text on both sides and binds as `$n::text::<type>`
   (`sql::key_cast`): sqlx caches a statement by its text with its first parameter types, so a text
-  value bound where a typed one was prepared fails in binary format. The backfill reads each table
-  through **its own cursor name** (`cdc/backfill.rs`) for the same cache reason (a shared `FETCH`
-  decoded a later table's key with the first table's row description). **A resolved document id is
+  value bound where a typed one was prepared fails in binary format. For the same cache reason a
+  backfill's key page (`query::key_page_query`) is its own statement text per root table, key type
+  and bound type (the first page has no bound), so no page decodes another root's keys with its row
+  description. **A resolved document id is
   the root row's own key** (`resolve.rs`'s `reads_root_from_a_link` / `root_keys`): where a path
   ends on a link column's value (`row_link` of its first step) and the root key's equal values can
   render differently (`ColumnMeta::equal_is_identical`: `numeric`, floats, `citext`, a
@@ -1199,7 +1200,8 @@ once per relation; `Diagnostic.path` is the field path; and on the root table th
 and the `soft_delete` marker's column, `when` and `field` (issue #211), and the root key (issue #225:
 the table's single-column catalog key, `RootPrimaryKey` when none or composite; the declared
 `primary_key` must exist and be that key, `RootPrimaryKeyMismatch` otherwise, since the batched
-build matches the table's key on the declared column and writes only tombstones — `wal`'s
+build matches the table's key on the declared column and writes only tombstones live, and the
+backfill pages no such root (it writes nothing) — `wal`'s
 `a_root_primary_key_other_than_the_tables_writes_no_document`; and of a type `Catalog::reads_key`
 accepts, `UnsupportedKeyType` otherwise (issue #295: Postgres answers from the base type through
 domains against `document::value::KEY_TYPES`, the types `decode_key` reads — not `json`/`jsonb`;

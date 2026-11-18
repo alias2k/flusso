@@ -261,6 +261,7 @@ A comparison with a string, a number or another kind fails rather than answering
 - **Vacuum isn't held back.** The transaction's snapshot kept every dead row newer than it for the length of the backfill. A page's snapshot lasts one statement.
 - **One connection fewer** while a backfill runs, and a transaction-mode PgBouncer no longer pins a server connection for its length.
 - **Key order, not table order.** Documents are built in the order of their root key. Two indexes rooted at the same table each read it once, where 0.17 read it once for both.
+- **A root whose `primary_key` isn't its table's primary key gets nothing from a backfill.** 0.17 read such a root's rows by the table's key and wrote a tombstone for each (the build finds no row by the declared column). 0.18 reads no keys for it. `run` already refuses to start on it (`root_primary_key_mismatch`), so only a deployment started some other way sees the difference.
 - **Embedding the crates.** `ChangeCapture::snapshot`, `source::SnapshotTable` and `source::document::IndexScope` are gone. A `DocumentBuilder` implements `backfill_indexes()` and `keys(index, after, limit)`, both required, so a decorator can't silently backfill nothing: forward both to the builder it wraps.
 
 ## Several batches build at once
