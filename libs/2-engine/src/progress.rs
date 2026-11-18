@@ -70,7 +70,13 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use kernel::{IndexName, Position, SinkName};
 use source::cdc::Landed;
+use source::document::DocumentId;
 use stream::LaneKey;
+
+mod pending;
+
+use pending::Pending;
+pub use pending::Taken;
 
 /// Which of a lane's two levels to read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +90,14 @@ pub enum Level {
 /// The landing state of every lane. One per deployment; it outlives every
 /// engine run.
 pub struct Progress {
+    /// The newest position routed (marked): what an index with nothing
+    /// pending and a lane with nothing unlanded have every change through.
+    routed: Mutex<Option<Position>>,
+    /// Per index, the ids marked and not yet published (ADR 0012 stage 8a).
+    pending: BTreeMap<IndexName, Mutex<Pending>>,
+    /// The next publish sequence: a live item's key (and position) on its
+    /// lanes, in publish order across every index.
+    next_key: AtomicU64,
     registry: Mutex<Registry>,
     marks: BTreeMap<LaneKey, Marks>,
     /// Called after every registration: a fence waiter may pass now.
@@ -133,7 +147,14 @@ impl Progress {
             .into_iter()
             .map(|lane| (lane, Marks::default()))
             .collect();
+        let pending = marks
+            .keys()
+            .map(|lane| (lane.index.clone(), Mutex::new(Pending::default())))
+            .collect();
         Self {
+            routed: Mutex::new(None),
+            pending,
+            next_key: AtomicU64::new(0),
             registry: Mutex::new(Registry {
                 lanes: marks
                     .keys()
@@ -177,6 +198,79 @@ impl Progress {
             Some(lane) => Err(crate::EngineError::LaneNotInProgress(lane.to_string())),
             None => Ok(()),
         }
+    }
+
+    /// `ids` of `index` changed at `at` (the reader resolved a change to
+    /// them): they wait until a build takes them, and hold the index's lanes
+    /// before `at` until their build lands. Call in position order, then
+    /// [`route`](Self::route) the change.
+    pub fn mark(&self, index: &IndexName, ids: impl IntoIterator<Item = DocumentId>, at: Position) {
+        if let Some(pending) = self.pending.get(index) {
+            lock(pending).mark(ids, at);
+        }
+    }
+
+    /// The change at `at` is routed: its ids are marked (or it touched none).
+    pub fn route(&self, at: Position) {
+        {
+            let mut routed = lock(&self.routed);
+            *routed = Some(routed.map_or(at, |routed| routed.max(at)));
+        }
+        self.registered();
+    }
+
+    /// Take up to `max` of `index`'s waiting ids for a build, oldest first,
+    /// skipping ids whose build is in flight.
+    pub fn take(&self, index: &IndexName, max: usize) -> Option<Taken> {
+        lock(self.pending.get(index)?).take(max)
+    }
+
+    /// The build `token` of `index` is about to be sent to `lanes`: register
+    /// it on each (under a fresh publish sequence, returned as the item's
+    /// position), then release it from the index's floor. Send after.
+    pub fn publish_taken(&self, index: &IndexName, token: u64, lanes: &[LaneKey]) -> Position {
+        let key = Position::new(self.next_key.fetch_add(1, Ordering::Relaxed));
+        let Some(pending) = self.pending.get(index) else {
+            return key;
+        };
+        let oldest = lock(pending).oldest_of(token);
+        if let Some(oldest) = oldest {
+            let mut registry = lock(&self.registry);
+            for lane in lanes {
+                if let Some(registered) = registry.lanes.get_mut(lane) {
+                    registered.unlanded.push_back((key.seq, oldest));
+                    registered.unsearchable.push_back((key.seq, oldest));
+                }
+            }
+        }
+        // Registered before released: a reader reads the floor first, then
+        // the lanes, so the item is in one or the other at every instant.
+        lock(pending).published(token);
+        self.registered();
+        key
+    }
+
+    /// The build `token` of `index` won't be published: its ids wait again.
+    pub fn give_back(&self, index: &IndexName, token: u64) {
+        if let Some(pending) = self.pending.get(index) {
+            lock(pending).give_back(token);
+        }
+    }
+
+    /// Every build in flight, of every index, given back: at the end of an
+    /// engine's run, and at the start of the next (a run that was aborted).
+    pub fn give_back_all(&self) {
+        for pending in self.pending.values() {
+            lock(pending).give_back_all();
+        }
+    }
+
+    /// How many ids wait, over every index.
+    pub fn waiting(&self) -> usize {
+        self.pending
+            .values()
+            .map(|pending| lock(pending).waiting())
+            .sum()
     }
 
     /// Call `listener` after every registration (one listener: the fence's).
@@ -257,14 +351,36 @@ impl Progress {
         lanes: impl IntoIterator<Item = &'a LaneKey>,
         level: Level,
     ) -> Option<Landed> {
+        // Routed, then the floors, then the lanes: a build is registered on
+        // its lanes before it leaves its index's floor, so a position routed
+        // by the copy below is in one of the two whenever it is read.
+        let routed = *lock(&self.routed);
+        let lanes: Vec<&LaneKey> = lanes.into_iter().collect();
+        let mut floors: BTreeMap<&IndexName, Option<Position>> = BTreeMap::new();
+        for lane in &lanes {
+            if !floors.contains_key(&lane.index) {
+                let floor = self.pending.get(&lane.index).and_then(|p| lock(p).floor());
+                floors.insert(&lane.index, floor);
+            }
+        }
         let mut registry = lock(&self.registry);
         let mut least: Option<Landed> = None;
         for lane in lanes {
             let marks = self.marks.get(lane)?;
             let registered = registry.lanes.get_mut(lane)?;
-            let answer = match registered.outstanding(marks, level) {
+            let floor = floors.get(&lane.index).copied().flatten();
+            let outstanding = registered.outstanding(marks, level);
+            let oldest = match (outstanding, floor) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            let newest = match (registered.newest, routed) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            };
+            let answer = match oldest {
                 Some(oldest) => Landed::Before(oldest),
-                None => registered.newest.map_or(Landed::Idle, Landed::Through),
+                None => newest.map_or(Landed::Idle, Landed::Through),
             };
             least = Some(match least {
                 Some(least) if bound(least) <= bound(answer) => least,

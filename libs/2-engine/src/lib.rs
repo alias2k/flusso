@@ -18,6 +18,6 @@ pub use error::*;
 pub use ingest::{IngestEngine, KEY_PAGE, document_id};
 pub use observer::*;
 pub use policy::{BatchPolicy, FailurePolicies, FailurePolicy};
-pub use progress::{Level, Listener, Progress};
+pub use progress::{Level, Listener, Progress, Taken};
 pub use sink_engine::{SinkControl, SinkEngine};
 pub use stop::{Stop, drain_lanes};
