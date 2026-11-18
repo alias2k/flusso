@@ -139,6 +139,30 @@ git checkout libs/2-adapters/source-postgres/benches/fixtures/pgoutput.bin   # r
 - **Designer.** A proptest round-trip (`apps/design/tests/roundtrip.rs`: random `IndexSchema` through codegen, parse, convert, identity) plus the CI job: Prettier, type-aware ESLint, an i18n completeness check, and a dist-drift guard that the committed SPA matches a fresh build.
 - **Trybuild UI tests** in `flusso-query-derive` compare exact compiler diagnostics, which is why `rust-toolchain.toml` pins the channel. Re-bless after a bump with `TRYBUILD=overwrite cargo test -p flusso-query-derive`.
 
+## Alert rules and the chart
+
+Not in CI yet. Run them by hand when you touch `dev/prometheus/rules/` or `deploy/helm/flusso/`; neither tool needs installing, the images carry them.
+
+```sh
+# The dev rules: syntax, then the rule unit tests (flusso.rules.test.yml).
+docker run --rm -v "$PWD/dev/prometheus/rules:/rules:ro" --entrypoint promtool \
+  prom/prometheus:v3.5.0 check rules /rules/flusso.rules.yml
+docker run --rm -v "$PWD/dev/prometheus/rules:/rules:ro" --entrypoint promtool \
+  prom/prometheus:v3.5.0 test rules /rules/flusso.rules.test.yml
+
+# The chart, with the PrometheusRule on; then its rendered rules through promtool.
+docker run --rm -v "$PWD/deploy/helm/flusso:/chart:ro" alpine/helm:3.16.4 \
+  lint /chart --set prometheusRule.enabled=true
+docker run --rm -v "$PWD/deploy/helm/flusso:/chart:ro" alpine/helm:3.16.4 \
+  template flusso /chart --set prometheusRule.enabled=true \
+  --show-only templates/prometheusrule.yaml \
+  | sed '1,/^spec:$/d; s/^  //' \
+  | docker run --rm -i --entrypoint sh prom/prometheus:v3.5.0 \
+      -c 'cat > /tmp/rules.yml && promtool check rules /tmp/rules.yml'
+```
+
+`flusso.rules.test.yml` holds the alert's cases: a stalled lane fires 5 minutes after passing 10, a sibling that keeps landing doesn't, and 2 GiB of WAL fires while the lane is young.
+
 ## Where this shows up
 
 - [Releasing](releasing.md) for what a green build feeds.

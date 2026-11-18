@@ -117,3 +117,16 @@ A page "A lane is stalled":
   - `helm lint` and `helm template` (`alpine/helm:3.16.4`) with `prometheusRule.enabled=true`.
 - **The e2e is in the `fence` binary's stalled-index block.** The audit sink gates only the `others` index. After 3.5 s that lane's age is at least 2 s, the `things` lane on the same sink stays at 0, `pinned_by` is `others → audit`, and once the gate opens the lane recovers and `pinned_by` is null.
 - **Why not an OpenSearch write block:** until stage 9 a write failure stops the sink's whole run, so its sibling lanes would stall too. Stage 9's per-lane failure is what will make a write-blocked index stall alone; its e2e should assert the sibling at 0 then.
+
+## Commits and checks
+
+| piece | commit | what was run | result |
+| --- | --- | --- | --- |
+| design | `092362df` | n/a | n/a |
+| stall age, WAL behind, the pinning lane (`stall.rs`, `/status`, gauges) | `c60fab73` | `cargo nextest run -p flusso-daemon -p flusso-cli` | 164 passed |
+| the alert, the Helm `PrometheusRule`, the dashboard, the runbook | `ab11f58e` | `promtool check rules` + `promtool test rules dev/prometheus/rules/flusso.rules.test.yml` (`prom/prometheus` image); `helm lint` + `helm template --set prometheusRule.enabled=true` (`alpine/helm:3.16.4`), the render through `promtool check rules` | rules valid, 3 rule tests pass, lint clean |
+| the e2e (`fence` binary, a gated lane on the audit sink) | `44233c0d` | `cargo nextest run -p flusso-daemon --run-ignored all -E 'binary(fence)'` | 2 passed |
+| `/status` and gauge tests | `063bd120` | `cargo nextest run -p flusso-daemon -p flusso-cli` | 164 passed |
+| as built | `bafadd0c` | docs only | n/a |
+
+The exact promtool and helm commands are in `docs/src/contribute/testing.md` ("Alert rules and the chart").

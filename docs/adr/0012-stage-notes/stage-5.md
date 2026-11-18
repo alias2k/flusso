@@ -237,3 +237,24 @@ Peak RSS before the budget, at `builds = 4`: 348–371 MiB (stage 4). At `builds
 **Not measured:**
 
 - held bytes in the three-round runs (only in the one earlier run above).
+
+## Review fixes: item, commit, check
+
+The stage-5 review's items, each with its commit and what was run on it. "Whole packages" is `cargo nextest run -p flusso-engine -p flusso-daemon -p flusso-cli -p flusso-stream-channel`, run at `2612085a`: 363 passed.
+
+| item | commit | what was run | result |
+| --- | --- | --- | --- |
+| 1. a release lost between the check and the wish | `38ff643a` | `cargo nextest run -p flusso-engine` (with the new `a_release_between_the_wish_and_the_check_is_not_lost`) | 175 passed |
+| 2. the engine e2e under a budget | `95e4185c` | `FLUSSO_E2E_BUDGET_KIB=16384 cargo nextest run --run-ignored all -E 'binary(pipeline) \| binary(backfill) \| binary(keyset_backfill) \| binary(wal_release)'` | 32 passed (17 + 2 + 5 + 9) |
+| 3. released to zero (dropped engine, abandoned snapshot at a stop, ingest restart with charged lanes; the rig asserts it for every engine) | `240897f6` | `cargo nextest run -p flusso-engine` | 175 passed |
+| 4. the stated bound | `4931f25e` | docs only (`CLAUDE.md`, this file, `contribute/pipeline.md`) | n/a |
+| 5. `metrics.md`'s Prometheus series | `99ac60f4` | `cargo nextest run -p flusso-cli -E 'test(the_memory_budget_is_exported_by_work)'` | 1 passed |
+| 6. the `[stream] capacity` deprecation | `3bf541c4` | `cargo nextest run -p flusso-stream-channel -p flusso-cli -E 'test(deprecated)'` | 2 passed |
+| 7a. the index name in the walk | `f0c48bcb` | `cargo nextest run -p flusso-engine -E 'test(a_document_counts_its_index_name) \| binary(heap_walk)'` | 2 passed |
+| 7b. what the budget doesn't count | `24488ef0` | docs only; `mdbook build docs`, anchors checked | builds |
+| 7c. the cgroup / host memory warning | `42e55893` | `cargo nextest run -p flusso-cli -E 'test(memory::)'` | 4 passed |
+| 7d. the `held()` race | `38ff643a` | doc comment | n/a |
+| 8. a merged write releases each part once | `0446fcec` | `cargo nextest run -p flusso-engine -E 'test(each_part_of_a_merged_write)'` | 1 passed |
+| the three-round table | `2612085a` | `run4.sh`: `flusso-bench --scenario {reference,complex} --scale default` at 512 / 128 / 32 MiB, 3 rounds | 18 runs, all exit 0 |
+
+Also run at `2612085a`: `cargo clippy --workspace`, `cargo check --workspace --all-targets --features flusso-source-postgres/bench,flusso-sink-opensearch/bench`, `cargo check -p flusso-cli --no-default-features`, `cargo fmt --all --check`: all clean.
