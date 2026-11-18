@@ -61,6 +61,28 @@ pub enum Visibility {
     Deferred,
 }
 
+impl Visibility {
+    /// The later of two: what a write holding both parts reports.
+    #[must_use]
+    pub fn later(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Deferred, _) | (_, Self::Deferred) => Self::Deferred,
+            (Self::Within(a), Self::Within(b)) => Self::Within(a.max(b)),
+            (Self::Within(a), Self::Immediate) | (Self::Immediate, Self::Within(a)) => {
+                Self::Within(a)
+            }
+            (Self::Immediate, Self::Immediate) => Self::Immediate,
+        }
+    }
+}
+
+fn sum_bytes(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+    }
+}
+
 impl WriteReport {
     /// A report with no rejections — everything in the write was applied.
     pub fn clean() -> Self {
@@ -188,6 +210,53 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// [`ensure_index`](Self::ensure_index), which is where the target is
     /// rebuilt.
     async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> Result<WriteReport>;
+
+    /// Write several lane items as **one** write: the engine merges items that
+    /// are ready at once (ADR 0012 stage 7), so a burst over many indexes goes
+    /// out in requests of about a batch, not one per index. `parts` are the
+    /// items' envelopes, each part in its own order; parts never share a
+    /// document. Everything [`write`](Self::write) promises holds for the whole
+    /// call, as one write: a rejection names its document's index, an `Err`
+    /// fails every part, `caught_up` covers what returned before the call.
+    ///
+    /// The default writes each part with [`write`](Self::write), in order,
+    /// passing `caught_up` to the last only (the earlier ones have returned
+    /// before it, so it covers them), and folds the reports: rejections
+    /// together, bytes summed, visibility the latest of them, or `Immediate`
+    /// when the caught-up last part reported it. Correct for any sink; a sink
+    /// that can send several parts in one request (OpenSearch's `_bulk`)
+    /// overrides it.
+    async fn write_parts(&self, parts: &[&[Envelope]], caught_up: bool) -> Result<WriteReport> {
+        let Some((last, earlier)) = parts.split_last() else {
+            return self.write(&[], caught_up).await;
+        };
+        let mut folded = WriteReport::clean();
+        let mut bytes: Option<u64> = None;
+        for part in earlier {
+            let report = self.write(part, false).await?;
+            folded.visibility = folded.visibility.later(report.visibility);
+            bytes = sum_bytes(bytes, report.bytes);
+            folded.rejected.extend(report.rejected);
+        }
+        let report = self.write(last, caught_up).await?;
+        folded.visibility = if caught_up && report.visibility == Visibility::Immediate {
+            Visibility::Immediate
+        } else {
+            folded.visibility.later(report.visibility)
+        };
+        folded.bytes = sum_bytes(bytes, report.bytes);
+        folded.rejected.extend(report.rejected);
+        Ok(folded)
+    }
+
+    /// The most documents one write should hold, if the sink splits larger
+    /// ones into several requests (the OpenSearch sink's `batch_size`). The
+    /// engine merges items only up to it, so a merged write is not then cut
+    /// into a full request and a small one. `None`: no limit of the sink's
+    /// own.
+    fn write_limit(&self) -> Option<usize> {
+        None
+    }
 
     /// Whether `index` has already been seeded — its initial backfill completed
     /// and durably applied here. The sink engine asks this at startup, after
