@@ -8,7 +8,7 @@ OpenSearch accepted a bulk request but refused one document: a value that doesn'
 
 ## Steps
 
-1. **Know your policy.** The default `on_error = "stop"` halts the run on the first rejection and leaves the batch unconfirmed, so it's redelivered on restart and the same document stops it again. That's deliberate: dropping data is opt-in. With several [writes](../reference/config-toml.md#concurrency) per sink, batches already in flight beside the rejected one can land before the sink stops; after that the rejected batch is retried alone, so nothing further lands until it's fixed.
+1. **Know your policy.** The default `on_error = "stop"` halts the run on the first rejection and leaves the batch unconfirmed, so it's redelivered on restart and the same document stops it again. That's deliberate: dropping data is opt-in. With several [writes](../reference/config-toml.md#concurrency) per sink, batches for other documents that were written beside the rejected one, or started while its write was in flight, can land before the sink stops; the position stays before the rejected batch. After that the rejected batch is retried alone, on every restart and every start of flusso, so nothing further lands until it's fixed.
 
 2. **Read the error.** With `stop`, the log names the index, the document id, and OpenSearch's reason. `/status` shows `phase: stopped` and `last_error`. Fix the source row or the schema (a `custom` type, a `default`, a wider type), then restart. A `Limit of total fields … exceeded` reason is fixed in config instead: raise the limit with [`index_settings`](../reference/sink-opensearch.md#index-settings), restart, and [reindex](reindex.md).
 
