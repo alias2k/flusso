@@ -60,6 +60,10 @@ _Avoid_: channel, topic, subject, partition
 The unit a lane carries and a sink engine acknowledges: the envelopes one ingest commit built, in build order, with the position of the last change it covers. A batch with no envelopes still carries its position.
 _Avoid_: chunk, bundle, message group
 
+**Build gate**:
+What hands out the ingest engine's `builds` build slots: live batches first, except every fourth slot a live and a backfill batch both wait for. A batch is granted only when no running build holds one of its documents, and built batches are published in the order they were granted.
+_Avoid_: semaphore, permit pool, scheduler
+
 **Snapshot complete**:
 The lane marker that follows the last batch of a snapshot, telling the sink engine it may record the index as seeded.
 _Avoid_: end marker, EOF, sentinel

@@ -54,10 +54,10 @@ The scope labels (`otel_scope_name`, `otel_scope_version`) are dropped; there is
 
 | `stage` | Task | `work` | `sink` | What the time is |
 | --- | --- | --- | --- | --- |
-| `idle` | ingest | | | Nothing in flight and nothing taken: waiting on the source with no snapshot running. |
-| `page` | ingest | `backfill` | | Getting a backfill's keys: waiting for the next page of root keys and buffering them. While a backfill runs, the ingest task's waits are `page`, not `idle`. |
+| `idle` | ingest | | | Nothing in flight and nothing taken: waiting on the source with no snapshot running and no build running. |
+| `page` | ingest | `backfill` | | Getting a backfill's keys: waiting for the next page of root keys and buffering them. While a backfill runs, the ingest task's waits are `page`, not `idle`; while a build runs, they are neither (the `build` covers them). |
 | `resolve` | ingest | `live` | | Taking the changes the stream has ready and resolving each to the documents it touches: the reverse lookups. |
-| `build` | ingest | both | | Building a batch's documents. |
+| `build` | ingest | both | | Building a batch's documents, from its start to its return. Reported once per build, so with `builds` above 1 several overlap and the rate passes 1. |
 | `publish` | ingest | both | | Handing a built batch to every lane, until the last one took it: for a snapshot batch, copying each lane's slice of its documents first. High means a lane is full (`lane_wait` says which), or, in a backfill with several sinks, the copies. |
 | `lane_wait` | ingest | both | ✓ | The same, per lane: names the full one. Ingest time, labelled with the sink it waited on; overlaps `publish`. |
 | `snapshot` | ingest | `backfill` | | Opening a backfill (gathering the requests it serves) and closing it (`SnapshotComplete` to each lane, acknowledging the requests). |

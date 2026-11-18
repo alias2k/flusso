@@ -755,7 +755,7 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   commit is seen in `SyncRep` (`standbys_in_force`): whether a commit waits is a flag the
   checkpointer sets on reload, after sessions see the setting, and an unforced probe table
   creation hung on a session the reload signal hadn't reached.
-- **Built once; build order is delivery order.** A batch buffers `(Position, ChangeEvent)`s,
+- **Built once; grant order is delivery order.** A batch buffers `(Position, ChangeEvent)`s,
   resolves each to `DocumentId`s, dedups, then `build_many` assembles each touched document
   **once** for all sinks. A backfill (a *snapshot*) goes through the same build but is **never
   resolved** (issue #385): it walks each requested index's root keys in pages
@@ -772,9 +772,29 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   `ingest/snapshot.rs`'s `Walk`, not in the `select!`, so a live change winning it drops no page. Resolving it like a live change ran a reverse query per related path and row
   and rebuilt related indexes' parents in every batch a child row landed in. They are published
   *without* a position and *only* to the requesting lanes, ending with `LaneItem::SnapshotComplete`;
-  snapshot and live builds are serialized on the one ingest task, so on any lane a later message is
-  the newer state; the sink engine keeps that order **per document** while it writes several items
-  at once (admission, below), so sinks need no versioning. Guards:
+  up to `builds` batches build at once on the one ingest task (`[concurrency] builds` /
+  `--builds` / `FLUSSO_BUILDS`, default 4 via `daemon::DEFAULT_BUILDS`, at most 32;
+  `IngestEngine::with_builds`, default 1; ADR 0012 stage 4, `ingest/builds.rs`), **published in
+  grant order** through a reorder queue of at most `2 × builds` slots (`SnapshotComplete` takes a
+  slot of its own), so lane order is grant order and live positions only grow. A batch is granted
+  only when no running build holds one of its documents (sorted 64-bit id hashes; nothing hashed at
+  `builds = 1`), so a later build of a document starts after the earlier one returned, reads newer
+  state, and lands later. Live goes first except every fourth contested grant (the counter moves
+  only on contested grants); a second live build waits for a full batch. A build is polled once
+  where it is granted and spawned only if that doesn't finish it (mocks never spawn); spawned ones
+  are awaited through `Flights`. A failed build (or a `Document::Failed` under `stop`) stops
+  grants; slots before it are published, nothing from it on, and the run awaits every running build
+  before returning the error. The stop and the stream's end `settle`: the buffered live batch once
+  its ids are free, then every build, in order. The builder's pool is `builds + 2`
+  (`backends.rs`); `resolve` and key pages run beside the builds. The sink engine keeps that order
+  **per document** while it writes several items at once (admission, below), so sinks need no
+  versioning. Guards: `ingest::tests` (`random_schedules_keep_every_document_in_order`, seeded,
+  `FLUSSO_BUILD_SCHEDULE_SEED` replays; `builds_run_at_once_up_to_the_setting`;
+  `a_document_is_never_built_twice_at_once`; `every_fourth_contested_grant_goes_to_the_backfill`;
+  `a_failed_build_publishes_nothing_after_it`;
+  `a_document_failed_under_stop_publishes_nothing_after_it_and_skip_goes_on`;
+  `a_stop_finishes_the_builds_in_flight_and_starts_no_other`;
+  `one_build_at_a_time_builds_and_publishes_as_before`, recorded from the serial engine),
   `builds_a_repeatedly_touched_document_once_per_batch`, `snapshots_go_only_to_the_requesting_lane`,
   `tests::snapshot`'s `a_backfill_of_related_indexes_builds_each_document_once` /
   `a_backfill_beside_seeded_related_indexes_writes_them_nothing` /
@@ -2124,7 +2144,7 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 
 | To work on… | Go to |
 | --- | --- |
-| The sync loops / batching / ack ordering | `libs/2-engine/src/` — `ingest.rs` (`IngestEngine`: batching, dedup, build once, publish, request coalescing, snapshots, watermark confirm), `sink_engine.rs` (`SinkEngine`: `stage`, reindex staging) with `sink_engine/writes.rs` (the run: window, admission, live-first selection, barriers, concurrent writes, failure policies) and `sink_engine/fences.rs` (applied/searchable in position order), `sink_engine/flights.rs` (the writes in flight, polled when woken), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` (drives both engines over a real `ChannelStream`) |
+| The sync loops / batching / ack ordering | `libs/2-engine/src/` — `ingest.rs` (`IngestEngine`: the run loop; `ingest/live.rs` batching and dedup, `ingest/builds.rs` the build gate and the grant-ordered slots, `ingest/commit.rs` granting and publishing, `ingest/snapshot.rs` request coalescing and the key walk, `ingest/confirm.rs` watermark confirm), `sink_engine.rs` (`SinkEngine`: `stage`, reindex staging) with `sink_engine/writes.rs` (the run: window, admission, live-first selection, barriers, concurrent writes, failure policies) and `sink_engine/fences.rs` (applied/searchable in position order), `sink_engine/flights.rs` (the writes in flight, polled when woken), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` (drives both engines over a real `ChannelStream`) |
 | Pipeline observability trait (`Observer`, `BuildStats`/`CommitStats`, `EngineId`, `FanOut`) | `libs/2-engine/src/observer.rs` |
 | Script fields (Rhai): compile, run, strip input-only fields, the `DocumentBuilder` decorator, the sandbox, value conversion, typed dates | `libs/2-script/src/` — `scripts.rs` (`Scripts`: plan + apply), `builder.rs` (`ScriptedBuilder`), `sandbox.rs`, `value.rs`, `dates.rs` + `dates/library.rs` (the date types + their Rhai registration), `view.rs` (a `map` of dates typed for scripts), `input.rs` (JSON typed by the schema); `benches/scripted.rs`; CLI `commands/script.rs` (`flusso script run`), `telemetry/script_log.rs` |
 | Daemon (domain): supervisor, `DaemonControl`, per-sink `Status`, `StatusObserver`, lag poll, the fence | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `supervise.rs` (stage → spawn → restart with backoff; `DaemonControl::reindex`), `backends.rs` (`Backends` trait + `SourceParts`/`SinkParts` seam), `observer.rs`, `status.rs`, `lag.rs`, `fence.rs` (`Fence`/`FenceRequest`/`FenceOutcome`/`FenceObserver`) |
