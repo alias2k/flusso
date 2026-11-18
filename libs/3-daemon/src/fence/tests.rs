@@ -70,9 +70,9 @@ impl ChangeCapture for NumberedSource {
 
     fn confirm(&self, position: Position) {
         let mut state = self.state.lock().unwrap();
-        let reached = reach(&state, Some(position.0));
+        let reached = reach(&state, Some(position.seq));
         state.floor = state.floor.max(reached);
-        state.entries = state.entries.split_off(&(position.0 + 1));
+        state.entries = state.entries.split_off(&(position.seq + 1));
     }
 
     fn parse_position(&self, text: &str) -> source::Result<SourcePosition> {
@@ -86,7 +86,7 @@ impl ChangeCapture for NumberedSource {
             return None;
         }
         let state = self.state.lock().unwrap();
-        Some(SourcePosition(reach(&state, position.map(|p| p.0))))
+        Some(SourcePosition(reach(&state, position.map(|p| p.seq))))
     }
 
     fn on_advance(&self, listener: AdvanceListener) {
@@ -156,7 +156,7 @@ async fn a_fence_passes_once_the_sink_applied_the_position() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!waiting.is_finished(), "the change is not applied yet");
 
-    observer.on_position_applied(&sink("primary"), Position(0));
+    observer.on_position_applied(&sink("primary"), Position::new(0));
     assert_eq!(waiting.await.unwrap(), reached("20"));
 }
 
@@ -178,7 +178,7 @@ async fn a_fence_times_out_reporting_how_far_it_got() {
     let (fence, source, observer) = fence(&["primary"]);
     source.emit(0, 10);
     source.emit(1, 20);
-    observer.on_position_applied(&sink("primary"), Position(0));
+    observer.on_position_applied(&sink("primary"), Position::new(0));
 
     let started = Instant::now();
     assert_eq!(
@@ -192,10 +192,10 @@ async fn a_fence_times_out_reporting_how_far_it_got() {
 async fn searchable_trails_applied_until_the_engine_reports_it() {
     let (fence, source, observer) = fence(&["primary"]);
     source.emit(0, 20);
-    observer.on_position_applied(&sink("primary"), Position(0));
+    observer.on_position_applied(&sink("primary"), Position::new(0));
     // Every sink acknowledged, so the source forgets the change: the fence
     // must not take "nothing outstanding" for "searchable".
-    source.confirm(Position(0));
+    source.confirm(Position::new(0));
 
     assert_eq!(
         fence.wait(&request("20", FenceLevel::Applied, None)).await,
@@ -211,7 +211,7 @@ async fn searchable_trails_applied_until_the_engine_reports_it() {
         timed_out("0"),
     );
 
-    observer.on_position_searchable(&sink("primary"), Position(0));
+    observer.on_position_searchable(&sink("primary"), Position::new(0));
     assert_eq!(
         fence
             .wait(&request("20", FenceLevel::Searchable, None))
@@ -224,8 +224,8 @@ async fn searchable_trails_applied_until_the_engine_reports_it() {
 async fn a_stalled_sibling_blocks_an_all_sinks_fence_but_not_one_on_the_healthy_sink() {
     let (fence, source, observer) = fence(&["audit", "primary"]);
     source.emit(0, 20);
-    observer.on_position_applied(&sink("primary"), Position(0));
-    observer.on_position_searchable(&sink("primary"), Position(0));
+    observer.on_position_applied(&sink("primary"), Position::new(0));
+    observer.on_position_searchable(&sink("primary"), Position::new(0));
 
     assert_eq!(
         fence
@@ -244,8 +244,8 @@ async fn a_stalled_sibling_blocks_an_all_sinks_fence_but_not_one_on_the_healthy_
 async fn idle_source_progress_wakes_a_waiter() {
     let (fence, source, observer) = fence(&["primary"]);
     source.emit(0, 20);
-    observer.on_position_applied(&sink("primary"), Position(0));
-    observer.on_position_searchable(&sink("primary"), Position(0));
+    observer.on_position_applied(&sink("primary"), Position::new(0));
+    observer.on_position_searchable(&sink("primary"), Position::new(0));
 
     // The client's position lies past its commit: unrelated WAL followed it.
     let waiting = tokio::spawn({
@@ -267,7 +267,7 @@ async fn idle_source_progress_wakes_a_waiter() {
 async fn a_reopened_source_stream_never_walks_a_sink_back() {
     let (fence, source, observer) = fence(&["primary"]);
     source.emit(0, 20);
-    observer.on_position_applied(&sink("primary"), Position(0));
+    observer.on_position_applied(&sink("primary"), Position::new(0));
     assert_eq!(
         fence.wait(&request("20", FenceLevel::Applied, None)).await,
         reached("20")
@@ -309,9 +309,9 @@ fn positions_report_each_sink_and_the_slowest() {
     let (fence, source, observer) = fence(&["audit", "primary"]);
     source.emit(0, 20);
     source.emit(1, 30);
-    observer.on_position_applied(&sink("primary"), Position(1));
-    observer.on_position_applied(&sink("audit"), Position(0));
-    observer.on_position_searchable(&sink("audit"), Position(0));
+    observer.on_position_applied(&sink("primary"), Position::new(1));
+    observer.on_position_applied(&sink("audit"), Position::new(0));
+    observer.on_position_searchable(&sink("audit"), Position::new(0));
 
     let positions = fence.positions();
     assert_eq!(positions.applied.as_deref(), Some("20"));
@@ -335,7 +335,7 @@ fn the_status_document_carries_the_positions() {
     .with_fence(fence);
 
     source.emit(0, 20);
-    observer.on_position_applied(&sink("primary"), Position(0));
+    observer.on_position_applied(&sink("primary"), Position::new(0));
 
     let json = serde_json::to_value(status.snapshot()).unwrap();
     assert_eq!(json["applied_position"], "20");

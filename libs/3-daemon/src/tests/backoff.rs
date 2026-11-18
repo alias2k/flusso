@@ -110,7 +110,7 @@ async fn a_sink_engine_that_made_progress_restarts_after_one_second_again() {
 
     feed.send(row_event(false, 1)).await.unwrap();
     wait_until("the first batch to be confirmed after a restart", || {
-        confirmed.lock().unwrap().contains(&Position(0))
+        confirmed.lock().unwrap().contains(&Position::new(0))
     })
     .await;
     feed.send(row_event(false, 2)).await.unwrap();
@@ -242,7 +242,7 @@ impl ChangeCapture for ScriptedStreams {
                     *next += 1;
                     *next - 1
                 });
-                let change = stream::iter([Ok((Position(position), row_event(false, 1)))]);
+                let change = stream::iter([Ok((Position::new(position), row_event(false, 1)))]);
                 let pause = stream::once(tokio::time::sleep(after)).filter_map(|()| async { None });
                 Box::pin(change.chain(pause).chain(self.times.failure()))
             }

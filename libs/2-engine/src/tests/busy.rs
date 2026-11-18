@@ -197,7 +197,7 @@ async fn a_batch_is_not_acked_until_its_busy_documents_are_written() {
         "a busy refusal never reaches on_error"
     );
     assert_eq!(requests.lock().unwrap().len(), 3);
-    assert_eq!(stream.watermark(), Some(Position(0)));
+    assert_eq!(stream.watermark(), Some(Position::new(0)));
 }
 
 fn item(position: u64, ids: &[&str]) -> stream::LaneItem {
@@ -208,13 +208,13 @@ fn item(position: u64, ids: &[&str]) -> stream::LaneItem {
                 super::users(),
                 *id,
                 kernel::GenericValue::Map(Default::default()),
-                Some(Position(position)),
+                Some(Position::new(position)),
                 chrono::Utc::now(),
             )
         })
         .collect();
     stream::LaneItem::Batch(stream::Batch {
-        position: Some(Position(position)),
+        position: Some(Position::new(position)),
         changes: 1,
         envelopes: envelopes.into(),
     })
@@ -250,7 +250,7 @@ async fn a_busy_item_holds_back_only_the_items_sharing_its_documents() {
     let (_control, mut rx) = tokio::sync::mpsc::channel(1);
     let run = tokio::spawn(async move { engine.run(&mut rx).await });
     lane.publish(item(0, &["0"])).await.unwrap();
-    wait_for(|| stream.watermark() == Some(Position(0))).await;
+    wait_for(|| stream.watermark() == Some(Position::new(0))).await;
 
     lane.publish(item(1, &["1", "3"])).await.unwrap();
     lane.publish(item(2, &["2"])).await.unwrap();
@@ -258,7 +258,7 @@ async fn a_busy_item_holds_back_only_the_items_sharing_its_documents() {
     wait_for(|| requests.lock().unwrap().contains(&vec!["2".to_owned()])).await;
     assert_eq!(
         stream.watermark(),
-        Some(Position(0)),
+        Some(Position::new(0)),
         "1 is still refused as busy"
     );
 
@@ -282,5 +282,5 @@ async fn a_busy_item_holds_back_only_the_items_sharing_its_documents() {
             .unwrap()
     };
     assert!(at(&["2"]) < at(&["1", "4"]));
-    assert_eq!(stream.watermark(), Some(Position(3)));
+    assert_eq!(stream.watermark(), Some(Position::new(3)));
 }

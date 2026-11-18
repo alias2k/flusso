@@ -159,7 +159,7 @@ impl ChangeCapture for BurstCapture {
         let changes: Vec<SourceResult<LiveChange>> = (1..=i32::try_from(self.count).unwrap())
             .map(|id| {
                 Ok((
-                    Position(u64::from(id.unsigned_abs())),
+                    Position::new(u64::from(id.unsigned_abs())),
                     ChangeEvent::Upsert {
                         table: table("users"),
                         key: row_key(id),

@@ -264,7 +264,7 @@ fn upsert(id: &str) -> Envelope {
         IndexName::try_new("users").unwrap(),
         id,
         document,
-        Some(Position(0)),
+        Some(Position::new(0)),
         chrono::Utc::now(),
     )
 }
@@ -573,7 +573,7 @@ async fn every_chunk_of_a_caught_up_write_refreshes_what_it_wrote() {
             IndexName::try_new(index).unwrap(),
             id,
             GenericValue::Map(BTreeMap::new()),
-            Some(Position(0)),
+            Some(Position::new(0)),
             chrono::Utc::now(),
         )
     };

@@ -108,7 +108,7 @@ impl ChangeCapture for MockCapture {
         let n = self.live;
         Ok(Box::pin(fstream::iter((0..n).map(|i| {
             Ok((
-                Position(i as u64),
+                Position::new(i as u64),
                 ChangeEvent::Upsert {
                     table: table(),
                     key: key((i % DOCUMENTS) as i64),

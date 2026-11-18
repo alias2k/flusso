@@ -30,7 +30,7 @@ fn ts() -> DateTime<Utc> {
 
 #[test]
 fn upsert_is_compact_ndjson_with_provenance_and_meta() {
-    let envelope = Envelope::upsert(index(), "42", document(), Some(Position(1)), ts());
+    let envelope = Envelope::upsert(index(), "42", document(), Some(Position::new(1)), ts());
     let sink = audit();
     let line = sink
         .render(&sink.wire_envelope(&envelope).unwrap())
@@ -60,7 +60,7 @@ fn upsert_is_compact_ndjson_with_provenance_and_meta() {
 
 #[test]
 fn delete_carries_provenance_but_no_document_or_meta() {
-    let envelope = Envelope::delete(index(), "7", Some(Position(7)), ts());
+    let envelope = Envelope::delete(index(), "7", Some(Position::new(7)), ts());
     let sink = audit();
     let line = sink
         .render(&sink.wire_envelope(&envelope).unwrap())
@@ -119,7 +119,7 @@ fn a_big_decimal_is_written_as_a_number_with_every_digit() {
 
 #[test]
 fn pretty_is_multiline() {
-    let envelope = Envelope::delete(index(), "7", Some(Position(1)), ts());
+    let envelope = Envelope::delete(index(), "7", Some(Position::new(1)), ts());
     let sink = StdoutSink::new(SinkName::try_new("audit").unwrap(), true);
     let line = sink
         .render(&sink.wire_envelope(&envelope).unwrap())

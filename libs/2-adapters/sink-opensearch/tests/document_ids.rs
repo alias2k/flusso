@@ -125,13 +125,13 @@ fn upsert(index: &IndexName, id: &str) -> Envelope {
         index.clone(),
         id,
         GenericValue::Map(doc),
-        Some(Position(0)),
+        Some(Position::new(0)),
         chrono::Utc::now(),
     )
 }
 
 fn delete(index: &IndexName, id: &str) -> Envelope {
-    Envelope::delete(index.clone(), id, Some(Position(0)), chrono::Utc::now())
+    Envelope::delete(index.clone(), id, Some(Position::new(0)), chrono::Utc::now())
 }
 
 /// Which of `ids` exist behind `target`: a realtime `_mget`, so no refresh is

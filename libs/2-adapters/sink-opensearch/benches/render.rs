@@ -120,7 +120,7 @@ fn upserts(body: fn(i64) -> GenericValue) -> Vec<Envelope> {
                 index(),
                 i.to_string(),
                 body(i),
-                Some(Position(i as u64)),
+                Some(Position::new(i as u64)),
                 chrono::Utc::now(),
             )
         })
@@ -133,7 +133,7 @@ fn deletes() -> Vec<Envelope> {
             Envelope::delete(
                 index(),
                 i.to_string(),
-                Some(Position(i as u64)),
+                Some(Position::new(i as u64)),
                 chrono::Utc::now(),
             )
         })

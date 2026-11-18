@@ -195,7 +195,7 @@ fn upsert(logical: &str, id: &str, title: &str) -> Envelope {
         IndexName::try_new(logical).unwrap(),
         id,
         GenericValue::Map(doc),
-        Some(Position(0)),
+        Some(Position::new(0)),
         chrono::Utc::now(),
     )
 }

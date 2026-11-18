@@ -553,7 +553,7 @@ impl ChangeCapture for WalChangeCapture {
 
     fn confirm(&self, position: Position) {
         if let Some(positions) = self.open_positions() {
-            positions.confirm(position.0);
+            positions.confirm(position.seq);
         }
     }
 
@@ -574,7 +574,7 @@ impl ChangeCapture for WalChangeCapture {
     fn reached(&self, position: Option<Position>) -> Option<SourcePosition> {
         let positions = self.open_positions()?;
         Some(SourcePosition(
-            positions.reached(position.map(|position| position.0)),
+            positions.reached(position.map(|position| position.seq)),
         ))
     }
 

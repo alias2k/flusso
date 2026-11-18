@@ -99,7 +99,7 @@ impl ChangeCapture for ClosableSource {
                                 return None;
                             }
                             pulled.fetch_add(1, Ordering::SeqCst);
-                            Some((Ok((Position(next), event)), (feed, next + 1)))
+                            Some((Ok((Position::new(next), event)), (feed, next + 1)))
                         }
                         () = closing.notified() => None,
                     }
@@ -112,7 +112,7 @@ impl ChangeCapture for ClosableSource {
         self.log
             .lock()
             .unwrap()
-            .push(format!("confirm {}", position.0));
+            .push(format!("confirm {}", position.seq));
     }
 
     fn close_live(&self) -> bool {
@@ -655,7 +655,7 @@ async fn a_deferred_sink_still_refreshes_when_skipped_snapshot_batches_follow_th
     let lane = stream.lane(&name).unwrap().producer;
     let live = |position: u64| {
         stream::LaneItem::Batch(stream::Batch {
-            position: Some(Position(position)),
+            position: Some(Position::new(position)),
             changes: 1,
             envelopes: Vec::new().into(),
         })

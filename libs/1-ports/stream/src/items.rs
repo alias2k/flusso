@@ -6,9 +6,9 @@
 //! use kernel::Position;
 //! use stream::{Batch, LaneItem};
 //!
-//! let live = LaneItem::Batch(Batch { position: Some(Position(7)), changes: 3, envelopes: Vec::new().into() });
+//! let live = LaneItem::Batch(Batch { position: Some(Position::new(7)), changes: 3, envelopes: Vec::new().into() });
 //! let snapshot = LaneItem::Batch(Batch { position: None, changes: 0, envelopes: Vec::new().into() });
-//! assert_eq!(live.position(), Some(Position(7)));
+//! assert_eq!(live.position(), Some(Position::new(7)));
 //! assert_eq!(snapshot.position(), None, "snapshot rows never move the watermark");
 //! ```
 

@@ -106,7 +106,7 @@ impl ChangeCapture for Placed {
     }
 
     fn reached(&self, position: Option<Position>) -> Option<SourcePosition> {
-        Some(SourcePosition(position.map_or(0, |p| p.0 + 1)))
+        Some(SourcePosition(position.map_or(0, |p| p.seq + 1)))
     }
 }
 
@@ -196,7 +196,7 @@ async fn a_stop_is_not_ready_refuses_a_reindex_and_ends_once_the_in_flight_batch
         .unwrap()
         .unwrap();
     assert_eq!(*sink.flushed.lock().unwrap(), 1);
-    assert_eq!(confirmed.lock().unwrap().last(), Some(&Position(0)));
+    assert_eq!(confirmed.lock().unwrap().last(), Some(&Position::new(0)));
     assert_eq!(status.snapshot().phase, Phase::Stopped);
 }
 

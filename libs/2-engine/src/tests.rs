@@ -127,7 +127,7 @@ impl ChangeCapture for MockSource {
                 (feed, 0u64),
                 |(mut feed, next)| async move {
                     let event = feed.recv().await?;
-                    Some((Ok((Position(next), event)), (feed, next + 1)))
+                    Some((Ok((Position::new(next), event)), (feed, next + 1)))
                 },
             )));
         }
@@ -136,7 +136,7 @@ impl ChangeCapture for MockSource {
             changes
                 .into_iter()
                 .enumerate()
-                .map(|(i, event)| Ok((Position(i as u64), event))),
+                .map(|(i, event)| Ok((Position::new(i as u64), event))),
         )))
     }
 
@@ -434,7 +434,7 @@ async fn drives_live_changes_to_the_sink_and_confirms_the_watermark() {
     let confirmed = source.confirmed.lock().unwrap();
     assert_eq!(
         confirmed.last(),
-        Some(&Position(2)),
+        Some(&Position::new(2)),
         "the last change's position reaches the source once every lane acked it"
     );
 }
@@ -595,8 +595,8 @@ async fn confirms_no_position_before_its_flush() {
     assert!(source.confirmed.lock().unwrap().is_empty());
     release.notify_one();
     run.await.unwrap();
-    assert_eq!(stream.watermark(), Some(Position(0)));
-    assert_eq!(*source.confirmed.lock().unwrap(), vec![Position(0)]);
+    assert_eq!(stream.watermark(), Some(Position::new(0)));
+    assert_eq!(*source.confirmed.lock().unwrap(), vec![Position::new(0)]);
 }
 
 #[tokio::test]
@@ -935,7 +935,7 @@ async fn redelivers_the_unacked_batch_to_a_restarted_sink_engine() {
         store.lock().unwrap().keys().cloned().collect::<Vec<_>>(),
         vec!["users/1".to_owned(), "users/3".to_owned()]
     );
-    assert_eq!(stream.watermark(), Some(Position(1)));
+    assert_eq!(stream.watermark(), Some(Position::new(1)));
 }
 
 #[tokio::test]
@@ -1041,7 +1041,7 @@ async fn skip_policy_quarantines_rejected_documents_and_acks_the_batch() {
     );
     assert_eq!(
         stream.watermark(),
-        Some(Position(1)),
+        Some(Position::new(1)),
         "the batch is acked despite rejections"
     );
 }
@@ -1269,14 +1269,14 @@ impl Observer for PositionObserver {
         self.events
             .lock()
             .unwrap()
-            .push(format!("applied {sink} {}", position.0));
+            .push(format!("applied {sink} {}", position.seq));
     }
 
     fn on_position_searchable(&self, sink: &SinkName, position: Position) {
         self.events
             .lock()
             .unwrap()
-            .push(format!("searchable {sink} {}", position.0));
+            .push(format!("searchable {sink} {}", position.seq));
     }
 }
 
@@ -1309,7 +1309,7 @@ impl PositionRig {
     async fn publish(&self, position: Option<u64>) {
         self.lane
             .publish(stream::LaneItem::Batch(stream::Batch {
-                position: position.map(Position),
+                position: position.map(Position::new),
                 changes: 1,
                 envelopes: Vec::new().into(),
             }))
@@ -1462,7 +1462,7 @@ async fn skip_policy_leaves_a_failed_document_out_and_keeps_going() {
     );
     assert_eq!(
         source.confirmed.lock().unwrap().last(),
-        Some(&Position(2)),
+        Some(&Position::new(2)),
         "a skipped document does not hold the slot back"
     );
 }

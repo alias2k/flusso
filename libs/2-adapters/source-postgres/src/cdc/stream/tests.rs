@@ -104,13 +104,13 @@ fn emitting_the_last_change_of_a_commit_moves_the_horizon() {
 
     let (first, _) = decode.next_change().unwrap();
     assert_eq!(
-        ack.reached(Some(first.0)),
+        ack.reached(Some(first.seq)),
         0,
         "half a transaction covers nothing of its commit"
     );
     let (second, _) = decode.next_change().unwrap();
-    assert_eq!(ack.reached(Some(first.0)), 99, "still short of the commit");
-    assert_eq!(ack.reached(Some(second.0)), 100);
+    assert_eq!(ack.reached(Some(first.seq)), 99, "still short of the commit");
+    assert_eq!(ack.reached(Some(second.seq)), 100);
     assert!(decode.next_change().is_none());
 }
 
@@ -125,10 +125,10 @@ fn a_commit_behind_another_keeps_the_horizon_at_the_emitted_one() {
     handle(&mut decode, commit(200)).unwrap();
 
     let (first, _) = decode.next_change().unwrap();
-    assert_eq!(ack.reached(Some(first.0)), 100);
+    assert_eq!(ack.reached(Some(first.seq)), 100);
     let (second, _) = decode.next_change().unwrap();
-    assert_eq!(ack.reached(Some(first.0)), 199, "short of the next commit");
-    assert_eq!(ack.reached(Some(second.0)), 200);
+    assert_eq!(ack.reached(Some(first.seq)), 199, "short of the next commit");
+    assert_eq!(ack.reached(Some(second.seq)), 200);
 }
 
 #[test]
@@ -1021,7 +1021,7 @@ fn a_held_transaction_is_not_emitted_and_nothing_passes_it() {
 
     decode.seen_by(&Snapshots::seeing(&[7]).snapshot_now());
     let (position, _) = decode.next_change().unwrap();
-    assert_eq!(ack.reached(Some(position.0)), 100);
+    assert_eq!(ack.reached(Some(position.seq)), 100);
     assert!(decode.readable.is_empty(), "an emitted xid is forgotten");
 }
 
@@ -1039,8 +1039,8 @@ fn an_earlier_held_transaction_holds_back_a_later_visible_one() {
     decode.seen_by(&Snapshots::seeing(&[7, 8]).snapshot_now());
     let (first, _) = decode.next_change().unwrap();
     let (second, _) = decode.next_change().unwrap();
-    assert_eq!(ack.reached(Some(first.0)), 199);
-    assert_eq!(ack.reached(Some(second.0)), 200);
+    assert_eq!(ack.reached(Some(first.seq)), 199);
+    assert_eq!(ack.reached(Some(second.seq)), 200);
     assert!(decode.readable.is_empty());
 }
 

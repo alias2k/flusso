@@ -365,7 +365,7 @@ impl DecodeState {
             self.ack.read_through(lsn);
             self.readable.remove(&xid);
         }
-        Some((Position(seq), event))
+        Some((Position::new(seq), event))
     }
 
     /// The xid of the front transaction while it may not be read back yet.

@@ -3,9 +3,10 @@
 //!
 //! A [`Position`] is assigned by the source, monotonic for the life of the
 //! source instance (across reopened streams, so a restarted ingest engine
-//! never reuses one), and meaningful only to the source that issued it (the Postgres adapter maps it
-//! back to an LSN). The stream orders positions to compute its watermark; the
-//! ingest engine hands the watermark back to the source as confirmation.
+//! never reuses one). It carries its own stamps, meaningful only to the source
+//! that issued it (the Postgres adapter's are WAL LSNs), so the source keeps
+//! no map of what it emitted: the engine tells it how far its lanes landed in
+//! terms of positions, and the source reads the answer off them.
 //!
 //! An [`Envelope`] is one document operation as every sink receives it: the
 //! index, the operation, the document id, the document itself (absent on a
@@ -17,9 +18,9 @@
 //! ```
 //! use kernel::{Envelope, Op, Position};
 //!
-//! let position = Position(42);
+//! let position = Position::new(42);
 //! assert_eq!(position.to_string(), "42");
-//! assert!(Position(41) < position);
+//! assert!(Position::new(41) < position);
 //!
 //! let json = serde_json::to_string(&Op::Upsert).unwrap();
 //! assert_eq!(json, "\"upsert\"");
@@ -32,15 +33,51 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::{GenericValue, IndexName, SinkName};
 
-/// An offset in the source's change feed: opaque to everyone but the source,
-/// ordered so the stream can take a minimum across lanes.
+/// One change's place in the source's change feed, describing itself.
+///
+/// `seq` orders positions (it is compared first, so `Ord` is by `seq`). The
+/// three stamps are the source's own, opaque to everyone else: what it needs
+/// to confirm or fence at this change without keeping a map of every change
+/// it emitted (see `ChangeCapture::confirm` in the source port).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Position(pub u64);
+pub struct Position {
+    /// The order the source emitted changes in, monotonic for its life.
+    pub seq: u64,
+    /// How far a fence may claim while this change is the oldest outstanding.
+    pub fence_before: u64,
+    /// How far the source may confirm while this change is the oldest
+    /// outstanding.
+    pub confirm_before: u64,
+    /// How far the source may confirm once this change has landed and a later
+    /// one was emitted.
+    pub confirm_through: u64,
+}
+
+impl Position {
+    /// A position with no stamps: for a source that cannot confirm, and tests.
+    pub const fn new(seq: u64) -> Self {
+        Self::stamped(seq, 0, 0, 0)
+    }
+
+    /// A position with the source's stamps.
+    pub const fn stamped(
+        seq: u64,
+        fence_before: u64,
+        confirm_before: u64,
+        confirm_through: u64,
+    ) -> Self {
+        Self {
+            seq,
+            fence_before,
+            confirm_before,
+            confirm_through,
+        }
+    }
+}
 
 impl fmt::Display for Position {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.seq)
     }
 }
 
@@ -145,7 +182,7 @@ mod seq_string {
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         position
-            .map(|position| position.0.to_string())
+            .map(|position| position.seq.to_string())
             .serialize(serializer)
     }
 
@@ -155,7 +192,7 @@ mod seq_string {
         Option::<String>::deserialize(deserializer)?
             .map(|raw| {
                 raw.parse::<u64>()
-                    .map(Position)
+                    .map(Position::new)
                     .map_err(serde::de::Error::custom)
             })
             .transpose()
@@ -218,7 +255,7 @@ mod tests {
         let envelope = Envelope::delete(
             IndexName::try_new("users").unwrap(),
             "7",
-            Some(Position(9)),
+            Some(Position::new(9)),
             ts,
         );
         let json = serde_json::to_value(&envelope).unwrap();
@@ -261,7 +298,7 @@ mod tests {
             IndexName::try_new("users").unwrap(),
             "1",
             GenericValue::Map(Default::default()),
-            Some(Position(3)),
+            Some(Position::new(3)),
             ts,
         );
         envelope.sink = Some(SinkName::try_new("audit").unwrap());
@@ -274,7 +311,7 @@ mod tests {
         }
         let back: Envelope<User> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.sink.as_ref().map(AsRef::as_ref), Some("audit"));
-        assert_eq!(back.position, Some(Position(3)));
+        assert_eq!(back.position, Some(Position::new(3)));
         assert_eq!(back.document.unwrap().email, "ada@x.io");
     }
 }

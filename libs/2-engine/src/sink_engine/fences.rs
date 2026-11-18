@@ -207,11 +207,11 @@ mod tests {
         let now = Instant::now();
         let mut fences = Fences::default();
         for position in 1..=3 {
-            fences.received(Position(position));
+            fences.received(Position::new(position));
         }
-        fences.write_returned(Some(Position(3)), Visibility::Immediate, None, now);
+        fences.write_returned(Some(Position::new(3)), Visibility::Immediate, None, now);
         fences.write_returned(
-            Some(Position(2)),
+            Some(Position::new(2)),
             Visibility::Within(Duration::from_secs(5)),
             None,
             now,
@@ -219,28 +219,28 @@ mod tests {
         assert_eq!(fences.advance_applied(), None);
         assert_eq!(fences.advance_searchable(now), None);
 
-        fences.write_returned(Some(Position(1)), Visibility::Immediate, None, now);
-        assert_eq!(fences.advance_applied(), Some(Position(3)));
-        assert_eq!(fences.advance_searchable(now), Some(Position(1)));
+        fences.write_returned(Some(Position::new(1)), Visibility::Immediate, None, now);
+        assert_eq!(fences.advance_applied(), Some(Position::new(3)));
+        assert_eq!(fences.advance_searchable(now), Some(Position::new(1)));
         assert_eq!(fences.next_due(), Some(now + Duration::from_secs(5)));
         let later = now + Duration::from_secs(5);
-        assert_eq!(fences.advance_searchable(later), Some(Position(3)));
+        assert_eq!(fences.advance_searchable(later), Some(Position::new(3)));
     }
 
     #[test]
     fn a_caught_up_write_covers_only_the_writes_that_returned_before_its_grant() {
         let now = Instant::now();
         let mut fences = Fences::default();
-        fences.received(Position(1));
-        fences.received(Position(2));
-        fences.write_returned(Some(Position(1)), Visibility::Deferred, None, now);
+        fences.received(Position::new(1));
+        fences.received(Position::new(2));
+        fences.write_returned(Some(Position::new(1)), Visibility::Deferred, None, now);
         let covers_below = fences.returned();
-        fences.write_returned(Some(Position(2)), Visibility::Deferred, None, now);
+        fences.write_returned(Some(Position::new(2)), Visibility::Deferred, None, now);
         assert!(fences.wants_a_caught_up_write(now));
 
         fences.write_returned(None, Visibility::Immediate, Some(covers_below), now);
-        assert_eq!(fences.advance_applied(), Some(Position(2)));
-        assert_eq!(fences.advance_searchable(now), Some(Position(1)));
+        assert_eq!(fences.advance_applied(), Some(Position::new(2)));
+        assert_eq!(fences.advance_searchable(now), Some(Position::new(1)));
         assert!(
             fences.wants_a_caught_up_write(now),
             "2 returned after the caught-up write was granted"
@@ -251,12 +251,12 @@ mod tests {
     fn a_redelivered_position_keeps_its_place() {
         let now = Instant::now();
         let mut fences = Fences::default();
-        fences.received(Position(1));
-        fences.received(Position(2));
-        fences.write_returned(Some(Position(2)), Visibility::Immediate, None, now);
-        fences.received(Position(1));
+        fences.received(Position::new(1));
+        fences.received(Position::new(2));
+        fences.write_returned(Some(Position::new(2)), Visibility::Immediate, None, now);
+        fences.received(Position::new(1));
         assert_eq!(fences.advance_applied(), None);
-        fences.write_returned(Some(Position(1)), Visibility::Immediate, None, now);
-        assert_eq!(fences.advance_applied(), Some(Position(2)));
+        fences.write_returned(Some(Position::new(1)), Visibility::Immediate, None, now);
+        assert_eq!(fences.advance_applied(), Some(Position::new(2)));
     }
 }

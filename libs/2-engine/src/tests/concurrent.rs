@@ -355,7 +355,7 @@ impl Rig {
         let mut rig = self.start();
         rig.live(0, &["warm"]).await;
         until("the warm-up write", || {
-            rig.stream.watermark() == Some(Position(0))
+            rig.stream.watermark() == Some(Position::new(0))
         })
         .await;
         rig.probe.log.lock().unwrap().clear();
@@ -389,10 +389,10 @@ impl Rig {
     }
 
     async fn live(&mut self, position: u64, ids: &[&str]) {
-        let envelopes = self.envelopes(ids, Some(Position(position)));
+        let envelopes = self.envelopes(ids, Some(Position::new(position)));
         self.lane
             .publish(LaneItem::Batch(Batch {
-                position: Some(Position(position)),
+                position: Some(Position::new(position)),
                 changes: 1,
                 envelopes,
             }))
@@ -544,7 +544,7 @@ async fn a_document_is_never_written_twice_at_once_and_its_versions_never_go_dow
                     "seed {seed}, writes {writes}: {id} ends at its last version"
                 );
             }
-            assert_eq!(rig.stream.watermark(), Some(Position(position)));
+            assert_eq!(rig.stream.watermark(), Some(Position::new(position)));
             assert!(probe.most_at_once() <= writes);
             concurrent |= probe.most_at_once() > 1;
         }
@@ -614,14 +614,14 @@ async fn a_later_write_finishing_first_moves_neither_the_watermark_nor_the_fence
     settle().await;
     assert_eq!(
         rig.stream.watermark(),
-        Some(Position(0)),
+        Some(Position::new(0)),
         "1 is still being written"
     );
     assert!(rig.applied().is_empty(), "{:?}", rig.applied());
 
     rig.probe.release("a");
     until("the lane to drain", || rig.stream.is_idle()).await;
-    assert_eq!(rig.stream.watermark(), Some(Position(3)));
+    assert_eq!(rig.stream.watermark(), Some(Position::new(3)));
     assert_eq!(rig.applied(), ["applied primary 3"]);
 }
 
@@ -738,14 +738,14 @@ async fn a_failed_write_lets_the_others_finish_and_comes_back_alone() {
     assert!(rig.ended().await.is_err(), "the failed write ends the run");
     assert_eq!(
         rig.stream.watermark(),
-        Some(Position(0)),
+        Some(Position::new(0)),
         "1 is not written"
     );
 
     let rig = rig.start();
     until("the lane to drain", || rig.stream.is_idle()).await;
     assert_eq!(rig.probe.starts(), ["a", "b", "c", "a"]);
-    assert_eq!(rig.stream.watermark(), Some(Position(3)));
+    assert_eq!(rig.stream.watermark(), Some(Position::new(3)));
 }
 
 /// After a run that ended in a failed write, the restarted engine writes the
@@ -794,7 +794,7 @@ async fn after_a_failed_run_the_oldest_item_is_written_alone_until_it_lands() {
     );
     rig.probe.release("c");
     until("the lane to drain", || rig.stream.is_idle()).await;
-    assert_eq!(rig.stream.watermark(), Some(Position(4)));
+    assert_eq!(rig.stream.watermark(), Some(Position::new(4)));
 }
 
 /// A stop lets the live writes in flight land and skips the backfill still
@@ -819,7 +819,7 @@ async fn a_stop_finishes_the_writes_in_flight_and_skips_waiting_backfill() {
         "the backfill page is skipped"
     );
     assert!(!rig.probe.log().contains(&"seeded users".to_owned()));
-    assert_eq!(rig.stream.watermark(), Some(Position(2)));
+    assert_eq!(rig.stream.watermark(), Some(Position::new(2)));
 }
 
 /// A stop requested while the run waits on its only write, with nothing
@@ -839,7 +839,7 @@ async fn a_stop_during_the_only_write_still_skips_the_backfill_behind_it() {
     until("the lane to drain", || rig.stream.is_idle()).await;
     assert_eq!(rig.probe.starts(), ["a"], "the backfill page is skipped");
     assert!(!rig.probe.log().contains(&"seeded users".to_owned()));
-    assert_eq!(rig.stream.watermark(), Some(Position(1)));
+    assert_eq!(rig.stream.watermark(), Some(Position::new(1)));
 }
 
 /// Three writes in flight; the last one granted is caught up and returns
@@ -989,12 +989,12 @@ async fn a_failed_acknowledgement_still_waits_for_the_writes_in_flight() {
             users(),
             id,
             GenericValue::Map(BTreeMap::new()),
-            Some(Position(position)),
+            Some(Position::new(position)),
             chrono::Utc::now(),
         )]
         .into();
         lane.publish(LaneItem::Batch(Batch {
-            position: Some(Position(position)),
+            position: Some(Position::new(position)),
             changes: 1,
             envelopes,
         }))
@@ -1062,7 +1062,7 @@ async fn a_stop_rejection_seen_at_its_first_poll_starts_nothing_after_it() {
     );
     assert_eq!(
         rig.stream.watermark(),
-        Some(Position(2)),
+        Some(Position::new(2)),
         "a landed; b is unacknowledged, so the lane confirms nothing past 2"
     );
 }
@@ -1083,12 +1083,12 @@ async fn a_stop_rejection_still_in_flight_lets_disjoint_writes_land_but_holds_th
     .await;
     assert_eq!(
         rig.stream.watermark(),
-        Some(Position(1)),
+        Some(Position::new(1)),
         "c landed, but b before it is still unacknowledged"
     );
     rig.probe.release("b");
     assert!(rig.ended().await.is_err());
-    assert_eq!(rig.stream.watermark(), Some(Position(1)));
+    assert_eq!(rig.stream.watermark(), Some(Position::new(1)));
 
     let rig = rig.start();
     settle().await;
@@ -1166,7 +1166,7 @@ async fn a_write_failing_at_its_first_poll_holds_back_a_later_item_sharing_its_d
     until("the lane to drain", || rig.stream.is_idle()).await;
     assert_eq!(rig.probe.starts(), ["z", "x", "x", "x"]);
     assert!(!rig.probe.regressed.load(Ordering::SeqCst));
-    assert_eq!(rig.stream.watermark(), Some(Position(3)));
+    assert_eq!(rig.stream.watermark(), Some(Position::new(3)));
 }
 
 /// A stop with backfill still on the lane and every write slot busy: the
@@ -1194,7 +1194,7 @@ async fn a_stop_with_backfill_on_the_lane_and_every_slot_busy_writes_none_of_it(
         "no backfill page is written"
     );
     assert!(!rig.probe.log().contains(&"seeded users".to_owned()));
-    assert_eq!(rig.stream.watermark(), Some(Position(3)));
+    assert_eq!(rig.stream.watermark(), Some(Position::new(3)));
 }
 
 /// Under `skip`, a rejected document is quarantined and its write
@@ -1219,12 +1219,12 @@ async fn a_skip_rejection_beside_writes_in_flight_is_quarantined_and_the_run_goe
     .await;
     assert_eq!(
         rig.stream.watermark(),
-        Some(Position(0)),
+        Some(Position::new(0)),
         "a is still being written, so nothing is confirmed yet"
     );
     rig.probe.release("a");
     until("the lane to drain", || rig.stream.is_idle()).await;
-    assert_eq!(rig.stream.watermark(), Some(Position(3)));
+    assert_eq!(rig.stream.watermark(), Some(Position::new(3)));
     assert!(
         rig.engine.as_ref().is_some_and(|run| !run.is_finished()),
         "a skipped rejection does not end the run"

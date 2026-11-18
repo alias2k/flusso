@@ -301,7 +301,7 @@ async fn load(sink: &OpensearchSink, mapping: &IndexMapping, seeds: &[Seed]) {
                 mapping.index.clone(),
                 seed.id.as_str(),
                 doc(seed),
-                Some(Position(0)),
+                Some(Position::new(0)),
                 Utc::now(),
             )
         })

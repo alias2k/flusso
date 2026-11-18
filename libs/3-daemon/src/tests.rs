@@ -431,7 +431,7 @@ impl ChangeCapture for ScriptedSource {
             changes
                 .into_iter()
                 .enumerate()
-                .map(|(i, event)| Ok((Position(i as u64), event))),
+                .map(|(i, event)| Ok((Position::new(i as u64), event))),
         );
         let end = self.end.lock().unwrap().take();
         let tail = stream::unfold(end, |end| async move {
@@ -472,13 +472,13 @@ impl ChangeCapture for FlakySource {
         let opened = self.opened.fetch_add(1, Ordering::SeqCst);
         Ok(if opened == 0 {
             Box::pin(stream::iter([
-                Ok((Position(0), row_event(false, 1))),
+                Ok((Position::new(0), row_event(false, 1))),
                 Err(source::SourceError::Connection("simulated drop".to_owned())),
             ]))
         } else {
             Box::pin(stream::iter([
-                Ok((Position(1), row_event(false, 1))),
-                Ok((Position(2), row_event(false, 3))),
+                Ok((Position::new(1), row_event(false, 1))),
+                Ok((Position::new(2), row_event(false, 3))),
             ]))
         })
     }
@@ -778,7 +778,7 @@ async fn drives_changes_through_injected_backends() {
     );
     assert_eq!(
         confirmed.lock().unwrap().last(),
-        Some(&Position(1)),
+        Some(&Position::new(1)),
         "the last position reaches the source once every lane acked it"
     );
 
@@ -968,7 +968,7 @@ async fn failed_sink_engine_restarts_and_redelivers() {
         vec!["upsert users 1".to_owned(), "upsert users 1".to_owned()],
         "the batch is applied again after the restart"
     );
-    assert_eq!(confirmed.lock().unwrap().last(), Some(&Position(0)));
+    assert_eq!(confirmed.lock().unwrap().last(), Some(&Position::new(0)));
     let snap = status.snapshot();
     assert_eq!(snap.errors, 1);
     assert_eq!(snap.sinks["primary"].changes_committed, 1);
@@ -1038,9 +1038,9 @@ async fn failed_ingest_engine_restarts_and_resumes_the_stream() {
         vec!["upsert users 1".to_owned(), "upsert users 3".to_owned()]
     );
     let confirmed = confirmed.lock().unwrap();
-    assert_eq!(confirmed.last(), Some(&Position(2)));
+    assert_eq!(confirmed.last(), Some(&Position::new(2)));
     assert!(
-        !confirmed.contains(&Position(0)),
+        !confirmed.contains(&Position::new(0)),
         "the change the failed stream never committed is not confirmed"
     );
     let snap = status.snapshot();
@@ -1120,7 +1120,7 @@ impl<C: ChangeCapture> ChangeCapture for FedSource<C> {
             (feed, 0u64),
             |(mut feed, next)| async move {
                 let event = feed.recv().await?;
-                Some((Ok((Position(next), event)), (feed, next + 1)))
+                Some((Ok((Position::new(next), event)), (feed, next + 1)))
             },
         )))
     }
