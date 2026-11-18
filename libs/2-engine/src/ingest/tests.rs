@@ -646,8 +646,8 @@ impl stream::Producer<stream::LaneItem> for SpyProducer {
 }
 
 impl Stream for Spy {
-    fn lane(&self, sink: &SinkName) -> stream::Result<stream::Lane> {
-        let lane = self.inner.lane(sink)?;
+    fn lane(&self, key: &stream::LaneKey) -> stream::Result<stream::Lane> {
+        let lane = self.inner.lane(key)?;
         Ok(stream::Lane {
             producer: Box::new(SpyProducer {
                 inner: lane.producer,
@@ -655,6 +655,10 @@ impl Stream for Spy {
             }),
             consumer: lane.consumer,
         })
+    }
+
+    fn lanes(&self, sink: &SinkName) -> Vec<stream::LaneKey> {
+        self.inner.lanes(sink)
     }
 
     fn requests(&self) -> stream::Result<stream::RequestLane> {
