@@ -587,14 +587,15 @@ impl Deployment {
             Arc::clone(&builder) as Arc<dyn DocumentBuilder>,
             Arc::clone(&stream) as Arc<dyn Stream>,
             vec![sink_name()],
+            Arc::new(crate::Progress::new([sink_name()])),
         );
         let sink = SinkEngine::new(
             sink_name(),
             Arc::clone(&recorder) as Arc<dyn Sink>,
             Arc::clone(&stream) as Arc<dyn Stream>,
             vec![mapping()],
-        )
-        .with_progress(ingest.progress());
+            ingest.progress(),
+        );
         Self {
             stream,
             feed,

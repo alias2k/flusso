@@ -283,8 +283,8 @@ async fn spawn_sinks(
             sink,
             Arc::clone(stream) as Arc<dyn Stream>,
             vec![mapping()],
-        )
-        .with_progress(Arc::clone(progress));
+            Arc::clone(progress),
+        );
         engine.stage(Continuity::Resumed).await.unwrap();
         tasks.push(tokio::spawn(async move {
             let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
@@ -307,8 +307,8 @@ fn ingest(
         documents,
         Arc::clone(stream) as Arc<dyn Stream>,
         sinks.iter().map(|sink| sink_name(sink)).collect(),
+        Arc::clone(progress),
     )
-    .with_progress(Arc::clone(progress))
     .with_stop(stop.clone())
 }
 
@@ -566,8 +566,8 @@ async fn a_stopping_sink_skips_queued_snapshot_batches_and_leaves_their_index_un
         sink,
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![mapping()],
-    )
-    .with_progress(Arc::clone(&progress));
+        Arc::clone(&progress),
+    );
     engine.stage(Continuity::Resumed).await.unwrap();
     let stop = Stop::new();
     let ingest_engine = ingest(
@@ -659,8 +659,8 @@ async fn a_stop_whose_final_position_never_reaches_the_source_fails_the_run() {
         Arc::new(MockDocuments::default()),
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![sink_name("primary")],
+        Arc::clone(&progress),
     )
-    .with_progress(Arc::clone(&progress))
     .with_stop(stop.clone());
     let run = tokio::spawn(async move { engine.run().await });
 
@@ -738,10 +738,11 @@ async fn a_deferred_sink_still_refreshes_when_skipped_snapshot_batches_follow_th
     let stop = Stop::new();
     stop.request();
     let engine = SinkEngine::new(
-        name,
+        name.clone(),
         Arc::clone(&sink) as Arc<dyn Sink>,
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![mapping()],
+        Arc::new(crate::Progress::new([name])),
     )
     .with_observer(Arc::clone(&observer) as Arc<dyn crate::Observer>)
     .with_stop(stop);

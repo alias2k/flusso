@@ -257,9 +257,9 @@ async fn a_busy_item_holds_back_only_the_items_sharing_its_documents() {
         Arc::new(opensearch(&stub.url)),
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![super::mapping()],
+        Arc::clone(&progress),
     )
-    .with_writes(4)
-    .with_progress(Arc::clone(&progress));
+    .with_writes(4);
     let (_control, mut rx) = tokio::sync::mpsc::channel(1);
     let run = tokio::spawn(async move { engine.run(&mut rx).await });
     publish(0, &["0"]).await;

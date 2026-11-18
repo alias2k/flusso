@@ -225,12 +225,12 @@ impl Daemon {
             Arc::clone(&documents),
             Arc::clone(&stream),
             sink_names.clone(),
+            Arc::clone(&progress),
         )
         .with_batch(batch_policy(&config))
         .with_builds(builds(&config))
         .with_observer(Arc::clone(&observer))
         .with_failure_policies(failure_policies.clone())
-        .with_progress(Arc::clone(&progress))
         .with_stop(stop.clone());
 
         let sink_engines: Vec<SinkEngine> = sinks
@@ -241,13 +241,13 @@ impl Daemon {
                     parts.sink,
                     Arc::clone(&stream),
                     mappings.clone(),
+                    Arc::clone(&progress),
                 )
                 .with_options(parts.options)
                 .with_writes(writes(&config))
                 .with_observer(Arc::clone(&observer))
                 .with_failure_policies(failure_policies.clone())
                 .skip_backfill(options.skip_backfill)
-                .with_progress(Arc::clone(&progress))
                 .with_stop(stop.clone())
             })
             .collect();

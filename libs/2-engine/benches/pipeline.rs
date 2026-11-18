@@ -194,9 +194,9 @@ async fn run_deployment(
         sink,
         Arc::clone(&stream) as Arc<dyn Stream>,
         mappings,
+        Arc::clone(&progress),
     )
-    .skip_backfill(true)
-    .with_progress(Arc::clone(&progress));
+    .skip_backfill(true);
     sink_engine.stage(Continuity::Resumed).await.unwrap();
     let (_control, mut control_rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
     let sink_task = tokio::spawn(async move { sink_engine.run(&mut control_rx).await });
@@ -205,9 +205,9 @@ async fn run_deployment(
         documents,
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![name],
+        progress,
     )
     .with_batch(batch)
-    .with_progress(progress)
     .run()
     .await
     .unwrap();

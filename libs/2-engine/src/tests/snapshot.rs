@@ -287,6 +287,7 @@ async fn backfill(
 ) {
     let names: Vec<SinkName> = sinks.iter().map(|(name, _)| name.clone()).collect();
     let stream = Arc::new(ChannelStream::new(64, names.clone()));
+    let progress = Arc::new(crate::Progress::new(names.clone()));
     let mut tasks = Vec::new();
     let mut controls = Vec::new();
     for (name, sink) in sinks {
@@ -295,6 +296,7 @@ async fn backfill(
             Arc::clone(sink) as Arc<dyn Sink>,
             Arc::clone(&stream) as Arc<dyn Stream>,
             mappings(),
+            Arc::clone(&progress),
         );
         engine.stage(Continuity::Resumed).await.unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
@@ -306,6 +308,7 @@ async fn backfill(
         Arc::clone(documents) as Arc<dyn DocumentBuilder>,
         Arc::clone(&stream) as Arc<dyn Stream>,
         names,
+        Arc::clone(&progress),
     )
     .with_batch(BatchPolicy {
         max_changes,

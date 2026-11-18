@@ -734,10 +734,15 @@ async fn run_deployment(
     let continuity = capture.continuity().await?;
     let mappings = documents.index_mappings().await?;
     let progress = Arc::new(engine::Progress::new([name.clone()]));
-    let sink_engine = SinkEngine::new(name.clone(), sink, Arc::clone(&stream), mappings)
-        .with_progress(Arc::clone(&progress));
+    let sink_engine = SinkEngine::new(
+        name.clone(),
+        sink,
+        Arc::clone(&stream),
+        mappings,
+        Arc::clone(&progress),
+    );
     sink_engine.stage(continuity).await?;
-    let ingest = IngestEngine::new(capture, documents, stream, vec![name]).with_progress(progress);
+    let ingest = IngestEngine::new(capture, documents, stream, vec![name], progress);
     let (_control, mut control_rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
     tokio::select! {
         result = ingest.run() => result,

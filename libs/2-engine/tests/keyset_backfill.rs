@@ -563,13 +563,12 @@ async fn run_with(
         Arc::clone(sink) as Arc<dyn Sink>,
         Arc::clone(&stream),
         mappings,
+        Arc::clone(&progress),
     )
-    .with_progress(Arc::clone(&progress))
     .with_writes(plan.writes)
     .with_stop(stop.clone());
     sink_engine.stage(continuity).await.unwrap();
-    let ingest = IngestEngine::new(capture, documents, stream, vec![name])
-        .with_progress(progress)
+    let ingest = IngestEngine::new(capture, documents, stream, vec![name], progress)
         .with_batch(BatchPolicy {
             max_changes: 64,
             max_delay: Duration::from_millis(10),

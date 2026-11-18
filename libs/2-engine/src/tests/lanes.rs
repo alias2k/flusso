@@ -53,6 +53,7 @@ async fn a_healthy_lane_reaches_what_it_landed_while_a_sibling_lane_is_full() {
         Arc::new(MockDocuments::default()) as Arc<dyn DocumentBuilder>,
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![healthy.clone(), stalled.clone()],
+        Arc::new(crate::Progress::new([healthy.clone(), stalled.clone()])),
     )
     .with_batch(BatchPolicy {
         max_changes: 1,
@@ -71,8 +72,8 @@ async fn a_healthy_lane_reaches_what_it_landed_while_a_sibling_lane_is_full() {
             sink,
             Arc::clone(&stream) as Arc<dyn Stream>,
             vec![mapping()],
-        )
-        .with_progress(Arc::clone(&progress));
+            Arc::clone(&progress),
+        );
         engine
             .stage(source::cdc::Continuity::Resumed)
             .await

@@ -114,7 +114,7 @@ pub struct SinkEngine {
     fences: Mutex<Fences>,
     /// Where landings and searchable positions are reported, for
     /// confirmation and fences.
-    progress: Option<Arc<Progress>>,
+    progress: Arc<Progress>,
     stop: Stop,
     /// Indexes whose snapshot batches were acknowledged unapplied during a
     /// stop: their `SnapshotComplete` must not mark them seeded.
@@ -143,12 +143,14 @@ pub struct SinkEngine {
 
 impl SinkEngine {
     /// An engine for `sink`, named `name` in the config, over its lane on
-    /// `stream`, maintaining `mappings`.
+    /// `stream`, maintaining `mappings`, reporting what lands to `progress`:
+    /// the one the ingest engine over `stream` registers in.
     pub fn new(
         name: SinkName,
         sink: Arc<dyn Sink>,
         stream: Arc<dyn Stream>,
         mappings: Vec<IndexMapping>,
+        progress: Arc<Progress>,
     ) -> Self {
         Self {
             name,
@@ -161,7 +163,7 @@ impl SinkEngine {
             skip_backfill: false,
             outstanding: Mutex::new(BTreeSet::new()),
             fences: Mutex::new(Fences::default()),
-            progress: None,
+            progress,
             stop: Stop::new(),
             skipped: Mutex::new(BTreeSet::new()),
             advanced: AtomicU64::new(0),
@@ -178,14 +180,6 @@ impl SinkEngine {
     /// the next start, so writing it now would only hold the drain up.
     pub fn with_stop(mut self, stop: Stop) -> Self {
         self.stop = stop;
-        self
-    }
-
-    /// Report each lane item that lands, and how far this sink is
-    /// searchable, to `progress`: the deployment's one, shared with the
-    /// ingest engine.
-    pub fn with_progress(mut self, progress: Arc<Progress>) -> Self {
-        self.progress = Some(progress);
         self
     }
 

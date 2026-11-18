@@ -347,8 +347,8 @@ async fn run_deployment(capture: MockCapture, sinks: usize, batch: BatchPolicy) 
             sink,
             Arc::clone(&stream) as Arc<dyn Stream>,
             mappings.clone(),
-        )
-        .with_progress(Arc::clone(&progress));
+            Arc::clone(&progress),
+        );
         engine.stage(Continuity::Resumed).await.unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
         controls.push(tx);
@@ -360,9 +360,9 @@ async fn run_deployment(capture: MockCapture, sinks: usize, batch: BatchPolicy) 
         documents,
         Arc::clone(&stream) as Arc<dyn Stream>,
         names,
+        progress,
     )
     .with_batch(batch)
-    .with_progress(progress)
     .run()
     .await
     .unwrap();

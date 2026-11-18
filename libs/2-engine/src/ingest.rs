@@ -118,12 +118,15 @@ enum Ended {
 }
 
 impl IngestEngine {
-    /// An engine publishing to the lanes of `sinks` on `stream`.
+    /// An engine publishing to the lanes of `sinks` on `stream`, registering
+    /// what it routes in `progress`: the one every sink engine over `stream`
+    /// reports to, which is what confirmation and fences read.
     pub fn new(
         source: Arc<dyn ChangeCapture>,
         documents: Arc<dyn DocumentBuilder>,
         stream: Arc<dyn Stream>,
         sinks: Vec<SinkName>,
+        progress: Arc<Progress>,
     ) -> Self {
         Self {
             source,
@@ -136,7 +139,7 @@ impl IngestEngine {
             stop: Stop::new(),
             advances: AtomicU64::new(0),
             furthest: Mutex::new(Furthest::default()),
-            progress: Arc::new(Progress::new(sinks.iter().cloned())),
+            progress,
             sinks,
         }
     }
@@ -159,14 +162,6 @@ impl IngestEngine {
     /// that failed where the last one did.
     pub fn advances(&self) -> u64 {
         self.advances.load(Ordering::Relaxed)
-    }
-
-    /// Register routed batches on `progress` and confirm from it: the
-    /// deployment's one, shared with every sink engine and the fence. By
-    /// default the engine has its own over its sinks.
-    pub fn with_progress(mut self, progress: Arc<Progress>) -> Self {
-        self.progress = progress;
-        self
     }
 
     /// How far each lane has landed what this engine routed.

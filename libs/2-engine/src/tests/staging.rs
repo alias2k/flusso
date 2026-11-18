@@ -137,6 +137,7 @@ fn staged(sink: SlowSink, indexes: usize) -> Staged {
         Arc::clone(&sink) as Arc<dyn Sink>,
         Arc::clone(&stream) as Arc<dyn Stream>,
         mappings(indexes),
+        Arc::new(crate::Progress::new([sink_name("primary")])),
     );
     Staged {
         sink,

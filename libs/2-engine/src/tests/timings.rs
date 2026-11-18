@@ -183,11 +183,13 @@ async fn run(
     let observer: Arc<dyn Observer> = Arc::clone(&timings) as Arc<dyn Observer>;
     let primary = sink_name("primary");
     let stream = Arc::new(ChannelStream::new(capacity, [primary.clone()]));
+    let progress = Arc::new(crate::Progress::new([primary.clone()]));
     let engine = SinkEngine::new(
         primary.clone(),
         sink,
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![mapping()],
+        Arc::clone(&progress),
     )
     .with_observer(Arc::clone(&observer));
     engine.stage(Continuity::Resumed).await.unwrap();
@@ -201,6 +203,7 @@ async fn run(
         })),
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![primary],
+        Arc::clone(&progress),
     )
     .with_batch(batch)
     .with_observer(observer)
@@ -367,11 +370,13 @@ async fn a_quiet_pipeline_reports_idle_every_second_and_a_reindex_is_not_idle() 
     let observer: Arc<dyn Observer> = Arc::clone(&timings) as Arc<dyn Observer>;
     let primary = sink_name("primary");
     let stream = Arc::new(ChannelStream::new(64, [primary.clone()]));
+    let progress = Arc::new(crate::Progress::new([primary.clone()]));
     let engine = SinkEngine::new(
         primary.clone(),
         SlowSink::new(true),
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![mapping()],
+        Arc::clone(&progress),
     )
     .with_observer(Arc::clone(&observer));
     engine.stage(Continuity::Resumed).await.unwrap();
@@ -383,6 +388,7 @@ async fn a_quiet_pipeline_reports_idle_every_second_and_a_reindex_is_not_idle() 
         Arc::new(SlowDocuments::default()),
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![primary],
+        Arc::clone(&progress),
     )
     .with_observer(observer);
     let ingest_task = tokio::spawn(async move { ingest.run().await });

@@ -354,7 +354,8 @@ impl Harness {
             Arc::clone(&source) as Arc<dyn ChangeCapture>,
             Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
             Arc::clone(&stream) as Arc<dyn Stream>,
-            names,
+            names.clone(),
+            Arc::new(Progress::new(names)),
         );
         let progress = ingest.progress();
         let sinks = sinks
@@ -365,8 +366,8 @@ impl Harness {
                     sink,
                     Arc::clone(&stream) as Arc<dyn Stream>,
                     vec![mapping()],
+                    Arc::clone(&progress),
                 )
-                .with_progress(Arc::clone(&progress))
             })
             .collect();
         Self {
@@ -728,6 +729,7 @@ async fn a_straggling_reindex_request_within_max_delay_joins_the_snapshot() {
     let a_marked = Arc::clone(&a.marked);
     let b_marked = Arc::clone(&b.marked);
     let stream = Arc::new(ChannelStream::new(64, [sink_name("a"), sink_name("b")]));
+    let progress = Arc::new(Progress::new([sink_name("a"), sink_name("b")]));
     let source = Arc::new(MockSource::new(vec![]).with_snapshot(vec![upsert(10)]));
     let events = Arc::clone(&source.events);
     let mut controls = Vec::new();
@@ -741,6 +743,7 @@ async fn a_straggling_reindex_request_within_max_delay_joins_the_snapshot() {
             sink,
             Arc::clone(&stream) as Arc<dyn Stream>,
             vec![mapping()],
+            Arc::clone(&progress),
         );
         engine.stage(Continuity::Resumed).await.unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
@@ -758,6 +761,7 @@ async fn a_straggling_reindex_request_within_max_delay_joins_the_snapshot() {
         Arc::new(MockDocuments::paging(&source)),
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![sink_name("a"), sink_name("b")],
+        Arc::clone(&progress),
     )
     .with_batch(BatchPolicy {
         max_changes: 256,
@@ -942,8 +946,8 @@ async fn redelivers_the_unacked_batch_to_a_restarted_sink_engine() {
         Arc::clone(&crashing) as Arc<dyn Sink>,
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![mapping()],
-    )
-    .with_progress(Arc::clone(&progress));
+        Arc::clone(&progress),
+    );
     let (_tx, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
     let task = tokio::spawn(async move { restarted.run(&mut rx).await });
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -1113,6 +1117,7 @@ async fn reindex_control_stages_and_requests_a_snapshot_without_restarting() {
     let marked = Arc::clone(&sink.marked);
     let ops = Arc::clone(&sink.ops);
     let stream = Arc::new(ChannelStream::new(64, [sink_name("primary")]));
+    let progress = Arc::new(Progress::new([sink_name("primary")]));
     let source = Arc::new(MockSource::new(vec![]).with_snapshot(vec![upsert(10)]));
     let documents = Arc::new(MockDocuments::paging(&source));
     let engine = SinkEngine::new(
@@ -1120,6 +1125,7 @@ async fn reindex_control_stages_and_requests_a_snapshot_without_restarting() {
         sink,
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![mapping()],
+        Arc::clone(&progress),
     );
     engine.stage(Continuity::Resumed).await.unwrap();
     let (control, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
@@ -1137,6 +1143,7 @@ async fn reindex_control_stages_and_requests_a_snapshot_without_restarting() {
         documents,
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![sink_name("primary")],
+        Arc::clone(&progress),
     );
     let ingest_task = tokio::spawn(async move { ingest.run().await });
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -1317,8 +1324,14 @@ impl PositionRig {
         let name = sink_name("primary");
         let stream: Arc<dyn Stream> = Arc::new(ChannelStream::new(64, [name.clone()]));
         let observer = Arc::new(PositionObserver::default());
-        let engine = SinkEngine::new(name.clone(), sink, Arc::clone(&stream), vec![mapping()])
-            .with_observer(Arc::clone(&observer) as Arc<dyn Observer>);
+        let engine = SinkEngine::new(
+            name.clone(),
+            sink,
+            Arc::clone(&stream),
+            vec![mapping()],
+            Arc::new(Progress::new([name.clone()])),
+        )
+        .with_observer(Arc::clone(&observer) as Arc<dyn Observer>);
         let lane = stream.lane(&name).unwrap().producer;
         let (control, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
         Self {

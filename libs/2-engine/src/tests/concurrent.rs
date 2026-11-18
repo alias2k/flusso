@@ -325,12 +325,12 @@ impl Rig {
                 Arc::clone(&probe) as Arc<dyn Sink>,
                 Arc::clone(&stream) as Arc<dyn Stream>,
                 vec![mapping()],
+                Arc::clone(&progress),
             )
             .with_writes(writes)
             .with_failure_policies(policies)
             .with_stop(stop.clone())
-            .with_observer(Arc::clone(&observer) as Arc<dyn Observer>)
-            .with_progress(Arc::clone(&progress)),
+            .with_observer(Arc::clone(&observer) as Arc<dyn Observer>),
         );
         Self {
             probe,
@@ -984,6 +984,7 @@ async fn a_failed_acknowledgement_still_waits_for_the_writes_in_flight() {
         Arc::clone(&probe) as Arc<dyn Sink>,
         stream as Arc<dyn Stream>,
         vec![mapping()],
+        Arc::new(crate::Progress::new([name.clone()])),
     )
     .with_writes(4);
     let lane = channel.lane(&name).unwrap().producer;

@@ -811,13 +811,11 @@ impl SinkEngine {
             };
             (applied, searchable, returned)
         };
-        if let Some(progress) = &self.progress {
-            if let Some(applied) = applied {
-                progress.applied(&self.name, applied);
-            }
-            if let Some(searchable) = searchable {
-                progress.searchable(&self.name, searchable);
-            }
+        if let Some(applied) = applied {
+            self.progress.applied(&self.name, applied);
+        }
+        if let Some(searchable) = searchable {
+            self.progress.searchable(&self.name, searchable);
         }
         if let Some(position) = applied {
             self.observer.on_position_applied(&self.name, position);
@@ -832,9 +830,7 @@ impl SinkEngine {
     pub(super) fn report_searchable(&self) {
         let reached = self.lock_fences().advance_searchable(Instant::now());
         if let Some(position) = reached {
-            if let Some(progress) = &self.progress {
-                progress.searchable(&self.name, position);
-            }
+            self.progress.searchable(&self.name, position);
             self.observer.on_position_searchable(&self.name, position);
         }
     }
