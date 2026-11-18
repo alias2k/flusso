@@ -278,6 +278,25 @@ async fn a_read_after_a_fence_sees_the_commit() {
         snapshot["sinks"]["audit"]["lanes"]["others"]["outstanding"], 1,
         "{snapshot}"
     );
+    // The stalled lane ages, pins the slot and holds its WAL; its sibling on
+    // the same sink keeps writing and doesn't age (ADR 0012 stage 8c).
+    tokio::time::sleep(Duration::from_millis(3_500)).await;
+    let snapshot = serde_json::to_value(status.snapshot()).unwrap();
+    let lanes = &snapshot["sinks"]["audit"]["lanes"];
+    assert!(
+        lanes["others"]["stall_seconds"].as_f64().unwrap() >= 2.0,
+        "the stalled lane ages: {snapshot}"
+    );
+    assert_eq!(
+        lanes["things"]["stall_seconds"].as_f64(),
+        Some(0.0),
+        "the sibling lane writes: {snapshot}"
+    );
+    assert_eq!(
+        snapshot["pinned_by"],
+        serde_json::json!({ "index": "others", "sink": "audit" }),
+        "{snapshot}"
+    );
     others_gate.send(true).unwrap();
     let reached = fence
         .wait(&FenceRequest {
@@ -290,6 +309,12 @@ async fn a_read_after_a_fence_sees_the_commit() {
         matches!(reached, FenceOutcome::Reached { .. }),
         "{reached:?}"
     );
+    eventually("the lane to recover", async || {
+        let snapshot = serde_json::to_value(status.snapshot()).unwrap();
+        snapshot["sinks"]["audit"]["lanes"]["others"]["stall_seconds"].as_f64() == Some(0.0)
+            && snapshot["pinned_by"].is_null()
+    })
+    .await;
 
     let snapshot = serde_json::to_value(status.snapshot()).unwrap();
     assert!(snapshot["applied_position"].is_string(), "{snapshot}");
