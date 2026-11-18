@@ -296,6 +296,16 @@ acquisitions, wakes per change) with the same counting as stage 6 §9, then rate
 - **Seeds are flights on the sink side** (track A): nothing here depends on how a sink seeds.
 - **Per-lane caught up and slots** (review 1, 4, 5): the sink side is unchanged by this stage.
 
+## 10b. Exit criteria (from the review of this design)
+
+Measured on `reference` at default scale, `writes = 4`, interleaved with `main` and stage 7, before the
+PR reopens. Failing either reopens the merging decision (stage 7 §12–13) before the PR does.
+
+- **Requests per document in a burst:** writes and documents per write within ~15% of `main`'s
+  (stage-7 rerun: 131 writes × 195 documents).
+- **Backfill:** at or above stage 7's 16,720 documents/s (before the slot cap), with the hard
+  `writes − 1` cap per lane kept: every index walks at once here, so no lane needs the last slot.
+
 ## 11. Open points for the review
 
 - `changes_committed` per sink: computed from `Progress` (proposed) or an approximate per-item count.

@@ -289,3 +289,9 @@ on; the ingest-side seeded schedule runs with the default limit, so merging is o
 - **An unknown lane is refused (review 10):** `EngineError::LaneNotInProgress` at the start of either
   engine's run.
 - **Ordered sinks (review 8):** an ordered sink takes every lane's front before picking by position.
+
+**Decided after the review:** merging across lanes stays limited (option (a): lanes merge only while
+none has a write out); 8a's per-index batches are expected to bring documents per write back, checked
+by 8a's exit criteria. The slot cap stays hard (`writes − 1` per lane with several lanes): its 10%
+backfill cost on `reference` (14,968 against 16,720 documents/s) comes from walking one index at a time,
+which 8a ends.
