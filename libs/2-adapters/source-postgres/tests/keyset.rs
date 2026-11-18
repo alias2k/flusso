@@ -653,3 +653,199 @@ async fn a_key_whose_operators_are_off_the_search_path_is_walked_through_its_ind
         "no page scanned the table (index scans {idx_before} → {idx_after})"
     );
 }
+
+/// A walk resumed after its mark (ADR 0012 stage 8b) reads every row past the
+/// mark exactly once, in the key index's order: for every key type, a
+/// `citext` and a nondeterministic collation among them, so the order a
+/// resumed walk follows is Postgres's, not Rust's. And two keys compare as
+/// the walk reads them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_walk_resumed_after_its_mark_misses_no_row_and_repeats_none() {
+    let container = test_postgres::image().start().await.unwrap();
+    let url = url(&container).await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    for statement in [
+        "CREATE EXTENSION citext",
+        "CREATE COLLATION ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false)",
+        "CREATE DOMAIN big_id AS int8",
+    ] {
+        execute(&pool, statement).await.unwrap();
+    }
+    for (table, ty) in KEY_COLUMNS {
+        create_keyed_table(&pool, table, ty, "").await;
+        for text in STORED {
+            let quoted = text.replace('\'', "''");
+            let _ = execute(
+                &pool,
+                &format!("INSERT INTO {table} VALUES ('{quoted}', '{quoted}')"),
+            )
+            .await;
+        }
+    }
+    let names: Vec<&str> = KEY_COLUMNS.iter().map(|(table, _)| *table).collect();
+    let builder = PgDocumentBuilder::connect(&url, Arc::new(spec(&names)))
+        .await
+        .unwrap();
+    for table in &names {
+        let index = index_name(table);
+        let whole = walk(&builder, table, 1024).await;
+        assert!(whole.len() > 1, "`{table}` kept {} rows", whole.len());
+        for at in [0, whole.len() / 2, whole.len() - 1] {
+            let mark = builder
+                .walk_mark(&index, &whole[at])
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("`{table}` wrote no mark"));
+            let restarted = PgDocumentBuilder::connect(&url, Arc::new(spec(&names)))
+                .await
+                .unwrap();
+            let after = restarted
+                .resume_after(&index, &mark)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("`{table}` refused its own mark {mark}"));
+            let through = restarted.last_key(&index).await.unwrap().unwrap();
+            let mut resumed: Vec<RowKey> = Vec::new();
+            loop {
+                let from = resumed.last().unwrap_or(&after);
+                let page = restarted
+                    .keys(&index, Some(from), &through, 7)
+                    .await
+                    .unwrap();
+                let last = page.len() < 7;
+                resumed.extend(page);
+                if last {
+                    break;
+                }
+            }
+            let mut joined = whole[..=at].to_vec();
+            joined.extend(resumed);
+            assert_eq!(
+                names_of(&builder, table, &joined).await,
+                names_of(&builder, table, &whole).await,
+                "`{table}` resumed after its key #{at} missed or repeated rows"
+            );
+        }
+        for pair in whole.windows(2) {
+            assert_eq!(
+                builder
+                    .compare_keys(&index, &pair[0], &pair[1])
+                    .await
+                    .unwrap(),
+                Some(std::cmp::Ordering::Less),
+                "`{table}`: {pair:?}"
+            );
+            assert_eq!(
+                builder
+                    .compare_keys(&index, &pair[1], &pair[0])
+                    .await
+                    .unwrap(),
+                Some(std::cmp::Ordering::Greater),
+                "`{table}`: {pair:?}"
+            );
+        }
+        assert_eq!(
+            builder
+                .compare_keys(&index, &whole[0], &whole[0])
+                .await
+                .unwrap(),
+            Some(std::cmp::Ordering::Equal)
+        );
+    }
+}
+
+/// A mark is resumed only while the key index orders as it did when the mark
+/// was written: a changed key type or collation, another index's key, and
+/// text that is not a mark all start the walk from the first key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_mark_from_another_order_is_never_resumed() {
+    let container = test_postgres::image().start().await.unwrap();
+    let url = url(&container).await;
+    let pool = PgPoolOptions::new().connect(&url).await.unwrap();
+    execute(&pool, "CREATE EXTENSION citext").await.unwrap();
+    for (table, ty) in [
+        ("m_int", "int8"),
+        ("m_citext", "citext"),
+        ("m_collate", "text COLLATE \"C\""),
+        ("m_other", "int8"),
+    ] {
+        create_keyed_table(&pool, table, ty, "").await;
+        execute(
+            &pool,
+            &format!(
+                "INSERT INTO {table} SELECT g::text::{}, g::text FROM generate_series(1, 20) g",
+                ty.split(' ').next().unwrap()
+            ),
+        )
+        .await
+        .unwrap();
+    }
+    let tables = ["m_int", "m_citext", "m_collate", "m_other"];
+    let fresh = || async {
+        PgDocumentBuilder::connect(&url, Arc::new(spec(&tables)))
+            .await
+            .unwrap()
+    };
+    let builder = fresh().await;
+    let mut marks = Vec::new();
+    for table in tables {
+        let index = index_name(table);
+        let keys = walk(&builder, table, 1024).await;
+        let mark = builder.walk_mark(&index, &keys[5]).await.unwrap().unwrap();
+        assert!(
+            fresh()
+                .await
+                .resume_after(&index, &mark)
+                .await
+                .unwrap()
+                .is_some(),
+            "`{table}` resumes its own mark"
+        );
+        marks.push((index, mark));
+    }
+
+    let other = index_name("m_int");
+    assert_eq!(
+        fresh()
+            .await
+            .resume_after(&other, &marks[3].1)
+            .await
+            .unwrap(),
+        Some(walk(&builder, "m_other", 1024).await[5].clone()),
+        "two int8 keys named alike are one order: the mark is the value"
+    );
+    assert_eq!(
+        fresh()
+            .await
+            .resume_after(&other, "not a mark")
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        fresh()
+            .await
+            .resume_after(&other, &marks[1].1)
+            .await
+            .unwrap(),
+        None,
+        "a citext mark on an int8 key"
+    );
+
+    for statement in [
+        "ALTER TABLE m_int ALTER COLUMN id TYPE numeric",
+        "ALTER TABLE m_citext ALTER COLUMN id TYPE text",
+        "ALTER TABLE m_collate ALTER COLUMN id TYPE text COLLATE \"POSIX\"",
+    ] {
+        execute(&pool, statement).await.unwrap();
+    }
+    for (index, mark) in &marks[..3] {
+        assert_eq!(
+            fresh().await.resume_after(index, mark).await.unwrap(),
+            None,
+            "`{index}`'s key order changed: its mark is not resumed"
+        );
+    }
+}

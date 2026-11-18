@@ -114,6 +114,23 @@ impl DocumentBuilder for ScriptedBuilder {
         self.inner.keys(index, after, through, limit).await
     }
 
+    async fn walk_mark(&self, index: &IndexName, key: &RowKey) -> Result<Option<String>> {
+        self.inner.walk_mark(index, key).await
+    }
+
+    async fn resume_after(&self, index: &IndexName, mark: &str) -> Result<Option<RowKey>> {
+        self.inner.resume_after(index, mark).await
+    }
+
+    async fn compare_keys(
+        &self,
+        index: &IndexName,
+        a: &RowKey,
+        b: &RowKey,
+    ) -> Result<Option<std::cmp::Ordering>> {
+        self.inner.compare_keys(index, a, b).await
+    }
+
     async fn index_mappings(&self) -> Result<Vec<IndexMapping>> {
         self.inner.index_mappings().await
     }

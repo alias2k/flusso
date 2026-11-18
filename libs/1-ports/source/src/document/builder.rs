@@ -232,6 +232,36 @@ pub trait DocumentBuilder: std::fmt::Debug + Send + Sync {
         limit: usize,
     ) -> Result<Vec<RowKey>>;
 
+    /// The text a sink keeps for how far a walk of `index` got: `key`, and
+    /// what the order it was walked in depends on, so a later
+    /// [`resume_after`](Self::resume_after) can tell whether it still holds.
+    /// `None`: this source can't resume a walk (the default), and every
+    /// backfill starts from the first key.
+    async fn walk_mark(&self, _index: &IndexName, _key: &RowKey) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// The key a walk of `index` resumes after, from a mark
+    /// [`walk_mark`](Self::walk_mark) wrote; `None` when the mark no longer
+    /// fits the index (its key column, type or order changed, or the text is
+    /// not this source's), and the walk starts from the first key. The
+    /// default resumes nothing.
+    async fn resume_after(&self, _index: &IndexName, _mark: &str) -> Result<Option<RowKey>> {
+        Ok(None)
+    }
+
+    /// How `a` compares with `b` in the order a walk of `index` reads its keys;
+    /// `None` when unknown (the default), and a walk then serves every lane
+    /// from the least of their points.
+    async fn compare_keys(
+        &self,
+        _index: &IndexName,
+        _a: &RowKey,
+        _b: &RowKey,
+    ) -> Result<Option<std::cmp::Ordering>> {
+        Ok(None)
+    }
+
     /// The resolved mapping of every index this builder serves: each field
     /// typed from the schema's explicit `mapping` where one is given, and from
     /// the source's own column types otherwise. Sinks that own their index use

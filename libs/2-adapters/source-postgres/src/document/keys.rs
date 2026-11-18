@@ -55,6 +55,20 @@
 //! - **A type changed under a page** (`0A000`) forgets the root's column
 //!   types and operators and reads the page once more, as a batched build
 //!   does.
+//! - **A resumable mark** (ADR 0012 stage 8b) is JSON: the key (a float as
+//!   its bits, since JSON has no `NaN` or infinity), and the
+//!   order it was walked in: the key column's type (a domain by its own
+//!   name), the key index's operator class and its collation. A walk resumes
+//!   after a mark only while all three are what the key index has now: a key
+//!   walked in another order would leave rows neither walk read. Two marks
+//!   compare with the walk's own `<`, so their order is Postgres's
+//!   (`citext`, a collation), never Rust's.
+//!
+//! ```text
+//! {"v":1,"key":[["id",{"Value":{"BigInt":42}}]],"order":"bigint|pg_catalog.int8_ops|"}
+//! ```
+
+use std::cmp::Ordering;
 
 use kernel::{ColumnName, GenericValue, IndexName, IndexSchema};
 use source::{Result, RowKey, SourceError};
@@ -187,6 +201,132 @@ impl PgDocumentBuilder {
         Ok(Ok(page))
     }
 
+    /// The mark a sink keeps for a walk of `index` that got to `key`.
+    pub(super) async fn mark_of(&self, index: &IndexName, key: &RowKey) -> Result<Option<String>> {
+        let schema = self.schema_of(index)?;
+        let Some(column) = self.walked_key(index, schema).await? else {
+            return Ok(None);
+        };
+        walked_value(key, &column)?;
+        let Some(order) = self.walk_order_of(schema, &column).await? else {
+            return Ok(None);
+        };
+        serde_json::to_string(&Mark::new(key, order.text))
+            .map(Some)
+            .map_err(|error| SourceError::Query(format!("writing a walk mark: {error}")))
+    }
+
+    /// The key a walk of `index` resumes after, when `text` is a mark of
+    /// this index's key walked in the order its key index has now.
+    pub(super) async fn resumed_key(
+        &self,
+        index: &IndexName,
+        text: &str,
+    ) -> Result<Option<RowKey>> {
+        let schema = self.schema_of(index)?;
+        let discard = |reason: &str| {
+            tracing::warn!(%index, reason, "the recorded backfill checkpoint doesn't fit this index any more; its backfill starts again from the first key");
+            Ok(None)
+        };
+        let Ok(mark) = serde_json::from_str::<Mark>(text) else {
+            return discard("it is not a mark this version wrote");
+        };
+        if mark.v != MARK_VERSION {
+            return discard("it is of another mark version");
+        }
+        let Some(column) = self.walked_key(index, schema).await? else {
+            return discard("the index's root can't be walked");
+        };
+        let order = mark.order.clone();
+        let key = mark.key();
+        if walked_value(&key, &column).is_err() {
+            return discard("its key column is not the root's key any more");
+        }
+        match self.walk_order_of(schema, &column).await? {
+            Some(now) if now.text == order => Ok(Some(key)),
+            _ => discard("the key's type, operator class or collation changed"),
+        }
+    }
+
+    /// How `a` compares with `b` by `index`'s walk operators.
+    pub(super) async fn walk_order(
+        &self,
+        index: &IndexName,
+        a: &RowKey,
+        b: &RowKey,
+    ) -> Result<Option<Ordering>> {
+        let schema = self.schema_of(index)?;
+        let Some(column) = self.walked_key(index, schema).await? else {
+            return Ok(None);
+        };
+        let (a, b) = (walked_value(a, &column)?, walked_value(b, &column)?);
+        let meta = self
+            .column_meta(&schema.db_schema, &schema.table, &column)
+            .await?;
+        let operators = self.walk_operators(index, schema, &column).await?;
+        let Some(order) = self.walk_order_of(schema, &column).await? else {
+            return Ok(None);
+        };
+        let walk = WalkKey {
+            column: &column,
+            key_type: &meta.key_type,
+            base_name: &meta.base_name,
+            operators: &operators,
+        };
+        let text = query::compare_keys_query(walk, order.collation.as_deref(), a, b)?;
+        let statement = query::bind_param(query::bind_param(sqlx::query(text), a)?, b)?;
+        let row = statement
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| self.failed_walk(index, schema, error))?;
+        let before: Option<bool> = row.try_get("before").map_err(super::query_err)?;
+        let after: Option<bool> = row.try_get("after").map_err(super::query_err)?;
+        Ok(match (before, after) {
+            (Some(true), _) => Some(Ordering::Less),
+            (_, Some(true)) => Some(Ordering::Greater),
+            (Some(false), Some(false)) => Some(Ordering::Equal),
+            _ => None,
+        })
+    }
+
+    /// What the walk order of `schema`'s root key depends on (cached per
+    /// root table): `None` when the root has no single-column primary key
+    /// index.
+    async fn walk_order_of(
+        &self,
+        schema: &IndexSchema,
+        key: &ColumnName,
+    ) -> Result<Option<WalkOrder>> {
+        let cache_key = (schema.db_schema.to_string(), schema.table.to_string());
+        if let Some(found) = self.lock_walk_orders().get(&cache_key) {
+            return Ok(Some(found.clone()));
+        }
+        let table = format!("{}.{}", schema.db_schema, schema.table);
+        let row = sqlx::query(WALK_ORDER_SQL)
+            .bind(table)
+            .bind(key.as_ref().to_owned())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(super::query_err)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let order = WalkOrder {
+            text: row.try_get(0).map_err(super::query_err)?,
+            collation: row.try_get(1).map_err(super::query_err)?,
+        };
+        self.lock_walk_orders().insert(cache_key, order.clone());
+        Ok(Some(order))
+    }
+
+    fn lock_walk_orders(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<(String, String), WalkOrder>> {
+        self.walk_orders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn schema_of(&self, index: &IndexName) -> Result<&IndexSchema> {
         self.spec
             .schema(index)
@@ -265,8 +405,9 @@ impl PgDocumentBuilder {
     /// Forget what a walk of `schema`'s root read from the catalog.
     fn forget_walk(&self, schema: &IndexSchema) {
         self.forget_tables_of(schema);
-        self.lock_walk_operators()
-            .remove(&(schema.db_schema.to_string(), schema.table.to_string()));
+        let table = (schema.db_schema.to_string(), schema.table.to_string());
+        self.lock_walk_operators().remove(&table);
+        self.lock_walk_orders().remove(&table);
     }
 
     fn failed_walk(
@@ -341,6 +482,91 @@ const WALK_OPERATORS_SQL: &str =
 /// `has_schema_privilege`: only `pg_catalog`, which every role may use.
 const WALK_OPERATORS_SQL_UNPROBED: &str = walk_operators_sql!("n.nspname = 'pg_catalog'");
 
+/// What a root's walk order depends on: [`WALK_ORDER_SQL`]'s text, and the
+/// key index's collation to compare two keys under (`None` for a type with
+/// none).
+#[derive(Debug, Clone)]
+pub(super) struct WalkOrder {
+    text: String,
+    collation: Option<String>,
+}
+
+/// The version of [`Mark`]'s layout: a mark of another is not resumed.
+const MARK_VERSION: u32 = 1;
+
+/// A resumable walk mark, as the sink keeps it.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Mark {
+    v: u32,
+    key: Vec<(ColumnName, MarkValue)>,
+    /// [`WALK_ORDER_SQL`]'s answer when the mark was written.
+    order: String,
+}
+
+/// A key value as a mark holds it. JSON has no `NaN` or infinity, so a
+/// float key is kept as its bits; every other value as its own serde form.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+enum MarkValue {
+    Float(u32),
+    Double(u64),
+    Value(GenericValue),
+}
+
+impl Mark {
+    fn new(key: &RowKey, order: String) -> Self {
+        let key = key
+            .0
+            .iter()
+            .map(|(column, value)| {
+                let value = match value {
+                    GenericValue::Float(float) => MarkValue::Float(float.to_bits()),
+                    GenericValue::Double(double) => MarkValue::Double(double.to_bits()),
+                    other => MarkValue::Value(other.clone()),
+                };
+                (column.clone(), value)
+            })
+            .collect();
+        Self {
+            v: MARK_VERSION,
+            key,
+            order,
+        }
+    }
+
+    fn key(self) -> RowKey {
+        RowKey(
+            self.key
+                .into_iter()
+                .map(|(column, value)| {
+                    let value = match value {
+                        MarkValue::Float(bits) => GenericValue::Float(f32::from_bits(bits)),
+                        MarkValue::Double(bits) => GenericValue::Double(f64::from_bits(bits)),
+                        MarkValue::Value(value) => value,
+                    };
+                    (column, value)
+                })
+                .collect(),
+        )
+    }
+}
+
+/// What the order of the root's primary key index depends on: the key
+/// column's type (a domain by its own name), the index's operator class and
+/// its collation, as one text. `$1` is the root table, `$2` its key column.
+const WALK_ORDER_SQL: &str = "SELECT format_type(a.atttypid, NULL) || '|' || \
+     quote_ident(cn.nspname) || '.' || quote_ident(c.opcname) || '|' || \
+     coalesce(quote_ident(kn.nspname) || '.' || quote_ident(k.collname), ''), \
+     quote_ident(kn.nspname) || '.' || quote_ident(k.collname) \
+     FROM pg_index i \
+     JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0] \
+     JOIN pg_opclass c ON c.oid = i.indclass[0] \
+     JOIN pg_namespace cn ON cn.oid = c.opcnamespace \
+     LEFT JOIN pg_collation k ON k.oid = i.indcollation[0] \
+     LEFT JOIN pg_namespace kn ON kn.oid = k.collnamespace \
+     WHERE i.indrelid = $1::regclass AND i.indisprimary AND i.indnatts = 1 \
+       AND a.attname = $2";
+
 /// A key's value of the walked column. A key the pages didn't hand out
 /// (another column, a null) is a caller's mistake, not a page.
 fn walked_value<'a>(walked: &'a RowKey, key: &ColumnName) -> Result<&'a GenericValue> {
@@ -358,6 +584,38 @@ mod tests {
     use kernel::GenericValue;
 
     use super::*;
+
+    /// JSON holds no `NaN` or infinity: a mark keeps a float key's bits, so
+    /// every float reads back as itself, `-0` and `NaN` included.
+    #[test]
+    fn a_mark_keeps_every_float_key_exactly() {
+        let id = ColumnName::try_new("id").unwrap();
+        let values = [
+            GenericValue::Float(f32::NEG_INFINITY),
+            GenericValue::Float(f32::NAN),
+            GenericValue::Float(-0.0),
+            GenericValue::Double(f64::INFINITY),
+            GenericValue::Double(f64::NAN),
+            GenericValue::Double(0.1),
+            GenericValue::BigInt(i64::MIN),
+            GenericValue::String("é".to_owned()),
+        ];
+        for value in values {
+            let key = RowKey(vec![(id.clone(), value)]);
+            let text = serde_json::to_string(&Mark::new(&key, "o".to_owned())).unwrap();
+            let read = serde_json::from_str::<Mark>(&text).unwrap().key();
+            assert_eq!(format!("{read:?}"), format!("{key:?}"), "{text}");
+            match (&read.0[0].1, &key.0[0].1) {
+                (GenericValue::Float(a), GenericValue::Float(b)) => {
+                    assert_eq!(a.to_bits(), b.to_bits())
+                }
+                (GenericValue::Double(a), GenericValue::Double(b)) => {
+                    assert_eq!(a.to_bits(), b.to_bits())
+                }
+                (a, b) => assert_eq!(a, b),
+            }
+        }
+    }
 
     #[test]
     fn a_page_follows_only_a_key_it_handed_out() {

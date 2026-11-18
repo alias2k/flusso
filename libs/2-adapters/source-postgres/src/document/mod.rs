@@ -364,6 +364,9 @@ pub struct PgDocumentBuilder {
     /// Each walked root table's key operators (`keys.rs`), cached until a
     /// page fails.
     walk_operators: Arc<Mutex<HashMap<(String, String), query::WalkOperators>>>,
+    /// What each root table's walk order depends on (its key's type, the key
+    /// index's operator class and collation), as a resumable mark records it.
+    walk_orders: Arc<Mutex<HashMap<(String, String), keys::WalkOrder>>>,
     /// Indexes whose walk sorts every page (operators the role may not
     /// name), so the warning is logged once per index.
     sorting_warned: Arc<Mutex<HashSet<IndexName>>>,
@@ -414,6 +417,7 @@ impl PgDocumentBuilder {
             keyless_warned: Arc::new(Mutex::new(HashSet::new())),
             unwalked_warned: Arc::new(Mutex::new(HashSet::new())),
             walk_operators: Arc::default(),
+            walk_orders: Arc::default(),
             sorting_warned: Arc::default(),
         }
     }
@@ -1604,6 +1608,23 @@ impl DocumentBuilder for PgDocumentBuilder {
         limit: usize,
     ) -> Result<Vec<RowKey>> {
         self.key_page(index, after, through, limit).await
+    }
+
+    async fn walk_mark(&self, index: &IndexName, key: &RowKey) -> Result<Option<String>> {
+        self.mark_of(index, key).await
+    }
+
+    async fn resume_after(&self, index: &IndexName, mark: &str) -> Result<Option<RowKey>> {
+        self.resumed_key(index, mark).await
+    }
+
+    async fn compare_keys(
+        &self,
+        index: &IndexName,
+        a: &RowKey,
+        b: &RowKey,
+    ) -> Result<Option<std::cmp::Ordering>> {
+        self.walk_order(index, a, b).await
     }
 
     async fn index_mappings(&self) -> Result<Vec<IndexMapping>> {

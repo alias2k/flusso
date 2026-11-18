@@ -309,6 +309,33 @@ pub(super) fn key_page_query(
     )))
 }
 
+/// Whether `$1` comes before `$2`, and `$2` before `$1`, in the walk's own
+/// order (see `keys.rs`): neither is equal.
+pub(super) fn compare_keys_query(
+    key: WalkKey<'_>,
+    collation: Option<&str>,
+    a: &GenericValue,
+    b: &GenericValue,
+) -> Result<SqlString> {
+    let cast = |value: &GenericValue| {
+        sql::key_cast(value, key.key_type)
+            .ok_or_else(|| SourceError::Query(format!("a backfill can't bind the key {value:?}")))
+    };
+    // Compared under the key index's collation, as the pages compare the
+    // column: a bare cast would take the database's default.
+    let collate = collation
+        .map(|name| format!(" COLLATE {name}"))
+        .unwrap_or_default();
+    let (a, b) = (
+        format!("{}{collate}", cast(a)?),
+        format!("{}{collate}", cast(b)?),
+    );
+    let less = &key.operators.less;
+    Ok(SqlString::new(format!(
+        "SELECT ($1{a} {less} $2{b}) AS \"before\", ($2{b} {less} $1{a}) AS \"after\""
+    )))
+}
+
 /// The root's greatest key, by the walk's own order (see `keys.rs`).
 pub(super) fn last_key_query(schema: &IndexSchema, key: WalkKey<'_>) -> SqlString {
     let column = qident(key.column.as_ref());
