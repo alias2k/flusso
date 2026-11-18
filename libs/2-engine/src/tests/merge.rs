@@ -465,3 +465,58 @@ async fn a_skip_rejection_in_a_merged_write_acknowledges_every_part() {
     task.abort();
     assert_eq!(sink.documents_per_write(), [8]);
 }
+
+/// `item` carrying a memory charge of `bytes`, as the ingest engine publishes it.
+fn charged(item: LaneItem, budget: &Arc<crate::Budget>, bytes: usize) -> LaneItem {
+    let LaneItem::Batch(mut batch) = item else {
+        unreachable!("item builds a batch")
+    };
+    let charge = budget
+        .try_reserve(crate::Work::Live, bytes)
+        .unwrap()
+        .settle(bytes);
+    batch.hold = stream::Hold::new(Arc::new(charge));
+    LaneItem::Batch(batch)
+}
+
+/// Each part of a merged write gives its memory back at its own
+/// acknowledgement, once: a part a `stop` rejection holds back keeps its bytes
+/// while the part that landed has returned its, and they come back when the
+/// held part lands on the next run.
+#[tokio::test]
+async fn each_part_of_a_merged_write_gives_its_bytes_back_at_its_own_ack() {
+    const KIB: usize = 1024;
+    let budget = Arc::new(crate::Budget::new(1 << 20));
+    let rig = Rig::new();
+    rig.publish(
+        "users",
+        charged(item("users", 0..4, Some(0)), &budget, 4 * KIB),
+    )
+    .await;
+    rig.publish(
+        "orders",
+        charged(item("orders", 0..4, Some(1)), &budget, 8 * KIB),
+    )
+    .await;
+    assert_eq!(budget.held().total, 12 * KIB);
+
+    let sink = Arc::new(Parts {
+        rejects: Some(index("orders")),
+        ..Parts::default()
+    });
+    let engine = rig
+        .engine(Arc::clone(&sink))
+        .with_writes(1)
+        .with_failure_policies(FailurePolicies::new(FailurePolicy::Stop));
+    let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
+    assert!(engine.run(&mut control).await.is_err());
+    assert_eq!(sink.documents_per_write(), [8], "one merged write");
+    wait_for(|| budget.held().total == 8 * KIB).await;
+
+    let again = Arc::new(Parts::default());
+    let task = spawn(rig.engine(Arc::clone(&again)).with_writes(1));
+    wait_for(|| rig.stream.is_idle()).await;
+    task.abort();
+    let _ = task.await;
+    wait_for(|| budget.held() == crate::Held::default()).await;
+}
