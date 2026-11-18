@@ -86,10 +86,18 @@ Line references are to `d082b9e5`.
 - **What stage 9 changes.** A parked lane's item is released once its fresh build is requested (ADR §5's extra rule), so a lane parked by `on_error = stop` stops pinning the budget.
 - **What stays the same.** A merely slow or unreachable sink still holds its bytes until it acknowledges, as the ADR says ("the other indexes keep going while memory allows").
 
-**The bound.** Held never passes `max_built_mib` + `builds` batches:
+**The bound.** Held never passes `max_built_mib` plus the **actual** size of each batch in flight (at most `2 × builds` of them: running, or built and waiting in the reorder queue):
 
-- each running build may settle above its estimate by at most its own size;
+- a grant is checked against its estimate, then settles to what it built, so each may overshoot by its actual size less its estimate, which is never more than its actual size;
 - an over-budget kind then gets no new reservation until it is back under.
+
+So the overshoot follows the batches really built, not the estimate: a run of documents much heavier than the average overshoots by what they weigh. The tiny-budget schedules assert exactly this (`limit + builds × batch` at every write).
+
+**Is the estimate robust enough? Kept as one average per kind, deliberately:**
+
+- **A heavier estimate buys little.** "Never below the largest recent batch" or a high quantile only moves the overshoot from after the grant to before it: every batch is still admitted once its kind is empty (the one-batch rule), and the measured overshoot was 0.5 MiB at a 256 MiB half (below).
+- **It costs throughput.** A cautious estimate refuses grants the real batches would have fit, and the 32 MiB row below shows what too few batches in flight costs.
+- **Per index is where it gets better, at 8a.** A mixed live batch has no single index, and a per-id lookup at grant is a cost per item on the loop. 8a gives each index its own half and its own task, so an average per index comes with no lookup there; a heavy index's documents then stop being averaged with light ones.
 
 ## 3. The backfill half
 
@@ -198,7 +206,7 @@ Peak RSS before the budget, at `builds = 4`: 348–371 MiB (stage 4). At `builds
 **What it says:**
 
 - **The walk is honest.** RSS minus held bytes stays near a constant for each scenario (86–103 MiB on `reference`, 49–62 on `complex`: the process's own working set). Held bytes track the documents' real heap. The per-document check against a counting allocator agrees: 0.87–1.09 (`tests/heap_walk.rs`).
-- **The bound holds.** Held never passed the backfill half by more than one estimate per build in flight: 255.5 MiB at a 256 MiB half; 67.2 at 64; 19.5 at 16.
+- **The bound holds.** Held never passed the backfill half by more than the batches in flight weighed: 255.5 MiB at a 256 MiB half; 67.2 at 64; 19.5 at 16.
 - **At the default 512 MiB the backfill's half is what binds on `reference`,** at 256 MiB, and peak RSS stays at 352 MiB, where stage 4 left it. So the default does not bring RSS back near `builds = 1`'s.
 - **128 MiB does, at no cost:** the backfill rate is the same or better (14,401 vs 13,144 docs/s) at 170 MiB RSS.
 - **32 MiB costs a quarter of the backfill rate** (10,402): too few batches fit in flight for 4 builds and 4 writes.

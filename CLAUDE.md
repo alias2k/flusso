@@ -1015,12 +1015,13 @@ is the one concrete piece.
   equal to any other), so the bytes return when the last copy drops: every lane acknowledged and no
   ledger can redeliver. Rules: total within the limit, backfill within half, and a kind holding nothing
   is always granted one batch (so a batch larger than the budget builds alone); held stays within the
-  limit plus one estimate per build in flight. `[stream] capacity` / `--queue-capacity` are deprecated
+  limit plus each in-flight build's **actual** batch (a grant is checked against its estimate, then
+  settles to what it built; the estimate stays one average per kind, per index waits for 8a). `[stream] capacity` / `--queue-capacity` are deprecated
   (load, warn, ignored); `ChannelStream::from_config` gives lanes `LANE_BACKSTOP` (1,048,576) items,
   which the floor keeps from binding (`ChannelStream::new` keeps an explicit capacity for tests).
   Metrics `flusso.memory.built{work}` and `flusso.memory.refused{work}` (once per wait). Guards:
   `budget::tests`, `ingest::tests`' `random_schedules_under_a_tiny_budget_stay_within_it_and_finish`
-  (held ≤ limit + one estimate per build at every write, every byte back at the end),
+  (held ≤ limit + each build's actual batch at every write, every byte back at the end),
   `a_stalled_sink_paces_builds_and_they_resume_when_it_does`,
   `live_keeps_room_beside_a_backfill_holding_its_half`, `a_batch_bigger_than_the_budget_still_builds`,
   `a_batch_redelivered_after_a_failed_write_gives_its_bytes_back_once_written`; every `ingest::tests`
