@@ -746,7 +746,6 @@ impl SinkEngine {
         Ok(())
     }
 
-    /// Move the fences for a write that returned and report what moved.
     /// A write returned: record it, and report what became applied and
     /// searchable, applied first. Applied is reported here, before the caller
     /// acknowledges: the source forgets a position once every sink confirmed
@@ -820,7 +819,6 @@ impl SinkEngine {
     }
 }
 
-/// Live changes carry a position; a backfill batch has none.
 /// What a returned write left in the fences.
 struct Returned {
     /// When the oldest position comes due, if that is a matter of time.
@@ -829,6 +827,7 @@ struct Returned {
     wants_a_caught_up_write: bool,
 }
 
+/// Live changes carry a position; a backfill batch has none.
 fn work_of(position: Option<Position>) -> Work {
     if position.is_some() {
         Work::Live

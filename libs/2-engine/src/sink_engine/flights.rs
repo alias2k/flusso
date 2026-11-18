@@ -204,4 +204,116 @@ mod tests {
             Poll::Ready(Some(3))
         );
     }
+
+    #[test]
+    fn only_the_runs_latest_waker_is_woken() {
+        let mut flights = Flights::new();
+        let (tx, rx) = oneshot::channel();
+        assert!(flights.start(pending_until(rx)).is_none());
+        let a = Arc::new(CountWakes(AtomicUsize::new(0)));
+        let b = Arc::new(CountWakes(AtomicUsize::new(0)));
+        let wa = waker(Arc::clone(&a));
+        let wb = waker(Arc::clone(&b));
+        assert!(
+            flights
+                .poll_next(&mut Context::from_waker(&wa))
+                .is_pending()
+        );
+        assert!(
+            flights
+                .poll_next(&mut Context::from_waker(&wb))
+                .is_pending()
+        );
+        tx.send(1).unwrap();
+        assert_eq!(a.0.load(Ordering::SeqCst), 0);
+        assert_eq!(b.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            flights.poll_next(&mut Context::from_waker(&wb)),
+            Poll::Ready(Some(1))
+        );
+    }
+
+    #[test]
+    fn a_wake_after_its_future_finished_leaves_the_others_in_flight() {
+        let mut flights = Flights::new();
+        let stash: Arc<std::sync::Mutex<Option<std::task::Waker>>> = Arc::default();
+        let s2 = Arc::clone(&stash);
+        let mut first = true;
+        let fut = std::future::poll_fn(move |cx| {
+            if first {
+                first = false;
+                *s2.lock().unwrap() = Some(cx.waker().clone());
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            } else {
+                Poll::Ready(5u32)
+            }
+        })
+        .boxed();
+        assert!(flights.start(fut).is_none());
+        let (_tx, rx) = oneshot::channel();
+        assert!(flights.start(pending_until(rx)).is_none());
+        let w = Arc::new(CountWakes(AtomicUsize::new(0)));
+        let run = waker(Arc::clone(&w));
+        assert_eq!(
+            flights.poll_next(&mut Context::from_waker(&run)),
+            Poll::Ready(Some(5))
+        );
+        stash.lock().unwrap().take().unwrap().wake();
+        assert!(
+            flights
+                .poll_next(&mut Context::from_waker(&run))
+                .is_pending()
+        );
+        assert_eq!(flights.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn wakes_from_other_threads_are_never_lost() {
+        fn rnd(x: &mut u64) -> u64 {
+            *x ^= *x << 13;
+            *x ^= *x >> 7;
+            *x ^= *x << 17;
+            *x
+        }
+        for round in 0..200u32 {
+            let mut flights = Flights::new();
+            let mut senders = Vec::new();
+            let n = 64u32;
+            let mut got = 0u32;
+            for i in 0..n {
+                let (tx, rx) = oneshot::channel();
+                senders.push((i, tx));
+                if let Some(_v) = flights.start(pending_until(rx)) {
+                    got += 1;
+                }
+            }
+            let handle = std::thread::spawn(move || {
+                let mut x = 0x9E37_79B9_7F4A_7C15u64 ^ u64::from(round);
+                for (i, tx) in senders {
+                    if rnd(&mut x) % 10 < 3 {
+                        std::thread::sleep(std::time::Duration::from_micros(rnd(&mut x) % 50));
+                    } else {
+                        std::thread::yield_now();
+                    }
+                    let _ = tx.send(i);
+                }
+            });
+            let collected = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                let mut seen = 0u32;
+                let mut y = 12345u64 + u64::from(round);
+                while let Some(_v) = flights.next().await {
+                    seen += 1;
+                    if rnd(&mut y) % 5 == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                }
+                seen
+            })
+            .await
+            .unwrap_or_else(|_| panic!("round {round} hung"));
+            handle.join().unwrap();
+            assert_eq!(collected + got, n);
+        }
+    }
 }
