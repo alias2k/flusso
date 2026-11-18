@@ -520,3 +520,73 @@ async fn each_part_of_a_merged_write_gives_its_bytes_back_at_its_own_ack() {
     let _ = task.await;
     wait_for(|| budget.held() == crate::Held::default()).await;
 }
+
+/// Refuses every document of `orders` and reports what it wrote searchable
+/// only later; the empty caught-up write that follows fails.
+#[derive(Debug, Default)]
+struct RefusesThenFailsToRefresh;
+
+#[async_trait]
+impl Sink for RefusesThenFailsToRefresh {
+    async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> sink::Result<WriteReport> {
+        let scope = if caught_up {
+            sink::CaughtUp::All
+        } else {
+            sink::CaughtUp::No
+        };
+        self.write_parts(&[envelopes], scope).await
+    }
+
+    async fn write_parts(
+        &self,
+        parts: &[&[Envelope]],
+        _: sink::CaughtUp<'_>,
+    ) -> sink::Result<WriteReport> {
+        if parts.iter().all(|part| part.is_empty()) {
+            return Err(sink::SinkError::Write("the refresh failed".to_owned()));
+        }
+        let rejected = parts
+            .iter()
+            .flat_map(|part| part.iter())
+            .filter(|e| e.index == index("orders"))
+            .map(|e| RejectedDocument {
+                index: e.index.to_string(),
+                id: e.id.clone(),
+                reason: "refused".to_owned(),
+            })
+            .collect::<Vec<_>>();
+        Ok(WriteReport::clean()
+            .rejecting(rejected)
+            .visible(sink::Visibility::Deferred))
+    }
+
+    async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
+        Ok(true)
+    }
+}
+
+/// A `stop` rejection in a merged write is blamed on its own lane even when
+/// acknowledging the other part fails (here, its caught-up write): the run
+/// doesn't fall back to blaming every lane.
+#[tokio::test]
+async fn a_stop_rejection_keeps_its_blame_when_an_acknowledgement_fails() {
+    let rig = Rig::new();
+    rig.publish("users", item("users", 0..4, Some(0))).await;
+    rig.publish("orders", item("orders", 0..4, Some(1))).await;
+    let engine = SinkEngine::new(
+        sink_name("primary"),
+        Arc::new(RefusesThenFailsToRefresh) as Arc<dyn Sink>,
+        Arc::clone(&rig.stream) as Arc<dyn Stream>,
+        mappings(),
+        Arc::clone(&rig.progress),
+    )
+    .with_writes(1)
+    .with_failure_policies(FailurePolicies::new(FailurePolicy::Stop));
+    engine.set_blame(Blame::Nobody);
+    let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
+    assert!(engine.run(&mut control).await.is_err());
+    assert_eq!(
+        engine.blame(),
+        Blame::Lanes([LaneKey::new(index("orders"), sink_name("primary"))].into()),
+    );
+}
