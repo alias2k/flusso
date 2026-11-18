@@ -409,8 +409,8 @@ impl DecodeState {
 
 /// Build the live-changes stream from a connected client.
 ///
-/// This carries only live changes; a backfill, when a sink needs one, is a
-/// separate snapshot stream (see [`super::backfill`]). Each emitted change is
+/// This carries only live changes; a backfill reads root keys through the
+/// document builder instead. Each emitted change is
 /// tagged with a [`Position`](kernel::Position) `ack` stamps from its commit
 /// LSN; the capture's `confirm` turns how far the engine's lanes landed into
 /// an LSN, so the slot's `confirmed_flush_lsn` advances only that far. While
