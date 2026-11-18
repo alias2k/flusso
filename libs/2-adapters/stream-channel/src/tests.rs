@@ -354,3 +354,48 @@ fn every_configured_lane_holds_the_backstop() {
     }
     assert_eq!(stream.requests.tx.max_capacity(), LANE_BACKSTOP);
 }
+
+/// Counts the warnings logged while it is the default subscriber.
+#[derive(Clone, Default)]
+struct Warnings(Arc<std::sync::atomic::AtomicUsize>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Warnings {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        if *event.metadata().level() == tracing::Level::WARN {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+/// A `capacity` the config still names warns once and changes nothing: a
+/// lane of capacity one takes several items unread.
+#[tokio::test]
+async fn a_deprecated_capacity_warns_once_and_is_ignored() {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let warnings = Warnings::default();
+    let subscriber = tracing_subscriber::registry().with(warnings.clone());
+    let config: ChannelConfig = toml::from_str("capacity = 1").unwrap();
+    let stream = tracing::subscriber::with_default(subscriber, || {
+        ChannelStream::from_config(&config, [key("a"), key("b")])
+    });
+    assert_eq!(warnings.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    let lane = stream.lane(&key("a")).unwrap();
+    for position in 0..4 {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            lane.producer.publish(batch(position)),
+        )
+        .await
+        .expect("a lane takes more than the deprecated capacity")
+        .unwrap();
+    }
+
+    let quiet = Warnings::default();
+    let subscriber = tracing_subscriber::registry().with(quiet.clone());
+    tracing::subscriber::with_default(subscriber, || {
+        ChannelStream::from_config(&ChannelConfig::default(), [key("a")])
+    });
+    assert_eq!(quiet.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+}

@@ -912,4 +912,52 @@ mod tests {
             Some(&serde_json::json!(5000))
         );
     }
+
+    /// `[stream] capacity` and `--queue-capacity` still validate, but the lanes
+    /// ignore them: a capacity of one still takes several items unread.
+    #[tokio::test]
+    async fn a_deprecated_queue_capacity_validates_and_is_ignored() {
+        let from_file = Config::from(
+            ConfigToml::try_parse(
+                "[source]\ntype = \"postgres\"\n[stream]\ntype = \"channel\"\ncapacity = 1\n",
+            )
+            .unwrap(),
+        );
+        let mut from_flag =
+            Config::from(ConfigToml::try_parse("[source]\ntype = \"postgres\"\n").unwrap());
+        adapters::apply_overrides(
+            &mut from_flag,
+            &adapters::Overrides {
+                queue_capacity: Some(1),
+                ..adapters::Overrides::default()
+            },
+        );
+        let key = LaneKey::new(
+            IndexName::try_new("users").unwrap(),
+            SinkName::try_new("primary").unwrap(),
+        );
+        for config in [from_file, from_flag] {
+            adapters::validate(&config).unwrap();
+            assert_eq!(adapters::stream_config(&config).unwrap().capacity, Some(1));
+            let stream = FlussoBackends
+                .stream(&config, std::slice::from_ref(&key))
+                .unwrap();
+            let lane = stream.lane(&key).unwrap();
+            for position in 0..4 {
+                let item = stream::LaneItem::Batch(stream::Batch {
+                    position: Some(kernel::Position::new(position)),
+                    changes: 1,
+                    envelopes: Vec::new().into(),
+                    hold: Default::default(),
+                });
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    lane.producer.publish(item),
+                )
+                .await
+                .expect("a lane takes more than the deprecated capacity")
+                .unwrap();
+            }
+        }
+    }
 }
