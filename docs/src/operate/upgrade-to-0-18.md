@@ -345,7 +345,10 @@ Each `(index, sink)` pair now has its own lane, its own progress and its own fen
 | `Backends::stream(config)` | `Backends::stream(config, &[LaneKey])` |
 | `MsearchBundle` (`flusso-query`) | gains `indexes()`, defaulting to none (a fence on every index); the tuple bundles name their slots' indexes |
 
-`Sink::write` is unchanged: every item now holds one index's documents, read it off the envelopes when a sink needs it.
+| `Sink::write` per lane item | the engine calls `Sink::write_parts(&[&[Envelope]], caught_up)`: the items ready at once, merged into one write up to `[batch] max_changes` documents and `Sink::write_limit`. Its default writes each part with `write`, so a sink that implements only `write` works unchanged; override it to send the parts in one request |
+| `SinkEngine` writes one item per write | `SinkEngine::with_write_documents(n)` bounds a merged write (the daemon passes `max_changes`) |
+
+`Sink::write` is unchanged: every part holds one index's documents, read it off the envelopes when a sink needs it. **Requests per document:** a burst over several indexes goes out in writes of about one batch, as before this release; one write per index would have tripled the `_bulk` requests.
 
 ## Related
 

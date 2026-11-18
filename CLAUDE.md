@@ -642,6 +642,18 @@ is the one concrete piece.
   `a_wait_on_named_indexes_echoes_them` / `an_unknown_or_invalid_index_is_refused`, `flusso-query`'s
   `a_fenced_client_waits_once_per_level_and_index`,
   `a_combined_search_and_a_multi_search_wait_on_every_index_they_read`.
+- **Ready items merge into one write (stage 7, #397's revisit).** `writes.rs`'s `pick` takes the first
+  item as before, then every other admissible item of the same kind (live or backfill), across lanes
+  and of one lane, up to `SinkEngine::with_write_documents` (the daemon passes `[batch] max_changes`)
+  and `Sink::write_limit` (OpenSearch: `batch_size`), never splitting an item, never waiting; it keeps
+  the no-hash front pick unless another item could fit (`could_join_the_front`). One `writes` slot per
+  write; the engine calls `Sink::write_parts(&[&[Envelope]], caught_up)` (default: `write` per part,
+  `caught_up` on the last, reports folded; OpenSearch overrides it with one `_bulk`). Each part is
+  decided alone: a `stop` rejection keeps that part unacknowledged and blames its lane only, the others
+  land and are acknowledged; an `Err` blames every part's lane. Caught up when some lane of the write
+  has nothing else waiting. A barrier lane and an ordered sink write one item alone. Guards:
+  `tests::merge`, and `tests::concurrent`'s seeded schedule run with merging off and on (its other
+  tests keep one item per write: `Rig::new` sets `with_write_documents(1)`).
 
 - **At-least-once via write-then-ack and `Progress` (ADR 0012 stage 6).** A position describes
   itself: `kernel::Position { seq, fence_before, confirm_before, confirm_through }`, the stamps the

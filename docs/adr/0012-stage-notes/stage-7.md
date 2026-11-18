@@ -209,3 +209,54 @@ seeded schedule test over several indexes, fence unit tests per index, HTTP, cli
   parking = keep the run alive and stop granting that lane, instead of ending the run. A parked
   lane's unlanded items pin confirmation (the slot) and its own fences only. Reindex per lane can
   come with it.
+
+## 12. Ready items merge into one write
+
+Measured by track C on `reference` (default scale, `writes = 4`, medians of 3): with one write per lane
+item a burst went out as ~733 writes of ~35 documents against `main`'s ~207 of ~125, the same changes
+in 3.5× the requests. So the sink engine merges (`sink_engine/writes.rs`, `pick`):
+
+- **What merges:** every item admissible *now* (per-lane document admission, as before) of the kind the
+  grant chose (live with live, backfill with backfill: the every-fourth rule stays per write), across
+  lanes and several of one lane (#397's revisit). The first item is the one lanes' turns and live-first
+  choose; then the others, a lane at a time from its lane on, each lane in window order. An item behind
+  its lane's `SnapshotComplete` is never admissible; an item behind a blocked item of its lane only
+  when it shares no document with it (unchanged admission). A lane behind a failed run's barrier writes
+  its front alone, and so does an ordered sink (stdout): no merging there.
+- **The bound:** documents per write ≤ `[batch] max_changes` (ADR settings: "documents per build and
+  per write") and ≤ `Sink::write_limit` (OpenSearch: `batch_size`), so a merged write is one `_bulk`
+  request and isn't then cut into a full request and a small one. An item is never split; one larger
+  than the bound goes alone. Bytes are left to the sink's own chunking (`max_bytes`), as for one item.
+- **It never waits:** it takes what is in the window when a slot is free. A lone change is written at
+  once (`a_lone_item_is_written_at_once`, on paused time with no timer to fire).
+- **One slot** per merged write.
+- **Acks, fences, `Progress`:** when the write returns, each part is decided on its own. Parts that
+  landed move their lanes' fences (one returned-write sequence number for the write) and `Progress`
+  marks, then are acknowledged in lane order.
+- **Caught up:** a merged write is caught up when *some* lane of it has nothing else queued or waiting,
+  as one item's write was when its lane had nothing: that lane's position doesn't wait out a refresh.
+- **Failure:** a write `Err` fails every part, blamed on all their lanes. An item-level rejection is
+  its document's index's: `on_error` per index decides; a part whose index decides `stop` stays
+  unacknowledged and the run fails blamed on its lane only (`Blame::Lanes`); the other parts are
+  acknowledged, and `skip` rejections of acknowledged parts are quarantined.
+- **Metrics:** `on_batch_committed` once per write, over the parts that landed: `flusso.flush.documents`
+  and `flusso.flush.size` count per write, as the sink sends it. The `write` stage timing is per write
+  and carries no `index`: a merged write spans indexes, so an index label would be wrong for most
+  writes. Left off, documented in the metrics reference.
+- **The port:** `Sink::write_parts(&[&[Envelope]], caught_up)`, with a default that writes each part
+  with `write` in order (`caught_up` on the last) and folds the reports, so every existing sink and
+  test double keeps working; the OpenSearch sink overrides it to send the parts' documents in the same
+  `_bulk` requests. `Sink::write_limit` defaults to none. `SinkEngine::with_write_documents` (the daemon
+  passes `max_changes`). No document is copied: parts are the items' `Arc<[Envelope]>`s.
+- **Cost:** a merge of items of one lane needs their document hashes (two items of one lane may share a
+  document), which one item per write at `writes = 1` never computed; `pick` keeps the no-hash front
+  pick when no other waiting item could fit beside the front (`could_join_the_front`). In-process A/B
+  (interleaved, pinned): no slowdown measured; see the report.
+
+Guards: `tests::merge` (`a_burst_over_three_indexes_is_written_in_writes_of_about_a_batch`,
+`small_items_of_one_lane_are_merged`, `a_lone_item_is_written_at_once`,
+`a_merged_write_stays_within_the_limit`, `a_document_is_never_merged_with_its_own_later_build`,
+`a_stop_rejection_in_a_merged_write_bars_only_its_own_lane`,
+`a_skip_rejection_in_a_merged_write_acknowledges_every_part`); the seeded schedule
+(`a_document_is_never_written_twice_at_once_and_its_versions_never_go_down`) runs with merging off and
+on; the ingest-side seeded schedule runs with the default limit, so merging is on there.
