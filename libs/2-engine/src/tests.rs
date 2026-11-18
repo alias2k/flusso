@@ -302,6 +302,9 @@ struct RecordingSink {
     reindexed: Arc<Mutex<Vec<String>>>,
     events: Arc<Mutex<Vec<String>>>,
     pending: AtomicUsize,
+    /// Answered by `is_rebuilding`: reads see another copy than the one
+    /// written.
+    rebuilding: AtomicBool,
 }
 
 impl RecordingSink {
@@ -342,6 +345,10 @@ impl Sink for RecordingSink {
         self.marked.lock().unwrap().push(index.as_ref().to_owned());
         self.seeded.store(true, Ordering::SeqCst);
         Ok(())
+    }
+
+    async fn is_rebuilding(&self, _: &IndexName) -> sink::Result<bool> {
+        Ok(self.rebuilding.load(Ordering::SeqCst))
     }
 
     async fn reindex(&self, mapping: &IndexMapping) -> sink::Result<()> {
@@ -1680,4 +1687,42 @@ async fn an_index_is_announced_rebuilding_before_the_sink_moves_its_writes() {
             "seeded users"
         ]
     );
+}
+
+/// Final review, finding 4: a process that starts in the middle of a rebuild
+/// (the sink still serves an older copy while it writes a new one) announces
+/// the index as rebuilding before its backfill request, so a fence vouches for
+/// nothing there and says `rebuilding`, not `backfilling`.
+#[tokio::test]
+async fn a_start_in_the_middle_of_a_rebuild_announces_it() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = RecordingSink::seeded(false).with_events(&events);
+    sink.rebuilding.store(true, Ordering::SeqCst);
+    let stream = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
+    let engine = SinkEngine::new(
+        sink_name("primary"),
+        Arc::new(sink),
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![mapping()],
+        Arc::new(Progress::of([users()], [sink_name("primary")])),
+    )
+    .with_observer(Arc::new(RebuildEvents(Arc::clone(&events))));
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert_eq!(
+        *events.lock().unwrap(),
+        ["rebuilding users", "requested users"]
+    );
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let stream = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
+    let first_seed = SinkEngine::new(
+        sink_name("primary"),
+        Arc::new(RecordingSink::seeded(false).with_events(&events)),
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![mapping()],
+        Arc::new(Progress::of([users()], [sink_name("primary")])),
+    )
+    .with_observer(Arc::new(RebuildEvents(Arc::clone(&events))));
+    first_seed.stage(Continuity::Resumed).await.unwrap();
+    assert_eq!(*events.lock().unwrap(), ["requested users"], "a first seed");
 }

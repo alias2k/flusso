@@ -318,6 +318,13 @@ impl SinkEngine {
                 );
             }
         } else if !unseeded.is_empty() {
+            // A start in the middle of a rebuild: reads still see the old copy,
+            // so a fence must vouch for nothing of it (#379).
+            for (index, _) in &unseeded {
+                if self.sink.is_rebuilding(index).await? {
+                    self.observer.on_index_rebuilding(&self.name, index);
+                }
+            }
             self.request_backfill(unseeded).await?;
         } else {
             tracing::info!("every index is seeded; no backfill needed");

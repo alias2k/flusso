@@ -983,3 +983,32 @@ async fn a_first_generation_left_without_its_meta_doc_is_reused() {
     assert_eq!(searchable(&client, &base, "users").await, ["1", "2"]);
     assert_eq!(marker(&client, &base, h1.as_str()).await, (1, true));
 }
+
+/// Final review, finding 4: the sink says when reads see another generation
+/// than the one it writes. A first seed: no (both aliases name the generation
+/// being filled). A reindex restarted by a new process: yes, until the seed
+/// swaps the aliases.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn the_sink_says_when_reads_see_another_generation_than_it_writes() {
+    let (_container, base) = start_opensearch().await;
+    let mapping = mapping("users", 1);
+    let index = &mapping.index;
+    let first = sink(&base);
+    first.ensure_index(&mapping).await.unwrap();
+    assert!(!first.is_rebuilding(index).await.unwrap(), "a first seed");
+    write(&first, index, &[1, 2]).await;
+    first.mark_seeded(index).await.unwrap();
+    assert!(!first.is_rebuilding(index).await.unwrap(), "seeded");
+    first.reindex(&mapping).await.unwrap();
+
+    let restarted = sink(&base);
+    restarted.ensure_index(&mapping).await.unwrap();
+    assert!(
+        restarted.is_rebuilding(index).await.unwrap(),
+        "reads stay on generation 1 while generation 2 is written"
+    );
+    write(&restarted, index, &[1]).await;
+    restarted.mark_seeded(index).await.unwrap();
+    assert!(!restarted.is_rebuilding(index).await.unwrap(), "swapped");
+}

@@ -762,7 +762,8 @@ is the one concrete piece.
   (beside its `Furthest`, same mutex) is set by the sink engine's events through `FenceObserver`:
   `on_sink_started` serves a `Pending` lane, `on_backfill_requested` makes it `Backfilling` (a
   `Rebuilding` lane stays), `on_index_rebuilding` (emitted in the `Rebuild` staging step **before**
-  `Sink::reindex`) makes it `Rebuilding`, freezing what a lane that served its writes had reached
+  `Sink::reindex`, and at staging for an unseeded index the sink reports `Sink::is_rebuilding`: a
+  restart in the middle of a rebuild) makes it `Rebuilding`, freezing what a lane that served its writes had reached
   (the old generation gets nothing new after it: the on-demand reindex runs with no write in
   flight), else `None` (a `Fresh` start vouches for nothing), `on_index_seeded` (after
   `mark_seeded` refreshed and moved the alias) serves it. A wait needing an unserved lane holds and

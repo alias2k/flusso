@@ -200,11 +200,13 @@ A comparison with a string, a number or another kind fails rather than answering
 | rebuilt after a lost slot | `200` once the lane wrote the change | held; `200` once seeded, else `503` `rebuilding` |
 | reindexed, position before the reindex began | `200` | `200` |
 | reindexed, position after it began | `200`, read stale until the swap | held; `200` once seeded, else `503` `rebuilding` |
+| reindexed, flusso restarted before the swap | `200`, read stale until the swap | held, any position: the new process knows nothing the old generation holds; `200` once seeded, else `503` `rebuilding` |
 | any of these, timeout passed | `408` | `503` with the reason |
 
 - **`flusso-query`** retries a `503` until `fence_timeout`, then fails with `FenceUnavailable` and the new cause `Backfilling`, or `Rebuilding`. A rebuild longer than the timeout fails the read where 0.17 returned stale data: handle the error, or size the timeout for it.
 - **The upgrade itself backfills** the indexes whose content hash moved ([Steps](#steps)): fenced reads of those indexes wait for that backfill. Reads naming other indexes don't.
 - **A plain-HTTP caller** that treated `503` as "flusso is down" sees it during rebuilds too: read `reason`.
+- **Embedding the crates.** `Sink::is_rebuilding(index)` (default `false`): whether reads see another copy than the one the sink writes. A sink that builds a rebuild beside the copy readers use overrides it, so a restart in the middle of a rebuild answers `rebuilding`. `Observer::on_index_rebuilding` is new (default nothing).
 
 ## A stop drains, then exits
 

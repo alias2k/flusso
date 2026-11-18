@@ -363,6 +363,18 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
         })
     }
 
+    /// Whether reads of `index` see another copy than the one this sink now
+    /// writes: a rebuild is under way (a reindex, or a rebuild after the
+    /// source lost its resume point), and readers stay on the old copy until
+    /// [`mark_seeded`](Self::mark_seeded) swaps. Asked while staging, after
+    /// [`ensure_index`](Self::ensure_index), for an unseeded index: a process
+    /// that starts in the middle of a rebuild says so, and a fence then vouches
+    /// for nothing of that index until it is seeded. The default, `false`, is
+    /// right for a sink whose reads see what it writes.
+    async fn is_rebuilding(&self, _: &IndexName) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Remember that `index`'s backfill has landed every document up to
     /// `mark` (opaque text the source wrote), so the next start resumes after
     /// it. Only the index's current, unseeded target holds it: seeding it, a

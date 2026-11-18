@@ -1029,6 +1029,10 @@ impl Sink for SeedGated {
         self.inner.seeding(index).await
     }
 
+    async fn is_rebuilding(&self, index: &IndexName) -> sink::Result<bool> {
+        self.inner.is_rebuilding(index).await
+    }
+
     async fn record_walked(&self, index: &IndexName, mark: &str) -> sink::Result<()> {
         self.inner.record_walked(index, mark).await
     }

@@ -380,6 +380,16 @@ impl Sink for OpensearchSink {
             .is_some_and(|(_, seeded)| seeded))
     }
 
+    /// The hash alias serves a generation other than the one written: the
+    /// rebuild's generation is being filled while readers stay on the old.
+    async fn is_rebuilding(&self, index: &IndexName) -> Result<bool> {
+        let Some(target) = self.target(index.as_ref()) else {
+            return Ok(false);
+        };
+        let serving = self.alias_holders(&target.hash_alias).await?;
+        Ok(!serving.is_empty() && !serving.contains(&target.generation))
+    }
+
     async fn seeding(&self, index: &IndexName) -> Result<Seeding> {
         let Some(target) = self.target(index.as_ref()) else {
             return Ok(Seeding::Unseeded { walked: None });
