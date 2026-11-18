@@ -1236,12 +1236,12 @@ impl<'a> Run<'a> {
                 }
             }
         }
+        // An acknowledgement (or its caught-up write) that fails still leaves
+        // a stop rejection blamed on its own lane, recorded first.
+        let mut acknowledged = Ok(());
         for (part, last) in landed_parts.into_iter().zip(last_of_lane) {
             // Let go of the batch before acknowledging it, so the lane frees it
-            // as the acknowledgement lands, as it did with one write at a time.
-            // Freeing it here after the acknowledgement made the pre-#417
-            // `live_drain` bench (an instant sink, where who frees a batch
-            // decided its time) at 64 changes per batch half again slower.
+            // as the acknowledgement lands.
             drop(part.documents);
             let oldest = self.is_oldest(part.lane, part.seq);
             let wants = last
@@ -1249,8 +1249,13 @@ impl<'a> Run<'a> {
                     .lanes
                     .get(part.lane)
                     .is_some_and(|run| returned.wanting.contains(&run.key));
-            self.acknowledge(part.handle, part.lane, oldest, Some(wants))
-                .await?;
+            if let Err(error) = self
+                .acknowledge(part.handle, part.lane, oldest, Some(wants))
+                .await
+            {
+                acknowledged = Err(error);
+                break;
+            }
             if let Some(run) = self.lanes.get_mut(part.lane) {
                 run.barrier = false;
             }
@@ -1260,6 +1265,7 @@ impl<'a> Run<'a> {
             self.hold_walks(&lanes);
             self.fail(error, &lanes);
         }
+        acknowledged?;
         for lane in walked {
             if let Some(landed) = self.record_walked(lane) {
                 Box::pin(self.landed(landed)).await?;
