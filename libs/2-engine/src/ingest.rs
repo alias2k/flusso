@@ -44,6 +44,7 @@
 mod builds;
 mod commit;
 mod confirm;
+mod gate;
 mod live;
 mod snapshot;
 #[cfg(test)]

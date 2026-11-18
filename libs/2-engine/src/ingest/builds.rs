@@ -48,14 +48,12 @@ use source::document::{Document, DocumentBuilder, DocumentId};
 use tokio::task::AbortHandle;
 use tokio::time::{Duration, Instant};
 
+use super::gate::{Gate, Permit};
 use super::snapshot::Snapshot;
 use crate::budget::{Budget, Charge, Reservation, document_bytes};
 use crate::error::{EngineError, Result};
 use crate::observer::Work;
 use crate::sink_engine::flights::Flights;
-
-/// How many of every kind of grant go to backfill when both kinds wait.
-const BACKFILL_EVERY: u64 = 4;
 
 /// The bytes per document a build is first estimated at, before any build
 /// of its kind landed: ADR 0012's measured `users` document.
@@ -146,7 +144,12 @@ pub(super) struct Builds {
     holding: Vec<(u64, Vec<u64>)>,
     /// The slot numbers of the live builds running on their own tasks.
     live_running: Vec<u64>,
-    contested: u64,
+    /// The permits every build holds while it runs (ADR 0012 §5).
+    gate: Arc<Gate>,
+    /// The permit the last choice took, for the build it granted.
+    granted: Option<Permit>,
+    /// Each running build's permit, by slot number.
+    permits: Vec<(u64, Permit)>,
     /// A build failed: nothing more is granted.
     halted: bool,
     spare: Vec<Vec<DocumentId>>,
@@ -190,7 +193,9 @@ impl Builds {
             flights: Flights::new(),
             holding: Vec::new(),
             live_running: Vec::new(),
-            contested: 0,
+            gate: Gate::new(limit),
+            granted: None,
+            permits: Vec::new(),
             halted: false,
             spare: Vec::new(),
             budget,
@@ -243,10 +248,10 @@ impl Builds {
         self.flights.len()
     }
 
-    /// A build may start: fewer than `builds` run, the queue has room, and
-    /// no build failed.
+    /// A build may start as far as this run goes: the queue has room and no
+    /// build failed. The permit is the gate's to give.
     fn has_room(&self) -> bool {
-        !self.halted && self.flights.len() < self.limit && self.slots.len() < 2 * self.limit
+        !self.halted && self.slots.len() < 2 * self.limit
     }
 
     /// Whether a running build holds any of `ids`.
@@ -279,26 +284,28 @@ impl Builds {
         });
         let backfill = backfill
             .is_some_and(|ids| !self.holds_any(ids) && self.affordable(Work::Backfill, ids.len()));
-        match (live, backfill) {
-            (true, true) => {
-                self.contested += 1;
-                Some(if self.contested.is_multiple_of(BACKFILL_EVERY) {
-                    Grant::Backfill
-                } else {
-                    Grant::Live
-                })
-            }
-            (true, false) => Some(Grant::Live),
-            (false, true) => Some(Grant::Backfill),
-            (false, false) => None,
-        }
+        let (work, permit) = self.gate.choose(live, backfill)?;
+        self.granted = Some(permit);
+        Some(match work {
+            Work::Live => Grant::Live,
+            Work::Backfill => Grant::Backfill,
+        })
     }
 
     /// Whether the live batch could be granted ignoring the rule that a
     /// second live build waits for a full batch: for the last batch of a run.
     pub(super) fn can_take_last(&mut self, ids: &[DocumentId]) -> bool {
         self.refused = None;
-        self.has_room() && !self.holds_any(ids) && self.affordable(Work::Live, ids.len())
+        if !(self.has_room() && !self.holds_any(ids) && self.affordable(Work::Live, ids.len())) {
+            return false;
+        }
+        match self.gate.choose(true, false) {
+            Some((_, permit)) => {
+                self.granted = Some(permit);
+                true
+            }
+            None => false,
+        }
     }
 
     /// An empty id list to fill, reusing one a finished build gave back.
@@ -328,6 +335,9 @@ impl Builds {
         halts: &(dyn Fn(&Built) -> bool + Sync),
     ) {
         let seq = self.front + self.slots.len() as u64;
+        if let Some(permit) = self.granted.take() {
+            self.permits.push((seq, permit));
+        }
         let live = matches!(job, Job::Live { .. });
         let work = if live { Work::Live } else { Work::Backfill };
         match work {
@@ -404,6 +414,9 @@ impl Builds {
         if let Some(at) = self.spawned.iter().position(|(spawned, _)| *spawned == seq) {
             self.spawned.swap_remove(at);
         }
+        if let Some(at) = self.permits.iter().position(|(held, _)| *held == seq) {
+            self.permits.swap_remove(at);
+        }
         let Some(slot) = seq
             .checked_sub(self.front)
             .and_then(|at| self.slots.get_mut(at as usize))
@@ -457,6 +470,7 @@ impl Builds {
     pub(super) async fn abandon(&mut self) {
         self.halted = true;
         while self.flights.next().await.is_some() {}
+        self.permits.clear();
         self.holding.clear();
         self.slots.clear();
     }
