@@ -186,3 +186,19 @@ computes its case when it checks.
 - With more than one item per lane sharing an `oldest`, the queues already allow it (they hold
   `(key, oldest)` and pop by key); keys must stay unique per lane.
 - `Stream::is_idle` can move to `Progress` once snapshot items are tracked there too.
+
+## 7. Settled in the stage
+
+- **`Progress`'s lock layout:** per lane, `registered` (the ingest engine's) and `reports` (that lane's sink engine's); plus `routed`. A reader takes `routed`, then each lane's two locks in that order. The ingest engine and a sink engine never take the same lock.
+- **The move from pending to in flight** has no atomic step in stage 6: a batch is registered after it is on every lane, and the source's `next_seq` test covers it until then. Stage 8a's pending sets need the move the ADR names (mark ids and record `routed` under one lock).
+- **A sink reports a landing before its acknowledgement**, after its rejections are decided. A landing reported before the registration, or twice after a redelivery, is matched or dropped (keys are unique per lane: a batch's last position).
+- **`Landed::covered_seq`** is a position-only view for mocks and logs. For `Before(o)` it says nothing of a position before `o` that was emitted and never routed: tests that cared (`failed_ingest_engine_restarts_and_resumes_the_stream`) assert on `Landed` itself.
+- **Engines built outside the daemon must share one `Progress`** (`IngestEngine::progress()` / `with_progress`); a sink engine without one reports nothing, so confirmation would wait on its lane forever. Every harness and e2e does so.
+- **`Stream::is_idle` stays** for the drain: it also waits for snapshot items, which `Progress` doesn't track.
+
+## 8. For stage 7
+
+- `Progress::new` takes lane keys; make them `(index, sink)`. `published` already takes the lanes a batch went to; a lane a batch skips pins nothing (`a_lane_with_nothing_routed_to_it_pins_nothing`).
+- Keys must stay unique per lane. With one item per `(index, sink)` per batch they are, as long as the key is still the batch's last position.
+- The fence reads `Progress::lane(sink, level)` per sink; per `(index, sink)` it takes the minimum over the named lanes. `FenceObserver` only wakes waiters, so the events can stay per sink.
+- `Fence::settled` compares each lane's searchable and applied cases; it becomes per lane unchanged.
