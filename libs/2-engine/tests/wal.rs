@@ -3314,7 +3314,9 @@ async fn the_pipeline_runs_through_pgbouncer_in_transaction_mode() {
 /// front of every connection flusso opens, the replication one included
 /// (issue #295): it refuses any parameter inside a startup `options`, so the
 /// settings a key's text depends on are set after connecting, or not needed.
-/// A `bytea` key under `bytea_output = escape` backfills and follows.
+/// A `bytea` key under `bytea_output = escape` backfills and follows. The
+/// backfill walks several key pages, each one statement on whatever server
+/// connection the pooler hands out.
 async fn the_pipeline_runs_through_pgbouncer(pool_mode: &str) {
     use testcontainers_modules::testcontainers::GenericImage;
     use testcontainers_modules::testcontainers::core::IntoContainerPort;
@@ -3326,6 +3328,7 @@ async fn the_pipeline_runs_through_pgbouncer(pool_mode: &str) {
         "CREATE TABLE users (id bytea PRIMARY KEY, email text)",
         "CREATE PUBLICATION flusso FOR TABLE users",
         "INSERT INTO users VALUES ('\\x01', 'a@x')",
+        "INSERT INTO users SELECT int4send(n), 'u' || n FROM generate_series(1, 2500) n",
     ] {
         sqlx::query(statement).execute(&pool).await.unwrap();
     }
@@ -3373,6 +3376,25 @@ async fn the_pipeline_runs_through_pgbouncer(pool_mode: &str) {
         Arc::new(RecordingSink::new(&recorded)),
     ));
     expect_op(&mut engine, &recorded, "upsert users \\x01").await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let backfilled: std::collections::BTreeSet<String> = recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|op| op.starts_with("upsert users \\x0000"))
+            .cloned()
+            .collect();
+        if backfilled.len() == 2500 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the paged backfill wrote {} of 2,500 rows",
+            backfilled.len()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     sqlx::query("INSERT INTO users VALUES ('\\x02', 'b@x')")
         .execute(&pool)
         .await
