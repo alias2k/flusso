@@ -76,6 +76,15 @@ async fn serve_public(at: u64) -> (String, Arc<SteadySource>) {
 
 /// [`serve_public`], plus the handle that ends a stop's drain.
 async fn serve_stoppable(at: u64) -> (String, Arc<SteadySource>, Waits) {
+    serve_staged(at, |_| {}).await
+}
+
+/// [`serve_stoppable`] with the `primary` sink staged, after `events` told
+/// the fence what else its sink engine did.
+async fn serve_staged(
+    at: u64,
+    events: impl FnOnce(&daemon::FenceObserver),
+) -> (String, Arc<SteadySource>, Waits) {
     let waits = Waits::default();
     let source = Arc::new(SteadySource::default());
     source.at.store(at, Ordering::SeqCst);
@@ -84,14 +93,18 @@ async fn serve_stoppable(at: u64) -> (String, Arc<SteadySource>, Waits) {
         kernel::IndexName::try_new("users").unwrap(),
         primary.clone(),
     );
+    let fence = Fence::new(
+        Arc::clone(&source) as Arc<dyn ChangeCapture>,
+        Arc::new(daemon::Progress::new([lane.clone()])),
+        [lane],
+    );
+    let observer = daemon::FenceObserver::new(fence.clone());
+    events(&observer);
+    daemon::Observer::on_sink_started(&observer, &primary);
     let state = PublicState {
         status: Arc::new(Status::new([], [primary.clone()], Instant::now())),
         registry: None,
-        fence: Fence::new(
-            Arc::clone(&source) as Arc<dyn ChangeCapture>,
-            Arc::new(daemon::Progress::new([lane.clone()])),
-            [lane],
-        ),
+        fence,
         waits: waits.clone(),
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -252,6 +265,51 @@ async fn a_wait_after_the_drain_is_refused_and_one_before_the_source_is_live_say
         body["reason"], "stopping",
         "even a reached position: this process no longer answers: {body}"
     );
+}
+
+/// A wait on an index its sink is seeding or rebuilding is `503` with the
+/// reason and the lanes, never `200` (#379).
+#[tokio::test]
+async fn a_wait_on_an_index_being_seeded_or_rebuilt_is_answered_503_with_the_reason() {
+    let primary = SinkName::try_new("primary").unwrap();
+    let users = kernel::IndexName::try_new("users").unwrap();
+    for (events, reason) in [
+        (
+            Box::new(|observer: &daemon::FenceObserver| {
+                daemon::Observer::on_backfill_requested(
+                    observer,
+                    &SinkName::try_new("primary").unwrap(),
+                    &[kernel::IndexName::try_new("users").unwrap()],
+                );
+            }) as Box<dyn FnOnce(&daemon::FenceObserver)>,
+            "backfilling",
+        ),
+        (
+            Box::new(|observer: &daemon::FenceObserver| {
+                daemon::Observer::on_index_rebuilding(
+                    observer,
+                    &SinkName::try_new("primary").unwrap(),
+                    &kernel::IndexName::try_new("users").unwrap(),
+                );
+            }),
+            "rebuilding",
+        ),
+    ] {
+        let (base, _source, _waits) = serve_staged(40, events).await;
+        let (status, retry, body) = get_wait_full(&base, "position=30&timeout_ms=50").await;
+        assert_eq!((status, retry.as_deref()), (503, Some("1")), "{body}");
+        assert_eq!(body["reason"], reason, "{body}");
+        assert_eq!(body["position"], "40", "{body}");
+        assert_eq!(
+            body["lanes"],
+            serde_json::json!([{
+                "index": users.as_ref(),
+                "sink": primary.as_ref(),
+                "state": reason,
+            }]),
+            "{body}"
+        );
+    }
 }
 
 #[tokio::test]

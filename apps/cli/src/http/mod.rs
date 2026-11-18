@@ -28,10 +28,11 @@ use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
 use daemon::{
     ControlError, DaemonControl, Fence, FenceError, FenceLevel, FenceOutcome, FenceRequest,
-    IndexName, SinkName, Status,
+    IndexName, SinkName, Status, Unserved,
 };
 use prometheus::{Registry, TextEncoder};
 use serde_json::json;
+use stream::LaneKey;
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, watch};
 
@@ -114,6 +115,42 @@ impl Drop for OpenWait {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+/// `503` with `Retry-After` for a wait some lane can't vouch for (#379): its
+/// index is being seeded (`backfilling`) or rebuilt beside the generation
+/// reads see (`rebuilding`), named in `lanes`. The most telling reason wins.
+fn unserved(position: &str, lanes: &[(LaneKey, Unserved)]) -> Response {
+    let reason = lanes
+        .iter()
+        .map(|(_, why)| *why)
+        .max()
+        .unwrap_or(Unserved::Starting);
+    let names: Vec<String> = lanes
+        .iter()
+        .map(|(lane, why)| format!("{} on {} ({})", lane.index, lane.sink, why.as_str()))
+        .collect();
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, RETRY_AFTER_SECS)],
+        Json(json!({
+            "error": format!(
+                "reads don't see this position yet: {}",
+                names.join(", ")
+            ),
+            "reason": reason.as_str(),
+            "position": position,
+            "lanes": lanes
+                .iter()
+                .map(|(lane, why)| json!({
+                    "index": lane.index.as_ref(),
+                    "sink": lane.sink.as_ref(),
+                    "state": why.as_str(),
+                }))
+                .collect::<Vec<_>>(),
+        })),
+    )
+        .into_response()
 }
 
 /// `503` with `Retry-After` and why: `stopping` (this process is going away;
@@ -397,6 +434,9 @@ async fn wait(
     let (status, reached, position) = match waited {
         Ok(FenceOutcome::Reached { position }) => (StatusCode::OK, true, position),
         Ok(FenceOutcome::TimedOut { position }) => (StatusCode::REQUEST_TIMEOUT, false, position),
+        Ok(FenceOutcome::Unserved { position, lanes }) => {
+            return unserved(&position, &lanes);
+        }
         Err(error @ FenceError::InvalidPosition(_)) => {
             return refuse(StatusCode::BAD_REQUEST, error.to_string());
         }
