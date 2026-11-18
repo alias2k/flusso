@@ -577,6 +577,7 @@ async fn run_with(
     sink_engine.stage(continuity).await.unwrap();
     let ingest = IngestEngine::new(capture, documents, stream, vec![name], progress)
         .with_builds(common::e2e_builds())
+        .with_budget(common::e2e_budget())
         .with_batch(BatchPolicy {
             max_changes: 64,
             max_delay: Duration::from_millis(10),

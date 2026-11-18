@@ -193,6 +193,22 @@ impl Budget {
     }
 }
 
+impl Drop for Budget {
+    /// Every reservation and charge holds the budget, so it is dropped only
+    /// once all of them are: anything still counted then is an accounting
+    /// mistake (a charge given back twice, or never), a standing guard in
+    /// every debug build's tests.
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            debug_assert_eq!(
+                self.held(),
+                Held::default(),
+                "the memory budget was dropped with bytes still counted"
+            );
+        }
+    }
+}
+
 /// Bytes reserved for a build in flight. Dropped unsettled, it gives them
 /// back.
 #[derive(Debug)]

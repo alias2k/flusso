@@ -209,6 +209,7 @@ async fn run(
         vec![primary],
         Arc::clone(&progress),
     )
+    .with_budget(std::sync::Arc::new(crate::Budget::new(usize::MAX / 4)))
     .with_batch(batch)
     .with_observer(observer)
     .run()
@@ -394,6 +395,7 @@ async fn a_quiet_pipeline_reports_idle_every_second_and_a_reindex_is_not_idle() 
         vec![primary],
         Arc::clone(&progress),
     )
+    .with_budget(std::sync::Arc::new(crate::Budget::new(usize::MAX / 4)))
     .with_observer(observer);
     let ingest_task = tokio::spawn(async move { ingest.run().await });
 

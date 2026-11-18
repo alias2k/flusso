@@ -726,6 +726,16 @@ impl Deployment {
             sink: Some(sink),
             budget: None,
         }
+        .counting()
+    }
+
+    /// Count what the engine builds within a budget that never refuses, so
+    /// every test checks every byte comes back.
+    fn counting(mut self) -> Self {
+        let budget = Arc::new(Budget::new(usize::MAX / 4));
+        self.ingest = self.ingest.with_budget(Arc::clone(&budget));
+        self.budget = Some(budget);
+        self
     }
 
     /// Hold built documents within `bytes`, and check at every write that the
@@ -1249,6 +1259,7 @@ async fn a_failed_build_publishes_nothing_after_it() {
     let result = deployment.ingest.run().await;
     releaser.await.unwrap();
     deployment.drained().await;
+    deployment.assert_released().await;
     sink.abort();
 
     assert!(result.is_err(), "the failed build fails the run");
@@ -1299,6 +1310,7 @@ async fn a_document_failed_under_stop_publishes_nothing_after_it_and_skip_goes_o
         let result = deployment.ingest.run().await;
         releaser.await.unwrap();
         deployment.drained().await;
+        deployment.assert_released().await;
         sink.abort();
 
         match policy {
@@ -1368,6 +1380,8 @@ async fn a_stop_finishes_the_builds_in_flight_and_starts_no_other() {
     };
     let result = deployment.ingest.run().await;
     driver.await.unwrap();
+    deployment.drained().await;
+    deployment.assert_released().await;
     sink.abort();
 
     assert!(result.is_ok(), "a stop ends the run cleanly: {result:?}");
@@ -1647,6 +1661,7 @@ async fn a_stop_while_a_closed_batch_waits_for_a_build_ends_the_run() {
     let result = deployment.ingest.run().await;
     driver.await.unwrap();
     deployment.drained().await;
+    deployment.assert_released().await;
     sink.abort();
 
     assert!(result.is_ok(), "{result:?}");
@@ -1672,4 +1687,130 @@ async fn a_batch_redelivered_after_a_failed_write_gives_its_bytes_back_once_writ
     deployment.run_to_end(0).await;
     assert!(!recorder.fail_next.load(Ordering::SeqCst), "a write failed");
     assert_eq!(deployment.recorder.state(), db.expected());
+}
+
+/// Builds every change as one document in each of two indexes, so a batch
+/// is split into a piece per `(index, sink)` lane.
+#[derive(Debug)]
+struct TwoIndexes;
+
+fn orders() -> IndexName {
+    IndexName::try_new("orders").unwrap()
+}
+
+#[async_trait]
+impl DocumentBuilder for TwoIndexes {
+    async fn resolve(
+        &self,
+        _table: &TableName,
+        key: &RowKey,
+        _before: Option<&RowImage>,
+        _after: Option<&RowImage>,
+    ) -> source::Result<Vec<DocumentId>> {
+        Ok([users(), orders()]
+            .into_iter()
+            .map(|index| DocumentId {
+                index,
+                key: key.clone(),
+            })
+            .collect())
+    }
+
+    async fn build(&self, id: &DocumentId) -> source::Result<Document> {
+        Ok(Document::Upsert {
+            id: id.clone(),
+            body: GenericValue::Map(BTreeMap::from([(
+                "v".to_owned(),
+                GenericValue::String("x".repeat(200)),
+            )])),
+        })
+    }
+
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        Vec::new()
+    }
+
+    async fn last_key(&self, _: &IndexName) -> source::Result<Option<RowKey>> {
+        Ok(None)
+    }
+
+    async fn keys(
+        &self,
+        _: &IndexName,
+        _: Option<&RowKey>,
+        _: &RowKey,
+        _: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        Ok(Vec::new())
+    }
+}
+
+/// One build's pieces travel on four lanes (two indexes into two sinks, the
+/// sinks merging ready items into one write); its bytes are counted once
+/// and come back exactly when the last lane acknowledged its piece: not
+/// while the stalled sink still holds it.
+#[tokio::test(start_paused = true)]
+async fn a_batch_split_across_lanes_gives_its_bytes_back_once_the_last_lane_lands() {
+    let audit = SinkName::try_new("audit").unwrap();
+    let sinks = [sink_name(), audit.clone()];
+    let stream = Arc::new(ChannelStream::over(64, [users(), orders()], sinks.clone()));
+    let db = Database::new(0, (0..12).map(Change::upsert).collect());
+    let feed = Arc::new(Feed::new(&db));
+    let budget = Arc::new(Budget::new(usize::MAX / 4));
+    let ingest = IngestEngine::new(
+        Arc::clone(&feed) as Arc<dyn ChangeCapture>,
+        Arc::new(TwoIndexes),
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        sinks.to_vec(),
+        Arc::new(crate::Progress::of([users(), orders()], sinks.clone())),
+    )
+    .with_batch(batch(4))
+    .with_builds(4)
+    .with_budget(Arc::clone(&budget));
+    let primary = Recorder::seeded(true);
+    let stalled = Recorder::seeded(true);
+    stalled.stall();
+    let mut tasks = Vec::new();
+    for (name, recorder) in [(sink_name(), &primary), (audit, &stalled)] {
+        let mappings = [users(), orders()]
+            .into_iter()
+            .map(|index| IndexMapping {
+                index,
+                hash: kernel::ContentHash::new(1),
+                fields: Vec::new(),
+            })
+            .collect();
+        let engine = SinkEngine::new(
+            name,
+            Arc::clone(recorder) as Arc<dyn Sink>,
+            Arc::clone(&stream) as Arc<dyn Stream>,
+            mappings,
+            ingest.progress(),
+        );
+        engine.stage(Continuity::Resumed).await.unwrap();
+        tasks.push(tokio::spawn(async move {
+            let (_control, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
+            engine.run(&mut rx).await
+        }));
+    }
+    ingest.run().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        primary.written_ids().len() >= 2,
+        "the healthy sink wrote both indexes' pieces"
+    );
+    assert!(
+        budget.held().total > 0,
+        "the stalled sink's pieces keep every batch counted"
+    );
+    stalled.resume();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !stream.is_idle() {
+        assert!(tokio::time::Instant::now() < deadline, "the lanes drain");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    crate::tests::assert_released(&budget).await;
+    for task in tasks {
+        task.abort();
+    }
 }

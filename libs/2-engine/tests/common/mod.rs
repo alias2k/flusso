@@ -27,6 +27,13 @@ pub(crate) fn e2e_builds() -> usize {
         .unwrap_or(4)
 }
 
+/// A memory budget for an e2e ingest engine: the daemon's default 512 MiB,
+/// so the e2e count what they build. Dropped with bytes still counted, it
+/// fails the test (in debug builds): the standing leak guard.
+pub(crate) fn e2e_budget() -> std::sync::Arc<engine::Budget> {
+    std::sync::Arc::new(engine::Budget::new(512 * 1024 * 1024))
+}
+
 /// A PG 16 with logical replication, and its connection URL. PG 14+ is
 /// required: the replication client requests the pgoutput `messages` option.
 pub(crate) async fn start_postgres() -> (test_postgres::Container, String) {

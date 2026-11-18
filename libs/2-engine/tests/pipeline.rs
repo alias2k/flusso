@@ -2722,7 +2722,8 @@ async fn run_deployment(
     .with_failure_policies(policies);
     sink_engine.stage(continuity).await?;
     let ingest = IngestEngine::new(capture, documents, stream, vec![name], progress)
-        .with_builds(common::e2e_builds());
+        .with_builds(common::e2e_builds())
+        .with_budget(common::e2e_budget());
     let (_control, mut control_rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
     tokio::select! {
         result = ingest.run() => result,

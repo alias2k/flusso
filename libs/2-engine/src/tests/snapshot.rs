@@ -311,6 +311,7 @@ async fn backfill(
         names,
         Arc::clone(&progress),
     )
+    .with_budget(std::sync::Arc::new(crate::Budget::new(usize::MAX / 4)))
     .with_batch(BatchPolicy {
         max_changes,
         max_delay: Duration::from_millis(10),

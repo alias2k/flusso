@@ -309,6 +309,7 @@ fn ingest(
         sinks.iter().map(|sink| sink_name(sink)).collect(),
         Arc::clone(progress),
     )
+    .with_budget(std::sync::Arc::new(crate::Budget::new(usize::MAX / 4)))
     .with_stop(stop.clone())
 }
 
@@ -666,6 +667,7 @@ async fn a_stop_whose_final_position_never_reaches_the_source_fails_the_run() {
         vec![sink_name("primary")],
         Arc::clone(&progress),
     )
+    .with_budget(std::sync::Arc::new(crate::Budget::new(usize::MAX / 4)))
     .with_stop(stop.clone());
     let run = tokio::spawn(async move { engine.run().await });
 

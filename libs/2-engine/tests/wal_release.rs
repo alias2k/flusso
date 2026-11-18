@@ -629,6 +629,7 @@ async fn deploy(url: &str, spec: SourceSpec, sinks: Vec<SinkSpec>, tuning: Tunin
     }
     let ingest = IngestEngine::new(capture, documents, stream, names, progress)
         .with_builds(common::e2e_builds())
+        .with_budget(common::e2e_budget())
         .with_batch(tuning.batch);
     engines.push(async move { ingest.run().await }.boxed());
     let stopped = Arc::new(Mutex::new(None));

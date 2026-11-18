@@ -339,6 +339,7 @@ async fn backfill(port: u16, url: &str, sink: Arc<RecordingSink>) -> Vec<String>
     // from its own root row in another is built twice.
     let ingest = IngestEngine::new(capture, documents, stream, vec![name], progress)
         .with_builds(common::e2e_builds())
+        .with_budget(common::e2e_budget())
         .with_batch(BatchPolicy {
             max_changes: 4,
             max_delay: Duration::from_millis(10),

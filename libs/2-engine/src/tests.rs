@@ -31,6 +31,20 @@ pub(crate) fn paused_runtime() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
+/// Every byte `budget` counted comes back once nothing holds a batch: the
+/// lanes drained and every sink acknowledged.
+pub(crate) async fn assert_released(budget: &crate::Budget) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while budget.held() != crate::Held::default() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the budget still holds {:?} after the lanes drained",
+            budget.held()
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
 fn users() -> IndexName {
     IndexName::try_new("users").unwrap()
 }
@@ -353,6 +367,9 @@ struct Harness {
     ingest: IngestEngine,
     sinks: Vec<SinkEngine>,
     progress: Arc<Progress>,
+    /// Counts what the ingest engine builds, so every test checks it gives
+    /// every byte back.
+    budget: Arc<crate::Budget>,
 }
 
 impl Harness {
@@ -368,6 +385,8 @@ impl Harness {
             names.clone(),
             Arc::new(Progress::of([users()], names)),
         );
+        let budget = Arc::new(crate::Budget::new(usize::MAX / 4));
+        let ingest = ingest.with_budget(Arc::clone(&budget));
         let progress = ingest.progress();
         let sinks = sinks
             .into_iter()
@@ -388,6 +407,7 @@ impl Harness {
             ingest,
             sinks,
             progress,
+            budget,
         }
     }
 
@@ -441,6 +461,9 @@ impl Harness {
         }
         self.source.confirm(self.progress.landed());
         drop(controls);
+        if stream.is_idle() {
+            assert_released(&self.budget).await;
+        }
         outcomes
     }
 }

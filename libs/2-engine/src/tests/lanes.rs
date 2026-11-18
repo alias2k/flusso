@@ -68,6 +68,7 @@ async fn a_healthy_lane_reaches_what_it_landed_while_a_sibling_lane_is_full() {
             [healthy.clone(), stalled.clone()],
         )),
     )
+    .with_budget(std::sync::Arc::new(crate::Budget::new(usize::MAX / 4)))
     .with_batch(BatchPolicy {
         max_changes: 1,
         max_delay: Duration::from_millis(1),
@@ -285,6 +286,7 @@ async fn run_two_indexes(
         vec![primary],
         Arc::clone(&progress),
     )
+    .with_budget(std::sync::Arc::new(crate::Budget::new(usize::MAX / 4)))
     .with_batch(BatchPolicy {
         max_changes,
         max_delay: Duration::from_secs(5),
@@ -366,6 +368,7 @@ async fn a_stalled_index_holds_back_neither_its_siblings_writes_nor_its_progress
         vec![primary.clone()],
         Arc::clone(&progress),
     )
+    .with_budget(std::sync::Arc::new(crate::Budget::new(usize::MAX / 4)))
     .with_batch(BatchPolicy {
         max_changes: 1,
         max_delay: Duration::from_millis(1),
