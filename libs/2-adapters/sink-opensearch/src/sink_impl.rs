@@ -72,8 +72,22 @@ impl Sink for OpensearchSink {
         let (generation, mut seeded) = match meta {
             Some(state) => state,
             None => {
-                let generation =
-                    next_generation(&self.list_generations(&hash_alias).await?, &hash_alias);
+                // No meta doc, but a generation of ours already holds the hash
+                // alias: a start that died between creating it (with its
+                // aliases) and writing the doc. Reuse it, unseeded: a second
+                // generation beside it would leave readers on the empty first
+                // until the seed. Any other generation is swept by the seed.
+                let holding = self
+                    .alias_holders(&hash_alias)
+                    .await?
+                    .iter()
+                    .find_map(|holder| parse_generation(&hash_alias, holder));
+                let generation = match holding {
+                    Some(generation) => generation,
+                    None => {
+                        next_generation(&self.list_generations(&hash_alias).await?, &hash_alias)
+                    }
+                };
                 (generation, false)
             }
         };
@@ -122,7 +136,26 @@ impl Sink for OpensearchSink {
                     attached.push(&convenience);
                 }
             }
-            created = self.create_index(&index, mapping, &attached).await?;
+            created = match self.create_index(&index, mapping, &attached).await {
+                // An index (not an alias) already has the convenience alias's
+                // name: OpenSearch refuses the whole create. The convenience
+                // alias is best effort; create with the hash alias alone and
+                // let the alias step below warn, as before #403.
+                Err(SinkError::Write(refused))
+                    if attached.contains(&convenience.as_str())
+                        && refused.contains("invalid_alias_name_exception") =>
+                {
+                    warn!(
+                        index,
+                        alias = %convenience,
+                        "an index holds the convenience alias's name; creating the generation \
+                         with the hash alias alone"
+                    );
+                    attached.retain(|alias| *alias != convenience.as_str());
+                    self.create_index(&index, mapping, &attached).await?
+                }
+                other => other?,
+            };
             if created {
                 for alias in attached {
                     holders.insert(alias.to_owned(), vec![index.clone()]);
