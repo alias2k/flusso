@@ -207,6 +207,25 @@ Release builds of `origin/main` (`ffd54d22`) and this stage (`2ee5e5b8`), each f
 - **`reference`**: no difference beyond the spread.
 - **`complex`**: the ingest side is identical, `page` 0.02 s and `build` 1.45 vs 1.46 s over 20 batches (round 1). The gap is the sink: `seed` (OpenSearch's `mark_seeded`) took 0.60 s against 0.17 s under that load, and nothing in this stage touches it.
 - **Live latency and drain** are unchanged within the spread.
+- **`complex` again, interleaved** (review item 8). Main (`ffd54d22`) and stage 3 (`2ee5e5b8`), rebuilt, alternating main then stage 3, three rounds, pinned to cores 0-3,12-15. The load average climbed during the run, so each stage-3 run started under more load than the main run before it.
+
+  | | Round 1 | Round 2 | Round 3 |
+  | --- | --- | --- | --- |
+  | Load at start (main / stage 3) | 1.9 / 6.9 | 8.0 / 11.5 | 10.3 / 11.6 |
+  | Backfill docs/s, main | 3,417 | 3,113 | 2,526 |
+  | Backfill docs/s, stage 3 | 3,070 | 2,381 | 2,531 |
+  | `page` busy s, main | 0.012 | 0.015 | 0.016 |
+  | `page` busy s, stage 3 | 0.010 | 0.014 | 0.012 |
+  | `build` busy s, main | 0.54 | 0.70 | 0.83 |
+  | `build` busy s, stage 3 | 0.63 | 0.87 | 0.83 |
+  | Time to seeded, main | 0.56 s | 0.67 s | 0.75 s |
+  | Time to seeded, stage 3 | 0.69 s | 0.70 s | 0.70 s |
+
+  **Not settled.**
+  - The medians differ (3,113 against 2,531 docs/s), but the ranges overlap: main's round 3 equals stage 3's round 3, and every stage-3 run started under more load.
+  - Key reading (`page`) is about 1% of the wall time on both and no slower on stage 3.
+  - The sink's time to seeded is the same on both.
+  - Nothing measured points at the keyset walk; the variation follows the load. A quiet machine, or CI's scenario history once this merges, decides it.
 - **The open transaction.** Sampled every 0.2 s on a `reference` run: on main the cursor's `REPEATABLE READ` transaction stays open **6.67 s**, the whole backfill. On this stage no flusso transaction is open longer than **0.04 s**. `xmin` age reads 0–63 on both, because nothing writes during that phase; the pin's length is the cost.
 - **Large table, keys only** (psql, 5M narrow rows, warm cache, load 4–6.5, 3 rounds). Both walks send every row to the client:
   - `int8`: cursor 2.3 / 3.4 / 3.6 s, keyset 2.4 / 2.9 / 3.2 s;
