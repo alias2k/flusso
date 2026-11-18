@@ -322,7 +322,9 @@ The Postgres source no longer keeps a map of every change it emitted until every
 
 ## One lane per index and sink
 
-Each `(index, sink)` pair now has its own lane, its own progress and its own fence. A sink is still one engine, writing all its indexes, but one index whose writes are stuck (a refused document under `on_error = "stop"`, a missing index) no longer holds up the sink's other indexes, nor a reader waiting on them. A deployment needs nothing; nothing is rebuilt.
+Each `(index, sink)` pair now has its own lane, its own progress and its own fence. A sink is still one engine, writing all its indexes, but a slow index (a large backfill, a reindex, writes that take long or hang) no longer holds up the sink's other indexes, nor a reader waiting on them: their changes are still written, their fences pass, and the slot is confirmed past them as far as the slow index allows. A deployment needs nothing; nothing is rebuilt.
+
+**Not yet:** a failure still stops the sink as a whole. A document refused under `on_error = "stop"`, a missing index or a failed write fails the sink engine's run; the daemon restarts it with backoff (up to `max_restart_backoff`), and between restarts the other indexes write only briefly, so their fences can time out. Parking only the failing index is a later release. With `writes = 1`, or on an ordered sink (stdout), the one write slot is shared, so a write that hangs holds up every index; with `writes` above 1 one index never takes every slot.
 
 - **`/wait` takes `index`, repeatable.** `index=users&index=orders` waits on those indexes only; without it the wait covers every index, as before. An index that is not enabled is a `404`. The answer echoes `indexes`. See [HTTP endpoints](../reference/http.md#get-waitpositionposition).
 - **`flusso-query` waits on the indexes a read touches**, and once per level and index. A root's `get` or search waits on its index, a combined search, cursor walk or `msearch` on each index it names. `Client::wait_on(position, indexes)` is the explicit form. An older flusso ignores `index` and waits on every index: still correct, only slower to pass.

@@ -406,9 +406,9 @@ let page = User::query().filter(..).send(&fresh).await?;   // waits until search
 - **Two levels, chosen by the read.** `get` waits until the write is *applied*; `send` / `ids` /
   `count` / cursors / walks / `msearch` / combined search wait until it is *searchable*, which can
   trail by the sink's `refresh_interval` while flusso drains a backlog. Each read waits only on the
-  indexes it reads (its root's; a combined search, walk or `msearch` every one it names), so a stalled
-  index blocks only its own reads. A fenced client waits once per level and index, and its clones
-  share that.
+  indexes it reads (its root's; a combined search, walk or `msearch` every one it names), so a slow
+  index (a backfill, a reindex) blocks only its own reads; a sink stopped by a refused document blocks
+  every read on it. A fenced client waits once per level and index, and its clones share that.
 - `client.wait(&position).await?` (searchable, every index), `client.wait_on(&position, &["users"])`
   (searchable, those indexes) and `client.wait_applied(&position).await?` wait explicitly, for reads
   made elsewhere.

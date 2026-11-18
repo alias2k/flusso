@@ -65,7 +65,7 @@ let page = User::query()
 | `get` | applied |
 | `send`, `ids`, `count`, cursors, walks, `msearch`, combined search | searchable |
 
-Each read waits only on the **indexes it reads**: a root's `get` or search on its root's index, a combined search, cursor walk or `msearch` on every index it names. One index stuck behind a refused document then holds up only its own reads.
+Each read waits only on the **indexes it reads**: a root's `get` or search on its root's index, a combined search, cursor walk or `msearch` on every index it names. A slow index (a backfill, a reindex, writes that take long) then holds up only its own reads. A refused document under `on_error = "stop"` still stops the whole sink, so it holds up every read on it until fixed.
 
 A fenced client waits **once per level and index**, not once per request, and its clones share that. Three searches of `users` through `fresh` cost one wait; a search of `orders` after them costs one more. Searchable covers applied, so a `get` after a search of the same index costs nothing.
 
