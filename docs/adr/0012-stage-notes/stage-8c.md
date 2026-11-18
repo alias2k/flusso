@@ -106,3 +106,14 @@ A page "A lane is stalled":
 - `libs/3-daemon/src/stall.rs` (new) and `status.rs`; `lag.rs` hands the lag to it.
 - The CLI's `telemetry/metrics.rs` and `http/`.
 - `deploy/helm/flusso/`, `dev/prometheus/`, `dev/grafana/`, `docs/src/operate/`, the Reference pages for `/status`, metrics and Helm values.
+
+## As built
+
+- **No change to `Progress`.** `Progress::lane`, `Progress::landed` and `ChangeCapture::reached` were enough.
+- **Fields are absent without tracking.** `/status`'s `stall_seconds` and `wal_behind_bytes` are left out when the status has no stall tracking, so stage 7's lane document stays as it was there.
+- **The alert is checked with real tools**, from Docker images, since neither is installed here:
+  - `promtool check rules` on `dev/prometheus/rules/flusso.rules.yml` and on the chart's rendered rule;
+  - `promtool test rules` on `flusso.rules.test.yml`: a stalled lane fires after 5 minutes past 10, a sibling that keeps landing doesn't, and 2 GiB of WAL fires while the lane is young;
+  - `helm lint` and `helm template` (`alpine/helm:3.16.4`) with `prometheusRule.enabled=true`.
+- **The e2e is in the `fence` binary's stalled-index block.** The audit sink gates only the `others` index. After 3.5 s that lane's age is at least 2 s, the `things` lane on the same sink stays at 0, `pinned_by` is `others → audit`, and once the gate opens the lane recovers and `pinned_by` is null.
+- **Why not an OpenSearch write block:** until stage 9 a write failure stops the sink's whole run, so its sibling lanes would stall too. Stage 9's per-lane failure is what will make a write-blocked index stall alone; its e2e should assert the sibling at 0 then.
