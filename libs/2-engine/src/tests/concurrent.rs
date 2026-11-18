@@ -478,7 +478,7 @@ async fn settle() {
 fn seeds() -> Vec<u64> {
     match std::env::var("FLUSSO_SCHEDULE_SEED") {
         Ok(seed) => vec![seed.parse().expect("FLUSSO_SCHEDULE_SEED is a number")],
-        Err(_) => (1..=40).collect(),
+        Err(_) => (1..=200).collect(),
     }
 }
 
@@ -491,77 +491,84 @@ fn seeds() -> Vec<u64> {
 /// schedule, no document is written twice at once, its versions never go
 /// down, every document ends at its last version, and the lane drains with
 /// the confirmation at the last position.
-#[tokio::test(start_paused = true)]
-async fn a_document_is_never_written_twice_at_once_and_its_versions_never_go_down() {
-    const IDS: [&str; 6] = ["a", "b", "c", "d", "e", "f"];
+#[test]
+fn a_document_is_never_written_twice_at_once_and_its_versions_never_go_down() {
     let mut concurrent = false;
     let mut restarted = false;
     for writes in [1, 2, 4] {
         for seed in seeds() {
-            let mut rng = Rng(seed * 7919 + writes as u64);
-            let mut rig =
-                Rig::new(Probe::new().with_delays(seed).failing_at_random(3), writes).start();
-            let mut last: HashMap<&str, i64> = HashMap::new();
-            let mut position = 0;
-            for _ in 0..60 {
-                let mut ids: Vec<&str> =
-                    IDS.iter().copied().filter(|_| rng.below(3) == 0).collect();
-                if ids.is_empty() {
-                    ids.push(IDS[rng.below(IDS.len() as u64) as usize]);
-                }
-                if rng.below(3) == 0 {
-                    rig.backfill(&ids).await;
-                } else {
-                    position += 1;
-                    rig.live(position, &ids).await;
-                }
-                for id in &ids {
-                    last.insert(id, rig.version);
-                }
-                if rng.below(4) == 0 {
-                    tokio::time::sleep(Duration::from_millis(rng.below(5))).await;
-                }
-            }
-            for _ in 0..60_000 {
-                if rig.stream.is_idle() {
-                    break;
-                }
-                if rig.engine.as_ref().is_some_and(|run| run.is_finished()) {
-                    assert!(rig.ended().await.is_err(), "only a failure ends the run");
-                    restarted = true;
-                    rig = rig.start();
-                }
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-            assert!(
-                rig.stream.is_idle(),
-                "seed {seed}, writes {writes}: the lane drains"
-            );
-
-            let probe = &rig.probe;
-            assert!(
-                !probe.overlapped.load(Ordering::SeqCst),
-                "seed {seed}, writes {writes}: a document was written twice at once"
-            );
-            assert!(
-                !probe.regressed.load(Ordering::SeqCst),
-                "seed {seed}, writes {writes}: a document's version went down"
-            );
-            let written = probe.versions.lock().unwrap().clone();
-            for (id, version) in &last {
-                assert_eq!(
-                    written.get(*id),
-                    Some(version),
-                    "seed {seed}, writes {writes}: {id} ends at its last version"
-                );
-            }
-            assert_eq!(super::covered(&rig.progress), Some(Position::new(position)));
-            assert!(probe.most_at_once() <= writes);
-            concurrent |= probe.most_at_once() > 1;
+            let (at_once, failed) = super::paused_runtime().block_on(one_schedule(seed, writes));
+            concurrent |= at_once;
+            restarted |= failed;
         }
     }
     assert!(concurrent, "some schedule wrote several items at once");
     assert!(restarted, "some schedule failed a write and restarted");
+}
+
+/// One schedule of the test above, on its own runtime so a seed replays
+/// alone: whether it wrote several items at once, and whether it restarted.
+async fn one_schedule(seed: u64, writes: usize) -> (bool, bool) {
+    const IDS: [&str; 6] = ["a", "b", "c", "d", "e", "f"];
+    let mut restarted = false;
+    let mut rng = Rng(seed * 7919 + writes as u64);
+    let mut rig = Rig::new(Probe::new().with_delays(seed).failing_at_random(3), writes).start();
+    let mut last: HashMap<&str, i64> = HashMap::new();
+    let mut position = 0;
+    for _ in 0..60 {
+        let mut ids: Vec<&str> = IDS.iter().copied().filter(|_| rng.below(3) == 0).collect();
+        if ids.is_empty() {
+            ids.push(IDS[rng.below(IDS.len() as u64) as usize]);
+        }
+        if rng.below(3) == 0 {
+            rig.backfill(&ids).await;
+        } else {
+            position += 1;
+            rig.live(position, &ids).await;
+        }
+        for id in &ids {
+            last.insert(id, rig.version);
+        }
+        if rng.below(4) == 0 {
+            tokio::time::sleep(Duration::from_millis(rng.below(5))).await;
+        }
+    }
+    for _ in 0..60_000 {
+        if rig.stream.is_idle() {
+            break;
+        }
+        if rig.engine.as_ref().is_some_and(|run| run.is_finished()) {
+            assert!(rig.ended().await.is_err(), "only a failure ends the run");
+            restarted = true;
+            rig = rig.start();
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert!(
+        rig.stream.is_idle(),
+        "seed {seed}, writes {writes}: the lane drains"
+    );
+
+    let probe = &rig.probe;
+    assert!(
+        !probe.overlapped.load(Ordering::SeqCst),
+        "seed {seed}, writes {writes}: a document was written twice at once"
+    );
+    assert!(
+        !probe.regressed.load(Ordering::SeqCst),
+        "seed {seed}, writes {writes}: a document's version went down"
+    );
+    let written = probe.versions.lock().unwrap().clone();
+    for (id, version) in &last {
+        assert_eq!(
+            written.get(*id),
+            Some(version),
+            "seed {seed}, writes {writes}: {id} ends at its last version"
+        );
+    }
+    assert_eq!(super::covered(&rig.progress), Some(Position::new(position)));
+    assert!(probe.most_at_once() <= writes);
+    (probe.most_at_once() > 1, restarted)
 }
 
 #[tokio::test(start_paused = true)]

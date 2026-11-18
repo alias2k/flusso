@@ -20,6 +20,17 @@ use tokio::sync::Notify;
 
 use super::*;
 
+/// A runtime of its own on paused time, so a seeded schedule replays alone:
+/// nothing a previous schedule left, and no `select!` choice it drew, carries
+/// over.
+pub(crate) fn paused_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .unwrap()
+}
+
 fn users() -> IndexName {
     IndexName::try_new("users").unwrap()
 }

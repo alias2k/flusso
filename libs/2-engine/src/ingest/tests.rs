@@ -600,9 +600,61 @@ impl Sink for Recorder {
     }
 }
 
+/// The channel stream, recording each position the ingest engine publishes,
+/// in lane order: the order the watermark trusts. The sink may write items
+/// in another order (it admits per document and takes live first).
+#[derive(Debug)]
+struct Spy {
+    inner: Arc<ChannelStream>,
+    published: Arc<Mutex<Vec<u64>>>,
+}
+
+#[derive(Debug)]
+struct SpyProducer {
+    inner: Box<dyn stream::Producer<stream::LaneItem>>,
+    published: Arc<Mutex<Vec<u64>>>,
+}
+
+#[async_trait]
+impl stream::Producer<stream::LaneItem> for SpyProducer {
+    async fn publish(&self, item: stream::LaneItem) -> stream::Result<()> {
+        // The engine awaits each item's send before the next one's: logged
+        // after the send, the log is lane order.
+        let position = item.position();
+        self.inner.publish(item).await?;
+        if let Some(position) = position {
+            self.published.lock().unwrap().push(position.seq);
+        }
+        Ok(())
+    }
+}
+
+impl Stream for Spy {
+    fn lane(&self, sink: &SinkName) -> stream::Result<stream::Lane> {
+        let lane = self.inner.lane(sink)?;
+        Ok(stream::Lane {
+            producer: Box::new(SpyProducer {
+                inner: lane.producer,
+                published: Arc::clone(&self.published),
+            }),
+            consumer: lane.consumer,
+        })
+    }
+
+    fn requests(&self) -> stream::Result<stream::RequestLane> {
+        self.inner.requests()
+    }
+
+    fn is_idle(&self) -> bool {
+        self.inner.is_idle()
+    }
+}
+
 /// One ingest engine and one sink engine over a channel stream.
 struct Deployment {
     stream: Arc<ChannelStream>,
+    /// Every position published, in lane order.
+    published: Arc<Mutex<Vec<u64>>>,
     feed: Arc<Feed>,
     recorder: Arc<Recorder>,
     ingest: IngestEngine,
@@ -614,10 +666,15 @@ impl Deployment {
     fn new(feed: Feed, builder: Arc<Builder>, recorder: Arc<Recorder>) -> Self {
         let stream = Arc::new(ChannelStream::new(64, [sink_name()]));
         let feed = Arc::new(feed);
+        let published = Arc::new(Mutex::new(Vec::new()));
+        let spy = Arc::new(Spy {
+            inner: Arc::clone(&stream),
+            published: Arc::clone(&published),
+        });
         let ingest = IngestEngine::new(
             Arc::clone(&feed) as Arc<dyn ChangeCapture>,
             Arc::clone(&builder) as Arc<dyn DocumentBuilder>,
-            Arc::clone(&stream) as Arc<dyn Stream>,
+            spy as Arc<dyn Stream>,
             vec![sink_name()],
             Arc::new(crate::Progress::new([sink_name()])),
         );
@@ -630,6 +687,7 @@ impl Deployment {
         );
         Self {
             stream,
+            published,
             feed,
             recorder,
             ingest,
@@ -792,7 +850,7 @@ async fn schedule(seed: u64, builds: usize) {
         regressed.is_empty(),
         "a document's version went down: {regressed:?} ({context})"
     );
-    let positions = deployment.recorder.positions();
+    let positions = deployment.published.lock().unwrap().clone();
     assert!(
         positions.windows(2).all(|pair| pair[0] < pair[1]),
         "the lane's positions are out of order: {positions:?} ({context})"
@@ -804,15 +862,20 @@ async fn schedule(seed: u64, builds: usize) {
     );
 }
 
-#[tokio::test(start_paused = true)]
-async fn random_schedules_keep_every_document_in_order() {
-    let seeds: Vec<u64> = match std::env::var("FLUSSO_BUILD_SCHEDULE_SEED") {
+/// The seeds a schedule test runs: `FLUSSO_BUILD_SCHEDULE_SEED` alone, else
+/// `1..=count`. Each runs on a runtime of its own, so a seed replays alone.
+fn seeds(count: u64) -> Vec<u64> {
+    match std::env::var("FLUSSO_BUILD_SCHEDULE_SEED") {
         Ok(seed) => vec![seed.parse().unwrap()],
-        Err(_) => (1..=60).collect(),
-    };
-    for seed in seeds {
+        Err(_) => (1..=count).collect(),
+    }
+}
+
+#[test]
+fn random_schedules_keep_every_document_in_order() {
+    for seed in seeds(500) {
         for builds in [1, 2, 4] {
-            schedule(seed, builds).await;
+            crate::tests::paused_runtime().block_on(schedule(seed, builds));
         }
     }
 }
@@ -1272,51 +1335,51 @@ const KIB: usize = 1024;
 /// the same rows, failures and restarts: the budget never holds more than
 /// its limit plus one batch per build, nothing deadlocks, and every byte
 /// comes back.
-#[tokio::test(start_paused = true)]
-async fn random_schedules_under_a_tiny_budget_stay_within_it_and_finish() {
-    let seeds: Vec<u64> = match std::env::var("FLUSSO_BUILD_SCHEDULE_SEED") {
-        Ok(seed) => vec![seed.parse().unwrap()],
-        Err(_) => (1..=30).collect(),
-    };
-    for seed in seeds {
+#[test]
+fn random_schedules_under_a_tiny_budget_stay_within_it_and_finish() {
+    for seed in seeds(200) {
         for builds in [1, 4] {
-            let mut random = Rng::new(seed);
-            let rows = 1 + random.below(40) as i64;
-            let log: Vec<Change> = (0..1 + random.below(80))
-                .map(|_| Change {
-                    id: random.below(rows as u64) as i64,
-                    delete: random.below(6) == 0,
-                })
-                .collect();
-            let max_changes = 1 + random.below(8) as usize;
-            let db = Database::new(rows, log);
-            let builder = Builder::new(
-                &db,
-                Behaviour {
-                    random: Some(Mutex::new(Rng::new(seed.wrapping_mul(31)))),
-                    failures_left: AtomicUsize::new(random.below(3) as usize),
-                    ..Behaviour::default()
-                },
-            );
-            let limit = 8 * KIB;
-            // A reservation is its estimate: at most `max_changes` documents
-            // at the first estimate's 16 KiB, before any build landed.
-            let batch_bytes = max_changes * 16 * KIB;
-            let mut deployment = Deployment::new(
-                Feed::new(&db).with_gaps(seed.wrapping_mul(17)),
-                builder,
-                Recorder::seeded(false),
-            )
-            .ingest(|ingest| ingest.with_batch(batch(max_changes)).with_builds(builds))
-            .with_budget(limit, limit + builds * batch_bytes);
-            deployment.run_to_end(8).await;
-            assert_eq!(
-                deployment.recorder.state(),
-                db.expected(),
-                "seed {seed}, builds {builds}"
-            );
+            crate::tests::paused_runtime().block_on(tiny_budget_schedule(seed, builds));
         }
     }
+}
+
+async fn tiny_budget_schedule(seed: u64, builds: usize) {
+    let mut random = Rng::new(seed);
+    let rows = 1 + random.below(40) as i64;
+    let log: Vec<Change> = (0..1 + random.below(80))
+        .map(|_| Change {
+            id: random.below(rows as u64) as i64,
+            delete: random.below(6) == 0,
+        })
+        .collect();
+    let max_changes = 1 + random.below(8) as usize;
+    let db = Database::new(rows, log);
+    let builder = Builder::new(
+        &db,
+        Behaviour {
+            random: Some(Mutex::new(Rng::new(seed.wrapping_mul(31)))),
+            failures_left: AtomicUsize::new(random.below(3) as usize),
+            ..Behaviour::default()
+        },
+    );
+    let limit = 8 * KIB;
+    // A reservation is its estimate: at most `max_changes` documents
+    // at the first estimate's 16 KiB, before any build landed.
+    let batch_bytes = max_changes * 16 * KIB;
+    let mut deployment = Deployment::new(
+        Feed::new(&db).with_gaps(seed.wrapping_mul(17)),
+        builder,
+        Recorder::seeded(false),
+    )
+    .ingest(|ingest| ingest.with_batch(batch(max_changes)).with_builds(builds))
+    .with_budget(limit, limit + builds * batch_bytes);
+    deployment.run_to_end(8).await;
+    assert_eq!(
+        deployment.recorder.state(),
+        db.expected(),
+        "seed {seed}, builds {builds}"
+    );
 }
 
 /// A sink that stops acknowledging holds the budget's bytes, so builds stop
