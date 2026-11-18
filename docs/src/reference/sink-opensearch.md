@@ -64,7 +64,7 @@ A refused connection ends in `tcp connect error: Connection refused` instead. Cr
 | `{prefix}{logical}_{hash}` | alias | The **hash alias**. What flusso and `flusso-query` address. The hash derives from the schema. |
 | `{prefix}{logical}_{hash}_{n}` | index | A **generation**: the concrete index holding data. `n` increments on reindex. |
 | `{prefix}{logical}` | alias | The **convenience alias** for humans and dashboards. Best-effort: if a real index already owns the name, flusso warns and carries on. |
-| `{prefix}flusso_meta` | index | One doc per index recording its active generation and seeded state. |
+| `{prefix}flusso_meta` | index | One doc per index recording its active generation and seeded state, and, while it is unseeded, how far its backfill got (`walked`: the source's own text and the generation it was recorded for), so a restart resumes after it. Written as a partial update, never creating a doc; read only while the doc is unseeded and names the same generation. |
 
 A structural schema change moves the hash, so the new shape gets a fresh alias and generation, re-seeded from scratch, rather than colliding with the old mapping. An on-demand reindex builds generation `n+1` behind the same hash alias while `n` keeps serving, then the alias flips atomically and `n` is dropped, along with any other `{logical}_{hash}_{n}` nothing serves. A reindex while the index is still unseeded does nothing: a rebuild from scratch is already pending. See [Reindex without downtime](../operate/reindex.md).
 

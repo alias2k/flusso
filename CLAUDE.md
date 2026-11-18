@@ -862,6 +862,27 @@ is the one concrete piece.
   each page, warned once per index (guards: `keyset`'s
   `a_key_whose_operators_are_off_the_search_path_is_paged_once` and
   `…_is_walked_through_its_index`, by `pg_stat_user_tables`).
+  **An interrupted backfill resumes (ADR 0012 stage 8b, `docs/adr/0012-stage-notes/stage-8b-resume.md`).**
+  Each snapshot item carries `Batch.walked` (a `stream::WalkMark`, the source's opaque text of the
+  batch's greatest key of that index: `DocumentBuilder::walk_mark`, set in `commit.rs`'s
+  `walk_marks`); the sink engine's per-lane `sink_engine/walked.rs` tracker records the landed
+  prefix's mark (`Sink::record_walked`, at most every `RECORD_EVERY` = 10 s, a flight holding no
+  slot, the lane's `SnapshotComplete` waiting for it; any release of a lane item holds the mark
+  for the rest of the walk); staging reads it back (`Sink::seeding`) into `Request::Backfill.after`,
+  and forgets it on a `Fresh` source before `prepare` (`forget_walked`). The walk
+  (`ingest/snapshot.rs`'s `plan_walk`/`WalkPlan`) starts after the least point and cuts segments
+  at the others, ordered by the source (`DocumentBuilder::compare_keys`, Postgres: the key
+  index's own `<`); a lane is served from the segment after its point (`Walk::reaches`,
+  `Snapshot::lanes_now`), a straddling batch going to the lanes of its last key. Postgres marks are
+  JSON with the key and its order (`format_type`, the key index's opclass and collation:
+  `keys.rs`'s `WALK_ORDER_SQL`); `resume_after` refuses a mark whose order changed. The OpenSearch
+  meta doc keeps `walked {mark, generation}` (partial `_update`, never upserted), read only while
+  unseeded and of the active generation; `ensure_index` rewrites an unseeded doc only when it
+  creates the generation. Guards: `walked::tests`, `tests::resume`, `tests::snapshot`'s
+  `*_resumed_*`/`lanes_at_different_points_*`/`a_point_*`, `keyset`'s
+  `a_walk_resumed_after_its_mark_misses_no_row_and_repeats_none` and
+  `a_mark_from_another_order_is_never_resumed`, the sink's `seeding` e2e
+  `a_backfill_checkpoint_lives_with_its_unseeded_generation`, and the CLI's kill e2e.
   No snapshot spans pages: `prepare` made the slot first, and a page names ids only, each document
   read when it is built. Only a root whose single-column catalog primary key is the declared one is
   paged; any other answers an empty page with a warning (#391). The page future lives in

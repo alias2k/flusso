@@ -36,6 +36,7 @@ pub(crate) struct OtelObserver {
     documents_built: Counter<u64>,
     batches: Counter<u64>,
     indexes_seeded: Counter<u64>,
+    backfill_checkpoints: Counter<u64>,
     documents_quarantined: Counter<u64>,
     script_failures: Counter<u64>,
     errors: Counter<u64>,
@@ -85,6 +86,13 @@ impl OtelObserver {
             indexes_seeded: meter
                 .u64_counter("flusso.indexes.seeded")
                 .with_description("Indexes whose backfill completed on a sink this run")
+                .build(),
+            backfill_checkpoints: meter
+                .u64_counter("flusso.backfill.checkpoints")
+                .with_description(
+                    "Times a sink recorded how far a lane's backfill durably got, so a restart \
+                     resumes after it",
+                )
                 .build(),
             documents_quarantined: meter
                 .u64_counter("flusso.documents.quarantined")
@@ -246,6 +254,16 @@ impl Observer for OtelObserver {
             &[
                 self.sink_label(sink),
                 KeyValue::new("index", index.as_ref().to_owned()),
+            ],
+        );
+    }
+
+    fn on_walk_recorded(&self, lane: &stream::LaneKey) {
+        self.backfill_checkpoints.add(
+            1,
+            &[
+                self.sink_label(&lane.sink),
+                KeyValue::new("index", lane.index.as_ref().to_owned()),
             ],
         );
     }

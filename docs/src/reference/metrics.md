@@ -24,6 +24,7 @@ flusso records OpenTelemetry instruments and exposes them two ways: a Prometheus
 | `flusso.startup.duration` | gauge | s | `step`, `sink` | Time a start spent in each step. See [Start-up](#start-up). |
 | `flusso.indexes` | gauge | | `sink` | Indexes ensured at that sink this run. |
 | `flusso.indexes.seeded` | counter | | `sink`, `index` | Indexes whose backfill completed at that sink this run. |
+| `flusso.backfill.checkpoints` | counter | | `sink`, `index` | Times a sink recorded how far an index's backfill durably got, so a restart resumes after it: about one every 10 s while a backfill lands. |
 | `flusso.replication.slot_lag` | gauge | By | | Bytes the confirmed position trails the WAL head by. Sampled every `--lag-poll-secs`. The confirmed position is the slowest sink's. |
 | `flusso.replication.visibility_wait` | gauge | s | | Seconds the source has held a committed transaction that isn't visible yet; every later change waits behind it. `0` while nothing waits. Read at scrape time. Past a few seconds it means a synchronous standby isn't answering: see [Behind a synchronous standby](source-postgres.md#behind-a-synchronous-standby). Alert on it: the dev stack's `dev/prometheus/rules/flusso.rules.yml` has `FlussoVisibilityWait`, over 30 s for a minute. |
 | `flusso.errors` | counter | | `engine` | Errors that stopped an engine: `ingest`, or `sink:<name>`. A sink engine is restarted with backoff; the counter keeps climbing while it fails. |
@@ -55,6 +56,7 @@ The Prometheus reader applies the usual conventions: dots become underscores, co
 | `flusso.startup.duration` | `flusso_startup_duration_seconds{step,sink}` |
 | `flusso.indexes` | `flusso_indexes{sink}` |
 | `flusso.indexes.seeded` | `flusso_indexes_seeded_total{sink,index}` |
+| `flusso.backfill.checkpoints` | `flusso_backfill_checkpoints_total{sink,index}` |
 | `flusso.replication.slot_lag` | `flusso_replication_slot_lag_bytes` |
 | `flusso.replication.visibility_wait` | `flusso_replication_visibility_wait_seconds` |
 | `flusso.errors` | `flusso_errors_total{engine}` |

@@ -42,6 +42,10 @@ impl Observer for StatusObserver {
         self.status.mark_seeded(sink, index);
     }
 
+    fn on_walk_recorded(&self, lane: &stream::LaneKey) {
+        self.status.walk_recorded(&lane.sink, &lane.index);
+    }
+
     fn on_sink_started(&self, sink: &SinkName) {
         self.status.mark_sink_started(sink);
     }

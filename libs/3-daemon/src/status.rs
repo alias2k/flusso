@@ -107,6 +107,8 @@ pub struct SinkStatus {
     batches: AtomicU64,
     documents_quarantined: AtomicU64,
     last_flush_micros: AtomicU64,
+    /// Backfill checkpoints recorded this run, per index.
+    checkpoints: Mutex<BTreeMap<IndexName, u64>>,
 }
 
 impl SinkStatus {
@@ -124,11 +126,13 @@ impl SinkStatus {
             batches: AtomicU64::new(0),
             documents_quarantined: AtomicU64::new(0),
             last_flush_micros: AtomicU64::new(0),
+            checkpoints: Mutex::new(BTreeMap::new()),
         }
     }
 
     fn snapshot(&self, captured: u64, positions: SinkPositions) -> SinkSnapshot {
         let committed = self.changes_committed.load(Ordering::Relaxed);
+        let checkpoints = lock(&self.checkpoints).clone();
         SinkSnapshot {
             applied_position: positions.applied,
             searchable_position: positions.searchable,
@@ -136,6 +140,7 @@ impl SinkStatus {
                 .indexes
                 .into_iter()
                 .map(|(index, lane)| {
+                    let backfill_checkpoints = checkpoints.get(&index).copied().unwrap_or(0);
                     (
                         index.as_ref().to_owned(),
                         LaneSnapshot {
@@ -144,6 +149,7 @@ impl SinkStatus {
                             outstanding: lane.outstanding,
                             stall_seconds: None,
                             wal_behind_bytes: None,
+                            backfill_checkpoints,
                         },
                     )
                 })
@@ -330,6 +336,12 @@ impl Status {
             *lock(&status.phase) = SinkPhase::Backfilling;
         }
         self.recompute_phase();
+    }
+
+    pub(crate) fn walk_recorded(&self, sink: &SinkName, index: &IndexName) {
+        if let Some(status) = self.sink(sink) {
+            *lock(&status.checkpoints).entry(index.clone()).or_insert(0) += 1;
+        }
     }
 
     pub(crate) fn mark_seeded(&self, sink: &SinkName, index: &IndexName) {
@@ -687,6 +699,11 @@ pub struct LaneSnapshot {
     /// while nothing is outstanding or before the first lag sample.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wal_behind_bytes: Option<u64>,
+    /// How many times this run recorded how far the lane's backfill got, so a
+    /// restart resumes after it: rising while a long backfill runs. Absent
+    /// while 0.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub backfill_checkpoints: u64,
 }
 
 /// A lane in `/status`'s `pinned_by`.
@@ -694,4 +711,8 @@ pub struct LaneSnapshot {
 pub struct LaneId {
     pub index: String,
     pub sink: String,
+}
+
+fn is_zero(count: &u64) -> bool {
+    *count == 0
 }
