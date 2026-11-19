@@ -70,6 +70,10 @@ struct Gate {
     ensured: Mutex<Vec<String>>,
     /// Indexes recreated empty by `ensure_index`: unseeded from then on.
     unseeded: Mutex<BTreeSet<String>>,
+    /// When each `ensure_index` ran.
+    ensured_at: Mutex<Vec<Instant>>,
+    /// A write holding this id takes 5 s.
+    slow_id: Mutex<Option<String>>,
 }
 
 impl Gate {
@@ -100,6 +104,7 @@ impl Sink for Gate {
     async fn ensure_index(&self, mapping: &IndexMapping) -> sink::Result<()> {
         let name = mapping.index.to_string();
         self.ensured.lock().unwrap().push(name.clone());
+        self.ensured_at.lock().unwrap().push(Instant::now());
         let mut answers = self.answers.lock().unwrap();
         if answers.get(&name) == Some(&Answer::Missing) {
             answers.remove(&name);
@@ -124,6 +129,13 @@ impl Sink for Gate {
     ) -> sink::Result<WriteReport> {
         if parts.iter().all(|part| part.is_empty()) {
             return Ok(WriteReport::clean());
+        }
+        let started = Instant::now();
+        let slow = self.slow_id.lock().unwrap().clone();
+        if let Some(slow) = slow
+            && parts.iter().any(|part| part.iter().any(|e| e.id == slow))
+        {
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
         let mut write = Vec::new();
         let mut report = WriteReport::clean();
@@ -163,7 +175,7 @@ impl Sink for Gate {
                 _ => {}
             }
         }
-        self.writes.lock().unwrap().push((Instant::now(), write));
+        self.writes.lock().unwrap().push((started, write));
         if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(SinkError::Write("connection refused".to_owned()));
         }
@@ -709,5 +721,35 @@ async fn a_missing_target_staging_cannot_cure_is_retried_with_a_backoff() {
         "in 10 s: {writes} writes of orders, {ensures} ensure_index calls"
     );
     assert_eq!(rig.applied(&users()), through(1001), "users keeps landing");
+    task.abort();
+}
+
+/// A lane's index is staged again only once nothing of the lane is in
+/// flight: a slow write of the lane started before the target went missing
+/// returns first (a write never holds a document of an index being staged).
+#[tokio::test(start_paused = true)]
+async fn restaging_waits_for_the_lanes_writes_in_flight() {
+    let rig = Rig::new(Gate::default());
+    *rig.sink.slow_id.lock().unwrap() = Some("9".to_owned());
+    rig.sink.answer(&orders(), Some(Answer::Missing));
+    let start = Instant::now();
+    rig.live(&orders(), 9..10, 0).await;
+    rig.live(&orders(), 0..1, 1).await;
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop).with_write_documents(1));
+    let task = spawn(Arc::clone(&engine));
+    eventually("orders lands", || rig.applied(&orders()) == through(1)).await;
+    let ensured: Vec<Duration> = rig
+        .sink
+        .ensured_at
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|at| *at - start)
+        .collect();
+    assert!(!ensured.is_empty());
+    assert!(
+        ensured.iter().all(|at| *at >= Duration::from_secs(5)),
+        "staged while the slow write was in flight: {ensured:?}"
+    );
     task.abort();
 }
