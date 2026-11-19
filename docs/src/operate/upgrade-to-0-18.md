@@ -295,11 +295,12 @@ A comparison with a string, a number or another kind fails rather than answering
 
 ## Memory is bounded in bytes
 
-0.17 bounded the batches waiting for a sink by count: `[stream] capacity`, 1,024 per sink, whatever their size. 0.18 bounds them by the heap they hold: [`[concurrency] max_built_mib`](../reference/config-toml.md#concurrency) (default 512, `--max-built-mib` / `FLUSSO_MAX_BUILT_MIB`). What changes:
+0.17 bounded the batches waiting for a sink by count: `[stream] capacity`, 1,024 per sink, whatever their size. 0.18 bounds them by the heap they hold: [`[concurrency] max_built_mib`](../reference/config-toml.md#concurrency) (default 64, `--max-built-mib` / `FLUSSO_MAX_BUILT_MIB`). What changes:
 
 - **`[stream] capacity` and `--queue-capacity` are deprecated.** They still load, flusso warns at start, and they do nothing. Remove them when convenient. The Helm chart's `run.queueCapacity` now defaults to unset.
+- **The default, 64 MiB, holds fewer large batches than 0.17's 1,024.** On `reference` a backfill stays faster than 0.17 and peak RSS drops (82 MiB, against 0.17's 129). A deployment of large documents, many indexes or a slow sink may now see ingest wait sooner: raise `max_built_mib` when `flusso.memory.refused` grows while the sinks are healthy ([when to raise it](../reference/config-toml.md#concurrency)).
 - **A stalled sink paces ingest by bytes.** Once built documents waiting for it reach the budget, the ingest engine builds nothing more until it acknowledges some, as a full queue did. A backfill holds at most half the budget, so live changes keep room.
-- **Size memory from the budget.** Plan from the formula in [config.toml](../reference/config-toml.md#concurrency): `max_built_mib`, the batches in flight past it, request bodies and the source's read-ahead, about 100 MiB, plus 10–20% for the allocator. The Helm chart now requests 512 MiB of memory and sets no limit; its `values.yaml` gives the formula for one.
+- **Size memory from the budget.** Plan from the formula in [config.toml](../reference/config-toml.md#concurrency): `max_built_mib`, the batches in flight past it, request bodies and the source's read-ahead, about 100 MiB, plus 10–20% for the allocator. The Helm chart now requests 256 MiB of memory and sets no limit; its `values.yaml` gives the formula for one.
 - **New in `/status` and `/metrics`:** `memory` (`limit_bytes`, `built_bytes`, `backfill_bytes`), `flusso.memory.built` and `flusso.memory.refused`.
 - **A warning at start** when `max_built_mib` alone reaches the cgroup's memory limit, or the host's memory without one (Linux): lower it, or raise the limit.
 - **Embedding the crates.** `IngestEngine::with_budget(Arc<Budget>)` counts built documents (without it, nothing is counted, as before). `stream::Batch` gains `hold: Hold`; a `Batch` written by hand sets `hold: Default::default()`. `ChannelConfig::capacity` is now `Option<usize>` and is ignored by `ChannelStream::from_config`.

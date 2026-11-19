@@ -1042,8 +1042,8 @@ is the one concrete piece.
   `reindex_control_stages_and_requests_a_snapshot_without_restarting`, the daemon's
   `reindex_operation_targets_one_sink`.
 - **Built documents are held within a byte budget (ADR 0012 stage 5).** `[concurrency] max_built_mib`
-  (`--max-built-mib` / `FLUSSO_MAX_BUILT_MIB`, 16..=1,048,576, default 512 via
-  `daemon::DEFAULT_MAX_BUILT_MIB`; never in the lock) is an `engine::Budget` the daemon hands the ingest
+  (`--max-built-mib` / `FLUSSO_MAX_BUILT_MIB`, 16..=1,048,576, default 64 via
+  `daemon::DEFAULT_MAX_BUILT_MIB`, not the ADR's 512: measured, `stage-5.md` "The default"; never in the lock) is an `engine::Budget` the daemon hands the ingest
   engine (`IngestEngine::with_budget`; without one nothing is counted) and `/status` (`memory`). A grant
   reserves an estimate (ids × a running average bytes per document, per kind) in `Builds::choose`: a
   candidate the budget can't fit is not admissible, so the gate's every-fourth counter doesn't move, and

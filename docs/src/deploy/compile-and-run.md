@@ -40,7 +40,7 @@ You have a validated config and want to run it, locally or in a deployment. The 
 - **Where it listens.** Both surfaces default to localhost. A container needs the public one on `0.0.0.0`; the private one should stay on localhost. Defaults and ports are in [HTTP endpoints](../reference/http.md).
 - **Change the admin password** before exposing anything: `--admin-password` / `FLUSSO_ADMIN_PASSWORD`. flusso warns on every start while it's the default.
 - **Logs** go to stderr; `RUST_LOG` filters them; `FLUSSO_LOG_FORMAT=json` structures them.
-- **Memory.** `[concurrency] max_built_mib` (or `--max-built-mib`, default 512) bounds built documents waiting for the sinks. Ingest waits when it's full; that's back-pressure, not a fault. See [config.toml](../reference/config-toml.md#concurrency).
+- **Memory.** `[concurrency] max_built_mib` (or `--max-built-mib`, default 64) bounds built documents waiting for the sinks. Ingest waits when it's full; that's back-pressure, not a fault. See [config.toml](../reference/config-toml.md#concurrency).
 
 ## Run under a task runner or supervisor
 

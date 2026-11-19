@@ -165,7 +165,7 @@ readinessProbe:
   failureThreshold: 30
 
 # Memory: built documents are held within `[concurrency] max_built_mib`
-# (default 512 MiB) until every sink acknowledges them. A limit, if you set
+# (default 64 MiB) until every sink acknowledges them. A limit, if you set
 # one, needs room for:
 #   max_built_mib
 #   + up to 2 x `builds` batches past it (each in-flight build counts what it
@@ -178,9 +178,9 @@ readinessProbe:
 # that runs today.
 resources:
   requests:
-    memory: 512Mi
+    memory: 256Mi
   # limits:
-  #   memory: 768Mi
+  #   memory: 384Mi
 
 podAnnotations: {}
 podLabels: {}

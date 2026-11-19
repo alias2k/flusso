@@ -272,7 +272,7 @@ Checked against:
 
 | Part | Size |
 | --- | --- |
-| built documents | 512 MiB plus one batch per index |
+| built documents | `max_built_mib` (64 MiB by default; 512 when this was written) plus one batch per index |
 | pending ids | up to ~250 MiB |
 | bulk bodies in flight | a few MiB |
 | read-ahead (`max_changes × 16` row images; bounded in count only, as today) | tens of MiB |
@@ -473,7 +473,7 @@ All in `flusso.toml`, never baked into the lock. Flag beats env, env beats file.
 | --- | ---: | --- |
 | `[concurrency] builds` (`--builds` / `FLUSSO_BUILDS`) | 4 | builds and key pages at once; the builder pool |
 | `[concurrency] writes` (`--writes` / `FLUSSO_WRITES`) | 4 | bulk requests in flight per sink |
-| `[concurrency] max_built_mib` (`--max-built-mib` / `FLUSSO_MAX_BUILT_MIB`) | 512 | heap of built documents not yet acknowledged |
+| `[concurrency] max_built_mib` (`--max-built-mib` / `FLUSSO_MAX_BUILT_MIB`) | 64 (512 when this ADR was written; changed on measurement, `stage-5.md` "The default") | heap of built documents not yet acknowledged |
 | `[concurrency] max_pending_documents` (`--max-pending-documents` / `FLUSSO_MAX_PENDING_DOCUMENTS`) | 1,000,000 | pending ids before the reader waits |
 | `[batch] max_changes` (existing) | 256 | documents per build and per write |
 | `[batch] max_delay_ms` (existing) | 50 | now only how long backfill requests coalesce |
