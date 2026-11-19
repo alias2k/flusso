@@ -63,7 +63,7 @@ Precedence is flag (`--batch-max-changes` / `--batch-max-delay-ms`), then `FLUSS
 | --- | --- | --- | --- |
 | `writes` | integer 1–64 | `4` | Bulk writes each sink runs at once. `1` writes one batch at a time. A sink that emits an ordered stream (stdout) always writes one at a time. |
 | `builds` | integer 1–32 | `4` | Batches of documents the ingest engine builds at once. `1` builds one batch at a time. The source's document builder keeps `builds` + 2 Postgres connections. |
-| `max_built_mib` | integer 16–1,048,576 | `64` | MiB of built documents held until every sink acknowledges them. Past it the ingest engine builds nothing more until a sink acknowledges some. |
+| `max_built_mib` | integer 16–1,048,576 | `512` | MiB of built documents held until every sink acknowledges them. Past it the ingest engine builds nothing more until a sink acknowledges some. |
 
 Several writes run at once, but never two holding the same document, so each document's later version still lands after its earlier one. Live changes go before backfill pages, except every fourth write slot both could take, so a backfill can't stall live indexing and live traffic can't starve a backfill.
 
@@ -73,11 +73,12 @@ Several builds run at once, but never two holding the same document, and each si
 
 **The memory budget.** A built batch is counted from its build until the last sink acknowledges it, in heap bytes (a document holds about 8–10× its JSON), at least 1 KiB a batch. A backfill holds at most half of `max_built_mib` (past the one batch a backfill holding nothing is always granted), so live changes always have room beside it. A batch larger than the whole budget still builds, alone, once nothing of its kind (live or backfill) is held. A sink that stops acknowledging fills the budget, and then ingest waits: the slowest sink paces ingest, as a full queue did before 0.18. The budget can be passed by the batches being built at the moment it fills, each by what it really built: up to `2 × builds` batches. It doesn't count a sink's request bodies (`writes` × one rendered `_bulk` per sink) or the source's read-ahead (`[batch] max_changes` × 16 changes with their row images). Plan the process's memory as `max_built_mib` + `2 × builds` batches + those two + about 100 MiB, plus 10–20% for the allocator. On Linux, `run` warns at start when `max_built_mib` alone reaches the cgroup's memory limit, or the host's memory without one. `/status` reports what is held (`memory`) and `flusso.memory.built` plots it ([Metrics](metrics.md)).
 
-**When to raise it.** The default, 64 MiB, keeps a backfill as fast as a larger budget on typical documents while the process stays small (measured on `reference`: 82 MiB peak RSS, where 512 MiB peaked at 212 MiB for no gain in throughput). Raise it when:
+**When to change it.** The default, 512 MiB, keeps the tail of visible latency short while a backfill runs beside live changes.
 
-- **documents are large** (a few hundred KiB of JSON or more each): a batch of them can take the whole budget, so only one batch is in flight at a time and builds and writes stop overlapping;
-- **many indexes are live at once**: they share the budget;
-- **a sink is slow but healthy** (a busy or distant cluster): more built batches can wait for it, so a burst is absorbed rather than paced.
+- **Lower it on a memory-constrained host.** On `reference`, 64 MiB measured 82–87 MiB peak RSS, against about 210 MiB at 512. p50 latency, burst and backfill throughput were unchanged, but the p99 of visible latency rose to about 1 s from about 200 ms (0.17: 2.2–2.5 s). Below 64 MiB the backfill slows.
+- **Raise it when documents are large** (a few hundred KiB of JSON or more each): a batch of them can take much of the budget, so fewer batches are in flight and builds and writes stop overlapping.
+- **Raise it when many indexes are live at once**: they share the budget.
+- **Raise it for a slow but healthy sink** (a busy or distant cluster): more built batches can wait for it, so a burst is absorbed rather than paced.
 
 Watch `flusso.memory.refused`: if it grows steadily while the sinks are healthy, the budget sets the pace and raising it helps. If it grows only while a sink is down, the budget is doing its job.
 

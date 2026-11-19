@@ -14,7 +14,7 @@ This merge takes in ADR 0012's stages 3–7 (stages 1–2, `Sink::write` and con
 | --- | --- | --- |
 | 3 | Keyset backfill: pages of root keys on the builder pool, no long transaction, bounded walk, the key index's own operators | `stage-3.md` |
 | 4 | Up to `[concurrency] builds` builds at once (default 4, max 32), published in grant order; the build gate (live first, every fourth contested grant to backfill) | `stage-4.md` |
-| 5 | Memory budget `[concurrency] max_built_mib` (default 64) in heap bytes; `[stream] capacity` deprecated | `stage-5.md` |
+| 5 | Memory budget `[concurrency] max_built_mib` (default 512) in heap bytes; `[stream] capacity` deprecated | `stage-5.md` |
 | 6 | Positions describe themselves; `Progress` confirms and fences; the stream keeps no watermark | `stage-6.md` |
 | 7 | One lane per `(index, sink)`; per-index fences and `/wait?index`; ready items merged into one write, a live item waiting (at most `max_delay`) for the writes out to merge; caught-up per lane | `stage-7.md` |
 | seed | Cheaper seeding and generation creation (#410, #403) | `seed.md` |
@@ -48,7 +48,7 @@ Each has its entry, with what to do, on `docs/src/operate/upgrade-to-0-18.md`:
 - **Several batches build at once** (`builds`), on `builds + 2` Postgres connections.
 - **Memory is bounded in bytes** (`max_built_mib`).
   - `[stream] capacity` and `--queue-capacity` warn and are ignored.
-  - Helm requests 256 Mi.
+  - Helm requests 512 Mi (a limit: the budget + about 150 MiB).
   - A warning at start when the budget reaches the cgroup or host memory.
 - **One lane per index and sink.** A slow index holds up only itself. `/wait?index`; `flusso-query` waits on the indexes a read touches.
 - **Batches of several indexes share a bulk request.** A live batch ready while a write is out waits for it, at most `[batch] max_delay_ms` (50 ms); a stalled write is not waited for.
@@ -75,7 +75,7 @@ The last full counts are in the stage notes' tables; the reviewers' runs replace
 - **A standing leak guard:** every engine test and e2e counts what it builds, and nothing stays counted.
 - **Measured with `flusso-bench`** (scenarios `reference` and `complex`, `--scale default`, three rounds where it says so):
   - concurrent builds: about +15% backfill on `reference` (`stage-4.md`);
-  - the budget: the default is 64 MiB. On GitHub's runners (`reference`, three rounds) 512 MiB peaked at 212 MiB RSS against `main`'s 129, while 64 MiB peaked at 82 MiB with the backfill 7% faster than `main` and burst and median latency level (`stage-5.md`, "The default").
+  - the budget: the default is 512 MiB, the owner's call. On GitHub's runners (`reference`) 512 MiB gives a p99 of visible latency of about 192 ms at about 211 MiB peak RSS; 64 MiB gives 87 MiB RSS but a p99 of 1,084 ms; `main` 115–126 MiB and 2.2–2.5 s (`stage-5.md`, "The default"). Memory above `main`'s is accepted.
 - **The no-regression comparison against `main`** is track B's scenario A/B (`bench-ab/concurrency`); its result goes here.
 - **Independent reviews** of stages 4, 5, 7, 8c and #379, each with its item → commit → check table in the stage note.
 
@@ -84,5 +84,5 @@ The last full counts are in the stage notes' tables; the reviewers' runs replace
 - **No soak run.** Nothing has run this branch for hours under steady writes and restarts.
 - **Item-level 429 against a real OpenSearch is not exercised.** The retry (#400) is tested against stubs, and the flood-stage block's 429 by hand.
 - **No e2e for a write-blocked index stalling alone.** That needs stage 9; today a write block stops the sink.
-- **The budget default (64 MiB)** was chosen on `reference`. Large documents, many indexes or a slow sink may want more; it is re-measured with several indexes at 8a.
+- **The budget default (512 MiB)** uses more memory than 0.17 (about 211 vs 115–126 MiB peak RSS on `reference`), accepted by the owner for the tenfold lower p99. A memory-constrained host sets it to 64 MiB.
 - **The `alerts` CI job** is new and not required: a rule or chart change can merge with it red.

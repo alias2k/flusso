@@ -119,7 +119,7 @@ So the overshoot follows the batches really built, not the estimate: a run of do
 
 **The lanes and the request lane get a fixed backstop of 1,048,576 items** (`stream_channel::LANE_BACKSTOP`).
 
-- It never binds before the budget at the 1 KiB floor: 1 GiB of 1 KiB batches (the default, 64 MiB since "The default" below, holds 65,536).
+- It never binds before the budget at the 1 KiB floor and the default 512 MiB: 524,288 items.
 - A tokio bounded `mpsc` doesn't preallocate its capacity, so the backstop costs nothing.
 
 **The channel adapter is the stream's, not mine.** Stage 7 (track B) reworks lanes per `(index, sink)`, so the change there is two lines (the default, and the backstop in `ChannelStream::new`), coordinated with B first.
@@ -128,7 +128,7 @@ So the overshoot follows the batches really built, not the estimate: a run of do
 
 **`[concurrency] max_built_mib`** (`--max-built-mib` / `FLUSSO_MAX_BUILT_MIB`):
 
-- default 512 as designed, 64 since "The default" below; at least 16, at most 1,048,576;
+- default 512 (64 for a day, reverted: "The default" below); at least 16, at most 1,048,576;
 - never written into the lock;
 - the daemon's `DEFAULT_MAX_BUILT_MIB`, and `IngestEngine::with_budget(Arc<Budget>)` (the engine's own default: unlimited, so embedders and the in-process bench keep today's behaviour unless they opt in).
 
@@ -142,7 +142,7 @@ So the overshoot follows the batches really built, not the estimate: a run of do
 
 **The Helm chart:**
 
-- `resources.requests.memory: 512Mi` (256Mi since the default became 64 MiB);
+- `resources.requests.memory: 512Mi`;
 - the limit commented out, with the formula beside it: `max_built_mib` + `builds` batches + ~100 MiB baseline + 10–20% allocator overhead;
 - the chart README updated.
 
@@ -222,46 +222,36 @@ Peak RSS before the budget, at `builds = 4`: 348–371 MiB (stage 4). At `builds
 
 - **The walk is honest.** RSS minus held bytes stays near a constant for each scenario (86–103 MiB on `reference`, 49–62 on `complex`: the process's own working set). Held bytes track the documents' real heap. The per-document check against a counting allocator agrees: 0.87–1.09 (`tests/heap_walk.rs`).
 - **The bound holds.** Held never passed the backfill half by more than the batches in flight weighed: 255.5 MiB at a 256 MiB half; 67.2 at 64; 19.5 at 16.
-- **At 512 MiB (the default then) the backfill's half is what binds on `reference`,** at 256 MiB, and peak RSS stays at 352 MiB, where stage 4 left it. So the default does not bring RSS back near `builds = 1`'s.
+- **At the default 512 MiB the backfill's half is what binds on `reference`,** at 256 MiB, and peak RSS stays at 352 MiB, where stage 4 left it. So the default does not bring RSS back near `builds = 1`'s.
 - **128 MiB does, at no cost to the backfill:** 20,099 vs 19,036 docs/s on `reference`, 3,368 vs 3,371 on `complex`, ranges overlapping, at 168 MiB RSS instead of 352.
 - **32 MiB costs about a third of `reference`'s backfill rate** (13,488) and a quarter of `complex`'s (2,596): too few batches fit in flight for 4 builds and 4 writes.
 - **The burst is not paced by the budget** at any setting: every median is inside the others' ranges (2,144–2,549 changes/s).
 - **Visible latency doesn't follow the budget.** `reference` at 128 MiB had a p99 of 88–810 ms where 512 and 32 stayed near 30; each round ran 128 right after 512 under the same load, and 32 (a tighter budget) is back at 33, so this reads as load, not the budget. Worth one targeted re-run at 8a's revisit.
 
-## The default: 64 MiB (owner, 2026-11-19)
+## The default: 512 MiB (owner, 2026-11-19)
 
-**Decided: 64 MiB,** down from the ADR's 512. The bar for the first merge is no regression against `main`, and 512 fails it on memory.
+**Decided: 512 MiB,** the ADR's number. The owner, on the 64 MiB detour below: "Why are we fixating on the default between 64/128 then? Those are really small numbers. 512/1g should be the default." Memory in the hundreds of MiB is not a cost he weighs. Memory use above `main`'s is **accepted**.
 
-**The evidence:** the comparison on GitHub's runners, `reference`, three rounds ([run 44435888604](https://github.com/alias2k/flusso/actions/runs/44435888604)).
+**Why 64 was tried and reverted.** "No regression against `main`" was first read strictly, memory included, and 64 MiB was set (`eb1a3f0c`) on this comparison from GitHub's runners ([run 44435888604](https://github.com/alias2k/flusso/actions/runs/44435888604), `reference`, 3 rounds):
 
 | | `main` | branch at 512 MiB | branch at 64 MiB |
 | --- | --- | --- | --- |
+| peak RSS | 115–126 MiB | 211–212 MiB | 82–87 MiB |
 | built ahead of the sink during the backfill | n/a | up to 159 MiB | at most the budget |
-| peak RSS | 129 MiB | 212 MiB | 82 MiB |
 | backfill vs `main` | — | faster | 7% faster |
-| burst throughput, median latency | — | level | level with `main` |
+| burst throughput, p50 latency | — | level | level |
+| visible latency p99 | ~2.2–2.5 s | ~192–232 ms | ~1,084 ms ([run 44458546896](https://github.com/alias2k/flusso/actions/runs/44458546896), 4 rounds) |
 
-**It agrees with the local measurements above:**
+That gave up a tenfold better p99 to save about 125 MiB. Back to 512 (this commit's series). The local measurements above (128 kept 512's backfill rate at half the RSS; 32 cost a quarter to a third of it) stand.
 
-- 128 MiB kept 512's backfill rate at half the peak RSS on `reference` (168 vs 352 MiB, three rounds);
-- 64 MiB peaked at 127 MiB RSS at 18,121 docs/s in the budget check;
-- 32 MiB cost a quarter to a third of the backfill rate, too tight for `builds = 4`.
+**What stays from the detour:**
 
-64 is the smallest setting measured that keeps the backfill ahead of `main`.
+- **"When to change it"** in `config-toml.md`: lower it to 64 MiB on a memory-constrained host (82–87 MiB peak RSS, p50, burst and backfill unchanged, p99 about 1 s, still below 0.17's); raise it for large documents, many indexes or a slow sink.
+- **`flusso.memory.wait{work,wake}`** and its docs.
+- **The guard** `every_budget_wait_ends_on_a_release_not_the_tick`.
+- **The finding below:** the 64 MiB p99 isn't a lost wake; the budget never held a live change back locally.
 
-**What it costs:**
-
-- **Large documents:** a batch of them can take the whole budget, so one batch is in flight at a time. The one-batch rule still grants a single batch larger than 64 MiB (`a_batch_bigger_than_the_budget_still_builds`, with its own 1 KiB budget, not the default).
-- **Many indexes** share it.
-- **A slow but healthy sink** absorbs less of a burst.
-
-`config-toml.md` says when to raise it ("When to raise it"), watching `flusso.memory.refused`.
-
-**Revisit at 8a.** The ADR sized 512 for about 24 indexes. Once each index gets at most half the budget and its own estimate, measure again with several indexes.
-
-**Not measured:**
-
-- held bytes in the three-round runs (only in the one earlier run above).
+**The Helm chart** requests 512Mi again. Its commented limit is 768Mi: the budget plus about 150 MiB, plus 10–20%, which the values comment states.
 
 ## Review fixes: item, commit, check
 

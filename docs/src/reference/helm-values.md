@@ -50,7 +50,7 @@ Every value the chart at `deploy/helm/flusso/` accepts, with its default. `value
 | `prometheusRule.laneWalStallSeconds` | `60` | …while that lane has landed nothing for this long, so a catch-up whose lanes keep landing doesn't page. |
 | `prometheusRule.for` | `5m` | How long the condition holds before the alert fires. |
 | `prometheusRule.severity` | `page` | The alerts' `severity` label. |
-| `resources` | `requests.memory: 256Mi` | No limit by default. A limit needs room for `[concurrency] max_built_mib` (64 MiB by default), the batches past it, what the budget doesn't count (request bodies, the source's read-ahead) and about 100 MiB, plus 10–20% allocator overhead; the formula is in [config.toml](config-toml.md#concurrency). |
+| `resources` | `requests.memory: 512Mi` | No limit by default. A limit needs room for `[concurrency] max_built_mib` (512 MiB by default) plus about 150 MiB (768Mi for the default), the batches past it, what the budget doesn't count (request bodies, the source's read-ahead) and about 100 MiB, plus 10–20% allocator overhead; the formula is in [config.toml](config-toml.md#concurrency). |
 | `podAnnotations`, `podLabels` | `{}` | |
 | `podSecurityContext` | non-root, uid/gid 65532 | |
 | `securityContext` | no privilege escalation, read-only root filesystem, all capabilities dropped | |

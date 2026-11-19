@@ -165,7 +165,7 @@ readinessProbe:
   failureThreshold: 30
 
 # Memory: built documents are held within `[concurrency] max_built_mib`
-# (default 64 MiB) until every sink acknowledges them. A limit, if you set
+# (default 512 MiB) until every sink acknowledges them. A limit, if you set
 # one, needs room for:
 #   max_built_mib
 #   + up to 2 x `builds` batches past it (each in-flight build counts what it
@@ -175,12 +175,14 @@ readinessProbe:
 #     `[batch] max_changes` x 16 changes, each with its row images
 #   + about 100 MiB baseline,
 # plus 10-20% for the allocator. A limit below that can OOM-kill a deployment
-# that runs today.
+# that runs today. Rule of thumb: the budget + ~150 MiB, plus 10-20% (768Mi
+# for the default 512 MiB; set `run`'s FLUSSO_MAX_BUILT_MIB or the config's
+# max_built_mib lower, e.g. 64, on a memory-constrained node).
 resources:
   requests:
-    memory: 256Mi
+    memory: 512Mi
   # limits:
-  #   memory: 384Mi
+  #   memory: 768Mi
 
 podAnnotations: {}
 podLabels: {}

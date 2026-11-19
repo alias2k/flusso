@@ -35,7 +35,7 @@ Guards: the engine's `ingest::tests` (`random_schedules_keep_every_document_in_o
 
 ## Built documents within a byte budget
 
-The ingest engine holds built documents within `[concurrency] max_built_mib` (default 64 MiB; ADR 0012 stage 5, `engine::Budget` in `libs/2-engine/src/budget.rs`), from their build until every lane acknowledged them.
+The ingest engine holds built documents within `[concurrency] max_built_mib` (default 512 MiB; ADR 0012 stage 5, `engine::Budget` in `libs/2-engine/src/budget.rs`), from their build until every lane acknowledged them.
 
 - **Counted.** A build's documents are measured by a walk of their trees on the build's own task (`document_bytes`: strings, byte arrays, arrays, B-tree nodes; held to a counting allocator within 0.8–1.2 by `tests/heap_walk.rs`), at least 1 KiB a batch.
 - **Reserved, then settled.** A grant reserves an estimate (the batch's ids × a running average per document of its kind) in `Builds::choose`; the build settles it to the measured size when it lands. A candidate the budget can't fit is simply not admissible: the gate's every-fourth counter doesn't move, and the loop waits for a release.

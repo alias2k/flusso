@@ -60,7 +60,7 @@ The engine's Postgres e2e binaries (`pipeline`, `wal`, `wal_release`, `visibilit
 FLUSSO_E2E_BUILDS=1 cargo nextest run -p flusso-engine --run-ignored all -E 'binary(wal)'
 ```
 
-They also hold built documents within a memory budget, the daemon's default 64 MiB. `FLUSSO_E2E_BUDGET_KIB` sets another (16384 for 16 MiB makes it bind on every backfill). A budget dropped with bytes still counted fails the test in debug builds: the standing check that every batch gives its bytes back.
+They also hold built documents within a memory budget, the daemon's default 512 MiB. `FLUSSO_E2E_BUDGET_KIB` sets another (16384 for 16 MiB makes it bind on every backfill). A budget dropped with bytes still counted fails the test in debug builds: the standing check that every batch gives its bytes back.
 
 ### Which Postgres
 
