@@ -719,3 +719,42 @@ async fn a_backoff_whose_cap_is_below_its_first_wait_is_refused_at_start() {
         engine::Backoff::default()
     );
 }
+
+/// A `[backoff]` of `u64::MAX` ms: a lane parks once, `/status` reads its
+/// probe as the latest date, and nothing panics or spins.
+#[tokio::test(start_paused = true)]
+async fn a_lane_parked_on_the_longest_backoff_is_reported_and_left_alone() {
+    let sink = Arc::new(RejectsOne::default());
+    let (source, feed) = FedSource::new(ScriptedSource::new(Vec::new()));
+    let backends = backends_for(
+        Arc::new(source),
+        vec![(
+            primary(),
+            Arc::clone(&sink) as Arc<dyn Sink>,
+            SinkOptions::default(),
+        )],
+    );
+    let mut config = backendless_config();
+    config.backoff.initial_ms = std::num::NonZeroU64::new(u64::MAX);
+    config.backoff.max_ms = std::num::NonZeroU64::new(u64::MAX);
+    let running = Daemon::new(config, backends).start().await.unwrap();
+    let status = running.status();
+    let run = tokio::spawn(running.run(std::future::pending()));
+
+    feed.send(row_event(false, 1)).await.unwrap();
+    while sink.attempts_at_the_poison().is_empty() {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(60)).await;
+
+    assert_eq!(sink.attempts_at_the_poison().len(), 1);
+    let snapshot = serde_json::to_value(status.snapshot()).unwrap();
+    let lane = &snapshot["sinks"]["primary"]["lanes"]["users"];
+    assert_eq!(lane["health"], "refused", "{snapshot}");
+    assert!(
+        lane["next_probe"].as_str().unwrap().starts_with("+26214"),
+        "{lane}"
+    );
+    assert!(!run.is_finished(), "the deployment goes on");
+    run.abort();
+}

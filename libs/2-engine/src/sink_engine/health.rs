@@ -42,6 +42,17 @@ use tokio::time::Instant;
 
 use crate::Backoff;
 
+/// About thirty years: where a wait no `Instant` can hold is put instead
+/// (tokio's own "far future").
+const FAR_FUTURE: Duration = Duration::from_secs(86_400 * 365 * 30);
+
+/// `wait` after `now`, held at the far future when no `Instant` can hold it.
+fn later(now: Instant, wait: Duration) -> Instant {
+    now.checked_add(wait)
+        .or_else(|| now.checked_add(FAR_FUTURE))
+        .unwrap_or(now)
+}
+
 /// Where one `(index, sink)` lane is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -219,7 +230,7 @@ impl LaneState {
             LaneHealth::Open => {
                 self.backoff = self.schedule.initial();
                 self.probes = 0;
-                self.due = now + self.backoff;
+                self.due = later(now, self.backoff);
                 self.health = LaneHealth::Parked {
                     reason,
                     since: now,
@@ -229,7 +240,7 @@ impl LaneState {
             }
             LaneHealth::Parked { since, .. } if probe => {
                 self.backoff = self.schedule.after(self.backoff);
-                self.due = now + self.backoff;
+                self.due = later(now, self.backoff);
                 self.health = LaneHealth::Parked {
                     reason,
                     since: *since,
@@ -250,7 +261,7 @@ impl LaneState {
             return false;
         }
         if self.unproven {
-            self.due = now + self.restage_backoff;
+            self.due = later(now, self.restage_backoff);
             self.restage_backoff = self.schedule.after(self.restage_backoff);
         } else {
             self.restage_backoff = self.schedule.initial();
@@ -292,7 +303,7 @@ impl LaneState {
     /// Staging failed: try again after the backoff, doubled each time up to
     /// the schedule's longest.
     pub(crate) fn restage_failed(&mut self, now: Instant) {
-        self.due = now + self.restage_backoff;
+        self.due = later(now, self.restage_backoff);
         self.restage_backoff = self.schedule.after(self.restage_backoff);
     }
 
@@ -431,6 +442,16 @@ mod tests {
         assert!(!state.is_kept());
         state.restage("gone".to_owned(), start);
         assert_eq!(state.due, start, "at once again");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wait_no_instant_holds_is_put_in_the_far_future() {
+        let now = Instant::now();
+        assert_eq!(later(now, Duration::MAX), now + FAR_FUTURE);
+        assert_eq!(
+            later(now, Duration::from_secs(3)),
+            now + Duration::from_secs(3)
+        );
     }
 
     /// The schedule is the engine's: a probe and a staging wait its first

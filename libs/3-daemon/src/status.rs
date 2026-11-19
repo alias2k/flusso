@@ -138,11 +138,11 @@ impl LaneHealthView {
         let now = tokio::time::Instant::now();
         let wall = chrono::Utc::now();
         let at = |instant: tokio::time::Instant| {
-            let ago = chrono::Duration::from_std(now.saturating_duration_since(instant))
-                .unwrap_or_default();
-            let ahead = chrono::Duration::from_std(instant.saturating_duration_since(now))
-                .unwrap_or_default();
-            wall - ago + ahead
+            wall_clock(
+                wall,
+                now.saturating_duration_since(instant),
+                instant.saturating_duration_since(now),
+            )
         };
         match health {
             engine::LaneHealth::Parked {
@@ -178,6 +178,23 @@ impl LaneHealthView {
             LaneHealthState::Open => "open",
         }
     }
+}
+
+/// `wall` moved back by `ago` and forward by `ahead`, held at the earliest
+/// or latest date a `DateTime` holds instead of overflowing: a backoff may
+/// put a probe further ahead than any date.
+fn wall_clock(
+    wall: chrono::DateTime<chrono::Utc>,
+    ago: std::time::Duration,
+    ahead: std::time::Duration,
+) -> chrono::DateTime<chrono::Utc> {
+    let delta =
+        |by: std::time::Duration| chrono::TimeDelta::from_std(by).unwrap_or(chrono::TimeDelta::MAX);
+    let back = wall
+        .checked_sub_signed(delta(ago))
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
+    back.checked_add_signed(delta(ahead))
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)
 }
 
 /// The live status of one sink engine.
@@ -854,4 +871,56 @@ pub struct LaneId {
 
 fn is_zero(count: &u64) -> bool {
     *count == 0
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    fn parked_until(ahead: Duration) -> engine::LaneHealth {
+        let since = tokio::time::Instant::now();
+        engine::LaneHealth::Parked {
+            reason: engine::ParkReason::Blocked {
+                reason: "index write (api)".to_owned(),
+            },
+            since,
+            next_probe: since + ahead,
+        }
+    }
+
+    /// A probe further ahead than a date can say reads as the latest date,
+    /// never a panic (a `[backoff]` of 10^16 ms, or of `u64::MAX` ms).
+    #[tokio::test(start_paused = true)]
+    async fn a_probe_past_every_date_reads_as_the_latest() {
+        for ms in [10_000_000_000_000_000, u64::MAX] {
+            let view = LaneHealthView::of(&parked_until(Duration::from_millis(ms))).unwrap();
+            assert_eq!(
+                view.next_probe,
+                Some(chrono::DateTime::<chrono::Utc>::MAX_UTC),
+                "{ms}"
+            );
+            assert!(view.since <= chrono::Utc::now());
+        }
+    }
+
+    /// A lane parked further back than a date can say reads as the earliest.
+    #[test]
+    fn a_wall_clock_reading_saturates_both_ways() {
+        let wall = chrono::Utc::now();
+        assert_eq!(
+            wall_clock(wall, Duration::MAX, Duration::ZERO),
+            chrono::DateTime::<chrono::Utc>::MIN_UTC
+        );
+        assert_eq!(
+            wall_clock(wall, Duration::ZERO, Duration::MAX),
+            chrono::DateTime::<chrono::Utc>::MAX_UTC
+        );
+        assert_eq!(
+            wall_clock(wall, Duration::from_secs(4), Duration::ZERO),
+            wall - chrono::Duration::seconds(4)
+        );
+    }
 }

@@ -929,3 +929,32 @@ async fn a_restaged_lane_retries_on_the_configured_schedule() {
     );
     task.abort();
 }
+
+/// A schedule as long as a configured `u64::MAX` ms parks the lane once:
+/// nothing panics, the parked item is not written again, and the sibling
+/// lane keeps landing.
+#[tokio::test(start_paused = true)]
+async fn a_lane_parked_on_the_longest_schedule_neither_panics_nor_spins() {
+    let longest = Duration::from_millis(u64::MAX);
+    let rig = Rig::new(Gate::default());
+    rig.sink.answer(&orders(), Some(Answer::Block));
+    let start = Instant::now();
+    rig.live(&orders(), 0..2, 0).await;
+    let engine = Arc::new(
+        rig.engine(FailurePolicy::Stop)
+            .with_backoff(crate::Backoff::new(longest, longest).unwrap()),
+    );
+    let task = spawn(Arc::clone(&engine));
+    for at in 0..10u32 {
+        tokio::time::sleep_until(start + Duration::from_secs(at.into())).await;
+        rig.live(&users(), at.into()..i64::from(at) + 1, u64::from(at) + 1)
+            .await;
+    }
+    tokio::time::sleep_until(start + Duration::from_secs(30)).await;
+
+    assert_eq!(rig.sink.writes_of(&orders(), start).len(), 1);
+    assert_eq!(rig.applied(&users()), through(10));
+    assert!(!engine.lane_health(&lane(orders())).is_open());
+    assert!(!task.is_finished(), "the run goes on");
+    task.abort();
+}
