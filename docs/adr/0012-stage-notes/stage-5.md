@@ -295,3 +295,59 @@ The review found the stage-5 fixes not sound until two items were fixed. The sta
 | 9 (low, note) | one estimate per kind | below | n/a |
 
 **One estimate per kind throttles small documents behind large ones.** An index with large documents raises the average for every batch of its kind. Another index with small documents is then estimated as large, and gets about one batch in flight where its real size would fit several. That costs throughput, not liveness: rule 4 always grants a kind holding nothing one batch, and the real bytes are what is held. Stage 8a's per-index budget is where it goes away: each index gets its own average and its own half, so a heavy index's documents stop being averaged with a light one's.
+
+## Does the 64 MiB default cost tail latency through a late wake? (2026-11-19)
+
+**The question.** On GitHub's runners ([run 44458546896](https://github.com/alias2k/flusso/actions/runs/44458546896), `reference`, 4 rounds) the visible latency p99 was 1,084 ms at 64 MiB and 192–232 ms at 512 MiB (`main`: 2,546 ms; p50 about 25 ms everywhere). An earlier run put 16 and 32 MiB near 320 ms. A p99 of 1–2 s matches the 1 s confirm tick, so the suspicion was a build the budget refused and only the tick's backstop granted.
+
+**How it was counted.** Each grant of a batch the budget had held back now records how long it waited and which event let it go:
+
+- `Observer::on_budget_wait(work, wake, waited)`;
+- the `flusso.memory.wait{work,wake}` histogram;
+- per phase in `flusso-bench`'s attribution.
+
+The wakes are `released`, `landed`, `change`, `page`, `tick` and `settle`.
+
+**Paused time** (`every_budget_wait_ends_on_a_release_not_the_tick`: a backfill and a trickle, a 5 ms sink, a 16 KiB budget):
+
+- 98 backfill and 35 live waits, all ended by `released`; the longest was 65 ms;
+- none ended by the tick;
+- with the release arm switched off, the test fails.
+
+**Real time, locally** (`reference`, `--scale default`, release binary, pinned to 0-3,12-15, `/metrics` scraped every second):
+
+| budget | p50 ms | p99 ms | peak RSS MiB | refused live / backfill | backfill waits ended by released / landed / tick |
+| --- | --- | --- | --- | --- | --- |
+| 16, run 1 | 4.8 | 29.2 | 75 | 0 / 213 | 200 / 12 / 1 (2 ms) |
+| 16, run 2 | 4.7 | 29.0 | 79 | 0 / 214 | 205 / 9 / 0 |
+| 32, run 1 | 4.6 | 35.9 | 107 | 0 / 211 | 196 / 15 / 0 |
+| 32, run 2 | 11.5 | 27.5 | 93 | 0 / 212 | 195 / 17 / 0 |
+| 64, run 1 | 12.9 | 34.1 | 121 | 0 / 186 | 177 / 8 / 1 (34 ms) |
+| 64, run 2 | 13.5 | 55.6 | 129 | 0 / 181 | 174 / 6 / 1 (9 ms) |
+| 512, run 1 | 11.8 | 32.2 | 365 | 0 / 10 | 10 / 0 / 0 |
+| 512, run 2 | 11.6 | 31.2 | 357 | 0 / 14 | 14 / 0 / 0 |
+
+Counts are over the whole run (backfill, trickle and burst). Comparing the scrape at the end of the backfill with the one at the end of the trickle, the trickle added no refusal and no wait in any run. A third 64 MiB run, without the scrape, gave p50 12.6 and p99 53.7 ms.
+
+**What it says:**
+
+- **No release goes unheard.** Every run has at most one wait ended by the tick, and it is short (2–34 ms): the tick and a release were ready at once and the tick's arm won the `select!`. The wait was already over.
+- **The budget never holds a live batch back,** in any phase, at any setting: `refused{work="live"}` is 0. Every wait is a backfill's, all of them before `seeded`, so none overlaps the latency phase.
+- **The candidates in the brief, checked against the code:**
+  - **A release of the other kind:** the wish is one flag for both kinds, and any release clears it and notifies.
+  - **A charge shared by several lanes:** it releases once, when its last copy goes. Until then its bytes are held, so the wait is honest.
+  - **A notification spent on a waiter that still doesn't fit:** `affordable` sets the wish again on every check, and the engine is the only waiter.
+  - **Live refused while backfill fills the budget:** backfill is held to half plus one batch.
+  - **The one-batch rule:** live waits only if it holds bytes and the estimate doesn't fit. Neither happened here.
+  - **A wake landing inside another arm:** `Notify` keeps it as a permit, and the next loop's release arm takes it.
+- **Where the latency difference is.** In the trickle the ingest stages are the same at 16 and 64 MiB (build 0.96 vs 1.39 ms, resolve about 0.3–0.5 ms). The sink's write, a caught-up `_bulk` with `?refresh=true`, takes 11.5 vs 16.3 ms. The cost is OpenSearch's, on the index the backfill left behind, not a budget wait. p50 is bimodal across runs (about 5 ms or about 12 ms) in the same way, with the engine idle 98% of the time.
+- **Why 16/32 can beat 64.** Not from the budget gate: it holds nothing back in that phase. The trickle's cost follows the state the backfill left OpenSearch in, which the backfill's pacing changes. That is consistent with a non-monotonic result, but not proven here: the index's segment and merge state wasn't measured.
+
+**Not reproduced:** the runners' p99 of about 1 s. Locally it is 27–56 ms at every setting.
+
+**Wanted on the runners** (the instrumentation is in this commit):
+
+- the attribution's budget rows for the trickle phase: live refusals and how the waits ended;
+- the sink's `write` ms/batch in the trickle, per budget.
+
+If live refusals ended by `tick` show up there, that is the bug, and this guard will be made to catch it. If they are zero, the p99 comes from the sink's writes, and the next thing to measure is OpenSearch's index state after the backfill.

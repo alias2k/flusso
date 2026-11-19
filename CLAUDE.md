@@ -1063,7 +1063,11 @@ is the one concrete piece.
   settles to what it built; the estimate stays one average per kind, per index waits for 8a). `[stream] capacity` / `--queue-capacity` are deprecated
   (load, warn, ignored); `ChannelStream::from_config` gives lanes `LANE_BACKSTOP` (1,048,576) items,
   which the floor keeps from binding (`ChannelStream::new` keeps an explicit capacity for tests).
-  Metrics `flusso.memory.built{work}` and `flusso.memory.refused{work}` (once per wait). `run` warns
+  Metrics `flusso.memory.built{work}`, `flusso.memory.refused{work}` (once per wait) and
+  `flusso.memory.wait{work,wake}` (each wait's length and the event that ended it: `Observer::on_budget_wait`,
+  `Wake`; the loop marks each grant's wake with `Builds::woke`; guard
+  `every_budget_wait_ends_on_a_release_not_the_tick`, which fails with the release arm off; `flusso-bench`'s
+  attribution lists them per phase). `run` warns
   when the budget alone reaches the cgroup limit or host memory (`apps/cli/src/memory.rs`, Linux files, best effort). Guards:
   `budget::tests`, `ingest::tests`' `random_schedules_under_a_tiny_budget_stay_within_it_and_finish`
   (held ≤ limit + each build's actual batch at every write, every byte back at the end),

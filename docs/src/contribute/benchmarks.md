@@ -74,7 +74,7 @@ A scenario reports these under the series `<scenario>/<scale>/…`:
 
 ## Where the time went
 
-Each scenario phase (backfill, trickle, burst) also gets an **attribution table**: how much of the phase's wall time each pipeline stage took, per task. It's read from flusso's own [`flusso.stage.duration`](../reference/metrics.md#where-the-time-goes) histogram, two scrapes of `/metrics` around the phase, so the release binary needs no patch. It isn't a data point: the run logs it and writes it to `attribution.md` (and `phases.attribution` in `summary.json`), ready to paste into a PR.
+Each scenario phase (backfill, trickle, burst) also gets an **attribution table**: how much of the phase's wall time each pipeline stage took, per task. It's read from flusso's own [`flusso.stage.duration`](../reference/metrics.md#where-the-time-goes) histogram, two scrapes of `/metrics` around the phase, so the release binary needs no patch. It also lists, per phase, the batches the memory budget held back (`flusso.memory.refused`) and how their waits ended (`flusso.memory.wait`, by work and wake). It isn't a data point: the run logs it and writes it to `attribution.md` (and `phases.attribution` in `summary.json`), ready to paste into a PR.
 
 ```text
 **burst** (7.37 s wall)
