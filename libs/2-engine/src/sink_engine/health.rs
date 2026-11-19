@@ -368,6 +368,42 @@ mod tests {
         assert!(!state.restage("gone".to_owned(), now, MAX_BACKOFF));
     }
 
+    /// A park in between keeps the staging's own backoff: a lane that never
+    /// landed a write since its staging waits the staging backoff (not the
+    /// park's, doubled by its probes); one whose write landed is staged again
+    /// at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_park_between_two_stagings_keeps_the_stagings_own_backoff() {
+        let max = MAX_BACKOFF;
+        let start = Instant::now();
+        let mut unproven = LaneState::default();
+        unproven.restage("gone".to_owned(), start, max);
+        unproven.reopen(start);
+        unproven.park(blocked(), false, start, max);
+        for _ in 0..3 {
+            let now = unproven.due;
+            unproven.park(blocked(), true, now, max);
+        }
+        let now = unproven.due;
+        assert!(unproven.restage("gone".to_owned(), now, max));
+        assert_eq!(
+            unproven.due - now,
+            FIRST_BACKOFF,
+            "the staging's backoff, not the park's 8 s"
+        );
+
+        let mut cured = LaneState::default();
+        cured.restage("gone".to_owned(), start, max);
+        cured.reopen(start);
+        assert!(cured.landed());
+        cured.park(blocked(), false, start, max);
+        let now = cured.due;
+        cured.park(blocked(), true, now, max);
+        let now = cured.due;
+        cured.restage("gone".to_owned(), now, max);
+        assert_eq!(cured.due, now, "a write landed since: at once");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_reopened_lane_missing_again_waits_its_backoff_until_a_write_lands() {
         let max = Duration::from_secs(4);
