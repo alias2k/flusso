@@ -53,6 +53,7 @@ enum Answer {
     Refuse,
     Block,
     Missing,
+    MissingForGood,
 }
 
 /// One write as the sink got it: when, and each part's index and ids.
@@ -151,7 +152,9 @@ impl Sink for Gate {
                         ),
                     );
                 }
-                Some(Answer::Missing) if named.insert(first.index.clone()) => {
+                Some(Answer::Missing | Answer::MissingForGood)
+                    if named.insert(first.index.clone()) =>
+                {
                     report = report.missing_target(
                         first.index.clone(),
                         format!("no such index [{}]", first.index),
@@ -675,5 +678,36 @@ async fn a_parked_lane_stays_parked_across_a_failed_run() {
         rig.sink.writes_of(&orders(), start)
     );
     assert!(!engine.lane_health(&lane(orders())).is_open());
+    task.abort();
+}
+
+/// A target staging can't bring back (an ingest pipeline routing to an index
+/// that auto-create may not make): the lane is staged again with a backoff,
+/// 1 s doubling, kept once it reopens until one of its writes lands, never in
+/// a loop of writes and stagings.
+#[tokio::test(start_paused = true)]
+async fn a_missing_target_staging_cannot_cure_is_retried_with_a_backoff() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.answer(&orders(), Some(Answer::MissingForGood));
+    rig.live(&orders(), 0..2, 0).await;
+    rig.live(&users(), 0..2, 1).await;
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop));
+    let task = spawn(Arc::clone(&engine));
+    let start = Instant::now();
+    for n in 0..1000u64 {
+        let id = i64::try_from(n).unwrap() + 10;
+        rig.live(&users(), id..id + 1, 2 + n).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let writes = rig
+        .sink
+        .writes_of(&orders(), start - Duration::from_secs(1))
+        .len();
+    let ensures = rig.sink.ensured.lock().unwrap().len();
+    assert!(
+        writes < 10 && ensures < 10,
+        "in 10 s: {writes} writes of orders, {ensures} ensure_index calls"
+    );
+    assert_eq!(rig.applied(&users()), through(1001), "users keeps landing");
     task.abort();
 }
