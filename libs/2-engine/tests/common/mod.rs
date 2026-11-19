@@ -28,14 +28,14 @@ pub(crate) fn e2e_builds() -> usize {
 }
 
 /// A memory budget for an e2e ingest engine: `FLUSSO_E2E_BUDGET_KIB`, else
-/// the daemon's default 64 MiB, so the e2e count what they build (a tiny
+/// the daemon's default 512 MiB, so the e2e count what they build (a tiny
 /// one makes the budget bind). Dropped with bytes still counted, it fails the
 /// test (in debug builds): the standing leak guard.
 pub(crate) fn e2e_budget() -> std::sync::Arc<engine::Budget> {
     let kib = std::env::var("FLUSSO_E2E_BUDGET_KIB")
         .ok()
         .and_then(|kib| kib.parse::<usize>().ok())
-        .unwrap_or(64 * 1024);
+        .unwrap_or(512 * 1024);
     std::sync::Arc::new(engine::Budget::new(kib * 1024))
 }
 

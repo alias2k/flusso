@@ -172,7 +172,7 @@
           ],
           "format": "uint",
           "minimum": 16,
-          "description": "MiB of built documents held before the ingest engine waits (default\n64): what it built and every sink has not yet acknowledged. A\nbackfill holds at most half of it, so live changes always have room,\nand a batch larger than the whole budget still builds, alone. Counts\nheap, not JSON: a document holds 8–10× its JSON size. At least 16, at\nmost 1,048,576.",
+          "description": "MiB of built documents held before the ingest engine waits (default\n512): what it built and every sink has not yet acknowledged. A\nbackfill holds at most half of it, so live changes always have room,\nand a batch larger than the whole budget still builds, alone. Counts\nheap, not JSON: a document holds 8–10× its JSON size. At least 16, at\nmost 1,048,576.",
           "maximum": 1048576
         }
       },

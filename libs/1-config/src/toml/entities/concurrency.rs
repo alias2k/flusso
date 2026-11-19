@@ -54,7 +54,7 @@ pub struct Concurrency {
     #[schemars(range(min = 1, max = 32))]
     pub builds: Option<NonZeroUsize>,
     /// MiB of built documents held before the ingest engine waits (default
-    /// 64): what it built and every sink has not yet acknowledged. A
+    /// 512): what it built and every sink has not yet acknowledged. A
     /// backfill holds at most half of it, so live changes always have room,
     /// and a batch larger than the whole budget still builds, alone. Counts
     /// heap, not JSON: a document holds 8–10× its JSON size. At least 16, at

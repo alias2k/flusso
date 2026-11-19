@@ -34,8 +34,8 @@ pub struct ChannelStream {
 
 /// How many items a lane built from configuration holds before publishing
 /// waits: a backstop that never binds before the ingest engine's memory
-/// budget, which counts at least 1 KiB per batch (the default 64 MiB holds at
-/// most 65,536 batches; only a budget past 1 GiB of 1 KiB batches reaches
+/// budget, which counts at least 1 KiB per batch (the default 512 MiB holds at
+/// most 524,288 batches; only a budget past 1 GiB of 1 KiB batches reaches
 /// it). A bounded channel doesn't allocate its capacity.
 pub const LANE_BACKSTOP: usize = 1 << 20;
 
