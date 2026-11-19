@@ -963,7 +963,7 @@ is the one concrete piece.
 - **A sink's indexes are staged concurrently (issue #398).** `SinkEngine::each_index` runs one
   `Step` per index, `STAGE_CONCURRENCY` (8) at once, each index's own steps in order; the `Sink`
   port allows `ensure_index`/`is_seeded`/`reindex` at once for different indexes, never for one,
-  never beside `write`/`mark_seeded`. After a failure no further index is started (a
+  and beside a `write`/`mark_seeded` of other indexes only (stage 9's restaging lane). After a failure no further index is started (a
   hanging cluster would cost a timeout per wave), the ones in flight finish, and
   `EngineError::Staging` names every failure seen; the daemon retries the whole stage. A reindex
   control stages the same way, each index once even when named twice. `validate_indexes` checks `VALIDATE_CONCURRENCY` (4) indexes at
