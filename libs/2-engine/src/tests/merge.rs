@@ -611,3 +611,130 @@ async fn a_parked_lane_stays_parked_when_an_acknowledgement_fails() {
         "parked"
     );
 }
+
+/// A stream whose acknowledgements record what the budget holds once the
+/// lane let the acknowledged item go.
+#[derive(Debug)]
+struct RecordsAtAck {
+    inner: Arc<ChannelStream>,
+    budget: Arc<crate::Budget>,
+    held: Arc<Mutex<Vec<usize>>>,
+}
+
+impl Stream for RecordsAtAck {
+    fn lane(&self, key: &LaneKey) -> stream::Result<stream::Lane> {
+        let lane = self.inner.lane(key)?;
+        Ok(stream::Lane {
+            producer: lane.producer,
+            consumer: Box::new(RecordingConsumer {
+                inner: lane.consumer,
+                budget: Arc::clone(&self.budget),
+                held: Arc::clone(&self.held),
+            }),
+        })
+    }
+
+    fn lanes(&self, sink: &kernel::SinkName) -> Vec<LaneKey> {
+        self.inner.lanes(sink)
+    }
+
+    fn requests(&self) -> stream::Result<stream::RequestLane> {
+        self.inner.requests()
+    }
+
+    fn is_idle(&self) -> bool {
+        self.inner.is_idle()
+    }
+}
+
+#[derive(Debug)]
+struct RecordingConsumer {
+    inner: Box<dyn stream::Consumer<LaneItem>>,
+    budget: Arc<crate::Budget>,
+    held: Arc<Mutex<Vec<usize>>>,
+}
+
+#[async_trait]
+impl stream::Consumer<LaneItem> for RecordingConsumer {
+    async fn recv(&mut self) -> stream::Result<Option<stream::Delivery<LaneItem>>> {
+        let Some(delivery) = self.inner.recv().await? else {
+            return Ok(None);
+        };
+        let (item, handle) = delivery.into_parts();
+        Ok(Some(stream::Delivery::new(
+            item,
+            Box::new(RecordingAck {
+                inner: handle,
+                budget: Arc::clone(&self.budget),
+                held: Arc::clone(&self.held),
+            }),
+        )))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+}
+
+#[derive(Debug)]
+struct RecordingAck {
+    inner: Box<dyn stream::AckHandle>,
+    budget: Arc<crate::Budget>,
+    held: Arc<Mutex<Vec<usize>>>,
+}
+
+#[async_trait]
+impl stream::AckHandle for RecordingAck {
+    async fn ack(self: Box<Self>) -> stream::Result<()> {
+        self.inner.ack().await?;
+        self.held.lock().unwrap().push(self.budget.held().total);
+        Ok(())
+    }
+
+    async fn nack(self: Box<Self>) -> stream::Result<()> {
+        self.inner.nack().await
+    }
+}
+
+/// The engine lets go of a part's batch before acknowledging it: once the
+/// lane released its copy at the acknowledgement, the part's bytes are back
+/// in the budget, with nothing of the engine still holding them.
+#[tokio::test]
+async fn a_parts_bytes_are_back_when_its_acknowledgement_returns() {
+    const KIB: usize = 1024;
+    let budget = Arc::new(crate::Budget::new(1 << 20));
+    let rig = Rig::new();
+    rig.publish(
+        "users",
+        charged(item("users", 0..4, Some(0)), &budget, 4 * KIB),
+    )
+    .await;
+    rig.publish(
+        "orders",
+        charged(item("orders", 0..4, Some(1)), &budget, 8 * KIB),
+    )
+    .await;
+    let held = Arc::new(Mutex::new(Vec::new()));
+    let stream = Arc::new(RecordsAtAck {
+        inner: Arc::clone(&rig.stream),
+        budget: Arc::clone(&budget),
+        held: Arc::clone(&held),
+    });
+    let engine = SinkEngine::new(
+        sink_name("primary"),
+        Arc::new(Parts::default()) as Arc<dyn Sink>,
+        stream as Arc<dyn Stream>,
+        mappings(),
+        Arc::clone(&rig.progress),
+    )
+    .with_writes(1);
+    engine.set_blame(Blame::Nobody);
+    let task = spawn(engine);
+    wait_for(|| held.lock().unwrap().len() == 2).await;
+    task.abort();
+    assert_eq!(
+        *held.lock().unwrap(),
+        [8 * KIB, 0],
+        "each acknowledgement finds its part's bytes already returned"
+    );
+}
