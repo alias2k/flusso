@@ -206,10 +206,10 @@
           ],
           "format": "uint64",
           "minimum": 1,
-          "description": "The longest wait, in milliseconds (default 60000). At least\n`initial_ms`; equal to it, every wait is the same."
+          "description": "The longest wait, in milliseconds (default 60000, or `initial_ms`\nwhen that is larger). At least `initial_ms`; equal to it, every wait\nis the same."
         }
       },
-      "description": "How long flusso waits before trying again, from a `flusso.toml`\n`[backoff]` table: a failed engine's restart (sink or ingest), a parked\nlane's probe, a re-staged lane's next staging. Each wait starts at\n`initial_ms` and doubles, up to `max_ms`; equal values wait a constant\ninterval. A property of the machine that runs flusso: never written into\n`flusso.lock`, so `run --locked` takes it from `--backoff-initial-ms` /\n`FLUSSO_BACKOFF_INITIAL_MS` and `--backoff-max-ms` / `FLUSSO_BACKOFF_MAX_MS`\nor the defaults (flag > env > file). Every key is optional."
+      "description": "How long flusso waits before trying again, from a `flusso.toml`\n`[backoff]` table: a failed engine's restart (sink or ingest), a parked\nlane's probe, a re-staged lane's next staging. Each wait starts at\n`initial_ms` and doubles, up to `max_ms`; equal values wait a constant\ninterval. An unset `max_ms` is 60000 or `initial_ms`, whichever is larger,\nso raising the first wait alone never needs the cap; a `max_ms` set below\n`initial_ms` is refused by `check`, `build` and `run` alike. A property of the machine that runs flusso: never written into\n`flusso.lock`, so `run --locked` takes it from `--backoff-initial-ms` /\n`FLUSSO_BACKOFF_INITIAL_MS` and `--backoff-max-ms` / `FLUSSO_BACKOFF_MAX_MS`\nor the defaults (flag > env > file). Every key is optional."
     },
     "Server": {
       "type": "object",
