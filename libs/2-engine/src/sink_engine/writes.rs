@@ -228,6 +228,16 @@ enum Outcome {
     Write(sink::Result<WriteReport>),
     Seed(sink::Result<()>),
     Record(sink::Result<()>),
+    /// A quiet lane's empty caught-up write.
+    Refresh(sink::Result<WriteReport>),
+}
+
+/// A lane's acknowledgement waiting for its empty caught-up write.
+struct Refreshing {
+    handle: Box<dyn AckHandle>,
+    lane: usize,
+    oldest: bool,
+    covers_below: u64,
 }
 
 /// A flight that returned.
@@ -247,6 +257,8 @@ pub(super) struct Run<'a> {
     seeding: Vec<(u64, Seeding)>,
     /// Backfill checkpoints in flight, by lane: they hold no write slot.
     recording: Vec<(u64, usize)>,
+    /// The empty caught-up writes in flight, by flight.
+    refreshing: Vec<(u64, Refreshing)>,
     next_flight: u64,
     /// The lane-order number the next delivered item gets.
     next_seq: u64,
@@ -302,6 +314,7 @@ impl<'a> Run<'a> {
             flying: Vec::new(),
             seeding: Vec::new(),
             recording: Vec::new(),
+            refreshing: Vec::new(),
             next_flight: 0,
             next_seq: 0,
             contested: 0,
@@ -549,11 +562,13 @@ impl<'a> Run<'a> {
             .any(|(_, flight)| flight.lanes().any(|at| at == lane))
             || self.lane_seeding(lane)
             || self.recording.iter().any(|(_, at)| *at == lane)
+            || self.refreshing.iter().any(|(_, at)| at.lane == lane)
     }
 
-    /// The flights holding a write slot: writes and seeds, not checkpoints.
+    /// The flights holding a write slot: writes and seeds, not checkpoints
+    /// or a quiet lane's caught-up write.
     fn writing(&self) -> usize {
-        self.flights.len() - self.recording.len()
+        self.flights.len() - self.recording.len() - self.refreshing.len()
     }
 
     /// Whether `lane`'s seed is in flight: nothing after it on the lane
@@ -1148,6 +1163,11 @@ impl<'a> Run<'a> {
                 self.record_returned(landed.flight, result);
                 return Ok(());
             }
+            Outcome::Refresh(result) => {
+                return self
+                    .refresh_returned(landed.flight, result, landed.took)
+                    .await;
+            }
         };
         let Some(index) = self.flying.iter().position(|(id, _)| *id == landed.flight) else {
             return Ok(());
@@ -1236,8 +1256,15 @@ impl<'a> Run<'a> {
                 }
             }
         }
-        // An acknowledgement (or its caught-up write) that fails still leaves
-        // a stop rejection blamed on its own lane, recorded first.
+        // A stop rejection is recorded before the other parts are
+        // acknowledged, so it keeps its blame on its own lane whatever
+        // acknowledging them (or a caught-up write it sends) does; their
+        // landing is no progress past it.
+        if let Some((_, error)) = stopped {
+            let lanes: Vec<usize> = failed.iter().map(|part| part.lane).collect();
+            self.hold_walks(&lanes);
+            self.fail(error, &lanes);
+        }
         let mut acknowledged = Ok(());
         for (part, last) in landed_parts.into_iter().zip(last_of_lane) {
             // Let go of the batch before acknowledging it, so the lane frees it
@@ -1259,11 +1286,6 @@ impl<'a> Run<'a> {
             if let Some(run) = self.lanes.get_mut(part.lane) {
                 run.barrier = false;
             }
-        }
-        if let Some((_, error)) = stopped {
-            let lanes: Vec<usize> = failed.iter().map(|part| part.lane).collect();
-            self.hold_walks(&lanes);
-            self.fail(error, &lanes);
         }
         acknowledged?;
         for lane in walked {
@@ -1382,35 +1404,95 @@ impl<'a> Run<'a> {
                 .get(lane)
                 .is_some_and(|run| run.consumer.is_empty())
         {
+            // A flight, not awaited here: another lane's caught-up write may
+            // hold the sink's one refresh, and only this loop drives it.
             let covers_below = self.engine.lock_fences().returned();
-            let started = Instant::now();
-            let report = self
-                .engine
-                .sink
-                .write_parts(&[], CaughtUp::Indexes(std::slice::from_ref(&key.index)))
-                .await?;
-            self.engine.observer.on_stage(
-                StageTiming::new(Stage::Write, started.elapsed())
-                    .work(Work::Live)
-                    .sink(&self.engine.name),
-            );
-            if report.refreshes > 0 {
-                self.engine
-                    .observer
-                    .on_refreshes(&self.engine.name, report.refreshes);
+            let flight = self.next_flight;
+            self.next_flight += 1;
+            self.refreshing.push((
+                flight,
+                Refreshing {
+                    handle,
+                    lane,
+                    oldest,
+                    covers_below,
+                },
+            ));
+            let sink = &self.engine.sink;
+            let index = key.index.clone();
+            let refresh = async move {
+                let started = Instant::now();
+                let result = sink
+                    .write_parts(&[], CaughtUp::Indexes(std::slice::from_ref(&index)))
+                    .await;
+                Landed {
+                    flight,
+                    outcome: Outcome::Refresh(result),
+                    took: started.elapsed(),
+                }
+            };
+            if let Some(landed) = self.flights.start(refresh.boxed()) {
+                Box::pin(self.landed(landed)).await?;
             }
-            let returned = self.engine.write_returned(
-                &[],
-                report.visibility,
-                Some((covers_below, std::slice::from_ref(&key))),
-            );
-            self.next_due = returned.next_due;
+            return Ok(());
         }
+        self.acknowledged(handle, lane, oldest).await
+    }
+
+    /// Acknowledge an item; a landing at the front of its lane is progress.
+    async fn acknowledged(
+        &mut self,
+        handle: Box<dyn AckHandle>,
+        lane: usize,
+        oldest: bool,
+    ) -> Result<()> {
         handle.ack().await?;
         if oldest && self.failure.is_none() && self.lanes.get(lane).is_some_and(|run| run.counts) {
             self.engine.advanced.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
+    }
+
+    /// A quiet lane's caught-up write returned: its lane's written positions
+    /// before it are searchable, and the item that waited for it is
+    /// acknowledged. A failed one fails the run; the item comes back.
+    async fn refresh_returned(
+        &mut self,
+        flight: u64,
+        result: sink::Result<WriteReport>,
+        took: Duration,
+    ) -> Result<()> {
+        let Some(at) = self.refreshing.iter().position(|(id, _)| *id == flight) else {
+            return Ok(());
+        };
+        let (_, refreshing) = self.refreshing.swap_remove(at);
+        let report = match result {
+            Ok(report) => report,
+            Err(error) => {
+                self.fail(error.into(), &[]);
+                return Ok(());
+            }
+        };
+        self.engine.observer.on_stage(
+            StageTiming::new(Stage::Write, took)
+                .work(Work::Live)
+                .sink(&self.engine.name),
+        );
+        if report.refreshes > 0 {
+            self.engine
+                .observer
+                .on_refreshes(&self.engine.name, report.refreshes);
+        }
+        if let Some(key) = self.lanes.get(refreshing.lane).map(|run| run.key.clone()) {
+            let returned = self.engine.write_returned(
+                &[],
+                report.visibility,
+                Some((refreshing.covers_below, std::slice::from_ref(&key))),
+            );
+            self.next_due = returned.next_due;
+        }
+        self.acknowledged(refreshing.handle, refreshing.lane, refreshing.oldest)
+            .await
     }
 
     fn refresh_due(&mut self) {
