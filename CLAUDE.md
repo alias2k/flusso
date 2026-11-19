@@ -743,8 +743,13 @@ is the one concrete piece.
   order (the daemon's `FenceObserver` only wakes waiters on them), with a timer arm for searchable. A **caught-up** write (nothing else
   queued or waiting) makes every write that returned before its grant searchable (the
   `Sink::write` contract; each returned write gets a sequence number), and before the ack that
-  leaves the engine idle a position not yet searchable gets an **empty caught-up write**, since
-  the last writes of a burst can return after the caught-up one. The OpenSearch sink reports
+  leaves its lane quiet a position not yet searchable gets an **empty caught-up write**, since
+  the last writes of a burst can return after the caught-up one. It is a flight, never awaited in
+  the run loop (which alone drives the other writes, one of which may hold the sink's one refresh);
+  a lane on which something landed meanwhile is checked again when it returns, a backfill part
+  landing last asks the fences, a starting run sends one over every quiet lane still owed one, and
+  an ordered sink's takes its one slot (guards: `tests::refresh`, and the schedule test, which also
+  runs over a sink holding a lock across caught-up writes and checks each lane ends searchable). The OpenSearch sink reports
   `Within(refresh_interval)` for an unforced write (`Deferred` with `refresh_interval = "-1"`),
   remembers every index an unforced write touched, and refreshes them in the next caught-up write,
   one caught-up refresh at a time (`refreshing`: take, refresh, put back on failure), so a second

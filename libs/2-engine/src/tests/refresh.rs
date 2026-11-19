@@ -562,3 +562,24 @@ async fn an_ordered_sinks_refresh_runs_alone() {
         "one write at a time"
     );
 }
+
+/// An item waiting for its lane's caught-up write is still unfinished: one
+/// landing behind it meanwhile is no progress, and the front landing once the
+/// refresh returns is one step.
+#[tokio::test(start_paused = true)]
+async fn an_item_landing_behind_one_waiting_for_its_refresh_is_no_progress() {
+    let mut rig = Rig::new(Refresher::unlocked(200, 50), &[users()], 3, 1);
+    rig.start();
+    rig.publish(&users(), "slow-a", Some(1)).await;
+    rig.publish(&users(), "b", Some(2)).await;
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    let before = rig.engine.advanced();
+    rig.publish(&users(), "e", Some(3)).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(rig.stream.is_idle());
+    assert_eq!(
+        rig.engine.advanced() - before,
+        1,
+        "e landed behind a, which waited for its refresh"
+    );
+}
