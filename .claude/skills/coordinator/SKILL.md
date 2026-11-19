@@ -14,14 +14,15 @@ You coordinate. Agents implement. You don't write feature code yourself: you pic
 1. Read `CLAUDE.md`, then `CONTEXT.md` for the vocabulary. ADRs are under `docs/adr/`.
 2. Find the tracking issue of the round. Its body has, or gets, a `## Plan` section: order, what is running, owner decisions and freezes, manual checks, deferred notes. That section is the durable state if the session is lost.
 3. Find out which `gh` account can write to `alias2k/flusso`. If the active one is read-only, pass `GH_TOKEN=$(gh auth token -u <account>)` on every gh write.
-4. Check the build: a warm `target/` in the main checkout lets an agent worktree start warm with `cp -r --reflink=auto <main checkout>/target <worktree>/target` on a copy-on-write filesystem. Agents need `~/.cargo/bin` on `PATH` and the pinned toolchain of `rust-toolchain.toml`.
+4. **Write down what done means** before the first agent starts. For a single issue the issue is enough. For anything with stages, get the owner's bar in one or two lines (for example "stable and no slower than `main`") with what counts as a regression and what does not, and put it at the top of the Plan. Read it again before you queue any new piece of work: work that does not move toward the bar is not started now.
+5. Check the build: a warm `target/` in the main checkout lets an agent worktree start warm with `cp -r --reflink=auto <main checkout>/target <worktree>/target` on a copy-on-write filesystem. Agents need `~/.cargo/bin` on `PATH` and the pinned toolchain of `rust-toolchain.toml`.
 
 ## What good work is
 
 These hold for every brief, every review and every fix you make yourself.
 
 - **The right solution, not the quick one.** Choose the fix that is correct for the whole problem, even when it is more complicated or touches more code than a patch over the symptom. A brief that names a quick fix as acceptable is a defect in the brief.
-- **Written for performance.** flusso sits on a replication stream: code is written with its cost in mind, with no needless allocation, copy, query or round trip per change or per document. That usually also means the simpler code. When the work is about speed or touches a hot path (WAL decode, resolve, document build, sink render, the engines' loops), benchmark before and after with `just bench`. The PR's `in-process (A/B vs base)` job is not a required check, but a failure there blocks the merge. `docs/src/contribute/benchmarks.md` describes the layers.
+- **Written for performance.** flusso sits on a replication stream: code is written with its cost in mind, with no needless allocation, copy, query or round trip per change or per document. That usually also means the simpler code. How and when the cost is measured is in "Measuring".
 - **Breaking is allowed in a minor or major release.** When the right solution breaks an API, a behaviour or what a start accepts, take it: mark the commit breaking (`fix(scope)!:`) and add the entry to the release's upgrade page under `docs/src/operate/`. Never bend a design to avoid a version bump. The file formats stay as `CLAUDE.md` freezes them.
 - **Flexibility in the query derive.** A type that deserializes the stored value keeps compiling. The derive never accepts or refuses a type by its name; a new refusal of something that compiled is a breaking change and needs a reason a user would accept.
 - **Only what the issue asks.** An agent's additions outside the issue (a new logger, an extra check, a refactor on the way) are reverted or split into their own PR.
@@ -32,6 +33,16 @@ These hold for every brief, every review and every fix you make yourself.
 - **Bug fix: test first.** The agent writes a test that fails on `origin/main` for the reported reason, commits it before the fix, then fixes. The report shows the test's output before and after. A bug that only shows against a live Postgres or OpenSearch gets an e2e test; a new e2e binary goes into both profiles of `.config/nextest.toml`.
 - **New feature: design, then tests, then implementation.** The design is settled first, in the issue, with the owner when the decision is theirs (`.claude/commands/implement.md` has the flow). Then the tests that state the design. Then the code that makes them pass. A feature a user authors also aligns the designer, as `CLAUDE.md` requires.
 - **Designer bugs** are filed with `area: designer` and not started until the owner asks. The owner checks the designer by using it; there is no browser test.
+
+## Measuring
+
+A number from a noisy system costs more than no number: it sends agents after regressions that don't exist. `docs/src/contribute/benchmarks.md` describes the layers and owns the commands.
+
+- **Benchmark only on a stable system with no noise.** The owner's machine while agents build and test on it is not one. In practice the quiet system is a GitHub runner: the PR's `in-process (A/B vs base)` job for the hot paths (WAL decode, resolve, document build, sink render, the engines' loops), and for the scenarios a run of base and head on the same runner. `.github/workflows/bench.yml` runs the scenarios only on `main` and stores their points in `main`'s history, so never dispatch it on a branch. Run `just bench` or `just review-ab` locally only when nothing else is running, and say so in the result.
+- **Benchmark towards the end of the ticket.** While the code is still changing, agents write with cost in mind and measure nothing. When the work is complete and reviewed, measure base against head once, and treat what it shows as review findings. The one exception is a design choice that depends on a number: measure a throwaway prototype for that choice, on a quiet system, then go back to building.
+- **A difference is real only when it repeats.** One run is a hint. Compare medians of several rounds and state the spread you judged against.
+- **The benchmark job is a gate.** `in-process (A/B vs base)` is not a required check, but a failure there blocks the merge unless the owner accepts it.
+- **What counts as a regression is the owner's bar** (Setup step 4). When a result trades one measure for another (latency for memory, throughput for requests sent), report both and ask; don't pick.
 
 ## Git rules
 
@@ -44,6 +55,7 @@ Conventional Commits matching the history (`fix(query): …`, `feat(engine)!: �
 At most **3 agents running cargo** at once, each in its own worktree branched from `origin/main` (a new worktree starts on whatever branch the main checkout is on). More than that and the timing-based tests flake.
 Effort **medium at most**; **low** for small or mechanical work. A lighter model for rebases and other mechanical work.
 **Size each piece to about 1–2 hours.** Small related issues batch into one PR (`Closes #a, #b`). Work on the same module runs one at a time.
+**Every task either gates the merge or it doesn't**, and its brief says which. Work that doesn't (an investigation of something odd, a sweep, an idea for later) never holds an agent or a machine the gating work needs, and never delays the merge; if it can't run beside the gating work, it becomes an issue.
 Agents run their own sub-agents in the foreground. When time runs out, tell each agent to stop, commit, push a **draft PR** with Done / Left / Resume sections, and report.
 
 A brief contains (keep it short):
@@ -51,15 +63,17 @@ A brief contains (keep it short):
 - the issue numbers and the decided design, if any;
 - the 3–5 relevant files and ADRs by path, taken from the "Where things live" table of `CLAUDE.md`;
 - the order of work that applies, and the rules of "What good work is" with the manual pages by path;
+- whether the task gates the merge, and that it measures nothing while building ("Measuring" says when and where);
 - the environment: the `PATH` export, the warm `target/` copy, `CARGO_INCREMENTAL=0`;
 - **never build or keep checkouts under `/tmp`** when it is a tmpfs (`df -t tmpfs /tmp`): they take RAM. Use the worktree;
 - **never touch the main checkout**, the owner works there; reading its `target/` to copy it is fine;
 - **Docker**: name every container it starts, remove only its own, never run a global prune;
+- **lock only what collides**: when several agents share the machine, runs that start containers (`--run-ignored`, the e2e binaries) and benchmarks take one shared `flock`; fmt, clippy, check and unit tests in separate worktrees run side by side with capped `-j`;
 - restore `libs/2-adapters/source-postgres/benches/fixtures/pgoutput.bin` if a test run re-recorded it;
 - out-of-scope findings are listed in the report, not fixed, and the agent creates no GitHub issues;
 - **don't cheat**: never weaken a test or drop a performance-motivated design to make a check pass;
-- **long runs in the foreground**: start every build, test, benchmark and check as a blocking call, never as a background command; never end the turn while one runs (nothing wakes an agent when it finishes). One call is limited to ten minutes, and a run that outlasts it moves to the background and the agent stops: split long runs into chunks that each fit one call (a 50-run loop as five calls of ten, a CI wait as repeated `timeout 570 gh pr checks <n> --watch`). Say this to reviewers too;
-- match CI's order from `CLAUDE.md` before reporting, pipe output through `tail`/`grep`, then **stop at "PR opened"**: report the PR URL and head SHA, don't wait for CI.
+- **long runs in the foreground**: start every build, test, benchmark and check as a blocking call, never as a background command; never end the turn while one runs (nothing wakes an agent when it finishes). **One final message carries the whole report**: only an agent's last message reaches you, so a result written earlier in its turn is lost. One call is limited to ten minutes, and a run that outlasts it moves to the background and the agent stops: split long runs into chunks that each fit one call (a 50-run loop as five calls of ten, a CI wait as repeated `timeout 570 gh pr checks <n> --watch`). Say this to reviewers too;
+- match CI's order from `CLAUDE.md` before reporting, with the commands copied from `.github/workflows/ci.yml`, flags and all (nextest and the doctests need `--workspace`: the default member is the CLI alone); pipe output through `tail`/`grep`, then **stop at "PR opened"**: report the PR URL and head SHA, don't wait for CI.
 
 Resume an agent only for tiny fixes. For a real follow-up round, start a fresh agent with a short handoff (PR, branch, what is left, files).
 
@@ -73,11 +87,11 @@ Resume an agent only for tiny fixes. For a real follow-up round, start a fresh a
    A PR that touches only docs, CI or other mechanical files needs the issue reviewer alone.
 2. Give a reviewer the code, the issue and the paths, never the author's conclusions or your own. Bound it: say what blocks a merge and what is a note. Include the foreground rule from the brief list.
 3. **Every re-check is a new reviewer.** Never send it to the reviewer that made the findings or to the author.
-4. **A re-check reviews the delta.** Give it the diff since the last reviewed commit, the earlier findings and the objections to them, and tell it to verify the fixes and what they could have broken, nothing else. Full depth is for round one and for the last round before merge.
+4. **A re-check reviews the delta, once.** Give it the diff since the last reviewed commit, the earlier findings and the objections to them, and tell it to verify the fixes and what they could have broken, nothing else. What it finds outside the delta is filed as an issue, unless it loses or duplicates a change, breaks an engine invariant of `CLAUDE.md` or stops a start; those are fixed now. Full depth is for round one. A second full-depth review is for a branch whose fixes changed its design, not a habit: repeated full reviews of a growing diff always find something, and the branch never lands.
 5. **Reviewers run committed tooling, they don't rebuild it:**
    - `just review-ab [base]` builds the base and the branch in **separate target dirs**, starts Postgres (the tests' default, or `--pg 14,16,18` when the major version matters), runs the Docker-backed benches on both and prints one table per Postgres version. A case counts as slower only after its re-run confirms it. Run a `noise` case again alone with `--filter` and more `--rounds`. `docs/src/contribute/benchmarks.md` owns the details;
    - `just review-digest [base]` answers "same documents?" (a digest per index of what `build`, `build_many` and a backfill built, a diff of a differing one) and `just review-plans [base]` "same plans?" (plans per call, root scan and partition pruning under `plan_cache_mode` auto and `force_generic_plan`), both on the `cases` roots, both on `--pg` like `review-ab`. A live-drain comparison of the two binaries is not committed yet: a reviewer does it by hand and reports;
-   - for anything `review-ab` does not cover, reviewers copy the warm `main` build (Setup step 4) for the baseline, each tree in its own target dir;
+   - for anything `review-ab` does not cover, reviewers copy the warm `main` build (Setup step 5) for the baseline, each tree in its own target dir;
    - when a reviewer finds a gap with a generator or script of its own (a key type, a key length, a Postgres version), the fix adds that case to a committed test or to the comparison command, so the next reviewer only runs it;
    - the tooling is a floor, not a fence. A reviewer that needs a check the tooling can't run does it by hand this round and reports what it needed and what it did. The missing tool is then committed: in the same PR when small, otherwise as the next tooling PR. Never tell a reviewer to use only what exists;
    - push before review when you can, and have reviewers read CI's result for the suites CI runs instead of running them again.
@@ -89,6 +103,15 @@ Resume an agent only for tiny fixes. For a real follow-up round, start a fresh a
 A test that fails only in CI is a bug until shown otherwise: find the cause before retrying. The e2e suites are retried by nextest; an intermittent failure elsewhere usually means two tests share state (an index name pattern, an environment variable).
 
 Repo files describe the current state; history goes in commits, PRs and issue comments.
+
+## Work in stages
+
+Work too big for one PR (an ADR carried out in stages) lands in slices.
+
+- **Each stage merges to `main` when it is reviewed and green**, behind a switch or unused if it must be. A branch that collects stage after stage grows a diff no review can finish and no benchmark can attribute. If a branch has taken two stages without merging, stop and find the slice that can land.
+- **The branch keeps its CI.** Open the PR as a draft from the first push and leave it open, so every push is checked. Never close a PR to quiet its notifications; mute them instead. A branch without CI needs a hand-run of the whole of CI after every fix.
+- **The scope freezes when the bar is in reach.** From then on nothing new goes onto the branch: no feature, no improvement found on the way, no fix for an issue that was open before the work started. Each becomes an issue for after the merge. Every addition resets the review and the measurements.
+- Agents sharing one stage branch each work in their own worktree, `git pull --rebase` before each push and never rewrite what is pushed.
 
 ## Scope and issues
 
@@ -111,5 +134,5 @@ After each merge or decision point: what merged, which issues closed, what is ru
 
 - Use tables for anything with more than two items: PRs, issues, what is open.
 - Questions go in one numbered list, each with your recommendation, so the owner can answer by number.
-- A decision that was the owner's to make and that you made to keep work moving is listed in the report, with a concrete example of what it changes. Never leave it only in a PR body.
+- **A decision that is the owner's is asked, not inferred.** A default, a trade between two measures, how strictly to read their bar, anything a flusso user sees: ask with your recommendation, and keep the work that doesn't depend on the answer moving. Never read a strict meaning into a short instruction and build on it. If you did decide something of theirs, it is listed in the report with a concrete example of what it changes, never only in a PR body.
 - When you were wrong about something you told the owner (a diagnosis, a limit), say so in the next report.
