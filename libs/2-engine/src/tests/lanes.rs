@@ -1254,3 +1254,109 @@ async fn a_lane_whose_live_item_is_blocked_answers_no_further_than_before() {
     );
     run.abort();
 }
+
+/// Like the OpenSearch sink, one caught-up refresh at a time: a caught-up
+/// write over `orders` (slow) or an empty one takes `refreshing` for its
+/// whole length. Every write that carries documents is searchable only after
+/// a caught-up write, so a lane going quiet sends one.
+#[derive(Debug, Default)]
+struct OneRefreshAtATime {
+    refreshing: tokio::sync::Mutex<()>,
+}
+
+#[async_trait]
+impl Sink for OneRefreshAtATime {
+    async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> sink::Result<WriteReport> {
+        let scope = if caught_up {
+            sink::CaughtUp::All
+        } else {
+            sink::CaughtUp::No
+        };
+        self.write_parts(&[envelopes], scope).await
+    }
+
+    async fn write_parts(
+        &self,
+        parts: &[&[Envelope]],
+        caught_up: sink::CaughtUp<'_>,
+    ) -> sink::Result<WriteReport> {
+        let empty = parts.iter().all(|part| part.is_empty());
+        let orders_part = parts
+            .iter()
+            .any(|part| part.first().is_some_and(|e| e.index == orders()));
+        if caught_up.is_caught_up() && (empty || orders_part) {
+            let _refreshing = self.refreshing.lock().await;
+            if orders_part {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+        Ok(WriteReport::clean().visible(if empty {
+            sink::Visibility::Immediate
+        } else {
+            sink::Visibility::Deferred
+        }))
+    }
+
+    async fn is_seeded(&self, _: &IndexName) -> sink::Result<bool> {
+        Ok(true)
+    }
+}
+
+/// A lane going quiet while another lane's caught-up write holds the sink's
+/// one refresh: the quiet lane's caught-up write waits for it without
+/// stopping the engine from driving the write that holds it.
+#[tokio::test]
+async fn a_quiet_lanes_caught_up_write_waits_beside_another_lanes_refresh() {
+    let sink = Arc::new(OneRefreshAtATime::default());
+    let primary = sink_name("primary");
+    let indexes = [orders(), users()];
+    let stream = Arc::new(ChannelStream::over(64, indexes.clone(), [primary.clone()]));
+    let progress = Arc::new(crate::Progress::of(indexes, [primary.clone()]));
+    for (index, position) in [(orders(), 0), (users(), 1)] {
+        stream
+            .lane(&LaneKey::new(index.clone(), primary.clone()))
+            .unwrap()
+            .producer
+            .publish(LaneItem::Batch(Batch {
+                position: Some(Position::new(position)),
+                changes: 1,
+                envelopes: vec![Envelope::upsert(
+                    index,
+                    position.to_string(),
+                    GenericValue::Map(BTreeMap::new()),
+                    Some(Position::new(position)),
+                    chrono::Utc::now(),
+                )]
+                .into(),
+                hold: Default::default(),
+                walked: None,
+            }))
+            .await
+            .unwrap();
+    }
+    let engine = SinkEngine::new(
+        primary,
+        Arc::clone(&sink) as Arc<dyn Sink>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![index_mapping(orders()), index_mapping(users())],
+        progress,
+    )
+    .with_writes(2)
+    .with_write_documents(1);
+    engine.set_blame(crate::sink_engine::Blame::Nobody);
+    let task = tokio::spawn(async move {
+        let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
+        engine.run(&mut control).await
+    });
+    let drained = tokio::time::timeout(Duration::from_secs(5), async {
+        while !stream.is_idle() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    task.abort();
+    assert!(
+        drained.is_ok(),
+        "the engine stopped driving the write holding the refresh"
+    );
+}
