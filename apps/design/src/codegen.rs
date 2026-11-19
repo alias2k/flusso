@@ -698,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn roundtrips_the_batch_and_concurrency_tables() {
+    fn roundtrips_the_batch_concurrency_and_backoff_tables() {
         let raw = r#"
             [source]
             type = "postgres"
@@ -710,6 +710,10 @@ mod tests {
             writes = 8
             builds = 6
             max_built_mib = 256
+
+            [backoff]
+            initial_ms = 200
+            max_ms = 800
         "#;
         let config = ConfigToml::try_parse(raw).unwrap();
         let regenerated = config_to_toml(&config).unwrap();
@@ -721,6 +725,12 @@ mod tests {
             std::num::NonZeroUsize::new(256)
         );
         assert!(regenerated.contains("[concurrency]"), "{regenerated}");
+        assert_eq!(
+            reparsed.backoff.initial_ms,
+            std::num::NonZeroU64::new(200),
+            "{regenerated}"
+        );
+        assert_eq!(reparsed.backoff.max_ms, std::num::NonZeroU64::new(800));
     }
 
     #[test]

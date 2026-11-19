@@ -13,9 +13,9 @@
 //!
 //! Isolation, not fail-fast: a sink engine that stops on an error (a flush-wide
 //! failure, or a `stop` policy rejection) is restarted with exponential backoff
-//! (one second, doubling to `max_restart_backoff` while it keeps failing with
-//! no progress; a run that made progress starts the next wait at one second
-//! again: a sink engine's oldest unfinished lane item landed
+//! (`[backoff]`'s first wait, one second by default, doubling to its longest,
+//! 60 s by default, while it keeps failing with no progress; a run that made
+//! progress starts the next wait at the first again: a sink engine's oldest unfinished lane item landed
 //! ([`SinkEngine::advanced`]), the ingest engine moved its
 //! source forward, see [`IngestEngine::advances`]. A replayed change or
 //! backfill page published again is not progress) and its lane
@@ -45,7 +45,6 @@ use stream::Stream;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
-use crate::DaemonOptions;
 use crate::fence::Fence;
 
 const CONTROL_CAPACITY: usize = 8;
@@ -149,11 +148,10 @@ pub(crate) async fn run_all(
     continuity: Continuity,
     source: &Arc<dyn ChangeCapture>,
     stream: &Arc<dyn Stream>,
-    options: &DaemonOptions,
+    schedule: engine::Backoff,
     stop: &Stop,
     fence: &Fence,
 ) -> anyhow::Result<()> {
-    let max_backoff = options.max_restart_backoff;
     let progress = ingest.progress();
 
     // First staging, every sink, retried until it succeeds: the ingest engine
@@ -162,7 +160,7 @@ pub(crate) async fn run_all(
     let staged = future::join_all(
         sink_engines
             .iter()
-            .map(|engine| stage_until_ok(engine, continuity, max_backoff).map(|()| ())),
+            .map(|engine| stage_until_ok(engine, continuity, schedule).map(|()| ())),
     );
     tokio::select! {
         _ = staged => {}
@@ -178,11 +176,11 @@ pub(crate) async fn run_all(
             anyhow::bail!("no control channel for sink `{}`", engine.name());
         };
         tasks.spawn(async move {
-            let mut backoff = Backoff::new(max_backoff);
+            let mut backoff = Backoff::new(schedule);
             let mut first = true;
             loop {
                 if !first {
-                    stage_until_ok(&engine, Continuity::Resumed, max_backoff).await;
+                    stage_until_ok(&engine, Continuity::Resumed, schedule).await;
                 }
                 first = false;
                 let acknowledged = engine.advanced();
@@ -201,7 +199,7 @@ pub(crate) async fn run_all(
 
     let ingest_stop = stop.clone();
     let mut ingest_task = AbortOnDrop(tokio::spawn(async move {
-        let mut backoff = Backoff::new(max_backoff);
+        let mut backoff = Backoff::new(schedule);
         loop {
             let advances = ingest.advances();
             match ingest.run().await {
@@ -277,8 +275,8 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
-async fn stage_until_ok(engine: &SinkEngine, continuity: Continuity, max_backoff: Duration) {
-    let mut backoff = Backoff::new(max_backoff);
+async fn stage_until_ok(engine: &SinkEngine, continuity: Continuity, schedule: engine::Backoff) {
+    let mut backoff = Backoff::new(schedule);
     loop {
         match engine.stage(continuity).await {
             Ok(()) => return,
@@ -290,35 +288,31 @@ async fn stage_until_ok(engine: &SinkEngine, continuity: Continuity, max_backoff
     }
 }
 
-/// Exponential backoff from one second, doubling to a cap, until a
-/// [`reset`](Self::reset).
+/// Waits on `schedule`, from its first wait doubling to its longest, until
+/// a [`reset`](Self::reset).
 #[derive(Debug)]
 struct Backoff {
     next: Duration,
-    max: Duration,
+    schedule: engine::Backoff,
 }
 
 impl Backoff {
-    fn new(max: Duration) -> Self {
+    fn new(schedule: engine::Backoff) -> Self {
         Self {
-            next: Self::first(max),
-            max,
+            next: schedule.initial(),
+            schedule,
         }
     }
 
-    fn first(max: Duration) -> Duration {
-        Duration::from_secs(1).min(max)
-    }
-
-    /// Start over at one second: the engine made progress since the last
+    /// Start over at the first wait: the engine made progress since the last
     /// failure, so the next one is a new outage, not the same one repeating.
     fn reset(&mut self) {
-        self.next = Self::first(self.max);
+        self.next = self.schedule.initial();
     }
 
     async fn wait(&mut self) {
         tracing::info!(after = ?self.next, "restarting engine after backoff");
         tokio::time::sleep(self.next).await;
-        self.next = (self.next * 2).min(self.max);
+        self.next = self.schedule.after(self.next);
     }
 }

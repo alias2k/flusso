@@ -16,7 +16,7 @@ mod projection;
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 
 use kernel::{FailurePolicy, IndexSchema, Options, PortEntry, common};
 use serde::{Deserialize, Serialize};
@@ -63,6 +63,13 @@ pub struct Config {
     /// file).
     #[serde(skip)]
     pub concurrency: ConcurrencyConfig,
+    /// How long flusso waits before trying again (`[backoff]`). Never written
+    /// into the lock, and read back from one as unset: it belongs to the
+    /// machine that runs flusso, which sets it with `--backoff-initial-ms` /
+    /// `FLUSSO_BACKOFF_INITIAL_MS` and `--backoff-max-ms` /
+    /// `FLUSSO_BACKOFF_MAX_MS` (which win over the file).
+    #[serde(skip)]
+    pub backoff: BackoffConfig,
     /// Bind addresses for the operational HTTP surfaces. Read by the binary, not
     /// the daemon — transport is the binary's concern. Env/flag overrides win;
     /// see [`ServerConfig`].
@@ -131,6 +138,16 @@ pub struct ConcurrencyConfig {
     pub builds: Option<NonZeroUsize>,
     /// MiB of built documents held before the ingest engine waits.
     pub max_built_mib: Option<NonZeroUsize>,
+}
+
+/// The `[backoff]` knobs from `flusso.toml`, in milliseconds. An unset key
+/// keeps the daemon's default (1000 doubling to 60000).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BackoffConfig {
+    /// The first wait.
+    pub initial_ms: Option<NonZeroU64>,
+    /// The longest wait.
+    pub max_ms: Option<NonZeroU64>,
 }
 
 /// One index in a [`Config`], paired with whether it is built on this run.

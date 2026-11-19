@@ -1149,10 +1149,24 @@ is the one concrete piece.
   `a_busy_item_holds_back_only_the_items_sharing_its_documents`, the daemon's
   `writes_default_to_four_unless_the_config_sets_them`, the golden lock (its `flusso.toml` sets
   `[concurrency]`, the lock stays byte-identical), and the sinks' concurrency tests below.
+- **One schedule for every engine-level retry (`[backoff]`).** `engine::Backoff` (`policy.rs`:
+  `initial`, doubling, capped at `max`; 1 s / 60 s by default; equal values wait a constant interval)
+  times a failed engine's restart (sink and ingest, `supervise.rs`'s `Backoff`), a parked lane's
+  probe and a re-staged lane's next staging (`LaneState`). `flusso.toml`'s `[backoff]`
+  `initial_ms`/`max_ms`, `--backoff-initial-ms`/`--backoff-max-ms`, `FLUSSO_BACKOFF_*` (flag > env >
+  file > default), laid over the defaults by the daemon (`daemon::backoff`, called by `Daemon::start`
+  and by `run` before it binds); like `[concurrency]` it is never written into the lock
+  (`Config.backoff` is `#[serde(skip)]`; the golden `flusso.toml` sets it,
+  `backoff_never_reaches_the_lock`). `initial_ms = 0` and `max_ms < initial_ms` are refused naming
+  the key (at parse when the file sets both, at start after the flags). The OpenSearch sink's own bulk
+  retry is not on it. Guards: `config_toml`'s `backoff_*`, `health::tests`'
+  `the_waits_follow_the_configured_schedule`, `tests::parking`'s `*_on_the_configured_schedule`, the
+  daemon's `*_on_the_configured_backoff` and `a_backoff_whose_cap_is_below_its_first_wait_is_refused_at_start`,
+  the CLI's `a_backoff_*`.
 - **Item-level rejections vs write-wide errors.** `Sink::write` returns a `WriteReport`:
   `Err` is write-wide (transport down, whole request refused) and stops *that sink engine*,
-  which the daemon restarts with exponential backoff (1 s doubling to `max_restart_backoff`,
-  default 60 s, reset to 1 s after a run that made progress: the sink engine's oldest unfinished
+  which the daemon restarts with exponential backoff (`[backoff]`, below; 1 s doubling to 60 s by
+  default, reset to the first wait after a run that made progress: the sink engine's oldest unfinished
   lane item landed, `SinkEngine::advanced` (not any acknowledgement: a later item landing beside an
   older one that then fails is no progress; guards `only_the_oldest_unfinished_item_landing_counts_as_progress`,
   `a_write_landing_after_an_older_one_failed_is_no_progress`),
@@ -1203,9 +1217,9 @@ is the one concrete piece.
   receive order, unacknowledged (`writes.rs`'s `put_back`), so the lane's marks, fences and the slot
   stay where they are (`Progress::pinned_by` names it); the other parts land. A **parked** lane
   (refused, blocked) is not granted, takes nothing more from its lane, and its items neither hold
-  nor end a merge wait (`merge_hold`); when its backoff is due (`health.rs`'s `LaneState`: 1 s,
-  doubling to `SinkEngine::with_max_probe_backoff`, the daemon's `max_restart_backoff`; reset only
-  by that lane's probe landing) its front item is written alone (a **probe**, `Flight.probe`):
+  nor end a merge wait (`merge_hold`); when its backoff is due (`health.rs`'s `LaneState` on the
+  engine's `Backoff`, `SinkEngine::with_backoff`, the daemon's `[backoff]`; reset only by that lane's
+  probe landing) its front item is written alone (a **probe**, `Flight.probe`):
   landed, the lane opens; held again, the backoff doubles; a write `Err` fails the run as before. A
   stop probes every parked lane once more at once (`probe_on_stop`). A write block never reaches
   `on_error`, so nothing is quarantined under `skip`. A **restaging** lane (missing target), once
@@ -1215,7 +1229,7 @@ is the one concrete piece.
   items are written again; a failed staging retries on the backoff; `stage` reopens restaging lanes.
   A reopened lane keeps its staging backoff (`LaneState.unproven`, `restage_backoff`: a park in between
   doesn't move it) until one of its writes lands, so a target
-  staging can't cure is staged again after 1 s, 2 s, … not in a loop (guard
+  staging can't cure is staged again after the first wait, then doubling, not in a loop (guard
   `a_missing_target_staging_cannot_cure_is_retried_with_a_backoff`); staging waits for the lane's
   writes in flight (`restaging_waits_for_the_lanes_writes_in_flight`). A part lets go of its batch
   (and its budget `Hold`) before its acknowledgement (`a_parts_bytes_are_back_when_its_acknowledgement_returns`).

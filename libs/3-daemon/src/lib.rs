@@ -10,7 +10,7 @@ pub mod status;
 mod supervise;
 
 pub use backends::{Backends, SinkParts, SourceParts};
-pub use engine::{Budget, Held, Progress};
+pub use engine::{Backoff, Budget, Held, Progress};
 pub use fence::{
     Fence, FenceError, FenceLevel, FenceObserver, FenceOutcome, FencePositions, FenceRequest,
     LanePositions, SinkPositions, Unserved,
@@ -54,10 +54,6 @@ pub struct DaemonOptions {
     pub skip_backfill: bool,
     /// How often to sample source capture lag.
     pub lag_poll_interval: Duration,
-    /// The longest pause between restarts of a failed engine, and between two
-    /// probes of a parked lane. Backoff starts at one second and doubles up to
-    /// this.
-    pub max_restart_backoff: Duration,
 }
 
 impl Default for DaemonOptions {
@@ -65,7 +61,6 @@ impl Default for DaemonOptions {
         Self {
             skip_backfill: false,
             lag_poll_interval: Duration::from_secs(15),
-            max_restart_backoff: Duration::from_secs(60),
         }
     }
 }
@@ -84,6 +79,26 @@ pub fn batch_policy(config: &Config) -> BatchPolicy {
             .max_delay_ms
             .map_or(defaults.max_delay, Duration::from_millis),
     }
+}
+
+/// How long the engines wait before trying again: the defaults (1000 ms
+/// doubling to 60000 ms) with whatever `[backoff]` set laid over them. Refused,
+/// naming the keys, when `max_ms` is below `initial_ms`.
+pub fn backoff(config: &Config) -> anyhow::Result<Backoff> {
+    let defaults = Backoff::default();
+    let ms = |key: Option<std::num::NonZeroU64>, default: Duration| {
+        key.map_or(default, |ms| Duration::from_millis(ms.get()))
+    };
+    let initial = ms(config.backoff.initial_ms, defaults.initial());
+    let max = ms(config.backoff.max_ms, defaults.max());
+    Backoff::new(initial, max).map_err(|_| {
+        anyhow::anyhow!(
+            "[backoff] max_ms = {} is below initial_ms = {}; set max_ms to at least \
+             initial_ms (equal values wait a constant interval)",
+            max.as_millis(),
+            initial.as_millis()
+        )
+    })
 }
 
 /// Lane items each sink writes at once when `[concurrency] writes` is unset.
@@ -182,6 +197,7 @@ impl Daemon {
         } = self;
 
         backends.validate(&config)?;
+        let backoff = backoff(&config)?;
         tracing::info!(
             source = %config.source.kind,
             stream = %config.stream.kind,
@@ -284,7 +300,7 @@ impl Daemon {
                 .with_writes(writes(&config))
                 .with_write_documents(batch_policy(&config).max_changes)
                 .with_merge_wait(batch_policy(&config).max_delay)
-                .with_max_probe_backoff(options.max_restart_backoff)
+                .with_backoff(backoff)
                 .with_observer(Arc::clone(&observer))
                 .with_failure_policies(failure_policies.clone())
                 .skip_backfill(options.skip_backfill)
@@ -305,6 +321,7 @@ impl Daemon {
             stream,
             observer,
             options,
+            backoff,
             stop,
             budget,
             stalls,
@@ -328,6 +345,7 @@ pub struct RunningDaemon {
     stream: Arc<dyn Stream>,
     observer: Arc<dyn Observer>,
     options: DaemonOptions,
+    backoff: Backoff,
     stop: engine::Stop,
     budget: Arc<Budget>,
     stalls: Arc<Stalls>,
@@ -386,6 +404,7 @@ impl RunningDaemon {
             stream,
             observer,
             options,
+            backoff,
             stop,
             budget: _,
             stalls,
@@ -412,7 +431,7 @@ impl RunningDaemon {
             continuity,
             &source,
             &stream,
-            &options,
+            backoff,
             &stop,
             &fence,
         );

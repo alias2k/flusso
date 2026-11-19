@@ -384,6 +384,29 @@ fn an_unchanged_config_keeps_the_file_byte_for_byte() {
     assert_eq!(save_config(CONFIG, |_| {}), CONFIG);
 }
 
+/// A `[backoff]` table survives a save that edits something else, comment
+/// and all.
+#[test]
+fn a_backoff_table_survives_a_save() {
+    let base = format!(
+        "{CONFIG}\n# Retry sooner on this machine.\n[backoff]\ninitial_ms = 200\nmax_ms = 800\n"
+    );
+    let text = save_config(&base, |c| c.index[1].enabled = false);
+    assert!(
+        text.ends_with(
+            "# Retry sooner on this machine.\n[backoff]\ninitial_ms = 200\nmax_ms = 800\n"
+        ),
+        "{text}"
+    );
+    let text = save_config(&base, |c| {
+        c.backoff.max_ms = std::num::NonZeroU64::new(1600)
+    });
+    assert_eq!(
+        changed(&base, &text),
+        (vec!["max_ms = 800".into()], vec!["max_ms = 1600".into()]),
+    );
+}
+
 #[test]
 fn a_config_edit_keeps_its_comments() {
     let text = save_config(CONFIG, |c| c.index[1].enabled = false);

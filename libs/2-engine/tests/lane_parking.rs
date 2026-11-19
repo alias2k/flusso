@@ -414,7 +414,7 @@ async fn deploy(pg: &Pg, os: &Os, indexes: &[&str], policies: FailurePolicies) -
         )
         .with_writes(4)
         .with_failure_policies(policies)
-        .with_max_probe_backoff(Duration::from_secs(2))
+        .with_backoff(engine::Backoff::new(Duration::from_secs(1), Duration::from_secs(2)).unwrap())
         .with_observer(Arc::clone(&quarantined) as Arc<dyn Observer>),
     );
     sink_engine

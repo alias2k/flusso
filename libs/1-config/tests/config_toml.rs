@@ -529,3 +529,68 @@ fn the_writes_flag_takes_the_same_cap() {
     assert!(config::parse_writes("65").unwrap_err().contains("64"));
     assert!(config::parse_writes("0").is_err());
 }
+
+#[test]
+fn backoff_section_converts_and_is_optional() {
+    let config = convert("[source]\ntype = \"postgres\"\n");
+    assert_eq!(
+        (config.backoff.initial_ms, config.backoff.max_ms),
+        (None, None),
+        "no [backoff] means the defaults"
+    );
+    let config = convert(
+        r#"
+        [source]
+        type = "postgres"
+
+        [backoff]
+        initial_ms = 200
+        max_ms = 800
+        "#,
+    );
+    assert_eq!(config.backoff.initial_ms, std::num::NonZeroU64::new(200));
+    assert_eq!(config.backoff.max_ms, std::num::NonZeroU64::new(800));
+    let constant =
+        convert("[source]\ntype = \"postgres\"\n\n[backoff]\ninitial_ms = 500\nmax_ms = 500\n");
+    assert_eq!(constant.backoff.max_ms, std::num::NonZeroU64::new(500));
+}
+
+#[test]
+fn backoff_refusals_name_the_key() {
+    for (table, says) in [
+        ("initial_ms = 0", "initial_ms"),
+        ("max_ms = 0", "max_ms"),
+        (
+            "initial_ms = 2000\nmax_ms = 1000",
+            "max_ms = 1000 is below initial_ms = 2000",
+        ),
+        ("multiplier = 2", "multiplier"),
+    ] {
+        let error = parse(&format!(
+            "[source]\ntype = \"postgres\"\n\n[backoff]\n{table}\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(says), "{table}: {error}");
+    }
+    assert_eq!(
+        config::parse_backoff_ms("250"),
+        Ok(std::num::NonZeroU64::new(250).unwrap())
+    );
+    for refused in ["0", "-1", "soon"] {
+        assert!(
+            config::parse_backoff_ms(refused)
+                .unwrap_err()
+                .contains("at least 1"),
+            "{refused}"
+        );
+    }
+}
+
+#[test]
+fn backoff_is_never_written_back() {
+    let config =
+        convert("[source]\ntype = \"postgres\"\n\n[backoff]\ninitial_ms = 200\nmax_ms = 800\n");
+    let written = serde_json::to_string(&config).unwrap();
+    assert!(!written.contains("backoff"), "{written}");
+}

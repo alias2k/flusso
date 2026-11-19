@@ -1,6 +1,19 @@
 //! Configuration vocabulary for a run: how changes are grouped into a flush
-//! ([`BatchPolicy`]) and how item-level sink rejections are handled
-//! ([`FailurePolicies`] over [`FailurePolicy`]).
+//! ([`BatchPolicy`]), how item-level sink rejections are handled
+//! ([`FailurePolicies`] over [`FailurePolicy`]), and how long a retry waits
+//! ([`Backoff`]).
+//!
+//! ```
+//! use std::time::Duration;
+//! use engine::Backoff;
+//!
+//! let backoff = Backoff::new(Duration::from_millis(200), Duration::from_millis(800)).unwrap();
+//! let waits: Vec<_> = std::iter::successors(Some(backoff.initial()), |wait| Some(backoff.after(*wait)))
+//!     .take(4)
+//!     .collect();
+//! assert_eq!(waits, [200, 400, 800, 800].map(Duration::from_millis));
+//! assert!(Backoff::new(Duration::ZERO, Duration::from_secs(1)).is_err());
+//! ```
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -37,6 +50,70 @@ impl Default for BatchPolicy {
         Self {
             max_changes: 256,
             max_delay: Duration::from_millis(50),
+        }
+    }
+}
+
+/// How long the engines wait before trying again: a failed engine's restart,
+/// a parked lane's probe, a re-staged lane's next staging. The first wait is
+/// `initial`, each next one doubles, up to `max`; equal values wait a constant
+/// interval. Default: 1 s doubling to 60 s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Backoff {
+    initial: Duration,
+    max: Duration,
+}
+
+/// A [`Backoff`] that can't be: a zero first wait (it would spin) or a cap
+/// below the first wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum BackoffError {
+    /// The first wait is zero.
+    #[error("the first wait must be at least 1 ms")]
+    ZeroInitial,
+    /// The cap is below the first wait.
+    #[error("the longest wait ({max:?}) is below the first ({initial:?})")]
+    MaxBelowInitial {
+        /// The first wait.
+        initial: Duration,
+        /// The longest wait.
+        max: Duration,
+    },
+}
+
+impl Backoff {
+    /// Waits from `initial`, doubling up to `max`.
+    pub fn new(initial: Duration, max: Duration) -> Result<Self, BackoffError> {
+        if initial.is_zero() {
+            return Err(BackoffError::ZeroInitial);
+        }
+        if max < initial {
+            return Err(BackoffError::MaxBelowInitial { initial, max });
+        }
+        Ok(Self { initial, max })
+    }
+
+    /// The first wait.
+    pub fn initial(&self) -> Duration {
+        self.initial
+    }
+
+    /// The longest wait.
+    pub fn max(&self) -> Duration {
+        self.max
+    }
+
+    /// The wait after `wait`: doubled, up to the longest.
+    pub fn after(&self, wait: Duration) -> Duration {
+        wait.saturating_mul(2).min(self.max)
+    }
+}
+
+impl Default for Backoff {
+    fn default() -> Self {
+        Self {
+            initial: Duration::from_secs(1),
+            max: Duration::from_secs(60),
         }
     }
 }

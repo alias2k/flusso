@@ -114,3 +114,25 @@ fn the_deepest_expression_survives_a_lock_round_trip() {
     };
     assert_eq!(config::to_bytes(&rewrapped).unwrap(), bytes);
 }
+
+/// `[backoff]` belongs to the machine that runs flusso: the golden config
+/// sets it, and the same config without it compiles to the same bytes.
+#[test]
+fn backoff_never_reaches_the_lock() {
+    let golden = std::fs::read_to_string(golden_dir().join("flusso.toml")).unwrap();
+    assert!(golden.contains("[backoff]"), "the golden config sets it");
+    let without = golden.replace("[backoff]\ninitial_ms = 200\nmax_ms = 800\n", "");
+    assert_ne!(without, golden);
+
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("golden-without-backoff");
+    std::fs::create_dir_all(&dir).unwrap();
+    for entry in std::fs::read_dir(golden_dir()).unwrap() {
+        let path = entry.unwrap().path();
+        std::fs::copy(&path, dir.join(path.file_name().unwrap())).unwrap();
+    }
+    std::fs::write(dir.join("flusso.toml"), without).unwrap();
+
+    let with = config::to_bytes(&config::compile(golden_dir().join("flusso.toml")).unwrap());
+    let without = config::to_bytes(&config::compile(dir.join("flusso.toml")).unwrap());
+    assert_eq!(with.unwrap(), without.unwrap());
+}

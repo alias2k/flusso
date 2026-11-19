@@ -396,10 +396,9 @@ async fn a_parked_lane_probes_its_front_item_alone_with_a_backoff_no_sibling_res
     let start = Instant::now();
     rig.live(&orders(), 0..2, 0).await;
     rig.live(&orders(), 5..7, 1).await;
-    let engine = Arc::new(
-        rig.engine(FailurePolicy::Stop)
-            .with_max_probe_backoff(Duration::from_secs(4)),
-    );
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop).with_backoff(
+        crate::Backoff::new(Duration::from_secs(1), Duration::from_secs(4)).unwrap(),
+    ));
     let task = spawn(Arc::clone(&engine));
     for (at, position) in (0..24).zip(2..) {
         tokio::time::sleep_until(start + Duration::from_millis(500) * at).await;
@@ -656,10 +655,9 @@ async fn a_parked_lane_stays_parked_across_a_failed_run() {
     rig.sink.answer(&orders(), Some(Answer::Block));
     let start = Instant::now();
     rig.live(&orders(), 0..2, 0).await;
-    let engine = Arc::new(
-        rig.engine(FailurePolicy::Stop)
-            .with_max_probe_backoff(Duration::from_secs(30)),
-    );
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop).with_backoff(
+        crate::Backoff::new(Duration::from_secs(1), Duration::from_secs(30)).unwrap(),
+    ));
     let task = spawn(Arc::clone(&engine));
     // Probes at 1, 3 and 7 s; the next is due at 15 s.
     tokio::time::sleep_until(start + Duration::from_millis(8_000)).await;
@@ -856,6 +854,75 @@ async fn a_lane_whose_write_landed_after_staging_is_staged_at_once_next_time() {
     assert!(
         waited < Duration::from_millis(500),
         "a cured lane is staged again at once, not after a backoff: {waited:?}"
+    );
+    task.abort();
+}
+
+fn configured() -> crate::Backoff {
+    crate::Backoff::new(Duration::from_millis(200), Duration::from_millis(800)).unwrap()
+}
+
+/// A configured schedule is what a parked lane's probes wait: 200 ms
+/// doubling to 800 ms.
+#[tokio::test(start_paused = true)]
+async fn a_parked_lane_probes_on_the_configured_schedule() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.answer(&orders(), Some(Answer::Refuse));
+    let start = Instant::now();
+    rig.live(&orders(), 0..2, 0).await;
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop).with_backoff(configured()));
+    let task = spawn(Arc::clone(&engine));
+    tokio::time::sleep_until(start + Duration::from_millis(3_100)).await;
+
+    let probes: Vec<u128> = rig
+        .sink
+        .writes_of(&orders(), start)
+        .iter()
+        .map(Duration::as_millis)
+        .collect();
+    assert_eq!(probes, [0, 200, 600, 1_400, 2_200, 3_000]);
+    task.abort();
+}
+
+/// A configured schedule is what a re-staged lane waits between stagings
+/// while its target stays gone: 200 ms doubling to 800 ms, counted from the
+/// write that found it gone again.
+#[tokio::test(start_paused = true)]
+async fn a_restaged_lane_retries_on_the_configured_schedule() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.answer(&orders(), Some(Answer::MissingForGood));
+    let start = Instant::now();
+    rig.live(&orders(), 0..2, 0).await;
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop).with_backoff(configured()));
+    let task = spawn(Arc::clone(&engine));
+    tokio::time::sleep_until(start + Duration::from_millis(4_500)).await;
+
+    let ensured: Vec<u128> = rig
+        .sink
+        .ensured_at
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|at| (*at - start).as_millis())
+        .collect();
+    let writes: Vec<u128> = rig
+        .sink
+        .writes_of(&orders(), start)
+        .iter()
+        .map(Duration::as_millis)
+        .collect();
+    let waits: Vec<u128> = ensured
+        .iter()
+        .skip(1)
+        .filter_map(|staged| {
+            let found_missing = writes.iter().rev().find(|at| *at < staged)?;
+            Some(staged - found_missing)
+        })
+        .collect();
+    assert_eq!(
+        waits,
+        [200, 400, 800, 800, 800],
+        "each staging after the write that found the target gone: stagings at {ensured:?}, writes at {writes:?}"
     );
     task.abort();
 }

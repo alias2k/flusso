@@ -729,6 +729,7 @@ fn backendless_config() -> Config {
         on_error: Default::default(),
         batch: Default::default(),
         concurrency: Default::default(),
+        backoff: Default::default(),
         server: Default::default(),
         prefix: String::new(),
     }
@@ -749,11 +750,16 @@ fn backends(
     })
 }
 
-fn fast_restarts() -> DaemonOptions {
-    DaemonOptions {
-        max_restart_backoff: Duration::from_millis(10),
-        ..DaemonOptions::default()
-    }
+/// A config whose restarts wait 10 ms each.
+fn fast_restarts() -> config::Config {
+    restarting_every(10)
+}
+
+fn restarting_every(ms: u64) -> config::Config {
+    let mut config = backendless_config();
+    config.backoff.initial_ms = std::num::NonZeroU64::new(ms);
+    config.backoff.max_ms = std::num::NonZeroU64::new(ms);
+    config
 }
 
 async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
@@ -1020,8 +1026,7 @@ async fn failed_sink_engine_restarts_and_redelivers() {
         )],
     );
 
-    let running = Daemon::new(backendless_config(), backends)
-        .with_options(fast_restarts())
+    let running = Daemon::new(fast_restarts(), backends)
         .start()
         .await
         .unwrap();
@@ -1057,11 +1062,7 @@ async fn a_restarting_sink_engine_keeps_its_lanes_stall_age() {
             SinkOptions::default(),
         )],
     );
-    let running = Daemon::new(backendless_config(), backends)
-        .with_options(DaemonOptions {
-            max_restart_backoff: Duration::from_millis(500),
-            ..DaemonOptions::default()
-        })
+    let running = Daemon::new(restarting_every(500), backends)
         .start()
         .await
         .unwrap();
@@ -1146,8 +1147,7 @@ async fn failed_ingest_engine_restarts_and_resumes_the_stream() {
         built: Arc::new(Mutex::new(Vec::new())),
     });
 
-    let running = Daemon::new(backendless_config(), backends)
-        .with_options(fast_restarts())
+    let running = Daemon::new(fast_restarts(), backends)
         .start()
         .await
         .unwrap();
@@ -1370,8 +1370,7 @@ async fn a_panicking_build_ends_or_restarts_the_ingest_engine_but_never_hangs() 
             Arc::new(PanickingDocuments { at_once }),
             vec![(primary(), sink as Arc<dyn Sink>, SinkOptions::default())],
         );
-        let running = Daemon::new(backendless_config(), backends)
-            .with_options(fast_restarts())
+        let running = Daemon::new(fast_restarts(), backends)
             .start()
             .await
             .unwrap();

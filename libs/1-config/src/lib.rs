@@ -13,12 +13,12 @@ pub use compiled::{
     CompileError, Compiled, FORMAT_VERSION, compile, from_bytes, load_compiled, to_bytes, write,
     write_if_changed,
 };
-pub use deployment::{Config, DEFAULT_STREAM_KIND, Index, ServerConfig};
+pub use deployment::{BackoffConfig, Config, DEFAULT_STREAM_KIND, Index, ServerConfig};
 pub use loader::{LoadError, load};
 pub use toml::SinkEntry;
 pub use toml::entities::{
-    MAX_BUILDS, MAX_BUILT_MIB, MAX_WRITES, MIN_BUILT_MIB, parse_builds, parse_max_built_mib,
-    parse_writes,
+    MAX_BUILDS, MAX_BUILT_MIB, MAX_WRITES, MIN_BUILT_MIB, check_backoff_order, parse_backoff_ms,
+    parse_builds, parse_max_built_mib, parse_writes,
 };
 
 // Re-export the kernel vocabulary so downstream crates depend only on `config`
