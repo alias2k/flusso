@@ -579,6 +579,100 @@ async fn generation_deleted_while_running_is_reported_missing_and_is_rebuilt() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_generation_deleted_mid_backfill_is_seeded_only_after_a_full_backfill() {
+    // Issue #428: the unseeded generation a backfill is filling is deleted.
+    // The next write finds it missing; staging again creates it anew, empty,
+    // and says so, which is how the engine knows the running backfill can't
+    // seed it. Its checkpoint went with it. What the old backfill still writes
+    // lands, but only a fresh backfill of every row makes it whole, and only
+    // then is it seeded.
+    const ROWS: usize = 20;
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let index = IndexName::try_new(LOGICAL).unwrap();
+    let mapping = mapping();
+    let hash_alias = format!("{LOGICAL}_{}", mapping.hash);
+    let gen1 = format!("{hash_alias}_1");
+
+    let sink = sink(&base);
+    let first = sink.ensure_index(&mapping).await.unwrap();
+    assert_eq!(
+        format!("{first:?}"),
+        "Created",
+        "the first generation is new"
+    );
+
+    // ── The backfill lands rows 1..=10 and records how far it got ────────────
+    hold_rows(&sink, &index, 1..=10).await;
+    sink.flush(false).await.unwrap();
+    sink.record_walked(&index, "10").await.unwrap();
+    assert_eq!(
+        sink.seeding(&index).await.unwrap(),
+        sink::Seeding::Unseeded {
+            walked: Some("10".to_owned())
+        }
+    );
+
+    // ── An operator deletes the generation; the next page finds it missing ───
+    let status = client
+        .delete(format!("{base}/{gen1}"))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(status.is_success(), "DELETE {gen1} returned {status}");
+    hold_rows(&sink, &index, 11..=12).await;
+    let report = sink.flush(false).await.unwrap();
+    assert_eq!(
+        report.missing.iter().map(|m| &m.index).collect::<Vec<_>>(),
+        [&index],
+        "{report:?}"
+    );
+
+    // ── Staged again: a new, empty generation, its checkpoint gone ───────────
+    let again = sink.ensure_index(&mapping).await.unwrap();
+    assert_eq!(
+        format!("{again:?}"),
+        "Created",
+        "staging must say the target is new: the backfill writing it has lost its pages"
+    );
+    assert_eq!(
+        sink.seeding(&index).await.unwrap(),
+        sink::Seeding::Unseeded { walked: None },
+        "the deleted generation's checkpoint must not resume the fresh one"
+    );
+
+    // ── The old backfill's remaining pages land, and are not the table ───────
+    hold_rows(&sink, &index, 11..=ROWS).await;
+    sink.flush(true).await.unwrap();
+    assert!(!sink.is_seeded(&index).await.unwrap());
+    assert_eq!(search_count(&client, &base, &hash_alias).await, 10);
+    assert!(!doc_exists(&client, &base, &hash_alias, "1").await);
+
+    // ── The fresh backfill writes every row; only then is it seeded ──────────
+    hold_rows(&sink, &index, 1..=ROWS).await;
+    sink.flush(true).await.unwrap();
+    sink.mark_seeded(&index).await.unwrap();
+    assert!(sink.is_seeded(&index).await.unwrap());
+    assert_eq!(
+        alias_targets(&client, &base, &hash_alias).await,
+        vec![gen1.clone()]
+    );
+    assert_eq!(
+        search_count(&client, &base, &hash_alias).await,
+        ROWS as u64,
+        "the seeded generation holds the table"
+    );
+    for id in 1..=ROWS {
+        assert!(
+            doc_exists(&client, &base, &hash_alias, &id.to_string()).await,
+            "id {id}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
 async fn a_second_reindex_while_rebuilding_stages_nothing() {
     // Issue #121: a reindex while a rebuild is already pending must not stage
     // another generation and orphan the one being built.
@@ -744,7 +838,15 @@ async fn index_settings_land_on_the_created_generation_per_index_winning() {
     assert_eq!(wide["index.max_result_window"], "20000");
 }
 
-/// The settings of `index` as flat dotted keys.
+/// Hold an upsert of each row in `rows` for the next flush.
+async fn hold_rows(sink: &Buffered, index: &IndexName, rows: std::ops::RangeInclusive<usize>) {
+    for i in rows {
+        sink.apply(&upsert(index, &i.to_string(), &document(i)))
+            .await
+            .unwrap();
+    }
+}
+
 /// How many documents a search through `target` matches right now.
 async fn search_count(client: &reqwest::Client, base: &str, target: &str) -> u64 {
     let body: Value = client
