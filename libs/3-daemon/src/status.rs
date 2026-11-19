@@ -95,14 +95,15 @@ pub struct Status {
     budget: Option<Arc<Budget>>,
     /// Where each lane's stall comes from; `None` reports none.
     stalls: Option<Arc<Stalls>>,
-    /// The lanes that are not open (parked, blocked, restaging); an open lane
-    /// has no entry.
+    /// The lanes that are not open (refused, blocked, restaging); an open
+    /// lane has no entry.
     lane_health: Mutex<BTreeMap<stream::LaneKey, LaneHealthView>>,
 }
 
-/// A lane's health in `/status`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+/// A lane's health in `/status`. Its name ([`name`](Self::name)) is the
+/// one `/status`, the `why` label of `flusso.lane.parked` and the stop's
+/// deadline message all say.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LaneHealthState {
     /// Written as usual.
     #[default]
@@ -116,6 +117,24 @@ pub enum LaneHealthState {
     Blocked,
     /// Its target was gone: the index is being staged again.
     Restaging,
+}
+
+impl LaneHealthState {
+    /// `open`, `refused`, `blocked` or `restaging`.
+    pub fn name(self) -> &'static str {
+        match self {
+            LaneHealthState::Open => "open",
+            LaneHealthState::Refused => "refused",
+            LaneHealthState::Blocked => "blocked",
+            LaneHealthState::Restaging => "restaging",
+        }
+    }
+}
+
+impl Serialize for LaneHealthState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.name())
+    }
 }
 
 /// A lane that is not open, as `/status` and the metrics read it.
@@ -169,14 +188,9 @@ impl LaneHealthView {
     }
 
     /// The `why` label of `flusso.lane.parked`: `refused`, `blocked` or
-    /// `restaging`, the same word `/status` gives.
+    /// `restaging`, the [name](LaneHealthState::name) `/status` gives.
     pub fn why(&self) -> &'static str {
-        match self.state {
-            LaneHealthState::Refused => "refused",
-            LaneHealthState::Blocked => "blocked",
-            LaneHealthState::Restaging => "restaging",
-            LaneHealthState::Open => "open",
-        }
+        self.state.name()
     }
 }
 
@@ -903,6 +917,27 @@ mod tests {
                 "{ms}"
             );
             assert!(view.since <= chrono::Utc::now());
+        }
+    }
+
+    /// `/status`, the metric's `why` and the stop message read one name.
+    #[test]
+    fn a_lane_health_has_one_name_everywhere() {
+        for (state, name) in [
+            (LaneHealthState::Open, "open"),
+            (LaneHealthState::Refused, "refused"),
+            (LaneHealthState::Blocked, "blocked"),
+            (LaneHealthState::Restaging, "restaging"),
+        ] {
+            assert_eq!(serde_json::to_value(state).unwrap(), name);
+            assert_eq!(state.name(), name);
+            let view = LaneHealthView {
+                state,
+                since: chrono::Utc::now(),
+                next_probe: None,
+                reason: String::new(),
+            };
+            assert_eq!(view.why(), name);
         }
     }
 

@@ -503,16 +503,13 @@ pub(crate) fn unfinished_sinks(status: &daemon::StatusSnapshot) -> String {
         .join("; ")
 }
 
-/// `lane users parked since … (refused: id 42 …)` for a lane that is not
+/// `lane users refused since … (refused: id 42 …)` for a lane that is not
 /// written; `None` for an open one.
 fn lane_note(index: &str, lane: &daemon::LaneSnapshot) -> Option<String> {
-    let health = match lane.health {
-        daemon::LaneHealthState::Open => return None,
-        daemon::LaneHealthState::Refused => "parked",
-        daemon::LaneHealthState::Blocked => "blocked",
-        daemon::LaneHealthState::Restaging => "restaging",
-    };
-    let mut note = format!("lane {index} {health}");
+    if lane.health == daemon::LaneHealthState::Open {
+        return None;
+    }
+    let mut note = format!("lane {index} {}", lane.health.name());
     if let Some(since) = &lane.parked_since {
         note.push_str(&format!(" since {since}"));
     }
