@@ -44,6 +44,8 @@ struct Refresher {
     deferred_even_caught_up: bool,
     ordered: bool,
     rejects_once: Mutex<HashSet<String>>,
+    /// The next empty caught-up write fails.
+    fails_a_refresh: std::sync::atomic::AtomicBool,
     now: AtomicUsize,
     most: AtomicUsize,
     refreshes: AtomicUsize,
@@ -117,6 +119,9 @@ impl Refresher {
             self.caught_up_ms
         };
         tokio::time::sleep(Duration::from_millis(ms)).await;
+        if empty && self.fails_a_refresh.swap(false, Ordering::SeqCst) {
+            return Err(sink::SinkError::Write("refresh refused".to_owned()));
+        }
         if empty {
             self.refreshes.fetch_add(1, Ordering::SeqCst);
         }
@@ -507,14 +512,17 @@ async fn a_checkpoint_landing_during_its_lanes_refresh() {
     );
 }
 
-/// A merged write lands `users` and has `orders` refused under `stop`: the
-/// run ends with `users` written but not searchable (only an empty caught-up
-/// write makes a position searchable here). The next run, before
-/// anything new arrives, sends `users` the caught-up write it is owed.
+/// A merged write lands `users` and has `orders` refused under `stop`, which
+/// parks `orders`; `users`, quiet, is owed a caught-up write, which fails and
+/// ends the run with `users` written but not searchable (only an empty
+/// caught-up write makes a position searchable here). The next run, before
+/// anything new arrives, sends `users` the caught-up write it is owed, and
+/// `orders`' probe lands.
 #[tokio::test(start_paused = true)]
 async fn a_restarted_run_makes_a_quiet_lanes_written_positions_searchable() {
     let sink = Refresher {
         deferred_even_caught_up: true,
+        fails_a_refresh: true.into(),
         ..Refresher::locked(10, 0)
     };
     sink.rejects_once.lock().unwrap().insert("o".to_owned());
@@ -530,7 +538,7 @@ async fn a_restarted_run_makes_a_quiet_lanes_written_positions_searchable() {
     rig.start();
     assert!(
         rig.ended().await.is_err(),
-        "the stop rejection ends the run"
+        "the failed refresh ends the run"
     );
     assert!(!rig.searchable.reached(&users(), 1));
 
@@ -542,6 +550,38 @@ async fn a_restarted_run_makes_a_quiet_lanes_written_positions_searchable() {
         "{:?}",
         rig.searchable.on(&users())
     );
+    assert!(rig.searchable.reached(&orders(), 2));
+}
+
+/// A merged write lands `users` and parks `orders` on a `stop` refusal: with
+/// the run going on, the quiet `users` lane gets its caught-up write at once,
+/// and `orders` once its probe lands.
+#[tokio::test(start_paused = true)]
+async fn a_quiet_lane_beside_a_parked_one_is_made_searchable() {
+    let sink = Refresher {
+        deferred_even_caught_up: true,
+        ..Refresher::locked(10, 0)
+    };
+    sink.rejects_once.lock().unwrap().insert("o".to_owned());
+    let mut rig = Rig::with_policies(
+        sink,
+        &[users(), orders()],
+        1,
+        crate::BatchPolicy::default().max_changes,
+        FailurePolicies::new(FailurePolicy::Stop),
+    );
+    rig.publish(&users(), "u", Some(1)).await;
+    rig.publish(&orders(), "o", Some(2)).await;
+    rig.start();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        rig.searchable.reached(&users(), 1),
+        "{:?}",
+        rig.searchable.on(&users())
+    );
+    assert!(!rig.searchable.reached(&orders(), 2), "orders is parked");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(rig.stream.is_idle());
     assert!(rig.searchable.reached(&orders(), 2));
 }
 

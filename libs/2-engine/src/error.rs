@@ -24,15 +24,6 @@ pub enum EngineError {
     #[error(transparent)]
     Stream(#[from] stream::QueueError),
 
-    /// The sink rejected one or more documents at the item level and the
-    /// failure policy is [`Stop`](crate::FailurePolicy::Stop). Switch to
-    /// `skip` to quarantine such documents and keep the pipeline running.
-    #[error(
-        "sink rejected {0} document(s) (e.g. {1}); stopping. \
-         set on-error=skip to quarantine rejected documents and continue"
-    )]
-    DocumentsRejected(usize, String),
-
     /// A document could not be built (a script failed on it, or an `array:
     /// true` column held an object) and the failure
     /// policy for its index is [`Stop`](crate::FailurePolicy::Stop).

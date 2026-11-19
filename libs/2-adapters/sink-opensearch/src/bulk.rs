@@ -15,9 +15,21 @@
 //! {"email":"ada@x.io"}
 //! ```
 //!
-//! A response item reporting `index_not_found_exception` means the target is
-//! gone, which is the sink's problem rather than the document's: it fails the
-//! whole write (see [`read_bulk_response`]).
+//! Two refusals are about an **index**, not a document, and are reported per
+//! index rather than per document (see [`read_bulk_response`]):
+//!
+//! - **missing**: `index_not_found_exception`, the target is gone (deleted
+//!   while running); the engine stages that index again;
+//! - **blocked**: `cluster_block_exception` (403: `index.blocks.write`,
+//!   `read_only`, `read_only_allow_delete`) or an item-level 403
+//!   `security_exception` (a role without write permission on that index);
+//!   the documents are fine, so the engine parks the index's lane and writes
+//!   them again once the block is lifted, never quarantining them (#404).
+//!
+//! ```text
+//! {"index":{"_index":"users_1a2b_1","_id":"42","status":403,
+//!   "error":{"type":"cluster_block_exception","reason":"index [users_1a2b_1] blocked by: [FORBIDDEN/8/index write (api)];"}}}
+//! ```
 //!
 //! A response item refused with 429 or 503 is **busy**, not rejected: a full
 //! write queue, a tripped circuit breaker, a primary shard not yet active. The
@@ -205,7 +217,6 @@ pub(crate) fn plan_chunks(sizes: &[usize], batch_size: usize, max_bytes: usize) 
 
 /// What a 2xx bulk response says about the actions it answered.
 #[derive(Debug, Default)]
-#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) struct BulkResponse {
     /// Documents refused for a reason resending won't change.
     pub(crate) rejected: Vec<RejectedDocument>,
@@ -229,6 +240,21 @@ pub(crate) fn is_busy(status: u64) -> bool {
     matches!(status, 429 | 503)
 }
 
+/// Whether an item refused with error `kind` means its index is gone: every document bound for it fails the same way.
+pub(crate) fn is_missing(kind: Option<&str>) -> bool {
+    kind == Some("index_not_found_exception")
+}
+
+/// Whether an item refused with `status` and error `kind` means its index
+/// refuses writes for now, whatever the document holds: a write block
+/// (`cluster_block_exception`; the flood-stage one answers 429 and is busy,
+/// asked first) or a role without write permission on the index (an
+/// item-level 403 `security_exception`; a request-level 403 refuses the whole
+/// `_bulk` and fails the write).
+pub(crate) fn is_blocked(status: u64, kind: Option<&str>) -> bool {
+    kind == Some("cluster_block_exception") || (status == 403 && kind == Some("security_exception"))
+}
+
 /// Read the item-level outcome of a 2xx bulk response to `actions`.
 ///
 /// A bulk response is `errors: true` when *any* item failed, but its accepted
@@ -241,12 +267,14 @@ pub(crate) fn is_busy(status: u64) -> bool {
 ///   index and id; if the arrays ever disagree, the response's own
 ///   `_index`/`_id` are used as a fallback.
 ///
-/// An item failing with `index_not_found_exception` is neither: the target
-/// index or alias is gone (deleted while running), so every document bound
-/// for it would fail the same way. That returns a write-wide `Err`, which
-/// stops the sink engine; its restart re-runs `ensure_index`, which recreates
-/// the generation and reseeds it. So does a busy item past the end of
-/// `actions`, which can't be resent.
+/// - **missing** ([`is_missing`]): the target index or alias is gone, so
+///   every document bound for it fails the same way; listed by position;
+/// - **blocked** ([`is_blocked`]): the index refuses writes for now; listed
+///   by position.
+///
+/// A busy, missing or blocked item past the end of `actions` can't be told
+/// apart from the rest: that returns a write-wide `Err`, and the write is
+/// redelivered whole.
 pub(crate) fn read_bulk_response(
     response: &Value,
     actions: &[&BulkAction],
@@ -302,6 +330,25 @@ pub(crate) fn read_bulk_response(
             continue;
         }
 
+        let missing = is_missing(kind);
+        if missing || is_blocked(status, kind) {
+            if action.is_none() {
+                return Err(SinkError::Write(format!(
+                    "bulk response item {i} refused its index (HTTP {status} {}) but the request \
+                     had only {} actions; failing the write so the batch is redelivered",
+                    kind.unwrap_or("error"),
+                    actions.len()
+                )));
+            }
+            let list = if missing {
+                &mut read.missing
+            } else {
+                &mut read.blocked
+            };
+            list.push((i, reason));
+            continue;
+        }
+
         let (index, id) = match action {
             Some(action) => (action.index().to_owned(), action.id().to_owned()),
             None => (
@@ -315,12 +362,6 @@ pub(crate) fn read_bulk_response(
                     .to_owned(),
             ),
         };
-        if kind == Some("index_not_found_exception") {
-            return Err(SinkError::Write(format!(
-                "bulk write target {index} is missing (deleted while running?); \
-                 failing the write so a restart recreates it: {reason}"
-            )));
-        }
         read.rejected.push(RejectedDocument { index, id, reason });
     }
     Ok(read)

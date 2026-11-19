@@ -1257,10 +1257,11 @@ async fn warm_up(rig: &mut Rig) {
 }
 
 /// Under `stop`, a rejection the sink reports at its write's first poll
-/// fails the run at once: nothing granted after it starts, the write still
-/// in flight beside it (`a`) lands, and the confirmation stops before the
-/// rejected item. The probe answers `b` on its first poll: that is the
-/// precondition of "nothing after it starts".
+/// parks the lane at once: nothing of the lane granted after it starts, the
+/// write still in flight beside it (`a`) lands, and the confirmation stops
+/// before the rejected item. The run goes on, and the lane writes `b` again
+/// alone once its backoff is due. The probe answers `b` on its first poll:
+/// that is the precondition of "nothing after it starts".
 #[tokio::test(start_paused = true)]
 async fn a_stop_rejection_seen_at_its_first_poll_starts_nothing_after_it() {
     let mut rig = Rig::new(Probe::new().holding(&["a"]).rejecting(&["b"]), 4).start();
@@ -1274,29 +1275,32 @@ async fn a_stop_rejection_seen_at_its_first_poll_starts_nothing_after_it() {
     .await;
     settle().await;
     assert!(
-        rig.engine.as_ref().is_some_and(|run| !run.is_finished()),
-        "the run waits for a"
-    );
-    assert!(
         !rig.probe.starts().contains(&"c".to_owned()),
-        "nothing starts once the rejection failed the run"
+        "nothing of the lane starts once the rejection parked it"
     );
     rig.probe.release("a");
-    assert!(
-        rig.ended().await.is_err(),
-        "the rejection under stop fails the run"
-    );
+    settle().await;
     assert_eq!(
         super::covered(&rig.progress),
         Some(Position::new(2)),
         "a landed; b is unacknowledged, so the lane confirms nothing past 2"
     );
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let starts = rig.probe.starts();
+    assert_eq!(
+        starts.iter().filter(|id| *id == "b").count(),
+        2,
+        "the parked lane writes b again, alone: {starts:?}"
+    );
+    assert!(!starts.contains(&"c".to_owned()), "{starts:?}");
+    assert!(rig.engine.as_ref().is_some_and(|run| !run.is_finished()));
+    assert_eq!(super::covered(&rig.progress), Some(Position::new(2)));
 }
 
 /// Under `stop`, while the rejected write is still in flight the run doesn't
 /// know yet: disjoint items behind it start and land. What is promised is
-/// that the lane's confirmation stays before the rejected item, and the next
-/// run writes it alone (the barrier).
+/// that the lane's confirmation stays before the rejected item, and the lane,
+/// parked once it returns, writes it again alone (its probe).
 #[tokio::test(start_paused = true)]
 async fn a_stop_rejection_still_in_flight_lets_disjoint_writes_land_but_holds_confirmation() {
     let mut rig = Rig::new(Probe::new().holding(&["b"]).rejecting(&["b"]), 4).start();
@@ -1313,38 +1317,43 @@ async fn a_stop_rejection_still_in_flight_lets_disjoint_writes_land_but_holds_co
         "c landed, but b before it is still unacknowledged"
     );
     rig.probe.release("b");
-    assert!(rig.ended().await.is_err());
-    assert_eq!(super::covered(&rig.progress), Some(Position::new(1)));
-
-    let rig = rig.start();
     settle().await;
+    assert_eq!(super::covered(&rig.progress), Some(Position::new(1)));
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
     assert_eq!(
         rig.probe.starts(),
         ["z", "b", "c", "b"],
-        "the restarted run writes b alone, and nothing behind it"
+        "the parked lane writes b alone, and nothing behind it"
     );
+    assert!(rig.engine.as_ref().is_some_and(|run| !run.is_finished()));
 }
 
 /// A fresh engine writes its first item alone: a sink that stopped the
 /// previous process on a `stop` rejection writes nothing past it on the next
 /// start either, even while the rejected write is still in flight (it awaits
-/// here, so the rejection isn't known when the next grant could start).
+/// here, so the rejection isn't known when the next grant could start). Once
+/// it returns the lane parks, and only its probes write it again.
 #[tokio::test(start_paused = true)]
 async fn a_fresh_engine_writes_nothing_past_a_persistent_stop_rejection() {
     let mut rig = Rig::new(Probe::new().holding(&["a"]).rejecting(&["a"]), 4);
     rig.live(1, &["a"]).await;
     rig.live(2, &["b"]).await;
     rig.live(3, &["c"]).await;
-    let mut rig = rig.start();
+    let rig = rig.start();
     settle().await;
     assert_eq!(rig.probe.starts(), ["a"], "nothing starts beside a");
     rig.probe.release("a");
-    assert!(rig.ended().await.is_err());
-    assert_eq!(rig.probe.starts(), ["a"], "nothing past the rejected item");
+    tokio::time::sleep(Duration::from_millis(3_500)).await;
+    assert_eq!(
+        rig.probe.starts(),
+        ["a", "a", "a"],
+        "nothing past the rejected item: it is probed at 1 and 3 s"
+    );
     assert_eq!(
         rig.progress.landed(),
         source::cdc::Landed::Before(Position::new(1))
     );
+    assert!(rig.engine.as_ref().is_some_and(|run| !run.is_finished()));
 }
 
 /// The oldest item fails first and a later one lands after it: the later one

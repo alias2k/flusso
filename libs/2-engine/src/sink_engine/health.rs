@@ -175,4 +175,155 @@ impl ProbeOutcome {
 #[derive(Debug, Clone)]
 pub(crate) struct LaneState {
     pub(crate) health: LaneHealth,
+    /// The wait before the next probe (parked) or staging attempt
+    /// (restaging), once the current one fails.
+    pub(crate) backoff: Duration,
+    /// When the lane is next probed or staged.
+    pub(crate) due: Instant,
+    /// Probes made since it parked.
+    pub(crate) probes: u32,
+}
+
+impl Default for LaneState {
+    fn default() -> Self {
+        Self {
+            health: LaneHealth::Open,
+            backoff: FIRST_BACKOFF,
+            due: Instant::now(),
+            probes: 0,
+        }
+    }
+}
+
+impl LaneState {
+    /// Whether the lane is written as usual.
+    pub(crate) fn is_open(&self) -> bool {
+        self.health.is_open()
+    }
+
+    /// Park on `reason`: an open lane starts its backoff at one second; a
+    /// parked lane whose probe returned `reason` doubles it, up to `max`; a
+    /// lane being staged again stays so (its staging comes first). Whether the
+    /// health changed.
+    pub(crate) fn park(
+        &mut self,
+        reason: ParkReason,
+        probe: bool,
+        now: Instant,
+        max: Duration,
+    ) -> bool {
+        match &self.health {
+            LaneHealth::Open => {
+                self.backoff = FIRST_BACKOFF;
+                self.probes = 0;
+                self.due = now + self.backoff;
+                self.health = LaneHealth::Parked {
+                    reason,
+                    since: now,
+                    next_probe: self.due,
+                };
+                true
+            }
+            LaneHealth::Parked { since, .. } if probe => {
+                self.backoff = (self.backoff * 2).min(max);
+                self.due = now + self.backoff;
+                self.health = LaneHealth::Parked {
+                    reason,
+                    since: *since,
+                    next_probe: self.due,
+                };
+                true
+            }
+            LaneHealth::Parked { .. } | LaneHealth::Restaging { .. } => false,
+        }
+    }
+
+    /// The index's target is gone: stage it again at once.
+    pub(crate) fn restage(&mut self, reason: String, now: Instant) -> bool {
+        if matches!(self.health, LaneHealth::Restaging { .. }) {
+            return false;
+        }
+        self.backoff = FIRST_BACKOFF;
+        self.due = now;
+        self.health = LaneHealth::Restaging { since: now, reason };
+        true
+    }
+
+    /// Staging failed: try again after the backoff, doubled each time up to
+    /// `max`.
+    pub(crate) fn restage_failed(&mut self, now: Instant, max: Duration) {
+        self.due = now + self.backoff;
+        self.backoff = (self.backoff * 2).min(max);
+    }
+
+    /// Probe at once: a stop doesn't wait out the backoff.
+    pub(crate) fn probe_now(&mut self, now: Instant) -> bool {
+        if let LaneHealth::Parked { next_probe, .. } = &mut self.health
+            && *next_probe > now
+        {
+            *next_probe = now;
+            self.due = now;
+            return true;
+        }
+        false
+    }
+
+    /// Open: a probe landed or the index is staged. How long it was not.
+    pub(crate) fn open(&mut self, now: Instant) -> Option<Duration> {
+        let since = match &self.health {
+            LaneHealth::Open => return None,
+            LaneHealth::Parked { since, .. } | LaneHealth::Restaging { since, .. } => *since,
+        };
+        *self = Self::default();
+        Some(now.saturating_duration_since(since))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn blocked() -> ParkReason {
+        ParkReason::Blocked {
+            reason: "index write (api)".to_owned(),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_backoff_doubles_on_each_failed_probe_up_to_the_maximum_and_resets_on_open() {
+        let max = Duration::from_secs(4);
+        let mut state = LaneState::default();
+        let start = Instant::now();
+        assert!(state.park(blocked(), false, start, max));
+        assert_eq!(state.due, start + Duration::from_secs(1));
+        assert!(
+            !state.park(blocked(), false, start, max),
+            "a write of the lane that was in flight when it parked moves nothing"
+        );
+        let mut waits = Vec::new();
+        for _ in 0..4 {
+            let now = state.due;
+            state.park(blocked(), true, now, max);
+            waits.push((state.due - now).as_secs());
+        }
+        assert_eq!(waits, [2, 4, 4, 4]);
+        assert!(matches!(state.health, LaneHealth::Parked { since, .. } if since == start));
+        assert_eq!(
+            state.open(start + Duration::from_secs(20)),
+            Some(Duration::from_secs(20))
+        );
+        assert!(state.is_open());
+        assert_eq!(state.backoff, FIRST_BACKOFF);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_missing_target_wins_over_a_park() {
+        let now = Instant::now();
+        let mut state = LaneState::default();
+        assert!(state.restage("gone".to_owned(), now));
+        assert!(!state.park(blocked(), true, now, MAX_BACKOFF));
+        assert_eq!(state.health.kind(), "restaging");
+        assert!(!state.restage("gone".to_owned(), now));
+    }
 }

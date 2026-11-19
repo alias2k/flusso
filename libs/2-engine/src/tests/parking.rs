@@ -409,6 +409,7 @@ async fn a_parked_lane_probes_its_front_item_alone_with_a_backoff_no_sibling_res
         .writes()
         .iter()
         .filter(|(_, parts)| parts.iter().any(|(at, _)| at == "orders"))
+        .skip(1)
     {
         assert_eq!(
             parts,

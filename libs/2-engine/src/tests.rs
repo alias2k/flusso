@@ -1118,41 +1118,69 @@ async fn skip_policy_quarantines_rejected_documents_and_acks_the_batch() {
     );
 }
 
-#[tokio::test]
-async fn stop_policy_errors_and_leaves_the_batch_unacked() {
-    let harness = Harness::new(
-        MockSource::new(vec![upsert(1)]),
-        vec![(sink_name("primary"), Arc::new(RejectingSink::default()))],
-    );
-    let progress = Arc::clone(&harness.progress);
-    let outcomes = harness.run(Continuity::Resumed).await;
-    assert!(matches!(
-        outcomes[0],
-        Err(EngineError::DocumentsRejected(1, _))
-    ));
-    assert_eq!(
-        covered(&progress),
-        None,
-        "nothing acked when the engine stops"
-    );
+/// Records each lane's health as it changes.
+#[derive(Debug, Default)]
+struct HealthObserver(Mutex<Vec<(String, &'static str)>>);
+
+impl Observer for HealthObserver {
+    fn on_lane_health(&self, lane: &stream::LaneKey, health: &crate::LaneHealth) {
+        self.0
+            .lock()
+            .unwrap()
+            .push((lane.index.to_string(), health.kind()));
+    }
 }
 
-#[tokio::test]
-async fn per_index_stop_override_halts_even_when_global_is_skip() {
+/// A rejection under `stop` parks the lane with the batch unacknowledged; the
+/// run goes on (ADR 0012 stage 9).
+#[tokio::test(start_paused = true)]
+async fn stop_policy_parks_the_lane_and_leaves_the_batch_unacked() {
+    let observer = Arc::new(HealthObserver::default());
+    let watching = Arc::clone(&observer) as Arc<dyn Observer>;
     let harness = Harness::new(
         MockSource::new(vec![upsert(1)]),
         vec![(sink_name("primary"), Arc::new(RejectingSink::default()))],
     )
-    .map_sinks(|engine| {
-        engine.with_failure_policies(
-            FailurePolicies::new(FailurePolicy::Skip).with_override("users", FailurePolicy::Stop),
-        )
-    });
+    .map_sinks(move |engine| engine.with_observer(Arc::clone(&watching)));
+    let progress = Arc::clone(&harness.progress);
     let outcomes = harness.run(Continuity::Resumed).await;
-    assert!(matches!(
-        outcomes[0],
-        Err(EngineError::DocumentsRejected(..))
-    ));
+    assert!(outcomes[0].is_ok(), "the run went on: {:?}", outcomes[0]);
+    assert_eq!(covered(&progress), None, "nothing acked while parked");
+    let mut kinds = observer.0.lock().unwrap().clone();
+    kinds.dedup();
+    assert_eq!(
+        kinds,
+        [("users".to_owned(), "parked")],
+        "parked, then probed"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn per_index_stop_override_parks_even_when_global_is_skip() {
+    let observer = Arc::new(HealthObserver::default());
+    let watching = Arc::clone(&observer) as Arc<dyn Observer>;
+    let harness = Harness::new(
+        MockSource::new(vec![upsert(1)]),
+        vec![(sink_name("primary"), Arc::new(RejectingSink::default()))],
+    )
+    .map_sinks(move |engine| {
+        engine
+            .with_observer(Arc::clone(&watching))
+            .with_failure_policies(
+                FailurePolicies::new(FailurePolicy::Skip)
+                    .with_override("users", FailurePolicy::Stop),
+            )
+    });
+    let progress = Arc::clone(&harness.progress);
+    harness.run(Continuity::Resumed).await;
+    assert_eq!(covered(&progress), None);
+    let mut kinds = observer.0.lock().unwrap().clone();
+    kinds.dedup();
+    assert_eq!(
+        kinds,
+        [("users".to_owned(), "parked")],
+        "parked, then probed"
+    );
 }
 
 #[tokio::test]

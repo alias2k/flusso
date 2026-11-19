@@ -53,8 +53,9 @@ pub struct DaemonOptions {
     pub skip_backfill: bool,
     /// How often to sample source capture lag.
     pub lag_poll_interval: Duration,
-    /// The longest pause between restarts of a failed engine. Backoff starts
-    /// at one second and doubles up to this.
+    /// The longest pause between restarts of a failed engine, and between two
+    /// probes of a parked lane. Backoff starts at one second and doubles up to
+    /// this.
     pub max_restart_backoff: Duration,
 }
 
@@ -282,6 +283,7 @@ impl Daemon {
                 .with_writes(writes(&config))
                 .with_write_documents(batch_policy(&config).max_changes)
                 .with_merge_wait(batch_policy(&config).max_delay)
+                .with_max_probe_backoff(options.max_restart_backoff)
                 .with_observer(Arc::clone(&observer))
                 .with_failure_policies(failure_policies.clone())
                 .skip_backfill(options.skip_backfill)

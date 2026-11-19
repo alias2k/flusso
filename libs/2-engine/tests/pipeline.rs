@@ -84,9 +84,10 @@
 //!
 //! - [`an_id_past_512_bytes_is_decided_by_on_error`] — a text key OpenSearch
 //!   refuses as an `_id` (over 512 bytes) is one rejected document, decided by
-//!   `on_error`: `skip` quarantines it and acks the batch, `stop` stops the sink
-//!   engine with the batch unacked; the rest of its batch lands either way
-//!   (issue #301: it failed the whole bulk request).
+//!   `on_error`: `skip` quarantines it and acks the batch, `stop` parks its
+//!   lane with the batch unacked while the other index goes on (ADR 0012
+//!   stage 9); the rest of its batch lands either way (issue #301: it failed
+//!   the whole bulk request).
 //!
 //! Each change is verified by polling a realtime `GET {index}/_doc/{id}` (reads
 //! the translog, so no refresh wait) until the index reflects the expectation or
@@ -106,7 +107,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use engine::{EngineError, FailurePolicies, FailurePolicy, IngestEngine, SinkControl, SinkEngine};
+use engine::{FailurePolicies, FailurePolicy, IngestEngine, SinkControl, SinkEngine};
 use kernel::{
     Aggregate, AggregateKey, AggregateOp, Column, ColumnName, DatabaseSchema, Field, FieldName,
     FieldSource, Filter, FlussoType, GenericValue, IndexName, IndexSchema, Join, JoinKind,
@@ -1656,8 +1657,8 @@ async fn current_lsn(pool: &PgPool) -> String {
 /// A text key past OpenSearch's 512-byte `_id` limit is one rejected document,
 /// decided by `on_error`: under `skip` it is quarantined, the rest of its
 /// transaction lands, the batch is acked (the slot confirms past it) and the
-/// engine keeps going; under `stop` the rest still lands, then the sink engine
-/// stops with the batch unacked.
+/// engine keeps going; under `stop` the rest still lands, and the lane parks
+/// with the batch unacked while the other index goes on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn an_id_past_512_bytes_is_decided_by_on_error() {
@@ -1720,27 +1721,23 @@ async fn an_id_past_512_bytes_is_decided_by_on_error() {
     )
     .await;
     let stopped_at = current_lsn(&pg.pool).await;
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let outcome = loop {
-        if let Some(outcome) = live.outcome.lock().unwrap().take() {
-            break outcome;
-        }
-        assert!(Instant::now() < deadline, "stop: the engine never stopped");
-        tokio::time::sleep(Duration::from_millis(150)).await;
-    };
-    assert!(
-        matches!(&outcome, Err(EngineError::DocumentsRejected(1, reason)) if reason.contains("512")),
-        "stop: the sink engine stops on the one rejection, got {outcome:?}"
-    );
-    assert_eq!(
-        live.fetch_name("long_stop", "normal").await.as_deref(),
-        Some("kept"),
-        "stop: the rest of the batch still landed",
-    );
+    live.assert_eventually("long_stop", "normal", Some("kept"))
+        .await
+        .unwrap_or_else(|got| panic!("stop: the rest of the batch still landed, saw {got}"));
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    live.fail_if_stopped();
     assert!(
         !slot_confirmed_past(&pg.pool, &stopped_at).await,
-        "stop: the batch stays unacked",
+        "stop: the lane parks with the batch unacked, holding the slot",
     );
+    exec(
+        &pg.pool,
+        "INSERT INTO long_skip (id, name) VALUES ('later', 'still')",
+    )
+    .await;
+    live.assert_eventually("long_skip", "later", Some("still"))
+        .await
+        .unwrap_or_else(|got| panic!("stop: the other index goes on, saw {got}"));
     live.shutdown();
 }
 
@@ -2041,7 +2038,7 @@ async fn a_float8_is_indexed_as_the_double_postgres_holds() {
 
 /// Numbers with no declared type, under a `json` field the user maps
 /// `dynamic: true`, at the magnitudes issue #366's review found: each lands
-/// with no rejection (`on_error` is `stop`, so one would stop the engine), on
+/// with no rejection (`on_error` is `stop`, so one would park the lane), on
 /// a fresh index where flusso maps every key, and on one whose keys a
 /// document in 0.17's form mapped first (a string past ±7.9e28, `0.0` for a
 /// value too small for `rust_decimal`). Past ±7.9e28 the value is still the
@@ -2144,7 +2141,7 @@ async fn an_untyped_number_lands_where_0_17_s_did() {
 /// decides (issue #327's review pins what `main` did). A `double` the index maps
 /// refuses the string, an item-level rejection: under `skip` it is quarantined
 /// while the rest of its transaction lands, the batch is acked and the engine
-/// keeps going; under `stop` the sink engine stops on it, the rest landed. One
+/// keeps going; under `stop` its lane parks on it, the rest landed. One
 /// that never reaches the index is kept: `ignore_malformed`, an unindexed join,
 /// and the discarded value of a field sharing its name.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2259,22 +2256,15 @@ async fn a_non_finite_number_reaches_the_sink_as_postgres_wrote_it() {
         "INSERT INTO odd_stop VALUES (1, 'nan', 'NaN'), (2, 'kept', 1.5)",
     )
     .await;
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let outcome = loop {
-        if let Some(outcome) = live.outcome.lock().unwrap().take() {
-            break outcome;
-        }
-        assert!(Instant::now() < deadline, "stop: the engine never stopped");
-        tokio::time::sleep(Duration::from_millis(150)).await;
-    };
-    assert!(
-        matches!(&outcome, Err(EngineError::DocumentsRejected(1, reason)) if reason.contains("NaN")),
-        "stop: the sink engine stops on the one rejection, got {outcome:?}"
-    );
+    live.assert_eventually("odd_stop", "2", Some("kept"))
+        .await
+        .unwrap_or_else(|got| panic!("stop: the rest of the batch still landed, saw {got}"));
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    live.fail_if_stopped();
     assert_eq!(
-        live.fetch_name("odd_stop", "2").await.as_deref(),
-        Some("kept"),
-        "stop: the rest of the batch still landed",
+        live.fetch_source("odd_stop", "1").await,
+        None,
+        "stop: the refused document is held on its parked lane, not quarantined",
     );
     live.shutdown();
 }
