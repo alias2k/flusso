@@ -822,10 +822,11 @@ async fn a_completion_answering_an_older_request_seeds_nothing() {
     assert!(lane.sink.ahead().is_empty(), "{:?}", lane.sink.ahead());
 }
 
-/// Both requests answered by one walk (the old one had not started when the
-/// fresh one was asked for): it names the fresh ticket, and seeds.
+/// After the cut, only the fresh request's completion arrives (as when one
+/// walk answered both: `one_walk_answers_a_lanes_two_requests_under_the_later_ticket`):
+/// it names the fresh ticket, and seeds.
 #[tokio::test(start_paused = true)]
-async fn a_completion_answering_the_fresh_request_seeds_with_no_old_one_first() {
+async fn a_completion_naming_the_fresh_ticket_seeds_with_no_old_completion_before_it() {
     let mut lane = Lane::start(Arc::default()).await;
     let (_, fresh) = cut(&mut lane).await;
 

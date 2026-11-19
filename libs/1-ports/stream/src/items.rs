@@ -98,6 +98,11 @@ pub struct Batch {
 /// engine that asked again (its target was created anew in the middle of a
 /// backfill) tells the items of the snapshot that can no longer seed it from
 /// the ones that can.
+///
+/// Tickets are numbered from one in each process. That is enough while a
+/// stream lives no longer than the process (the in-process channel): no item
+/// of an earlier process can reach a lane. A stream adapter that outlives it
+/// needs tickets unique across processes.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -108,11 +113,6 @@ impl Ticket {
     /// The ticket numbered `number`.
     pub const fn new(number: u64) -> Self {
         Self(number)
-    }
-
-    /// Its number.
-    pub const fn get(self) -> u64 {
-        self.0
     }
 }
 
