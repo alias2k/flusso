@@ -1724,6 +1724,7 @@ async fn an_id_past_512_bytes_is_decided_by_on_error() {
     live.assert_eventually("long_stop", "normal", Some("kept"))
         .await
         .unwrap_or_else(|got| panic!("stop: the rest of the batch still landed, saw {got}"));
+    live.assert_parked_on("long_stop", "512").await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     live.fail_if_stopped();
     assert!(
@@ -2259,6 +2260,7 @@ async fn a_non_finite_number_reaches_the_sink_as_postgres_wrote_it() {
     live.assert_eventually("odd_stop", "2", Some("kept"))
         .await
         .unwrap_or_else(|got| panic!("stop: the rest of the batch still landed, saw {got}"));
+    live.assert_parked_on("odd_stop", "NaN").await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     live.fail_if_stopped();
     assert_eq!(
@@ -2293,11 +2295,48 @@ struct Pipeline {
     /// stopped on an error fails the test immediately, with the error, instead
     /// of timing out on an assertion that can never become true.
     outcome: Arc<std::sync::Mutex<Option<engine::Result<()>>>>,
+    /// The sink engine, once built: its lanes' health.
+    sink_engine: SinkEngineSlot,
     http: reqwest::Client,
     os_url: String,
 }
 
+/// Where the running deployment puts its sink engine.
+type SinkEngineSlot = Arc<std::sync::Mutex<Option<Arc<SinkEngine>>>>;
+
 impl Pipeline {
+    /// The health of `index`'s lane, once the sink engine is built.
+    fn lane_health(&self, index: &str) -> Option<engine::LaneHealth> {
+        let engine = self.sink_engine.lock().unwrap().clone()?;
+        Some(engine.lane_health(&stream::LaneKey::new(
+            index_name(index),
+            SinkName::try_new("e2e").unwrap(),
+        )))
+    }
+
+    /// Wait until `index`'s lane is parked on a refusal whose reason holds
+    /// `holding`; panics with the last health at the deadline.
+    async fn assert_parked_on(&self, index: &str, holding: &str) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            self.fail_if_stopped();
+            let health = self.lane_health(index);
+            if let Some(engine::LaneHealth::Parked {
+                reason: reason @ engine::ParkReason::Refused { .. },
+                ..
+            }) = &health
+                && reason.to_string().contains(holding)
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{index} never parked on a refusal naming {holding:?}: {health:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    }
+
     fn fail_if_stopped(&self) {
         if let Some(outcome) = self.outcome.lock().unwrap().as_ref() {
             panic!("the engine stopped: {outcome:?}");
@@ -2670,12 +2709,15 @@ async fn spawn_pipeline_with(
     );
     let outcome = Arc::new(std::sync::Mutex::new(None));
     let record = Arc::clone(&outcome);
+    let sink_engine: SinkEngineSlot = Arc::default();
+    let slot = Arc::clone(&sink_engine);
     Pipeline {
         engine: tokio::spawn(async move {
-            let result = run_deployment(capture, documents, sink, policies).await;
+            let result = run_deployment(capture, documents, sink, policies, slot).await;
             *record.lock().unwrap() = Some(result);
         }),
         outcome,
+        sink_engine,
         http: reqwest::Client::new(),
         os_url: os.url.clone(),
     }
@@ -2689,6 +2731,7 @@ async fn run_deployment(
     documents: Arc<dyn DocumentBuilder>,
     sink: Arc<dyn Sink>,
     policies: FailurePolicies,
+    slot: SinkEngineSlot,
 ) -> engine::Result<()> {
     let name = SinkName::try_new("e2e").unwrap();
     let stream: Arc<dyn Stream> = Arc::new(ChannelStream::over(
@@ -2702,14 +2745,17 @@ async fn run_deployment(
         documents.backfill_indexes(),
         [name.clone()],
     ));
-    let sink_engine = SinkEngine::new(
-        name.clone(),
-        sink,
-        Arc::clone(&stream),
-        mappings,
-        Arc::clone(&progress),
-    )
-    .with_failure_policies(policies);
+    let sink_engine = Arc::new(
+        SinkEngine::new(
+            name.clone(),
+            sink,
+            Arc::clone(&stream),
+            mappings,
+            Arc::clone(&progress),
+        )
+        .with_failure_policies(policies),
+    );
+    *slot.lock().unwrap() = Some(Arc::clone(&sink_engine));
     sink_engine.stage(continuity).await?;
     let ingest = IngestEngine::new(capture, documents, stream, vec![name], progress)
         .with_builds(common::e2e_builds())
