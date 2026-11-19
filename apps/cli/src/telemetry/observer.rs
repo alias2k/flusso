@@ -45,6 +45,7 @@ pub(crate) struct OtelObserver {
     flush_documents: Histogram<u64>,
     flush_size: Histogram<u64>,
     stage_duration: Histogram<f64>,
+    memory_wait: Histogram<f64>,
     startup_duration: Gauge<f64>,
     slot_lag: Gauge<u64>,
     indexes: Gauge<u64>,
@@ -147,6 +148,16 @@ impl OtelObserver {
                      in flight, above 1 when a task runs the stage concurrently.",
                 )
                 .build(),
+            memory_wait: meter
+                .f64_histogram("flusso.memory.wait")
+                .with_unit("s")
+                .with_description(
+                    "How long a batch the memory budget held back waited before it was \
+                     granted, by work (live, backfill) and the event that let it go (released: \
+                     a sink acknowledged bytes; landed, change, page; tick: the once-a-second \
+                     backstop; settle).",
+                )
+                .build(),
             startup_duration: meter
                 .f64_gauge("flusso.startup.duration")
                 .with_unit("s")
@@ -203,6 +214,16 @@ impl Observer for OtelObserver {
         self.startup_duration.record(
             self.started.elapsed().as_secs_f64(),
             &[KeyValue::new("step", "live")],
+        );
+    }
+
+    fn on_budget_wait(&self, work: daemon::Work, wake: daemon::Wake, waited: std::time::Duration) {
+        self.memory_wait.record(
+            waited.as_secs_f64(),
+            &[
+                KeyValue::new("work", work.as_str()),
+                KeyValue::new("wake", wake.as_str()),
+            ],
         );
     }
 

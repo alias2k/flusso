@@ -52,7 +52,7 @@ use super::gate::{Gate, Permit};
 use super::snapshot::Snapshot;
 use crate::budget::{Budget, Charge, Reservation, document_bytes};
 use crate::error::{EngineError, Result};
-use crate::observer::Work;
+use crate::observer::{Observer, Wake, Work};
 use crate::sink_engine::flights::Flights;
 
 /// The bytes per document a build is first estimated at, before any build
@@ -163,6 +163,12 @@ pub(super) struct Builds {
     refused: Option<Work>,
     /// The kinds counted as waiting for the budget since their last grant.
     waiting: (bool, bool),
+    /// When each kind (live, backfill) was first held back by the budget
+    /// since its last grant.
+    refused_at: (Option<Instant>, Option<Instant>),
+    /// What woke the loop before this grant, for [`Observer::on_budget_wait`].
+    wake: Wake,
+    observer: Arc<dyn Observer>,
     /// The spawned builds, aborted when the run's future is dropped (a
     /// supervisor's abort, a shutdown deadline) so none outlives it.
     spawned: Vec<(u64, AbortHandle)>,
@@ -207,8 +213,22 @@ impl Builds {
             },
             refused: None,
             waiting: (false, false),
+            refused_at: (None, None),
+            wake: Wake::Change,
+            observer: Arc::new(crate::observer::NoopObserver),
             spawned: Vec::new(),
         }
+    }
+
+    /// Report each wait for the budget to `observer`.
+    pub(super) fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
+        self.observer = observer;
+        self
+    }
+
+    /// The loop woke on `wake`: what the next grants follow.
+    pub(super) fn woke(&mut self, wake: Wake) {
+        self.wake = wake;
     }
 
     /// The kind of batch the budget alone held back at the last choice, if
@@ -235,6 +255,11 @@ impl Builds {
             return true;
         }
         self.refused.get_or_insert(work);
+        let refused_at = match work {
+            Work::Live => &mut self.refused_at.0,
+            Work::Backfill => &mut self.refused_at.1,
+        };
+        refused_at.get_or_insert_with(Instant::now);
         let waiting = match work {
             Work::Live => &mut self.waiting.0,
             Work::Backfill => &mut self.waiting.1,
@@ -345,6 +370,14 @@ impl Builds {
         match work {
             Work::Live => self.waiting.0 = false,
             Work::Backfill => self.waiting.1 = false,
+        }
+        let refused_at = match work {
+            Work::Live => self.refused_at.0.take(),
+            Work::Backfill => self.refused_at.1.take(),
+        };
+        if let Some(since) = refused_at {
+            self.observer
+                .on_budget_wait(work, self.wake, since.elapsed());
         }
         let reservation = self
             .budget

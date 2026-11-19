@@ -23,7 +23,7 @@ use super::live::PendingBatch;
 use super::snapshot::Snapshot;
 use super::{IngestEngine, Lanes, document_id};
 use crate::error::{EngineError, Result};
-use crate::observer::{BuildStats, Stage, StageTiming, Work};
+use crate::observer::{BuildStats, Stage, StageTiming, Wake, Work};
 use crate::policy::FailurePolicy;
 
 impl IngestEngine {
@@ -92,6 +92,7 @@ impl IngestEngine {
         builds: &mut Builds,
         lanes: &Lanes,
     ) -> Result<()> {
+        builds.woke(Wake::Settle);
         loop {
             self.publish_ready(builds, lanes).await?;
             if pending.count > 0 && builds.can_take_last(&pending.ids) {

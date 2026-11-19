@@ -196,6 +196,40 @@ impl Work {
     }
 }
 
+/// What woke the ingest loop when it granted a batch the memory budget had
+/// held back: which event the grant followed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Wake {
+    /// A live change arrived.
+    Change,
+    /// A sink's acknowledgement released bytes (the mechanism).
+    Released,
+    /// A build landed.
+    Landed,
+    /// A backfill page of keys arrived.
+    Page,
+    /// The once-a-second confirm tick (a backstop: a grant here means no
+    /// earlier event let the batch go).
+    Tick,
+    /// The end of a run, settling the last batch.
+    Settle,
+}
+
+impl Wake {
+    /// The wake's name in metrics and logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Wake::Change => "change",
+            Wake::Released => "released",
+            Wake::Landed => "landed",
+            Wake::Page => "page",
+            Wake::Tick => "tick",
+            Wake::Settle => "settle",
+        }
+    }
+}
+
 /// How long one [`Stage`] took, once: for a batch, a lane item, an idle
 /// stretch or an operation. Built with [`StageTiming::new`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -349,6 +383,13 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
     /// A sink engine asked for a snapshot of `indexes` into its lane.
     fn on_backfill_requested(&self, sink: &SinkName, indexes: &[IndexName]) {
         let _ = (sink, indexes);
+    }
+
+    /// A batch of `work` the memory budget had held back was granted after
+    /// `waited`, on the event `wake`: how long the budget held it, and what
+    /// let it go.
+    fn on_budget_wait(&self, work: Work, wake: Wake, waited: Duration) {
+        let _ = (work, wake, waited);
     }
 
     /// A sink recorded `index` as seeded.
@@ -516,6 +557,12 @@ impl Observer for FanOut {
     fn on_backfill_requested(&self, sink: &SinkName, indexes: &[IndexName]) {
         for observer in &self.observers {
             observer.on_backfill_requested(sink, indexes);
+        }
+    }
+
+    fn on_budget_wait(&self, work: Work, wake: Wake, waited: Duration) {
+        for observer in &self.observers {
+            observer.on_budget_wait(work, wake, waited);
         }
     }
 

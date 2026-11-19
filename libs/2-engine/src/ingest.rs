@@ -65,7 +65,9 @@ use tokio::time::{Duration, Instant, timeout_at};
 
 use crate::budget::Budget;
 use crate::error::{EngineError, Result};
-use crate::observer::{EngineId, NoopObserver, Observer, Stage, StageTiming, StartupStep, Work};
+use crate::observer::{
+    EngineId, NoopObserver, Observer, Stage, StageTiming, StartupStep, Wake, Work,
+};
 use crate::policy::{BatchPolicy, FailurePolicies};
 use crate::progress::Progress;
 use crate::stop::{Stop, drain_lanes};
@@ -275,7 +277,8 @@ impl IngestEngine {
         tracing::info!("following live changes");
         self.observer.on_live_started();
 
-        let mut builds = Builds::new(self.builds, self.budget.clone());
+        let mut builds =
+            Builds::new(self.builds, self.budget.clone()).with_observer(Arc::clone(&self.observer));
         let ended = self
             .follow(&lanes, requests, &scopes, live, &mut builds)
             .await;
@@ -357,17 +360,20 @@ impl IngestEngine {
                         self.observer.on_stage(
                             StageTiming::new(Stage::Resolve, started.elapsed()).work(Work::Live),
                         );
+                        builds.woke(Wake::Change);
                         self.grant(&mut pending, &mut snapshot, builds, lanes).await?;
                         self.confirm(&mut last_confirmed, false);
                         mark = Instant::now();
                     }
                 },
                 () = released(self.budget.as_deref()), if builds.refused().is_some() => {
+                    builds.woke(Wake::Released);
                     self.grant(&mut pending, &mut snapshot, builds, lanes).await?;
                     self.confirm(&mut last_confirmed, false);
                     mark = Instant::now();
                 }
                 landed = builds.next(), if building => {
+                    builds.woke(Wake::Landed);
                     self.landed(landed, &mut pending, &mut snapshot, builds, lanes).await?;
                     self.confirm(&mut last_confirmed, false);
                     mark = Instant::now();
@@ -386,6 +392,7 @@ impl IngestEngine {
                         Ok(Step::Keys) => active.take_keys(),
                         Ok(Step::Done) => active.done = true,
                     }
+                    builds.woke(Wake::Page);
                     self.grant(&mut pending, &mut snapshot, builds, lanes).await?;
                     mark = Instant::now();
                 },
@@ -412,6 +419,7 @@ impl IngestEngine {
                     // release ever go unheard, the next tick still grants it,
                     // so it costs a second, never the run.
                     if builds.refused().is_some() {
+                        builds.woke(Wake::Tick);
                         self.grant(&mut pending, &mut snapshot, builds, lanes).await?;
                         mark = Instant::now();
                     }

@@ -68,7 +68,7 @@ const FLUSH_SIZE_BUCKETS_BYTES: &[f64] = &[
 fn buckets(instrument: &str) -> Option<&'static [f64]> {
     match instrument {
         "flusso.flush.duration" => Some(FLUSH_BUCKETS_SECONDS),
-        "flusso.stage.duration" => Some(STAGE_BUCKETS_SECONDS),
+        "flusso.stage.duration" | "flusso.memory.wait" => Some(STAGE_BUCKETS_SECONDS),
         "flusso.flush.documents" => Some(FLUSH_DOCUMENT_BUCKETS),
         "flusso.flush.size" => Some(FLUSH_SIZE_BUCKETS_BYTES),
         _ => None,

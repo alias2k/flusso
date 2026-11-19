@@ -549,6 +549,8 @@ struct Recorder {
     overdrawn: Mutex<Vec<usize>>,
     /// The next write fails, once.
     fail_next: AtomicBool,
+    /// How long each write takes, when set.
+    write_delay: Mutex<Option<Duration>>,
 }
 
 impl Recorder {
@@ -610,6 +612,10 @@ impl Sink for Recorder {
         }
         if self.fail_next.swap(false, Ordering::SeqCst) {
             return Err(sink::SinkError::Write("the write failed".to_owned()));
+        }
+        let delay = *self.write_delay.lock().unwrap();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
         }
         if let Some((budget, most)) = &*self.watch.lock().unwrap() {
             let held = budget.held().total;
@@ -1964,4 +1970,76 @@ async fn an_ingest_restart_while_lanes_hold_charges_gives_every_byte_back() {
     );
     assert_eq!(failed, 1, "the build of 8 failed once");
     assert_eq!(deployment.recorder.state(), db.expected());
+}
+
+/// Every budget wait, as the engine reports it: what let it go and after how
+/// long.
+#[derive(Debug, Default)]
+struct BudgetWaits(Mutex<Vec<(crate::Work, crate::Wake, Duration)>>);
+
+impl crate::Observer for BudgetWaits {
+    fn on_budget_wait(&self, work: crate::Work, wake: crate::Wake, waited: Duration) {
+        self.0.lock().unwrap().push((work, wake, waited));
+    }
+}
+
+impl BudgetWaits {
+    fn by_wake(&self) -> BTreeMap<String, (usize, Duration)> {
+        let mut counts: BTreeMap<String, (usize, Duration)> = BTreeMap::new();
+        for (work, wake, waited) in self.0.lock().unwrap().iter() {
+            let entry = counts
+                .entry(format!("{}/{}", work.as_str(), wake.as_str()))
+                .or_default();
+            entry.0 += 1;
+            entry.1 = entry.1.max(*waited);
+        }
+        counts
+    }
+}
+
+/// Stage 5, the 64 MiB question: every budget wait in a steady pipeline (a
+/// backfill and a trickle of live changes through a slow, steadily
+/// acknowledging sink and a small budget) ends on the event that freed the
+/// bytes, a release or a landing, never on the confirm tick's backstop, and
+/// well within it.
+#[tokio::test(start_paused = true)]
+async fn every_budget_wait_ends_on_a_release_not_the_tick() {
+    let db = Database::new(400, (0..300).map(|i| Change::upsert(1000 + i)).collect());
+    let builder = instant(&db);
+    let recorder = Recorder::seeded(false);
+    *recorder.write_delay.lock().unwrap() = Some(Duration::from_millis(5));
+    let waits = Arc::new(BudgetWaits::default());
+    let observer = Arc::clone(&waits);
+    let mut deployment = Deployment::new(
+        Feed::new(&db).with_delay(Duration::from_millis(2)),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+    )
+    .ingest(|ingest| {
+        ingest
+            .with_batch(batch(4))
+            .with_builds(4)
+            .with_observer(observer)
+    })
+    .with_budget(16 * KIB, usize::MAX);
+    deployment.run_to_end(0).await;
+    assert_eq!(deployment.recorder.state(), db.expected());
+
+    let by_wake = waits.by_wake();
+    assert!(
+        by_wake
+            .get("backfill/released")
+            .is_some_and(|(n, _)| *n > 10),
+        "the budget bound, many times: {by_wake:?}"
+    );
+    for (kind, (count, longest)) in &by_wake {
+        assert!(
+            !kind.ends_with("/tick") && !kind.ends_with("/settle"),
+            "{count} waits of {kind}: a release went unheard: {by_wake:?}"
+        );
+        assert!(
+            *longest < Duration::from_millis(200),
+            "{kind} waited {longest:?}, near the tick: {by_wake:?}"
+        );
+    }
 }
