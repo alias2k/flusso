@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-sink-opensearch-v0.17.0...flusso-sink-opensearch-v0.18.0) - 2026-11-19
+
+### Added
+
+- *(engine)* [**breaking**] stage timings account for each task's whole time (#399 review)
+- per-stage timings in /metrics and the bench's attribution table ([#399](https://github.com/alias2k/flusso/pull/399))
+- *(engine)* stage a sink's indexes concurrently, and validate indexes concurrently
+- *(sink-opensearch)* [**breaking**] warn when ca_file is set with tls_verify off; say when the file is read
+- *(sink-opensearch)* trust a private CA with ca_file; never retry a refused certificate
+
+### Fixed
+
+- *(sink-opensearch)* caught-up writes refresh one at a time (#408 review 1, finding 1)
+- *(engine)* only an advance of the source is ingest progress; a failed apply drops its batch's buffer (#395 review 3)
+- *(daemon)* reset an engine's restart backoff after a run that made progress (#395 review)
+- *(sinks)* resend items OpenSearch refuses as busy, and release a lane delivery by its ticket ([#395](https://github.com/alias2k/flusso/pull/395))
+- *(source-postgres)* [**breaking**] write every numeric digit as a JSON number
+- *(engine,sink-opensearch)* a rejected document's id is shown shortened; an empty-id delete is dropped
+- *(sink-opensearch)* reject an id OpenSearch refuses instead of failing the bulk
+
+### Other
+
+- a restart in the middle of a rebuild says rebuilding, vouching for nothing
+- a first start goes on beside a plain index named like the alias; a generation without its meta doc is reused
+- tests: a plain index named like the convenience alias, a first generation without its meta doc (red)
+- flusso.sink.refreshes{sink}: refresh requests a sink sent; dev/bench reports them per phase
+- the sink keeps a backfill checkpoint: Sink::seeding, record_walked, forget_walked; OpenSearch keeps it in the meta doc
+- caught up per lane: a caught-up write covers its quiet lanes' indexes, and a lane going quiet makes its own writes searchable (review 4, 5)
+- crash table for the new mark_seeded order; a first seed and each first-round request failing alone
+- measured before and after; seeding indexes at once designed and pinned on the sink
+- the sink engine merges ready items into one write
+- rustfmt
+- rustfmt mark_seeded
+- cheaper seeding and generation creation (#410, #403)
+- e2e for seeding and generation creation, request by request (#354, #403, #410)
+- Position carries its seq and the source's stamps (touches all constructors)
+- *(sink-opensearch)* each doc comment on its own item; every chunk of a caught-up write refreshes (#408 review 4, findings 1-2)
+- *(sink-opensearch)* every chunk of a caught-up write refreshes, a multi-shard index is refreshed (#408 review 3, review 4 finding 2)
+- *(sink-opensearch)* a caught-up write skips the refresh its own bulk already did (#408 review 2, finding 5)
+- *(sink-opensearch)* a caught-up write over the one single-shard index left unrefreshed sends no extra refresh (#408 review 2, finding 5)
+- *(sink-opensearch)* overlapping caught-up writes wait for an earlier refresh (#408 review 1, finding 1)
+- *(sink-opensearch)* an empty write that isn't caught up reports Immediate (#386 stage 2)
+- concurrent writes keep per-document order, the watermark and live-first (#386 stage 2)
+- *(sink)* [**breaking**] Sink::write replaces apply + flush (#386 stage 2)
+- a replayed change or backfill page is no progress, and a failed apply leaves nothing buffered (#395 review 3)
+- an item refused as busy is resent, and a release redelivers only its ticket ([#395](https://github.com/alias2k/flusso/pull/395))
+- *(sink-opensearch)* write a bulk action line without a value tree
+- *(sink-opensearch)* an id OpenSearch refuses fails the whole bulk request
+
 ## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-sink-opensearch-v0.16.0...flusso-sink-opensearch-v0.17.0) - 2026-11-12
 
 ### Added

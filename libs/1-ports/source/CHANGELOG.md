@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-source-v0.17.0...flusso-source-v0.18.0) - 2026-11-19
+
+### Added
+
+- *(engine)* stage a sink's indexes concurrently, and validate indexes concurrently
+- *(engine,daemon,source-postgres)* [**breaking**] a stop drains what is in flight before the run ends
+- *(source)* warn on a timestamp format that refuses the ISO form
+- *(source)* [**breaking**] validate array columns against the catalog ([#276](https://github.com/alias2k/flusso/pull/276))
+- *(kernel)* a column may hold an array of its type ([#276](https://github.com/alias2k/flusso/pull/276))
+
+### Fixed
+
+- *(engine)* a snapshot row is its own document, not a change to resolve
+- *(source-postgres)* [**breaking**] emit a change only once its transaction is visible
+- *(source)* say what an unreadable root key type costs now
+- *(source-postgres)* Postgres decides which row answers which requested key
+- *(source-postgres)* statements survive a column type change
+- *(source-postgres)* [**breaking**] write every numeric digit as a JSON number
+- *(source)* a check the database would not let run is reported, not dropped ([#324](https://github.com/alias2k/flusso/pull/324))
+- *(source)* [**breaking**] a schema that can never index a document stops the start (#316, #309)
+- *(source-postgres)* say a lossy ids key may be stored altered; check prints a skipped probe (#299, #313)
+- *(source-postgres)* probe a type pair once, in one round trip; pin exact ids pairs (#299, #313)
+- *(source-postgres)* check reports a link or ids element the key can't take (#299, #312, #313)
+- *(source)* a camelCase format name reads the ISO form; the date table follows the T form ([#304](https://github.com/alias2k/flusso/pull/304))
+- *(source-postgres)* resolve each change as it is buffered again ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* read a batch's root keys back in one query per index ([#295](https://github.com/alias2k/flusso/pull/295))
+- *(source-postgres)* read every key type the same way in backfill, WAL and build
+- *(design,source)* a name applies when the press that left its box ends; key lists by identity
+- *(source,design)* duplicate-name outcomes for constants and binary; one-line node header; palette returns focus
+- *(design)* refuse a field name its level already has; warn about duplicates; read typed table and column names as flusso does
+- *(source)* a domain over an array or jsonb holds an array
+- review findings on array columns ([#276](https://github.com/alias2k/flusso/pull/276))
+- *(source-postgres)* a transform probe the role cannot run is not a verdict
+- *(source)* [**breaking**] settle the root-key kinds; probe transforms without a table
+- *(source)* report four schemas check accepted that cannot work
+
+### Other
+
+- a mark records the comparison operator the walk used, so one taken with the bare `<` is never resumed with the qualified one; compare_keys' doc says an unplaced lane starts from the first key
+- the source marks a walk's point and resumes after it in its own key order (walk_mark, resume_after, compare_keys)
+- review follow-ups: no watermark left, wal_idle's half named, the argument per lane
+- a walk ends at the greatest key it found, read through the key index's own operators
+- the engines confirm and fence from one Progress; the stream keeps no watermark
+- the source confirms and fences from Landed; the Postgres capture keeps no map
+- a backfill pages each index's root keys on the builder pool
+- *(engine)* snapshot rows are not resolved, and what a faster backfill holds in memory
+- *(source)* a check the database would not let run is reported ([#324](https://github.com/alias2k/flusso/pull/324))
+- *(source)* a camelCase format name is a name, not a literal pattern ([#304](https://github.com/alias2k/flusso/pull/304))
+- warn on a timestamp format that refuses the ISO form; pin tuned mappings
+
 ## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-source-v0.16.0...flusso-source-v0.17.0) - 2026-11-12
 
 ### Added

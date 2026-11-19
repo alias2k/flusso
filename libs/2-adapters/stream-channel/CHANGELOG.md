@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-stream-channel-v0.17.0...flusso-stream-channel-v0.18.0) - 2026-11-19
+
+### Added
+
+- *(engine)* write several lane items at once per sink (#386 stage 2)
+
+### Fixed
+
+- *(daemon)* reset an engine's restart backoff after a run that made progress (#395 review)
+- *(sinks)* resend items OpenSearch refuses as busy, and release a lane delivery by its ticket ([#395](https://github.com/alias2k/flusso/pull/395))
+
+### Other
+
+- the default memory budget goes back to 512 MiB
+- the default memory budget is 64 MiB, not 512
+- a deprecated [stream] capacity or --queue-capacity validates, warns once and is ignored
+- Batch.walked and Request::Backfill.after (touches all constructors)
+- a configured lane holds the backstop, not the backstop times the sinks (review 11); search.rs doc order (review 9)
+- [stream] capacity is deprecated: accepted, warned about, ignored; lanes keep a 1,048,576-item backstop
+- a published batch carries its charge until its last copy is dropped
+- one lane per (index, sink): stream, Progress, sink engine, publish, requests, fence
+- READMEs and a doc link no longer name the stream's watermark
+- the engines confirm and fence from one Progress; the stream keeps no watermark
+- Position carries its seq and the source's stamps (touches all constructors)
+- *(stream-channel)* is_empty reads no lock; an acknowledged handle takes none on drop ([#408](https://github.com/alias2k/flusso/pull/408))
+- the sink's real bound, the measured numbers, the catch-up refresh cost and the API changes (#408 review 1 findings 3-4, review 2 findings 1, 3, 5, 6)
+- concurrent writes keep per-document order, the watermark and live-first (#386 stage 2)
+- an item refused as busy is resent, and a release redelivers only its ticket ([#395](https://github.com/alias2k/flusso/pull/395))
+
 ## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-stream-channel-v0.16.0...flusso-stream-channel-v0.17.0) - 2026-11-12
 
 ### Other

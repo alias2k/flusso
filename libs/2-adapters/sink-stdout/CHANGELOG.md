@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-sink-stdout-v0.17.0...flusso-sink-stdout-v0.18.0) - 2026-11-19
+
+### Added
+
+- *(engine)* an ordered sink gets lane order, one write at a time; stdout is one (#408 review 2, finding 4)
+
+### Fixed
+
+- *(source-postgres)* [**breaking**] write every numeric digit as a JSON number
+
+### Other
+
+- rustfmt
+- Position carries its seq and the source's stamps (touches all constructors)
+- *(sink)* [**breaking**] Sink::write replaces apply + flush (#386 stage 2)
+
 ## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-sink-stdout-v0.16.0...flusso-sink-stdout-v0.17.0) - 2026-11-12
 
 ### Other

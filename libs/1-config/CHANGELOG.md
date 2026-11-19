@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-config-v0.17.0...flusso-config-v0.18.0) - 2026-11-19
+
+### Added
+
+- *(config)* cap [concurrency] writes at 64 (#408 review 1, finding 3)
+- *(engine)* write several lane items at once per sink (#386 stage 2)
+- *(config)* array: true on a scalar, enum, custom or json column ([#276](https://github.com/alias2k/flusso/pull/276))
+- *(kernel)* a column may hold an array of its type ([#276](https://github.com/alias2k/flusso/pull/276))
+- *(sink-opensearch)* trust a private CA with ca_file; never retry a refused certificate
+
+### Fixed
+
+- *(sinks)* resend items OpenSearch refuses as busy, and release a lane delivery by its ticket ([#395](https://github.com/alias2k/flusso/pull/395))
+- *(config)* write the lock through its symlink, keep its permissions, fall back to in place
+- *(config)* replace the lock whole, so a stop mid-write never truncates it
+- *(config)* an array default's refused element reads "an object element"
+- review findings on array columns ([#276](https://github.com/alias2k/flusso/pull/276))
+
+### Other
+
+- the default memory budget goes back to 512 MiB
+- the default memory budget is 64 MiB, not 512
+- changes are resolved on a connection of their own (step 2)
+- [stream] capacity is deprecated: accepted, warned about, ignored; lanes keep a 1,048,576-item backstop
+- [concurrency] max_built_mib (16..=1048576, default 512), the daemon's budget, /status memory, flusso.memory metrics, the designer's field
+- [concurrency] builds, capped at 32, in the config and its editor schema
+- *(config)* the golden fixture names each root field once
+
 ## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-config-v0.16.0...flusso-config-v0.17.0) - 2026-11-12
 
 ### Added
