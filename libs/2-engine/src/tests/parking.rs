@@ -800,3 +800,29 @@ async fn a_parked_lanes_waiting_backfill_does_not_end_the_merge_wait() {
     );
     task.abort();
 }
+
+/// A backfill item refused under `stop` parks its lane like a live one: it
+/// carries no position, so the lane gets no stall age, and the lane's health
+/// (`flusso.lane.parked`, `FlussoLaneParked`) is what says so.
+#[tokio::test(start_paused = true)]
+async fn a_refused_backfill_item_parks_its_lane() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.answer(&orders(), Some(Answer::Refuse));
+    rig.stream
+        .lane(&lane(orders()))
+        .unwrap()
+        .producer
+        .publish(item(&orders(), 0..2, None))
+        .await
+        .unwrap();
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop));
+    let task = spawn(Arc::clone(&engine));
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(engine.lane_health(&lane(orders())).kind(), "parked");
+    assert_eq!(rig.observer.kinds(&lane(orders())).first(), Some(&"parked"));
+    assert!(
+        !rig.stream.is_idle(),
+        "the refused page stays unacknowledged"
+    );
+    task.abort();
+}

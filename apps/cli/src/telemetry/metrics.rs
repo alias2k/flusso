@@ -428,7 +428,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_parked_lane_is_exported_with_why_and_an_open_one_is_not() {
+    async fn a_lane_not_written_is_exported_with_why() {
         let lane = |index: &str| {
             LaneKey::new(
                 IndexName::try_new(index).unwrap(),
@@ -490,10 +490,10 @@ mod tests {
         for line in [
             r#"flusso_lane_parked{index="orders",sink="primary",why="blocked"} 1"#,
             r#"flusso_lane_parked{index="users",sink="primary",why="refused"} 1"#,
+            r#"flusso_lane_parked{index="items",sink="primary",why="restaging"} 1"#,
         ] {
             assert!(text.contains(line), "{line} missing from:\n{text}");
         }
-        assert!(!text.contains(r#"index="items""#), "{text}");
     }
 
     #[test]
