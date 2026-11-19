@@ -983,7 +983,7 @@ is the one concrete piece.
   from the first key for the current target). The old snapshot's remaining pages are still written
   (each a build in lane order, so never a step back; the fresh walk repeats them). A seed the sink
   refuses with `SinkError::TargetChanged` puts its `SnapshotComplete` back and stages the lane again
-  (`Held::Missing`), which cuts; a lane's `SnapshotComplete` runs only while the lane is open. A
+  (`Held::Missing`), which cuts. A
   restage resets the lane's `Walked`; a walk ends at its `SnapshotComplete`'s lane order
   (`Walked::ended`, boundaries recorded at receive), keeping the next walk's items the run read ahead;
   a held walk keeps none of its items and tracks none that arrive (binary search by lane order), and
@@ -992,8 +992,11 @@ is the one concrete piece.
   `ensure_index`); `ensure_index` finding an **unseeded** generation under that name with another
   uuid (deleted, then auto-created dynamically by a write under the default `action.auto_create_index`)
   deletes it and creates it strict and empty, without a checkpoint, answered as created; a seeded one
-  with another uuid (only a restore can do that: seeded writes use `require_alias`) is adopted; a
-  generation that did not exist always gets its meta rewritten without a checkpoint; `mark_seeded`
+  with another uuid was replaced outside flusso (a restore, or a recreate by hand: seeded writes use
+  `require_alias`, and flusso's own staging can't leave one) and is adopted as it is, served as seeded
+  even if empty; before creating a generation the meta doc is written unseeded naming no uuid, and the
+  uuid recorded only after the create, so a failure in between never leaves "seeded" or an old uuid
+  beside the new, empty generation (the next staging adopts it unseeded); `mark_seeded`
   answers `TargetChanged` for a generation missing or with another uuid. The fence stays
   `Backfilling` (or `Rebuilding`) until the fresh seed; a reindex control is still ignored while
   outstanding; a stop after the cut skips as before; other lanes of the snapshot answer their own
@@ -1006,7 +1009,11 @@ is the one concrete piece.
   ticket, also a resumed one with a fresh one), `walked::tests` (read-ahead, a held walk keeps
   nothing, a release never received), and the sink's `reindex` e2e
   `a_generation_deleted_mid_backfill_is_staged_as_created_without_its_checkpoint` and
-  `an_auto_created_generation_is_never_seeded_and_is_replaced_by_a_strict_one` (auto-create on).
+  `an_auto_created_generation_is_never_seeded_and_is_replaced_by_a_strict_one` (auto-create on),
+  `a_seeded_generation_recreated_by_a_staging_that_then_failed_is_never_served_seeded`. A lane's
+  `SnapshotComplete` waits while the lane is being staged again, not while it is parked (a stop that
+  skips a parked lane's refused page lets the completion behind it run: `parking`'s
+  `a_parked_lanes_completion_runs_once_a_stop_skipped_the_page_in_front`).
 - **A sink's indexes are staged concurrently (issue #398).** `SinkEngine::each_index` runs one
   `Step` per index, `STAGE_CONCURRENCY` (8) at once, each index's own steps in order; the `Sink`
   port allows `ensure_index`/`is_seeded`/`reindex` at once for different indexes, never for one,
