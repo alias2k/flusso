@@ -576,6 +576,12 @@ impl<'a> Run<'a> {
                 }
                 self.grant().await?;
             }
+            // A write that returned at its first poll, inside a grant, may
+            // have found its target missing: stage it now, not at the next
+            // wake-up.
+            if self.unhealthy > 0 {
+                self.start_restages();
+            }
         }
         Ok(())
     }
