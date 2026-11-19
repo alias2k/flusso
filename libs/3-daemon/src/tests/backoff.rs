@@ -827,3 +827,46 @@ async fn a_lane_parked_on_the_longest_backoff_is_reported_and_left_alone() {
     assert!(!run.is_finished(), "the deployment goes on");
     run.abort();
 }
+
+/// A run that made progress starts the next wait over at the configured
+/// first wait (200 ms), not at one second.
+#[tokio::test(start_paused = true)]
+async fn a_sink_engine_that_made_progress_restarts_after_the_configured_first_wait() {
+    let sink = ScriptedFlushes::new(&[false, false, true, false, true]);
+    let inner = ScriptedSource::new(Vec::new());
+    let confirmed = Arc::clone(&inner.confirmed);
+    let (source, feed) = FedSource::new(inner);
+    let backends = backends_for(
+        Arc::new(source),
+        vec![(
+            primary(),
+            Arc::clone(&sink) as Arc<dyn Sink>,
+            SinkOptions::default(),
+        )],
+    );
+    let running = Daemon::new(configured(), backends).start().await.unwrap();
+    let flushes = Arc::clone(&sink);
+    let run = tokio::spawn(running.run(async move {
+        wait_until_count(&flushes, 5).await;
+    }));
+
+    feed.send(row_event(false, 1)).await.unwrap();
+    wait_until("the first batch to be confirmed after two restarts", || {
+        confirmed.lock().unwrap().contains(&Position::new(0))
+    })
+    .await;
+    feed.send(row_event(false, 2)).await.unwrap();
+    run.await.unwrap().unwrap();
+
+    let waits = gaps(&sink.flushes());
+    assert_eq!(waits.len(), 4, "{waits:?}");
+    let rounded: Vec<u128> = millis(&[waits[0], waits[1], waits[3]])
+        .iter()
+        .map(|ms| ms / 100 * 100)
+        .collect();
+    assert_eq!(
+        rounded,
+        [200, 400, 200],
+        "200 ms, doubled, then the first wait again after the landed batch: {waits:?}"
+    );
+}
