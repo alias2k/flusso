@@ -1,6 +1,7 @@
 //! Items ready at once go out as one write (ADR 0012 stage 7, #397's
 //! revisit): across lanes, and several small items of one lane, up to the
-//! merge limit, never waiting for more.
+//! merge limit. Merging takes what is ready; the bounded wait for a write
+//! that is out is `tests::wait`'s.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -320,8 +321,8 @@ async fn small_items_of_one_lane_are_merged() {
     assert_eq!(sink.documents_per_write(), [32], "{:?}", sink.writes());
 }
 
-/// Merging takes what is ready; it never waits for more. A lone item is
-/// written at once, alone, with no timer involved.
+/// A lone item on a quiet engine is written at once, alone, with no timer
+/// involved.
 #[tokio::test(start_paused = true)]
 async fn a_lone_item_is_written_at_once() {
     let rig = Rig::new();

@@ -477,7 +477,13 @@ impl<'a> Run<'a> {
                     self.engine.report_searchable();
                     self.refresh_due();
                 }
-                () = until(hold_until), if hold_until.is_some() => self.close_idle(),
+                () = until(hold_until), if hold_until.is_some() => {
+                    // A failed run or a pending reindex grants nothing, so
+                    // nothing else ends this hold: left set, its past instant
+                    // is ready on every turn.
+                    self.hold_until = None;
+                    self.close_idle();
+                }
                 () = stop.requested(), if watch_stop => self.close_idle(),
                 _ = idle_tick.tick() => self.close_idle(),
             }
