@@ -114,9 +114,11 @@ pub fn builds(config: &Config) -> usize {
         .map_or(DEFAULT_BUILDS, NonZeroUsize::get)
 }
 
-/// MiB of built documents held when `[concurrency] max_built_mib` is unset
-/// (ADR 0012 §5).
-pub const DEFAULT_MAX_BUILT_MIB: usize = 512;
+/// MiB of built documents held when `[concurrency] max_built_mib` is unset.
+/// 64, not the ADR's 512: on `reference` it keeps the backfill faster than
+/// 0.17 at 82 MiB peak RSS, where 512 built up to 159 MiB ahead of the sink
+/// (ADR 0012 stage 5, `stage-5.md`).
+pub const DEFAULT_MAX_BUILT_MIB: usize = 64;
 
 /// Bytes of built documents the ingest engine holds before it waits:
 /// `[concurrency] max_built_mib`, else [`DEFAULT_MAX_BUILT_MIB`].
