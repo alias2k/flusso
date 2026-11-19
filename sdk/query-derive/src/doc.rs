@@ -1525,9 +1525,12 @@ impl Namespaces {
                 continue;
             };
 
+            let doc = format!("Query `{path}`. Generated from the schema.");
             handles.extend(match receiver {
-                Receiver::Associated => quote! { pub fn #name() -> #ret { #ctor } },
-                Receiver::Method => quote! { pub fn #name(&self) -> #ret { #ctor } },
+                Receiver::Associated => quote! { #[doc = #doc] pub fn #name() -> #ret { #ctor } },
+                Receiver::Method => {
+                    quote! { #[doc = #doc] pub fn #name(&self) -> #ret { #ctor } }
+                }
             });
         }
         handles

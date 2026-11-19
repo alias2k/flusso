@@ -322,7 +322,8 @@ pub(crate) fn rule_handles(
         if let Some((ret, ctor)) = handle
             && taken.insert(name.to_string())
         {
-            methods.extend(quote! { pub fn #name(&self) -> #ret { #ctor } });
+            let doc = format!("`{path}`, as a rule reads it. Generated from the schema.");
+            methods.extend(quote! { #[doc = #doc] pub fn #name(&self) -> #ret { #ctor } });
         }
     }
     quote! {
