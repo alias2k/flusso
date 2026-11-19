@@ -248,7 +248,7 @@ impl SinkEngine {
     pub(super) fn store_lane(&self, lane: &LaneKey, state: &LaneState, changed: bool) {
         {
             let mut health = self.lock_health();
-            if state.is_open() {
+            if !state.is_kept() {
                 health.remove(lane);
             } else {
                 health.insert(lane.clone(), state.clone());
@@ -449,7 +449,7 @@ impl SinkEngine {
             .collect();
         for lane in restaged {
             let mut state = self.lane_state(&lane);
-            state.open(Instant::now());
+            state.reopen(Instant::now());
             tracing::info!(%lane, "staged again with the sink; the lane is open");
             self.store_lane(&lane, &state, true);
         }

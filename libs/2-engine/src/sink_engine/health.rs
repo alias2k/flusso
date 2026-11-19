@@ -182,6 +182,10 @@ pub(crate) struct LaneState {
     pub(crate) due: Instant,
     /// Probes made since it parked.
     pub(crate) probes: u32,
+    /// Opened by a staging, and no write of it has landed since: a target
+    /// missing again is staged after the backoff, not at once, so a target
+    /// staging can't cure is never a loop of writes and stagings.
+    pub(crate) unproven: bool,
 }
 
 impl Default for LaneState {
@@ -191,6 +195,7 @@ impl Default for LaneState {
             backoff: FIRST_BACKOFF,
             due: Instant::now(),
             probes: 0,
+            unproven: false,
         }
     }
 }
@@ -238,15 +243,51 @@ impl LaneState {
         }
     }
 
-    /// The index's target is gone: stage it again at once.
-    pub(crate) fn restage(&mut self, reason: String, now: Instant) -> bool {
+    /// The index's target is gone: stage it again, at once the first time;
+    /// after the backoff, doubled up to `max`, when no write of the lane
+    /// landed since its last staging.
+    pub(crate) fn restage(&mut self, reason: String, now: Instant, max: Duration) -> bool {
         if matches!(self.health, LaneHealth::Restaging { .. }) {
             return false;
         }
-        self.backoff = FIRST_BACKOFF;
-        self.due = now;
+        if self.unproven {
+            self.due = now + self.backoff;
+            self.backoff = (self.backoff * 2).min(max);
+        } else {
+            self.backoff = FIRST_BACKOFF;
+            self.due = now;
+        }
         self.health = LaneHealth::Restaging { since: now, reason };
         true
+    }
+
+    /// The index is staged again: the lane opens, keeping its backoff until
+    /// one of its writes lands. How long it was not open.
+    pub(crate) fn reopen(&mut self, now: Instant) -> Option<Duration> {
+        let since = match &self.health {
+            LaneHealth::Open => return None,
+            LaneHealth::Parked { since, .. } | LaneHealth::Restaging { since, .. } => *since,
+        };
+        self.health = LaneHealth::Open;
+        self.probes = 0;
+        self.unproven = true;
+        Some(now.saturating_duration_since(since))
+    }
+
+    /// A write of the lane landed: whatever backoff it kept is forgotten.
+    /// Whether there was one.
+    pub(crate) fn landed(&mut self) -> bool {
+        if !self.unproven || !self.is_open() {
+            return false;
+        }
+        *self = Self::default();
+        true
+    }
+
+    /// Whether the engine keeps this state: a lane not open, or one keeping
+    /// its backoff.
+    pub(crate) fn is_kept(&self) -> bool {
+        !self.is_open() || self.unproven
     }
 
     /// Staging failed: try again after the backoff, doubled each time up to
@@ -321,9 +362,32 @@ mod tests {
     async fn a_missing_target_wins_over_a_park() {
         let now = Instant::now();
         let mut state = LaneState::default();
-        assert!(state.restage("gone".to_owned(), now));
+        assert!(state.restage("gone".to_owned(), now, MAX_BACKOFF));
         assert!(!state.park(blocked(), true, now, MAX_BACKOFF));
         assert_eq!(state.health.kind(), "restaging");
-        assert!(!state.restage("gone".to_owned(), now));
+        assert!(!state.restage("gone".to_owned(), now, MAX_BACKOFF));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reopened_lane_missing_again_waits_its_backoff_until_a_write_lands() {
+        let max = Duration::from_secs(4);
+        let start = Instant::now();
+        let mut state = LaneState::default();
+        state.restage("gone".to_owned(), start, max);
+        assert_eq!(state.due, start, "the first staging goes at once");
+        let mut waits = Vec::new();
+        for _ in 0..4 {
+            let now = state.due;
+            state.reopen(now);
+            assert!(state.is_open() && state.is_kept());
+            state.restage("gone".to_owned(), now, max);
+            waits.push((state.due - now).as_secs());
+        }
+        assert_eq!(waits, [1, 2, 4, 4]);
+        state.reopen(state.due);
+        assert!(state.landed(), "a landing write forgets the backoff");
+        assert!(!state.is_kept());
+        state.restage("gone".to_owned(), start, max);
+        assert_eq!(state.due, start, "at once again");
     }
 }

@@ -702,7 +702,7 @@ impl<'a> Run<'a> {
         };
         match result {
             Ok(()) => {
-                if let Some(down) = run.health.open(now) {
+                if let Some(down) = run.health.reopen(now) {
                     self.unhealthy = self.unhealthy.saturating_sub(1);
                     tracing::info!(lane = %run.key, after = ?down, "the index is staged again; the lane is open");
                     self.engine.store_lane(&run.key, &run.health, true);
@@ -1633,6 +1633,9 @@ impl<'a> Run<'a> {
             }
             if let Some(run) = self.lanes.get_mut(part.lane) {
                 run.barrier = false;
+                if run.health.landed() {
+                    self.engine.store_lane(&run.key, &run.health, false);
+                }
             }
         }
         acknowledged?;
@@ -1677,7 +1680,7 @@ impl<'a> Run<'a> {
         };
         let was_open = run.health.is_open();
         let (changed, outcome) = match why {
-            Held::Missing(reason) => (run.health.restage(reason, now), ProbeOutcome::Missing),
+            Held::Missing(reason) => (run.health.restage(reason, now, max), ProbeOutcome::Missing),
             Held::Blocked(reason) => (
                 run.health
                     .park(ParkReason::Blocked { reason }, probe, now, max),
