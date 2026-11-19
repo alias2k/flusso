@@ -1066,36 +1066,42 @@ impl<'a> Run<'a> {
 
     fn merge_hold(&self, now: Instant) -> Option<Instant> {
         let bound = self.engine.merge_wait;
-        if bound.is_zero()
-            || self.lanes.len() < 2
-            || self.ordered()
-            || self.merge_limit() < 2
-            || self.backfill_waiting > 0
-            || self.live_waiting == 0
-        {
+        if bound.is_zero() || self.lanes.len() < 2 || self.ordered() || self.merge_limit() < 2 {
             return None;
         }
-        let youngest_write = self.flying.iter().map(|(_, flight)| flight.started).max()?;
-        // A parked lane's items wait for its probe, not for a merge: they
-        // neither hold nor end a hold, and a due probe is never held.
         let oldest_ready = if self.unhealthy == 0 {
+            if self.backfill_waiting > 0 || self.live_waiting == 0 {
+                return None;
+            }
             self.window
                 .iter()
                 .filter(|queued| matches!(queued.item, Queue::Batch { .. }))
                 .map(|queued| queued.ready_at)
                 .min()?
         } else {
+            // A parked lane's items wait for its probe, not for a merge: they
+            // neither hold nor end a hold, and a due probe is never held.
             if (0..self.lanes.len()).any(|lane| !self.lane_open(lane) && self.grantable(lane, now))
             {
                 return None;
             }
-            self.window
+            let mut oldest: Option<Instant> = None;
+            for queued in self
+                .window
                 .iter()
                 .filter(|queued| self.lane_open(queued.lane))
-                .filter(|queued| matches!(queued.item, Queue::Batch { .. }))
-                .map(|queued| queued.ready_at)
-                .min()?
+            {
+                match &queued.item {
+                    Queue::Batch { batch, .. } if batch.position.is_none() => return None,
+                    Queue::Batch { .. } => {
+                        oldest = Some(oldest.map_or(queued.ready_at, |at| at.min(queued.ready_at)));
+                    }
+                    Queue::Complete { .. } => {}
+                }
+            }
+            oldest?
         };
+        let youngest_write = self.flying.iter().map(|(_, flight)| flight.started).max()?;
         let until = oldest_ready.min(youngest_write) + bound;
         (now < until).then_some(until)
     }
