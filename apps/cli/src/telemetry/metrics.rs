@@ -191,7 +191,9 @@ fn lane_parked_gauge(
 ) -> ObservableGauge<u64> {
     meter
         .u64_observable_gauge("flusso.lane.parked")
-        .with_description("1 while an (index, sink) lane is not written: refused, blocked or restaging")
+        .with_description(
+            "1 while an (index, sink) lane is not written: refused, blocked or restaging",
+        )
         .with_callback(move |observer| {
             for (lane, view) in status.unhealthy_lanes() {
                 observer.observe(
