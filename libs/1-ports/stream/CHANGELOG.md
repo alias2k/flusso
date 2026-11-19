@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-stream-v0.17.0...flusso-stream-v0.18.0) - 2026-11-19
+
+### Added
+
+- *(engine)* write several lane items at once per sink (#386 stage 2)
+
+### Other
+
+- Batch.walked and Request::Backfill.after (touches all constructors)
+- a published batch carries its charge until its last copy is dropped
+- one lane per (index, sink): stream, Progress, sink engine, publish, requests, fence
+- READMEs and a doc link no longer name the stream's watermark
+- the engines confirm and fence from one Progress; the stream keeps no watermark
+- Position carries its seq and the source's stamps (touches all constructors)
+
 ## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-stream-v0.16.0...flusso-stream-v0.17.0) - 2026-11-12
 
 ### Other

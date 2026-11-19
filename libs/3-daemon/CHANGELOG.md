@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-daemon-v0.17.0...flusso-daemon-v0.18.0) - 2026-11-19
+
+### Added
+
+- *(engine)* write several lane items at once per sink (#386 stage 2)
+- *(engine)* [**breaking**] stage timings account for each task's whole time (#399 review)
+- per-stage timings in /metrics and the bench's attribution table ([#399](https://github.com/alias2k/flusso/pull/399))
+- *(engine)* stage a sink's indexes concurrently, and validate indexes concurrently
+- *(engine,daemon,source-postgres)* [**breaking**] a stop drains what is in flight before the run ends
+- *(kernel)* a column may hold an array of its type ([#276](https://github.com/alias2k/flusso/pull/276))
+- *(sink-opensearch)* trust a private CA with ca_file; never retry a refused certificate
+
+### Fixed
+
+- *(engine)* [**breaking**] progress is the oldest unfinished item landing, not any acknowledgement (#408 review 2, finding 3)
+- *(engine)* a replay under new stream positions is not progress
+- *(engine)* only an advance of the source is ingest progress; a failed apply drops its batch's buffer (#395 review 3)
+- *(daemon)* reset an engine's restart backoff after a run that made progress (#395 review)
+- *(daemon)* [**breaking**] Phase and ControlError are non_exhaustive
+- *(engine)* a stopping sink acknowledges queued snapshot batches unapplied
+- *(source-postgres)* [**breaking**] emit a change only once its transaction is visible
+- *(test)* every test and bench starts Postgres through dev/test-postgres
+- *(design)* refuse a field name its level already has; warn about duplicates; read typed table and column names as flusso does
+
+### Other
+
+- the default memory budget goes back to 512 MiB
+- a live item ready while a write is out waits for it, bounded, and goes out merged
+- count how each budget wait ends: flusso.memory.wait{work,wake}
+- the default memory budget is 64 MiB, not 512
+- comments say what the code does, not which review or stage changed it (review L4)
+- a panicking build never hangs the deployment; what a first-poll panic does, documented (review L1)
+- a restart in the middle of a rebuild says rebuilding, vouching for nothing
+- a restarting sink engine keeps its lane's stall age
+- pinned_by is the lane Progress::landed is decided by
+- e2e: a first seed's index already holds the live write; only the fence's answer is asserted
+- /status backfill_checkpoints, flusso.backfill.checkpoints, docs
+- e2e: a fence holds through a first seed, a reindex and a dropped-slot rebuild
+- a fence vouches only for what reads of each lane see
+- changes are resolved on a connection of their own (step 2)
+- tests: /status carries each lane's stall and the pinning lane; the gauges export them
+- e2e: a stalled index's lane ages and pins the slot while its sibling writes; CLAUDE.md
+- stall age and WAL behind per lane, and the lane that pins the slot
+- the sink engine merges ready items into one write
+- fence e2e: a stalled index on a sink blocks only the fences that include it
+- flusso.lane.outstanding{index,sink}: items routed to a lane and not landed
+- /status reports each lane; fence and /wait tests per index
+- one lane per (index, sink): stream, Progress, sink engine, publish, requests, fence
+- [concurrency] max_built_mib (16..=1048576, default 512), the daemon's budget, /status memory, flusso.memory metrics, the designer's field
+- review follow-ups: no watermark left, wal_idle's half named, the argument per lane
+- an engine takes the Progress it shares; none is built without one
+- each lane is registered as its own send succeeds and answers from its own newest
+- tests: a full sibling lane holds back a healthy lane's progress and fence (red)
+- measured on reference: about +15% backfill at 2-4 builds, sink-bound beyond; RSS up; one allocation per batch more
+- rustfmt
+- a sink engine raises its lane's marks without a lock
+- a walk ends at the greatest key it found, read through the key index's own operators
+- the failing-page backoff test declares its index, and every backoff wait has a deadline
+- the engines confirm and fence from one Progress; the stream keeps no watermark
+- --builds / FLUSSO_BUILDS, the daemon's DEFAULT_BUILDS, the builder pool at builds + 2, the designer's field
+- the source confirms and fences from Landed; the Postgres capture keeps no map
+- Position carries its seq and the source's stamps (touches all constructors)
+- a backfill pages each index's root keys on the builder pool
+- the sink's real bound, the measured numbers, the catch-up refresh cost and the API changes (#408 review 1 findings 3-4, review 2 findings 1, 3, 5, 6)
+- after a failed run the oldest item is written alone until it lands (#408 review 1, finding 2)
+- *(sink)* [**breaking**] Sink::write replaces apply + flush (#386 stage 2)
+- a replayed change or backfill page is no progress, and a failed apply leaves nothing buffered (#395 review 3)
+- *(daemon)* a restart after a run that made progress waits one second again
+- *(engine,daemon)* hold a commit only once Postgres makes commits wait
+- *(engine,daemon)* pin read-after-visible in its own e2e binary
+- *(engine,daemon)* a commit read before it is visible is indexed as committed
+
 ## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-daemon-v0.16.0...flusso-daemon-v0.17.0) - 2026-11-12
 
 ### Added

@@ -7,6 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-cli-v0.17.0...flusso-cli-v0.18.0) - 2026-11-19
+
+### Added
+
+- *(config)* cap [concurrency] writes at 64 (#408 review 1, finding 3)
+- *(engine)* write several lane items at once per sink (#386 stage 2)
+- *(engine)* [**breaking**] stage timings account for each task's whole time (#399 review)
+- per-stage timings in /metrics and the bench's attribution table ([#399](https://github.com/alias2k/flusso/pull/399))
+- *(query)* [**breaking**] a fenced read rides out a restart of flusso
+- *(dev)* the visibility wait on the dashboard and as an alert; name it beside slot lag
+- *(script)* [**breaking**] a real date type in script fields ([#364](https://github.com/alias2k/flusso/pull/364))
+- *(source)* [**breaking**] validate array columns against the catalog ([#276](https://github.com/alias2k/flusso/pull/276))
+- *(cli)* --ca-file for the indexes and reindex admin client
+
+### Fixed
+
+- *(daemon)* [**breaking**] Phase and ControlError are non_exhaustive
+- *(cli)* build the stop on Windows; check the CLI on Windows and macOS in CI
+- *(cli)* [**breaking**] force a stop only on the same sender twice quickly; keep nohup's ignored SIGHUP
+- *(cli)* [**breaking**] drain on stop under a 30 s deadline; a repeated signal is one stop
+- *(cli)* bound the stop, honour a second signal and SIGHUP, follow the parent
+- *(query)* pace, bound and classify fence retries (#377 review)
+- *(source-postgres)* read and write every number exactly
+- *(cli)* check judges the source server as run does
+- *(source-postgres)* [**breaking**] emit a change only once its transaction is visible
+- *(test)* the guard rejects the postgres import, not call shapes
+- *(test)* every test and bench starts Postgres through dev/test-postgres
+- *(script)* a decimal script result is written with every digit
+- *(source-postgres)* [**breaking**] write every numeric digit as a JSON number
+- *(source)* a check the database would not let run is reported, not dropped ([#324](https://github.com/alias2k/flusso/pull/324))
+- *(cli)* a refusal stops the start only when every sink refuses ([#316](https://github.com/alias2k/flusso/pull/316))
+- *(source)* [**breaking**] a schema that can never index a document stops the start (#316, #309)
+- *(source-postgres)* a table's Relation message drops its cached column types ([#298](https://github.com/alias2k/flusso/pull/298))
+- *(source-postgres)* say a lossy ids key may be stored altered; check prints a skipped probe (#299, #313)
+- *(cli)* an ids element_type that holds no key prints and starts ([#299](https://github.com/alias2k/flusso/pull/299))
+- *(source-postgres)* check reports a link or ids element the key can't take (#299, #312, #313)
+- *(source-postgres)* read every key type the same way in backfill, WAL and build
+- *(design,source)* a name applies when the press that left its box ends; key lists by identity
+- *(source,design)* duplicate-name outcomes for constants and binary; one-line node header; palette returns focus
+- *(design)* refuse a field name its level already has; warn about duplicates; read typed table and column names as flusso does
+- *(cli)* script run reports a document that fails to build as the failure
+- *(source)* a domain over an array or jsonb holds an array
+- *(source)* [**breaking**] settle the root-key kinds; probe transforms without a table
+- *(source)* report four schemas check accepted that cannot work
+
+### Other
+
+- count how each budget wait ends: flusso.memory.wait{work,wake}
+- e2e: a backfill killed mid-way resumes and reads fewer key-page rows than a full one; stage notes as built
+- /status backfill_checkpoints, flusso.backfill.checkpoints, docs
+- /wait answers 503 backfilling or rebuilding, naming the lanes
+- changes are resolved on a connection of their own (step 2)
+- flusso.sink.refreshes{sink}: refresh requests a sink sent; dev/bench reports them per phase
+- compile fix: backends.rs test Batch takes walked (3bf541c4 crossed 73cfe0d7)
+- run warns when max_built_mib reaches the cgroup limit or host memory
+- a deprecated [stream] capacity or --queue-capacity validates, warns once and is ignored
+- the memory series in metrics.md's Prometheus table, pinned by an export test
+- e2e: a fenced read with an index prefix waits on the logical index (review: not verified)
+- tests: /status carries each lane's stall and the pinning lane; the gauges export them
+- stall age and WAL behind per lane, and the lane that pins the slot
+- [stream] capacity is deprecated: accepted, warned about, ignored; lanes keep a 1,048,576-item backstop
+- flusso.lane.outstanding{index,sink}: items routed to a lane and not landed
+- /status reports each lane; fence and /wait tests per index
+- one lane per (index, sink): stream, Progress, sink engine, publish, requests, fence
+- [concurrency] max_built_mib (16..=1048576, default 512), the daemon's budget, /status memory, flusso.memory metrics, the designer's field
+- the engines confirm and fence from one Progress; the stream keeps no watermark
+- --builds / FLUSSO_BUILDS, the daemon's DEFAULT_BUILDS, the builder pool at builds + 2, the designer's field
+- the source confirms and fences from Landed; the Postgres capture keeps no map
+- a backfill pages each index's root keys on the builder pool
+- *(sink)* [**breaking**] Sink::write replaces apply + flush (#386 stage 2)
+- *(cli)* random stops under writes converge after a restart (seeded)
+- exit 0 means the final position was confirmed; --shutdown-timeout-secs 0 is the one exception
+- the help, manual and demo compose describe the drain and the force rule
+- *(cli)* check fails where run refuses the source server
+- *(source-postgres)* a wide document's first failure is the first declared
+- *(agents)* add the coordinator skill and guard its paths
+- *(source)* a check the database would not let run is reported ([#324](https://github.com/alias2k/flusso/pull/324))
+- *(cli)* a refusal stops the start only when every sink refuses ([#316](https://github.com/alias2k/flusso/pull/316))
+- Merge pull request #321 from alias2k/fix/type-pairs-that-fail-at-runtime-299
+- *(cli)* check installs no logger of its own ([#299](https://github.com/alias2k/flusso/pull/299))
+- *(cli)* the duplicate-names matrix deletes only its own pair's indexes
+- *(cli)* an ids element_type that holds no key prints and starts ([#299](https://github.com/alias2k/flusso/pull/299))
+- warn on a timestamp format that refuses the ISO form; pin tuned mappings
+- Merge pull request #249 from alias2k/fix/check-validation-gaps
+
 ## [0.17.0](https://github.com/alias2k/flusso/compare/flusso-cli-v0.16.0...flusso-cli-v0.17.0) - 2026-11-12
 
 ### Added

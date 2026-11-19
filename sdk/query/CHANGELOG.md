@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0](https://github.com/alias2k/flusso/compare/flusso-query-v0.17.0...flusso-query-v0.18.0) - 2026-11-19
+
+### Added
+
+- *(query)* [**breaking**] read-time fields: a root's context, rule fields and computed fields
+- *(query)* [**breaking**] a fenced read rides out a restart of flusso
+- *(query-derive)* read an array column as a Vec or an array newtype ([#276](https://github.com/alias2k/flusso/pull/276))
+- *(query)* Client::ca_file and ca_pem add a private CA to the pinned roots
+
+### Fixed
+
+- *(query)* a rule reads a value the index coerced as the index stored it
+- *(query)* no value, the value order and partial dates decide alike on both sides
+- *(query)* jitter never drops a retry that fits; a spinning pacing test fails
+- *(query)* pace, bound and classify fence retries (#377 review)
+- *(source-postgres)* a float reads as Postgres casts to float4; exact reads pinned in flusso-query
+- *(source-postgres)* read and write every number exactly
+- *(query-derive)* an Arc<str>/Rc<str> field without `rc` names the feature ([#306](https://github.com/alias2k/flusso/pull/306))
+- *(query-derive)* string alternatives, Decimal by its kinds, a true message ([#306](https://github.com/alias2k/flusso/pull/306))
+- *(query-derive)* a fragment accepts what a root accepts ([#306](https://github.com/alias2k/flusso/pull/306))
+- *(query-derive)* read null map values, refuse exhaustive enums without variants, name the tagged-newtype refusals
+- *(query-derive)* check typed maps against what they read; pin the boundary
+- *(query)* GeoPoint reads a compact format's fields as written ([#307](https://github.com/alias2k/flusso/pull/307))
+- *(query)* GeoPoint reads every form a geo field is written in
+- *(query-derive)* [**breaking**] refuse a flattened non-object and a map type that reads no object
+- *(query-derive)* [**breaking**] a newtype reads an array only as one of the two array kinds
+- *(query-derive)* say why an array newtype does not fit a single value
+- *(query-derive)* an array newtype of values holds leaf values only
+- *(query-derive)* a value type is no sub-document at a nested or object field
+- *(query-derive)* refuse an array of arrays at any depth of newtypes
+- *(query-derive)* an array newtype needs a sub-document element
+- *(query-derive)* [**breaking**] arrays of maps, newtypes over a Vec, hand-written values in fragments
+- *(query-derive)* [**breaking**] root and fragment agree on maps; reject a rename serde does not see
+- *(query-derive)* match a fragment's opaque to a root's, and close the review gaps
+- *(query-derive)* [**breaking**] reject the remaining unread attributes
+
+### Other
+
+- flusso-query: UnavailableCause::Backfilling
+- docs: a slow index holds up only itself; a stop-refused document or a missing index still stops the sink (review 3)
+- a configured lane holds the backstop, not the backstop times the sinks (review 11); search.rs doc order (review 9)
+- docs: /wait?index, /status lanes, flusso.lane.outstanding, the client's per-index fence, upgrade page, CLAUDE.md, CONTEXT.md, stage notes as built
+- query: a fenced read waits on the indexes it reads; the cache is per level and index
+- Merge remote-tracking branch 'origin/main' into feat/read-time-fields
+- *(query)* read-time fields
+- *(query)* keep the test stub's TLS key out of the package
+- *(query-derive)* no assert on a field type named Arc<str> or Rc<str> ([#306](https://github.com/alias2k/flusso/pull/306))
+- Merge pull request #300 from alias2k/fix/derive-map-boundary-294
+- *(query)* a GeoPoint written by a compact format reads back as written ([#307](https://github.com/alias2k/flusso/pull/307))
+- *(query)* GeoPoint reads every form a geo field is written in
+
 ### Changed
 
 - *(query)* a fenced read waits on the indexes it reads (`/wait?index=…`), once per level and index; `Client::wait_on` waits on named indexes; `MsearchBundle::indexes` (default none: every index)
