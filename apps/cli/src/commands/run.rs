@@ -171,6 +171,21 @@ pub(crate) struct RunArgs {
     #[arg(long, env = "FLUSSO_MAX_BUILT_MIB", value_parser = config::parse_max_built_mib)]
     max_built_mib: Option<std::num::NonZeroUsize>,
 
+    /// The first wait before trying again, in milliseconds: a failed engine's
+    /// restart, a parked lane's probe, a re-staged lane's next staging. Each
+    /// wait doubles up to `--backoff-max-ms`. Overrides `[backoff].initial_ms`
+    /// from config; defaults to 1000. At least 1. Never written into the lock.
+    /// [env: FLUSSO_BACKOFF_INITIAL_MS]
+    #[arg(long, value_parser = config::parse_backoff_ms)]
+    backoff_initial_ms: Option<std::num::NonZeroU64>,
+
+    /// The longest wait before trying again, in milliseconds. Overrides
+    /// `[backoff].max_ms` from config; defaults to 60000, or the first wait
+    /// when that is larger. At least the first wait; equal to it, every wait
+    /// is the same. Never written into the lock. [env: FLUSSO_BACKOFF_MAX_MS]
+    #[arg(long, value_parser = config::parse_backoff_ms)]
+    backoff_max_ms: Option<std::num::NonZeroU64>,
+
     /// How long a stop may take, in seconds, from the first signal to exit.
     /// A stop drains: nothing new is read, what is in flight lands on every
     /// sink and is confirmed to Postgres, then the HTTP surfaces close and
@@ -224,6 +239,12 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     if let Some(max_built_mib) = args.max_built_mib {
         config.concurrency.max_built_mib = Some(max_built_mib);
     }
+    lay_backoff(
+        &mut config,
+        args.backoff_initial_ms,
+        args.backoff_max_ms,
+        |name| std::env::var(name).ok(),
+    )?;
 
     // Adapter knobs given as flags/env are laid over the file's entries, then
     // every entry is validated against its adapter before anything connects.
@@ -274,7 +295,6 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let options = DaemonOptions {
         skip_backfill: args.skip_backfill,
         lag_poll_interval: Duration::from_secs(args.lag_poll_secs),
-        ..DaemonOptions::default()
     };
 
     let backends: Arc<dyn daemon::Backends> = Arc::new(FlussoBackends);
@@ -543,6 +563,49 @@ fn resolve_config(args: &RunArgs) -> anyhow::Result<Config> {
 fn load_lock(path: &Path) -> anyhow::Result<Config> {
     config::load_compiled(path)
         .with_context(|| format!("loading compiled lock from {}", path.display()))
+}
+
+/// Lay `--backoff-*` over `FLUSSO_BACKOFF_*` over `[backoff]`, each value
+/// keeping where it was set, then resolve and check them with the daemon's
+/// one judge, so a bad pair fails before anything connects. The variables
+/// are read here, not by clap, so the refusal can tell a flag from its
+/// variable.
+fn lay_backoff(
+    config: &mut config::Config,
+    initial_ms: Option<std::num::NonZeroU64>,
+    max_ms: Option<std::num::NonZeroU64>,
+    env: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<()> {
+    let layer = |flag: Option<std::num::NonZeroU64>,
+                 name: &str,
+                 file: Option<config::BackoffValue>|
+     -> anyhow::Result<Option<config::BackoffValue>> {
+        if let Some(ms) = flag {
+            return Ok(Some(config::BackoffValue {
+                ms,
+                origin: config::BackoffOrigin::Flag,
+            }));
+        }
+        match env(name).filter(|text| !text.is_empty()) {
+            Some(text) => {
+                let ms = config::parse_backoff_ms(&text)
+                    .map_err(|why| anyhow::anyhow!("{name}: {why}"))?;
+                Ok(Some(config::BackoffValue {
+                    ms,
+                    origin: config::BackoffOrigin::Env,
+                }))
+            }
+            None => Ok(file),
+        }
+    };
+    config.backoff.initial_ms = layer(
+        initial_ms,
+        "FLUSSO_BACKOFF_INITIAL_MS",
+        config.backoff.initial_ms,
+    )?;
+    config.backoff.max_ms = layer(max_ms, "FLUSSO_BACKOFF_MAX_MS", config.backoff.max_ms)?;
+    daemon::backoff(config)?;
+    Ok(())
 }
 
 #[cfg(test)]

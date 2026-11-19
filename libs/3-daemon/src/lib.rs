@@ -10,7 +10,7 @@ pub mod status;
 mod supervise;
 
 pub use backends::{Backends, SinkParts, SourceParts};
-pub use engine::{Budget, Held, Progress};
+pub use engine::{Backoff, Budget, Held, Progress};
 pub use fence::{
     Fence, FenceError, FenceLevel, FenceObserver, FenceOutcome, FencePositions, FenceRequest,
     LanePositions, SinkPositions, Unserved,
@@ -54,10 +54,6 @@ pub struct DaemonOptions {
     pub skip_backfill: bool,
     /// How often to sample source capture lag.
     pub lag_poll_interval: Duration,
-    /// The longest pause between restarts of a failed engine, and between two
-    /// probes of a parked lane. Backoff starts at one second and doubles up to
-    /// this.
-    pub max_restart_backoff: Duration,
 }
 
 impl Default for DaemonOptions {
@@ -65,7 +61,6 @@ impl Default for DaemonOptions {
         Self {
             skip_backfill: false,
             lag_poll_interval: Duration::from_secs(15),
-            max_restart_backoff: Duration::from_secs(60),
         }
     }
 }
@@ -84,6 +79,69 @@ pub fn batch_policy(config: &Config) -> BatchPolicy {
             .max_delay_ms
             .map_or(defaults.max_delay, Duration::from_millis),
     }
+}
+
+/// How long the engines wait before trying again, resolved and checked: the
+/// one judge `run`, `check`, `build` and [`Daemon::start`] share.
+///
+/// - `initial_ms`: the value set (flag > env > file), else 1000.
+/// - `max_ms`: the value set, else 60000 or `initial_ms`, whichever is larger,
+///   so raising the first wait alone is always valid.
+/// - A `max_ms` set below `initial_ms` is refused; the message says where each
+///   value came from and how to change it. Equal values wait a constant
+///   interval.
+pub fn backoff(config: &Config) -> anyhow::Result<Backoff> {
+    let defaults = Backoff::default();
+    let initial = config
+        .backoff
+        .initial_ms
+        .map_or(defaults.initial(), |value| {
+            Duration::from_millis(value.ms.get())
+        });
+    let max = match config.backoff.max_ms {
+        Some(value) => Duration::from_millis(value.ms.get()),
+        None => defaults.max().max(initial),
+    };
+    Backoff::new(initial, max).map_err(|_| {
+        anyhow::anyhow!(
+            "[backoff] max_ms = {} ({}) is below initial_ms = {} ({}): the longest wait must be \
+             at least the first (equal values wait a constant interval). Raise max_ms with {} or \
+             lower initial_ms with {}; a flag wins over its variable, a variable over the file",
+            max.as_millis(),
+            origin(config.backoff.max_ms, "max_ms"),
+            initial.as_millis(),
+            origin(config.backoff.initial_ms, "initial_ms"),
+            ways("max_ms"),
+            ways("initial_ms"),
+        )
+    })
+}
+
+/// Where a `[backoff]` value came from, in the words a user set it with.
+fn origin(value: Option<config::BackoffValue>, key: &str) -> String {
+    match value.map(|value| value.origin) {
+        None => "the default".to_owned(),
+        Some(config::BackoffOrigin::File) => format!("set in flusso.toml's [backoff] {key}"),
+        Some(config::BackoffOrigin::Flag) => format!("set by {}", flag(key)),
+        Some(config::BackoffOrigin::Env) => format!("set by {}", variable(key)),
+    }
+}
+
+/// Every way to set a `[backoff]` key.
+fn ways(key: &str) -> String {
+    format!(
+        "flusso.toml's [backoff] {key}, {} or {}",
+        flag(key),
+        variable(key)
+    )
+}
+
+fn flag(key: &str) -> String {
+    format!("--backoff-{}", key.replace('_', "-"))
+}
+
+fn variable(key: &str) -> String {
+    format!("FLUSSO_BACKOFF_{}", key.to_uppercase())
 }
 
 /// Lane items each sink writes at once when `[concurrency] writes` is unset.
@@ -182,6 +240,7 @@ impl Daemon {
         } = self;
 
         backends.validate(&config)?;
+        let backoff = backoff(&config)?;
         tracing::info!(
             source = %config.source.kind,
             stream = %config.stream.kind,
@@ -284,7 +343,7 @@ impl Daemon {
                 .with_writes(writes(&config))
                 .with_write_documents(batch_policy(&config).max_changes)
                 .with_merge_wait(batch_policy(&config).max_delay)
-                .with_max_probe_backoff(options.max_restart_backoff)
+                .with_backoff(backoff)
                 .with_observer(Arc::clone(&observer))
                 .with_failure_policies(failure_policies.clone())
                 .skip_backfill(options.skip_backfill)
@@ -305,6 +364,7 @@ impl Daemon {
             stream,
             observer,
             options,
+            backoff,
             stop,
             budget,
             stalls,
@@ -328,6 +388,7 @@ pub struct RunningDaemon {
     stream: Arc<dyn Stream>,
     observer: Arc<dyn Observer>,
     options: DaemonOptions,
+    backoff: Backoff,
     stop: engine::Stop,
     budget: Arc<Budget>,
     stalls: Arc<Stalls>,
@@ -386,6 +447,7 @@ impl RunningDaemon {
             stream,
             observer,
             options,
+            backoff,
             stop,
             budget: _,
             stalls,
@@ -412,7 +474,7 @@ impl RunningDaemon {
             continuity,
             &source,
             &stream,
-            &options,
+            backoff,
             &stop,
             &fence,
         );

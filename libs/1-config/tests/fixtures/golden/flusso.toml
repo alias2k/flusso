@@ -14,6 +14,11 @@ writes = 8
 builds = 6
 max_built_mib = 256
 
+# Also the machine's: never written into the lock.
+[backoff]
+initial_ms = 200
+max_ms = 800
+
 [server]
 public_address = "0.0.0.0:9464"
 private_address = "127.0.0.1:9465"

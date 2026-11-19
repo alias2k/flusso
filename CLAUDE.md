@@ -543,7 +543,8 @@ so the committed lock stays current; with no config it loads the existing `--loc
 editor-assist JSON Schema: `schema config` or `schema index`; no DB), `script run` (build one
 document — `--id`, the first row, or `--input` JSON with no DB — run its index's scripts, print input,
 prints, and output or the failure with a caret; `--watch` re-runs on file changes). See `dev/README.md` for the walk-through. **Every flag also reads a
-`FLUSSO_*` env var** (clap's `env` feature; the flag wins when both are set) — e.g.
+`FLUSSO_*` env var** (clap's `env` feature, except `--backoff-*`, whose `FLUSSO_BACKOFF_*` `run`
+reads itself so a refusal names each value's origin; the flag wins when both are set) — e.g.
 `FLUSSO_CONFIG`, `FLUSSO_SLOT`, `FLUSSO_PUBLIC_ADDRESS` — so the binary configures cleanly from
 the environment (Helm/compose). This is separate from the config's own reserved env vars
 (`SOURCE_POSTGRES_CONNECTION_URL`, `<SINK>_OPENSEARCH_URL`: one `<ENTRY>_<TYPE>_<KEY>` rule) and
@@ -1149,10 +1150,30 @@ is the one concrete piece.
   `a_busy_item_holds_back_only_the_items_sharing_its_documents`, the daemon's
   `writes_default_to_four_unless_the_config_sets_them`, the golden lock (its `flusso.toml` sets
   `[concurrency]`, the lock stays byte-identical), and the sinks' concurrency tests below.
+- **One schedule for every engine-level retry (`[backoff]`).** `engine::Backoff` (`policy.rs`:
+  `initial`, doubling, capped at `max`; 1 s / 60 s by default; equal values wait a constant interval)
+  times a failed engine's restart (sink and ingest, `supervise.rs`'s `Backoff`), a parked lane's
+  probe and a re-staged lane's next staging (`LaneState`). `flusso.toml`'s `[backoff]`
+  `initial_ms`/`max_ms`, `--backoff-initial-ms`/`--backoff-max-ms`, `FLUSSO_BACKOFF_*` (flag > env >
+  file > default; `run.rs`'s `lay_backoff` reads the variables itself, not through clap, so each
+  value keeps its `config::BackoffOrigin`). **One judge**, `daemon::backoff`: an unset `max_ms` is
+  `max(60000, initial_ms)` (raising the first wait alone is always valid), an explicit one below
+  `initial_ms` is refused with each value's origin and the ways to set it; `run` (before it binds),
+  `check`, `build` and `Daemon::start` all call it, so they refuse the same file alike. Like
+  `[concurrency]` it is never written into the lock (`Config.backoff` is `#[serde(skip)]`; the golden
+  `flusso.toml` sets it, `backoff_never_reaches_the_lock`). `0` is refused at parse. A wait no
+  `Instant` holds goes to the far future (`health.rs`'s `later`) and `/status` holds a probe past
+  every date at the latest one (`status.rs`'s `wall_clock`), so `u64::MAX` ms parks a lane once and
+  panics nothing. The OpenSearch sink's own bulk retry is not on it. Guards: `config_toml`'s
+  `backoff_*`, `health::tests`, `tests::parking`'s `*_on_the_configured_schedule` and
+  `a_lane_parked_on_the_longest_schedule_neither_panics_nor_spins`, the daemon's `tests::backoff`
+  (`*_on_the_configured_backoff`, `a_backoff_resolves_*`, `a_backoff_refusal_says_*`,
+  `a_lane_parked_on_the_longest_backoff_*`), `status::tests`, the CLI's `run::tests` (`lay_backoff`)
+  and `tests/backoff.rs` (the real binary: `check`/`build`/`run` alike, env over file, flag over env).
 - **Item-level rejections vs write-wide errors.** `Sink::write` returns a `WriteReport`:
   `Err` is write-wide (transport down, whole request refused) and stops *that sink engine*,
-  which the daemon restarts with exponential backoff (1 s doubling to `max_restart_backoff`,
-  default 60 s, reset to 1 s after a run that made progress: the sink engine's oldest unfinished
+  which the daemon restarts with exponential backoff (`[backoff]`, below; 1 s doubling to 60 s by
+  default, reset to the first wait after a run that made progress: the sink engine's oldest unfinished
   lane item landed, `SinkEngine::advanced` (not any acknowledgement: a later item landing beside an
   older one that then fails is no progress; guards `only_the_oldest_unfinished_item_landing_counts_as_progress`,
   `a_write_landing_after_an_older_one_failed_is_no_progress`),
@@ -1203,9 +1224,9 @@ is the one concrete piece.
   receive order, unacknowledged (`writes.rs`'s `put_back`), so the lane's marks, fences and the slot
   stay where they are (`Progress::pinned_by` names it); the other parts land. A **parked** lane
   (refused, blocked) is not granted, takes nothing more from its lane, and its items neither hold
-  nor end a merge wait (`merge_hold`); when its backoff is due (`health.rs`'s `LaneState`: 1 s,
-  doubling to `SinkEngine::with_max_probe_backoff`, the daemon's `max_restart_backoff`; reset only
-  by that lane's probe landing) its front item is written alone (a **probe**, `Flight.probe`):
+  nor end a merge wait (`merge_hold`); when its backoff is due (`health.rs`'s `LaneState` on the
+  engine's `Backoff`, `SinkEngine::with_backoff`, the daemon's `[backoff]`; reset only by that lane's
+  probe landing) its front item is written alone (a **probe**, `Flight.probe`):
   landed, the lane opens; held again, the backoff doubles; a write `Err` fails the run as before. A
   stop probes every parked lane once more at once (`probe_on_stop`). A write block never reaches
   `on_error`, so nothing is quarantined under `skip`. A **restaging** lane (missing target), once
@@ -1215,7 +1236,7 @@ is the one concrete piece.
   items are written again; a failed staging retries on the backoff; `stage` reopens restaging lanes.
   A reopened lane keeps its staging backoff (`LaneState.unproven`, `restage_backoff`: a park in between
   doesn't move it) until one of its writes lands, so a target
-  staging can't cure is staged again after 1 s, 2 s, … not in a loop (guard
+  staging can't cure is staged again after the first wait, then doubling, not in a loop (guard
   `a_missing_target_staging_cannot_cure_is_retried_with_a_backoff`); staging waits for the lane's
   writes in flight (`restaging_waits_for_the_lanes_writes_in_flight`). A part lets go of its batch
   (and its budget `Hold`) before its acknowledgement (`a_parts_bytes_are_back_when_its_acknowledgement_returns`).
@@ -1223,7 +1244,9 @@ is the one concrete piece.
   The health (`LaneHealth`, public; `on_lane_health`/`on_lane_probe` events) lives on the
   `SinkEngine` and outlives a run; a parked lane stays parked across a failed run, on its schedule.
   The run ends only on a sink-wide failure (a write `Err`, a seed, a lane delivery or ack). `/status`
-  `sinks.<s>.lanes.<i>.health` (+ `parked_since`, `next_probe`, `reason`), `flusso.lane.parked{why}`,
+  `sinks.<s>.lanes.<i>.health` (`open`/`refused`/`blocked`/`restaging`, the same words as the
+  metric's `why`; "parked" names the refused and blocked states together: the metric, the alert, the
+  logs) (+ `parked_since`, `next_probe`, `reason`), `flusso.lane.parked{why}`,
   `flusso.lane.probes{outcome}`, and the stop's deadline message names the lane. Not yet: fresh
   builds of a refused item (§6, needs 8a), reindex per lane, a per-index memory share (a parked lane
   can fill the budget, as a stalled sink does). Guards: `tests::parking` (paused time),

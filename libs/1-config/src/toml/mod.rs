@@ -23,6 +23,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use entities::Backoff;
 use entities::Batch;
 use entities::Concurrency;
 use entities::IndexEntry;
@@ -39,7 +40,7 @@ use kernel::common;
 pub struct ConfigToml {
     // Field order is the `flusso.toml` serialization order: the `toml` writer
     // floats the scalar globals (prefix, on_error) to the top, then emits tables
-    // in declaration order — source, stream, batch, concurrency, server, sinks,
+    // in declaration order — source, stream, batch, concurrency, backoff, server, sinks,
     // indexes.
     /// The database rows come from: `type` selects the source adapter, the
     /// rest of the table is that adapter's options.
@@ -73,6 +74,13 @@ pub struct ConfigToml {
     /// (flag > env > file).
     #[serde(default, skip_serializing_if = "Concurrency::is_empty")]
     pub concurrency: Concurrency,
+    /// How long flusso waits before trying again: a failed engine's restart,
+    /// a parked lane's probe, a re-staged lane's next staging. Never written
+    /// into `flusso.lock`: `--backoff-initial-ms` / `FLUSSO_BACKOFF_INITIAL_MS`
+    /// and `--backoff-max-ms` / `FLUSSO_BACKOFF_MAX_MS` override it, and give
+    /// it to `run --locked` (flag > env > file).
+    #[serde(default, skip_serializing_if = "Backoff::is_empty")]
+    pub backoff: Backoff,
     /// Bind addresses for the operational HTTP surfaces. The `FLUSSO_*`
     /// variables and CLI flags override these (flag > env > file).
     #[serde(default, skip_serializing_if = "Server::is_empty")]

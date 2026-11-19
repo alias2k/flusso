@@ -701,7 +701,6 @@ impl<'a> Run<'a> {
             return;
         };
         let (_, lane) = self.restaging.swap_remove(at);
-        let max = self.engine.max_probe_backoff;
         let now = Instant::now();
         let Some(run) = self.lanes.get_mut(lane) else {
             return;
@@ -715,7 +714,7 @@ impl<'a> Run<'a> {
                 }
             }
             Err(error) => {
-                run.health.restage_failed(now, max);
+                run.health.restage_failed(now);
                 tracing::warn!(lane = %run.key, %error, retry_in = ?run.health.due.saturating_duration_since(now), "could not stage the index again; trying again later");
                 self.engine.store_lane(&run.key, &run.health, false);
             }
@@ -1681,21 +1680,19 @@ impl<'a> Run<'a> {
     /// write was the lane's probe, so a park doubles its backoff.
     fn hold(&mut self, lane: usize, why: Held, probe: bool) {
         let now = Instant::now();
-        let max = self.engine.max_probe_backoff;
         let Some(run) = self.lanes.get_mut(lane) else {
             return;
         };
         let was_open = run.health.is_open();
         let (changed, outcome) = match why {
-            Held::Missing(reason) => (run.health.restage(reason, now, max), ProbeOutcome::Missing),
+            Held::Missing(reason) => (run.health.restage(reason, now), ProbeOutcome::Missing),
             Held::Blocked(reason) => (
-                run.health
-                    .park(ParkReason::Blocked { reason }, probe, now, max),
+                run.health.park(ParkReason::Blocked { reason }, probe, now),
                 ProbeOutcome::Blocked,
             ),
             Held::Refused { ids, reason } => (
                 run.health
-                    .park(ParkReason::Refused { ids, reason }, probe, now, max),
+                    .park(ParkReason::Refused { ids, reason }, probe, now),
                 ProbeOutcome::Refused,
             ),
         };

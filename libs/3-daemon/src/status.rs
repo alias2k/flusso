@@ -95,32 +95,52 @@ pub struct Status {
     budget: Option<Arc<Budget>>,
     /// Where each lane's stall comes from; `None` reports none.
     stalls: Option<Arc<Stalls>>,
-    /// The lanes that are not open (parked, blocked, restaging); an open lane
-    /// has no entry.
+    /// The lanes that are not open (refused, blocked, restaging); an open
+    /// lane has no entry.
     lane_health: Mutex<BTreeMap<stream::LaneKey, LaneHealthView>>,
 }
 
-/// A lane's health in `/status`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+/// A lane's health in `/status`. Its name ([`name`](Self::name)) is the
+/// one `/status`, the `why` label of `flusso.lane.parked` and the stop's
+/// deadline message all say.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LaneHealthState {
     /// Written as usual.
     #[default]
     Open,
-    /// Not written: an item was refused under `on_error = "stop"`; its front
-    /// item is probed with a backoff.
-    Parked,
-    /// Not written: the destination refuses writes to the index for now (a
-    /// write block, a role without write permission); probed with a backoff.
+    /// Parked on a refusal: an item was refused under `on_error = "stop"`;
+    /// its front item is probed with a backoff.
+    Refused,
+    /// Parked on a block: the destination refuses writes to the index for now
+    /// (a write block, a role without write permission); probed with a
+    /// backoff.
     Blocked,
     /// Its target was gone: the index is being staged again.
     Restaging,
 }
 
+impl LaneHealthState {
+    /// `open`, `refused`, `blocked` or `restaging`.
+    pub fn name(self) -> &'static str {
+        match self {
+            LaneHealthState::Open => "open",
+            LaneHealthState::Refused => "refused",
+            LaneHealthState::Blocked => "blocked",
+            LaneHealthState::Restaging => "restaging",
+        }
+    }
+}
+
+impl Serialize for LaneHealthState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.name())
+    }
+}
+
 /// A lane that is not open, as `/status` and the metrics read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneHealthView {
-    /// Parked, blocked or restaging (never open: an open lane has no view).
+    /// Refused, blocked or restaging (never open: an open lane has no view).
     pub state: LaneHealthState,
     /// When it stopped being written (UTC).
     pub since: chrono::DateTime<chrono::Utc>,
@@ -137,11 +157,11 @@ impl LaneHealthView {
         let now = tokio::time::Instant::now();
         let wall = chrono::Utc::now();
         let at = |instant: tokio::time::Instant| {
-            let ago = chrono::Duration::from_std(now.saturating_duration_since(instant))
-                .unwrap_or_default();
-            let ahead = chrono::Duration::from_std(instant.saturating_duration_since(now))
-                .unwrap_or_default();
-            wall - ago + ahead
+            wall_clock(
+                wall,
+                now.saturating_duration_since(instant),
+                instant.saturating_duration_since(now),
+            )
         };
         match health {
             engine::LaneHealth::Parked {
@@ -151,7 +171,7 @@ impl LaneHealthView {
             } => Some(Self {
                 state: match reason {
                     engine::ParkReason::Blocked { .. } => LaneHealthState::Blocked,
-                    _ => LaneHealthState::Parked,
+                    _ => LaneHealthState::Refused,
                 },
                 since: at(*since),
                 next_probe: Some(at(*next_probe)),
@@ -167,16 +187,28 @@ impl LaneHealthView {
         }
     }
 
-    /// `parked`, `blocked` or `restaging`: the `why` label of
-    /// `flusso.lane.parked` is `refused` for `parked`.
+    /// The `why` label of `flusso.lane.parked`: `refused`, `blocked` or
+    /// `restaging`, the [name](LaneHealthState::name) `/status` gives.
     pub fn why(&self) -> &'static str {
-        match self.state {
-            LaneHealthState::Parked => "refused",
-            LaneHealthState::Blocked => "blocked",
-            LaneHealthState::Restaging => "restaging",
-            LaneHealthState::Open => "open",
-        }
+        self.state.name()
     }
+}
+
+/// `wall` moved back by `ago` and forward by `ahead`, held at the earliest
+/// or latest date a `DateTime` holds instead of overflowing: a backoff may
+/// put a probe further ahead than any date.
+fn wall_clock(
+    wall: chrono::DateTime<chrono::Utc>,
+    ago: std::time::Duration,
+    ahead: std::time::Duration,
+) -> chrono::DateTime<chrono::Utc> {
+    let delta =
+        |by: std::time::Duration| chrono::TimeDelta::from_std(by).unwrap_or(chrono::TimeDelta::MAX);
+    let back = wall
+        .checked_sub_signed(delta(ago))
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
+    back.checked_add_signed(delta(ahead))
+        .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC)
 }
 
 /// The live status of one sink engine.
@@ -853,4 +885,77 @@ pub struct LaneId {
 
 fn is_zero(count: &u64) -> bool {
     *count == 0
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    fn parked_until(ahead: Duration) -> engine::LaneHealth {
+        let since = tokio::time::Instant::now();
+        engine::LaneHealth::Parked {
+            reason: engine::ParkReason::Blocked {
+                reason: "index write (api)".to_owned(),
+            },
+            since,
+            next_probe: since + ahead,
+        }
+    }
+
+    /// A probe further ahead than a date can say reads as the latest date,
+    /// never a panic (a `[backoff]` of 10^16 ms, or of `u64::MAX` ms).
+    #[tokio::test(start_paused = true)]
+    async fn a_probe_past_every_date_reads_as_the_latest() {
+        for ms in [10_000_000_000_000_000, u64::MAX] {
+            let view = LaneHealthView::of(&parked_until(Duration::from_millis(ms))).unwrap();
+            assert_eq!(
+                view.next_probe,
+                Some(chrono::DateTime::<chrono::Utc>::MAX_UTC),
+                "{ms}"
+            );
+            assert!(view.since <= chrono::Utc::now());
+        }
+    }
+
+    /// `/status`, the metric's `why` and the stop message read one name.
+    #[test]
+    fn a_lane_health_has_one_name_everywhere() {
+        for (state, name) in [
+            (LaneHealthState::Open, "open"),
+            (LaneHealthState::Refused, "refused"),
+            (LaneHealthState::Blocked, "blocked"),
+            (LaneHealthState::Restaging, "restaging"),
+        ] {
+            assert_eq!(serde_json::to_value(state).unwrap(), name);
+            assert_eq!(state.name(), name);
+            let view = LaneHealthView {
+                state,
+                since: chrono::Utc::now(),
+                next_probe: None,
+                reason: String::new(),
+            };
+            assert_eq!(view.why(), name);
+        }
+    }
+
+    /// A lane parked further back than a date can say reads as the earliest.
+    #[test]
+    fn a_wall_clock_reading_saturates_both_ways() {
+        let wall = chrono::Utc::now();
+        assert_eq!(
+            wall_clock(wall, Duration::MAX, Duration::ZERO),
+            chrono::DateTime::<chrono::Utc>::MIN_UTC
+        );
+        assert_eq!(
+            wall_clock(wall, Duration::ZERO, Duration::MAX),
+            chrono::DateTime::<chrono::Utc>::MAX_UTC
+        );
+        assert_eq!(
+            wall_clock(wall, Duration::from_secs(4), Duration::ZERO),
+            wall - chrono::Duration::seconds(4)
+        );
+    }
 }

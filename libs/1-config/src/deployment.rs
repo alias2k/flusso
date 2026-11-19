@@ -16,7 +16,7 @@ mod projection;
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 
 use kernel::{FailurePolicy, IndexSchema, Options, PortEntry, common};
 use serde::{Deserialize, Serialize};
@@ -63,6 +63,13 @@ pub struct Config {
     /// file).
     #[serde(skip)]
     pub concurrency: ConcurrencyConfig,
+    /// How long flusso waits before trying again (`[backoff]`). Never written
+    /// into the lock, and read back from one as unset: it belongs to the
+    /// machine that runs flusso, which sets it with `--backoff-initial-ms` /
+    /// `FLUSSO_BACKOFF_INITIAL_MS` and `--backoff-max-ms` /
+    /// `FLUSSO_BACKOFF_MAX_MS` (which win over the file).
+    #[serde(skip)]
+    pub backoff: BackoffConfig,
     /// Bind addresses for the operational HTTP surfaces. Read by the binary, not
     /// the daemon — transport is the binary's concern. Env/flag overrides win;
     /// see [`ServerConfig`].
@@ -131,6 +138,48 @@ pub struct ConcurrencyConfig {
     pub builds: Option<NonZeroUsize>,
     /// MiB of built documents held before the ingest engine waits.
     pub max_built_mib: Option<NonZeroUsize>,
+}
+
+/// The `[backoff]` knobs, in milliseconds, each with where it was set: the
+/// file, then `--backoff-*` / `FLUSSO_BACKOFF_*` laid over it by the binary.
+/// An unset key keeps the daemon's default. The daemon resolves and checks
+/// the pair (`daemon::backoff`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BackoffConfig {
+    /// The first wait.
+    pub initial_ms: Option<BackoffValue>,
+    /// The longest wait.
+    pub max_ms: Option<BackoffValue>,
+}
+
+/// One `[backoff]` value and where it was set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackoffValue {
+    /// Milliseconds.
+    pub ms: NonZeroU64,
+    /// Where it was set.
+    pub origin: BackoffOrigin,
+}
+
+impl BackoffValue {
+    /// `ms`, set in `flusso.toml`.
+    pub fn from_file(ms: NonZeroU64) -> Self {
+        Self {
+            ms,
+            origin: BackoffOrigin::File,
+        }
+    }
+}
+
+/// Where a `[backoff]` value was set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackoffOrigin {
+    /// `flusso.toml`'s `[backoff]` table.
+    File,
+    /// The command line (`--backoff-initial-ms` / `--backoff-max-ms`).
+    Flag,
+    /// The environment (`FLUSSO_BACKOFF_INITIAL_MS` / `FLUSSO_BACKOFF_MAX_MS`).
+    Env,
 }
 
 /// One index in a [`Config`], paired with whether it is built on this run.

@@ -529,3 +529,72 @@ fn the_writes_flag_takes_the_same_cap() {
     assert!(config::parse_writes("65").unwrap_err().contains("64"));
     assert!(config::parse_writes("0").is_err());
 }
+
+#[test]
+fn backoff_section_converts_and_is_optional() {
+    let config = convert("[source]\ntype = \"postgres\"\n");
+    assert_eq!(
+        (config.backoff.initial_ms, config.backoff.max_ms),
+        (None, None),
+        "no [backoff] means the defaults"
+    );
+    let config = convert(
+        r#"
+        [source]
+        type = "postgres"
+
+        [backoff]
+        initial_ms = 200
+        max_ms = 800
+        "#,
+    );
+    let from_file = |ms| std::num::NonZeroU64::new(ms).map(config::BackoffValue::from_file);
+    assert_eq!(config.backoff.initial_ms, from_file(200));
+    assert_eq!(config.backoff.max_ms, from_file(800));
+    let constant =
+        convert("[source]\ntype = \"postgres\"\n\n[backoff]\ninitial_ms = 500\nmax_ms = 500\n");
+    assert_eq!(constant.backoff.max_ms, from_file(500));
+    let inverted =
+        convert("[source]\ntype = \"postgres\"\n\n[backoff]\ninitial_ms = 2000\nmax_ms = 1000\n");
+    assert_eq!(
+        inverted.backoff.max_ms,
+        from_file(1000),
+        "the pair is judged by the daemon's resolver, which says where each value came from"
+    );
+}
+
+#[test]
+fn backoff_refusals_name_the_key() {
+    for (table, says) in [
+        ("initial_ms = 0", "initial_ms"),
+        ("max_ms = 0", "max_ms"),
+        ("multiplier = 2", "multiplier"),
+    ] {
+        let error = parse(&format!(
+            "[source]\ntype = \"postgres\"\n\n[backoff]\n{table}\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(says), "{table}: {error}");
+    }
+    assert_eq!(
+        config::parse_backoff_ms("250"),
+        Ok(std::num::NonZeroU64::new(250).unwrap())
+    );
+    for refused in ["0", "-1", "soon"] {
+        assert!(
+            config::parse_backoff_ms(refused)
+                .unwrap_err()
+                .contains("at least 1"),
+            "{refused}"
+        );
+    }
+}
+
+#[test]
+fn backoff_is_never_written_back() {
+    let config =
+        convert("[source]\ntype = \"postgres\"\n\n[backoff]\ninitial_ms = 200\nmax_ms = 800\n");
+    let written = serde_json::to_string(&config).unwrap();
+    assert!(!written.contains("backoff"), "{written}");
+}

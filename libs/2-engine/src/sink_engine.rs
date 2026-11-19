@@ -175,8 +175,9 @@ pub struct SinkEngine {
     /// Outlives a run: a run failing for another reason leaves a parked lane
     /// parked, on its schedule. A lane not in it is open.
     health: Mutex<std::collections::BTreeMap<LaneKey, LaneState>>,
-    /// The longest a parked lane waits between two probes.
-    max_probe_backoff: std::time::Duration,
+    /// How long a parked lane waits between two probes, and a re-staged
+    /// lane between two stagings.
+    backoff: crate::Backoff,
 }
 
 impl SinkEngine {
@@ -212,15 +213,16 @@ impl SinkEngine {
             pending_reindex: Mutex::new(None),
             reindex_waiting: AtomicBool::new(false),
             health: Mutex::new(std::collections::BTreeMap::new()),
-            max_probe_backoff: health::MAX_BACKOFF,
+            backoff: crate::Backoff::default(),
         }
     }
 
-    /// The longest a parked lane waits between two probes of its front item:
-    /// the backoff starts at one second and doubles up to it. The daemon sets
-    /// `max_restart_backoff`; the default is 60 s.
-    pub fn with_max_probe_backoff(mut self, max: std::time::Duration) -> Self {
-        self.max_probe_backoff = max.max(health::FIRST_BACKOFF);
+    /// How long a parked lane waits between two probes of its front item, and
+    /// a re-staged lane between two stagings: the first wait, doubling up to
+    /// the longest. The daemon sets `[backoff]`; the default is 1 s doubling
+    /// to 60 s.
+    pub fn with_backoff(mut self, backoff: crate::Backoff) -> Self {
+        self.backoff = backoff;
         self
     }
 
@@ -240,7 +242,10 @@ impl SinkEngine {
 
     /// `lane`'s state as the last run left it; open when never stored.
     pub(super) fn lane_state(&self, lane: &LaneKey) -> LaneState {
-        self.lock_health().get(lane).cloned().unwrap_or_default()
+        self.lock_health()
+            .get(lane)
+            .cloned()
+            .unwrap_or_else(|| LaneState::new(self.backoff))
     }
 
     /// Keep `lane`'s state for the runs to come, and tell the observers when

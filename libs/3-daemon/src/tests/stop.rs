@@ -120,8 +120,7 @@ async fn a_stop_while_staging_ends_the_run_before_anything_is_captured() {
         source,
         vec![(primary(), Arc::new(UnstageableSink), SinkOptions::default())],
     );
-    let running = Daemon::new(backendless_config(), backends)
-        .with_options(super::fast_restarts())
+    let running = Daemon::new(super::fast_restarts(), backends)
         .start()
         .await
         .unwrap();

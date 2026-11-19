@@ -608,7 +608,7 @@ async fn a_parked_lane_stays_parked_when_an_acknowledgement_fails() {
         engine
             .lane_health(&LaneKey::new(index("orders"), sink_name("primary")))
             .kind(),
-        "parked"
+        "refused"
     );
 }
 

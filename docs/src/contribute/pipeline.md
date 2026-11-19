@@ -91,7 +91,7 @@ A stop is a drain, not an abort. The daemon hands the ingest engine an `engine::
 
 ### A write-wide error restarts the sink
 
-An `Err` stops **that sink engine** once the writes in flight beside it returned. The daemon restarts it with exponential backoff: one second, doubling to `max_restart_backoff` (60 s by default), back to one second after a run that made progress. Progress means:
+An `Err` stops **that sink engine** once the writes in flight beside it returned. The daemon restarts it on the one retry schedule, `engine::Backoff` ([`[backoff]`](../reference/config-toml.md#backoff), resolved and checked by `daemon::backoff`): the first wait, doubling to the longest, back to the first after a run that made progress. Progress means:
 
 - the sink engine's oldest unfinished lane item landed (a later item landing beside an older one that then fails is no progress);
 - or the ingest engine moved its source forward: its source reported reading further than ever, keepalives on a quiet stream included (or, for a source that reports no such position, confirming further than ever);
@@ -107,7 +107,7 @@ Publishing alone is not progress: a restart publishes a replayed change or backf
 
 A parked lane's parts go back in the sink engine's window unacknowledged, in receive order. Its marks, its fences and the slot stay where they are. Nothing of it is granted: it takes nothing more from its lane, and its items neither hold nor end a merge wait. Other lanes, and the merged write's other parts, land and are acknowledged as usual.
 
-When its backoff is due, its front item is written alone: a **probe**. The backoff starts at 1 s and doubles to `max_restart_backoff`; only that lane's probe landing resets it.
+When its backoff is due, its front item is written alone: a **probe**. The wait is the same `engine::Backoff` (`SinkEngine::with_backoff`); only that lane's probe landing resets it.
 
 - **Landed:** the lane opens and the rest follows.
 - **Refused or blocked again:** the backoff doubles.
@@ -119,7 +119,7 @@ A restaging lane waits until nothing of it is in flight. Then it runs `ensure_in
 
 ### The lane's state outlives a run
 
-The lane's state (`LaneHealth`: open, parked, restaging, with its backoff) lives on the `SinkEngine`, not on the run. A run that fails for another reason leaves a parked lane parked, on its schedule; `stage` reopens a restaging lane, having ensured every index. The run ends only for a sink-wide failure: a write `Err`, a failed seed, a lane failing to deliver or acknowledge.
+The lane's state (`LaneHealth`: open, parked, restaging, with its backoff; `/status` splits parked into `refused` and `blocked` by its `ParkReason`) lives on the `SinkEngine`, not on the run. A run that fails for another reason leaves a parked lane parked, on its schedule; `stage` reopens a restaging lane, having ensured every index. The run ends only for a sink-wide failure: a write `Err`, a failed seed, a lane failing to deliver or acknowledge.
 
 ### Busy items stay inside the sink
 

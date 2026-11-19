@@ -4,11 +4,13 @@
 //! kernel's [`PortEntry`](kernel::PortEntry): a `type` plus uninterpreted
 //! options.
 
+mod backoff;
 mod batch;
 mod concurrency;
 mod index_entry;
 mod server;
 
+pub use backoff::*;
 pub use batch::*;
 pub use concurrency::*;
 pub use index_entry::*;

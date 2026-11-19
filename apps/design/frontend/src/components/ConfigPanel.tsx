@@ -231,6 +231,26 @@ export function ConfigPanel({
             />
           </Field>
         </div>
+        <div className="w-28">
+          <Field label="backoff.initial_ms">
+            <Num
+              value={config.backoff?.initial_ms}
+              onChange={(v) => onChange({ ...config, backoff: { ...config.backoff, initial_ms: v } })}
+              placeholder="1000"
+              min={1}
+            />
+          </Field>
+        </div>
+        <div className="w-28">
+          <Field label="backoff.max_ms">
+            <Num
+              value={config.backoff?.max_ms}
+              onChange={(v) => onChange({ ...config, backoff: { ...config.backoff, max_ms: v } })}
+              placeholder="60000"
+              min={1}
+            />
+          </Field>
+        </div>
         <div className="w-44">
           <Field label="public_address">
             <Text

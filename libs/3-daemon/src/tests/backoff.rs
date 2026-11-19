@@ -186,6 +186,10 @@ struct RunTimes {
 impl RunTimes {
     /// How long each restart waited: from a failure to the next open.
     fn waits(&self) -> Vec<u64> {
+        seconds(&self.gaps())
+    }
+
+    fn gaps(&self) -> Vec<Duration> {
         let opened = self.opened.lock().unwrap();
         let failed = self.failed.lock().unwrap();
         let waits: Vec<Duration> = failed
@@ -193,7 +197,7 @@ impl RunTimes {
             .zip(opened.iter().skip(1))
             .map(|(failed, opened)| *opened - *failed)
             .collect();
-        seconds(&waits)
+        waits
     }
 
     fn opened(&self) -> usize {
@@ -549,7 +553,7 @@ impl Sink for RejectsOne {
 /// `stop` policy still halts its lane (ADR 0012 stage 9: the lane parks, the
 /// run goes on): after the first rejection only that item is written, alone,
 /// on every probe, nothing behind it on the lane lands or is acknowledged, and
-/// the probe's backoff (the daemon's `max_restart_backoff`) keeps doubling.
+/// the probe's backoff (the daemon's `[backoff]`) keeps doubling.
 #[tokio::test(start_paused = true)]
 async fn a_stop_rejection_halts_its_lane_writing_several_items_at_once() {
     let sink = Arc::new(RejectsOne::default());
@@ -590,5 +594,279 @@ async fn a_stop_rejection_halts_its_lane_writing_several_items_at_once() {
         seconds(&gaps(&sink.attempts_at_the_poison())),
         [1, 2, 4],
         "no probe landed, so the backoff doubles"
+    );
+}
+
+/// `[backoff] initial_ms = 200, max_ms = 800`.
+fn configured() -> config::Config {
+    let mut config = backendless_config();
+    config.backoff.initial_ms = super::in_file(200);
+    config.backoff.max_ms = super::in_file(800);
+    config
+}
+
+fn millis(gaps: &[Duration]) -> Vec<u128> {
+    gaps.iter().map(Duration::as_millis).collect()
+}
+
+/// A configured `[backoff]` is what a failed sink engine waits before each
+/// restart: 200 ms doubling to 800 ms.
+#[tokio::test(start_paused = true)]
+async fn a_sink_engine_restarts_on_the_configured_backoff() {
+    let sink = ScriptedFlushes::new(&[false, false, false, false, true]);
+    let (source, feed) = FedSource::new(ScriptedSource::new(Vec::new()));
+    let backends = backends_for(
+        Arc::new(source),
+        vec![(
+            primary(),
+            Arc::clone(&sink) as Arc<dyn Sink>,
+            SinkOptions::default(),
+        )],
+    );
+    let running = Daemon::new(configured(), backends).start().await.unwrap();
+    let flushes = Arc::clone(&sink);
+    let run = tokio::spawn(running.run(async move {
+        wait_until_count(&flushes, 5).await;
+    }));
+
+    feed.send(row_event(false, 1)).await.unwrap();
+    run.await.unwrap().unwrap();
+
+    let waits = gaps(&sink.flushes());
+    let rounded: Vec<u128> = millis(&waits).iter().map(|ms| ms / 100 * 100).collect();
+    assert_eq!(rounded, [200, 400, 800, 800], "{waits:?}");
+}
+
+/// A configured `[backoff]` is what a failed ingest engine waits before each
+/// restart.
+#[tokio::test(start_paused = true)]
+async fn an_ingest_engine_restarts_on_the_configured_backoff() {
+    let script = [AT_ONCE, AT_ONCE, AT_ONCE, AT_ONCE];
+    let source = Arc::new(ScriptedStreams::new(&script));
+    let times = Arc::clone(&source.times);
+    run_until_opened(
+        source,
+        &times,
+        script.len() + 1,
+        ScriptedFlushes::new(&[]),
+        configured(),
+    )
+    .await;
+    assert_eq!(millis(&times.gaps()), [200, 400, 800, 800]);
+}
+
+/// A configured `[backoff]` is what a parked lane's probes wait.
+#[tokio::test(start_paused = true)]
+async fn a_parked_lane_probes_on_the_configured_backoff() {
+    let sink = Arc::new(RejectsOne::default());
+    let (source, feed) = FedSource::new(ScriptedSource::new(Vec::new()));
+    let backends = backends_for(
+        Arc::new(source),
+        vec![(
+            primary(),
+            Arc::clone(&sink) as Arc<dyn Sink>,
+            SinkOptions::default(),
+        )],
+    );
+    let running = Daemon::new(configured(), backends).start().await.unwrap();
+    let run = tokio::spawn(running.run(std::future::pending()));
+
+    feed.send(row_event(false, 1)).await.unwrap();
+    while sink.attempts_at_the_poison().len() < 5 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    run.abort();
+
+    let waits = gaps(&sink.attempts_at_the_poison());
+    let rounded: Vec<u128> = millis(&waits).iter().map(|ms| ms / 100 * 100).collect();
+    assert_eq!(rounded, [200, 400, 800, 800], "{waits:?}");
+}
+
+/// A `[backoff]` whose longest wait is set below its first is refused at
+/// start, naming where each value came from.
+#[tokio::test]
+async fn a_backoff_whose_cap_is_below_its_first_wait_is_refused_at_start() {
+    let mut config = backendless_config();
+    config.backoff.max_ms = super::in_file(100);
+    let (source, _feed) = FedSource::new(ScriptedSource::new(Vec::new()));
+    let backends = backends_for(
+        Arc::new(source),
+        vec![(
+            primary(),
+            ScriptedFlushes::new(&[]) as Arc<dyn Sink>,
+            SinkOptions::default(),
+        )],
+    );
+    let error = Daemon::new(config, backends)
+        .start()
+        .await
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        error.contains(
+            "[backoff] max_ms = 100 (set in flusso.toml's [backoff] max_ms) is below \
+             initial_ms = 1000 (the default)"
+        ),
+        "{error}"
+    );
+}
+
+/// How `[backoff]` resolves: each key set or not, an unset `max_ms` never
+/// below `initial_ms`.
+#[test]
+fn a_backoff_resolves_each_unset_key_to_a_valid_value() {
+    let ms = |initial: u64, max: u64| {
+        engine::Backoff::new(Duration::from_millis(initial), Duration::from_millis(max)).unwrap()
+    };
+    let resolved = |initial: Option<u64>, max: Option<u64>| {
+        let mut config = backendless_config();
+        config.backoff.initial_ms = initial.and_then(super::in_file);
+        config.backoff.max_ms = max.and_then(super::in_file);
+        crate::backoff(&config)
+    };
+    assert_eq!(resolved(None, None).unwrap(), ms(1_000, 60_000));
+    assert_eq!(resolved(Some(200), None).unwrap(), ms(200, 60_000));
+    assert_eq!(
+        resolved(Some(120_000), None).unwrap(),
+        ms(120_000, 120_000),
+        "raising the first wait alone raises the cap with it"
+    );
+    assert_eq!(resolved(None, Some(5_000)).unwrap(), ms(1_000, 5_000));
+    assert_eq!(resolved(Some(200), Some(800)).unwrap(), ms(200, 800));
+    assert_eq!(
+        resolved(Some(500), Some(500)).unwrap(),
+        ms(500, 500),
+        "equal values: a constant interval"
+    );
+    assert!(resolved(None, Some(999)).is_err());
+    assert!(resolved(Some(800), Some(200)).is_err());
+}
+
+/// The refusal names each value's origin and the ways to change it.
+#[test]
+fn a_backoff_refusal_says_where_each_value_came_from() {
+    let value = |ms: u64, origin| {
+        Some(config::BackoffValue {
+            ms: std::num::NonZeroU64::new(ms).unwrap(),
+            origin,
+        })
+    };
+    let refusal = |initial, max| {
+        let mut config = backendless_config();
+        config.backoff.initial_ms = initial;
+        config.backoff.max_ms = max;
+        crate::backoff(&config).unwrap_err().to_string()
+    };
+    let said = refusal(
+        value(800, config::BackoffOrigin::Flag),
+        value(200, config::BackoffOrigin::Env),
+    );
+    assert!(
+        said.contains("max_ms = 200 (set by FLUSSO_BACKOFF_MAX_MS) is below initial_ms = 800 (set by --backoff-initial-ms)"),
+        "{said}"
+    );
+    assert!(
+        said.contains("Raise max_ms with flusso.toml's [backoff] max_ms, --backoff-max-ms or FLUSSO_BACKOFF_MAX_MS"),
+        "{said}"
+    );
+    assert!(
+        said.contains("lower initial_ms with flusso.toml's [backoff] initial_ms, --backoff-initial-ms or FLUSSO_BACKOFF_INITIAL_MS"),
+        "{said}"
+    );
+    let said = refusal(
+        value(800, config::BackoffOrigin::Env),
+        value(200, config::BackoffOrigin::Flag),
+    );
+    assert!(
+        said.contains("max_ms = 200 (set by --backoff-max-ms) is below initial_ms = 800 (set by FLUSSO_BACKOFF_INITIAL_MS)"),
+        "{said}"
+    );
+    let said = refusal(None, value(200, config::BackoffOrigin::File));
+    assert!(
+        said.contains("max_ms = 200 (set in flusso.toml's [backoff] max_ms) is below initial_ms = 1000 (the default)"),
+        "{said}"
+    );
+}
+
+/// A `[backoff]` of `u64::MAX` ms: a lane parks once, `/status` reads its
+/// probe as the latest date, and nothing panics or spins.
+#[tokio::test(start_paused = true)]
+async fn a_lane_parked_on_the_longest_backoff_is_reported_and_left_alone() {
+    let sink = Arc::new(RejectsOne::default());
+    let (source, feed) = FedSource::new(ScriptedSource::new(Vec::new()));
+    let backends = backends_for(
+        Arc::new(source),
+        vec![(
+            primary(),
+            Arc::clone(&sink) as Arc<dyn Sink>,
+            SinkOptions::default(),
+        )],
+    );
+    let mut config = backendless_config();
+    config.backoff.initial_ms = super::in_file(u64::MAX);
+    config.backoff.max_ms = super::in_file(u64::MAX);
+    let running = Daemon::new(config, backends).start().await.unwrap();
+    let status = running.status();
+    let run = tokio::spawn(running.run(std::future::pending()));
+
+    feed.send(row_event(false, 1)).await.unwrap();
+    while sink.attempts_at_the_poison().is_empty() {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(60)).await;
+
+    assert_eq!(sink.attempts_at_the_poison().len(), 1);
+    let snapshot = serde_json::to_value(status.snapshot()).unwrap();
+    let lane = &snapshot["sinks"]["primary"]["lanes"]["users"];
+    assert_eq!(lane["health"], "refused", "{snapshot}");
+    assert!(
+        lane["next_probe"].as_str().unwrap().starts_with("+26214"),
+        "{lane}"
+    );
+    assert!(!run.is_finished(), "the deployment goes on");
+    run.abort();
+}
+
+/// A run that made progress starts the next wait over at the configured
+/// first wait (200 ms), not at one second.
+#[tokio::test(start_paused = true)]
+async fn a_sink_engine_that_made_progress_restarts_after_the_configured_first_wait() {
+    let sink = ScriptedFlushes::new(&[false, false, true, false, true]);
+    let inner = ScriptedSource::new(Vec::new());
+    let confirmed = Arc::clone(&inner.confirmed);
+    let (source, feed) = FedSource::new(inner);
+    let backends = backends_for(
+        Arc::new(source),
+        vec![(
+            primary(),
+            Arc::clone(&sink) as Arc<dyn Sink>,
+            SinkOptions::default(),
+        )],
+    );
+    let running = Daemon::new(configured(), backends).start().await.unwrap();
+    let flushes = Arc::clone(&sink);
+    let run = tokio::spawn(running.run(async move {
+        wait_until_count(&flushes, 5).await;
+    }));
+
+    feed.send(row_event(false, 1)).await.unwrap();
+    wait_until("the first batch to be confirmed after two restarts", || {
+        confirmed.lock().unwrap().contains(&Position::new(0))
+    })
+    .await;
+    feed.send(row_event(false, 2)).await.unwrap();
+    run.await.unwrap().unwrap();
+
+    let waits = gaps(&sink.flushes());
+    assert_eq!(waits.len(), 4, "{waits:?}");
+    let rounded: Vec<u128> = millis(&[waits[0], waits[1], waits[3]])
+        .iter()
+        .map(|ms| ms / 100 * 100)
+        .collect();
+    assert_eq!(
+        rounded,
+        [200, 400, 200],
+        "200 ms, doubled, then the first wait again after the landed batch: {waits:?}"
     );
 }

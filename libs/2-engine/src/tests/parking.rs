@@ -382,7 +382,7 @@ async fn a_refusal_parks_only_its_lane_and_the_sibling_keeps_landing() {
         other => panic!("orders should be parked on its refusal, is {other:?}"),
     }
     assert!(engine.lane_health(&lane(users())).is_open());
-    assert_eq!(rig.observer.kinds(&lane(orders())), ["parked"]);
+    assert_eq!(rig.observer.kinds(&lane(orders())), ["refused"]);
     task.abort();
 }
 
@@ -396,10 +396,9 @@ async fn a_parked_lane_probes_its_front_item_alone_with_a_backoff_no_sibling_res
     let start = Instant::now();
     rig.live(&orders(), 0..2, 0).await;
     rig.live(&orders(), 5..7, 1).await;
-    let engine = Arc::new(
-        rig.engine(FailurePolicy::Stop)
-            .with_max_probe_backoff(Duration::from_secs(4)),
-    );
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop).with_backoff(
+        crate::Backoff::new(Duration::from_secs(1), Duration::from_secs(4)).unwrap(),
+    ));
     let task = spawn(Arc::clone(&engine));
     for (at, position) in (0..24).zip(2..) {
         tokio::time::sleep_until(start + Duration::from_millis(500) * at).await;
@@ -656,10 +655,9 @@ async fn a_parked_lane_stays_parked_across_a_failed_run() {
     rig.sink.answer(&orders(), Some(Answer::Block));
     let start = Instant::now();
     rig.live(&orders(), 0..2, 0).await;
-    let engine = Arc::new(
-        rig.engine(FailurePolicy::Stop)
-            .with_max_probe_backoff(Duration::from_secs(30)),
-    );
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop).with_backoff(
+        crate::Backoff::new(Duration::from_secs(1), Duration::from_secs(30)).unwrap(),
+    ));
     let task = spawn(Arc::clone(&engine));
     // Probes at 1, 3 and 7 s; the next is due at 15 s.
     tokio::time::sleep_until(start + Duration::from_millis(8_000)).await;
@@ -818,8 +816,11 @@ async fn a_refused_backfill_item_parks_its_lane() {
     let engine = Arc::new(rig.engine(FailurePolicy::Stop));
     let task = spawn(Arc::clone(&engine));
     tokio::time::sleep(Duration::from_secs(5)).await;
-    assert_eq!(engine.lane_health(&lane(orders())).kind(), "parked");
-    assert_eq!(rig.observer.kinds(&lane(orders())).first(), Some(&"parked"));
+    assert_eq!(engine.lane_health(&lane(orders())).kind(), "refused");
+    assert_eq!(
+        rig.observer.kinds(&lane(orders())).first(),
+        Some(&"refused")
+    );
     assert!(
         !rig.stream.is_idle(),
         "the refused page stays unacknowledged"
@@ -857,5 +858,103 @@ async fn a_lane_whose_write_landed_after_staging_is_staged_at_once_next_time() {
         waited < Duration::from_millis(500),
         "a cured lane is staged again at once, not after a backoff: {waited:?}"
     );
+    task.abort();
+}
+
+fn configured() -> crate::Backoff {
+    crate::Backoff::new(Duration::from_millis(200), Duration::from_millis(800)).unwrap()
+}
+
+/// A configured schedule is what a parked lane's probes wait: 200 ms
+/// doubling to 800 ms.
+#[tokio::test(start_paused = true)]
+async fn a_parked_lane_probes_on_the_configured_schedule() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.answer(&orders(), Some(Answer::Refuse));
+    let start = Instant::now();
+    rig.live(&orders(), 0..2, 0).await;
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop).with_backoff(configured()));
+    let task = spawn(Arc::clone(&engine));
+    tokio::time::sleep_until(start + Duration::from_millis(3_100)).await;
+
+    let probes: Vec<u128> = rig
+        .sink
+        .writes_of(&orders(), start)
+        .iter()
+        .map(Duration::as_millis)
+        .collect();
+    assert_eq!(probes, [0, 200, 600, 1_400, 2_200, 3_000]);
+    task.abort();
+}
+
+/// A configured schedule is what a re-staged lane waits between stagings
+/// while its target stays gone: 200 ms doubling to 800 ms, counted from the
+/// write that found it gone again.
+#[tokio::test(start_paused = true)]
+async fn a_restaged_lane_retries_on_the_configured_schedule() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.answer(&orders(), Some(Answer::MissingForGood));
+    let start = Instant::now();
+    rig.live(&orders(), 0..2, 0).await;
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop).with_backoff(configured()));
+    let task = spawn(Arc::clone(&engine));
+    tokio::time::sleep_until(start + Duration::from_millis(4_500)).await;
+
+    let ensured: Vec<u128> = rig
+        .sink
+        .ensured_at
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|at| (*at - start).as_millis())
+        .collect();
+    let writes: Vec<u128> = rig
+        .sink
+        .writes_of(&orders(), start)
+        .iter()
+        .map(Duration::as_millis)
+        .collect();
+    let waits: Vec<u128> = ensured
+        .iter()
+        .skip(1)
+        .filter_map(|staged| {
+            let found_missing = writes.iter().rev().find(|at| *at < staged)?;
+            Some(staged - found_missing)
+        })
+        .collect();
+    assert_eq!(
+        waits,
+        [200, 400, 800, 800, 800],
+        "each staging after the write that found the target gone: stagings at {ensured:?}, writes at {writes:?}"
+    );
+    task.abort();
+}
+
+/// A schedule as long as a configured `u64::MAX` ms parks the lane once:
+/// nothing panics, the parked item is not written again, and the sibling
+/// lane keeps landing.
+#[tokio::test(start_paused = true)]
+async fn a_lane_parked_on_the_longest_schedule_neither_panics_nor_spins() {
+    let longest = Duration::from_millis(u64::MAX);
+    let rig = Rig::new(Gate::default());
+    rig.sink.answer(&orders(), Some(Answer::Block));
+    let start = Instant::now();
+    rig.live(&orders(), 0..2, 0).await;
+    let engine = Arc::new(
+        rig.engine(FailurePolicy::Stop)
+            .with_backoff(crate::Backoff::new(longest, longest).unwrap()),
+    );
+    let task = spawn(Arc::clone(&engine));
+    for at in 0..10u32 {
+        tokio::time::sleep_until(start + Duration::from_secs(at.into())).await;
+        rig.live(&users(), at.into()..i64::from(at) + 1, u64::from(at) + 1)
+            .await;
+    }
+    tokio::time::sleep_until(start + Duration::from_secs(30)).await;
+
+    assert_eq!(rig.sink.writes_of(&orders(), start).len(), 1);
+    assert_eq!(rig.applied(&users()), through(10));
+    assert!(!engine.lane_health(&lane(orders())).is_open());
+    assert!(!task.is_finished(), "the run goes on");
     task.abort();
 }
