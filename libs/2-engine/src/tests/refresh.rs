@@ -647,3 +647,35 @@ async fn a_merged_write_landing_during_a_lanes_refresh() {
         rig.searchable.on(&orders())
     );
 }
+
+/// Behind the refresh lock, writes landing during a lane's refresh, merged or
+/// not, still end with every lane searchable.
+#[tokio::test(start_paused = true)]
+async fn writes_during_a_lanes_refresh_behind_the_lock_end_searchable() {
+    let mut rig = Rig::new(
+        Refresher::locked(200, 50),
+        &[users(), orders()],
+        4,
+        crate::BatchPolicy::default().max_changes,
+    );
+    rig.start();
+    rig.publish(&users(), "slow-a", Some(1)).await;
+    rig.publish(&users(), "b", Some(2)).await;
+    tokio::time::sleep(Duration::from_millis(55)).await;
+    rig.publish(&orders(), "slow-o", Some(3)).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    rig.publish(&users(), "u", Some(4)).await;
+    rig.publish(&orders(), "o", Some(5)).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(rig.stream.is_idle());
+    assert!(
+        rig.searchable.reached(&users(), 4),
+        "{:?}",
+        rig.searchable.on(&users())
+    );
+    assert!(
+        rig.searchable.reached(&orders(), 5),
+        "{:?}",
+        rig.searchable.on(&orders())
+    );
+}

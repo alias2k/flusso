@@ -184,7 +184,7 @@ struct Rig {
     engine: Arc<SinkEngine>,
     stream: Arc<ChannelStream>,
     users: Box<dyn Producer<LaneItem>>,
-    orders: Box<dyn Producer<LaneItem>>,
+    orders: Option<Box<dyn Producer<LaneItem>>>,
     quarantined: Arc<Quarantined>,
     running: Option<tokio::task::JoinHandle<Result<()>>>,
     began: Instant,
@@ -196,8 +196,18 @@ impl Rig {
     }
 
     fn with_policies(sink: Recorder, writes: usize, policies: FailurePolicies) -> Self {
+        Self::over(sink, writes, policies, &[users(), orders()])
+    }
+
+    /// A rig over `indexes`' lanes: `users`, and `orders` when listed.
+    fn over(
+        sink: Recorder,
+        writes: usize,
+        policies: FailurePolicies,
+        indexes: &[IndexName],
+    ) -> Self {
         let name: SinkName = sink_name("primary");
-        let indexes = [users(), orders()];
+        let indexes = indexes.to_vec();
         let stream = Arc::new(ChannelStream::over(64, indexes.clone(), [name.clone()]));
         let lane = |index: IndexName| {
             stream
@@ -206,7 +216,7 @@ impl Rig {
                 .producer
         };
         let users_lane = lane(users());
-        let orders_lane = lane(orders());
+        let orders_lane = indexes.contains(&orders()).then(|| lane(orders()));
         let began = Instant::now();
         *sink.started_at.lock().unwrap() = Some(began);
         let sink = Arc::new(sink);
@@ -259,7 +269,7 @@ impl Rig {
         let producer = if *index == users() {
             &self.users
         } else {
-            &self.orders
+            self.orders.as_ref().unwrap()
         };
         producer
             .publish(LaneItem::Batch(Batch {
@@ -328,6 +338,26 @@ async fn items_ready_while_a_write_is_out_go_out_together_once_it_returns() {
         Some(ms(30)),
         "once the write out returned"
     );
+}
+
+/// With one lane there is nothing to merge with: an item ready while that
+/// lane's write is out starts at once, not held for the merge wait.
+#[tokio::test(start_paused = true)]
+async fn a_single_lane_item_is_never_held_for_a_merge() {
+    let mut rig = Rig::over(
+        Recorder::default(),
+        4,
+        FailurePolicies::default(),
+        &[users()],
+    );
+    rig.start();
+    rig.publish(&users(), "slow-u1", Some(1)).await;
+    tokio::time::sleep(ms(5)).await;
+    let published = rig.publish(&users(), "u2", Some(2)).await;
+    tokio::time::sleep(ms(200)).await;
+    assert!(rig.stream.is_idle());
+    assert_eq!(rig.sink.started("users/slow-u1"), Some(ms(0)));
+    assert_eq!(rig.sink.started("users/u2"), Some(published));
 }
 
 /// A change on a quiet engine is written at once: nothing is out to wait for.
