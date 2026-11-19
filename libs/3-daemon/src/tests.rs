@@ -193,6 +193,25 @@ async fn status_reports_each_lanes_health() {
     assert_eq!(status.unhealthy_lanes().len(), 1);
     assert_eq!(status.unhealthy_lanes()[0].1.why(), "blocked");
 
+    observer.on_lane_health(
+        &lane,
+        &engine::LaneHealth::Parked {
+            reason: engine::ParkReason::Refused {
+                ids: vec!["42".to_owned()],
+                reason: "mapper_parsing_exception".to_owned(),
+            },
+            since,
+            next_probe: since + Duration::from_secs(1),
+        },
+    );
+    let lane_json = health(&status);
+    assert_eq!(
+        lane_json["health"], "refused",
+        "/status names a refusal as the metric's `why` does"
+    );
+    assert!(lane_json["reason"].as_str().unwrap().contains("id 42"));
+    assert_eq!(status.unhealthy_lanes()[0].1.why(), "refused");
+
     observer.on_lane_health(&lane, &engine::LaneHealth::Open);
     let lane_json = health(&status);
     assert_eq!(lane_json["health"], "open");

@@ -382,7 +382,7 @@ async fn a_refusal_parks_only_its_lane_and_the_sibling_keeps_landing() {
         other => panic!("orders should be parked on its refusal, is {other:?}"),
     }
     assert!(engine.lane_health(&lane(users())).is_open());
-    assert_eq!(rig.observer.kinds(&lane(orders())), ["parked"]);
+    assert_eq!(rig.observer.kinds(&lane(orders())), ["refused"]);
     task.abort();
 }
 
@@ -816,8 +816,11 @@ async fn a_refused_backfill_item_parks_its_lane() {
     let engine = Arc::new(rig.engine(FailurePolicy::Stop));
     let task = spawn(Arc::clone(&engine));
     tokio::time::sleep(Duration::from_secs(5)).await;
-    assert_eq!(engine.lane_health(&lane(orders())).kind(), "parked");
-    assert_eq!(rig.observer.kinds(&lane(orders())).first(), Some(&"parked"));
+    assert_eq!(engine.lane_health(&lane(orders())).kind(), "refused");
+    assert_eq!(
+        rig.observer.kinds(&lane(orders())).first(),
+        Some(&"refused")
+    );
     assert!(
         !rig.stream.is_idle(),
         "the refused page stays unacknowledged"

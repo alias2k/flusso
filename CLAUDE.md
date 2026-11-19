@@ -1237,7 +1237,9 @@ is the one concrete piece.
   The health (`LaneHealth`, public; `on_lane_health`/`on_lane_probe` events) lives on the
   `SinkEngine` and outlives a run; a parked lane stays parked across a failed run, on its schedule.
   The run ends only on a sink-wide failure (a write `Err`, a seed, a lane delivery or ack). `/status`
-  `sinks.<s>.lanes.<i>.health` (+ `parked_since`, `next_probe`, `reason`), `flusso.lane.parked{why}`,
+  `sinks.<s>.lanes.<i>.health` (`open`/`refused`/`blocked`/`restaging`, the same words as the
+  metric's `why`; "parked" names the refused and blocked states together: the metric, the alert, the
+  logs) (+ `parked_since`, `next_probe`, `reason`), `flusso.lane.parked{why}`,
   `flusso.lane.probes{outcome}`, and the stop's deadline message names the lane. Not yet: fresh
   builds of a refused item (§6, needs 8a), reindex per lane, a per-index memory share (a parked lane
   can fill the budget, as a stalled sink does). Guards: `tests::parking` (paused time),

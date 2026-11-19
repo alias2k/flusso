@@ -1150,7 +1150,7 @@ async fn stop_policy_parks_the_lane_and_leaves_the_batch_unacked() {
     kinds.dedup();
     assert_eq!(
         kinds,
-        [("users".to_owned(), "parked")],
+        [("users".to_owned(), "refused")],
         "parked, then probed"
     );
 }
@@ -1178,7 +1178,7 @@ async fn per_index_stop_override_parks_even_when_global_is_skip() {
     kinds.dedup();
     assert_eq!(
         kinds,
-        [("users".to_owned(), "parked")],
+        [("users".to_owned(), "refused")],
         "parked, then probed"
     );
 }

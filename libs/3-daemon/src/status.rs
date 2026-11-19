@@ -107,11 +107,12 @@ pub enum LaneHealthState {
     /// Written as usual.
     #[default]
     Open,
-    /// Not written: an item was refused under `on_error = "stop"`; its front
-    /// item is probed with a backoff.
-    Parked,
-    /// Not written: the destination refuses writes to the index for now (a
-    /// write block, a role without write permission); probed with a backoff.
+    /// Parked on a refusal: an item was refused under `on_error = "stop"`;
+    /// its front item is probed with a backoff.
+    Refused,
+    /// Parked on a block: the destination refuses writes to the index for now
+    /// (a write block, a role without write permission); probed with a
+    /// backoff.
     Blocked,
     /// Its target was gone: the index is being staged again.
     Restaging,
@@ -120,7 +121,7 @@ pub enum LaneHealthState {
 /// A lane that is not open, as `/status` and the metrics read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneHealthView {
-    /// Parked, blocked or restaging (never open: an open lane has no view).
+    /// Refused, blocked or restaging (never open: an open lane has no view).
     pub state: LaneHealthState,
     /// When it stopped being written (UTC).
     pub since: chrono::DateTime<chrono::Utc>,
@@ -151,7 +152,7 @@ impl LaneHealthView {
             } => Some(Self {
                 state: match reason {
                     engine::ParkReason::Blocked { .. } => LaneHealthState::Blocked,
-                    _ => LaneHealthState::Parked,
+                    _ => LaneHealthState::Refused,
                 },
                 since: at(*since),
                 next_probe: Some(at(*next_probe)),
@@ -167,11 +168,11 @@ impl LaneHealthView {
         }
     }
 
-    /// `parked`, `blocked` or `restaging`: the `why` label of
-    /// `flusso.lane.parked` is `refused` for `parked`.
+    /// The `why` label of `flusso.lane.parked`: `refused`, `blocked` or
+    /// `restaging`, the same word `/status` gives.
     pub fn why(&self) -> &'static str {
         match self.state {
-            LaneHealthState::Parked => "refused",
+            LaneHealthState::Refused => "refused",
             LaneHealthState::Blocked => "blocked",
             LaneHealthState::Restaging => "restaging",
             LaneHealthState::Open => "open",

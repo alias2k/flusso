@@ -67,8 +67,8 @@ pub enum LaneHealth {
 }
 
 impl LaneHealth {
-    /// The health's name in `/status` and the logs: `open`, `parked` (a
-    /// refusal), `blocked` or `restaging`.
+    /// The health's name in `/status`: `open`, `refused` or `blocked` (the
+    /// two ways a lane parks), or `restaging`.
     pub fn kind(&self) -> &'static str {
         match self {
             LaneHealth::Open => "open",
@@ -104,10 +104,10 @@ pub enum ParkReason {
 }
 
 impl ParkReason {
-    /// `parked` for a refusal, `blocked` for a block.
+    /// `refused` or `blocked`: the lane's health in `/status`.
     pub fn kind(&self) -> &'static str {
         match self {
-            ParkReason::Refused { .. } => "parked",
+            ParkReason::Refused { .. } => "refused",
             ParkReason::Blocked { .. } => "blocked",
         }
     }

@@ -508,7 +508,7 @@ pub(crate) fn unfinished_sinks(status: &daemon::StatusSnapshot) -> String {
 fn lane_note(index: &str, lane: &daemon::LaneSnapshot) -> Option<String> {
     let health = match lane.health {
         daemon::LaneHealthState::Open => return None,
-        daemon::LaneHealthState::Parked => "parked",
+        daemon::LaneHealthState::Refused => "parked",
         daemon::LaneHealthState::Blocked => "blocked",
         daemon::LaneHealthState::Restaging => "restaging",
     };

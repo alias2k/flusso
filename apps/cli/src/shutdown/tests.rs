@@ -315,7 +315,7 @@ fn a_parked_lane_is_named_in_the_deadline_message() {
         reason: Some("refused: id 42 (mapper_parsing_exception)".to_owned()),
     };
     assert_eq!(
-        super::lane_note("users", &lane(daemon::LaneHealthState::Parked)).as_deref(),
+        super::lane_note("users", &lane(daemon::LaneHealthState::Refused)).as_deref(),
         Some(
             "lane users parked since 2026-11-19T12:03:11Z (refused: id 42 (mapper_parsing_exception))"
         )
