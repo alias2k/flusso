@@ -97,13 +97,13 @@ impl SlowSink {
 
 #[async_trait]
 impl Sink for SlowSink {
-    async fn ensure_index(&self, mapping: &IndexMapping) -> sink::Result<()> {
+    async fn ensure_index(&self, mapping: &IndexMapping) -> sink::Result<sink::Ensured> {
         let index = mapping.index.as_ref();
         self.call("ensure", index).await;
         if self.failing.contains(index) {
             return Err(SinkError::Write(format!("{index} refused")));
         }
-        Ok(())
+        Ok(sink::Ensured::Existing)
     }
 
     async fn write(&self, _: &[Envelope], _: bool) -> sink::Result<WriteReport> {

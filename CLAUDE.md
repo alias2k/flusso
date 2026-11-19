@@ -961,6 +961,28 @@ is the one concrete piece.
   `a_backfill_with_every_lane_asking_starts_without_waiting`,
   `a_straggling_reindex_request_within_max_delay_joins_the_snapshot`, the daemon's
   `unseeded_sink_is_backfilled_without_touching_its_sibling`.
+- **A backfill whose target was created anew can't seed it (issue #428).** Each `Request::Backfill`
+  carries a `stream::Ticket`, numbered up per sink engine; the ingest engine answers a lane's
+  requests in one snapshot under the greatest ticket it serves, on every snapshot `Batch.ticket` and
+  the `SnapshotComplete { index, ticket }`. `outstanding` maps each index to the ticket its seed waits
+  for. When staging finds the target of an outstanding index new (`restage` after a missing target,
+  always; `stage` when `Sink::ensure_index` answers `Ensured::Created`), the pages that backfill
+  wrote are gone: `ask_again` forgets the checkpoint and requests the index from the first key under
+  a new ticket. The old snapshot's remaining pages are still written (each a build in lane order, so
+  never a step back; the fresh walk repeats them) but record no walk mark; its `SnapshotComplete`
+  names an older ticket and is acknowledged without seeding (`superseded`); a seed removes the entry
+  only for its own ticket or later. A restage resets the lane's `Walked`, and a walk ends at its
+  `SnapshotComplete`'s lane order (`Walked::ended`), keeping the next walk's items the run read
+  ahead. The fence stays `Backfilling` (or `Rebuilding`) until the fresh seed; a reindex control is
+  still ignored while outstanding; a stop after the cut skips as before; other lanes of the snapshot
+  answer their own tickets. Only a deletion the sink sees counts: an unseeded generation is written by
+  its concrete name, so with `action.auto_create_index` allowing it a write recreates it dynamically
+  and nothing is reported. Guards: `tests::gone` (both engines over a sink keeping generations:
+  deleted mid-backfill, a second deletion during the fresh one, deleted while the sink engine
+  restarts, a restart with the target intact asking nothing more, a reindex racing it, the stale and
+  repeated completions, a stop after the cut, one walk answering two requests under the later
+  ticket), `walked::tests`' `the_next_walks_items_read_ahead_survive_the_end_of_the_last`, and the
+  sink's `reindex` e2e `a_generation_deleted_mid_backfill_is_seeded_only_after_a_full_backfill`.
 - **A sink's indexes are staged concurrently (issue #398).** `SinkEngine::each_index` runs one
   `Step` per index, `STAGE_CONCURRENCY` (8) at once, each index's own steps in order; the `Sink`
   port allows `ensure_index`/`is_seeded`/`reindex` at once for different indexes, never for one,

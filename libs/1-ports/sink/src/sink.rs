@@ -245,6 +245,18 @@ impl Default for SinkOptions {
     }
 }
 
+/// What [`Sink::ensure_index`] did to an index's target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Ensured {
+    /// The target was already there, holding what was written to it; also
+    /// the answer of a sink with no target of its own.
+    Existing,
+    /// The target was created by this call, empty: whatever was written to
+    /// the index before went with a target that is gone.
+    Created,
+}
+
 /// What [`Sink::seeding`] answers for an index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -295,8 +307,15 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// this is the one place that has both facts. Never let a marker outlive
     /// the data it describes — a recreated-empty index that claims to be seeded
     /// is served, silently, with nothing in it.
-    async fn ensure_index(&self, _mapping: &IndexMapping) -> Result<()> {
-        Ok(())
+    ///
+    /// The answer says whether the target was created by this call
+    /// ([`Ensured::Created`]): it holds nothing written before. The engine
+    /// reads it for an index whose backfill is still running: the pages that
+    /// backfill wrote went with the old target, so it can't seed the new one
+    /// and a fresh backfill is asked for. The checkpoint a created target
+    /// carries must be none ([`record_walked`](Self::record_walked)).
+    async fn ensure_index(&self, _mapping: &IndexMapping) -> Result<Ensured> {
+        Ok(Ensured::Existing)
     }
 
     /// Write `envelopes`: index each upserted document, remove each deleted

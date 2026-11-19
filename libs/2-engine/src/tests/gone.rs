@@ -9,6 +9,10 @@
 //! checks two things as they happen: a seed holds every row of the table, and
 //! a recorded walk mark has every key up to it in the target it names. A
 //! second sink, `audit`, shares the first snapshot and is never touched.
+//!
+//! The rules the fix rests on are tested on their own: a lane fed by hand
+//! (which ticket seeds, what a stop after the cut leaves), and the ingest
+//! engine answering two requests of one lane with one walk.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -21,13 +25,13 @@ use sink::{Seeding, Sink, WriteReport};
 use source::cdc::{ChangeCapture, Continuity, LiveChange};
 use source::document::{Document, DocumentBuilder, DocumentId};
 use source::{RowImage, RowKey};
-use stream::Stream;
+use stream::{Batch, Consumer, LaneItem, LaneKey, Producer, Request, Stream, Ticket};
 use stream_channel::ChannelStream;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use super::{key, mapping, page_of, sink_name, users};
-use crate::{BatchPolicy, IngestEngine, Observer, Progress, SinkControl, SinkEngine};
+use crate::{BatchPolicy, IngestEngine, Observer, Progress, SinkControl, SinkEngine, Stop};
 
 /// The table's rows, `1..=ROWS`.
 const ROWS: i64 = 80;
@@ -244,16 +248,17 @@ fn row_of(envelope: &Envelope) -> i64 {
 
 #[async_trait]
 impl Sink for Generations {
-    async fn ensure_index(&self, _: &IndexMapping) -> sink::Result<()> {
+    async fn ensure_index(&self, _: &IndexMapping) -> sink::Result<sink::Ensured> {
         let mut target = self.target.lock().unwrap();
-        if !target.exists {
-            target.generation += 1;
-            target.exists = true;
-            target.content.clear();
-            target.seeded = false;
-            target.walked = None;
+        if target.exists {
+            return Ok(sink::Ensured::Existing);
         }
-        Ok(())
+        target.generation += 1;
+        target.exists = true;
+        target.content.clear();
+        target.seeded = false;
+        target.walked = None;
+        Ok(sink::Ensured::Created)
     }
 
     async fn write(&self, envelopes: &[Envelope], _: bool) -> sink::Result<WriteReport> {
@@ -615,4 +620,267 @@ async fn a_reindex_while_the_fresh_backfill_runs_stages_nothing() {
     deployment.assert_primary_whole(2);
     assert_eq!(deployment.seen.requested(&primary()), 2);
     deployment.assert_audit_untouched();
+}
+
+/// One sink engine over the `users` lane, fed by hand, with the request lane
+/// read by the test.
+struct Lane {
+    sink: Arc<Generations>,
+    stream: Arc<ChannelStream>,
+    lane: Box<dyn Producer<LaneItem>>,
+    requests: Box<dyn Consumer<Request>>,
+    stop: Stop,
+    running: JoinHandle<crate::Result<()>>,
+}
+
+impl Lane {
+    /// Staged (asking for the first backfill), then running.
+    async fn start(sink: Arc<Generations>) -> Self {
+        let stream = Arc::new(ChannelStream::over(1024, [users()], [primary()]));
+        let stop = Stop::new();
+        let engine = Arc::new(
+            SinkEngine::new(
+                primary(),
+                Arc::clone(&sink) as Arc<dyn Sink>,
+                Arc::clone(&stream) as Arc<dyn Stream>,
+                vec![mapping()],
+                Arc::new(Progress::of([users()], [primary()])),
+            )
+            .with_stop(stop.clone()),
+        );
+        engine.stage(Continuity::Resumed).await.unwrap();
+        let running = tokio::spawn(async move {
+            let (_control, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
+            engine.run(&mut rx).await
+        });
+        Self {
+            sink,
+            lane: stream
+                .lane(&LaneKey::new(users(), primary()))
+                .unwrap()
+                .producer,
+            requests: stream.requests().unwrap().consumer,
+            stream,
+            stop,
+            running,
+        }
+    }
+
+    /// The next backfill request, with its checkpoint and ticket.
+    async fn request(&mut self) -> (Option<String>, Ticket) {
+        let delivery = tokio::time::timeout(Duration::from_secs(600), self.requests.recv())
+            .await
+            .expect("no backfill request")
+            .unwrap()
+            .unwrap();
+        let (Request::Backfill { after, ticket, .. }, handle) = delivery.into_parts();
+        handle.ack().await.unwrap();
+        (after.map(|mark| mark.as_str().to_owned()), ticket)
+    }
+
+    /// A snapshot page of `rows`, as the walk answering `ticket` sends it.
+    async fn page(&self, rows: std::ops::RangeInclusive<i64>, ticket: Ticket) {
+        let last = *rows.end();
+        let envelopes: Vec<Envelope> = rows
+            .map(|row| {
+                Envelope::upsert(
+                    users(),
+                    row.to_string(),
+                    GenericValue::Map(BTreeMap::new()),
+                    None,
+                    chrono::Utc::now(),
+                )
+            })
+            .collect();
+        self.lane
+            .publish(LaneItem::Batch(Batch {
+                position: None,
+                changes: 0,
+                envelopes: envelopes.into(),
+                hold: Default::default(),
+                walked: Some(stream::WalkMark::new(format!("{last:04}"))),
+                ticket: Some(ticket),
+            }))
+            .await
+            .unwrap();
+    }
+
+    async fn complete(&self, ticket: Ticket) {
+        self.lane
+            .publish(LaneItem::SnapshotComplete {
+                index: users(),
+                ticket,
+            })
+            .await
+            .unwrap();
+    }
+
+    /// Everything published was taken and acknowledged.
+    async fn drained(&self) {
+        let drained = tokio::time::timeout(Duration::from_secs(600), async {
+            while !self.stream.is_idle() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(drained.is_ok(), "the lane never drained");
+    }
+}
+
+impl Drop for Lane {
+    fn drop(&mut self) {
+        self.running.abort();
+    }
+}
+
+/// The cut, by hand: rows 1..=10 land, the target is deleted, row 11 finds
+/// it missing, and staging asks again.
+async fn cut(lane: &mut Lane) -> (Ticket, Ticket) {
+    let (_, first) = lane.request().await;
+    lane.page(1..=10, first).await;
+    lane.drained().await;
+    lane.sink.delete();
+    lane.page(11..=11, first).await;
+    let (after, fresh) = lane.request().await;
+    assert_eq!(after, None, "a fresh backfill starts from the first key");
+    assert!(fresh > first, "{fresh} after {first}");
+    (first, fresh)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_completion_answering_an_older_request_seeds_nothing() {
+    let mut lane = Lane::start(Arc::default()).await;
+    let (first, fresh) = cut(&mut lane).await;
+
+    lane.page(12..=ROWS, first).await;
+    lane.complete(first).await;
+    lane.drained().await;
+    assert!(lane.sink.seeds().is_empty(), "the cut backfill seeded");
+    // The old request delivered again (an ingest restart before its
+    // acknowledgement) completes once more, and still seeds nothing.
+    lane.complete(first).await;
+    lane.drained().await;
+    assert!(
+        lane.sink.seeds().is_empty(),
+        "a repeated old completion seeded"
+    );
+
+    lane.page(1..=ROWS, fresh).await;
+    lane.complete(fresh).await;
+    lane.drained().await;
+    assert_eq!(
+        lane.sink.seeds(),
+        vec![Seed {
+            generation: 2,
+            missing: Vec::new()
+        }]
+    );
+    assert!(lane.sink.ahead().is_empty(), "{:?}", lane.sink.ahead());
+}
+
+/// Both requests answered by one walk (the old one had not started when the
+/// fresh one was asked for): it names the fresh ticket, and seeds.
+#[tokio::test(start_paused = true)]
+async fn a_completion_answering_the_fresh_request_seeds_with_no_old_one_first() {
+    let mut lane = Lane::start(Arc::default()).await;
+    let (_, fresh) = cut(&mut lane).await;
+
+    lane.page(1..=ROWS, fresh).await;
+    lane.complete(fresh).await;
+    lane.drained().await;
+    assert_eq!(
+        lane.sink.seeds(),
+        vec![Seed {
+            generation: 2,
+            missing: Vec::new()
+        }]
+    );
+}
+
+/// A stop after the cut leaves the index unseeded, and records no mark of
+/// either walk in the new target: the next start asks from the first key.
+#[tokio::test(start_paused = true)]
+async fn a_stop_after_the_cut_leaves_it_unseeded_for_a_full_backfill_on_the_next_start() {
+    let mut lane = Lane::start(Arc::default()).await;
+    let (first, fresh) = cut(&mut lane).await;
+    lane.page(12..=ROWS, first).await;
+    lane.complete(first).await;
+    lane.drained().await;
+
+    lane.stop.request();
+    lane.page(1..=ROWS, fresh).await;
+    lane.complete(fresh).await;
+    lane.drained().await;
+    assert!(lane.sink.seeds().is_empty(), "seeded past a stop");
+
+    let sink = Arc::clone(&lane.sink);
+    drop(lane);
+    let mut next = Lane::start(sink).await;
+    assert_eq!(
+        next.request().await.0,
+        None,
+        "the next start resumes no walk of the deleted target or the cut one"
+    );
+}
+
+/// Two requests of one lane, queued before the snapshot starts, are walked
+/// once and answered under the later ticket; another lane of the same
+/// snapshot keeps its own.
+#[tokio::test(start_paused = true)]
+async fn one_walk_answers_a_lanes_two_requests_under_the_later_ticket() {
+    let names = [primary(), audit()];
+    let stream = Arc::new(ChannelStream::over(1024, [users()], names.clone()));
+    let requests = stream.requests().unwrap().producer;
+    for (sink, ticket) in [(primary(), 1), (primary(), 2), (audit(), 7)] {
+        requests
+            .publish(Request::Backfill {
+                index: users(),
+                sink,
+                after: None,
+                ticket: Ticket::new(ticket),
+            })
+            .await
+            .unwrap();
+    }
+    let ingest = IngestEngine::new(
+        Arc::new(Quiet) as Arc<dyn ChangeCapture>,
+        Arc::new(Table::new()) as Arc<dyn DocumentBuilder>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        names.to_vec(),
+        Arc::new(Progress::of([users()], names.clone())),
+    )
+    .with_batch(BatchPolicy {
+        max_changes: 16,
+        max_delay: Duration::from_millis(50),
+    });
+    let running = tokio::spawn(async move { ingest.run().await });
+
+    for (sink, expected) in [(primary(), Ticket::new(2)), (audit(), Ticket::new(7))] {
+        let mut consumer = stream
+            .lane(&LaneKey::new(users(), sink.clone()))
+            .unwrap()
+            .consumer;
+        let mut rows = BTreeSet::new();
+        let mut completes = Vec::new();
+        while completes.is_empty() {
+            let delivery = tokio::time::timeout(Duration::from_secs(60), consumer.recv())
+                .await
+                .expect("the snapshot never completed")
+                .unwrap()
+                .unwrap();
+            let (item, handle) = delivery.into_parts();
+            match item {
+                LaneItem::Batch(batch) => {
+                    assert_eq!(batch.ticket, Some(expected), "{sink}");
+                    rows.extend(batch.envelopes.iter().map(row_of));
+                }
+                LaneItem::SnapshotComplete { ticket, .. } => completes.push(ticket),
+            }
+            handle.ack().await.unwrap();
+        }
+        assert_eq!(completes, vec![expected], "{sink}");
+        assert_eq!(rows, (1..=ROWS).collect::<BTreeSet<_>>(), "{sink}");
+        assert!(consumer.is_empty(), "{sink}: one walk, one completion");
+    }
+    running.abort();
 }

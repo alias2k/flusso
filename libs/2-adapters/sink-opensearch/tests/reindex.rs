@@ -48,7 +48,7 @@ use kernel::{
 use kernel::{Envelope, Position};
 use reqwest::StatusCode;
 use serde_json::Value;
-use sink::Sink;
+use sink::{Ensured, Sink};
 use sink_opensearch::OpensearchSink;
 
 #[path = "support/buffered.rs"]
@@ -580,15 +580,29 @@ async fn generation_deleted_while_running_is_reported_missing_and_is_rebuilt() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs Docker (starts an OpenSearch container)"]
 async fn a_generation_deleted_mid_backfill_is_seeded_only_after_a_full_backfill() {
-    // Issue #428: the unseeded generation a backfill is filling is deleted.
-    // The next write finds it missing; staging again creates it anew, empty,
-    // and says so, which is how the engine knows the running backfill can't
-    // seed it. Its checkpoint went with it. What the old backfill still writes
-    // lands, but only a fresh backfill of every row makes it whole, and only
-    // then is it seeded.
+    // Issue #428: the unseeded generation a backfill is filling is deleted,
+    // on a cluster that forbids auto-creating flusso's generations (the
+    // manual's recommended `action.auto_create_index`). The next write finds
+    // it missing; staging again creates it anew, empty, and says so, which is
+    // how the engine knows the running backfill can't seed it. Its checkpoint
+    // went with it. What the old backfill still writes lands, but only a fresh
+    // backfill of every row makes it whole, and only then is it seeded.
     const ROWS: usize = 20;
     let (_container, base) = start_opensearch().await;
     let client = reqwest::Client::new();
+    let status = client
+        .put(format!("{base}/_cluster/settings"))
+        .json(&serde_json::json!({
+            "persistent": { "action.auto_create_index": format!("+flusso_meta,-{LOGICAL}_*,+*") }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(
+        status.is_success(),
+        "setting auto_create_index returned {status}"
+    );
     let index = IndexName::try_new(LOGICAL).unwrap();
     let mapping = mapping();
     let hash_alias = format!("{LOGICAL}_{}", mapping.hash);
@@ -632,8 +646,8 @@ async fn a_generation_deleted_mid_backfill_is_seeded_only_after_a_full_backfill(
     // ── Staged again: a new, empty generation, its checkpoint gone ───────────
     let again = sink.ensure_index(&mapping).await.unwrap();
     assert_eq!(
-        format!("{again:?}"),
-        "Created",
+        again,
+        Ensured::Created,
         "staging must say the target is new: the backfill writing it has lost its pages"
     );
     assert_eq!(

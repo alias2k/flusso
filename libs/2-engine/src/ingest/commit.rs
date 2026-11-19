@@ -287,6 +287,7 @@ impl IngestEngine {
                             envelopes: Arc::clone(envelopes),
                             hold: hold.clone(),
                             walked: None,
+                            ticket: None,
                         }),
                     ));
                 }
@@ -320,7 +321,7 @@ impl IngestEngine {
     async fn publish_backfill(
         &self,
         built: Built,
-        requested: &BTreeMap<SinkName, std::collections::BTreeSet<IndexName>>,
+        requested: &BTreeMap<SinkName, BTreeMap<IndexName, stream::Ticket>>,
         marks: &BTreeMap<IndexName, stream::WalkMark>,
         hold: &Hold,
         lanes: &Lanes,
@@ -333,7 +334,7 @@ impl IngestEngine {
         let documents: usize = groups.values().map(|envelopes| envelopes.len()).sum();
         let mut publishes = Vec::new();
         for (sink, indexes) in requested {
-            for index in indexes {
+            for (index, ticket) in indexes {
                 let Some(envelopes) = groups.get(index) else {
                     continue;
                 };
@@ -351,6 +352,7 @@ impl IngestEngine {
                         envelopes: Arc::clone(envelopes),
                         hold: hold.clone(),
                         walked: marks.get(index).cloned(),
+                        ticket: Some(*ticket),
                     }),
                 ));
             }

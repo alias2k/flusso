@@ -101,7 +101,7 @@ impl Gate {
 
 #[async_trait]
 impl Sink for Gate {
-    async fn ensure_index(&self, mapping: &IndexMapping) -> sink::Result<()> {
+    async fn ensure_index(&self, mapping: &IndexMapping) -> sink::Result<sink::Ensured> {
         let name = mapping.index.to_string();
         self.ensured.lock().unwrap().push(name.clone());
         self.ensured_at.lock().unwrap().push(Instant::now());
@@ -109,8 +109,9 @@ impl Sink for Gate {
         if answers.get(&name) == Some(&Answer::Missing) {
             answers.remove(&name);
             self.unseeded.lock().unwrap().insert(name);
+            return Ok(sink::Ensured::Created);
         }
-        Ok(())
+        Ok(sink::Ensured::Existing)
     }
 
     async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> sink::Result<WriteReport> {
@@ -256,6 +257,7 @@ fn item(of: &IndexName, ids: std::ops::Range<i64>, position: Option<u64>) -> Lan
             .into(),
         hold: Default::default(),
         walked: None,
+        ticket: None,
     })
 }
 

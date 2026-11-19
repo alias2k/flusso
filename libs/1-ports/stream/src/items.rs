@@ -4,10 +4,10 @@
 //!
 //! ```
 //! use kernel::Position;
-//! use stream::{Batch, LaneItem};
+//! use stream::{Batch, LaneItem, Ticket};
 //!
-//! let live = LaneItem::Batch(Batch { position: Some(Position::new(7)), changes: 3, envelopes: Vec::new().into(), hold: Default::default(), walked: None });
-//! let snapshot = LaneItem::Batch(Batch { position: None, changes: 0, envelopes: Vec::new().into(), hold: Default::default(), walked: None });
+//! let live = LaneItem::Batch(Batch { position: Some(Position::new(7)), changes: 3, envelopes: Vec::new().into(), hold: Default::default(), walked: None, ticket: None });
+//! let snapshot = LaneItem::Batch(Batch { position: None, changes: 0, envelopes: Vec::new().into(), hold: Default::default(), walked: None, ticket: Some(Ticket::new(1)) });
 //! assert_eq!(live.position(), Some(Position::new(7)));
 //! assert_eq!(snapshot.position(), None, "snapshot rows carry no position");
 //! ```
@@ -24,8 +24,15 @@ pub enum LaneItem {
     /// The envelopes one ingest commit built, in build order.
     Batch(Batch),
     /// The snapshot the lane requested for its index is fully published; the
-    /// sink engine may now record the index as seeded.
-    SnapshotComplete { index: IndexName },
+    /// sink engine may now record the index as seeded, unless `ticket` names
+    /// an older request than the one its seed waits for.
+    SnapshotComplete {
+        index: IndexName,
+        /// The lane's request this snapshot answers: the greatest of those it
+        /// served.
+        #[serde(default)]
+        ticket: Ticket,
+    },
 }
 
 /// Which lane: one index, as one sink receives it. Ordered by index, then
@@ -79,6 +86,40 @@ pub struct Batch {
     /// of the batch's documents. `None` on a live batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub walked: Option<WalkMark>,
+    /// On a snapshot batch, the lane's request its snapshot answers (as
+    /// [`LaneItem::SnapshotComplete`] names it). `None` on a live batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<Ticket>,
+}
+
+/// Names one backfill request of a lane. A sink engine numbers its requests
+/// in increasing order, and every snapshot item a lane receives names the
+/// greatest ticket of that lane's requests its snapshot serves. So a sink
+/// engine that asked again (its target was created anew in the middle of a
+/// backfill) tells the items of the snapshot that can no longer seed it from
+/// the ones that can.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct Ticket(u64);
+
+impl Ticket {
+    /// The ticket numbered `number`.
+    pub const fn new(number: u64) -> Self {
+        Self(number)
+    }
+
+    /// Its number.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for Ticket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
 }
 
 /// A point in a backfill's walk over an index's root keys: opaque to the
@@ -148,12 +189,15 @@ pub enum Request {
     /// [`LaneItem::SnapshotComplete`]. Acknowledged by the ingest engine only
     /// after that marker is published, so a crash mid-snapshot redelivers it.
     /// `after`: where the sink's last walk of the index durably got, if it
-    /// recorded one; the snapshot resumes after it.
+    /// recorded one; the snapshot resumes after it. `ticket`: this request's
+    /// number, which every item of the snapshot names back.
     Backfill {
         index: IndexName,
         sink: SinkName,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         after: Option<WalkMark>,
+        #[serde(default)]
+        ticket: Ticket,
     },
 }
 

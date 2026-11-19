@@ -15,6 +15,13 @@
 //! lanes   A (no point)   B after k₁   C after k₂
 //! walk    (·, k₁] → A    (k₁, k₂] → A, B    (k₂, last] → A, B, C
 //! ```
+//!
+//! **Tickets.** Every item a lane receives from a snapshot, its batches and
+//! its `SnapshotComplete`, names the greatest [`Ticket`] of the lane's
+//! requests the snapshot serves. A lane that asked twice before the snapshot
+//! started (its sink engine asked again after its target was created anew)
+//! has both answered by one walk, which started after the second request: it
+//! names the second, and seeds.
 
 use std::cmp::Ordering as KeyOrder;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -25,7 +32,7 @@ use futures::future::{BoxFuture, try_join_all};
 use kernel::{IndexName, SinkName};
 use source::RowKey;
 use source::document::{DocumentBuilder, DocumentId};
-use stream::{AckHandle, Consumer, LaneItem, LaneKey, Request};
+use stream::{AckHandle, Consumer, LaneItem, LaneKey, Request, Ticket};
 use tokio::time::{Duration, Instant, timeout_at};
 
 use crate::error::Result;
@@ -92,25 +99,36 @@ impl IngestEngine {
         scopes: &HashSet<IndexName>,
         lanes: &Lanes,
     ) -> Result<Option<Snapshot>> {
-        let mut requested: BTreeMap<SinkName, BTreeSet<IndexName>> = BTreeMap::new();
+        let mut requested: BTreeMap<SinkName, BTreeMap<IndexName, Ticket>> = BTreeMap::new();
         let mut points: BTreeMap<IndexName, Vec<(SinkName, Option<stream::WalkMark>)>> =
             BTreeMap::new();
         let mut handles = Vec::with_capacity(deliveries.len());
         for delivery in deliveries {
             let (request, handle) = delivery.into_parts();
-            let Request::Backfill { index, sink, after } = request;
+            let Request::Backfill {
+                index,
+                sink,
+                after,
+                ticket,
+            } = request;
             if scopes.contains(&index) {
-                requested
+                let answered = requested
                     .entry(sink.clone())
                     .or_default()
-                    .insert(index.clone());
+                    .entry(index.clone())
+                    .or_default();
+                *answered = (*answered).max(ticket);
                 points.entry(index).or_default().push((sink, after));
             } else {
                 tracing::warn!(index = %index, %sink, "backfill requested for an index the source does not build; ignoring");
             }
             handles.push(handle);
         }
-        let indexes: BTreeSet<IndexName> = requested.values().flatten().cloned().collect();
+        let indexes: BTreeSet<IndexName> = requested
+            .values()
+            .flat_map(BTreeMap::keys)
+            .cloned()
+            .collect();
         let mut plans = HashMap::with_capacity(points.len());
         for (index, points) in points {
             let plan = plan_walk(self.documents.as_ref(), &index, points).await;
@@ -147,12 +165,13 @@ impl IngestEngine {
         lanes: &Lanes,
     ) -> Result<()> {
         let markers = snapshot.requested.iter().flat_map(|(sink, indexes)| {
-            indexes.iter().filter_map(|index| {
+            indexes.iter().filter_map(|(index, ticket)| {
                 lanes
                     .get(&LaneKey::new(index.clone(), sink.clone()))
                     .map(|producer| {
                         producer.publish(LaneItem::SnapshotComplete {
                             index: index.clone(),
+                            ticket: *ticket,
                         })
                     })
             })
@@ -169,11 +188,12 @@ impl IngestEngine {
     }
 }
 
-/// A running snapshot: the walk over its indexes' keys, who asked for what,
-/// the request handles to acknowledge at the end, and the batch being filled.
+/// A running snapshot: the walk over its indexes' keys, who asked for what
+/// (each lane with the greatest ticket it is answered under), the request
+/// handles to acknowledge at the end, and the batch being filled.
 pub(super) struct Snapshot {
     pub(super) walk: Walk,
-    pub(super) requested: BTreeMap<SinkName, BTreeSet<IndexName>>,
+    pub(super) requested: BTreeMap<SinkName, BTreeMap<IndexName, Ticket>>,
     pub(super) indexes: HashSet<IndexName>,
     pub(super) handles: Vec<Box<dyn AckHandle>>,
     pub(super) batch: PendingBatch,
@@ -187,19 +207,20 @@ pub(super) struct Snapshot {
 
 impl Snapshot {
     /// The lanes a batch built now goes to: each requested index to the
-    /// lanes its walk has reached.
-    pub(super) fn lanes_now(&self) -> BTreeMap<SinkName, BTreeSet<IndexName>> {
+    /// lanes its walk has reached, with the ticket each lane is answered
+    /// under.
+    pub(super) fn lanes_now(&self) -> BTreeMap<SinkName, BTreeMap<IndexName, Ticket>> {
         self.requested
             .iter()
             .map(|(sink, indexes)| {
                 let reached = indexes
                     .iter()
-                    .filter(|index| self.walk.reaches(index, sink))
-                    .cloned()
+                    .filter(|(index, _)| self.walk.reaches(index, sink))
+                    .map(|(index, ticket)| (index.clone(), *ticket))
                     .collect();
                 (sink.clone(), reached)
             })
-            .filter(|(_, indexes): &(SinkName, BTreeSet<IndexName>)| !indexes.is_empty())
+            .filter(|(_, indexes): &(SinkName, BTreeMap<IndexName, Ticket>)| !indexes.is_empty())
             .collect()
     }
 

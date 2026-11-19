@@ -29,6 +29,25 @@
 //! flight returned: `reindex` + `ensure_index` on the sink, then a fresh
 //! `Backfill` request.
 //!
+//! **A backfill cut short by a new target** (issue #428). Each request
+//! carries a [`Ticket`], increasing, and every snapshot item names the ticket
+//! it answers. When staging finds the target of an index whose backfill is
+//! still outstanding created anew (it went missing under a write, or
+//! `ensure_index` had to create it on a restage), the pages that backfill
+//! wrote went with the old target. The index is asked for again from the
+//! first key, under a new ticket, and its checkpoint forgotten. The old
+//! snapshot's remaining pages still land: each is a build of its row,
+//! delivered in lane order with the live changes, so writing it is never a
+//! step back, only work the fresh backfill repeats. But they record no walk
+//! mark, and the old `SnapshotComplete`, naming an older ticket, seeds
+//! nothing: only the fresh backfill's does. Other lanes of the same snapshot
+//! (another sink, another index) answer their own tickets and are untouched.
+//!
+//! ```text
+//! lane     p₁ p₂ │delete│ p₃ p₄ Complete(1) q₁ q₂ q₃ q₄ Complete(2)
+//! target   A  A        B  B   (not seeded)  B  B  B  B  seeded
+//! ```
+//!
 //! The loop also reports the sink's two **fence levels** to the progress and
 //! the observer, in position order whatever order the writes finish in
 //! (`fences`). *Applied* is the last position before the oldest one still
@@ -37,7 +56,7 @@
 //! position always means "this and everything before it". The engine only
 //! observes; nothing here asks the sink to refresh because a reader waits.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -46,7 +65,7 @@ use futures::stream::FuturesUnordered;
 use kernel::{IndexMapping, IndexName, SinkName};
 use sink::{Sink, SinkOptions};
 use source::cdc::Continuity;
-use stream::{LaneKey, Request, Stream, WalkMark};
+use stream::{LaneKey, Request, Stream, Ticket, WalkMark};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant, sleep_until};
 
@@ -130,10 +149,14 @@ pub struct SinkEngine {
     observer: Arc<dyn Observer>,
     failure_policies: FailurePolicies,
     skip_backfill: bool,
-    /// Indexes with a `Backfill` request published and no `SnapshotComplete`
-    /// received yet. Survives a restart of this engine's run, so re-staging
-    /// doesn't ask for a snapshot the ingest engine is already serving.
-    outstanding: Mutex<BTreeSet<IndexName>>,
+    /// Indexes with a `Backfill` request published and not seeded yet, each
+    /// with the ticket of its latest request: only a `SnapshotComplete`
+    /// answering it seeds the index. Survives a restart of this engine's run,
+    /// so re-staging doesn't ask for a snapshot the ingest engine is already
+    /// serving.
+    outstanding: Mutex<BTreeMap<IndexName, Ticket>>,
+    /// The last ticket a request of this engine carried.
+    tickets: AtomicU64,
     /// The fence levels over the positions received, in position order.
     /// Survives a restart of this engine's run, so a redelivered item keeps
     /// its place and a position written before a failure is still reported
@@ -200,7 +223,8 @@ impl SinkEngine {
             observer: Arc::new(NoopObserver),
             failure_policies: FailurePolicies::default(),
             skip_backfill: false,
-            outstanding: Mutex::new(BTreeSet::new()),
+            outstanding: Mutex::new(BTreeMap::new()),
+            tickets: AtomicU64::new(0),
             fences: Mutex::new(Fences::default()),
             progress,
             stop: Stop::new(),
@@ -266,8 +290,10 @@ impl SinkEngine {
 
     /// Stage `index` again after its target went missing: `ensure_index`
     /// (which retracts a seed whose target is gone and creates a fresh one),
-    /// then, when it is unseeded, a backfill unless one is outstanding. Runs
-    /// beside writes of the other indexes, never beside one of `index`.
+    /// then, when it is unseeded, a backfill. One already outstanding is cut
+    /// short: what it wrote went with the missing target, so a fresh one is
+    /// asked for. Runs beside writes of the other indexes, never beside one
+    /// of `index`.
     pub(super) async fn restage(&self, index: &IndexName) -> Result<()> {
         let Some(mapping) = self.mappings.iter().find(|m| &m.index == index) else {
             return Ok(());
@@ -280,8 +306,8 @@ impl SinkEngine {
                 mapping,
             )
             .await
-            .map_err(|error| EngineError::Staging(StagingFailures(vec![(index.clone(), error)])))?;
-        let Staged::Unseeded(walked) = staged else {
+            .map_err(|error| staging_failed(index, error))?;
+        let Staged::Unseeded { walked, .. } = staged else {
             return Ok(());
         };
         if !self.options.backfill || self.skip_backfill {
@@ -289,10 +315,26 @@ impl SinkEngine {
             return Ok(());
         }
         if self.outstanding().contains(index) {
-            tracing::warn!(%index, sink = %self.name, "staged again while its backfill is still outstanding; that backfill fills the fresh target");
-            return Ok(());
+            return self.ask_again(vec![index.clone()]).await;
         }
         self.request_backfill(vec![(index.clone(), walked)]).await
+    }
+
+    /// `indexes` were staged into new targets while their backfill was still
+    /// outstanding: the rows it wrote went with the old targets, so it can't
+    /// seed them. Forget their checkpoints, so a restart never resumes the
+    /// old walk, and ask for each again from the first key; the new ticket is
+    /// the one their seed now waits for.
+    async fn ask_again(&self, indexes: Vec<IndexName>) -> Result<()> {
+        for index in &indexes {
+            tracing::warn!(%index, sink = %self.name, "staged into a new target while its backfill was running: the rows that backfill wrote went with the old target, so it can't seed this one; asking for a fresh backfill");
+            self.sink
+                .forget_walked(index)
+                .await
+                .map_err(|error| staging_failed(index, error))?;
+        }
+        self.request_backfill(indexes.into_iter().map(|index| (index, None)).collect())
+            .await
     }
 
     /// The deployment's stop: once requested, a snapshot batch still on the
@@ -410,15 +452,27 @@ impl SinkEngine {
             self.forget_walks(&mut seeded).await?;
         }
 
+        // An index already asked for is not asked again (a restart of this
+        // engine), unless its target was just created anew: then what its
+        // backfill wrote is gone.
         let already_requested = self.outstanding();
-        let unseeded: Vec<(IndexName, Option<WalkMark>)> = seeded
-            .into_iter()
-            .filter(|(mapping, _)| !already_requested.contains(&mapping.index))
-            .filter_map(|(mapping, staged)| match staged {
-                Staged::Seeded => None,
-                Staged::Unseeded(walked) => Some((mapping.index.clone(), walked)),
-            })
-            .collect();
+        let mut unseeded: Vec<(IndexName, Option<WalkMark>)> = Vec::new();
+        let mut cut: Vec<IndexName> = Vec::new();
+        for (mapping, staged) in seeded {
+            let index = mapping.index.clone();
+            match staged {
+                Staged::Seeded => {}
+                Staged::Unseeded { created, .. } if already_requested.contains(&index) => {
+                    if created {
+                        cut.push(index);
+                    }
+                }
+                Staged::Unseeded { walked, .. } => unseeded.push((index, walked)),
+            }
+        }
+        if !cut.is_empty() {
+            self.ask_again(cut).await?;
+        }
         if self.skip_backfill {
             if !unseeded.is_empty() {
                 tracing::warn!(
@@ -515,14 +569,16 @@ impl SinkEngine {
     /// before the new walk records anything never resumes the old one.
     async fn forget_walks(&self, staged: &mut [(&IndexMapping, Staged)]) -> Result<()> {
         for (mapping, state) in staged.iter_mut() {
-            if let Staged::Unseeded(walked @ Some(_)) = state {
+            if let Staged::Unseeded {
+                walked: walked @ Some(_),
+                ..
+            } = state
+            {
                 tracing::warn!(index = %mapping.index, "the source has no resume point, so this index's unfinished backfill starts again from the first key");
                 self.sink
                     .forget_walked(&mapping.index)
                     .await
-                    .map_err(|error| {
-                        EngineError::Staging(StagingFailures(vec![(mapping.index.clone(), error)]))
-                    })?;
+                    .map_err(|error| staging_failed(&mapping.index, error))?;
                 *walked = None;
             }
         }
@@ -589,45 +645,69 @@ impl SinkEngine {
                 ask_seeded
             }
         };
-        self.sink.ensure_index(mapping).await?;
+        let created = self.sink.ensure_index(mapping).await? == sink::Ensured::Created;
         if !ask_seeded {
-            return Ok(Staged::Unseeded(None));
+            return Ok(Staged::Unseeded {
+                walked: None,
+                created,
+            });
         }
         Ok(match self.sink.seeding(&mapping.index).await? {
             sink::Seeding::Seeded => Staged::Seeded,
-            sink::Seeding::Unseeded { walked } => Staged::Unseeded(walked.map(WalkMark::new)),
-            _ => Staged::Unseeded(None),
+            sink::Seeding::Unseeded { walked } => Staged::Unseeded {
+                walked: walked.map(WalkMark::new),
+                created,
+            },
+            _ => Staged::Unseeded {
+                walked: None,
+                created,
+            },
         })
     }
 
     /// Ask for a backfill of each index, after where its last one durably
-    /// got, if anywhere.
+    /// got, if anywhere, each under a new ticket that its seed then waits
+    /// for. An index counts as asked for once its request is published, so a
+    /// failure part way leaves the rest to be asked for again.
     async fn request_backfill(&self, requests: Vec<(IndexName, Option<WalkMark>)>) -> Result<()> {
         tracing::info!(indexes = requests.len(), "requesting backfill");
         let producer = self.stream.requests()?.producer;
-        for (index, after) in &requests {
+        let mut indexes = Vec::with_capacity(requests.len());
+        for (index, after) in requests {
             if after.is_some() {
                 tracing::info!(%index, sink = %self.name, "requesting a resumed backfill: its last walk recorded how far it got");
             }
+            let ticket = Ticket::new(self.tickets.fetch_add(1, Ordering::Relaxed) + 1);
             producer
                 .publish(Request::Backfill {
                     index: index.clone(),
                     sink: self.name.clone(),
-                    after: after.clone(),
+                    after,
+                    ticket,
                 })
                 .await?;
+            self.lock_outstanding().insert(index.clone(), ticket);
+            indexes.push(index);
         }
-        let indexes: Vec<IndexName> = requests.into_iter().map(|(index, _)| index).collect();
-        self.lock_outstanding().extend(indexes.iter().cloned());
         self.observer.on_backfill_requested(&self.name, &indexes);
         Ok(())
     }
 
     fn outstanding(&self) -> BTreeSet<IndexName> {
-        self.lock_outstanding().clone()
+        self.lock_outstanding().keys().cloned().collect()
     }
 
-    fn lock_outstanding(&self) -> std::sync::MutexGuard<'_, BTreeSet<IndexName>> {
+    /// Whether an item naming `ticket` answers `index`'s latest request: no
+    /// request is outstanding, or the item's ticket is that request's or
+    /// later. A snapshot batch naming none answers nothing outstanding.
+    pub(super) fn answers(&self, index: &IndexName, ticket: Option<Ticket>) -> bool {
+        match self.lock_outstanding().get(index) {
+            None => true,
+            Some(wanted) => ticket.is_some_and(|ticket| ticket >= *wanted),
+        }
+    }
+
+    fn lock_outstanding(&self) -> std::sync::MutexGuard<'_, BTreeMap<IndexName, Ticket>> {
         self.outstanding
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -774,8 +854,17 @@ impl SinkEngine {
 #[derive(Debug, Clone, PartialEq)]
 enum Staged {
     Seeded,
-    /// Unseeded, with where its last backfill durably got, if recorded.
-    Unseeded(Option<WalkMark>),
+    /// Unseeded, with where its last backfill durably got, if recorded, and
+    /// whether staging created its target (it holds nothing written before).
+    Unseeded {
+        walked: Option<WalkMark>,
+        created: bool,
+    },
+}
+
+/// A staging step of `index` failed with `error`.
+fn staging_failed(index: &IndexName, error: sink::SinkError) -> EngineError {
+    EngineError::Staging(StagingFailures(vec![(index.clone(), error)]))
 }
 
 /// Sleep until `at`; never, when nothing is waiting on time. Keeps the loop

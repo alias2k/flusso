@@ -67,7 +67,7 @@ struct UnstageableSink;
 
 #[async_trait]
 impl Sink for UnstageableSink {
-    async fn ensure_index(&self, _: &IndexMapping) -> sink::Result<()> {
+    async fn ensure_index(&self, _: &IndexMapping) -> sink::Result<sink::Ensured> {
         Err(sink::SinkError::Write("destination unreachable".to_owned()))
     }
 

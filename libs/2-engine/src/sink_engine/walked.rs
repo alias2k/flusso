@@ -12,6 +12,10 @@
 //! - **A release holds the mark.** Once any item of the lane is released,
 //!   nacked or skipped, the mark moves no further until the walk ends: the
 //!   item may come back after others, under a new delivery.
+//! - **A walk ends at its `SnapshotComplete`**, and only the items before it
+//!   are its own: items of the next walk may already be in the window (the
+//!   run reads ahead), and they start the next walk's prefix. A release among
+//!   them holds the next walk.
 //! - **Recording** is every [`RECORD_EVERY`], never ahead of the prefix, one
 //!   record in flight at a time.
 //!
@@ -41,8 +45,9 @@ pub(super) struct Walked {
     /// When the walk's first item arrived or the last record went out.
     since: Option<Instant>,
     recording: bool,
-    /// An item of the lane was released: the prefix stops where it is.
-    held: bool,
+    /// The lane order of the latest item released: until the walk holding
+    /// it ends, the prefix stops where it is.
+    held: Option<u64>,
     /// The last item's lane order, for the debug check.
     last_seq: Option<u64>,
 }
@@ -63,13 +68,11 @@ impl Walked {
         );
         self.last_seq = Some(seq);
         self.since.get_or_insert(now);
-        if !self.held {
-            self.items.push_back(Item {
-                seq,
-                mark,
-                landed: false,
-            });
-        }
+        self.items.push_back(Item {
+            seq,
+            mark,
+            landed: false,
+        });
     }
 
     /// The item at `seq` landed. Moves the prefix over every landed item at
@@ -77,6 +80,9 @@ impl Walked {
     pub(super) fn landed(&mut self, seq: u64) {
         if let Some(item) = self.items.iter_mut().find(|item| item.seq == seq) {
             item.landed = true;
+        }
+        if self.held.is_some() {
+            return;
         }
         while self.items.front().is_some_and(|item| item.landed) {
             if let Some(item) = self.items.pop_front()
@@ -87,15 +93,25 @@ impl Walked {
         }
     }
 
-    /// An item of the lane was released, nacked or acknowledged unwritten:
-    /// the prefix moves no further this walk.
-    pub(super) fn hold(&mut self) {
-        self.held = true;
-        self.items.clear();
+    /// The item at `seq` was released, nacked or acknowledged unwritten: the
+    /// prefix moves no further this walk.
+    pub(super) fn hold(&mut self, seq: u64) {
+        self.held = Some(self.held.map_or(seq, |held| held.max(seq)));
     }
 
-    /// The walk ended (its `SnapshotComplete` runs): nothing of it is
-    /// recorded any more, and the next walk starts afresh.
+    /// The walk whose `SnapshotComplete` is at `seq` ended: nothing of it is
+    /// recorded any more. Items received after it (read ahead) start the next
+    /// walk, which records from now.
+    pub(super) fn ended(&mut self, seq: u64, now: Instant) {
+        self.items.retain(|item| item.seq > seq);
+        self.reached = None;
+        self.recorded = None;
+        self.since = (!self.items.is_empty()).then_some(now);
+        self.held = self.held.filter(|held| *held > seq);
+    }
+
+    /// Forget every walk: what the lane's target held is gone, so no mark of
+    /// any item received so far means anything in the new one.
     pub(super) fn reset(&mut self) {
         *self = Self::default();
     }
@@ -166,7 +182,7 @@ mod tests {
         walked.received(1, mark("a2"), now);
         walked.landed(0);
         assert_eq!(walked.reached(), Some("a1"));
-        walked.hold();
+        walked.hold(1);
         walked.received(2, mark("a3"), now);
         walked.landed(1);
         walked.landed(2);
@@ -228,10 +244,60 @@ mod tests {
         let mut walked = Walked::default();
         walked.received(0, mark("a1"), now);
         walked.landed(0);
-        walked.hold();
+        walked.hold(0);
+        walked.ended(1, now);
+        walked.received(2, mark("b1"), now);
+        walked.landed(2);
+        assert_eq!(walked.reached(), Some("b1"));
+    }
+
+    /// The run read b1 and b2 before a's `SnapshotComplete` (seq 1) ran: they
+    /// are the next walk's, and its prefix waits for b1.
+    #[test]
+    fn the_next_walks_items_read_ahead_survive_the_end_of_the_last() {
+        let now = Instant::now();
+        let mut walked = Walked::default();
+        walked.received(0, mark("a1"), now);
+        walked.landed(0);
+        walked.received(2, mark("b1"), now);
+        walked.received(3, mark("b2"), now);
+        walked.ended(1, now);
+        assert_eq!(walked.reached(), None, "a1 is the old walk's");
+        walked.landed(3);
+        assert_eq!(walked.reached(), None, "b1 is still out");
+        walked.landed(2);
+        assert_eq!(walked.reached(), Some("b2"));
+    }
+
+    /// b1, read ahead of a's end, was released: the next walk is held too.
+    #[test]
+    fn a_release_read_ahead_holds_the_next_walk() {
+        let now = Instant::now();
+        let mut walked = Walked::default();
+        walked.received(0, mark("a1"), now);
+        walked.received(2, mark("b1"), now);
+        walked.hold(2);
+        walked.landed(0);
+        walked.ended(1, now);
+        walked.received(3, mark("b2"), now);
+        walked.landed(2);
+        walked.landed(3);
+        assert_eq!(walked.reached(), None);
+    }
+
+    /// Staging the lane again forgets every walk received so far.
+    #[test]
+    fn a_reset_forgets_every_walk() {
+        let now = Instant::now();
+        let mut walked = Walked::default();
+        walked.received(0, mark("a1"), now);
+        walked.landed(0);
+        walked.received(1, mark("a2"), now);
         walked.reset();
-        walked.received(1, mark("b1"), now);
         walked.landed(1);
+        assert_eq!(walked.reached(), None);
+        walked.received(2, mark("b1"), now);
+        walked.landed(2);
         assert_eq!(walked.reached(), Some("b1"));
     }
 

@@ -22,6 +22,7 @@ fn batch(position: u64) -> LaneItem {
         envelopes: Vec::new().into(),
         hold: Default::default(),
         walked: None,
+        ticket: None,
     })
 }
 
@@ -97,6 +98,7 @@ async fn requests_travel_up_and_are_redelivered_until_acked() {
         index: index("users"),
         sink: sink("a"),
         after: None,
+        ticket: stream::Ticket::new(1),
     };
     requests.producer.publish(request.clone()).await.unwrap();
     let mut consumer = requests.consumer;

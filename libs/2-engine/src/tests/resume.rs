@@ -237,6 +237,7 @@ impl Rig {
                 .into(),
                 hold: Default::default(),
                 walked: Some(WalkMark::new(key)),
+                ticket: None,
             }))
             .await
             .unwrap();
@@ -244,7 +245,10 @@ impl Rig {
 
     async fn complete(&self) {
         self.lane
-            .publish(LaneItem::SnapshotComplete { index: users() })
+            .publish(LaneItem::SnapshotComplete {
+                index: users(),
+                ticket: stream::Ticket::new(1),
+            })
             .await
             .unwrap();
     }

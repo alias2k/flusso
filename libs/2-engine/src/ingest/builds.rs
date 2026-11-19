@@ -37,7 +37,7 @@
 //! ```
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::task::Poll;
@@ -70,7 +70,7 @@ pub(super) enum Job {
     /// A snapshot batch, to each lane the slice it asked for, each index's
     /// slice carrying how far its walk got (the batch's greatest key of it).
     Backfill {
-        requested: BTreeMap<SinkName, BTreeSet<IndexName>>,
+        requested: BTreeMap<SinkName, BTreeMap<IndexName, stream::Ticket>>,
         marks: BTreeMap<IndexName, stream::WalkMark>,
     },
     /// A snapshot's end: `SnapshotComplete` to every lane that asked.

@@ -9,7 +9,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use async_trait::async_trait;
 use kernel::{Envelope, IndexMapping, IndexName, Op};
 use serde_json::{Value, json};
-use sink::{CaughtUp, RejectedDocument, Result, Seeding, Sink, SinkError, Visibility, WriteReport};
+use sink::{
+    CaughtUp, Ensured, RejectedDocument, Result, Seeding, Sink, SinkError, Visibility, WriteReport,
+};
 use tracing::{debug, info, warn};
 
 use crate::bulk::{BulkAction, bulk_action_fragment, plan_chunks, refused_id, render_document};
@@ -54,7 +56,7 @@ impl Sink for OpensearchSink {
         fields(index = mapping.index.as_ref()),
         err,
     )]
-    async fn ensure_index(&self, mapping: &IndexMapping) -> Result<()> {
+    async fn ensure_index(&self, mapping: &IndexMapping) -> Result<Ensured> {
         let logical = mapping.index.as_ref();
         let hash_alias = self.hash_alias(logical, &mapping.hash.to_string());
 
@@ -216,7 +218,13 @@ impl Sink for OpensearchSink {
                 single_shard,
             },
         );
-        Ok(())
+        // Created here, or by a concurrent writer since the check: either way
+        // it holds nothing written before this call.
+        Ok(if exists {
+            Ensured::Existing
+        } else {
+            Ensured::Created
+        })
     }
 
     /// Write `envelopes` as one or more bulk requests.
