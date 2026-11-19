@@ -14,14 +14,28 @@ All three of `name`, `schema`, and `enabled` are required.
 
 ## on_error
 
-`on_error` governs **per-document failures** only: an **item-level rejection** (the sink applied a bulk request, but the destination refused one document: a mapping conflict, a value it can't index, an [id OpenSearch refuses](sink-opensearch.md#document-ids)), and a document that fails to build (a [script failed on it](scripts.md#failures), or an [`array: true`](field-types.md#array) column met an object element). Under `skip`, a document that fails to build keeps its previous indexed version (none on a first backfill) and the log says so; one the destination rejected is quarantined. A write-wide failure (destination unreachable, whole request refused, or the OpenSearch sink's [target index deleted while running](sink-opensearch.md#seeding)) always stops the run and the batch is redelivered on restart. A document the OpenSearch sink refuses as busy (HTTP 429 or 503) isn't a per-document failure either: it is [resent](sink-opensearch.md#retries), and a write that runs out of retries fails like any write-wide failure.
+`on_error` decides what one bad **document** does. It covers two failures:
 
-| Value | Behavior |
-| --- | --- |
-| `"stop"` | Stop the run. The batch stays unconfirmed and is redelivered on restart, so a persistently bad document halts sync until the data or the policy changes. Dropping data is opt-in. This is the default. |
-| `"skip"` | Quarantine the document and continue. The rest of the batch is applied and acked, so the slot advances past the poison. The event is logged, counted in `flusso.documents.quarantined`, and shown in `/status` as `documents_quarantined`. The document never lands until its source row changes again. |
+- **An item-level rejection.** The destination took the write but refused one document: a mapping conflict, a value it can't index, an [id OpenSearch refuses](sink-opensearch.md#document-ids).
+- **A document that fails to build.** A [script failed on it](scripts.md#failures), or an [`array: true`](field-types.md#array) column met an object element.
 
-The global key is the default for every index; an `[[index]]` entry's `on_error` overrides it. A single `stop` rejection halts the whole batch, decided before any quarantine event is emitted. The policy is operational, not part of the document shape, so changing it never triggers a reindex. The runbook is [Handle rejected documents](../operate/rejected-documents.md).
+| Value | What happens to the document | What happens to its index |
+| --- | --- | --- |
+| `"stop"` (default) | Nothing is dropped. A rejected document's batch stays unconfirmed; a document that fails to build stops the ingest engine, which retries it after a restart. | A rejection **parks** the index's lane on that sink: it writes the same batch again alone after 1 s, then with the wait doubling up to 60 s, until it lands. The index's later changes wait behind it; the other indexes keep being written. See [A lane is stalled](../operate/stalled-lane.md). |
+| `"skip"` | A rejected document is **quarantined**: logged, counted in `flusso.documents.quarantined`, shown in `/status` as `documents_quarantined`. A document that fails to build keeps its previous indexed version (none on a first backfill). It doesn't land until its source row changes again. | Keeps going: the rest of the batch is applied and acknowledged, and the slot moves past the bad document. |
+
+The top-level `on_error` is the default for every index; an `[[index]]` entry's `on_error` overrides it. In a write holding several indexes, each is decided by its own policy: a `stop` rejection parks only its own lane, the others land, and a `skip` index's rejections are quarantined. The policy is operational, not part of the document shape, so changing it never triggers a reindex. The runbook is [Handle rejected documents](../operate/rejected-documents.md).
+
+### What never reaches on_error
+
+Failures that aren't the document's fault are handled the same way under either policy, and nothing is quarantined:
+
+| Failure | Example | What happens |
+| --- | --- | --- |
+| The index refuses writes for now | a [write block](sink-opensearch.md#write-blocks), a role without write permission on that index | The lane parks as `blocked` and is probed with the same backoff; it resumes once the refusal is lifted. |
+| The index's target is gone | its generation [deleted while flusso runs](sink-opensearch.md#seeding) | That index alone is staged again and backfilled; the other indexes keep being written. |
+| The destination is busy | HTTP 429 or 503, including the flood-stage disk block | [Resent](sink-opensearch.md#retries); a write that runs out of retries fails like the row below. |
+| The destination fails the whole write | unreachable, credentials refused, the whole request refused | The sink's run stops and restarts with backoff; the batch is redelivered. Every index on that sink waits. |
 
 ## sinks
 

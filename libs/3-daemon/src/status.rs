@@ -95,6 +95,88 @@ pub struct Status {
     budget: Option<Arc<Budget>>,
     /// Where each lane's stall comes from; `None` reports none.
     stalls: Option<Arc<Stalls>>,
+    /// The lanes that are not open (parked, blocked, restaging); an open lane
+    /// has no entry.
+    lane_health: Mutex<BTreeMap<stream::LaneKey, LaneHealthView>>,
+}
+
+/// A lane's health in `/status`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneHealthState {
+    /// Written as usual.
+    #[default]
+    Open,
+    /// Not written: an item was refused under `on_error = "stop"`; its front
+    /// item is probed with a backoff.
+    Parked,
+    /// Not written: the destination refuses writes to the index for now (a
+    /// write block, a role without write permission); probed with a backoff.
+    Blocked,
+    /// Its target was gone: the index is being staged again.
+    Restaging,
+}
+
+/// A lane that is not open, as `/status` and the metrics read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneHealthView {
+    /// Parked, blocked or restaging (never open: an open lane has no view).
+    pub state: LaneHealthState,
+    /// When it stopped being written (UTC).
+    pub since: chrono::DateTime<chrono::Utc>,
+    /// When its front item is next written alone (UTC), while parked.
+    pub next_probe: Option<chrono::DateTime<chrono::Utc>>,
+    /// Why, in the destination's words (the refused ids for a refusal).
+    pub reason: String,
+}
+
+impl LaneHealthView {
+    /// The view of an engine's `health`, its instants read against now; `None`
+    /// for an open lane.
+    fn of(health: &engine::LaneHealth) -> Option<Self> {
+        let now = tokio::time::Instant::now();
+        let wall = chrono::Utc::now();
+        let at = |instant: tokio::time::Instant| {
+            let ago = chrono::Duration::from_std(now.saturating_duration_since(instant))
+                .unwrap_or_default();
+            let ahead = chrono::Duration::from_std(instant.saturating_duration_since(now))
+                .unwrap_or_default();
+            wall - ago + ahead
+        };
+        match health {
+            engine::LaneHealth::Parked {
+                reason,
+                since,
+                next_probe,
+            } => Some(Self {
+                state: match reason {
+                    engine::ParkReason::Blocked { .. } => LaneHealthState::Blocked,
+                    _ => LaneHealthState::Parked,
+                },
+                since: at(*since),
+                next_probe: Some(at(*next_probe)),
+                reason: reason.to_string(),
+            }),
+            engine::LaneHealth::Restaging { since, reason } => Some(Self {
+                state: LaneHealthState::Restaging,
+                since: at(*since),
+                next_probe: None,
+                reason: reason.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// `parked`, `blocked` or `restaging`: the `why` label of
+    /// `flusso.lane.parked` is `refused` for `parked`.
+    pub fn why(&self) -> &'static str {
+        match self.state {
+            LaneHealthState::Parked => "refused",
+            LaneHealthState::Blocked => "blocked",
+            LaneHealthState::Restaging => "restaging",
+            LaneHealthState::Open => "open",
+        }
+    }
 }
 
 /// The live status of one sink engine.
@@ -150,6 +232,10 @@ impl SinkStatus {
                             stall_seconds: None,
                             wal_behind_bytes: None,
                             backfill_checkpoints,
+                            health: LaneHealthState::Open,
+                            parked_since: None,
+                            next_probe: None,
+                            reason: None,
                         },
                     )
                 })
@@ -197,7 +283,30 @@ impl Status {
             source: None,
             budget: None,
             stalls: None,
+            lane_health: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Record `lane`'s health, as the sink engine reported it.
+    pub(crate) fn set_lane_health(&self, lane: &stream::LaneKey, health: &engine::LaneHealth) {
+        let mut lanes = lock(&self.lane_health);
+        match LaneHealthView::of(health) {
+            Some(view) => {
+                lanes.insert(lane.clone(), view);
+            }
+            None => {
+                lanes.remove(lane);
+            }
+        }
+    }
+
+    /// Every lane that is not open: parked, blocked or being staged again.
+    /// What `flusso.lane.parked` and the stop's deadline message read.
+    pub fn unhealthy_lanes(&self) -> Vec<(stream::LaneKey, LaneHealthView)> {
+        lock(&self.lane_health)
+            .iter()
+            .map(|(lane, view)| (lane.clone(), view.clone()))
+            .collect()
     }
 
     /// Report each lane's stall and the lane that pins the slot.
@@ -491,6 +600,17 @@ impl Status {
             .map(|(name, status)| {
                 let positions = positions.sinks.remove(name).unwrap_or_default();
                 let mut snapshot = status.snapshot(captured, positions);
+                for (lane, view) in lock(&self.lane_health)
+                    .iter()
+                    .filter(|(lane, _)| &lane.sink == name)
+                {
+                    if let Some(entry) = snapshot.lanes.get_mut(lane.index.as_ref()) {
+                        entry.health = view.state;
+                        entry.parked_since = Some(rfc3339(view.since));
+                        entry.next_probe = view.next_probe.map(rfc3339);
+                        entry.reason = Some(view.reason.clone());
+                    }
+                }
                 if let Some(stalls) = &self.stalls {
                     for (index, lane) in &mut snapshot.lanes {
                         let Ok(index) = IndexName::try_new(index.as_str()) else {
@@ -704,6 +824,24 @@ pub struct LaneSnapshot {
     /// while 0.
     #[serde(skip_serializing_if = "is_zero")]
     pub backfill_checkpoints: u64,
+    /// Whether the lane is written: `open`, `parked` (a refusal under
+    /// `on_error = "stop"`), `blocked` (the index refuses writes for now) or
+    /// `restaging` (its target was gone).
+    pub health: LaneHealthState,
+    /// When it stopped being written (RFC 3339, UTC); absent while open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parked_since: Option<String>,
+    /// When its front item is next written alone (RFC 3339, UTC); absent
+    /// unless parked or blocked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_probe: Option<String>,
+    /// Why it is not written, in the destination's words; absent while open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+fn rfc3339(at: chrono::DateTime<chrono::Utc>) -> String {
+    at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 /// A lane in `/status`'s `pinned_by`.

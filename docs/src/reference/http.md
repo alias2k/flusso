@@ -15,7 +15,9 @@ Bind addresses: `--public-address` / `--private-address`, then `FLUSSO_PUBLIC_AD
 
 ## GET /readyz
 
-`200` when the phase is `backfilling` or `live`; `503` while `starting`, `stopping`, or after `stopped`. A stopping or stopped pipeline is deliberately not ready.
+`200` when the phase is `backfilling` or `live` and so is every sink's; `503` otherwise: while `starting`, while a sink is `failed` and waits to restart, from `stopping` on. A stopping or stopped pipeline is deliberately not ready.
+
+A [parked lane](#lane-health) leaves `/readyz` at `200`: the other indexes are written and served, and a restart would not unpark it. Watch the lane instead: its `health` in `/status`, the `flusso_lane_parked` series, and the `FlussoLaneParked` alert ([A lane is stalled](../operate/stalled-lane.md)).
 
 ## GET /status
 
@@ -57,6 +59,10 @@ The live status document as JSON: the deployment, then one block per sink.
 | `sinks.<name>.lanes.<index>.outstanding` | int | Items routed to the lane and not written yet. A lane that stays high is the one holding back the slot. |
 | `sinks.<name>.lanes.<index>.stall_seconds` | number, absent | How long the lane's oldest outstanding change has stayed its oldest: the lane has written nothing for that long. 0 while nothing is outstanding, and while it lands steadily. Sampled every second. Backfill rows aren't counted: they carry no position. See [A lane is stalled](../operate/stalled-lane.md). |
 | `sinks.<name>.lanes.<index>.wal_behind_bytes` | int, absent | Bytes of WAL the replication slot keeps behind this lane: the slot lag less how far the lane is ahead of the lane that pins it. It counts WAL flusso hasn't read yet as well as what it read and hasn't landed (a stalled lane pins both), so a healthy catch-up shows a large value on lanes that land every second: read it with the stall age. It is computed from the slot lag, polled every `--lag-poll-secs` (15 s by default); a failed poll keeps the last value. Absent while nothing is outstanding, or before the first lag sample. |
+| `sinks.<name>.lanes.<index>.health` | `open` \| `parked` \| `blocked` \| `restaging` | Whether flusso writes the lane. See [Lane health](#lane-health). |
+| `sinks.<name>.lanes.<index>.parked_since` | string, absent | When the lane stopped being written (RFC 3339, UTC). Absent while `open`. |
+| `sinks.<name>.lanes.<index>.next_probe` | string, absent | When a `parked` or `blocked` lane next writes its oldest batch again (RFC 3339, UTC). Absent while `open` or `restaging`. |
+| `sinks.<name>.lanes.<index>.reason` | string, absent | Why the lane isn't written, in the destination's words. Absent while `open`. |
 | `sinks.<name>.lanes.<index>.backfill_checkpoints` | int, absent | Times this run recorded how far the lane's backfill got, so a restart resumes after it (about one every 10 s while a backfill lands); absent while 0. Staying absent through a long backfill means nothing lands. See [Postgres source](source-postgres.md), "An interrupted backfill resumes". |
 
 A source position is in the source's own text form: for Postgres, a WAL LSN such as `0/16B3748`, comparable with `pg_current_wal_lsn()`. Both positions keep moving while the watched tables are idle, because the source follows unrelated WAL too.
@@ -91,12 +97,35 @@ A source position is in the source's own text form: for Postgres, a WAL LSN such
       "applied_position": "0/16B3748",
       "searchable_position": "0/16B3748",
       "lanes": {
-        "orders": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0, "stall_seconds": 0.0 },
-        "products": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0, "stall_seconds": 0.0 },
-        "users": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0, "stall_seconds": 0.0 }
+        "orders": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0, "stall_seconds": 0.0, "health": "open" },
+        "products": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0, "stall_seconds": 0.0, "health": "open" },
+        "users": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0, "stall_seconds": 0.0, "health": "open" }
       }
     }
   }
+}
+```
+
+### Lane health
+
+Each `(index, sink)` lane is written unless something about that one index stops it. Then the lane is held, its changes stay unconfirmed (so it [holds the replication slot](../operate/stalled-lane.md#what-it-costs-while-it-lasts)), and the sink's other indexes keep being written.
+
+| `health` | Meaning | `reason` holds | Until |
+| --- | --- | --- | --- |
+| `open` | Written as usual. | (absent) | |
+| `parked` | A document of the lane was refused under [`on_error = "stop"`](index-and-on-error.md#on_error). | `refused: id <ids> (<first reason>)`, a few ids at most | a probe lands |
+| `blocked` | The destination refuses every write to the index for now: a [write block](sink-opensearch.md#write-blocks), a role without write permission on it. | `blocked: <OpenSearch's reason>` | a probe lands |
+| `restaging` | The index's target was deleted while flusso ran: it is staged again and backfilled, alone. | OpenSearch's reason | staging succeeds |
+
+A **probe** writes a `parked` or `blocked` lane's oldest batch again, alone: 1 s after it parked, then with the wait doubling up to 60 s. Another lane landing never shortens the wait; a stop probes at once. A failed staging of a `restaging` lane is retried on the same schedule. A lane flusso doesn't write:
+
+```json
+"users": {
+  "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 3, "stall_seconds": 412.0,
+  "health": "blocked",
+  "parked_since": "2026-11-19T12:03:11Z",
+  "next_probe": "2026-11-19T12:10:03Z",
+  "reason": "blocked: index [users_1a2b3c4d_1] blocked by: [FORBIDDEN/8/index write (api)];"
 }
 ```
 

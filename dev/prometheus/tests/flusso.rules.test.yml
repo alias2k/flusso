@@ -81,3 +81,61 @@ tests:
                 refused under on_error = "stop", the cluster down), then fix the
                 cause, skip the document, or reindex.
               runbook_url: https://alias2k.github.io/flusso/operate/stalled-lane.html
+
+  # A refused backfill item parks `orders`: a backfill item carries no
+  # position, so the lane never gets a stall age and FlussoLaneStalled stays
+  # quiet. FlussoLaneParked fires once it has been parked for 5 minutes.
+  - interval: 1m
+    input_series:
+      - series: 'flusso_lane_parked{index="orders",sink="primary",why="refused"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: FlussoLaneParked
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: FlussoLaneStalled
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: FlussoLaneParked
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              index: orders
+              sink: primary
+              why: refused
+            exp_annotations:
+              summary: "flusso's orders lane into primary is parked (refused)"
+              description: >-
+                flusso stopped writing this index to this sink: a document
+                refused under on_error = "stop" (refused), the index refusing
+                writes (blocked: a write block, a role without write permission),
+                or a target that staging can't bring back (restaging). The other
+                indexes keep being written; this one holds the replication slot.
+                /status names why under sinks.<sink>.lanes.<index>.reason.
+              runbook_url: https://alias2k.github.io/flusso/operate/stalled-lane.html
+
+  # A lane stuck staging again is exported as parked too, why "restaging".
+  - interval: 1m
+    input_series:
+      - series: 'flusso_lane_parked{index="users",sink="primary",why="restaging"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: FlussoLaneParked
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              index: users
+              sink: primary
+              why: restaging
+            exp_annotations:
+              summary: "flusso's users lane into primary is parked (restaging)"
+              description: >-
+                flusso stopped writing this index to this sink: a document
+                refused under on_error = "stop" (refused), the index refusing
+                writes (blocked: a write block, a role without write permission),
+                or a target that staging can't bring back (restaging). The other
+                indexes keep being written; this one holds the replication slot.
+                /status names why under sinks.<sink>.lanes.<index>.reason.
+              runbook_url: https://alias2k.github.io/flusso/operate/stalled-lane.html

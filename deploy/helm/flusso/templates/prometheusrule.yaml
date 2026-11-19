@@ -55,4 +55,19 @@ spec:
               refused under on_error = "stop", the cluster down), then fix the
               cause, skip the document, or reindex.
             runbook_url: https://alias2k.github.io/flusso/operate/stalled-lane.html
+        - alert: FlussoLaneParked
+          expr: flusso_lane_parked > 0
+          for: {{ .Values.prometheusRule.for }}
+          labels:
+            severity: {{ .Values.prometheusRule.severity }}
+          annotations:
+            summary: "flusso's {{ "{{" }} $labels.index {{ "}}" }} lane into {{ "{{" }} $labels.sink {{ "}}" }} is parked ({{ "{{" }} $labels.why {{ "}}" }})"
+            description: >-
+              flusso stopped writing this index to this sink: a document
+              refused under on_error = "stop" (refused), the index refusing
+              writes (blocked: a write block, a role without write permission),
+              or a target that staging can't bring back (restaging). The other
+              indexes keep being written; this one holds the replication slot.
+              /status names why under sinks.<sink>.lanes.<index>.reason.
+            runbook_url: https://alias2k.github.io/flusso/operate/stalled-lane.html
 {{- end }}

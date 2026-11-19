@@ -58,14 +58,15 @@
 //! without merging. The slot cap and a quiet lane's one item still apply.
 //!
 //! An item behind a `SnapshotComplete` of its lane is not
-//! admissible; a lane behind a failed run's barrier, and an ordered sink,
-//! write one item alone. Two items of one lane in a write share no document
-//! (each is admissible against every earlier item of its lane). The write
-//! takes one slot; when it returns each part is decided on its own: a part
-//! whose index decides a rejection `stop` stays unacknowledged and the run
-//! fails blamed on its lane, the other parts land, move their lanes' fences
-//! and are acknowledged in lane order. A write that fails fails every part,
-//! blamed on all their lanes.
+//! admissible; a lane behind a failed run's barrier, a parked lane's probe,
+//! and an ordered sink write one item alone. Two items of one lane in a write
+//! share no document (each is admissible against every earlier item of its
+//! lane). The write takes one slot; when it returns each part is decided on
+//! its own: a part whose index the sink reports blocked or missing, or whose
+//! rejection its index decides `stop`, goes back in the window unacknowledged
+//! and its lane parks or is staged again (below); the other parts land, move
+//! their lanes' fences and are acknowledged in lane order. A write that fails
+//! fails every part, blamed on all their lanes.
 //!
 //! **Caught up.** A write is granted as caught up when some lane of it has
 //! nothing else queued or waiting in the window. Its refresh can't cover a write in
@@ -73,8 +74,18 @@
 //! leaves the engine idle, a position not yet searchable gets an empty
 //! caught-up write.
 //!
-//! **Failure.** A write that fails, a `stop` rejection, or any other error
-//! of the run (the lane failing to deliver or acknowledge, staging a reindex)
+//! **One lane's failure parks that lane** (ADR 0012 stage 9, see `health`).
+//! A `stop` refusal or a write block parks the lane: it is no longer granted,
+//! takes nothing more from its lane, and its unacknowledged items hold its
+//! marks, its fences and the source's resume point. Its front item is written
+//! again alone (a probe) when its backoff is due, at once when a stop is
+//! requested; landed, the lane opens. A missing target stages the lane's index
+//! again once nothing of the lane is in flight, beside the other lanes'
+//! writes, then the lane opens. A parked lane's items neither hold nor end a
+//! merge wait. A parked lane stays parked across runs.
+//!
+//! **Failure.** A write that fails as a whole, or any other error of the run
+//! (the lane failing to deliver or acknowledge, a seed, staging a reindex)
 //! ends the run: no new item starts, the writes in flight are awaited (the
 //! sink bounds each by its own timeouts and retries) and acknowledged when
 //! they succeeded, then the first error is returned. Every unfinished item is released with its handle, and
@@ -92,10 +103,10 @@
 //! writes its oldest item alone, as a barrier, and opens only once a write on
 //! it landed; other lanes write freely.
 //! A fresh engine counts because a previous process may have stopped on that
-//! item. So a write that fails every time (a `stop` rejection, a destination
-//! refusing it) halts the sink after its first run: on every restart of the
-//! engine nothing behind it lands, no progress resets the backoff, and the
-//! lane fills. In the run that first meets it, writes already granted beside
+//! item. So a write that fails as a whole every time (a destination refusing
+//! the request it makes) halts the sink after its first run: on every restart
+//! of the engine nothing behind it lands, no progress resets the backoff, and
+//! the lane fills. In the run that first meets it, writes already granted beside
 //! it, and disjoint ones granted while it is in flight, can land;
 //! confirmation stays before it. A new process writes its oldest *unconfirmed*
 //! item alone: when that is an older item already written (a sibling sink
@@ -110,7 +121,7 @@
 
 use std::cmp::Ordering as Order;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
@@ -126,8 +137,12 @@ use tokio::time::Instant;
 use tracing::Instrument;
 
 use super::flights::Flights;
+use super::health::LaneState;
 use super::walked::Walked;
-use super::{Blame, IDLE_TICK, SinkControl, SinkEngine, shown_id, until};
+use super::{
+    Blame, IDLE_TICK, LaneHealth, ParkReason, ProbeOutcome, SinkControl, SinkEngine, shown_id,
+    until,
+};
 use crate::error::{EngineError, Result};
 use crate::observer::{CommitStats, Stage, StageTiming, Work};
 use crate::policy::FailurePolicy;
@@ -163,6 +178,9 @@ struct LaneRun {
     backfill_waiting: usize,
     /// How far its backfill has durably got, and when to record it.
     walked: Walked,
+    /// Open, parked or being staged again; outlives the run (the engine
+    /// keeps it).
+    health: LaneState,
 }
 
 impl LaneRun {
@@ -215,6 +233,8 @@ struct Flight {
     /// For a caught-up write, how many writes had returned at its grant, and
     /// the lanes it is caught up for.
     caught_up: Option<(u64, Vec<LaneKey>)>,
+    /// The parked lane this write probes: its front item, alone.
+    probe: Option<usize>,
 }
 
 /// One lane item of a write.
@@ -225,6 +245,10 @@ struct Part {
     changes: usize,
     documents: Documents,
     seq: u64,
+    /// The item itself, put back in the window if its lane parks.
+    batch: Batch,
+    /// When it was first taken off the lane.
+    ready_at: Instant,
 }
 
 impl Flight {
@@ -248,6 +272,8 @@ enum Outcome {
     Record(sink::Result<()>),
     /// A quiet lane's empty caught-up write.
     Refresh(sink::Result<WriteReport>),
+    /// A lane's index staged again after its target went missing.
+    Restage(Result<()>),
 }
 
 /// A lane waiting for its empty caught-up write: the item whose
@@ -284,6 +310,13 @@ pub(super) struct Run<'a> {
     recording: Vec<(u64, usize)>,
     /// The empty caught-up writes in flight, by flight.
     refreshing: Vec<(u64, Refreshing)>,
+    /// Lanes being staged again, by flight: they hold no write slot.
+    restaging: Vec<(u64, usize)>,
+    /// Lanes not open (parked or restaging): while none is, nothing of the
+    /// parking is looked at.
+    unhealthy: usize,
+    /// The stop's one probe of every parked lane was scheduled.
+    stop_probed: bool,
     /// While live items wait for the writes out to merge: when the wait ends.
     hold_until: Option<Instant>,
     next_flight: u64,
@@ -317,11 +350,12 @@ impl<'a> Run<'a> {
         // Read once: from here on this run is the one a failure is blamed on.
         let blame = engine.blame();
         engine.set_blame(Blame::Nobody);
-        let lanes = lanes
+        let lanes: Vec<LaneRun> = lanes
             .into_iter()
             .map(|(key, consumer)| {
                 let blamed = blame.covers(&key);
                 LaneRun {
+                    health: engine.lane_state(&key),
                     barrier: blamed && !matches!(blame, Blame::Nobody),
                     counts: blamed,
                     key,
@@ -333,9 +367,13 @@ impl<'a> Run<'a> {
                 }
             })
             .collect();
+        let unhealthy = lanes.iter().filter(|lane| !lane.health.is_open()).count();
         Self {
             engine,
             lanes,
+            restaging: Vec::new(),
+            unhealthy,
+            stop_probed: false,
             window: VecDeque::new(),
             flights: Flights::new(),
             flying: Vec::new(),
@@ -399,11 +437,14 @@ impl<'a> Run<'a> {
             let room = wanting.contains(&true);
             let next_due = self.next_due;
             let hold_until = self.hold_until;
+            let lane_wake = self.lane_wake(Instant::now());
             // A stop changes nothing for the loop but the backfill waiting
-            // (skipped unwritten), so it is watched only while some waits.
+            // (skipped unwritten) and the parked lanes (probed at once), so it
+            // is watched only while some wait.
             let engine = self.engine;
             let stop = &engine.stop;
-            let watch_stop = self.backfill_waiting > 0 && !stop.is_requested();
+            let watch_stop =
+                (self.backfill_waiting > 0 || self.unhealthy > 0) && !stop.is_requested();
             if self.flights.is_empty() && self.window.is_empty() {
                 self.idle_since.get_or_insert_with(Instant::now);
             }
@@ -439,6 +480,7 @@ impl<'a> Run<'a> {
                         self.engine.report_searchable();
                         self.refresh_due();
                     }
+                    () = until(lane_wake), if lane_wake.is_some() => {}
                 }
                 continue;
             }
@@ -484,6 +526,7 @@ impl<'a> Run<'a> {
                     self.hold_until = None;
                     self.close_idle();
                 }
+                () = until(lane_wake), if lane_wake.is_some() => self.close_idle(),
                 () = stop.requested(), if watch_stop => self.close_idle(),
                 _ = idle_tick.tick() => self.close_idle(),
             }
@@ -496,6 +539,7 @@ impl<'a> Run<'a> {
     async fn advance(&mut self) -> Result<()> {
         if self.engine.stop.is_requested() {
             self.skip_backfill().await?;
+            self.probe_on_stop();
         }
         let pending = if self.flights.is_empty() {
             self.engine.take_pending_reindex()
@@ -513,6 +557,9 @@ impl<'a> Run<'a> {
             );
         }
         if !self.engine.reindex_pending() {
+            if self.unhealthy > 0 {
+                self.start_restages();
+            }
             // An ordered sink first takes every lane's front, so the pick by
             // position sees an earlier item a lane held back while its write
             // was in flight.
@@ -529,6 +576,12 @@ impl<'a> Run<'a> {
                 }
                 self.grant().await?;
             }
+            // A write that returned at its first poll, inside a grant, may
+            // have found its target missing: stage it now, not at the next
+            // wake-up.
+            if self.unhealthy > 0 {
+                self.start_restages();
+            }
         }
         Ok(())
     }
@@ -543,9 +596,130 @@ impl<'a> Run<'a> {
     }
 
     /// Whether a lane's items are granted only from its front, one at a time:
-    /// a lane behind the barrier of a failed run.
+    /// a lane behind the barrier of a failed run, or a parked lane's probe.
     fn in_lane_order(&self, lane: usize) -> bool {
-        self.lanes.get(lane).is_some_and(|lane| lane.barrier)
+        self.lanes
+            .get(lane)
+            .is_some_and(|lane| lane.barrier || !lane.health.is_open())
+    }
+
+    /// Whether `lane` is written as usual (not parked, not being staged).
+    fn lane_open(&self, lane: usize) -> bool {
+        self.lanes.get(lane).is_some_and(|run| run.health.is_open())
+    }
+
+    /// Whether `lane` may be granted now: open, or parked with its probe due
+    /// and nothing of it in flight.
+    fn grantable(&self, lane: usize, now: Instant) -> bool {
+        let Some(run) = self.lanes.get(lane) else {
+            return false;
+        };
+        match &run.health.health {
+            LaneHealth::Open => true,
+            LaneHealth::Parked { .. } => run.health.due <= now && !self.lane_in_flight(lane),
+            _ => false,
+        }
+    }
+
+    /// The next time a parked lane's probe or a restaging lane's staging comes
+    /// due, if any is still ahead: a due one starts on the next pass, or once
+    /// what holds it back (a write of the lane, every slot) returns.
+    fn lane_wake(&self, now: Instant) -> Option<Instant> {
+        if self.unhealthy == 0 || self.failure.is_some() {
+            return None;
+        }
+        self.lanes
+            .iter()
+            .filter(|run| !run.health.is_open() && run.health.due > now)
+            .map(|run| run.health.due)
+            .min()
+    }
+
+    /// Once a stop is requested, every parked lane is probed at once: a block
+    /// lifted meanwhile still drains, without waiting out the backoff.
+    fn probe_on_stop(&mut self) {
+        if self.stop_probed || self.unhealthy == 0 {
+            return;
+        }
+        self.stop_probed = true;
+        let now = Instant::now();
+        for run in &mut self.lanes {
+            if run.health.probe_now(now) {
+                tracing::info!(lane = %run.key, "stopping: probing the parked lane once more now");
+                self.engine.store_lane(&run.key, &run.health, true);
+            }
+        }
+    }
+
+    /// Stage again each lane whose target went missing, once nothing of it
+    /// is in flight, as a flight holding no write slot.
+    fn start_restages(&mut self) {
+        let now = Instant::now();
+        let due: Vec<usize> = (0..self.lanes.len())
+            .filter(|lane| {
+                self.lanes.get(*lane).is_some_and(|run| {
+                    matches!(run.health.health, LaneHealth::Restaging { .. })
+                        && run.health.due <= now
+                })
+            })
+            .filter(|lane| !self.lane_in_flight(*lane))
+            .collect();
+        for lane in due {
+            let Some(index) = self.lanes.get(lane).map(|run| run.key.index.clone()) else {
+                continue;
+            };
+            tracing::info!(%index, sink = %self.engine.name, "staging the index again: its target is gone");
+            let flight = self.next_flight;
+            self.next_flight += 1;
+            self.restaging.push((flight, lane));
+            let engine = self.engine;
+            let restage = async move {
+                let started = Instant::now();
+                let result = engine.restage(&index).await;
+                Landed {
+                    flight,
+                    outcome: Outcome::Restage(result),
+                    took: started.elapsed(),
+                }
+            };
+            if let Some(landed) = self.flights.start(restage.boxed()) {
+                self.restage_returned(
+                    landed.flight,
+                    match landed.outcome {
+                        Outcome::Restage(result) => result,
+                        _ => Ok(()),
+                    },
+                );
+            }
+        }
+    }
+
+    /// A lane's staging returned: staged, the lane opens and its items are
+    /// written again; failed, it is tried again after its backoff.
+    fn restage_returned(&mut self, flight: u64, result: Result<()>) {
+        let Some(at) = self.restaging.iter().position(|(id, _)| *id == flight) else {
+            return;
+        };
+        let (_, lane) = self.restaging.swap_remove(at);
+        let max = self.engine.max_probe_backoff;
+        let now = Instant::now();
+        let Some(run) = self.lanes.get_mut(lane) else {
+            return;
+        };
+        match result {
+            Ok(()) => {
+                if let Some(down) = run.health.reopen(now) {
+                    self.unhealthy = self.unhealthy.saturating_sub(1);
+                    tracing::info!(lane = %run.key, after = ?down, "the index is staged again; the lane is open");
+                    self.engine.store_lane(&run.key, &run.health, true);
+                }
+            }
+            Err(error) => {
+                run.health.restage_failed(now, max);
+                tracing::warn!(lane = %run.key, %error, retry_in = ?run.health.due.saturating_duration_since(now), "could not stage the index again; trying again later");
+                self.engine.store_lane(&run.key, &run.health, false);
+            }
+        }
     }
 
     /// An ordered sink: one write at a time over every lane.
@@ -579,7 +753,7 @@ impl<'a> Run<'a> {
         if run.closed || self.failure.is_some() {
             return false;
         }
-        if run.barrier || self.ordered() {
+        if run.barrier || !run.health.is_open() || self.ordered() {
             return run.waiting() == 0 && !self.lane_in_flight(lane);
         }
         // With several lanes, a lane with nothing waiting always takes one
@@ -594,7 +768,8 @@ impl<'a> Run<'a> {
                 || (run.live_waiting == 0 && run.backfill_waiting > 0))
     }
 
-    /// Whether a write, the seed or a checkpoint of `lane` is in flight.
+    /// Whether a write, the seed, a checkpoint or a staging of `lane` is in
+    /// flight.
     fn lane_in_flight(&self, lane: usize) -> bool {
         self.flying
             .iter()
@@ -602,6 +777,7 @@ impl<'a> Run<'a> {
             || self.lane_seeding(lane)
             || self.recording.iter().any(|(_, at)| *at == lane)
             || self.refreshing.iter().any(|(_, at)| at.lane == lane)
+            || self.restaging.iter().any(|(_, at)| *at == lane)
     }
 
     /// The flights holding a write slot: writes and seeds, not checkpoints;
@@ -613,7 +789,7 @@ impl<'a> Run<'a> {
         } else {
             self.refresh_flights()
         };
-        self.flights.len() - self.recording.len() - refreshes
+        self.flights.len() - self.recording.len() - self.restaging.len() - refreshes
     }
 
     /// The caught-up write flights out: one may cover several lanes.
@@ -828,7 +1004,7 @@ impl<'a> Run<'a> {
                     handle,
                     lane,
                     seq,
-                    ..
+                    ready_at,
                 }) = self.take_from_window(at)
                 {
                     envelopes.push(Arc::clone(&batch.envelopes));
@@ -839,6 +1015,8 @@ impl<'a> Run<'a> {
                         changes: batch.changes,
                         documents,
                         seq,
+                        batch,
+                        ready_at,
                     });
                 }
             }
@@ -848,6 +1026,15 @@ impl<'a> Run<'a> {
                 return Ok(());
             };
             let work = work_of(first.position);
+            let probe = Some(first.lane).filter(|lane| !self.lane_open(*lane));
+            if let Some(lane) = probe
+                && let Some(run) = self.lanes.get_mut(lane)
+            {
+                run.health.probes += 1;
+                if run.health.probes > 1 {
+                    tracing::info!(lane = %run.key, probe = run.health.probes, "probing the parked lane again: its front item, alone");
+                }
+            }
             // Caught up for each lane of the write with nothing else queued or
             // waiting: as with one item per write, that lane's position need
             // not wait out a refresh. Only those lanes' indexes are refreshed.
@@ -863,7 +1050,7 @@ impl<'a> Run<'a> {
                 })
                 .collect();
             caught_up.dedup();
-            if let Some(landed) = self.launch(parts, envelopes, work, caught_up) {
+            if let Some(landed) = self.launch(parts, envelopes, work, caught_up, probe) {
                 self.landed(landed).await?;
             }
         }
@@ -885,22 +1072,42 @@ impl<'a> Run<'a> {
 
     fn merge_hold(&self, now: Instant) -> Option<Instant> {
         let bound = self.engine.merge_wait;
-        if bound.is_zero()
-            || self.lanes.len() < 2
-            || self.ordered()
-            || self.merge_limit() < 2
-            || self.backfill_waiting > 0
-            || self.live_waiting == 0
-        {
+        if bound.is_zero() || self.lanes.len() < 2 || self.ordered() || self.merge_limit() < 2 {
             return None;
         }
+        let oldest_ready = if self.unhealthy == 0 {
+            if self.backfill_waiting > 0 || self.live_waiting == 0 {
+                return None;
+            }
+            self.window
+                .iter()
+                .filter(|queued| matches!(queued.item, Queue::Batch { .. }))
+                .map(|queued| queued.ready_at)
+                .min()?
+        } else {
+            // A parked lane's items wait for its probe, not for a merge: they
+            // neither hold nor end a hold, and a due probe is never held.
+            if (0..self.lanes.len()).any(|lane| !self.lane_open(lane) && self.grantable(lane, now))
+            {
+                return None;
+            }
+            let mut oldest: Option<Instant> = None;
+            for queued in self
+                .window
+                .iter()
+                .filter(|queued| self.lane_open(queued.lane))
+            {
+                match &queued.item {
+                    Queue::Batch { batch, .. } if batch.position.is_none() => return None,
+                    Queue::Batch { .. } => {
+                        oldest = Some(oldest.map_or(queued.ready_at, |at| at.min(queued.ready_at)));
+                    }
+                    Queue::Complete { .. } => {}
+                }
+            }
+            oldest?
+        };
         let youngest_write = self.flying.iter().map(|(_, flight)| flight.started).max()?;
-        let oldest_ready = self
-            .window
-            .iter()
-            .filter(|queued| matches!(queued.item, Queue::Batch { .. }))
-            .map(|queued| queued.ready_at)
-            .min()?;
         let until = oldest_ready.min(youngest_write) + bound;
         (now < until).then_some(until)
     }
@@ -932,6 +1139,7 @@ impl<'a> Run<'a> {
         // to take, so the front is the pick. Unless another item could join it
         // in the write, nothing needs hashing, as with one item per write.
         if self.lanes.len() == 1
+            && self.unhealthy == 0
             && self.flying.is_empty()
             && self.seeding.is_empty()
             && !(self.live_waiting > 0 && self.backfill_waiting > 0)
@@ -957,8 +1165,13 @@ impl<'a> Run<'a> {
         // A seeding lane starts nothing, nor does a lane holding its share of
         // the slots.
         let cap = self.lane_cap();
+        let now = Instant::now();
         let mut blocked: Vec<bool> = (0..lanes)
-            .map(|lane| self.lane_seeding(lane) || self.lane_writes(lane) >= cap)
+            .map(|lane| {
+                self.lane_seeding(lane)
+                    || self.lane_writes(lane) >= cap
+                    || (self.unhealthy > 0 && !self.grantable(lane, now))
+            })
             .collect();
         let mut earlier: Vec<HashSet<u64>> = vec![HashSet::new(); lanes];
         let ordered = self.ordered();
@@ -1127,6 +1340,7 @@ impl<'a> Run<'a> {
         envelopes: Vec<Arc<[Envelope]>>,
         work: Work,
         caught_up: Vec<usize>,
+        probe: Option<usize>,
     ) -> Option<Landed> {
         let flight = self.next_flight;
         self.next_flight += 1;
@@ -1145,6 +1359,7 @@ impl<'a> Run<'a> {
                 work,
                 started: Instant::now(),
                 caught_up: covers_below,
+                probe,
             },
         ));
         let sink = &self.engine.sink;
@@ -1244,11 +1459,12 @@ impl<'a> Run<'a> {
         Ok(())
     }
 
-    /// A write returned: decide its rejections per part, move the fences, and
-    /// acknowledge every part that landed. A part with a rejection its index
-    /// decides `stop` stays unacknowledged and the run fails, blamed on its
-    /// lane; the other parts landed and are acknowledged. A write that failed
-    /// fails every part, blamed on all their lanes.
+    /// A write returned: decide each part, move the fences, and acknowledge
+    /// every part that landed. A part whose index was refused under `stop`,
+    /// blocked, or found missing goes back in the window unacknowledged and
+    /// its lane parks (or is staged again); the run goes on. The other parts
+    /// landed and are acknowledged. A write that failed fails every part,
+    /// blamed on all their lanes, and ends the run.
     async fn landed(&mut self, landed: Landed) -> Result<()> {
         let result = match landed.outcome {
             Outcome::Write(result) => result,
@@ -1264,6 +1480,10 @@ impl<'a> Run<'a> {
                     .refresh_returned(landed.flight, result, landed.took)
                     .await;
             }
+            Outcome::Restage(result) => {
+                self.restage_returned(landed.flight, result);
+                return Ok(());
+            }
         };
         let Some(index) = self.flying.iter().position(|(id, _)| *id == landed.flight) else {
             return Ok(());
@@ -1278,25 +1498,58 @@ impl<'a> Run<'a> {
             Ok(report) => report,
             Err(error) => {
                 let lanes: Vec<usize> = flight.lanes().collect();
+                if let Some(lane) = flight.probe {
+                    self.probed(lane, ProbeOutcome::Failed);
+                }
                 self.hold_walks(&lanes);
                 self.fail(error.into(), &lanes);
                 return Ok(());
             }
         };
-        let stopped = self.engine.stopping_rejections(&report);
-        let (failed, landed_parts): (Vec<Part>, Vec<Part>) =
-            flight.parts.into_iter().partition(|part| {
-                stopped.as_ref().is_some_and(|(indexes, _)| {
-                    self.lanes
-                        .get(part.lane)
-                        .is_some_and(|run| indexes.contains(run.key.index.as_ref()))
-                })
-            });
-        self.engine.quarantine(&report, |index| {
-            stopped
-                .as_ref()
-                .is_none_or(|(indexes, _)| !indexes.contains(index))
-        });
+        let held = self.engine.held_indexes(&report);
+        if let Some(stray) = held.keys().find(|index| {
+            !flight.parts.iter().any(|part| {
+                self.lanes
+                    .get(part.lane)
+                    .is_some_and(|run| run.key.index.as_ref() == index.as_str())
+            })
+        }) {
+            // A refusal naming an index no part holds can't be placed: every
+            // part of the write is redelivered, as for a write that failed.
+            let lanes: Vec<usize> = flight.lanes().collect();
+            self.hold_walks(&lanes);
+            self.fail(
+                EngineError::Sink(sink::SinkError::Write(format!(
+                    "the sink refused index {stray}, which no part of the write holds"
+                ))),
+                &lanes,
+            );
+            return Ok(());
+        }
+        let held_lane = |run: Option<&LaneRun>| {
+            run.is_some_and(|run| held.contains_key(run.key.index.as_ref()))
+        };
+        let (failed, landed_parts): (Vec<Part>, Vec<Part>) = flight
+            .parts
+            .into_iter()
+            .partition(|part| held_lane(self.lanes.get(part.lane)));
+        self.engine
+            .quarantine(&report, |index| !held.contains_key(index));
+        let mut parked: Vec<usize> = Vec::new();
+        for part in failed {
+            if !parked.contains(&part.lane) {
+                parked.push(part.lane);
+            }
+            self.put_back(part);
+        }
+        for &lane in &parked {
+            let Some(index) = self.lanes.get(lane).map(|run| run.key.index.to_string()) else {
+                continue;
+            };
+            if let Some(why) = held.get(index.as_str()) {
+                self.hold(lane, why.clone(), flight.probe == Some(lane));
+            }
+        }
         if !landed_parts.is_empty() {
             let envelopes = landed_parts
                 .iter()
@@ -1352,20 +1605,17 @@ impl<'a> Run<'a> {
                 }
             }
         }
-        // A stop rejection is recorded before the other parts are
-        // acknowledged, so it keeps its blame on its own lane whatever
-        // acknowledging them (or a caught-up write it sends) does; their
-        // landing is no progress past it.
-        if let Some((_, error)) = stopped {
-            let lanes: Vec<usize> = failed.iter().map(|part| part.lane).collect();
-            self.hold_walks(&lanes);
-            self.fail(error, &lanes);
+        if let Some(lane) = flight.probe
+            && !parked.contains(&lane)
+        {
+            self.probed(lane, ProbeOutcome::Landed);
         }
         let mut acknowledged = Ok(());
         for (part, last) in landed_parts.into_iter().zip(last_of_lane) {
             // Let go of the batch before acknowledging it, so the lane frees it
             // as the acknowledgement lands.
             drop(part.documents);
+            drop(part.batch);
             let oldest = self.is_oldest(part.lane, part.seq);
             // `wanting` names only lanes this write gave a position: a
             // backfill part landing last on its lane asks the fences, since an
@@ -1390,6 +1640,9 @@ impl<'a> Run<'a> {
             }
             if let Some(run) = self.lanes.get_mut(part.lane) {
                 run.barrier = false;
+                if run.health.landed() {
+                    self.engine.store_lane(&run.key, &run.health, false);
+                }
             }
         }
         acknowledged?;
@@ -1399,6 +1652,104 @@ impl<'a> Run<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Put a part of a returned write back in the window, at its place in
+    /// receive order, still unacknowledged: its lane parked or is staged
+    /// again, and writes it again later, before anything after it.
+    fn put_back(&mut self, part: Part) {
+        let at = self.window.partition_point(|queued| queued.seq < part.seq);
+        let item = Queue::Batch {
+            batch: part.batch,
+            documents: part.documents,
+        };
+        self.count(part.lane, &item, 1);
+        self.window.insert(
+            at,
+            Queued {
+                item,
+                handle: part.handle,
+                lane: part.lane,
+                seq: part.seq,
+                ready_at: part.ready_at,
+            },
+        );
+    }
+
+    /// `lane`'s part of a write was held back by `why`: park the lane (a
+    /// refusal, a block) or stage it again (a missing target). `probe`: the
+    /// write was the lane's probe, so a park doubles its backoff.
+    fn hold(&mut self, lane: usize, why: Held, probe: bool) {
+        let now = Instant::now();
+        let max = self.engine.max_probe_backoff;
+        let Some(run) = self.lanes.get_mut(lane) else {
+            return;
+        };
+        let was_open = run.health.is_open();
+        let (changed, outcome) = match why {
+            Held::Missing(reason) => (run.health.restage(reason, now, max), ProbeOutcome::Missing),
+            Held::Blocked(reason) => (
+                run.health
+                    .park(ParkReason::Blocked { reason }, probe, now, max),
+                ProbeOutcome::Blocked,
+            ),
+            Held::Refused { ids, reason } => (
+                run.health
+                    .park(ParkReason::Refused { ids, reason }, probe, now, max),
+                ProbeOutcome::Refused,
+            ),
+        };
+        if was_open && !run.health.is_open() {
+            self.unhealthy += 1;
+        }
+        if changed {
+            let retry_in = run.health.due.saturating_duration_since(now);
+            match &run.health.health {
+                LaneHealth::Parked { reason, .. } if was_open => tracing::warn!(
+                    index = %run.key.index,
+                    sink = %run.key.sink,
+                    %reason,
+                    backoff = ?retry_in,
+                    "the lane is parked: its item is written again alone after the backoff; the other indexes go on"
+                ),
+                LaneHealth::Parked { reason, .. } => tracing::info!(
+                    index = %run.key.index,
+                    sink = %run.key.sink,
+                    %reason,
+                    backoff = ?retry_in,
+                    "the parked lane's probe did not land; probing again after the backoff"
+                ),
+                LaneHealth::Restaging { reason, .. } => tracing::warn!(
+                    index = %run.key.index,
+                    sink = %run.key.sink,
+                    %reason,
+                    retry_in = ?retry_in,
+                    "the index's target is gone: staging it again; the other indexes go on"
+                ),
+                LaneHealth::Open => {}
+            }
+        }
+        self.engine.store_lane(&run.key, &run.health, changed);
+        if probe {
+            self.engine.observer.on_lane_probe(&run.key, outcome);
+        }
+    }
+
+    /// A parked lane's probe returned `outcome` without being held: landed,
+    /// it opens; failed with the write, it stays parked.
+    fn probed(&mut self, lane: usize, outcome: ProbeOutcome) {
+        let Some(run) = self.lanes.get_mut(lane) else {
+            return;
+        };
+        self.engine.observer.on_lane_probe(&run.key, outcome);
+        if outcome != ProbeOutcome::Landed {
+            return;
+        }
+        if let Some(parked) = run.health.open(Instant::now()) {
+            self.unhealthy = self.unhealthy.saturating_sub(1);
+            tracing::info!(index = %run.key.index, sink = %run.key.sink, after = ?parked, "the parked lane's probe landed; the lane is open");
+            self.engine.store_lane(&run.key, &run.health, true);
+        }
     }
 
     /// Items of `lanes` go back unlanded: their walks' marks move no further.
@@ -1721,30 +2072,40 @@ impl<'a> Run<'a> {
 }
 
 impl SinkEngine {
-    /// The indexes whose rejections in `report` their policy decides `stop`,
-    /// with the error that ends the run; `None` when there is none. Decided
-    /// before any quarantine event is emitted, so a `skip` document beside
-    /// them isn't counted twice when the unacknowledged part is redelivered.
-    fn stopping_rejections(
-        &self,
-        report: &WriteReport,
-    ) -> Option<(std::collections::BTreeSet<String>, EngineError)> {
-        let mut indexes = std::collections::BTreeSet::new();
-        let mut stop_count = 0usize;
-        let mut stop_example = String::new();
+    /// The indexes `report` holds back, by name, with why: missing, else
+    /// blocked, else refused under a `stop` policy (with the refused ids, a
+    /// few). Their parts stay unacknowledged; a `skip` rejection is not held.
+    fn held_indexes(&self, report: &WriteReport) -> BTreeMap<String, Held> {
+        let mut held: BTreeMap<String, Held> = BTreeMap::new();
         for doc in &report.rejected {
-            if self.failure_policies.resolve(&doc.index) == FailurePolicy::Stop {
-                if stop_count == 0 {
-                    stop_example = format!("{}/{}: {}", doc.index, shown_id(&doc.id), doc.reason);
+            if self.failure_policies.resolve(&doc.index) != FailurePolicy::Stop {
+                continue;
+            }
+            match held
+                .entry(doc.index.clone())
+                .or_insert_with(|| Held::Refused {
+                    ids: Vec::new(),
+                    reason: doc.reason.clone(),
+                }) {
+                Held::Refused { ids, .. } if ids.len() < SHOWN_IDS => {
+                    ids.push(shown_id(&doc.id).into_owned());
                 }
-                stop_count += 1;
-                indexes.insert(doc.index.clone());
+                _ => {}
             }
         }
-        (stop_count > 0).then_some((
-            indexes,
-            EngineError::DocumentsRejected(stop_count, stop_example),
-        ))
+        for blocked in &report.blocked {
+            held.insert(
+                blocked.index.to_string(),
+                Held::Blocked(blocked.reason.clone()),
+            );
+        }
+        for missing in &report.missing {
+            held.insert(
+                missing.index.to_string(),
+                Held::Missing(missing.reason.clone()),
+            );
+        }
+        held
     }
 
     /// Quarantine the rejections of the indexes `landed` accepts (the parts
@@ -1844,6 +2205,20 @@ impl SinkEngine {
         self.lock_outstanding().remove(index);
         tracing::info!(%index, "backfill complete");
     }
+}
+
+/// The most refused ids a parked lane names.
+const SHOWN_IDS: usize = 5;
+
+/// Why a part of a returned write is held back.
+#[derive(Debug, Clone)]
+enum Held {
+    /// Its index's target is gone.
+    Missing(String),
+    /// Its index refuses writes for now.
+    Blocked(String),
+    /// Documents of it were refused, and its index's `on_error` is `stop`.
+    Refused { ids: Vec<String>, reason: String },
 }
 
 /// What a returned write left in the fences.

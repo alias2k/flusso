@@ -84,9 +84,10 @@
 //!
 //! - [`an_id_past_512_bytes_is_decided_by_on_error`] — a text key OpenSearch
 //!   refuses as an `_id` (over 512 bytes) is one rejected document, decided by
-//!   `on_error`: `skip` quarantines it and acks the batch, `stop` stops the sink
-//!   engine with the batch unacked; the rest of its batch lands either way
-//!   (issue #301: it failed the whole bulk request).
+//!   `on_error`: `skip` quarantines it and acks the batch, `stop` parks its
+//!   lane with the batch unacked while the other index goes on (ADR 0012
+//!   stage 9); the rest of its batch lands either way (issue #301: it failed
+//!   the whole bulk request).
 //!
 //! Each change is verified by polling a realtime `GET {index}/_doc/{id}` (reads
 //! the translog, so no refresh wait) until the index reflects the expectation or
@@ -106,7 +107,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use engine::{EngineError, FailurePolicies, FailurePolicy, IngestEngine, SinkControl, SinkEngine};
+use engine::{FailurePolicies, FailurePolicy, IngestEngine, SinkControl, SinkEngine};
 use kernel::{
     Aggregate, AggregateKey, AggregateOp, Column, ColumnName, DatabaseSchema, Field, FieldName,
     FieldSource, Filter, FlussoType, GenericValue, IndexName, IndexSchema, Join, JoinKind,
@@ -1656,8 +1657,8 @@ async fn current_lsn(pool: &PgPool) -> String {
 /// A text key past OpenSearch's 512-byte `_id` limit is one rejected document,
 /// decided by `on_error`: under `skip` it is quarantined, the rest of its
 /// transaction lands, the batch is acked (the slot confirms past it) and the
-/// engine keeps going; under `stop` the rest still lands, then the sink engine
-/// stops with the batch unacked.
+/// engine keeps going; under `stop` the rest still lands, and the lane parks
+/// with the batch unacked while the other index goes on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn an_id_past_512_bytes_is_decided_by_on_error() {
@@ -1720,27 +1721,24 @@ async fn an_id_past_512_bytes_is_decided_by_on_error() {
     )
     .await;
     let stopped_at = current_lsn(&pg.pool).await;
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let outcome = loop {
-        if let Some(outcome) = live.outcome.lock().unwrap().take() {
-            break outcome;
-        }
-        assert!(Instant::now() < deadline, "stop: the engine never stopped");
-        tokio::time::sleep(Duration::from_millis(150)).await;
-    };
-    assert!(
-        matches!(&outcome, Err(EngineError::DocumentsRejected(1, reason)) if reason.contains("512")),
-        "stop: the sink engine stops on the one rejection, got {outcome:?}"
-    );
-    assert_eq!(
-        live.fetch_name("long_stop", "normal").await.as_deref(),
-        Some("kept"),
-        "stop: the rest of the batch still landed",
-    );
+    live.assert_eventually("long_stop", "normal", Some("kept"))
+        .await
+        .unwrap_or_else(|got| panic!("stop: the rest of the batch still landed, saw {got}"));
+    live.assert_parked_on("long_stop", "512").await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    live.fail_if_stopped();
     assert!(
         !slot_confirmed_past(&pg.pool, &stopped_at).await,
-        "stop: the batch stays unacked",
+        "stop: the lane parks with the batch unacked, holding the slot",
     );
+    exec(
+        &pg.pool,
+        "INSERT INTO long_skip (id, name) VALUES ('later', 'still')",
+    )
+    .await;
+    live.assert_eventually("long_skip", "later", Some("still"))
+        .await
+        .unwrap_or_else(|got| panic!("stop: the other index goes on, saw {got}"));
     live.shutdown();
 }
 
@@ -2041,7 +2039,7 @@ async fn a_float8_is_indexed_as_the_double_postgres_holds() {
 
 /// Numbers with no declared type, under a `json` field the user maps
 /// `dynamic: true`, at the magnitudes issue #366's review found: each lands
-/// with no rejection (`on_error` is `stop`, so one would stop the engine), on
+/// with no rejection (`on_error` is `stop`, so one would park the lane), on
 /// a fresh index where flusso maps every key, and on one whose keys a
 /// document in 0.17's form mapped first (a string past ±7.9e28, `0.0` for a
 /// value too small for `rust_decimal`). Past ±7.9e28 the value is still the
@@ -2144,7 +2142,7 @@ async fn an_untyped_number_lands_where_0_17_s_did() {
 /// decides (issue #327's review pins what `main` did). A `double` the index maps
 /// refuses the string, an item-level rejection: under `skip` it is quarantined
 /// while the rest of its transaction lands, the batch is acked and the engine
-/// keeps going; under `stop` the sink engine stops on it, the rest landed. One
+/// keeps going; under `stop` its lane parks on it, the rest landed. One
 /// that never reaches the index is kept: `ignore_malformed`, an unindexed join,
 /// and the discarded value of a field sharing its name.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2259,22 +2257,16 @@ async fn a_non_finite_number_reaches_the_sink_as_postgres_wrote_it() {
         "INSERT INTO odd_stop VALUES (1, 'nan', 'NaN'), (2, 'kept', 1.5)",
     )
     .await;
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let outcome = loop {
-        if let Some(outcome) = live.outcome.lock().unwrap().take() {
-            break outcome;
-        }
-        assert!(Instant::now() < deadline, "stop: the engine never stopped");
-        tokio::time::sleep(Duration::from_millis(150)).await;
-    };
-    assert!(
-        matches!(&outcome, Err(EngineError::DocumentsRejected(1, reason)) if reason.contains("NaN")),
-        "stop: the sink engine stops on the one rejection, got {outcome:?}"
-    );
+    live.assert_eventually("odd_stop", "2", Some("kept"))
+        .await
+        .unwrap_or_else(|got| panic!("stop: the rest of the batch still landed, saw {got}"));
+    live.assert_parked_on("odd_stop", "NaN").await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    live.fail_if_stopped();
     assert_eq!(
-        live.fetch_name("odd_stop", "2").await.as_deref(),
-        Some("kept"),
-        "stop: the rest of the batch still landed",
+        live.fetch_source("odd_stop", "1").await,
+        None,
+        "stop: the refused document is held on its parked lane, not quarantined",
     );
     live.shutdown();
 }
@@ -2303,11 +2295,48 @@ struct Pipeline {
     /// stopped on an error fails the test immediately, with the error, instead
     /// of timing out on an assertion that can never become true.
     outcome: Arc<std::sync::Mutex<Option<engine::Result<()>>>>,
+    /// The sink engine, once built: its lanes' health.
+    sink_engine: SinkEngineSlot,
     http: reqwest::Client,
     os_url: String,
 }
 
+/// Where the running deployment puts its sink engine.
+type SinkEngineSlot = Arc<std::sync::Mutex<Option<Arc<SinkEngine>>>>;
+
 impl Pipeline {
+    /// The health of `index`'s lane, once the sink engine is built.
+    fn lane_health(&self, index: &str) -> Option<engine::LaneHealth> {
+        let engine = self.sink_engine.lock().unwrap().clone()?;
+        Some(engine.lane_health(&stream::LaneKey::new(
+            index_name(index),
+            SinkName::try_new("e2e").unwrap(),
+        )))
+    }
+
+    /// Wait until `index`'s lane is parked on a refusal whose reason holds
+    /// `holding`; panics with the last health at the deadline.
+    async fn assert_parked_on(&self, index: &str, holding: &str) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            self.fail_if_stopped();
+            let health = self.lane_health(index);
+            if let Some(engine::LaneHealth::Parked {
+                reason: reason @ engine::ParkReason::Refused { .. },
+                ..
+            }) = &health
+                && reason.to_string().contains(holding)
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{index} never parked on a refusal naming {holding:?}: {health:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    }
+
     fn fail_if_stopped(&self) {
         if let Some(outcome) = self.outcome.lock().unwrap().as_ref() {
             panic!("the engine stopped: {outcome:?}");
@@ -2680,12 +2709,15 @@ async fn spawn_pipeline_with(
     );
     let outcome = Arc::new(std::sync::Mutex::new(None));
     let record = Arc::clone(&outcome);
+    let sink_engine: SinkEngineSlot = Arc::default();
+    let slot = Arc::clone(&sink_engine);
     Pipeline {
         engine: tokio::spawn(async move {
-            let result = run_deployment(capture, documents, sink, policies).await;
+            let result = run_deployment(capture, documents, sink, policies, slot).await;
             *record.lock().unwrap() = Some(result);
         }),
         outcome,
+        sink_engine,
         http: reqwest::Client::new(),
         os_url: os.url.clone(),
     }
@@ -2699,6 +2731,7 @@ async fn run_deployment(
     documents: Arc<dyn DocumentBuilder>,
     sink: Arc<dyn Sink>,
     policies: FailurePolicies,
+    slot: SinkEngineSlot,
 ) -> engine::Result<()> {
     let name = SinkName::try_new("e2e").unwrap();
     let stream: Arc<dyn Stream> = Arc::new(ChannelStream::over(
@@ -2712,14 +2745,17 @@ async fn run_deployment(
         documents.backfill_indexes(),
         [name.clone()],
     ));
-    let sink_engine = SinkEngine::new(
-        name.clone(),
-        sink,
-        Arc::clone(&stream),
-        mappings,
-        Arc::clone(&progress),
-    )
-    .with_failure_policies(policies);
+    let sink_engine = Arc::new(
+        SinkEngine::new(
+            name.clone(),
+            sink,
+            Arc::clone(&stream),
+            mappings,
+            Arc::clone(&progress),
+        )
+        .with_failure_policies(policies),
+    );
+    *slot.lock().unwrap() = Some(Arc::clone(&sink_engine));
     sink_engine.stage(continuity).await?;
     let ingest = IngestEngine::new(capture, documents, stream, vec![name], progress)
         .with_builds(common::e2e_builds())

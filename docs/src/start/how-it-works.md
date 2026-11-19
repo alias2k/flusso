@@ -46,7 +46,7 @@ A seed is only as good as the stream behind it. If the replication slot is missi
 
 ## When the destination says no
 
-A write-wide failure (OpenSearch unreachable, the whole request refused) always stops the run; the batch is redelivered on restart. An **item-level rejection** (one document with a mapping conflict) is decided by the `on_error` policy: `stop` halts the run, `skip` quarantines the document, counts it, and lets the batch through. See [Handle rejected documents](../operate/rejected-documents.md).
+A write-wide failure (OpenSearch unreachable, the whole request refused) always stops the run; the batch is redelivered on restart. An **item-level rejection** (one document with a mapping conflict) is decided by the `on_error` policy: `stop` parks that index's lane (it is retried with a backoff while the other indexes keep going), `skip` quarantines the document, counts it, and lets the batch through. A write block on one index parks its lane too, whatever the policy. See [Handle rejected documents](../operate/rejected-documents.md).
 
 ## Where this shows up
 

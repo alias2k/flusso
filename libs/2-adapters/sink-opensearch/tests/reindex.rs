@@ -477,10 +477,11 @@ async fn deleted_generation_is_recreated_and_reported_unseeded() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs Docker (starts an OpenSearch container)"]
-async fn generation_deleted_while_running_fails_the_flush_and_is_rebuilt() {
+async fn generation_deleted_while_running_is_reported_missing_and_is_rebuilt() {
     // Issue #123: the active generation is deleted while the sink runs. The
     // next write must not let OpenSearch auto-create a dynamic-mapped index; it
-    // must fail the flush, and the restart's `ensure_index` must rebuild it.
+    // reports the index missing (ADR 0012 stage 9: the engine stages that lane
+    // again), and `ensure_index` rebuilds it.
     let (_container, base) = start_opensearch().await;
     let client = reqwest::Client::new();
     let index = IndexName::try_new(LOGICAL).unwrap();
@@ -515,11 +516,16 @@ async fn generation_deleted_while_running_fails_the_flush_and_is_rebuilt() {
     sink.apply(&upsert(&index, "3", &document(3)))
         .await
         .unwrap();
-    let err = sink
+    let report = sink
         .flush(true)
         .await
-        .expect_err("a write to a deleted generation must fail the flush");
-    assert!(err.to_string().contains("missing"), "{err}");
+        .expect("a missing target is reported for its index, not a failed write");
+    assert_eq!(
+        report.missing.iter().map(|m| &m.index).collect::<Vec<_>>(),
+        [&index],
+        "{report:?}"
+    );
+    assert!(report.rejected.is_empty() && report.blocked.is_empty());
     assert!(
         !index_exists(&client, &base, &gen1).await
             && !index_exists(&client, &base, &hash_alias).await,

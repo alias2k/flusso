@@ -63,7 +63,7 @@ What a failing pair does depends on the index's [`on_error`](index-and-on-error.
 | Pair | `stop` (the default) | `skip` |
 | --- | --- | --- |
 | fails to build | the ingest engine stops and restarts on the same change, so **the whole deployment** (every index, every sink) makes no progress | the document keeps its previous indexed version (none on a first backfill); the rest go on |
-| rejected by OpenSearch | that sink stops and restarts on the same batch, so **every index it writes** makes no progress, and the replication slot keeps the WAL | the document is quarantined; the rest go on |
+| rejected by OpenSearch | that index's lane on the sink parks and retries the same batch, so **that index** makes no progress there while the sink's other indexes go on, and the replication slot keeps the WAL | the document is quarantined; the rest go on |
 
 Elsewhere:
 

@@ -475,6 +475,86 @@ async fn a_stop_with_opensearch_paused_gives_up_at_the_deadline_naming_the_sink_
     );
 }
 
+/// A stop with a lane parked on a write block: the stop probes it once more,
+/// the block holds, so the drain can't finish; at the deadline flusso exits 1
+/// naming the lane, its health and OpenSearch's reason. Once the block is
+/// lifted, the next start writes what was left and converges.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_stop_with_a_write_blocked_lane_gives_up_at_the_deadline_naming_the_lane_and_a_restart_converges()
+ {
+    let (_postgres, url) = common::start_postgres(TABLE).await;
+    let (_opensearch, os_url) = common::start_opensearch().await;
+    let dir = project_opensearch(&url, &os_url, "blocked");
+    let mut flusso = Flusso::start(&dir, &["--shutdown-timeout-secs", "5"]);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect(&url)
+        .await
+        .unwrap();
+    insert(&pool, 1..=10).await;
+    wait_for_count(&os_url, 10).await;
+
+    block_writes(&os_url, "t", true).await;
+    insert(&pool, 11..=20).await;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while lane_health(flusso.public, "t").await.as_deref() != Some("blocked") {
+        assert!(
+            Instant::now() < deadline,
+            "the lane never parked as blocked"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    flusso.signal("TERM");
+    let status = flusso.exit_within(Duration::from_secs(15));
+    let stderr = flusso.stderr();
+    assert_eq!(status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("shutdown deadline of 5s passed while draining the pipeline")
+            && stderr.contains("lane t blocked since")
+            && stderr.contains("FORBIDDEN/8"),
+        "the log names the parked lane and why: {stderr}"
+    );
+    assert_eq!(documents(&os_url, "t").await.len(), 10);
+
+    block_writes(&os_url, "t", false).await;
+    let mut restarted = Flusso::start(&dir, &[]);
+    wait_for_count(&os_url, 20).await;
+    restarted.signal("TERM");
+    assert_eq!(
+        restarted.exit_within(Duration::from_secs(30)).code(),
+        Some(0)
+    );
+}
+
+/// Set or lift `index.blocks.write` on `index`.
+async fn block_writes(os_url: &str, index: &str, on: bool) {
+    let value = if on {
+        serde_json::Value::Bool(true)
+    } else {
+        serde_json::Value::Null
+    };
+    let response = reqwest::Client::new()
+        .put(format!("{os_url}/{index}/_settings"))
+        .json(&serde_json::json!({ "index.blocks.write": value }))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success(), "{index}/_settings");
+}
+
+/// `index`'s lane health into `primary`, as `/status` reports it.
+async fn lane_health(public: SocketAddr, index: &str) -> Option<String> {
+    let status: serde_json::Value = reqwest::get(format!("http://{public}/status"))
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    status["sinks"]["primary"]["lanes"][index]["health"]
+        .as_str()
+        .map(str::to_owned)
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn a_position_reached_before_a_graceful_stop_is_answered_by_the_next_process() {

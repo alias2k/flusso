@@ -26,6 +26,16 @@ use crate::OpensearchSink;
 use crate::bulk::{BulkAction, build_bulk_url, bulk_action_fragment, read_bulk_response};
 use crate::mapping::build_index_body;
 
+/// What one bulk request's items came back as, past the busy ones it resent.
+#[derive(Debug, Default)]
+pub(crate) struct Chunk {
+    pub(crate) rejected: Vec<RejectedDocument>,
+    /// Physical index and why, per item whose index refuses writes for now.
+    pub(crate) blocked: Vec<(String, String)>,
+    /// Physical index and why, per item whose target is gone.
+    pub(crate) missing: Vec<(String, String)>,
+}
+
 /// A `reqwest` failure as a [`SinkError::Write`]: `context`, the error, and
 /// every cause in its source chain, joined with `": "`. A cause whose text its
 /// parent already printed is skipped.
@@ -119,8 +129,9 @@ impl OpensearchSink {
     /// **Item-level rejections** — a mapping conflict, a malformed value — are
     /// **not** retried: re-sending the same document yields the same rejection.
     /// They are returned as [`RejectedDocument`]s, each once, for the engine's
-    /// failure policy to handle, except a missing target, which is an `Err`
-    /// (see the `bulk` module docs).
+    /// failure policy to handle. Items whose index is missing or blocked are
+    /// not retried either: they come back by physical index, with why (see the
+    /// `bulk` module docs).
     #[tracing::instrument(
         name = "os.bulk",
         level = "debug",
@@ -133,16 +144,16 @@ impl OpensearchSink {
         body: &str,
         actions: &[BulkAction],
         refresh: bool,
-    ) -> Result<Vec<RejectedDocument>> {
+    ) -> Result<Chunk> {
+        let mut chunk = Chunk::default();
         if actions.is_empty() {
-            return Ok(Vec::new());
+            return Ok(chunk);
         }
 
         let url = build_bulk_url(&self.base_url, self.pipeline.as_deref(), refresh);
 
         let mut sending: Vec<&BulkAction> = actions.iter().collect();
         let mut resend_body: Option<String> = None;
-        let mut rejected = Vec::new();
         let mut last_err: Option<SinkError> = None;
 
         for attempt in 0..=self.max_retries {
@@ -177,9 +188,19 @@ impl OpensearchSink {
                         refresh,
                         "bulk request applied",
                     );
-                    rejected.extend(read.rejected);
+                    chunk.rejected.extend(read.rejected);
+                    for (refused, into) in [
+                        (read.blocked, &mut chunk.blocked),
+                        (read.missing, &mut chunk.missing),
+                    ] {
+                        into.extend(refused.into_iter().filter_map(|(at, reason)| {
+                            sending
+                                .get(at)
+                                .map(|action| (action.index().to_owned(), reason))
+                        }));
+                    }
                     if read.busy.is_empty() {
-                        return Ok(rejected);
+                        return Ok(chunk);
                     }
                     sending = read
                         .busy

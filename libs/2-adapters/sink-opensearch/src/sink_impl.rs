@@ -4,7 +4,7 @@
 //! lower-level pieces live in [`transport`](crate), [`generations`](crate),
 //! [`mapping`](crate), and [`bulk`](crate).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use async_trait::async_trait;
 use kernel::{Envelope, IndexMapping, IndexName, Op};
@@ -243,8 +243,9 @@ impl Sink for OpensearchSink {
     /// with automatic refresh off (`refresh_interval = "-1"`), and its indexes
     /// are remembered for the next caught-up write.
     ///
-    /// A missing target fails the whole write, not one document (see the
-    /// `bulk` module docs). An id OpenSearch would refuse before running the
+    /// A missing target, or one refusing writes for now, is reported for its
+    /// index as a whole, and the rest of the write still lands (see the `bulk`
+    /// module docs). An id OpenSearch would refuse before running the
     /// request (empty, or an upsert's past 512 bytes) is one rejected
     /// document: it is never sent, so the rest of the write still lands.
     async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> Result<WriteReport> {
@@ -274,8 +275,13 @@ impl Sink for OpensearchSink {
     ) -> Result<WriteReport> {
         let sent_at = self.lock_unrefreshed().point();
         let mut actions = Vec::with_capacity(parts.iter().map(|part| part.len()).sum());
+        let mut logical: HashMap<String, IndexName> = HashMap::new();
         for envelope in parts.iter().flat_map(|part| part.iter()) {
-            actions.push(self.bulk_action(envelope)?);
+            let action = self.bulk_action(envelope)?;
+            if !logical.contains_key(action.index()) {
+                logical.insert(action.index().to_owned(), envelope.index.clone());
+            }
+            actions.push(action);
         }
 
         let mut rejected: Vec<RejectedDocument> = Vec::new();
@@ -325,6 +331,8 @@ impl Sink for OpensearchSink {
             "writing",
         );
 
+        let mut blocked: BTreeMap<IndexName, String> = BTreeMap::new();
+        let mut missing: BTreeMap<IndexName, String> = BTreeMap::new();
         let mut start = 0usize;
         for &count in &plan {
             let end = start + count;
@@ -334,10 +342,21 @@ impl Sink for OpensearchSink {
             for fragment in chunk_fragments {
                 body.push_str(fragment);
             }
-            rejected.extend(
-                self.send_bulk_chunk(&body, chunk_actions, caught_up.is_caught_up())
-                    .await?,
-            );
+            let chunk = self
+                .send_bulk_chunk(&body, chunk_actions, caught_up.is_caught_up())
+                .await?;
+            rejected.extend(chunk.rejected);
+            for (refused, into) in [(chunk.blocked, &mut blocked), (chunk.missing, &mut missing)] {
+                for (physical, reason) in refused {
+                    let Some(index) = logical.get(&physical) else {
+                        return Err(SinkError::Write(format!(
+                            "OpenSearch refused writes to {physical}, which no document of the \
+                             write was bound for; failing the write so it is redelivered: {reason}"
+                        )));
+                    };
+                    into.entry(index.clone()).or_insert(reason);
+                }
+            }
             start = end;
         }
 
@@ -357,8 +376,16 @@ impl Sink for OpensearchSink {
         } else {
             0
         };
-        Ok(WriteReport::clean()
-            .rejecting(rejected)
+        let mut report = WriteReport::clean().rejecting(rejected);
+        for (index, reason) in blocked {
+            warn!(%index, %reason, "OpenSearch refuses writes to this index for now");
+            report = report.blocking(index, reason);
+        }
+        for (index, reason) in missing {
+            warn!(%index, %reason, "this index's target is gone");
+            report = report.missing_target(index, reason);
+        }
+        Ok(report
             .visible(visibility)
             .sent(total_bytes as u64)
             .refreshed(refreshing_bulks + refreshes))

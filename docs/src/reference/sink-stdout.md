@@ -8,7 +8,7 @@ Logs go to stderr, so stdout stays a clean data stream. When `flusso.toml` defin
 
 ## Order
 
-Lines come in the order the ingest engine published them, one write at a time: [`[concurrency] writes`](config-toml.md#concurrency) doesn't apply to this sink. A live change never overtakes a backfill row published before it, so a consumer that resumes from the last `seq` it read skips nothing.
+Lines come in the order the ingest engine published them, one write at a time: [`[concurrency] writes`](config-toml.md#concurrency) doesn't apply to this sink. A live change never overtakes a backfill row published before it, so a consumer that resumes from the last `seq` it read skips nothing. The order a sink is promised is per index (lane); across indexes the lines keep position order because this sink never refuses a document or an index, so none of its lanes ever [parks](../operate/stalled-lane.md).
 
 ## The envelope
 

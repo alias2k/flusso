@@ -81,6 +81,10 @@ impl Observer for StatusObserver {
         self.status.record_lag(bytes);
     }
 
+    fn on_lane_health(&self, lane: &stream::LaneKey, health: &engine::LaneHealth) {
+        self.status.set_lane_health(lane, health);
+    }
+
     fn on_engine_error(&self, engine: &EngineId, error: &str) {
         self.status.record_error(error);
         match engine {

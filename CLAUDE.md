@@ -963,7 +963,7 @@ is the one concrete piece.
 - **A sink's indexes are staged concurrently (issue #398).** `SinkEngine::each_index` runs one
   `Step` per index, `STAGE_CONCURRENCY` (8) at once, each index's own steps in order; the `Sink`
   port allows `ensure_index`/`is_seeded`/`reindex` at once for different indexes, never for one,
-  never beside `write`/`mark_seeded`. After a failure no further index is started (a
+  and beside a `write`/`mark_seeded` of other indexes only (stage 9's restaging lane). After a failure no further index is started (a
   hanging cluster would cost a timeout per wave), the ones in flight finish, and
   `EngineError::Staging` names every failure seen; the daemon retries the whole stage. A reindex
   control stages the same way, each index once even when named twice. `validate_indexes` checks `VALIDATE_CONCURRENCY` (4) indexes at
@@ -1036,7 +1036,8 @@ is the one concrete piece.
   engine's `fresh_source_*`/`skip_backfill_with_a_fresh_source_*` unit tests, the daemon's
   `fresh_source_rebuilds_seeded_sinks_before_preparing`, the sink's
   `deleted_generation_is_recreated_and_reported_unseeded`,
-  `generation_deleted_while_running_fails_the_flush_and_is_rebuilt`,
+  `generation_deleted_while_running_is_reported_missing_and_is_rebuilt`, the `lane_parking` e2e's
+  `a_generation_deleted_mid_run_is_staged_again_alone`,
   `a_second_reindex_while_rebuilding_stages_nothing`, `mark_seeded_sweeps_an_orphan_generation` e2e, the Postgres `continuity` e2e,
   and the two `restart_*` cases in `engine`'s `pipeline` e2e.
 - **Reindex is an operation on one sink, no restart.** `DaemonControl::reindex(index,
@@ -1123,11 +1124,11 @@ is the one concrete piece.
   in flight, and nothing behind it on its lane starts until its seed returned; a reindex waits for the
   writes and seeds in flight.
   A write is **caught up** when the window and the lane have nothing else. A **failure** (a write
-  `Err`, a `stop` rejection) starts nothing new: the writes in flight are awaited and acked when they
+  `Err`; a `stop` rejection parks its lane instead, see the stage 9 bullet) starts nothing new: the writes in flight are awaited and acked when they
   succeeded, then the run ends with the first error and the lane redelivers only what is unacked;
   the engine remembers the failed run (`failed_run`, also set on a fresh engine, so every process
   writes its oldest unconfirmed item alone), and the next run is a **barrier**: it grants only the
-  window's front item until a write lands, so a `stop` rejection or a write refused every time halts
+  window's front item until a write lands, so a write refused as a whole every time halts
   the sink across engine restarts (nothing behind it lands, the backoff grows, the lane fills); in
   the run that first meets it, disjoint writes started while it is in flight can land, confirmation
   staying before it; a new process whose oldest unconfirmed item was already written (a sibling
@@ -1144,7 +1145,7 @@ is the one concrete piece.
   `an_idle_engine_makes_its_last_writes_searchable`,
   `after_a_failed_run_the_oldest_item_is_written_alone_until_it_lands`,
   `a_fresh_engine_writes_nothing_past_a_persistent_stop_rejection`), the daemon's
-  `a_stop_rejection_halts_a_sink_writing_several_items_at_once`, `tests::busy`'s
+  `a_stop_rejection_halts_its_lane_writing_several_items_at_once`, `tests::busy`'s
   `a_busy_item_holds_back_only_the_items_sharing_its_documents`, the daemon's
   `writes_default_to_four_unless_the_config_sets_them`, the golden lock (its `flusso.toml` sets
   `[concurrency]`, the lock stays byte-identical), and the sinks' concurrency tests below.
@@ -1165,12 +1166,15 @@ is the one concrete piece.
   stalled sink eventually paces ingest and pins WAL (per-sink lag/in-flight are the alarm). An
   `Ok` report lists documents the destination *applied the write but rejected* individually. The
   `FailurePolicies` (global `FailurePolicy` default + per-index overrides, from config `on_error`,
-  resolved by **logical** index name) decide each when the write returns (`decide_rejections`): `Stop` errors the engine out with
-  the batch unacked (redelivered after restart); `Skip` quarantines it
+  resolved by **logical** index name) decide each when the write returns: `Stop` **parks the
+  lane** with the part unacked (next bullet); `Skip` quarantines it
   (`Observer::on_document_quarantined`, with the sink) and acks so the poison isn't redelivered.
-  A single `Stop` halts the whole batch before any quarantine event is emitted. The OpenSearch
-  sink does *not* retry item-level rejections, and reports a missing target
-  (`index_not_found_exception`) as write-wide, not as a rejection. An item refused as **busy**
+  A `Stop` part never quarantines; the other parts of a merged write are decided on their own. The
+  OpenSearch sink does *not* retry item-level rejections, and reports an index refused as a whole
+  per index, never as a rejection or an `Err`: `WriteReport::blocked` (`cluster_block_exception`,
+  an item-level 403 `security_exception`: `bulk::is_blocked`) and `WriteReport::missing`
+  (`index_not_found_exception`: `bulk::is_missing`), mapped to the logical index from the write's
+  own envelopes; a refusal naming an index no part holds fails the write. An item refused as **busy**
   (429 or 503: a full write queue, a circuit breaker, an unavailable shard; issue #395) is neither:
   `send_bulk_chunk` resends those items alone (`bulk::read_bulk_response` lists them by position,
   `bulk::is_busy`) from the same `max_retries` budget and backoff as a request-wide failure, and
@@ -1193,7 +1197,47 @@ is the one concrete piece.
   `items_refused_as_busy_are_resent_until_written` / `items_still_busy_after_the_retries_fail_the_write`
   (a stub `_bulk`), the engine's `tests::busy::a_batch_is_not_acked_until_its_busy_documents_are_written`, the sink's
   `document_ids` e2e (seeded alias and unseeded generation, multi-byte ids at the limit), and
-  `pipeline`'s `an_id_past_512_bytes_is_decided_by_on_error` (`skip` acks, `stop` leaves it unacked).
+  `pipeline`'s `an_id_past_512_bytes_is_decided_by_on_error` (`skip` acks, `stop` parks the lane unacked).
+- **One lane's failure parks that lane, not the sink (ADR 0012 stage 9, #404).** A part held back
+  (refused under `stop`, its index blocked, or missing) goes back in the sink engine's window at its
+  receive order, unacknowledged (`writes.rs`'s `put_back`), so the lane's marks, fences and the slot
+  stay where they are (`Progress::pinned_by` names it); the other parts land. A **parked** lane
+  (refused, blocked) is not granted, takes nothing more from its lane, and its items neither hold
+  nor end a merge wait (`merge_hold`); when its backoff is due (`health.rs`'s `LaneState`: 1 s,
+  doubling to `SinkEngine::with_max_probe_backoff`, the daemon's `max_restart_backoff`; reset only
+  by that lane's probe landing) its front item is written alone (a **probe**, `Flight.probe`):
+  landed, the lane opens; held again, the backoff doubles; a write `Err` fails the run as before. A
+  stop probes every parked lane once more at once (`probe_on_stop`). A write block never reaches
+  `on_error`, so nothing is quarantined under `skip`. A **restaging** lane (missing target), once
+  nothing of it is in flight, runs `SinkEngine::restage` as a flight holding no slot: `ensure_index`
+  for its index alone beside other indexes' writes (the port allows staging beside writes of other
+  indexes), then a `Backfill` request when unseeded and none is outstanding; then it opens and its
+  items are written again; a failed staging retries on the backoff; `stage` reopens restaging lanes.
+  A reopened lane keeps its staging backoff (`LaneState.unproven`, `restage_backoff`: a park in between
+  doesn't move it) until one of its writes lands, so a target
+  staging can't cure is staged again after 1 s, 2 s, … not in a loop (guard
+  `a_missing_target_staging_cannot_cure_is_retried_with_a_backoff`); staging waits for the lane's
+  writes in flight (`restaging_waits_for_the_lanes_writes_in_flight`). A part lets go of its batch
+  (and its budget `Hold`) before its acknowledgement (`a_parts_bytes_are_back_when_its_acknowledgement_returns`).
+  An ordered sink's order is per lane: a parked lane is overtaken (stdout never parks).
+  The health (`LaneHealth`, public; `on_lane_health`/`on_lane_probe` events) lives on the
+  `SinkEngine` and outlives a run; a parked lane stays parked across a failed run, on its schedule.
+  The run ends only on a sink-wide failure (a write `Err`, a seed, a lane delivery or ack). `/status`
+  `sinks.<s>.lanes.<i>.health` (+ `parked_since`, `next_probe`, `reason`), `flusso.lane.parked{why}`,
+  `flusso.lane.probes{outcome}`, and the stop's deadline message names the lane. Not yet: fresh
+  builds of a refused item (§6, needs 8a), reindex per lane, a per-index memory share (a parked lane
+  can fill the budget, as a stalled sink does). Guards: `tests::parking` (paused time),
+  `health::tests`, `tests::concurrent`'s `a_stop_rejection_*`/`a_fresh_engine_writes_nothing_past_*`,
+  `tests::merge`'s `a_stop_rejection_in_a_merged_write_parks_only_its_own_lane`/
+  `a_parked_lane_stays_parked_when_an_acknowledgement_fails`, `tests::wait`'s
+  `a_stop_rejection_in_a_merged_write_loses_no_other_part`, `tests::refresh`'s
+  `a_quiet_lane_beside_a_parked_one_is_made_searchable`, the daemon's
+  `status_reports_each_lanes_health`, the CLI's `a_parked_lane_is_exported_with_why_*`,
+  `a_parked_lanes_probes_are_counted_by_outcome`, `a_parked_lane_is_named_in_the_deadline_message`,
+  `bulk::tests`' block/missing cases, and the `lane_parking` e2e (a write block under `stop` and
+  `skip`: the sibling stays current, nothing quarantined, the lane pins the slot, lifted it catches up
+  with no restart; a generation deleted mid-run staged again alone), and `flusso-cli`'s `shutdown`
+  `a_stop_with_a_write_blocked_lane_gives_up_at_the_deadline_naming_the_lane_and_a_restart_converges`.
 - **A document a script fails on is decided on the ingest side (issue #198).** A
   `DocumentBuilder` may return `Document::Failed { id, failure: BuildFailure }`; the ingest engine
   resolves the index's `FailurePolicies` (the same `on_error` the sink engines use, handed to it by
@@ -1449,7 +1493,9 @@ recovery. `FlussoLaneStalled` (`dev/prometheus/rules/flusso.rules.yml`, tested b
 dev server loads whole; the Helm chart's `prometheusRule`, kept equal by
 `.github/scripts/test_alert_rule_copies.py`) fires past 10 min of age, or past 1 GiB of WAL behind
 with an age over 60 s (WAL behind includes WAL flusso hasn't read, so a catch-up has it too), for 5
-min; runbook `docs/src/operate/stalled-lane.md`. Guards: `stall::tests`, the
+min; `FlussoLaneParked` (same two copies and rule tests) fires on `flusso_lane_parked > 0` for 5 min,
+the only alert a refused backfill page (no position, no stall age) reaches;
+runbook `docs/src/operate/stalled-lane.md`. Guards: `stall::tests`, the
 `fence` e2e's stalled-index block (age, sibling at 0, `pinned_by`, recovery). It is **telemetry-agnostic** — it depends only on the
 engine's `Observer` trait, not on any metrics backend — and owns **no transport**: no HTTP
 server, no process signals, no metrics *recording* or *exporter*; those are the binary's.

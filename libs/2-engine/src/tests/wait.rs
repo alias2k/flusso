@@ -521,8 +521,9 @@ async fn a_failed_merged_write_is_blamed_on_its_lanes_and_both_come_back() {
     assert_eq!(rig.sink.times_written("users/u2"), 2);
 }
 
-/// A `stop` rejection of `orders/o1` in a merged write ends the run blamed on
-/// `orders` alone; `users/u2` landed and is not written again.
+/// A `stop` rejection of `orders/o1` in a merged write parks `orders` alone;
+/// `users/u2` landed and is not written again, and `orders/o1` lands on its
+/// probe, with no restart.
 #[tokio::test(start_paused = true)]
 async fn a_stop_rejection_in_a_merged_write_loses_no_other_part() {
     let mut rig = Rig::with_policies(
@@ -535,18 +536,18 @@ async fn a_stop_rejection_in_a_merged_write_loses_no_other_part() {
     tokio::time::sleep(ms(5)).await;
     rig.publish(&orders(), "o1", Some(2)).await;
     rig.publish(&users(), "u2", Some(3)).await;
-    assert!(rig.ended().await.is_err());
+    tokio::time::sleep(ms(200)).await;
     assert!(
         rig.sink.merged("orders/o1", "users/u2"),
         "one merged write: {:?}",
         rig.sink.writes()
     );
-    assert_eq!(
-        rig.engine.blame(),
-        Blame::Lanes([LaneKey::new(orders(), sink_name("primary"))].into()),
+    assert!(
+        !rig.engine
+            .lane_health(&LaneKey::new(orders(), sink_name("primary")))
+            .is_open()
     );
-    rig.start();
-    tokio::time::sleep(ms(200)).await;
+    tokio::time::sleep(ms(1_500)).await;
     assert!(rig.stream.is_idle());
     assert_eq!(rig.sink.times_written("orders/o1"), 2);
     assert_eq!(rig.sink.times_written("users/u2"), 1);

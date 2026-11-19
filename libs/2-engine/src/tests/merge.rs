@@ -404,10 +404,10 @@ async fn a_document_is_never_merged_with_its_own_later_build() {
 }
 
 /// A `stop` rejection in a merged write is its own index's: only that lane's
-/// item stays unacknowledged and only that lane is blamed; the other parts
-/// landed and are acknowledged.
+/// item stays unacknowledged and only that lane parks; the other parts landed
+/// and are acknowledged, and the run goes on.
 #[tokio::test]
-async fn a_stop_rejection_in_a_merged_write_bars_only_its_own_lane() {
+async fn a_stop_rejection_in_a_merged_write_parks_only_its_own_lane() {
     let rig = Rig::new();
     rig.publish("users", item("users", 0..4, Some(0))).await;
     rig.publish("orders", item("orders", 0..4, Some(1))).await;
@@ -415,18 +415,30 @@ async fn a_stop_rejection_in_a_merged_write_bars_only_its_own_lane() {
         rejects: Some(index("orders")),
         ..Parts::default()
     });
-    let engine = rig
-        .engine(Arc::clone(&sink))
-        .with_writes(1)
-        .with_failure_policies(FailurePolicies::new(FailurePolicy::Stop));
-    let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
-    let result = engine.run(&mut control).await;
-    assert!(result.is_err(), "the orders rejection stops the run");
-    assert_eq!(sink.documents_per_write(), [8], "one merged write");
-    assert_eq!(
-        engine.blame(),
-        Blame::Lanes([LaneKey::new(index("orders"), sink_name("primary"))].into()),
+    let engine = Arc::new(
+        rig.engine(Arc::clone(&sink))
+            .with_writes(1)
+            .with_failure_policies(FailurePolicies::new(FailurePolicy::Stop)),
     );
+    let running = Arc::clone(&engine);
+    let task = tokio::spawn(async move {
+        let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
+        running.run(&mut control).await
+    });
+    let orders_lane = LaneKey::new(index("orders"), sink_name("primary"));
+    wait_for(|| !engine.lane_health(&orders_lane).is_open()).await;
+    assert_eq!(sink.documents_per_write()[0], 8, "one merged write");
+    assert!(
+        !task.is_finished(),
+        "the orders rejection parks its lane only"
+    );
+    assert!(
+        engine
+            .lane_health(&LaneKey::new(index("users"), sink_name("primary")))
+            .is_open()
+    );
+    task.abort();
+    let _ = task.await;
 
     // The next run gets back only what wasn't acknowledged: the orders item.
     let again = Arc::new(Parts::default());
@@ -508,10 +520,11 @@ async fn each_part_of_a_merged_write_gives_its_bytes_back_at_its_own_ack() {
         .engine(Arc::clone(&sink))
         .with_writes(1)
         .with_failure_policies(FailurePolicies::new(FailurePolicy::Stop));
-    let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
-    assert!(engine.run(&mut control).await.is_err());
-    assert_eq!(sink.documents_per_write(), [8], "one merged write");
+    let task = spawn(engine);
     wait_for(|| budget.held().total == 8 * KIB).await;
+    assert_eq!(sink.documents_per_write()[0], 8, "one merged write");
+    task.abort();
+    let _ = task.await;
 
     let again = Arc::new(Parts::default());
     let task = spawn(rig.engine(Arc::clone(&again)).with_writes(1));
@@ -565,11 +578,12 @@ impl Sink for RefusesThenFailsToRefresh {
     }
 }
 
-/// A `stop` rejection in a merged write is blamed on its own lane even when
-/// acknowledging the other part fails (here, the lane refuses the `users`
-/// part's acknowledgement): the run doesn't fall back to blaming every lane.
+/// A `stop` rejection in a merged write parks its own lane; when
+/// acknowledging the other part then fails (here, the lane refuses the
+/// `users` part's acknowledgement) the run fails, as a failure no lane caused,
+/// and the parked lane stays parked for the next run.
 #[tokio::test]
-async fn a_stop_rejection_keeps_its_blame_when_an_acknowledgement_fails() {
+async fn a_parked_lane_stays_parked_when_an_acknowledgement_fails() {
     let rig = Rig::new();
     rig.publish("users", item("users", 10..14, Some(0))).await;
     rig.publish("orders", item("orders", 0..4, Some(1))).await;
@@ -589,8 +603,139 @@ async fn a_stop_rejection_keeps_its_blame_when_an_acknowledgement_fails() {
     engine.set_blame(Blame::Nobody);
     let (_keep, mut control) = mpsc::channel::<SinkControl>(1);
     assert!(engine.run(&mut control).await.is_err());
+    assert_eq!(engine.blame(), Blame::Everyone);
     assert_eq!(
-        engine.blame(),
-        Blame::Lanes([LaneKey::new(index("orders"), sink_name("primary"))].into()),
+        engine
+            .lane_health(&LaneKey::new(index("orders"), sink_name("primary")))
+            .kind(),
+        "parked"
+    );
+}
+
+/// A stream whose acknowledgements record what the budget holds once the
+/// lane let the acknowledged item go.
+#[derive(Debug)]
+struct RecordsAtAck {
+    inner: Arc<ChannelStream>,
+    budget: Arc<crate::Budget>,
+    held: Arc<Mutex<Vec<usize>>>,
+}
+
+impl Stream for RecordsAtAck {
+    fn lane(&self, key: &LaneKey) -> stream::Result<stream::Lane> {
+        let lane = self.inner.lane(key)?;
+        Ok(stream::Lane {
+            producer: lane.producer,
+            consumer: Box::new(RecordingConsumer {
+                inner: lane.consumer,
+                budget: Arc::clone(&self.budget),
+                held: Arc::clone(&self.held),
+            }),
+        })
+    }
+
+    fn lanes(&self, sink: &kernel::SinkName) -> Vec<LaneKey> {
+        self.inner.lanes(sink)
+    }
+
+    fn requests(&self) -> stream::Result<stream::RequestLane> {
+        self.inner.requests()
+    }
+
+    fn is_idle(&self) -> bool {
+        self.inner.is_idle()
+    }
+}
+
+#[derive(Debug)]
+struct RecordingConsumer {
+    inner: Box<dyn stream::Consumer<LaneItem>>,
+    budget: Arc<crate::Budget>,
+    held: Arc<Mutex<Vec<usize>>>,
+}
+
+#[async_trait]
+impl stream::Consumer<LaneItem> for RecordingConsumer {
+    async fn recv(&mut self) -> stream::Result<Option<stream::Delivery<LaneItem>>> {
+        let Some(delivery) = self.inner.recv().await? else {
+            return Ok(None);
+        };
+        let (item, handle) = delivery.into_parts();
+        Ok(Some(stream::Delivery::new(
+            item,
+            Box::new(RecordingAck {
+                inner: handle,
+                budget: Arc::clone(&self.budget),
+                held: Arc::clone(&self.held),
+            }),
+        )))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+}
+
+#[derive(Debug)]
+struct RecordingAck {
+    inner: Box<dyn stream::AckHandle>,
+    budget: Arc<crate::Budget>,
+    held: Arc<Mutex<Vec<usize>>>,
+}
+
+#[async_trait]
+impl stream::AckHandle for RecordingAck {
+    async fn ack(self: Box<Self>) -> stream::Result<()> {
+        self.inner.ack().await?;
+        self.held.lock().unwrap().push(self.budget.held().total);
+        Ok(())
+    }
+
+    async fn nack(self: Box<Self>) -> stream::Result<()> {
+        self.inner.nack().await
+    }
+}
+
+/// The engine lets go of a part's batch before acknowledging it: once the
+/// lane released its copy at the acknowledgement, the part's bytes are back
+/// in the budget, with nothing of the engine still holding them.
+#[tokio::test]
+async fn a_parts_bytes_are_back_when_its_acknowledgement_returns() {
+    const KIB: usize = 1024;
+    let budget = Arc::new(crate::Budget::new(1 << 20));
+    let rig = Rig::new();
+    rig.publish(
+        "users",
+        charged(item("users", 0..4, Some(0)), &budget, 4 * KIB),
+    )
+    .await;
+    rig.publish(
+        "orders",
+        charged(item("orders", 0..4, Some(1)), &budget, 8 * KIB),
+    )
+    .await;
+    let held = Arc::new(Mutex::new(Vec::new()));
+    let stream = Arc::new(RecordsAtAck {
+        inner: Arc::clone(&rig.stream),
+        budget: Arc::clone(&budget),
+        held: Arc::clone(&held),
+    });
+    let engine = SinkEngine::new(
+        sink_name("primary"),
+        Arc::new(Parts::default()) as Arc<dyn Sink>,
+        stream as Arc<dyn Stream>,
+        mappings(),
+        Arc::clone(&rig.progress),
+    )
+    .with_writes(1);
+    engine.set_blame(Blame::Nobody);
+    let task = spawn(engine);
+    wait_for(|| held.lock().unwrap().len() == 2).await;
+    task.abort();
+    let held = held.lock().unwrap().clone();
+    assert!(
+        matches!(held.as_slice(), [first, 0] if *first == 4 * KIB || *first == 8 * KIB),
+        "each acknowledgement finds its part's bytes already returned, only the other part's \
+         left: {held:?}"
     );
 }

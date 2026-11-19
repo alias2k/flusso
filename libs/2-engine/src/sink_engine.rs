@@ -51,6 +51,8 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant, sleep_until};
 
 use self::fences::Fences;
+use self::health::LaneState;
+pub use self::health::{LaneHealth, ParkReason, ProbeOutcome};
 
 use crate::error::{EngineError, Result, StagingFailures};
 use crate::observer::{EngineId, NoopObserver, Observer, Stage, StageTiming, StartupStep};
@@ -73,6 +75,7 @@ const IDLE_TICK: Duration = Duration::from_secs(1);
 
 mod fences;
 pub(crate) mod flights;
+mod health;
 mod walked;
 mod writes;
 
@@ -168,6 +171,12 @@ pub struct SinkEngine {
     /// engine blames every lane, since a previous process may have stopped
     /// on any.
     blame: Mutex<Blame>,
+    /// Each lane's health (open, parked, restaging) and its probe backoff.
+    /// Outlives a run: a run failing for another reason leaves a parked lane
+    /// parked, on its schedule. A lane not in it is open.
+    health: Mutex<std::collections::BTreeMap<LaneKey, LaneState>>,
+    /// The longest a parked lane waits between two probes.
+    max_probe_backoff: std::time::Duration,
 }
 
 impl SinkEngine {
@@ -202,7 +211,83 @@ impl SinkEngine {
             blame: Mutex::new(Blame::Everyone),
             pending_reindex: Mutex::new(None),
             reindex_waiting: AtomicBool::new(false),
+            health: Mutex::new(std::collections::BTreeMap::new()),
+            max_probe_backoff: health::MAX_BACKOFF,
         }
+    }
+
+    /// The longest a parked lane waits between two probes of its front item:
+    /// the backoff starts at one second and doubles up to it. The daemon sets
+    /// `max_restart_backoff`; the default is 60 s.
+    pub fn with_max_probe_backoff(mut self, max: std::time::Duration) -> Self {
+        self.max_probe_backoff = max.max(health::FIRST_BACKOFF);
+        self
+    }
+
+    /// Where `lane` is: open, parked, or staged again after its target went
+    /// missing.
+    pub fn lane_health(&self, lane: &LaneKey) -> LaneHealth {
+        self.lock_health()
+            .get(lane)
+            .map_or(LaneHealth::Open, |state| state.health.clone())
+    }
+
+    fn lock_health(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::BTreeMap<LaneKey, LaneState>> {
+        self.health.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// `lane`'s state as the last run left it; open when never stored.
+    pub(super) fn lane_state(&self, lane: &LaneKey) -> LaneState {
+        self.lock_health().get(lane).cloned().unwrap_or_default()
+    }
+
+    /// Keep `lane`'s state for the runs to come, and tell the observers when
+    /// its health `changed`.
+    pub(super) fn store_lane(&self, lane: &LaneKey, state: &LaneState, changed: bool) {
+        {
+            let mut health = self.lock_health();
+            if !state.is_kept() {
+                health.remove(lane);
+            } else {
+                health.insert(lane.clone(), state.clone());
+            }
+        }
+        if changed {
+            self.observer.on_lane_health(lane, &state.health);
+        }
+    }
+
+    /// Stage `index` again after its target went missing: `ensure_index`
+    /// (which retracts a seed whose target is gone and creates a fresh one),
+    /// then, when it is unseeded, a backfill unless one is outstanding. Runs
+    /// beside writes of the other indexes, never beside one of `index`.
+    pub(super) async fn restage(&self, index: &IndexName) -> Result<()> {
+        let Some(mapping) = self.mappings.iter().find(|m| &m.index == index) else {
+            return Ok(());
+        };
+        let staged = self
+            .step(
+                Step::Ensure {
+                    ask_seeded: self.options.backfill,
+                },
+                mapping,
+            )
+            .await
+            .map_err(|error| EngineError::Staging(StagingFailures(vec![(index.clone(), error)])))?;
+        let Staged::Unseeded(walked) = staged else {
+            return Ok(());
+        };
+        if !self.options.backfill || self.skip_backfill {
+            tracing::warn!(%index, sink = %self.name, "staged again with no backfill (backfill off for this sink, or skip_backfill): it holds only what is written from now on");
+            return Ok(());
+        }
+        if self.outstanding().contains(index) {
+            tracing::warn!(%index, sink = %self.name, "staged again while its backfill is still outstanding; that backfill fills the fresh target");
+            return Ok(());
+        }
+        self.request_backfill(vec![(index.clone(), walked)]).await
     }
 
     /// The deployment's stop: once requested, a snapshot batch still on the
@@ -310,6 +395,7 @@ impl SinkEngine {
 
         if !backfill {
             tracing::info!("backfill disabled for this sink; live changes only");
+            self.reopen_restaged();
             self.staged(started);
             return Ok(());
         }
@@ -347,8 +433,26 @@ impl SinkEngine {
         } else {
             tracing::info!("every index is seeded; no backfill needed");
         }
+        self.reopen_restaged();
         self.staged(started);
         Ok(())
+    }
+
+    /// Every index was just ensured: a lane waiting to be staged again after
+    /// its target went missing is staged.
+    fn reopen_restaged(&self) {
+        let restaged: Vec<LaneKey> = self
+            .lock_health()
+            .iter()
+            .filter(|(_, state)| matches!(state.health, LaneHealth::Restaging { .. }))
+            .map(|(lane, _)| lane.clone())
+            .collect();
+        for lane in restaged {
+            let mut state = self.lane_state(&lane);
+            state.reopen(Instant::now());
+            tracing::info!(%lane, "staged again with the sink; the lane is open");
+            self.store_lane(&lane, &state, true);
+        }
     }
 
     fn staged(&self, started: Instant) {

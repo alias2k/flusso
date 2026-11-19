@@ -463,6 +463,19 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
         let _ = (lane, position);
     }
 
+    /// `lane`'s health changed: it parked (a refusal under `stop`, a write
+    /// block), a probe failed and the next one is scheduled, it is staged
+    /// again after its target went missing, or it opened. See
+    /// [`LaneHealth`](crate::LaneHealth).
+    fn on_lane_health(&self, lane: &LaneKey, health: &crate::LaneHealth) {
+        let _ = (lane, health);
+    }
+
+    /// A parked lane's probe (its front item, written alone) returned.
+    fn on_lane_probe(&self, lane: &LaneKey, outcome: crate::ProbeOutcome) {
+        let _ = (lane, outcome);
+    }
+
     /// An engine stopped on an error. The daemon decides whether it restarts.
     fn on_engine_error(&self, engine: &EngineId, error: &str) {
         let _ = (engine, error);
@@ -629,6 +642,18 @@ impl Observer for FanOut {
     fn on_position_searchable(&self, lane: &LaneKey, position: Position) {
         for observer in &self.observers {
             observer.on_position_searchable(lane, position);
+        }
+    }
+
+    fn on_lane_health(&self, lane: &LaneKey, health: &crate::LaneHealth) {
+        for observer in &self.observers {
+            observer.on_lane_health(lane, health);
+        }
+    }
+
+    fn on_lane_probe(&self, lane: &LaneKey, outcome: crate::ProbeOutcome) {
+        for observer in &self.observers {
+            observer.on_lane_probe(lane, outcome);
         }
     }
 
