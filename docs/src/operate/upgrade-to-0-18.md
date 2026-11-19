@@ -1,6 +1,46 @@
 # Upgrade to 0.18
 
-0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index. It also writes a `timestamp` column in ISO 8601, which changes stored documents and can break a tuned `format`: see [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601). A `decimal` field is written with every digit: see [A decimal is written with every digit](#a-decimal-is-written-with-every-digit). A `double` is indexed as the exact value Postgres holds: see [A float or double is indexed as Postgres holds it](#a-float-or-double-is-indexed-as-postgres-holds-it). A filter value that doesn't fit its column no longer matches by being cut to fit: see [A filter value is compared as written](#a-filter-value-is-compared-as-written). A script reads a date as a date, not a string: see [A date reaches a script as a date](#a-date-reaches-a-script-as-a-date). A change is indexed only once its transaction is visible: see [A change waits until its commit is visible](#a-change-waits-until-its-commit-is-visible). A fenced read in `flusso-query` waits through a restart of flusso, with a 20 s default timeout: see [A fenced read waits through a restart](#a-fenced-read-waits-through-a-restart). A stop drains and has a deadline and new exit codes: see [A stop drains, then exits](#a-stop-drains-then-exits). A document OpenSearch refuses as busy is resent instead of reaching `on_error`: see [A busy cluster no longer drops documents](#a-busy-cluster-no-longer-drops-documents). `/metrics` gains per-stage timings, and the engine's observer types change for code embedding the crates: see [Stage timings in /metrics](#stage-timings-in-metrics). Each sink writes several batches at once, and a custom `Sink` implements one `write` instead of `apply` and `flush`: see [Each sink writes several batches at once](#each-sink-writes-several-batches-at-once). A backfill reads its keys in pages with no long transaction: see [A backfill reads key pages, with no long transaction](#a-backfill-reads-key-pages-with-no-long-transaction). Several batches of documents are built at once: see [Several batches build at once](#several-batches-build-at-once). Memory is bounded in bytes and `[stream] capacity` is deprecated: see [Memory is bounded in bytes](#memory-is-bounded-in-bytes). An interrupted backfill continues where it got to: see [An interrupted backfill resumes](#an-interrupted-backfill-resumes). A backfill of indexes that read each other's tables builds each document once: see [A backfill of related indexes is faster and holds more in memory](#a-backfill-of-related-indexes-is-faster-and-holds-more-in-memory). Seeding and index creation send fewer requests: see [Seeding and index creation take fewer requests](#seeding-and-index-creation-take-fewer-requests). A sink's indexes are staged several at once: see [Indexes are staged at once at start](#indexes-are-staged-at-once-at-start). Confirmation and fences read the engine's progress, and the source keeps no map of what it emitted: see [Confirmation and fences read the engine's progress](#confirmation-and-fences-read-the-engines-progress). Each index and sink has its own lane, so a slow index holds up only itself, and `/wait` takes `index`: see [One lane per index and sink](#one-lane-per-index-and-sink). A fence no longer passes while an index is seeded or rebuilt; it answers `503` with a reason: see [A fence holds while an index is seeded or rebuilt](#a-fence-holds-while-an-index-is-seeded-or-rebuilt). A lane that lands nothing is named, measured and alerted on: see [A stalled lane is named, measured and alerted on](#a-stalled-lane-is-named-measured-and-alerted-on).
+0.18 rebuilds some indexes once, changes how a few values are stored, and runs builds and writes concurrently. Each change below links to its section; the steps on this page cover the rebuild.
+
+**Check before upgrading: stored documents or results change**
+
+- **An index with a `binary` field or an unindexed `constant` is rebuilt once** into a new physical index. A `binary` field is indexed as base64 of its bytes, a `constant` as written. See [When to use this](#when-to-use-this) and [Steps](#steps).
+- **A `timestamp` column is written in ISO 8601**, which can break a tuned `format`: [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601).
+- **A `decimal` keeps every digit**: [A decimal is written with every digit](#a-decimal-is-written-with-every-digit).
+- **A `float` or `double` is the exact value Postgres holds**: [A float or double is indexed as Postgres holds it](#a-float-or-double-is-indexed-as-postgres-holds-it).
+- **A filter value that doesn't fit its column no longer matches by being cut to fit**: [A filter value is compared as written](#a-filter-value-is-compared-as-written).
+- **A script reads a date as a date, not a string**: [A date reaches a script as a date](#a-date-reaches-a-script-as-a-date).
+
+**Reads and fences**
+
+- **A change is indexed only once its transaction is visible**: [A change waits until its commit is visible](#a-change-waits-until-its-commit-is-visible).
+- **A fenced read in `flusso-query` waits through a restart of flusso**, 20 s by default: [A fenced read waits through a restart](#a-fenced-read-waits-through-a-restart).
+- **A fence no longer passes while an index is seeded or rebuilt**; it answers `503` with a reason: [A fence holds while an index is seeded or rebuilt](#a-fence-holds-while-an-index-is-seeded-or-rebuilt).
+- **Each index and sink has its own lane**, so a slow index holds up only itself, and `/wait` takes `index`: [One lane per index and sink](#one-lane-per-index-and-sink).
+
+**Running flusso**
+
+- **A stop drains, has a deadline and new exit codes**: [A stop drains, then exits](#a-stop-drains-then-exits).
+- **A document OpenSearch refuses as busy is resent** instead of reaching `on_error`: [A busy cluster no longer drops documents](#a-busy-cluster-no-longer-drops-documents).
+- **Memory is bounded in bytes**, and `[stream] capacity` is deprecated: [Memory is bounded in bytes](#memory-is-bounded-in-bytes).
+- **An interrupted backfill continues where it got to**: [An interrupted backfill resumes](#an-interrupted-backfill-resumes).
+- **A lane that lands nothing is named, measured and alerted on**: [A stalled lane is named, measured and alerted on](#a-stalled-lane-is-named-measured-and-alerted-on).
+- **`/metrics` gains per-stage timings**: [Stage timings in /metrics](#stage-timings-in-metrics).
+
+**Faster, with nothing to do**
+
+- **Each sink writes several batches at once**: [Each sink writes several batches at once](#each-sink-writes-several-batches-at-once).
+- **Several batches of documents are built at once**: [Several batches build at once](#several-batches-build-at-once).
+- **A backfill reads its keys in pages, with no long transaction**: [A backfill reads key pages, with no long transaction](#a-backfill-reads-key-pages-with-no-long-transaction).
+- **A backfill of indexes that read each other's tables builds each document once**: [A backfill of related indexes is faster and holds more in memory](#a-backfill-of-related-indexes-is-faster-and-holds-more-in-memory).
+- **Seeding and index creation send fewer requests**: [Seeding and index creation take fewer requests](#seeding-and-index-creation-take-fewer-requests).
+- **A sink's indexes are staged several at once at start**: [Indexes are staged at once at start](#indexes-are-staged-at-once-at-start).
+
+**Code that embeds the crates**
+
+- **A custom `Sink` implements one `write`** instead of `apply` and `flush`: [Each sink writes several batches at once](#each-sink-writes-several-batches-at-once).
+- **The engine's observer types change**: [Stage timings in /metrics](#stage-timings-in-metrics).
+- **Confirmation and fences read the engine's progress**, and the source keeps no map of what it emitted: [Confirmation and fences read the engine's progress](#confirmation-and-fences-read-the-engines-progress).
 
 ## When to use this
 
