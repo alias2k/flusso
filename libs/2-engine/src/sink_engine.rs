@@ -51,6 +51,8 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant, sleep_until};
 
 use self::fences::Fences;
+use self::health::LaneState;
+pub use self::health::{LaneHealth, ParkReason, ProbeOutcome};
 
 use crate::error::{EngineError, Result, StagingFailures};
 use crate::observer::{EngineId, NoopObserver, Observer, Stage, StageTiming, StartupStep};
@@ -73,6 +75,7 @@ const IDLE_TICK: Duration = Duration::from_secs(1);
 
 mod fences;
 pub(crate) mod flights;
+mod health;
 mod walked;
 mod writes;
 
@@ -168,6 +171,12 @@ pub struct SinkEngine {
     /// engine blames every lane, since a previous process may have stopped
     /// on any.
     blame: Mutex<Blame>,
+    /// Each lane's health (open, parked, restaging) and its probe backoff.
+    /// Outlives a run: a run failing for another reason leaves a parked lane
+    /// parked, on its schedule. A lane not in it is open.
+    health: Mutex<std::collections::BTreeMap<LaneKey, LaneState>>,
+    /// The longest a parked lane waits between two probes.
+    max_probe_backoff: std::time::Duration,
 }
 
 impl SinkEngine {
@@ -202,7 +211,31 @@ impl SinkEngine {
             blame: Mutex::new(Blame::Everyone),
             pending_reindex: Mutex::new(None),
             reindex_waiting: AtomicBool::new(false),
+            health: Mutex::new(std::collections::BTreeMap::new()),
+            max_probe_backoff: health::MAX_BACKOFF,
         }
+    }
+
+    /// The longest a parked lane waits between two probes of its front item:
+    /// the backoff starts at one second and doubles up to it. The daemon sets
+    /// `max_restart_backoff`; the default is 60 s.
+    pub fn with_max_probe_backoff(mut self, max: std::time::Duration) -> Self {
+        self.max_probe_backoff = max.max(health::FIRST_BACKOFF);
+        self
+    }
+
+    /// Where `lane` is: open, parked, or staged again after its target went
+    /// missing.
+    pub fn lane_health(&self, lane: &LaneKey) -> LaneHealth {
+        self.lock_health()
+            .get(lane)
+            .map_or(LaneHealth::Open, |state| state.health.clone())
+    }
+
+    fn lock_health(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::BTreeMap<LaneKey, LaneState>> {
+        self.health.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The deployment's stop: once requested, a snapshot batch still on the

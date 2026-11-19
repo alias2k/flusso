@@ -205,6 +205,7 @@ pub(crate) fn plan_chunks(sizes: &[usize], batch_size: usize, max_bytes: usize) 
 
 /// What a 2xx bulk response says about the actions it answered.
 #[derive(Debug, Default)]
+#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) struct BulkResponse {
     /// Documents refused for a reason resending won't change.
     pub(crate) rejected: Vec<RejectedDocument>,
@@ -212,6 +213,12 @@ pub(crate) struct BulkResponse {
     pub(crate) busy: Vec<usize>,
     /// How the last busy item was refused: status, error type and reason.
     pub(crate) busy_reason: Option<String>,
+    /// Positions, in the request, of the actions whose index refuses writes
+    /// for now, with why.
+    pub(crate) blocked: Vec<(usize, String)>,
+    /// Positions, in the request, of the actions whose target is gone, with
+    /// why.
+    pub(crate) missing: Vec<(usize, String)>,
 }
 
 /// Whether an item refused with `status` is the cluster being busy, so the

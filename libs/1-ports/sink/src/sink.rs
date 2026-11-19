@@ -16,11 +16,39 @@ use crate::Result;
 /// handles them per its failure policy (stop, or quarantine and continue)
 /// instead of looping. An empty report means everything was written cleanly.
 /// Built with [`WriteReport::clean`] and its builders; more fields may come.
+///
+/// Between the two sit the **index-wide** outcomes, about one index of the
+/// write and not its documents (ADR 0012 stage 9): the destination refuses
+/// writes to that index for now ([`blocked`](Self::blocked): a write block, a
+/// role without write permission on it), or the index is gone
+/// ([`missing`](Self::missing)). No document of a named index counts as
+/// applied, whatever the destination did with some of them (writing them again
+/// is idempotent); the other indexes of the write landed. The engine parks that
+/// index's lane, or stages it again, and goes on with the others; these never
+/// reach the failure policy.
+///
+/// ```
+/// use kernel::IndexName;
+/// use sink::WriteReport;
+///
+/// let orders = IndexName::try_new("orders").unwrap();
+/// let report = WriteReport::clean().blocking(orders.clone(), "index write (api)");
+/// assert_eq!(report.blocked[0].index, orders);
+/// assert!(!report.is_clean());
+/// ```
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct WriteReport {
     /// Documents the destination accepted the write but rejected individually.
     pub rejected: Vec<RejectedDocument>,
+    /// Indexes the destination refuses to write to for now: none of their
+    /// documents in this write counts as applied, and they are written again
+    /// once the refusal is lifted. Never a document's fault.
+    pub blocked: Vec<IndexRefusal>,
+    /// Indexes whose target is gone (deleted while the sink runs): none of
+    /// their documents in this write counts as applied, and the engine stages
+    /// the index again ([`Sink::ensure_index`]) before writing them again.
+    pub missing: Vec<IndexRefusal>,
     /// When what this write wrote can be *searched*, as opposed to fetched by
     /// id. The sink only reports what its write did; the sink engine turns the
     /// reports into the sink's searchable position.
@@ -135,6 +163,28 @@ impl WriteReport {
         self
     }
 
+    /// Report every document of `index` in the write unapplied: the
+    /// destination refuses writes to it for now, for `reason`.
+    #[must_use]
+    pub fn blocking(mut self, index: IndexName, reason: impl Into<String>) -> Self {
+        self.blocked.push(IndexRefusal {
+            index,
+            reason: reason.into(),
+        });
+        self
+    }
+
+    /// Report every document of `index` in the write unapplied: its target is
+    /// gone, for `reason`.
+    #[must_use]
+    pub fn missing_target(mut self, index: IndexName, reason: impl Into<String>) -> Self {
+        self.missing.push(IndexRefusal {
+            index,
+            reason: reason.into(),
+        });
+        self
+    }
+
     /// Set how many bytes the write sent.
     #[must_use]
     pub fn sent(mut self, bytes: u64) -> Self {
@@ -149,10 +199,21 @@ impl WriteReport {
         self
     }
 
-    /// Whether the write applied every document (no item-level rejections).
+    /// Whether the write applied every document: no item-level rejection and
+    /// no index blocked or missing.
     pub fn is_clean(&self) -> bool {
-        self.rejected.is_empty()
+        self.rejected.is_empty() && self.blocked.is_empty() && self.missing.is_empty()
     }
+}
+
+/// One index of a write the destination refused as a whole, with why
+/// (see [`WriteReport::blocked`] and [`WriteReport::missing`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexRefusal {
+    /// The logical index, as the envelopes name it.
+    pub index: IndexName,
+    /// Why, in the destination's words.
+    pub reason: String,
 }
 
 /// One document a sink rejected at the item level during a [`write`](Sink::write).
@@ -207,10 +268,12 @@ pub enum Seeding {
 /// **Staging is concurrent across indexes.** The sink engine stages a sink's
 /// indexes several at a time: [`ensure_index`](Self::ensure_index),
 /// [`is_seeded`](Self::is_seeded) and [`reindex`](Self::reindex) may run at
-/// once for *different* indexes, never two at once for the same index, and
-/// never beside [`write`](Self::write) or [`mark_seeded`](Self::mark_seeded)
-/// (staging happens before the first write and once the writes and seeds in
-/// flight have returned).
+/// once for *different* indexes, never two at once for the same index. They
+/// may run beside a [`write`](Self::write) or a
+/// [`mark_seeded`](Self::mark_seeded) of **other** indexes (an index whose
+/// target went missing is staged again while the others are written), never
+/// beside one holding the same index: a write never holds a document of an
+/// index being staged.
 ///
 /// **Seeding is concurrent across indexes.** [`mark_seeded`](Self::mark_seeded)
 /// may run at once for different indexes, and beside `write` for other
@@ -258,12 +321,13 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// now (busy) is retried inside the write and never reported; still
     /// refused after the sink's retries, it fails the write. `Err` is
     /// write-wide: nothing in the write is known applied, and the lane
-    /// redelivers it to the restarted engine, which writes it again whole. A
-    /// write whose *target* is gone (the destination index was deleted under
-    /// the sink) is write-wide too: every document bound for it would fail the
-    /// same way, and the engine's restart re-runs
-    /// [`ensure_index`](Self::ensure_index), which is where the target is
-    /// rebuilt.
+    /// redelivers it to the restarted engine, which writes it again whole: a
+    /// failure of the destination or the client (unreachable, credentials
+    /// refused, the whole request refused). A refusal of one *index* is a
+    /// report, not an `Err`: an index closed to writes for now is
+    /// [`blocked`](WriteReport::blocked), one whose target is gone (deleted
+    /// under the sink) is [`missing`](WriteReport::missing), and the other
+    /// indexes of the write still land.
     async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> Result<WriteReport>;
 
     /// Write several lane items as **one** write: the engine merges items that
@@ -271,8 +335,9 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// out in requests of about a batch, not one per index. `parts` are the
     /// items' envelopes, each part in its own order; parts never share a
     /// document. Everything [`write`](Self::write) promises holds for the whole
-    /// call, as one write: a rejection names its document's index, an `Err`
-    /// fails every part.
+    /// call, as one write: a rejection names its document's index, a blocked
+    /// or missing index names every part of that index, an `Err` fails every
+    /// part.
     ///
     /// `caught_up` says what the write must make searchable beyond its own
     /// documents, when it returns `Immediate`: every write of the indexes it
@@ -307,6 +372,8 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
             bytes = sum_bytes(bytes, report.bytes);
             folded.refreshes += report.refreshes;
             folded.rejected.extend(report.rejected);
+            folded.blocked.extend(report.blocked);
+            folded.missing.extend(report.missing);
         }
         let report = self.write(last, caught_up).await?;
         folded.visibility = if caught_up && report.visibility == Visibility::Immediate {
@@ -317,6 +384,8 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
         folded.bytes = sum_bytes(bytes, report.bytes);
         folded.refreshes += report.refreshes;
         folded.rejected.extend(report.rejected);
+        folded.blocked.extend(report.blocked);
+        folded.missing.extend(report.missing);
         Ok(folded)
     }
 

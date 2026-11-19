@@ -221,28 +221,40 @@ fn a_generation_targeted_index_action_omits_require_alias() {
 }
 
 #[test]
-fn a_missing_alias_fails_the_whole_flush() {
-    let actions = [BulkAction::Index {
-        index: "users_ab12".to_owned(),
-        id: "1".to_owned(),
-        doc: json!({}).to_string(),
-        require_alias: true,
-    }];
+fn a_missing_alias_is_its_index_missing_not_a_failed_write() {
+    let actions = [
+        BulkAction::Index {
+            index: "users_ab12".to_owned(),
+            id: "1".to_owned(),
+            doc: json!({}).to_string(),
+            require_alias: true,
+        },
+        index_action("2"),
+    ];
     let resp = json!({
         "errors": true,
-        "items": [{ "index": { "_index": "users_ab12", "_id": "1", "status": 404,
-            "error": {
-                "type": "index_not_found_exception",
-                "reason": "no such index [users_ab12] and [require_alias] request flag is [true] and [users_ab12] is not an alias"
-            } } }]
+        "items": [
+            { "index": { "_index": "users_ab12", "_id": "1", "status": 404,
+                "error": {
+                    "type": "index_not_found_exception",
+                    "reason": "no such index [users_ab12] and [require_alias] request flag is [true] and [users_ab12] is not an alias"
+                } } },
+            { "index": { "_index": "users_1", "_id": "2", "status": 201 } }
+        ]
     });
-    let err = read(&resp, &actions).unwrap_err().to_string();
-    assert!(err.contains("users_ab12 is missing"), "{err}");
-    assert!(err.contains("is not an alias"), "{err}");
+    let read = read(&resp, &actions).unwrap();
+    assert_eq!(read.missing.len(), 1);
+    assert_eq!(read.missing[0].0, 0);
+    assert!(
+        read.missing[0].1.contains("is not an alias"),
+        "{:?}",
+        read.missing
+    );
+    assert!(read.rejected.is_empty() && read.blocked.is_empty());
 }
 
 #[test]
-fn a_delete_against_a_missing_index_fails_the_whole_flush() {
+fn a_delete_against_a_missing_index_is_its_index_missing() {
     let actions = [BulkAction::Delete {
         index: "users_ab12".to_owned(),
         id: "1".to_owned(),
@@ -252,7 +264,74 @@ fn a_delete_against_a_missing_index_fails_the_whole_flush() {
         "items": [{ "delete": { "_index": "users_ab12", "_id": "1", "status": 404,
             "error": { "type": "index_not_found_exception", "reason": "no such index [users_ab12]" } } }]
     });
-    assert!(read(&resp, &actions).is_err());
+    let read = read(&resp, &actions).unwrap();
+    assert_eq!(
+        read.missing.iter().map(|(at, _)| *at).collect::<Vec<_>>(),
+        [0]
+    );
+}
+
+/// `index.blocks.write` (or `read_only`, `read_only_allow_delete`) answers each
+/// item 403 `cluster_block_exception`: the index is closed to writes for now,
+/// so its documents are blocked, never rejected (#404).
+#[test]
+fn a_write_block_is_blocked_never_rejected() {
+    let actions = [index_action("1"), delete_action("2"), index_action("3")];
+    let block = |id: &str| {
+        json!({ "_index": "users_1", "_id": id, "status": 403,
+            "error": { "type": "cluster_block_exception",
+                "reason": "index [users_1] blocked by: [FORBIDDEN/8/index write (api)];" } })
+    };
+    let resp = json!({
+        "errors": true,
+        "items": [
+            { "index": block("1") },
+            { "delete": block("2") },
+            { "index": { "_index": "users_1", "_id": "3", "status": 200 } }
+        ]
+    });
+    let read = read(&resp, &actions).unwrap();
+    assert!(read.rejected.is_empty(), "{:?}", read.rejected);
+    assert_eq!(
+        read.blocked.iter().map(|(at, _)| *at).collect::<Vec<_>>(),
+        [0, 1]
+    );
+    assert!(read.blocked[0].1.contains("FORBIDDEN/8/index write (api)"));
+    assert!(read.busy.is_empty());
+}
+
+/// A role without write permission on one index answers its items 403
+/// `security_exception`: a misconfiguration of that index, blocked like a
+/// write block.
+#[test]
+fn an_item_level_security_exception_is_blocked() {
+    let actions = [index_action("1")];
+    let resp = json!({
+        "errors": true,
+        "items": [{ "index": { "_index": "users_1", "_id": "1", "status": 403,
+            "error": { "type": "security_exception",
+                "reason": "no permissions for [indices:data/write/bulk[s]] and User [name=writer, backend_roles=[], requestedTenant=null]" } } }]
+    });
+    let read = read(&resp, &actions).unwrap();
+    assert!(read.rejected.is_empty());
+    assert_eq!(read.blocked.len(), 1);
+    assert!(read.blocked[0].1.contains("no permissions"));
+}
+
+/// A flood-stage disk block answers 429 `cluster_block_exception`: busy, and
+/// resent inside the write as before (#400), not blocked.
+#[test]
+fn a_flood_stage_block_is_busy_not_blocked() {
+    let actions = [index_action("1")];
+    let resp = json!({
+        "errors": true,
+        "items": [{ "index": { "_index": "users_1", "_id": "1", "status": 429,
+            "error": { "type": "cluster_block_exception",
+                "reason": "index [users_1] blocked by: [TOO_MANY_REQUESTS/12/disk usage exceeded flood-stage watermark, index has read-only-allow-delete block];" } } }]
+    });
+    let read = read(&resp, &actions).unwrap();
+    assert_eq!(read.busy, [0]);
+    assert!(read.blocked.is_empty() && read.rejected.is_empty());
 }
 
 fn index_action(id: &str) -> BulkAction {
