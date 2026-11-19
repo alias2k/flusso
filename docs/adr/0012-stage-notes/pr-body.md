@@ -16,7 +16,7 @@ This merge takes in ADR 0012's stages 3–7 (stages 1–2, `Sink::write` and con
 | 4 | Up to `[concurrency] builds` builds at once (default 4, max 32), published in grant order; the build gate (live first, every fourth contested grant to backfill) | `stage-4.md` |
 | 5 | Memory budget `[concurrency] max_built_mib` (default 64) in heap bytes; `[stream] capacity` deprecated | `stage-5.md` |
 | 6 | Positions describe themselves; `Progress` confirms and fences; the stream keeps no watermark | `stage-6.md` |
-| 7 | One lane per `(index, sink)`; per-index fences and `/wait?index`; ready items merged into one write; caught-up per lane | `stage-7.md` |
+| 7 | One lane per `(index, sink)`; per-index fences and `/wait?index`; ready items merged into one write, a live item waiting (at most `max_delay`) for the writes out to merge; caught-up per lane | `stage-7.md` |
 | seed | Cheaper seeding and generation creation (#410, #403) | `seed.md` |
 | 8b (resume) | An interrupted backfill resumes after its landed prefix (`Batch.walked`, `Sink::seeding`) | `stage-8b-resume.md` |
 | 8c | Stall age and WAL behind per lane, `pinned_by`, `FlussoLaneStalled`, the Helm `PrometheusRule`, the runbook "A lane is stalled" | `stage-8c.md` |
@@ -51,6 +51,7 @@ Each has its entry, with what to do, on `docs/src/operate/upgrade-to-0-18.md`:
   - Helm requests 256 Mi.
   - A warning at start when the budget reaches the cgroup or host memory.
 - **One lane per index and sink.** A slow index holds up only itself. `/wait?index`; `flusso-query` waits on the indexes a read touches.
+- **Batches of several indexes share a bulk request.** A live batch ready while a write is out waits for it, at most `[batch] max_delay_ms` (50 ms); a stalled write is not waited for.
 - **A fence holds while an index is seeded or rebuilt** (breaking, correct). It used to answer `200` there and the read was stale.
 - **An interrupted backfill resumes.**
 - **New `/status` fields:** `memory`, `pinned_by`, `lanes.*`. **New metrics:** `flusso.memory.*`, `flusso.lane.*`, `flusso.slot.pinned_by`, `flusso.backfill.checkpoints`, `flusso.sink.refreshes`.

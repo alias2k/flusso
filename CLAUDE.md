@@ -659,6 +659,12 @@ is the one concrete piece.
   has nothing else waiting. A barrier lane and an ordered sink write one item alone. Guards:
   `tests::merge`, and `tests::concurrent`'s seeded schedule run with merging off and on (its other
   tests keep one item per write: `Rig::new` sets `with_write_documents(1)`).
+  **The merge wait** (`merge_hold`): with several lanes, a live item ready while a write is out waits
+  for the writes out, then goes out merged; bounded hard by `SinkEngine::with_merge_wait` (the daemon
+  passes `[batch] max_delay`, 50 ms) from the earlier of the oldest waiting item's ready time and the
+  youngest write out's send time, so a stalled or slow lane holds no other index past it. Nothing is
+  held while a backfill item waits, nor on an ordered sink, one lane, or without merging; the slot cap
+  and a quiet lane's one item are unchanged (stage-7 §14; guards: `tests::wait`).
 
 - **At-least-once via write-then-ack and `Progress` (ADR 0012 stage 6).** A position describes
   itself: `kernel::Position { seq, fence_before, confirm_before, confirm_through }`, the stamps the

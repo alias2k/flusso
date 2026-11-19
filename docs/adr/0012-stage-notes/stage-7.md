@@ -295,3 +295,45 @@ none has a write out); 8a's per-index batches are expected to bring documents pe
 by 8a's exit criteria. The slot cap stays hard (`writes − 1` per lane with several lanes): its 10%
 backfill cost on `reference` (14,968 against 16,720 documents/s) comes from walking one index at a time,
 which 8a ends.
+
+## 14. The merge wait: "it never waits" reopened
+
+§12's merge took what was ready and never waited, and §13 kept lanes merging only while none of them had
+a write out, so a stuck write never holds a sibling. Under a burst, though, some write is almost always
+out on every lane, so lanes rarely merged: the CI comparison on `reference` (4 vCPU runners) measured
+3.0–3.1× `main`'s bulk requests (≈ 18 documents per request against ≈ 57), and OpenSearch's own
+counters showed refresh time 6–25% above `main` over the run, outside the spread, with the refresh
+*count* level (≈ 93% of refreshes are flusso's own caught-up ones). Two prototypes, each against `main`
+and the shared tip on one runner, 4 interleaved rounds (runs 44448363321 and 44448492250; medians):
+
+| | `main` | tip | refresh-merge | wait-and-merge |
+| --- | --- | --- | --- | --- |
+| OpenSearch refresh time | 50.4 s / 47.6 s | 49.5 s / 51.1 s | 30.1 s (−40%) | 38.1 s (−20% vs `main`) |
+| bulk requests per burst | 337 / 328 | 975 / 1005 | 675 | 390 (1.19× `main`) |
+| burst changes/s | 454 / 465 | 520 / 519 | 574 | 548 |
+| latency p50 | 44.6 / 34.9 ms | 25.9 / 26.6 ms | 30.6 ms (+18% vs tip) | 26.3 ms (equal to tip) |
+| CPU | 8 s | 8–9 s | 8–9 s | 8 s |
+
+(Two numbers in a cell: the refresh-merge run, then the wait-and-merge run.) Refresh-merge (one shared
+refresh over every quiet lane) cut the most refresh time but cost visible latency: a lone write became a
+bulk request then a refresh. Wait-and-merge was adopted.
+
+**The rule** (`sink_engine/writes.rs`, `merge_hold`): with several lanes, on a merging, unordered sink,
+while every waiting item is live, a live item ready while a write is out waits until the writes out
+return, then goes out merged by the unchanged `pick`. Bounded hard by `merge_wait`
+(`SinkEngine::with_merge_wait`; the daemon passes `[batch] max_delay`, 50 ms by default), from the
+earlier of when the oldest waiting item became ready and when the youngest write out was sent: a write
+out longer than the bound is not waited for, so a stalled or slow lane holds no other index's writes past
+it, and an item another lane's turn sent past is not held again for that write. A backfill item waiting
+means nothing is held; an ordered sink (one slot) never has a write out with a slot free. Unchanged:
+per-document admission (an older build never goes after a newer one), the slot cap (`writes − 1` per
+lane), a quiet lane's one item, per-part acknowledgement, fences and blame. A lone change on a quiet
+engine is written at once.
+
+Guards: `tests::wait` (merging once the write out returns; a lone change at once; a stuck sibling write,
+every item within the bound and at once once the stuck write is older than it; a busy sibling; another
+lane's write started when the wait ends; backfill never held; an ordered sink unaffected; a rejection,
+a flush-wide failure and a `stop` rejection in a merged write each attributed to its own lane), each
+mutation of `merge_hold` (no hold, no ready-time bound, no write-age bound, holding with backfill
+waiting) failing one; `tests::refresh::a_merged_write_landing_during_a_lanes_refresh`; the schedule test's
+merging variants run with the default wait, over the locked sink too.
