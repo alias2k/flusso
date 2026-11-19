@@ -1723,6 +1723,7 @@ impl<'a> Run<'a> {
                     index = %run.key.index,
                     sink = %run.key.sink,
                     %reason,
+                    retry_in = ?retry_in,
                     "the index's target is gone: staging it again; the other indexes go on"
                 ),
                 LaneHealth::Open => {}

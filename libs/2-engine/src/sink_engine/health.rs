@@ -175,9 +175,13 @@ impl ProbeOutcome {
 #[derive(Debug, Clone)]
 pub(crate) struct LaneState {
     pub(crate) health: LaneHealth,
-    /// The wait before the next probe (parked) or staging attempt
-    /// (restaging), once the current one fails.
+    /// The wait before the next probe of a parked lane, once the current one
+    /// fails.
     pub(crate) backoff: Duration,
+    /// The wait before the next staging, once the current one fails or the
+    /// target goes missing again before a write of the lane landed. Apart
+    /// from `backoff`: a park in between doesn't move it.
+    pub(crate) restage_backoff: Duration,
     /// When the lane is next probed or staged.
     pub(crate) due: Instant,
     /// Probes made since it parked.
@@ -193,6 +197,7 @@ impl Default for LaneState {
         Self {
             health: LaneHealth::Open,
             backoff: FIRST_BACKOFF,
+            restage_backoff: FIRST_BACKOFF,
             due: Instant::now(),
             probes: 0,
             unproven: false,
@@ -243,18 +248,19 @@ impl LaneState {
         }
     }
 
-    /// The index's target is gone: stage it again, at once the first time;
-    /// after the backoff, doubled up to `max`, when no write of the lane
-    /// landed since its last staging.
+    /// The index's target is gone: stage it again, at once when a write of
+    /// the lane landed since its last staging (or there was none); after the
+    /// staging backoff, doubled up to `max`, when none did, whether or not the
+    /// lane parked in between.
     pub(crate) fn restage(&mut self, reason: String, now: Instant, max: Duration) -> bool {
         if matches!(self.health, LaneHealth::Restaging { .. }) {
             return false;
         }
         if self.unproven {
-            self.due = now + self.backoff;
-            self.backoff = (self.backoff * 2).min(max);
+            self.due = now + self.restage_backoff;
+            self.restage_backoff = (self.restage_backoff * 2).min(max);
         } else {
-            self.backoff = FIRST_BACKOFF;
+            self.restage_backoff = FIRST_BACKOFF;
             self.due = now;
         }
         self.health = LaneHealth::Restaging { since: now, reason };
@@ -293,8 +299,8 @@ impl LaneState {
     /// Staging failed: try again after the backoff, doubled each time up to
     /// `max`.
     pub(crate) fn restage_failed(&mut self, now: Instant, max: Duration) {
-        self.due = now + self.backoff;
-        self.backoff = (self.backoff * 2).min(max);
+        self.due = now + self.restage_backoff;
+        self.restage_backoff = (self.restage_backoff * 2).min(max);
     }
 
     /// Probe at once: a stop doesn't wait out the backoff.

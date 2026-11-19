@@ -1213,7 +1213,8 @@ is the one concrete piece.
   for its index alone beside other indexes' writes (the port allows staging beside writes of other
   indexes), then a `Backfill` request when unseeded and none is outstanding; then it opens and its
   items are written again; a failed staging retries on the backoff; `stage` reopens restaging lanes.
-  A reopened lane keeps its backoff (`LaneState.unproven`) until one of its writes lands, so a target
+  A reopened lane keeps its staging backoff (`LaneState.unproven`, `restage_backoff`: a park in between
+  doesn't move it) until one of its writes lands, so a target
   staging can't cure is staged again after 1 s, 2 s, … not in a loop (guard
   `a_missing_target_staging_cannot_cure_is_retried_with_a_backoff`); staging waits for the lane's
   writes in flight (`restaging_waits_for_the_lanes_writes_in_flight`). A part lets go of its batch
