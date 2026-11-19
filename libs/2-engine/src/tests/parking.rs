@@ -753,3 +753,50 @@ async fn restaging_waits_for_the_lanes_writes_in_flight() {
     );
     task.abort();
 }
+
+/// A parked lane's items neither hold nor end another lane's merge wait: with
+/// a backfill item waiting on a blocked lane, a live item ready while a write
+/// of an open lane is out still waits for it (up to the merge wait), as it
+/// would with no lane parked.
+#[tokio::test(start_paused = true)]
+async fn a_parked_lanes_waiting_backfill_does_not_end_the_merge_wait() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.answer(&orders(), Some(Answer::Block));
+    *rig.sink.slow_id.lock().unwrap() = Some("9".to_owned());
+    rig.stream
+        .lane(&lane(orders()))
+        .unwrap()
+        .producer
+        .publish(item(&orders(), 0..2, None))
+        .await
+        .unwrap();
+    rig.live(&users(), 9..10, 0).await;
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop));
+    let task = spawn(Arc::clone(&engine));
+    eventually("orders parks", || {
+        !engine.lane_health(&lane(orders())).is_open()
+    })
+    .await;
+    let ready = Instant::now();
+    rig.live(&users(), 1..2, 1).await;
+    eventually("users 1 is written", || {
+        rig.sink
+            .writes()
+            .iter()
+            .any(|(_, parts)| parts.iter().any(|(_, ids)| ids == &["1".to_owned()]))
+    })
+    .await;
+    let started = rig
+        .sink
+        .writes()
+        .iter()
+        .find(|(_, parts)| parts.iter().any(|(_, ids)| ids == &["1".to_owned()]))
+        .map(|(at, _)| *at)
+        .unwrap();
+    assert!(
+        started >= ready + Duration::from_millis(40),
+        "users 1 waited for the write out, as with no lane parked: started {:?} after it was ready",
+        started - ready
+    );
+    task.abort();
+}
