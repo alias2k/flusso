@@ -23,8 +23,9 @@ retries = 0
 max-threads = 8
 
 # The query derive's boundary test compiles thousands of generated cases with
-# cargo (three jobs); run alone so it doesn't compete with the `ui` harness
-# for CPU and memory.
+# cargo (three jobs), and its consumer_lints test runs cargo clippy over every
+# ui_pass case; one at a time, so they don't compete with each other or the
+# `ui` harness for CPU and memory.
 [test-groups.boundary]
 max-threads = 1
 
@@ -52,10 +53,10 @@ test-group = 'opensearch'
 retries = 2
 slow-timeout = { period = "120s", terminate-after = 5 }
 
-# The derive's boundary test: cold, it builds its own dependencies and every
-# case (minutes); warm, it reads its cache (seconds).
+# The derive's boundary and consumer_lints tests: cold, they build their own
+# dependencies and every case (minutes); warm, they read their caches (seconds).
 [[profile.default.overrides]]
-filter = 'package(flusso-query-derive) & binary(boundary)'
+filter = 'package(flusso-query-derive) & binary(boundary) | package(flusso-query-derive) & binary(consumer_lints)'
 test-group = 'boundary'
 slow-timeout = { period = "300s", terminate-after = 3 }
 
@@ -88,6 +89,6 @@ retries = 2
 slow-timeout = { period = "150s", terminate-after = 5 }
 
 [[profile.ci.overrides]]
-filter = 'package(flusso-query-derive) & binary(boundary)'
+filter = 'package(flusso-query-derive) & binary(boundary) | package(flusso-query-derive) & binary(consumer_lints)'
 test-group = 'boundary'
 slow-timeout = { period = "300s", terminate-after = 3 }
