@@ -1611,6 +1611,7 @@ mod snapshot;
 mod staging;
 mod stop;
 mod timings;
+mod wait;
 
 /// Wait (up to five seconds) until `condition` holds.
 async fn wait_for(mut condition: impl FnMut() -> bool) {

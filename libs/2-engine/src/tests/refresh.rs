@@ -49,6 +49,8 @@ struct Refresher {
     refreshes: AtomicUsize,
     seeded: Mutex<BTreeSet<String>>,
     records: Mutex<Vec<String>>,
+    /// Each non-empty write's `index/id`s, sorted, in the order they started.
+    writes: Mutex<Vec<Vec<String>>>,
 }
 
 impl Refresher {
@@ -76,6 +78,13 @@ impl Refresher {
     ) -> sink::Result<WriteReport> {
         let empty = parts.iter().all(|part| part.is_empty());
         let envelopes = || parts.iter().flat_map(|part| part.iter());
+        if !empty {
+            let mut labels: Vec<String> = envelopes()
+                .map(|e| format!("{}/{}", e.index, e.id))
+                .collect();
+            labels.sort();
+            self.writes.lock().unwrap().push(labels);
+        }
         if envelopes().any(|e| e.id.starts_with("slow")) {
             tokio::time::sleep(Duration::from_millis(self.slow_ms)).await;
         }
@@ -581,5 +590,55 @@ async fn an_item_landing_behind_one_waiting_for_its_refresh_is_no_progress() {
         rig.engine.advanced() - before,
         1,
         "e landed behind a, which waited for its refresh"
+    );
+}
+
+/// `users`' refresh is out (behind the lock); `orders`' slow write is out
+/// too, and an item of each lane waits for it, then goes out merged while
+/// the refresh is still out. The merged write's `users` part lands during
+/// `users`' refresh: once it returns, `users` is checked again, and both
+/// lanes end searchable.
+#[tokio::test(start_paused = true)]
+async fn a_merged_write_landing_during_a_lanes_refresh() {
+    let mut rig = Rig::new(
+        Refresher::locked(200, 50),
+        &[users(), orders()],
+        4,
+        crate::BatchPolicy::default().max_changes,
+    );
+    rig.start();
+    rig.publish(&users(), "slow-a", Some(1)).await;
+    rig.publish(&users(), "b", Some(2)).await;
+    tokio::time::sleep(Duration::from_millis(55)).await;
+    rig.publish(&orders(), "slow-o", Some(3)).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    rig.publish(&users(), "u", Some(4)).await;
+    rig.publish(&orders(), "o", Some(5)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        rig.sink
+            .writes
+            .lock()
+            .unwrap()
+            .contains(&vec!["orders/o".to_owned(), "users/u".to_owned()]),
+        "u and o went out merged: {:?}",
+        rig.sink.writes.lock().unwrap()
+    );
+    assert_eq!(
+        rig.sink.refreshes.load(Ordering::SeqCst),
+        0,
+        "while users' refresh was still out"
+    );
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(rig.stream.is_idle());
+    assert!(
+        rig.searchable.reached(&users(), 4),
+        "{:?}",
+        rig.searchable.on(&users())
+    );
+    assert!(
+        rig.searchable.reached(&orders(), 5),
+        "{:?}",
+        rig.searchable.on(&orders())
     );
 }
