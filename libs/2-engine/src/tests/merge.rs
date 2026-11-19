@@ -565,17 +565,21 @@ impl Sink for RefusesThenFailsToRefresh {
 }
 
 /// A `stop` rejection in a merged write is blamed on its own lane even when
-/// acknowledging the other part fails (here, its caught-up write): the run
-/// doesn't fall back to blaming every lane.
+/// acknowledging the other part fails (here, the lane refuses the `users`
+/// part's acknowledgement): the run doesn't fall back to blaming every lane.
 #[tokio::test]
 async fn a_stop_rejection_keeps_its_blame_when_an_acknowledgement_fails() {
     let rig = Rig::new();
-    rig.publish("users", item("users", 0..4, Some(0))).await;
+    rig.publish("users", item("users", 10..14, Some(0))).await;
     rig.publish("orders", item("orders", 0..4, Some(1))).await;
+    let stream = Arc::new(super::concurrent::FailingAcks {
+        inner: Arc::clone(&rig.stream),
+        fail: "10",
+    });
     let engine = SinkEngine::new(
         sink_name("primary"),
         Arc::new(RefusesThenFailsToRefresh) as Arc<dyn Sink>,
-        Arc::clone(&rig.stream) as Arc<dyn Stream>,
+        stream as Arc<dyn Stream>,
         mappings(),
         Arc::clone(&rig.progress),
     )

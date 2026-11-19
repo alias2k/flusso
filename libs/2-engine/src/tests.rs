@@ -1328,6 +1328,8 @@ impl Sink for ScriptedVisibility {
 #[derive(Debug, Default)]
 struct PositionObserver {
     events: Mutex<Vec<String>>,
+    /// The searchable positions with their lane's index.
+    searchable: Mutex<Vec<(IndexName, u64)>>,
 }
 
 impl PositionObserver {
@@ -1336,6 +1338,18 @@ impl PositionObserver {
     }
     fn forget(&self) {
         self.events.lock().unwrap().clear();
+        self.searchable.lock().unwrap().clear();
+    }
+
+    /// The positions reported searchable on `index`'s lane.
+    fn searchable_on(&self, index: &IndexName) -> Vec<u64> {
+        self.searchable
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(at, _)| at == index)
+            .map(|(_, seq)| *seq)
+            .collect()
     }
 }
 
@@ -1348,6 +1362,10 @@ impl Observer for PositionObserver {
     }
 
     fn on_position_searchable(&self, lane: &stream::LaneKey, position: Position) {
+        self.searchable
+            .lock()
+            .unwrap()
+            .push((lane.index.clone(), position.seq));
         self.events
             .lock()
             .unwrap()
@@ -1586,6 +1604,7 @@ mod busy;
 mod concurrent;
 mod lanes;
 mod merge;
+mod refresh;
 mod resume;
 mod seeding;
 mod snapshot;

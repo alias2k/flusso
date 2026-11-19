@@ -73,6 +73,9 @@ struct Probe {
     caught_up: Mutex<Vec<bool>>,
     visibility: fn(bool) -> Visibility,
     ordered: bool,
+    /// Held across every caught-up write, as the OpenSearch sink holds its
+    /// one refresh: a caught-up write waits for the one before it.
+    refresh_lock: Option<tokio::sync::Mutex<()>>,
 }
 
 impl Probe {
@@ -94,6 +97,7 @@ impl Probe {
             caught_up: Mutex::default(),
             visibility: |_| Visibility::Immediate,
             ordered: false,
+            refresh_lock: None,
         }
     }
 
@@ -136,6 +140,21 @@ impl Probe {
     /// A sink whose readers consume its output in order.
     fn ordered(mut self) -> Self {
         self.ordered = true;
+        self
+    }
+
+    /// Caught-up writes one at a time behind a lock, each refreshing for a
+    /// random time; an unforced write is `Deferred`, so a position is
+    /// searchable only once a caught-up write covers it.
+    fn locking_refreshes(mut self) -> Self {
+        self.refresh_lock = Some(tokio::sync::Mutex::new(()));
+        self.visibility = |caught_up| {
+            if caught_up {
+                Visibility::Immediate
+            } else {
+                Visibility::Deferred
+            }
+        };
         self
     }
 
@@ -203,6 +222,15 @@ impl Sink for Probe {
         if let Some(delay) = delay {
             tokio::time::sleep(Duration::from_millis(delay)).await;
         }
+        let _refreshing = match (&self.refresh_lock, caught_up) {
+            (Some(lock), true) => {
+                let guard = lock.lock().await;
+                let refresh = self.delays.as_ref().map(|rng| rng.lock().unwrap().below(8));
+                tokio::time::sleep(Duration::from_millis(refresh.unwrap_or(1))).await;
+                Some(guard)
+            }
+            _ => None,
+        };
         let failed = {
             let mut fail_once = self.fail_once.lock().unwrap();
             ids.iter().any(|id| fail_once.remove(id))
@@ -309,6 +337,8 @@ struct Rig {
     version: i64,
     /// The version each id was last published at.
     published: HashMap<String, i64>,
+    /// The last live position published on each index's lane.
+    last_live: HashMap<IndexName, u64>,
 }
 
 impl Rig {
@@ -420,6 +450,7 @@ impl Rig {
             stop,
             version: 0,
             published: HashMap::new(),
+            last_live: HashMap::new(),
         }
     }
 
@@ -513,6 +544,7 @@ impl Rig {
         let position = Position::new(position);
         let parts = self.split(ids);
         for (index, mine) in &parts {
+            self.last_live.insert(index.clone(), position.seq);
             let envelopes = self.envelopes(mine, Some(position));
             self.producer(index)
                 .publish(LaneItem::Batch(Batch {
@@ -620,20 +652,25 @@ fn seeds() -> Vec<u64> {
 /// fails while later ones sharing its documents wait. Builds are numbered in
 /// lane order (the version), as the one ingest task builds them. Whatever the
 /// schedule, no document is written twice at once, its versions never go
-/// down, every document ends at its last version, and the lane drains with
-/// the confirmation at the last position.
+/// down, every document ends at its last version, the lane drains with the
+/// confirmation at the last position, and each lane's last live position ends
+/// searchable with no new traffic. Every schedule also runs over a sink that
+/// holds one lock across its caught-up writes (as the OpenSearch sink holds
+/// its refresh) and leaves unforced writes `Deferred`.
 #[test]
 fn a_document_is_never_written_twice_at_once_and_its_versions_never_go_down() {
     let mut concurrent = false;
     let mut restarted = false;
-    for two in [false, true] {
-        for merge in [false, true] {
-            for writes in [1, 2, 4] {
-                for seed in seeds() {
-                    let (at_once, failed) =
-                        super::paused_runtime().block_on(one_schedule(seed, writes, merge, two));
-                    concurrent |= at_once;
-                    restarted |= failed;
+    for locked in [false, true] {
+        for two in [false, true] {
+            for merge in [false, true] {
+                for writes in [1, 2, 4] {
+                    for seed in seeds() {
+                        let (at_once, failed) = super::paused_runtime()
+                            .block_on(one_schedule(seed, writes, merge, two, locked));
+                        concurrent |= at_once;
+                        restarted |= failed;
+                    }
                 }
             }
         }
@@ -644,11 +681,22 @@ fn a_document_is_never_written_twice_at_once_and_its_versions_never_go_down() {
 
 /// One schedule of the test above, on its own runtime so a seed replays
 /// alone: whether it wrote several items at once, and whether it restarted.
-async fn one_schedule(seed: u64, writes: usize, merge: bool, two: bool) -> (bool, bool) {
+async fn one_schedule(
+    seed: u64,
+    writes: usize,
+    merge: bool,
+    two: bool,
+    locked: bool,
+) -> (bool, bool) {
     const IDS: [&str; 6] = ["a", "b", "c", "d", "e", "f"];
     let mut restarted = false;
     let mut rng = Rng(seed * 7919 + writes as u64);
     let probe = Probe::new().with_delays(seed).failing_at_random(3);
+    let probe = if locked {
+        probe.locking_refreshes()
+    } else {
+        probe
+    };
     let mut rig = if two {
         Rig::two_indexes(probe, writes, merge)
     } else if merge {
@@ -712,6 +760,14 @@ async fn one_schedule(seed: u64, writes: usize, merge: bool, two: bool) -> (bool
     }
     assert_eq!(super::covered(&rig.progress), Some(Position::new(position)));
     assert!(probe.most_at_once() <= writes);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    for (index, last) in &rig.last_live {
+        assert!(
+            rig.observer.searchable_on(index).contains(last),
+            "seed {seed}, writes {writes}, merge {merge}, two indexes {two}, locked {locked}: \
+             {index}'s last live position {last} ends searchable with no new traffic"
+        );
+    }
     (probe.most_at_once() > 1, restarted)
 }
 
@@ -1045,9 +1101,9 @@ async fn an_idle_engine_makes_its_last_writes_searchable() {
 /// A stream over a channel whose acknowledgement of any item holding
 /// document `fail` errs, as a broker might.
 #[derive(Debug)]
-struct FailingAcks {
-    inner: Arc<ChannelStream>,
-    fail: &'static str,
+pub(super) struct FailingAcks {
+    pub(super) inner: Arc<ChannelStream>,
+    pub(super) fail: &'static str,
 }
 
 impl Stream for FailingAcks {
