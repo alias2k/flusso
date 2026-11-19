@@ -337,3 +337,5 @@ a flush-wide failure and a `stop` rejection in a merged write each attributed to
 mutation of `merge_hold` (no hold, no ready-time bound, no write-age bound, holding with backfill
 waiting) failing one; `tests::refresh::a_merged_write_landing_during_a_lanes_refresh`; the schedule test's
 merging variants run with the default wait, over the locked sink too.
+
+**As measured on the shared tip** (`1324183b`, run 44482030261, 4 vCPU, medians of 5): a burst is 512 bulk requests against `main`'s 214 (2.39×, about 25 documents each against 60), with OpenSearch refresh time 26.3 s against 26.2 s and indexing time 16.4 s against 15.2 s (ranges overlap), no rejections. The prototype's 1.19× came from a slower runner, where more writes were out at once.
