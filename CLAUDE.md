@@ -1154,15 +1154,21 @@ is the one concrete piece.
   times a failed engine's restart (sink and ingest, `supervise.rs`'s `Backoff`), a parked lane's
   probe and a re-staged lane's next staging (`LaneState`). `flusso.toml`'s `[backoff]`
   `initial_ms`/`max_ms`, `--backoff-initial-ms`/`--backoff-max-ms`, `FLUSSO_BACKOFF_*` (flag > env >
-  file > default), laid over the defaults by the daemon (`daemon::backoff`, called by `Daemon::start`
-  and by `run` before it binds); like `[concurrency]` it is never written into the lock
-  (`Config.backoff` is `#[serde(skip)]`; the golden `flusso.toml` sets it,
-  `backoff_never_reaches_the_lock`). `initial_ms = 0` and `max_ms < initial_ms` are refused naming
-  the key (at parse when the file sets both, at start after the flags). The OpenSearch sink's own bulk
-  retry is not on it. Guards: `config_toml`'s `backoff_*`, `health::tests`'
-  `the_waits_follow_the_configured_schedule`, `tests::parking`'s `*_on_the_configured_schedule`, the
-  daemon's `*_on_the_configured_backoff` and `a_backoff_whose_cap_is_below_its_first_wait_is_refused_at_start`,
-  the CLI's `a_backoff_*`.
+  file > default; `run.rs`'s `lay_backoff` reads the variables itself, not through clap, so each
+  value keeps its `config::BackoffOrigin`). **One judge**, `daemon::backoff`: an unset `max_ms` is
+  `max(60000, initial_ms)` (raising the first wait alone is always valid), an explicit one below
+  `initial_ms` is refused with each value's origin and the ways to set it; `run` (before it binds),
+  `check`, `build` and `Daemon::start` all call it, so they refuse the same file alike. Like
+  `[concurrency]` it is never written into the lock (`Config.backoff` is `#[serde(skip)]`; the golden
+  `flusso.toml` sets it, `backoff_never_reaches_the_lock`). `0` is refused at parse. A wait no
+  `Instant` holds goes to the far future (`health.rs`'s `later`) and `/status` holds a probe past
+  every date at the latest one (`status.rs`'s `wall_clock`), so `u64::MAX` ms parks a lane once and
+  panics nothing. The OpenSearch sink's own bulk retry is not on it. Guards: `config_toml`'s
+  `backoff_*`, `health::tests`, `tests::parking`'s `*_on_the_configured_schedule` and
+  `a_lane_parked_on_the_longest_schedule_neither_panics_nor_spins`, the daemon's `tests::backoff`
+  (`*_on_the_configured_backoff`, `a_backoff_resolves_*`, `a_backoff_refusal_says_*`,
+  `a_lane_parked_on_the_longest_backoff_*`), `status::tests`, the CLI's `run::tests` (`lay_backoff`)
+  and `tests/backoff.rs` (the real binary: `check`/`build`/`run` alike, env over file, flag over env).
 - **Item-level rejections vs write-wide errors.** `Sink::write` returns a `WriteReport`:
   `Err` is write-wide (transport down, whole request refused) and stops *that sink engine*,
   which the daemon restarts with exponential backoff (`[backoff]`, below; 1 s doubling to 60 s by

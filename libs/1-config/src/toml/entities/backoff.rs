@@ -9,7 +9,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// `[backoff]` table: a failed engine's restart (sink or ingest), a parked
 /// lane's probe, a re-staged lane's next staging. Each wait starts at
 /// `initial_ms` and doubles, up to `max_ms`; equal values wait a constant
-/// interval. A property of the machine that runs flusso: never written into
+/// interval. An unset `max_ms` is 60000 or `initial_ms`, whichever is larger,
+/// so raising the first wait alone never needs the cap; a `max_ms` set below
+/// `initial_ms` is refused by `check`, `build` and `run` alike. A property of the machine that runs flusso: never written into
 /// `flusso.lock`, so `run --locked` takes it from `--backoff-initial-ms` /
 /// `FLUSSO_BACKOFF_INITIAL_MS` and `--backoff-max-ms` / `FLUSSO_BACKOFF_MAX_MS`
 /// or the defaults (flag > env > file). Every key is optional.
@@ -20,8 +22,9 @@ pub struct Backoff {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub initial_ms: Option<NonZeroU64>,
-    /// The longest wait, in milliseconds (default 60000). At least
-    /// `initial_ms`; equal to it, every wait is the same.
+    /// The longest wait, in milliseconds (default 60000, or `initial_ms`
+    /// when that is larger). At least `initial_ms`; equal to it, every wait
+    /// is the same.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub max_ms: Option<NonZeroU64>,
@@ -47,26 +50,11 @@ impl<'de> Deserialize<'de> for Backoff {
                 ))
             }),
         };
-        let backoff = Backoff {
+        Ok(Backoff {
             initial_ms: at_least_one("initial_ms", raw.initial_ms)?,
             max_ms: at_least_one("max_ms", raw.max_ms)?,
-        };
-        if let (Some(initial), Some(max)) = (backoff.initial_ms, backoff.max_ms) {
-            check_backoff_order(initial, max).map_err(serde::de::Error::custom)?;
-        }
-        Ok(backoff)
+        })
     }
-}
-
-/// `max_ms` must not be below `initial_ms`.
-pub fn check_backoff_order(initial_ms: NonZeroU64, max_ms: NonZeroU64) -> Result<(), String> {
-    if max_ms < initial_ms {
-        return Err(format!(
-            "max_ms = {max_ms} is below initial_ms = {initial_ms}; \
-             set max_ms to at least initial_ms (equal values wait a constant interval)"
-        ));
-    }
-    Ok(())
 }
 
 /// `initial_ms` or `max_ms` from a flag or an env var: a whole number of

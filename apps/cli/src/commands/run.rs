@@ -175,13 +175,15 @@ pub(crate) struct RunArgs {
     /// restart, a parked lane's probe, a re-staged lane's next staging. Each
     /// wait doubles up to `--backoff-max-ms`. Overrides `[backoff].initial_ms`
     /// from config; defaults to 1000. At least 1. Never written into the lock.
-    #[arg(long, env = "FLUSSO_BACKOFF_INITIAL_MS", value_parser = config::parse_backoff_ms)]
+    /// [env: FLUSSO_BACKOFF_INITIAL_MS]
+    #[arg(long, value_parser = config::parse_backoff_ms)]
     backoff_initial_ms: Option<std::num::NonZeroU64>,
 
     /// The longest wait before trying again, in milliseconds. Overrides
-    /// `[backoff].max_ms` from config; defaults to 60000. At least the first
-    /// wait; equal to it, every wait is the same. Never written into the lock.
-    #[arg(long, env = "FLUSSO_BACKOFF_MAX_MS", value_parser = config::parse_backoff_ms)]
+    /// `[backoff].max_ms` from config; defaults to 60000, or the first wait
+    /// when that is larger. At least the first wait; equal to it, every wait
+    /// is the same. Never written into the lock. [env: FLUSSO_BACKOFF_MAX_MS]
+    #[arg(long, value_parser = config::parse_backoff_ms)]
     backoff_max_ms: Option<std::num::NonZeroU64>,
 
     /// How long a stop may take, in seconds, from the first signal to exit.
@@ -237,7 +239,12 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     if let Some(max_built_mib) = args.max_built_mib {
         config.concurrency.max_built_mib = Some(max_built_mib);
     }
-    lay_backoff(&mut config, args.backoff_initial_ms, args.backoff_max_ms)?;
+    lay_backoff(
+        &mut config,
+        args.backoff_initial_ms,
+        args.backoff_max_ms,
+        |name| std::env::var(name).ok(),
+    )?;
 
     // Adapter knobs given as flags/env are laid over the file's entries, then
     // every entry is validated against its adapter before anything connects.
@@ -558,20 +565,45 @@ fn load_lock(path: &Path) -> anyhow::Result<Config> {
         .with_context(|| format!("loading compiled lock from {}", path.display()))
 }
 
-/// Lay the `--backoff-*` flags (or their `FLUSSO_BACKOFF_*` variables) over
-/// `[backoff]`, then check the result, so a cap below the first wait fails
-/// before anything connects.
+/// Lay `--backoff-*` over `FLUSSO_BACKOFF_*` over `[backoff]`, each value
+/// keeping where it was set, then resolve and check them with the daemon's
+/// one judge, so a bad pair fails before anything connects. The variables
+/// are read here, not by clap, so the refusal can tell a flag from its
+/// variable.
 fn lay_backoff(
     config: &mut config::Config,
     initial_ms: Option<std::num::NonZeroU64>,
     max_ms: Option<std::num::NonZeroU64>,
+    env: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<()> {
-    if let Some(initial_ms) = initial_ms {
-        config.backoff.initial_ms = Some(initial_ms);
-    }
-    if let Some(max_ms) = max_ms {
-        config.backoff.max_ms = Some(max_ms);
-    }
+    let layer = |flag: Option<std::num::NonZeroU64>,
+                 name: &str,
+                 file: Option<config::BackoffValue>|
+     -> anyhow::Result<Option<config::BackoffValue>> {
+        if let Some(ms) = flag {
+            return Ok(Some(config::BackoffValue {
+                ms,
+                origin: config::BackoffOrigin::Flag,
+            }));
+        }
+        match env(name).filter(|text| !text.is_empty()) {
+            Some(text) => {
+                let ms = config::parse_backoff_ms(&text)
+                    .map_err(|why| anyhow::anyhow!("{name}: {why}"))?;
+                Ok(Some(config::BackoffValue {
+                    ms,
+                    origin: config::BackoffOrigin::Env,
+                }))
+            }
+            None => Ok(file),
+        }
+    };
+    config.backoff.initial_ms = layer(
+        initial_ms,
+        "FLUSSO_BACKOFF_INITIAL_MS",
+        config.backoff.initial_ms,
+    )?;
+    config.backoff.max_ms = layer(max_ms, "FLUSSO_BACKOFF_MAX_MS", config.backoff.max_ms)?;
     daemon::backoff(config)?;
     Ok(())
 }

@@ -140,14 +140,46 @@ pub struct ConcurrencyConfig {
     pub max_built_mib: Option<NonZeroUsize>,
 }
 
-/// The `[backoff]` knobs from `flusso.toml`, in milliseconds. An unset key
-/// keeps the daemon's default (1000 doubling to 60000).
+/// The `[backoff]` knobs, in milliseconds, each with where it was set: the
+/// file, then `--backoff-*` / `FLUSSO_BACKOFF_*` laid over it by the binary.
+/// An unset key keeps the daemon's default. The daemon resolves and checks
+/// the pair (`daemon::backoff`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BackoffConfig {
     /// The first wait.
-    pub initial_ms: Option<NonZeroU64>,
+    pub initial_ms: Option<BackoffValue>,
     /// The longest wait.
-    pub max_ms: Option<NonZeroU64>,
+    pub max_ms: Option<BackoffValue>,
+}
+
+/// One `[backoff]` value and where it was set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackoffValue {
+    /// Milliseconds.
+    pub ms: NonZeroU64,
+    /// Where it was set.
+    pub origin: BackoffOrigin,
+}
+
+impl BackoffValue {
+    /// `ms`, set in `flusso.toml`.
+    pub fn from_file(ms: NonZeroU64) -> Self {
+        Self {
+            ms,
+            origin: BackoffOrigin::File,
+        }
+    }
+}
+
+/// Where a `[backoff]` value was set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackoffOrigin {
+    /// `flusso.toml`'s `[backoff]` table.
+    File,
+    /// The command line (`--backoff-initial-ms` / `--backoff-max-ms`).
+    Flag,
+    /// The environment (`FLUSSO_BACKOFF_INITIAL_MS` / `FLUSSO_BACKOFF_MAX_MS`).
+    Env,
 }
 
 /// One index in a [`Config`], paired with whether it is built on this run.

@@ -600,8 +600,8 @@ async fn a_stop_rejection_halts_its_lane_writing_several_items_at_once() {
 /// `[backoff] initial_ms = 200, max_ms = 800`.
 fn configured() -> config::Config {
     let mut config = backendless_config();
-    config.backoff.initial_ms = std::num::NonZeroU64::new(200);
-    config.backoff.max_ms = std::num::NonZeroU64::new(800);
+    config.backoff.initial_ms = super::in_file(200);
+    config.backoff.max_ms = super::in_file(800);
     config
 }
 
@@ -682,12 +682,12 @@ async fn a_parked_lane_probes_on_the_configured_backoff() {
     assert_eq!(rounded, [200, 400, 800, 800], "{waits:?}");
 }
 
-/// A `[backoff]` whose longest wait is below its first is refused at start,
-/// naming both keys.
+/// A `[backoff]` whose longest wait is set below its first is refused at
+/// start, naming where each value came from.
 #[tokio::test]
 async fn a_backoff_whose_cap_is_below_its_first_wait_is_refused_at_start() {
     let mut config = backendless_config();
-    config.backoff.initial_ms = std::num::NonZeroU64::new(120_000);
+    config.backoff.max_ms = super::in_file(100);
     let (source, _feed) = FedSource::new(ScriptedSource::new(Vec::new()));
     let backends = backends_for(
         Arc::new(source),
@@ -697,26 +697,95 @@ async fn a_backoff_whose_cap_is_below_its_first_wait_is_refused_at_start() {
             SinkOptions::default(),
         )],
     );
-    let error = Daemon::new(config.clone(), backends)
+    let error = Daemon::new(config, backends)
         .start()
         .await
         .err()
         .unwrap()
         .to_string();
     assert!(
-        error.contains("max_ms = 60000 is below initial_ms = 120000"),
+        error.contains(
+            "[backoff] max_ms = 100 (set in flusso.toml's [backoff] max_ms) is below \
+             initial_ms = 1000 (the default)"
+        ),
         "{error}"
     );
+}
 
-    config.backoff.max_ms = std::num::NonZeroU64::new(120_000);
+/// How `[backoff]` resolves: each key set or not, an unset `max_ms` never
+/// below `initial_ms`.
+#[test]
+fn a_backoff_resolves_each_unset_key_to_a_valid_value() {
+    let ms = |initial: u64, max: u64| {
+        engine::Backoff::new(Duration::from_millis(initial), Duration::from_millis(max)).unwrap()
+    };
+    let resolved = |initial: Option<u64>, max: Option<u64>| {
+        let mut config = backendless_config();
+        config.backoff.initial_ms = initial.and_then(super::in_file);
+        config.backoff.max_ms = max.and_then(super::in_file);
+        crate::backoff(&config)
+    };
+    assert_eq!(resolved(None, None).unwrap(), ms(1_000, 60_000));
+    assert_eq!(resolved(Some(200), None).unwrap(), ms(200, 60_000));
     assert_eq!(
-        crate::backoff(&config).unwrap(),
-        engine::Backoff::new(Duration::from_secs(120), Duration::from_secs(120)).unwrap(),
-        "equal values are a constant interval"
+        resolved(Some(120_000), None).unwrap(),
+        ms(120_000, 120_000),
+        "raising the first wait alone raises the cap with it"
     );
+    assert_eq!(resolved(None, Some(5_000)).unwrap(), ms(1_000, 5_000));
+    assert_eq!(resolved(Some(200), Some(800)).unwrap(), ms(200, 800));
     assert_eq!(
-        crate::backoff(&backendless_config()).unwrap(),
-        engine::Backoff::default()
+        resolved(Some(500), Some(500)).unwrap(),
+        ms(500, 500),
+        "equal values: a constant interval"
+    );
+    assert!(resolved(None, Some(999)).is_err());
+    assert!(resolved(Some(800), Some(200)).is_err());
+}
+
+/// The refusal names each value's origin and the ways to change it.
+#[test]
+fn a_backoff_refusal_says_where_each_value_came_from() {
+    let value = |ms: u64, origin| {
+        Some(config::BackoffValue {
+            ms: std::num::NonZeroU64::new(ms).unwrap(),
+            origin,
+        })
+    };
+    let refusal = |initial, max| {
+        let mut config = backendless_config();
+        config.backoff.initial_ms = initial;
+        config.backoff.max_ms = max;
+        crate::backoff(&config).unwrap_err().to_string()
+    };
+    let said = refusal(
+        value(800, config::BackoffOrigin::Flag),
+        value(200, config::BackoffOrigin::Env),
+    );
+    assert!(
+        said.contains("max_ms = 200 (set by FLUSSO_BACKOFF_MAX_MS) is below initial_ms = 800 (set by --backoff-initial-ms)"),
+        "{said}"
+    );
+    assert!(
+        said.contains("Raise max_ms with flusso.toml's [backoff] max_ms, --backoff-max-ms or FLUSSO_BACKOFF_MAX_MS"),
+        "{said}"
+    );
+    assert!(
+        said.contains("lower initial_ms with flusso.toml's [backoff] initial_ms, --backoff-initial-ms or FLUSSO_BACKOFF_INITIAL_MS"),
+        "{said}"
+    );
+    let said = refusal(
+        value(800, config::BackoffOrigin::Env),
+        value(200, config::BackoffOrigin::Flag),
+    );
+    assert!(
+        said.contains("max_ms = 200 (set by --backoff-max-ms) is below initial_ms = 800 (set by FLUSSO_BACKOFF_INITIAL_MS)"),
+        "{said}"
+    );
+    let said = refusal(None, value(200, config::BackoffOrigin::File));
+    assert!(
+        said.contains("max_ms = 200 (set in flusso.toml's [backoff] max_ms) is below initial_ms = 1000 (the default)"),
+        "{said}"
     );
 }
 
@@ -735,8 +804,8 @@ async fn a_lane_parked_on_the_longest_backoff_is_reported_and_left_alone() {
         )],
     );
     let mut config = backendless_config();
-    config.backoff.initial_ms = std::num::NonZeroU64::new(u64::MAX);
-    config.backoff.max_ms = std::num::NonZeroU64::new(u64::MAX);
+    config.backoff.initial_ms = super::in_file(u64::MAX);
+    config.backoff.max_ms = super::in_file(u64::MAX);
     let running = Daemon::new(config, backends).start().await.unwrap();
     let status = running.status();
     let run = tokio::spawn(running.run(std::future::pending()));

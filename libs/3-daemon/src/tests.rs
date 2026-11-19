@@ -774,10 +774,15 @@ fn fast_restarts() -> config::Config {
     restarting_every(10)
 }
 
+/// `ms`, as if `flusso.toml`'s `[backoff]` set it.
+fn in_file(ms: u64) -> Option<config::BackoffValue> {
+    std::num::NonZeroU64::new(ms).map(config::BackoffValue::from_file)
+}
+
 fn restarting_every(ms: u64) -> config::Config {
     let mut config = backendless_config();
-    config.backoff.initial_ms = std::num::NonZeroU64::new(ms);
-    config.backoff.max_ms = std::num::NonZeroU64::new(ms);
+    config.backoff.initial_ms = in_file(ms);
+    config.backoff.max_ms = in_file(ms);
     config
 }
 

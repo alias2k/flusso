@@ -548,11 +548,19 @@ fn backoff_section_converts_and_is_optional() {
         max_ms = 800
         "#,
     );
-    assert_eq!(config.backoff.initial_ms, std::num::NonZeroU64::new(200));
-    assert_eq!(config.backoff.max_ms, std::num::NonZeroU64::new(800));
+    let from_file = |ms| std::num::NonZeroU64::new(ms).map(config::BackoffValue::from_file);
+    assert_eq!(config.backoff.initial_ms, from_file(200));
+    assert_eq!(config.backoff.max_ms, from_file(800));
     let constant =
         convert("[source]\ntype = \"postgres\"\n\n[backoff]\ninitial_ms = 500\nmax_ms = 500\n");
-    assert_eq!(constant.backoff.max_ms, std::num::NonZeroU64::new(500));
+    assert_eq!(constant.backoff.max_ms, from_file(500));
+    let inverted =
+        convert("[source]\ntype = \"postgres\"\n\n[backoff]\ninitial_ms = 2000\nmax_ms = 1000\n");
+    assert_eq!(
+        inverted.backoff.max_ms,
+        from_file(1000),
+        "the pair is judged by the daemon's resolver, which says where each value came from"
+    );
 }
 
 #[test]
@@ -560,10 +568,6 @@ fn backoff_refusals_name_the_key() {
     for (table, says) in [
         ("initial_ms = 0", "initial_ms"),
         ("max_ms = 0", "max_ms"),
-        (
-            "initial_ms = 2000\nmax_ms = 1000",
-            "max_ms = 1000 is below initial_ms = 2000",
-        ),
         ("multiplier = 2", "multiplier"),
     ] {
         let error = parse(&format!(
