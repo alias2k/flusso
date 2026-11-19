@@ -26,7 +26,7 @@ These hold for every brief, every review and every fix you make yourself.
 - **Breaking is allowed in a minor or major release.** When the right solution breaks an API, a behaviour or what a start accepts, take it: mark the commit breaking (`fix(scope)!:`) and add the entry to the release's upgrade page under `docs/src/operate/`. Never bend a design to avoid a version bump. The file formats stay as `CLAUDE.md` freezes them.
 - **Flexibility in the query derive.** A type that deserializes the stored value keeps compiling. The derive never accepts or refuses a type by its name; a new refusal of something that compiled is a breaking change and needs a reason a user would accept.
 - **Only what the issue asks.** An agent's additions outside the issue (a new logger, an extra check, a refactor on the way) are reverted or split into their own PR.
-- **The manual is part of the change.** A PR that changes what a user sees updates `docs/src/` in the same PR: the Reference page that owns the fact, and every how-to page that describes the behaviour. In every review, run `git diff --stat origin/main -- docs/src` and search the manual for statements the change made wrong. It is a merge gate.
+- **The manual is part of the change, and its own agent writes it.** A PR that changes what a user sees updates `docs/src/` in the same PR, and that is a merge gate. The implementing agent does not write the manual: see "The documentation agent".
 
 ## Order of work
 
@@ -62,7 +62,8 @@ A brief contains (keep it short):
 
 - the issue numbers and the decided design, if any;
 - the 3–5 relevant files and ADRs by path, taken from the "Where things live" table of `CLAUDE.md`;
-- the order of work that applies, and the rules of "What good work is" with the manual pages by path;
+- the order of work that applies, and the rules of "What good work is";
+- **the manual is not its job**: it keeps `CLAUDE.md`, code docs and crate READMEs current, touches `docs/src/` only where a build or a guard test would otherwise fail (a generated table, an included recipe), and ends its report with every change a user sees: each new or changed key, flag, metric, endpoint, message and behaviour, and what stops, warns or needs action on upgrade;
 - whether the task gates the merge, and that it measures nothing while building ("Measuring" says when and where);
 - the environment: the `PATH` export, the warm `target/` copy, `CARGO_INCREMENTAL=0`;
 - **never build or keep checkouts under `/tmp`** when it is a tmpfs (`df -t tmpfs /tmp`): they take RAM. Use the worktree;
@@ -82,7 +83,7 @@ Resume an agent only for tiny fixes. For a real follow-up round, start a fresh a
 **Every PR gets independent reviewers**: fresh agents that did not write the code, working in the PR's worktree. Your own read of the diff comes on top; it never replaces them.
 
 1. Start **two reviewers in parallel**, each with one job:
-   - **The issue reviewer** checks the change against the issue and "What good work is": does it solve the whole problem the right way, does the test really fail on `origin/main`, is the manual current, is anything outside the issue, does it follow `CLAUDE.md`.
+   - **The issue reviewer** checks the change against the issue and "What good work is": does it solve the whole problem the right way, does the test really fail on `origin/main`, is anything outside the issue, does it follow `CLAUDE.md`.
    - **The regression reviewer** ignores the issue and compares the branch with `origin/main`. It looks for: a `run` or `check` that now stops, warns or restarts where it did not; a struct or schema that compiled or loaded and no longer does; a `flusso.toml`, `*.schema.yml` or `flusso.lock` that stops loading; a content hash that moves for a schema that did not opt in (a moved hash is a new physical index and a full rebuild); a document stored differently; a slower hot path. It reports each case with the input that shows it.
    A PR that touches only docs, CI or other mechanical files needs the issue reviewer alone.
 2. Give a reviewer the code, the issue and the paths, never the author's conclusions or your own. Bound it: say what blocks a merge and what is a note. Include the foreground rule from the brief list.
@@ -96,13 +97,41 @@ Resume an agent only for tiny fixes. For a real follow-up round, start a fresh a
    - the tooling is a floor, not a fence. A reviewer that needs a check the tooling can't run does it by hand this round and reports what it needed and what it did. The missing tool is then committed: in the same PR when small, otherwise as the next tooling PR. Never tell a reviewer to use only what exists;
    - push before review when you can, and have reviewers read CI's result for the suites CI runs instead of running them again.
 6. Read the diff yourself. Small findings you fix and push. The rest go back to the PR's agent, or to a new agent on the same branch when the first one is gone.
-7. Merge when the four required checks pass (`clippy + tests`, `fuzz (pgoutput decoder)`, `designer SPA (build + no drift)`, `manual (build + links)`) and the benchmark job did not fail. The ruleset also asks for an approving review; use `--admin` only when the owner has allowed it for the round.
-8. Clean up: `git worktree remove --force <worktree>`, delete the local branch (the remote one deletes itself on merge), and refresh the warm `target/` when the main checkout is on `main`.
-9. Update the tracking issue's `## Plan` (edit a local copy, then `gh issue edit N --body-file`) when an agent starts and when a PR merges.
+7. Once the reviews' findings are fixed and before the PR is marked ready, start the documentation agent (next section).
+8. Merge when the four required checks pass (`clippy + tests`, `fuzz (pgoutput decoder)`, `designer SPA (build + no drift)`, `manual (build + links)`) and the benchmark job did not fail. The ruleset also asks for an approving review; use `--admin` only when the owner has allowed it for the round.
+9. Clean up: `git worktree remove --force <worktree>`, delete the local branch (the remote one deletes itself on merge), and refresh the warm `target/` when the main checkout is on `main`.
+10. Update the tracking issue's `## Plan` (edit a local copy, then `gh issue edit N --body-file`) when an agent starts and when a PR merges.
 
 A test that fails only in CI is a bug until shown otherwise: find the cause before retrying. The e2e suites are retried by nextest; an intermittent failure elsewhere usually means two tests share state (an index name pattern, an environment variable).
 
 Repo files describe the current state; history goes in commits, PRs and issue comments.
+
+## The documentation agent
+
+Documentation written a sentence at a time by the agent that wrote the code reads like a change log: every fact is there, and no page can be read. So the manual is written once, at the end, by an agent whose only job is the reader.
+
+**When.** After the reviews' findings are fixed, while the PR is still a draft, so the pages describe what was built and not what was planned. A PR that changes nothing a user sees needs none.
+
+**Who.** A fresh agent on the PR's branch, in its own worktree. Never the implementing agent, never a reviewer.
+
+**What it is given.** The implementing agent's list of user-visible changes, the diff (`git diff origin/main...HEAD`), `docs/STYLE.md` (page types, templates, tone) and `CLAUDE.md`'s rule of one fact, one home. It checks each fact against the code, not against the list.
+
+**What it must produce: pages a reader can use, not pages that mention the change.**
+
+- **Start from the reader.** For each page it touches: who opens this page, and what are they trying to do? The page is organised around that, not around what the PR changed.
+- **Structure before sentences.** Decide the page's outline first. When new content does not fit the page's shape, reshape the page: move sections, split a page, add a table. Never append a sentence to the nearest paragraph.
+- **Each page reads top to bottom on its own.** The first lines say what the page is for. One idea per section, under a heading someone scanning would recognise. A paragraph holds at most about four sentences. Anything enumerable (keys, flags, states, steps, changes) is a list or a table.
+- **Show it.** A behaviour gets an example a reader can copy: the config, the command, the output or the `/status` fragment they will see.
+- **Present tense, no history.** A page describes how flusso works. "Now", "no longer", "as of 0.19" belong only on the release's upgrade page.
+- **Each fact once.** The Reference page that owns a key, flag, metric, endpoint or message gets the fact. How-to and runbook pages link to it and say what to do.
+- **The upgrade page** under `docs/src/operate/` gets a section per change (what changed, who is affected, what to do) and one bullet in its opening list, as `docs/STYLE.md` describes.
+- **Nothing left wrong.** It searches the whole manual for statements the change made false and fixes them where they stand.
+
+**How it checks itself.** It builds the book and reads every page it touched in the rendered form, from the top, as the reader would: does the outline make sense on its own, can each section be found by its heading, is any paragraph a wall? Then `mdbook build docs`, `.github/scripts/check-manual-links.sh docs/book`, `just schema-gen` with no drift, and the tests that read the manual (the upgrade page's replacement snippets, the included recipes).
+
+**Its report** lists each page with what it restructured and why, so you can open the pages that changed most.
+
+**No review of the pages follows.** You read the rendered result once before marking the PR ready. The reviewers do not go back to it.
 
 ## Work in stages
 
