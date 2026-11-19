@@ -546,3 +546,70 @@ async fn an_item_waits_no_longer_than_the_bound_when_another_write_starts_meanwh
         started - published
     );
 }
+
+/// Runs `body` on a paused current-thread runtime in its own
+/// thread, and fail if it doesn't finish within `real` wall-clock time (a
+/// task that never yields to an idle runtime keeps paused time from moving).
+fn within_real_time<F>(real: std::time::Duration, body: impl FnOnce() -> F + Send + 'static)
+where
+    F: std::future::Future<Output = ()>,
+{
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        runtime.block_on(body());
+        let _ = done.send(());
+    });
+    assert!(
+        finished.recv_timeout(real).is_ok(),
+        "the paused runtime never went idle: something spins"
+    );
+}
+
+/// A hold set before the run failed is not decided again (a failed run
+/// grants nothing), so it must end when its instant passes: left in place it
+/// is ready on every turn while a write is still out, and the loop spins.
+#[test]
+fn a_hold_outliving_a_failure_does_not_spin() {
+    within_real_time(std::time::Duration::from_secs(10), || async {
+        let mut rig = Rig::new(Recorder::default().failing_once(&["slow-f1"]), 4);
+        rig.start();
+        rig.publish(&orders(), "stuck-o", Some(1)).await;
+        tokio::time::sleep(ms(60)).await;
+        rig.publish(&users(), "slow-f1", Some(2)).await;
+        tokio::time::sleep(ms(5)).await;
+        rig.publish(&users(), "u2", Some(3)).await;
+        tokio::time::sleep(ms(300)).await;
+        assert!(rig.sink.started("users/slow-f1").is_some());
+    });
+}
+
+/// A pending reindex grants nothing either, so a hold set before it must end
+/// when its instant passes, as after a failure.
+#[test]
+fn a_hold_outliving_a_pending_reindex_does_not_spin() {
+    within_real_time(std::time::Duration::from_secs(10), || async {
+        let mut rig = Rig::new(Recorder::default(), 4);
+        let engine = Arc::clone(&rig.engine);
+        let (control_tx, mut control) = mpsc::channel::<SinkControl>(1);
+        rig.running = Some(tokio::spawn(async move { engine.run(&mut control).await }));
+        rig.publish(&orders(), "stuck-o", Some(1)).await;
+        tokio::time::sleep(ms(60)).await;
+        rig.publish(&users(), "slow-u1", Some(2)).await;
+        tokio::time::sleep(ms(5)).await;
+        rig.publish(&users(), "u2", Some(3)).await;
+        tokio::time::sleep(ms(1)).await;
+        control_tx
+            .send(SinkControl::Reindex {
+                indexes: vec![users()],
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(ms(300)).await;
+        assert!(rig.sink.started("users/slow-u1").is_some());
+    });
+}
