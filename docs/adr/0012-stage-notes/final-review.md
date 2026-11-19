@@ -67,3 +67,27 @@ Earlier, on the new tests alone: `seeding` + `reindex` 21/21 after findings 1 an
 Checks at `3537e8d8` (`90278455` once rebased onto the shared tip): `cargo clippy --workspace`, `cargo check --workspace --all-targets --features flusso-source-postgres/bench,flusso-sink-opensearch/bench`, `cargo nextest run -p flusso-engine -p flusso-stream -p flusso-stream-channel -p flusso-daemon` 282/282; under the lock, `cargo nextest run --profile ci --run-ignored all -p flusso-engine` 321/321 and `-p flusso-daemon --test fence` 3/3.
 
 Checks at `269688f3`: clippy, the `--all-targets` check, `cargo nextest run -p flusso-engine -p flusso-stream -p flusso-stream-channel -p flusso-daemon -p flusso-sink-opensearch` 388/388; under the lock, `--profile ci --run-ignored all` `-p flusso-engine` 323/323, `-p flusso-daemon --test fence` 3/3, `-p flusso-cli --test shutdown` 14/14.
+
+### Track B: the re-check of the deadlock fix (at `ef37995e`)
+
+The deadlock fix held (no await reachable from either engine's loop waits on a flight). It brought one regression, and the re-check found an older bug beside it. Tests first: `f01de028` adds them red, `1d3f30e9` fixes. Each fix was mutated away afterwards, and its test fails without it (M-2 and L-b also fail the schedule test).
+
+| Item | What | Guard |
+| --- | --- | --- |
+| M-1 (regression of `269688f3`) | A write landing on a lane while the lane's caught-up write was out was never made searchable under `Deferred`: its acknowledgement saw the lane busy, and the refresh's return didn't look again. Something landing during a refresh now marks it; on return the lane is checked again and owes one more caught-up write if a position is still uncovered. It can't loop: the next one covers every write that returned before it started, and only a new landing marks it again. | `tests::refresh::a_write_landing_on_its_lane_during_the_lanes_refresh_becomes_searchable` (and behind a lock), `several_writes_landing_during_one_refresh_all_become_searchable` (at most two refreshes) |
+| M-2 (older) | A backfill part landing last on its lane was told no caught-up write is wanted (the write's answer names only lanes it gave a position), so a live write before it waited for the seed. It now asks the fences. | `a_backfill_part_landing_last_on_its_lane_keeps_the_lanes_caught_up_write` |
+| L-b | A run that failed sends no caught-up write, and the next one never did. A starting run now sends one over every quiet lane with a written position not yet searchable. A new process has none (empty fences), and the OpenSearch sink's once-per-start refresh in `ensure_index` covers what an earlier process left, so nothing is sent twice. The blame test now has the lane refuse the other part's acknowledgement, as its name says (it fails if the stop is recorded after the acknowledgements). | `a_restarted_run_makes_a_quiet_lanes_written_positions_searchable`, `tests::merge::a_stop_rejection_keeps_its_blame_when_an_acknowledgement_fails` |
+| L-c | An ordered sink's caught-up write takes its one slot. | `an_ordered_sinks_refresh_runs_alone` |
+| L-d (fixed) | An item waiting for its lane's caught-up write is unfinished: one landing behind it is no progress, and the module doc's memory bound counts it (one per lane). | `an_item_landing_behind_one_waiting_for_its_refresh_is_no_progress` |
+| L-a | The ADR's status line and the PR body no longer say the pending sets are in; they live on `feat/concurrency-8a`. | `0efdf55f` |
+| The family | `tests::refresh` drives a sink that can hold one lock across caught-up writes, as the OpenSearch sink does, and covers a seed and a checkpoint record landing while a refresh is out. The schedule test runs every schedule over such a sink too (unforced writes `Deferred`), and checks each lane's last live position ends searchable with no new traffic: red at seed 2 before the fix. | `tests::concurrent::a_document_is_never_written_twice_at_once_and_its_versions_never_go_down` |
+
+Checks at `0efdf55f` (on `fc47cbff`):
+- `cargo fmt --all --check`, `cargo clippy --workspace` and the `--all-targets` check pass.
+- `cargo nextest run -p flusso-engine -p flusso-stream-channel -p flusso-daemon`: 293/293.
+- `-p flusso-engine --lib --stress-count 30`: 30/30 iterations.
+- Under the lock, `--profile ci --run-ignored all`:
+  - `-p flusso-engine`: 332/332.
+  - `-p flusso-daemon --test fence`: 3/3.
+  - `-p flusso-sink-opensearch --test reindex`: 9/9.
+  - `-p flusso-cli --test shutdown`: 14/14.
