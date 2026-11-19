@@ -1,6 +1,16 @@
 //! A library that exports every kind of derived type, documented, under the
 //! strictest lints a consumer turns on: whatever the derives add to a public
 //! API must pass `missing_docs`, `unreachable_pub` and the rest too.
+//!
+//! It forbids a lint from each of clippy's groups (`all`, `pedantic`,
+//! `nursery`, `restriction`): the derives' output must not `allow` one, which
+//! a `forbid` refuses (E0453).
+#![forbid(
+    clippy::needless_return,
+    clippy::manual_assert,
+    clippy::fallible_impl_from,
+    clippy::unwrap_used
+)]
 
 use std::collections::HashMap;
 
