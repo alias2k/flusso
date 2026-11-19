@@ -130,6 +130,17 @@ empty under the same number, and the engine's backfill refills it. So deleting
 one index. (The reverse, a missing marker with the index present, was already
 safe: it stages the next generation and reseeds behind the alias.)
 
+The meta doc also records the generation's `index.uuid`, which OpenSearch gives
+each index anew when it is recreated under the same name. An **unseeded**
+generation under another uuid (deleted, then auto-created with a dynamic mapping
+by a write) is deleted and created again, strict and empty, and
+[`mark_seeded`](OpensearchSink::mark_seeded) refuses such a generation with
+`SinkError::TargetChanged`, so it is never seeded. A **seeded** one under another
+uuid (a snapshot restore, a recreate by hand) is kept as found.
+[`ensure_index`](OpensearchSink::ensure_index) names the generation by its uuid
+in its `Ensured` answer, which lets the engine tell a backfill cut by a new
+generation from one that can still seed it.
+
 The marker also can't vouch for the *source*: when the Postgres replication slot
 had to be recreated, the engine treats every seeded index as stale and stages a
 [`reindex`](OpensearchSink::reindex) — a fresh generation, so rows that no longer
@@ -141,10 +152,11 @@ lives in the engine, not here; see the `flusso-engine` docs.
 - **A deleted generation fails the write.** A seeded index is written through
   its hash alias with `require_alias`, so a deleted generation can't be
   auto-created with a dynamic mapping. The `index_not_found_exception` fails the
-  whole [`write`](OpensearchSink::write), and the sink engine's restart
-  rebuilds the generation through `ensure_index`. An unseeded generation is
-  still written by its concrete name. The gap and the recommended
-  `action.auto_create_index` setting are in the
+  index's write, and the sink engine stages that index again, which rebuilds
+  the generation through `ensure_index`. An unseeded generation is written by
+  its concrete name, so a write can auto-create it once deleted; the uuid check
+  above keeps that index from being seeded. Each case, and why the recommended
+  `action.auto_create_index` setting still matters, is in the
   [manual](https://alias2k.github.io/flusso/reference/sink-opensearch.html#seeding).
 - **A second reindex is a no-op.** [`reindex`](OpensearchSink::reindex) stages
   nothing for an index that's unseeded or has no meta doc, since a rebuild from

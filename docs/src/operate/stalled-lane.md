@@ -102,6 +102,8 @@ The flood-stage block is not a `blocked` lane. OpenSearch answers it with `429`,
 
 A `restaging` lane fixes itself: flusso creates a fresh generation for that index, backfills it, and opens the lane, while the other indexes keep writing. Reads through the alias return 404 until the generation exists, and `/wait` answers `503 backfilling` for the index until its backfill completes. A lane that stays `restaging` is one whose staging keeps failing; the log says `could not stage the index again; trying again later` with the cause, retried with the same backoff.
 
+An index deleted **mid-backfill** is backfilled again from the first row, and stays `backfilling` until that fresh backfill lands. Where `action.auto_create_index` lets a write recreate the generation, the lane never goes `restaging`: the writes land in a dynamically mapped index until the seed or the next start replaces it. If that mapping refuses a document under `on_error = "stop"`, the lane parks `refused` and stays parked; restart flusso to replace the index. See [Why forbid auto-create](../reference/sink-opensearch.md#why-forbid-auto-create).
+
 #### The sink itself (health `open`)
 
 The lane is written but nothing lands. The log has OpenSearch's reason and `sinks.<sink>.last_error` the latest:
