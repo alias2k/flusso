@@ -440,6 +440,7 @@ mod tests {
                 lane("orders").index,
                 lane("users").index,
                 lane("items").index,
+                lane("carts").index,
             ],
             [SinkName::try_new("primary").unwrap()],
             std::time::Instant::now(),
@@ -469,6 +470,17 @@ mod tests {
             },
         );
         observer.on_lane_health(
+            &lane("carts"),
+            &daemon::LaneHealth::Parked {
+                reason: daemon::ParkReason::Blocked {
+                    reason: "index write (api)".to_owned(),
+                },
+                since: now,
+                next_probe: now + Duration::from_secs(1),
+            },
+        );
+        observer.on_lane_health(&lane("carts"), &daemon::LaneHealth::Open);
+        observer.on_lane_health(
             &lane("items"),
             &daemon::LaneHealth::Restaging {
                 since: now,
@@ -494,6 +506,10 @@ mod tests {
         ] {
             assert!(text.contains(line), "{line} missing from:\n{text}");
         }
+        assert!(
+            !text.contains(r#"index="carts""#),
+            "an open lane, parked and opened again, has no series:\n{text}"
+        );
     }
 
     #[test]
