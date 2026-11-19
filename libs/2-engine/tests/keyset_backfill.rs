@@ -627,8 +627,10 @@ impl Engines {
 }
 
 /// Wait until the sink equals the table, the live stream still running.
+/// The bound only ends a run that stopped converging: a loaded machine takes
+/// several times the quiet 12 s, and the test asserts what was built, not how fast.
 async fn settles(url: &str, pool: &PgPool, sink: &LastWrite) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(120);
     loop {
         let want = expected(url, pool).await;
         let diff = differences(&sink.state.lock().unwrap(), &want);
