@@ -496,7 +496,12 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// Whether the destination is a stream its readers consume in order (an
     /// emitting sink, such as stdout): the engine then hands it lane items in
     /// exact lane order, one write at a time, whatever `[concurrency] writes`
-    /// says, with no live item overtaking an earlier backfill page. The
+    /// says, with no live item overtaking an earlier backfill page. Order is
+    /// **per lane** (one index): across lanes, live items go in position order
+    /// while every lane is written, but a lane parked on a refusal, a block or
+    /// a missing target (see [`WriteReport`]) is overtaken by the other lanes'
+    /// later items, and its own follow once it opens. A sink that never reports
+    /// one (stdout) never parks a lane. The
     /// default `false` lets the engine write several items at once and order
     /// them per document only, which a destination keyed by document id (a
     /// search index) is indifferent to.
