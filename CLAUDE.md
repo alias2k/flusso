@@ -1213,6 +1213,12 @@ is the one concrete piece.
   for its index alone beside other indexes' writes (the port allows staging beside writes of other
   indexes), then a `Backfill` request when unseeded and none is outstanding; then it opens and its
   items are written again; a failed staging retries on the backoff; `stage` reopens restaging lanes.
+  A reopened lane keeps its backoff (`LaneState.unproven`) until one of its writes lands, so a target
+  staging can't cure is staged again after 1 s, 2 s, … not in a loop (guard
+  `a_missing_target_staging_cannot_cure_is_retried_with_a_backoff`); staging waits for the lane's
+  writes in flight (`restaging_waits_for_the_lanes_writes_in_flight`). A part lets go of its batch
+  (and its budget `Hold`) before its acknowledgement (`a_parts_bytes_are_back_when_its_acknowledgement_returns`).
+  An ordered sink's order is per lane: a parked lane is overtaken (stdout never parks).
   The health (`LaneHealth`, public; `on_lane_health`/`on_lane_probe` events) lives on the
   `SinkEngine` and outlives a run; a parked lane stays parked across a failed run, on its schedule.
   The run ends only on a sink-wide failure (a write `Err`, a seed, a lane delivery or ack). `/status`
