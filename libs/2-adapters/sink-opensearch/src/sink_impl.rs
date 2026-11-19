@@ -115,12 +115,14 @@ impl Sink for OpensearchSink {
             if seeded {
                 info!(
                     index,
-                    "the seeded generation has another index.uuid than when it was created                      (restored from a snapshot?); keeping it"
+                    "the seeded generation has another index.uuid than when it was created \
+                     (restored from a snapshot, or recreated by hand?); keeping it"
                 );
             } else {
                 warn!(
                     index,
-                    "this generation is not the one flusso created (deleted, then recreated by a                      write under action.auto_create_index); deleting it and creating it again"
+                    "this generation is not the one flusso created (deleted, then recreated by a \
+                     write under action.auto_create_index); deleting it and creating it again"
                 );
                 self.delete_index(&index).await?;
                 live = None;
@@ -157,6 +159,12 @@ impl Sink for OpensearchSink {
         let first = held(&holders, &hash_alias).is_empty();
 
         if !exists {
+            // Before the create: from here on the doc says unseeded and names
+            // no uuid, so a failure after the create can't leave a "seeded"
+            // or another generation's uuid beside the new, empty one. The
+            // next staging adopts what it finds, unseeded.
+            self.write_index_meta(&hash_alias, generation, false, None)
+                .await?;
             // The aliases this generation takes anyway, attached at creation:
             // one cluster-state update instead of one per alias. Never the
             // convenience alias while another index holds it: an alias added
@@ -198,27 +206,31 @@ impl Sink for OpensearchSink {
                     .await?;
             }
             live = self.index_uuid(&index).await?;
-            if live.is_none() {
+            let Some(uuid) = &live else {
                 return Err(SinkError::Write(format!(
                     "{index} was created but is gone again"
                 )));
-            }
+            };
+            self.record_uuid(&hash_alias, uuid).await?;
         }
 
         // Persist the active generation and its uuid, so a resumed run
         // targets the same one and can tell it from one recreated under its
         // name. A generation that did not exist (created here, or by a
-        // concurrent creator since the check) holds nothing, so its doc is
-        // rewritten without a checkpoint. One that already existed keeps its
-        // doc, checkpoint (`walked`) included; a doc an older flusso wrote
-        // gains the uuid.
-        if !exists || meta.is_none() {
-            self.write_index_meta(&hash_alias, generation, false, live.as_deref())
-                .await?;
-        } else if recorded.is_none()
-            && let Some(uuid) = &live
-        {
-            self.record_uuid(&hash_alias, uuid).await?;
+        // concurrent creator since the check) holds nothing: its doc was
+        // rewritten above without a checkpoint. One that already existed
+        // keeps its doc, checkpoint (`walked`) included; a doc with no uuid
+        // (an older flusso's, or a staging that failed after its create)
+        // gains it.
+        if exists {
+            if meta.is_none() {
+                self.write_index_meta(&hash_alias, generation, false, live.as_deref())
+                    .await?;
+            } else if recorded.is_none()
+                && let Some(uuid) = &live
+            {
+                self.record_uuid(&hash_alias, uuid).await?;
+            }
         }
 
         // A caught-up write may skip refreshing an index only when its own
@@ -545,7 +557,8 @@ impl Sink for OpensearchSink {
         let live = self.index_uuid(generation).await?;
         if live.is_none() || (uuid.is_some() && live != *uuid) {
             return Err(SinkError::TargetChanged(format!(
-                "{generation} is not the generation staged for {logical} (deleted, or recreated                  by a write under action.auto_create_index)"
+                "{generation} is not the generation staged for {logical} (deleted, or recreated \
+                 by a write under action.auto_create_index)"
             )));
         }
 
