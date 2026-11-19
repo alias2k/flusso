@@ -1609,6 +1609,7 @@ impl<'a> Run<'a> {
             // Let go of the batch before acknowledging it, so the lane frees it
             // as the acknowledgement lands.
             drop(part.documents);
+            drop(part.batch);
             let oldest = self.is_oldest(part.lane, part.seq);
             // `wanting` names only lanes this write gave a position: a
             // backfill part landing last on its lane asks the fences, since an

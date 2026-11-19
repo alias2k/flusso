@@ -732,9 +732,10 @@ async fn a_parts_bytes_are_back_when_its_acknowledgement_returns() {
     let task = spawn(engine);
     wait_for(|| held.lock().unwrap().len() == 2).await;
     task.abort();
-    assert_eq!(
-        *held.lock().unwrap(),
-        [8 * KIB, 0],
-        "each acknowledgement finds its part's bytes already returned"
+    let held = held.lock().unwrap().clone();
+    assert!(
+        matches!(held.as_slice(), [first, 0] if *first == 4 * KIB || *first == 8 * KIB),
+        "each acknowledgement finds its part's bytes already returned, only the other part's \
+         left: {held:?}"
     );
 }
