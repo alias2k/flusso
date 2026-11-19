@@ -608,6 +608,13 @@ impl<'a> Run<'a> {
             .is_some_and(|lane| lane.barrier || !lane.health.is_open())
     }
 
+    /// Whether `lane` is waiting to be staged again, or being staged.
+    fn lane_restaging(&self, lane: usize) -> bool {
+        self.lanes
+            .get(lane)
+            .is_some_and(|run| matches!(run.health.health, LaneHealth::Restaging { .. }))
+    }
+
     /// Whether `lane` is written as usual (not parked, not being staged).
     fn lane_open(&self, lane: usize) -> bool {
         self.lanes.get(lane).is_some_and(|run| run.health.is_open())
@@ -1139,8 +1146,11 @@ impl<'a> Run<'a> {
                 continue;
             }
             seen.push(queued.lane);
+            // A lane being staged again holds its completion: the staging
+            // decides whether the backfill it ends was cut. A parked lane's
+            // runs once nothing is in front of it, as any other lane's.
             if matches!(queued.item, Queue::Complete { .. })
-                && self.lane_open(queued.lane)
+                && !self.lane_restaging(queued.lane)
                 && !self.lane_in_flight(queued.lane)
             {
                 return Some(at);
