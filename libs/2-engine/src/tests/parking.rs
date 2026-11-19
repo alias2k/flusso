@@ -830,6 +830,38 @@ async fn a_refused_backfill_item_parks_its_lane() {
     task.abort();
 }
 
+/// A parked lane's `SnapshotComplete` still runs once nothing is in front
+/// of it: a stop acknowledges the refused page unwritten, and the completion
+/// behind it is acknowledged (seeding nothing, as a cut-short backfill), so
+/// the lane drains. Only a lane being staged again holds its completion.
+#[tokio::test(start_paused = true)]
+async fn a_parked_lanes_completion_runs_once_a_stop_skipped_the_page_in_front() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.answer(&orders(), Some(Answer::Refuse));
+    let producer = rig.stream.lane(&lane(orders())).unwrap().producer;
+    producer.publish(item(&orders(), 0..2, None)).await.unwrap();
+    producer
+        .publish(LaneItem::SnapshotComplete {
+            index: orders(),
+            ticket: stream::Ticket::new(1),
+        })
+        .await
+        .unwrap();
+    let stop = Stop::new();
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop).with_stop(stop.clone()));
+    let task = spawn(Arc::clone(&engine));
+    eventually("the lane parks on the refusal", || {
+        engine.lane_health(&lane(orders())).kind() == "refused"
+    })
+    .await;
+    stop.request();
+    eventually("the parked lane's completion is acknowledged", || {
+        rig.stream.is_idle()
+    })
+    .await;
+    task.abort();
+}
+
 /// A lane staged again whose write then lands is cured: when its target goes
 /// missing again later, it is staged again at once, not after the backoff it
 /// kept while unproven.
