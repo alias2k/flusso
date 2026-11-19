@@ -826,3 +826,36 @@ async fn a_refused_backfill_item_parks_its_lane() {
     );
     task.abort();
 }
+
+/// A lane staged again whose write then lands is cured: when its target goes
+/// missing again later, it is staged again at once, not after the backoff it
+/// kept while unproven.
+#[tokio::test(start_paused = true)]
+async fn a_lane_whose_write_landed_after_staging_is_staged_at_once_next_time() {
+    let rig = Rig::new(Gate::default());
+    rig.sink.answer(&orders(), Some(Answer::Missing));
+    rig.live(&orders(), 0..2, 0).await;
+    let engine = Arc::new(rig.engine(FailurePolicy::Stop));
+    let task = spawn(Arc::clone(&engine));
+    eventually("orders is staged and lands", || {
+        rig.applied(&orders()) == through(0)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    rig.sink.answer(&orders(), Some(Answer::Missing));
+    let missing_again = Instant::now();
+    rig.live(&orders(), 2..4, 1).await;
+    eventually("orders is staged again and lands", || {
+        rig.applied(&orders()) == through(1)
+    })
+    .await;
+    let ensured = rig.sink.ensured_at.lock().unwrap().clone();
+    assert_eq!(ensured.len(), 2, "two stagings");
+    let waited = ensured[1] - missing_again;
+    assert!(
+        waited < Duration::from_millis(500),
+        "a cured lane is staged again at once, not after a backoff: {waited:?}"
+    );
+    task.abort();
+}
