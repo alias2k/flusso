@@ -43,6 +43,7 @@
 - [Secure the private surface](operate/private-surface.md)
 - [Upgrade to 0.17](operate/upgrade-to-0-17.md)
 - [Upgrade to 0.18](operate/upgrade-to-0-18.md)
+- [Upgrade to 0.19](operate/upgrade-to-0-19.md)
 
 # Query
 

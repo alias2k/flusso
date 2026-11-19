@@ -546,11 +546,12 @@ impl Sink for RejectsOne {
 }
 
 /// With four writes per sink, a document the destination rejects under the
-/// `stop` policy still halts the sink: after the first rejection only that
-/// item is written, alone, on every restart, nothing behind it lands or is
-/// acknowledged, and the backoff keeps doubling because no run made progress.
+/// `stop` policy still halts its lane (ADR 0012 stage 9: the lane parks, the
+/// run goes on): after the first rejection only that item is written, alone,
+/// on every probe, nothing behind it on the lane lands or is acknowledged, and
+/// the probe's backoff (the daemon's `max_restart_backoff`) keeps doubling.
 #[tokio::test(start_paused = true)]
-async fn a_stop_rejection_halts_a_sink_writing_several_items_at_once() {
+async fn a_stop_rejection_halts_its_lane_writing_several_items_at_once() {
     let sink = Arc::new(RejectsOne::default());
     let (source, feed) = FedSource::new(ScriptedSource::new(Vec::new()));
     let backends = backends_for(
@@ -588,6 +589,6 @@ async fn a_stop_rejection_halts_a_sink_writing_several_items_at_once() {
     assert_eq!(
         seconds(&gaps(&sink.attempts_at_the_poison())),
         [1, 2, 4],
-        "no run made progress, so the backoff doubles"
+        "no probe landed, so the backoff doubles"
     );
 }

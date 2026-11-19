@@ -57,6 +57,10 @@ The live status document as JSON: the deployment, then one block per sink.
 | `sinks.<name>.lanes.<index>.outstanding` | int | Items routed to the lane and not written yet. A lane that stays high is the one holding back the slot. |
 | `sinks.<name>.lanes.<index>.stall_seconds` | number, absent | How long the lane's oldest outstanding change has stayed its oldest: the lane has written nothing for that long. 0 while nothing is outstanding, and while it lands steadily. Sampled every second. Backfill rows aren't counted: they carry no position. See [A lane is stalled](../operate/stalled-lane.md). |
 | `sinks.<name>.lanes.<index>.wal_behind_bytes` | int, absent | Bytes of WAL the replication slot keeps behind this lane: the slot lag less how far the lane is ahead of the lane that pins it. It counts WAL flusso hasn't read yet as well as what it read and hasn't landed (a stalled lane pins both), so a healthy catch-up shows a large value on lanes that land every second: read it with the stall age. It is computed from the slot lag, polled every `--lag-poll-secs` (15 s by default); a failed poll keeps the last value. Absent while nothing is outstanding, or before the first lag sample. |
+| `sinks.<name>.lanes.<index>.health` | string | Whether flusso writes the lane: `open`; `parked`, a document refused under `on_error = "stop"`; `blocked`, the index refuses writes for now (a write block, a role without write permission on it); `restaging`, its target was gone and the index is being staged again. A parked or blocked lane writes its oldest batch again alone at `next_probe`; the other lanes go on. See [A lane is stalled](../operate/stalled-lane.md). |
+| `sinks.<name>.lanes.<index>.parked_since` | string, absent | When the lane stopped being written (RFC 3339, UTC). Absent while `open`. |
+| `sinks.<name>.lanes.<index>.next_probe` | string, absent | When a `parked` or `blocked` lane next writes its oldest batch again (RFC 3339, UTC): 1 s after it parked, then the wait doubles up to `max_restart_backoff`, and a stop tries at once. |
+| `sinks.<name>.lanes.<index>.reason` | string, absent | Why the lane isn't written, in the destination's words: the refused ids and the first reason, or the block. Absent while `open`. |
 | `sinks.<name>.lanes.<index>.backfill_checkpoints` | int, absent | Times this run recorded how far the lane's backfill got, so a restart resumes after it (about one every 10 s while a backfill lands); absent while 0. Staying absent through a long backfill means nothing lands. See [Postgres source](source-postgres.md), "An interrupted backfill resumes". |
 
 A source position is in the source's own text form: for Postgres, a WAL LSN such as `0/16B3748`, comparable with `pg_current_wal_lsn()`. Both positions keep moving while the watched tables are idle, because the source follows unrelated WAL too.
@@ -91,9 +95,9 @@ A source position is in the source's own text form: for Postgres, a WAL LSN such
       "applied_position": "0/16B3748",
       "searchable_position": "0/16B3748",
       "lanes": {
-        "orders": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0, "stall_seconds": 0.0 },
-        "products": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0, "stall_seconds": 0.0 },
-        "users": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0, "stall_seconds": 0.0 }
+        "orders": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0, "stall_seconds": 0.0, "health": "open" },
+        "products": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0, "stall_seconds": 0.0, "health": "open" },
+        "users": { "applied_position": "0/16B3748", "searchable_position": "0/16B3748", "outstanding": 0, "stall_seconds": 0.0, "health": "open" }
       }
     }
   }

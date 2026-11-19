@@ -10,6 +10,8 @@ flusso records OpenTelemetry instruments and exposes them two ways: a Prometheus
 | `flusso.lane.stall_age` | gauge | s | `index`, `sink` | How long the lane's oldest outstanding change has stayed its oldest: the lane has written nothing for that long. 0 while nothing is outstanding or while it lands steadily; sampled every second. Alert on it: [A lane is stalled](../operate/stalled-lane.md). |
 | `flusso.lane.wal_behind` | gauge | By | `index`, `sink` | Bytes of WAL the replication slot keeps behind the lane, while it has a change outstanding. It counts WAL flusso hasn't read yet as well as what it read and hasn't landed (a stalled lane pins both), so a healthy catch-up shows a large value on lanes that land every second: read it with the stall age. It is computed from the slot lag, polled every `--lag-poll-secs` (15 s by default); a failed poll keeps the last value. |
 | `flusso.slot.pinned_by` | gauge | | `index`, `sink` | 1 on the lane holding the slot back the most; no series while no lane has a change outstanding. |
+| `flusso.lane.parked` | gauge | | `index`, `sink`, `why` | 1 while the lane is parked: `why` is `refused` (a document refused under `on_error = "stop"`) or `blocked` (the index refuses writes for now). No series while the lane is written, or while it is staged again. Read at scrape time. See [A lane is stalled](../operate/stalled-lane.md). |
+| `flusso.lane.probes` | counter | | `index`, `sink`, `outcome` | A parked lane's oldest batch written again alone, by how it came back: `landed` (the lane opens), `refused`, `blocked`, `missing` (the index is staged again) or `failed` (the write failed as a whole). |
 | `flusso.lane.outstanding` | gauge | | `index`, `sink` | Items routed to that `(index, sink)` lane and not written yet. Read at scrape time. The lane that stays high is the one holding back the replication slot and every fence on its index. |
 | `flusso.documents.built` | counter | | `index` | Documents assembled by the ingest engine, once for every sink. The unlabeled total is the sum. |
 | `flusso.documents.quarantined` | counter | | `sink`, `index` | Documents that sink rejected and its engine skipped under `on_error = "skip"`. Non-zero means data is being dropped. Alert on it. |
@@ -41,6 +43,8 @@ The Prometheus reader applies the usual conventions: dots become underscores, co
 | `flusso.changes.committed` | `flusso_changes_committed_total{sink}` |
 | `flusso.changes.in_flight` | `flusso_changes_in_flight{sink}` |
 | `flusso.lane.outstanding` | `flusso_lane_outstanding{index,sink}` |
+| `flusso.lane.parked` | `flusso_lane_parked{index,sink,why}` |
+| `flusso.lane.probes` | `flusso_lane_probes_total{index,sink,outcome}` |
 | `flusso.lane.stall_age` | `flusso_lane_stall_age_seconds{index,sink}` |
 | `flusso.lane.wal_behind` | `flusso_lane_wal_behind_bytes{index,sink}` |
 | `flusso.slot.pinned_by` | `flusso_slot_pinned_by{index,sink}` |

@@ -40,7 +40,7 @@ You're standing up flusso against a database and a cluster, or adding a sink or 
    enabled = true
    ```
 
-4. **Decide the rejection policy.** The default `stop` halts on a single bad document. Set `on_error = "skip"` globally or per index only where dropping a document is preferable to stopping. See [on_error](../reference/index-and-on-error.md#on_error).
+4. **Decide the rejection policy.** The default `stop` halts that index (its lane parks and retries) on a single bad document, while the other indexes keep going. Set `on_error = "skip"` globally or per index only where dropping a document is preferable to stopping. See [on_error](../reference/index-and-on-error.md#on_error).
 
 5. **Raise an OpenSearch index limit if a document needs it.** A wide document can pass OpenSearch's default of 1000 mapped fields (`mapping.total_fields.limit`), or the `nested_fields`/`nested_objects` limits, and fail index creation or get rejected. Raise it for every index the sink creates:
 

@@ -14,15 +14,29 @@ A write sends its documents in bulk requests and retries what can succeed on a s
 | --- | --- | --- |
 | The whole request: no response, or a non-2xx status | the whole request | the write fails |
 | Single documents refused as **busy**: HTTP 429 (a full write queue, a circuit breaker, a flood-stage disk block) or 503 (a shard unavailable or timed out) | only those documents; the rest of the request is already written | the write fails |
+| Single documents refused because their **index** refuses writes (a [write block](#write-blocks), a role without write permission on it) or is gone (`index_not_found_exception`) | not inside the write | n/a: the index's lane parks, or is staged again (see [Write blocks](#write-blocks) and [Seeding](#seeding)) |
 | Single documents refused for any other reason (a mapping conflict, a malformed value, a version conflict) | never: the same document is refused again | n/a: each is an [item-level rejection](index-and-on-error.md#on_error), reported once |
 | The server's certificate | never | the write fails at once (see below) |
 
-A busy document never reaches [`on_error`](index-and-on-error.md#on_error): under `skip` it is not quarantined, and under `stop` it doesn't stop the sink. When the write fails, the sink engine restarts with backoff (one second, doubling to 60 s while it keeps failing, back to one second once a restart writes a batch) and the batch it held comes back, so nothing it carried is confirmed or lost.
+A busy document never reaches [`on_error`](index-and-on-error.md#on_error): under `skip` it is not quarantined, and under `stop` it doesn't park its lane. When the write fails, the sink engine restarts with backoff (one second, doubling to 60 s while it keeps failing, back to one second once a restart writes a batch) and the batch it held comes back, so nothing it carried is confirmed or lost.
 
 What a long busy spell costs:
 
 - **The sink falls behind.** While it retries (a full disk, a cluster refusing work for minutes) its lane fills, the ingest engine is paced to it, and the replication slot keeps WAL on the Postgres server until the sink catches up. Watch the sink's lag and the slot's retained WAL; see [Watch it run](../operate/watch-it-run.md).
 - **A redelivered batch is written again in full.** The documents OpenSearch accepted before the write failed are rewritten, with `refresh=true` when the sink is caught up: more load on a cluster that is already refusing work. Each resend logs `OpenSearch refused documents as busy; resending them` with the count and OpenSearch's reason; a write that runs out of retries fails with `… still refused as busy after <n> retries`.
+
+## Write blocks
+
+An index closed to writes answers each bulk item `403 cluster_block_exception`: `index.blocks.write`, `index.blocks.read_only`, and `index.blocks.read_only_allow_delete` set by an operator. A role without write permission on one index answers its items `403 security_exception`. Either is about the index, not its documents, so it never reaches [`on_error`](index-and-on-error.md#on_error): nothing is quarantined under `skip`, and `stop` isn't consulted.
+
+The sink reports the index **blocked**, with OpenSearch's reason. The sink engine parks that index's lane: it writes the oldest blocked batch again alone after 1 s, then with the wait doubling up to `max_restart_backoff` (60 s), while the sink's other indexes keep being written. Once the block is lifted the next try lands, and the lane resumes with no restart. `/status` shows the lane `blocked` meanwhile, and it holds the replication slot: see [A lane is stalled](../operate/stalled-lane.md).
+
+The flood-stage disk block is different: OpenSearch answers it 429, which is [busy](#retries) and resent inside the write. A request-level 403 (the whole `_bulk` refused: credentials, a role without bulk permission at all) fails the write, and the sink restarts with backoff.
+
+```text
+{"index":{"_index":"users_1a2b3c4d_1","_id":"42","status":403,
+  "error":{"type":"cluster_block_exception","reason":"index [users_1a2b3c4d_1] blocked by: [FORBIDDEN/8/index write (api)];"}}}
+```
 
 ## TLS and transport errors
 
@@ -162,9 +176,9 @@ When a backfill completes, the sink seeds the index in this order:
 
 Seeded state is recorded in `flusso_meta`, so a restart skips a completed backfill. On every start the marker is checked against the generation it names: if that index is gone, the marker is retracted with a warning, the generation is recreated empty, and the backfill refills it. Deleting `{logical}_{hash}_{n}` between runs is the supported way to force a rebuild of one index. A missing replication slot overrides every marker; see [Recover from a dropped slot](../operate/dropped-slot.md).
 
-Deleting a seeded generation **while flusso runs** is caught on the next write to that index: the alias is gone with it, so the write fails with `index_not_found_exception` instead of OpenSearch auto-creating a dynamically mapped index. That fails the whole flush, not one document. The sink's engine restarts with backoff, the batch is redelivered, and the restart's marker check rebuilds the generation as above. Until that next write, reads through the alias return 404.
+Deleting a seeded generation **while flusso runs** is caught on the next write to that index: the alias is gone with it, so the write answers `index_not_found_exception` instead of OpenSearch auto-creating a dynamically mapped index. The sink reports that index missing, and the sink engine stages that one index again while the sink's other indexes keep being written: the marker check rebuilds the generation as above, a backfill is requested for it, and the batch is written again into the fresh generation. Nothing restarts. Until that next write, reads through the alias return 404; then `/wait` answers `503 backfilling` for the index until it is seeded.
 
-Deleting an **unseeded** generation mid-backfill isn't covered by `require_alias`. With the default `action.auto_create_index: true` the next write recreates it with a dynamic mapping. With the recommended pattern from [Cluster requirements](#cluster-requirements) the write fails and the engine restarts, but the part of the snapshot already written is lost. A restart doesn't fix either case: the snapshot in flight is still outstanding, so no new one is requested, and when it completes the partial (or dynamically mapped) generation is marked seeded and kept. Once that backfill finishes, run `flusso reindex <index>` to rebuild it from scratch.
+Deleting an **unseeded** generation mid-backfill isn't covered by `require_alias`. With the default `action.auto_create_index: true` the next write recreates it with a dynamic mapping. With the recommended pattern from [Cluster requirements](#cluster-requirements) the write answers `index_not_found_exception` and the lane is staged again, but the part of the snapshot already written is lost. Neither staging again nor a restart fixes either case: the snapshot in flight is still outstanding, so no new one is requested, and when it completes the partial (or dynamically mapped) generation is marked seeded and kept. Once that backfill finishes, run `flusso reindex <index>` to rebuild it from scratch.
 
 ## Analysis and subfields
 
