@@ -1,41 +1,133 @@
 # A lane is stalled
 
-Find the index and sink that stopped writing, fix the cause, and know what it costs while it lasts.
+Find the index that stopped writing to a sink, read why, fix the cause, and know what it costs while it lasts.
 
 ## When to use this
 
-`FlussoLaneStalled` or `FlussoLaneParked` fired, flusso logged `a lane has landed nothing for …s` or `the lane is parked`, or `/status` shows a lane with a high `stall_seconds` or a `health` other than `open`. A **lane** is one index flowing into one sink. It is stalled when its oldest outstanding change hasn't been written for a while: a busy lane that keeps writing is not stalled, however long its backlog.
+A **lane** is one index flowing into one sink. Open this page when any of these shows up:
 
-**What it costs.** The replication slot is confirmed only as far as the slowest lane has written. A stalled lane therefore keeps Postgres's WAL for **every** index, not just its own: `flusso.lane.wal_behind` grows on it (it counts WAL flusso hasn't read yet too, so on its own it is high during any catch-up; with a stall age it is the real pin), and `pg_replication_slots` shows the slot's retained WAL growing. Past `max_slot_wal_keep_size` Postgres invalidates the slot, and every index on every sink is rebuilt from a backfill ([Recover from a dropped slot](dropped-slot.md)). Dropping and rebuilding just the stalled index is not available yet ([#394](https://github.com/alias2k/flusso/issues/394)). The other indexes keep being written while memory allows: their changes still flow, but the built documents waiting on the stalled lane hold part of the [memory budget](../reference/config-toml.md#concurrency).
+- `FlussoLaneParked` fired: flusso stopped writing a lane on purpose.
+- `FlussoLaneStalled` fired: a lane has landed nothing for 10 minutes.
+- The log says `the lane is parked`, `the index's target is gone`, or `a lane has landed nothing for …s`.
+- [`/status`](../reference/http.md#get-status) shows a lane whose `health` isn't `open`, or whose `stall_seconds` keeps climbing.
+
+A lane that keeps writing is not stalled, however long its backlog. For a whole sink that is down or refusing requests, the lane is `open` and the sink's `phase` is `failed`: the cause is the sink, covered in [step 3](#the-sink-itself-health-open).
+
+## What it costs while it lasts
+
+- **WAL on the Postgres server.** The replication slot is confirmed only as far as the slowest lane has written, so one stuck lane keeps the WAL of **every** index. Past `max_slot_wal_keep_size`, Postgres invalidates the slot and every index on every sink is rebuilt from a backfill ([Recover from a dropped slot](dropped-slot.md)).
+- **Memory, eventually.** The other indexes keep being written, but documents queued behind the stuck lane hold part of the [memory budget](../reference/config-toml.md#concurrency). Long enough, the budget fills and the other indexes slow down too.
+- **Fences on that index.** A [`/wait`](../reference/http.md#get-waitpositionposition) covering the stuck lane times out (`408`); a wait that names only other indexes (`index=…`) still answers.
+
+Dropping and rebuilding just the stuck index is not available yet ([#394](https://github.com/alias2k/flusso/issues/394)).
 
 ## Steps
 
-1. **Find the lane.** The alert's `index` and `sink` labels name it. Without alerting, `/status` names the lane pinning the slot in `pinned_by`, and each lane's `stall_seconds` and `wal_behind_bytes` sit under `sinks.<sink>.lanes.<index>`. `flusso.lane.stall_age` plots it.
-2. **Read why.** `sinks.<sink>.lanes.<index>.health` in `/status` says whether flusso still writes the lane. A lane flusso stopped writing is **parked**: the other indexes keep being written, and it writes its oldest batch again alone (a probe) at `next_probe`, 1 s after it parked, then with the wait doubling up to `max_restart_backoff` (60 s); another index landing never shortens the wait. `reason` says why, in OpenSearch's words, and the log line `the lane is parked` names the index, the sink, the reason and the wait:
-   - `blocked`: the index refuses writes for now;
-   - `parked`: a document refused under `on_error = "stop"`, its ids in `reason`;
-   - `restaging`: its target was gone; the index is being staged again and backfilled, and opens on its own;
-   - `open`: flusso writes it, and the sink is the cause: the log has the reason OpenSearch gave, and `last_error` the latest.
-3. **Fix the cause:**
-   - **A write block on the index** (`blocked`: `index.blocks.write`, `read_only`, or `read_only_allow_delete` after a disk watermark): free disk space or lift the block. The next probe lands and the lane resumes, at most `max_restart_backoff` later; no restart. Nothing was quarantined meanwhile, whatever `on_error` says.
-   - **A role without write permission on the index** (`blocked`, `security_exception`): grant it. The next probe lands.
-   - **A document refused under `on_error = "stop"`** (`parked`): fix the schema and restart (a schema change builds a new index), or switch the index to `skip` and restart ([Handle rejected documents](rejected-documents.md)). A fixed row isn't picked up by the probe, which writes the same batch again. The stall is the policy doing its job.
-   - **Its generation was deleted** (`restaging`): nothing to do; the lane opens once the index is staged again, and `/wait` answers `503 backfilling` until its backfill completes.
-   - **The cluster down or refusing as busy for good:** bring it back. Busy (429/503) refusals are retried, so a lane that stays stalled behind them means the cluster never had room.
-   - **A wrong mapping on an index flusso didn't create:** [reindex](reindex.md) the index on that sink.
-4. **Watch it recover.** flusso logs `the parked lane's probe landed; the lane is open` and `a stalled lane is landing again`, `health` is `open`, `stall_seconds` drops to 0, and `pinned_by` moves on. The slot then releases the WAL it kept.
+### 1. Find the lane
+
+The alert's `index` and `sink` labels name it. Without alerting, read `/status`: `pinned_by` names the lane holding the slot, and each lane sits under `sinks.<sink>.lanes.<index>`:
+
+```sh
+curl -s localhost:9464/status | jq '.pinned_by, (.sinks[].lanes | with_entries(select(.value.health != "open")))'
+```
+
+A lane flusso has stopped writing looks like this (fields in [`/status`](../reference/http.md#lane-health)):
+
+```json
+"users": {
+  "applied_position": "0/16B3748",
+  "outstanding": 3,
+  "stall_seconds": 412.0,
+  "health": "blocked",
+  "parked_since": "2026-11-19T12:03:11Z",
+  "next_probe": "2026-11-19T12:10:03Z",
+  "reason": "blocked: index [users_1a2b3c4d_1] blocked by: [FORBIDDEN/8/index write (api)];"
+}
+```
+
+The same lane shows as `flusso_lane_parked{index="users",sink="primary",why="blocked"} 1`, and the log line names it once when it parks:
+
+```text
+WARN the lane is parked: its item is written again alone after the backoff; the other indexes go on index=users sink=primary reason=blocked: index [users_1a2b3c4d_1] blocked by: [FORBIDDEN/8/index write (api)]; backoff=1s
+```
+
+### 2. Read its health
+
+| `health` | What happened | What flusso does | Fix |
+| --- | --- | --- | --- |
+| `blocked` | OpenSearch refuses every write to the index for now: a write block, or a role without write permission on it. | Holds the lane, writes its oldest batch again alone at `next_probe`. Quarantines nothing, whatever `on_error` says. | [Lift the block](#a-write-block) or [grant the permission](#a-role-without-write-permission) |
+| `parked` | A document was refused under `on_error = "stop"`; `reason` names the ids. | Holds the lane, writes the same batch again at `next_probe`. | [Fix the schema or switch to `skip`](#a-document-refused-under-stop) |
+| `restaging` | The index's target was deleted while flusso ran. | Stages that index again and backfills it, alone. | [Nothing, usually](#a-deleted-index) |
+| `open` | flusso writes the lane; something else stops it landing. | Restarts the sink with backoff. | [The sink itself](#the-sink-itself-health-open) |
+
+While a lane is `parked` or `blocked`, the sink's other indexes keep being written. Each retry of the held lane is a **probe**: 1 s after it parked, then the wait doubles up to 60 s. Another index landing never shortens the wait. `flusso_lane_probes_total{outcome}` counts the probes.
+
+### 3. Fix the cause
+
+#### A write block
+
+`reason` carries `cluster_block_exception` text such as `FORBIDDEN/8/index write (api)` (`index.blocks.write`), `FORBIDDEN/5/index read-only (api)` (`index.blocks.read_only`) or `FORBIDDEN/12/index read-only / allow delete (api)` (`index.blocks.read_only_allow_delete`, set by hand). See which block is set, on the generation `reason` names:
+
+```sh
+curl -s 'localhost:9200/users_1a2b3c4d_1/_settings/index.blocks*?flat_settings=true'
+```
+
+Lift it:
+
+```sh
+curl -s -X PUT localhost:9200/users_1a2b3c4d_1/_settings \
+  -H 'Content-Type: application/json' \
+  -d '{"index.blocks.write": null, "index.blocks.read_only": null, "index.blocks.read_only_allow_delete": null}'
+```
+
+The next probe lands and the lane catches up, at most 60 s later. No restart, and nothing was lost meanwhile.
+
+#### A disk watermark
+
+The flood-stage block is not a `blocked` lane. OpenSearch answers it with `429`, which flusso treats as **busy**: it [resends](../reference/sink-opensearch.md#retries), and when the retries run out the whole sink restarts with backoff. The lanes stay `open` and the sink's `last_error` says `still refused as busy`. Free disk space (`curl -s 'localhost:9200/_cat/allocation?v'` shows usage per node); OpenSearch lifts the block once usage drops below the high watermark, and the sink's next restart writes.
+
+#### A role without write permission
+
+`reason` carries a `security_exception` naming the role and the index. Grant the role `index` (or `write`) permission on the index pattern flusso writes (`users_*` and its aliases, or the deployment's [prefix](../reference/config-toml.md#prefix)). The next probe lands.
+
+#### A document refused under `stop`
+
+`reason` reads `refused: id 42 (…)` with OpenSearch's words. The probe writes the **same** batch every time, so fixing the row in Postgres doesn't unpark the lane yet. Pick one:
+
+- **The schema is wrong** (a value the mapping can't take: a wider type, a `custom` type, a `default`): fix the schema and restart. A schema change builds a new index.
+- **The row is wrong**: set `on_error = "skip"` on that index and restart, then fix the row. The refused document is quarantined; the row's next change indexes it. See [Handle rejected documents](rejected-documents.md).
+- **`Limit of total fields … exceeded`**: raise the limit with [`index_settings`](../reference/sink-opensearch.md#index-settings), restart, and [reindex](reindex.md).
+
+#### A deleted index
+
+A `restaging` lane fixes itself: flusso creates a fresh generation for that index, backfills it, and opens the lane, while the other indexes keep writing. Reads through the alias return 404 until the generation exists, and `/wait` answers `503 backfilling` for the index until its backfill completes. A lane that stays `restaging` is one whose staging keeps failing; the log says `could not stage the index again; trying again later` with the cause, retried with the same backoff.
+
+#### The sink itself (health `open`)
+
+The lane is written but nothing lands. The log has OpenSearch's reason and `sinks.<sink>.last_error` the latest:
+
+- **The cluster is down or refusing requests**: bring it back. The sink restarts with backoff until it can write.
+- **Busy (`429`/`503`) for good**: busy refusals are resent, so a lane stalled behind them means the cluster never had room. Add capacity or lower the load.
+- **A wrong mapping on an index flusso didn't create**: [reindex](reindex.md) the index on that sink.
+
+### 4. Watch it recover
+
+- The log says `the parked lane's probe landed; the lane is open` (or `the index is staged again; the lane is open`), then `a stalled lane is landing again`.
+- `health` is back to `open`, `stall_seconds` drops to 0, the `flusso_lane_parked` series disappears.
+- `pinned_by` moves on and the slot releases the WAL it kept.
 
 ## Options and variations
 
-- **A backfill that stops making progress isn't a stall here.** Backfill rows carry no position, hold back no WAL, and give the lane no stall age. It shows as the index staying `backfilling` in `/status` while `flusso.documents.built` stops moving. A live change queued behind it on the same lane does age, and alerts.
-- **Thresholds.** flusso logs a warning once a lane passes 10 minutes and every 10 minutes after; it changes nothing else. `FlussoLaneStalled` (in `dev/prometheus/rules/flusso.rules.yml` and the Helm chart's `prometheusRule`) fires for 5 minutes of either: a lane landing nothing for 10 minutes (label `reason: age`), or the slot keeping more than 1 GiB of WAL behind a lane that has landed nothing for over a minute (`reason: wal`). The WAL branch needs the age because WAL behind includes WAL not read yet: a catch-up after a restart has gigabytes of it while every lane lands each second. A lane that lands, just slowly, isn't stalled and fires neither; `flusso:backlog_drain_eta_seconds` shows how long it will take. Tune the thresholds in the [Helm values](../reference/helm-values.md) or your own rules.
-- **A stop with a parked lane.** A stop tries every parked lane once more at once, then the drain waits for the deadline (`--shutdown-timeout-secs`), since a parked lane's batches never land: flusso exits `1` and the log names the lane (`lane users blocked since …`). The next start writes those batches again first.
-- **`FlussoLaneParked`.** `flusso_lane_parked{why}` is 1 from the moment a lane parks (or is staged again), and `FlussoLaneParked` fires once it has stayed so for 5 minutes, naming the index, the sink and why; `flusso_lane_probes_total{outcome}` counts its tries. It also catches what `FlussoLaneStalled` can't: a refused **backfill** page carries no position, so its lane never gets a stall age.
+- **The two alerts.** `FlussoLaneParked` fires once `flusso_lane_parked > 0` has held for 5 minutes. `FlussoLaneStalled` fires on a lane landing nothing for 10 minutes (`reason: age`), or on more than 1 GiB of WAL kept behind a lane that has landed nothing for a minute (`reason: wal`). Both ship in `dev/prometheus/rules/flusso.rules.yml` and the Helm chart's `prometheusRule`; tune them in the [Helm values](../reference/helm-values.md). Only `FlussoLaneParked` sees a refused **backfill** page: backfill rows carry no position, so their lane never ages.
 - **`/readyz` stays ready.** A parked lane doesn't make flusso unready: the other indexes are written and served, and a restart wouldn't help. Alert on the lane, not on readiness.
-- **A process restart resets the age.** The age is kept in memory: a sink engine or ingest engine restarting inside one process keeps it, a new process starts it at 0 (and the alert's 5 minutes over again). A process that crash-loops therefore never ages a lane into the alert. Alert on the process instead, in your monitoring: `up{job="<flusso's scrape job>"} == 0` for a few minutes, or, under Kubernetes, the pod's restart count rising (`increase(kube_pod_container_status_restarts_total{container="flusso"}[15m]) > 2`).
+- **A slow lane isn't stalled.** A lane that lands, just slowly, fires neither alert; `flusso:backlog_drain_eta_seconds` shows how long it will take. flusso logs a warning once a lane passes 10 minutes without landing, and every 10 minutes after.
+- **A backfill that stops making progress** shows as the index staying `backfilling` in `/status` while `flusso.documents.built` stops moving. A live change queued behind it on the same lane does age, and alerts.
+- **A stop with a parked lane.** A stop probes every parked lane once more at once. If one still can't land, the drain waits for `--shutdown-timeout-secs`, then flusso exits `1` naming the lane: `primary: 3 changes in flight, lane users blocked since 2026-11-19T12:03:11Z (blocked: …)`. The next start writes those batches again first. See [Stopping](../reference/cli.md#stopping).
+- **A process restart resets the stall age.** The age is kept in memory, so a process that crash-loops never ages a lane into `FlussoLaneStalled`. Alert on the process too: `up{job="<flusso's scrape job>"} == 0` for a few minutes, or under Kubernetes `increase(kube_pod_container_status_restarts_total{container="flusso"}[15m]) > 2`.
 
 ## Related
 
 - [`/status`](../reference/http.md#get-status) and [Metrics](../reference/metrics.md)
 - [Handle rejected documents](rejected-documents.md)
+- [Sink: OpenSearch — write blocks](../reference/sink-opensearch.md#write-blocks)
 - [Recover from a dropped slot](dropped-slot.md)

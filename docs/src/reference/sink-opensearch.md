@@ -27,16 +27,25 @@ What a long busy spell costs:
 
 ## Write blocks
 
-An index closed to writes answers each bulk item `403 cluster_block_exception`: `index.blocks.write`, `index.blocks.read_only`, and `index.blocks.read_only_allow_delete` set by an operator. A role without write permission on one index answers its items `403 security_exception`. Either is about the index, not its documents, so it never reaches [`on_error`](index-and-on-error.md#on_error): nothing is quarantined under `skip`, and `stop` isn't consulted.
+Some refusals are about an **index**, not its documents. The sink reports them per index, so the sink engine holds that index's lane and keeps writing the others. None of them reaches [`on_error`](index-and-on-error.md#on_error): nothing is quarantined under `skip`, and `stop` isn't consulted.
 
-The sink reports the index **blocked**, with OpenSearch's reason. The sink engine parks that index's lane: it writes the oldest blocked batch again alone after 1 s, then with the wait doubling up to `max_restart_backoff` (60 s), while the sink's other indexes keep being written. Once the block is lifted the next try lands, and the lane resumes with no restart. `/status` shows the lane `blocked` meanwhile, and it holds the replication slot: see [A lane is stalled](../operate/stalled-lane.md).
+| OpenSearch answers each item | Cause | The lane |
+| --- | --- | --- |
+| `403 cluster_block_exception` | `index.blocks.write`, `index.blocks.read_only` or `index.blocks.read_only_allow_delete`, set by an operator | `blocked` |
+| `403 security_exception` | a role without write permission on that index | `blocked` |
+| `404 index_not_found_exception` | the generation was deleted while flusso runs: see [Seeding](#seeding) | `restaging` |
 
-The flood-stage disk block is different: OpenSearch answers it 429, which is [busy](#retries) and resent inside the write. A request-level 403 (the whole `_bulk` refused: credentials, a role without bulk permission at all) fails the write, and the sink restarts with backoff.
+A `blocked` lane writes its oldest batch again alone after 1 s, then with the wait doubling up to 60 s. Once the block is lifted the next try lands and the lane resumes, with no restart. Meanwhile [`/status`](http.md#lane-health) shows the lane `blocked` with OpenSearch's reason, and the lane holds the replication slot: the runbook is [A lane is stalled](../operate/stalled-lane.md).
 
 ```text
 {"index":{"_index":"users_1a2b3c4d_1","_id":"42","status":403,
   "error":{"type":"cluster_block_exception","reason":"index [users_1a2b3c4d_1] blocked by: [FORBIDDEN/8/index write (api)];"}}}
 ```
+
+Two look alike and aren't index-wide:
+
+- **The flood-stage disk block** answers `429`, so it is [busy](#retries): resent inside the write, and a write still refused after `max_retries` fails and restarts the sink.
+- **A request-level 403** (the whole `_bulk` refused: credentials, a role with no bulk permission at all) fails the write, and the sink restarts with backoff.
 
 ## TLS and transport errors
 
@@ -105,7 +114,7 @@ OpenSearch checks ids before it runs a bulk request, and one bad id refuses the 
 A rejected id is an item-level rejection like any other, so the index's [`on_error`](index-and-on-error.md#on_error) decides it and nothing retries it:
 
 - **`skip`**: the document is quarantined and the batch is acked. The log carries `document rejected by sink; quarantining and continuing` with the `index`, `id`, and `reason` (a log line and `last_error` show the first 64 characters of a longer id, then its length); [`/status`](http.md#get-status) counts it in `documents_quarantined`, and the [`flusso.documents.quarantined`](metrics.md) counter goes up. The row stays out of the index until its key changes.
-- **`stop`**: the rest of the batch is written, and the index's lane **parks** with the batch unconfirmed, while the sink's other indexes keep being written. The log carries `the lane is parked` with the index, the sink and the reason (`refused: id kkkk… (600 bytes) (document id is 600 bytes; …)`); [`/status`](http.md#get-status) shows the lane `parked` under `sinks.<sink>.lanes.<index>`, with that reason and the next try, and `flusso_lane_parked{why="refused"}` is 1. The lane writes the batch again alone after its backoff and parks again on the same row until the key is shortened, or the policy is `skip` and flusso restarted. See [A lane is stalled](../operate/stalled-lane.md).
+- **`stop`**: the rest of the batch is written, and the index's lane **parks** with the batch unconfirmed, while the sink's other indexes keep being written. [`/status`](http.md#lane-health) shows the lane `parked` with the reason `refused: id kkkk… (600 bytes) (document id is 600 bytes; …)`. Each probe writes the same batch and is refused again, until the key is shortened, or the policy is `skip` and flusso restarted. See [A lane is stalled](../operate/stalled-lane.md).
 
 ## Index settings
 
