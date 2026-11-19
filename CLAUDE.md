@@ -1485,7 +1485,9 @@ recovery. `FlussoLaneStalled` (`dev/prometheus/rules/flusso.rules.yml`, tested b
 dev server loads whole; the Helm chart's `prometheusRule`, kept equal by
 `.github/scripts/test_alert_rule_copies.py`) fires past 10 min of age, or past 1 GiB of WAL behind
 with an age over 60 s (WAL behind includes WAL flusso hasn't read, so a catch-up has it too), for 5
-min; runbook `docs/src/operate/stalled-lane.md`. Guards: `stall::tests`, the
+min; `FlussoLaneParked` (same two copies and rule tests) fires on `flusso_lane_parked > 0` for 5 min,
+the only alert a refused backfill page (no position, no stall age) reaches;
+runbook `docs/src/operate/stalled-lane.md`. Guards: `stall::tests`, the
 `fence` e2e's stalled-index block (age, sibling at 0, `pinned_by`, recovery). It is **telemetry-agnostic** — it depends only on the
 engine's `Observer` trait, not on any metrics backend — and owns **no transport**: no HTTP
 server, no process signals, no metrics *recording* or *exporter*; those are the binary's.

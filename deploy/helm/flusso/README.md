@@ -53,6 +53,7 @@ A pod stop is a graceful drain: flusso lands what is in flight, confirms it to P
 With the Prometheus Operator installed, `prometheusRule.enabled: true` creates a `PrometheusRule` with flusso's alerts, the same rules as the dev stack's `dev/prometheus/rules/flusso.rules.yml`:
 
 - `FlussoLaneStalled`: a lane (one index into one sink) has landed nothing for `laneStallSeconds` (600), or the slot keeps more than `laneWalBehindBytes` (1 GiB) of WAL behind a lane that has landed nothing for `laneWalStallSeconds` (60), for `for` (5m). Runbook: [A lane is stalled](https://alias2k.github.io/flusso/operate/stalled-lane.html).
+- `FlussoLaneParked`: flusso stopped writing a lane for `for` (5m): `why` `refused` (a document refused under `on_error = "stop"`), `blocked` (the index refuses writes) or `restaging` (a target staging can't bring back). It also covers a refused backfill page, which never ages a lane into `FlussoLaneStalled`. Runbook: [A lane is stalled](https://alias2k.github.io/flusso/operate/stalled-lane.html).
 - `FlussoVisibilityWait`: a commit held invisible for over 30 s (a synchronous standby not answering).
 
 `prometheusRule.labels` adds labels to match your Prometheus's `ruleSelector`. A process that crash-loops never ages a lane into `FlussoLaneStalled` (the age starts at 0 in each process): alert on the pod's restarts in your own rules.

@@ -17,6 +17,8 @@ Bind addresses: `--public-address` / `--private-address`, then `FLUSSO_PUBLIC_AD
 
 `200` when the phase is `backfilling` or `live`; `503` while `starting`, `stopping`, or after `stopped`. A stopping or stopped pipeline is deliberately not ready.
 
+A **parked lane** leaves `/readyz` at `200`: the other indexes are written and served, and a restart would not unpark it. Watch the lane instead: `sinks.<sink>.lanes.<index>.health` in [`/status`](#get-status), the `flusso_lane_parked` series, and the `FlussoLaneParked` alert ([A lane is stalled](../operate/stalled-lane.md)).
+
 ## GET /status
 
 The live status document as JSON: the deployment, then one block per sink.

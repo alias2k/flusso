@@ -14,12 +14,12 @@
 | The index's generation deleted while running (`index_not_found_exception`) | the sink stops; its restart recreates the generation | the lane is **staged again** alone: a fresh generation, backfilled, while the others write |
 | The whole `_bulk` refused, credentials refused (401, a request-level 403), the cluster unreachable | the sink stops and restarts | unchanged |
 
-A parked lane writes its oldest item again alone (a **probe**) after 1 s, then with the wait doubling up to `max_restart_backoff` (60 s by default); when it lands the lane opens and the rest follows, with no restart. It holds the replication slot meanwhile, as a stalled lane does, so the existing `FlussoLaneStalled` alert fires after 10 minutes. The runbook is [A lane is stalled](stalled-lane.md).
+A parked lane writes its oldest item again alone (a **probe**) after 1 s, then with the wait doubling up to `max_restart_backoff` (60 s by default); when it lands the lane opens and the rest follows, with no restart. It holds the replication slot meanwhile, as a stalled lane does. A new alert, `FlussoLaneParked`, fires once a lane has been parked (or stuck being staged again) for 5 minutes, naming the index, the sink and why; `FlussoLaneStalled` still fires after 10 minutes for a parked live change, but never for a refused backfill page, which has no position. The runbook is [A lane is stalled](stalled-lane.md).
 
 ## Steps
 
 1. **Upgrade flusso.** Nothing to rebuild: no content hash moves.
-2. **Check what `stop` means to your operations.** A document refused under `on_error = "stop"` no longer stops the sink: its index's lane parks and the other indexes stay current. `/status` shows the lane `parked` under `sinks.<sink>.lanes.<index>.health`, with the refused ids in `reason`. An alert that watched for the sink's phase `failed` or for restarts no longer sees it: alert on `flusso_lane_parked` or on `FlussoLaneStalled` instead ([Metrics](../reference/metrics.md)).
+2. **Check what `stop` means to your operations.** A document refused under `on_error = "stop"` no longer stops the sink: its index's lane parks and the other indexes stay current. `/status` shows the lane `parked` under `sinks.<sink>.lanes.<index>.health`, with the refused ids in `reason`. An alert that watched for the sink's phase `failed` or for restarts no longer sees it, and `/readyz` stays `200` while a lane is parked (the other indexes are healthy, and a restart wouldn't unpark it): add `FlussoLaneParked` (in the dev rules and the Helm chart's `prometheusRule`), or alert on `flusso_lane_parked` yourself ([Metrics](../reference/metrics.md)).
 3. **Lift a write block to resume.** An index blocked for writes is written again by the next probe once the block is lifted, at most `max_restart_backoff` later. No restart.
 
 ## Options and variations

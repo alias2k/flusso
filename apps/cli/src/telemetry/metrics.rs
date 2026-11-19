@@ -177,9 +177,10 @@ pub(crate) fn register_in_flight_gauge(status: Arc<Status>) -> ObservableGauge<u
 }
 
 /// Register `flusso.lane.parked` as an observable gauge read from the daemon's
-/// [`Status`] at collection: 1 per `(index, sink)` lane that is parked, with
-/// `why` `refused` (a refusal under `on_error = "stop"`) or `blocked` (the
-/// index refuses writes for now). An open or restaging lane has no series.
+/// [`Status`] at collection: 1 per `(index, sink)` lane flusso doesn't write,
+/// with `why` `refused` (a refusal under `on_error = "stop"`), `blocked` (the
+/// index refuses writes for now) or `restaging` (its target was gone). An
+/// open lane has no series.
 pub(crate) fn register_lane_parked_gauge(status: Arc<Status>) -> ObservableGauge<u64> {
     lane_parked_gauge(&global::meter("flusso"), status)
 }
@@ -190,12 +191,9 @@ fn lane_parked_gauge(
 ) -> ObservableGauge<u64> {
     meter
         .u64_observable_gauge("flusso.lane.parked")
-        .with_description("1 while an (index, sink) lane is parked: refused or blocked")
+        .with_description("1 while an (index, sink) lane is not written: refused, blocked or restaging")
         .with_callback(move |observer| {
             for (lane, view) in status.unhealthy_lanes() {
-                if view.next_probe.is_none() {
-                    continue;
-                }
                 observer.observe(
                     1,
                     &[
