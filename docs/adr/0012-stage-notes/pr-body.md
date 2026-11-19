@@ -26,8 +26,9 @@ This merge takes in ADR 0012's stages 3–7 (stages 1–2, `Sink::write` and con
 **8a groundwork, already on the branch** (inert or behaviour-neutral):
 
 - the build permits (`ingest/gate.rs`, drawn by one task);
-- changes resolved on a connection of their own (the connection count is still `builds + 2`);
-- `Progress`'s per-index pending sets, which nothing marks yet.
+- changes resolved on a connection of their own (the connection count is still `builds + 2`).
+
+`Progress`'s per-index pending sets are not in: they live on `feat/concurrency-8a` with the rest of 8a.
 
 ## What is not in
 
