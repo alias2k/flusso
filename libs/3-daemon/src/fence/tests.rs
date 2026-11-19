@@ -431,6 +431,7 @@ fn the_status_document_carries_the_positions() {
             "applied_position": "20",
             "searchable_position": "19",
             "outstanding": 0,
+            "health": "open",
         })
     );
 }
