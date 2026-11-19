@@ -721,6 +721,14 @@ async fn an_auto_created_generation_is_never_seeded_and_is_replaced_by_a_strict_
         matches!(refused, Err(sink::SinkError::TargetChanged(_))),
         "an auto-created generation must never be seeded: {refused:?}"
     );
+    let message = refused.unwrap_err().to_string();
+    assert_eq!(
+        message,
+        format!(
+            "the index's target changed: {gen1} is not the generation staged for {LOGICAL} \
+             (deleted, or recreated by a write under action.auto_create_index)"
+        )
+    );
     assert!(!sink.is_seeded(&index).await.unwrap());
 
     let restarted = self::sink(&base);
@@ -758,6 +766,89 @@ async fn dynamic_of(client: &reqwest::Client, base: &str, index: &str) -> Value 
         .await
         .unwrap();
     body[index]["mappings"]["dynamic"].clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker (starts an OpenSearch container)"]
+async fn a_seeded_generation_recreated_by_a_staging_that_then_failed_is_never_served_seeded() {
+    // A seeded generation is deleted; staging recreates it empty, then fails
+    // to write the meta doc (here the meta index refuses writes for a while).
+    // The meta doc must never still say "seeded" beside the empty generation:
+    // the next staging reports it unseeded, so the engine backfills it.
+    let (_container, base) = start_opensearch().await;
+    let client = reqwest::Client::new();
+    let index = IndexName::try_new(LOGICAL).unwrap();
+    let mapping = mapping();
+    let hash_alias = format!("{LOGICAL}_{}", mapping.hash);
+    let gen1 = format!("{hash_alias}_1");
+
+    let run1 = sink(&base);
+    let first = run1.ensure_index(&mapping).await.unwrap();
+    hold_rows(&run1, &index, 1..=5).await;
+    run1.flush(true).await.unwrap();
+    run1.mark_seeded(&index).await.unwrap();
+    let status = client
+        .delete(format!("{base}/{gen1}"))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(status.is_success(), "DELETE {gen1} returned {status}");
+
+    let block_meta = |blocked: bool| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let status = client
+                .put(format!("{base}/flusso_meta/_settings"))
+                .json(&serde_json::json!({ "index.blocks.write": blocked }))
+                .send()
+                .await
+                .unwrap()
+                .status();
+            assert!(
+                status.is_success(),
+                "blocking the meta index returned {status}"
+            );
+        }
+    };
+    block_meta(true).await;
+    assert!(
+        sink(&base).ensure_index(&mapping).await.is_err(),
+        "the meta write is refused, so staging fails"
+    );
+    block_meta(false).await;
+
+    let run2 = sink(&base);
+    let staged = run2.ensure_index(&mapping).await.unwrap();
+    assert_ne!(staged.target, first.target);
+    assert!(
+        !run2.is_seeded(&index).await.unwrap(),
+        "an empty generation must not be served as seeded"
+    );
+    assert_eq!(
+        run2.seeding(&index).await.unwrap(),
+        sink::Seeding::Unseeded { walked: None }
+    );
+    assert_eq!(search_count(&client, &base, &hash_alias).await, 0);
+
+    // What a failure after the create leaves now: an unseeded doc naming no
+    // uuid beside the new generation. Staging adopts it, still unseeded.
+    let status = client
+        .put(format!("{base}/flusso_meta/_doc/{hash_alias}"))
+        .json(&serde_json::json!({ "active_generation": 1, "seeded": false }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(
+        status.is_success(),
+        "rewriting the meta doc returned {status}"
+    );
+    let run3 = sink(&base);
+    let adopted = run3.ensure_index(&mapping).await.unwrap();
+    assert_eq!(adopted.target, staged.target);
+    assert!(!run3.is_seeded(&index).await.unwrap());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
