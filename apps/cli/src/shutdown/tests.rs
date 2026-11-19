@@ -298,3 +298,33 @@ mod repeats {
         assert_eq!(shown, vec![true, false, false, true, false, true]);
     }
 }
+
+/// A lane the drain is stuck on is named, with since when and why.
+#[test]
+fn a_parked_lane_is_named_in_the_deadline_message() {
+    let lane = |health| daemon::LaneSnapshot {
+        applied_position: None,
+        searchable_position: None,
+        outstanding: 1,
+        stall_seconds: None,
+        wal_behind_bytes: None,
+        backfill_checkpoints: 0,
+        health,
+        parked_since: Some("2026-11-19T12:03:11Z".to_owned()),
+        next_probe: Some("2026-11-19T12:04:11Z".to_owned()),
+        reason: Some("refused: id 42 (mapper_parsing_exception)".to_owned()),
+    };
+    assert_eq!(
+        super::lane_note("users", &lane(daemon::LaneHealthState::Parked)).as_deref(),
+        Some(
+            "lane users parked since 2026-11-19T12:03:11Z (refused: id 42 (mapper_parsing_exception))"
+        )
+    );
+    let open = daemon::LaneSnapshot {
+        parked_since: None,
+        next_probe: None,
+        reason: None,
+        ..lane(daemon::LaneHealthState::Open)
+    };
+    assert_eq!(super::lane_note("users", &open), None);
+}

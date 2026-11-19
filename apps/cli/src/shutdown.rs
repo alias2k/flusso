@@ -472,23 +472,54 @@ pub(crate) async fn within<T>(
 }
 
 /// The sinks a drain cut short was still waiting on, for the log line:
-/// `primary: 120 changes in flight, failed`. Empty when every sink is done.
+/// `primary: 120 changes in flight, failed`, and each lane of it that is not
+/// written: `primary: 3 changes in flight, lane users blocked since
+/// 2026-11-19T12:03:11Z (blocked: index [users] blocked by: …)`. Empty when
+/// every sink is done.
 pub(crate) fn unfinished_sinks(status: &daemon::StatusSnapshot) -> String {
     status
         .sinks
         .iter()
         .filter_map(|(name, sink)| {
             let failed = sink.phase == daemon::SinkPhase::Failed;
-            (sink.changes_in_flight > 0 || failed).then(|| {
+            let lanes: Vec<String> = sink
+                .lanes
+                .iter()
+                .filter_map(|(index, lane)| lane_note(index, lane))
+                .collect();
+            (sink.changes_in_flight > 0 || failed || !lanes.is_empty()).then(|| {
                 let mut said = format!("{name}: {} changes in flight", sink.changes_in_flight);
                 if failed {
                     said.push_str(", failed");
+                }
+                for lane in lanes {
+                    said.push_str(", ");
+                    said.push_str(&lane);
                 }
                 said
             })
         })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// `lane users parked since … (refused: id 42 …)` for a lane that is not
+/// written; `None` for an open one.
+fn lane_note(index: &str, lane: &daemon::LaneSnapshot) -> Option<String> {
+    let health = match lane.health {
+        daemon::LaneHealthState::Open => return None,
+        daemon::LaneHealthState::Parked => "parked",
+        daemon::LaneHealthState::Blocked => "blocked",
+        daemon::LaneHealthState::Restaging => "restaging",
+    };
+    let mut note = format!("lane {index} {health}");
+    if let Some(since) = &lane.parked_since {
+        note.push_str(&format!(" since {since}"));
+    }
+    if let Some(reason) = &lane.reason {
+        note.push_str(&format!(" ({reason})"));
+    }
+    Some(note)
 }
 
 #[cfg(test)]

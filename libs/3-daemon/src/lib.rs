@@ -18,15 +18,16 @@ pub use fence::{
 pub use observer::StatusObserver;
 pub use stall::{LaneStall, SAMPLE_EVERY, STALL_WARN, StallEvent, Stalls};
 pub use status::{
-    IndexState, LastScriptFailure, Phase, ScriptFailures, SinkPhase, SinkSnapshot, Status,
-    StatusSnapshot,
+    IndexState, LaneHealthState, LaneHealthView, LaneSnapshot, LastScriptFailure, Phase,
+    ScriptFailures, SinkPhase, SinkSnapshot, Status, StatusSnapshot,
 };
 pub use supervise::{ControlError, DaemonControl};
 
 use supervise::ControlReceivers;
 
 pub use engine::{
-    BuildStats, CommitStats, EngineId, Observer, Stage, StageTiming, StartupStep, Wake, Work,
+    BuildStats, CommitStats, EngineId, LaneHealth, Observer, ParkReason, ProbeOutcome, Stage,
+    StageTiming, StartupStep, Wake, Work,
 };
 pub use kernel::{IndexName, SinkName};
 

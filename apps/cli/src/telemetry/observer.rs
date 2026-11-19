@@ -38,6 +38,7 @@ pub(crate) struct OtelObserver {
     indexes_seeded: Counter<u64>,
     backfill_checkpoints: Counter<u64>,
     documents_quarantined: Counter<u64>,
+    lane_probes: Counter<u64>,
     script_failures: Counter<u64>,
     errors: Counter<u64>,
     refreshes: Counter<u64>,
@@ -73,6 +74,12 @@ impl OtelObserver {
             changes_committed: meter
                 .u64_counter("flusso.changes.committed")
                 .with_description("Changes whose batch a sink has flushed and acknowledged")
+                .build(),
+            lane_probes: meter
+                .u64_counter("flusso.lane.probes")
+                .with_description(
+                    "A parked lane's front item written again alone, by how it came back",
+                )
                 .build(),
             documents_built: meter
                 .u64_counter("flusso.documents.built")
@@ -320,6 +327,17 @@ impl Observer for OtelObserver {
             &[
                 self.sink_label(sink),
                 KeyValue::new("index", index.to_owned()),
+            ],
+        );
+    }
+
+    fn on_lane_probe(&self, lane: &stream::LaneKey, outcome: daemon::ProbeOutcome) {
+        self.lane_probes.add(
+            1,
+            &[
+                KeyValue::new("index", lane.index.as_ref().to_owned()),
+                self.sink_label(&lane.sink),
+                KeyValue::new("outcome", outcome.label()),
             ],
         );
     }

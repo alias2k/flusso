@@ -150,6 +150,56 @@ fn status_reports_how_long_the_source_holds_a_change_it_cannot_read_back() {
     assert!(json["visibility_wait_seconds"].is_null());
 }
 
+/// A parked, blocked or restaging lane shows on `/status` under its sink's
+/// lane, with when, the next probe and why; open again, the fields go.
+#[tokio::test(start_paused = true)]
+async fn status_reports_each_lanes_health() {
+    let lane = ::stream::LaneKey::new(users(), primary());
+    let progress = Arc::new(Progress::of([users()], [primary()]));
+    let fence = Fence::new(Arc::new(Holding(None)), progress, [lane.clone()]);
+    let status = Arc::new(Status::new([users()], [primary()], Instant::now()).with_fence(fence));
+    let observer = StatusObserver::new(Arc::clone(&status));
+    let health = |status: &Status| {
+        serde_json::to_value(status.snapshot()).unwrap()["sinks"]["primary"]["lanes"]["users"]
+            .clone()
+    };
+    assert_eq!(health(&status)["health"], "open");
+    assert!(health(&status)["parked_since"].is_null());
+
+    let since = tokio::time::Instant::now();
+    observer.on_lane_health(
+        &lane,
+        &engine::LaneHealth::Parked {
+            reason: engine::ParkReason::Blocked {
+                reason: "index [users] blocked by: [FORBIDDEN/8/index write (api)]".to_owned(),
+            },
+            since,
+            next_probe: since + Duration::from_secs(4),
+        },
+    );
+    let lane_json = health(&status);
+    assert_eq!(lane_json["health"], "blocked");
+    assert!(
+        lane_json["reason"]
+            .as_str()
+            .unwrap()
+            .contains("FORBIDDEN/8")
+    );
+    let parked =
+        chrono::DateTime::parse_from_rfc3339(lane_json["parked_since"].as_str().unwrap()).unwrap();
+    let probe =
+        chrono::DateTime::parse_from_rfc3339(lane_json["next_probe"].as_str().unwrap()).unwrap();
+    assert_eq!((probe - parked).num_seconds(), 4);
+    assert_eq!(status.unhealthy_lanes().len(), 1);
+    assert_eq!(status.unhealthy_lanes()[0].1.why(), "blocked");
+
+    observer.on_lane_health(&lane, &engine::LaneHealth::Open);
+    let lane_json = health(&status);
+    assert_eq!(lane_json["health"], "open");
+    assert!(lane_json["reason"].is_null() && lane_json["next_probe"].is_null());
+    assert!(status.unhealthy_lanes().is_empty());
+}
+
 /// A script failure the `skip` policy left out shows on `/status` under its
 /// index, with a count and the last failure; an index without one is absent.
 #[test]

@@ -176,6 +176,39 @@ pub(crate) fn register_in_flight_gauge(status: Arc<Status>) -> ObservableGauge<u
         .build()
 }
 
+/// Register `flusso.lane.parked` as an observable gauge read from the daemon's
+/// [`Status`] at collection: 1 per `(index, sink)` lane that is parked, with
+/// `why` `refused` (a refusal under `on_error = "stop"`) or `blocked` (the
+/// index refuses writes for now). An open or restaging lane has no series.
+pub(crate) fn register_lane_parked_gauge(status: Arc<Status>) -> ObservableGauge<u64> {
+    lane_parked_gauge(&global::meter("flusso"), status)
+}
+
+fn lane_parked_gauge(
+    meter: &opentelemetry::metrics::Meter,
+    status: Arc<Status>,
+) -> ObservableGauge<u64> {
+    meter
+        .u64_observable_gauge("flusso.lane.parked")
+        .with_description("1 while an (index, sink) lane is parked: refused or blocked")
+        .with_callback(move |observer| {
+            for (lane, view) in status.unhealthy_lanes() {
+                if view.next_probe.is_none() {
+                    continue;
+                }
+                observer.observe(
+                    1,
+                    &[
+                        KeyValue::new("index", lane.index.as_ref().to_owned()),
+                        KeyValue::new("sink", lane.sink.as_ref().to_owned()),
+                        KeyValue::new("why", view.why()),
+                    ],
+                );
+            }
+        })
+        .build()
+}
+
 /// Register `flusso.lane.outstanding` as an observable gauge read from the
 /// daemon's [`Status`] at collection: per `(index, sink)` lane, the items
 /// routed to it and not landed. A lane that stays high is the one holding
@@ -392,6 +425,75 @@ mod tests {
             Ok(Box::pin(futures::stream::empty()))
         }
         fn confirm(&self, _: Landed) {}
+    }
+
+    #[tokio::test]
+    async fn a_parked_lane_is_exported_with_why_and_an_open_one_is_not() {
+        let lane = |index: &str| {
+            LaneKey::new(
+                IndexName::try_new(index).unwrap(),
+                SinkName::try_new("primary").unwrap(),
+            )
+        };
+        let status = Arc::new(Status::new(
+            [
+                lane("orders").index,
+                lane("users").index,
+                lane("items").index,
+            ],
+            [SinkName::try_new("primary").unwrap()],
+            std::time::Instant::now(),
+        ));
+        let observer = daemon::StatusObserver::new(Arc::clone(&status));
+        let now = tokio::time::Instant::now();
+        use daemon::Observer as _;
+        observer.on_lane_health(
+            &lane("orders"),
+            &daemon::LaneHealth::Parked {
+                reason: daemon::ParkReason::Blocked {
+                    reason: "index write (api)".to_owned(),
+                },
+                since: now,
+                next_probe: now + Duration::from_secs(1),
+            },
+        );
+        observer.on_lane_health(
+            &lane("users"),
+            &daemon::LaneHealth::Parked {
+                reason: daemon::ParkReason::Refused {
+                    ids: vec!["42".to_owned()],
+                    reason: "mapper_parsing_exception".to_owned(),
+                },
+                since: now,
+                next_probe: now + Duration::from_secs(1),
+            },
+        );
+        observer.on_lane_health(
+            &lane("items"),
+            &daemon::LaneHealth::Restaging {
+                since: now,
+                reason: "no such index".to_owned(),
+            },
+        );
+
+        let registry = Registry::new();
+        let exporter = opentelemetry_prometheus::exporter()
+            .with_registry(registry.clone())
+            .scope_info_enabled(false)
+            .build()
+            .unwrap();
+        let provider = provider_builder().with_reader(exporter).build();
+        let _gauge = lane_parked_gauge(&provider.meter("flusso"), status);
+        let text = TextEncoder::new()
+            .encode_to_string(&registry.gather())
+            .unwrap();
+        for line in [
+            r#"flusso_lane_parked{index="orders",sink="primary",why="blocked"} 1"#,
+            r#"flusso_lane_parked{index="users",sink="primary",why="refused"} 1"#,
+        ] {
+            assert!(text.contains(line), "{line} missing from:\n{text}");
+        }
+        assert!(!text.contains(r#"index="items""#), "{text}");
     }
 
     #[test]

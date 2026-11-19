@@ -206,3 +206,27 @@ fn start_up_steps_are_a_gauge_per_step_and_sink() {
         "a restarted ingest engine opening the stream again doesn't move the start-up time"
     );
 }
+
+#[test]
+fn a_parked_lanes_probes_are_counted_by_outcome() {
+    let (observer, registry, _provider) = recorder();
+    let lane = stream::LaneKey::new(IndexName::try_new("orders").unwrap(), sink("primary"));
+    observer.on_lane_probe(&lane, daemon::ProbeOutcome::Blocked);
+    observer.on_lane_probe(&lane, daemon::ProbeOutcome::Blocked);
+    observer.on_lane_probe(&lane, daemon::ProbeOutcome::Landed);
+    let text = scrape(&registry);
+    assert_eq!(
+        value(
+            &text,
+            r#"flusso_lane_probes_total{index="orders",outcome="blocked",sink="primary"}"#
+        ),
+        2.0
+    );
+    assert_eq!(
+        value(
+            &text,
+            r#"flusso_lane_probes_total{index="orders",outcome="landed",sink="primary"}"#
+        ),
+        1.0
+    );
+}
