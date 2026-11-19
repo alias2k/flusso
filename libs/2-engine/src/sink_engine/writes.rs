@@ -909,6 +909,11 @@ impl<'a> Run<'a> {
         };
         let seq = self.next_seq;
         self.next_seq += 1;
+        if let Queue::Complete { .. } = &item
+            && let Some(run) = self.lanes.get_mut(lane)
+        {
+            run.walked.boundary(seq);
+        }
         if let Queue::Batch { batch, .. } = &item
             && batch.position.is_none()
             && let Some(run) = self.lanes.get_mut(lane)

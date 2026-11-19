@@ -9,13 +9,20 @@
 //! - **Landed** is a write that returned with the item acknowledged: a
 //!   document quarantined under `skip` counts, a part rejected under `stop`
 //!   does not, and neither does an item a stop acknowledged unwritten.
-//! - **A release holds the mark.** Once any item of the lane is released,
+//! - **A release holds the mark.** Once any item of a walk is released,
 //!   nacked or skipped, the mark moves no further until the walk ends: the
-//!   item may come back after others, under a new delivery.
+//!   item may come back after others, under a new delivery. Nothing of a held
+//!   walk can count again, so none of it is kept, and the rest of it is not
+//!   tracked as it arrives. A release of an item the tracker never received
+//!   (a live one) holds nothing.
 //! - **A walk ends at its `SnapshotComplete`**, and only the items before it
 //!   are its own: items of the next walk may already be in the window (the
 //!   run reads ahead), and they start the next walk's prefix. A release among
-//!   them holds the next walk.
+//!   them holds the next walk. Where each walk ends is known when its
+//!   `SnapshotComplete` is received.
+//! - **Cost.** An item is found by its lane order with a binary search; the
+//!   tracker keeps only the items of walks not held, which the run's window
+//!   bounds.
 //! - **Recording** is every [`RECORD_EVERY`], never ahead of the prefix, one
 //!   record in flight at a time.
 //!
@@ -36,8 +43,12 @@ pub(super) const RECORD_EVERY: Duration = Duration::from_secs(10);
 /// One lane's backfill progress within a run.
 #[derive(Debug, Default)]
 pub(super) struct Walked {
-    /// The walk's items received and not yet in the prefix, in lane order.
+    /// The items received and not yet in the prefix, in lane order, none of
+    /// a held walk.
     items: VecDeque<Item>,
+    /// The lane order of each `SnapshotComplete` received whose walk has not
+    /// ended: where each walk read ahead stops.
+    boundaries: VecDeque<u64>,
     /// The newest mark of the landed prefix.
     reached: Option<WalkMark>,
     /// The mark last recorded, or being recorded.
@@ -45,8 +56,8 @@ pub(super) struct Walked {
     /// When the walk's first item arrived or the last record went out.
     since: Option<Instant>,
     recording: bool,
-    /// The lane order of the latest item released: until the walk holding
-    /// it ends, the prefix stops where it is.
+    /// The lane order of the latest item released: the walk holding it is
+    /// held until it ends.
     held: Option<u64>,
     /// The last item's lane order, for the debug check.
     last_seq: Option<u64>,
@@ -68,20 +79,37 @@ impl Walked {
         );
         self.last_seq = Some(seq);
         self.since.get_or_insert(now);
-        self.items.push_back(Item {
-            seq,
-            mark,
-            landed: false,
-        });
+        let receiving_held = self
+            .held
+            .is_some_and(|held| self.boundaries.back().is_none_or(|end| held > *end));
+        if !receiving_held {
+            self.items.push_back(Item {
+                seq,
+                mark,
+                landed: false,
+            });
+        }
+    }
+
+    /// A `SnapshotComplete` was received at `seq`: the walk being received
+    /// ends there, and what follows is the next one's.
+    pub(super) fn boundary(&mut self, seq: u64) {
+        self.last_seq = Some(seq);
+        self.boundaries.push_back(seq);
     }
 
     /// The item at `seq` landed. Moves the prefix over every landed item at
     /// its front.
     pub(super) fn landed(&mut self, seq: u64) {
-        if let Some(item) = self.items.iter_mut().find(|item| item.seq == seq) {
+        if let Ok(at) = self.items.binary_search_by_key(&seq, |item| item.seq)
+            && let Some(item) = self.items.get_mut(at)
+        {
             item.landed = true;
         }
-        if self.held.is_some() {
+        let front_held = self
+            .held
+            .is_some_and(|held| self.boundaries.front().is_none_or(|end| held < *end));
+        if front_held {
             return;
         }
         while self.items.front().is_some_and(|item| item.landed) {
@@ -93,17 +121,43 @@ impl Walked {
         }
     }
 
-    /// The item at `seq` was released, nacked or acknowledged unwritten: the
-    /// prefix moves no further this walk.
+    /// The item at `seq` was released, nacked or acknowledged unwritten: its
+    /// walk's prefix moves no further, and nothing of that walk is kept. An
+    /// item the tracker doesn't hold (a live one) holds nothing.
     pub(super) fn hold(&mut self, seq: u64) {
+        if self
+            .items
+            .binary_search_by_key(&seq, |item| item.seq)
+            .is_err()
+        {
+            return;
+        }
         self.held = Some(self.held.map_or(seq, |held| held.max(seq)));
+        let start = self
+            .boundaries
+            .iter()
+            .rev()
+            .find(|end| **end < seq)
+            .copied();
+        let end = self.boundaries.iter().find(|end| **end > seq).copied();
+        let from = self
+            .items
+            .partition_point(|item| start.is_some_and(|start| item.seq <= start));
+        let to = self
+            .items
+            .partition_point(|item| end.is_none_or(|end| item.seq < end));
+        self.items.drain(from..to);
     }
 
     /// The walk whose `SnapshotComplete` is at `seq` ended: nothing of it is
     /// recorded any more. Items received after it (read ahead) start the next
     /// walk, which records from now.
     pub(super) fn ended(&mut self, seq: u64, now: Instant) {
-        self.items.retain(|item| item.seq > seq);
+        let kept = self.items.partition_point(|item| item.seq <= seq);
+        self.items.drain(..kept);
+        while self.boundaries.front().is_some_and(|end| *end <= seq) {
+            self.boundaries.pop_front();
+        }
         self.reached = None;
         self.recorded = None;
         self.since = (!self.items.is_empty()).then_some(now);
@@ -243,11 +297,13 @@ mod tests {
         let now = Instant::now();
         let mut walked = Walked::default();
         walked.received(0, mark("a1"), now);
+        walked.received(1, mark("a2"), now);
         walked.landed(0);
-        walked.hold(0);
-        walked.ended(1, now);
-        walked.received(2, mark("b1"), now);
-        walked.landed(2);
+        walked.hold(1);
+        walked.boundary(2);
+        walked.ended(2, now);
+        walked.received(3, mark("b1"), now);
+        walked.landed(3);
         assert_eq!(walked.reached(), Some("b1"));
     }
 
@@ -259,6 +315,7 @@ mod tests {
         let mut walked = Walked::default();
         walked.received(0, mark("a1"), now);
         walked.landed(0);
+        walked.boundary(1);
         walked.received(2, mark("b1"), now);
         walked.received(3, mark("b2"), now);
         walked.ended(1, now);
@@ -275,9 +332,15 @@ mod tests {
         let now = Instant::now();
         let mut walked = Walked::default();
         walked.received(0, mark("a1"), now);
+        walked.boundary(1);
         walked.received(2, mark("b1"), now);
         walked.hold(2);
         walked.landed(0);
+        assert_eq!(
+            walked.reached(),
+            Some("a1"),
+            "the release is the next walk's"
+        );
         walked.ended(1, now);
         walked.received(3, mark("b2"), now);
         walked.landed(2);
