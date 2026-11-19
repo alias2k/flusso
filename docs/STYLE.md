@@ -179,6 +179,12 @@ for *reasoning* the reader can't get from a list.
 
 If a paragraph runs past ~4 sentences, look for the list hiding inside it.
 
+**An upgrade page opens with lists, never a paragraph.** One lead sentence, then the
+changes as bullets under bold group labels (what to check before upgrading, reads and
+fences, running flusso, faster with nothing to do, code that embeds the crates), each
+bullet one change linking to its section. A change that adds a section adds a bullet
+to the group it belongs to; it never adds a sentence to the lead.
+
 ## Examples — prose-first, example confirms
 
 Explain the concept, then show an example that *confirms* it. The example reinforces;

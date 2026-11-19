@@ -1,6 +1,10 @@
 # Upgrade to 0.19
 
-0.19 stops one index, not the sink, when that index can't be written: see [One index's failure parks its own lane](#one-indexs-failure-parks-its-own-lane). A write block on an index no longer drops documents under `on_error = "skip"` (#404).
+0.19 keeps a failure of one index on that index. Each change below links to its section.
+
+**Running flusso**
+
+- **An index that can't be written parks alone**; the sink's other indexes keep writing, and a write block no longer drops documents under `on_error = "skip"` (#404): [One index's failure parks its own lane](#one-indexs-failure-parks-its-own-lane).
 
 ## One index's failure parks its own lane
 
