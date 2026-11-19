@@ -149,6 +149,14 @@ pub(crate) fn embeddable_leaf(ident: &Ident) -> TokenStream {
 /// and the check it runs against the level it is placed at.
 pub(crate) fn embeddable(ident: &Ident, fields: &[DocField]) -> TokenStream {
     let checks = fields.iter().map(|field| field_check(ident, field));
+    // A flattened field's check asserts constants, spanned on the user's
+    // field so a failure points there, and clippy reads it as theirs (issue
+    // #431). Only that lint, only where it can fire: a consumer may `forbid`
+    // any lint, and an `allow` of a forbidden lint is E0453.
+    let allow = fields
+        .iter()
+        .any(|field| field.flatten && !field.skip)
+        .then(|| quote! { #[allow(clippy::assertions_on_constants)] });
     let NewtypeArray {
         checks: declared,
         array,
@@ -193,6 +201,7 @@ pub(crate) fn embeddable(ident: &Ident, fields: &[DocField]) -> TokenStream {
             /// Check this shape against one mapping level. Called by the root
             /// that embeds it, once per embedding site.
             #[doc(hidden)]
+            #allow
             pub const fn __flusso_check(level: &[::flusso_query::FieldSpec]) {
                 // Silences the unused warning for a shape with no checkable
                 // field (every field skipped/opaque).

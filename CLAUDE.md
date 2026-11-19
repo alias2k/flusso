@@ -2056,6 +2056,18 @@ not which check refused, so three refusals that another check backs up are pinne
 `.stderr` files instead (see the test's module doc). The manual's map example is included by anchor
 from `tests/ui_pass/docs_map_examples.rs`, and the plugin's is checked equal to it.
 
+**The output passes a strict consumer's lints (issue #431).** Code spanned on the user's tokens
+is linted as the user's code. The one allowance is `#[allow(clippy::assertions_on_constants)]` on a
+fragment's `__flusso_check`, emitted only when it flattens a field (`fragment.rs`'s `embeddable`):
+never allow a group or a lint that doesn't fire, since a consumer may `forbid` any lint and an
+`allow` of a forbidden one is E0453. Every generated `pub` handle has a doc. Guard:
+`sdk/query-derive/tests/consumer_lints.rs` (nextest group `boundary`) runs `cargo clippy` with a strict
+consumer's lints denied (the workspace's, rustc's common extras, clippy's default + pedantic) over
+every `ui_pass` case (their own code's lints allowed: unread fields, `unwrap()`, …) and
+`tests/consumer/{public,private}.rs` (a documented library exporting each derived kind behind a glob
+import and forbidding a lint from each clippy group, and a binary using private derived types,
+nothing allowed), in `target/tests/flusso-consumer-lints/`, its own target dir (~30 s cold).
+
 **Ordered enums (issue #87).** A keyword mapping with `Mapping.enum_order` set gets the
 `Enum<S, Sub>` handle (`handles/string.rs`) instead of `Keyword`: same value ops (delegated;
 `.keyword()` exposes the full keyword surface), but `.asc()`/`.desc()` sort on the prebaked
