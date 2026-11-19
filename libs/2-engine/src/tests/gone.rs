@@ -189,6 +189,10 @@ struct Generations {
     /// How many walk marks each generation recorded.
     records: Mutex<BTreeMap<u64, usize>>,
     reindexed: Mutex<usize>,
+    /// `forget_walked` fails this many times.
+    forget_failures: Mutex<usize>,
+    /// `ensure_index` creates a new target, then fails, this many times.
+    ensure_failures_after_create: Mutex<usize>,
 }
 
 impl Generations {
@@ -258,6 +262,15 @@ impl Sink for Generations {
         target.content.clear();
         target.seeded = false;
         target.walked = None;
+        {
+            let mut failures = self.ensure_failures_after_create.lock().unwrap();
+            if *failures > 0 && target.generation > 1 {
+                *failures -= 1;
+                return Err(sink::SinkError::Write(
+                    "created, then a later step failed".to_owned(),
+                ));
+            }
+        }
         Ok(sink::Ensured::Created)
     }
 
@@ -331,6 +344,13 @@ impl Sink for Generations {
     }
 
     async fn forget_walked(&self, _: &IndexName) -> sink::Result<()> {
+        {
+            let mut failures = self.forget_failures.lock().unwrap();
+            if *failures > 0 {
+                *failures -= 1;
+                return Err(sink::SinkError::Write("forget failed once".to_owned()));
+            }
+        }
         self.target.lock().unwrap().walked = None;
         Ok(())
     }
@@ -882,5 +902,344 @@ async fn one_walk_answers_a_lanes_two_requests_under_the_later_ticket() {
         assert_eq!(rows, (1..=ROWS).collect::<BTreeSet<_>>(), "{sink}");
         assert!(consumer.is_empty(), "{sink}: one walk, one completion");
     }
+    running.abort();
+}
+
+/// (a) The target vanished while the sink engine restarts; staging creates
+/// a new one, then fails to forget the old checkpoint. The next staging sees
+/// the same new target as already there, and must still ask again.
+#[tokio::test(start_paused = true)]
+async fn a_cut_whose_first_staging_failed_to_forget_the_checkpoint_is_still_asked_again() {
+    let sink = Generations::default().failing(1, 41, true);
+    *sink.forget_failures.lock().unwrap() = 1;
+    let deployment = Deployment::start(sink).await;
+    deployment.settled().await;
+
+    deployment.assert_primary_whole(2);
+    deployment.assert_audit_untouched();
+}
+
+/// (b) Staging creates the new target, then fails on a later step of its
+/// own: the engine never hears it was created, and must still ask again.
+#[tokio::test(start_paused = true)]
+async fn a_target_created_by_a_staging_that_then_failed_is_still_a_cut() {
+    let sink = Generations::default().failing(1, 41, true);
+    *sink.ensure_failures_after_create.lock().unwrap() = 1;
+    let deployment = Deployment::start(sink).await;
+    deployment.settled().await;
+
+    deployment.assert_primary_whole(2);
+    deployment.assert_audit_untouched();
+}
+
+fn orders() -> IndexName {
+    IndexName::try_new("orders").unwrap()
+}
+
+/// A sink with one target per index, numbered as created, for the staging
+/// cases: the test deletes a target; an index's `ensure_index` or any
+/// `forget_walked` fails a set number of times; a write holding the id
+/// `boom` fails as a whole once.
+#[derive(Debug, Default)]
+struct Targets {
+    made: Mutex<u64>,
+    live: Mutex<BTreeMap<IndexName, u64>>,
+    ensure_failures: Mutex<BTreeMap<IndexName, usize>>,
+    forget_failures: Mutex<usize>,
+    forgets: Mutex<usize>,
+    boom: Mutex<bool>,
+}
+
+impl Targets {
+    fn delete(&self, index: &IndexName) {
+        self.live.lock().unwrap().remove(index);
+    }
+
+    fn fail_ensure(&self, index: &IndexName, times: usize) {
+        self.ensure_failures
+            .lock()
+            .unwrap()
+            .insert(index.clone(), times);
+    }
+}
+
+#[async_trait]
+impl Sink for Targets {
+    async fn ensure_index(&self, mapping: &IndexMapping) -> sink::Result<sink::Ensured> {
+        if let Some(left) = self.ensure_failures.lock().unwrap().get_mut(&mapping.index)
+            && *left > 0
+        {
+            *left -= 1;
+            return Err(sink::SinkError::Write("ensure failed".to_owned()));
+        }
+        let mut live = self.live.lock().unwrap();
+        if live.contains_key(&mapping.index) {
+            return Ok(sink::Ensured::Existing);
+        }
+        let mut made = self.made.lock().unwrap();
+        *made += 1;
+        live.insert(mapping.index.clone(), *made);
+        Ok(sink::Ensured::Created)
+    }
+
+    async fn write(&self, envelopes: &[Envelope], _: bool) -> sink::Result<WriteReport> {
+        if envelopes.iter().any(|envelope| envelope.id == "boom") {
+            let mut boom = self.boom.lock().unwrap();
+            if !*boom {
+                *boom = true;
+                return Err(sink::SinkError::Write("the write failed".to_owned()));
+            }
+        }
+        let live = self.live.lock().unwrap();
+        let mut report = WriteReport::clean();
+        let gone: BTreeSet<&IndexName> = envelopes
+            .iter()
+            .map(|envelope| &envelope.index)
+            .filter(|index| !live.contains_key(*index))
+            .collect();
+        for index in gone {
+            report = report.missing_target(index.clone(), "the target is gone");
+        }
+        Ok(report)
+    }
+
+    async fn seeding(&self, _: &IndexName) -> sink::Result<Seeding> {
+        Ok(Seeding::Unseeded { walked: None })
+    }
+
+    async fn forget_walked(&self, _: &IndexName) -> sink::Result<()> {
+        *self.forgets.lock().unwrap() += 1;
+        let mut left = self.forget_failures.lock().unwrap();
+        if *left > 0 {
+            *left -= 1;
+            return Err(sink::SinkError::Write("forget failed".to_owned()));
+        }
+        Ok(())
+    }
+}
+
+/// One sink engine over the `users` and `orders` lanes, fed by hand, with the
+/// request lane read by the test.
+struct Pair {
+    sink: Arc<Targets>,
+    engine: Arc<SinkEngine>,
+    stream: Arc<ChannelStream>,
+    requests: Box<dyn Consumer<Request>>,
+}
+
+/// A backfill request as the test reads it.
+#[derive(Debug, Clone, PartialEq)]
+struct Asked {
+    index: IndexName,
+    ticket: Ticket,
+    after: Option<String>,
+}
+
+impl Pair {
+    fn new(sink: Targets) -> Self {
+        let sink = Arc::new(sink);
+        let stream = Arc::new(ChannelStream::over(1024, [users(), orders()], [primary()]));
+        let mapping_of = |index: IndexName| IndexMapping { index, ..mapping() };
+        let engine = Arc::new(SinkEngine::new(
+            primary(),
+            Arc::clone(&sink) as Arc<dyn Sink>,
+            Arc::clone(&stream) as Arc<dyn Stream>,
+            vec![mapping_of(users()), mapping_of(orders())],
+            Arc::new(Progress::of([users(), orders()], [primary()])),
+        ));
+        Self {
+            requests: stream.requests().unwrap().consumer,
+            sink,
+            engine,
+            stream,
+        }
+    }
+
+    /// The requests published so far, acknowledged.
+    async fn requests(&mut self) -> Vec<Asked> {
+        let mut seen = Vec::new();
+        while !self.requests.is_empty() {
+            let (request, handle) = self.requests.recv().await.unwrap().unwrap().into_parts();
+            handle.ack().await.unwrap();
+            let Request::Backfill {
+                index,
+                after,
+                ticket,
+                ..
+            } = request;
+            seen.push(Asked {
+                index,
+                ticket,
+                after: after.map(|mark| mark.as_str().to_owned()),
+            });
+        }
+        seen
+    }
+
+    fn run(&self) -> JoinHandle<crate::Result<()>> {
+        let engine = Arc::clone(&self.engine);
+        tokio::spawn(async move {
+            let (_control, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
+            engine.run(&mut rx).await
+        })
+    }
+
+    /// A snapshot page of one document, `id`, of `index`, answering `ticket`.
+    async fn page(&self, index: &IndexName, id: &str, ticket: Ticket) {
+        self.stream
+            .lane(&LaneKey::new(index.clone(), primary()))
+            .unwrap()
+            .producer
+            .publish(LaneItem::Batch(Batch {
+                position: None,
+                changes: 0,
+                envelopes: vec![Envelope::upsert(
+                    index.clone(),
+                    id,
+                    GenericValue::Map(BTreeMap::new()),
+                    None,
+                    chrono::Utc::now(),
+                )]
+                .into(),
+                hold: Default::default(),
+                walked: None,
+                ticket: Some(ticket),
+            }))
+            .await
+            .unwrap();
+    }
+}
+
+fn ticket_of(requests: &[Asked], index: &IndexName) -> Ticket {
+    requests
+        .iter()
+        .find(|asked| &asked.index == index)
+        .map(|asked| asked.ticket)
+        .unwrap()
+}
+
+/// (c) Staging finds the `users` target new while `orders` fails to stage:
+/// the pass fails as a whole, and the next one, finding `users` as it left
+/// it, must still ask for it again (and not for `orders`).
+#[tokio::test(start_paused = true)]
+async fn a_cut_found_beside_another_index_failing_to_stage_is_kept() {
+    let mut pair = Pair::new(Targets::default());
+    pair.engine.stage(Continuity::Resumed).await.unwrap();
+    let first = pair.requests().await;
+    assert_eq!(first.len(), 2, "{first:?}");
+
+    pair.sink.delete(&users());
+    pair.sink.fail_ensure(&orders(), 1);
+    assert!(pair.engine.stage(Continuity::Resumed).await.is_err());
+    pair.engine.stage(Continuity::Resumed).await.unwrap();
+
+    let again = pair.requests().await;
+    assert_eq!(again.len(), 1, "{again:?}");
+    let fresh = again.first().unwrap();
+    assert_eq!(fresh.index, users());
+    assert_eq!(fresh.after, None);
+    assert!(fresh.ticket > ticket_of(&first, &users()), "{again:?}");
+}
+
+/// (d) A restage finds the `users` target missing and creates a new one, then
+/// fails to forget its checkpoint; before it is retried, the run fails on
+/// `orders`. The restart's staging finds `users` as the restage left it, and
+/// must still ask for it again.
+#[tokio::test(start_paused = true)]
+async fn a_cut_found_by_a_restage_that_failed_survives_the_run_failing() {
+    let mut pair = Pair::new(Targets {
+        forget_failures: Mutex::new(1),
+        ..Targets::default()
+    });
+    pair.engine.stage(Continuity::Resumed).await.unwrap();
+    let first = pair.requests().await;
+    let running = pair.run();
+
+    pair.sink.delete(&users());
+    pair.page(&users(), "1", ticket_of(&first, &users())).await;
+    let tried = tokio::time::timeout(Duration::from_secs(60), async {
+        while *pair.sink.forgets.lock().unwrap() == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(
+        tried.is_ok(),
+        "the restage never tried to forget the checkpoint"
+    );
+    pair.page(&orders(), "boom", ticket_of(&first, &orders()))
+        .await;
+    assert!(running.await.unwrap().is_err(), "the run did not fail");
+
+    pair.engine.stage(Continuity::Resumed).await.unwrap();
+    let again = pair.requests().await;
+    assert_eq!(again.len(), 1, "{again:?}");
+    let fresh = again.first().unwrap();
+    assert_eq!(fresh.index, users());
+    assert_eq!(fresh.after, None);
+    assert!(fresh.ticket > ticket_of(&first, &users()), "{again:?}");
+}
+
+/// A lane's two requests as an ingest restart in the middle of a cut leaves
+/// them: the first resuming after a checkpoint, the second from the first
+/// key. One walk serves both from the first key, under the later ticket.
+#[tokio::test(start_paused = true)]
+async fn a_resumed_request_and_a_fresh_one_of_a_lane_are_walked_once_from_the_first_key() {
+    let names = [primary()];
+    let stream = Arc::new(ChannelStream::over(1024, [users()], names.clone()));
+    let requests = stream.requests().unwrap().producer;
+    for (after, ticket) in [(Some("0040"), 1), (None, 2)] {
+        requests
+            .publish(Request::Backfill {
+                index: users(),
+                sink: primary(),
+                after: after.map(stream::WalkMark::new),
+                ticket: Ticket::new(ticket),
+            })
+            .await
+            .unwrap();
+    }
+    let ingest = IngestEngine::new(
+        Arc::new(Quiet) as Arc<dyn ChangeCapture>,
+        Arc::new(Table::new()) as Arc<dyn DocumentBuilder>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        names.to_vec(),
+        Arc::new(Progress::of([users()], names.clone())),
+    )
+    .with_batch(BatchPolicy {
+        max_changes: 16,
+        max_delay: Duration::from_millis(50),
+    });
+    let running = tokio::spawn(async move { ingest.run().await });
+
+    let mut consumer = stream
+        .lane(&LaneKey::new(users(), primary()))
+        .unwrap()
+        .consumer;
+    let mut rows = Vec::new();
+    let mut completes = Vec::new();
+    while completes.is_empty() {
+        let delivery = tokio::time::timeout(Duration::from_secs(60), consumer.recv())
+            .await
+            .expect("the snapshot never completed")
+            .unwrap()
+            .unwrap();
+        let (item, handle) = delivery.into_parts();
+        match item {
+            LaneItem::Batch(batch) => {
+                assert_eq!(batch.ticket, Some(Ticket::new(2)));
+                rows.extend(batch.envelopes.iter().map(row_of));
+            }
+            LaneItem::SnapshotComplete { ticket, .. } => completes.push(ticket),
+        }
+        handle.ack().await.unwrap();
+    }
+    assert_eq!(completes, vec![Ticket::new(2)]);
+    assert_eq!(
+        rows,
+        (1..=ROWS).collect::<Vec<_>>(),
+        "every row once, from the first key"
+    );
+    assert!(consumer.is_empty(), "one walk, one completion");
     running.abort();
 }

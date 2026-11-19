@@ -301,6 +301,37 @@ mod tests {
         assert_eq!(walked.reached(), Some("b1"));
     }
 
+    /// A released item holds the rest of its walk, which can never count
+    /// again: none of it is kept, however long the walk goes on, and landing
+    /// one is a search, not a scan.
+    #[test]
+    fn a_held_walk_keeps_nothing_it_can_never_count() {
+        let now = Instant::now();
+        let mut walked = Walked::default();
+        walked.received(0, mark("a0"), now);
+        walked.received(1, mark("a1"), now);
+        walked.hold(1);
+        for seq in 2..20_000 {
+            walked.received(seq, mark("a"), now);
+            walked.landed(seq);
+        }
+        walked.landed(0);
+        assert_eq!(walked.items.len(), 0, "kept items the walk can never count");
+        assert_eq!(walked.reached(), None);
+    }
+
+    /// A seq the walk never received (a live item's, released before any
+    /// backfill) holds nothing.
+    #[test]
+    fn releasing_an_item_the_walk_never_received_holds_nothing() {
+        let now = Instant::now();
+        let mut walked = Walked::default();
+        walked.hold(7);
+        walked.received(8, mark("a1"), now);
+        walked.landed(8);
+        assert_eq!(walked.reached(), Some("a1"));
+    }
+
     /// Items land in a random order; at every step the mark is the newest
     /// key whose item and every earlier one landed (a model of the rule).
     #[test]
