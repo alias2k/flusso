@@ -225,7 +225,7 @@ export function ConfigPanel({
             <Num
               value={config.concurrency?.max_built_mib}
               onChange={(v) => onChange({ ...config, concurrency: { ...config.concurrency, max_built_mib: v } })}
-              placeholder="512"
+              placeholder="64"
               min={16}
               max={1048576}
             />
