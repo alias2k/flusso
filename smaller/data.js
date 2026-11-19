@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795080864884,
+  "lastUpdate": 1795083513806,
   "repoUrl": "https://github.com/alias2k/flusso",
   "entries": {
     "flusso (smaller is better)": [
@@ -31873,6 +31873,372 @@ window.BENCHMARK_DATA = {
             "value": 253.0555555555559,
             "unit": "ms",
             "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 46.478, \"disk_write_ms\": 329.036, \"memory_copy_ms\": 189.624}, \"cores\": 4, \"cpu\": \"AMD EPYC 9V74 80-Core Processor\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "89390131+JakubWasilczyk-Alias2k@users.noreply.github.com",
+            "name": "Jakub Wasilczyk",
+            "username": "JakubWasilczyk-Alias2k"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c58f05534ea8bb8f2bc5a47782b58096f8d5f312",
+          "message": "Merge pull request #424 from alias2k/test/merge-wait-guards\n\ntest(engine): pin the one-lane merge-wait guard and the locked refresh case",
+          "timestamp": "2026-11-19T10:57:09+01:00",
+          "tree_id": "1c6608c0a2e41c6da6207d0b5f1b6acae512d2ca",
+          "url": "https://github.com/alias2k/flusso/commit/c58f05534ea8bb8f2bc5a47782b58096f8d5f312"
+        },
+        "date": 1795083513375,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "inprocess/decode/fixture",
+            "value": 3965990.038461538,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/documents/double_array",
+            "value": 110722.19393939394,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/documents/doubles",
+            "value": 33001.371423975,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/documents/keywords",
+            "value": 33144.988647342994,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/documents/untyped",
+            "value": 69106.37891551072,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/live_drain_held/sinks1/1",
+            "value": 137548385.2083333,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/live_drain_held/sinks1/256",
+            "value": 151046485.5833333,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/live_drain_held/sinks1/64",
+            "value": 148580387.2638889,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/live_drain_held/sinks2/1",
+            "value": 215382650.8333333,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/live_drain_held/sinks2/256",
+            "value": 151666902.8333333,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/live_drain_held/sinks2/64",
+            "value": 149406895.6666667,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/render/delete",
+            "value": 204220.10605590063,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/render/mid",
+            "value": 5427492.9,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/render/wide",
+            "value": 56887598,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/resolve_no_io/root_table",
+            "value": 384.50732971654884,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/resolve_no_io/unread_update",
+            "value": 1304.2826832039768,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/resolve_no_io/unrelated_table",
+            "value": 348.1825843296124,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/resolve_no_io/walked_from_the_key",
+            "value": 1160.8329139267694,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/scripted/dates_unused",
+            "value": 8731393.083333332,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/scripted/dates_used",
+            "value": 6631193.9375,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/scripted/flat",
+            "value": 7398614.785714285,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/scripted/nested",
+            "value": 33543602.5,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "inprocess/snapshot/rows",
+            "value": 149294041.5833333,
+            "unit": "ns",
+            "extra": "{\"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "components/baseline/os_flush_1",
+            "value": 11477050.333333332,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "components/baseline/pg_select_1",
+            "value": 327615.12316849816,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "components/baseline/resolve_unrelated",
+            "value": 601.3968608427033,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "components/baseline/select_1",
+            "value": 325549.1221591907,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "components/batch_size/100",
+            "value": 1208933004.5,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "components/batch_size/1000",
+            "value": 314520913.75,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "components/batch_size/500",
+            "value": 429364963.75,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "components/batch_size/5000",
+            "value": 203187221.33333334,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "components/build/0",
+            "value": 420700.0383158508,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "components/build/1",
+            "value": 410320.5350138295,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "components/build/10",
+            "value": 442649.4548120301,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "components/build/100",
+            "value": 773135.5397086467,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "components/bulk_index/1",
+            "value": 12552674.211805556,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "components/bulk_index/100",
+            "value": 24275080.465277776,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "components/bulk_index/1000",
+            "value": 66710543.3,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "components/bulk_index/5000",
+            "value": 289158736.5,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "components/change/item_update",
+            "value": 17205228.375,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "components/change_burst/1",
+            "value": 519684542.1666666,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "components/change_burst/16",
+            "value": 261310328.11904764,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "components/change_burst/256",
+            "value": 65932695.86111111,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "components/resolve/related_table",
+            "value": 347145.9445421847,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "components/resolve/root_table",
+            "value": 609.8400294916081,
+            "unit": "ns",
+            "extra": "{\"images\": {\"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}}"
+          },
+          {
+            "name": "complex/ci/visible_latency_p50_ms",
+            "value": 13.019421,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\", \"probe\": \"midpoint-5ms\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/visible_latency_p99_ms",
+            "value": 578.153598,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\", \"probe\": \"midpoint-5ms\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/peak_rss_mib",
+            "value": 82.77734375,
+            "unit": "MiB",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/cpu_seconds",
+            "value": 3,
+            "unit": "s",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/flush_p50_ms",
+            "value": 20.502958579881657,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/flush_p99_ms",
+            "value": 660.0000000000014,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/visible_latency_p50_ms",
+            "value": 21.780676,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\", \"probe\": \"midpoint-5ms\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/visible_latency_p99_ms",
+            "value": 583.388825,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\", \"probe\": \"midpoint-5ms\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/peak_rss_mib",
+            "value": 207.7890625,
+            "unit": "MiB",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/cpu_seconds",
+            "value": 8,
+            "unit": "s",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/flush_p50_ms",
+            "value": 38.50482315112541,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/flush_p99_ms",
+            "value": 458.5416666666665,
+            "unit": "ms",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 54.376, \"disk_write_ms\": 130.987, \"memory_copy_ms\": 214.246}, \"cores\": 4, \"cpu\": \"AMD EPYC 7763 64-Core Processor\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
           }
         ]
       }
