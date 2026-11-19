@@ -14,6 +14,7 @@ Every port table (`[source]`, `[stream]`, `[sinks.<name>]`) has the same shape: 
 | `prefix` | string | `""` | Literal prefix prepended to every index name flusso owns. See [prefix](#prefix). |
 | `[batch]` | table | none | How live changes are grouped into a batch. See [batch](#batch). |
 | `[concurrency]` | table | none | How many writes each sink runs at once. Never written into the lock. See [concurrency](#concurrency). |
+| `[backoff]` | table | none | How long flusso waits before trying again after a failure. Never written into the lock. See [backoff](#backoff). |
 | `[server]` | table | none | Bind addresses for the two HTTP surfaces. See [server](#server). |
 
 Unknown keys are rejected. Schema paths in `[[index]]` resolve relative to the config file's directory. Loading validates both layers (this file and every referenced `*.schema.yml`) plus every port table against its adapter, and needs no database.
@@ -83,6 +84,58 @@ Several builds run at once, but never two holding the same document, and each si
 Watch `flusso.memory.refused`: if it grows steadily while the sinks are healthy, the budget sets the pace and raising it helps. If it grows only while a sink is down, the budget is doing its job.
 
 The table is a property of the machine that runs flusso, so it is **never written into `flusso.lock`**: `run` with a `flusso.toml` reads it, `run --locked` takes the flag or the env var, else the default. Precedence is flag (`--writes`, `--builds`, `--max-built-mib`), then `FLUSSO_WRITES` / `FLUSSO_BUILDS` / `FLUSSO_MAX_BUILT_MIB`, then this table, then the default. See [CLI](cli.md#run).
+
+## backoff
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `initial_ms` | integer ≥ 1 | `1000` | The first wait before trying again, in milliseconds. |
+| `max_ms` | integer ≥ `initial_ms` | `60000`, or `initial_ms` when that is larger | The longest wait, in milliseconds. Equal to `initial_ms`, every wait is the same. |
+
+Each wait doubles, up to `max_ms`. One schedule times every retry flusso makes on its own:
+
+- **A failed engine's restart**, sink or ingest, and a restarted sink's staging when it fails. The wait goes back to `initial_ms` after a run that made progress.
+- **A parked lane's probe**: its oldest batch written again alone, while the lane is `refused` or `blocked` ([lane health](http.md#lane-health)). Only that lane's probe landing resets the wait.
+- **A restaging lane's next staging**, when staging the index again fails.
+
+The OpenSearch sink's bulk retry is not on this schedule: it has its own, 200 ms doubling, up to [`max_retries`](sink-opensearch.md#retries) times.
+
+```toml
+[backoff]
+initial_ms = 200    # first retry after 0.2 s
+max_ms = 10000      # then 0.4 s, 0.8 s, … never more than 10 s apart
+```
+
+### How the two keys resolve
+
+| `initial_ms` | `max_ms` | Waits |
+| --- | --- | --- |
+| unset | unset | 1000, doubling to 60000 |
+| `200` | unset | 200, doubling to 60000 |
+| `120000` | unset | 120000 every time: an unset `max_ms` follows a larger `initial_ms` |
+| unset | `5000` | 1000, doubling to 5000 |
+| unset | `999` | refused: below the default first wait |
+| `500` | `500` | 500 every time |
+| `800` | `200` | refused |
+
+### What is refused
+
+- **`0`**, or anything but a whole number, for either key. In the file: `initial_ms = 0 would try again without waiting; it must be at least 1`. In a flag or a variable: `` `0` is not a whole number of milliseconds, at least 1 ``.
+- **An unknown key** in the table.
+- **`max_ms` below `initial_ms`**, refused alike by `check`, `build` and `run` (before anything connects). The message names where each value came from and every way to set it:
+
+  ```text
+  [backoff] max_ms = 800 (set in flusso.toml's [backoff] max_ms) is below initial_ms = 900 (set by FLUSSO_BACKOFF_INITIAL_MS): the longest wait must be at least the first (equal values wait a constant interval). Raise max_ms with flusso.toml's [backoff] max_ms, --backoff-max-ms or FLUSSO_BACKOFF_MAX_MS or lower initial_ms with flusso.toml's [backoff] initial_ms, --backoff-initial-ms or FLUSSO_BACKOFF_INITIAL_MS; a flag wins over its variable, a variable over the file
+  ```
+
+### Where it is set
+
+The table is a property of the machine that runs flusso, so it is **never written into `flusso.lock`**: `run --locked` takes the flags or the variables, else the defaults. Precedence, per key:
+
+1. The flag: `--backoff-initial-ms`, `--backoff-max-ms` ([CLI](cli.md#run)).
+2. The variable: `FLUSSO_BACKOFF_INITIAL_MS`, `FLUSSO_BACKOFF_MAX_MS` ([Environment variables](environment.md#cli-flags)). An empty one counts as unset.
+3. This table.
+4. The default.
 
 ## server
 

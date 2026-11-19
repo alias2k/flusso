@@ -56,11 +56,11 @@ WARN the lane is parked: its item is written again alone after the backoff; the 
 | `health` | What happened | What flusso does | Fix |
 | --- | --- | --- | --- |
 | `blocked` | OpenSearch refuses every write to the index for now: a write block, or a role without write permission on it. | Holds the lane, writes its oldest batch again alone at `next_probe`. Quarantines nothing, whatever `on_error` says. | [Lift the block](#a-write-block) or [grant the permission](#a-role-without-write-permission) |
-| `parked` | A document was refused under `on_error = "stop"`; `reason` names the ids. | Holds the lane, writes the same batch again at `next_probe`. | [Fix the schema or switch to `skip`](#a-document-refused-under-stop) |
+| `refused` | A document was refused under `on_error = "stop"`; `reason` names the ids. | Holds the lane, writes the same batch again at `next_probe`. | [Fix the schema or switch to `skip`](#a-document-refused-under-stop) |
 | `restaging` | The index's target was deleted while flusso ran. | Stages that index again and backfills it, alone. | [Nothing, usually](#a-deleted-index) |
 | `open` | flusso writes the lane; something else stops it landing. | Restarts the sink with backoff. | [The sink itself](#the-sink-itself-health-open) |
 
-While a lane is `parked` or `blocked`, the sink's other indexes keep being written. Each retry of the held lane is a **probe**: 1 s after it parked, then the wait doubles up to 60 s. Another index landing never shortens the wait. `flusso_lane_probes_total{outcome}` counts the probes.
+A `refused` or `blocked` lane is **parked**. While it is, the sink's other indexes keep being written. Each retry of the held lane is a **probe**, on the [`[backoff]`](../reference/config-toml.md#backoff) schedule: 1 s after it parked, then doubling to 60 s, by default. Another index landing never shortens the wait. `flusso_lane_probes_total{outcome}` counts the probes.
 
 ### 3. Fix the cause
 
@@ -80,7 +80,7 @@ curl -s -X PUT localhost:9200/users_1a2b3c4d_1/_settings \
   -d '{"index.blocks.write": null, "index.blocks.read_only": null, "index.blocks.read_only_allow_delete": null}'
 ```
 
-The next probe lands and the lane catches up, at most 60 s later. No restart, and nothing was lost meanwhile.
+The next probe lands and the lane catches up, at most one [`max_ms`](../reference/config-toml.md#backoff) later (60 s by default). No restart, and nothing was lost meanwhile.
 
 #### A disk watermark
 
@@ -119,6 +119,7 @@ The lane is written but nothing lands. The log has OpenSearch's reason and `sink
 ## Options and variations
 
 - **The two alerts.** `FlussoLaneParked` fires once `flusso_lane_parked > 0` has held for 5 minutes. `FlussoLaneStalled` fires on a lane landing nothing for 10 minutes (`reason: age`), or on more than 1 GiB of WAL kept behind a lane that has landed nothing for a minute (`reason: wal`). Both ship in `dev/prometheus/rules/flusso.rules.yml` and the Helm chart's `prometheusRule`; tune them in the [Helm values](../reference/helm-values.md). Only `FlussoLaneParked` sees a refused **backfill** page: backfill rows carry no position, so their lane never ages.
+- **Probe sooner, or less often.** [`[backoff]`](../reference/config-toml.md#backoff) sets the first and the longest wait between probes, for every lane and every engine restart. A short `max_ms` unparks a lane sooner once its cause is fixed; each probe of a lane still refused costs one bulk request.
 - **`/readyz` stays ready.** A parked lane doesn't make flusso unready: the other indexes are written and served, and a restart wouldn't help. Alert on the lane, not on readiness.
 - **A slow lane isn't stalled.** A lane that lands, just slowly, fires neither alert; `flusso:backlog_drain_eta_seconds` shows how long it will take. flusso logs a warning once a lane passes 10 minutes without landing, and every 10 minutes after.
 - **A backfill that stops making progress** shows as the index staying `backfilling` in `/status` while `flusso.documents.built` stops moving. A live change queued behind it on the same lane does age, and alerts.

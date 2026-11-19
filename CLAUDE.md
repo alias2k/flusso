@@ -543,7 +543,8 @@ so the committed lock stays current; with no config it loads the existing `--loc
 editor-assist JSON Schema: `schema config` or `schema index`; no DB), `script run` (build one
 document — `--id`, the first row, or `--input` JSON with no DB — run its index's scripts, print input,
 prints, and output or the failure with a caret; `--watch` re-runs on file changes). See `dev/README.md` for the walk-through. **Every flag also reads a
-`FLUSSO_*` env var** (clap's `env` feature; the flag wins when both are set) — e.g.
+`FLUSSO_*` env var** (clap's `env` feature, except `--backoff-*`, whose `FLUSSO_BACKOFF_*` `run`
+reads itself so a refusal names each value's origin; the flag wins when both are set) — e.g.
 `FLUSSO_CONFIG`, `FLUSSO_SLOT`, `FLUSSO_PUBLIC_ADDRESS` — so the binary configures cleanly from
 the environment (Helm/compose). This is separate from the config's own reserved env vars
 (`SOURCE_POSTGRES_CONNECTION_URL`, `<SINK>_OPENSEARCH_URL`: one `<ENTRY>_<TYPE>_<KEY>` rule) and

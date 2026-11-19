@@ -6,10 +6,11 @@
 
 - **An index that can't be written parks alone**; the sink's other indexes keep writing, and a write block no longer drops documents under `on_error = "skip"` (#404): [One index's failure parks its own lane](#one-indexs-failure-parks-its-own-lane).
 - **`on_error = "stop"` no longer stops the sink**, and `/readyz` stays `200` while an index is parked; alert on the new `FlussoLaneParked` instead: [Alerting on a parked index](#alerting-on-a-parked-index).
+- **The retry wait is configurable**: `[backoff]` sets the first and the longest wait of every restart and probe: [Retry timing is configurable](#retry-timing-is-configurable).
 
 **Code that embeds the crates**
 
-- **New lane-health API, `EngineError::DocumentsRejected` removed, order per index for an ordered sink**: [For code embedding the crates](#for-code-embedding-the-crates).
+- **New lane-health API, `EngineError::DocumentsRejected` removed, order per index for an ordered sink, `DaemonOptions::max_restart_backoff` replaced by `[backoff]`**: [For code embedding the crates](#for-code-embedding-the-crates).
 
 ## One index's failure parks its own lane
 
@@ -17,20 +18,20 @@
 
 | What OpenSearch answers | 0.18 | 0.19 |
 | --- | --- | --- |
-| A document refused under `on_error = "stop"` | the sink stops and restarts with backoff | the lane is **parked** |
+| A document refused under `on_error = "stop"` | the sink stops and restarts with backoff | the lane is **refused** |
 | A write block (`index.blocks.write`, `read_only`, `read_only_allow_delete`: 403 `cluster_block_exception`) | an item-level rejection: **quarantined under `skip`** (documents lost), the sink stops under `stop` | the lane is **blocked**, whatever `on_error` says; nothing is quarantined |
 | An item-level 403 `security_exception` (the role can't write that index) | an item-level rejection | the lane is **blocked** |
 | The index's generation deleted while running (`index_not_found_exception`) | the sink stops; its restart recreates the generation | that index alone is **staged again** and backfilled |
 | The whole `_bulk` refused, credentials refused, the cluster unreachable, busy past `max_retries` | the sink stops and restarts | unchanged |
 
-A parked or blocked lane writes its oldest batch again alone (a **probe**) after 1 s, then with the wait doubling up to 60 s. When a probe lands, the lane opens and the rest follows, with no restart. Meanwhile the lane holds the replication slot, as a stalled lane always has.
+A refused or blocked lane is **parked**: it writes its oldest batch again alone (a **probe**) after 1 s, then with the wait doubling up to 60 s ([configurable](#retry-timing-is-configurable)). When a probe lands, the lane opens and the rest follows, with no restart. Meanwhile the lane holds the replication slot, as a stalled lane always has.
 
 **Who is affected.** Every deployment that writes more than one index to a sink: one bad document or one blocked index no longer holds up the others. Deployments on `on_error = "skip"` whose indexes ever got a write block: those documents used to be quarantined, and are now written once the block is lifted.
 
 **What to do.**
 
 1. **Upgrade flusso.** Nothing to rebuild: no content hash moves.
-2. **Lift write blocks to resume.** A blocked index is written by the next probe once the block is lifted, at most 60 s later. No restart. The runbook is [A lane is stalled](stalled-lane.md).
+2. **Lift write blocks to resume.** A blocked index is written by the next probe once the block is lifted, at most one `[backoff] max_ms` later (60 s by default). No restart. The runbook is [A lane is stalled](stalled-lane.md).
 3. **Fix a refused document as before.** A probe writes the same batch again, so fixing the row in Postgres doesn't unpark the lane yet: change the schema, or switch the index to `skip` and restart ([Handle rejected documents](rejected-documents.md)).
 
 **What to know.**
@@ -49,7 +50,22 @@ A parked or blocked lane writes its oldest batch again alone (a **probe**) after
 
 - **`FlussoLaneParked`** is new in `dev/prometheus/rules/flusso.rules.yml` and the Helm chart's `prometheusRule`. It fires once `flusso_lane_parked > 0` has held for 5 minutes, naming the index, the sink and `why` (`refused`, `blocked`, `restaging`). With your own rules, copy it or alert on [`flusso_lane_parked`](../reference/metrics.md) directly.
 - `FlussoLaneStalled` still fires after 10 minutes for a parked live change, but never for a refused backfill page, which carries no position: only `FlussoLaneParked` sees that one.
-- `/status` shows each lane's state under [`sinks.<sink>.lanes.<index>.health`](../reference/http.md#lane-health), with `reason` and `next_probe`.
+- `/status` shows each lane's state under [`sinks.<sink>.lanes.<index>.health`](../reference/http.md#lane-health) (`open`, `refused`, `blocked`, `restaging`), with `reason` and `next_probe`.
+
+## Retry timing is configurable
+
+**What changed.** Every retry flusso makes on its own waits on one schedule: a failed sink or ingest engine's restart, a parked lane's probe, a restaging lane's next staging. 0.18 fixed it at 1 s doubling to 60 s (only code embedding the daemon could change the cap). 0.19 adds a `[backoff]` table, with a flag and a variable for each key:
+
+| `flusso.toml` | Flag | Variable | Default |
+| --- | --- | --- | --- |
+| `[backoff] initial_ms` | `--backoff-initial-ms` | `FLUSSO_BACKOFF_INITIAL_MS` | `1000` |
+| `[backoff] max_ms` | `--backoff-max-ms` | `FLUSSO_BACKOFF_MAX_MS` | `60000`, or `initial_ms` when larger |
+
+The OpenSearch sink's bulk retry (200 ms doubling, `max_retries`) is unchanged.
+
+**Who is affected.** Nobody, unless they set it: the defaults are 0.18's schedule.
+
+**What to do.** Nothing. To tune it, see [backoff](../reference/config-toml.md#backoff): how the keys resolve, and what is refused (`0`, an unknown key, `max_ms` below `initial_ms`). Like `[concurrency]`, it is never written into `flusso.lock`.
 
 ## For code embedding the crates
 
@@ -58,8 +74,9 @@ A parked or blocked lane writes its oldest batch again alone (a **probe**) after
 - **`Sink::ensure_index` and `reindex`** may now run beside writes of **other** indexes, never beside one holding the same index.
 - **Order is per index** for an ordered sink (`Sink::ordered`). Across indexes, live items go in position order while every lane is written; a parked lane is overtaken by the other indexes' later items. The stdout sink never reports a refusal or a block, so its lines keep position order as in 0.18.
 - **`Observer`** gains `on_lane_health` and `on_lane_probe`; `engine::LaneHealth`, `ParkReason` and `ProbeOutcome` are new and re-exported by `daemon`.
-- **`daemon::LaneSnapshot`** (a lane of `/status`) gains the public fields `health`, `parked_since`, `next_probe` and `reason`: code building one with a struct literal must set them. `Status::unhealthy_lanes`, `LaneHealthView` and `LaneHealthState` are new.
-- **`SinkEngine::with_max_probe_backoff`** sets the longest wait between probes; the daemon passes `DaemonOptions::max_restart_backoff` (60 s by default).
+- **`daemon::LaneSnapshot`** (a lane of `/status`) gains the public fields `health`, `parked_since`, `next_probe` and `reason`: code building one with a struct literal must set them. `Status::unhealthy_lanes`, `LaneHealthView` and `LaneHealthState` (`Open`, `Refused`, `Blocked`, `Restaging`; `name()` gives the word `/status` writes) are new.
+- **Removed: `DaemonOptions::max_restart_backoff`.** The schedule comes from the config: `Config.backoff` (`config::BackoffConfig`, each key a `BackoffValue` with its `BackoffOrigin`), resolved by `daemon::backoff(&Config)`. `Daemon::start` fails when `max_ms` is below `initial_ms`. A struct literal of `DaemonOptions` drops the field.
+- **New: `engine::Backoff`** (re-exported as `daemon::Backoff`): `Backoff::new(initial, max)` returns `Err(engine::BackoffError)` for a zero first wait or a cap below it; `initial()`, `max()`, `after(wait)` (doubled, capped); `Default` is 1 s / 60 s. `SinkEngine::with_backoff(Backoff)` sets a sink engine's probe and staging schedule. `config::parse_backoff_ms` parses a flag's or a variable's value.
 
 ## Related
 

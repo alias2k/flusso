@@ -14,7 +14,7 @@ Three refusals look similar and are **not** rejections. `on_error` never sees th
 
 ## Steps
 
-1. **Know your policy.** The default, `stop`, drops nothing: the first rejection **parks** the index's lane on that sink. The batch stays unconfirmed and is written again alone after 1 s, then with the wait doubling up to 60 s, until it lands. The index's later changes wait behind it; the other indexes, and the other sinks, keep going. `skip` quarantines the document and moves on. Dropping data is opt-in.
+1. **Know your policy.** The default, `stop`, drops nothing: the first rejection **parks** the index's lane on that sink. The batch stays unconfirmed and is written again alone on the [`[backoff]`](../reference/config-toml.md#backoff) schedule (1 s, doubling to 60 s, by default) until it lands. The index's later changes wait behind it; the other indexes, and the other sinks, keep going. `skip` quarantines the document and moves on. Dropping data is opt-in.
 
 2. **Under `stop`, read the error.** The log names the index, the sink, the refused ids and OpenSearch's reason:
 
@@ -22,7 +22,7 @@ Three refusals look similar and are **not** rejections. `on_error` never sees th
    WARN the lane is parked: its item is written again alone after the backoff; the other indexes go on index=users sink=primary reason=refused: id 42 (failed to parse field [age] of type [long] in document with id '42'. …) backoff=1s
    ```
 
-   [`/status`](../reference/http.md#lane-health) shows the lane `parked` under `sinks.<sink>.lanes.<index>`, with the same `reason` and the next try in `next_probe`; `flusso_lane_parked{why="refused"}` is 1.
+   [`/status`](../reference/http.md#lane-health) shows the lane `refused` under `sinks.<sink>.lanes.<index>`, with the same `reason` and the next try in `next_probe`; `flusso_lane_parked{why="refused"}` is 1.
 
 3. **Fix the cause.** Each probe writes the **same** batch, so fixing the row in Postgres doesn't unpark the lane on its own. Pick the fix that matches the reason:
 
