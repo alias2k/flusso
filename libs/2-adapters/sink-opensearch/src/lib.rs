@@ -133,6 +133,10 @@ pub(crate) struct IndexTarget {
     /// bulk sent with `?refresh=true` refreshes only the shards it touched,
     /// so only then does it refresh the whole index.
     pub(crate) single_shard: bool,
+    /// The `index.uuid` of the active generation as staging found it: a
+    /// generation under that name with another uuid (deleted, then recreated
+    /// by an auto-create) is not seeded.
+    pub(crate) uuid: Option<String>,
 }
 
 impl IndexTarget {

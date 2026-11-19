@@ -109,9 +109,9 @@ impl Sink for Gate {
         if answers.get(&name) == Some(&Answer::Missing) {
             answers.remove(&name);
             self.unseeded.lock().unwrap().insert(name);
-            return Ok(sink::Ensured::Created);
+            return Ok(sink::Ensured::created(None));
         }
-        Ok(sink::Ensured::Existing)
+        Ok(sink::Ensured::default())
     }
 
     async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> sink::Result<WriteReport> {

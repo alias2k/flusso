@@ -183,18 +183,37 @@ impl OpensearchSink {
         Ok(())
     }
 
-    /// Write an index's meta doc: its active generation and seeded-state.
+    /// Write an index's meta doc: its active generation, seeded-state, and
+    /// the `index.uuid` the generation was created with, once it exists.
     pub(crate) async fn write_index_meta(
         &self,
         hash_alias: &str,
         generation: u64,
         seeded: bool,
+        uuid: Option<&str>,
     ) -> Result<()> {
-        self.put_meta(
-            hash_alias,
-            json!({ "active_generation": generation, "seeded": seeded }),
-        )
-        .await
+        let mut doc = json!({ "active_generation": generation, "seeded": seeded });
+        if let (Some(uuid), Some(fields)) = (uuid, doc.as_object_mut()) {
+            fields.insert("uuid".to_owned(), Value::from(uuid));
+        }
+        self.put_meta(hash_alias, doc).await
+    }
+
+    /// Record the `index.uuid` of the active generation in its meta doc,
+    /// touching nothing else: for a doc an older flusso wrote without one.
+    pub(crate) async fn record_uuid(&self, hash_alias: &str, uuid: &str) -> Result<()> {
+        let url = format!(
+            "{}/{}/_update/{hash_alias}",
+            self.base_url,
+            self.meta_index()
+        );
+        let req = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&json!({ "doc": { "uuid": uuid } }));
+        self.send_ok(req, "meta update failed").await?;
+        Ok(())
     }
 
     /// The existing generation indexes of a hash alias (`{hash_alias}_{n}`).
@@ -224,6 +243,10 @@ pub(crate) struct Meta {
     /// record (on a seeded doc, or of a generation since replaced) reads as
     /// none.
     pub(crate) walked: Option<String>,
+    /// The `index.uuid` the active generation was created with: a live index
+    /// under its name with another uuid is not the one flusso made. `None`
+    /// before the generation exists, or in a doc an older flusso wrote.
+    pub(crate) uuid: Option<String>,
 }
 
 impl Meta {
@@ -243,10 +266,15 @@ impl Meta {
                 })
                 .flatten()
         });
+        let uuid = source
+            .get("uuid")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         Some(Self {
             generation,
             seeded,
             walked,
+            uuid,
         })
     }
 }

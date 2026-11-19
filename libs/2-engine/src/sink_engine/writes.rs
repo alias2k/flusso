@@ -1134,7 +1134,10 @@ impl<'a> Run<'a> {
                 continue;
             }
             seen.push(queued.lane);
-            if matches!(queued.item, Queue::Complete { .. }) && !self.lane_in_flight(queued.lane) {
+            if matches!(queued.item, Queue::Complete { .. })
+                && self.lane_open(queued.lane)
+                && !self.lane_in_flight(queued.lane)
+            {
                 return Some(at);
             }
         }
@@ -1460,9 +1463,21 @@ impl<'a> Run<'a> {
             return Ok(());
         };
         let (_, seeding) = self.seeding.swap_remove(at);
-        if let Err(error) = result {
-            self.fail(error.into(), &[seeding.lane]);
-            return Ok(());
+        match result {
+            Ok(()) => {}
+            // The target is not the one staged: the lane is staged again,
+            // which cuts the backfill, and the `SnapshotComplete` waits for
+            // it, seeding nothing.
+            Err(sink::SinkError::TargetChanged(reason)) => {
+                let lane = seeding.lane;
+                self.put_back_complete(seeding);
+                self.hold(lane, Held::Missing(reason), false);
+                return Ok(());
+            }
+            Err(error) => {
+                self.fail(error.into(), &[seeding.lane]);
+                return Ok(());
+            }
         }
         self.engine.seeded(&seeding.index, seeding.ticket, took);
         let oldest = self.is_oldest(seeding.lane, seeding.seq);
@@ -1667,6 +1682,28 @@ impl<'a> Run<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Put a seed's `SnapshotComplete` back in the window, at its place in
+    /// receive order, still unacknowledged: it runs again once its lane is
+    /// staged again.
+    fn put_back_complete(&mut self, seeding: Seeding) {
+        let at = self
+            .window
+            .partition_point(|queued| queued.seq < seeding.seq);
+        self.window.insert(
+            at,
+            Queued {
+                item: Queue::Complete {
+                    index: seeding.index,
+                    ticket: seeding.ticket,
+                },
+                handle: seeding.handle,
+                lane: seeding.lane,
+                seq: seeding.seq,
+                ready_at: Instant::now(),
+            },
+        );
     }
 
     /// Put a part of a returned write back in the window, at its place in
@@ -2226,15 +2263,7 @@ impl SinkEngine {
                 .index(index),
         );
         self.observer.on_index_seeded(&self.name, index);
-        {
-            let mut outstanding = self.lock_outstanding();
-            if outstanding
-                .get(index)
-                .is_some_and(|wanted| *wanted <= ticket)
-            {
-                outstanding.remove(index);
-            }
-        }
+        self.settle(index, ticket);
         tracing::info!(%index, "backfill complete");
     }
 }

@@ -156,9 +156,12 @@ impl DocumentBuilder for Table {
 /// The index's one target, as the sink holds it.
 #[derive(Debug, Default)]
 struct Target {
-    /// Which target: a new one is created after each deletion.
+    /// Which target: a new one is created after each deletion, and each
+    /// auto-create.
     generation: u64,
     exists: bool,
+    /// Created by a write after a deletion (auto-create on), not by staging.
+    impostor: bool,
     content: BTreeSet<i64>,
     seeded: bool,
     walked: Option<String>,
@@ -193,6 +196,10 @@ struct Generations {
     forget_failures: Mutex<usize>,
     /// `ensure_index` creates a new target, then fails, this many times.
     ensure_failures_after_create: Mutex<usize>,
+    /// A write to a deleted target recreates it (an impostor), as
+    /// OpenSearch's default `action.auto_create_index` does, instead of
+    /// reporting it missing.
+    auto_create: bool,
 }
 
 impl Generations {
@@ -245,6 +252,11 @@ impl Generations {
     }
 }
 
+/// The name `Generations` gives a target: its generation.
+fn identity(generation: u64) -> sink::TargetId {
+    sink::TargetId::new(generation.to_string())
+}
+
 fn row_of(envelope: &Envelope) -> i64 {
     let digits: String = envelope.id.chars().filter(char::is_ascii_digit).collect();
     digits.parse().unwrap()
@@ -254,11 +266,12 @@ fn row_of(envelope: &Envelope) -> i64 {
 impl Sink for Generations {
     async fn ensure_index(&self, _: &IndexMapping) -> sink::Result<sink::Ensured> {
         let mut target = self.target.lock().unwrap();
-        if target.exists {
-            return Ok(sink::Ensured::Existing);
+        if target.exists && !target.impostor {
+            return Ok(sink::Ensured::existing(Some(identity(target.generation))));
         }
         target.generation += 1;
         target.exists = true;
+        target.impostor = false;
         target.content.clear();
         target.seeded = false;
         target.walked = None;
@@ -271,7 +284,7 @@ impl Sink for Generations {
                 ));
             }
         }
-        Ok(sink::Ensured::Created)
+        Ok(sink::Ensured::created(Some(identity(target.generation))))
     }
 
     async fn write(&self, envelopes: &[Envelope], _: bool) -> sink::Result<WriteReport> {
@@ -303,6 +316,11 @@ impl Sink for Generations {
             }
             return Err(sink::SinkError::Write("the write failed once".to_owned()));
         }
+        if !target.exists && self.auto_create {
+            target.generation += 1;
+            target.exists = true;
+            target.impostor = true;
+        }
         if !target.exists {
             return Ok(WriteReport::clean().missing_target(users(), "the target is gone"));
         }
@@ -327,7 +345,8 @@ impl Sink for Generations {
         let missing: Vec<i64> = (1..=through)
             .filter(|row| !target.content.contains(row))
             .collect();
-        if !missing.is_empty() {
+        // An impostor's checkpoint goes with it when staging replaces it.
+        if !missing.is_empty() && !target.impostor {
             self.ahead.lock().unwrap().push(format!(
                 "generation {} recorded {mark} without {missing:?}",
                 target.generation
@@ -357,6 +376,11 @@ impl Sink for Generations {
 
     async fn mark_seeded(&self, _: &IndexName) -> sink::Result<()> {
         let mut target = self.target.lock().unwrap();
+        if !target.exists || target.impostor {
+            return Err(sink::SinkError::TargetChanged(
+                "not the target staging made".to_owned(),
+            ));
+        }
         let missing = (1..=ROWS)
             .filter(|row| !target.content.contains(row))
             .collect();
@@ -905,6 +929,26 @@ async fn one_walk_answers_a_lanes_two_requests_under_the_later_ticket() {
     running.abort();
 }
 
+/// Auto-create on: the write after the deletion recreates the target, so
+/// nothing is reported missing and the old backfill fills the impostor. Its
+/// seed is refused (`TargetChanged`): the lane is staged again, which
+/// replaces the impostor and cuts the backfill, and the fresh one seeds.
+#[tokio::test(start_paused = true)]
+async fn an_auto_created_target_is_never_seeded_and_the_index_is_backfilled_again() {
+    let sink = Generations {
+        auto_create: true,
+        ..Generations::default()
+    }
+    .holding(1, 41);
+    let deployment = Deployment::start(sink).await;
+    deployment.delete_at(1, 41).await;
+    deployment.settled().await;
+
+    deployment.assert_primary_whole(3);
+    assert_eq!(deployment.seen.requested(&primary()), 2);
+    deployment.assert_audit_untouched();
+}
+
 /// (a) The target vanished while the sink engine restarts; staging creates
 /// a new one, then fails to forget the old checkpoint. The next staging sees
 /// the same new target as already there, and must still ask again.
@@ -973,13 +1017,13 @@ impl Sink for Targets {
             return Err(sink::SinkError::Write("ensure failed".to_owned()));
         }
         let mut live = self.live.lock().unwrap();
-        if live.contains_key(&mapping.index) {
-            return Ok(sink::Ensured::Existing);
+        if let Some(made) = live.get(&mapping.index) {
+            return Ok(sink::Ensured::existing(Some(identity(*made))));
         }
         let mut made = self.made.lock().unwrap();
         *made += 1;
         live.insert(mapping.index.clone(), *made);
-        Ok(sink::Ensured::Created)
+        Ok(sink::Ensured::created(Some(identity(*made))))
     }
 
     async fn write(&self, envelopes: &[Envelope], _: bool) -> sink::Result<WriteReport> {

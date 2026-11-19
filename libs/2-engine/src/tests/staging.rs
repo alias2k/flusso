@@ -103,7 +103,7 @@ impl Sink for SlowSink {
         if self.failing.contains(index) {
             return Err(SinkError::Write(format!("{index} refused")));
         }
-        Ok(sink::Ensured::Existing)
+        Ok(sink::Ensured::default())
     }
 
     async fn write(&self, _: &[Envelope], _: bool) -> sink::Result<WriteReport> {
