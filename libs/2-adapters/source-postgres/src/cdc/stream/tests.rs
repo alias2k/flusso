@@ -1,5 +1,6 @@
 use kernel::{GenericValue, TableName};
 use source::RowKey;
+use source::cdc::Landed;
 
 use std::collections::HashSet;
 
@@ -29,6 +30,13 @@ fn state() -> (DecodeState, Arc<Positions>) {
     (decode, ack)
 }
 
+/// Where the next confirmation moves the slot while the engine has routed
+/// nothing: the horizon, as long as nothing was emitted.
+fn released(ack: &Positions) -> u64 {
+    ack.confirm(Landed::Idle);
+    ack.confirmed_lsn()
+}
+
 fn keepalive(wal_end: u64) -> ReplicationEvent {
     ReplicationEvent::KeepAlive {
         wal_end: Lsn::from_u64(wal_end),
@@ -55,10 +63,10 @@ fn upsert() -> ChangeEvent {
 }
 
 #[test]
-fn keepalive_advances_the_watermark_when_idle() {
+fn keepalive_moves_the_horizon_when_idle() {
     let (mut decode, ack) = state();
     handle(&mut decode, keepalive(100)).unwrap();
-    assert_eq!(ack.confirmed_lsn(), 100);
+    assert_eq!(released(&ack), 100);
 }
 
 #[test]
@@ -66,7 +74,7 @@ fn keepalive_is_ignored_while_a_transaction_is_open() {
     let (mut decode, ack) = state();
     decode.open_txn.push(upsert());
     handle(&mut decode, keepalive(100)).unwrap();
-    assert_eq!(ack.confirmed_lsn(), 0);
+    assert_eq!(released(&ack), 0);
 }
 
 #[test]
@@ -78,20 +86,22 @@ fn keepalive_is_ignored_while_changes_await_emission() {
         xid: 1,
     });
     handle(&mut decode, keepalive(100)).unwrap();
-    assert_eq!(ack.confirmed_lsn(), 0);
+    assert_eq!(released(&ack), 0);
 }
 
 #[test]
 fn keepalive_waits_for_an_emitted_but_unconfirmed_change() {
     let (mut decode, ack) = state();
-    let seq = ack.register(50); // emitted to the engine, not yet flushed
+    let position = ack.emit(50, true); // emitted to the engine, not yet landed
     handle(&mut decode, keepalive(100)).unwrap();
-    assert_eq!(ack.confirmed_lsn(), 0, "must not pass the unflushed change");
-    ack.confirm(seq);
+    assert_eq!(released(&ack), 0, "must not pass the unlanded change");
+    ack.confirm(Landed::Before(position));
+    assert_eq!(ack.confirmed_lsn(), 0, "must not pass the unlanded change");
+    ack.confirm(Landed::Through(position));
     assert_eq!(
         ack.confirmed_lsn(),
         100,
-        "with the change confirmed, the keepalive's WAL end is covered"
+        "with the change landed, the keepalive's WAL end is covered"
     );
 }
 
@@ -104,13 +114,22 @@ fn emitting_the_last_change_of_a_commit_moves_the_horizon() {
 
     let (first, _) = decode.next_change().unwrap();
     assert_eq!(
-        ack.reached(Some(first.0)),
+        ack.reached(Landed::Through(first)),
         0,
         "half a transaction covers nothing of its commit"
     );
     let (second, _) = decode.next_change().unwrap();
-    assert_eq!(ack.reached(Some(first.0)), 99, "still short of the commit");
-    assert_eq!(ack.reached(Some(second.0)), 100);
+    assert_eq!(
+        ack.reached(Landed::Through(first)),
+        0,
+        "the rest is emitted, not landed"
+    );
+    assert_eq!(
+        ack.reached(Landed::Before(second)),
+        99,
+        "still short of the commit"
+    );
+    assert_eq!(ack.reached(Landed::Through(second)), 100);
     assert!(decode.next_change().is_none());
 }
 
@@ -125,17 +144,21 @@ fn a_commit_behind_another_keeps_the_horizon_at_the_emitted_one() {
     handle(&mut decode, commit(200)).unwrap();
 
     let (first, _) = decode.next_change().unwrap();
-    assert_eq!(ack.reached(Some(first.0)), 100);
+    assert_eq!(ack.reached(Landed::Through(first)), 100);
     let (second, _) = decode.next_change().unwrap();
-    assert_eq!(ack.reached(Some(first.0)), 199, "short of the next commit");
-    assert_eq!(ack.reached(Some(second.0)), 200);
+    assert_eq!(
+        ack.reached(Landed::Before(second)),
+        199,
+        "short of the next commit"
+    );
+    assert_eq!(ack.reached(Landed::Through(second)), 200);
 }
 
 #[test]
-fn empty_commit_advances_the_watermark() {
+fn empty_commit_moves_the_horizon() {
     let (mut decode, ack) = state();
     handle(&mut decode, commit(100)).unwrap();
-    assert_eq!(ack.confirmed_lsn(), 100);
+    assert_eq!(released(&ack), 100);
     assert!(decode.pending.is_empty(), "nothing to emit");
 }
 
@@ -148,7 +171,7 @@ fn empty_commit_is_ignored_while_changes_await_emission() {
         xid: 1,
     });
     handle(&mut decode, commit(100)).unwrap();
-    assert_eq!(ack.confirmed_lsn(), 0);
+    assert_eq!(released(&ack), 0);
 }
 
 #[test]
@@ -159,9 +182,9 @@ fn non_empty_commit_queues_changes_without_advancing() {
     assert_eq!(decode.pending.len(), 1);
     assert_eq!(decode.pending.front().map(|change| change.lsn), Some(100));
     assert_eq!(
-        ack.confirmed_lsn(),
+        released(&ack),
         0,
-        "advance waits for the engine confirm"
+        "nothing emitted passes a buffered change"
     );
 }
 
@@ -565,7 +588,7 @@ fn a_commit_of_only_unaddressable_deletes_is_emitted_at_its_position() {
     handle(&mut decode, commit(100)).unwrap();
     assert_eq!(decode.pending.len(), 1);
     assert_eq!(decode.pending.front().map(|change| change.lsn), Some(100));
-    assert_eq!(ack.confirmed_lsn(), 0, "the engine's confirm moves it");
+    assert_eq!(released(&ack), 0, "a buffered change holds the horizon");
 }
 
 /// An update whose old tuple lacks the key, then its new tuple `(id, parent)`.
@@ -671,8 +694,7 @@ async fn a_confirmation_reaches_the_client_without_a_replication_event() {
     use std::time::Duration;
 
     let ack = Arc::new(Positions::new(0, 0, Default::default()));
-    let seq = ack.register(10);
-    ack.read_through(10);
+    let position = ack.emit(10, true);
     let applied = Arc::new(AtomicU64::new(0));
     let client = SilentClient {
         applied: Arc::clone(&applied),
@@ -698,7 +720,7 @@ async fn a_confirmation_reaches_the_client_without_a_replication_event() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(applied.load(Ordering::SeqCst), 0, "nothing confirmed yet");
 
-    ack.confirm(seq);
+    ack.confirm(Landed::Through(position));
     tokio::time::timeout(Duration::from_secs(1), async {
         while applied.load(Ordering::SeqCst) < 10 {
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -746,8 +768,7 @@ async fn a_close_hands_over_the_confirmed_position_then_ends_the_stream_without_
     use std::time::Duration;
 
     let ack = Arc::new(Positions::new(0, 0, Default::default()));
-    let seq = ack.register(10);
-    ack.read_through(10);
+    let position = ack.emit(10, true);
     let log = Arc::new(std::sync::Mutex::new(Vec::new()));
     let client = ClosingClient {
         log: Arc::clone(&log),
@@ -772,7 +793,7 @@ async fn a_close_hands_over_the_confirmed_position_then_ends_the_stream_without_
     let reader = tokio::spawn(async move { stream.next().await.is_none() });
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    ack.confirm(seq);
+    ack.confirm(Landed::Through(position));
     ack.request_close();
     let ended = tokio::time::timeout(Duration::from_secs(1), reader)
         .await
@@ -834,8 +855,7 @@ async fn a_close_whose_final_position_never_reaches_the_server_ends_the_stream_w
     use std::time::Duration;
 
     let ack = Arc::new(Positions::new(0, 0, Default::default()));
-    let seq = ack.register(10);
-    ack.read_through(10);
+    let position = ack.emit(10, true);
     let log = Arc::new(std::sync::Mutex::new(Vec::new()));
     let client = ClosingClient {
         log: Arc::clone(&log),
@@ -858,7 +878,7 @@ async fn a_close_whose_final_position_never_reaches_the_server_ends_the_stream_w
         None,
     );
 
-    ack.confirm(seq);
+    ack.confirm(Landed::Through(position));
     ack.request_close();
     let last = tokio::time::timeout(Duration::from_secs(1), stream.next())
         .await
@@ -1015,13 +1035,16 @@ fn a_held_transaction_is_not_emitted_and_nothing_passes_it() {
     handle(&mut decode, keepalive(500)).unwrap();
     handle(&mut decode, begin(8)).unwrap();
     handle(&mut decode, commit(300)).unwrap();
-    assert_eq!(ack.confirmed_lsn(), 0, "nothing may be confirmed past it");
-    assert!(ack.reached(None) < 100, "no fence may claim its commit");
-    assert_eq!(ack.next_seq(), 0, "not registered");
+    assert_eq!(released(&ack), 0, "nothing may be confirmed past it");
+    assert!(
+        ack.reached(Landed::Idle) < 100,
+        "no fence may claim its commit"
+    );
+    assert_eq!(ack.next_seq(), 0, "not emitted");
 
     decode.seen_by(&Snapshots::seeing(&[7]).snapshot_now());
     let (position, _) = decode.next_change().unwrap();
-    assert_eq!(ack.reached(Some(position.0)), 100);
+    assert_eq!(ack.reached(Landed::Through(position)), 100);
     assert!(decode.readable.is_empty(), "an emitted xid is forgotten");
 }
 
@@ -1039,8 +1062,9 @@ fn an_earlier_held_transaction_holds_back_a_later_visible_one() {
     decode.seen_by(&Snapshots::seeing(&[7, 8]).snapshot_now());
     let (first, _) = decode.next_change().unwrap();
     let (second, _) = decode.next_change().unwrap();
-    assert_eq!(ack.reached(Some(first.0)), 199);
-    assert_eq!(ack.reached(Some(second.0)), 200);
+    assert_eq!(ack.reached(Landed::Before(second)), 199);
+    assert_eq!(ack.reached(Landed::Through(second)), 200);
+    assert!(first < second);
     assert!(decode.readable.is_empty());
 }
 
@@ -1128,8 +1152,7 @@ async fn a_confirmation_is_handed_over_during_a_hold() {
     use std::sync::atomic::Ordering;
 
     let (mut decode, ack) = holding_state();
-    let earlier = ack.register(50);
-    ack.read_through(50);
+    let earlier = ack.emit(50, true);
     transaction(&mut decode, 7, 100);
     let (client, _, applied) = script(Vec::new());
     let mut stream = holding_stream(decode, client, Snapshots::default(), 16, Arc::default());
@@ -1137,7 +1160,7 @@ async fn a_confirmation_is_handed_over_during_a_hold() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(applied.load(Ordering::SeqCst), 0);
-    ack.confirm(earlier);
+    ack.confirm(Landed::Through(earlier));
     tokio::time::timeout(Duration::from_secs(1), async {
         while applied.load(Ordering::SeqCst) < 50 {
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1334,8 +1357,7 @@ fn insert_child(id: u32) -> ReplicationEvent {
     }
 }
 
-/// Item 1 of the review of #343: the snapshot task must never stop just as a
-/// new commit needs it. Lone commits, each sent 0.7–1.9 ms after the previous
+/// The snapshot task must never stop just as a new commit needs it. Lone commits, each sent 0.7–1.9 ms after the previous
 /// one was emitted (around the task's pause between reads), on a
 /// multi-threaded runtime: every one must be emitted, promptly. The task that
 /// exited after reading `wanted == false` while the stream, seeing it not yet

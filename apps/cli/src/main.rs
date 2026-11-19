@@ -38,6 +38,7 @@ mod adapters;
 mod backends;
 mod commands;
 mod http;
+mod memory;
 mod shutdown;
 mod telemetry;
 

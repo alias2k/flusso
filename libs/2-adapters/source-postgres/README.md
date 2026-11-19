@@ -6,7 +6,7 @@ The Postgres logical-replication **source** for flusso: capture row changes over
 
 | Trait (`source` port) | Role |
 | --- | --- |
-| `ChangeCapture` | streams thin per-row changes (table + primary key, plus the pre-image an update or delete logs) from a replication slot; confirms progress via an LSN watermark; answers how far a sink has reached as an LSN, for fences |
+| `ChangeCapture` | streams thin per-row changes (table + primary key, plus the pre-image an update or delete logs) from a replication slot; stamps each position with the LSNs it stands for, so it confirms what every lane landed with no map; answers how far a sink has reached as an LSN, for fences |
 | `DocumentBuilder` | resolves which documents a changed row affects, then assembles each one. Also implements `Catalog` (a column's SQL type + nullability, for index validation) |
 | `CaptureProvisioning` | reports stream coverage + a privilege verdict for an index's tables, and provisions the gap (create/extend a publication, published via the partition root so a partitioned table's changes keep its own name) when allowed; does the same for replica identity: sets `REPLICA IDENTITY FULL` on every table an index reads, reporting a missing parent link apart from a table that only misses the rest of the old row |
 
@@ -33,7 +33,7 @@ TLS.
 ## The traits
 
 - **`ChangeCapture`** streams thin per-row changes (table + primary key) from a
-  replication slot and confirms progress via an LSN watermark. The key is the
+  replication slot and confirms what every lane landed as an LSN. The key is the
   table's catalog primary key, not the replica-identity columns (all of them
   under `REPLICA IDENTITY FULL`); an update or delete also carries the old row's
   identity columns as its pre-image, which is how a deleted or re-parented child

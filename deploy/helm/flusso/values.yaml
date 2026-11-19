@@ -59,7 +59,9 @@ run:
   slot: flusso
   publication: flusso
   skipBackfill: false
-  queueCapacity: 1024
+  # Deprecated and ignored (flusso warns): [concurrency] max_built_mib bounds
+  # what the lanes hold. Passed as --queue-capacity only when set.
+  queueCapacity: null
   lagPollSecs: 15
   # Passed as --shutdown-timeout-secs: how long a stop may drain what is in
   # flight before flusso gives up and exits 1. Keep it below
@@ -121,6 +123,27 @@ metrics:
     relabelings: []
     metricRelabelings: []
 
+# Prometheus Operator PrometheusRule with flusso's alerts: a stalled lane
+# (one index into one sink landing nothing, which pins the replication slot
+# for every index) and a commit held while not visible. Requires the
+# Prometheus Operator CRDs.
+prometheusRule:
+  enabled: false
+  # Namespace to create the PrometheusRule in; defaults to the release namespace.
+  namespace: ""
+  # Extra labels (e.g. to match your Prometheus `ruleSelector`).
+  labels: {}
+  # FlussoLaneStalled fires, after `for`, when a lane has landed nothing for
+  # `laneStallSeconds`, or when the slot keeps more than `laneWalBehindBytes`
+  # of WAL behind a lane that has landed nothing for `laneWalStallSeconds`
+  # (the WAL counted includes WAL flusso hasn't read, so a healthy catch-up,
+  # whose lanes land every second, is kept from paging by that age).
+  laneStallSeconds: 600
+  laneWalBehindBytes: 1073741824
+  laneWalStallSeconds: 60
+  for: 5m
+  severity: page
+
 serviceAccount:
   create: true
   name: ""
@@ -141,13 +164,25 @@ readinessProbe:
   periodSeconds: 10
   failureThreshold: 30
 
-resources: {}
+# Memory: built documents are held within `[concurrency] max_built_mib`
+# (default 512 MiB) until every sink acknowledges them. A limit, if you set
+# one, needs room for:
+#   max_built_mib
+#   + up to 2 x `builds` batches past it (each in-flight build counts what it
+#     really built; a batch of 256 documents is a few MiB)
+#   + what the budget does NOT count: per sink, `writes` x one bulk request
+#     body (the rendered JSON of a write), and the source's read-ahead of
+#     `[batch] max_changes` x 16 changes, each with its row images
+#   + about 100 MiB baseline,
+# plus 10-20% for the allocator. A limit below that can OOM-kill a deployment
+# that runs today. Rule of thumb: the budget + ~150 MiB, plus 10-20% (768Mi
+# for the default 512 MiB; set `run`'s FLUSSO_MAX_BUILT_MIB or the config's
+# max_built_mib lower, e.g. 64, on a memory-constrained node).
+resources:
+  requests:
+    memory: 512Mi
   # limits:
-  #   cpu: 500m
-  #   memory: 512Mi
-  # requests:
-  #   cpu: 100m
-  #   memory: 128Mi
+  #   memory: 768Mi
 
 podAnnotations: {}
 podLabels: {}

@@ -28,10 +28,11 @@ use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
 use daemon::{
     ControlError, DaemonControl, Fence, FenceError, FenceLevel, FenceOutcome, FenceRequest,
-    IndexName, SinkName, Status,
+    IndexName, SinkName, Status, Unserved,
 };
 use prometheus::{Registry, TextEncoder};
 use serde_json::json;
+use stream::LaneKey;
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, watch};
 
@@ -114,6 +115,42 @@ impl Drop for OpenWait {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+/// `503` with `Retry-After` for a wait some lane can't vouch for (#379): its
+/// index is being seeded (`backfilling`) or rebuilt beside the generation
+/// reads see (`rebuilding`), named in `lanes`. The most telling reason wins.
+fn unserved(position: &str, lanes: &[(LaneKey, Unserved)]) -> Response {
+    let reason = lanes
+        .iter()
+        .map(|(_, why)| *why)
+        .max()
+        .unwrap_or(Unserved::Starting);
+    let names: Vec<String> = lanes
+        .iter()
+        .map(|(lane, why)| format!("{} on {} ({})", lane.index, lane.sink, why.as_str()))
+        .collect();
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, RETRY_AFTER_SECS)],
+        Json(json!({
+            "error": format!(
+                "reads don't see this position yet: {}",
+                names.join(", ")
+            ),
+            "reason": reason.as_str(),
+            "position": position,
+            "lanes": lanes
+                .iter()
+                .map(|(lane, why)| json!({
+                    "index": lane.index.as_ref(),
+                    "sink": lane.sink.as_ref(),
+                    "state": why.as_str(),
+                }))
+                .collect::<Vec<_>>(),
+        })),
+    )
+        .into_response()
 }
 
 /// `503` with `Retry-After` and why: `stopping` (this process is going away;
@@ -309,22 +346,37 @@ async fn metrics(State(state): State<PublicState>) -> impl IntoResponse {
 }
 
 /// Wait until a commit is readable
-/// (`GET /wait?position=<text>[&until=applied|searchable][&sink=<name>][&timeout_ms=<n>]`).
+/// (`GET /wait?position=<text>[&until=applied|searchable][&sink=<name>][&index=<name>]…[&timeout_ms=<n>]`).
 ///
 /// `position` is what the client read from the source after its commit
 /// (Postgres: `SELECT pg_current_wal_lsn()`). The request is held until the
-/// named sink, or every sink, has every commit at or before it `applied` (a
-/// fetch by id sees it) or `searchable` (a search sees it; the default), then
-/// answers `200`. `408` when `timeout_ms` (default 5000, at most 60000) passes
+/// named sink, or every sink, has, for the named indexes (`index`, repeatable)
+/// or every index, every commit at or before it `applied` (a fetch by id sees
+/// it) or `searchable` (a search sees it; the default), then answers `200`. `408` when `timeout_ms` (default 5000, at most 60000) passes
 /// first; both carry the position reached. Nothing is refreshed or hurried on
 /// behalf of the caller.
 async fn wait(
     State(state): State<PublicState>,
-    Query(params): Query<HashMap<String, String>>,
+    Query(pairs): Query<Vec<(String, String)>>,
 ) -> Response {
     let refuse = |status: StatusCode, error: String| {
         (status, Json(json!({ "error": error }))).into_response()
     };
+    let mut indexes = Vec::new();
+    for (key, raw) in &pairs {
+        if key == "index" {
+            match IndexName::try_new(raw.clone()) {
+                Ok(index) => indexes.push(index),
+                Err(_) => {
+                    return refuse(
+                        StatusCode::BAD_REQUEST,
+                        format!("invalid index name {raw:?}"),
+                    );
+                }
+            }
+        }
+    }
+    let params: HashMap<String, String> = pairs.into_iter().collect();
     let Some(position) = params.get("position") else {
         return refuse(
             StatusCode::BAD_REQUEST,
@@ -362,6 +414,7 @@ async fn wait(
         position: position.clone(),
         level,
         sink,
+        indexes,
         timeout,
     };
     let stopping = || {
@@ -381,10 +434,13 @@ async fn wait(
     let (status, reached, position) = match waited {
         Ok(FenceOutcome::Reached { position }) => (StatusCode::OK, true, position),
         Ok(FenceOutcome::TimedOut { position }) => (StatusCode::REQUEST_TIMEOUT, false, position),
+        Ok(FenceOutcome::Unserved { position, lanes }) => {
+            return unserved(&position, &lanes);
+        }
         Err(error @ FenceError::InvalidPosition(_)) => {
             return refuse(StatusCode::BAD_REQUEST, error.to_string());
         }
-        Err(error @ FenceError::UnknownSink(_)) => {
+        Err(error @ (FenceError::UnknownSink(_) | FenceError::UnknownIndex(_))) => {
             return refuse(StatusCode::NOT_FOUND, error.to_string());
         }
         Err(error @ FenceError::Unavailable(_)) => {
@@ -398,6 +454,7 @@ async fn wait(
             "position": position,
             "until": level.as_str(),
             "sink": request.sink.as_ref().map(AsRef::<str>::as_ref),
+            "indexes": request.indexes.iter().map(AsRef::<str>::as_ref).collect::<Vec<_>>(),
         })),
     )
         .into_response()

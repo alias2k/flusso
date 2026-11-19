@@ -71,8 +71,10 @@ spec:
             - {{ .Values.run.slot | quote }}
             - --publication
             - {{ .Values.run.publication | quote }}
+            {{- with .Values.run.queueCapacity }}
             - --queue-capacity
-            - {{ .Values.run.queueCapacity | quote }}
+            - {{ . | quote }}
+            {{- end }}
             - --lag-poll-secs
             - {{ .Values.run.lagPollSecs | quote }}
             - --shutdown-timeout-secs

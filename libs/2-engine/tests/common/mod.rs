@@ -18,6 +18,27 @@ use source::SourceSpec;
 use testcontainers_modules::testcontainers::ImageExt;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 
+/// The builds an e2e ingest engine runs at once: `FLUSSO_E2E_BUILDS`, else
+/// 4, the daemon's `DEFAULT_BUILDS`: what a deployment runs.
+pub(crate) fn e2e_builds() -> usize {
+    std::env::var("FLUSSO_E2E_BUILDS")
+        .ok()
+        .and_then(|builds| builds.parse().ok())
+        .unwrap_or(4)
+}
+
+/// A memory budget for an e2e ingest engine: `FLUSSO_E2E_BUDGET_KIB`, else
+/// the daemon's default 512 MiB, so the e2e count what they build (a tiny
+/// one makes the budget bind). Dropped with bytes still counted, it fails the
+/// test (in debug builds): the standing leak guard.
+pub(crate) fn e2e_budget() -> std::sync::Arc<engine::Budget> {
+    let kib = std::env::var("FLUSSO_E2E_BUDGET_KIB")
+        .ok()
+        .and_then(|kib| kib.parse::<usize>().ok())
+        .unwrap_or(512 * 1024);
+    std::sync::Arc::new(engine::Budget::new(kib * 1024))
+}
+
 /// A PG 16 with logical replication, and its connection URL. PG 14+ is
 /// required: the replication client requests the pgoutput `messages` option.
 pub(crate) async fn start_postgres() -> (test_postgres::Container, String) {

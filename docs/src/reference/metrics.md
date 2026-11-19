@@ -7,20 +7,29 @@ flusso records OpenTelemetry instruments and exposes them two ways: a Prometheus
 | `flusso.changes.captured` | counter | | | Changes the ingest engine pulled from the source. |
 | `flusso.changes.committed` | counter | | `sink` | Changes whose batch that sink wrote and acked. |
 | `flusso.changes.in_flight` | gauge | | `sink` | Captured minus that sink's committed: the back-pressure signal per sink. Read from status at scrape time, so it stays current while a sink is stalled. |
+| `flusso.lane.stall_age` | gauge | s | `index`, `sink` | How long the lane's oldest outstanding change has stayed its oldest: the lane has written nothing for that long. 0 while nothing is outstanding or while it lands steadily; sampled every second. Alert on it: [A lane is stalled](../operate/stalled-lane.md). |
+| `flusso.lane.wal_behind` | gauge | By | `index`, `sink` | Bytes of WAL the replication slot keeps behind the lane, while it has a change outstanding. It counts WAL flusso hasn't read yet as well as what it read and hasn't landed (a stalled lane pins both), so a healthy catch-up shows a large value on lanes that land every second: read it with the stall age. It is computed from the slot lag, polled every `--lag-poll-secs` (15 s by default); a failed poll keeps the last value. |
+| `flusso.slot.pinned_by` | gauge | | `index`, `sink` | 1 on the lane holding the slot back the most; no series while no lane has a change outstanding. |
+| `flusso.lane.outstanding` | gauge | | `index`, `sink` | Items routed to that `(index, sink)` lane and not written yet. Read at scrape time. The lane that stays high is the one holding back the replication slot and every fence on its index. |
 | `flusso.documents.built` | counter | | `index` | Documents assembled by the ingest engine, once for every sink. The unlabeled total is the sum. |
 | `flusso.documents.quarantined` | counter | | `sink`, `index` | Documents that sink rejected and its engine skipped under `on_error = "skip"`. Non-zero means data is being dropped. Alert on it. |
 | `flusso.script.failures` | counter | | `index`, `field`, `policy` | Documents that failed to build: a [script failed](scripts.md#failures), or an [`array: true`](field-types.md#array) column held an object. `field` is the path with array positions folded (`variants[].gross`); `policy` is `skip` (the document kept its indexed version) or `stop` (the ingest engine stopped; each retry counts). Non-zero means documents are going stale. Alert on it. See [Script fields](scripts.md#failures). |
 | `flusso.batches` | counter | | `sink` | Batches that sink wrote. |
 | `flusso.flush.duration` | histogram | s | `sink` | Time per write (one batch) at that sink. Several run at once, so the sum can exceed wall time. Buckets from 1 ms to 10 s. |
-| `flusso.flush.documents` | histogram | | `sink`, `work` | Documents per write at that sink. A write of nothing (a live batch that resolved to no document) isn't counted. Buckets from 1 to 10,000. |
+| `flusso.flush.documents` | histogram | | `sink`, `work` | Documents per write at that sink, every lane item merged into the write counted (about one batch in a burst). A write of nothing (a live batch that resolved to no document) isn't counted. Buckets from 1 to 10,000. |
 | `flusso.flush.size` | histogram | By | `sink`, `work` | Bytes per write, where the sink counts them (OpenSearch: the `_bulk` bodies; stdout: none). Same writes as `flusso.flush.documents`. Buckets from 1 KiB to 64 MiB. |
 | `flusso.stage.duration` | histogram | s | `stage`, `work`, `sink`, `index` | Time each pipeline stage took, once per batch, lane item, idle stretch or operation. See [Where the time goes](#where-the-time-goes). Buckets from 100 µs to 30 s. |
+| `flusso.memory.built` | gauge | By | `work` | Bytes of built documents not yet acknowledged by every sink, builds in flight included, by `live` and `backfill`. Their sum stays near `[concurrency] max_built_mib`'s budget at most; `backfill` at most half of it. Flat at the budget means a sink isn't acknowledging and ingest is paced. |
+| `flusso.memory.refused` | counter | | `work` | Times a batch waited for the memory budget before it could be built, once per wait. Steady growth means the budget, or a sink behind it, sets the pace. |
+| `flusso.memory.wait` | histogram | s | `work`, `wake` | How long a batch the memory budget held back waited before it was granted, and what let it go: `released` (a sink acknowledged bytes: the mechanism), `landed` (a build landed), `change`, `page`, `tick` (the once-a-second backstop: a few short ones are a race between the tick and a release already there; long ones would mean a release went unheard), `settle` (the end of a run). |
 | `flusso.startup.duration` | gauge | s | `step`, `sink` | Time a start spent in each step. See [Start-up](#start-up). |
 | `flusso.indexes` | gauge | | `sink` | Indexes ensured at that sink this run. |
 | `flusso.indexes.seeded` | counter | | `sink`, `index` | Indexes whose backfill completed at that sink this run. |
+| `flusso.backfill.checkpoints` | counter | | `sink`, `index` | Times a sink recorded how far an index's backfill durably got, so a restart resumes after it: about one every 10 s while a backfill lands. |
 | `flusso.replication.slot_lag` | gauge | By | | Bytes the confirmed position trails the WAL head by. Sampled every `--lag-poll-secs`. The confirmed position is the slowest sink's. |
 | `flusso.replication.visibility_wait` | gauge | s | | Seconds the source has held a committed transaction that isn't visible yet; every later change waits behind it. `0` while nothing waits. Read at scrape time. Past a few seconds it means a synchronous standby isn't answering: see [Behind a synchronous standby](source-postgres.md#behind-a-synchronous-standby). Alert on it: the dev stack's `dev/prometheus/rules/flusso.rules.yml` has `FlussoVisibilityWait`, over 30 s for a minute. |
 | `flusso.errors` | counter | | `engine` | Errors that stopped an engine: `ingest`, or `sink:<name>`. A sink engine is restarted with backoff; the counter keeps climbing while it fails. |
+| `flusso.sink.refreshes` | counter | | `sink` | Requests the sink sent that refresh the destination: for OpenSearch, `_refresh` calls and `_bulk` requests with `?refresh=true`. A caught-up write (its index has nothing else waiting) refreshes; a write during a backlog doesn't. Compare with `flusso.batches` to see how many writes refresh. |
 
 ## Prometheus names
 
@@ -31,7 +40,14 @@ The Prometheus reader applies the usual conventions: dots become underscores, co
 | `flusso.changes.captured` | `flusso_changes_captured_total` |
 | `flusso.changes.committed` | `flusso_changes_committed_total{sink}` |
 | `flusso.changes.in_flight` | `flusso_changes_in_flight{sink}` |
+| `flusso.lane.outstanding` | `flusso_lane_outstanding{index,sink}` |
+| `flusso.lane.stall_age` | `flusso_lane_stall_age_seconds{index,sink}` |
+| `flusso.lane.wal_behind` | `flusso_lane_wal_behind_bytes{index,sink}` |
+| `flusso.slot.pinned_by` | `flusso_slot_pinned_by{index,sink}` |
 | `flusso.documents.built` | `flusso_documents_built_total{index}` |
+| `flusso.memory.built` | `flusso_memory_built_bytes{work}` |
+| `flusso.memory.refused` | `flusso_memory_refused_total{work}` |
+| `flusso.memory.wait` | `flusso_memory_wait_seconds_bucket{work,wake}`, `_sum`, `_count` |
 | `flusso.documents.quarantined` | `flusso_documents_quarantined_total{sink,index}` |
 | `flusso.script.failures` | `flusso_script_failures_total{index,field,policy}` |
 | `flusso.batches` | `flusso_batches_total{sink}` |
@@ -42,9 +58,11 @@ The Prometheus reader applies the usual conventions: dots become underscores, co
 | `flusso.startup.duration` | `flusso_startup_duration_seconds{step,sink}` |
 | `flusso.indexes` | `flusso_indexes{sink}` |
 | `flusso.indexes.seeded` | `flusso_indexes_seeded_total{sink,index}` |
+| `flusso.backfill.checkpoints` | `flusso_backfill_checkpoints_total{sink,index}` |
 | `flusso.replication.slot_lag` | `flusso_replication_slot_lag_bytes` |
 | `flusso.replication.visibility_wait` | `flusso_replication_visibility_wait_seconds` |
 | `flusso.errors` | `flusso_errors_total{engine}` |
+| `flusso.sink.refreshes` | `flusso_sink_refreshes_total{sink}` |
 
 The scope labels (`otel_scope_name`, `otel_scope_version`) are dropped; there is one scope.
 
@@ -54,15 +72,15 @@ The scope labels (`otel_scope_name`, `otel_scope_version`) are dropped; there is
 
 | `stage` | Task | `work` | `sink` | What the time is |
 | --- | --- | --- | --- | --- |
-| `idle` | ingest | | | Nothing in flight and nothing taken: waiting on the source with no snapshot running. |
-| `page` | ingest | `backfill` | | Getting snapshot rows from the source: waiting for the next page of keys, decoding and buffering each row. While a snapshot runs, the ingest task's waits are `page`, not `idle`. |
+| `idle` | ingest | | | Nothing in flight and nothing taken: waiting on the source with no snapshot running and no build running. |
+| `page` | ingest | `backfill` | | Getting a backfill's keys: waiting for the next page of root keys and buffering them. While a backfill runs, the ingest task's waits are `page`, not `idle`; while a build runs, they are neither (the `build` covers them). |
 | `resolve` | ingest | `live` | | Taking the changes the stream has ready and resolving each to the documents it touches: the reverse lookups. |
-| `build` | ingest | both | | Building a batch's documents. |
+| `build` | ingest | both | | Building a batch's documents, from its start to its return. Reported once per build, so with `builds` above 1 several overlap and the rate passes 1. |
 | `publish` | ingest | both | | Handing a built batch to every lane, until the last one took it: for a snapshot batch, copying each lane's slice of its documents first. High means a lane is full (`lane_wait` says which), or, in a backfill with several sinks, the copies. |
 | `lane_wait` | ingest | both | ✓ | The same, per lane: names the full one. Ingest time, labelled with the sink it waited on; overlaps `publish`. |
-| `snapshot` | ingest | `backfill` | | Opening a snapshot (gathering the requests it serves, opening its row stream) and closing it (`SnapshotComplete` to each lane, acknowledging the requests). |
+| `snapshot` | ingest | `backfill` | | Opening a backfill (gathering the requests it serves) and closing it (`SnapshotComplete` to each lane, acknowledging the requests). |
 | `idle` | sink | | ✓ | Nothing in flight and nothing taken: no write running and no lane item waiting. A sink waiting for one of its writes to return is not idle. |
-| `write` | sink | both | ✓ | Writing one lane item to the destination, one [`Sink::write`](../contribute/pipeline.md#several-writes-per-sink-one-document-at-a-time): for OpenSearch, rendering it and sending its `_bulk` request. Reported once per write, so with `writes` above 1 several overlap and the rate passes 1. Also an empty caught-up write, as when the sink goes idle with a position not yet searchable. `flusso.flush.duration` times the same writes. |
+| `write` | sink | both | ✓ | Writing to the destination: one write, which holds every lane item that was ready at once, across indexes, up to `[batch] max_changes` documents ([`Sink::write`](../contribute/pipeline.md#several-writes-per-sink-one-document-at-a-time)): for OpenSearch, rendering them and sending their `_bulk` request. No `index` label: a write can hold several indexes. Reported once per write, so with `writes` above 1 several overlap and the rate passes 1. Also an empty caught-up write, as when the sink goes idle with a position not yet searchable. `flusso.flush.duration` times the same writes. |
 | `seed` | sink | `backfill` | ✓ | Recording one index as seeded at the destination (`index` label): for OpenSearch a refresh, the settings restored and the alias moved. |
 | `reindex` | sink | | ✓ | Staging a reindex asked for while running. |
 

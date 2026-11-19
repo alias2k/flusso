@@ -25,12 +25,12 @@ The reverse direction is what makes sync possible. When a row changes, flusso re
 
 ```text
 ChangeCapture ─▶ ingest engine ─▶ lane per sink ─▶ sink engine ─▶ write ×4 ─▶ ack
-                 resolve · build once · publish                                     └▶ watermark ─▶ slot
+                 resolve · build once · publish                                     └▶ progress ─▶ slot
 ```
 
-An **ingest engine** follows Postgres logical replication, resolves each change to the document ids it affects, deduplicates them, builds each document **once** per batch, and publishes the batch onto one lane per sink. A **sink engine** per sink pulls from its lane and writes several batches at once as bulk requests (never two holding the same document, live changes before backfill pages), acknowledging each as it lands. Sinks are independent: each seeds itself, a reindex targets one sink, and one sink's outage stops only that sink.
+An **ingest engine** follows Postgres logical replication, resolves each change to the document ids it affects, deduplicates them, builds each document **once** per batch (several batches at once, never two holding the same document), and publishes the batches onto one lane per sink in the order they started. A **sink engine** per sink pulls from its lane and writes several batches at once as bulk requests (never two holding the same document, live changes before backfill pages), acknowledging each as it lands. Sinks are independent: each seeds itself, a reindex targets one sink, and one sink's outage stops only that sink.
 
-Delivery is **at-least-once**. Each lane's acknowledgements feed a watermark, and the replication slot advances only to the lowest position **every** sink has written, everything before it included. A crash before a write returns redelivers that sink's batch; the rebuild is idempotent, so redelivery is harmless.
+Delivery is **at-least-once**. The engine records what each lane has been sent and what its sink has written, and the replication slot advances only past changes **every** sink has written, everything before them included. A crash before a write returns redelivers that sink's batch; the rebuild is idempotent, so redelivery is harmless.
 
 ## flusso owns the index
 
@@ -40,7 +40,7 @@ A [reindex](../operate/reindex.md) builds the next generation behind the same al
 
 ## Seeding and continuity
 
-On start, flusso asks the sink whether each index is already seeded. Seeded state lives in a small `flusso_meta` index. A sink's indexes are created and checked eight at a time, and `/status` reports `live` only once every index of every sink has been. Unseeded indexes are backfilled from a snapshot of their root tables through the same pipeline, then marked seeded. Each root row is its own document, built once, however many indexes read its table as a relation.
+On start, flusso asks the sink whether each index is already seeded. Seeded state lives in a small `flusso_meta` index. A sink's indexes are created and checked eight at a time, and `/status` reports `live` only once every index of every sink has been. Unseeded indexes are backfilled through the same pipeline, then marked seeded: flusso reads each one's root keys a page at a time and builds each key as its document, once, however many indexes read the table as a relation. No snapshot is held across pages. The slot exists before the first page, so a row written during the backfill reaches the index through the stream, and a document is always read when it is built, never earlier.
 
 A seed is only as good as the stream behind it. If the replication slot is missing at start (the database was replaced, or someone dropped the slot), every change since the last seed is unobservable, so flusso rebuilds every seeded index into a fresh generation before backfilling. The rebuild is staged *before* the slot is created, so a crash in between comes back to the same decision. Dropping the slot is therefore the supported way to force a full rebuild. See [Recover from a dropped slot](../operate/dropped-slot.md).
 

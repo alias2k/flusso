@@ -2,6 +2,8 @@
 status: accepted
 ---
 
+> **Implementation status (the first merge, PR #422).** In: stages 1–2 (already on `main`) and 3–7, 8b's backfill resume, 8c (stall age, WAL behind, the alert), and #379 (a fence holds while an index is seeded or rebuilt). Some 8a groundwork is in as well: the build permits and resolution on its own connection. `Progress`'s pending sets live on `feat/concurrency-8a` with the rest of 8a. **Not yet:** 8a's reader and index tasks, the per-index budget half, per-index restart (8b), and stage 9 (per-lane failure). Until then one ingest task builds every index, and a failure stops a sink's whole run.
+
 # Each index runs on its own task; order is kept per document
 
 Today one ingest task builds every index in turn, and each sink writes one batch at a time (issue #386). A backfill of one index holds up live changes of every other index. On `reference` the sink's flushes take about twice the build time, while the cluster could take four requests at once.
@@ -236,8 +238,9 @@ Chosen: **once, on the reader.** The alternative is to publish the row change an
 
 **Keyset backfill.**
 
-- `WHERE key > $last ORDER BY key LIMIT 1024`, with `$last` bound through `sql::key_cast`, and root filters and soft-delete on the page.
-- No shared snapshot is needed: the slot predates the backfill (#120), so every change made during it is in the WAL and rebuilt live.
+- `WHERE key > $last ORDER BY key LIMIT 1024`, with `$last` bound through `sql::key_cast`, one page of an index's root keys at a time, up to the greatest key the walk read when it started.
+- The page reads the bare key. Root filters and soft-delete stay in the build, which turns a filtered-out row into a tombstone, as the cursor did. A filter on the page would make the page's plan depend on the filter, and a raw filter can read anything (#386 stage 3).
+- No shared snapshot is needed: the slot predates the backfill (#120), so every change made during it is in the WAL and rebuilt live. A page gives only ids: the document is read when it is built, and per document build order is lane order (section 2).
 
 **Memory: four rules** over heap bytes of built documents not yet acknowledged by every lane:
 
@@ -402,6 +405,16 @@ Each stage leaves `main` correct and is measured on `reference` before and after
    - **Queued items are not merged into one write (#397).** Measured on `reference` at default scale, three runs each, with #409's per-stage timings: in a burst the ingest task's `resolve` is busy 0.71 of the wall at every `writes` setting, while the sink is idle 0.25–0.30 of it. The burst is bound by resolution on the ingest side (#387), not by the number of writes, so merging has nothing to win. An earlier run of the merge at `writes = 4` moved the burst drain 2,069 → 2,156 changes/s (within the spread) and the writes per burst 157 → 152. Revisit with per-`(index, sink)` lanes (stage 7), whose items are one index's and smaller.
    - **Measured** (`main` with #409 against this stage, release builds, load average 4–18 on 24 cores, medians of three): backfill 9,270 → 13,171 documents/s at `writes = 2` (12,910 at 4, 11,942 at 8, 9,185 at 1); the sink's `write` runs 1.6, 3.1 and 4.9 deep at 2, 4 and 8, and the ingest task's `idle` falls from 0.38 to 0, so the build on the one ingest task is now the backfill's bottleneck (stage 4). Peak RSS 251 → 131 MiB at `writes = 4`: the sink keeps up, so built batches no longer pile up in the lane. Burst drain (2,225 → 2,235 changes/s at 4) and live latency p99 (38.6 → 31.0 ms) unchanged within the spread.
 3. **Keyset backfill on the builder pool:** no long transaction, one connection fewer. It doesn't depend on stage 2, so concurrent writes land first.
+
+   Settled in its PR (#386 stage 3):
+   - **The port.** `ChangeCapture::snapshot` and `SnapshotTable` go. `DocumentBuilder` gains `keys(index, after, limit)` and `backfill_indexes()`, both required, so a decorator can't silently seed with nothing. The engine holds the cursor (the last key it read), so 8b only has to store it.
+   - **One index at a time, from its own root.** Pages are per index, not per root table: two indexes on one table each read it (one key scan more, about 0.3 s on `reference`). That also stops the backfill routing rows by table name alone, the backfill half of #390.
+   - **`ORDER BY key USING <`**, not a plain `ORDER BY`. The `>` of the next page resolves its operator through the search path, the index's order doesn't: for a type whose operators are off the path (`citext` in `ext`), a plain `ORDER BY` walked in `citext` order and compared as `text`, and skipped rows. `USING <` makes both the same operator; where it is the index's own (every other case) the plan is unchanged.
+   - **The bare key on the page.** Filters and soft-delete stay in the build (section 5).
+   - **The same roots as the cursor read:** a single-column catalog primary key that is the declared one. #391's roots still get nothing.
+   - **A walk is bounded** (review of stage 3). It reads the index's greatest key once when it starts (`DocumentBuilder::last_key`) and pages up to it (`keys`' `through`). A row whose key is past the bound got that key after the walk started, so after the slot existed: an insert, or a key changed to past it, reaches the live stream. A row at or below it is paged, or changed later and delivered live. The bound is compared by value, so deleting its row mid-walk still ends the walk. Unbounded, writers inserting greater keys kept the walk going for N/(B − R) pages, never ending when they kept pace, and built every row they added twice.
+   - **The bound sits in the select list** (`(key <= $2) AS within`), not the `WHERE`: as a second range condition, a generic plan took `key > $1 AND key <= $2` for a small range and switched to a bitmap scan and a sort on every page.
+   - **The key index's own operators.** `<`, `>` and `<=` are read from the primary key index's opclass and written schema-qualified (`OPERATOR(ext.<)`), so the index serves the order whatever the search path. A role that may not use their schema gets the bare names with `USING <`: correct, but every page sorts the rest of the table, and a warning says so once per index.
 4. **The build gate and concurrent builds on the one ingest task.** Builds are published in position order (a small reorder buffer), because stage 2's watermark still trusts lane order.
 5. **The memory budget:** the global limit, the backfill half and the one-batch grant. The per-index half lands with stage 8a.
 6. **Self-describing positions and `Progress`,** still with one lane per sink. `entries` goes; the tick always confirms.
@@ -460,7 +473,7 @@ All in `flusso.toml`, never baked into the lock. Flag beats env, env beats file.
 | --- | ---: | --- |
 | `[concurrency] builds` (`--builds` / `FLUSSO_BUILDS`) | 4 | builds and key pages at once; the builder pool |
 | `[concurrency] writes` (`--writes` / `FLUSSO_WRITES`) | 4 | bulk requests in flight per sink |
-| `[concurrency] max_built_mib` (`--max-built-mib` / `FLUSSO_MAX_BUILT_MIB`) | 512 | heap of built documents not yet acknowledged |
+| `[concurrency] max_built_mib` (`--max-built-mib` / `FLUSSO_MAX_BUILT_MIB`) | 512 (64 was tried and reverted, `stage-5.md` "The default") | heap of built documents not yet acknowledged |
 | `[concurrency] max_pending_documents` (`--max-pending-documents` / `FLUSSO_MAX_PENDING_DOCUMENTS`) | 1,000,000 | pending ids before the reader waits |
 | `[batch] max_changes` (existing) | 256 | documents per build and per write |
 | `[batch] max_delay_ms` (existing) | 50 | now only how long backfill requests coalesce |

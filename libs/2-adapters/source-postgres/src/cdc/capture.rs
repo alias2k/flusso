@@ -5,21 +5,18 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use kernel::Position;
 use pgwire_replication::{Lsn, ReplicationClient, ReplicationConfig};
-use source::cdc::{
-    AdvanceListener, ChangeCapture, ChangeEvent, Continuity, LiveChange, SourcePosition,
-};
+use source::cdc::{AdvanceListener, ChangeCapture, Continuity, Landed, LiveChange, SourcePosition};
 use source::{
     CaptureProvisioning, CoverageReport, PreImageColumns, PreImageReport, QualifiedTable, Result,
-    SnapshotTable, SourceError,
+    SourceError,
 };
 use sqlx::{PgPool, Row};
 use tokio::sync::OnceCell;
 
 use super::ack::{Listeners, Positions};
 use super::visibility::{PgVisibility, refuse_standby};
-use super::{backfill, publication, replica_identity, stream};
+use super::{publication, replica_identity, stream};
 use crate::ColumnTypes;
 
 /// How often the replication client reports the confirmed position to the
@@ -45,15 +42,15 @@ const READ_AHEAD: usize = 256 * 16;
 ///   be created at the current WAL position and knows nothing of earlier
 ///   changes, so this reports [`Continuity::Fresh`] and the engine rebuilds
 ///   every index the sink still calls seeded. [`prepare`](ChangeCapture::prepare)
-///   then creates the slot — after that reconciliation and before any snapshot,
-///   so a backfill can't miss a write that lands between snapshot and stream.
+///   then creates the slot — after that reconciliation and before any
+///   backfill, so every write a backfill's pages don't see reaches the stream.
 /// - [`live`](ChangeCapture::live) connects to the replication slot and streams
-///   committed row changes as thin, positioned [`ChangeEvent`]s. Resume is the
+///   committed row changes as thin, positioned [`ChangeEvent`](source::cdc::ChangeEvent)s. Resume is the
 ///   slot's: its `confirmed_flush_lsn` is the durable cursor on the server,
 ///   advanced as far as [`confirm`](ChangeCapture::confirm) has been called.
-/// - [`snapshot`](ChangeCapture::snapshot) reads current rows over an ordinary
-///   SQL connection for an initial backfill (see the crate-private `backfill`). The engine calls
-///   it only for tables backing an index the sink reports as unseeded.
+///
+/// The backfill reads no change: it pages each index's root keys through the
+/// document builder (`PgDocumentBuilder`'s `keys`), on the builder's pool.
 ///
 /// A change is yielded only once its transaction is visible to a new snapshot
 /// (issue #343, ADR 0010): the stream holds a committed transaction, and every
@@ -72,14 +69,13 @@ const READ_AHEAD: usize = 256 * 16;
 #[derive(Debug, Clone)]
 pub struct WalChangeCapture {
     config: ReplicationConfig,
-    /// Ordinary SQL connection URL, used by [`snapshot`](Self::snapshot) and
-    /// for the automatic slot creation check.
+    /// Ordinary SQL connection URL, for the admin pool and the visibility
+    /// reads.
     connection_url: String,
     /// A small, lazily-opened SQL pool shared by the slot check and the
     /// out-of-band [`lag`](Self::lag) polling, so periodic status probes reuse
     /// connections instead of opening and tearing one down each time. Shared
-    /// across clones (an `Arc`), opened on first use. The bulk snapshot read
-    /// stays on its own connection (see [`snapshot`](Self::snapshot)).
+    /// across clones (an `Arc`), opened on first use.
     admin_pool: Arc<OnceCell<PgPool>>,
     /// Every table the enabled indexes read — the set the publication must
     /// cover. Empty unless set via [`with_publication_management`](Self::with_publication_management).
@@ -554,9 +550,9 @@ impl ChangeCapture for WalChangeCapture {
         stream::held_for(&self.hold_clock)
     }
 
-    fn confirm(&self, position: Position) {
+    fn confirm(&self, landed: Landed) {
         if let Some(positions) = self.open_positions() {
-            positions.confirm(position.0);
+            positions.confirm(landed);
         }
     }
 
@@ -574,24 +570,13 @@ impl ChangeCapture for WalChangeCapture {
         Lsn::from_u64(position.0).to_pg_string()
     }
 
-    fn reached(&self, position: Option<Position>) -> Option<SourcePosition> {
+    fn reached(&self, landed: Landed) -> Option<SourcePosition> {
         let positions = self.open_positions()?;
-        Some(SourcePosition(
-            positions.reached(position.map(|position| position.0)),
-        ))
+        Some(SourcePosition(positions.reached(landed)))
     }
 
     fn on_advance(&self, listener: AdvanceListener) {
         self.listeners.add(listener);
-    }
-
-    #[tracing::instrument(name = "wal.snapshot", skip_all, fields(tables = tables.len()), err)]
-    async fn snapshot(
-        &self,
-        tables: &[SnapshotTable],
-    ) -> Result<BoxStream<'static, Result<ChangeEvent>>> {
-        tracing::info!(tables = tables.len(), "starting snapshot");
-        backfill::snapshot(&self.connection_url, tables).await
     }
 
     /// Bytes between the slot's `confirmed_flush_lsn` and the server's current
@@ -895,8 +880,8 @@ mod tests {
         );
     }
 
-    /// Review of #343, item 8: a standby is refused, whatever its standby
-    /// names, and the message points at the primary.
+    /// A standby is refused, whatever its standby names, and the message
+    /// points at the primary.
     #[test]
     fn a_standby_is_refused() {
         let refusal = WalChangeCapture::judged(true, "", "flusso").unwrap_err();

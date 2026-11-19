@@ -95,8 +95,8 @@ impl ChangeCapture for Placed {
         self.0.live().await
     }
 
-    fn confirm(&self, position: Position) {
-        self.0.confirm(position);
+    fn confirm(&self, landed: source::cdc::Landed) {
+        self.0.confirm(landed);
     }
 
     fn parse_position(&self, text: &str) -> source::Result<SourcePosition> {
@@ -105,8 +105,10 @@ impl ChangeCapture for Placed {
             .map_err(|_| source::SourceError::Unsupported(text.to_owned()))
     }
 
-    fn reached(&self, position: Option<Position>) -> Option<SourcePosition> {
-        Some(SourcePosition(position.map_or(0, |p| p.0 + 1)))
+    fn reached(&self, landed: source::cdc::Landed) -> Option<SourcePosition> {
+        Some(SourcePosition(
+            landed.covered_seq().map_or(0, |seq| seq + 1),
+        ))
     }
 }
 
@@ -196,7 +198,7 @@ async fn a_stop_is_not_ready_refuses_a_reindex_and_ends_once_the_in_flight_batch
         .unwrap()
         .unwrap();
     assert_eq!(*sink.flushed.lock().unwrap(), 1);
-    assert_eq!(confirmed.lock().unwrap().last(), Some(&Position(0)));
+    assert_eq!(confirmed.lock().unwrap().last(), Some(&Position::new(0)));
     assert_eq!(status.snapshot().phase, Phase::Stopped);
 }
 
@@ -235,6 +237,7 @@ async fn a_stop_ends_once_the_last_flush_is_searchable_and_answers_a_searchable_
                 position: "1".to_owned(),
                 level: FenceLevel::Searchable,
                 sink: None,
+                indexes: Vec::new(),
                 timeout: Duration::from_secs(20),
             })
             .await

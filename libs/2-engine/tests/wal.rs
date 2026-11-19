@@ -59,6 +59,8 @@ use common::{column, column_field, field, index_name, table, users_spec};
 struct RecordingSink {
     ops: Arc<Mutex<Vec<String>>>,
     applied: Mutex<Vec<String>>,
+    /// The indexes marked seeded, apart from `ops`.
+    seeded: Arc<Mutex<Vec<String>>>,
 }
 
 impl RecordingSink {
@@ -66,6 +68,7 @@ impl RecordingSink {
         Self {
             ops: Arc::clone(ops),
             applied: Mutex::default(),
+            seeded: Arc::default(),
         }
     }
 }
@@ -88,6 +91,11 @@ impl Sink for RecordingSink {
         let applied = std::mem::take(&mut *self.applied.lock().unwrap());
         self.ops.lock().unwrap().extend(applied);
         Ok(sink::WriteReport::clean())
+    }
+
+    async fn mark_seeded(&self, index: &kernel::IndexName) -> SinkResult<()> {
+        self.seeded.lock().unwrap().push(index.to_string());
+        Ok(())
     }
 }
 
@@ -1823,12 +1831,28 @@ async fn run_deployment(
     sink: Arc<dyn Sink>,
 ) -> engine::Result<()> {
     let name = SinkName::try_new("recording").unwrap();
-    let stream: Arc<dyn Stream> = Arc::new(ChannelStream::new(1024, [name.clone()]));
+    let stream: Arc<dyn Stream> = Arc::new(ChannelStream::over(
+        1024,
+        documents.backfill_indexes(),
+        [name.clone()],
+    ));
     let continuity = capture.continuity().await?;
     let mappings = documents.index_mappings().await?;
-    let sink_engine = SinkEngine::new(name.clone(), sink, Arc::clone(&stream), mappings);
+    let progress = Arc::new(engine::Progress::of(
+        documents.backfill_indexes(),
+        [name.clone()],
+    ));
+    let sink_engine = SinkEngine::new(
+        name.clone(),
+        sink,
+        Arc::clone(&stream),
+        mappings,
+        Arc::clone(&progress),
+    );
     sink_engine.stage(continuity).await?;
-    let ingest = IngestEngine::new(capture, documents, stream, vec![name]);
+    let ingest = IngestEngine::new(capture, documents, stream, vec![name], progress)
+        .with_builds(common::e2e_builds())
+        .with_budget(common::e2e_budget());
     let (_control, mut control_rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
     tokio::select! {
         result = ingest.run() => result,
@@ -2553,12 +2577,14 @@ fn aggregate_field(name: &str, aggregate: Aggregate) -> Field {
 }
 
 /// A root `primary_key` naming a unique column other than the table's own key
-/// never keeps a document (issue #225): the backfill and every root change
-/// carry the table's key, the batched build matches it against the declared
-/// column, finds nothing and writes a tombstone; a change on a related table
-/// is addressed by the declared column, so its document is written under
-/// that value, and the next root change deletes it again. This is why
-/// `root_primary_key_mismatch` refuses the start.
+/// never keeps a document (issue #225): every root change carries the
+/// table's key, the batched build matches it against the declared column,
+/// finds nothing and writes a tombstone; a change on a related table is
+/// addressed by the declared column, so its document is written under that
+/// value, and the next root change deletes it again. The backfill pages only
+/// a root whose declared key is its catalog key (#386 stage 3), so here it
+/// completes and writes nothing. This is why `root_primary_key_mismatch`
+/// refuses the start.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker"]
 async fn a_root_primary_key_other_than_the_tables_writes_no_document() {
@@ -2604,14 +2630,26 @@ async fn a_root_primary_key_other_than_the_tables_writes_no_document() {
         .await
         .unwrap();
     let recorded = Arc::new(Mutex::new(Vec::new()));
+    let sink = RecordingSink::new(&recorded);
+    let seeded = Arc::clone(&sink.seeded);
     let mut engine = tokio::spawn(run_deployment(
         Arc::new(WalChangeCapture::new(replication(port), url.clone())),
         Arc::new(documents),
-        Arc::new(RecordingSink::new(&recorded)),
+        Arc::new(sink),
     ));
 
-    expect_op(&mut engine, &recorded, "delete users 1").await;
-    expect_op(&mut engine, &recorded, "delete users 2").await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while seeded.lock().unwrap().is_empty() {
+        assert!(Instant::now() < deadline, "the backfill never completed");
+        assert!(!engine.is_finished(), "the engine stopped");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(*seeded.lock().unwrap(), ["users"]);
+    assert!(
+        recorded.lock().unwrap().is_empty(),
+        "the backfill wrote nothing: {:?}",
+        recorded.lock().unwrap()
+    );
     for (sql, op) in [
         (
             "INSERT INTO users VALUES (3, 'u3', 'c@x')",
@@ -3314,7 +3352,9 @@ async fn the_pipeline_runs_through_pgbouncer_in_transaction_mode() {
 /// front of every connection flusso opens, the replication one included
 /// (issue #295): it refuses any parameter inside a startup `options`, so the
 /// settings a key's text depends on are set after connecting, or not needed.
-/// A `bytea` key under `bytea_output = escape` backfills and follows.
+/// A `bytea` key under `bytea_output = escape` backfills and follows. The
+/// backfill walks several key pages, each one statement on whatever server
+/// connection the pooler hands out.
 async fn the_pipeline_runs_through_pgbouncer(pool_mode: &str) {
     use testcontainers_modules::testcontainers::GenericImage;
     use testcontainers_modules::testcontainers::core::IntoContainerPort;
@@ -3326,6 +3366,7 @@ async fn the_pipeline_runs_through_pgbouncer(pool_mode: &str) {
         "CREATE TABLE users (id bytea PRIMARY KEY, email text)",
         "CREATE PUBLICATION flusso FOR TABLE users",
         "INSERT INTO users VALUES ('\\x01', 'a@x')",
+        "INSERT INTO users SELECT int4send(n), 'u' || n FROM generate_series(1, 2500) n",
     ] {
         sqlx::query(statement).execute(&pool).await.unwrap();
     }
@@ -3373,6 +3414,25 @@ async fn the_pipeline_runs_through_pgbouncer(pool_mode: &str) {
         Arc::new(RecordingSink::new(&recorded)),
     ));
     expect_op(&mut engine, &recorded, "upsert users \\x01").await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let backfilled: std::collections::BTreeSet<String> = recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|op| op.starts_with("upsert users \\x0000"))
+            .cloned()
+            .collect();
+        if backfilled.len() == 2500 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the paged backfill wrote {} of 2,500 rows",
+            backfilled.len()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     sqlx::query("INSERT INTO users VALUES ('\\x02', 'b@x')")
         .execute(&pool)
         .await

@@ -30,6 +30,33 @@ impl DocumentBuilder for Fixed {
     async fn build_many(&self, _: &[DocumentId]) -> Result<Vec<Document>> {
         Ok(self.0.clone())
     }
+
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        vec![IndexName::try_new("products").unwrap()]
+    }
+
+    /// Keys 1 to 3, one past `after`.
+    async fn last_key(&self, _: &IndexName) -> Result<Option<RowKey>> {
+        Ok(Some(id(3).key))
+    }
+
+    async fn keys(
+        &self,
+        _: &IndexName,
+        after: Option<&RowKey>,
+        through: &RowKey,
+        limit: usize,
+    ) -> Result<Vec<RowKey>> {
+        let number = |key: &RowKey| match key.0.first() {
+            Some((_, GenericValue::BigInt(n))) => *n,
+            _ => 4,
+        };
+        let start = after.map_or(1, |after| number(after) + 1);
+        Ok((start..=number(through))
+            .take(limit)
+            .map(|n| id(n).key)
+            .collect())
+    }
 }
 
 fn id(key: i64) -> DocumentId {
@@ -78,4 +105,20 @@ async fn upserts_are_finished_and_a_failure_becomes_failed() {
         &built[..],
         [Document::Failed { failure, .. }, Document::Delete { .. }] if failure.field == "n"
     ));
+}
+
+#[tokio::test]
+async fn a_backfill_walks_the_inner_builders_keys() {
+    let builder = ScriptedBuilder::wrap(Arc::new(Fixed(Vec::new())), scripts("1"));
+    let index = IndexName::try_new("products").unwrap();
+    assert_eq!(builder.backfill_indexes(), [index.clone()]);
+    let through = builder.last_key(&index).await.unwrap().unwrap();
+    assert_eq!(through, id(3).key);
+    let first = builder.keys(&index, None, &through, 2).await.unwrap();
+    assert_eq!(first, [id(1).key, id(2).key]);
+    let rest = builder
+        .keys(&index, first.last(), &through, 2)
+        .await
+        .unwrap();
+    assert_eq!(rest, [id(3).key]);
 }

@@ -30,7 +30,7 @@ schemars.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-tokio = { workspace = true, features = ["sync", "time"] }
+tokio = { workspace = true, features = ["sync", "time", "macros"] }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 webpki-root-certs.workspace = true
 # Only to read a refused certificate off a reqwest error (`is_certificate_error`).

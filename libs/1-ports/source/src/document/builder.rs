@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use kernel::{GenericValue, IndexMapping, IndexName, TableName};
 
-use crate::{Result, RowImage, RowKey, SnapshotTable};
+use crate::{Result, RowImage, RowKey};
 
 /// Addresses one document in a target index: which index, and the root row's
 /// key within it. The same source row can map to documents in several indexes,
@@ -132,21 +132,6 @@ impl std::fmt::Display for BuildFailure {
     }
 }
 
-/// What an index needs in order to be seeded: its name and the source table to
-/// snapshot for it. A document is identified by its root row, so snapshotting
-/// the **root table** alone seeds the whole index — `build` pulls in every join
-/// and aggregate server-side when each root row is assembled.
-///
-/// The engine takes each snapshot row of `root` as the index's document keyed
-/// by the row's [`RowKey`], with no [`resolve`](DocumentBuilder::resolve):
-/// a snapshot's key must be the key a document of this index is built by.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IndexScope {
-    pub index: IndexName,
-    /// The index's root table — the one whose rows map one-to-one to documents.
-    pub root: SnapshotTable,
-}
-
 /// Turns changed rows into target documents — the read half of a source.
 ///
 /// Used in two steps so the engine can deduplicate between them:
@@ -208,12 +193,73 @@ pub trait DocumentBuilder: std::fmt::Debug + Send + Sync {
         Ok(out)
     }
 
-    /// The enabled indexes this builder serves, each with the root table to
-    /// snapshot when seeding it. The engine uses this to scope an initial
-    /// backfill per index. The default is empty — a builder with no backfillable
-    /// indexes, which the engine simply never seeds.
-    fn backfill_scopes(&self) -> Vec<IndexScope> {
-        Vec::new()
+    /// The enabled indexes this builder serves, each seeded by a backfill of
+    /// its root rows ([`keys`](Self::keys)).
+    ///
+    /// Required, like `keys`: a decorator that forgot it would seed every
+    /// index with nothing.
+    fn backfill_indexes(&self) -> Vec<IndexName>;
+
+    /// The greatest of `index`'s root keys now, in the order the pages walk;
+    /// `None` when it has none, or the source can't walk it.
+    ///
+    /// A walk reads it once, at its start, and ends there
+    /// ([`keys`](Self::keys)' `through`). That bounds it: a row whose key
+    /// is past it got that key after the walk started, which is after the
+    /// source's resume point existed, so the live stream delivers it. Without
+    /// a bound, writers adding keys ahead of the cursor keep the walk going,
+    /// and every such row is built twice.
+    async fn last_key(&self, index: &IndexName) -> Result<Option<RowKey>>;
+
+    /// One page of `index`'s root keys for a backfill: up to `limit` keys,
+    /// each the key of one document of `index`, from the start with `after`
+    /// `None`, else the keys that follow `after` (the last key of the
+    /// previous page), never past `through` (the walk's [`last_key`](Self::last_key)),
+    /// in the order the pages walk. A page with fewer than `limit` keys is
+    /// the last.
+    ///
+    /// The engine builds each key as its own document, with no
+    /// [`resolve`](Self::resolve). A key is read when its page is: a row that
+    /// gets a key behind the walk later is the live stream's to deliver, so a
+    /// backfill needs no snapshot shared across pages.
+    ///
+    /// An index the source can't walk answers an empty page.
+    async fn keys(
+        &self,
+        index: &IndexName,
+        after: Option<&RowKey>,
+        through: &RowKey,
+        limit: usize,
+    ) -> Result<Vec<RowKey>>;
+
+    /// The text a sink keeps for how far a walk of `index` got: `key`, and
+    /// what the order it was walked in depends on, so a later
+    /// [`resume_after`](Self::resume_after) can tell whether it still holds.
+    /// `None`: this source can't resume a walk (the default), and every
+    /// backfill starts from the first key.
+    async fn walk_mark(&self, _index: &IndexName, _key: &RowKey) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// The key a walk of `index` resumes after, from a mark
+    /// [`walk_mark`](Self::walk_mark) wrote; `None` when the mark no longer
+    /// fits the index (its key column, type or order changed, or the text is
+    /// not this source's), and the walk starts from the first key. The
+    /// default resumes nothing.
+    async fn resume_after(&self, _index: &IndexName, _mark: &str) -> Result<Option<RowKey>> {
+        Ok(None)
+    }
+
+    /// How `a` compares with `b` in the order a walk of `index` reads its keys;
+    /// `None` when unknown (the default), and a lane whose point can't be
+    /// placed among the others' is then served from the first key.
+    async fn compare_keys(
+        &self,
+        _index: &IndexName,
+        _a: &RowKey,
+        _b: &RowKey,
+    ) -> Result<Option<std::cmp::Ordering>> {
+        Ok(None)
     }
 
     /// The resolved mapping of every index this builder serves: each field

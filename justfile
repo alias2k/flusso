@@ -256,6 +256,12 @@ review-plans base="origin/main" *args:
 bench-scenario scenario="reference" scale="ci":
     cargo run -p flusso-bench -- --scenario {{scenario}} --scale {{scale}} --out target/bench
 
+# The memory budget still binds: a `reference` backfill at default scale with
+# `max_built_mib = 64` and 4 builds must peak under 224 MiB of RSS (about 100
+# MiB working set + 64 MiB + in-flight batches; unbounded it peaks near 350).
+bench-budget:
+    FLUSSO_MAX_BUILT_MIB=64 FLUSSO_BUILDS=4 FLUSSO_WRITES=4 cargo run -p flusso-bench -- --scenario reference --scale default --out target/bench/budget --max-peak-rss-mib 224
+
 # Start-up on the real binary: time to `live` with each index declared `copies`
 # times and the backfill skipped, fresh and on restart. Writes
 # target/bench/<scenario>-startup/startup.json. The harness itself is a debug

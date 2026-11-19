@@ -187,7 +187,7 @@ async fn upsert_into(sink: &Buffered, logical: &str, id: &str, doc: Value) {
         IndexName::try_new(logical).unwrap(),
         id,
         generic(doc),
-        Some(Position(0)),
+        Some(Position::new(0)),
         chrono::Utc::now(),
     ))
     .await

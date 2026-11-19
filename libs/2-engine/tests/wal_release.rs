@@ -342,7 +342,7 @@ async fn a_stalled_sink_pins_the_slot_until_it_catches_up() {
     wait_until_live(&run, &pool, &stalled, 0).await;
 
     // Every lane, the stalled one included, acks a positioned batch first, so
-    // the watermark is a real minimum over lanes rather than "no position yet".
+    // confirmation is a real minimum over lanes rather than "no position yet".
     exec(&pool, "INSERT INTO users (id, email) VALUES (0, 'a')").await;
     let before_stall = current_lsn(&pool).await;
     for sink in [&fast, &stalled, &live_only] {
@@ -594,16 +594,30 @@ async fn deploy(url: &str, spec: SourceSpec, sinks: Vec<SinkSpec>, tuning: Tunin
             .unwrap(),
     );
     let names: Vec<SinkName> = sinks.iter().map(|s| s.name.clone()).collect();
-    let stream: Arc<dyn Stream> = Arc::new(ChannelStream::new(1024, names.clone()));
+    let stream: Arc<dyn Stream> = Arc::new(ChannelStream::over(
+        1024,
+        documents.backfill_indexes(),
+        names.clone(),
+    ));
     let continuity = capture.continuity().await.unwrap();
     let mappings = documents.index_mappings().await.unwrap();
 
     let mut engines: Vec<BoxFuture<'static, engine::Result<()>>> = Vec::new();
+    let progress = Arc::new(engine::Progress::of(
+        documents.backfill_indexes(),
+        names.iter().cloned(),
+    ));
     for spec in sinks {
-        let engine = SinkEngine::new(spec.name, spec.sink, Arc::clone(&stream), mappings.clone())
-            .with_options(SinkOptions {
-                backfill: spec.backfill,
-            });
+        let engine = SinkEngine::new(
+            spec.name,
+            spec.sink,
+            Arc::clone(&stream),
+            mappings.clone(),
+            Arc::clone(&progress),
+        )
+        .with_options(SinkOptions {
+            backfill: spec.backfill,
+        });
         engine.stage(continuity).await.unwrap();
         engines.push(
             async move {
@@ -613,7 +627,10 @@ async fn deploy(url: &str, spec: SourceSpec, sinks: Vec<SinkSpec>, tuning: Tunin
             .boxed(),
         );
     }
-    let ingest = IngestEngine::new(capture, documents, stream, names).with_batch(tuning.batch);
+    let ingest = IngestEngine::new(capture, documents, stream, names, progress)
+        .with_builds(common::e2e_builds())
+        .with_budget(common::e2e_budget())
+        .with_batch(tuning.batch);
     engines.push(async move { ingest.run().await }.boxed());
     let stopped = Arc::new(Mutex::new(None));
     let outcome = Arc::clone(&stopped);

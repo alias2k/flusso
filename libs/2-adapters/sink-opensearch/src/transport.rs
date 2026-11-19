@@ -283,18 +283,33 @@ impl OpensearchSink {
         Err(Self::status_error(resp, "index check failed").await)
     }
 
-    /// `PUT /{index}` with the explicit mapping body. Tolerates losing a
-    /// creation race — a concurrent creator winning is fine, the index exists.
-    pub(crate) async fn create_index(&self, index: &str, mapping: &IndexMapping) -> Result<()> {
+    /// `PUT /{index}` with the explicit mapping body and `aliases` attached in
+    /// the same request (one cluster-state update instead of one per alias).
+    /// `true` when this call created it; `false` when a concurrent creator
+    /// won the race, which is fine (the index exists), but then the aliases
+    /// are whatever that creator attached.
+    pub(crate) async fn create_index(
+        &self,
+        index: &str,
+        mapping: &IndexMapping,
+        aliases: &[&str],
+    ) -> Result<bool> {
         let url = format!("{}/{index}", self.base_url);
+        let mut body = build_index_body(&mapping.fields, &self.index_options_for(&mapping.index));
+        if !aliases.is_empty()
+            && let Some(object) = body.as_object_mut()
+        {
+            let attached: serde_json::Map<String, serde_json::Value> = aliases
+                .iter()
+                .map(|alias| ((*alias).to_owned(), json!({})))
+                .collect();
+            object.insert("aliases".to_owned(), serde_json::Value::Object(attached));
+        }
         let req = self
             .client
             .put(&url)
             .header("Content-Type", "application/json")
-            .json(&build_index_body(
-                &mapping.fields,
-                &self.index_options_for(&mapping.index),
-            ));
+            .json(&body);
 
         let resp = self
             .maybe_auth(req)
@@ -303,14 +318,14 @@ impl OpensearchSink {
             .map_err(|e| request_error("index create failed", e))?;
 
         if resp.status().is_success() {
-            debug!(index, "created index with explicit mapping");
-            return Ok(());
+            debug!(index, ?aliases, "created index with explicit mapping");
+            return Ok(true);
         }
 
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if text.contains("resource_already_exists_exception") {
-            return Ok(());
+            return Ok(false);
         }
         Err(SinkError::Write(format!(
             "index create failed: HTTP {status}: {text}"
@@ -417,23 +432,6 @@ impl OpensearchSink {
                     .collect()
             })
             .unwrap_or_default())
-    }
-
-    /// Delete an index. A 404 (already gone) is success — dropping a superseded
-    /// generation must be idempotent across retries.
-    pub(crate) async fn delete_index(&self, index: &str) -> Result<()> {
-        let url = format!("{}/{index}", self.base_url);
-        let resp = self
-            .maybe_auth(self.client.delete(&url))
-            .send()
-            .await
-            .map_err(|e| request_error("index delete failed", e))?;
-        if resp.status().is_success() || resp.status() == reqwest::StatusCode::NOT_FOUND {
-            debug!(index, "dropped superseded generation");
-            Ok(())
-        } else {
-            Err(Self::status_error(resp, "index delete failed").await)
-        }
     }
 }
 

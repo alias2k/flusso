@@ -42,8 +42,16 @@ impl Observer for StatusObserver {
         self.status.mark_seeded(sink, index);
     }
 
+    fn on_walk_recorded(&self, lane: &stream::LaneKey) {
+        self.status.walk_recorded(&lane.sink, &lane.index);
+    }
+
     fn on_sink_started(&self, sink: &SinkName) {
         self.status.mark_sink_started(sink);
+    }
+
+    fn on_changes_settled(&self, sink: &SinkName, changes: usize) {
+        self.status.settle_changes(sink, changes as u64);
     }
 
     fn on_batch_committed(&self, sink: &SinkName, stats: CommitStats) {

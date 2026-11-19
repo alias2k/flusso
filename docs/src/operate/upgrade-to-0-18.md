@@ -1,6 +1,6 @@
 # Upgrade to 0.18
 
-0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index. It also writes a `timestamp` column in ISO 8601, which changes stored documents and can break a tuned `format`: see [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601). A `decimal` field is written with every digit: see [A decimal is written with every digit](#a-decimal-is-written-with-every-digit). A `double` is indexed as the exact value Postgres holds: see [A float or double is indexed as Postgres holds it](#a-float-or-double-is-indexed-as-postgres-holds-it). A filter value that doesn't fit its column no longer matches by being cut to fit: see [A filter value is compared as written](#a-filter-value-is-compared-as-written). A script reads a date as a date, not a string: see [A date reaches a script as a date](#a-date-reaches-a-script-as-a-date). A change is indexed only once its transaction is visible: see [A change waits until its commit is visible](#a-change-waits-until-its-commit-is-visible). A fenced read in `flusso-query` waits through a restart of flusso, with a 20 s default timeout: see [A fenced read waits through a restart](#a-fenced-read-waits-through-a-restart). A stop drains and has a deadline and new exit codes: see [A stop drains, then exits](#a-stop-drains-then-exits). A document OpenSearch refuses as busy is resent instead of reaching `on_error`: see [A busy cluster no longer drops documents](#a-busy-cluster-no-longer-drops-documents). `/metrics` gains per-stage timings, and the engine's observer types change for code embedding the crates: see [Stage timings in /metrics](#stage-timings-in-metrics). Each sink writes several batches at once, and a custom `Sink` implements one `write` instead of `apply` and `flush`: see [Each sink writes several batches at once](#each-sink-writes-several-batches-at-once).
+0.18 indexes a `binary` field as base64 of its bytes and a `constant` as written, so each index with a `binary` field or a `constant` that is stored unindexed (an object, or a list holding one or mixing kinds) is rebuilt once into a new physical index. It also writes a `timestamp` column in ISO 8601, which changes stored documents and can break a tuned `format`: see [A timestamp column is written in ISO 8601](#a-timestamp-column-is-written-in-iso-8601). A `decimal` field is written with every digit: see [A decimal is written with every digit](#a-decimal-is-written-with-every-digit). A `double` is indexed as the exact value Postgres holds: see [A float or double is indexed as Postgres holds it](#a-float-or-double-is-indexed-as-postgres-holds-it). A filter value that doesn't fit its column no longer matches by being cut to fit: see [A filter value is compared as written](#a-filter-value-is-compared-as-written). A script reads a date as a date, not a string: see [A date reaches a script as a date](#a-date-reaches-a-script-as-a-date). A change is indexed only once its transaction is visible: see [A change waits until its commit is visible](#a-change-waits-until-its-commit-is-visible). A fenced read in `flusso-query` waits through a restart of flusso, with a 20 s default timeout: see [A fenced read waits through a restart](#a-fenced-read-waits-through-a-restart). A stop drains and has a deadline and new exit codes: see [A stop drains, then exits](#a-stop-drains-then-exits). A document OpenSearch refuses as busy is resent instead of reaching `on_error`: see [A busy cluster no longer drops documents](#a-busy-cluster-no-longer-drops-documents). `/metrics` gains per-stage timings, and the engine's observer types change for code embedding the crates: see [Stage timings in /metrics](#stage-timings-in-metrics). Each sink writes several batches at once, and a custom `Sink` implements one `write` instead of `apply` and `flush`: see [Each sink writes several batches at once](#each-sink-writes-several-batches-at-once). A backfill reads its keys in pages with no long transaction: see [A backfill reads key pages, with no long transaction](#a-backfill-reads-key-pages-with-no-long-transaction). Several batches of documents are built at once: see [Several batches build at once](#several-batches-build-at-once). Memory is bounded in bytes and `[stream] capacity` is deprecated: see [Memory is bounded in bytes](#memory-is-bounded-in-bytes). An interrupted backfill continues where it got to: see [An interrupted backfill resumes](#an-interrupted-backfill-resumes). A backfill of indexes that read each other's tables builds each document once: see [A backfill of related indexes is faster and holds more in memory](#a-backfill-of-related-indexes-is-faster-and-holds-more-in-memory). Seeding and index creation send fewer requests: see [Seeding and index creation take fewer requests](#seeding-and-index-creation-take-fewer-requests). A sink's indexes are staged several at once: see [Indexes are staged at once at start](#indexes-are-staged-at-once-at-start). Confirmation and fences read the engine's progress, and the source keeps no map of what it emitted: see [Confirmation and fences read the engine's progress](#confirmation-and-fences-read-the-engines-progress). Each index and sink has its own lane, so a slow index holds up only itself, and `/wait` takes `index`: see [One lane per index and sink](#one-lane-per-index-and-sink). A fence no longer passes while an index is seeded or rebuilt; it answers `503` with a reason: see [A fence holds while an index is seeded or rebuilt](#a-fence-holds-while-an-index-is-seeded-or-rebuilt). A lane that lands nothing is named, measured and alerted on: see [A stalled lane is named, measured and alerted on](#a-stalled-lane-is-named-measured-and-alerted-on).
 
 ## When to use this
 
@@ -190,6 +190,24 @@ A comparison with a string, a number or another kind fails rather than answering
 - **A missing `.flusso(url)` is `Error::FenceMisconfigured`**, which was a `FenceUnavailable`. `Error` is `#[non_exhaustive]`, so this is silent: code that matched `FenceUnavailable` to spot the missing address compiles and falls through to its wildcard arm. Match `FenceMisconfigured` for it. A certificate the client refuses and a redirect loop are `FenceMisconfigured` too, at once.
 - **Remove a retry loop around fenced reads**, if one was written for deploys: it now multiplies the timeout.
 
+## A fence holds while an index is seeded or rebuilt
+
+**Breaking, correct.** 0.17 answered `/wait` with `200` for a position whose document a read couldn't see yet, while a sink seeded an index for the first time, rebuilt every seeded index after the replication slot was lost, or ran a [reindex](reindex.md) ([#379](https://github.com/alias2k/flusso/issues/379)). A fenced read then returned a stale or missing document. 0.18 vouches only for what reads see (see [HTTP endpoints](../reference/http.md#get-waitpositionposition)). What changes:
+
+| Wait, while the index it needs is… | 0.17 | 0.18 |
+| --- | --- | --- |
+| seeded for the first time | `200` once the lane wrote the change | held; `200` once seeded, else `503` `backfilling` at the timeout |
+| rebuilt after a lost slot | `200` once the lane wrote the change | held; `200` once seeded, else `503` `rebuilding` |
+| reindexed, position before the reindex began | `200` | `200` |
+| reindexed, position after it began | `200`, read stale until the swap | held; `200` once seeded, else `503` `rebuilding` |
+| reindexed, flusso restarted before the swap | `200`, read stale until the swap | held, any position: the new process knows nothing the old generation holds; `200` once seeded, else `503` `rebuilding` |
+| any of these, timeout passed | `408` | `503` with the reason |
+
+- **`flusso-query`** retries a `503` until `fence_timeout`, then fails with `FenceUnavailable` and the new cause `Backfilling`, or `Rebuilding`. A rebuild longer than the timeout fails the read where 0.17 returned stale data: handle the error, or size the timeout for it.
+- **The upgrade itself backfills** the indexes whose content hash moved ([Steps](#steps)): fenced reads of those indexes wait for that backfill. Reads naming other indexes don't.
+- **A plain-HTTP caller** that treated `503` as "flusso is down" sees it during rebuilds too: read `reason`.
+- **Embedding the crates.** `Sink::is_rebuilding(index)` (default `false`): whether reads see another copy than the one the sink writes. A sink that builds a rebuild beside the copy readers use overrides it, so a restart in the middle of a rebuild answers `rebuilding`. `Observer::on_index_rebuilding` is new (default nothing).
+
 ## A stop drains, then exits
 
 0.17 dropped everything on `SIGTERM`, and could then wait forever: a client that went silent mid-request held the HTTP surfaces open and every further signal was ignored, so only `SIGKILL` ended it. A process whose task runner died kept running unnoticed. 0.18 drains instead (see [Stopping](../reference/cli.md#stopping)):
@@ -229,7 +247,8 @@ A comparison with a string, a number or another kind fails rather than answering
 - **A stdout sink keeps lane order.** It writes one batch at a time in the order they were published, whatever `writes` says, since its readers consume its output in order. A custom `Sink` that emits a stream says so with `fn ordered(&self) -> bool { true }`.
 - **`[concurrency]` is never written into `flusso.lock`.** `run` with a `flusso.toml` reads it; `run --locked` takes the flag, the env var, or the default.
 - **A burst is searchable as it ends.** A burst's last writes can finish after the write that refreshed, so a sink that goes idle with documents not yet searchable sends one empty caught-up write. On OpenSearch every caught-up write also refreshes the indexes earlier writes left unrefreshed, not only under `refresh_interval = "-1"` as in 0.17, so a fence's `searchable` no longer waits up to `refresh_interval` (default 10 s) after a burst. The cost is at most one `_refresh` request per catch-up, and none when the only index left unrefreshed has one primary shard and the caught-up write's own `?refresh=true` bulk wrote it (the common single-index case). Caught-up refreshes run one at a time.
-- **Each sink holds a few more batches.** A sink engine takes up to `writes` + 32 batches from its lane before acknowledging them, beside the lane's `capacity`: see [stream: channel](../reference/stream-channel.md).
+- **Batches of several indexes share a request.** Each index has its own lane, so a burst over three indexes is three items per batch. A live item that is ready while a write is out waits for it and then goes out in one bulk request with what else is ready. The wait is at most [`[batch] max_delay_ms`](../reference/config-toml.md#batch) (50 ms) from when the item was ready, and a write out longer than that is not waited for, so a stalled or slow index never holds another index's writes past it. A lone change on an idle sink is written at once; a backfill and a stdout sink never wait. On the `reference` benchmark a burst went out in about 2.4 times 0.17's bulk requests of about 25 documents each (three times without the wait), with OpenSearch's refresh time, indexing time and write rejections level with 0.17's.
+- **Each sink holds a few more batches.** A sink engine takes up to `writes` + 32 batches from its lane before acknowledging them; they count against the memory budget like any other: see [Memory is bounded in bytes](#memory-is-bounded-in-bytes).
 - **Metrics read per write.** `flusso.flush.duration` and `last_flush_micros` time one write; with several in flight their sum exceeds wall time. `flusso.batches` counts writes.
 
 **Embedding the crates.** The `Sink` port changed:
@@ -240,7 +259,7 @@ A comparison with a string, a number or another kind fails rather than answering
 | `FlushReport` | `WriteReport`, the same fields |
 | `caught_up`: refresh this flush's documents | `caught_up`: make everything written by the writes that returned before this call searchable too, then report `Immediate` |
 | `Visibility::Deferred`: until the next `Immediate` flush | until the next caught-up write that reports `Immediate` |
-| `Stream::watermark`: the highest acknowledgement per lane, minimum over lanes | the position before each lane's oldest unacknowledged positioned item, minimum over lanes |
+| `Stream::watermark`: the highest acknowledgement per lane, minimum over lanes | removed: see [below](#confirmation-and-fences-read-the-engines-progress) |
 | — | `Sink::ordered()` (default `false`): `true` for a sink whose readers consume its output in order; the engine then writes one batch at a time in lane order |
 | `SinkEngine::acknowledged()` | `SinkEngine::advanced()`: how often the oldest unfinished lane item landed, which a supervisor reads as progress |
 
@@ -250,8 +269,49 @@ A comparison with a string, a number or another kind fails rather than answering
 
 0.17 ran one query per row and relation while backfilling indexes that read each other's tables, and built the same documents several times. 0.18 builds each document once, with no query per row.
 
-- **Peak memory during a backfill can rise.** Documents are now built faster than a sink takes them, so built batches wait in the sink's lane: up to `capacity` batches (1,024) of `max_changes` documents (256) each. Under a tight memory limit, lower [`capacity`](../reference/stream-channel.md) (`--queue-capacity`) or raise the limit.
+- **Peak memory during a backfill can rise.** Documents are now built faster than a sink takes them, so built batches wait in the sink's lane, up to the memory budget: see [Memory is bounded in bytes](#memory-is-bounded-in-bytes).
 - **A root without a single-column primary key gets no document from a backfill.** That was already the rule (see [Postgres source](../reference/source-postgres.md)), but 0.17 could index some of its rows by accident while backfilling a related index.
+
+## A backfill reads key pages, with no long transaction
+
+0.17 read a backfill's root rows through one cursor in a `REPEATABLE READ` transaction on a connection of its own, held open until the whole backfill ended. 0.18 reads each index's root keys in pages of 1,024, in key order, one statement per page on the connections that build documents (see [Postgres source](../reference/source-postgres.md#capture)). A deployment needs nothing.
+
+- **No lock held across the backfill.** The transaction kept an `ACCESS SHARE` lock on every root table it had read until the end, so an `ALTER TABLE` on one waited for the whole backfill, and every query queued behind it waited too. Now it waits for one page at most.
+- **Vacuum isn't held back.** The transaction's snapshot kept every dead row newer than it for the length of the backfill. A page's snapshot lasts one statement.
+- **One connection fewer** while a backfill runs, and a transaction-mode PgBouncer no longer pins a server connection for its length.
+- **Key order, not table order.** Documents are built in the order of their root key. Two indexes rooted at the same table each read it once, where 0.17 read it once for both.
+- **A root whose `primary_key` isn't its table's primary key gets nothing from a backfill.** 0.17 read such a root's rows by the table's key and wrote a tombstone for each (the build finds no row by the declared column). 0.18 reads no keys for it. `run` already refuses to start on it (`root_primary_key_mismatch`), so only a deployment started some other way sees the difference.
+- **Embedding the crates.** `ChangeCapture::snapshot`, `source::SnapshotTable` and `source::document::IndexScope` are gone. A `DocumentBuilder` implements `backfill_indexes()` and `keys(index, after, limit)`, both required, so a decorator can't silently backfill nothing: forward both to the builder it wraps.
+
+## Several batches build at once
+
+0.17 built one batch of documents at a time, and nothing else moved while it ran. 0.18 builds up to [`[concurrency] builds`](../reference/config-toml.md#concurrency) batches at once (default 4, at most 32), and each sink still receives them in the order they started. On the `reference` benchmark a backfill ran about 15% faster at 2 or 4 builds; the sink's writes then bound it. What changes:
+
+- **More memory during a backfill.** Built batches can now outrun the sink and wait in its lane, up to the memory budget: see [Memory is bounded in bytes](#memory-is-bounded-in-bytes).
+- **More Postgres connections.** The document builder keeps up to `builds` + 2 connections (0.17: up to ten, opened as needed). A role with a tight `CONNECTION LIMIT`, or a small PgBouncer pool, needs room for them; `builds = 1` builds one batch at a time, as 0.17 did, on 3.
+- **Order holds per document.** Two batches holding the same document are never built at once, and a later build reaches every sink after an earlier one.
+- **Changes are read and resolved while a batch builds.** A burst no longer waits for each build before reading the next changes.
+- **A failed build publishes nothing after it.** The builds running beside it finish first, then the run ends with the error and restarts as before.
+- **Embedding the crates.** `IngestEngine::with_builds(n)` sets the number; it defaults to 1. The `DocumentBuilder`'s `build_many` is called from several tasks at once and must be safe for that (it takes `&self`, so it usually is).
+
+## Memory is bounded in bytes
+
+0.17 bounded the batches waiting for a sink by count: `[stream] capacity`, 1,024 per sink, whatever their size. 0.18 bounds them by the heap they hold: [`[concurrency] max_built_mib`](../reference/config-toml.md#concurrency) (default 512, `--max-built-mib` / `FLUSSO_MAX_BUILT_MIB`). What changes:
+
+- **`[stream] capacity` and `--queue-capacity` are deprecated.** They still load, flusso warns at start, and they do nothing. Remove them when convenient. The Helm chart's `run.queueCapacity` now defaults to unset.
+- **Memory rises with the default, 512 MiB.** On `reference` peak RSS was about 210 MiB, against 0.17's 115–126, for a p99 of visible latency about ten times lower (about 200 ms against 2.2–2.5 s). On a memory-constrained host set `max_built_mib = 64`: about 85 MiB peak RSS, with a p99 of about 1 s, still below 0.17's ([when to change it](../reference/config-toml.md#concurrency)).
+- **A stalled sink paces ingest by bytes.** Once built documents waiting for it reach the budget, the ingest engine builds nothing more until it acknowledges some, as a full queue did. A backfill holds at most half the budget, so live changes keep room.
+- **Size memory from the budget.** Plan from the formula in [config.toml](../reference/config-toml.md#concurrency): `max_built_mib`, the batches in flight past it, request bodies and the source's read-ahead, about 100 MiB, plus 10–20% for the allocator. The Helm chart now requests 512 MiB of memory and sets no limit; its `values.yaml` gives the formula for one (the budget plus about 150 MiB).
+- **New in `/status` and `/metrics`:** `memory` (`limit_bytes`, `built_bytes`, `backfill_bytes`), `flusso.memory.built`, `flusso.memory.refused` and `flusso.memory.wait` (how long the budget held a batch, and what let it go). Embedding the crates: `Observer::on_budget_wait(work, wake, waited)` (default nothing) and `engine::Wake`.
+- **A warning at start** when `max_built_mib` alone reaches the cgroup's memory limit, or the host's memory without one (Linux): lower it, or raise the limit.
+- **Embedding the crates.** `IngestEngine::with_budget(Arc<Budget>)` counts built documents (without it, nothing is counted, as before). `stream::Batch` gains `hold: Hold`; a `Batch` written by hand sets `hold: Default::default()`. `ChannelConfig::capacity` is now `Option<usize>` and is ignored by `ChannelStream::from_config`.
+
+## Seeding and index creation take fewer requests
+
+A deployment needs nothing; readers see what they saw in 0.17.
+
+- **A first generation is created with its aliases** in the create request (the `{logical}` alias only when no index holds that name), where 0.17 created it, then added each alias. As before, a reader of a first backfill sees the index filling. Wait for `seeded` in `/status` before sending readers to it; a fenced read waits on its own (`503 backfilling`, see [A fence holds while an index is seeded or rebuilt](#a-fence-holds-while-an-index-is-seeded-or-rebuilt)). A rebuild's generation is created bare, and readers stay on the old one until the swap.
+- **A seed runs its refresh, the steady-state settings and the alias lookups at once**, then moves both aliases and drops the old generations in one atomic `_aliases` call, then writes the marker (see [OpenSearch sink](../reference/sink-opensearch.md)).
 
 ## Indexes are staged at once at start
 
@@ -262,9 +322,81 @@ A comparison with a string, a number or another kind fails rather than answering
 
 ## Stage timings in /metrics
 
-0.18 records where the pipeline's time goes: [`flusso.stage.duration`](../reference/metrics.md#where-the-time-goes) per stage, `flusso.flush.documents` and `flusso.flush.size` per flush, and [`flusso.startup.duration`](../reference/metrics.md#start-up) per start-up step. Existing series are unchanged. A deployment needs nothing.
+0.18 records where the pipeline's time goes: [`flusso.stage.duration`](../reference/metrics.md#where-the-time-goes) per stage, `flusso.flush.documents` and `flusso.flush.size` per flush, and [`flusso.startup.duration`](../reference/metrics.md#start-up) per start-up step, and `flusso.sink.refreshes{sink}`, the refresh requests each sink sent. Existing series are unchanged. A deployment needs nothing.
 
 - **Embedding the crates.** `Observer` gains `on_stage` and `on_startup_step` (both default to nothing). `sink::FlushReport` and `engine::CommitStats` are `#[non_exhaustive]` and gain `bytes` (and `CommitStats` `work`): build them with `FlushReport::clean()` and its builders (`visible`, `rejecting`, `sent`) and `CommitStats::new(…).sent(…)`, not a struct literal. A sink that counts the bytes it sends reports them with `sent`; it is a metric only.
+
+## Confirmation and fences read the engine's progress
+
+The Postgres source no longer keeps a map of every change it emitted until every sink confirmed it. Each position carries what the source needs to confirm or fence at it, and the engine keeps, per sink, what it routed there and the sink hasn't landed. A deployment needs nothing; nothing is rebuilt.
+
+- **Memory no longer grows with a stalled sink's backlog in the source.** The map held one entry per emitted change until every sink caught up.
+- **Idle WAL is released by the engine's once-a-second confirmation**, not by the keepalive itself: the slot follows unrelated WAL within about two seconds, as before.
+- **A fence can answer a little lower while a change is between the source and the lanes.** It never claims a change the sinks haven't landed; at worst a waiter waits until that change lands.
+- **An emitting sink's output is unchanged:** the position is still written as `seq`, the same string.
+
+**Embedding the crates.**
+
+| 0.17 | 0.18 |
+| --- | --- |
+| `kernel::Position(n)`, `position.0` | `Position::new(n)`, `position.seq`; a source stamps its own with `Position::stamped(seq, fence_before, confirm_before, confirm_through)` |
+| a `Position` serialized on its own: a bare number (`42`) | a struct, `{"seq":42,"fence_before":…,"confirm_before":…,"confirm_through":…}`, and a bare number no longer reads back. An `Envelope` still writes its position as the `seq` string |
+| `ChangeCapture::confirm(&self, Position)` | `confirm(&self, Landed)`: `Before(oldest)`, `Through(newest routed)` or `Idle`. Called after each commit and once a second whatever changed; keep it monotonic |
+| `ChangeCapture::reached(&self, Option<Position>)` | `reached(&self, Landed)` |
+| `Stream::watermark()` | removed; `engine::Progress` keeps what each lane landed |
+| `engine::drain_lanes(stream, source, &mut Option<Position>)` | `drain_lanes(stream, source, &Progress, &mut Option<Landed>)` |
+| `Fence::new(source, sinks)` | `Fence::new(source, progress, sinks)` |
+| `IngestEngine::new(source, documents, stream, sinks)`, `SinkEngine::new(name, sink, stream, mappings)` | each takes the deployment's `Arc<Progress>` last: the one both engines over a stream share (`Progress::of(indexes, sinks)`, see below) |
+
+## One lane per index and sink
+
+Each `(index, sink)` pair now has its own lane, its own progress and its own fence. A sink is still one engine, writing all its indexes, but a slow index (a large backfill, a reindex, writes that take long or hang) no longer holds up the sink's other indexes, nor a reader waiting on them: their changes are still written, their fences pass, and the slot is confirmed past them as far as the slow index allows. A deployment needs nothing; nothing is rebuilt.
+
+**Not yet:** a failure still stops the sink as a whole. A document refused under `on_error = "stop"`, a missing index or a failed write fails the sink engine's run; the daemon restarts it with backoff (up to `max_restart_backoff`), and between restarts the other indexes write only briefly, so their fences can time out. Parking only the failing index is a later release. With `writes = 1`, or on an ordered sink (stdout), the one write slot is shared, so a write that hangs holds up every index; with `writes` above 1 one index never takes every slot.
+
+- **`/wait` takes `index`, repeatable.** `index=users&index=orders` waits on those indexes only; without it the wait covers every index, as before. An index that is not enabled is a `404`. The answer echoes `indexes`. See [HTTP endpoints](../reference/http.md#get-waitpositionposition).
+- **`flusso-query` waits on the indexes a read touches**, and once per level and index. A root's `get` or search waits on its index, a combined search, cursor walk or `msearch` on each index it names. `Client::wait_on(position, indexes)` is the explicit form. An older flusso ignores `index` and waits on every index: still correct, only slower to pass.
+- **`/status` reports each lane** under `sinks.<sink>.lanes.<index>`: `applied_position`, `searchable_position`, `outstanding`. The new gauge [`flusso.lane.outstanding{index,sink}`](../reference/metrics.md) names the lane holding back the slot.
+- **The replication slot still waits for every lane**: confirmation is the lowest lane's.
+- **Still sink-wide:** a failed write stops the sink's engine, which restarts with backoff; on restart only the lanes that failed write one item at a time until one lands. A reindex is staged once the sink has no write in flight, so while one index has a write that never returns, a reindex of another index waits, and every index of that sink stops writing until it can be staged. Parking one index, and reindexing one index while the others write, are a later change.
+
+**Embedding the crates.**
+
+| 0.17 | 0.18 |
+| --- | --- |
+| `Stream::lane(&SinkName)` | `Stream::lane(&LaneKey)` (`LaneKey { index, sink }`), plus `Stream::lanes(&SinkName)`: a sink engine's lanes |
+| `ChannelStream::new(capacity, sinks)` | `ChannelStream::new(capacity, lanes)` or `ChannelStream::over(capacity, indexes, sinks)` |
+| `LaneItem::SnapshotComplete` | `LaneItem::SnapshotComplete { index }` |
+| `Request::Backfill { sink, indexes }` | `Request::Backfill { index, sink }`: one request per index |
+| `Progress::new(sinks)` | `Progress::new(lanes)` or `Progress::of(indexes, sinks)` |
+| `Fence::new(source, progress, sinks)` | `Fence::new(source, progress, lanes)` |
+| `FenceRequest { position, level, sink, timeout }` | gains `indexes: Vec<IndexName>`; empty waits on every index. `FenceError::UnknownIndex` is new |
+| `Observer::on_position_applied(&SinkName, …)`, `on_position_searchable` | take the `&LaneKey`; `on_changes_settled(sink, changes)` is new (a batch that gave a sink no item) |
+| `Backends::stream(config)` | `Backends::stream(config, &[LaneKey])` |
+| `MsearchBundle` (`flusso-query`) | gains `indexes()`, defaulting to none (a fence on every index); the tuple bundles name their slots' indexes |
+| `Sink::write` per lane item | the engine calls `Sink::write_parts(&[&[Envelope]], caught_up)`: the items ready at once, merged into one write up to `[batch] max_changes` documents and `Sink::write_limit`. Its default writes each part with `write`, so a sink that implements only `write` works unchanged; override it to send the parts in one request |
+| `SinkEngine` writes one item per write | `SinkEngine::with_write_documents(n)` bounds a merged write (the daemon passes `max_changes`); `SinkEngine::with_merge_wait(d)` bounds how long a ready live item waits for the writes out to merge (the daemon passes `max_delay`, default 50 ms; zero turns it off) |
+
+`Sink::write` is unchanged: every part holds one index's documents, read it off the envelopes when a sink needs it. **Requests per document:** a burst over several indexes goes out in writes of about one batch, close to before this release: one write per index would have tripled the `_bulk` requests, so a live item ready while a write is out waits for it (bounded, see above) and goes out merged.
+
+## An interrupted backfill resumes
+
+0.17 started an interrupted backfill again from the first key: a crash, a stop or a restart at hour 5 of a 6-hour backfill cost 11 hours. 0.18 records, about every 10 s and per sink, how far the backfill has landed, and the next start continues after that point. See [Postgres source](../reference/source-postgres.md), "An interrupted backfill resumes", for when it starts from the first key instead.
+
+- **Nothing to do.** The first 0.18 start finds no recorded point and backfills as before; the next interrupted backfill resumes.
+- **The OpenSearch sink's meta document** in `{prefix}flusso_meta` gains a `walked` field while an index is unseeded. It is dropped when the index is seeded, reindexed, or its physical index is recreated.
+- **A custom `Sink`** inherits defaults that record nothing, so its backfills start from the first key as before. A custom `DocumentBuilder` (or a decorator) gets `walk_mark`, `resume_after` and `compare_keys`, whose defaults resume nothing; a decorator must forward them.
+- **`/status`** gains `sinks.<name>.lanes.<index>.backfill_checkpoints`, and `/metrics` gains `flusso.backfill.checkpoints`.
+
+## A stalled lane is named, measured and alerted on
+
+A lane that lands nothing pins the replication slot for every index. 0.18 says which lane, for how long, and how much WAL it holds (see [A lane is stalled](stalled-lane.md)). Nothing to do; new fields and series only:
+
+- **`/status`:** `pinned_by` at the top level (`{ "index", "sink" }` of the lane holding the slot back, or `null`); under each `sinks.<sink>.lanes.<index>`, `stall_seconds` (how long its oldest outstanding change has stayed its oldest) and `wal_behind_bytes` (WAL the slot keeps behind it, WAL not read yet included). See [HTTP endpoints](../reference/http.md#get-status).
+- **Metrics:** `flusso.lane.stall_age{index,sink}`, `flusso.lane.wal_behind{index,sink}` and `flusso.slot.pinned_by{index,sink}` ([Metrics](../reference/metrics.md)).
+- **The alert `FlussoLaneStalled`** in `dev/prometheus/rules/flusso.rules.yml`: 10 minutes without landing, or 1 GiB of WAL behind a lane silent for a minute, for 5 minutes. Copy it into your own rules.
+- **Helm:** `prometheusRule.enabled` creates a Prometheus Operator `PrometheusRule` with the same alerts (off by default; [Helm chart values](../reference/helm-values.md)).
+- **Logs:** a warning once a lane has landed nothing for 10 minutes and every 10 minutes after; an info line when it lands again.
 
 ## Related
 

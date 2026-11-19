@@ -14,10 +14,13 @@ use futures::stream::{self, BoxStream, StreamExt};
 use kernel::{Envelope, IndexName, Position};
 use sink::{Sink, SinkError, SinkOptions, WriteReport};
 use source::cdc::{ChangeCapture, Continuity, LiveChange};
+use source::document::{Document, DocumentBuilder, DocumentId};
+use source::{RowImage, RowKey};
 use tokio::time::Instant;
 
 use super::{
-    FedSource, ScriptedSource, backendless_config, backends_for, primary, row_event, wait_until,
+    FedSource, ScriptedSource, backendless_config, backends_for, backends_with, primary, row_event,
+    wait_until,
 };
 use crate::Daemon;
 
@@ -107,7 +110,7 @@ async fn a_sink_engine_that_made_progress_restarts_after_one_second_again() {
 
     feed.send(row_event(false, 1)).await.unwrap();
     wait_until("the first batch to be confirmed after a restart", || {
-        confirmed.lock().unwrap().contains(&Position(0))
+        confirmed.lock().unwrap().contains(&Position::new(0))
     })
     .await;
     feed.send(row_event(false, 2)).await.unwrap();
@@ -239,14 +242,14 @@ impl ChangeCapture for ScriptedStreams {
                     *next += 1;
                     *next - 1
                 });
-                let change = stream::iter([Ok((Position(position), row_event(false, 1)))]);
+                let change = stream::iter([Ok((Position::new(position), row_event(false, 1)))]);
                 let pause = stream::once(tokio::time::sleep(after)).filter_map(|()| async { None });
                 Box::pin(change.chain(pause).chain(self.times.failure()))
             }
         })
     }
 
-    fn confirm(&self, _: Position) {}
+    fn confirm(&self, _: source::cdc::Landed) {}
 }
 
 /// A sink whose flush never returns: nothing it is handed is acknowledged.
@@ -267,6 +270,21 @@ impl Sink for NeverFlushes {
 /// Run `capture` with `sink` until `capture` was opened `opened` times, then
 /// abort the deployment: a sink that never acknowledges would hold a graceful
 /// stop's drain for ever.
+/// Wait until the source was opened `count` times, failing after ten
+/// minutes of (paused) time: a run that never opens it fails instead of
+/// spinning.
+async fn opened(times: &RunTimes, count: usize) {
+    let deadline = Instant::now() + Duration::from_secs(600);
+    while times.opened() < count {
+        assert!(
+            Instant::now() < deadline,
+            "opened {} of {count} times",
+            times.opened()
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 async fn run_until_opened(
     capture: Arc<dyn ChangeCapture>,
     times: &Arc<RunTimes>,
@@ -277,9 +295,7 @@ async fn run_until_opened(
     let backends = backends_for(capture, vec![(primary(), sink, SinkOptions::default())]);
     let running = Daemon::new(config, backends).start().await.unwrap();
     let run = tokio::spawn(running.run(std::future::pending::<()>()));
-    while times.opened() < opened {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    self::opened(&times, opened).await;
     run.abort();
 }
 
@@ -324,15 +340,12 @@ async fn an_ingest_engine_replaying_an_unconfirmed_change_doubles_its_backoff() 
     assert_eq!(waits, [1, 2, 4, 8]);
 }
 
-/// A live stream that stays open, and a backfill that publishes its first
-/// page then fails at the same row every time it is served.
+/// A live stream that stays open.
 #[derive(Debug, Default)]
-struct BackfillFailingAtOneRow {
-    times: Arc<RunTimes>,
-}
+struct OpenSource;
 
 #[async_trait]
-impl ChangeCapture for BackfillFailingAtOneRow {
+impl ChangeCapture for OpenSource {
     async fn continuity(&self) -> source::Result<Continuity> {
         Ok(Continuity::Resumed)
     }
@@ -345,34 +358,89 @@ impl ChangeCapture for BackfillFailingAtOneRow {
         Ok(Box::pin(stream::pending()))
     }
 
-    fn confirm(&self, _: Position) {}
+    fn confirm(&self, _: source::cdc::Landed) {}
+}
 
-    async fn snapshot(
+/// A backfill that reads and publishes its first page, then fails at the
+/// second every time it is served.
+#[derive(Debug, Default)]
+struct BackfillFailingAtOnePage {
+    times: Arc<RunTimes>,
+}
+
+#[async_trait]
+impl DocumentBuilder for BackfillFailingAtOnePage {
+    async fn resolve(
         &self,
-        _: &[source::SnapshotTable],
-    ) -> source::Result<BoxStream<'static, source::Result<source::cdc::ChangeEvent>>> {
+        _: &kernel::TableName,
+        _: &RowKey,
+        _: Option<&RowImage>,
+        _: Option<&RowImage>,
+    ) -> source::Result<Vec<DocumentId>> {
+        Ok(Vec::new())
+    }
+
+    async fn build(&self, id: &DocumentId) -> source::Result<Document> {
+        Ok(Document::Upsert {
+            id: id.clone(),
+            body: kernel::GenericValue::Map(Default::default()),
+        })
+    }
+
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        vec![IndexName::try_new("users").unwrap()]
+    }
+
+    async fn index_mappings(&self) -> source::Result<Vec<kernel::IndexMapping>> {
+        Ok(vec![kernel::IndexMapping {
+            index: IndexName::try_new("users").unwrap(),
+            hash: kernel::ContentHash::new(1),
+            fields: Vec::new(),
+        }])
+    }
+
+    async fn last_key(&self, _: &IndexName) -> source::Result<Option<RowKey>> {
+        Ok(Some(row_event(false, i64::MAX).key().clone()))
+    }
+
+    async fn keys(
+        &self,
+        _: &IndexName,
+        after: Option<&RowKey>,
+        _through: &RowKey,
+        limit: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        if after.is_some() {
+            self.times.failed.lock().unwrap().push(Instant::now());
+            return Err(source::SourceError::Connection(
+                "simulated failure at the second page".to_owned(),
+            ));
+        }
         self.times.opened.lock().unwrap().push(Instant::now());
-        let first_page = stream::iter([Ok(row_event(false, 10))]);
-        let times = Arc::clone(&self.times);
-        let failure = stream::once(async move {
-            times.failed.lock().unwrap().push(Instant::now());
-            Err(source::SourceError::Connection(
-                "simulated failure at row 11".to_owned(),
-            ))
-        });
-        Ok(Box::pin(first_page.chain(failure)))
+        let first = i64::try_from(limit).unwrap();
+        Ok((1..=first)
+            .map(|id| row_event(false, id).key().clone())
+            .collect())
     }
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_backfill_failing_at_the_same_row_doubles_its_backoff() {
-    let source = Arc::new(BackfillFailingAtOneRow::default());
-    let times = Arc::clone(&source.times);
-    let mut config = backendless_config();
-    config.batch.max_changes = std::num::NonZeroUsize::new(1);
+async fn a_backfill_failing_at_the_same_page_doubles_its_backoff() {
+    let documents = Arc::new(BackfillFailingAtOnePage::default());
+    let times = Arc::clone(&documents.times);
     let sink = Arc::new(ScriptedFlushes::new(&[]).unseeded());
-
-    run_until_opened(source, &times, 5, sink, config).await;
+    let backends = backends_with(
+        Arc::new(OpenSource),
+        documents,
+        vec![(primary(), sink, SinkOptions::default())],
+    );
+    let running = Daemon::new(backendless_config(), backends)
+        .start()
+        .await
+        .unwrap();
+    let run = tokio::spawn(running.run(std::future::pending::<()>()));
+    opened(&times, 5).await;
+    run.abort();
 
     assert_eq!(times.waits(), [1, 2, 4, 8]);
 }
@@ -394,8 +462,8 @@ impl ChangeCapture for ReplaysUnderNewPositions {
     async fn live(&self) -> source::Result<BoxStream<'static, source::Result<LiveChange>>> {
         self.0.live().await
     }
-    fn confirm(&self, _: Position) {}
-    fn reached(&self, _: Option<Position>) -> Option<source::cdc::SourcePosition> {
+    fn confirm(&self, _: source::cdc::Landed) {}
+    fn reached(&self, _: source::cdc::Landed) -> Option<source::cdc::SourcePosition> {
         Some(source::cdc::SourcePosition(41))
     }
 }

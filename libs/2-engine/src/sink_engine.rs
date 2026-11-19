@@ -22,17 +22,17 @@
 //! one [`Sink::write`], several at once but never two holding the same
 //! document, decides item-level rejections by the failure policies, and
 //! acknowledges: write-then-ack is what makes delivery at-least-once, because
-//! the acknowledgement is what moves this lane's watermark, and the lane's
-//! watermark never passes an item still being written. A `SnapshotComplete`
+//! an item counts as landed in the engine's [`Progress`] only once its write
+//! returned, and an item not acknowledged is delivered again. A `SnapshotComplete`
 //! marker records its indexes as seeded once everything before it is written.
 //! A reindex arrives as a control message and is staged once the writes in
 //! flight returned: `reindex` + `ensure_index` on the sink, then a fresh
 //! `Backfill` request.
 //!
-//! The loop also reports the sink's two **fence levels** to the observer, in
-//! position order whatever order the writes finish in (`fences`). *Applied* is
-//! the last position before the oldest one still being written, reported
-//! before the acknowledgement that lets the watermark pass it. *Searchable*
+//! The loop also reports the sink's two **fence levels** to the progress and
+//! the observer, in position order whatever order the writes finish in
+//! (`fences`). *Applied* is the last position before the oldest one still
+//! being written, reported before the item's acknowledgement. *Searchable*
 //! trails it by what each write reported ([`Visibility`](sink::Visibility)), so a searchable
 //! position always means "this and everything before it". The engine only
 //! observes; nothing here asks the sink to refresh because a reader waits.
@@ -46,7 +46,7 @@ use futures::stream::FuturesUnordered;
 use kernel::{IndexMapping, IndexName, SinkName};
 use sink::{Sink, SinkOptions};
 use source::cdc::Continuity;
-use stream::{Request, Stream};
+use stream::{LaneKey, Request, Stream, WalkMark};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant, sleep_until};
 
@@ -55,6 +55,7 @@ use self::fences::Fences;
 use crate::error::{EngineError, Result, StagingFailures};
 use crate::observer::{EngineId, NoopObserver, Observer, Stage, StageTiming, StartupStep};
 use crate::policy::FailurePolicies;
+use crate::progress::Progress;
 use crate::stop::Stop;
 
 /// How many of a sink's indexes are staged at once.
@@ -71,8 +72,32 @@ pub(crate) const STAGE_CONCURRENCY: usize = 8;
 const IDLE_TICK: Duration = Duration::from_secs(1);
 
 mod fences;
-mod flights;
+pub(crate) mod flights;
+mod walked;
 mod writes;
+
+/// Which lanes a failed run is blamed on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Blame {
+    /// The last run ended cleanly: no barrier, every landing is progress.
+    Nobody,
+    /// A fresh engine, or a failure no one lane caused: every lane has a
+    /// barrier, every landing is progress.
+    Everyone,
+    /// A failure on these lanes: only they have a barrier, and only a landing
+    /// on them is progress.
+    Lanes(BTreeSet<LaneKey>),
+}
+
+impl Blame {
+    /// Whether `lane` is blamed (or nothing is, and so everyone counts).
+    pub(crate) fn covers(&self, lane: &LaneKey) -> bool {
+        match self {
+            Blame::Nobody | Blame::Everyone => true,
+            Blame::Lanes(lanes) => lanes.contains(lane),
+        }
+    }
+}
 
 /// An operation the daemon hands a running sink engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +136,9 @@ pub struct SinkEngine {
     /// its place and a position written before a failure is still reported
     /// once its time comes.
     fences: Mutex<Fences>,
+    /// Where landings and searchable positions are reported, for
+    /// confirmation and fences.
+    progress: Arc<Progress>,
     stop: Stop,
     /// Indexes whose snapshot batches were acknowledged unapplied during a
     /// stop: their `SnapshotComplete` must not mark them seeded.
@@ -120,6 +148,11 @@ pub struct SinkEngine {
     advanced: AtomicU64,
     /// Lane items written at once.
     writes: usize,
+    /// The most documents one write holds when ready items are merged.
+    write_documents: usize,
+    /// The longest a ready live item waits for the writes out, to go out
+    /// merged with what else is ready.
+    pub(crate) merge_wait: std::time::Duration,
     /// A reindex taken off the control channel and not yet staged. It
     /// outlives a run, so a run failing with writes in flight doesn't lose a
     /// reindex the daemon already accepted; the next run stages it once its
@@ -130,21 +163,23 @@ pub struct SinkEngine {
     /// Whether `pending_reindex` holds one: the run asks every turn, so
     /// the answer is read without the lock.
     reindex_waiting: AtomicBool,
-    /// The last run ended in an error, or none has run yet: the next run
-    /// writes the oldest item alone before anything else (see `writes`). A
-    /// fresh engine starts with it set, since a previous process may have
-    /// stopped on that item.
-    failed_run: AtomicBool,
+    /// Which lanes the last run's failure is blamed on: their next run writes
+    /// its oldest item alone before anything else (see `writes`). A fresh
+    /// engine blames every lane, since a previous process may have stopped
+    /// on any.
+    blame: Mutex<Blame>,
 }
 
 impl SinkEngine {
     /// An engine for `sink`, named `name` in the config, over its lane on
-    /// `stream`, maintaining `mappings`.
+    /// `stream`, maintaining `mappings`, reporting what lands to `progress`:
+    /// the one the ingest engine over `stream` registers in.
     pub fn new(
         name: SinkName,
         sink: Arc<dyn Sink>,
         stream: Arc<dyn Stream>,
         mappings: Vec<IndexMapping>,
+        progress: Arc<Progress>,
     ) -> Self {
         Self {
             name,
@@ -157,11 +192,14 @@ impl SinkEngine {
             skip_backfill: false,
             outstanding: Mutex::new(BTreeSet::new()),
             fences: Mutex::new(Fences::default()),
+            progress,
             stop: Stop::new(),
             skipped: Mutex::new(BTreeSet::new()),
             advanced: AtomicU64::new(0),
             writes: 1,
-            failed_run: AtomicBool::new(true),
+            write_documents: crate::BatchPolicy::default().max_changes,
+            merge_wait: crate::BatchPolicy::default().max_delay,
+            blame: Mutex::new(Blame::Everyone),
             pending_reindex: Mutex::new(None),
             reindex_waiting: AtomicBool::new(false),
         }
@@ -186,6 +224,32 @@ impl SinkEngine {
     /// is the default. The daemon sets `[concurrency] writes`.
     pub fn with_writes(mut self, writes: usize) -> Self {
         self.writes = writes.max(1);
+        self
+    }
+
+    /// The most documents one write holds: items ready at once (across lanes,
+    /// and several of one lane) are merged into one write up to it, never
+    /// splitting an item, and below the sink's own
+    /// [`write_limit`](sink::Sink::write_limit). The default is
+    /// [`BatchPolicy`](crate::BatchPolicy)'s `max_changes`; the daemon sets
+    /// `[batch] max_changes`, so a write holds about one batch, as with one
+    /// lane per sink.
+    pub fn with_write_documents(mut self, documents: usize) -> Self {
+        self.write_documents = documents.max(1);
+        self
+    }
+
+    /// The longest a live item ready while a write is out waits for the writes
+    /// out to return, so it goes out in one write with what else is ready
+    /// (fewer, larger requests, as one lane per sink wrote one batch over
+    /// every index). Bounded from when the item became ready; a write out
+    /// longer than this is not waited for, so a stalled or slow lane holds no
+    /// other index's writes past it. Never for backfill, an ordered sink, a
+    /// sink with one lane, or without merging. The default is
+    /// [`BatchPolicy`](crate::BatchPolicy)'s `max_delay`, which the daemon
+    /// sets from `[batch] max_delay_ms`; zero turns the wait off.
+    pub fn with_merge_wait(mut self, wait: std::time::Duration) -> Self {
+        self.merge_wait = wait;
         self
     }
 
@@ -252,22 +316,33 @@ impl SinkEngine {
 
         if continuity == Continuity::Fresh {
             self.rebuild_stale_seeds(&mut seeded).await?;
+            self.forget_walks(&mut seeded).await?;
         }
 
         let already_requested = self.outstanding();
-        let unseeded: Vec<IndexName> = seeded
+        let unseeded: Vec<(IndexName, Option<WalkMark>)> = seeded
             .into_iter()
-            .filter(|(mapping, seeded)| !seeded && !already_requested.contains(&mapping.index))
-            .map(|(mapping, _)| mapping.index.clone())
+            .filter(|(mapping, _)| !already_requested.contains(&mapping.index))
+            .filter_map(|(mapping, staged)| match staged {
+                Staged::Seeded => None,
+                Staged::Unseeded(walked) => Some((mapping.index.clone(), walked)),
+            })
             .collect();
         if self.skip_backfill {
             if !unseeded.is_empty() {
                 tracing::warn!(
-                    indexes = ?unseeded.iter().map(|i| i.as_ref()).collect::<Vec<_>>(),
+                    indexes = ?unseeded.iter().map(|(i, _)| i.as_ref()).collect::<Vec<_>>(),
                     "skipping backfill (skip_backfill set); these indexes stay unseeded"
                 );
             }
         } else if !unseeded.is_empty() {
+            // A start in the middle of a rebuild: reads still see the old copy,
+            // so a fence must vouch for nothing of it (#379).
+            for (index, _) in &unseeded {
+                if self.sink.is_rebuilding(index).await? {
+                    self.observer.on_index_rebuilding(&self.name, index);
+                }
+            }
             self.request_backfill(unseeded).await?;
         } else {
             tracing::info!("every index is seeded; no backfill needed");
@@ -295,10 +370,10 @@ impl SinkEngine {
     ///
     /// `seeded` is each index with whether it is seeded; a rebuilt index's
     /// answer is asked again.
-    async fn rebuild_stale_seeds(&self, seeded: &mut [(&IndexMapping, bool)]) -> Result<()> {
+    async fn rebuild_stale_seeds(&self, seeded: &mut [(&IndexMapping, Staged)]) -> Result<()> {
         let stale: Vec<&IndexMapping> = seeded
             .iter()
-            .filter(|(_, seeded)| *seeded)
+            .filter(|(_, staged)| *staged == Staged::Seeded)
             .map(|(mapping, _)| *mapping)
             .collect();
         if stale.is_empty() {
@@ -325,9 +400,29 @@ impl SinkEngine {
         Ok(())
     }
 
+    /// The source has no resume point, so where an unseeded index's last
+    /// backfill got means nothing any more: the changes since are lost. Forget
+    /// it before the source prepares (the daemon's order), so that a crash
+    /// before the new walk records anything never resumes the old one.
+    async fn forget_walks(&self, staged: &mut [(&IndexMapping, Staged)]) -> Result<()> {
+        for (mapping, state) in staged.iter_mut() {
+            if let Staged::Unseeded(walked @ Some(_)) = state {
+                tracing::warn!(index = %mapping.index, "the source has no resume point, so this index's unfinished backfill starts again from the first key");
+                self.sink
+                    .forget_walked(&mapping.index)
+                    .await
+                    .map_err(|error| {
+                        EngineError::Staging(StagingFailures(vec![(mapping.index.clone(), error)]))
+                    })?;
+                *walked = None;
+            }
+        }
+        Ok(())
+    }
+
     /// Run `step` for each of `mappings`, at most [`STAGE_CONCURRENCY`] at
-    /// once, and return each mapping with whether it is seeded (`false` when
-    /// not asked), in the order given.
+    /// once, and return each mapping with what staging learned of it
+    /// (unseeded with no checkpoint when not asked), in the order given.
     ///
     /// After a failure no further index is started: a destination that is
     /// down or never answers fails every index alike, and each wave would cost
@@ -338,7 +433,7 @@ impl SinkEngine {
         &self,
         mappings: impl IntoIterator<Item = &'a IndexMapping>,
         step: Step,
-    ) -> Result<Vec<(&'a IndexMapping, bool)>> {
+    ) -> Result<Vec<(&'a IndexMapping, Staged)>> {
         let mut waiting = mappings.into_iter().enumerate();
         let mut running = FuturesUnordered::new();
         let mut outcomes = Vec::new();
@@ -373,31 +468,47 @@ impl SinkEngine {
     }
 
     /// One index's staging steps, in order.
-    async fn step(&self, step: Step, mapping: &IndexMapping) -> sink::Result<bool> {
+    async fn step(&self, step: Step, mapping: &IndexMapping) -> sink::Result<Staged> {
         let ask_seeded = match step {
             Step::Ensure { ask_seeded } => ask_seeded,
             Step::Rebuild { ask_seeded } => {
+                // Before the sink moves its writes: a fence must stop vouching
+                // for this index first (#379).
+                self.observer
+                    .on_index_rebuilding(&self.name, &mapping.index);
                 self.sink.reindex(mapping).await?;
                 ask_seeded
             }
         };
         self.sink.ensure_index(mapping).await?;
-        if ask_seeded {
-            self.sink.is_seeded(&mapping.index).await
-        } else {
-            Ok(false)
+        if !ask_seeded {
+            return Ok(Staged::Unseeded(None));
         }
+        Ok(match self.sink.seeding(&mapping.index).await? {
+            sink::Seeding::Seeded => Staged::Seeded,
+            sink::Seeding::Unseeded { walked } => Staged::Unseeded(walked.map(WalkMark::new)),
+            _ => Staged::Unseeded(None),
+        })
     }
 
-    async fn request_backfill(&self, indexes: Vec<IndexName>) -> Result<()> {
-        tracing::info!(indexes = indexes.len(), "requesting backfill");
+    /// Ask for a backfill of each index, after where its last one durably
+    /// got, if anywhere.
+    async fn request_backfill(&self, requests: Vec<(IndexName, Option<WalkMark>)>) -> Result<()> {
+        tracing::info!(indexes = requests.len(), "requesting backfill");
         let producer = self.stream.requests()?.producer;
-        producer
-            .publish(Request::Backfill {
-                sink: self.name.clone(),
-                indexes: indexes.clone(),
-            })
-            .await?;
+        for (index, after) in &requests {
+            if after.is_some() {
+                tracing::info!(%index, sink = %self.name, "requesting a resumed backfill: its last walk recorded how far it got");
+            }
+            producer
+                .publish(Request::Backfill {
+                    index: index.clone(),
+                    sink: self.name.clone(),
+                    after: after.clone(),
+                })
+                .await?;
+        }
+        let indexes: Vec<IndexName> = requests.into_iter().map(|(index, _)| index).collect();
         self.lock_outstanding().extend(indexes.iter().cloned());
         self.observer.on_backfill_requested(&self.name, &indexes);
         Ok(())
@@ -420,7 +531,11 @@ impl SinkEngine {
     #[tracing::instrument(name = "sink.run", skip_all, fields(sink = %self.name))]
     pub async fn run(&self, control: &mut mpsc::Receiver<SinkControl>) -> Result<()> {
         let result = self.run_inner(control).await;
-        self.failed_run.store(result.is_err(), Ordering::Relaxed);
+        match &result {
+            Ok(()) => self.set_blame(Blame::Nobody),
+            Err(_) if matches!(self.blame(), Blame::Nobody) => self.set_blame(Blame::Everyone),
+            Err(_) => {}
+        }
         let id = EngineId::Sink(self.name.clone());
         match &result {
             Ok(()) => {
@@ -436,8 +551,32 @@ impl SinkEngine {
     }
 
     async fn run_inner(&self, control: &mut mpsc::Receiver<SinkControl>) -> Result<()> {
-        let lane = self.stream.lane(&self.name)?.consumer;
-        writes::Run::new(self, lane).run(control).await
+        self.progress.check_lanes(self.lane_keys().iter())?;
+        let lanes = self
+            .lane_keys()
+            .into_iter()
+            .map(|key| Ok((key.clone(), self.stream.lane(&key)?.consumer)))
+            .collect::<Result<Vec<_>>>()?;
+        writes::Run::new(self, lanes).run(control).await
+    }
+
+    /// The lanes this engine reads: one per index it maintains.
+    fn lane_keys(&self) -> Vec<LaneKey> {
+        self.mappings
+            .iter()
+            .map(|mapping| LaneKey::new(mapping.index.clone(), self.name.clone()))
+            .collect()
+    }
+
+    pub(super) fn blame(&self) -> Blame {
+        self.blame
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(super) fn set_blame(&self, blame: Blame) {
+        *self.blame.lock().unwrap_or_else(PoisonError::into_inner) = blame;
     }
 
     /// Close an idle window (nothing in flight, nothing taken) and report it;
@@ -509,17 +648,25 @@ impl SinkEngine {
             tracing::info!(%index, "reindex requested; staging a fresh generation");
             chosen.push(mapping);
         }
-        let staged: Vec<IndexName> = self
+        let staged: Vec<(IndexName, Option<WalkMark>)> = self
             .each_index(chosen, Step::Rebuild { ask_seeded: false })
             .await?
             .into_iter()
-            .map(|(mapping, _)| mapping.index.clone())
+            .map(|(mapping, _)| (mapping.index.clone(), None))
             .collect();
         if !staged.is_empty() {
             self.request_backfill(staged).await?;
         }
         Ok(())
     }
+}
+
+/// What staging learned of an index.
+#[derive(Debug, Clone, PartialEq)]
+enum Staged {
+    Seeded,
+    /// Unseeded, with where its last backfill durably got, if recorded.
+    Unseeded(Option<WalkMark>),
 }
 
 /// Sleep until `at`; never, when nothing is waiting on time. Keeps the loop

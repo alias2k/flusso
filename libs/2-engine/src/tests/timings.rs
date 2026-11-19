@@ -70,12 +70,12 @@ const RESOLVE: Duration = Duration::from_millis(2);
 const BUILD: Duration = Duration::from_millis(30);
 const APPLY: Duration = Duration::from_millis(1);
 const FLUSH: Duration = Duration::from_millis(50);
-const ROW_FETCH: Duration = Duration::from_millis(10);
+const PAGE_FETCH: Duration = Duration::from_millis(10);
 const SEED: Duration = Duration::from_millis(20);
 const REINDEX: Duration = Duration::from_millis(40);
 
-/// [`MockDocuments`] that takes [`RESOLVE`] per change and [`BUILD`] per
-/// batch.
+/// [`MockDocuments`] that takes [`RESOLVE`] per change, [`BUILD`] per batch
+/// and [`PAGE_FETCH`] per key page.
 #[derive(Debug, Default)]
 struct SlowDocuments(MockDocuments);
 
@@ -101,8 +101,23 @@ impl DocumentBuilder for SlowDocuments {
         self.0.build_many(ids).await
     }
 
-    fn backfill_scopes(&self) -> Vec<IndexScope> {
-        self.0.backfill_scopes()
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        self.0.backfill_indexes()
+    }
+
+    async fn last_key(&self, index: &IndexName) -> source::Result<Option<RowKey>> {
+        self.0.last_key(index).await
+    }
+
+    async fn keys(
+        &self,
+        index: &IndexName,
+        after: Option<&RowKey>,
+        through: &RowKey,
+        limit: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        tokio::time::sleep(PAGE_FETCH).await;
+        self.0.keys(index, after, through, limit).await
     }
 
     async fn index_mappings(&self) -> source::Result<Vec<IndexMapping>> {
@@ -154,46 +169,12 @@ impl Sink for SlowSink {
     }
 }
 
-/// A source whose snapshot fetches each row for [`ROW_FETCH`].
-#[derive(Debug)]
-struct SlowSnapshot(MockSource);
-
-#[async_trait]
-impl ChangeCapture for SlowSnapshot {
-    async fn continuity(&self) -> source::Result<Continuity> {
-        self.0.continuity().await
-    }
-
-    async fn prepare(&self) -> source::Result<()> {
-        self.0.prepare().await
-    }
-
-    async fn live(&self) -> source::Result<BoxStream<'static, source::Result<LiveChange>>> {
-        self.0.live().await
-    }
-
-    fn confirm(&self, position: Position) {
-        self.0.confirm(position);
-    }
-
-    async fn snapshot(
-        &self,
-        _: &[SnapshotTable],
-    ) -> source::Result<BoxStream<'static, source::Result<ChangeEvent>>> {
-        use futures::StreamExt;
-        let rows = self.0.snapshot_rows.clone();
-        Ok(Box::pin(futures::stream::iter(rows).then(|row| async {
-            tokio::time::sleep(ROW_FETCH).await;
-            Ok(row)
-        })))
-    }
-}
-
 /// Run one ingest engine over `source` and one sink engine over `sink`, on a
 /// lane holding `capacity` items, until the live stream ends and the lane is
-/// drained.
+/// drained. A backfill pages `rows`.
 async fn run(
     source: Arc<dyn ChangeCapture>,
+    rows: Vec<RowKey>,
     sink: Arc<dyn Sink>,
     capacity: usize,
     batch: BatchPolicy,
@@ -201,12 +182,18 @@ async fn run(
     let timings = Arc::new(Timings::default());
     let observer: Arc<dyn Observer> = Arc::clone(&timings) as Arc<dyn Observer>;
     let primary = sink_name("primary");
-    let stream = Arc::new(ChannelStream::new(capacity, [primary.clone()]));
+    let stream = Arc::new(ChannelStream::over(
+        capacity,
+        [super::users()],
+        [primary.clone()],
+    ));
+    let progress = Arc::new(crate::Progress::of([super::users()], [primary.clone()]));
     let engine = SinkEngine::new(
         primary.clone(),
         sink,
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![mapping()],
+        Arc::clone(&progress),
     )
     .with_observer(Arc::clone(&observer));
     engine.stage(Continuity::Resumed).await.unwrap();
@@ -214,10 +201,15 @@ async fn run(
     let task = tokio::spawn(async move { engine.run(&mut rx).await });
     IngestEngine::new(
         source,
-        Arc::new(SlowDocuments::default()),
+        Arc::new(SlowDocuments(MockDocuments {
+            rows,
+            ..MockDocuments::default()
+        })),
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![primary],
+        Arc::clone(&progress),
     )
+    .with_budget(std::sync::Arc::new(crate::Budget::new(usize::MAX / 4)))
     .with_batch(batch)
     .with_observer(observer)
     .run()
@@ -240,7 +232,7 @@ fn batch(max_changes: usize) -> BatchPolicy {
 #[tokio::test(start_paused = true)]
 async fn a_live_batch_reports_each_stage_once_with_the_time_it_took() {
     let source = Arc::new(MockSource::new(vec![upsert(1), upsert(2), upsert(3)]));
-    let timings = run(source, SlowSink::new(true), 64, batch(256)).await;
+    let timings = run(source, Vec::new(), SlowSink::new(true), 64, batch(256)).await;
 
     let live = Some(Work::Live);
     let primary = Some("primary".to_owned());
@@ -296,7 +288,7 @@ async fn a_full_lane_shows_as_time_waiting_to_publish() {
     const CHANGES: u32 = 6;
     let changes: Vec<ChangeEvent> = (1..=CHANGES as i64).map(upsert).collect();
     let source = Arc::new(MockSource::new(changes));
-    let timings = run(source, SlowSink::new(true), 1, batch(1)).await;
+    let timings = run(source, Vec::new(), SlowSink::new(true), 1, batch(1)).await;
 
     let lane_wait = timings.of(Stage::LaneWait);
     let publish = timings.of(Stage::Publish);
@@ -321,26 +313,24 @@ async fn a_full_lane_shows_as_time_waiting_to_publish() {
 
 #[tokio::test(start_paused = true)]
 async fn a_backfill_reports_its_pages_snapshot_and_seed_and_tags_its_work() {
-    let rows: Vec<ChangeEvent> = (1..=5).map(upsert).collect();
-    let source = Arc::new(SlowSnapshot(
-        MockSource::new(Vec::new()).with_snapshot(rows),
-    ));
-    let timings = run(source, SlowSink::new(false), 64, batch(2)).await;
+    let rows: Vec<RowKey> = (1..=5).map(key).collect();
+    let source = Arc::new(MockSource::new(Vec::new()));
+    let timings = run(source, rows, SlowSink::new(false), 64, batch(2)).await;
 
     let backfill = Some(Work::Backfill);
     let page = timings.of(Stage::Page);
     assert!(page.iter().all(|t| t.1 == backfill && t.2.is_none()));
     assert_eq!(
         timings.total(Stage::Page),
-        ROW_FETCH * 5,
-        "every row's fetch is counted once: {page:?}"
+        PAGE_FETCH,
+        "the one page's fetch is counted once: {page:?}"
     );
     assert!(
         timings
             .of(Stage::Idle)
             .iter()
             .filter(|t| t.2.is_none())
-            .all(|t| t.3 < ROW_FETCH),
+            .all(|t| t.3 < PAGE_FETCH),
         "a wait for the snapshot is a page, not ingest idle time"
     );
     let builds = timings.of(Stage::Build);
@@ -384,12 +374,14 @@ async fn a_quiet_pipeline_reports_idle_every_second_and_a_reindex_is_not_idle() 
     let timings = Arc::new(Timings::default());
     let observer: Arc<dyn Observer> = Arc::clone(&timings) as Arc<dyn Observer>;
     let primary = sink_name("primary");
-    let stream = Arc::new(ChannelStream::new(64, [primary.clone()]));
+    let stream = Arc::new(ChannelStream::over(64, [super::users()], [primary.clone()]));
+    let progress = Arc::new(crate::Progress::of([super::users()], [primary.clone()]));
     let engine = SinkEngine::new(
         primary.clone(),
         SlowSink::new(true),
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![mapping()],
+        Arc::clone(&progress),
     )
     .with_observer(Arc::clone(&observer));
     engine.stage(Continuity::Resumed).await.unwrap();
@@ -401,7 +393,9 @@ async fn a_quiet_pipeline_reports_idle_every_second_and_a_reindex_is_not_idle() 
         Arc::new(SlowDocuments::default()),
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![primary],
+        Arc::clone(&progress),
     )
+    .with_budget(std::sync::Arc::new(crate::Budget::new(usize::MAX / 4)))
     .with_observer(observer);
     let ingest_task = tokio::spawn(async move { ingest.run().await });
 
@@ -457,7 +451,7 @@ async fn a_quiet_pipeline_reports_idle_every_second_and_a_reindex_is_not_idle() 
 #[tokio::test(start_paused = true)]
 async fn start_up_reports_staging_per_sink_then_prepare_and_the_live_stream() {
     let source = Arc::new(MockSource::new(vec![upsert(1)]));
-    let timings = run(source, SlowSink::new(true), 64, batch(256)).await;
+    let timings = run(source, Vec::new(), SlowSink::new(true), 64, batch(256)).await;
 
     let steps: Vec<(StartupStep, Option<String>)> = timings
         .startup

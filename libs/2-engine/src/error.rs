@@ -51,6 +51,15 @@ pub enum EngineError {
     /// its own error; the indexes not listed were staged or never started.
     #[error("{0}")]
     Staging(StagingFailures),
+
+    /// A lane of the stream has no place in the engine's [`Progress`](crate::Progress):
+    /// what is routed to it could never hold confirmation back, so the engine
+    /// refuses to run. Build the stream and the progress from the same lanes.
+    #[error(
+        "the stream's lane `{0}` is not in the engine's progress; build the stream and the \
+         progress from the same lanes"
+    )]
+    LaneNotInProgress(String),
 }
 
 /// The indexes a sink failed to stage, in the sink's index order, each with

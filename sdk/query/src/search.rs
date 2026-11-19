@@ -596,12 +596,19 @@ impl<T> Search<T> {
     pub async fn ids(&self, client: &Client) -> Result<Vec<String>> {
         self.runnable()?;
         let body = self.ids_body();
-        let response = client.search_at(&self.physical_index(), &body).await?;
+        let response = client
+            .search_at(&self.physical_index(), &[&self.index], &body)
+            .await?;
         let raw: RawIdsResponse = serde_json::from_value(response)?;
         let ids: Vec<String> = raw.hits.hits.into_iter().map(|hit| hit.id).collect();
         tracing::Span::current().record("returned", ids.len());
         tracing::debug!(returned = ids.len(), "ids search completed");
         Ok(ids)
+    }
+
+    /// The logical index this query reads: what a fence waits on.
+    pub(crate) fn index(&self) -> &str {
+        &self.index
     }
 
     /// The physical index this query addresses (`{index}_{hash}` — exactly
@@ -630,7 +637,9 @@ impl<T> Search<T> {
     pub async fn count(&self, client: &Client) -> Result<u64> {
         self.runnable()?;
         let body = self.count_body();
-        let response = client.count_at(&self.physical_index(), &body).await?;
+        let response = client
+            .count_at(&self.physical_index(), &[&self.index], &body)
+            .await?;
         let raw: RawCount = serde_json::from_value(response)?;
         tracing::Span::current().record("count", raw.count);
         tracing::debug!(count = raw.count, "count completed");
@@ -658,7 +667,9 @@ where
     pub async fn send(&self, client: &Client) -> Result<SearchResponse<T>> {
         self.runnable()?;
         let body = self.body();
-        let mut response = client.search_at(&self.physical_index(), &body).await?;
+        let mut response = client
+            .search_at(&self.physical_index(), &[&self.index], &body)
+            .await?;
         let paths = self.nested_paths();
         if !paths.is_empty() {
             merge_inner_hits(&mut response, &paths);
@@ -760,6 +771,7 @@ impl<T> CursorSearch<T> {
             body,
             tiebreak: SINGLE_INDEX_TIEBREAK,
             targets: vec![self.search.physical_index()],
+            indexes: vec![self.search.index.as_str()],
             cursor,
             pin: self.pin,
         })

@@ -36,13 +36,16 @@ pub(crate) struct OtelObserver {
     documents_built: Counter<u64>,
     batches: Counter<u64>,
     indexes_seeded: Counter<u64>,
+    backfill_checkpoints: Counter<u64>,
     documents_quarantined: Counter<u64>,
     script_failures: Counter<u64>,
     errors: Counter<u64>,
+    refreshes: Counter<u64>,
     flush_duration: Histogram<f64>,
     flush_documents: Histogram<u64>,
     flush_size: Histogram<u64>,
     stage_duration: Histogram<f64>,
+    memory_wait: Histogram<f64>,
     startup_duration: Gauge<f64>,
     slot_lag: Gauge<u64>,
     indexes: Gauge<u64>,
@@ -85,6 +88,13 @@ impl OtelObserver {
                 .u64_counter("flusso.indexes.seeded")
                 .with_description("Indexes whose backfill completed on a sink this run")
                 .build(),
+            backfill_checkpoints: meter
+                .u64_counter("flusso.backfill.checkpoints")
+                .with_description(
+                    "Times a sink recorded how far a lane's backfill durably got, so a restart \
+                     resumes after it",
+                )
+                .build(),
             documents_quarantined: meter
                 .u64_counter("flusso.documents.quarantined")
                 .with_description(
@@ -105,6 +115,13 @@ impl OtelObserver {
             errors: meter
                 .u64_counter("flusso.errors")
                 .with_description("Errors that stopped an engine (the daemon restarts it)")
+                .build(),
+            refreshes: meter
+                .u64_counter("flusso.sink.refreshes")
+                .with_description(
+                    "Requests a sink sent that refresh the destination (OpenSearch: `_refresh` \
+                     calls and `_bulk` requests with `?refresh=true`)",
+                )
                 .build(),
             flush_duration: meter
                 .f64_histogram("flusso.flush.duration")
@@ -129,6 +146,16 @@ impl OtelObserver {
                      snapshot, write, seed, reindex), work (live, backfill), sink and index \
                      where known. rate(_sum) is busy seconds per wall second: the mean number \
                      in flight, above 1 when a task runs the stage concurrently.",
+                )
+                .build(),
+            memory_wait: meter
+                .f64_histogram("flusso.memory.wait")
+                .with_unit("s")
+                .with_description(
+                    "How long a batch the memory budget held back waited before it was \
+                     granted, by work (live, backfill) and the event that let it go (released: \
+                     a sink acknowledged bytes; landed, change, page; tick: the once-a-second \
+                     backstop; settle).",
                 )
                 .build(),
             startup_duration: meter
@@ -190,6 +217,16 @@ impl Observer for OtelObserver {
         );
     }
 
+    fn on_budget_wait(&self, work: daemon::Work, wake: daemon::Wake, waited: std::time::Duration) {
+        self.memory_wait.record(
+            waited.as_secs_f64(),
+            &[
+                KeyValue::new("work", work.as_str()),
+                KeyValue::new("wake", wake.as_str()),
+            ],
+        );
+    }
+
     fn on_stage(&self, timing: StageTiming<'_>) {
         let mut labels = Vec::with_capacity(4);
         labels.push(KeyValue::new("stage", timing.stage.as_str()));
@@ -242,6 +279,16 @@ impl Observer for OtelObserver {
         );
     }
 
+    fn on_walk_recorded(&self, lane: &stream::LaneKey) {
+        self.backfill_checkpoints.add(
+            1,
+            &[
+                self.sink_label(&lane.sink),
+                KeyValue::new("index", lane.index.as_ref().to_owned()),
+            ],
+        );
+    }
+
     fn on_batch_committed(&self, sink: &SinkName, stats: CommitStats) {
         let label = [self.sink_label(sink)];
         self.changes_committed.add(stats.changes as u64, &label);
@@ -261,6 +308,10 @@ impl Observer for OtelObserver {
         if let Some(bytes) = stats.bytes {
             self.flush_size.record(bytes, &sized);
         }
+    }
+
+    fn on_refreshes(&self, sink: &SinkName, refreshes: u64) {
+        self.refreshes.add(refreshes, &[self.sink_label(sink)]);
     }
 
     fn on_document_quarantined(&self, sink: &SinkName, index: &str, _id: &str, _reason: &str) {

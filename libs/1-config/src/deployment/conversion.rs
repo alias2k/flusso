@@ -35,6 +35,8 @@ impl From<ConfigToml> for Config {
             },
             concurrency: ConcurrencyConfig {
                 writes: toml.concurrency.writes,
+                builds: toml.concurrency.builds,
+                max_built_mib: toml.concurrency.max_built_mib,
             },
             server: ServerConfig {
                 public_address: toml.server.public_address,

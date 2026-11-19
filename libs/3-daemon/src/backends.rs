@@ -17,7 +17,7 @@ use kernel::SinkName;
 use sink::{Sink, SinkOptions};
 use source::cdc::ChangeCapture;
 use source::document::DocumentBuilder;
-use stream::Stream;
+use stream::{LaneKey, Stream};
 
 use crate::DaemonOptions;
 
@@ -33,6 +33,10 @@ pub struct SourceParts {
     /// Resolves changed rows to [`DocumentId`](source::document)s and
     /// assembles the documents.
     pub documents: Arc<dyn DocumentBuilder>,
+    /// Resolves live changes on a connection of its own, so the reader never
+    /// waits for a build's connection (ADR 0012 stage 8a); `None` resolves
+    /// with `documents`.
+    pub resolver: Option<Arc<dyn DocumentBuilder>>,
 }
 
 /// One configured sink: its name, the adapter instance, and the universal
@@ -67,8 +71,8 @@ pub trait Backends: std::fmt::Debug + Send + Sync {
         options: &DaemonOptions,
     ) -> anyhow::Result<SourceParts>;
 
-    /// The stream with one lane per sink in `sinks`.
-    fn stream(&self, config: &Config, sinks: &[SinkName]) -> anyhow::Result<Arc<dyn Stream>>;
+    /// The stream with exactly `lanes`: one per `(index, sink)`.
+    fn stream(&self, config: &Config, lanes: &[LaneKey]) -> anyhow::Result<Arc<dyn Stream>>;
 
     /// Every configured sink, in name order. An empty config yields the
     /// composition root's default sink.

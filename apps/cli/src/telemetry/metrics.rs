@@ -19,7 +19,7 @@ use anyhow::Context;
 use daemon::Status;
 use opentelemetry::KeyValue;
 use opentelemetry::global;
-use opentelemetry::metrics::ObservableGauge;
+use opentelemetry::metrics::{ObservableCounter, ObservableGauge};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::{
     Aggregation, MeterProviderBuilder, PeriodicReader, SdkMeterProvider, Stream,
@@ -68,7 +68,7 @@ const FLUSH_SIZE_BUCKETS_BYTES: &[f64] = &[
 fn buckets(instrument: &str) -> Option<&'static [f64]> {
     match instrument {
         "flusso.flush.duration" => Some(FLUSH_BUCKETS_SECONDS),
-        "flusso.stage.duration" => Some(STAGE_BUCKETS_SECONDS),
+        "flusso.stage.duration" | "flusso.memory.wait" => Some(STAGE_BUCKETS_SECONDS),
         "flusso.flush.documents" => Some(FLUSH_DOCUMENT_BUCKETS),
         "flusso.flush.size" => Some(FLUSH_SIZE_BUCKETS_BYTES),
         _ => None,
@@ -176,6 +176,96 @@ pub(crate) fn register_in_flight_gauge(status: Arc<Status>) -> ObservableGauge<u
         .build()
 }
 
+/// Register `flusso.lane.outstanding` as an observable gauge read from the
+/// daemon's [`Status`] at collection: per `(index, sink)` lane, the items
+/// routed to it and not landed. A lane that stays high is the one holding
+/// back confirmation.
+pub(crate) fn register_lane_outstanding_gauge(status: Arc<Status>) -> ObservableGauge<u64> {
+    global::meter("flusso")
+        .u64_observable_gauge("flusso.lane.outstanding")
+        .with_description("Items routed to an (index, sink) lane and not landed yet")
+        .with_callback(move |observer| {
+            for (lane, outstanding) in status.lanes_outstanding() {
+                observer.observe(
+                    u64::try_from(outstanding).unwrap_or(u64::MAX),
+                    &[
+                        KeyValue::new("index", lane.index.as_ref().to_owned()),
+                        KeyValue::new("sink", lane.sink.as_ref().to_owned()),
+                    ],
+                );
+            }
+        })
+        .build()
+}
+
+/// Stalled lanes, read from the daemon's [`Status`] at collection, per
+/// `(index, sink)` lane: `flusso.lane.stall_age` (seconds the lane's oldest
+/// outstanding item has stayed its oldest), `flusso.lane.wal_behind` (bytes
+/// of WAL the slot holds because of it, while it has something outstanding)
+/// and `flusso.slot.pinned_by` (1 on the lane holding the slot back most).
+pub(crate) fn register_stall_gauges(status: Arc<Status>) -> StallGauges {
+    stall_gauges(&global::meter("flusso"), status)
+}
+
+/// The three gauges [`register_stall_gauges`] keeps registered.
+pub(crate) type StallGauges = (
+    ObservableGauge<f64>,
+    ObservableGauge<u64>,
+    ObservableGauge<u64>,
+);
+
+fn stall_gauges(meter: &opentelemetry::metrics::Meter, status: Arc<Status>) -> StallGauges {
+    let lane = |key: &stream::LaneKey| {
+        [
+            KeyValue::new("index", key.index.as_ref().to_owned()),
+            KeyValue::new("sink", key.sink.as_ref().to_owned()),
+        ]
+    };
+    let ages = Arc::clone(&status);
+    let stall_age = meter
+        .f64_observable_gauge("flusso.lane.stall_age")
+        .with_unit("s")
+        .with_description(
+            "Seconds an (index, sink) lane's oldest outstanding item has stayed its oldest: the \
+             lane has landed nothing for that long; 0 while nothing is outstanding",
+        )
+        .with_callback(move |observer| {
+            for (key, stall) in ages.stalls().0 {
+                observer.observe(stall.stalled_for.as_secs_f64(), &lane(&key));
+            }
+        })
+        .build();
+    let behind = Arc::clone(&status);
+    let wal_behind = meter
+        .u64_observable_gauge("flusso.lane.wal_behind")
+        .with_unit("By")
+        .with_description(
+            "Bytes of WAL the replication slot holds because of an (index, sink) lane, while \
+             it has something outstanding",
+        )
+        .with_callback(move |observer| {
+            for (key, stall) in behind.stalls().0 {
+                if let Some(bytes) = stall.wal_behind {
+                    observer.observe(bytes, &lane(&key));
+                }
+            }
+        })
+        .build();
+    let pinned_by = meter
+        .u64_observable_gauge("flusso.slot.pinned_by")
+        .with_description(
+            "1 on the (index, sink) lane holding the replication slot back the most; absent \
+             while no lane has anything outstanding",
+        )
+        .with_callback(move |observer| {
+            if let Some(key) = status.stalls().1 {
+                observer.observe(1, &lane(&key));
+            }
+        })
+        .build();
+    (stall_age, wal_behind, pinned_by)
+}
+
 /// Register `flusso.replication.visibility_wait` as an observable gauge that reads
 /// the daemon's [`Status`] at collection time: seconds the source has held a
 /// committed change it can't read back yet, `0` while nothing waits.
@@ -196,6 +286,53 @@ pub(crate) fn register_visibility_wait_gauge(status: Arc<Status>) -> ObservableG
             );
         })
         .build()
+}
+
+/// The memory budget's holding, read at collection: `flusso.memory.built`
+/// (bytes, by `work`) and `flusso.memory.refused` (batches that waited for
+/// the budget, by `work`).
+pub(crate) fn register_memory_instruments(
+    budget: Arc<daemon::Budget>,
+) -> (ObservableGauge<u64>, ObservableCounter<u64>) {
+    memory_instruments(&global::meter("flusso"), budget)
+}
+
+fn memory_instruments(
+    meter: &opentelemetry::metrics::Meter,
+    budget: Arc<daemon::Budget>,
+) -> (ObservableGauge<u64>, ObservableCounter<u64>) {
+    let held = Arc::clone(&budget);
+    let built = meter
+        .u64_observable_gauge("flusso.memory.built")
+        .with_unit("By")
+        .with_description(
+            "Bytes of built documents not yet acknowledged by every sink, reservations of \
+             builds in flight included, by work (live, backfill)",
+        )
+        .with_callback(move |observer| {
+            let now = held.held();
+            observer.observe(
+                (now.total - now.backfill.min(now.total)) as u64,
+                &[KeyValue::new("work", "live")],
+            );
+            observer.observe(now.backfill as u64, &[KeyValue::new("work", "backfill")]);
+        })
+        .build();
+    let refused = meter
+        .u64_observable_counter("flusso.memory.refused")
+        .with_description(
+            "Times a batch waited for the memory budget before it could be built, by work",
+        )
+        .with_callback(move |observer| {
+            for work in [daemon::Work::Live, daemon::Work::Backfill] {
+                observer.observe(
+                    budget.refused(work),
+                    &[KeyValue::new("work", work.as_str())],
+                );
+            }
+        })
+        .build();
+    (built, refused)
 }
 
 /// Whether an OTLP endpoint is configured (general or metrics-specific).
@@ -221,4 +358,119 @@ fn otlp_reader() -> anyhow::Result<PeriodicReader<opentelemetry_otlp::MetricExpo
 
 fn resource() -> Resource {
     Resource::builder().with_service_name("flusso").build()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::time::Duration;
+
+    use daemon::{Progress, Stalls};
+    use kernel::{IndexName, Position, SinkName};
+    use opentelemetry::metrics::MeterProvider;
+    use prometheus::TextEncoder;
+    use source::cdc::{ChangeCapture, Continuity, Landed, LiveChange};
+    use stream::LaneKey;
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct NoPositions;
+
+    #[async_trait::async_trait]
+    impl ChangeCapture for NoPositions {
+        async fn continuity(&self) -> source::Result<Continuity> {
+            Ok(Continuity::Resumed)
+        }
+        async fn prepare(&self) -> source::Result<()> {
+            Ok(())
+        }
+        async fn live(
+            &self,
+        ) -> source::Result<futures::stream::BoxStream<'static, source::Result<LiveChange>>>
+        {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+        fn confirm(&self, _: Landed) {}
+    }
+
+    #[test]
+    fn a_stalled_lane_is_exported_with_its_age_wal_and_as_the_pinning_lane() {
+        let users = LaneKey::new(
+            IndexName::try_new("users").unwrap(),
+            SinkName::try_new("primary").unwrap(),
+        );
+        let progress = Progress::new([users.clone()]);
+        let stalls = Arc::new(Stalls::new([users.clone()]));
+        progress.published(&users, Position::new(3), Position::new(3));
+        let start = tokio::time::Instant::now();
+        stalls.sample(start, &progress, &NoPositions, Some(2_048));
+        stalls.sample(
+            start + Duration::from_secs(30),
+            &progress,
+            &NoPositions,
+            Some(2_048),
+        );
+        let status = Arc::new(
+            Status::new(
+                [users.index.clone()],
+                [users.sink.clone()],
+                std::time::Instant::now(),
+            )
+            .with_stalls(stalls),
+        );
+
+        let registry = Registry::new();
+        let exporter = opentelemetry_prometheus::exporter()
+            .with_registry(registry.clone())
+            .scope_info_enabled(false)
+            .build()
+            .unwrap();
+        let provider = provider_builder().with_reader(exporter).build();
+        let _gauges = stall_gauges(&provider.meter("flusso"), status);
+        let text = TextEncoder::new()
+            .encode_to_string(&registry.gather())
+            .unwrap();
+        for line in [
+            r#"flusso_lane_stall_age_seconds{index="users",sink="primary"} 30"#,
+            r#"flusso_lane_wal_behind_bytes{index="users",sink="primary"} 2048"#,
+            r#"flusso_slot_pinned_by{index="users",sink="primary"} 1"#,
+        ] {
+            assert!(text.contains(line), "no `{line}` in:\n{text}");
+        }
+    }
+
+    #[test]
+    fn the_memory_budget_is_exported_by_work() {
+        let budget = Arc::new(daemon::Budget::new(1 << 20));
+        let _live = budget
+            .try_reserve(daemon::Work::Live, 3 * 1024)
+            .unwrap()
+            .settle(3 * 1024);
+        let _backfill = budget
+            .try_reserve(daemon::Work::Backfill, 2 * 1024)
+            .unwrap()
+            .settle(2 * 1024);
+        budget.note_refused(daemon::Work::Backfill);
+
+        let registry = Registry::new();
+        let exporter = opentelemetry_prometheus::exporter()
+            .with_registry(registry.clone())
+            .scope_info_enabled(false)
+            .build()
+            .unwrap();
+        let provider = provider_builder().with_reader(exporter).build();
+        let _instruments = memory_instruments(&provider.meter("flusso"), budget);
+        let text = TextEncoder::new()
+            .encode_to_string(&registry.gather())
+            .unwrap();
+        for line in [
+            r#"flusso_memory_built_bytes{work="live"} 3072"#,
+            r#"flusso_memory_built_bytes{work="backfill"} 2048"#,
+            r#"flusso_memory_refused_total{work="backfill"} 1"#,
+            r#"flusso_memory_refused_total{work="live"} 0"#,
+        ] {
+            assert!(text.contains(line), "no `{line}` in:\n{text}");
+        }
+    }
 }

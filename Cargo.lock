@@ -1537,6 +1537,8 @@ dependencies = [
  "serde",
  "tokio",
  "toml",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -1737,3 +1737,83 @@ fn a_large_batch_passes_its_keys_as_one_array_per_kind() {
     );
     assert_eq!(params.len(), 1);
 }
+
+fn walk_schema() -> IndexSchema {
+    IndexSchema {
+        version: 1,
+        table: TableName::try_new("users").unwrap(),
+        db_schema: DatabaseSchema::try_new("app").unwrap(),
+        primary_key: Some(ColumnName::try_new("id").unwrap()),
+        doc_id: None,
+        soft_delete: None,
+        filters: None,
+        fields: Vec::new(),
+    }
+}
+
+fn key_page(after: Option<&GenericValue>, operators: &WalkOperators) -> String {
+    let column = ColumnName::try_new("id").unwrap();
+    let key = WalkKey {
+        column: &column,
+        key_type: "pg_catalog.int8",
+        base_name: "int8",
+        operators,
+    };
+    key_page_query(&walk_schema(), key, after, &GenericValue::BigInt(99), 1024)
+        .unwrap()
+        .as_str()
+        .to_owned()
+}
+
+#[test]
+fn the_first_key_page_reads_from_the_start_in_key_order() {
+    assert_eq!(
+        key_page(None, &WalkOperators::qualified("pg_catalog")),
+        "SELECT format('%s', \"id\") AS \"key\", \"id\"::pg_catalog.int8 AS \"key:typed\", \
+         (\"id\" OPERATOR(pg_catalog.<=) $1::int8::pg_catalog.int8) AS \"within\" \
+         FROM \"app\".\"users\" ORDER BY \"id\" USING OPERATOR(pg_catalog.<) LIMIT 1024"
+    );
+}
+
+#[test]
+fn a_later_key_page_binds_the_last_key_and_the_bound_with_their_types_spelled_out() {
+    let ops = WalkOperators::qualified("\"ext\"");
+    let page = key_page(Some(&GenericValue::BigInt(7)), &ops);
+    assert!(
+        page.contains("WHERE \"id\" OPERATOR(\"ext\".>) $1::int8::pg_catalog.int8 ORDER BY"),
+        "{page}"
+    );
+    assert!(
+        page.contains("OPERATOR(\"ext\".<=) $2::int8::pg_catalog.int8"),
+        "{page}"
+    );
+    assert!(
+        key_page(Some(&GenericValue::String("infinity".to_owned())), &ops)
+            .contains(".>) $1::text::pg_catalog.int8")
+    );
+}
+
+#[test]
+fn a_walk_whose_operators_the_role_may_not_name_uses_the_bare_ones() {
+    let page = key_page(Some(&GenericValue::BigInt(7)), &WalkOperators::bare());
+    assert!(page.contains("WHERE \"id\" > $1"), "{page}");
+    assert!(page.contains("(\"id\" <= $2"), "{page}");
+    assert!(page.contains("ORDER BY \"id\" USING < LIMIT"), "{page}");
+}
+
+#[test]
+fn the_last_key_is_the_first_in_the_walks_reverse_order() {
+    let column = ColumnName::try_new("id").unwrap();
+    let ops = WalkOperators::qualified("\"ext\"");
+    let key = WalkKey {
+        column: &column,
+        key_type: "\"ext\".\"citext\"",
+        base_name: "citext",
+        operators: &ops,
+    };
+    assert_eq!(
+        last_key_query(&walk_schema(), key).as_str(),
+        "SELECT format('%s', \"id\") AS \"key\", \"id\"::\"ext\".\"citext\" AS \"key:typed\" \
+         FROM \"app\".\"users\" ORDER BY \"id\" USING OPERATOR(\"ext\".>) LIMIT 1"
+    );
+}

@@ -64,7 +64,7 @@ A refused connection ends in `tcp connect error: Connection refused` instead. Cr
 | `{prefix}{logical}_{hash}` | alias | The **hash alias**. What flusso and `flusso-query` address. The hash derives from the schema. |
 | `{prefix}{logical}_{hash}_{n}` | index | A **generation**: the concrete index holding data. `n` increments on reindex. |
 | `{prefix}{logical}` | alias | The **convenience alias** for humans and dashboards. Best-effort: if a real index already owns the name, flusso warns and carries on. |
-| `{prefix}flusso_meta` | index | One doc per index recording its active generation and seeded state. |
+| `{prefix}flusso_meta` | index | One doc per index recording its active generation and seeded state, and, while it is unseeded, how far its backfill got (`walked`: the source's own text and the generation it was recorded for), so a restart resumes after it. Written as a partial update, never creating a doc; read only while the doc is unseeded and names the same generation. |
 
 A structural schema change moves the hash, so the new shape gets a fresh alias and generation, re-seeded from scratch, rather than colliding with the old mapping. An on-demand reindex builds generation `n+1` behind the same hash alias while `n` keeps serving, then the alias flips atomically and `n` is dropped, along with any other `{logical}_{hash}_{n}` nothing serves. A reindex while the index is still unseeded does nothing: a rebuild from scratch is already pending. See [Reindex without downtime](../operate/reindex.md).
 
@@ -149,6 +149,16 @@ A write is **caught up** when nothing else is queued behind it. It carries `refr
 Each write also reports when its documents become searchable, which is what a [`searchable` fence](http.md#get-waitpositionposition) waits on: at once for a caught-up write, within `refresh_interval` otherwise, or at the next caught-up write with `refresh_interval = "-1"`. flusso never refreshes because a reader is waiting.
 
 ## Seeding
+
+A generation is created with the aliases it may carry. The first generation of a hash alias gets the hash alias and the convenience alias in its create request; the convenience alias is left out while an index holds that name. A rebuild's generation is created with none, because the old generation keeps serving until the swap.
+
+> ℹ️ **Note** — A first seed has no older copy to serve meanwhile. Both aliases name the new generation from the moment it is created, so a reader sees the index filling: the documents a refresh has already covered, and the whole index once `/status` shows it `seeded`. A rebuild is different: a reindex, a schema change that moves the hash, or a lost slot. Readers stay on the complete old generation until the swap below. To keep readers off an index until its first backfill finishes, wait for `seeded` in `/status` before sending them to it.
+
+When a backfill completes, the sink seeds the index in this order:
+
+1. Refresh the generation, restore its `refresh_interval`, and read the alias holders and the other generations, all at once.
+2. Move both aliases onto the generation and drop every other generation of the hash alias, in one atomic `_aliases` call. On a rebuild, readers see the old generation or the new, refreshed one, never neither. On a first seed the aliases are already there, and nothing moves. If OpenSearch refuses that call, the hash alias is moved alone and the convenience alias stays best-effort.
+3. Write the marker in `flusso_meta`, last. If anything before it fails, the index stays unseeded, and the next start runs the backfill again. The backfill is idempotent.
 
 Seeded state is recorded in `flusso_meta`, so a restart skips a completed backfill. On every start the marker is checked against the generation it names: if that index is gone, the marker is retracted with a warning, the generation is recreated empty, and the backfill refills it. Deleting `{logical}_{hash}_{n}` between runs is the supported way to force a rebuild of one index. A missing replication slot overrides every marker; see [Recover from a dropped slot](../operate/dropped-slot.md).
 

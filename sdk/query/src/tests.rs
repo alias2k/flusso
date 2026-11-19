@@ -3317,7 +3317,7 @@ mod fence {
         assert_eq!(
             requests(&seen),
             vec![
-                "GET /wait?position=0%2F10&until=applied&timeout_ms=T HTTP/1.1",
+                "GET /wait?position=0%2F10&until=applied&timeout_ms=T&index=users HTTP/1.1",
                 "GET /users_abc/_doc/7 HTTP/1.1",
             ]
         );
@@ -3350,7 +3350,7 @@ mod fence {
         assert_eq!(
             requests(&seen),
             vec![
-                "GET /wait?position=0%2F10&until=searchable&timeout_ms=T&sink=primary HTTP/1.1",
+                "GET /wait?position=0%2F10&until=searchable&timeout_ms=T&sink=primary&index=users HTTP/1.1",
                 "POST /users_abc/_count HTTP/1.1",
             ]
         );
@@ -3377,10 +3377,80 @@ mod fence {
         assert_eq!(
             waits(&seen),
             vec![
-                "GET /wait?position=0%2F10&until=applied&timeout_ms=T HTTP/1.1",
-                "GET /wait?position=0%2F10&until=searchable&timeout_ms=T HTTP/1.1",
+                "GET /wait?position=0%2F10&until=applied&timeout_ms=T&index=users HTTP/1.1",
+                "GET /wait?position=0%2F10&until=searchable&timeout_ms=T&index=users HTTP/1.1",
             ],
             "searchable covers applied, and neither is asked twice"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_fenced_client_waits_once_per_level_and_index() -> Result {
+        let (base, seen) = stub(&[REACHED]).await?;
+        let client = Client::connect(&base)?.flusso(&base)?;
+        let fresh = client.after("0/10");
+
+        let _: Option<Doc> = fresh.get_one("users", "abc", 1).await?;
+        Search::<Doc>::new("orders", "def").count(&fresh).await?;
+        Search::<Doc>::new("users", "abc").count(&fresh).await?;
+        Search::<Doc>::new("orders", "def").count(&fresh).await?;
+        let _: Option<Doc> = fresh.get_one("orders", "def", 2).await?;
+
+        assert_eq!(
+            waits(&seen),
+            vec![
+                "GET /wait?position=0%2F10&until=applied&timeout_ms=T&index=users HTTP/1.1",
+                "GET /wait?position=0%2F10&until=searchable&timeout_ms=T&index=orders HTTP/1.1",
+                "GET /wait?position=0%2F10&until=searchable&timeout_ms=T&index=users HTTP/1.1",
+            ],
+            "one index passing says nothing of another; searchable covers applied"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_combined_search_and_a_multi_search_wait_on_every_index_they_read() -> Result {
+        let (base, seen) = stub(&[REACHED]).await?;
+        let client = Client::connect(&base)?.flusso(&base)?;
+
+        let _ = crate::MultiSearch::<super::StoreItem>::new()
+            .count(&client.after("0/10"))
+            .await;
+        let users = Search::<Doc>::new("users", "abc");
+        let tags = Search::<Doc>::new("tags", "ghi");
+        let _ = client.after("0/11").msearch((&users, &tags)).await;
+        let _ = client
+            .after("0/12")
+            .msearch_all(&[
+                Search::<Doc>::new("users", "abc"),
+                Search::<Doc>::new("tags", "ghi"),
+            ])
+            .await;
+
+        assert_eq!(
+            waits(&seen),
+            vec![
+                "GET /wait?position=0%2F10&until=searchable&timeout_ms=T&index=users&index=orders HTTP/1.1",
+                "GET /wait?position=0%2F11&until=searchable&timeout_ms=T&index=users&index=tags HTTP/1.1",
+                "GET /wait?position=0%2F12&until=searchable&timeout_ms=T&index=users&index=tags HTTP/1.1",
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn wait_on_names_its_indexes_and_wait_names_none() -> Result {
+        let (base, seen) = stub(&[REACHED]).await?;
+        let client = Client::connect(&base)?.flusso(&base)?;
+        client.wait_on("0/10", &["users", "orders"]).await?;
+        client.wait("0/10").await?;
+        assert_eq!(
+            waits(&seen),
+            vec![
+                "GET /wait?position=0%2F10&until=searchable&timeout_ms=T&index=users&index=orders HTTP/1.1",
+                "GET /wait?position=0%2F10&until=searchable&timeout_ms=T HTTP/1.1",
+            ]
         );
         Ok(())
     }
@@ -3438,6 +3508,23 @@ mod fence {
         assert!(started.elapsed() >= Duration::from_millis(300));
         assert_eq!(waits(&seen).len(), 3, "{:?}", requests(&seen));
         assert_eq!(requests(&reads.1), vec!["GET /users_abc/_doc/7 HTTP/1.1"]);
+        Ok(())
+    }
+
+    /// A daemon still seeding or rebuilding the index answers `503` with the
+    /// reason (#379): the fence asks again and passes once it is seeded.
+    #[tokio::test]
+    async fn a_rebuild_is_waited_out_and_never_read_as_reached() -> Result {
+        const REBUILDING: Reply = Reply::Answer(
+            503,
+            "retry-after: 1\r\n",
+            r#"{"error":"users on primary (rebuilding)","reason":"rebuilding","position":"0/20"}"#,
+        );
+        let (base, seen) = stub(&[REBUILDING, REACHED]).await?;
+        fenced(&base, &base, Duration::from_secs(5))?
+            .wait("0/10")
+            .await?;
+        assert_eq!(waits(&seen).len(), 2, "{:?}", requests(&seen));
         Ok(())
     }
 
@@ -3528,6 +3615,15 @@ mod fence {
                 ),
                 UnavailableCause::Rebuilding,
                 "index t is rebuilding",
+            ),
+            (
+                Reply::Answer(
+                    503,
+                    "retry-after: 1\r\n",
+                    r#"{"error":"users on primary (backfilling)","reason":"backfilling"}"#,
+                ),
+                UnavailableCause::Backfilling,
+                "users on primary (backfilling)",
             ),
             (
                 Reply::Answer(503, "", r#"{"error":"busy","reason":"moon phase"}"#),

@@ -691,12 +691,28 @@ async fn run_deployment(
     sink: Arc<dyn Sink>,
 ) -> engine::Result<()> {
     let name = SinkName::try_new("recording").unwrap();
-    let stream: Arc<dyn Stream> = Arc::new(ChannelStream::new(1024, [name.clone()]));
+    let stream: Arc<dyn Stream> = Arc::new(ChannelStream::over(
+        1024,
+        documents.backfill_indexes(),
+        [name.clone()],
+    ));
     let continuity = capture.continuity().await?;
     let mappings = documents.index_mappings().await?;
-    let sink_engine = SinkEngine::new(name.clone(), sink, Arc::clone(&stream), mappings);
+    let progress = Arc::new(engine::Progress::of(
+        documents.backfill_indexes(),
+        [name.clone()],
+    ));
+    let sink_engine = SinkEngine::new(
+        name.clone(),
+        sink,
+        Arc::clone(&stream),
+        mappings,
+        Arc::clone(&progress),
+    );
     sink_engine.stage(continuity).await?;
-    let ingest = IngestEngine::new(capture, documents, stream, vec![name]);
+    let ingest = IngestEngine::new(capture, documents, stream, vec![name], progress)
+        .with_builds(common::e2e_builds())
+        .with_budget(common::e2e_budget());
     let (_control, mut control_rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
     tokio::select! {
         result = ingest.run() => result,

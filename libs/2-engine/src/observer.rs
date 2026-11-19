@@ -41,6 +41,7 @@ use std::time::Duration;
 
 use kernel::{IndexName, Position, SinkName};
 use source::document::BuildFailure;
+use stream::LaneKey;
 
 use crate::policy::FailurePolicy;
 
@@ -195,6 +196,40 @@ impl Work {
     }
 }
 
+/// What woke the ingest loop when it granted a batch the memory budget had
+/// held back: which event the grant followed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Wake {
+    /// A live change arrived.
+    Change,
+    /// A sink's acknowledgement released bytes (the mechanism).
+    Released,
+    /// A build landed.
+    Landed,
+    /// A backfill page of keys arrived.
+    Page,
+    /// The once-a-second confirm tick (a backstop: a grant here means no
+    /// earlier event let the batch go).
+    Tick,
+    /// The end of a run, settling the last batch.
+    Settle,
+}
+
+impl Wake {
+    /// The wake's name in metrics and logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Wake::Change => "change",
+            Wake::Released => "released",
+            Wake::Landed => "landed",
+            Wake::Page => "page",
+            Wake::Tick => "tick",
+            Wake::Settle => "settle",
+        }
+    }
+}
+
 /// How long one [`Stage`] took, once: for a batch, a lane item, an idle
 /// stretch or an operation. Built with [`StageTiming::new`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -337,14 +372,35 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
         let _ = (sink, count);
     }
 
+    /// A sink engine is about to stage a fresh generation of `index` (a
+    /// reindex, or a rebuild after a `Fresh` source): from here until
+    /// [`on_index_seeded`](Self::on_index_seeded), its live writes go to the
+    /// new generation while reads still see the old one.
+    fn on_index_rebuilding(&self, sink: &SinkName, index: &IndexName) {
+        let _ = (sink, index);
+    }
+
     /// A sink engine asked for a snapshot of `indexes` into its lane.
     fn on_backfill_requested(&self, sink: &SinkName, indexes: &[IndexName]) {
         let _ = (sink, indexes);
     }
 
+    /// A batch of `work` the memory budget had held back was granted after
+    /// `waited`, on the event `wake`: how long the budget held it, and what
+    /// let it go.
+    fn on_budget_wait(&self, work: Work, wake: Wake, waited: Duration) {
+        let _ = (work, wake, waited);
+    }
+
     /// A sink recorded `index` as seeded.
     fn on_index_seeded(&self, sink: &SinkName, index: &IndexName) {
         let _ = (sink, index);
+    }
+
+    /// A sink recorded how far a lane's backfill durably got, so a restart
+    /// resumes after it.
+    fn on_walk_recorded(&self, lane: &stream::LaneKey) {
+        let _ = lane;
     }
 
     /// A sink engine finished staging and is following its lane.
@@ -353,8 +409,21 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
     }
 
     /// A sink engine applied, flushed, and acknowledged one batch.
+    /// A batch built `changes` source changes into no document `sink`
+    /// receives: they are settled for `sink` without a write.
+    fn on_changes_settled(&self, sink: &SinkName, changes: usize) {
+        let _ = (sink, changes);
+    }
+
     fn on_batch_committed(&self, sink: &SinkName, stats: CommitStats) {
         let _ = (sink, stats);
+    }
+
+    /// A write of `sink` sent `refreshes` requests that refresh the
+    /// destination (what its `WriteReport` counted): caught-up writes and the
+    /// empty caught-up write of a lane going quiet.
+    fn on_refreshes(&self, sink: &SinkName, refreshes: u64) {
+        let _ = (sink, refreshes);
     }
 
     /// A sink rejected one document and the `skip` policy left it out.
@@ -376,23 +445,22 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
         let _ = (index, id, failure, policy);
     }
 
-    /// `sink` flushed every live change up to and including `position`: a
-    /// fetch by id at the destination now sees them. Reported as the flush
-    /// returns and *before* the batch is acknowledged, so whoever listens
-    /// knows of a position before the source can be told it is confirmed. A
-    /// redelivered batch can repeat an earlier position; keep the highest.
-    fn on_position_applied(&self, sink: &SinkName, position: Position) {
-        let _ = (sink, position);
+    /// `lane`'s sink wrote every live change of the lane up to and including
+    /// `position`: a fetch by id at the destination now sees them. Reported
+    /// as the write returns and *before* the item is acknowledged. A
+    /// redelivered item can repeat an earlier position; keep the highest.
+    fn on_position_applied(&self, lane: &LaneKey, position: Position) {
+        let _ = (lane, position);
     }
 
-    /// Every live change up to and including `position` can now be *searched*
-    /// at `sink`'s destination, as its flushes reported
+    /// Every live change of `lane` up to and including `position` can now be
+    /// *searched* at its sink's destination, as its writes reported
     /// ([`Visibility`](sink::Visibility)). Trails
     /// [`on_position_applied`](Self::on_position_applied) by however long the
     /// destination takes to refresh. A redelivered batch can repeat an earlier
     /// position; keep the highest.
-    fn on_position_searchable(&self, sink: &SinkName, position: Position) {
-        let _ = (sink, position);
+    fn on_position_searchable(&self, lane: &LaneKey, position: Position) {
+        let _ = (lane, position);
     }
 
     /// An engine stopped on an error. The daemon decides whether it restarts.
@@ -480,9 +548,21 @@ impl Observer for FanOut {
         }
     }
 
+    fn on_index_rebuilding(&self, sink: &SinkName, index: &IndexName) {
+        for observer in &self.observers {
+            observer.on_index_rebuilding(sink, index);
+        }
+    }
+
     fn on_backfill_requested(&self, sink: &SinkName, indexes: &[IndexName]) {
         for observer in &self.observers {
             observer.on_backfill_requested(sink, indexes);
+        }
+    }
+
+    fn on_budget_wait(&self, work: Work, wake: Wake, waited: Duration) {
+        for observer in &self.observers {
+            observer.on_budget_wait(work, wake, waited);
         }
     }
 
@@ -492,9 +572,27 @@ impl Observer for FanOut {
         }
     }
 
+    fn on_walk_recorded(&self, lane: &stream::LaneKey) {
+        for observer in &self.observers {
+            observer.on_walk_recorded(lane);
+        }
+    }
+
     fn on_sink_started(&self, sink: &SinkName) {
         for observer in &self.observers {
             observer.on_sink_started(sink);
+        }
+    }
+
+    fn on_changes_settled(&self, sink: &SinkName, changes: usize) {
+        for observer in &self.observers {
+            observer.on_changes_settled(sink, changes);
+        }
+    }
+
+    fn on_refreshes(&self, sink: &SinkName, refreshes: u64) {
+        for observer in &self.observers {
+            observer.on_refreshes(sink, refreshes);
         }
     }
 
@@ -522,15 +620,15 @@ impl Observer for FanOut {
         }
     }
 
-    fn on_position_applied(&self, sink: &SinkName, position: Position) {
+    fn on_position_applied(&self, lane: &LaneKey, position: Position) {
         for observer in &self.observers {
-            observer.on_position_applied(sink, position);
+            observer.on_position_applied(lane, position);
         }
     }
 
-    fn on_position_searchable(&self, sink: &SinkName, position: Position) {
+    fn on_position_searchable(&self, lane: &LaneKey, position: Position) {
         for observer in &self.observers {
-            observer.on_position_searchable(sink, position);
+            observer.on_position_searchable(lane, position);
         }
     }
 

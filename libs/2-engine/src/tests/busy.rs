@@ -180,14 +180,14 @@ async fn a_batch_is_not_acked_until_its_busy_documents_are_written() {
             .with_observer(Arc::clone(&observer_dyn))
             .with_failure_policies(FailurePolicies::new(FailurePolicy::Skip))
     });
-    let stream = Arc::clone(&harness.stream);
+    let progress = Arc::clone(&harness.progress);
 
     let run = tokio::spawn(harness.run(Continuity::Resumed));
     wait_for(|| requests.lock().unwrap().len() >= 2).await;
     assert_eq!(
-        stream.watermark(),
+        super::covered(&progress),
         None,
-        "the document is still refused as busy: the batch is not acknowledged"
+        "the document is still refused as busy: the batch has not landed"
     );
 
     let outcomes = run.await.unwrap();
@@ -197,7 +197,7 @@ async fn a_batch_is_not_acked_until_its_busy_documents_are_written() {
         "a busy refusal never reaches on_error"
     );
     assert_eq!(requests.lock().unwrap().len(), 3);
-    assert_eq!(stream.watermark(), Some(Position(0)));
+    assert_eq!(super::covered(&progress), Some(Position::new(0)));
 }
 
 fn item(position: u64, ids: &[&str]) -> stream::LaneItem {
@@ -208,22 +208,24 @@ fn item(position: u64, ids: &[&str]) -> stream::LaneItem {
                 super::users(),
                 *id,
                 kernel::GenericValue::Map(Default::default()),
-                Some(Position(position)),
+                Some(Position::new(position)),
                 chrono::Utc::now(),
             )
         })
         .collect();
     stream::LaneItem::Batch(stream::Batch {
-        position: Some(Position(position)),
+        position: Some(Position::new(position)),
         changes: 1,
         envelopes: envelopes.into(),
+        hold: Default::default(),
+        walked: None,
     })
 }
 
 /// With several writes in flight, an item whose document is refused as busy
 /// holds back only the items sharing a document with it: a later item over
 /// other documents is written meanwhile, a later item over the busy document
-/// waits until it lands, and the watermark stays before the busy item.
+/// waits until it lands, and confirmation stays before the busy item.
 /// Item 0 lands first, since a fresh engine writes its first item alone.
 #[tokio::test]
 async fn a_busy_item_holds_back_only_the_items_sharing_its_documents() {
@@ -238,27 +240,51 @@ async fn a_busy_item_holds_back_only_the_items_sharing_its_documents() {
     .await;
     let requests = Arc::clone(&stub.requests);
     let name = sink_name("primary");
-    let stream = Arc::new(stream_channel::ChannelStream::new(16, [name.clone()]));
-    let lane = stream.lane(&name).unwrap().producer;
+    let stream = Arc::new(stream_channel::ChannelStream::over(
+        16,
+        [super::users()],
+        [name.clone()],
+    ));
+    let lane = stream
+        .lane(&stream::LaneKey::new(super::users(), name.clone()))
+        .unwrap()
+        .producer;
+    let progress = Arc::new(crate::Progress::of([super::users()], [name.clone()]));
+    let publish = |position: u64, ids: &[&str]| {
+        let item = item(position, ids);
+        let lane = &lane;
+        let progress = &progress;
+        let name = &name;
+        async move {
+            lane.publish(item).await.unwrap();
+            let position = Position::new(position);
+            progress.published(
+                &stream::LaneKey::new(super::users(), name.clone()),
+                position,
+                position,
+            );
+        }
+    };
     let engine = crate::SinkEngine::new(
-        name,
+        name.clone(),
         Arc::new(opensearch(&stub.url)),
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![super::mapping()],
+        Arc::clone(&progress),
     )
     .with_writes(4);
     let (_control, mut rx) = tokio::sync::mpsc::channel(1);
     let run = tokio::spawn(async move { engine.run(&mut rx).await });
-    lane.publish(item(0, &["0"])).await.unwrap();
-    wait_for(|| stream.watermark() == Some(Position(0))).await;
+    publish(0, &["0"]).await;
+    wait_for(|| super::covered(&progress) == Some(Position::new(0))).await;
 
-    lane.publish(item(1, &["1", "3"])).await.unwrap();
-    lane.publish(item(2, &["2"])).await.unwrap();
-    lane.publish(item(3, &["1", "4"])).await.unwrap();
+    publish(1, &["1", "3"]).await;
+    publish(2, &["2"]).await;
+    publish(3, &["1", "4"]).await;
     wait_for(|| requests.lock().unwrap().contains(&vec!["2".to_owned()])).await;
     assert_eq!(
-        stream.watermark(),
-        Some(Position(0)),
+        super::covered(&progress),
+        Some(Position::new(0)),
         "1 is still refused as busy"
     );
 
@@ -282,5 +308,5 @@ async fn a_busy_item_holds_back_only_the_items_sharing_its_documents() {
             .unwrap()
     };
     assert!(at(&["2"]) < at(&["1", "4"]));
-    assert_eq!(stream.watermark(), Some(Position(3)));
+    assert_eq!(super::covered(&progress), Some(Position::new(3)));
 }

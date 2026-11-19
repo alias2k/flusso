@@ -21,8 +21,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use kernel::{IndexMapping, TableName};
-use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
+use kernel::{IndexMapping, IndexName, TableName};
+use source::document::{Document, DocumentBuilder, DocumentId};
 use source::{Result, RowImage, RowKey};
 
 use crate::Scripts;
@@ -96,8 +96,39 @@ impl DocumentBuilder for ScriptedBuilder {
         Ok(documents.into_iter().map(|d| self.finish(d)).collect())
     }
 
-    fn backfill_scopes(&self) -> Vec<IndexScope> {
-        self.inner.backfill_scopes()
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        self.inner.backfill_indexes()
+    }
+
+    async fn last_key(&self, index: &IndexName) -> Result<Option<RowKey>> {
+        self.inner.last_key(index).await
+    }
+
+    async fn keys(
+        &self,
+        index: &IndexName,
+        after: Option<&RowKey>,
+        through: &RowKey,
+        limit: usize,
+    ) -> Result<Vec<RowKey>> {
+        self.inner.keys(index, after, through, limit).await
+    }
+
+    async fn walk_mark(&self, index: &IndexName, key: &RowKey) -> Result<Option<String>> {
+        self.inner.walk_mark(index, key).await
+    }
+
+    async fn resume_after(&self, index: &IndexName, mark: &str) -> Result<Option<RowKey>> {
+        self.inner.resume_after(index, mark).await
+    }
+
+    async fn compare_keys(
+        &self,
+        index: &IndexName,
+        a: &RowKey,
+        b: &RowKey,
+    ) -> Result<Option<std::cmp::Ordering>> {
+        self.inner.compare_keys(index, a, b).await
     }
 
     async fn index_mappings(&self) -> Result<Vec<IndexMapping>> {

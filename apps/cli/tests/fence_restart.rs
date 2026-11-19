@@ -9,6 +9,9 @@
 //! read returns the committed state, which for the second row only the new
 //! process can have indexed.
 //!
+//! A second test runs flusso with `--index-prefix` and reads through a client
+//! with the same prefix: the fence waits on the logical index.
+//!
 //! Requires Docker. Ignored by default; run with:
 //!
 //! ```text
@@ -38,9 +41,9 @@ async fn fenced_reads_made_while_flusso_restarts_return_the_committed_rows() {
     let dir = project(&pg_url, &os_url);
     let public = free_address();
 
-    let mut flusso = start(&dir, public);
+    let mut flusso = start(&dir, public, &[]);
     ready(public, &mut flusso, &dir).await;
-    let hash = schema_hash(&os_url).await;
+    let hash = schema_hash(&os_url, "").await;
     let before = commit(&pool, 0, "committed before the stop").await;
     stop(&mut flusso);
     let during = commit(&pool, 1, "committed while flusso was down").await;
@@ -77,7 +80,7 @@ async fn fenced_reads_made_while_flusso_restarts_return_the_committed_rows() {
         !get_during.is_finished() && !count_during.is_finished(),
         "both levels wait through the gap"
     );
-    let mut flusso = start(&dir, public);
+    let mut flusso = start(&dir, public, &[]);
 
     let within = Duration::from_secs(120);
     let get_before = tokio::time::timeout(within, get_before).await;
@@ -111,6 +114,42 @@ async fn fenced_reads_made_while_flusso_restarts_return_the_committed_rows() {
     );
     assert_eq!(count_during, 2, "searchable: a search sees both rows");
     assert!(elapsed >= Duration::from_secs(3), "{elapsed:?}");
+}
+
+/// A deployment run with `--index-prefix`: a fenced client with the same
+/// `index_prefix` names the logical index to `/wait` (the daemon's lanes are
+/// keyed by it, prefix or not) and reads the prefixed physical index.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires docker"]
+async fn a_fenced_read_with_an_index_prefix_waits_on_the_logical_index() {
+    let (_postgres, pg_url) =
+        common::start_postgres("CREATE TABLE t (id int PRIMARY KEY, name text NOT NULL)").await;
+    let (_opensearch, os_url) = common::start_opensearch().await;
+    let pool = PgPoolOptions::new().connect(&pg_url).await.unwrap();
+    let dir = project(&pg_url, &os_url);
+    let public = free_address();
+    let mut flusso = start(&dir, public, &["--index-prefix", "dev_"]);
+    ready(public, &mut flusso, &dir).await;
+    let hash = schema_hash(&os_url, "dev_").await;
+    let position = commit(&pool, 7, "prefixed").await;
+
+    let client = Client::connect(&os_url)
+        .unwrap()
+        .index_prefix("dev_")
+        .flusso(format!("http://{public}"))
+        .unwrap()
+        .fence_sink("primary")
+        .fence_timeout(Duration::from_secs(30));
+    let fresh = client.after(position);
+    let got = fresh.get_one::<Value>("t", &hash, 7).await;
+    let count = Search::<Value>::new("t", &hash).count(&fresh).await;
+    stop(&mut flusso);
+    let log = stderr(&dir);
+    assert_eq!(
+        got.unwrap_or_else(|e| panic!("{e}: {log}")),
+        Some(json!({ "id": 7, "name": "prefixed" }))
+    );
+    assert_eq!(count.unwrap_or_else(|e| panic!("{e}: {log}")), 1);
 }
 
 /// Insert a row and return the source position read after its commit.
@@ -157,7 +196,7 @@ fn free_address() -> SocketAddr {
         .unwrap()
 }
 
-fn start(dir: &Path, public: SocketAddr) -> Child {
+fn start(dir: &Path, public: SocketAddr, extra: &[&str]) -> Child {
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -176,6 +215,7 @@ fn start(dir: &Path, public: SocketAddr) -> Child {
             "--shutdown-timeout-secs",
             "10",
         ])
+        .args(extra)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(log)
@@ -222,8 +262,9 @@ async fn ready(public: SocketAddr, flusso: &mut Child, dir: &Path) {
     }
 }
 
-/// The schema hash of index `t`, from its hash alias `t_<hash>`.
-async fn schema_hash(os_url: &str) -> String {
+/// The schema hash of index `t`, from its hash alias `<prefix>t_<hash>`.
+async fn schema_hash(os_url: &str, prefix: &str) -> String {
+    let alias_prefix = format!("{prefix}t_");
     let aliases: serde_json::Value = reqwest::get(format!("{os_url}/_alias"))
         .await
         .unwrap()
@@ -236,8 +277,8 @@ async fn schema_hash(os_url: &str) -> String {
         .values()
         .filter_map(|index| index["aliases"].as_object())
         .flat_map(|aliases| aliases.keys())
-        .find_map(|alias| alias.strip_prefix("t_"))
-        .expect("a hash alias t_<hash>")
+        .find_map(|alias| alias.strip_prefix(alias_prefix.as_str()))
+        .expect("a hash alias <prefix>t_<hash>")
         .to_owned()
 }
 

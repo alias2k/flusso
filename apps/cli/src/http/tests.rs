@@ -5,9 +5,8 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use kernel::Position;
-use source::cdc::{ChangeCapture, ChangeEvent, Continuity, LiveChange, SourcePosition};
-use source::{SnapshotTable, SourceError};
+use source::SourceError;
+use source::cdc::{ChangeCapture, Continuity, LiveChange, SourcePosition};
 
 use super::*;
 
@@ -50,14 +49,7 @@ impl ChangeCapture for SteadySource {
         Ok(Box::pin(futures::stream::empty()))
     }
 
-    fn confirm(&self, _: Position) {}
-
-    async fn snapshot(
-        &self,
-        _: &[SnapshotTable],
-    ) -> source::Result<BoxStream<'static, source::Result<ChangeEvent>>> {
-        Ok(Box::pin(futures::stream::empty()))
-    }
+    fn confirm(&self, _: source::cdc::Landed) {}
 
     fn parse_position(&self, text: &str) -> source::Result<SourcePosition> {
         text.parse()
@@ -65,7 +57,7 @@ impl ChangeCapture for SteadySource {
             .map_err(|_| SourceError::Decode(format!("`{text}` is not a number")))
     }
 
-    fn reached(&self, _: Option<Position>) -> Option<SourcePosition> {
+    fn reached(&self, _: source::cdc::Landed) -> Option<SourcePosition> {
         (!self.closed.load(Ordering::SeqCst))
             .then(|| SourcePosition(self.at.load(Ordering::SeqCst)))
     }
@@ -84,14 +76,35 @@ async fn serve_public(at: u64) -> (String, Arc<SteadySource>) {
 
 /// [`serve_public`], plus the handle that ends a stop's drain.
 async fn serve_stoppable(at: u64) -> (String, Arc<SteadySource>, Waits) {
+    serve_staged(at, |_| {}).await
+}
+
+/// [`serve_stoppable`] with the `primary` sink staged, after `events` told
+/// the fence what else its sink engine did.
+async fn serve_staged(
+    at: u64,
+    events: impl FnOnce(&daemon::FenceObserver),
+) -> (String, Arc<SteadySource>, Waits) {
     let waits = Waits::default();
     let source = Arc::new(SteadySource::default());
     source.at.store(at, Ordering::SeqCst);
     let primary = SinkName::try_new("primary").unwrap();
+    let lane = stream::LaneKey::new(
+        kernel::IndexName::try_new("users").unwrap(),
+        primary.clone(),
+    );
+    let fence = Fence::new(
+        Arc::clone(&source) as Arc<dyn ChangeCapture>,
+        Arc::new(daemon::Progress::new([lane.clone()])),
+        [lane],
+    );
+    let observer = daemon::FenceObserver::new(fence.clone());
+    events(&observer);
+    daemon::Observer::on_sink_started(&observer, &primary);
     let state = PublicState {
         status: Arc::new(Status::new([], [primary.clone()], Instant::now())),
         registry: None,
-        fence: Fence::new(Arc::clone(&source) as Arc<dyn ChangeCapture>, [primary]),
+        fence,
         waits: waits.clone(),
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -113,14 +126,14 @@ async fn a_reached_position_answers_200_with_where_the_sink_is() {
     assert_eq!(status, 200);
     assert_eq!(
         body,
-        json!({ "reached": true, "position": "40", "until": "searchable", "sink": null })
+        json!({ "reached": true, "position": "40", "until": "searchable", "sink": null, "indexes": [] })
     );
 
     let (status, body) = get_wait(&base, "position=40&until=applied&sink=primary").await;
     assert_eq!(status, 200);
     assert_eq!(
         body,
-        json!({ "reached": true, "position": "40", "until": "applied", "sink": "primary" })
+        json!({ "reached": true, "position": "40", "until": "applied", "sink": "primary", "indexes": [] })
     );
 }
 
@@ -133,7 +146,7 @@ async fn an_unreached_position_answers_408_after_the_timeout() {
     assert!(started.elapsed() >= Duration::from_millis(150));
     assert_eq!(
         body,
-        json!({ "reached": false, "position": "40", "until": "searchable", "sink": null })
+        json!({ "reached": false, "position": "40", "until": "searchable", "sink": null, "indexes": [] })
     );
 }
 
@@ -159,6 +172,27 @@ async fn an_unknown_sink_answers_404() {
     let (status, body) = get_wait(&base, "position=1&sink=audit").await;
     assert_eq!(status, 404);
     assert_eq!(body["error"], "unknown sink `audit`");
+}
+
+#[tokio::test]
+async fn a_wait_on_named_indexes_echoes_them() {
+    let (base, _source) = serve_public(40).await;
+    let (status, body) = get_wait(&base, "position=35&index=users&until=applied").await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body,
+        json!({ "reached": true, "position": "40", "until": "applied", "sink": null, "indexes": ["users"] })
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_or_invalid_index_is_refused() {
+    let (base, _source) = serve_public(40).await;
+    let (status, body) = get_wait(&base, "position=1&index=users&index=orders").await;
+    assert_eq!(status, 404);
+    assert_eq!(body["error"], "unknown index `orders`");
+    let (status, body) = get_wait(&base, "position=1&index=").await;
+    assert_eq!(status, 400, "{body}");
 }
 
 #[tokio::test]
@@ -231,6 +265,51 @@ async fn a_wait_after_the_drain_is_refused_and_one_before_the_source_is_live_say
         body["reason"], "stopping",
         "even a reached position: this process no longer answers: {body}"
     );
+}
+
+/// A wait on an index its sink is seeding or rebuilding is `503` with the
+/// reason and the lanes, never `200` (#379).
+#[tokio::test]
+async fn a_wait_on_an_index_being_seeded_or_rebuilt_is_answered_503_with_the_reason() {
+    let primary = SinkName::try_new("primary").unwrap();
+    let users = kernel::IndexName::try_new("users").unwrap();
+    for (events, reason) in [
+        (
+            Box::new(|observer: &daemon::FenceObserver| {
+                daemon::Observer::on_backfill_requested(
+                    observer,
+                    &SinkName::try_new("primary").unwrap(),
+                    &[kernel::IndexName::try_new("users").unwrap()],
+                );
+            }) as Box<dyn FnOnce(&daemon::FenceObserver)>,
+            "backfilling",
+        ),
+        (
+            Box::new(|observer: &daemon::FenceObserver| {
+                daemon::Observer::on_index_rebuilding(
+                    observer,
+                    &SinkName::try_new("primary").unwrap(),
+                    &kernel::IndexName::try_new("users").unwrap(),
+                );
+            }),
+            "rebuilding",
+        ),
+    ] {
+        let (base, _source, _waits) = serve_staged(40, events).await;
+        let (status, retry, body) = get_wait_full(&base, "position=30&timeout_ms=50").await;
+        assert_eq!((status, retry.as_deref()), (503, Some("1")), "{body}");
+        assert_eq!(body["reason"], reason, "{body}");
+        assert_eq!(body["position"], "40", "{body}");
+        assert_eq!(
+            body["lanes"],
+            serde_json::json!([{
+                "index": users.as_ref(),
+                "sink": primary.as_ref(),
+                "state": reason,
+            }]),
+            "{body}"
+        );
+    }
 }
 
 #[tokio::test]

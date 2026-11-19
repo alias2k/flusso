@@ -51,7 +51,7 @@ backfill = false
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `max_changes` | integer ≥ 1 | `256` | Commit a batch once this many live changes have accumulated. `1` commits per change. |
-| `max_delay_ms` | integer | `50` | The longest a batch stays open after its first change while changes keep arriving, in milliseconds. Also the window a backfill snapshot waits for straggling requests from other sinks, so a reindex fanned to every sink is one pass over the table. |
+| `max_delay_ms` | integer | `50` | The longest a batch stays open after its first change while changes keep arriving, in milliseconds. Also the window a backfill snapshot waits for straggling requests from other sinks, so a reindex fanned to every sink is one pass over the table, and the longest a sink holds a live batch that is ready while one of its writes is out, so batches of several indexes go out in one bulk request. |
 
 A batch takes every change the stream has ready and is committed the moment the stream would block, so a lone change on a quiet stream is built at once and never waits for `max_delay_ms`; only a burst, which keeps the stream ready, fills batches to `max_changes`. Fewer changes per batch means more, smaller bulk requests; more means fewer round-trips under load. The defaults suit most deployments — tune only with a measured reason (see [Metrics](metrics.md)).
 
@@ -62,12 +62,27 @@ Precedence is flag (`--batch-max-changes` / `--batch-max-delay-ms`), then `FLUSS
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `writes` | integer 1–64 | `4` | Bulk writes each sink runs at once. `1` writes one batch at a time. A sink that emits an ordered stream (stdout) always writes one at a time. |
+| `builds` | integer 1–32 | `4` | Batches of documents the ingest engine builds at once. `1` builds one batch at a time. The source's document builder keeps `builds` + 2 Postgres connections. |
+| `max_built_mib` | integer 16–1,048,576 | `512` | MiB of built documents held until every sink acknowledges them. Past it the ingest engine builds nothing more until a sink acknowledges some. |
 
 Several writes run at once, but never two holding the same document, so each document's later version still lands after its earlier one. Live changes go before backfill pages, except every fourth write slot both could take, so a backfill can't stall live indexing and live traffic can't starve a backfill.
 
 End to end on the `reference` benchmark, 2 and 4 writes backfilled about 1.4× faster than one, and 8 a little slower than 4; live latency and burst drain didn't move, since resolving changes on the ingest side bounds them. (ADR 0012's 3× was raw OpenSearch bulk throughput, not flusso end to end.) Raise it for a cluster with headroom, lower it if the cluster answers `429`. Above 64 is refused. Each write holds one delivered batch, so a sink holds up to `writes` + 32 batches beside its lane: see [stream: channel](stream-channel.md).
 
-The table is a property of the machine that runs flusso, so it is **never written into `flusso.lock`**: `run` with a `flusso.toml` reads it, `run --locked` takes the flag or the env var, else the default. Precedence is flag (`--writes`), then `FLUSSO_WRITES`, then this table, then the default. See [CLI](cli.md#run).
+Several builds run at once, but never two holding the same document, and each sink gets the built batches in the order they were started, so a document's later version still lands after its earlier one. Live batches go before backfill batches, except every fourth build slot both could take. A second live build starts only while the batch waiting behind the first is full, so a trickle of changes still batches itself. A backfill gains while building is what holds it back. On the `reference` benchmark, 2 and 4 builds backfilled about 15% faster than one; past that the sink's writes bound it. Peak memory rose there, from about 120 to 300–400 MiB, because built batches wait in the sink's lane. Each build holds a Postgres connection; behind PgBouncer count `builds` + 2 server connections in transaction mode. Up to `2 × builds` built batches wait behind a slow one before nothing more starts.
+
+**The memory budget.** A built batch is counted from its build until the last sink acknowledges it, in heap bytes (a document holds about 8–10× its JSON), at least 1 KiB a batch. A backfill holds at most half of `max_built_mib` (past the one batch a backfill holding nothing is always granted), so live changes always have room beside it. A batch larger than the whole budget still builds, alone, once nothing of its kind (live or backfill) is held. A sink that stops acknowledging fills the budget, and then ingest waits: the slowest sink paces ingest, as a full queue did before 0.18. The budget can be passed by the batches being built at the moment it fills, each by what it really built: up to `2 × builds` batches. It doesn't count a sink's request bodies (`writes` × one rendered `_bulk` per sink) or the source's read-ahead (`[batch] max_changes` × 16 changes with their row images). Plan the process's memory as `max_built_mib` + `2 × builds` batches + those two + about 100 MiB, plus 10–20% for the allocator. On Linux, `run` warns at start when `max_built_mib` alone reaches the cgroup's memory limit, or the host's memory without one. `/status` reports what is held (`memory`) and `flusso.memory.built` plots it ([Metrics](metrics.md)).
+
+**When to change it.** The default, 512 MiB, keeps the tail of visible latency short while a backfill runs beside live changes.
+
+- **Lower it on a memory-constrained host.** On `reference`, 64 MiB measured 82–87 MiB peak RSS, against about 210 MiB at 512. p50 latency, burst and backfill throughput were unchanged, but the p99 of visible latency rose to about 1 s from about 200 ms (0.17: 2.2–2.5 s). Below 64 MiB the backfill slows.
+- **Raise it when documents are large** (a few hundred KiB of JSON or more each): a batch of them can take much of the budget, so fewer batches are in flight and builds and writes stop overlapping.
+- **Raise it when many indexes are live at once**: they share the budget.
+- **Raise it for a slow but healthy sink** (a busy or distant cluster): more built batches can wait for it, so a burst is absorbed rather than paced.
+
+Watch `flusso.memory.refused`: if it grows steadily while the sinks are healthy, the budget sets the pace and raising it helps. If it grows only while a sink is down, the budget is doing its job.
+
+The table is a property of the machine that runs flusso, so it is **never written into `flusso.lock`**: `run` with a `flusso.toml` reads it, `run --locked` takes the flag or the env var, else the default. Precedence is flag (`--writes`, `--builds`, `--max-built-mib`), then `FLUSSO_WRITES` / `FLUSSO_BUILDS` / `FLUSSO_MAX_BUILT_MIB`, then this table, then the default. See [CLI](cli.md#run).
 
 ## server
 

@@ -2,10 +2,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::stream::{self, BoxStream};
+use futures::stream::BoxStream;
 use kernel::Position;
 
-use crate::{Result, SnapshotTable, SourceError};
+use crate::{Result, SourceError};
 
 use super::ChangeEvent;
 
@@ -22,6 +22,38 @@ pub type LiveChange = (Position, ChangeEvent);
 /// [`ChangeCapture::format_position`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SourcePosition(pub u64);
+
+/// How far every lane that needs a change has landed it, in positions: what
+/// the engine hands [`ChangeCapture::confirm`] and [`ChangeCapture::reached`].
+///
+/// The mechanism turns it into its own terms with the stamps the positions
+/// carry, so it keeps no map of the changes it emitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Landed {
+    /// Every change before this one has landed; this one is the oldest still
+    /// outstanding on some lane.
+    Before(Position),
+    /// Every change through this one has landed, and it is the newest the
+    /// engine has routed. A change emitted after it may not be routed yet:
+    /// only the mechanism, which knows what it emitted, can tell.
+    Through(Position),
+    /// The engine has routed nothing yet.
+    Idle,
+}
+
+impl Landed {
+    /// For a position-only view (a mock, a log line): the `seq` up to which
+    /// nothing routed is outstanding. For `Before(o)` that is `o.seq - 1`,
+    /// which says nothing of a position there that was emitted but never
+    /// routed: only the source knows of those.
+    pub fn covered_seq(self) -> Option<u64> {
+        match self {
+            Landed::Before(oldest) => oldest.seq.checked_sub(1),
+            Landed::Through(last) => Some(last.seq),
+            Landed::Idle => None,
+        }
+    }
+}
 
 /// Called by a mechanism when [`ChangeCapture::reached`] may answer further.
 pub type AdvanceListener = Arc<dyn Fn() + Send + Sync>;
@@ -62,22 +94,20 @@ pub enum Continuity {
 ///   [`Position`] the mechanism assigned it, resuming from the mechanism's own
 ///   durable position (a replication slot's `confirmed_flush_lsn`, a poll
 ///   cursor, …). Positions are monotonic within one run.
-/// - [`confirm`](Self::confirm) tells the mechanism that every change up to and
-///   including a position has been made durable downstream, so it may advance
-///   its resume point. Confirmation is cumulative: confirming `P` covers every
-///   position before `P`. The stream's watermark is what the ingest engine
-///   confirms, so delivery stays at-least-once across restarts.
-/// - [`snapshot`](Self::snapshot) reads the *current* rows of a set of tables as
-///   a finite stream — the data a backfill needs. Whether a backfill is
-///   *needed* is not the mechanism's call: each sink engine asks its **sink**
-///   whether an index is seeded and requests a snapshot only then. A mechanism
-///   that cannot snapshot keeps the default (an empty stream).
+/// - [`confirm`](Self::confirm) tells the mechanism how far every lane has
+///   landed the changes it emitted ([`Landed`]), so it may advance its resume
+///   point that far and no further. The mechanism reads the answer off the
+///   positions' own stamps and what it knows it emitted, so delivery stays
+///   at-least-once across restarts with no map of every change.
+///
+/// A backfill is not the mechanism's: it reads root keys through the document
+/// builder ([`DocumentBuilder::keys`](crate::document::DocumentBuilder::keys)).
 ///
 /// - [`reached`](Self::reached) translates progress back into the source's own
-///   terms: given the stream position a sink has processed through, the
-///   [`SourcePosition`] that is fully covered. It is what a fence compares a
-///   client's position with. A mechanism that cannot answer keeps the default
-///   (`None`) and fences are unavailable.
+///   terms: given how far a sink's lanes have landed, the [`SourcePosition`]
+///   that is fully covered. It is what a fence compares a client's position
+///   with. A mechanism that cannot answer keeps the default (`None`) and
+///   fences are unavailable.
 ///
 /// Returned streams are `'static` and `Send`: an implementation moves whatever
 /// it needs (its connection, its position bookkeeping) into the stream rather
@@ -122,10 +152,14 @@ pub trait ChangeCapture: std::fmt::Debug + Send + Sync {
     /// then; [`readable_wait`](Self::readable_wait) reports how long.
     async fn live(&self) -> Result<BoxStream<'static, Result<LiveChange>>>;
 
-    /// Every change up to and including `position` is durable downstream; the
-    /// mechanism may advance its resume point that far. Cheap and non-blocking:
-    /// the ingest engine calls it after every commit.
-    fn confirm(&self, position: Position);
+    /// The lanes have landed `landed`; the mechanism may advance its resume
+    /// point as far as that covers, and never into a change emitted but not
+    /// landed: one in no lane yet is the mechanism's to know (`Through(p)`
+    /// says only that `p` is the newest routed). Monotonic: an answer behind
+    /// the resume point moves nothing. Cheap and non-blocking: the engine
+    /// calls it after every commit and once a second, whether or not `landed`
+    /// changed, since the answer can move with it unchanged (idle WAL).
+    fn confirm(&self, landed: Landed);
 
     /// Ask the open live stream to end gracefully: hand the position last
     /// [`confirm`](Self::confirm)ed to the source, then end the stream
@@ -136,23 +170,6 @@ pub trait ChangeCapture: std::fmt::Debug + Send + Sync {
     /// delivery allows.
     fn close_live(&self) -> bool {
         false
-    }
-
-    /// Snapshot the current rows of `tables` as a finite stream of
-    /// [`Upsert`](super::ChangeEvent::Upsert) events — the rows to seed an
-    /// index with. The stream ends when the snapshot is complete; there is no
-    /// in-band boundary marker.
-    ///
-    /// Each event names its table as `tables` does: the engine routes a row to
-    /// its indexes by that name, so a partition's row carries the parent's.
-    ///
-    /// The default is an empty stream, for mechanisms that cannot snapshot.
-    async fn snapshot(
-        &self,
-        tables: &[SnapshotTable],
-    ) -> Result<BoxStream<'static, Result<ChangeEvent>>> {
-        let _ = tables;
-        Ok(Box::pin(stream::empty()))
     }
 
     /// How far the mechanism's durable resume point trails the source's latest
@@ -191,17 +208,17 @@ pub trait ChangeCapture: std::fmt::Debug + Send + Sync {
         position.0.to_string()
     }
 
-    /// How far the source's own order is covered once every change up to and
-    /// including `position` has been processed downstream: every source commit
-    /// at or before the returned position is among them. `None` for `position`
-    /// means "nothing processed since the stream opened".
+    /// How far the source's own order is covered once a sink's lanes have
+    /// landed `landed`: every source commit at or before the returned
+    /// position is among what landed. A fence compares a client's position
+    /// with it.
     ///
-    /// The answer keeps moving while the watched tables are idle: with no
-    /// change outstanding past `position`, it follows what the mechanism has
-    /// read. Returns `None` while the mechanism cannot tell (no live stream
-    /// yet, or no notion of a source position at all — the default).
-    fn reached(&self, position: Option<Position>) -> Option<SourcePosition> {
-        let _ = position;
+    /// The answer keeps moving while the watched tables are idle: with nothing
+    /// emitted after what landed, it follows what the mechanism has read.
+    /// Returns `None` while the mechanism cannot tell (no live stream yet, or
+    /// no notion of a source position at all — the default).
+    fn reached(&self, landed: Landed) -> Option<SourcePosition> {
+        let _ = landed;
         None
     }
 

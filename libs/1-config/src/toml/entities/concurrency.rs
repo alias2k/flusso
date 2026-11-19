@@ -10,10 +10,24 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// slower), so the cap only stops a typo from holding hundreds of batches.
 pub const MAX_WRITES: usize = 64;
 
+/// The most document builds the ingest engine may run at once. Each holds a
+/// Postgres connection (the source keeps `builds + 2`: `builds + 1` building,
+/// one resolving changes), so the cap keeps
+/// a typo from opening hundreds.
+pub const MAX_BUILDS: usize = 32;
+
+/// The least `max_built_mib` takes: below it a single `users`-like batch
+/// (about 4 MiB) fills the budget, and every build waits for the last.
+pub const MIN_BUILT_MIB: usize = 16;
+
+/// The most `max_built_mib` takes: a TiB, so a typo can't overflow a count.
+pub const MAX_BUILT_MIB: usize = 1 << 20;
+
 /// How much the pipeline does at once, from a `flusso.toml` `[concurrency]`
 /// table. A property of the machine that runs flusso, not of the deployment:
 /// it is never written into `flusso.lock`, so `run --locked` takes it from
-/// `--writes` / `FLUSSO_WRITES` or the default. Every key is optional.
+/// `--writes` / `FLUSSO_WRITES` and `--builds` / `FLUSSO_BUILDS` or the
+/// defaults. Every key is optional.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Concurrency {
@@ -27,6 +41,88 @@ pub struct Concurrency {
     )]
     #[schemars(range(min = 1, max = 64))]
     pub writes: Option<NonZeroUsize>,
+    /// Document builds the ingest engine runs at once (default 4). A document
+    /// is never built twice at once, and each lane still gets batches in the
+    /// order they were started. Live batches go before backfill pages. `1`
+    /// builds one batch at a time. At most 32; the source holds `builds + 2`
+    /// connections (`builds + 1` building, one resolving changes).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "capped_builds"
+    )]
+    #[schemars(range(min = 1, max = 32))]
+    pub builds: Option<NonZeroUsize>,
+    /// MiB of built documents held before the ingest engine waits (default
+    /// 512): what it built and every sink has not yet acknowledged. A
+    /// backfill holds at most half of it, so live changes always have room,
+    /// and a batch larger than the whole budget still builds, alone. Counts
+    /// heap, not JSON: a document holds 8–10× its JSON size. At least 16, at
+    /// most 1,048,576.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "bounded_built_mib"
+    )]
+    #[schemars(range(min = 16, max = 1_048_576))]
+    pub max_built_mib: Option<NonZeroUsize>,
+}
+
+/// `max_built_mib`, refused outside [`MIN_BUILT_MIB`]..=[`MAX_BUILT_MIB`].
+fn bounded_built_mib<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<NonZeroUsize>, D::Error> {
+    match Option::<NonZeroUsize>::deserialize(deserializer)? {
+        Some(mib) => built_mib_in_bounds(mib)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+        None => Ok(None),
+    }
+}
+
+fn built_mib_in_bounds(mib: NonZeroUsize) -> Result<NonZeroUsize, String> {
+    if (MIN_BUILT_MIB..=MAX_BUILT_MIB).contains(&mib.get()) {
+        Ok(mib)
+    } else {
+        Err(format!(
+            "max_built_mib = {mib} is outside {MIN_BUILT_MIB}..={MAX_BUILT_MIB} MiB"
+        ))
+    }
+}
+
+/// `max_built_mib` from a flag or an env var, with the file's bounds.
+pub fn parse_max_built_mib(text: &str) -> Result<NonZeroUsize, String> {
+    let mib: NonZeroUsize = text
+        .parse()
+        .map_err(|_| format!("`{text}` is not a whole number of MiB, at least 1"))?;
+    built_mib_in_bounds(mib)
+}
+
+/// `builds`, refused past [`MAX_BUILDS`].
+fn capped_builds<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<NonZeroUsize>, D::Error> {
+    let builds = Option::<NonZeroUsize>::deserialize(deserializer)?;
+    match builds {
+        Some(builds) if builds.get() > MAX_BUILDS => Err(serde::de::Error::custom(format!(
+            "builds = {builds} is past the cap of {MAX_BUILDS} builds at once"
+        ))),
+        builds => Ok(builds),
+    }
+}
+
+/// `builds` from a flag or an env var, refused past [`MAX_BUILDS`] as the
+/// file's key is.
+pub fn parse_builds(text: &str) -> Result<NonZeroUsize, String> {
+    let builds: NonZeroUsize = text
+        .parse()
+        .map_err(|_| format!("`{text}` is not a whole number of builds, at least 1"))?;
+    if builds.get() > MAX_BUILDS {
+        return Err(format!(
+            "{builds} is past the cap of {MAX_BUILDS} builds at once"
+        ));
+    }
+    Ok(builds)
 }
 
 /// `writes`, refused past [`MAX_WRITES`].
@@ -59,6 +155,6 @@ pub fn parse_writes(text: &str) -> Result<NonZeroUsize, String> {
 impl Concurrency {
     /// True when no key is set, so serialization can omit the table.
     pub fn is_empty(&self) -> bool {
-        self.writes.is_none()
+        self.writes.is_none() && self.builds.is_none() && self.max_built_mib.is_none()
     }
 }

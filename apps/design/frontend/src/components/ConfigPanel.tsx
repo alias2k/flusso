@@ -209,6 +209,28 @@ export function ConfigPanel({
             />
           </Field>
         </div>
+        <div className="w-28">
+          <Field label="concurrency.builds">
+            <Num
+              value={config.concurrency?.builds}
+              onChange={(v) => onChange({ ...config, concurrency: { ...config.concurrency, builds: v } })}
+              placeholder="4"
+              min={1}
+              max={32}
+            />
+          </Field>
+        </div>
+        <div className="w-28">
+          <Field label="concurrency.max_built_mib">
+            <Num
+              value={config.concurrency?.max_built_mib}
+              onChange={(v) => onChange({ ...config, concurrency: { ...config.concurrency, max_built_mib: v } })}
+              placeholder="512"
+              min={16}
+              max={1048576}
+            />
+          </Field>
+        </div>
         <div className="w-44">
           <Field label="public_address">
             <Text

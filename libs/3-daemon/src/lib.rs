@@ -5,15 +5,18 @@ mod backends;
 mod fence;
 mod lag;
 mod observer;
+mod stall;
 pub mod status;
 mod supervise;
 
 pub use backends::{Backends, SinkParts, SourceParts};
+pub use engine::{Budget, Held, Progress};
 pub use fence::{
     Fence, FenceError, FenceLevel, FenceObserver, FenceOutcome, FencePositions, FenceRequest,
-    SinkPositions,
+    LanePositions, SinkPositions, Unserved,
 };
 pub use observer::StatusObserver;
+pub use stall::{LaneStall, SAMPLE_EVERY, STALL_WARN, StallEvent, Stalls};
 pub use status::{
     IndexState, LastScriptFailure, Phase, ScriptFailures, SinkPhase, SinkSnapshot, Status,
     StatusSnapshot,
@@ -23,7 +26,7 @@ pub use supervise::{ControlError, DaemonControl};
 use supervise::ControlReceivers;
 
 pub use engine::{
-    BuildStats, CommitStats, EngineId, Observer, Stage, StageTiming, StartupStep, Work,
+    BuildStats, CommitStats, EngineId, Observer, Stage, StageTiming, StartupStep, Wake, Work,
 };
 pub use kernel::{IndexName, SinkName};
 
@@ -37,7 +40,7 @@ use config::Config;
 use engine::{BatchPolicy, FailurePolicies, FanOut, IngestEngine, SinkEngine};
 use kernel::IndexMapping;
 use source::cdc::{ChangeCapture, Continuity};
-use stream::Stream;
+use stream::{LaneKey, Stream};
 
 /// How a [`Daemon`] run is parameterized: the knobs that belong to the
 /// deployment as a whole. Adapter settings (the slot, the publication,
@@ -94,6 +97,36 @@ pub fn writes(config: &Config) -> usize {
         .concurrency
         .writes
         .map_or(DEFAULT_WRITES, NonZeroUsize::get)
+}
+
+/// Document builds the ingest engine runs at once when `[concurrency] builds`
+/// is unset. End to end on `reference` (ADR 0012 stage 4) a backfill ran about
+/// 15% faster at 2 and 4 than at 1, then the sink's writes bound it; the
+/// prototype's 3× at 4 built with no sink behind it.
+pub const DEFAULT_BUILDS: usize = 4;
+
+/// Document builds the ingest engine runs at once: `[concurrency] builds`,
+/// else [`DEFAULT_BUILDS`].
+pub fn builds(config: &Config) -> usize {
+    config
+        .concurrency
+        .builds
+        .map_or(DEFAULT_BUILDS, NonZeroUsize::get)
+}
+
+/// MiB of built documents held when `[concurrency] max_built_mib` is unset
+/// (ADR 0012 §5). A smaller budget saves memory but lengthens the tail of
+/// visible latency (`stage-5.md`, "The default").
+pub const DEFAULT_MAX_BUILT_MIB: usize = 512;
+
+/// Bytes of built documents the ingest engine holds before it waits:
+/// `[concurrency] max_built_mib`, else [`DEFAULT_MAX_BUILT_MIB`].
+pub fn max_built_bytes(config: &Config) -> usize {
+    config
+        .concurrency
+        .max_built_mib
+        .map_or(DEFAULT_MAX_BUILT_MIB, NonZeroUsize::get)
+        .saturating_mul(1024 * 1024)
 }
 
 /// A configured-but-not-yet-running deployment over one [`Config`].
@@ -157,18 +190,37 @@ impl Daemon {
 
         let config = Arc::new(config);
         let source_started = Instant::now();
-        let SourceParts { capture, documents } =
-            backends.source(Arc::clone(&config), &options).await?;
+        let SourceParts {
+            capture,
+            documents,
+            resolver,
+        } = backends.source(Arc::clone(&config), &options).await?;
         let source_took = source_started.elapsed();
         let sinks = backends.sinks(&config).await?;
         let sink_names: Vec<SinkName> = sinks.iter().map(|s| s.name.clone()).collect();
-        let stream: Arc<dyn Stream> = backends.stream(&config, &sink_names)?;
         let mappings: Vec<IndexMapping> = documents
             .index_mappings()
             .await
             .context("resolving the index mappings")?;
+        // One lane per (index, sink): every index a sink engine maintains.
+        let lanes: Vec<LaneKey> = mappings
+            .iter()
+            .flat_map(|mapping| {
+                sink_names
+                    .iter()
+                    .map(|sink| LaneKey::new(mapping.index.clone(), sink.clone()))
+            })
+            .collect();
+        let stream: Arc<dyn Stream> = backends.stream(&config, &lanes)?;
 
-        let fence = Fence::new(Arc::clone(&capture), sink_names.iter().cloned());
+        let progress = Arc::new(Progress::new(lanes.iter().cloned()));
+        let fence = Fence::new(
+            Arc::clone(&capture),
+            Arc::clone(&progress),
+            lanes.iter().cloned(),
+        );
+        let budget = Arc::new(Budget::new(max_built_bytes(&config)));
+        let stalls = Arc::new(Stalls::new(lanes.iter().cloned()));
         let status = Arc::new(
             Status::new(
                 config.indexes.keys().cloned(),
@@ -176,7 +228,9 @@ impl Daemon {
                 Instant::now(),
             )
             .with_fence(fence.clone())
-            .with_source(Arc::clone(&capture)),
+            .with_source(Arc::clone(&capture))
+            .with_budget(Arc::clone(&budget))
+            .with_stalls(Arc::clone(&stalls)),
         );
         let mut observers: Vec<Arc<dyn Observer>> = vec![
             Arc::new(StatusObserver::new(Arc::clone(&status))),
@@ -204,8 +258,12 @@ impl Daemon {
             Arc::clone(&documents),
             Arc::clone(&stream),
             sink_names.clone(),
+            Arc::clone(&progress),
         )
+        .with_resolver(resolver)
         .with_batch(batch_policy(&config))
+        .with_builds(builds(&config))
+        .with_budget(Arc::clone(&budget))
         .with_observer(Arc::clone(&observer))
         .with_failure_policies(failure_policies.clone())
         .with_stop(stop.clone());
@@ -218,9 +276,12 @@ impl Daemon {
                     parts.sink,
                     Arc::clone(&stream),
                     mappings.clone(),
+                    Arc::clone(&progress),
                 )
                 .with_options(parts.options)
                 .with_writes(writes(&config))
+                .with_write_documents(batch_policy(&config).max_changes)
+                .with_merge_wait(batch_policy(&config).max_delay)
                 .with_observer(Arc::clone(&observer))
                 .with_failure_policies(failure_policies.clone())
                 .skip_backfill(options.skip_backfill)
@@ -242,6 +303,9 @@ impl Daemon {
             observer,
             options,
             stop,
+            budget,
+            stalls,
+            progress,
         })
     }
 }
@@ -262,6 +326,9 @@ pub struct RunningDaemon {
     observer: Arc<dyn Observer>,
     options: DaemonOptions,
     stop: engine::Stop,
+    budget: Arc<Budget>,
+    stalls: Arc<Stalls>,
+    progress: Arc<Progress>,
 }
 
 impl RunningDaemon {
@@ -269,6 +336,12 @@ impl RunningDaemon {
     /// to read while the daemon runs. Cheap to clone.
     pub fn status(&self) -> Arc<Status> {
         Arc::clone(&self.status)
+    }
+
+    /// The memory budget the ingest engine builds within, for a transport to
+    /// report (see [`Budget`]). Cheap to clone.
+    pub fn budget(&self) -> Arc<Budget> {
+        Arc::clone(&self.budget)
     }
 
     /// The fence: what a transport waits on so a client can read its own
@@ -291,7 +364,7 @@ impl RunningDaemon {
     /// The stop: the phase turns `stopping` (not ready, no new operation);
     /// the ingest engine reads nothing more, publishes the batch it was
     /// buffering, waits until every sink flushed and acknowledged its lane,
-    /// hands the final watermark to the source and closes the live stream.
+    /// hands what every lane landed to the source and closes the live stream.
     /// A snapshot in progress is abandoned; its sink asks again on the next
     /// start. Nothing here bounds the stop: a stalled sink holds it, so the
     /// caller owns the deadline, and dropping this future past it is safe
@@ -311,12 +384,22 @@ impl RunningDaemon {
             observer,
             options,
             stop,
+            budget: _,
+            stalls,
+            progress,
         } = self;
 
         let _lag = LagGuard(tokio::spawn(lag::poll(
             Arc::clone(&source),
             Arc::clone(&observer),
             options.lag_poll_interval,
+        )));
+
+        let _stalls = LagGuard(tokio::spawn(stall::watch(
+            stalls,
+            progress,
+            Arc::clone(&source),
+            Arc::clone(&status),
         )));
 
         let supervised = supervise::run_all(

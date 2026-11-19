@@ -68,7 +68,8 @@ pub struct ConfigToml {
     #[serde(default, skip_serializing_if = "Batch::is_empty")]
     pub batch: Batch,
     /// How much the pipeline does at once. Never written into `flusso.lock`:
-    /// `--writes` / `FLUSSO_WRITES` override it, and give it to `run --locked`
+    /// `--writes` / `FLUSSO_WRITES` and `--builds` / `FLUSSO_BUILDS` override
+    /// it, and give it to `run --locked`
     /// (flag > env > file).
     #[serde(default, skip_serializing_if = "Concurrency::is_empty")]
     pub concurrency: Concurrency,

@@ -6,24 +6,26 @@
 //! block or [`BatchPolicy::max_changes`] is reached, so a lone change on a
 //! quiet stream never waits out [`BatchPolicy::max_delay`] — resolved to the
 //! documents they touch (deduplicated), built once with
-//! [`DocumentBuilder::build_many`], and published as one [`Batch`] to every
-//! lane, carrying the position of the last change. Snapshot rows for a
-//! backfill go through the same build path but are not resolved: a snapshot
-//! reads every row of each requested index's root table, so a row is its own
-//! document, once per requested index rooted at its table (see
-//! [`IndexScope`](source::document::IndexScope)), and every document is
-//! reached exactly once by its own root row. Resolving a row like a live
-//! change would cost a reverse query per related path and rebuild the parents
-//! of related indexes over and over (issue #385). Snapshot batches are
-//! published only to the lanes that requested them, without a position,
-//! followed by a [`LaneItem::SnapshotComplete`]. Both kinds interleave on this
-//! single task, so lane order is build order and a document's later message is
-//! always the newer state.
+//! [`DocumentBuilder::build_many`], and published as one [`Batch`](stream::Batch) to every
+//! lane, carrying the position of the last change. A backfill (a *snapshot*)
+//! walks each requested index's root keys in pages
+//! ([`DocumentBuilder::keys`], [`KEY_PAGE`] at a time, the engine holding the
+//! last key as the cursor), and each key is its own document, built through
+//! the same path but never resolved: resolving it like a live change would
+//! cost a reverse query per related path and rebuild the parents of related
+//! indexes over and over (issue #385). A page is read when it is needed, with
+//! no snapshot shared across pages: the source's resume point exists before
+//! any backfill, so a row that gets a key behind the walk reaches the live
+//! stream. Snapshot batches are published only to the lanes that requested
+//! them, without a position, followed by a [`LaneItem::SnapshotComplete`].
+//! Both kinds interleave on this single task, so lane order is build order and
+//! a document's later message is always the newer state: a page only names
+//! ids, and its documents are read when they are built.
 //!
-//! After every commit the engine reads the stream's watermark — the lowest
-//! position every lane has acknowledged — and hands it to the source as
-//! confirmation. That is the at-least-once guarantee: the resume point advances
-//! only past what *every* sink has made durable.
+//! After every commit, and once a second, the engine reads how far every lane
+//! has landed ([`Progress`]) and hands it to the source as confirmation. That
+//! is the at-least-once guarantee: the resume point advances only past what
+//! *every* sink has made durable.
 //!
 //! Requests are at-least-once too: a `Backfill` is acknowledged only after its
 //! `SnapshotComplete` is published, and concurrent requests for the same index
@@ -39,31 +41,42 @@
 //! live stream closed once the source has the final position. See
 //! [`Stop`] for the sequence.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+mod builds;
+mod commit;
+mod confirm;
+mod gate;
+mod live;
+mod snapshot;
+#[cfg(test)]
+mod tests;
+
+use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
-use chrono::Utc;
-use futures::future::try_join_all;
+use futures::StreamExt;
 use futures::stream::BoxStream;
-use futures::{FutureExt, StreamExt};
-use kernel::{Envelope, IndexName, Position, SinkName, TableName};
-use source::cdc::{ChangeCapture, ChangeEvent, LiveChange, SourcePosition};
-use source::document::{BuildFailure, Document, DocumentBuilder, DocumentId};
-use source::{SnapshotTable, SourceError};
-use stream::{AckHandle, Batch, Consumer, LaneItem, Producer, Request, Stream};
-use tokio::time::{Duration, Instant, sleep_until, timeout_at};
+use kernel::{IndexName, SinkName};
+use source::SourceError;
+use source::cdc::{ChangeCapture, Landed, LiveChange};
+use source::document::{DocumentBuilder, DocumentId};
+use stream::{Consumer, LaneItem, LaneKey, Producer, Request, Stream};
+use tokio::time::{Duration, Instant, timeout_at};
 
+use crate::budget::Budget;
 use crate::error::{EngineError, Result};
 use crate::observer::{
-    BuildStats, EngineId, NoopObserver, Observer, Stage, StageTiming, StartupStep, Work,
+    EngineId, NoopObserver, Observer, Stage, StageTiming, StartupStep, Wake, Work,
 };
-use crate::policy::{BatchPolicy, FailurePolicies, FailurePolicy};
+use crate::policy::{BatchPolicy, FailurePolicies};
+use crate::progress::Progress;
 use crate::stop::{Stop, drain_lanes};
 
-/// How often the watermark is confirmed to the source while no commit happens,
-/// so acknowledgements that arrive during a quiet period still advance it.
-const CONFIRM_TICK: Duration = Duration::from_secs(1);
+use builds::Builds;
+use confirm::{CONFIRM_TICK, Furthest};
+use live::{Next, PendingBatch, next_live};
+pub use snapshot::KEY_PAGE;
+use snapshot::{ClosedConsumer, Snapshot, Step, next_snapshot_step};
 
 /// The longest a stopping engine polls the live stream for its end after
 /// asking the source to close it. Past it the stream is dropped. Longer than
@@ -72,8 +85,8 @@ const CONFIRM_TICK: Duration = Duration::from_secs(1);
 /// reported as one that failed.
 const CLOSE_WAIT: Duration = Duration::from_secs(12);
 
-/// The producing end of every sink's lane, by sink name.
-type Lanes = BTreeMap<SinkName, Box<dyn Producer<LaneItem>>>;
+/// The producing end of every `(index, sink)` lane.
+type Lanes = BTreeMap<LaneKey, Box<dyn Producer<LaneItem>>>;
 
 /// The source's live change stream.
 type LiveStream = BoxStream<'static, source::Result<LiveChange>>;
@@ -83,10 +96,14 @@ type LiveStream = BoxStream<'static, source::Result<LiveChange>>;
 pub struct IngestEngine {
     source: Arc<dyn ChangeCapture>,
     documents: Arc<dyn DocumentBuilder>,
+    /// Resolves live changes; `documents` when none was given.
+    resolver: Arc<dyn DocumentBuilder>,
     stream: Arc<dyn Stream>,
     sinks: Vec<SinkName>,
     observer: Arc<dyn Observer>,
     batch: BatchPolicy,
+    builds: usize,
+    budget: Option<Arc<Budget>>,
     failure_policies: FailurePolicies,
     stop: Stop,
     /// How many times this engine moved the source forward (see
@@ -95,13 +112,9 @@ pub struct IngestEngine {
     /// The furthest this engine has confirmed, and the furthest its source
     /// reported reaching, across restarts of its run.
     furthest: Mutex<Furthest>,
-}
-
-/// The furthest an ingest engine has moved its source, over its life.
-#[derive(Debug, Default)]
-struct Furthest {
-    confirmed: Option<Position>,
-    reached: Option<SourcePosition>,
+    /// How far each lane has landed what this engine routed: registered at
+    /// publish, read to confirm.
+    progress: Arc<Progress>,
 }
 
 /// How the engine's run ended without an error.
@@ -112,24 +125,31 @@ enum Ended {
 }
 
 impl IngestEngine {
-    /// An engine publishing to the lanes of `sinks` on `stream`.
+    /// An engine publishing to the lanes of `sinks` on `stream`, registering
+    /// what it routes in `progress`: the one every sink engine over `stream`
+    /// reports to, which is what confirmation and fences read.
     pub fn new(
         source: Arc<dyn ChangeCapture>,
         documents: Arc<dyn DocumentBuilder>,
         stream: Arc<dyn Stream>,
         sinks: Vec<SinkName>,
+        progress: Arc<Progress>,
     ) -> Self {
         Self {
             source,
+            resolver: Arc::clone(&documents),
             documents,
             stream,
-            sinks,
             observer: Arc::new(NoopObserver),
             batch: BatchPolicy::default(),
+            builds: 1,
+            budget: None,
             failure_policies: FailurePolicies::default(),
             stop: Stop::new(),
             advances: AtomicU64::new(0),
             furthest: Mutex::new(Furthest::default()),
+            progress,
+            sinks,
         }
     }
 
@@ -153,6 +173,21 @@ impl IngestEngine {
         self.advances.load(Ordering::Relaxed)
     }
 
+    /// How far each lane has landed what this engine routed.
+    pub fn progress(&self) -> Arc<Progress> {
+        Arc::clone(&self.progress)
+    }
+
+    /// Resolve live changes with `resolver` (a builder on a connection of its
+    /// own, so resolving never waits for a build's connection); `None` keeps
+    /// the document builder.
+    pub fn with_resolver(mut self, resolver: Option<Arc<dyn DocumentBuilder>>) -> Self {
+        if let Some(resolver) = resolver {
+            self.resolver = resolver;
+        }
+        self
+    }
+
     /// Report lifecycle and progress to `observer`.
     pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
         self.observer = observer;
@@ -173,6 +208,21 @@ impl IngestEngine {
             max_changes: batch.max_changes.max(1),
             ..batch
         };
+        self
+    }
+
+    /// Hold built documents within `budget` (see [`Budget`]): a build is
+    /// granted only when the budget has room, and its bytes are held until
+    /// every lane acknowledged its batch. Without one nothing is counted.
+    pub fn with_budget(mut self, budget: Arc<Budget>) -> Self {
+        self.budget = Some(budget);
+        self
+    }
+
+    /// Build up to `builds` batches at once (at least one). Each lane still
+    /// gets its items in the order they were granted.
+    pub fn with_builds(mut self, builds: usize) -> Self {
+        self.builds = builds.max(1);
         self
     }
 
@@ -210,26 +260,46 @@ impl IngestEngine {
         let lanes: Lanes = self
             .sinks
             .iter()
-            .map(|sink| Ok((sink.clone(), self.stream.lane(sink)?.producer)))
+            .flat_map(|sink| self.stream.lanes(sink))
+            .map(|key| {
+                let producer = self.stream.lane(&key)?.producer;
+                Ok((key, producer))
+            })
             .collect::<Result<_>>()?;
-        let mut requests = self.stream.requests()?.consumer;
-        let scopes: HashMap<IndexName, SnapshotTable> = self
-            .documents
-            .backfill_scopes()
-            .into_iter()
-            .map(|scope| (scope.index, scope.root))
-            .collect();
+        self.progress.check_lanes(lanes.keys())?;
+        let requests = self.stream.requests()?.consumer;
+        let scopes: HashSet<IndexName> = self.documents.backfill_indexes().into_iter().collect();
 
         let started = Instant::now();
-        let mut live: LiveStream = self.source.live().await?;
+        let live: LiveStream = self.source.live().await?;
         self.observer
             .on_startup_step(StartupStep::OpenLive, None, started.elapsed());
         tracing::info!("following live changes");
         self.observer.on_live_started();
 
+        let mut builds =
+            Builds::new(self.builds, self.budget.clone()).with_observer(Arc::clone(&self.observer));
+        let ended = self
+            .follow(&lanes, requests, &scopes, live, &mut builds)
+            .await;
+        if ended.is_err() {
+            builds.abandon().await;
+        }
+        ended
+    }
+
+    /// The run's loop, from an open live stream to its end or a stop.
+    async fn follow(
+        &self,
+        lanes: &Lanes,
+        mut requests: Box<dyn Consumer<Request>>,
+        scopes: &HashSet<IndexName>,
+        mut live: LiveStream,
+        builds: &mut Builds,
+    ) -> Result<Ended> {
         let mut pending = PendingBatch::new(self.batch.max_changes);
         let mut snapshot: Option<Snapshot> = None;
-        let mut last_confirmed: Option<Position> = None;
+        let mut last_confirmed: Option<Landed> = None;
         let mut confirm_tick = tokio::time::interval(CONFIRM_TICK);
         let mut live_ended = false;
         // Where the last arm's work ended: every arm times its wait from here,
@@ -241,8 +311,8 @@ impl IngestEngine {
             // (a sink staged its backfill before this engine started) still
             // gets those served; the run ends once nothing is left to do.
             if live_ended && snapshot.is_none() && requests.is_empty() {
-                self.commit_live(&mut pending, &lanes).await?;
-                self.confirm(&mut last_confirmed);
+                self.settle(&mut pending, builds, lanes).await?;
+                self.confirm(&mut last_confirmed, false);
                 return Ok(Ended::LiveEnded);
             }
             if self.stop.is_requested() {
@@ -253,83 +323,89 @@ impl IngestEngine {
                          served again on the next start"
                     );
                 }
-                self.wind_down(&mut pending, &lanes, live, live_ended, &mut last_confirmed)
-                    .await?;
+                self.wind_down(
+                    &mut pending,
+                    builds,
+                    lanes,
+                    live,
+                    live_ended,
+                    &mut last_confirmed,
+                )
+                .await?;
                 return Ok(Ended::Stopped);
             }
-            let deadline = pending.deadline.unwrap_or_else(far_future);
+            // A batch that can't take more changes (full, or past its
+            // deadline) and waits for a build stops the reading: the stream
+            // waits, as it did while a build ran.
+            let open = pending.is_open();
+            let building = builds.running() > 0;
             tokio::select! {
-                // While the live stream is open, `next_live` watches the stop.
-                () = self.stop.requested(), if live_ended => {
-                    mark = self.waited(mark, &mut snapshot);
+                // While the live stream is read, `next_live` watches the stop.
+                () = self.stop.requested(), if live_ended || !open => {
+                    mark = self.waited(mark, &mut snapshot, building);
                 }
-                change = next_live(&mut live, &self.stop), if !live_ended => match change {
+                change = next_live(&mut live, &self.stop), if !live_ended && open => match change {
                     Next::Stopped => {
-                        mark = self.waited(mark, &mut snapshot);
+                        mark = self.waited(mark, &mut snapshot, building);
                     }
                     Next::Change(None) => {
-                        mark = self.waited(mark, &mut snapshot);
+                        mark = self.waited(mark, &mut snapshot, building);
                         live_ended = true;
                     }
                     Next::Change(Some(Err(error))) => return Err(error.into()),
                     Next::Change(Some(Ok((position, event)))) => {
-                        let started = self.waited(mark, &mut snapshot);
+                        let started = self.waited(mark, &mut snapshot, building);
                         self.buffer_live(&mut pending, position, event).await?;
                         live_ended = self.drain_ready(&mut live, &mut pending).await?;
                         self.observer.on_stage(
                             StageTiming::new(Stage::Resolve, started.elapsed()).work(Work::Live),
                         );
-                        self.commit_live(&mut pending, &lanes).await?;
-                        self.confirm(&mut last_confirmed);
+                        builds.woke(Wake::Change);
+                        self.grant(&mut pending, &mut snapshot, builds, lanes).await?;
+                        self.confirm(&mut last_confirmed, false);
                         mark = Instant::now();
                     }
                 },
-                () = sleep_until(deadline), if pending.deadline.is_some() => {
-                    self.waited(mark, &mut snapshot);
-                    self.commit_live(&mut pending, &lanes).await?;
-                    self.confirm(&mut last_confirmed);
+                () = released(self.budget.as_deref()), if builds.refused().is_some() => {
+                    builds.woke(Wake::Released);
+                    self.grant(&mut pending, &mut snapshot, builds, lanes).await?;
+                    self.confirm(&mut last_confirmed, false);
                     mark = Instant::now();
                 }
-                row = next_snapshot_row(&mut snapshot), if snapshot.is_some() => {
+                landed = builds.next(), if building => {
+                    builds.woke(Wake::Landed);
+                    self.landed(landed, &mut pending, &mut snapshot, builds, lanes).await?;
+                    self.confirm(&mut last_confirmed, false);
+                    mark = Instant::now();
+                }
+                step = next_snapshot_step(&mut snapshot),
+                    if snapshot.as_ref().is_some_and(Snapshot::wants_keys) =>
+                {
                     let Some(active) = snapshot.as_mut() else { continue };
-                    match row {
-                        Some(Err(error)) => return Err(error.into()),
-                        Some(Ok(event)) => {
-                            active.buffer(&event);
-                            // The one clock read per row: the wait for it, if
-                            // any, its decoding and buffering, all `Page`.
-                            let now = Instant::now();
-                            active.page_wait += now - mark;
-                            mark = now;
-                            if active.batch.is_full() {
-                                self.commit_snapshot(active, &lanes).await?;
-                                mark = Instant::now();
-                            }
-                        }
-                        None => {
-                            active.page_wait += mark.elapsed();
-                            self.commit_snapshot(active, &lanes).await?;
-                            let started = Instant::now();
-                            self.finish_snapshot(active, &lanes).await?;
-                            self.observer.on_stage(
-                                StageTiming::new(Stage::Snapshot, started.elapsed())
-                                    .work(Work::Backfill),
-                            );
-                            snapshot = None;
-                            mark = Instant::now();
-                        }
+                    // The wait for a page, if any, is `Page`, unless builds
+                    // ran meanwhile: then the loop was waiting on them too.
+                    if !building {
+                        active.page_wait += mark.elapsed();
                     }
+                    match step {
+                        Err(error) => return Err(error.into()),
+                        Ok(Step::Keys) => active.take_keys(),
+                        Ok(Step::Done) => active.done = true,
+                    }
+                    builds.woke(Wake::Page);
+                    self.grant(&mut pending, &mut snapshot, builds, lanes).await?;
+                    mark = Instant::now();
                 },
                 request = requests.recv(), if snapshot.is_none() => match request? {
                     None => {
-                        mark = self.waited(mark, &mut snapshot);
+                        mark = self.waited(mark, &mut snapshot, building);
                         tracing::warn!("request lane closed; no further backfills can be served");
                         requests = Box::new(ClosedConsumer);
                     }
                     Some(first) => {
-                        let started = self.waited(mark, &mut snapshot);
-                        let deliveries = self.collect_requests(first, &mut requests, &lanes).await?;
-                        snapshot = self.start_snapshot(deliveries, &scopes, &lanes).await?;
+                        let started = self.waited(mark, &mut snapshot, building);
+                        let deliveries = self.collect_requests(first, &mut requests, lanes).await?;
+                        snapshot = self.start_snapshot(deliveries, scopes, lanes).await?;
                         mark = Instant::now();
                         self.observer.on_stage(
                             StageTiming::new(Stage::Snapshot, mark - started).work(Work::Backfill),
@@ -337,20 +413,33 @@ impl IngestEngine {
                     }
                 },
                 _ = confirm_tick.tick() => {
-                    mark = self.waited(mark, &mut snapshot);
-                    self.confirm(&mut last_confirmed);
+                    mark = self.waited(mark, &mut snapshot, building);
+                    // A backstop, not the mechanism: a batch the budget held
+                    // back is granted on a release (the arm above). Should a
+                    // release ever go unheard, the next tick still grants it,
+                    // so it costs a second, never the run.
+                    if builds.refused().is_some() {
+                        builds.woke(Wake::Tick);
+                        self.grant(&mut pending, &mut snapshot, builds, lanes).await?;
+                        mark = Instant::now();
+                    }
+                    self.confirm(&mut last_confirmed, true);
                 }
             }
         }
     }
 
     /// Close the wait since `since` as the loop wakes, and return the moment,
-    /// so the work that follows times from it. With no snapshot running the
-    /// wait is [`Stage::Idle`]; with one, the loop was waiting on its rows
-    /// too, so it is the snapshot's [`Stage::Page`] (reported with its next
-    /// batch).
-    fn waited(&self, since: Instant, snapshot: &mut Option<Snapshot>) -> Instant {
+    /// so the work that follows times from it. While builds run, the loop was
+    /// waiting on them, which their [`Stage::Build`] covers. Otherwise, with
+    /// no snapshot running the wait is [`Stage::Idle`]; with one, the loop
+    /// was waiting on its rows too, so it is the snapshot's [`Stage::Page`]
+    /// (reported with its next batch).
+    fn waited(&self, since: Instant, snapshot: &mut Option<Snapshot>, building: bool) -> Instant {
         let now = Instant::now();
+        if building {
+            return now;
+        }
         match snapshot {
             Some(active) => active.page_wait += now - since,
             None => self
@@ -360,23 +449,25 @@ impl IngestEngine {
         now
     }
 
-    /// The rest of a stop: publish the buffered batch, wait until every lane
-    /// acknowledged it (confirming as the watermark moves), then close the
+    /// The rest of a stop: finish the builds running, build and publish the
+    /// buffered batch, wait until every lane
+    /// acknowledged it (confirming what landed as it moves), then close the
     /// live stream so the final position reaches the source.
     async fn wind_down(
         &self,
         pending: &mut PendingBatch,
+        builds: &mut Builds,
         lanes: &Lanes,
         mut live: LiveStream,
         live_ended: bool,
-        last_confirmed: &mut Option<Position>,
+        last_confirmed: &mut Option<Landed>,
     ) -> Result<()> {
         tracing::info!(
             buffered = pending.count,
             "stop requested: reading no further changes; landing what is in flight"
         );
-        self.commit_live(pending, lanes).await?;
-        drain_lanes(&*self.stream, &*self.source, last_confirmed).await;
+        self.settle(pending, builds, lanes).await?;
+        drain_lanes(&*self.stream, &*self.source, &self.progress, last_confirmed).await;
         tracing::info!(position = ?last_confirmed, "every sink acknowledged; closing the live stream");
         if live_ended || !self.source.close_live() {
             return Ok(());
@@ -414,514 +505,13 @@ impl IngestEngine {
             .into()),
         }
     }
-
-    /// Buffer every change the live stream has ready *right now*, stopping at
-    /// a full batch, the batch's deadline, or the moment the stream would
-    /// block. Returns whether the stream ended. The caller commits on return
-    /// either way: a change on a quiet stream has nothing to batch with, so
-    /// waiting out `max_delay` would only add latency, while a burst keeps the
-    /// stream ready and fills the batch — for at most `max_delay`.
-    async fn drain_ready(&self, live: &mut LiveStream, pending: &mut PendingBatch) -> Result<bool> {
-        while pending.is_open() && !self.stop.is_requested() {
-            match live.next().now_or_never() {
-                None => return Ok(false),
-                Some(None) => return Ok(true),
-                Some(Some(Err(error))) => return Err(error.into()),
-                Some(Some(Ok((position, event)))) => {
-                    self.buffer_live(pending, position, event).await?;
-                }
-            }
-        }
-        Ok(false)
-    }
-
-    /// Resolve one live change into the batch: the documents it touches,
-    /// deduplicated, and its position.
-    async fn buffer_live(
-        &self,
-        pending: &mut PendingBatch,
-        position: Position,
-        event: ChangeEvent,
-    ) -> Result<()> {
-        self.observer.on_change_captured();
-        let affected = self
-            .documents
-            .resolve(event.table(), event.key(), event.before(), event.after())
-            .await?;
-        tracing::trace!(documents = affected.len(), "change resolved to documents");
-        pending.add(affected);
-        pending.position = Some(position);
-        if pending.deadline.is_none() {
-            pending.deadline = Some(Instant::now() + self.batch.max_delay);
-        }
-        Ok(())
-    }
-
-    /// Build the batch's documents once and publish them to every lane with
-    /// the batch's position, concurrently, so a full lane delays only its own
-    /// copy. A batch that resolved to no document is still published (empty),
-    /// so the lanes acknowledge its position.
-    #[tracing::instrument(name = "ingest.commit", level = "debug", skip_all, fields(changes = pending.count, documents = pending.ids.len()))]
-    async fn commit_live(&self, pending: &mut PendingBatch, lanes: &Lanes) -> Result<()> {
-        if pending.count == 0 {
-            return Ok(());
-        }
-        let started = Instant::now();
-        let (envelopes, by_index) = self.build(&pending.ids, pending.position).await?;
-        let built = Instant::now();
-        let build = built - started;
-        self.observer
-            .on_stage(StageTiming::new(Stage::Build, build).work(Work::Live));
-        let stats = BuildStats {
-            changes: pending.count,
-            documents: envelopes.len(),
-            documents_by_index: by_index.into_iter().collect(),
-            build,
-        };
-        let item = LaneItem::Batch(Batch {
-            position: pending.position,
-            changes: pending.count,
-            envelopes: envelopes.into(),
-        });
-        self.publish(
-            lanes
-                .iter()
-                .map(|(sink, producer)| (sink, producer, item.clone())),
-            Work::Live,
-            built,
-        )
-        .await?;
-        pending.clear();
-        self.observer.on_batch_built(stats);
-        tracing::debug!("batch built and published");
-        Ok(())
-    }
-
-    /// Publish each item to its lane, all at once, so a full lane delays only
-    /// its own copy. Times each lane ([`Stage::LaneWait`]) and the whole
-    /// ([`Stage::Publish`]) from `started`, the end of the build, so cutting
-    /// the items is publishing too.
-    async fn publish<'a>(
-        &self,
-        items: impl IntoIterator<Item = (&'a SinkName, &'a Box<dyn Producer<LaneItem>>, LaneItem)>,
-        work: Work,
-        started: Instant,
-    ) -> Result<()> {
-        try_join_all(items.into_iter().map(|(sink, producer, item)| async move {
-            producer.publish(item).await?;
-            self.observer.on_stage(
-                StageTiming::new(Stage::LaneWait, started.elapsed())
-                    .work(work)
-                    .sink(sink),
-            );
-            Ok::<_, EngineError>(())
-        }))
-        .await?;
-        self.observer
-            .on_stage(StageTiming::new(Stage::Publish, started.elapsed()).work(work));
-        Ok(())
-    }
-
-    /// Build `ids` into envelopes tagged with `position`.
-    async fn build(
-        &self,
-        ids: &[DocumentId],
-        position: Option<Position>,
-    ) -> Result<(Vec<Envelope>, BTreeMap<IndexName, usize>)> {
-        let mut by_index: BTreeMap<IndexName, usize> = BTreeMap::new();
-        let mut envelopes = Vec::with_capacity(ids.len());
-        let ts = Utc::now();
-        for document in self.documents.build_many(ids).await? {
-            let envelope = match document {
-                Document::Upsert { id, body } => {
-                    Envelope::upsert(id.index.clone(), document_id(&id), body, position, ts)
-                }
-                Document::Delete { id } => {
-                    Envelope::delete(id.index.clone(), document_id(&id), position, ts)
-                }
-                Document::Failed { id, failure } => {
-                    self.document_failed(&id, failure)?;
-                    continue;
-                }
-            };
-            *by_index.entry(envelope.index.clone()).or_insert(0) += 1;
-            envelopes.push(envelope);
-        }
-        Ok((envelopes, by_index))
-    }
-
-    /// Report a document that could not be built, then apply its policy: `stop`
-    /// fails the batch (nothing in it is published, so the change is retried),
-    /// `skip` leaves every sink's indexed version alone.
-    fn document_failed(&self, id: &DocumentId, failure: BuildFailure) -> Result<()> {
-        let rendered = document_id(id);
-        let policy = self.failure_policies.resolve(id.index.as_ref());
-        self.observer
-            .on_document_failed(&id.index, &rendered, &failure, policy);
-        match policy {
-            FailurePolicy::Stop => Err(EngineError::DocumentFailed {
-                index: id.index.to_string(),
-                id: rendered,
-                failure: Box::new(failure),
-            }),
-            FailurePolicy::Skip => Ok(()),
-        }
-    }
-
-    /// Gather the requests one snapshot will serve: everything already queued
-    /// behind `first`, then, only while some lane has not asked yet, stragglers
-    /// for up to `max_delay`. Returns as soon as every lane has asked, so a
-    /// single-sink backfill starts at once; a lane that never asks (a seeded
-    /// sibling) costs one `max_delay`. A straggler past the window simply gets
-    /// its own snapshot.
-    async fn collect_requests(
-        &self,
-        first: stream::Delivery<Request>,
-        requests: &mut Box<dyn Consumer<Request>>,
-        lanes: &Lanes,
-    ) -> Result<Vec<stream::Delivery<Request>>> {
-        let mut deliveries = vec![first];
-        let deadline = Instant::now() + self.batch.max_delay;
-        loop {
-            let asked: HashSet<&SinkName> = deliveries
-                .iter()
-                .map(|delivery| {
-                    let Request::Backfill { sink, .. } = delivery.item();
-                    sink
-                })
-                .collect();
-            if lanes.keys().all(|lane| asked.contains(lane)) {
-                break;
-            }
-            let next = if requests.is_empty() {
-                match timeout_at(deadline, requests.recv()).await {
-                    Ok(received) => received?,
-                    Err(_) => break,
-                }
-            } else {
-                requests.recv().await?
-            };
-            match next {
-                Some(more) => deliveries.push(more),
-                None => break,
-            }
-        }
-        Ok(deliveries)
-    }
-
-    /// Hand the stream's watermark to the source when it moved, and count an
-    /// advance past the furthest this engine ever got.
-    fn confirm(&self, last_confirmed: &mut Option<Position>) {
-        let watermark = self.stream.watermark();
-        if let Some(watermark) = watermark
-            && *last_confirmed != Some(watermark)
-        {
-            self.source.confirm(watermark);
-            *last_confirmed = Some(watermark);
-        }
-        let reached = self.source.reached(watermark);
-        let mut furthest = self.furthest.lock().unwrap_or_else(PoisonError::into_inner);
-        // A reopened stream numbers a replayed change afresh, so the stream's
-        // own position moves on every replay: the source's answer decides
-        // whenever it gives one.
-        let moved = match reached {
-            Some(_) => reached > furthest.reached,
-            None => watermark > furthest.confirmed,
-        };
-        furthest.confirmed = furthest.confirmed.max(watermark);
-        furthest.reached = furthest.reached.max(reached);
-        if moved {
-            self.advances.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    /// Coalesce the delivered requests into one snapshot: the union of their
-    /// indexes' root tables, remembering which lane asked for which indexes.
-    /// Requests for indexes the builder knows nothing about are answered with
-    /// an immediate `SnapshotComplete` for whatever *is* known.
-    async fn start_snapshot(
-        &self,
-        deliveries: Vec<stream::Delivery<Request>>,
-        scopes: &HashMap<IndexName, SnapshotTable>,
-        lanes: &Lanes,
-    ) -> Result<Option<Snapshot>> {
-        let mut requested: BTreeMap<SinkName, BTreeSet<IndexName>> = BTreeMap::new();
-        let mut handles = Vec::with_capacity(deliveries.len());
-        for delivery in deliveries {
-            let (request, handle) = delivery.into_parts();
-            let Request::Backfill { sink, indexes } = request;
-            let known: BTreeSet<IndexName> = indexes
-                .into_iter()
-                .filter(|index| {
-                    let known = scopes.contains_key(index);
-                    if !known {
-                        tracing::warn!(index = %index, %sink, "backfill requested for an index the source does not build; ignoring");
-                    }
-                    known
-                })
-                .collect();
-            requested.entry(sink).or_default().extend(known);
-            handles.push(handle);
-        }
-        let indexes: BTreeSet<IndexName> = requested.values().flatten().cloned().collect();
-        let mut tables: Vec<SnapshotTable> = Vec::new();
-        let mut roots: HashMap<TableName, Vec<IndexName>> = HashMap::new();
-        for index in &indexes {
-            if let Some(root) = scopes.get(index) {
-                roots
-                    .entry(root.table.clone())
-                    .or_default()
-                    .push(index.clone());
-                if !tables.contains(root) {
-                    tables.push(root.clone());
-                }
-            }
-        }
-        let mut snapshot = Snapshot {
-            stream: Box::pin(futures::stream::empty()),
-            requested,
-            indexes: indexes.iter().cloned().collect(),
-            roots,
-            handles,
-            batch: PendingBatch::new(self.batch.max_changes),
-            page_wait: Duration::ZERO,
-        };
-        if tables.is_empty() {
-            self.finish_snapshot(&mut snapshot, lanes).await?;
-            return Ok(None);
-        }
-        let ordered: Vec<IndexName> = indexes.into_iter().collect();
-        tracing::info!(
-            indexes = ordered.len(),
-            tables = tables.len(),
-            lanes = snapshot.requested.len(),
-            "starting snapshot"
-        );
-        self.observer.on_snapshot_started(&ordered);
-        snapshot.stream = self.source.snapshot(&tables).await?;
-        Ok(Some(snapshot))
-    }
-
-    /// Build the snapshot batch once and publish each lane the slice of it that
-    /// lane requested, with no position.
-    async fn commit_snapshot(&self, snapshot: &mut Snapshot, lanes: &Lanes) -> Result<()> {
-        let page = std::mem::take(&mut snapshot.page_wait);
-        if snapshot.batch.count == 0 && page.is_zero() {
-            return Ok(());
-        }
-        self.observer
-            .on_stage(StageTiming::new(Stage::Page, page).work(Work::Backfill));
-        if snapshot.batch.count == 0 {
-            return Ok(());
-        }
-        let started = Instant::now();
-        let (envelopes, by_index) = self.build(&snapshot.batch.ids, None).await?;
-        let built = Instant::now();
-        let build = built - started;
-        self.observer
-            .on_stage(StageTiming::new(Stage::Build, build).work(Work::Backfill));
-        // Cutting each lane's slice copies its documents: part of publishing.
-        let mut publishes = Vec::with_capacity(snapshot.requested.len());
-        for (sink, indexes) in &snapshot.requested {
-            let slice: Vec<Envelope> = envelopes
-                .iter()
-                .filter(|envelope| indexes.contains(&envelope.index))
-                .cloned()
-                .collect();
-            if slice.is_empty() {
-                continue;
-            }
-            let Some(producer) = lanes.get(sink) else {
-                tracing::warn!(%sink, "snapshot requested by a sink with no lane; dropping its slice");
-                continue;
-            };
-            publishes.push((
-                sink,
-                producer,
-                LaneItem::Batch(Batch {
-                    position: None,
-                    changes: 0,
-                    envelopes: slice.into(),
-                }),
-            ));
-        }
-        self.publish(publishes, Work::Backfill, built).await?;
-        self.observer.on_batch_built(BuildStats {
-            changes: 0,
-            documents: envelopes.len(),
-            documents_by_index: by_index.into_iter().collect(),
-            build,
-        });
-        snapshot.batch.clear();
-        Ok(())
-    }
-
-    /// Publish `SnapshotComplete` to every requesting lane, then acknowledge
-    /// the requests: a crash before this point redelivers them.
-    async fn finish_snapshot(&self, snapshot: &mut Snapshot, lanes: &Lanes) -> Result<()> {
-        let markers = snapshot.requested.iter().filter_map(|(sink, indexes)| {
-            lanes.get(sink).map(|producer| {
-                producer.publish(LaneItem::SnapshotComplete {
-                    indexes: indexes.iter().cloned().collect(),
-                })
-            })
-        });
-        try_join_all(markers).await?;
-        for handle in snapshot.handles.drain(..) {
-            handle.ack().await?;
-        }
-        let indexes: Vec<IndexName> = snapshot.indexes.iter().cloned().collect();
-        tracing::info!(indexes = indexes.len(), "snapshot complete");
-        self.advances.fetch_add(1, Ordering::Relaxed);
-        self.observer.on_snapshot_completed(&indexes);
-        Ok(())
-    }
 }
 
-/// What the live arm of the loop got.
-enum Next {
-    /// The stop was requested first; nothing was read.
-    Stopped,
-    Change(Option<source::Result<LiveChange>>),
-}
-
-/// The next live change, unless the stop is requested first: checked before
-/// the stream on every poll, so a stop is never raced by a ready change. The
-/// check is an atomic load; the stop's waker is registered only when the
-/// stream would wait, so a busy stream pays nothing more.
-async fn next_live(live: &mut LiveStream, stop: &Stop) -> Next {
-    let notified = stop.notified();
-    tokio::pin!(notified);
-    std::future::poll_fn(|cx| {
-        if stop.is_requested() {
-            return std::task::Poll::Ready(Next::Stopped);
-        }
-        if let std::task::Poll::Ready(change) = live.poll_next_unpin(cx) {
-            return std::task::Poll::Ready(Next::Change(change));
-        }
-        match notified.as_mut().poll(cx) {
-            std::task::Poll::Ready(()) => std::task::Poll::Ready(Next::Stopped),
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
-    })
-    .await
-}
-
-/// A batch in the making: the deduplicated document ids of the buffered changes
-/// (or snapshot rows), how many were buffered, and — for a live
-/// batch — the last position and the flush deadline.
-#[derive(Debug)]
-struct PendingBatch {
-    ids: Vec<DocumentId>,
-    seen: HashSet<DocumentId>,
-    count: usize,
-    position: Option<Position>,
-    deadline: Option<Instant>,
-    capacity: usize,
-}
-
-impl PendingBatch {
-    fn new(capacity: usize) -> Self {
-        Self {
-            ids: Vec::with_capacity(capacity),
-            seen: HashSet::with_capacity(capacity),
-            count: 0,
-            position: None,
-            deadline: None,
-            capacity,
-        }
-    }
-
-    /// Buffer one change's affected documents, deduplicated.
-    fn add(&mut self, affected: impl IntoIterator<Item = DocumentId>) {
-        for id in affected {
-            if self.seen.insert(id.clone()) {
-                self.ids.push(id);
-            }
-        }
-        self.count += 1;
-    }
-
-    fn is_full(&self) -> bool {
-        self.count >= self.capacity
-    }
-
-    /// Still accepting changes: neither full nor past its deadline.
-    fn is_open(&self) -> bool {
-        !self.is_full()
-            && self
-                .deadline
-                .is_none_or(|deadline| Instant::now() < deadline)
-    }
-
-    fn clear(&mut self) {
-        self.ids.clear();
-        self.seen.clear();
-        self.count = 0;
-        self.position = None;
-        self.deadline = None;
-    }
-}
-
-/// A running snapshot: its row stream, who asked for what, the requested
-/// indexes by root table, the request handles to acknowledge at the end, and
-/// the batch being filled.
-struct Snapshot {
-    stream: BoxStream<'static, source::Result<ChangeEvent>>,
-    requested: BTreeMap<SinkName, BTreeSet<IndexName>>,
-    indexes: HashSet<IndexName>,
-    roots: HashMap<TableName, Vec<IndexName>>,
-    handles: Vec<Box<dyn AckHandle>>,
-    batch: PendingBatch,
-    /// Time spent getting rows since the last batch: waiting for key pages,
-    /// decoding and buffering rows.
-    page_wait: Duration,
-}
-
-impl Snapshot {
-    /// Buffer a snapshot row as its own document in every requested index
-    /// rooted at its table. Matched by table name, as
-    /// [`DocumentBuilder::resolve`] matches a change. A key with a null part
-    /// addresses no document.
-    fn buffer(&mut self, row: &ChangeEvent) {
-        let key = row.key();
-        let indexes = match self.roots.get(row.table()) {
-            Some(indexes) if !key.has_null() => indexes.as_slice(),
-            _ => &[],
-        };
-        self.batch.add(indexes.iter().map(|index| DocumentId {
-            index: index.clone(),
-            key: key.clone(),
-        }));
-    }
-}
-
-async fn next_snapshot_row(
-    snapshot: &mut Option<Snapshot>,
-) -> Option<std::result::Result<ChangeEvent, SourceError>> {
-    match snapshot {
-        Some(active) => active.stream.next().await,
+/// The next release of `budget`'s bytes; never, without a budget.
+async fn released(budget: Option<&Budget>) {
+    match budget {
+        Some(budget) => budget.released().await,
         None => std::future::pending().await,
-    }
-}
-
-fn far_future() -> Instant {
-    Instant::now() + Duration::from_secs(60 * 60 * 24 * 365)
-}
-
-/// Stands in for the request consumer once the request lane has closed, so the
-/// select loop keeps serving live changes instead of spinning on `None`.
-#[derive(Debug)]
-struct ClosedConsumer;
-
-#[async_trait::async_trait]
-impl Consumer<Request> for ClosedConsumer {
-    async fn recv(&mut self) -> stream::Result<Option<stream::Delivery<Request>>> {
-        std::future::pending().await
-    }
-
-    fn is_empty(&self) -> bool {
-        true
     }
 }
 

@@ -15,7 +15,7 @@ Every library crate, its layer, and what it holds. The numeric prefix on each di
 | 1 | port | `sink` | [`1-ports/sink`](1-ports/sink) | The sink port: the `Sink` trait and the JSON rendering of documents. |
 | 1 | config | `config` | [`1-config`](1-config) | The `flusso.toml` and `*.schema.yml` parsers (as modules), the assembled `Config`, and the deterministic `flusso.lock`. Depends only on the kernel. |
 | 2 | adapter | `source_postgres` | [`2-adapters/source-postgres`](2-adapters/source-postgres) | Postgres source: WAL capture, backfill, document building, publication management, and its own config type. |
-| 2 | adapter | `stream_channel` | [`2-adapters/stream-channel`](2-adapters/stream-channel) | In-process stream: one bounded `tokio` channel per sink lane plus a request lane, with a ticketed in-flight ledger and the watermark. |
+| 2 | adapter | `stream_channel` | [`2-adapters/stream-channel`](2-adapters/stream-channel) | In-process stream: one bounded `tokio` channel per sink lane plus a request lane, with a ticketed in-flight ledger. |
 | 2 | adapter | `sink_opensearch` | [`2-adapters/sink-opensearch`](2-adapters/sink-opensearch) | OpenSearch sink: bulk API, typed mappings, hash alias over generations, seeding, reindex. |
 | 2 | adapter | `sink_stdout` | [`2-adapters/sink-stdout`](2-adapters/sink-stdout) | Emits each operation to stdout (NDJSON or pretty). |
 | 2 | engine | `engine` | [`2-engine`](2-engine) | The two generic loops that drive the ports: the ingest engine (capture → resolve → build once → publish) and one sink engine per sink (receive → apply → flush → ack); batched, deduplicated, at-least-once. |

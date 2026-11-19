@@ -117,8 +117,10 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   bases lack and plain `review-ab` keeps building any base it built before (guard: `test_review_modes.py`'s
   `HarnessSplit`, a proxy that checks names, not a compile of `cases.rs` against an old base); what `review.rs` needs is one `// review-ab requires: <text>` line each, looked up with
   `git grep` in the base's `source-postgres/src`, and a base without it is refused by name (from #357 on today).
-  A mode refuses `--bench`, `--rounds`, `--limit`, `--own-benches`. **`just review-digest`** (`--digest`): each side builds every
-  root index's documents by `build`, `build_many` under 16 keys and 16+, and a backfill (snapshot → resolve →
+  A mode refuses `--bench`, `--rounds`, `--limit`, `--own-benches`; `--own-review` lays nothing over the base,
+  each side running its own `review.rs` over its own `cases.rs` (for a change to what a form calls: the
+  backfill form pages `keys` since #386 stage 3, which bases before it lack; refused without the base's harness). **`just review-digest`** (`--digest`): each side builds every
+  root index's documents by `build`, `build_many` under 16 keys and 16+, and a backfill (key pages of 1,024 →
   `build_many` by 256), rendered by `sink::to_json` with sorted keys; `review-ab-digest.py` prints a digest per
   index and side, `same`/`differ` (with the first ids and a diff), `forms disagree` (two forms built one id
   differently) and `no documents` (an index the harness declared with `#index` and nothing built), plus the
@@ -179,24 +181,32 @@ cargo +nightly fuzz run pgoutput_decode    # fuzz the WAL decoder (from libs/2-a
   failing the job. Tests: `python3 -m unittest discover -s .github/scripts -p
   'test_*.py'` (CI's `scripts` job) over the real history in `.github/scripts/fixtures/`, with a frozen
   copy of the rule that every change must flag identically to. `just load` is the soak script — not a benchmark.
-- The `#[ignore]`d e2e tests live in `source-postgres`'s `integration`, `key_matching`, `filter_operands`,
+- The `#[ignore]`d e2e tests live in `source-postgres`'s `integration`, `key_matching`, `keyset`, `filter_operands`,
   `config_coverage`, `publication`, `introspection`, `tls`, `wal_idle`, `continuity`, and `partitions` binaries
-  (`tls` boots a hostssl-only Postgres with a committed throwaway self-signed cert and
+  (`keyset`, issue #386 stage 3: a backfill's key pages read every row once in the primary key index's
+  order for every key type, hash- and range-partitioned twins included, at page sizes 1 to 1,024, with a
+  type whose operators sit off the search path, as the cases roots' cursor did, and hold no lock between
+  pages; `tls` boots a hostssl-only Postgres with a committed throwaway self-signed cert and
   proves the replication stream + SQL pool honor `sslmode`; `wal_idle`: the slot keeps
   advancing from keepalives/filtered commits while watched tables are idle, so unrelated
-  writes don't pin WAL retention — issue #111; `continuity`: `continuity()` is read-only and
+  writes don't pin WAL retention — issue #111 (the capture's half: the test confirms `Idle` itself; the
+  engine's half, the tick confirming with nothing new landed, is `wal_release`'s
+  `idle_after_a_burst_the_slot_reaches_the_current_wal_position`); `continuity`: `continuity()` is read-only and
   reports `Fresh` exactly while the slot is missing, `prepare()` creates it — issue #120;
   `partitions`: a range-partitioned root and child stream under the parent's name via
   `publish_via_partition_root`, resolve, and backfill through the parent — issue #143) plus
-  `engine`'s `wal`, `wal_release`, `visibility`, `backfill`, and `pipeline`
-  binaries (`wal_release`, issue #204: with the engines running over recording sinks, the slot's
+  `engine`'s `wal`, `wal_release`, `visibility`, `backfill`, `keyset_backfill` and `pipeline`
+  binaries (`keyset_backfill`: writes run right after each full key page, behind, ahead of and inside the
+  page just read, including key changes both ways across the cursor, soft-deletes, a root filter and
+  re-parents, on a plain and a hash-partitioned root and across a stop mid-walk; the sink must end equal
+  to a `build` of every row; `wal_release`, issue #204: with the engines running over recording sinks, the slot's
   `confirmed_flush_lsn` and `restart_lsn` pass the WAL written by changes that produce no document
   — an unread table under `FOR ALL TABLES`, unread-column updates, filtered/soft-deleted/orphaned
   rows, a large and a split mixed transaction, idle WAL after a burst — `confirmed_flush_lsn` within
   `CONFIRM_BOUND` (5 s, what flusso controls; also from the last sink flush for bursts and lone
   changes that produce documents, issue #205), `restart_lsn` within `RELEASE_BOUND` (45 s, also
   waits on Postgres's next `running_xacts` record), and the sinks got exactly the expected ops; a stalled sink
-  pins the slot at its last flushed position (the watermark's minimum over lanes) until it catches
+  pins the slot at its oldest unlanded position (`Progress`'s `Before` over every lane) until it catches
   up, a `backfill = false` sink does not; the full
   source→engine→sink e2e lives in `engine` — a leaf source crate must not dev-depend on
   the engine, or it can't be published before the engine and the layering is violated);
@@ -278,9 +288,10 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   stream keys its `Relation` (`stream.rs`'s `retype_domains`). A value the parser can't hold
   (`infinity`, numeric `NaN`) stays text on both sides and binds as `$n::text::<type>`
   (`sql::key_cast`): sqlx caches a statement by its text with its first parameter types, so a text
-  value bound where a typed one was prepared fails in binary format. The backfill reads each table
-  through **its own cursor name** (`cdc/backfill.rs`) for the same cache reason (a shared `FETCH`
-  decoded a later table's key with the first table's row description). **A resolved document id is
+  value bound where a typed one was prepared fails in binary format. For the same cache reason a
+  backfill's key page (`query::key_page_query`) is its own statement text per root table, key type
+  and bound type (the first page has no bound), so no page decodes another root's keys with its row
+  description. **A resolved document id is
   the root row's own key** (`resolve.rs`'s `reads_root_from_a_link` / `root_keys`): where a path
   ends on a link column's value (`row_link` of its first step) and the root key's equal values can
   render differently (`ColumnMeta::equal_is_identical`: `numeric`, floats, `citext`, a
@@ -381,7 +392,10 @@ Postgres wrote: a mapped number field is an item-level rejection `on_error` deci
   runs everything.
   A `docs` job builds the mdBook (`mdbook build docs`), link-checks it (`lychee --offline
   --include-fragments --root-dir docs/book 'docs/book/**/*.html'`), and runs
-  `.github/scripts/check-manual-links.sh`. A separate `fuzz` job runs a 60-second
+  `.github/scripts/check-manual-links.sh`. An `alerts` job (not a required check) runs
+  `.github/scripts/check-alerts.sh`: promtool and helm from their Docker images over
+  `dev/prometheus/` (config as compose mounts it, the rule tests in `dev/prometheus/tests/`) and the
+  chart's `PrometheusRule`. A separate `fuzz` job runs a 60-second
   `pgoutput_decode` smoke fuzz on nightly (see below); a separate workflow, `postgres-matrix.yml`
   (issue #348, **not** a required check), runs `-E 'rdeps(flusso-test-postgres)'` under the `ci`
   profile once per tested major other than the default (`TESTED_TAGS` in `dev/test-postgres`, their
@@ -588,78 +602,160 @@ arm in `apps/cli/src/backends.rs`. See "Config layer" below.
 ### The pipeline (`libs/2-engine/src/ingest.rs` + `sink_engine.rs`)
 
 ```text
-                 ┌─ lane ─▶ SinkEngine(primary) ─▶ write ×writes ─▶ ack ─┐
-ChangeCapture ─▶ IngestEngine ─┤                                            ├─▶ watermark ─▶ confirm
-  resolve · build once · publish└─ lane ─▶ SinkEngine(audit)   ─▶ write ×writes ─▶ ack ─┘
-                 ◀─ request lane ─ Backfill { sink, indexes } ─────────────────────
+                 ┌─ lanes (users,primary) (orders,primary) ─▶ SinkEngine(primary) ─▶ write ×writes ─▶ ack ─┐
+ChangeCapture ─▶ IngestEngine ─┤                                                                          ├─▶ Progress ─▶ confirm
+  resolve · build once · publish└─ lanes (users,audit)   (orders,audit)   ─▶ SinkEngine(audit)   ─▶ write ×writes ─▶ ack ─┘
+                 ◀─ request lane ─ Backfill { index, sink } ─────────────────────
 ```
 
 Two generic engines, backend-neutral (ADR 0002/0003, issue #130). The **ingest engine**
 (`IngestEngine`) owns the source side: capture → batch → resolve → dedup → `build_many` once →
-publish one `LaneItem::Batch` of kernel `Envelope`s to every sink's lane; it also drains the
-**request lane** and serves `Request::Backfill { sink, indexes }` as snapshots. One **sink
-engine** per sink (`SinkEngine`): `stage` (ensure indexes, retire stale seeds, request its
+publish one `LaneItem::Batch` of kernel `Envelope`s per index to that index's lane of every sink; it also drains the
+**request lane** and serves `Request::Backfill { index, sink }` as snapshots. One **sink
+engine** per sink (`SinkEngine`), reading all its sink's lanes: `stage` (ensure indexes, retire stale seeds, request its
 backfill) then recv → `write` (up to `writes` at once) → ack. Everything they drive — `ChangeCapture`,
-`DocumentBuilder`, `Stream` (lanes + request lane + watermark), `Sink` — is a **trait object**.
+`DocumentBuilder`, `Stream` (lanes + request lane), `Sink` — is a **trait object**; the engine's
+`Progress` (`libs/2-engine/src/progress.rs`, one per deployment, shared by both engines and the fence)
+is the one concrete piece.
 `FanOutSink` is gone; sinks are independent. Key invariants to preserve when editing the engines:
 
-- **At-least-once via write-then-ack and the watermark.** A sink engine acks a lane item *only
-  after* the `Sink::write` that made its documents durable; acks arrive in any order (several
-  writes in flight), so a lane's part of `Stream::watermark()` is the position delivered before its
-  **oldest unacknowledged** positioned item (the channel's ledger records each entry's predecessor
-  at first delivery, `InFlight.before`), the watermark is the **minimum** over lanes, and the ingest
-  engine hands it to `ChangeCapture::confirm` after each commit (and on a 1 s tick), so the slot
-  advances past a change exactly when *every* sink has landed it. The Postgres capture confirms
-  within ~1 s of the last flush (issue #205): `Positions::confirm` wakes the stream loop
-  (`confirmed_moved`), which hands `confirmed_lsn()` to the replication client at once instead of
-  at the next replication event, and `WalChangeCapture::new` sets the client's status and idle
-  wake-up intervals to 1 s (`STATUS_INTERVAL`, fixed, no option). `Positions` stays the one place
-  that computes what may be confirmed; only the moment of hand-over is new. `pgwire-replication`
-  0.5 sends a raised LSN within its status interval on its own (issue #215), but only once
-  `update_applied_lsn` is called, which only the stream loop can do (`recv` takes `&mut`), so the
-  wake-up stays: without it a confirm waits for the next replication event (measured +1 s quiet,
-  up to +1 s under a trickle). Guards:
-  `a_confirmation_reaches_the_client_without_a_replication_event` (`cdc::stream` unit, over the
-  `Replication` seam) and `wal_release`'s `the_slot_confirms_within_seconds_of_the_last_flush` (`CONFIRM_BOUND`, 5 s). A sink engine that dies before
-  its write returns leaves the item unacked; the lane redelivers it to the restarted engine (idempotent
-  rebuild, deterministic id). Positions are monotonic for the life of the source across
-  reopened streams (`Positions::new(start_lsn, first_seq)` continues from the previous map), so
-  the watermark the lanes hold across an ingest-engine restart never names a new-stream change.
-  Guards: `confirms_no_position_before_its_flush`,
+- **One lane per `(index, sink)` (ADR 0012 stage 7).** `stream::LaneKey { index, sink }`; the daemon
+  builds every enabled index × every sink (`Backends::stream(config, &[LaneKey])`), `Stream::lanes(sink)`
+  is a sink engine's set. Publish (`ingest/commit.rs`) groups a built batch by index (`group_by_index`, one
+  `Arc<[Envelope]>` per index, the documents moved, each piece carrying the build's `Hold`): one item per
+  `(index, sink)` lane, keyed by the batch's last position on every lane; a lane with no item is
+  `Progress::skipped`, so a quiet index pins nothing; `changes` rides on each sink's first item and a sink
+  with no item hears `Observer::on_changes_settled`. Snapshots and `SnapshotComplete { index }` go to
+  `(index, s)` of each requesting sink; requests are one per index and coalesce by sink set. The sink
+  engine (`writes.rs`'s `Run`) keeps per lane a consumer, its window, counts and barrier; admission is per
+  lane (two lanes never share a document); `pick` takes live first, every fourth contested grant to
+  backfill, lanes taking turns (`turn`); an ordered sink writes the live front with the lowest position;
+  `SnapshotComplete` is a barrier on its own lane only, and its `mark_seeded` runs as a flight holding a
+  write slot (seeds of several lanes at once, beside other lanes' writes; the lane blocked until it
+  returns; a failed seed fails the run like a write; guards: `tests::seeding`); after a failed run only the failed lanes
+  (`Blame::Lanes`) write their front alone; a reindex is still staged sink-wide between writes. `Fences`
+  and caught-up are per lane (a write is caught up when nothing else of its lane waits). The fence takes
+  `indexes` (`/wait?index=…`, repeatable, `UnknownIndex` → 404); `/status` has `sinks.<s>.lanes.<index>`;
+  `flusso.lane.outstanding{index,sink}`; `flusso-query` fences on the indexes a read reads, cached per
+  `(level, index)` (`fence.rs`'s `After`). Guards: `engine` `tests::lanes`
+  (`a_batch_is_split_by_index_and_a_quiet_index_pins_nothing`,
+  `a_stalled_index_holds_back_neither_its_siblings_writes_nor_its_progress`,
+  `lanes_take_turns_so_a_backlog_on_one_index_does_not_starve_another`,
+  `a_snapshot_complete_waits_only_for_its_own_lane`), the channel's
+  `a_release_on_one_lane_leaves_the_others_alone`, the daemon's
+  `a_stalled_sibling_index_blocks_no_fence_on_the_healthy_index`, `positions_report_each_lane`, the CLI's
+  `a_wait_on_named_indexes_echoes_them` / `an_unknown_or_invalid_index_is_refused`, `flusso-query`'s
+  `a_fenced_client_waits_once_per_level_and_index`,
+  `a_combined_search_and_a_multi_search_wait_on_every_index_they_read`.
+- **Ready items merge into one write (stage 7, #397's revisit).** `writes.rs`'s `pick` takes the first
+  item as before, then every other admissible item of the same kind (live or backfill), across lanes
+  and of one lane, up to `SinkEngine::with_write_documents` (the daemon passes `[batch] max_changes`)
+  and `Sink::write_limit` (OpenSearch: `batch_size`), never splitting an item, never waiting; it keeps
+  the no-hash front pick unless another item could fit (`could_join_the_front`). One `writes` slot per
+  write; the engine calls `Sink::write_parts(&[&[Envelope]], caught_up)` (default: `write` per part,
+  `caught_up` on the last, reports folded; OpenSearch overrides it with one `_bulk`). Each part is
+  decided alone: a `stop` rejection keeps that part unacknowledged and blames its lane only, the others
+  land and are acknowledged; an `Err` blames every part's lane. Caught up when some lane of the write
+  has nothing else waiting. A barrier lane and an ordered sink write one item alone. Guards:
+  `tests::merge`, and `tests::concurrent`'s seeded schedule run with merging off and on (its other
+  tests keep one item per write: `Rig::new` sets `with_write_documents(1)`).
+  **The merge wait** (`merge_hold`): with several lanes, a live item ready while a write is out waits
+  for the writes out, then goes out merged; bounded hard by `SinkEngine::with_merge_wait` (the daemon
+  passes `[batch] max_delay`, 50 ms) from the earlier of the oldest waiting item's ready time and the
+  youngest write out's send time, so a stalled or slow lane holds no other index past it. Nothing is
+  held while a backfill item waits, nor on an ordered sink, one lane, or without merging; the slot cap
+  and a quiet lane's one item are unchanged (stage-7 §14; guards: `tests::wait`).
+
+- **At-least-once via write-then-ack and `Progress` (ADR 0012 stage 6).** A position describes
+  itself: `kernel::Position { seq, fence_before, confirm_before, confirm_through }`, the stamps the
+  source's own (Postgres, `cdc/ack.rs`'s `Positions::emit`, under the one lock it takes per change:
+  `fence_before` = commit LSN − 1, `confirm_before` = the **horizon** before it, `confirm_through` =
+  the commit LSN if it is its commit's last change, else `confirm_before`), so the capture keeps
+  only `next_seq`, the horizon and the confirmed LSN, no map. The ingest engine **routes** a live
+  batch (`commit.rs`'s `publish`): `Progress::published(lane, oldest, last)` registers it on each lane
+  **as that lane's own send succeeds** (one lane per call;
+  `skipped(lane, last)` for a lane a batch has nothing for), so a full lane holds back only itself. A sink
+  engine raises its lane's **marks** (`Progress::applied` / `searchable`, in `writes.rs`'s
+  `write_returned`, before the ack): the last item written, and made searchable, with every item
+  before it in lane order (`Fences`' in-order answers); lane order is registration order, so a mark
+  covers every registered item up to it, and one that runs ahead covers an item registered later.
+  Each lane answers `Before(oldest unlanded)` / `Through(the newest position routed to it)` / `Idle`
+  (`source::cdc::Landed`), and several lanes (`landed()`, `over`) answer as the lane that covers least,
+  so a lane that hasn't taken a batch yet holds the others back and a fence on a healthy lane isn't
+  held back by a full sibling. Both engines take the one `Arc<Progress>` in their constructors
+  (`IngestEngine::new`, `SinkEngine::new`): none is built without it. The ingest engine hands it to `ChangeCapture::confirm` after a commit when
+  it changed and on the 1 s tick **always**, since the source's answer moves with idle WAL while
+  the case stays put; `drain_lanes` the same. The source decides what an emitted-but-unrouted change
+  means: `Through(p)` follows the horizon only while `p.seq + 1 == next_seq`, else `p.confirm_through`;
+  `Idle` follows it only while nothing was ever emitted (`FIRST_SEQ`), else nothing moves. Confirmation
+  is monotonic. **Locks:** the registrations sit under one lock that only the ingest engine (once per
+  lane per batch, and per confirmation) and a fence reader take; a sink engine never does. A reader
+  reads every lane under it, so no registration falls between two lanes' answers (marks only grow: a
+  mark read early makes its lane's answer older, never wider). Each mark is one `AtomicU64` with one
+  writer (its lane's sink engine), raised by a plain load and store. A registration calls the fence's
+  listener, which wakes waiters only while one is open. Per run of `live_drain_held/sinks2/1`
+  (20,000 lane items), counted in the bench: lane ledger locks 60,030 → about 40,000–46,500 (timing),
+  plus 30,002 registry locks and 40,000 mark stores.
+  The Postgres capture confirms within ~1 s of the last flush (issue #205): `Positions::confirm` wakes
+  the stream loop (`confirmed_moved`), which hands `confirmed_lsn()` to the replication client at once
+  instead of at the next replication event, and `WalChangeCapture::new` sets the client's status and
+  idle wake-up intervals to 1 s (`STATUS_INTERVAL`, fixed, no option). `pgwire-replication` 0.5 sends
+  a raised LSN within its status interval on its own (issue #215), but only once `update_applied_lsn`
+  is called, which only the stream loop can do (`recv` takes `&mut`), so the wake-up stays. Idle WAL
+  is released by the tick's confirmation (keepalives move the horizon only; `read_through` confirms
+  nothing). A sink engine that dies before its write returns leaves the item unacked; the lane
+  redelivers it to the restarted engine (idempotent rebuild, deterministic id). Positions are
+  monotonic for the life of the source across reopened streams (`Positions::new(start_lsn,
+  first_seq)` continues `next_seq`), so the `next_seq` test stays exact across an ingest restart.
+  Guards: `progress::tests` (`every_interleaving_answers_as_the_model_does`, 300 seeded interleavings
+  against a model; `a_stalled_lane_pins_confirmation_and_its_own_fence_only`,
+  `a_skipped_lane_pins_nothing`, `a_landing_reported_before_its_registration_still_counts`,
+  `a_mark_never_moves_back`, `a_healthy_lane_reaches_what_it_landed_while_a_sibling_lane_is_full`,
+  `several_lanes_answer_their_least_and_an_unknown_lane_none` (successor of the channel's
+  `watermark_is_the_minimum_over_lanes`), `concurrent_registration_and_landing_never_answer_past_a_lane`,
+  threads against an oracle), `tests::lanes`' `a_healthy_lane_reaches_what_it_landed_while_a_sibling_lane_is_full`
+  (engine) and the daemon's `tests::lanes` `a_fence_on_a_healthy_sink_passes_while_a_sibling_lane_is_full`, `confirms_no_position_before_its_flush`,
   `redelivers_the_unacked_batch_to_a_restarted_sink_engine`, the channel adapter's
-  `watermark_is_the_minimum_over_lanes`/`several_deliveries_can_be_outstanding_and_ack_independently`/
-  `a_later_ack_never_moves_the_watermark_past_an_earlier_unacked_item`/
-  `a_released_delivery_holds_the_watermark_until_it_is_acked`,
-  the daemon's `failed_sink_engine_restarts_and_redelivers` /
-  `failed_ingest_engine_restarts_and_resumes_the_stream`, the Postgres adapter's
-  `a_reopened_stream_continues_the_numbering`, and the `wal_release` e2e (an empty batch is still
-  published and acked, keepalives move the horizon, a `backfill = false` lane acks).
+  `several_deliveries_can_be_outstanding_and_ack_independently`, the daemon's
+  `failed_sink_engine_restarts_and_redelivers` / `failed_ingest_engine_restarts_and_resumes_the_stream`,
+  the Postgres adapter's `ack::tests` (`a_change_emitted_but_not_routed_is_never_fenced_or_confirmed`,
+  `the_tick_releases_idle_wal_while_routed_stays_put`, `a_fresh_process_never_confirms_its_first_unrouted_change`,
+  `an_idle_stream_after_an_ingest_restart_still_releases_wal`, `a_reopened_stream_continues_the_numbering`,
+  `a_position_is_stamped_from_its_commit_and_the_horizon_before_it`),
+  `a_confirmation_reaches_the_client_without_a_replication_event` (`cdc::stream` unit, over the
+  `Replication` seam), and the `wal_release` e2e (`the_slot_confirms_within_seconds_of_the_last_flush`,
+  `CONFIRM_BOUND` 5 s; an empty batch is still published and lands, keepalives move the horizon, a
+  `backfill = false` lane lands).
 - **A fence only observes, per sink, at two levels (issue #136, ADR 0009).** A client reads the
   **source position** after its commit (`pg_current_wal_lsn()`) and waits on the daemon's `Fence`
   (`libs/3-daemon/src/fence.rs`; the CLI serves it as `GET /wait`) until a sink, or every sink, has
   every commit at or before it **applied** (its write and every earlier one returned) or **searchable** (a refresh covered
-  it). Nothing is flushed or refreshed for a waiter, and a backfill is not covered. Three pieces,
-  each load-bearing: (1) `ChangeCapture::reached(Option<Position>) -> Option<SourcePosition>`
-  translates a stream position into the source's terms. The Postgres `Positions` map
-  (`cdc/ack.rs`) answers it from its entries plus a **horizon** (the LSN through which everything
-  read is registered: moved by the last change of a commit being emitted, and by a keepalive or a
-  filtered commit while nothing is buffered; seeded from the slot's `confirmed_flush_lsn`). The
-  answer is **strictly below the next outstanding change's LSN**, because the changes of one
-  transaction share its commit LSN: a transaction split across batches is neither confirmed nor
-  fenced until its last change is in. A fence claims everything short of that commit (`next - 1`);
-  `confirm` stops at the **end of the last covered commit**, because Postgres skips a transaction
-  whose commit record *starts* before the confirmed LSN (never confirm into an unprocessed
-  commit's record). (2) A sink
+  it). Nothing is flushed or refreshed for a waiter. Four pieces,
+  each load-bearing: (1) `ChangeCapture::reached(Landed) -> Option<SourcePosition>` translates how
+  far a sink's lane landed (`Progress::lane(sink, Level::Applied | Searchable)`) into the source's
+  terms. The Postgres `Positions` (`cdc/ack.rs`) reads it off the stamps plus a **horizon** (the LSN
+  through which everything read is emitted: moved by the last change of a commit being emitted, and
+  by a keepalive or a filtered commit while nothing is buffered; seeded from the slot's
+  `confirmed_flush_lsn`). `Before(o)` answers `o.fence_before`, **strictly below the oldest
+  outstanding change's commit**, because the changes of one transaction share its commit LSN: a
+  transaction split across batches is neither confirmed nor fenced until its last change has landed.
+  A fence claims everything short of that commit; `confirm` stops at `o.confirm_before`, the **end of
+  the last covered commit**, because Postgres skips a transaction whose commit record *starts* before
+  the confirmed LSN (never confirm into an unprocessed commit's record). (2) A sink
   *reports* visibility (`WriteReport.visibility`: `Immediate` / `Within(d)` / `Deferred`); the
   sink engine keeps the positions it received in position order (`sink_engine/fences.rs`, kept
-  across restarts of its run) and reports `Observer::on_position_applied` for the last position
-  before the oldest one still being written, **before the ack** that lets the watermark pass it (the
-  source forgets a position once every sink confirmed it, so the fence must hear first), and
-  `on_position_searchable` in the same order with a timer arm. A **caught-up** write (nothing else
+  across restarts of its run), reports each item landed and how far it is searchable to `Progress`
+  **before the ack**, and `Observer::on_position_applied` / `on_position_searchable` in position
+  order (the daemon's `FenceObserver` only wakes waiters on them), with a timer arm for searchable. A **caught-up** write (nothing else
   queued or waiting) makes every write that returned before its grant searchable (the
   `Sink::write` contract; each returned write gets a sequence number), and before the ack that
-  leaves the engine idle a position not yet searchable gets an **empty caught-up write**, since
-  the last writes of a burst can return after the caught-up one. The OpenSearch sink reports
+  leaves its lane quiet a position not yet searchable gets an **empty caught-up write**, since
+  the last writes of a burst can return after the caught-up one. It is a flight, never awaited in
+  the run loop (which alone drives the other writes, one of which may hold the sink's one refresh);
+  a lane on which something landed meanwhile is checked again when it returns, a backfill part
+  landing last asks the fences, a starting run sends one over every quiet lane still owed one, and
+  an ordered sink's takes its one slot (guards: `tests::refresh`, and the schedule test, which also
+  runs over a sink holding a lock across caught-up writes and checks each lane ends searchable). The OpenSearch sink reports
   `Within(refresh_interval)` for an unforced write (`Deferred` with `refresh_interval = "-1"`),
   remembers every index an unforced write touched, and refreshes them in the next caught-up write,
   one caught-up refresh at a time (`refreshing`: take, refresh, put back on failure), so a second
@@ -671,11 +767,23 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   before the bulk was sent (`refresh.rs`'s `Unrefreshed`, marks with sequence numbers; guards
   `a_caught_up_write_over_the_one_index_left_unrefreshed_sends_no_extra_refresh`, `refresh::tests`); its
   `ensure_index` refreshes a seeded generation once per start, because what an earlier run left
-  unrefreshed is remembered nowhere (fences are unavailable until staging is done). An index
-  mid-reindex is **not** covered: live writes go to the new generation while the alias serves the
-  old one (#6). (3) The fence
-  translates a position when it is applied and keeps that answer until it is searchable, and
-  keeps each level monotonic across a reopened source stream. Guards: the Postgres adapter's
+  unrefreshed is remembered nowhere (fences are unavailable until staging is done). (3) The fence reads both levels off `Progress` per sink whenever a waiter checks
+  (searchable never above applied), and keeps each level monotonic across a reopened source stream.
+  (4) **It vouches only for what reads see (#379, `fence-rebuilding.md`).** Each lane's `Serving`
+  (beside its `Furthest`, same mutex) is set by the sink engine's events through `FenceObserver`:
+  `on_sink_started` serves a `Pending` lane, `on_backfill_requested` makes it `Backfilling` (a
+  `Rebuilding` lane stays), `on_index_rebuilding` (emitted in the `Rebuild` staging step **before**
+  `Sink::reindex`, and at staging for an unseeded index the sink reports `Sink::is_rebuilding`: a
+  restart in the middle of a rebuild) makes it `Rebuilding`, freezing what a lane that served its writes had reached
+  (the old generation gets nothing new after it: the on-demand reindex runs with no write in
+  flight), else `None` (a `Fresh` start vouches for nothing), `on_index_seeded` (after
+  `mark_seeded` refreshed and moved the alias) serves it. A wait needing an unserved lane holds and
+  passes when seeded; at its timeout it is `FenceOutcome::Unserved` → `503` `backfilling` /
+  `rebuilding` + `lanes`. Guards: `fence::tests`' `a_backfilling_index_*`, `a_reindex_*`,
+  `a_rebuild_after_a_fresh_source_vouches_for_nothing`, `a_recreated_index_*`,
+  `a_wait_naming_only_healthy_indexes_*`, the engine's
+  `an_index_is_announced_rebuilding_before_the_sink_moves_its_writes`, `http::tests`'
+  `a_wait_on_an_index_being_seeded_or_rebuilt_*`, the `fence` e2e. Guards: the Postgres adapter's
   `a_split_transaction_is_not_confirmed_until_its_last_change`,
   `a_keepalive_during_a_flight_does_not_pin_the_resume_point`,
   `confirmation_stops_at_a_commit_boundary_where_a_fence_goes_further`, `reached_*`,
@@ -747,22 +855,85 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   commit is seen in `SyncRep` (`standbys_in_force`): whether a commit waits is a flag the
   checkpointer sets on reload, after sessions see the setting, and an unforced probe table
   creation hung on a session the reload signal hadn't reached.
-- **Built once; build order is delivery order.** A batch buffers `(Position, ChangeEvent)`s,
+- **Built once; grant order is delivery order.** A batch buffers `(Position, ChangeEvent)`s,
   resolves each to `DocumentId`s, dedups, then `build_many` assembles each touched document
-  **once** for all sinks. Snapshot rows go through the same build but are **never resolved**
-  (issue #385): a snapshot reads every row of each requested index's root table, so a row is its
-  own document, once per requested index rooted at its table (`Snapshot::buffer`, matched by table
-  name as `resolve` matches; a key with a null part addresses nothing), and each document is built
-  once per snapshot. Resolving it like a live change ran a reverse query per related path and row
+  **once** for all sinks. A backfill (a *snapshot*) goes through the same build but is **never
+  resolved** (issue #385): it walks each requested index's root keys in pages
+  (`DocumentBuilder::keys(index, after, through, limit)`, `engine::KEY_PAGE` = 1,024, the engine
+  holding the last key read; issue #386 stage 3) up to `through`, the index's greatest key read
+  once when its walk starts (`DocumentBuilder::last_key`): a row past it got its key after the slot
+  existed, so the live stream delivers it, and writers inserting greater keys can't keep a walk going
+  (guards: `tests::snapshot`'s `a_walk_ends_at_the_greatest_key_its_index_had_when_it_started`,
+  `keyset`'s `a_walk_ends_at_the_greatest_key_it_found_when_it_started`, `keyset_backfill`'s
+  `rows_added_ahead_of_the_walk_end_it_where_it_began_and_are_built_once`). Each key is its own
+  document of that index (a key with a null part addresses nothing), built once per snapshot. The
+  Postgres page is `WHERE key OPERATOR(s.>) $1::<bound>::<key type> ORDER BY key USING OPERATOR(s.<)
+  LIMIT n` with `(key OPERATOR(s.<=) $2…) AS within` in the select list (a second range condition in
+  the `WHERE` made a generic plan sort every page), on the builder's pool, one statement, no
+  transaction (`document/keys.rs`, `query::key_page_query`/`last_key_query`). The operators are the
+  primary key index's own btree operators, read from its opclass and written schema-qualified, so the
+  index serves the order whatever the search path (a `citext` in `ext` compared as `text` would skip
+  rows); a role that may not use their schema gets the bare names and `USING <`, correct but sorting
+  each page, warned once per index (guards: `keyset`'s
+  `a_key_whose_operators_are_off_the_search_path_is_paged_once` and
+  `…_is_walked_through_its_index`, by `pg_stat_user_tables`).
+  **An interrupted backfill resumes (ADR 0012 stage 8b, `docs/adr/0012-stage-notes/stage-8b-resume.md`).**
+  Each snapshot item carries `Batch.walked` (a `stream::WalkMark`, the source's opaque text of the
+  batch's greatest key of that index: `DocumentBuilder::walk_mark`, set in `commit.rs`'s
+  `walk_marks`); the sink engine's per-lane `sink_engine/walked.rs` tracker records the landed
+  prefix's mark (`Sink::record_walked`, at most every `RECORD_EVERY` = 10 s, a flight holding no
+  slot, the lane's `SnapshotComplete` waiting for it; any release of a lane item holds the mark
+  for the rest of the walk); staging reads it back (`Sink::seeding`) into `Request::Backfill.after`,
+  and forgets it on a `Fresh` source before `prepare` (`forget_walked`). The walk
+  (`ingest/snapshot.rs`'s `plan_walk`/`WalkPlan`) starts after the least point and cuts segments
+  at the others, ordered by the source (`DocumentBuilder::compare_keys`, Postgres: the key
+  index's own `<`); a lane is served from the segment after its point (`Walk::reaches`,
+  `Snapshot::lanes_now`), a straddling batch going to the lanes of its last key. Postgres marks are
+  JSON with the key and its order (`format_type`, the key index's opclass and collation:
+  `keys.rs`'s `WALK_ORDER_SQL`); `resume_after` refuses a mark whose order changed. The OpenSearch
+  meta doc keeps `walked {mark, generation}` (partial `_update`, never upserted), read only while
+  unseeded and of the active generation; `ensure_index` rewrites an unseeded doc only when it
+  creates the generation. Guards: `walked::tests`, `tests::resume`, `tests::snapshot`'s
+  `*_resumed_*`/`lanes_at_different_points_*`/`a_point_*`, `keyset`'s
+  `a_walk_resumed_after_its_mark_misses_no_row_and_repeats_none` and
+  `a_mark_from_another_order_is_never_resumed`, the sink's `seeding` e2e
+  `a_backfill_checkpoint_lives_with_its_unseeded_generation`, and the CLI's kill e2e.
+  No snapshot spans pages: `prepare` made the slot first, and a page names ids only, each document
+  read when it is built. Only a root whose single-column catalog primary key is the declared one is
+  paged; any other answers an empty page with a warning (#391). The page future lives in
+  `ingest/snapshot.rs`'s `Walk`, not in the `select!`, so a live change winning it drops no page. Resolving it like a live change ran a reverse query per related path and row
   and rebuilt related indexes' parents in every batch a child row landed in. They are published
   *without* a position and *only* to the requesting lanes, ending with `LaneItem::SnapshotComplete`;
-  snapshot and live builds are serialized on the one ingest task, so on any lane a later message is
-  the newer state; the sink engine keeps that order **per document** while it writes several items
-  at once (admission, below), so sinks need no versioning. Guards:
+  up to `builds` batches build at once on the one ingest task (`[concurrency] builds` /
+  `--builds` / `FLUSSO_BUILDS`, default 4 via `daemon::DEFAULT_BUILDS`, at most 32;
+  `IngestEngine::with_builds`, default 1; ADR 0012 stage 4, `ingest/builds.rs`), **published in
+  grant order** through a reorder queue of at most `2 × builds` slots (`SnapshotComplete` takes a
+  slot of its own), so lane order is grant order and live positions only grow. A batch is granted
+  only when no running build holds one of its documents (sorted 64-bit id hashes; nothing hashed at
+  `builds = 1`), so a later build of a document starts after the earlier one returned, reads newer
+  state, and lands later. Live goes first except every fourth contested grant (the counter moves
+  only on contested grants); a second live build waits for a full batch. A build is polled once
+  where it is granted and spawned only if that doesn't finish it (mocks never spawn); spawned ones
+  are awaited through `Flights`. A failed build (or a `Document::Failed` under `stop`) stops
+  grants; slots before it are published, nothing from it on, and the run awaits every running build
+  before returning the error. The stop and the stream's end `settle`: the buffered live batch once
+  its ids are free, then every build, in order. The builder's pool is `builds + 1`
+  (`backends.rs`: key pages run beside the builds); changes are resolved on a pool of their own, one
+  connection sharing the builder's caches (`PgDocumentBuilder::on_own_pool`, `SourceParts.resolver`,
+  `IngestEngine::with_resolver`; ADR 0012 stage 8a). The sink engine keeps that order
+  **per document** while it writes several items at once (admission, below), so sinks need no
+  versioning. Guards: `ingest::tests` (`random_schedules_keep_every_document_in_order`, seeded,
+  `FLUSSO_BUILD_SCHEDULE_SEED` replays; `builds_run_at_once_up_to_the_setting`;
+  `a_document_is_never_built_twice_at_once`; `every_fourth_contested_grant_goes_to_the_backfill`;
+  `a_failed_build_publishes_nothing_after_it`;
+  `a_document_failed_under_stop_publishes_nothing_after_it_and_skip_goes_on`;
+  `a_stop_finishes_the_builds_in_flight_and_starts_no_other`;
+  `one_build_at_a_time_builds_and_publishes_as_before`, recorded from the serial engine),
   `builds_a_repeatedly_touched_document_once_per_batch`, `snapshots_go_only_to_the_requesting_lane`,
   `tests::snapshot`'s `a_backfill_of_related_indexes_builds_each_document_once` /
   `a_backfill_beside_seeded_related_indexes_writes_them_nothing` /
-  `a_backfill_of_one_of_two_indexes_on_a_table_builds_only_that_one`, and `engine`'s `backfill` e2e
+  `a_backfill_of_one_of_two_indexes_on_a_table_builds_only_that_one` /
+  `each_page_follows_the_last_key_the_walk_read`, `engine`'s `keyset_backfill` e2e, and `engine`'s `backfill` e2e
   (`pg_stat_statements`: no reverse lookup; every document once and equal to its `build`; two
   indexes on one table, a self-referencing `has_many`, `soft_delete`, a root filter, seeded
   siblings).
@@ -816,7 +987,7 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   `a_deferred_sink_still_refreshes_when_skipped_snapshot_batches_follow_the_last_live_one`);
   the buffered batch is published as a
   normal commit; `engine::drain_lanes` (the same drain `supervise` runs when the stream ends) waits until
-  every lane is acked, confirming the watermark as it moves; then `ChangeCapture::close_live` (Postgres:
+  every lane is acked, confirming what landed as it moves; then `ChangeCapture::close_live` (Postgres:
   `Positions::request_close` → the stream loop hands `confirmed_lsn` over, `Replication::close` waits until
   a status update carried it, then stops the worker: stopping first would skip the update, the worker
   checks its stop before a due status; with nothing confirmed past the stream's start position, which
@@ -826,7 +997,7 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   within `CLOSE_WAIT`: the run fails, so the stop exits 1, never 0, with the position unconfirmed
   (guards: `a_close_whose_final_position_never_reaches_the_server_ends_the_stream_with_an_error`,
   `a_stop_whose_final_position_never_reaches_the_source_fails_the_run`). A stalled sink holds
-  the drain (the watermark is the minimum); the caller's deadline bounds it. After it the supervisor
+  the drain (confirmation follows the slowest lane); the caller's deadline bounds it. After it the supervisor
   waits on `Fence::settled` only while a `/wait` on `searchable` is open, so a stop nobody waits on
   doesn't sit out a `Within(refresh_interval)`. A stop during staging ends before `prepare`; an ingest
   engine that fails while stopping is not restarted. Guards: `engine` `tests::stop` (a stop raised mid-burst
@@ -847,14 +1018,21 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   ingest engine's first act) → serve requests + live. `continuity` is **read-only** (Postgres:
   does the slot exist?); `prepare` creates the resume point. **The order is load-bearing twice**:
   rebuilds are staged *before* `prepare` creates the slot (a crash in between comes back `Fresh`
-  and re-stages) and `prepare` runs *before* any snapshot (a write between snapshot and first
-  live read is covered). The daemon enforces it by finishing every sink's first `stage` before
+  and re-stages) and `prepare` runs *before* any snapshot (a write no key page sees is in the
+  stream). The daemon enforces it by finishing every sink's first `stage` before
   spawning the ingest engine. Only *seeded* indexes are staged (#121). Under `--skip-backfill`
   staging warns only. Both trait methods are required. The sink-side half: the OpenSearch
   `ensure_index` retracts a seeded marker whose generation index is missing; while running,
   seeded writes go through the hash alias with `require_alias`, so a deleted generation is a
   write-wide `Err` and the restart re-stages it (#123). Its `reindex` no-ops while unseeded and
-  `mark_seeded` drops every non-active generation (#121). Guarded by the
+  `mark_seeded` drops every non-active generation (#121): refresh, `refresh_interval` restore and
+  the holder/generation lookups run at once, then one atomic `_aliases` call moves both aliases
+  and `remove_index`es the stale generations (refused: re-read, hash alias alone), then the marker,
+  last (#354, #410). `ensure_index` creates a first generation with its aliases in the create
+  request, a rebuild's bare (#403). `mark_seeded` is safe for several indexes at once beside other
+  indexes' writes (one meta doc per index, disjoint aliases). Guards: `seeding` e2e (behind a
+  fault proxy: request order, a crash after every request, `several_indexes_seed_at_once_*`;
+  `docs/adr/0012-stage-notes/seed.md`). Guarded by the
   engine's `fresh_source_*`/`skip_backfill_with_a_fresh_source_*` unit tests, the daemon's
   `fresh_source_rebuilds_seeded_sinks_before_preparing`, the sink's
   `deleted_generation_is_recreated_and_reported_unseeded`,
@@ -874,14 +1052,45 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   type. Guards:
   `reindex_control_stages_and_requests_a_snapshot_without_restarting`, the daemon's
   `reindex_operation_targets_one_sink`.
+- **Built documents are held within a byte budget (ADR 0012 stage 5).** `[concurrency] max_built_mib`
+  (`--max-built-mib` / `FLUSSO_MAX_BUILT_MIB`, 16..=1,048,576, default 512 via
+  `daemon::DEFAULT_MAX_BUILT_MIB`, the owner's call after 64 was tried: `stage-5.md` "The default"; never in the lock) is an `engine::Budget` the daemon hands the ingest
+  engine (`IngestEngine::with_budget`; without one nothing is counted) and `/status` (`memory`). A grant
+  reserves an estimate (ids × a running average bytes per document, per kind) in `Builds::choose`: a
+  candidate the budget can't fit is not admissible, so the gate's every-fourth counter doesn't move, and
+  the loop waits on `Budget::released` (`ingest.rs`'s release arm; `settle` waits too). The build future
+  walks its documents (`budget::document_bytes`, B-tree nodes not entries; `tests/heap_walk.rs` holds it
+  to a counting allocator within 0.8–1.2) and the reservation settles to that, at least `FLOOR` (1 KiB).
+  The `Arc<Charge>` rides every lane's piece as `stream::Batch.hold` (an opaque `Hold`, serde-skipped,
+  equal to any other), so the bytes return when the last copy drops: every lane acknowledged and no
+  ledger can redeliver. Rules: total within the limit, backfill within half, and a kind holding nothing
+  is always granted one batch (so a batch larger than the budget builds alone); held stays within the
+  limit plus each in-flight build's **actual** batch (a grant is checked against its estimate, then
+  settles to what it built; the estimate stays one average per kind, per index waits for 8a). `[stream] capacity` / `--queue-capacity` are deprecated
+  (load, warn, ignored); `ChannelStream::from_config` gives lanes `LANE_BACKSTOP` (1,048,576) items,
+  which the floor keeps from binding (`ChannelStream::new` keeps an explicit capacity for tests).
+  Metrics `flusso.memory.built{work}`, `flusso.memory.refused{work}` (once per wait) and
+  `flusso.memory.wait{work,wake}` (each wait's length and the event that ended it: `Observer::on_budget_wait`,
+  `Wake`; the loop marks each grant's wake with `Builds::woke`; guard
+  `every_budget_wait_ends_on_a_release_not_the_tick`, which fails with the release arm off; `flusso-bench`'s
+  attribution lists them per phase). `run` warns
+  when the budget alone reaches the cgroup limit or host memory (`apps/cli/src/memory.rs`, Linux files, best effort). Guards:
+  `budget::tests`, `ingest::tests`' `random_schedules_under_a_tiny_budget_stay_within_it_and_finish`
+  (held ≤ limit + each build's actual batch at every write, every byte back at the end),
+  `a_stalled_sink_paces_builds_and_they_resume_when_it_does`,
+  `live_keeps_room_beside_a_backfill_holding_its_half`, `a_batch_bigger_than_the_budget_still_builds`,
+  `a_batch_redelivered_after_a_failed_write_gives_its_bytes_back_once_written`; every `ingest::tests`
+  deployment with a budget asserts it returns to zero (`Deployment::assert_released`).
 - **A lone change on a quiet stream is committed at once (issue #135).** `BatchPolicy`
   (default 256 changes / 50 ms; `flusso.toml`'s `[batch]` table `max_changes`/`max_delay_ms`,
   laid over the defaults by the daemon; `--batch-max-changes`/`--batch-max-delay-ms` +
   `FLUSSO_BATCH_*` override at run time, never baked into the lock) controls batch grouping:
   after the live arm buffers a change, `IngestEngine::drain_ready` buffers every change the
   stream has ready (`now_or_never`) while the batch `is_open` (not full, deadline not passed), and
-  the engine commits the moment the stream would block, so a burst fills batches for at most
-  `max_delay` while a trickle never waits it out. The `sleep_until` deadline arm stays. `max_changes:
+  the batch goes to the build gate the moment the stream would block, so a burst fills batches for
+  at most `max_delay` while a trickle never waits it out. Grants are event-driven (a buffered change,
+  a landed build, a budget release, the snapshot taking keys); there is no deadline arm: a batch past
+  its deadline only stops taking changes, and is granted when the gate allows. `max_changes:
   1` reproduces a write per change. The coalescing wait for further requests is `max_delay`. Guards:
   `a_lone_change_on_a_quiet_stream_commits_without_waiting`,
   `max_delay_caps_a_batch_while_changes_keep_arriving` (both on a channel-fed `MockSource::fed`
@@ -910,8 +1119,9 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   (`(index, id)` hashed to `u64`, only when a comparison is needed: nothing in flight and one kind
   waiting grants the front item unhashed; a collision only holds an item back). **Selection**: live
   (positioned) items first, every fourth *contested* grant (both kinds admissible) to the oldest
-  admissible backfill item; a `SnapshotComplete` starts once it is the window's front and nothing is
-  in flight, and nothing behind it starts until it is done; a reindex waits for the writes in flight.
+  admissible backfill item; a `SnapshotComplete` starts once nothing before it on its lane is waiting or
+  in flight, and nothing behind it on its lane starts until its seed returned; a reindex waits for the
+  writes and seeds in flight.
   A write is **caught up** when the window and the lane have nothing else. A **failure** (a write
   `Err`, a `stop` rejection) starts nothing new: the writes in flight are awaited and acked when they
   succeeded, then the run ends with the first error and the lane redelivers only what is unacked;
@@ -919,7 +1129,7 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   writes its oldest unconfirmed item alone), and the next run is a **barrier**: it grants only the
   window's front item until a write lands, so a `stop` rejection or a write refused every time halts
   the sink across engine restarts (nothing behind it lands, the backoff grows, the lane fills); in
-  the run that first meets it, disjoint writes started while it is in flight can land, the watermark
+  the run that first meets it, disjoint writes started while it is in flight can land, confirmation
   staying before it; a new process whose oldest unconfirmed item was already written (a sibling
   lags, a confirmation was lost) lands it and opens the window, and disjoint items past the failing
   one, granted beside it or while it is in flight, can land before it fails (nothing lost).
@@ -927,7 +1137,7 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   engine's `tests::concurrent` (`a_document_is_never_written_twice_at_once_and_its_versions_never_go_down`,
   seeded, `FLUSSO_SCHEDULE_SEED` replays; `writes_run_at_once_up_to_the_setting`,
   `an_item_waits_for_an_earlier_one_sharing_a_document`,
-  `a_later_write_finishing_first_moves_neither_the_watermark_nor_the_fence`,
+  `a_later_write_finishing_first_moves_neither_confirmation_nor_the_fence`,
   `live_goes_first_except_every_fourth_contested_grant`, `a_snapshot_complete_is_a_barrier`,
   `a_reindex_waits_for_the_writes_in_flight`, `a_failed_write_lets_the_others_finish_and_comes_back_alone`,
   `a_stop_finishes_the_writes_in_flight_and_skips_waiting_backfill`,
@@ -1010,8 +1220,8 @@ backfill) then recv → `write` (up to `writes` at once) → ack. Everything the
   closes on every `select!` arm before its work and is cut by a 1 s tick (the sink's `IDLE_TICK`
   arm, the ingest `confirm_tick`), so a quiet hour is a flat line; the ingest loop reads no clock
   of its own: `mark` (where the last arm's work ended) carries across iterations, `waited` closes
-  the wait from it (`idle` with no snapshot, else the snapshot's `page`), and the row arm's one clock
-  read per row puts the whole row (wait, decode, buffer) into `page`. A task's stages add up to its wall time less bookkeeping (acks, confirms, a stop);
+  the wait from it (`idle` with no snapshot, else the snapshot's `page`), and the snapshot arm's one
+  clock read per step puts the wait for a key page and the buffering of its keys into `page`. A task's stages add up to its wall time less bookkeeping (acks, confirms, a stop);
   share is busy seconds per wall second, which passes 1 once a task runs a stage concurrently.
   `on_startup_step` per start step (`source`, `stage` per sink, `prepare`, `open_live`). The CLI
   records them as `flusso.stage.duration{stage,work,sink,index}`, `flusso.flush.documents`/
@@ -1148,7 +1358,8 @@ once per relation; `Diagnostic.path` is the field path; and on the root table th
 and the `soft_delete` marker's column, `when` and `field` (issue #211), and the root key (issue #225:
 the table's single-column catalog key, `RootPrimaryKey` when none or composite; the declared
 `primary_key` must exist and be that key, `RootPrimaryKeyMismatch` otherwise, since the batched
-build matches the table's key on the declared column and writes only tombstones — `wal`'s
+build matches the table's key on the declared column and writes only tombstones live, and the
+backfill pages no such root (it writes nothing) — `wal`'s
 `a_root_primary_key_other_than_the_tables_writes_no_document`; and of a type `Catalog::reads_key`
 accepts, `UnsupportedKeyType` otherwise (issue #295: Postgres answers from the base type through
 domains against `document::value::KEY_TYPES`, the types `decode_key` reads — not `json`/`jsonb`;
@@ -1225,7 +1436,21 @@ runs the engines under `supervise.rs` (stage every sink engine → spawn them + 
 as independent tasks → restart a failed one with backoff while the others keep going; the
 ingest engine ending cleanly ends the deployment after the lanes drain), exposes the reindex
 *operation* through `DaemonControl`, and polls source capture lag out-of-band (`lag.rs` over
-`ChangeCapture::lag`). It is **telemetry-agnostic** — it depends only on the
+`ChangeCapture::lag`). It also samples every `(index, sink)` lane once a second (`stall.rs`, ADR
+0012 stage 8c): a lane's **stall age** is how long its oldest outstanding position (`Progress::lane`,
+`Applied`) has stayed its oldest, reset when it changes or clears (nothing per item; a backfill-only
+lane has none, backfill items carry no position); its **WAL behind** is the slot lag less how far its
+`ChangeCapture::reached` is ahead of `Progress::landed`'s; the least outstanding lane is
+`pinned_by`. `/status` lanes carry `stall_seconds`/`wal_behind_bytes` (absent without tracking) and
+the document `pinned_by`; the CLI exports `flusso.lane.stall_age`, `flusso.lane.wal_behind`,
+`flusso.slot.pinned_by`; `warn!` past `STALL_WARN` (10 min) and every 10 min after, `info!` on
+recovery. `FlussoLaneStalled` (`dev/prometheus/rules/flusso.rules.yml`, tested by
+`dev/prometheus/tests/flusso.rules.test.yml` with `promtool test rules`, outside `rules/` which the
+dev server loads whole; the Helm chart's `prometheusRule`, kept equal by
+`.github/scripts/test_alert_rule_copies.py`) fires past 10 min of age, or past 1 GiB of WAL behind
+with an age over 60 s (WAL behind includes WAL flusso hasn't read, so a catch-up has it too), for 5
+min; runbook `docs/src/operate/stalled-lane.md`. Guards: `stall::tests`, the
+`fence` e2e's stalled-index block (age, sibling at 0, `pinned_by`, recovery). It is **telemetry-agnostic** — it depends only on the
 engine's `Observer` trait, not on any metrics backend — and owns **no transport**: no HTTP
 server, no process signals, no metrics *recording* or *exporter*; those are the binary's.
 `Daemon::start()` builds everything and returns a `RunningDaemon` exposing `status()` (an
@@ -2107,12 +2332,12 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 
 | To work on… | Go to |
 | --- | --- |
-| The sync loops / batching / ack ordering | `libs/2-engine/src/` — `ingest.rs` (`IngestEngine`: batching, dedup, build once, publish, request coalescing, snapshots, watermark confirm), `sink_engine.rs` (`SinkEngine`: `stage`, reindex staging) with `sink_engine/writes.rs` (the run: window, admission, live-first selection, barriers, concurrent writes, failure policies) and `sink_engine/fences.rs` (applied/searchable in position order), `sink_engine/flights.rs` (the writes in flight, polled when woken), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` (drives both engines over a real `ChannelStream`) |
+| The sync loops / batching / ack ordering | `libs/2-engine/src/` — `ingest.rs` (`IngestEngine`: the run loop; `ingest/live.rs` batching and dedup, `ingest/builds.rs` admission and the grant-ordered slots, `ingest/gate.rs` the build permits (live first, every fourth contested grant to backfill), `ingest/commit.rs` granting and publishing, `ingest/snapshot.rs` request coalescing and the key walk, `ingest/confirm.rs` confirming `Progress::landed`; `progress.rs` the per-lane `Progress`; `budget.rs` the memory budget: `Budget`, `Reservation`/`Charge`, the heap walk), `sink_engine.rs` (`SinkEngine`: `stage`, reindex staging) with `sink_engine/writes.rs` (the run: window, admission, live-first selection, barriers, concurrent writes, failure policies) and `sink_engine/fences.rs` (applied/searchable in position order), `sink_engine/flights.rs` (the writes in flight, polled when woken), `sink_engine/walked.rs` (the landed prefix of a backfill walk, recorded for resume), `policy.rs` (`BatchPolicy`/`FailurePolicies`), `tests.rs` (drives both engines over a real `ChannelStream`) |
 | Pipeline observability trait (`Observer`, `BuildStats`/`CommitStats`, `EngineId`, `FanOut`) | `libs/2-engine/src/observer.rs` |
 | Script fields (Rhai): compile, run, strip input-only fields, the `DocumentBuilder` decorator, the sandbox, value conversion, typed dates | `libs/2-script/src/` — `scripts.rs` (`Scripts`: plan + apply), `builder.rs` (`ScriptedBuilder`), `sandbox.rs`, `value.rs`, `dates.rs` + `dates/library.rs` (the date types + their Rhai registration), `view.rs` (a `map` of dates typed for scripts), `input.rs` (JSON typed by the schema); `benches/scripted.rs`; CLI `commands/script.rs` (`flusso script run`), `telemetry/script_log.rs` |
-| Daemon (domain): supervisor, `DaemonControl`, per-sink `Status`, `StatusObserver`, lag poll, the fence | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `supervise.rs` (stage → spawn → restart with backoff; `DaemonControl::reindex`), `backends.rs` (`Backends` trait + `SourceParts`/`SinkParts` seam), `observer.rs`, `status.rs`, `lag.rs`, `fence.rs` (`Fence`/`FenceRequest`/`FenceOutcome`/`FenceObserver`) |
+| Daemon (domain): supervisor, `DaemonControl`, per-sink `Status`, `StatusObserver`, lag poll, the fence | `libs/3-daemon/src/` — `lib.rs` (`Daemon`/`RunningDaemon`/`DaemonOptions`), `supervise.rs` (stage → spawn → restart with backoff; `DaemonControl::reindex`), `backends.rs` (`Backends` trait + `SourceParts`/`SinkParts` seam), `observer.rs`, `status.rs`, `lag.rs`, `stall.rs` (stall age, WAL behind, `pinned_by`), `fence.rs` (`Fence`/`FenceRequest`/`FenceOutcome`/`FenceObserver`) |
 | Read-after-visible (issue #343): holding a change until its transaction is visible, the stall warning, the synchronous-standby refusal | `libs/2-adapters/source-postgres/src/cdc/stream.rs` (the hold in `pending`, the snapshot read on its own task), `cdc/visibility.rs` (`Snapshot`, `widen`, `poll_delay`, `refuse_standby`, `standby_listing`, `PgVisibility`), `cdc/capture.rs` (`check_server`, `with_read_ahead`, `readable_wait`); `libs/3-daemon/src/status.rs` (`with_source`); CLI `telemetry/metrics.rs` (`register_visibility_wait_gauge`); e2e `libs/2-engine/tests/visibility.rs`; scenario `dev/bench/src/standby.rs` (`sync-standby`) |
-| Read-your-writes (fences), end to end | source: `libs/1-ports/source/src/cdc/capture.rs` (`SourcePosition`, `reached`, `on_advance`), `libs/2-adapters/source-postgres/src/cdc/ack.rs` (`Positions`: entries + horizon) and `stream.rs` (who moves the horizon); sink: `libs/1-ports/sink/src/sink.rs` (`Visibility`), `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`settle_visibility`); engine: `libs/2-engine/src/sink_engine.rs` (`report_positions`, the searchable queue); daemon: `libs/3-daemon/src/fence.rs`; CLI: `apps/cli/src/http/mod.rs` (`wait`); client: `sdk/query/src/fence.rs`, `position.rs`; e2e: `libs/3-daemon/tests/fence.rs` |
+| Read-your-writes (fences), end to end | source: `libs/1-ports/source/src/cdc/capture.rs` (`SourcePosition`, `reached`, `on_advance`), `libs/2-adapters/source-postgres/src/cdc/ack.rs` (`Positions`: stamps + horizon, no map) and `stream.rs` (who moves the horizon); sink: `libs/1-ports/sink/src/sink.rs` (`Visibility`), `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`settle_visibility`); engine: `libs/2-engine/src/progress.rs` (`Progress`: what each lane landed), `sink_engine/writes.rs` (`write_returned` reports to it), `sink_engine/fences.rs` (the searchable queue); daemon: `libs/3-daemon/src/fence.rs`; CLI: `apps/cli/src/http/mod.rs` (`wait`); client: `sdk/query/src/fence.rs`, `position.rs`; e2e: `libs/3-daemon/tests/fence.rs` |
 | Adapter registry (the one place that names adapters): `type` → config struct, `validate`, descriptions, flag overrides | `apps/cli/src/adapters.rs` |
 | Adapter assembly (build the running source/sinks): the `Backends` impl | `apps/cli/src/backends.rs` (`FlussoBackends` — Postgres source + OpenSearch/stdout sinks) |
 | Transport + telemetry (binary): exporters, metrics recording, HTTP surfaces, auth, signals | `apps/cli/src/` — `telemetry/mod.rs` (traces), `telemetry/metrics.rs` (meter provider + `in_flight` gauge), `telemetry/observer.rs` (`OtelObserver`), `http/mod.rs` (public + private routers + `serve`), `http/auth.rs` (Basic auth), `commands/run.rs` (orchestration + signals) |
@@ -2121,12 +2346,12 @@ Two CI guards in the `designer-frontend` job enforce this and will fail the buil
 | Adapter config types (one per adapter, `#[derive(AdapterConfig)]`) | `libs/2-adapters/source-postgres/src/config.rs` (`PostgresConfig`, `Connection`, `SslMode`, `Tls`), `stream-channel/src/config.rs`, `sink-opensearch/src/config.rs` (+ `TextAnalysis`, the per-index `OpensearchIndexConfig`; `settings.rs` holds `IndexSettings`: normalization, owned-key rejection, layering), `sink-stdout/src/config.rs` |
 | `flusso.toml` parsing (entities only; conversion is beside `Config`) | `libs/1-config/src/toml/` (`entities/`) |
 | `*.schema.yml` parsing / field syntax | `libs/1-config/src/yaml/entities/field.rs`, `conversion.rs` |
-| Postgres WAL capture / backfill / doc building / publication management | `libs/2-adapters/source-postgres/src/` — `cdc/` (incl. `publication.rs`, `replica_identity.rs`), `document/` (`resolve.rs`: reverse resolution + the first-hop pre-image union) |
+| Postgres WAL capture / backfill / doc building / publication management | `libs/2-adapters/source-postgres/src/` — `cdc/` (incl. `publication.rs`, `replica_identity.rs`), `document/` (`resolve.rs`: reverse resolution + the first-hop pre-image union; `keys.rs`: a backfill's key pages) |
 | Source trait abstractions (`ChangeCapture` + `Continuity`, `ChangeEvent` + `RowImage` pre-image, `DocumentBuilder`, `SourceSpec` + `all_tables`/`pre_image_columns`/`pre_images`, `validate_indexes`, `CaptureProvisioning`/`CoverageReport`/`PreImageReport`, `SchemaIntrospection`/`RelationalCatalog`) | `libs/1-ports/source/src/` (`provisioning.rs` for coverage; `introspection.rs` for catalog enumeration + `junction_candidates`) |
 | Visual schema designer (web app: introspect → edit → preview → write files) | `apps/design/` (`flusso-design`) — `server.rs` (axum + JSON API: project/catalog/test-connection/**parse**/**expression**/**value**/preview/validate/**sample**/diff/save; `value.rs` reads a typed inspector value as its saved file will in its slot (`constant`/`default`/`option`; a `default` takes only a scalar), refusing a number it cannot hold exactly or nesting past `MAX_DEPTH` (32, so preview/diff/save stay under serde_json's 128 levels), and returns the file's spelling for the *Saved as* note; the frontend's `model/exact.ts` keeps integers past 2^53 exact in every parse/clone, and `model/pending.ts` holds values still being read, one per target, flushed before Save/Code/undo (Save waits a bounded time and refuses, naming the field, on a read that failed or got no answer) and dropped on Reset; a reply is applied through the setter of the render it was typed in, which addresses the field by `uid` (`edit.updateField`), and the inspector is keyed by that uid), `codegen.rs` (model → canonical `*.schema.yml`/`flusso.toml`: a new file's form), `api.rs`'s `plan` (every save check, before any write: which on-disk index each saved index is comes from `SaveRequest.identity`, else by name, never from the request's word; a file the review leaves out is not checked; after any save every index of the on-disk `flusso.toml` has a file of its own with its own schema), the **stale-page check** (issue #280: `load_project` returns `Project.digests`, SHA-256 per project-relative file the model came from (`../x` outside the folder), `null` = absent; the page sends them as `SaveRequest.digests` — **required**, and `SaveRequest` denies unknown fields: `read_save_request` answers a page of another designer version with a 400 `BadRequest { reload }` — and merges `SaveResponse.digests` after its own save; `flusso.toml` is compared **first** (`stale_file`), before `plan` reads the disk: the review is that entry alone (`stale_config`), the save a `Stale` 409; then `plan` marks `OpDiff.stale` per file (a file the page never loaded counts as expected absent) and `save_with` refuses, under the lock, an applied entry that is marked; the expected digests go into `commit` as `Expect::Holds` (`Write.expect`/`Remove.expect`): `Journal::plan` takes them as the journal's `before`, and `run` re-checks each file (`Disk::holds`, not a counted step; `Disk::editing_at_check` is the test hook) right before the rename that replaces or removes it, so a lock-free writer meanwhile stops the commit with `Changed`, `undo_reached` undoes the renames done (keeping any file written since, `Disk::with_edit` is the test hook), and the API answers the same 409 naming every changed file — only a write between that check and the rename can still be lost; "overwrite anyway" sends the review's `StaleFile.on_disk`; completed recoveries are kept per process (`COMPLETED`) and reported on a diff/save whose digests show the page hasn't seen them (`unseen_recoveries`, compared before the save writes), and the page shows each `RecoveredSave.id` once; "overwrite anyway" recomputes the review with the override (`api.diff`'s `overwrite`), so Write shows every file it writes; guards: `tests/api.rs`'s `a_page_cannot_save_over_a_file_another_page_saved` and siblings, `a_config_another_page_restructured_is_the_refusal_not_a_failed_check`, `a_request_from_another_designer_version_is_told_to_reload`, `api::tests`' `a_file_written_*` and `an_editor_writing_during_a_save_gets_a_save_or_the_refusal`, and `commit::tests`' `an_editor_write_after_any_step_is_kept_and_nothing_is_left`), `commit/` (the all-or-nothing commit, kill- and power-loss-safe, issue #274; invariant in `mod.rs`'s doc: the project is, or after recovery becomes, exactly before or after a save: under `lock.rs`'s advisory lock (`.flusso-save.lock`, std `File::try_lock`, held for the whole commit and every recovery; never followed: a link or non-file there is `LockError::NotAFile`), `journal.rs` writes `.flusso-save.journal` (format 2 JSON: every destination and removal **relative to the config's folder**, with SHA-256 of each file before and after; temp/backup names are derived from the path, a token and the position, never stored). Order: a **record** in the user's state folder (`state.rs`: `<token>.json` = journal bytes' digest + canonical config folder + `committed`, under `$XDG_STATE_HOME/flusso/design-saves/` via `etcetera`, 0700/0600, `create_new` through a hard-linked temp, never followed, non-blocking reads, a folder or record open to others or another owner's is not used; `State::for_saving` falls back to an unrecorded save, logged once; pruned at start past 180 days, or with its folder missing once past 7 days (`GONE_AGE`); a temp a killed private write left goes once its pid is dead (an hour where that can't be checked); a unit test sees only its thread's `state::use_test_dir`, the integration tests call `api::use_state_dir`), then the journal, flushed temp files, hard-link backups, renames with `flusso.toml` last, the **commit point = marking the record committed** (one rename, then the state folder flushed), rename to `.flusso-save.done`, cleanup, record removed last; journal/staging/temps are written and read with `O_NOFOLLOW` (`disk.rs`'s `no_follow`). **A journal is acted on only when a record of this folder names its exact bytes**, so once, in its own folder: `recover.rs` decides roll back vs finish from the record, never the file name; a file holding a **third text** (neither its before- nor after-text, or deleted) is another program's write and is kept, never blocks (`recover::Kept`, `RecoveredSave.kept`): `finish` cleans up around it, a rollback restores the rest (`Backups::Keep` in recovery keeps and names its before-text backup, `Backups::Drop` in the save's own undo drops it, a backup holding the kept bytes always goes), so the result is before or after plus that write, never a mix; only an unreadable file, a missing backup or a failed step blocks; `Journal::steps` then accepts only what a save writes (plain names, leading `..` for a `plan`-accepted outside file, no save-file name, no link, config only as the last write, removals inside, `dirs` ancestors of a destination, ≤ `MAX_ENTRIES` paths of ≤ `fspath::MAX_PATH` bytes); anything else (no record, another folder's, no state folder, too large, malformed, not a save, `.journal` + `.done` both) is never acted on: `recover.rs` blocks with a read-only `Report` that looks only inside the config folder (`Inside`; an outside path is text, `Holds::Outside`) and gives `Report::route` back/forward as literal `HandStep`s (each file's `Fix`, every implied temp/backup on disk whatever it holds, created folders if empty, the journal last) plus "delete only the journal"; a blocked *recorded* save carries its `Direction`, per `Problem` a `fix` from a copy verified by digest at report time (never a backup while finishing: the after-text is nowhere else) and, when every problem is a missing backup, `keep` steps; `commit::tests` follow every such step literally and assert the promised state. Every recovery action is digest-gated (an empty temp is deleted only while rolling back and its file unreplaced; a `dirs` folder only when empty); `fspath::on_disk` (shared with `plan`, which caps request paths at `MAX_PATH`) bisects for the deepest existing ancestor, so resolution is O(log n) canonicalizations; the backups are deleted only once the commit mark is flushed; `api.rs`'s `recover_project` runs it at `flusso design` start, on `/api/project` (handlers run it under `spawn_blocking`), and before a diff/save that finds a journal: a rollback lets the diff/save go on with the notice, a completion is reported except the process's own save whose cleanup it left (`OWN_CLEANUP`), and the pages that loaded before it are caught by the digest check below; a blocked one is a 409 too (carrying `SaveRecovery`, with `BlockedSave.report`; the frontend's `components/Recovery.tsx` shows the notice or, when blocked, the files and the report instead of the project); stray `*.flusso-save.*` files with no journal are only reported; `disk.rs`'s `Disk` counts steps so `commit::tests` fails, or stops dead after, each one, for the commit and for recovery itself, and `a_process_aborted_mid_save_is_recovered` re-runs the test binary as a child that aborts mid-save), `keep/` (a save, `/api/diff` and the preview's YAML over an existing file: its text is patched only where the canonical renderings of its model and the saved model differ, so comments and untouched formatting stay — `yaml.rs` a line-based block scanner: the comment block directly above a key/item is its own, a blank-line-separated one is nobody's and stays put, a list's trailing comments are the list's; `toml_doc.rs` over `toml_edit`, the same rules for headers via markers in their prefixes; list items, `[[index]]` entries and sinks pair by identity — `pairing.rs`, from the uids/index ids/sink ids the client sends as `FileOp.identity`/`SaveRequest.identity`/`PreviewRequest.identity` (before = the model the base reads as, after = the saved model; a sink rename is applied to the TOML in place, `[index.sinks]` included, before the patch; an identity with an empty, repeated or unknown id is ignored), else by name, never by slot; a `|+` scalar owns the blank lines after it, so the patcher drops blank lines it would put after one (`KEPT_OPEN`); a comment dropped while its owner may still exist counts in `OpDiff.dropped`; the result is re-parsed and must equal the model, else the canonical form with `OpDiff.notice`; the Code-mode text is the save `base` — `FileOp.base`, the design store's `texts`, under undo with `doc`), `preview.rs` (mapping + document tree), `assets.rs` (embedded SPA); CLI `design` subcommand in `apps/cli/src/commands/design.rs`; frontend under `apps/design/frontend/` (React Flow node-graph canvas — `model/` projects the `IndexSchema` tree ↔ nodes/edges + path-addressed edits (every field carries a client-only `uid` from `ids.ts`: a container's is its node id, which collapse state + drag positions key on, and inspector edits address a field by it; stripped from every request), plus `complete.ts` (incomplete-field checks) and `prune.ts` (drops incomplete pieces from the **live preview** payload only, so a mid-build blank name doesn't 400 the strict backend, and lists them; that copy is lossy, so Code mode seeds from the unpruned schema and refuses to open while anything would be pruned), `selection.ts` (the selection carries the selected field's uid; the store re-points its path after every doc change and clears it once the field is gone), `rowIds.ts` (option rows keyed by a row id, not their editable key), `components/` the canvas/nodes/inspector/catalog-browser), built to `apps/design/dist/`; property round-trip in `apps/design/tests/roundtrip.rs` (also: random edits saved into a hand-written, commented file keep every comment with the field it names). The **sample document** preview builds a real doc from one live row via `PgDocumentBuilder::sample_document` (postgres crate — keeps sqlx/`RowKey` there; reuses the `build` path + `sink::to_json`) |
 | `Sink` trait (`write`, safe for concurrent calls; seeding; `reindex`), `WriteReport`, `SinkOptions`, JSON render | `libs/1-ports/sink/src/` |
 | OpenSearch sink (bulk, mappings, seeding; alias-over-generations + reindex) | `libs/2-adapters/sink-opensearch/src/` — `lib.rs` (the `OpensearchSink` type + ctor), `sink_impl.rs` (the `Sink` impl), `transport.rs` (HTTP plumbing + index CRUD), `generations.rs` (aliases, meta doc, generation naming), `mapping.rs` (index body/analysis), `bulk.rs` (wire format + chunking) |
-| Stream port (`Stream`, lanes, `LaneItem`/`Request`, `Producer`/`Consumer`/`AckHandle`) / in-process channel adapter (ticketed in-flight ledger, watermark) | `libs/1-ports/stream/src/` (`items.rs`, `queue.rs`), `libs/2-adapters/stream-channel/src/lib.rs` |
+| Stream port (`Stream`, lanes, `LaneItem`/`Request`, `Producer`/`Consumer`/`AckHandle`) / in-process channel adapter (ticketed in-flight ledger) | `libs/1-ports/stream/src/` (`items.rs`, `queue.rs`), `libs/2-adapters/stream-channel/src/lib.rs` |
 | Editor schema + Reference table generation (`flusso schema config\|docs`, drift test) | `apps/cli/src/commands/schema_cmd.rs`; artifacts at `libs/1-config/config.schema.json`, `docs/src/reference/generated/` |
 | CLI subcommands (`build`/`run`/`check`/`schema`/`indexes`/`reindex`) | `apps/cli/src/` — `main.rs` dispatches; `commands/` holds one module per command (`build.rs`, `run.rs` → composition root: installs telemetry, serves the HTTP surfaces, drives `Daemon::start`/`run`, owns signals; `check.rs`, `schema_cmd.rs`, the `indexes`/`reindex` HTTP-client `admin.rs`, shared `print.rs`); `telemetry/` and `http/` hold the transport, `backends.rs` the backend assembly |
 | On-demand reindex (alias-over-generations, per sink, no restart) | sink: `libs/2-adapters/sink-opensearch/src/sink_impl.rs` (`reindex`/`ensure_index`/`mark_seeded`) + `generations.rs` (generation helpers); engine `SinkEngine::reindex` (staged between batches + a `Backfill` request); daemon `DaemonControl::reindex` (`supervise.rs`); CLI `http/mod.rs` (`POST /reindex?index&sink`), `commands/admin.rs` (client, `--sink`). Deferred write-side zero-downtime follow-on: issue #6 |

@@ -63,7 +63,7 @@ impl<T> Delivery<T> {
 
 /// Confirms or returns a single delivery. Adapter-specific: an in-memory
 /// bookkeeping step for the channel, a server acknowledgement for a broker.
-/// Acking a lane batch is also what moves that lane's watermark.
+/// The sink engine reports a lane batch landed to the engine's `Progress`.
 #[async_trait]
 pub trait AckHandle: std::fmt::Debug + Send {
     /// Confirm the delivery; it will not be redelivered.

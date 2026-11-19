@@ -100,6 +100,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, unused_crate_dependencies)]
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -2699,13 +2701,29 @@ async fn run_deployment(
     policies: FailurePolicies,
 ) -> engine::Result<()> {
     let name = SinkName::try_new("e2e").unwrap();
-    let stream: Arc<dyn Stream> = Arc::new(ChannelStream::new(1024, [name.clone()]));
+    let stream: Arc<dyn Stream> = Arc::new(ChannelStream::over(
+        1024,
+        documents.backfill_indexes(),
+        [name.clone()],
+    ));
     let continuity = capture.continuity().await?;
     let mappings = documents.index_mappings().await?;
-    let sink_engine = SinkEngine::new(name.clone(), sink, Arc::clone(&stream), mappings)
-        .with_failure_policies(policies);
+    let progress = Arc::new(engine::Progress::of(
+        documents.backfill_indexes(),
+        [name.clone()],
+    ));
+    let sink_engine = SinkEngine::new(
+        name.clone(),
+        sink,
+        Arc::clone(&stream),
+        mappings,
+        Arc::clone(&progress),
+    )
+    .with_failure_policies(policies);
     sink_engine.stage(continuity).await?;
-    let ingest = IngestEngine::new(capture, documents, stream, vec![name]);
+    let ingest = IngestEngine::new(capture, documents, stream, vec![name], progress)
+        .with_builds(common::e2e_builds())
+        .with_budget(common::e2e_budget());
     let (_control, mut control_rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
     tokio::select! {
         result = ingest.run() => result,

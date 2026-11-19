@@ -222,6 +222,131 @@ impl sqlx::SqlSafeStr for SqlString {
     }
 }
 
+/// The alias a backfill page selects each key under.
+pub(super) const KEY_PAGE_KEY: &str = "key";
+
+/// The alias of a page's "at or before the walk's bound" flag.
+pub(super) const KEY_PAGE_WITHIN: &str = "within";
+
+/// The operators a backfill walk orders and compares its keys by, as SQL:
+/// the root key's btree operators written schema-qualified
+/// (`OPERATOR(ext.<)`), or bare (`<`) when the role may not name them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct WalkOperators {
+    pub(super) less: String,
+    pub(super) greater: String,
+    pub(super) at_most: String,
+}
+
+impl WalkOperators {
+    /// The operators the search path finds, for a key whose own the role
+    /// may not name.
+    pub(super) fn bare() -> Self {
+        Self {
+            less: "<".to_owned(),
+            greater: ">".to_owned(),
+            at_most: "<=".to_owned(),
+        }
+    }
+
+    /// The btree operators of `schema` (quoted already): `<`, `>`, `<=`.
+    pub(super) fn qualified(schema: &str) -> Self {
+        let named = |op: &str| format!("OPERATOR({schema}.{op})");
+        Self {
+            less: named("<"),
+            greater: named(">"),
+            at_most: named("<="),
+        }
+    }
+}
+
+/// How a key is read and compared in a walk: its type to cast to, its base
+/// type's name (for its text), and the walk's operators.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct WalkKey<'a> {
+    pub(super) column: &'a ColumnName,
+    pub(super) key_type: &'a str,
+    pub(super) base_name: &'a str,
+    pub(super) operators: &'a WalkOperators,
+}
+
+/// A backfill's key page (see `keys.rs`): up to `limit` of the root's keys
+/// after `after`, in key order, each with whether it is at or before
+/// `through`. The bound is in the select list, not the `WHERE`: as a second
+/// range condition a generic plan would take the range for a small one and
+/// sort it, every page. Only identifiers, the key type (from the catalog),
+/// the operators (from the catalog) and the limit are written into the
+/// text; `after` and `through` are parameters cast by [`sql::key_cast`].
+pub(super) fn key_page_query(
+    schema: &IndexSchema,
+    key: WalkKey<'_>,
+    after: Option<&GenericValue>,
+    through: &GenericValue,
+    limit: usize,
+) -> Result<SqlString> {
+    let cast = |value: &GenericValue| {
+        sql::key_cast(value, key.key_type).ok_or_else(|| {
+            SourceError::Query(format!("a backfill page can't bind the key {value:?}"))
+        })
+    };
+    let column = qident(key.column.as_ref());
+    let select = super::value::key_select(&column, KEY_PAGE_KEY, key.key_type, key.base_name);
+    let table = qtable(&schema.db_schema, &schema.table);
+    let ops = key.operators;
+    let (bound, through_param) = match after {
+        None => (String::new(), 1),
+        Some(after) => (
+            format!(" WHERE {column} {} $1{}", ops.greater, cast(after)?),
+            2,
+        ),
+    };
+    Ok(SqlString::new(format!(
+        "SELECT {select}, ({column} {} ${through_param}{}) AS \"{KEY_PAGE_WITHIN}\" \
+         FROM {table}{bound} ORDER BY {column} USING {} LIMIT {limit}",
+        ops.at_most,
+        cast(through)?,
+        ops.less,
+    )))
+}
+
+/// Whether `$1` comes before `$2`, and `$2` before `$1`, in the walk's own
+/// order (see `keys.rs`): neither is equal.
+pub(super) fn compare_keys_query(
+    key: WalkKey<'_>,
+    collation: Option<&str>,
+    a: &GenericValue,
+    b: &GenericValue,
+) -> Result<SqlString> {
+    let cast = |value: &GenericValue| {
+        sql::key_cast(value, key.key_type)
+            .ok_or_else(|| SourceError::Query(format!("a backfill can't bind the key {value:?}")))
+    };
+    // Compared under the key index's collation, as the pages compare the
+    // column: a bare cast would take the database's default.
+    let collate = collation
+        .map(|name| format!(" COLLATE {name}"))
+        .unwrap_or_default();
+    let (a, b) = (
+        format!("{}{collate}", cast(a)?),
+        format!("{}{collate}", cast(b)?),
+    );
+    let less = &key.operators.less;
+    Ok(SqlString::new(format!(
+        "SELECT ($1{a} {less} $2{b}) AS \"before\", ($2{b} {less} $1{a}) AS \"after\""
+    )))
+}
+
+/// The root's greatest key, by the walk's own order (see `keys.rs`).
+pub(super) fn last_key_query(schema: &IndexSchema, key: WalkKey<'_>) -> SqlString {
+    let column = qident(key.column.as_ref());
+    let select = super::value::key_select(&column, KEY_PAGE_KEY, key.key_type, key.base_name);
+    let table = qtable(&schema.db_schema, &schema.table);
+    SqlString::new(format!(
+        "SELECT {select} FROM {table} ORDER BY {column} USING {} LIMIT 1",
+        key.operators.greater
+    ))
+}
+
 /// Bind a scalar parameter onto a query, in `params` order.
 pub(super) fn bind_param<'q>(query: PgQuery<'q>, value: &GenericValue) -> Result<PgQuery<'q>> {
     Ok(match value {

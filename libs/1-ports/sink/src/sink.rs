@@ -28,6 +28,10 @@ pub struct WriteReport {
     /// Bytes the write sent to the destination, when the sink counts them
     /// (the OpenSearch sink: its `_bulk` bodies). Reported as a metric only.
     pub bytes: Option<u64>,
+    /// Requests the write sent that refresh the destination (the OpenSearch
+    /// sink: `_refresh` calls and `_bulk` requests with `?refresh=true`).
+    /// Reported as a metric only.
+    pub refreshes: u64,
 }
 
 /// When the documents of one [`write`](Sink::write) become searchable.
@@ -61,6 +65,56 @@ pub enum Visibility {
     Deferred,
 }
 
+/// What a caught-up write must make searchable beyond its own documents
+/// (see [`Sink::write_parts`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaughtUp<'a> {
+    /// Nothing: the write forces no refresh.
+    No,
+    /// Every write of these (logical) indexes that returned before it.
+    Indexes(&'a [IndexName]),
+    /// Every write of every index that returned before it.
+    All,
+}
+
+impl CaughtUp<'_> {
+    /// Whether the write is caught up at all.
+    pub fn is_caught_up(&self) -> bool {
+        !matches!(self, CaughtUp::No)
+    }
+
+    /// Whether the write must cover earlier writes of the logical `index`.
+    pub fn covers(&self, index: &str) -> bool {
+        match self {
+            CaughtUp::No => false,
+            CaughtUp::Indexes(indexes) => indexes.iter().any(|named| named.as_ref() == index),
+            CaughtUp::All => true,
+        }
+    }
+}
+
+impl Visibility {
+    /// The later of two: what a write holding both parts reports.
+    #[must_use]
+    pub fn later(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Deferred, _) | (_, Self::Deferred) => Self::Deferred,
+            (Self::Within(a), Self::Within(b)) => Self::Within(a.max(b)),
+            (Self::Within(a), Self::Immediate) | (Self::Immediate, Self::Within(a)) => {
+                Self::Within(a)
+            }
+            (Self::Immediate, Self::Immediate) => Self::Immediate,
+        }
+    }
+}
+
+fn sum_bytes(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+    }
+}
+
 impl WriteReport {
     /// A report with no rejections — everything in the write was applied.
     pub fn clean() -> Self {
@@ -85,6 +139,13 @@ impl WriteReport {
     #[must_use]
     pub fn sent(mut self, bytes: u64) -> Self {
         self.bytes = Some(bytes);
+        self
+    }
+
+    /// Set how many requests of the write refreshed the destination.
+    #[must_use]
+    pub fn refreshed(mut self, refreshes: u64) -> Self {
+        self.refreshes = refreshes;
         self
     }
 
@@ -123,6 +184,17 @@ impl Default for SinkOptions {
     }
 }
 
+/// What [`Sink::seeding`] answers for an index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Seeding {
+    /// Its backfill completed; a start skips it.
+    Seeded,
+    /// It needs a backfill; `walked` is where the last one durably got, as
+    /// the source wrote it, if the sink recorded one.
+    Unseeded { walked: Option<String> },
+}
+
 /// A destination for built documents.
 ///
 /// A sink engine hands each lane item's envelopes to [`write`](Self::write),
@@ -137,9 +209,14 @@ impl Default for SinkOptions {
 /// [`is_seeded`](Self::is_seeded) and [`reindex`](Self::reindex) may run at
 /// once for *different* indexes, never two at once for the same index, and
 /// never beside [`write`](Self::write) or [`mark_seeded`](Self::mark_seeded)
-/// (staging happens before the first write and once the writes in flight have
-/// returned). State a sink shares between indexes, such as one metadata store,
-/// must take concurrent writes for different indexes.
+/// (staging happens before the first write and once the writes and seeds in
+/// flight have returned).
+///
+/// **Seeding is concurrent across indexes.** [`mark_seeded`](Self::mark_seeded)
+/// may run at once for different indexes, and beside `write` for other
+/// indexes; never beside a write, a `mark_seeded` or staging of the same
+/// index, and never beside staging. State a sink shares between indexes, such
+/// as one metadata store, must take concurrent calls for different indexes.
 #[async_trait]
 pub trait Sink: std::fmt::Debug + Send + Sync {
     /// Ensure the destination index exists, creating it from `mapping` if it is
@@ -189,6 +266,69 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
     /// rebuilt.
     async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> Result<WriteReport>;
 
+    /// Write several lane items as **one** write: the engine merges items that
+    /// are ready at once (ADR 0012 stage 7), so a burst over many indexes goes
+    /// out in requests of about a batch, not one per index. `parts` are the
+    /// items' envelopes, each part in its own order; parts never share a
+    /// document. Everything [`write`](Self::write) promises holds for the whole
+    /// call, as one write: a rejection names its document's index, an `Err`
+    /// fails every part.
+    ///
+    /// `caught_up` says what the write must make searchable beyond its own
+    /// documents, when it returns `Immediate`: every write of the indexes it
+    /// names that returned before the call ([`CaughtUp::Indexes`]: the
+    /// engine's lanes with nothing else waiting, one index each), of every
+    /// index ([`CaughtUp::All`], what [`write`](Self::write)'s `true` means),
+    /// or nothing ([`CaughtUp::No`]). So a trickle on one index refreshes
+    /// that index, not another index's backlog.
+    ///
+    /// The default writes each part with [`write`](Self::write), in order,
+    /// passing whether it is caught up to the last only (the earlier ones have
+    /// returned before it, so it covers them; a scope is widened to every
+    /// index, which covers more than asked), and folds the reports:
+    /// rejections together, bytes summed, visibility the latest of them, or
+    /// `Immediate` when the caught-up last part reported it. Correct for any
+    /// sink; a sink that can send several parts in one request (OpenSearch's
+    /// `_bulk`), or refresh one index, overrides it.
+    async fn write_parts(
+        &self,
+        parts: &[&[Envelope]],
+        caught_up: CaughtUp<'_>,
+    ) -> Result<WriteReport> {
+        let caught_up = caught_up.is_caught_up();
+        let Some((last, earlier)) = parts.split_last() else {
+            return self.write(&[], caught_up).await;
+        };
+        let mut folded = WriteReport::clean();
+        let mut bytes: Option<u64> = None;
+        for part in earlier {
+            let report = self.write(part, false).await?;
+            folded.visibility = folded.visibility.later(report.visibility);
+            bytes = sum_bytes(bytes, report.bytes);
+            folded.refreshes += report.refreshes;
+            folded.rejected.extend(report.rejected);
+        }
+        let report = self.write(last, caught_up).await?;
+        folded.visibility = if caught_up && report.visibility == Visibility::Immediate {
+            Visibility::Immediate
+        } else {
+            folded.visibility.later(report.visibility)
+        };
+        folded.bytes = sum_bytes(bytes, report.bytes);
+        folded.refreshes += report.refreshes;
+        folded.rejected.extend(report.rejected);
+        Ok(folded)
+    }
+
+    /// The most documents one write should hold, if the sink splits larger
+    /// ones into several requests (the OpenSearch sink's `batch_size`). The
+    /// engine merges items only up to it, so a merged write is not then cut
+    /// into a full request and a small one. `None`: no limit of the sink's
+    /// own.
+    fn write_limit(&self) -> Option<usize> {
+        None
+    }
+
     /// Whether `index` has already been seeded — its initial backfill completed
     /// and durably applied here. The sink engine asks this at startup, after
     /// [`ensure_index`](Self::ensure_index), and requests a snapshot only for
@@ -210,8 +350,55 @@ pub trait Sink: std::fmt::Debug + Send + Sync {
         Ok(false)
     }
 
+    /// What staging needs of `index`: seeded, or, when not, where its last
+    /// backfill durably got, if this sink recorded it
+    /// ([`record_walked`](Self::record_walked)). The default reads
+    /// [`is_seeded`](Self::is_seeded) and records nothing, so a backfill
+    /// starts from the first key.
+    async fn seeding(&self, index: &IndexName) -> Result<Seeding> {
+        Ok(if self.is_seeded(index).await? {
+            Seeding::Seeded
+        } else {
+            Seeding::Unseeded { walked: None }
+        })
+    }
+
+    /// Whether reads of `index` see another copy than the one this sink now
+    /// writes: a rebuild is under way (a reindex, or a rebuild after the
+    /// source lost its resume point), and readers stay on the old copy until
+    /// [`mark_seeded`](Self::mark_seeded) swaps. Asked while staging, after
+    /// [`ensure_index`](Self::ensure_index), for an unseeded index: a process
+    /// that starts in the middle of a rebuild says so, and a fence then vouches
+    /// for nothing of that index until it is seeded. The default, `false`, is
+    /// right for a sink whose reads see what it writes.
+    async fn is_rebuilding(&self, _: &IndexName) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Remember that `index`'s backfill has landed every document up to
+    /// `mark` (opaque text the source wrote), so the next start resumes after
+    /// it. Only the index's current, unseeded target holds it: seeding it, a
+    /// reindex, or a target created anew forgets it. A failure costs only
+    /// redone work; the caller logs it and goes on. The default stores
+    /// nothing.
+    async fn record_walked(&self, _: &IndexName, _mark: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Forget where `index`'s backfill got, so the next one starts from the
+    /// first key: the source lost the changes since (a fresh replication
+    /// slot). Called while staging, before the source prepares. The default
+    /// has nothing to forget.
+    async fn forget_walked(&self, _: &IndexName) -> Result<()> {
+        Ok(())
+    }
+
     /// Record that `index` has been seeded, so a later run skips its backfill.
     /// The default is a no-op (paired with `is_seeded` returning `false`).
+    ///
+    /// Called once the index's backfill is written, possibly while other
+    /// indexes are written or seeded (see the trait's doc on concurrency).
+    /// A failure is retried by calling it again, so it must be idempotent.
     async fn mark_seeded(&self, _: &IndexName) -> Result<()> {
         Ok(())
     }

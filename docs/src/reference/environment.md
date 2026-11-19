@@ -48,7 +48,7 @@ Every flag reads a `FLUSSO_*` variable. **The flag wins** when both are set. `fl
 | `FLUSSO_MANAGE_REPLICA_IDENTITY` | `--manage-replica-identity` | `run`, `check` |
 | `FLUSSO_SKIP_BACKFILL` | `--skip-backfill` | `run` |
 | `FLUSSO_PRETTY` | `--pretty` | `run` |
-| `FLUSSO_QUEUE_CAPACITY` | `--queue-capacity` | `run` |
+| `FLUSSO_QUEUE_CAPACITY` | `--queue-capacity` (deprecated, ignored) | `run` |
 | `FLUSSO_PUBLIC_ADDRESS` | `--public-address` | `run` |
 | `FLUSSO_PRIVATE_ADDRESS` | `--private-address` | `run` |
 | `FLUSSO_ADMIN_USER` | `--admin-user` | `run`, `indexes`, `reindex` |
@@ -58,6 +58,8 @@ Every flag reads a `FLUSSO_*` variable. **The flag wins** when both are set. `fl
 | `FLUSSO_BATCH_MAX_CHANGES` | `--batch-max-changes` | `run` |
 | `FLUSSO_BATCH_MAX_DELAY_MS` | `--batch-max-delay-ms` | `run` |
 | `FLUSSO_WRITES` | `--writes` | `run` |
+| `FLUSSO_BUILDS` | `--builds` | `run` |
+| `FLUSSO_MAX_BUILT_MIB` | `--max-built-mib` | `run` |
 | `FLUSSO_SHUTDOWN_TIMEOUT_SECS` | `--shutdown-timeout-secs` | `run` |
 | `FLUSSO_EXIT_WITH_PARENT` | `--exit-with-parent` | `run` |
 | `FLUSSO_SERVER` | `--server` | `indexes`, `reindex` |

@@ -159,7 +159,7 @@ impl ChangeCapture for BurstCapture {
         let changes: Vec<SourceResult<LiveChange>> = (1..=i32::try_from(self.count).unwrap())
             .map(|id| {
                 Ok((
-                    Position(u64::from(id.unsigned_abs())),
+                    Position::new(u64::from(id.unsigned_abs())),
                     ChangeEvent::Upsert {
                         table: table("users"),
                         key: row_key(id),
@@ -173,7 +173,7 @@ impl ChangeCapture for BurstCapture {
     }
 
     /// The burst bench measures throughput, not durability.
-    fn confirm(&self, _position: Position) {}
+    fn confirm(&self, _: source::cdc::Landed) {}
 }
 
 /// One live-only deployment the way the daemon runs it: stage the sink engine
@@ -186,13 +186,22 @@ async fn run_deployment(
     batch: BatchPolicy,
 ) {
     let name = SinkName::try_new("bench").unwrap();
-    let stream = Arc::new(ChannelStream::new(1024, [name.clone()]));
+    let stream = Arc::new(ChannelStream::over(
+        1024,
+        documents.backfill_indexes(),
+        [name.clone()],
+    ));
     let mappings = documents.index_mappings().await.unwrap();
+    let progress = Arc::new(engine::Progress::of(
+        documents.backfill_indexes(),
+        [name.clone()],
+    ));
     let sink_engine = SinkEngine::new(
         name.clone(),
         sink,
         Arc::clone(&stream) as Arc<dyn Stream>,
         mappings,
+        Arc::clone(&progress),
     )
     .skip_backfill(true);
     sink_engine.stage(Continuity::Resumed).await.unwrap();
@@ -203,6 +212,7 @@ async fn run_deployment(
         documents,
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![name],
+        progress,
     )
     .with_batch(batch)
     .run()

@@ -8,13 +8,23 @@
 //! fetch by id sees it) or **searchable** (a refresh covered
 //! it: a search sees it). See [`FenceLevel`].
 //!
-//! It only ever *observes*. The sink engines report the stream position each
-//! sink has applied and made searchable ([`FenceObserver`]); the source
-//! translates a stream position into its own terms
-//! ([`ChangeCapture::reached`]) and wakes the fence when that answer moves
-//! with no new change (idle WAL). Nothing here refreshes a destination or
-//! hurries a flush because a client is waiting, and a backfill is not part of
-//! it: seeding is reported by the status, not fenced.
+//! It only ever *observes*. The engines record in the deployment's
+//! [`Progress`] how far each sink's lane has landed and made searchable what
+//! was routed to it (a [`FenceObserver`] wakes waiters when a sink reports);
+//! the source turns that into its own terms ([`ChangeCapture::reached`], off
+//! the positions' own stamps) and wakes the fence when the answer moves with
+//! no new change (idle WAL). Nothing here refreshes a destination or
+//! hurries a flush because a client is waiting.
+//!
+//! **A fence vouches only for what reads see (#379).** Each lane also tracks
+//! whether reads through the sink's alias see what the lane writes: not while
+//! an index is seeded for the first time (`backfilling`), nor while a fresh
+//! generation is built beside the one serving (`rebuilding`: a reindex, or
+//! every seeded index after a `Fresh` source). A lane mid-reindex still
+//! vouches for what the serving generation held when the rebuild began. A
+//! wait that needs more answers [`FenceOutcome::Unserved`] at its timeout,
+//! unless the seed lands first. The sink engines' events set the state
+//! ([`FenceObserver`]); they are a few per index per run.
 //!
 //! The daemon owns the wait; putting it on a wire is the transport's job
 //! (the CLI serves it as `GET /wait`).
@@ -27,6 +37,7 @@
 //!     position: "0/16B3748".to_owned(),
 //!     level: "applied".parse().unwrap(),
 //!     sink: None,
+//!     indexes: Vec::new(),
 //!     timeout: Duration::from_secs(5),
 //! };
 //! assert_eq!(request.level, FenceLevel::Applied);
@@ -34,15 +45,16 @@
 //! assert!("visible".parse::<FenceLevel>().is_err());
 //! ```
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
-use engine::Observer;
-use kernel::{Position, SinkName};
+use engine::{Level, Observer, Progress};
+use kernel::{IndexName, Position, SinkName};
 use serde::Serialize;
 use source::cdc::{ChangeCapture, SourcePosition};
+use stream::LaneKey;
 use tokio::sync::Notify;
 use tokio::time::{Instant, timeout_at};
 
@@ -97,6 +109,8 @@ pub struct FenceRequest {
     pub level: FenceLevel,
     /// The sink to wait for; `None` waits for every sink.
     pub sink: Option<SinkName>,
+    /// The indexes to wait for; empty waits for every index.
+    pub indexes: Vec<IndexName>,
     /// How long to wait before giving up.
     pub timeout: Duration,
 }
@@ -109,6 +123,37 @@ pub enum FenceOutcome {
     Reached { position: String },
     /// The timeout passed first. `position` is how far it got.
     TimedOut { position: String },
+    /// The timeout passed while some lane the wait needs serves reads from
+    /// elsewhere than it writes: it can't be vouched for until it is seeded.
+    /// `lanes` are those lanes; `position` is how far the wait got.
+    Unserved {
+        position: String,
+        lanes: Vec<(LaneKey, Unserved)>,
+    },
+}
+
+/// Why a lane can't vouch for its writes yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Unserved {
+    /// Its sink engine hasn't staged it yet.
+    Starting,
+    /// It is being seeded for the first time (or its index was recreated
+    /// empty): reads see it filling.
+    Backfilling,
+    /// A fresh generation is being built while reads see the old one.
+    Rebuilding,
+}
+
+impl Unserved {
+    /// The reason on the wire.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Unserved::Starting => "starting",
+            Unserved::Backfilling => "backfilling",
+            Unserved::Rebuilding => "rebuilding",
+        }
+    }
 }
 
 /// Why a wait could not start.
@@ -120,6 +165,9 @@ pub enum FenceError {
     /// No sink of that name is configured.
     #[error("unknown sink `{0}`")]
     UnknownSink(String),
+    /// No enabled index of that name is configured.
+    #[error("unknown index `{0}`")]
+    UnknownIndex(String),
     /// The source cannot say how far it is: its live stream is not open yet,
     /// or it has no position a client could wait on.
     #[error("fences are not available: {0}")]
@@ -140,10 +188,23 @@ pub struct FencePositions {
 /// One sink's fence positions, in the source's own text form.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SinkPositions {
-    /// How far this sink has applied.
+    /// How far this sink has applied (its slowest index).
     pub applied: Option<String>,
-    /// How far this sink is searchable.
+    /// How far this sink is searchable (its slowest index).
     pub searchable: Option<String>,
+    /// The same pair for each index of this sink: each `(index, sink)` lane.
+    pub indexes: BTreeMap<IndexName, LanePositions>,
+}
+
+/// One `(index, sink)` lane's fence positions, in the source's own text form.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LanePositions {
+    /// How far this lane has applied.
+    pub applied: Option<String>,
+    /// How far this lane is searchable.
+    pub searchable: Option<String>,
+    /// Items routed to this lane and not landed.
+    pub outstanding: usize,
 }
 
 /// The handle a transport waits on. Cheap to clone.
@@ -155,12 +216,32 @@ pub struct Fence {
 #[derive(Debug)]
 struct Inner {
     source: Arc<dyn ChangeCapture>,
-    sinks: BTreeMap<SinkName, Mutex<Progress>>,
+    progress: Arc<Progress>,
+    lanes: BTreeMap<LaneKey, Mutex<Furthest>>,
     /// Woken whenever any sink's position or the source's answer may have
     /// moved; every waiter re-checks.
     moved: Notify,
     /// How many waits on `searchable` are open.
     searchable_waits: AtomicUsize,
+    /// How many waits are open: a registration wakes them only then. Its own
+    /// `Arc`, so the registration listener reads it without upgrading.
+    waits: Arc<AtomicUsize>,
+}
+
+/// Counts one open wait, so registrations know to wake it.
+struct OpenWait<'a>(&'a Inner);
+
+impl<'a> OpenWait<'a> {
+    fn enter(inner: &'a Inner) -> Self {
+        inner.waits.fetch_add(1, Ordering::AcqRel);
+        Self(inner)
+    }
+}
+
+impl Drop for OpenWait<'_> {
+    fn drop(&mut self) {
+        self.0.waits.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Counts one open wait on `searchable`, and wakes [`Fence::settled`] when it
@@ -174,34 +255,75 @@ impl Drop for SearchableWait<'_> {
     }
 }
 
-/// What one sink has reported, and the furthest source position each level
-/// has been seen to stand for. Those only grow, so a reopened source stream
-/// (which restarts from what *every* sink confirmed) never walks a sink back
-/// from what it already applied.
+/// The furthest source position each level of one lane has been seen to
+/// stand for. They only grow, so a reopened source stream (which restarts
+/// from what *every* sink confirmed) never walks a sink back from what it
+/// already reached. Beside them, what reads of the lane's index see.
 #[derive(Debug, Default)]
-struct Progress {
-    /// The highest stream position reported applied.
-    applied: Option<Position>,
-    applied_reached: Option<SourcePosition>,
-    searchable_reached: Option<SourcePosition>,
-    /// Applied positions not yet reported searchable, oldest first, each with
-    /// the source position it stood for when it was applied. The source
-    /// forgets a position once every sink confirmed it, which can be before it
-    /// is searchable, so the translation is taken while it is still exact.
-    unsearchable: VecDeque<(Position, SourcePosition)>,
+struct Furthest {
+    applied: Option<SourcePosition>,
+    searchable: Option<SourcePosition>,
+    serving: Serving,
+}
+
+/// What reads of a lane's index see, set by the sink engine's events.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Serving {
+    /// Not staged yet.
+    #[default]
+    Pending,
+    /// Every write the lane applied.
+    Writes,
+    /// A partial index, being seeded.
+    Backfilling,
+    /// The old generation, exactly as it stood at `through` (applied,
+    /// searchable), or nothing to vouch for.
+    Rebuilding {
+        through: (Option<SourcePosition>, Option<SourcePosition>),
+    },
+}
+
+impl Serving {
+    /// How far reads vouch at `level`, given how far the lane `reached`.
+    fn vouches(self, level: FenceLevel, reached: Option<SourcePosition>) -> Option<SourcePosition> {
+        match self {
+            Serving::Writes => reached,
+            Serving::Rebuilding { through } => match level {
+                FenceLevel::Applied => through.0,
+                FenceLevel::Searchable => through.1,
+            },
+            Serving::Pending | Serving::Backfilling => None,
+        }
+    }
+
+    fn unserved(self) -> Option<Unserved> {
+        match self {
+            Serving::Writes => None,
+            Serving::Pending => Some(Unserved::Starting),
+            Serving::Backfilling => Some(Unserved::Backfilling),
+            Serving::Rebuilding { .. } => Some(Unserved::Rebuilding),
+        }
+    }
 }
 
 impl Fence {
-    /// A fence over `source` for `sinks`, nothing reached yet.
-    pub fn new(source: Arc<dyn ChangeCapture>, sinks: impl IntoIterator<Item = SinkName>) -> Self {
+    /// A fence over `source` for `lanes` (one per `(index, sink)`), reading
+    /// how far each landed from `progress`.
+    pub fn new(
+        source: Arc<dyn ChangeCapture>,
+        progress: Arc<Progress>,
+        lanes: impl IntoIterator<Item = LaneKey>,
+    ) -> Self {
         let inner = Arc::new(Inner {
             source: Arc::clone(&source),
-            sinks: sinks
+            progress,
+            lanes: lanes
                 .into_iter()
-                .map(|sink| (sink, Mutex::new(Progress::default())))
+                .map(|lane| (lane, Mutex::new(Furthest::default())))
                 .collect(),
             moved: Notify::new(),
             searchable_waits: AtomicUsize::new(0),
+            waits: Arc::new(AtomicUsize::new(0)),
         });
         // Weak: the source keeps its listeners for life, and must not keep the
         // fence (and through it, itself) alive.
@@ -211,106 +333,156 @@ impl Fence {
                 inner.moved.notify_waiters();
             }
         }));
+        // A lane registering an item it already landed can let a waiter
+        // pass: wake them, and only when some wait (registration is on the
+        // ingest engine's path for every batch).
+        let registrations: Weak<Inner> = Arc::downgrade(&inner);
+        let waits = Arc::clone(&inner.waits);
+        inner.progress.on_registered(Arc::new(move || {
+            if waits.load(Ordering::Acquire) > 0
+                && let Some(inner) = registrations.upgrade()
+            {
+                inner.moved.notify_waiters();
+            }
+        }));
         Self { inner }
     }
 
-    /// `sink` applied everything through `position`.
-    fn record_applied(&self, sink: &SinkName, position: Position) {
-        if let Some(progress) = self.inner.sinks.get(sink) {
-            let mut progress = lock(progress);
-            // With nothing waiting for a refresh, everything before this
-            // position is searchable. Taken now, while the source still holds
-            // this position: it bounds the answer just below it.
-            if progress.unsearchable.is_empty()
-                && let Some(before) = self.inner.source.reached(progress.applied)
-            {
-                progress.searchable_reached = progress.searchable_reached.max(Some(before));
-            }
-            progress.applied = Some(progress.applied.map_or(position, |p| p.max(position)));
-            if let Some(reached) = self.inner.source.reached(Some(position)) {
-                progress.applied_reached = progress.applied_reached.max(Some(reached));
-                progress.unsearchable.push_back((position, reached));
-            }
-        }
+    /// A sink reported progress: every waiter checks again.
+    fn moved(&self) {
         self.inner.moved.notify_waiters();
     }
 
-    /// Everything `sink` applied through `position` is now searchable.
-    fn record_searchable(&self, sink: &SinkName, position: Position) {
-        if let Some(progress) = self.inner.sinks.get(sink) {
-            let mut progress = lock(progress);
-            while let Some((applied, reached)) = progress.unsearchable.front().copied() {
-                if applied > position {
-                    break;
-                }
-                progress.searchable_reached = progress.searchable_reached.max(Some(reached));
-                progress.unsearchable.pop_front();
-            }
+    /// Set what reads of `lane` see, from what they saw, and wake the waiters.
+    fn serve(&self, lane: &LaneKey, next: impl FnOnce(&Furthest) -> Serving) {
+        let Some(furthest) = self.inner.lanes.get(lane) else {
+            return;
+        };
+        {
+            let mut furthest = lock(furthest);
+            furthest.serving = next(&furthest);
         }
-        self.inner.moved.notify_waiters();
+        self.moved();
     }
 
-    /// How far `sink` is for `level`, in the source's terms. `None` while the
+    /// `lane`'s sink is about to build a fresh generation of its index. A
+    /// lane that served its writes keeps vouching for what it had reached:
+    /// the serving generation gets nothing new from here on.
+    fn rebuilding(&self, lane: &LaneKey) {
+        // Both levels brought up to date first, so the frozen `through` is
+        // what the lane had reached when the rebuild began.
+        self.reached(lane, FenceLevel::Searchable);
+        self.serve(lane, |furthest| Serving::Rebuilding {
+            through: match furthest.serving {
+                Serving::Writes => (furthest.applied, furthest.searchable),
+                Serving::Rebuilding { through } => through,
+                Serving::Pending | Serving::Backfilling => (None, None),
+            },
+        });
+    }
+
+    /// A snapshot was requested for `lane`: a rebuild stays one; anything else
+    /// is a seed of an index that reads see filling.
+    fn backfilling(&self, lane: &LaneKey) {
+        self.serve(lane, |furthest| match furthest.serving {
+            rebuilding @ Serving::Rebuilding { .. } => rebuilding,
+            _ => Serving::Backfilling,
+        });
+    }
+
+    /// `lane`'s index is seeded: reads see every write it applied.
+    fn seeded(&self, lane: &LaneKey) {
+        self.serve(lane, |_| Serving::Writes);
+    }
+
+    /// `sink` finished staging: its lanes not seeding serve their writes.
+    fn started(&self, sink: &SinkName) {
+        for lane in self.inner.lanes.keys().filter(|lane| &lane.sink == sink) {
+            self.serve(lane, |furthest| match furthest.serving {
+                Serving::Pending => Serving::Writes,
+                other => other,
+            });
+        }
+    }
+
+    /// How far reads of `lane` vouch at `level`, with why they don't when
+    /// they can't; `reached` is how far the lane got.
+    fn vouched(
+        &self,
+        lane: &LaneKey,
+        level: FenceLevel,
+    ) -> (
+        Option<SourcePosition>,
+        Option<SourcePosition>,
+        Option<Unserved>,
+    ) {
+        let reached = self.reached(lane, level);
+        let serving = self
+            .inner
+            .lanes
+            .get(lane)
+            .map_or(Serving::Pending, |furthest| lock(furthest).serving);
+        (reached, serving.vouches(level, reached), serving.unserved())
+    }
+
+    /// How far `lane` is for `level`, in the source's terms. `None` while the
     /// source cannot say.
     ///
-    /// Applied follows the source live, so it keeps moving over idle WAL.
-    /// Searchable does the same while nothing applied is still waiting for a
-    /// refresh; otherwise it stands at the last position reported searchable.
-    fn reached(&self, sink: &SinkName, level: FenceLevel) -> Option<SourcePosition> {
-        let mut progress = lock(self.inner.sinks.get(sink)?);
-        if let Some(now) = self.inner.source.reached(progress.applied) {
-            progress.applied_reached = progress.applied_reached.max(Some(now));
-        }
+    /// Read off what the lane landed (or made searchable), so it keeps moving
+    /// over idle WAL. Searchable never runs ahead of applied.
+    fn reached(&self, lane: &LaneKey, level: FenceLevel) -> Option<SourcePosition> {
+        let mut furthest = lock(self.inner.lanes.get(lane)?);
+        let applied = self
+            .inner
+            .progress
+            .lane(lane, Level::Applied)
+            .and_then(|landed| self.inner.source.reached(landed));
+        furthest.applied = furthest.applied.max(applied);
         match level {
-            FenceLevel::Applied => progress.applied_reached,
+            FenceLevel::Applied => furthest.applied,
             FenceLevel::Searchable => {
-                if progress.unsearchable.is_empty() {
-                    progress.searchable_reached =
-                        progress.searchable_reached.max(progress.applied_reached);
-                }
-                progress.searchable_reached
+                let searchable = self
+                    .inner
+                    .progress
+                    .lane(lane, Level::Searchable)
+                    .and_then(|landed| self.inner.source.reached(landed));
+                furthest.searchable = furthest.searchable.max(searchable.min(furthest.applied));
+                furthest.searchable
             }
         }
     }
 
-    /// The slowest of `sinks` for `level`. `None` if any cannot be placed.
+    /// The slowest of `lanes` for `level`. `None` if any cannot be placed.
     fn slowest<'a>(
         &self,
-        sinks: impl IntoIterator<Item = &'a SinkName>,
+        lanes: impl IntoIterator<Item = &'a LaneKey>,
         level: FenceLevel,
     ) -> Option<SourcePosition> {
         let mut slowest: Option<SourcePosition> = None;
         let mut any = false;
-        for sink in sinks {
-            let reached = self.reached(sink, level)?;
+        for lane in lanes {
+            let reached = self.reached(lane, level)?;
             slowest = Some(slowest.map_or(reached, |low| low.min(reached)));
             any = true;
         }
         if any { slowest } else { None }
     }
 
-    /// Wait until the requested sink (or every sink) has reached the requested
-    /// position at the requested level, or the timeout passes.
+    /// Wait until the requested lanes (the named sink, or every sink, by the
+    /// named indexes, or every index) have reached the requested position at
+    /// the requested level, or the timeout passes.
     ///
     /// Returns at once when the position is already reached, and `Err` at once
-    /// when the wait cannot start: an unreadable position, an unknown sink, or
-    /// a source whose live stream is not open yet.
+    /// when the wait cannot start: an unreadable position, an unknown sink or
+    /// index, or a source whose live stream is not open yet.
     pub async fn wait(&self, request: &FenceRequest) -> Result<FenceOutcome, FenceError> {
         let source = &self.inner.source;
         let target = source
             .parse_position(&request.position)
             .map_err(|error| FenceError::InvalidPosition(error.to_string()))?;
-        let sinks: Vec<&SinkName> = match &request.sink {
-            Some(sink) => vec![
-                self.inner
-                    .sinks
-                    .get_key_value(sink)
-                    .map(|(name, _)| name)
-                    .ok_or_else(|| FenceError::UnknownSink(sink.to_string()))?,
-            ],
-            None => self.inner.sinks.keys().collect(),
-        };
+        let lanes = self.select(request.sink.as_ref(), &request.indexes)?;
         let deadline = Instant::now() + request.timeout;
+        let _open = OpenWait::enter(&self.inner);
         let _counted = (request.level == FenceLevel::Searchable).then(|| {
             self.inner.searchable_waits.fetch_add(1, Ordering::SeqCst);
             SearchableWait(&self.inner)
@@ -322,17 +494,49 @@ impl Fence {
             tokio::pin!(moved);
             moved.as_mut().enable();
 
-            let Some(reached) = self.slowest(sinks.iter().copied(), request.level) else {
+            let mut slowest: Option<SourcePosition> = None;
+            let mut vouched: Option<SourcePosition> = None;
+            let mut short = false;
+            let mut unserved = Vec::new();
+            for lane in lanes.iter().copied() {
+                let (reached, vouches, why) = self.vouched(lane, request.level);
+                let Some(reached) = reached else {
+                    return Err(FenceError::Unavailable(
+                        "the source is not following live changes yet".to_owned(),
+                    ));
+                };
+                slowest = Some(slowest.map_or(reached, |low| low.min(reached)));
+                match vouches.filter(|vouches| *vouches >= target) {
+                    Some(vouches) => {
+                        vouched = Some(vouched.map_or(vouches, |low| low.min(vouches)));
+                    }
+                    None => {
+                        short = true;
+                        if let Some(why) = why {
+                            unserved.push((lane.clone(), why));
+                        }
+                    }
+                }
+            }
+            let Some(slowest) = slowest else {
                 return Err(FenceError::Unavailable(
                     "the source is not following live changes yet".to_owned(),
                 ));
             };
-            let position = source.format_position(reached);
-            if reached >= target {
+            if !short && let Some(vouched) = vouched {
+                let position = source.format_position(vouched);
                 return Ok(FenceOutcome::Reached { position });
             }
             if timeout_at(deadline, moved).await.is_err() {
-                return Ok(FenceOutcome::TimedOut { position });
+                let position = source.format_position(slowest);
+                return Ok(if unserved.is_empty() {
+                    FenceOutcome::TimedOut { position }
+                } else {
+                    FenceOutcome::Unserved {
+                        position,
+                        lanes: unserved,
+                    }
+                });
             }
         }
     }
@@ -348,11 +552,10 @@ impl Fence {
             tokio::pin!(moved);
             moved.as_mut().enable();
             if self.inner.searchable_waits.load(Ordering::SeqCst) == 0
-                || self
-                    .inner
-                    .sinks
-                    .values()
-                    .all(|progress| lock(progress).unsearchable.is_empty())
+                || self.inner.lanes.keys().all(|lane| {
+                    self.inner.progress.lane(lane, Level::Searchable)
+                        == self.inner.progress.lane(lane, Level::Applied)
+                })
             {
                 return;
             }
@@ -360,35 +563,79 @@ impl Fence {
         }
     }
 
-    /// Where every sink is right now, for a status surface.
+    /// The lanes a request names: `sink` (or every sink) by `indexes` (or
+    /// every index).
+    fn select(
+        &self,
+        sink: Option<&SinkName>,
+        indexes: &[IndexName],
+    ) -> Result<Vec<&LaneKey>, FenceError> {
+        if let Some(sink) = sink
+            && !self.inner.lanes.keys().any(|lane| &lane.sink == sink)
+        {
+            return Err(FenceError::UnknownSink(sink.to_string()));
+        }
+        for index in indexes {
+            if !self.inner.lanes.keys().any(|lane| &lane.index == index) {
+                return Err(FenceError::UnknownIndex(index.to_string()));
+            }
+        }
+        Ok(self
+            .inner
+            .lanes
+            .keys()
+            .filter(|lane| sink.is_none_or(|sink| &lane.sink == sink))
+            .filter(|lane| indexes.is_empty() || indexes.contains(&lane.index))
+            .collect())
+    }
+
+    /// Each lane and the items routed to it it hasn't landed, for a metric.
+    pub fn outstanding(&self) -> Vec<(LaneKey, usize)> {
+        self.inner
+            .lanes
+            .keys()
+            .map(|lane| (lane.clone(), self.inner.progress.outstanding(lane)))
+            .collect()
+    }
+
+    /// Where every sink and lane is right now, for a status surface.
     pub fn positions(&self) -> FencePositions {
         let format = |position: Option<SourcePosition>| {
             position.map(|p| self.inner.source.format_position(p))
         };
-        let names = || self.inner.sinks.keys();
+        let lanes = || self.inner.lanes.keys();
+        let mut sinks: BTreeMap<SinkName, SinkPositions> = BTreeMap::new();
+        for lane in lanes() {
+            sinks.entry(lane.sink.clone()).or_default().indexes.insert(
+                lane.index.clone(),
+                LanePositions {
+                    applied: format(self.reached(lane, FenceLevel::Applied)),
+                    searchable: format(self.reached(lane, FenceLevel::Searchable)),
+                    outstanding: self.inner.progress.outstanding(lane),
+                },
+            );
+        }
+        for (sink, positions) in &mut sinks {
+            let of_sink = || lanes().filter(|lane| &lane.sink == sink);
+            positions.applied = format(self.slowest(of_sink(), FenceLevel::Applied));
+            positions.searchable = format(self.slowest(of_sink(), FenceLevel::Searchable));
+        }
         FencePositions {
-            applied: format(self.slowest(names(), FenceLevel::Applied)),
-            searchable: format(self.slowest(names(), FenceLevel::Searchable)),
-            sinks: names()
-                .map(|sink| {
-                    (
-                        sink.clone(),
-                        SinkPositions {
-                            applied: format(self.reached(sink, FenceLevel::Applied)),
-                            searchable: format(self.reached(sink, FenceLevel::Searchable)),
-                        },
-                    )
-                })
-                .collect(),
+            applied: format(self.slowest(lanes(), FenceLevel::Applied)),
+            searchable: format(self.slowest(lanes(), FenceLevel::Searchable)),
+            sinks,
         }
     }
 }
 
-fn lock(progress: &Mutex<Progress>) -> std::sync::MutexGuard<'_, Progress> {
-    progress.lock().unwrap_or_else(PoisonError::into_inner)
+fn lock(furthest: &Mutex<Furthest>) -> std::sync::MutexGuard<'_, Furthest> {
+    furthest.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Feeds a [`Fence`] from the sink engines' position events.
+/// Wakes a [`Fence`]'s waiters on the sink engines' position events, and
+/// tells it what reads of each lane see from their staging, rebuild and seed
+/// events. What a sink reached is read from the deployment's `Progress`, not
+/// from the event.
 #[derive(Debug)]
 pub struct FenceObserver {
     fence: Fence,
@@ -402,12 +649,33 @@ impl FenceObserver {
 }
 
 impl Observer for FenceObserver {
-    fn on_position_applied(&self, sink: &SinkName, position: Position) {
-        self.fence.record_applied(sink, position);
+    fn on_position_applied(&self, _: &LaneKey, _: Position) {
+        self.fence.moved();
     }
 
-    fn on_position_searchable(&self, sink: &SinkName, position: Position) {
-        self.fence.record_searchable(sink, position);
+    fn on_position_searchable(&self, _: &LaneKey, _: Position) {
+        self.fence.moved();
+    }
+
+    fn on_index_rebuilding(&self, sink: &SinkName, index: &IndexName) {
+        self.fence
+            .rebuilding(&LaneKey::new(index.clone(), sink.clone()));
+    }
+
+    fn on_backfill_requested(&self, sink: &SinkName, indexes: &[IndexName]) {
+        for index in indexes {
+            self.fence
+                .backfilling(&LaneKey::new(index.clone(), sink.clone()));
+        }
+    }
+
+    fn on_index_seeded(&self, sink: &SinkName, index: &IndexName) {
+        self.fence
+            .seeded(&LaneKey::new(index.clone(), sink.clone()));
+    }
+
+    fn on_sink_started(&self, sink: &SinkName) {
+        self.fence.started(sink);
     }
 }
 

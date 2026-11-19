@@ -12,13 +12,38 @@ use futures::stream::BoxStream;
 use kernel::{ColumnName, Envelope, IndexMapping, IndexName, Op, Position, SinkName, TableName};
 use sink::{Sink, SinkOptions, WriteReport};
 use source::cdc::{ChangeCapture, ChangeEvent, Continuity, LiveChange};
-use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
-use source::{RowImage, RowKey, SnapshotTable};
+use source::document::{Document, DocumentBuilder, DocumentId};
+use source::{RowImage, RowKey};
 use stream::Stream;
 use stream_channel::ChannelStream;
 use tokio::sync::Notify;
 
 use super::*;
+
+/// A runtime of its own on paused time, so a seeded schedule replays alone:
+/// nothing a previous schedule left, and no `select!` choice it drew, carries
+/// over.
+pub(crate) fn paused_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .unwrap()
+}
+
+/// Every byte `budget` counted comes back once nothing holds a batch: the
+/// lanes drained and every sink acknowledged.
+pub(crate) async fn assert_released(budget: &crate::Budget) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while budget.held() != crate::Held::default() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the budget still holds {:?} after the lanes drained",
+            budget.held()
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
 
 fn users() -> IndexName {
     IndexName::try_new("users").unwrap()
@@ -60,8 +85,10 @@ fn mapping() -> IndexMapping {
     }
 }
 
-/// A source that replays live changes (positions 0..n) once and snapshots a
-/// fixed set of rows, recording what it was asked and what was confirmed.
+/// A source that replays live changes (positions 0..n) once, recording what it
+/// was asked and what was confirmed. The rows a backfill reads
+/// ([`with_snapshot`](Self::with_snapshot)) are handed to the harness's
+/// builder, which pages them.
 ///
 /// [`MockSource::fed`] instead hands out a live stream fed through a channel:
 /// it stays open and pending while nothing is sent — a *quiet* stream — and
@@ -125,7 +152,7 @@ impl ChangeCapture for MockSource {
                 (feed, 0u64),
                 |(mut feed, next)| async move {
                     let event = feed.recv().await?;
-                    Some((Ok((Position(next), event)), (feed, next + 1)))
+                    Some((Ok((Position::new(next), event)), (feed, next + 1)))
                 },
             )));
         }
@@ -134,35 +161,60 @@ impl ChangeCapture for MockSource {
             changes
                 .into_iter()
                 .enumerate()
-                .map(|(i, event)| Ok((Position(i as u64), event))),
+                .map(|(i, event)| Ok((Position::new(i as u64), event))),
         )))
     }
 
-    fn confirm(&self, position: Position) {
-        self.confirmed.lock().unwrap().push(position);
-    }
-
-    async fn snapshot(
-        &self,
-        tables: &[SnapshotTable],
-    ) -> source::Result<BoxStream<'static, source::Result<ChangeEvent>>> {
-        self.events
-            .lock()
-            .unwrap()
-            .push(format!("snapshot {}", tables.len()));
-        Ok(Box::pin(futures::stream::iter(
-            self.snapshot_rows.clone().into_iter().map(Ok),
-        )))
+    fn confirm(&self, landed: source::cdc::Landed) {
+        let mut confirmed = self.confirmed.lock().unwrap();
+        if let Some(seq) = landed.covered_seq()
+            && confirmed.last().is_none_or(|last| last.seq != seq)
+        {
+            confirmed.push(Position::new(seq));
+        }
     }
 }
 
 /// Resolves every change to one `users` document; a delete builds a tombstone.
-/// Counts `build_many` calls and the ids handed to each.
+/// Counts `build_many` calls and the ids handed to each. Pages the keys of
+/// `rows` for a backfill, in order, recording `keys users` for each walk's
+/// first page.
 #[derive(Debug, Default)]
 struct MockDocuments {
     builds: Arc<Mutex<Vec<usize>>>,
     deleted: Mutex<Vec<i64>>,
     failing: Mutex<Vec<i64>>,
+    rows: Vec<RowKey>,
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+impl MockDocuments {
+    /// Paging `source`'s snapshot rows, recording into its events.
+    fn paging(source: &MockSource) -> Self {
+        Self {
+            rows: source
+                .snapshot_rows
+                .iter()
+                .map(|row| row.key().clone())
+                .collect(),
+            events: Arc::clone(&source.events),
+            ..Self::default()
+        }
+    }
+}
+
+/// The page of `rows` after `after`, up to and including `through` (by
+/// position: `rows` is in walk order).
+fn page_of(rows: &[RowKey], after: Option<&RowKey>, through: &RowKey, limit: usize) -> Vec<RowKey> {
+    let position = |key: &RowKey| rows.iter().position(|row| row == key);
+    let start = after.map_or(0, |after| position(after).map_or(rows.len(), |at| at + 1));
+    let end = position(through).map_or(rows.len(), |at| at + 1);
+    rows.iter()
+        .take(end)
+        .skip(start)
+        .take(limit)
+        .cloned()
+        .collect()
 }
 
 #[async_trait]
@@ -213,14 +265,25 @@ impl DocumentBuilder for MockDocuments {
         Ok(out)
     }
 
-    fn backfill_scopes(&self) -> Vec<IndexScope> {
-        vec![IndexScope {
-            index: users(),
-            root: SnapshotTable {
-                db_schema: kernel::DatabaseSchema::try_new("public").unwrap(),
-                table: TableName::try_new("users").unwrap(),
-            },
-        }]
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        vec![users()]
+    }
+
+    async fn last_key(&self, _index: &IndexName) -> source::Result<Option<RowKey>> {
+        Ok(self.rows.last().cloned())
+    }
+
+    async fn keys(
+        &self,
+        _index: &IndexName,
+        after: Option<&RowKey>,
+        through: &RowKey,
+        limit: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        if after.is_none() {
+            self.events.lock().unwrap().push("keys users".to_owned());
+        }
+        Ok(page_of(&self.rows, after, through, limit))
     }
 
     async fn index_mappings(&self) -> source::Result<Vec<IndexMapping>> {
@@ -239,6 +302,9 @@ struct RecordingSink {
     reindexed: Arc<Mutex<Vec<String>>>,
     events: Arc<Mutex<Vec<String>>>,
     pending: AtomicUsize,
+    /// Answered by `is_rebuilding`: reads see another copy than the one
+    /// written.
+    rebuilding: AtomicBool,
 }
 
 impl RecordingSink {
@@ -281,6 +347,10 @@ impl Sink for RecordingSink {
         Ok(())
     }
 
+    async fn is_rebuilding(&self, _: &IndexName) -> sink::Result<bool> {
+        Ok(self.rebuilding.load(Ordering::SeqCst))
+    }
+
     async fn reindex(&self, mapping: &IndexMapping) -> sink::Result<()> {
         let index = mapping.index.as_ref().to_owned();
         self.events.lock().unwrap().push(format!("reindex {index}"));
@@ -288,6 +358,11 @@ impl Sink for RecordingSink {
         self.seeded.store(false, Ordering::SeqCst);
         Ok(())
     }
+}
+
+/// The newest position every lane has landed, with all before it.
+fn covered(progress: &Progress) -> Option<Position> {
+    progress.landed().covered_seq().map(Position::new)
 }
 
 /// One deployment in a test: a stream with one lane per sink, the ingest
@@ -298,20 +373,28 @@ struct Harness {
     documents: Arc<MockDocuments>,
     ingest: IngestEngine,
     sinks: Vec<SinkEngine>,
+    progress: Arc<Progress>,
+    /// Counts what the ingest engine builds, so every test checks it gives
+    /// every byte back.
+    budget: Arc<crate::Budget>,
 }
 
 impl Harness {
     fn new(source: MockSource, sinks: Vec<(SinkName, Arc<dyn Sink>)>) -> Self {
-        let documents = Arc::new(MockDocuments::default());
+        let documents = Arc::new(MockDocuments::paging(&source));
         let names: Vec<SinkName> = sinks.iter().map(|(n, _)| n.clone()).collect();
-        let stream = Arc::new(ChannelStream::new(64, names.clone()));
+        let stream = Arc::new(ChannelStream::over(64, [users()], names.clone()));
         let source = Arc::new(source);
         let ingest = IngestEngine::new(
             Arc::clone(&source) as Arc<dyn ChangeCapture>,
             Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
             Arc::clone(&stream) as Arc<dyn Stream>,
-            names,
+            names.clone(),
+            Arc::new(Progress::of([users()], names)),
         );
+        let budget = Arc::new(crate::Budget::new(usize::MAX / 4));
+        let ingest = ingest.with_budget(Arc::clone(&budget));
+        let progress = ingest.progress();
         let sinks = sinks
             .into_iter()
             .map(|(name, sink)| {
@@ -320,6 +403,7 @@ impl Harness {
                     sink,
                     Arc::clone(&stream) as Arc<dyn Stream>,
                     vec![mapping()],
+                    Arc::clone(&progress),
                 )
             })
             .collect();
@@ -329,6 +413,8 @@ impl Harness {
             documents,
             ingest,
             sinks,
+            progress,
+            budget,
         }
     }
 
@@ -380,16 +466,17 @@ impl Harness {
                 Err(_) => Ok(()),
             });
         }
-        if let Some(watermark) = stream.watermark() {
-            self.source.confirm(watermark);
-        }
+        self.source.confirm(self.progress.landed());
         drop(controls);
+        if stream.is_idle() {
+            assert_released(&self.budget).await;
+        }
         outcomes
     }
 }
 
 #[tokio::test]
-async fn drives_live_changes_to_the_sink_and_confirms_the_watermark() {
+async fn drives_live_changes_to_the_sink_and_confirms_what_landed() {
     let sink = Arc::new(RecordingSink::seeded(true));
     let ops = Arc::clone(&sink.ops);
     let harness = Harness::new(
@@ -410,7 +497,7 @@ async fn drives_live_changes_to_the_sink_and_confirms_the_watermark() {
     let confirmed = source.confirmed.lock().unwrap();
     assert_eq!(
         confirmed.last(),
-        Some(&Position(2)),
+        Some(&Position::new(2)),
         "the last change's position reaches the source once every lane acked it"
     );
 }
@@ -526,7 +613,7 @@ async fn builds_a_repeatedly_touched_document_once_per_batch() {
 }
 
 /// A sink whose flush blocks until released, so a test can look at the
-/// watermark while a batch is applied-but-not-flushed.
+/// confirmation while a batch is applied-but-not-flushed.
 #[derive(Debug)]
 struct GatedSink {
     release: Arc<Notify>,
@@ -558,21 +645,21 @@ async fn confirms_no_position_before_its_flush() {
         MockSource::new(vec![upsert(1)]),
         vec![(sink_name("primary"), sink)],
     );
-    let stream = Arc::clone(&harness.stream);
+    let progress = Arc::clone(&harness.progress);
     let source = Arc::clone(&harness.source);
 
     let run = tokio::spawn(harness.run(Continuity::Resumed));
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
-        stream.watermark(),
+        covered(&progress),
         None,
         "the batch is applied but its flush has not returned: nothing is confirmed"
     );
     assert!(source.confirmed.lock().unwrap().is_empty());
     release.notify_one();
     run.await.unwrap();
-    assert_eq!(stream.watermark(), Some(Position(0)));
-    assert_eq!(*source.confirmed.lock().unwrap(), vec![Position(0)]);
+    assert_eq!(covered(&progress), Some(Position::new(0)));
+    assert_eq!(*source.confirmed.lock().unwrap(), vec![Position::new(0)]);
 }
 
 #[tokio::test]
@@ -587,7 +674,7 @@ async fn an_unseeded_sink_requests_a_snapshot_then_marks_seeded() {
     let events = Arc::clone(&harness.source.events);
     harness.run(Continuity::Resumed).await;
 
-    assert_eq!(*events.lock().unwrap(), vec!["prepare", "snapshot 1"]);
+    assert_eq!(*events.lock().unwrap(), vec!["prepare", "keys users"]);
     assert_eq!(
         *ops.lock().unwrap(),
         vec!["upsert users 10".to_owned(), "upsert users 11".to_owned()]
@@ -646,7 +733,7 @@ async fn concurrent_requests_for_the_same_index_coalesce_into_one_snapshot() {
 
     assert_eq!(
         *events.lock().unwrap(),
-        vec!["prepare", "snapshot 1"],
+        vec!["prepare", "keys users"],
         "two requests, one pass over the table"
     );
     assert_eq!(*a_marked.lock().unwrap(), vec!["users".to_owned()]);
@@ -682,7 +769,12 @@ async fn a_straggling_reindex_request_within_max_delay_joins_the_snapshot() {
     let b = Arc::new(RecordingSink::seeded(true));
     let a_marked = Arc::clone(&a.marked);
     let b_marked = Arc::clone(&b.marked);
-    let stream = Arc::new(ChannelStream::new(64, [sink_name("a"), sink_name("b")]));
+    let stream = Arc::new(ChannelStream::over(
+        64,
+        [users()],
+        [sink_name("a"), sink_name("b")],
+    ));
+    let progress = Arc::new(Progress::of([users()], [sink_name("a"), sink_name("b")]));
     let source = Arc::new(MockSource::new(vec![]).with_snapshot(vec![upsert(10)]));
     let events = Arc::clone(&source.events);
     let mut controls = Vec::new();
@@ -696,6 +788,7 @@ async fn a_straggling_reindex_request_within_max_delay_joins_the_snapshot() {
             sink,
             Arc::clone(&stream) as Arc<dyn Stream>,
             vec![mapping()],
+            Arc::clone(&progress),
         );
         engine.stage(Continuity::Resumed).await.unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
@@ -710,9 +803,10 @@ async fn a_straggling_reindex_request_within_max_delay_joins_the_snapshot() {
     controls[0].send(reindex()).await.unwrap();
     let ingest = IngestEngine::new(
         Arc::clone(&source) as Arc<dyn ChangeCapture>,
-        Arc::new(MockDocuments::default()),
+        Arc::new(MockDocuments::paging(&source)),
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![sink_name("a"), sink_name("b")],
+        Arc::clone(&progress),
     )
     .with_batch(BatchPolicy {
         max_changes: 256,
@@ -736,7 +830,7 @@ async fn a_straggling_reindex_request_within_max_delay_joins_the_snapshot() {
 
     assert_eq!(
         *events.lock().unwrap(),
-        vec!["prepare", "snapshot 1"],
+        vec!["prepare", "keys users"],
         "the straggler joined the first request's snapshot"
     );
     assert_eq!(*a_marked.lock().unwrap(), vec!["users".to_owned()]);
@@ -759,7 +853,7 @@ async fn fresh_source_rebuilds_seeded_indexes_before_prepare_then_snapshots() {
     assert_eq!(*reindexed.lock().unwrap(), vec!["users".to_owned()]);
     assert_eq!(
         *events.lock().unwrap(),
-        vec!["reindex users", "prepare", "snapshot 1"],
+        vec!["reindex users", "prepare", "keys users"],
         "stage the rebuild, then establish the resume point, then snapshot"
     );
     assert_eq!(*marked.lock().unwrap(), vec!["users".to_owned()]);
@@ -874,6 +968,7 @@ async fn redelivers_the_unacked_batch_to_a_restarted_sink_engine() {
         max_delay: Duration::from_secs(5),
     });
     let stream = Arc::clone(&harness.stream);
+    let progress = Arc::clone(&harness.progress);
     let source = Arc::clone(&harness.source);
     let outcomes = harness.run(Continuity::Resumed).await;
 
@@ -883,7 +978,7 @@ async fn redelivers_the_unacked_batch_to_a_restarted_sink_engine() {
     );
     assert!(store.lock().unwrap().is_empty());
     assert_eq!(
-        stream.watermark(),
+        covered(&progress),
         None,
         "nothing acknowledged, nothing confirmed"
     );
@@ -896,6 +991,7 @@ async fn redelivers_the_unacked_batch_to_a_restarted_sink_engine() {
         Arc::clone(&crashing) as Arc<dyn Sink>,
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![mapping()],
+        Arc::clone(&progress),
     );
     let (_tx, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
     let task = tokio::spawn(async move { restarted.run(&mut rx).await });
@@ -911,7 +1007,7 @@ async fn redelivers_the_unacked_batch_to_a_restarted_sink_engine() {
         store.lock().unwrap().keys().cloned().collect::<Vec<_>>(),
         vec!["users/1".to_owned(), "users/3".to_owned()]
     );
-    assert_eq!(stream.watermark(), Some(Position(1)));
+    assert_eq!(covered(&progress), Some(Position::new(1)));
 }
 
 #[tokio::test]
@@ -1005,7 +1101,7 @@ async fn skip_policy_quarantines_rejected_documents_and_acks_the_batch() {
             .with_observer(Arc::clone(&observer_dyn))
             .with_failure_policies(FailurePolicies::new(FailurePolicy::Skip))
     });
-    let stream = Arc::clone(&harness.stream);
+    let progress = Arc::clone(&harness.progress);
     let outcomes = harness.run(Continuity::Resumed).await;
     assert!(outcomes[0].is_ok());
     let quarantined = observer.quarantined.lock().unwrap();
@@ -1016,8 +1112,8 @@ async fn skip_policy_quarantines_rejected_documents_and_acks_the_batch() {
             .all(|(sink, index, _)| sink == "primary" && index == "users")
     );
     assert_eq!(
-        stream.watermark(),
-        Some(Position(1)),
+        covered(&progress),
+        Some(Position::new(1)),
         "the batch is acked despite rejections"
     );
 }
@@ -1028,14 +1124,14 @@ async fn stop_policy_errors_and_leaves_the_batch_unacked() {
         MockSource::new(vec![upsert(1)]),
         vec![(sink_name("primary"), Arc::new(RejectingSink::default()))],
     );
-    let stream = Arc::clone(&harness.stream);
+    let progress = Arc::clone(&harness.progress);
     let outcomes = harness.run(Continuity::Resumed).await;
     assert!(matches!(
         outcomes[0],
         Err(EngineError::DocumentsRejected(1, _))
     ));
     assert_eq!(
-        stream.watermark(),
+        covered(&progress),
         None,
         "nothing acked when the engine stops"
     );
@@ -1065,14 +1161,16 @@ async fn reindex_control_stages_and_requests_a_snapshot_without_restarting() {
     let reindexed = Arc::clone(&sink.reindexed);
     let marked = Arc::clone(&sink.marked);
     let ops = Arc::clone(&sink.ops);
-    let stream = Arc::new(ChannelStream::new(64, [sink_name("primary")]));
+    let stream = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
+    let progress = Arc::new(Progress::of([users()], [sink_name("primary")]));
     let source = Arc::new(MockSource::new(vec![]).with_snapshot(vec![upsert(10)]));
-    let documents = Arc::new(MockDocuments::default());
+    let documents = Arc::new(MockDocuments::paging(&source));
     let engine = SinkEngine::new(
         sink_name("primary"),
         sink,
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![mapping()],
+        Arc::clone(&progress),
     );
     engine.stage(Continuity::Resumed).await.unwrap();
     let (control, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
@@ -1090,6 +1188,7 @@ async fn reindex_control_stages_and_requests_a_snapshot_without_restarting() {
         documents,
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![sink_name("primary")],
+        Arc::clone(&progress),
     );
     let ingest_task = tokio::spawn(async move { ingest.run().await });
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -1229,6 +1328,8 @@ impl Sink for ScriptedVisibility {
 #[derive(Debug, Default)]
 struct PositionObserver {
     events: Mutex<Vec<String>>,
+    /// The searchable positions with their lane's index.
+    searchable: Mutex<Vec<(IndexName, u64)>>,
 }
 
 impl PositionObserver {
@@ -1237,22 +1338,38 @@ impl PositionObserver {
     }
     fn forget(&self) {
         self.events.lock().unwrap().clear();
+        self.searchable.lock().unwrap().clear();
+    }
+
+    /// The positions reported searchable on `index`'s lane.
+    fn searchable_on(&self, index: &IndexName) -> Vec<u64> {
+        self.searchable
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(at, _)| at == index)
+            .map(|(_, seq)| *seq)
+            .collect()
     }
 }
 
 impl Observer for PositionObserver {
-    fn on_position_applied(&self, sink: &SinkName, position: Position) {
+    fn on_position_applied(&self, lane: &stream::LaneKey, position: Position) {
         self.events
             .lock()
             .unwrap()
-            .push(format!("applied {sink} {}", position.0));
+            .push(format!("applied {} {}", lane.sink, position.seq));
     }
 
-    fn on_position_searchable(&self, sink: &SinkName, position: Position) {
+    fn on_position_searchable(&self, lane: &stream::LaneKey, position: Position) {
+        self.searchable
+            .lock()
+            .unwrap()
+            .push((lane.index.clone(), position.seq));
         self.events
             .lock()
             .unwrap()
-            .push(format!("searchable {sink} {}", position.0));
+            .push(format!("searchable {} {}", lane.sink, position.seq));
     }
 }
 
@@ -1268,11 +1385,20 @@ struct PositionRig {
 impl PositionRig {
     fn start(sink: Arc<dyn Sink>) -> Self {
         let name = sink_name("primary");
-        let stream: Arc<dyn Stream> = Arc::new(ChannelStream::new(64, [name.clone()]));
+        let stream: Arc<dyn Stream> = Arc::new(ChannelStream::over(64, [users()], [name.clone()]));
         let observer = Arc::new(PositionObserver::default());
-        let engine = SinkEngine::new(name.clone(), sink, Arc::clone(&stream), vec![mapping()])
-            .with_observer(Arc::clone(&observer) as Arc<dyn Observer>);
-        let lane = stream.lane(&name).unwrap().producer;
+        let engine = SinkEngine::new(
+            name.clone(),
+            sink,
+            Arc::clone(&stream),
+            vec![mapping()],
+            Arc::new(Progress::of([users()], [name.clone()])),
+        )
+        .with_observer(Arc::clone(&observer) as Arc<dyn Observer>);
+        let lane = stream
+            .lane(&stream::LaneKey::new(users(), name.clone()))
+            .unwrap()
+            .producer;
         let (control, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
         Self {
             observer,
@@ -1285,9 +1411,11 @@ impl PositionRig {
     async fn publish(&self, position: Option<u64>) {
         self.lane
             .publish(stream::LaneItem::Batch(stream::Batch {
-                position: position.map(Position),
+                position: position.map(Position::new),
                 changes: 1,
                 envelopes: Vec::new().into(),
+                hold: Default::default(),
+                walked: None,
             }))
             .await
             .unwrap();
@@ -1438,7 +1566,7 @@ async fn skip_policy_leaves_a_failed_document_out_and_keeps_going() {
     );
     assert_eq!(
         source.confirmed.lock().unwrap().last(),
-        Some(&Position(2)),
+        Some(&Position::new(2)),
         "a skipped document does not hold the slot back"
     );
 }
@@ -1474,10 +1602,16 @@ async fn stop_policy_fails_the_ingest_engine_on_a_failed_document() {
 
 mod busy;
 mod concurrent;
+mod lanes;
+mod merge;
+mod refresh;
+mod resume;
+mod seeding;
 mod snapshot;
 mod staging;
 mod stop;
 mod timings;
+mod wait;
 
 /// Wait (up to five seconds) until `condition` holds.
 async fn wait_for(mut condition: impl FnMut() -> bool) {
@@ -1488,4 +1622,127 @@ async fn wait_for(mut condition: impl FnMut() -> bool) {
     })
     .await
     .unwrap();
+}
+
+/// Logs the rebuild events into the sink's own event list, so their order
+/// against `Sink::reindex` shows.
+#[derive(Debug)]
+struct RebuildEvents(Arc<Mutex<Vec<String>>>);
+
+impl Observer for RebuildEvents {
+    fn on_index_rebuilding(&self, _: &SinkName, index: &IndexName) {
+        self.0.lock().unwrap().push(format!("rebuilding {index}"));
+    }
+
+    fn on_backfill_requested(&self, _: &SinkName, indexes: &[IndexName]) {
+        for index in indexes {
+            self.0.lock().unwrap().push(format!("requested {index}"));
+        }
+    }
+
+    fn on_index_seeded(&self, _: &SinkName, index: &IndexName) {
+        self.0.lock().unwrap().push(format!("seeded {index}"));
+    }
+}
+
+/// A fence stops vouching for an index before its writes move to a new
+/// generation (#379): the rebuilding event comes before `Sink::reindex`, on a
+/// `Fresh` start and on an on-demand reindex alike.
+#[tokio::test]
+async fn an_index_is_announced_rebuilding_before_the_sink_moves_its_writes() {
+    let engine = |events: &Arc<Mutex<Vec<String>>>, stream: &Arc<ChannelStream>| {
+        let sink = Arc::new(RecordingSink::seeded(true).with_events(events));
+        let marked = Arc::clone(&sink.marked);
+        let engine = SinkEngine::new(
+            sink_name("primary"),
+            sink,
+            Arc::clone(stream) as Arc<dyn Stream>,
+            vec![mapping()],
+            Arc::new(Progress::of([users()], [sink_name("primary")])),
+        )
+        .with_observer(Arc::new(RebuildEvents(Arc::clone(events))));
+        (engine, marked)
+    };
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let stream = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
+    let (fresh, _) = engine(&events, &stream);
+    fresh.stage(Continuity::Fresh).await.unwrap();
+    assert_eq!(
+        *events.lock().unwrap(),
+        ["rebuilding users", "reindex users", "requested users"]
+    );
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let stream = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
+    let progress = Arc::new(Progress::of([users()], [sink_name("primary")]));
+    let (resumed, marked) = engine(&events, &stream);
+    resumed.stage(Continuity::Resumed).await.unwrap();
+    let (control, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
+    let sink_task = tokio::spawn(async move { resumed.run(&mut rx).await });
+    control
+        .send(SinkControl::Reindex {
+            indexes: vec![users()],
+        })
+        .await
+        .unwrap();
+    let source = Arc::new(MockSource::new(vec![]).with_snapshot(vec![upsert(10)]));
+    let ingest = IngestEngine::new(
+        Arc::clone(&source) as Arc<dyn ChangeCapture>,
+        Arc::new(MockDocuments::paging(&source)),
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![sink_name("primary")],
+        progress,
+    );
+    let ingest_task = tokio::spawn(async move { ingest.run().await });
+    wait_for(|| !marked.lock().unwrap().is_empty()).await;
+    ingest_task.abort();
+    sink_task.abort();
+    assert_eq!(
+        *events.lock().unwrap(),
+        [
+            "rebuilding users",
+            "reindex users",
+            "requested users",
+            "seeded users"
+        ]
+    );
+}
+
+/// Final review, finding 4: a process that starts in the middle of a rebuild
+/// (the sink still serves an older copy while it writes a new one) announces
+/// the index as rebuilding before its backfill request, so a fence vouches for
+/// nothing there and says `rebuilding`, not `backfilling`.
+#[tokio::test]
+async fn a_start_in_the_middle_of_a_rebuild_announces_it() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = RecordingSink::seeded(false).with_events(&events);
+    sink.rebuilding.store(true, Ordering::SeqCst);
+    let stream = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
+    let engine = SinkEngine::new(
+        sink_name("primary"),
+        Arc::new(sink),
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![mapping()],
+        Arc::new(Progress::of([users()], [sink_name("primary")])),
+    )
+    .with_observer(Arc::new(RebuildEvents(Arc::clone(&events))));
+    engine.stage(Continuity::Resumed).await.unwrap();
+    assert_eq!(
+        *events.lock().unwrap(),
+        ["rebuilding users", "requested users"]
+    );
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let stream = Arc::new(ChannelStream::over(64, [users()], [sink_name("primary")]));
+    let first_seed = SinkEngine::new(
+        sink_name("primary"),
+        Arc::new(RecordingSink::seeded(false).with_events(&events)),
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![mapping()],
+        Arc::new(Progress::of([users()], [sink_name("primary")])),
+    )
+    .with_observer(Arc::new(RebuildEvents(Arc::clone(&events))));
+    first_seed.stage(Continuity::Resumed).await.unwrap();
+    assert_eq!(*events.lock().unwrap(), ["requested users"], "a first seed");
 }

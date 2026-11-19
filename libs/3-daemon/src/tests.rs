@@ -15,8 +15,8 @@ use kernel::{
 };
 use sink::{Sink, SinkError, SinkOptions, WriteReport};
 use source::cdc::{ChangeEvent, LiveChange};
-use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
-use source::{RowImage, RowKey, SnapshotTable};
+use source::document::{Document, DocumentBuilder, DocumentId};
+use source::{RowImage, RowKey};
 use stream_channel::ChannelStream;
 use tokio::sync::{Notify, oneshot};
 
@@ -128,7 +128,7 @@ impl ChangeCapture for Holding {
         Ok(Box::pin(stream::empty()))
     }
 
-    fn confirm(&self, _: Position) {}
+    fn confirm(&self, _: source::cdc::Landed) {}
 
     fn readable_wait(&self) -> Option<Duration> {
         self.0
@@ -277,7 +277,7 @@ impl ChangeCapture for LaggySource {
         Ok(Box::pin(stream::empty()))
     }
 
-    fn confirm(&self, _: Position) {}
+    fn confirm(&self, _: source::cdc::Landed) {}
 
     async fn lag(&self) -> source::Result<Option<u64>> {
         Ok(self.0)
@@ -353,12 +353,17 @@ impl Backends for MockBackends {
         Ok(SourceParts {
             capture: Arc::clone(&self.capture),
             documents: Arc::clone(&self.documents),
+            resolver: None,
         })
     }
 
-    fn stream(&self, _config: &Config, sinks: &[SinkName]) -> anyhow::Result<Arc<dyn Stream>> {
+    fn stream(
+        &self,
+        _config: &Config,
+        lanes: &[::stream::LaneKey],
+    ) -> anyhow::Result<Arc<dyn Stream>> {
         self.built.lock().unwrap().push("stream");
-        Ok(Arc::new(ChannelStream::new(64, sinks.iter().cloned())))
+        Ok(Arc::new(ChannelStream::new(64, lanes.iter().cloned())))
     }
 
     async fn sinks(&self, _config: &Config) -> anyhow::Result<Vec<SinkParts>> {
@@ -431,7 +436,7 @@ impl ChangeCapture for ScriptedSource {
             changes
                 .into_iter()
                 .enumerate()
-                .map(|(i, event)| Ok((Position(i as u64), event))),
+                .map(|(i, event)| Ok((Position::new(i as u64), event))),
         );
         let end = self.end.lock().unwrap().take();
         let tail = stream::unfold(end, |end| async move {
@@ -443,18 +448,13 @@ impl ChangeCapture for ScriptedSource {
         Ok(Box::pin(scripted.chain(tail)))
     }
 
-    fn confirm(&self, position: Position) {
-        self.confirmed.lock().unwrap().push(position);
-    }
-
-    async fn snapshot(
-        &self,
-        _tables: &[SnapshotTable],
-    ) -> source::Result<BoxStream<'static, source::Result<ChangeEvent>>> {
-        self.events.lock().unwrap().push("snapshot".to_owned());
-        Ok(Box::pin(stream::iter(
-            [row_event(false, 10), row_event(false, 11)].map(Ok),
-        )))
+    fn confirm(&self, landed: source::cdc::Landed) {
+        let mut confirmed = self.confirmed.lock().unwrap();
+        if let Some(seq) = landed.covered_seq()
+            && confirmed.last().is_none_or(|last| last.seq != seq)
+        {
+            confirmed.push(Position::new(seq));
+        }
     }
 }
 
@@ -465,7 +465,7 @@ impl ChangeCapture for ScriptedSource {
 #[derive(Debug)]
 struct FlakySource {
     opened: AtomicU64,
-    confirmed: Arc<Mutex<Vec<Position>>>,
+    confirmed: Arc<Mutex<Vec<source::cdc::Landed>>>,
 }
 
 #[async_trait]
@@ -482,25 +482,28 @@ impl ChangeCapture for FlakySource {
         let opened = self.opened.fetch_add(1, Ordering::SeqCst);
         Ok(if opened == 0 {
             Box::pin(stream::iter([
-                Ok((Position(0), row_event(false, 1))),
+                Ok((Position::new(0), row_event(false, 1))),
                 Err(source::SourceError::Connection("simulated drop".to_owned())),
             ]))
         } else {
             Box::pin(stream::iter([
-                Ok((Position(1), row_event(false, 1))),
-                Ok((Position(2), row_event(false, 3))),
+                Ok((Position::new(1), row_event(false, 1))),
+                Ok((Position::new(2), row_event(false, 3))),
             ]))
         })
     }
 
-    fn confirm(&self, position: Position) {
-        self.confirmed.lock().unwrap().push(position);
+    fn confirm(&self, landed: source::cdc::Landed) {
+        self.confirmed.lock().unwrap().push(landed);
     }
 }
 
 /// Resolves each change to one `users` document; key value `2` is a delete.
-#[derive(Debug)]
-struct ScriptedDocuments;
+/// A backfill reads rows 10 and 11, recording `keys users` into `events`.
+#[derive(Debug, Default)]
+struct ScriptedDocuments {
+    events: Arc<Mutex<Vec<String>>>,
+}
 
 #[async_trait]
 impl DocumentBuilder for ScriptedDocuments {
@@ -529,14 +532,28 @@ impl DocumentBuilder for ScriptedDocuments {
         })
     }
 
-    fn backfill_scopes(&self) -> Vec<IndexScope> {
-        vec![IndexScope {
-            index: users(),
-            root: SnapshotTable {
-                db_schema: DatabaseSchema::try_new("public").unwrap(),
-                table: TableName::try_new("users").unwrap(),
-            },
-        }]
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        vec![users()]
+    }
+
+    async fn last_key(&self, _: &IndexName) -> source::Result<Option<RowKey>> {
+        Ok(Some(row_event(false, 11).key().clone()))
+    }
+
+    async fn keys(
+        &self,
+        _: &IndexName,
+        after: Option<&RowKey>,
+        _: &RowKey,
+        _: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        if after.is_some() {
+            return Ok(Vec::new());
+        }
+        self.events.lock().unwrap().push("keys users".to_owned());
+        Ok([10, 11]
+            .map(|id| row_event(false, id).key().clone())
+            .to_vec())
     }
 
     async fn index_mappings(&self) -> source::Result<Vec<IndexMapping>> {
@@ -671,9 +688,12 @@ fn backends(
     source: ScriptedSource,
     sinks: Vec<(SinkName, Arc<dyn Sink>, SinkOptions)>,
 ) -> Arc<MockBackends> {
+    let documents = Arc::new(ScriptedDocuments {
+        events: Arc::clone(&source.events),
+    });
     Arc::new(MockBackends {
         capture: Arc::new(source),
-        documents: Arc::new(ScriptedDocuments),
+        documents,
         sinks,
         built: Arc::new(Mutex::new(Vec::new())),
     })
@@ -733,7 +753,7 @@ async fn start_builds_backends_through_the_seam() {
 
 /// A run over a non-empty live stream drives changes through the injected
 /// builder to **every** sink — capture, build once, publish, apply, flush, ack
-/// — confirms the watermark to the source, and the status reflects it.
+/// — confirms what landed to the source, and the status reflects it.
 #[tokio::test]
 async fn drives_changes_through_injected_backends() {
     let primary_sink = Arc::new(RecordingSink::seeded());
@@ -773,7 +793,7 @@ async fn drives_changes_through_injected_backends() {
     );
     assert_eq!(
         confirmed.lock().unwrap().last(),
-        Some(&Position(1)),
+        Some(&Position::new(1)),
         "the last position reaches the source once every lane acked it"
     );
 
@@ -859,7 +879,7 @@ async fn fresh_source_rebuilds_seeded_sinks_before_preparing() {
         vec![
             "reindex users".to_owned(),
             "prepare".to_owned(),
-            "snapshot".to_owned()
+            "keys users".to_owned()
         ]
     );
     assert_eq!(
@@ -963,11 +983,67 @@ async fn failed_sink_engine_restarts_and_redelivers() {
         vec!["upsert users 1".to_owned(), "upsert users 1".to_owned()],
         "the batch is applied again after the restart"
     );
-    assert_eq!(confirmed.lock().unwrap().last(), Some(&Position(0)));
+    assert_eq!(confirmed.lock().unwrap().last(), Some(&Position::new(0)));
     let snap = status.snapshot();
     assert_eq!(snap.errors, 1);
     assert_eq!(snap.sinks["primary"].changes_committed, 1);
     assert_eq!(snap.sinks["primary"].batches, 1);
+}
+
+/// A sink engine failing and restarting with backoff over
+/// the item it never lands keeps the lane's stall age: the age is the
+/// lane's, read off the deployment's `Progress`, not the engine run's. Once
+/// the sink writes again the lane lands and the age clears.
+#[tokio::test(start_paused = true)]
+async fn a_restarting_sink_engine_keeps_its_lanes_stall_age() {
+    let sink = Arc::new(RecordingSink::seeded());
+    sink.failing_flushes.store(u64::MAX, Ordering::SeqCst);
+    let (source, _end) = ScriptedSource::new(vec![row_event(false, 1)]).held_open();
+    let backends = backends(
+        source,
+        vec![(
+            primary(),
+            Arc::clone(&sink) as Arc<dyn Sink>,
+            SinkOptions::default(),
+        )],
+    );
+    let running = Daemon::new(backendless_config(), backends)
+        .with_options(DaemonOptions {
+            max_restart_backoff: Duration::from_millis(500),
+            ..DaemonOptions::default()
+        })
+        .start()
+        .await
+        .unwrap();
+    let status = running.status();
+    let run = tokio::spawn(running.run(std::future::pending::<()>()));
+    let lane = |status: &Status| {
+        let snapshot = serde_json::to_value(status.snapshot()).unwrap();
+        (
+            snapshot["sinks"]["primary"]["lanes"]["users"]["stall_seconds"].as_f64(),
+            snapshot["errors"].as_u64().unwrap_or(0),
+        )
+    };
+
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let (early, errors_early) = lane(&status);
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    let (late, errors_late) = lane(&status);
+    let (early, late) = (early.unwrap(), late.unwrap());
+    assert!(
+        errors_late > errors_early && errors_early >= 2,
+        "the sink engine kept failing and restarting: {errors_early} then {errors_late}"
+    );
+    assert!(early >= 8.0, "the lane aged across restarts: {early}");
+    assert!(
+        late >= early + 19.0,
+        "and kept aging through every restart: {early} then {late}"
+    );
+
+    sink.failing_flushes.store(0, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(lane(&status).0, Some(0.0), "the item landed: no age");
+    run.abort();
 }
 
 /// The caller's shutdown future stops the run even while the source stream is
@@ -1011,7 +1087,7 @@ async fn failed_ingest_engine_restarts_and_resumes_the_stream() {
             opened: AtomicU64::new(0),
             confirmed: Arc::clone(&confirmed),
         }),
-        documents: Arc::new(ScriptedDocuments),
+        documents: Arc::new(ScriptedDocuments::default()),
         sinks: vec![(
             primary(),
             Arc::clone(&sink) as Arc<dyn Sink>,
@@ -1033,10 +1109,16 @@ async fn failed_ingest_engine_restarts_and_resumes_the_stream() {
         vec!["upsert users 1".to_owned(), "upsert users 3".to_owned()]
     );
     let confirmed = confirmed.lock().unwrap();
-    assert_eq!(confirmed.last(), Some(&Position(2)));
+    assert_eq!(
+        confirmed.last(),
+        Some(&source::cdc::Landed::Through(Position::new(2)))
+    );
     assert!(
-        !confirmed.contains(&Position(0)),
-        "the change the failed stream never committed is not confirmed"
+        !confirmed.iter().any(|landed| matches!(
+            landed,
+            source::cdc::Landed::Through(p) if p.seq == 0
+        )),
+        "the change the failed stream never committed is not confirmed: it was never routed"
     );
     let snap = status.snapshot();
     assert_eq!(snap.errors, 1);
@@ -1051,6 +1133,23 @@ fn writes_default_to_four_unless_the_config_sets_them() {
     assert_eq!(DEFAULT_WRITES, 4);
     config.concurrency.writes = std::num::NonZeroUsize::new(1);
     assert_eq!(writes(&config), 1);
+}
+
+#[test]
+fn the_budget_defaults_to_512_mib_unless_the_config_sets_it() {
+    let mut config = backendless_config();
+    assert_eq!(max_built_bytes(&config), 512 * 1024 * 1024);
+    config.concurrency.max_built_mib = std::num::NonZeroUsize::new(64);
+    assert_eq!(max_built_bytes(&config), 64 * 1024 * 1024);
+}
+
+#[test]
+fn builds_default_to_four_unless_the_config_sets_them() {
+    let mut config = backendless_config();
+    assert_eq!(builds(&config), DEFAULT_BUILDS);
+    assert_eq!(DEFAULT_BUILDS, 4);
+    config.concurrency.builds = std::num::NonZeroUsize::new(1);
+    assert_eq!(builds(&config), 1);
 }
 
 #[test]
@@ -1073,6 +1172,7 @@ fn batch_policy_lays_the_config_over_the_engine_defaults() {
 }
 
 mod backoff;
+mod lanes;
 mod staging;
 mod stop;
 
@@ -1115,21 +1215,21 @@ impl<C: ChangeCapture> ChangeCapture for FedSource<C> {
             (feed, 0u64),
             |(mut feed, next)| async move {
                 let event = feed.recv().await?;
-                Some((Ok((Position(next), event)), (feed, next + 1)))
+                Some((Ok((Position::new(next), event)), (feed, next + 1)))
             },
         )))
     }
 
-    fn confirm(&self, position: Position) {
-        self.inner.confirm(position);
+    fn confirm(&self, landed: source::cdc::Landed) {
+        self.inner.confirm(landed);
     }
 
     fn parse_position(&self, text: &str) -> source::Result<source::cdc::SourcePosition> {
         self.inner.parse_position(text)
     }
 
-    fn reached(&self, position: Option<Position>) -> Option<source::cdc::SourcePosition> {
-        self.inner.reached(position)
+    fn reached(&self, landed: source::cdc::Landed) -> Option<source::cdc::SourcePosition> {
+        self.inner.reached(landed)
     }
 }
 
@@ -1138,10 +1238,107 @@ fn backends_for(
     capture: Arc<dyn ChangeCapture>,
     sinks: Vec<(SinkName, Arc<dyn Sink>, SinkOptions)>,
 ) -> Arc<MockBackends> {
+    backends_with(capture, Arc::new(ScriptedDocuments::default()), sinks)
+}
+
+fn backends_with(
+    capture: Arc<dyn ChangeCapture>,
+    documents: Arc<dyn DocumentBuilder>,
+    sinks: Vec<(SinkName, Arc<dyn Sink>, SinkOptions)>,
+) -> Arc<MockBackends> {
     Arc::new(MockBackends {
         capture,
-        documents: Arc::new(ScriptedDocuments),
+        documents,
         sinks,
         built: Arc::new(Mutex::new(Vec::new())),
     })
+}
+
+/// Builds that panic: `at_once` before anything is awaited (in the ingest
+/// task's own poll), else after a yield (on the build's own task).
+#[derive(Debug)]
+struct PanickingDocuments {
+    at_once: bool,
+}
+
+#[async_trait]
+impl DocumentBuilder for PanickingDocuments {
+    async fn resolve(
+        &self,
+        table: &TableName,
+        key: &RowKey,
+        before: Option<&RowImage>,
+        after: Option<&RowImage>,
+    ) -> source::Result<Vec<DocumentId>> {
+        ScriptedDocuments::default()
+            .resolve(table, key, before, after)
+            .await
+    }
+
+    #[allow(clippy::panic)]
+    async fn build(&self, _: &DocumentId) -> source::Result<Document> {
+        if !self.at_once {
+            tokio::task::yield_now().await;
+        }
+        panic!("a build that panics");
+    }
+
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        vec![users()]
+    }
+
+    async fn last_key(&self, _: &IndexName) -> source::Result<Option<RowKey>> {
+        Ok(None)
+    }
+
+    async fn keys(
+        &self,
+        _: &IndexName,
+        _: Option<&RowKey>,
+        _: &RowKey,
+        _: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        Ok(Vec::new())
+    }
+
+    async fn index_mappings(&self) -> source::Result<Vec<IndexMapping>> {
+        ScriptedDocuments::default().index_mappings().await
+    }
+}
+
+/// A build that panics never hangs the deployment. On its own task (it
+/// awaited first) it is a failed build: an engine error, the ingest engine
+/// fails and the daemon restarts it. In the ingest task's own poll (it
+/// panicked before awaiting anything) it unwinds the ingest task, as main's
+/// inline builds did, and the deployment ends with an error.
+#[tokio::test]
+async fn a_panicking_build_ends_or_restarts_the_ingest_engine_but_never_hangs() {
+    for at_once in [false, true] {
+        let sink = Arc::new(RecordingSink::seeded());
+        let backends = backends_with(
+            Arc::new(ScriptedSource::new(vec![row_event(false, 1)])),
+            Arc::new(PanickingDocuments { at_once }),
+            vec![(primary(), sink as Arc<dyn Sink>, SinkOptions::default())],
+        );
+        let running = Daemon::new(backendless_config(), backends)
+            .with_options(fast_restarts())
+            .start()
+            .await
+            .unwrap();
+        let status = running.status();
+        let run = tokio::spawn(running.run(tokio::time::sleep(Duration::from_millis(500))));
+        let result = tokio::time::timeout(Duration::from_secs(20), run)
+            .await
+            .unwrap_or_else(|_| panic!("at_once {at_once}: the deployment hung"))
+            .unwrap();
+        if at_once {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("ingest engine task failed"), "{error}");
+        } else {
+            assert!(
+                status.snapshot().errors >= 1,
+                "the failed build is an engine error"
+            );
+        }
+    }
 }

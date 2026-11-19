@@ -38,7 +38,7 @@ use async_trait::async_trait;
 use config::Config;
 use daemon::{
     Backends, Daemon, DaemonOptions, Fence, FenceLevel, FenceOutcome, FenceRequest, Phase,
-    SinkParts, SourceParts, Status,
+    SinkParts, SourceParts, Status, Unserved,
 };
 use kernel::{
     Column, ColumnName, DatabaseSchema, Envelope, Field, FieldName, FieldSource, FlussoType,
@@ -106,22 +106,42 @@ async fn a_read_after_a_fence_sees_the_commit() {
     );
 
     exec(&pool, "CREATE TABLE things (id int PRIMARY KEY, name text)").await;
+    exec(&pool, "CREATE TABLE others (id int PRIMARY KEY, name text)").await;
     exec(&pool, "CREATE TABLE noise (id serial PRIMARY KEY, v text)").await;
     exec(
         &pool,
         "INSERT INTO things SELECT n, 'seed' FROM generate_series(1, 40) n",
     )
     .await;
-    exec(&pool, "CREATE PUBLICATION flusso FOR TABLE things").await;
+    exec(&pool, "INSERT INTO others VALUES (1, 'seed')").await;
+    exec(&pool, "CREATE PUBLICATION flusso FOR TABLE things, others").await;
 
     let (gate, gated) = watch::channel(true);
+    let (others_gate, others_gated) = watch::channel(true);
     let backends = Arc::new(RealBackends {
         pg_url: pg_url.clone(),
         pg_port,
         os_url: os_url.clone(),
-        audit: Arc::new(GatedSink { open: gated }),
+        audit: Arc::new(GatedSink {
+            open: gated,
+            others_open: others_gated,
+        }),
+        seeds: None,
     });
-    let running = Daemon::new(config(), backends)
+    let mut config = config();
+    config.indexes.insert(
+        others(),
+        config::Index {
+            enabled: true,
+            schema: IndexSchema {
+                table: TableName::try_new("others").unwrap(),
+                ..schema()
+            },
+            on_error: None,
+            sinks: BTreeMap::new(),
+        },
+    );
+    let running = Daemon::new(config, backends)
         .with_options(DaemonOptions::default())
         .start()
         .await
@@ -219,6 +239,7 @@ async fn a_read_after_a_fence_sees_the_commit() {
             position: position.clone(),
             level: FenceLevel::Applied,
             sink: None,
+            indexes: Vec::new(),
             timeout: Duration::from_millis(500),
         })
         .await
@@ -229,6 +250,72 @@ async fn a_read_after_a_fence_sees_the_commit() {
     );
     gate.send(true).unwrap();
     client.fence(&position, FenceLevel::Applied, None).await;
+
+    // ── a stalled index on a sink blocks only the fences that include it ─────
+    others_gate.send(false).unwrap();
+    exec(&pool, "UPDATE others SET name = 'stalled' WHERE id = 1").await;
+    let position = client.rename(6, "beside a stalled index").await;
+    let on = |indexes: Vec<IndexName>| FenceRequest {
+        position: position.clone(),
+        level: FenceLevel::Applied,
+        sink: Some(SinkName::try_new("audit").unwrap()),
+        indexes,
+        timeout: Duration::from_millis(500),
+    };
+    let healthy = fence.wait(&on(vec![things()])).await.unwrap();
+    assert!(
+        matches!(healthy, FenceOutcome::Reached { .. }),
+        "the things lane of audit landed: {healthy:?}"
+    );
+    for indexes in [vec![others()], vec![things(), others()], Vec::new()] {
+        let outcome = fence.wait(&on(indexes.clone())).await.unwrap();
+        assert!(
+            matches!(outcome, FenceOutcome::TimedOut { .. }),
+            "{indexes:?} includes the stalled others lane: {outcome:?}"
+        );
+    }
+    let snapshot = serde_json::to_value(status.snapshot()).unwrap();
+    assert_eq!(
+        snapshot["sinks"]["audit"]["lanes"]["others"]["outstanding"], 1,
+        "{snapshot}"
+    );
+    // The stalled lane ages, pins the slot and holds its WAL; its sibling on
+    // the same sink keeps writing and doesn't age (ADR 0012 stage 8c).
+    tokio::time::sleep(Duration::from_millis(3_500)).await;
+    let snapshot = serde_json::to_value(status.snapshot()).unwrap();
+    let lanes = &snapshot["sinks"]["audit"]["lanes"];
+    assert!(
+        lanes["others"]["stall_seconds"].as_f64().unwrap() >= 2.0,
+        "the stalled lane ages: {snapshot}"
+    );
+    assert_eq!(
+        lanes["things"]["stall_seconds"].as_f64(),
+        Some(0.0),
+        "the sibling lane writes: {snapshot}"
+    );
+    assert_eq!(
+        snapshot["pinned_by"],
+        serde_json::json!({ "index": "others", "sink": "audit" }),
+        "{snapshot}"
+    );
+    others_gate.send(true).unwrap();
+    let reached = fence
+        .wait(&FenceRequest {
+            timeout: WAIT,
+            ..on(Vec::new())
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(reached, FenceOutcome::Reached { .. }),
+        "{reached:?}"
+    );
+    eventually("the lane to recover", async || {
+        let snapshot = serde_json::to_value(status.snapshot()).unwrap();
+        snapshot["sinks"]["audit"]["lanes"]["others"]["stall_seconds"].as_f64() == Some(0.0)
+            && snapshot["pinned_by"].is_null()
+    })
+    .await;
 
     let snapshot = serde_json::to_value(status.snapshot()).unwrap();
     assert!(snapshot["applied_position"].is_string(), "{snapshot}");
@@ -277,7 +364,11 @@ async fn a_fence_never_covers_a_commit_read_before_it_was_visible() {
             pg_url: pg_url.clone(),
             pg_port,
             os_url: os_url.clone(),
-            audit: Arc::new(GatedSink { open: gated }),
+            audit: Arc::new(GatedSink {
+                open: gated.clone(),
+                others_open: gated,
+            }),
+            seeds: None,
         }),
     )
     .start()
@@ -310,6 +401,7 @@ async fn a_fence_never_covers_a_commit_read_before_it_was_visible() {
             position: past_the_commit.clone(),
             level: FenceLevel::Applied,
             sink: PRIMARY.map(|name| SinkName::try_new(name).unwrap()),
+            indexes: Vec::new(),
             timeout: Duration::from_secs(3),
         })
         .await
@@ -656,6 +748,7 @@ impl Client {
                 position: position.to_owned(),
                 level,
                 sink: sink.map(|name| SinkName::try_new(name).unwrap()),
+                indexes: Vec::new(),
                 timeout: WAIT,
             })
             .await
@@ -725,6 +818,10 @@ fn things() -> IndexName {
     IndexName::try_new("things").unwrap()
 }
 
+fn others() -> IndexName {
+    IndexName::try_new("others").unwrap()
+}
+
 fn schema() -> IndexSchema {
     let keyword = |name: &str| Field {
         field: FieldName::try_new(name).unwrap(),
@@ -788,6 +885,8 @@ struct RealBackends {
     pg_port: u16,
     os_url: String,
     audit: Arc<GatedSink>,
+    /// When set, `primary`'s seeds wait while it is closed.
+    seeds: Option<watch::Receiver<bool>>,
 }
 
 #[async_trait]
@@ -816,11 +915,12 @@ impl Backends for RealBackends {
         Ok(SourceParts {
             capture: Arc::new(WalChangeCapture::new(replication, self.pg_url.clone())),
             documents: Arc::new(PgDocumentBuilder::connect(&self.pg_url, spec).await?),
+            resolver: None,
         })
     }
 
-    fn stream(&self, _: &Config, sinks: &[SinkName]) -> anyhow::Result<Arc<dyn Stream>> {
-        Ok(Arc::new(ChannelStream::new(1024, sinks.iter().cloned())))
+    fn stream(&self, _: &Config, lanes: &[stream::LaneKey]) -> anyhow::Result<Arc<dyn Stream>> {
+        Ok(Arc::new(ChannelStream::new(1024, lanes.iter().cloned())))
     }
 
     async fn sinks(&self, _: &Config) -> anyhow::Result<Vec<SinkParts>> {
@@ -846,10 +946,17 @@ impl Backends for RealBackends {
                 index_settings: Default::default(),
             },
         )?;
+        let opensearch: Arc<dyn Sink> = match &self.seeds {
+            Some(open) => Arc::new(SeedGated {
+                inner: opensearch,
+                open: open.clone(),
+            }),
+            None => Arc::new(opensearch),
+        };
         Ok(vec![
             SinkParts {
                 name: primary,
-                sink: Arc::new(opensearch),
+                sink: opensearch,
                 options: SinkOptions::default(),
             },
             SinkParts {
@@ -861,18 +968,294 @@ impl Backends for RealBackends {
     }
 }
 
-/// A sink whose flush waits while its gate is closed: a destination that
-/// stopped answering.
+/// A sink whose writes wait while its gate is closed: a destination that
+/// stopped answering. Writes of the `others` index also wait on their own
+/// gate: one index stuck while the sink's others go on.
 #[derive(Debug)]
 struct GatedSink {
     open: watch::Receiver<bool>,
+    others_open: watch::Receiver<bool>,
 }
 
 #[async_trait]
 impl Sink for GatedSink {
-    async fn write(&self, _envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
+    async fn write(&self, envelopes: &[Envelope], _caught_up: bool) -> sink::Result<WriteReport> {
         let mut open = self.open.clone();
         let _ = open.wait_for(|open| *open).await;
+        if envelopes.first().is_some_and(|e| e.index == others()) {
+            let mut open = self.others_open.clone();
+            let _ = open.wait_for(|open| *open).await;
+        }
         Ok(WriteReport::clean())
     }
+}
+
+/// The OpenSearch sink, its seeds (the refresh and alias move that end a
+/// backfill) waiting while a gate is closed: a backfill that takes as long as
+/// a test needs. Every other call goes straight through.
+#[derive(Debug)]
+struct SeedGated {
+    inner: OpensearchSink,
+    open: watch::Receiver<bool>,
+}
+
+#[async_trait]
+impl Sink for SeedGated {
+    async fn ensure_index(&self, mapping: &kernel::IndexMapping) -> sink::Result<()> {
+        self.inner.ensure_index(mapping).await
+    }
+
+    async fn write(&self, envelopes: &[Envelope], caught_up: bool) -> sink::Result<WriteReport> {
+        self.inner.write(envelopes, caught_up).await
+    }
+
+    async fn write_parts(
+        &self,
+        parts: &[&[Envelope]],
+        caught_up: sink::CaughtUp<'_>,
+    ) -> sink::Result<WriteReport> {
+        self.inner.write_parts(parts, caught_up).await
+    }
+
+    fn write_limit(&self) -> Option<usize> {
+        self.inner.write_limit()
+    }
+
+    async fn is_seeded(&self, index: &IndexName) -> sink::Result<bool> {
+        self.inner.is_seeded(index).await
+    }
+
+    async fn seeding(&self, index: &IndexName) -> sink::Result<sink::Seeding> {
+        self.inner.seeding(index).await
+    }
+
+    async fn is_rebuilding(&self, index: &IndexName) -> sink::Result<bool> {
+        self.inner.is_rebuilding(index).await
+    }
+
+    async fn record_walked(&self, index: &IndexName, mark: &str) -> sink::Result<()> {
+        self.inner.record_walked(index, mark).await
+    }
+
+    async fn forget_walked(&self, index: &IndexName) -> sink::Result<()> {
+        self.inner.forget_walked(index).await
+    }
+
+    async fn mark_seeded(&self, index: &IndexName) -> sink::Result<()> {
+        let mut open = self.open.clone();
+        let _ = open.wait_for(|open| *open).await;
+        self.inner.mark_seeded(index).await
+    }
+
+    async fn reindex(&self, mapping: &kernel::IndexMapping) -> sink::Result<()> {
+        self.inner.reindex(mapping).await
+    }
+
+    fn ordered(&self) -> bool {
+        self.inner.ordered()
+    }
+}
+
+/// Wait until the source follows live changes: fences can be asked.
+async fn await_fences(fence: &Fence) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let asked = fence
+            .wait(&FenceRequest {
+                position: "0/0".to_owned(),
+                level: FenceLevel::Applied,
+                sink: None,
+                indexes: Vec::new(),
+                timeout: Duration::ZERO,
+            })
+            .await;
+        if asked.is_ok() {
+            return;
+        }
+        assert!(Instant::now() < deadline, "fences never became available");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// A fence on `things` at `primary`, applied, bounded at 1.5 s.
+async fn held(fence: &Fence, position: &str) -> FenceOutcome {
+    fence
+        .wait(&FenceRequest {
+            position: position.to_owned(),
+            level: FenceLevel::Applied,
+            sink: PRIMARY.map(|name| SinkName::try_new(name).unwrap()),
+            indexes: vec![things()],
+            timeout: Duration::from_millis(1_500),
+        })
+        .await
+        .unwrap()
+}
+
+/// Whether `outcome` says the `things` lane can't vouch, for `reason`.
+fn unserved_as(outcome: &FenceOutcome, reason: Unserved) -> bool {
+    matches!(outcome, FenceOutcome::Unserved { lanes, .. }
+        if lanes.iter().any(|(lane, why)| lane.index == things() && *why == reason))
+}
+
+/// A running deployment, as a test drives it.
+struct Running {
+    fence: Fence,
+    status: Arc<Status>,
+    control: daemon::DaemonControl,
+    stop: tokio::sync::oneshot::Sender<()>,
+    deployment: tokio::task::JoinHandle<anyhow::Result<()>>,
+}
+
+impl Running {
+    async fn start(backends: &Arc<RealBackends>) -> Self {
+        let running = Daemon::new(config(), Arc::clone(backends) as Arc<dyn Backends>)
+            .start()
+            .await
+            .unwrap();
+        let fence = running.fence();
+        let status = running.status();
+        let control = running.control();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let deployment = tokio::spawn(running.run(async {
+            let _ = stopped.await;
+        }));
+        await_fences(&fence).await;
+        Self {
+            fence,
+            status,
+            control,
+            stop,
+            deployment,
+        }
+    }
+
+    async fn stop(self) {
+        let _ = self.stop.send(());
+        self.deployment.await.unwrap().unwrap();
+    }
+}
+
+/// Issue #379: a fence never answers reached for a position reads don't see
+/// while the sink seeds or rebuilds the index: a first backfill, an on-demand
+/// reindex, and a rebuild after the slot was dropped while flusso was
+/// stopped. Each seed is held back by a gate, so the window is as long as
+/// the test needs; a read right after the fence is reached sees the commit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs Docker (starts Postgres and OpenSearch containers)"]
+async fn a_fence_holds_while_the_index_is_seeded_or_rebuilt() {
+    let (_postgres, pg_port, pg_url) = start_postgres().await;
+    let pool = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&pg_url)
+        .await
+        .unwrap();
+    let (_opensearch, os_url) = start_opensearch().await;
+    exec(&pool, "CREATE TABLE things (id int PRIMARY KEY, name text)").await;
+    exec(
+        &pool,
+        "INSERT INTO things SELECT n, 'seed' FROM generate_series(1, 10) n",
+    )
+    .await;
+    exec(&pool, "CREATE PUBLICATION flusso FOR TABLE things").await;
+
+    let (_audit_gate, audit_open) = watch::channel(true);
+    let (seeds, seeds_open) = watch::channel(false);
+    let backends = Arc::new(RealBackends {
+        pg_url: pg_url.clone(),
+        pg_port,
+        os_url: os_url.clone(),
+        audit: Arc::new(GatedSink {
+            open: audit_open.clone(),
+            others_open: audit_open,
+        }),
+        seeds: Some(seeds_open),
+    });
+
+    // ── a first backfill: nothing is vouched for until the seed ──────────────
+    let running = Running::start(&backends).await;
+    let client = Client {
+        pool: pool.clone(),
+        fence: running.fence.clone(),
+        http: reqwest::Client::new(),
+        os_url: os_url.clone(),
+    };
+    let position = client.rename(1, "first").await;
+    let outcome = held(&running.fence, &position).await;
+    assert!(
+        unserved_as(&outcome, Unserved::Backfilling),
+        "while the first seed waits: {outcome:?}"
+    );
+    seeds.send(true).unwrap();
+    client
+        .fence(&position, FenceLevel::Searchable, PRIMARY)
+        .await;
+    assert_eq!(client.get(1).await.as_deref(), Some("first"));
+    await_live(&running.status).await;
+
+    // ── a reindex: the old generation vouches for what it holds, no more ─────
+    let before = client.rename(2, "before").await;
+    client.fence(&before, FenceLevel::Searchable, PRIMARY).await;
+    seeds.send(false).unwrap();
+    running
+        .control
+        .reindex(things(), Some(&SinkName::try_new("primary").unwrap()))
+        .unwrap();
+    eventually("the reindex to start", async || {
+        let probe = client.rename(9, "probe").await;
+        unserved_as(&held(&running.fence, &probe).await, Unserved::Rebuilding)
+    })
+    .await;
+    let after = client.rename(2, "after").await;
+    let outcome = held(&running.fence, &after).await;
+    assert!(
+        unserved_as(&outcome, Unserved::Rebuilding),
+        "a change after the reindex began: {outcome:?}"
+    );
+    assert_eq!(
+        client.get(2).await.as_deref(),
+        Some("before"),
+        "reads still see the old generation"
+    );
+    let outcome = held(&running.fence, &before).await;
+    assert!(
+        matches!(outcome, FenceOutcome::Reached { .. }),
+        "a change the old generation holds is vouched for throughout: {outcome:?}"
+    );
+    seeds.send(true).unwrap();
+    client.fence(&after, FenceLevel::Searchable, PRIMARY).await;
+    assert_eq!(client.get(2).await.as_deref(), Some("after"));
+    assert_eq!(client.search("after").await, vec![2]);
+
+    // ── a dropped slot: a commit made while flusso was away (the issue) ──────
+    running.stop().await;
+    exec(&pool, "SELECT pg_drop_replication_slot('flusso')").await;
+    let gap = client.rename(3, "gap").await;
+    seeds.send(false).unwrap();
+    let running = Running::start(&backends).await;
+    let client = Client {
+        fence: running.fence.clone(),
+        ..client
+    };
+    let outcome = held(&running.fence, &gap).await;
+    assert!(
+        unserved_as(&outcome, Unserved::Rebuilding),
+        "a commit made while flusso was away: {outcome:?}"
+    );
+    assert_eq!(
+        client.get(3).await.as_deref(),
+        Some("seed"),
+        "reads still see the generation that missed it"
+    );
+    let since = client.rename(4, "since").await;
+    let outcome = held(&running.fence, &since).await;
+    assert!(
+        unserved_as(&outcome, Unserved::Rebuilding),
+        "a commit made after the restart: {outcome:?}"
+    );
+    seeds.send(true).unwrap();
+    client.fence(&since, FenceLevel::Searchable, PRIMARY).await;
+    assert_eq!(client.get(3).await.as_deref(), Some("gap"));
+    assert_eq!(client.get(4).await.as_deref(), Some("since"));
+
+    running.stop().await;
 }

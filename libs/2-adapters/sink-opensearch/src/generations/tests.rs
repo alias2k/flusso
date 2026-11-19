@@ -107,3 +107,136 @@ fn next_generation_is_one_past_the_highest_existing() {
         3
     );
 }
+
+fn names(list: &[&str]) -> Vec<String> {
+    list.iter().map(|name| (*name).to_owned()).collect()
+}
+
+#[test]
+fn a_first_seed_with_its_aliases_in_place_needs_no_alias_call() {
+    let target = "users_1_1";
+    let held = names(&[target]);
+    let none = std::collections::BTreeSet::new();
+    assert_eq!(
+        plan_seed_actions(target, &[("users_1", &held), ("users", &held)], &none),
+        None
+    );
+}
+
+#[test]
+fn a_rebuild_moves_both_aliases_and_removes_the_old_generation_in_one_call() {
+    let target = "users_1_2";
+    let old = names(&["users_1_1"]);
+    let stale = std::collections::BTreeSet::from(["users_1_1".to_owned()]);
+    let actions = plan_seed_actions(target, &[("users_1", &old), ("users", &old)], &stale).unwrap();
+    assert_eq!(
+        actions,
+        json!({ "actions": [
+            { "add": { "index": "users_1_2", "alias": "users_1" } },
+            { "add": { "index": "users_1_2", "alias": "users" } },
+            { "remove_index": { "index": "users_1_1" } },
+        ]}),
+        "the removed generation's aliases go with it"
+    );
+}
+
+#[test]
+fn an_alias_held_by_an_index_that_stays_is_removed_from_it() {
+    let target = "users_2_1";
+    let hash = names(&[target]);
+    let other_schema = names(&["users_1_1"]);
+    let none = std::collections::BTreeSet::new();
+    let actions = plan_seed_actions(
+        target,
+        &[("users_2", &hash), ("users", &other_schema)],
+        &none,
+    )
+    .unwrap();
+    assert_eq!(
+        actions,
+        json!({ "actions": [
+            { "remove": { "index": "users_1_1", "alias": "users" } },
+            { "add": { "index": "users_2_1", "alias": "users" } },
+        ]})
+    );
+}
+
+#[test]
+fn an_orphan_generation_holding_no_alias_is_removed_too() {
+    let target = "users_1_3";
+    let held = names(&[target]);
+    let stale = std::collections::BTreeSet::from(["users_1_2".to_owned()]);
+    let actions = plan_seed_actions(target, &[("users_1", &held)], &stale).unwrap();
+    assert_eq!(
+        actions,
+        json!({ "actions": [{ "remove_index": { "index": "users_1_2" } }] })
+    );
+}
+
+#[test]
+fn an_alias_lookup_lists_every_asked_alias_even_a_missing_one() {
+    let body = json!({
+        "users_1_1": { "aliases": { "users_1": {}, "users": {} } },
+        "orders_1_1": { "aliases": { "orders": {} } },
+        "error": "alias [missing] missing",
+        "status": 404,
+    });
+    let holders = holders_of(&["users_1", "users", "missing"], &body);
+    assert_eq!(holders["users_1"], names(&["users_1_1"]));
+    assert_eq!(holders["users"], names(&["users_1_1"]));
+    assert!(holders["missing"].is_empty());
+    assert!(!holders.contains_key("orders"));
+}
+
+/// `walked` is read only from an unseeded doc, and only when it names the
+/// active generation: anything else is no checkpoint, never an error.
+#[test]
+fn a_backfill_checkpoint_is_read_only_for_the_unseeded_active_generation() {
+    let read = |source: serde_json::Value| Meta::read(&source).map(|meta| meta.walked);
+    assert_eq!(
+        read(
+            json!({ "active_generation": 2, "seeded": false, "walked": { "mark": "k", "generation": 2 } })
+        ),
+        Some(Some("k".to_owned()))
+    );
+    assert_eq!(
+        read(
+            json!({ "active_generation": 3, "seeded": false, "walked": { "mark": "k", "generation": 2 } })
+        ),
+        Some(None),
+        "a record of a generation since replaced"
+    );
+    assert_eq!(
+        read(
+            json!({ "active_generation": 2, "seeded": true, "walked": { "mark": "k", "generation": 2 } })
+        ),
+        Some(None),
+        "a stray record on a seeded doc"
+    );
+    assert_eq!(
+        read(json!({ "active_generation": 2, "seeded": false })),
+        Some(None)
+    );
+    assert_eq!(
+        read(json!({ "active_generation": 2, "seeded": false, "walked": null })),
+        Some(None),
+        "forgotten"
+    );
+    assert_eq!(
+        read(
+            json!({ "active_generation": 2, "seeded": false, "walked": { "mark": 7, "generation": 2 } })
+        ),
+        Some(None),
+        "malformed"
+    );
+    assert_eq!(
+        read(json!({ "active_generation": 2, "seeded": false, "walked": "k" })),
+        Some(None),
+        "malformed"
+    );
+    assert_eq!(
+        read(json!({ "seeded": false })),
+        None,
+        "a legacy doc with no generation"
+    );
+}

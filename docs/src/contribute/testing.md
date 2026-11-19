@@ -52,6 +52,16 @@ The workspace lints deny `unwrap_used` and `expect_used`, and test targets use `
 
 The `#[ignore]`d suites spin up containers with `testcontainers`. They're legitimately slow and occasionally flaky, so `.config/nextest.toml` puts each binary in a test group by what it needs and retries it twice: the `docker` group (no OpenSearch, eight at a time) and the `opensearch` group (anything with OpenSearch, one at a time). Both groups get a longer slow-timeout than ordinary tests, a little longer still under the `ci` profile; `.config/nextest.toml` holds the numbers. A new e2e binary must be added to the filtersets in both profiles.
 
+### How many builds
+
+The engine's Postgres e2e binaries (`pipeline`, `wal`, `wal_release`, `visibility`, `backfill`, `keyset_backfill`, `type_change`, `bytea_output`) run their ingest engine with `builds = 4`, the daemon's default, so they test what a deployment runs. `FLUSSO_E2E_BUILDS` sets another number for the whole run; `1` builds one batch at a time:
+
+```sh
+FLUSSO_E2E_BUILDS=1 cargo nextest run -p flusso-engine --run-ignored all -E 'binary(wal)'
+```
+
+They also hold built documents within a memory budget, the daemon's default 512 MiB. `FLUSSO_E2E_BUDGET_KIB` sets another (16384 for 16 MiB makes it bind on every backfill). A budget dropped with bytes still counted fails the test in debug builds: the standing check that every batch gives its bytes back.
+
 ### Which Postgres
 
 Every test and bench that starts Postgres takes its image from one place, `dev/test-postgres` (`flusso-test-postgres`, unpublished, a dev-dependency only): `postgres:16-alpine`. `FLUSSO_TEST_PG_TAG` names another tag of the official image for the whole run, with no code change:
@@ -128,6 +138,18 @@ git checkout libs/2-adapters/source-postgres/benches/fixtures/pgoutput.bin   # r
 - **Agent docs paths.** `apps/cli/tests/agent_docs_paths.rs` asserts every repo path named under `plugin/**` and `.claude/commands/**` exists.
 - **Designer.** A proptest round-trip (`apps/design/tests/roundtrip.rs`: random `IndexSchema` through codegen, parse, convert, identity) plus the CI job: Prettier, type-aware ESLint, an i18n completeness check, and a dist-drift guard that the committed SPA matches a fresh build.
 - **Trybuild UI tests** in `flusso-query-derive` compare exact compiler diagnostics, which is why `rust-toolchain.toml` pins the channel. Re-bless after a bump with `TRYBUILD=overwrite cargo test -p flusso-query-derive`.
+
+## Alert rules and the chart
+
+CI's `alerts` job (not a required check) runs them; run them by hand when you touch `dev/prometheus/` or `deploy/helm/flusso/`. Nothing to install, the tools come from their Docker images:
+
+```sh
+bash .github/scripts/check-alerts.sh
+```
+
+It checks the dev Prometheus config as compose mounts it (every file under `rules/` is loaded, so the rule tests live in `dev/prometheus/tests/`), runs the rule unit tests, `helm lint`s the chart with the `PrometheusRule` on, and puts the chart's rendered rules through `promtool check rules`.
+
+`flusso.rules.test.yml` holds the alert's cases: a stalled lane fires 5 minutes after passing 10, a sibling that keeps landing doesn't, a catch-up with 2 GiB of slot lag and lanes that keep landing doesn't, and the same lag behind a lane silent for over a minute fires on WAL. The two copies of the alerts (the dev rules and the chart's template) are kept equal by `.github/scripts/test_alert_rule_copies.py`, in the `scripts` job.
 
 ## Where this shows up
 

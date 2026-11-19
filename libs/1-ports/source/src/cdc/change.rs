@@ -23,9 +23,8 @@ use crate::{RowImage, RowKey};
 /// document layer's job — not something this layer knows.
 ///
 /// A live event travels with the [`Position`](kernel::Position) the source
-/// assigned it (see [`ChangeCapture::live`](super::ChangeCapture::live)); a
-/// snapshot row has none: an initial backfill is a separate finite stream of
-/// [`Upsert`](Self::Upsert)s (see [`ChangeCapture::snapshot`](super::ChangeCapture::snapshot)),
+/// assigned it (see [`ChangeCapture::live`](super::ChangeCapture::live)). A
+/// backfill reads no changes: it pages root keys through the document builder,
 /// and a crashed backfill simply re-runs, idempotently.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]

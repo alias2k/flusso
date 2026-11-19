@@ -168,7 +168,7 @@ async fn index_batch(
                 index.clone(),
                 id,
                 doc.clone(),
-                Some(Position(0)),
+                Some(Position::new(0)),
                 chrono::Utc::now(),
             )
         })

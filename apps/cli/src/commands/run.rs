@@ -99,8 +99,8 @@ pub(crate) struct RunArgs {
     #[arg(long, env = "FLUSSO_PRETTY")]
     pretty: bool,
 
-    /// Maximum changes buffered between capture and processing. Overrides
-    /// `[stream] capacity`; defaults to it, then to 1024.
+    /// Deprecated, and ignored with a warning, as `[stream] capacity` is:
+    /// `--max-built-mib` bounds what the lanes hold.
     #[arg(long, env = "FLUSSO_QUEUE_CAPACITY")]
     queue_capacity: Option<usize>,
 
@@ -155,6 +155,22 @@ pub(crate) struct RunArgs {
     #[arg(long, env = "FLUSSO_WRITES", value_parser = config::parse_writes)]
     writes: Option<std::num::NonZeroUsize>,
 
+    /// Document builds the ingest engine runs at once. Overrides
+    /// `[concurrency].builds` from config; defaults to 4. A document is never
+    /// built twice at once, each lane gets batches in the order they started,
+    /// and live batches go before backfill pages. At most 32. Never written
+    /// into the lock.
+    #[arg(long, env = "FLUSSO_BUILDS", value_parser = config::parse_builds)]
+    builds: Option<std::num::NonZeroUsize>,
+
+    /// MiB of built documents held before the ingest engine waits for the
+    /// sinks to acknowledge some. Overrides `[concurrency].max_built_mib`
+    /// from config; defaults to 512. A backfill holds at most half. Counts
+    /// heap, about 8–10× a document's JSON. 16 to 1,048,576. Never written
+    /// into the lock.
+    #[arg(long, env = "FLUSSO_MAX_BUILT_MIB", value_parser = config::parse_max_built_mib)]
+    max_built_mib: Option<std::num::NonZeroUsize>,
+
     /// How long a stop may take, in seconds, from the first signal to exit.
     /// A stop drains: nothing new is read, what is in flight lands on every
     /// sink and is confirmed to Postgres, then the HTTP surfaces close and
@@ -202,6 +218,12 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     if let Some(writes) = args.writes {
         config.concurrency.writes = Some(writes);
     }
+    if let Some(builds) = args.builds {
+        config.concurrency.builds = Some(builds);
+    }
+    if let Some(max_built_mib) = args.max_built_mib {
+        config.concurrency.max_built_mib = Some(max_built_mib);
+    }
 
     // Adapter knobs given as flags/env are laid over the file's entries, then
     // every entry is validated against its adapter before anything connects.
@@ -218,6 +240,11 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     );
     adapters::validate(&config)?;
     crate::backends::compile_scripts(&config).context("compiling the scripts")?;
+    if let Some(warning) =
+        crate::memory::over_budget(daemon::max_built_bytes(&config), crate::memory::ceiling())
+    {
+        tracing::warn!("{warning}");
+    }
 
     let public_addr = args
         .public_address
@@ -263,6 +290,9 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let fence = running.fence();
     let _in_flight_gauge = metrics::register_in_flight_gauge(Arc::clone(&status));
     let _visibility_wait_gauge = metrics::register_visibility_wait_gauge(Arc::clone(&status));
+    let _lane_outstanding_gauge = metrics::register_lane_outstanding_gauge(Arc::clone(&status));
+    let _stall_gauges = metrics::register_stall_gauges(Arc::clone(&status));
+    let _memory_instruments = metrics::register_memory_instruments(running.budget());
 
     let waits = http::Waits::default();
     let (public_shutdown, public_rx) = oneshot::channel::<()>();

@@ -3,7 +3,7 @@
 //!
 //! - **per document**: never two writes of one document at once, and the
 //!   versions written never go down (a later build lands after an earlier one);
-//! - **per lane**: the watermark and the fence never pass an earlier item that
+//! - **per lane**: confirmation and the fence never pass an earlier item that
 //!   is still being written, whatever finishes first;
 //! - **selection**: live items before backfill, except every fourth contested
 //!   grant; `SnapshotComplete` and a reindex are barriers;
@@ -20,14 +20,17 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::FutureExt;
-use kernel::{Envelope, GenericValue, IndexMapping, IndexName, Position};
+use kernel::{Envelope, GenericValue, IndexMapping, IndexName, Position, SinkName};
 use sink::{Sink, Visibility, WriteReport};
 use stream::{Batch, LaneItem, Producer, Stream};
 use stream_channel::ChannelStream;
 use tokio::sync::Notify;
 
 use super::{PositionObserver, mapping, sink_name, users};
-use crate::{FailurePolicies, FailurePolicy, Observer, Result, SinkControl, SinkEngine, Stop};
+use crate::{
+    FailurePolicies, FailurePolicy, Observer, Progress, Result, SinkControl, SinkEngine, Stop,
+};
+use stream::LaneKey;
 
 /// A small deterministic generator, so a schedule replays from its seed.
 #[derive(Debug)]
@@ -70,6 +73,9 @@ struct Probe {
     caught_up: Mutex<Vec<bool>>,
     visibility: fn(bool) -> Visibility,
     ordered: bool,
+    /// Held across every caught-up write, as the OpenSearch sink holds its
+    /// one refresh: a caught-up write waits for the one before it.
+    refresh_lock: Option<tokio::sync::Mutex<()>>,
 }
 
 impl Probe {
@@ -91,6 +97,7 @@ impl Probe {
             caught_up: Mutex::default(),
             visibility: |_| Visibility::Immediate,
             ordered: false,
+            refresh_lock: None,
         }
     }
 
@@ -133,6 +140,21 @@ impl Probe {
     /// A sink whose readers consume its output in order.
     fn ordered(mut self) -> Self {
         self.ordered = true;
+        self
+    }
+
+    /// Caught-up writes one at a time behind a lock, each refreshing for a
+    /// random time; an unforced write is `Deferred`, so a position is
+    /// searchable only once a caught-up write covers it.
+    fn locking_refreshes(mut self) -> Self {
+        self.refresh_lock = Some(tokio::sync::Mutex::new(()));
+        self.visibility = |caught_up| {
+            if caught_up {
+                Visibility::Immediate
+            } else {
+                Visibility::Deferred
+            }
+        };
         self
     }
 
@@ -200,6 +222,15 @@ impl Sink for Probe {
         if let Some(delay) = delay {
             tokio::time::sleep(Duration::from_millis(delay)).await;
         }
+        let _refreshing = match (&self.refresh_lock, caught_up) {
+            (Some(lock), true) => {
+                let guard = lock.lock().await;
+                let refresh = self.delays.as_ref().map(|rng| rng.lock().unwrap().below(8));
+                tokio::time::sleep(Duration::from_millis(refresh.unwrap_or(1))).await;
+                Some(guard)
+            }
+            _ => None,
+        };
         let failed = {
             let mut fail_once = self.fail_once.lock().unwrap();
             ids.iter().any(|id| fail_once.remove(id))
@@ -293,35 +324,114 @@ struct Rig {
     /// does, so what it keeps across runs (fences, a failed run) carries over.
     sink_engine: Arc<SinkEngine>,
     stream: Arc<ChannelStream>,
+    progress: Arc<Progress>,
+    name: SinkName,
     observer: Arc<PositionObserver>,
     lane: Box<dyn Producer<LaneItem>>,
+    /// With a second index (`orders`), its lane: ids `d`, `e`, `f` and
+    /// `orders-*` go there, every other to `users`.
+    orders: Option<Box<dyn Producer<LaneItem>>>,
     control: tokio::sync::mpsc::Sender<SinkControl>,
     engine: Option<tokio::task::JoinHandle<Result<()>>>,
     stop: Stop,
     version: i64,
+    /// The version each id was last published at.
+    published: HashMap<String, i64>,
+    /// The last live position published on each index's lane.
+    last_live: HashMap<IndexName, u64>,
 }
 
 impl Rig {
+    /// One lane item per write: what these tests were written for. Merging
+    /// ready items is `tests::merge`'s, and the schedule test runs both.
     fn new(probe: Probe, writes: usize) -> Self {
         Self::with_policies(probe, writes, FailurePolicies::default())
     }
 
     fn with_policies(probe: Probe, writes: usize, policies: FailurePolicies) -> Self {
+        Self::built(probe, writes, policies, 1)
+    }
+
+    /// Ready items merged into one write, up to the default limit.
+    fn merging(probe: Probe, writes: usize) -> Self {
+        Self::built(
+            probe,
+            writes,
+            FailurePolicies::default(),
+            crate::BatchPolicy::default().max_changes,
+        )
+    }
+
+    /// Over two indexes, `users` and `orders`, merging when `merge`.
+    fn two_indexes(probe: Probe, writes: usize, merge: bool) -> Self {
+        Self::over(
+            probe,
+            writes,
+            FailurePolicies::default(),
+            if merge {
+                crate::BatchPolicy::default().max_changes
+            } else {
+                1
+            },
+            true,
+        )
+    }
+
+    fn built(
+        probe: Probe,
+        writes: usize,
+        policies: FailurePolicies,
+        write_documents: usize,
+    ) -> Self {
+        Self::over(probe, writes, policies, write_documents, false)
+    }
+
+    fn over(
+        probe: Probe,
+        writes: usize,
+        policies: FailurePolicies,
+        write_documents: usize,
+        two: bool,
+    ) -> Self {
         let name = sink_name("primary");
-        let stream = Arc::new(ChannelStream::new(1024, [name.clone()]));
-        let lane = stream.lane(&name).unwrap().producer;
+        let indexes: Vec<IndexName> = if two {
+            vec![orders(), users()]
+        } else {
+            vec![users()]
+        };
+        let stream = Arc::new(ChannelStream::over(1024, indexes.clone(), [name.clone()]));
+        let lane = stream
+            .lane(&LaneKey::new(users(), name.clone()))
+            .unwrap()
+            .producer;
+        let orders_lane = two.then(|| {
+            stream
+                .lane(&LaneKey::new(orders(), name.clone()))
+                .unwrap()
+                .producer
+        });
         let (control, _) = tokio::sync::mpsc::channel(4);
         let probe = Arc::new(probe);
         let observer = Arc::new(PositionObserver::default());
         let stop = Stop::new();
+        let progress = Arc::new(Progress::of(indexes.clone(), [name.clone()]));
+        let mappings = indexes
+            .iter()
+            .map(|index| IndexMapping {
+                index: index.clone(),
+                ..mapping()
+            })
+            .collect();
         let sink_engine = Arc::new(
             SinkEngine::new(
-                name,
+                name.clone(),
                 Arc::clone(&probe) as Arc<dyn Sink>,
                 Arc::clone(&stream) as Arc<dyn Stream>,
-                vec![mapping()],
+                mappings,
+                Arc::clone(&progress),
             )
             .with_writes(writes)
+            .with_write_documents(write_documents)
             .with_failure_policies(policies)
             .with_stop(stop.clone())
             .with_observer(Arc::clone(&observer) as Arc<dyn Observer>),
@@ -330,12 +440,17 @@ impl Rig {
             probe,
             sink_engine,
             stream,
+            progress,
+            name,
             observer,
             lane,
+            orders: orders_lane,
             control,
             engine: None,
             stop,
             version: 0,
+            published: HashMap::new(),
+            last_live: HashMap::new(),
         }
     }
 
@@ -355,7 +470,7 @@ impl Rig {
         let mut rig = self.start();
         rig.live(0, &["warm"]).await;
         until("the warm-up write", || {
-            rig.stream.watermark() == Some(Position(0))
+            super::covered(&rig.progress) == Some(Position::new(0))
         })
         .await;
         rig.probe.log.lock().unwrap().clear();
@@ -368,13 +483,48 @@ impl Rig {
         self.engine.take().unwrap().await.unwrap()
     }
 
+    /// The index an id belongs to.
+    fn index_of(&self, id: &str) -> IndexName {
+        if self.orders.is_some() && (matches!(id, "d" | "e" | "f") || id.starts_with("orders-")) {
+            orders()
+        } else {
+            users()
+        }
+    }
+
+    /// The ids of each index, users first; an index with none is left out.
+    fn split<'a>(&self, ids: &[&'a str]) -> Vec<(IndexName, Vec<&'a str>)> {
+        let mut parts: Vec<(IndexName, Vec<&str>)> = Vec::new();
+        for index in [users(), orders()] {
+            let mine: Vec<&str> = ids
+                .iter()
+                .copied()
+                .filter(|id| self.index_of(id) == index)
+                .collect();
+            if !mine.is_empty() {
+                parts.push((index, mine));
+            }
+        }
+        parts
+    }
+
+    fn producer(&self, index: &IndexName) -> &dyn Producer<LaneItem> {
+        match &self.orders {
+            Some(orders_lane) if *index == orders() => orders_lane.as_ref(),
+            _ => self.lane.as_ref(),
+        }
+    }
+
     fn envelopes(&mut self, ids: &[&str], position: Option<Position>) -> Arc<[Envelope]> {
         self.version += 1;
         let version = self.version;
+        for id in ids {
+            self.published.insert((*id).to_owned(), version);
+        }
         ids.iter()
             .map(|id| {
                 Envelope::upsert(
-                    users(),
+                    self.index_of(id),
                     *id,
                     GenericValue::Map(BTreeMap::from([(
                         "v".to_owned(),
@@ -388,35 +538,59 @@ impl Rig {
             .into()
     }
 
+    /// Publish a live batch, one item per index it touches, then register
+    /// each as the ingest engine does (a lane it has nothing for, skipped).
     async fn live(&mut self, position: u64, ids: &[&str]) {
-        let envelopes = self.envelopes(ids, Some(Position(position)));
-        self.lane
-            .publish(LaneItem::Batch(Batch {
-                position: Some(Position(position)),
-                changes: 1,
-                envelopes,
-            }))
-            .await
-            .unwrap();
+        let position = Position::new(position);
+        let parts = self.split(ids);
+        for (index, mine) in &parts {
+            self.last_live.insert(index.clone(), position.seq);
+            let envelopes = self.envelopes(mine, Some(position));
+            self.producer(index)
+                .publish(LaneItem::Batch(Batch {
+                    position: Some(position),
+                    changes: 1,
+                    envelopes,
+                    hold: Default::default(),
+                    walked: None,
+                }))
+                .await
+                .unwrap();
+            self.progress.published(
+                &LaneKey::new(index.clone(), self.name.clone()),
+                position,
+                position,
+            );
+        }
+        if self.orders.is_some() {
+            for index in [users(), orders()] {
+                if !parts.iter().any(|(touched, _)| *touched == index) {
+                    self.progress
+                        .skipped(&LaneKey::new(index, self.name.clone()), position);
+                }
+            }
+        }
     }
 
     async fn backfill(&mut self, ids: &[&str]) {
-        let envelopes = self.envelopes(ids, None);
-        self.lane
-            .publish(LaneItem::Batch(Batch {
-                position: None,
-                changes: 0,
-                envelopes,
-            }))
-            .await
-            .unwrap();
+        for (index, mine) in self.split(ids) {
+            let envelopes = self.envelopes(&mine, None);
+            self.producer(&index)
+                .publish(LaneItem::Batch(Batch {
+                    position: None,
+                    changes: 0,
+                    envelopes,
+                    hold: Default::default(),
+                    walked: None,
+                }))
+                .await
+                .unwrap();
+        }
     }
 
     async fn complete(&self) {
         self.lane
-            .publish(LaneItem::SnapshotComplete {
-                indexes: vec![users()],
-            })
+            .publish(LaneItem::SnapshotComplete { index: users() })
             .await
             .unwrap();
     }
@@ -467,7 +641,7 @@ async fn settle() {
 fn seeds() -> Vec<u64> {
     match std::env::var("FLUSSO_SCHEDULE_SEED") {
         Ok(seed) => vec![seed.parse().expect("FLUSSO_SCHEDULE_SEED is a number")],
-        Err(_) => (1..=40).collect(),
+        Err(_) => (1..=200).collect(),
     }
 }
 
@@ -478,79 +652,125 @@ fn seeds() -> Vec<u64> {
 /// fails while later ones sharing its documents wait. Builds are numbered in
 /// lane order (the version), as the one ingest task builds them. Whatever the
 /// schedule, no document is written twice at once, its versions never go
-/// down, every document ends at its last version, and the lane drains with
-/// the watermark at the last position.
-#[tokio::test(start_paused = true)]
-async fn a_document_is_never_written_twice_at_once_and_its_versions_never_go_down() {
-    const IDS: [&str; 6] = ["a", "b", "c", "d", "e", "f"];
+/// down, every document ends at its last version, the lane drains with the
+/// confirmation at the last position, and each lane's last live position ends
+/// searchable with no new traffic. Every schedule also runs over a sink that
+/// holds one lock across its caught-up writes (as the OpenSearch sink holds
+/// its refresh) and leaves unforced writes `Deferred`. The merging schedules
+/// run with the default merge wait, so items ready while a write is out wait
+/// for it (bounded) before going out merged.
+#[test]
+fn a_document_is_never_written_twice_at_once_and_its_versions_never_go_down() {
     let mut concurrent = false;
     let mut restarted = false;
-    for writes in [1, 2, 4] {
-        for seed in seeds() {
-            let mut rng = Rng(seed * 7919 + writes as u64);
-            let mut rig =
-                Rig::new(Probe::new().with_delays(seed).failing_at_random(3), writes).start();
-            let mut last: HashMap<&str, i64> = HashMap::new();
-            let mut position = 0;
-            for _ in 0..60 {
-                let mut ids: Vec<&str> =
-                    IDS.iter().copied().filter(|_| rng.below(3) == 0).collect();
-                if ids.is_empty() {
-                    ids.push(IDS[rng.below(IDS.len() as u64) as usize]);
-                }
-                if rng.below(3) == 0 {
-                    rig.backfill(&ids).await;
-                } else {
-                    position += 1;
-                    rig.live(position, &ids).await;
-                }
-                for id in &ids {
-                    last.insert(id, rig.version);
-                }
-                if rng.below(4) == 0 {
-                    tokio::time::sleep(Duration::from_millis(rng.below(5))).await;
+    for locked in [false, true] {
+        for two in [false, true] {
+            for merge in [false, true] {
+                for writes in [1, 2, 4] {
+                    for seed in seeds() {
+                        let (at_once, failed) = super::paused_runtime()
+                            .block_on(one_schedule(seed, writes, merge, two, locked));
+                        concurrent |= at_once;
+                        restarted |= failed;
+                    }
                 }
             }
-            for _ in 0..60_000 {
-                if rig.stream.is_idle() {
-                    break;
-                }
-                if rig.engine.as_ref().is_some_and(|run| run.is_finished()) {
-                    assert!(rig.ended().await.is_err(), "only a failure ends the run");
-                    restarted = true;
-                    rig = rig.start();
-                }
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-            assert!(
-                rig.stream.is_idle(),
-                "seed {seed}, writes {writes}: the lane drains"
-            );
-
-            let probe = &rig.probe;
-            assert!(
-                !probe.overlapped.load(Ordering::SeqCst),
-                "seed {seed}, writes {writes}: a document was written twice at once"
-            );
-            assert!(
-                !probe.regressed.load(Ordering::SeqCst),
-                "seed {seed}, writes {writes}: a document's version went down"
-            );
-            let written = probe.versions.lock().unwrap().clone();
-            for (id, version) in &last {
-                assert_eq!(
-                    written.get(*id),
-                    Some(version),
-                    "seed {seed}, writes {writes}: {id} ends at its last version"
-                );
-            }
-            assert_eq!(rig.stream.watermark(), Some(Position(position)));
-            assert!(probe.most_at_once() <= writes);
-            concurrent |= probe.most_at_once() > 1;
         }
     }
     assert!(concurrent, "some schedule wrote several items at once");
     assert!(restarted, "some schedule failed a write and restarted");
+}
+
+/// One schedule of the test above, on its own runtime so a seed replays
+/// alone: whether it wrote several items at once, and whether it restarted.
+async fn one_schedule(
+    seed: u64,
+    writes: usize,
+    merge: bool,
+    two: bool,
+    locked: bool,
+) -> (bool, bool) {
+    const IDS: [&str; 6] = ["a", "b", "c", "d", "e", "f"];
+    let mut restarted = false;
+    let mut rng = Rng(seed * 7919 + writes as u64);
+    let probe = Probe::new().with_delays(seed).failing_at_random(3);
+    let probe = if locked {
+        probe.locking_refreshes()
+    } else {
+        probe
+    };
+    let mut rig = if two {
+        Rig::two_indexes(probe, writes, merge)
+    } else if merge {
+        Rig::merging(probe, writes)
+    } else {
+        Rig::new(probe, writes)
+    }
+    .start();
+    let mut last: HashMap<&str, i64> = HashMap::new();
+    let mut position = 0;
+    for _ in 0..60 {
+        let mut ids: Vec<&str> = IDS.iter().copied().filter(|_| rng.below(3) == 0).collect();
+        if ids.is_empty() {
+            ids.push(IDS[rng.below(IDS.len() as u64) as usize]);
+        }
+        if rng.below(3) == 0 {
+            rig.backfill(&ids).await;
+        } else {
+            position += 1;
+            rig.live(position, &ids).await;
+        }
+        for id in &ids {
+            last.insert(id, rig.published[*id]);
+        }
+        if rng.below(4) == 0 {
+            tokio::time::sleep(Duration::from_millis(rng.below(5))).await;
+        }
+    }
+    for _ in 0..60_000 {
+        if rig.stream.is_idle() {
+            break;
+        }
+        if rig.engine.as_ref().is_some_and(|run| run.is_finished()) {
+            assert!(rig.ended().await.is_err(), "only a failure ends the run");
+            restarted = true;
+            rig = rig.start();
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert!(
+        rig.stream.is_idle(),
+        "seed {seed}, writes {writes}, merge {merge}, two indexes {two}: the lane drains"
+    );
+
+    let probe = &rig.probe;
+    assert!(
+        !probe.overlapped.load(Ordering::SeqCst),
+        "seed {seed}, writes {writes}, merge {merge}, two indexes {two}: a document was written twice at once"
+    );
+    assert!(
+        !probe.regressed.load(Ordering::SeqCst),
+        "seed {seed}, writes {writes}, merge {merge}, two indexes {two}: a document's version went down"
+    );
+    let written = probe.versions.lock().unwrap().clone();
+    for (id, version) in &last {
+        assert_eq!(
+            written.get(*id),
+            Some(version),
+            "seed {seed}, writes {writes}, merge {merge}, two indexes {two}: {id} ends at its last version"
+        );
+    }
+    assert_eq!(super::covered(&rig.progress), Some(Position::new(position)));
+    assert!(probe.most_at_once() <= writes);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    for (index, last) in &rig.last_live {
+        assert!(
+            rig.observer.searchable_on(index).contains(last),
+            "seed {seed}, writes {writes}, merge {merge}, two indexes {two}, locked {locked}: \
+             {index}'s last live position {last} ends searchable with no new traffic"
+        );
+    }
+    (probe.most_at_once() > 1, restarted)
 }
 
 #[tokio::test(start_paused = true)]
@@ -594,10 +814,10 @@ async fn an_item_waits_for_an_earlier_one_sharing_a_document() {
 }
 
 /// Item 3 and 2 finish while item 1 is still being written: the lane's
-/// watermark and the sink's applied fence stay before 1, then move to 3 once
+/// confirmation and the sink's applied fence stay before 1, then move to 3 once
 /// it lands.
 #[tokio::test(start_paused = true)]
-async fn a_later_write_finishing_first_moves_neither_the_watermark_nor_the_fence() {
+async fn a_later_write_finishing_first_moves_neither_confirmation_nor_the_fence() {
     let mut rig = Rig::new(Probe::new().holding(&["a"]), 4).warm().await;
     rig.live(1, &["a"]).await;
     rig.live(2, &["b"]).await;
@@ -613,15 +833,15 @@ async fn a_later_write_finishing_first_moves_neither_the_watermark_nor_the_fence
     .await;
     settle().await;
     assert_eq!(
-        rig.stream.watermark(),
-        Some(Position(0)),
+        super::covered(&rig.progress),
+        Some(Position::new(0)),
         "1 is still being written"
     );
     assert!(rig.applied().is_empty(), "{:?}", rig.applied());
 
     rig.probe.release("a");
     until("the lane to drain", || rig.stream.is_idle()).await;
-    assert_eq!(rig.stream.watermark(), Some(Position(3)));
+    assert_eq!(super::covered(&rig.progress), Some(Position::new(3)));
     assert_eq!(rig.applied(), ["applied primary 3"]);
 }
 
@@ -737,15 +957,15 @@ async fn a_failed_write_lets_the_others_finish_and_comes_back_alone() {
     rig.probe.release("a");
     assert!(rig.ended().await.is_err(), "the failed write ends the run");
     assert_eq!(
-        rig.stream.watermark(),
-        Some(Position(0)),
+        super::covered(&rig.progress),
+        Some(Position::new(0)),
         "1 is not written"
     );
 
     let rig = rig.start();
     until("the lane to drain", || rig.stream.is_idle()).await;
     assert_eq!(rig.probe.starts(), ["a", "b", "c", "a"]);
-    assert_eq!(rig.stream.watermark(), Some(Position(3)));
+    assert_eq!(super::covered(&rig.progress), Some(Position::new(3)));
 }
 
 /// After a run that ended in a failed write, the restarted engine writes the
@@ -794,7 +1014,7 @@ async fn after_a_failed_run_the_oldest_item_is_written_alone_until_it_lands() {
     );
     rig.probe.release("c");
     until("the lane to drain", || rig.stream.is_idle()).await;
-    assert_eq!(rig.stream.watermark(), Some(Position(4)));
+    assert_eq!(super::covered(&rig.progress), Some(Position::new(4)));
 }
 
 /// A stop lets the live writes in flight land and skips the backfill still
@@ -819,7 +1039,7 @@ async fn a_stop_finishes_the_writes_in_flight_and_skips_waiting_backfill() {
         "the backfill page is skipped"
     );
     assert!(!rig.probe.log().contains(&"seeded users".to_owned()));
-    assert_eq!(rig.stream.watermark(), Some(Position(2)));
+    assert_eq!(super::covered(&rig.progress), Some(Position::new(2)));
 }
 
 /// A stop requested while the run waits on its only write, with nothing
@@ -839,7 +1059,7 @@ async fn a_stop_during_the_only_write_still_skips_the_backfill_behind_it() {
     until("the lane to drain", || rig.stream.is_idle()).await;
     assert_eq!(rig.probe.starts(), ["a"], "the backfill page is skipped");
     assert!(!rig.probe.log().contains(&"seeded users".to_owned()));
-    assert_eq!(rig.stream.watermark(), Some(Position(1)));
+    assert_eq!(super::covered(&rig.progress), Some(Position::new(1)));
 }
 
 /// Three writes in flight; the last one granted is caught up and returns
@@ -883,14 +1103,14 @@ async fn an_idle_engine_makes_its_last_writes_searchable() {
 /// A stream over a channel whose acknowledgement of any item holding
 /// document `fail` errs, as a broker might.
 #[derive(Debug)]
-struct FailingAcks {
-    inner: Arc<ChannelStream>,
-    fail: &'static str,
+pub(super) struct FailingAcks {
+    pub(super) inner: Arc<ChannelStream>,
+    pub(super) fail: &'static str,
 }
 
 impl Stream for FailingAcks {
-    fn lane(&self, sink: &kernel::SinkName) -> stream::Result<stream::Lane> {
-        let lane = self.inner.lane(sink)?;
+    fn lane(&self, key: &LaneKey) -> stream::Result<stream::Lane> {
+        let lane = self.inner.lane(key)?;
         Ok(stream::Lane {
             producer: lane.producer,
             consumer: Box::new(FailingConsumer {
@@ -900,12 +1120,12 @@ impl Stream for FailingAcks {
         })
     }
 
-    fn requests(&self) -> stream::Result<stream::RequestLane> {
-        self.inner.requests()
+    fn lanes(&self, sink: &kernel::SinkName) -> Vec<LaneKey> {
+        self.inner.lanes(sink)
     }
 
-    fn watermark(&self) -> Option<Position> {
-        self.inner.watermark()
+    fn requests(&self) -> stream::Result<stream::RequestLane> {
+        self.inner.requests()
     }
 
     fn is_idle(&self) -> bool {
@@ -966,7 +1186,7 @@ impl stream::AckHandle for FailingAck {
 #[tokio::test(start_paused = true)]
 async fn a_failed_acknowledgement_still_waits_for_the_writes_in_flight() {
     let name = sink_name("primary");
-    let channel = Arc::new(ChannelStream::new(1024, [name.clone()]));
+    let channel = Arc::new(ChannelStream::over(1024, [users()], [name.clone()]));
     let stream = Arc::new(FailingAcks {
         inner: Arc::clone(&channel),
         fail: "b",
@@ -977,9 +1197,13 @@ async fn a_failed_acknowledgement_still_waits_for_the_writes_in_flight() {
         Arc::clone(&probe) as Arc<dyn Sink>,
         stream as Arc<dyn Stream>,
         vec![mapping()],
+        Arc::new(crate::Progress::of([users()], [name.clone()])),
     )
     .with_writes(4);
-    let lane = channel.lane(&name).unwrap().producer;
+    let lane = channel
+        .lane(&LaneKey::new(users(), name.clone()))
+        .unwrap()
+        .producer;
     let run = tokio::spawn(async move {
         let (_control, mut rx) = tokio::sync::mpsc::channel(1);
         engine.run(&mut rx).await
@@ -989,14 +1213,16 @@ async fn a_failed_acknowledgement_still_waits_for_the_writes_in_flight() {
             users(),
             id,
             GenericValue::Map(BTreeMap::new()),
-            Some(Position(position)),
+            Some(Position::new(position)),
             chrono::Utc::now(),
         )]
         .into();
         lane.publish(LaneItem::Batch(Batch {
-            position: Some(Position(position)),
+            position: Some(Position::new(position)),
             changes: 1,
             envelopes,
+            hold: Default::default(),
+            walked: None,
         }))
         .await
         .unwrap();
@@ -1032,7 +1258,7 @@ async fn warm_up(rig: &mut Rig) {
 
 /// Under `stop`, a rejection the sink reports at its write's first poll
 /// fails the run at once: nothing granted after it starts, the write still
-/// in flight beside it (`a`) lands, and the watermark stops before the
+/// in flight beside it (`a`) lands, and the confirmation stops before the
 /// rejected item. The probe answers `b` on its first poll: that is the
 /// precondition of "nothing after it starts".
 #[tokio::test(start_paused = true)]
@@ -1061,18 +1287,18 @@ async fn a_stop_rejection_seen_at_its_first_poll_starts_nothing_after_it() {
         "the rejection under stop fails the run"
     );
     assert_eq!(
-        rig.stream.watermark(),
-        Some(Position(2)),
+        super::covered(&rig.progress),
+        Some(Position::new(2)),
         "a landed; b is unacknowledged, so the lane confirms nothing past 2"
     );
 }
 
 /// Under `stop`, while the rejected write is still in flight the run doesn't
 /// know yet: disjoint items behind it start and land. What is promised is
-/// that the lane's watermark stays before the rejected item, and the next
+/// that the lane's confirmation stays before the rejected item, and the next
 /// run writes it alone (the barrier).
 #[tokio::test(start_paused = true)]
-async fn a_stop_rejection_still_in_flight_lets_disjoint_writes_land_but_holds_the_watermark() {
+async fn a_stop_rejection_still_in_flight_lets_disjoint_writes_land_but_holds_confirmation() {
     let mut rig = Rig::new(Probe::new().holding(&["b"]).rejecting(&["b"]), 4).start();
     warm_up(&mut rig).await;
     rig.live(2, &["b"]).await;
@@ -1082,13 +1308,13 @@ async fn a_stop_rejection_still_in_flight_lets_disjoint_writes_land_but_holds_th
     })
     .await;
     assert_eq!(
-        rig.stream.watermark(),
-        Some(Position(1)),
+        super::covered(&rig.progress),
+        Some(Position::new(1)),
         "c landed, but b before it is still unacknowledged"
     );
     rig.probe.release("b");
     assert!(rig.ended().await.is_err());
-    assert_eq!(rig.stream.watermark(), Some(Position(1)));
+    assert_eq!(super::covered(&rig.progress), Some(Position::new(1)));
 
     let rig = rig.start();
     settle().await;
@@ -1115,7 +1341,10 @@ async fn a_fresh_engine_writes_nothing_past_a_persistent_stop_rejection() {
     rig.probe.release("a");
     assert!(rig.ended().await.is_err());
     assert_eq!(rig.probe.starts(), ["a"], "nothing past the rejected item");
-    assert_eq!(rig.stream.watermark(), None);
+    assert_eq!(
+        rig.progress.landed(),
+        source::cdc::Landed::Before(Position::new(1))
+    );
 }
 
 /// The oldest item fails first and a later one lands after it: the later one
@@ -1166,7 +1395,7 @@ async fn a_write_failing_at_its_first_poll_holds_back_a_later_item_sharing_its_d
     until("the lane to drain", || rig.stream.is_idle()).await;
     assert_eq!(rig.probe.starts(), ["z", "x", "x", "x"]);
     assert!(!rig.probe.regressed.load(Ordering::SeqCst));
-    assert_eq!(rig.stream.watermark(), Some(Position(3)));
+    assert_eq!(super::covered(&rig.progress), Some(Position::new(3)));
 }
 
 /// A stop with backfill still on the lane and every write slot busy: the
@@ -1194,7 +1423,7 @@ async fn a_stop_with_backfill_on_the_lane_and_every_slot_busy_writes_none_of_it(
         "no backfill page is written"
     );
     assert!(!rig.probe.log().contains(&"seeded users".to_owned()));
-    assert_eq!(rig.stream.watermark(), Some(Position(3)));
+    assert_eq!(super::covered(&rig.progress), Some(Position::new(3)));
 }
 
 /// Under `skip`, a rejected document is quarantined and its write
@@ -1218,13 +1447,13 @@ async fn a_skip_rejection_beside_writes_in_flight_is_quarantined_and_the_run_goe
     })
     .await;
     assert_eq!(
-        rig.stream.watermark(),
-        Some(Position(0)),
+        super::covered(&rig.progress),
+        Some(Position::new(0)),
         "a is still being written, so nothing is confirmed yet"
     );
     rig.probe.release("a");
     until("the lane to drain", || rig.stream.is_idle()).await;
-    assert_eq!(rig.stream.watermark(), Some(Position(3)));
+    assert_eq!(super::covered(&rig.progress), Some(Position::new(3)));
     assert!(
         rig.engine.as_ref().is_some_and(|run| !run.is_finished()),
         "a skipped rejection does not end the run"
@@ -1324,4 +1553,8 @@ async fn an_ordered_sink_gets_its_items_in_lane_order_one_at_a_time() {
     until("the lane to drain", || rig.stream.is_idle()).await;
     assert_eq!(rig.probe.starts(), ["a", "p", "c", "d"], "exact lane order");
     assert_eq!(rig.probe.most_at_once(), 1);
+}
+
+fn orders() -> IndexName {
+    IndexName::try_new("orders").unwrap()
 }

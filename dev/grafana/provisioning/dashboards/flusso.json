@@ -375,6 +375,87 @@
           "refId": "B"
         }
       ]
+    },
+    {
+      "id": 15,
+      "title": "Built documents held (bytes; the budget is [concurrency] max_built_mib)",
+      "description": "Heap of built documents not yet acknowledged by every sink, by work. Backfill holds at most half of the budget. A flat line at the budget means a sink isn't acknowledging and ingest is paced; the waits are batches that waited for room.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 52 },
+      "fieldConfig": {
+        "defaults": { "unit": "bytes" },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "B" },
+            "properties": [
+              { "id": "unit", "value": "short" },
+              { "id": "custom.axisPlacement", "value": "right" }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (work) (flusso_memory_built_bytes)",
+          "legendFormat": "{{work}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (work) (rate(flusso_memory_refused_total[5m]))",
+          "legendFormat": "{{work}} waits/s",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "title": "Lane stall age (s; a lane that writes nothing pins the slot for every index)",
+      "description": "How long each (index, sink) lane's oldest outstanding change has stayed its oldest. 0 while the lane writes. FlussoLaneStalled fires past 10 minutes.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 52 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "thresholdsStyle": { "mode": "line" } },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 600 } ] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "max by (index, sink) (flusso_lane_stall_age_seconds)",
+          "legendFormat": "{{index}} → {{sink}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "title": "WAL held per lane (bytes; the pinning lane holds the slot's whole lag)",
+      "description": "Bytes of WAL the replication slot keeps because of each lane, while it has a change outstanding. The lane marked pinned holds the slot back the most.",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 60 },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "max by (index, sink) (flusso_lane_wal_behind_bytes)",
+          "legendFormat": "{{index}} → {{sink}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "max by (index, sink) (flusso_lane_wal_behind_bytes * on (index, sink) flusso_slot_pinned_by)",
+          "legendFormat": "pinned by {{index}} → {{sink}}",
+          "refId": "B"
+        }
+      ]
     }
   ]
 }

@@ -65,12 +65,15 @@ let page = User::query()
 | `get` | applied |
 | `send`, `ids`, `count`, cursors, walks, `msearch`, combined search | searchable |
 
-A fenced client waits **once per level**, not once per request, and its clones share that. Three searches through `fresh` cost one wait. Searchable covers applied, so a `get` after a search costs nothing.
+Each read waits only on the **indexes it reads**: a root's `get` or search on its root's index, a combined search, cursor walk or `msearch` on every index it names. A slow index (a backfill, a reindex, writes that take long) then holds up only its own reads. A refused document under `on_error = "stop"` still stops the whole sink, so it holds up every read on it until fixed.
+
+A fenced client waits **once per level and index**, not once per request, and its clones share that. Three searches of `users` through `fresh` cost one wait; a search of `orders` after them costs one more. Searchable covers applied, so a `get` after a search of the same index costs nothing.
 
 To wait explicitly, for instance before reads made elsewhere:
 
 ```rust
-client.wait(&position).await?;           // searchable: every read sees the commit
+client.wait(&position).await?;           // searchable on every index: every read sees the commit
+client.wait_on(&position, &["users"]).await?;  // searchable on these indexes only
 client.wait_applied(&position).await?;   // applied: a get sees it; returns sooner under a backlog
 ```
 
@@ -91,7 +94,8 @@ A fence never falls back to a stale read. The read fails, and OpenSearch isn't a
 | --- | --- |
 | `Stopping` | flusso is stopping: a deploy or a restart. |
 | `Starting` | flusso isn't following the source yet. A daemon that gives no reason (0.17) means this. |
-| `Rebuilding` | A sink is rebuilding the index; see [the limit below](#while-flusso-restarts). |
+| `Rebuilding` | A sink is rebuilding an index the read covers (a reindex, or a rebuild after the slot was lost): reads still see the old copy. |
+| `Backfilling` | A sink is seeding an index the read covers for the first time: reads see it filling. |
 | `Unreachable` | Refused, reset or dropped connection, no answer in time, or a gateway's `502`/`503`/`504`. |
 | `Throttled` | A `429` from something in front of flusso. |
 | `Unusable` | A `503` with a reason this client doesn't know. |
@@ -127,7 +131,7 @@ A pause is the backoff (100 ms doubling to 2 s) or the `Retry-After` flusso sent
 
 After an ordinary restart the new process answers the same question the old one was asked: the position is the database's own. To a caller, a deploy is a slow read, not an error, as long as the timeout covers the gap.
 
-> ⚠️ **Warning** — A fence doesn't vouch for an index a sink is rebuilding: a first backfill, a rebuild after the slot was lost (see [Recover from a dropped slot](../operate/dropped-slot.md)), or a [reindex](../operate/reindex.md). Today the daemon can answer `200` there while the document isn't readable yet ([#379](https://github.com/alias2k/flusso/issues/379)). Once that's fixed it answers `503` with the reason `rebuilding`, which the fence retries like any other unavailable answer.
+> ℹ️ **Info** — A fence never passes for an index a sink is seeding or rebuilding: a first backfill, a rebuild after the slot was lost (see [Recover from a dropped slot](../operate/dropped-slot.md)), or a [reindex](../operate/reindex.md). flusso holds the wait and passes it once the index is seeded; past the fence's timeout the read fails with `FenceUnavailable` and the cause `Backfilling` or `Rebuilding`, never with a stale or partial result. A long rebuild outlasts the default twenty seconds: size `fence_timeout` for it, or handle the error.
 
 > ℹ️ **Info** — When flusso is caught up, both levels are reached within one write of the commit. While a backlog drains, `searchable` trails `applied` by up to the sink's `refresh_interval`, because flusso never refreshes on a reader's behalf.
 

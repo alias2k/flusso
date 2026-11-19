@@ -29,6 +29,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use testcontainers_modules::testcontainers::ImageExt;
+use testcontainers_modules::testcontainers::runners::AsyncRunner;
+
 /// How long closing the HTTP surfaces may take of a stop, and room for a slow
 /// runner on top.
 const SIDE_STEP: Duration = Duration::from_secs(5);
@@ -1036,4 +1039,208 @@ fn unique() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos()
+}
+
+/// A backfill killed mid-way (`SIGKILL`, nothing drained) resumes where it
+/// durably got (ADR 0012 stage 8b): killed twice, each time once a checkpoint
+/// was recorded, with writes between the kill and the restart below and
+/// above any point it could have reached (deletes and updates of low ids,
+/// updates of high ones, new ids past the end). Each restarted run reads
+/// fewer key-page rows than the table holds, counted by
+/// `pg_stat_statements`, and the index ends equal to the table: a resume
+/// that skipped a row would leave a hole.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires docker"]
+async fn a_killed_backfill_resumes_and_reads_fewer_rows_than_a_full_one() {
+    const ROWS: i64 = 1_000_000;
+    // Slow enough for several checkpoints, ten seconds apart.
+    const PACE: &[&str] = &["--writes", "1", "--batch-max-changes", "64"];
+    let postgres = test_postgres::image()
+        .with_cmd([
+            "postgres",
+            "-c",
+            "wal_level=logical",
+            "-c",
+            "shared_preload_libraries=pg_stat_statements",
+        ])
+        .start()
+        .await
+        .unwrap();
+    let port = postgres.get_host_port_ipv4(5432).await.unwrap();
+    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    let (_opensearch, os_url) = common::start_opensearch().await;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .unwrap();
+    for statement in [
+        "CREATE EXTENSION pg_stat_statements",
+        TABLE,
+        "INSERT INTO t SELECT g, 'row ' || g FROM generate_series(1, 1000000) g",
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(statement.to_owned()))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let dir = project_opensearch(&url, &os_url, "resume");
+
+    let mut read = Vec::new();
+    for round in 0..3 {
+        reset_statements(&pool).await;
+        let mut flusso = Flusso::spawn(&dir, PACE);
+        if round == 2 {
+            wait_until_indexed(&pool, &os_url).await;
+            read.push(key_page_rows(&pool).await);
+            flusso.signal("TERM");
+            flusso.exit_within(Duration::from_secs(40));
+            break;
+        }
+        let public = flusso.public_address();
+        let deadline = Instant::now() + Duration::from_secs(180);
+        while checkpoints(public).await < 1 {
+            assert!(
+                !seeded(public).await,
+                "round {round}: the backfill ended before a checkpoint: {}",
+                flusso.stderr()
+            );
+            assert!(flusso.running(), "flusso exited: {}", flusso.stderr());
+            assert!(
+                Instant::now() < deadline,
+                "no checkpoint: {}",
+                flusso.stderr()
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        flusso.signal("KILL");
+        let _ = flusso.exit_within(Duration::from_secs(10));
+        read.push(key_page_rows(&pool).await);
+        for statement in [
+            "DELETE FROM t WHERE id BETWEEN 1 AND 500".to_owned(),
+            "UPDATE t SET name = 'low ' || id || ' ' || clock_timestamp() WHERE id BETWEEN 1000 AND 1500"
+                .to_owned(),
+            "UPDATE t SET name = 'high ' || id || ' ' || clock_timestamp() WHERE id > 999500"
+                .to_owned(),
+            format!(
+                "INSERT INTO t SELECT g, 'new ' || g FROM generate_series({}, {}) g",
+                1_000_001 + 100 * round,
+                1_000_100 + 100 * round
+            ),
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(statement))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    }
+    eprintln!("key-page rows read per run: {read:?} ({ROWS} rows in the table at the start)");
+    let resumed = &read[1..];
+    for rows in resumed {
+        assert!(
+            *rows < ROWS,
+            "a resumed run read {rows} key-page rows, as many as the table holds: {read:?}"
+        );
+    }
+}
+
+/// Wait until the index holds exactly the table, for at most three minutes.
+async fn wait_until_indexed(pool: &sqlx::PgPool, os_url: &str) {
+    let wanted: std::collections::BTreeMap<i32, String> = sqlx::query_as("SELECT id, name FROM t")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        let indexed = names(os_url, "t").await;
+        if indexed == wanted {
+            return;
+        }
+        if Instant::now() > deadline {
+            let missing: Vec<_> = wanted
+                .keys()
+                .filter(|id| !indexed.contains_key(id))
+                .take(5)
+                .collect();
+            let stale: Vec<_> = indexed
+                .iter()
+                .filter(|(id, name)| wanted.get(id).is_some_and(|wanted| wanted != *name))
+                .take(5)
+                .collect();
+            let extra: Vec<_> = indexed
+                .keys()
+                .filter(|id| !wanted.contains_key(id))
+                .take(5)
+                .collect();
+            panic!(
+                "the index differs from the table: missing {missing:?}, stale {stale:?}, extra {extra:?} \
+                 ({} rows, {} documents)",
+                wanted.len(),
+                indexed.len()
+            );
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+async fn reset_statements(pool: &sqlx::PgPool) {
+    sqlx::query("SELECT pg_stat_statements_reset()")
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// Rows the backfill's key pages returned since the last reset.
+async fn key_page_rows(pool: &sqlx::PgPool) -> i64 {
+    sqlx::query_scalar(
+        "SELECT coalesce(sum(rows), 0)::int8 FROM pg_stat_statements WHERE query LIKE '%\"within\"%'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// Whether `t` is seeded on the sink, from `/status`.
+async fn seeded(public: SocketAddr) -> bool {
+    let Ok(response) = reqwest::get(format!("http://{public}/status")).await else {
+        return false;
+    };
+    let Ok(status) = response.json::<serde_json::Value>().await else {
+        return false;
+    };
+    status["sinks"]["primary"]["indexes"]["t"] == "seeded"
+}
+
+/// The `t` lane's backfill checkpoints this run, from `/status`.
+async fn checkpoints(public: SocketAddr) -> u64 {
+    let Ok(response) = reqwest::get(format!("http://{public}/status")).await else {
+        return 0;
+    };
+    let Ok(status) = response.json::<serde_json::Value>().await else {
+        return 0;
+    };
+    status["sinks"]["primary"]["lanes"]["t"]["backfill_checkpoints"]
+        .as_u64()
+        .unwrap_or(0)
+}
+
+impl Flusso {
+    /// The public address, once the process logged it.
+    fn public_address(&mut self) -> SocketAddr {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Some(address) = listening(&self.stderr(), "public") {
+                return address;
+            }
+            assert!(self.running(), "flusso exited at start: {}", self.stderr());
+            assert!(
+                Instant::now() < deadline,
+                "no public address: {}",
+                self.stderr()
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
 }

@@ -272,7 +272,7 @@ mod tests {
         );
         validate(&cfg).unwrap();
         assert_eq!(source_config(&cfg).unwrap().slot, "flusso");
-        assert_eq!(stream_config(&cfg).unwrap().capacity, 1024);
+        assert_eq!(stream_config(&cfg).unwrap().capacity, None);
     }
 
     #[test]
@@ -425,7 +425,7 @@ mod tests {
         assert_eq!(postgres.publication, "flusso");
         assert!(!postgres.manage_publication);
         assert!(!postgres.manage_replica_identity);
-        assert_eq!(stream_config(&cfg).unwrap().capacity, 64);
+        assert_eq!(stream_config(&cfg).unwrap().capacity, Some(64));
         let (name, entry) = cfg.sinks.iter().next().unwrap();
         assert_eq!(name.as_ref(), "stdout");
         match sink_config(name, entry).unwrap() {

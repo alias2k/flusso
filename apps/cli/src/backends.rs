@@ -25,7 +25,7 @@ use source_postgres::{
     ColumnTypes, PgDocumentBuilder, PostgresConfig, WalChangeCapture, replication_config,
     sql_connection_url,
 };
-use stream::Stream;
+use stream::{LaneKey, Stream};
 use stream_channel::ChannelStream;
 
 use script::{ScriptedBuilder, Scripts};
@@ -61,7 +61,7 @@ impl Backends for FlussoBackends {
             .context("applying the source TLS settings to the connection URL")?;
 
         let spec = source_spec(&config);
-        let (documents, column_types) = build_documents(&sql_url, &config).await?;
+        let (documents, resolver, column_types) = build_documents(&sql_url, &config).await?;
         let capture = WalChangeCapture::new(replication, sql_url.clone())
             .with_publication_management(spec.all_tables(), postgres.manage_publication)
             .with_pre_image_management(spec.pre_images(), postgres.manage_replica_identity)
@@ -73,14 +73,18 @@ impl Backends for FlussoBackends {
             .context("checking the source server")?;
         let capture: Arc<dyn ChangeCapture> = Arc::new(capture);
 
-        Ok(SourceParts { capture, documents })
+        Ok(SourceParts {
+            capture,
+            documents,
+            resolver: Some(resolver),
+        })
     }
 
-    fn stream(&self, config: &Config, sinks: &[SinkName]) -> anyhow::Result<Arc<dyn Stream>> {
+    fn stream(&self, config: &Config, lanes: &[LaneKey]) -> anyhow::Result<Arc<dyn Stream>> {
         let channel = adapters::stream_config(config)?;
         Ok(Arc::new(ChannelStream::from_config(
             &channel,
-            sinks.iter().cloned(),
+            lanes.iter().cloned(),
         )))
     }
 
@@ -150,16 +154,33 @@ fn resolve_connection_url(postgres: &PostgresConfig) -> anyhow::Result<String> {
 async fn build_documents(
     connection_url: &str,
     config: &Config,
-) -> anyhow::Result<(Arc<dyn DocumentBuilder>, ColumnTypes)> {
+) -> anyhow::Result<(
+    Arc<dyn DocumentBuilder>,
+    Arc<dyn DocumentBuilder>,
+    ColumnTypes,
+)> {
     let scripts = compile_scripts(config)?;
     let spec = Arc::new(source_spec(config));
-    let builder = PgDocumentBuilder::connect(connection_url, Arc::clone(&spec))
-        .await
-        .context("connecting to Postgres")?;
+    // Every build the ingest engine runs at once holds a connection, beside
+    // one backfill page being read; changes are resolved on a pool of their
+    // own, one connection, sharing the builder's caches.
+    let connections = u32::try_from(daemon::builds(config) + 1).unwrap_or(u32::MAX);
+    let builder = PgDocumentBuilder::connect_with_max_connections(
+        connection_url,
+        Arc::clone(&spec),
+        connections,
+    )
+    .await
+    .context("connecting to Postgres")?;
     validate_at_start(&spec, &builder, config).await?;
     let column_types = builder.column_types();
+    let resolver = builder
+        .on_own_pool(connection_url, 1)
+        .await
+        .context("connecting to Postgres for resolving changes")?;
     Ok((
         ScriptedBuilder::wrap(Arc::new(builder), scripts),
+        Arc::new(resolver),
         column_types,
     ))
 }
@@ -904,5 +925,54 @@ mod tests {
             orders.get("index.mapping.total_fields.limit"),
             Some(&serde_json::json!(5000))
         );
+    }
+
+    /// `[stream] capacity` and `--queue-capacity` still validate, but the lanes
+    /// ignore them: a capacity of one still takes several items unread.
+    #[tokio::test]
+    async fn a_deprecated_queue_capacity_validates_and_is_ignored() {
+        let from_file = Config::from(
+            ConfigToml::try_parse(
+                "[source]\ntype = \"postgres\"\n[stream]\ntype = \"channel\"\ncapacity = 1\n",
+            )
+            .unwrap(),
+        );
+        let mut from_flag =
+            Config::from(ConfigToml::try_parse("[source]\ntype = \"postgres\"\n").unwrap());
+        adapters::apply_overrides(
+            &mut from_flag,
+            &adapters::Overrides {
+                queue_capacity: Some(1),
+                ..adapters::Overrides::default()
+            },
+        );
+        let key = LaneKey::new(
+            IndexName::try_new("users").unwrap(),
+            SinkName::try_new("primary").unwrap(),
+        );
+        for config in [from_file, from_flag] {
+            adapters::validate(&config).unwrap();
+            assert_eq!(adapters::stream_config(&config).unwrap().capacity, Some(1));
+            let stream = FlussoBackends
+                .stream(&config, std::slice::from_ref(&key))
+                .unwrap();
+            let lane = stream.lane(&key).unwrap();
+            for position in 0..4 {
+                let item = stream::LaneItem::Batch(stream::Batch {
+                    position: Some(kernel::Position::new(position)),
+                    changes: 1,
+                    envelopes: Vec::new().into(),
+                    hold: Default::default(),
+                    walked: None,
+                });
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    lane.producer.publish(item),
+                )
+                .await
+                .expect("a lane takes more than the deprecated capacity")
+                .unwrap();
+            }
+        }
     }
 }

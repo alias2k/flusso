@@ -1,23 +1,27 @@
 use super::*;
+use kernel::{IndexName, Position};
 use stream::Batch;
 
 fn sink(name: &str) -> SinkName {
     SinkName::try_new(name).unwrap()
 }
 
-fn batch(position: u64) -> LaneItem {
-    LaneItem::Batch(Batch {
-        position: Some(Position(position)),
-        changes: 1,
-        envelopes: Vec::new().into(),
-    })
+fn index(name: &str) -> IndexName {
+    IndexName::try_new(name).unwrap()
 }
 
-fn snapshot_batch() -> LaneItem {
+/// The `users` lane of `name`.
+fn key(name: &str) -> LaneKey {
+    LaneKey::new(index("users"), sink(name))
+}
+
+fn batch(position: u64) -> LaneItem {
     LaneItem::Batch(Batch {
-        position: None,
-        changes: 0,
+        position: Some(Position::new(position)),
+        changes: 1,
         envelopes: Vec::new().into(),
+        hold: Default::default(),
+        walked: None,
     })
 }
 
@@ -29,59 +33,21 @@ fn envelopes_of(item: &LaneItem) -> &Arc<[kernel::Envelope]> {
 }
 
 #[tokio::test]
-async fn publishes_and_consumes_in_order_and_acks_move_the_watermark() {
-    let stream = ChannelStream::new(8, [sink("a")]);
-    let lane = stream.lane(&sink("a")).unwrap();
+async fn publishes_and_consumes_in_order() {
+    let stream = ChannelStream::new(8, [key("a")]);
+    let lane = stream.lane(&key("a")).unwrap();
     lane.producer.publish(batch(1)).await.unwrap();
     lane.producer.publish(batch(2)).await.unwrap();
     let mut consumer = lane.consumer;
 
-    assert_eq!(stream.watermark(), None);
     let (first, handle) = consumer.recv().await.unwrap().unwrap().into_parts();
-    assert_eq!(first.position(), Some(Position(1)));
+    assert_eq!(first.position(), Some(Position::new(1)));
     handle.ack().await.unwrap();
-    assert_eq!(stream.watermark(), Some(Position(1)));
 
     let (second, handle) = consumer.recv().await.unwrap().unwrap().into_parts();
-    assert_eq!(second.position(), Some(Position(2)));
+    assert_eq!(second.position(), Some(Position::new(2)));
     assert!(consumer.is_empty());
     handle.ack().await.unwrap();
-    assert_eq!(stream.watermark(), Some(Position(2)));
-}
-
-#[tokio::test]
-async fn watermark_is_the_minimum_over_lanes() {
-    let stream = ChannelStream::new(8, [sink("fast"), sink("slow")]);
-    for name in ["fast", "slow"] {
-        let lane = stream.lane(&sink(name)).unwrap();
-        lane.producer.publish(batch(5)).await.unwrap();
-        lane.producer.publish(batch(6)).await.unwrap();
-    }
-    let mut fast = stream.lane(&sink("fast")).unwrap().consumer;
-    let mut slow = stream.lane(&sink("slow")).unwrap().consumer;
-    for _ in 0..2 {
-        let (_, handle) = fast.recv().await.unwrap().unwrap().into_parts();
-        handle.ack().await.unwrap();
-    }
-    assert_eq!(stream.watermark(), None, "slow has acked nothing yet");
-    let (_, handle) = slow.recv().await.unwrap().unwrap().into_parts();
-    handle.ack().await.unwrap();
-    assert_eq!(stream.watermark(), Some(Position(5)));
-}
-
-#[tokio::test]
-async fn snapshot_batches_do_not_move_the_watermark() {
-    let stream = ChannelStream::new(8, [sink("a")]);
-    let lane = stream.lane(&sink("a")).unwrap();
-    lane.producer.publish(snapshot_batch()).await.unwrap();
-    lane.producer.publish(batch(3)).await.unwrap();
-    let mut consumer = lane.consumer;
-    let (_, handle) = consumer.recv().await.unwrap().unwrap().into_parts();
-    handle.ack().await.unwrap();
-    assert_eq!(stream.watermark(), None);
-    let (_, handle) = consumer.recv().await.unwrap().unwrap().into_parts();
-    handle.ack().await.unwrap();
-    assert_eq!(stream.watermark(), Some(Position(3)));
 }
 
 /// The lane and its redelivery ledger hold the ingest engine's one build, not
@@ -90,8 +56,8 @@ async fn snapshot_batches_do_not_move_the_watermark() {
 async fn a_delivery_and_its_redelivery_share_the_published_envelopes() {
     let published = batch(1);
     let envelopes = Arc::clone(envelopes_of(&published));
-    let stream = ChannelStream::new(8, [sink("a")]);
-    let lane = stream.lane(&sink("a")).unwrap();
+    let stream = ChannelStream::new(8, [key("a")]);
+    let lane = stream.lane(&key("a")).unwrap();
     lane.producer.publish(published).await.unwrap();
 
     let mut consumer = lane.consumer;
@@ -104,32 +70,33 @@ async fn a_delivery_and_its_redelivery_share_the_published_envelopes() {
 
 #[tokio::test]
 async fn an_unacked_item_is_redelivered_to_the_next_consumer() {
-    let stream = ChannelStream::new(8, [sink("a")]);
-    let lane = stream.lane(&sink("a")).unwrap();
+    let stream = ChannelStream::new(8, [key("a")]);
+    let lane = stream.lane(&key("a")).unwrap();
     lane.producer.publish(batch(1)).await.unwrap();
     lane.producer.publish(batch(2)).await.unwrap();
 
     let mut first = lane.consumer;
     let delivery = first.recv().await.unwrap().unwrap();
-    assert_eq!(delivery.item().position(), Some(Position(1)));
+    assert_eq!(delivery.item().position(), Some(Position::new(1)));
     delivery.nack().await.unwrap();
     drop(first);
 
-    let mut second = stream.lane(&sink("a")).unwrap().consumer;
+    let mut second = stream.lane(&key("a")).unwrap().consumer;
     let (redelivered, handle) = second.recv().await.unwrap().unwrap().into_parts();
-    assert_eq!(redelivered.position(), Some(Position(1)));
+    assert_eq!(redelivered.position(), Some(Position::new(1)));
     handle.ack().await.unwrap();
     let (next, _) = second.recv().await.unwrap().unwrap().into_parts();
-    assert_eq!(next.position(), Some(Position(2)));
+    assert_eq!(next.position(), Some(Position::new(2)));
 }
 
 #[tokio::test]
 async fn requests_travel_up_and_are_redelivered_until_acked() {
-    let stream = ChannelStream::new(8, [sink("a")]);
+    let stream = ChannelStream::new(8, [key("a")]);
     let requests = stream.requests().unwrap();
     let request = Request::Backfill {
+        index: index("users"),
         sink: sink("a"),
-        indexes: vec![kernel::IndexName::try_new("users").unwrap()],
+        after: None,
     };
     requests.producer.publish(request.clone()).await.unwrap();
     let mut consumer = requests.consumer;
@@ -148,8 +115,8 @@ async fn requests_travel_up_and_are_redelivered_until_acked() {
 /// and whatever is nacked or dropped unacked comes back in its original order.
 #[tokio::test]
 async fn several_deliveries_can_be_outstanding_and_ack_independently() {
-    let stream = ChannelStream::new(8, [sink("a")]);
-    let lane = stream.lane(&sink("a")).unwrap();
+    let stream = ChannelStream::new(8, [key("a")]);
+    let lane = stream.lane(&key("a")).unwrap();
     for position in 1..=3 {
         lane.producer.publish(batch(position)).await.unwrap();
     }
@@ -159,29 +126,31 @@ async fn several_deliveries_can_be_outstanding_and_ack_independently() {
     let (third, third_handle) = consumer.recv().await.unwrap().unwrap().into_parts();
     assert_eq!(
         [first.position(), second.position(), third.position()],
-        [Some(Position(1)), Some(Position(2)), Some(Position(3))],
+        [
+            Some(Position::new(1)),
+            Some(Position::new(2)),
+            Some(Position::new(3))
+        ],
         "each recv hands out the next item, not the one still unacked"
     );
     assert!(consumer.is_empty(), "nothing waits behind the deliveries");
     assert!(!stream.is_idle(), "but three are unacknowledged");
 
     second_handle.ack().await.unwrap();
-    assert_eq!(
-        stream.watermark(),
-        None,
+    assert!(
+        !stream.is_idle(),
         "2 is acknowledged, but 1 before it is not"
     );
     first_handle.nack().await.unwrap();
     drop(third_handle);
 
     let (redelivered, handle) = consumer.recv().await.unwrap().unwrap().into_parts();
-    assert_eq!(redelivered.position(), Some(Position(1)));
+    assert_eq!(redelivered.position(), Some(Position::new(1)));
     handle.ack().await.unwrap();
     let (redelivered, handle) = consumer.recv().await.unwrap().unwrap().into_parts();
-    assert_eq!(redelivered.position(), Some(Position(3)));
+    assert_eq!(redelivered.position(), Some(Position::new(3)));
     handle.ack().await.unwrap();
     assert!(stream.is_idle());
-    assert_eq!(stream.watermark(), Some(Position(3)));
 }
 
 /// A handle dropped without an ack makes its delivery due: the lane is not
@@ -190,8 +159,8 @@ async fn several_deliveries_can_be_outstanding_and_ack_independently() {
 /// lane reads empty and idle.
 #[tokio::test]
 async fn only_a_handle_dropped_unacked_is_redelivered() {
-    let stream = ChannelStream::new(8, [sink("a")]);
-    let lane = stream.lane(&sink("a")).unwrap();
+    let stream = ChannelStream::new(8, [key("a")]);
+    let lane = stream.lane(&key("a")).unwrap();
     lane.producer.publish(batch(1)).await.unwrap();
     lane.producer.publish(batch(2)).await.unwrap();
     let mut consumer = lane.consumer;
@@ -204,7 +173,7 @@ async fn only_a_handle_dropped_unacked_is_redelivered() {
     assert!(!consumer.is_empty(), "the dropped delivery is due");
 
     let (again, handle) = consumer.recv().await.unwrap().unwrap().into_parts();
-    assert_eq!(again.position(), Some(Position(2)), "it comes back");
+    assert_eq!(again.position(), Some(Position::new(2)), "it comes back");
     handle.ack().await.unwrap();
     assert!(consumer.is_empty());
     assert!(stream.is_idle());
@@ -223,8 +192,8 @@ async fn only_a_handle_dropped_unacked_is_redelivered() {
 /// backlog is queued.
 #[tokio::test]
 async fn caught_up_ignores_the_delivery_being_processed() {
-    let stream = ChannelStream::new(8, [sink("a")]);
-    let lane = stream.lane(&sink("a")).unwrap();
+    let stream = ChannelStream::new(8, [key("a")]);
+    let lane = stream.lane(&key("a")).unwrap();
     lane.producer.publish(batch(1)).await.unwrap();
     lane.producer.publish(batch(2)).await.unwrap();
     let mut consumer = lane.consumer;
@@ -243,20 +212,20 @@ async fn caught_up_ignores_the_delivery_being_processed() {
 
 #[test]
 fn unknown_lane_is_an_error() {
-    let stream = ChannelStream::new(1, [sink("a")]);
+    let stream = ChannelStream::new(1, [key("a")]);
     assert!(matches!(
-        stream.lane(&sink("zzz")),
+        stream.lane(&key("zzz")),
         Err(QueueError::UnknownLane(_))
     ));
-    assert_eq!(stream.sinks().count(), 1);
+    assert_eq!(stream.sinks(), [sink("a")]);
 }
 
 /// Releasing one of several deliveries redelivers that one alone: the others
 /// are still being processed and are neither served again nor disturbed.
 #[tokio::test]
 async fn releasing_one_delivery_redelivers_only_that_one() {
-    let stream = ChannelStream::new(8, [sink("a")]);
-    let lane = stream.lane(&sink("a")).unwrap();
+    let stream = ChannelStream::new(8, [key("a")]);
+    let lane = stream.lane(&key("a")).unwrap();
     for position in 1..=4 {
         lane.producer.publish(batch(position)).await.unwrap();
     }
@@ -268,11 +237,11 @@ async fn releasing_one_delivery_redelivers_only_that_one() {
     first.nack().await.unwrap();
 
     let (redelivered, first) = consumer.recv().await.unwrap().unwrap().into_parts();
-    assert_eq!(redelivered.position(), Some(Position(1)));
+    assert_eq!(redelivered.position(), Some(Position::new(1)));
     let (next, fourth) = consumer.recv().await.unwrap().unwrap().into_parts();
     assert_eq!(
         next.position(),
-        Some(Position(4)),
+        Some(Position::new(4)),
         "the deliveries still in flight are not served again"
     );
     assert!(consumer.is_empty());
@@ -281,15 +250,14 @@ async fn releasing_one_delivery_redelivers_only_that_one() {
         handle.ack().await.unwrap();
     }
     assert!(stream.is_idle());
-    assert_eq!(stream.watermark(), Some(Position(4)));
 }
 
 /// Released deliveries come back in lane order, whatever order they were
 /// released in, and the ones left in flight stay out of it.
 #[tokio::test]
 async fn released_deliveries_come_back_in_lane_order() {
-    let stream = ChannelStream::new(8, [sink("a")]);
-    let lane = stream.lane(&sink("a")).unwrap();
+    let stream = ChannelStream::new(8, [key("a")]);
+    let lane = stream.lane(&key("a")).unwrap();
     for position in 1..=3 {
         lane.producer.publish(batch(position)).await.unwrap();
     }
@@ -303,69 +271,131 @@ async fn released_deliveries_come_back_in_lane_order() {
     assert!(!consumer.is_empty(), "two deliveries are due again");
 
     let (again, first) = consumer.recv().await.unwrap().unwrap().into_parts();
-    assert_eq!(again.position(), Some(Position(1)));
+    assert_eq!(again.position(), Some(Position::new(1)));
     let (again, third) = consumer.recv().await.unwrap().unwrap().into_parts();
-    assert_eq!(again.position(), Some(Position(3)));
+    assert_eq!(again.position(), Some(Position::new(3)));
     assert!(consumer.is_empty(), "the second is still in flight");
 
     second.ack().await.unwrap();
     first.ack().await.unwrap();
     third.ack().await.unwrap();
     assert!(stream.is_idle());
-    assert_eq!(stream.watermark(), Some(Position(3)));
 }
 
-/// Deliveries acknowledged out of order (several writes in flight) never move
-/// the watermark past an earlier one still unacknowledged: it stays at the
-/// last positioned item before the oldest unacknowledged one.
+/// A sink's lanes share the configured capacity: each holds its part, so a
+/// sink holds about `capacity` items whatever the number of its indexes.
 #[tokio::test]
-async fn a_later_ack_never_moves_the_watermark_past_an_earlier_unacked_item() {
-    let stream = ChannelStream::new(8, [sink("a")]);
-    let lane = stream.lane(&sink("a")).unwrap();
-    for position in 1..=4 {
-        lane.producer.publish(batch(position)).await.unwrap();
+async fn a_sinks_lanes_share_its_capacity() {
+    let users = LaneKey::new(index("users"), sink("a"));
+    let orders = LaneKey::new(index("orders"), sink("a"));
+    let audit = LaneKey::new(index("users"), sink("audit"));
+    let stream = ChannelStream::new(4, [users.clone(), orders.clone(), audit.clone()]);
+    for (key, room) in [(&users, 2), (&orders, 2), (&audit, 4)] {
+        let producer = stream.lane(key).unwrap().producer;
+        for position in 0..room {
+            producer.publish(batch(position)).await.unwrap();
+        }
+        let mut full = producer.publish(batch(room));
+        let polled = full
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()));
+        assert!(polled.is_pending(), "{key} holds {room} items");
     }
-    let mut consumer = lane.consumer;
-    let (_, first) = consumer.recv().await.unwrap().unwrap().into_parts();
-    let (_, second) = consumer.recv().await.unwrap().unwrap().into_parts();
-    let (_, third) = consumer.recv().await.unwrap().unwrap().into_parts();
-    let (_, fourth) = consumer.recv().await.unwrap().unwrap().into_parts();
-
-    fourth.ack().await.unwrap();
-    third.ack().await.unwrap();
-    assert_eq!(stream.watermark(), None, "1 and 2 are unacknowledged");
-
-    first.ack().await.unwrap();
-    assert_eq!(stream.watermark(), Some(Position(1)), "2 is unacknowledged");
-
-    second.ack().await.unwrap();
-    assert_eq!(stream.watermark(), Some(Position(4)));
+    assert_eq!(stream.lanes(&sink("a")), [orders, users]);
 }
 
-/// A released delivery holds the watermark back until it is acknowledged on
-/// redelivery, even when later ones were acknowledged meanwhile; snapshot
-/// batches between them hold nothing back.
+/// Lanes are independent: an item released on one lane is redelivered there
+/// alone, and another lane's deliveries go on.
 #[tokio::test]
-async fn a_released_delivery_holds_the_watermark_until_it_is_acked() {
-    let stream = ChannelStream::new(8, [sink("a")]);
-    let lane = stream.lane(&sink("a")).unwrap();
-    lane.producer.publish(batch(1)).await.unwrap();
-    lane.producer.publish(snapshot_batch()).await.unwrap();
-    lane.producer.publish(batch(2)).await.unwrap();
-    lane.producer.publish(batch(3)).await.unwrap();
-    let mut consumer = lane.consumer;
-    let (_, first) = consumer.recv().await.unwrap().unwrap().into_parts();
-    let (_, page) = consumer.recv().await.unwrap().unwrap().into_parts();
-    let (_, second) = consumer.recv().await.unwrap().unwrap().into_parts();
-    let (_, third) = consumer.recv().await.unwrap().unwrap().into_parts();
-    first.ack().await.unwrap();
-    page.ack().await.unwrap();
-    third.ack().await.unwrap();
-    second.nack().await.unwrap();
-    assert_eq!(stream.watermark(), Some(Position(1)));
+async fn a_release_on_one_lane_leaves_the_others_alone() {
+    let users = LaneKey::new(index("users"), sink("a"));
+    let orders = LaneKey::new(index("orders"), sink("a"));
+    let stream = ChannelStream::new(8, [users.clone(), orders.clone()]);
+    let users_lane = stream.lane(&users).unwrap();
+    let orders_lane = stream.lane(&orders).unwrap();
+    users_lane.producer.publish(batch(1)).await.unwrap();
+    orders_lane.producer.publish(batch(2)).await.unwrap();
+    orders_lane.producer.publish(batch(3)).await.unwrap();
 
-    let (again, handle) = consumer.recv().await.unwrap().unwrap().into_parts();
-    assert_eq!(again.position(), Some(Position(2)));
+    let mut users_consumer = users_lane.consumer;
+    let mut orders_consumer = orders_lane.consumer;
+    let delivery = users_consumer.recv().await.unwrap().unwrap();
+    let (first, handle) = orders_consumer.recv().await.unwrap().unwrap().into_parts();
+    assert_eq!(first.position(), Some(Position::new(2)));
+    delivery.nack().await.unwrap();
     handle.ack().await.unwrap();
-    assert_eq!(stream.watermark(), Some(Position(3)));
+
+    let (again, handle) = users_consumer.recv().await.unwrap().unwrap().into_parts();
+    assert_eq!(again.position(), Some(Position::new(1)));
+    handle.ack().await.unwrap();
+    let (next, handle) = orders_consumer.recv().await.unwrap().unwrap().into_parts();
+    assert_eq!(next.position(), Some(Position::new(3)));
+    handle.ack().await.unwrap();
+    assert!(stream.is_idle());
+}
+
+/// Each lane built from configuration holds the backstop, whatever the
+/// number of sinks and indexes (the request lane too).
+#[test]
+fn every_configured_lane_holds_the_backstop() {
+    let sinks = ["audit", "primary"].map(|name| kernel::SinkName::try_new(name).unwrap());
+    let indexes = ["orders", "users"].map(|name| kernel::IndexName::try_new(name).unwrap());
+    let lanes: Vec<LaneKey> = indexes
+        .iter()
+        .flat_map(|index| {
+            sinks
+                .iter()
+                .map(move |sink| LaneKey::new(index.clone(), sink.clone()))
+        })
+        .collect();
+    let stream = ChannelStream::from_config(&ChannelConfig::default(), lanes);
+    for channel in stream.lanes.values() {
+        assert_eq!(channel.tx.max_capacity(), LANE_BACKSTOP);
+    }
+    assert_eq!(stream.requests.tx.max_capacity(), LANE_BACKSTOP);
+}
+
+/// Counts the warnings logged while it is the default subscriber.
+#[derive(Clone, Default)]
+struct Warnings(Arc<std::sync::atomic::AtomicUsize>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Warnings {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        if *event.metadata().level() == tracing::Level::WARN {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+/// A `capacity` the config still names warns once and changes nothing: a
+/// lane of capacity one takes several items unread.
+#[tokio::test]
+async fn a_deprecated_capacity_warns_once_and_is_ignored() {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let warnings = Warnings::default();
+    let subscriber = tracing_subscriber::registry().with(warnings.clone());
+    let config: ChannelConfig = toml::from_str("capacity = 1").unwrap();
+    let stream = tracing::subscriber::with_default(subscriber, || {
+        ChannelStream::from_config(&config, [key("a"), key("b")])
+    });
+    assert_eq!(warnings.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    let lane = stream.lane(&key("a")).unwrap();
+    for position in 0..4 {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            lane.producer.publish(batch(position)),
+        )
+        .await
+        .expect("a lane takes more than the deprecated capacity")
+        .unwrap();
+    }
+
+    let quiet = Warnings::default();
+    let subscriber = tracing_subscriber::registry().with(quiet.clone());
+    tracing::subscriber::with_default(subscriber, || {
+        ChannelStream::from_config(&ChannelConfig::default(), [key("a")])
+    });
+    assert_eq!(quiet.0.load(std::sync::atomic::Ordering::SeqCst), 0);
 }

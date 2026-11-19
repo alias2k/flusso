@@ -178,9 +178,14 @@ impl Client {
         fields(path, status = tracing::field::Empty),
         err,
     )]
-    pub(crate) async fn search_at(&self, path: &str, body: &Value) -> Result<Value> {
+    pub(crate) async fn search_at(
+        &self,
+        path: &str,
+        indexes: &[&str],
+        body: &Value,
+    ) -> Result<Value> {
         crate::rules::refuse_invalid(body)?;
-        self.fence_before(Level::Searchable).await?;
+        self.fence_before(Level::Searchable, indexes).await?;
         let endpoint = format!("{}/{}/_search", self.base, self.prefixed(path));
         tracing::debug!(%endpoint, query = %body, "POST _search");
         self.post_json(&endpoint, body).await
@@ -196,9 +201,14 @@ impl Client {
         fields(path, status = tracing::field::Empty),
         err,
     )]
-    pub(crate) async fn count_at(&self, path: &str, body: &Value) -> Result<Value> {
+    pub(crate) async fn count_at(
+        &self,
+        path: &str,
+        indexes: &[&str],
+        body: &Value,
+    ) -> Result<Value> {
         crate::rules::refuse_invalid(body)?;
-        self.fence_before(Level::Searchable).await?;
+        self.fence_before(Level::Searchable, indexes).await?;
         let endpoint = format!("{}/{}/_count", self.base, self.prefixed(path));
         tracing::debug!(%endpoint, query = %body, "POST _count");
         self.post_json(&endpoint, body).await
@@ -214,8 +224,13 @@ impl Client {
         fields(path, status = tracing::field::Empty),
         err,
     )]
-    pub(crate) async fn open_pit(&self, path: &str, keep_alive: Duration) -> Result<String> {
-        self.fence_before(Level::Searchable).await?;
+    pub(crate) async fn open_pit(
+        &self,
+        path: &str,
+        indexes: &[&str],
+        keep_alive: Duration,
+    ) -> Result<String> {
+        self.fence_before(Level::Searchable, indexes).await?;
         let endpoint = format!(
             "{}/{}/_search/point_in_time?keep_alive={}",
             self.base,
@@ -239,9 +254,9 @@ impl Client {
         fields(status = tracing::field::Empty),
         err,
     )]
-    pub(crate) async fn search_pit(&self, body: &Value) -> Result<Value> {
+    pub(crate) async fn search_pit(&self, indexes: &[&str], body: &Value) -> Result<Value> {
         crate::rules::refuse_invalid(body)?;
-        self.fence_before(Level::Searchable).await?;
+        self.fence_before(Level::Searchable, indexes).await?;
         let endpoint = format!("{}/_search", self.base);
         tracing::debug!(%endpoint, query = %body, "POST _search (point in time)");
         self.post_json(&endpoint, body)
@@ -314,8 +329,8 @@ impl Client {
         fields(bytes = ndjson.len(), status = tracing::field::Empty),
         err,
     )]
-    pub(crate) async fn msearch_raw(&self, ndjson: String) -> Result<Value> {
-        self.fence_before(Level::Searchable).await?;
+    pub(crate) async fn msearch_raw(&self, indexes: &[&str], ndjson: String) -> Result<Value> {
+        self.fence_before(Level::Searchable, indexes).await?;
         let endpoint = format!("{}/_msearch", self.base);
         tracing::debug!(%endpoint, query = %ndjson, "POST _msearch");
         let builder = self
@@ -385,7 +400,7 @@ impl Client {
         T: DeserializeOwned,
     {
         computation.check()?;
-        self.fence_before(Level::Applied).await?;
+        self.fence_before(Level::Applied, &[index]).await?;
         let endpoint = format!(
             "{}/{}/_doc/{id}",
             self.base,

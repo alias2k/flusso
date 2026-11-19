@@ -1,7 +1,7 @@
 //! Backfill e2e (issue #385): a real Postgres → the ingest engine → a
 //! recording sink, seeding several indexes that read each other's root
-//! tables. Each snapshot row is its own document, once per index rooted at
-//! its table: the backfill runs no reverse-resolution query, builds every
+//! tables. Each key a backfill page reads is its own document of the index
+//! walked: the backfill runs no reverse-resolution query, builds every
 //! document once, and writes exactly what a `build` of each root row gives.
 //!
 //! The indexes: `users` (soft-deleted by a column, embeds its orders),
@@ -289,14 +289,16 @@ async fn expected(url: &str, pool: &PgPool, indexes: &[&str]) -> Vec<String> {
 }
 
 /// Reverse-resolution statements run since the last reset: a `SELECT` from a
-/// watched table that builds no document. The snapshot's own reads are
-/// `DECLARE`/`FETCH`, and every document query selects `"document"`.
+/// watched table that builds no document. Every document query selects
+/// `"document"`, and a backfill's key pages and its bound order `USING` the
+/// key's own operator.
 async fn reverse_lookups(pool: &PgPool) -> i64 {
     sqlx::query_scalar(
         "SELECT coalesce(sum(calls), 0)::int8 FROM pg_stat_statements \
          WHERE query LIKE 'SELECT %' \
            AND query ~ 'FROM \"public\"\\.\"(users|orders|categories)\"' \
-           AND query NOT LIKE '%\"document\"%'",
+           AND query NOT LIKE '%\"document\"%' \
+           AND query NOT LIKE '%USING%'",
     )
     .fetch_one(pool)
     .await
@@ -314,20 +316,31 @@ async fn backfill(port: u16, url: &str, sink: Arc<RecordingSink>) -> Vec<String>
     let capture: Arc<dyn ChangeCapture> =
         Arc::new(WalChangeCapture::new(replication(port), url.to_owned()));
     let name = SinkName::try_new("recording").unwrap();
-    let stream: Arc<dyn Stream> = Arc::new(ChannelStream::new(1024, [name.clone()]));
+    let stream: Arc<dyn Stream> = Arc::new(ChannelStream::over(
+        1024,
+        documents.backfill_indexes(),
+        [name.clone()],
+    ));
     let continuity = capture.continuity().await.unwrap();
     let mappings = documents.index_mappings().await.unwrap();
+    let progress = Arc::new(engine::Progress::of(
+        documents.backfill_indexes(),
+        [name.clone()],
+    ));
     let sink_engine = SinkEngine::new(
         name.clone(),
         Arc::clone(&sink) as Arc<dyn Sink>,
         Arc::clone(&stream),
         mappings,
+        Arc::clone(&progress),
     );
     sink_engine.stage(continuity).await.unwrap();
     // Small batches: a document built from a related row in one batch and
     // from its own root row in another is built twice.
-    let ingest =
-        IngestEngine::new(capture, documents, stream, vec![name]).with_batch(BatchPolicy {
+    let ingest = IngestEngine::new(capture, documents, stream, vec![name], progress)
+        .with_builds(common::e2e_builds())
+        .with_budget(common::e2e_budget())
+        .with_batch(BatchPolicy {
             max_changes: 4,
             max_delay: Duration::from_millis(10),
         });

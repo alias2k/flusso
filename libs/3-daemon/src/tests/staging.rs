@@ -8,12 +8,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use kernel::{ContentHash, DatabaseSchema, Envelope, GenericValue, IndexMapping, IndexName};
+use kernel::{ContentHash, Envelope, GenericValue, IndexMapping, IndexName};
 use kernel::{SinkName, TableName};
 use sink::{Sink, SinkOptions, WriteReport};
 use source::cdc::Continuity;
-use source::document::{Document, DocumentBuilder, DocumentId, IndexScope};
-use source::{RowImage, RowKey, SnapshotTable};
+use source::document::{Document, DocumentBuilder, DocumentId};
+use source::{RowImage, RowKey};
 
 use super::{MockBackends, ScriptedSource, backendless_config, primary};
 use crate::Daemon;
@@ -47,16 +47,22 @@ impl DocumentBuilder for ManyIndexes {
         })
     }
 
-    fn backfill_scopes(&self) -> Vec<IndexScope> {
-        (0..INDEXES)
-            .map(|i| IndexScope {
-                index: index(i),
-                root: SnapshotTable {
-                    db_schema: DatabaseSchema::try_new("public").unwrap(),
-                    table: TableName::try_new("users").unwrap(),
-                },
-            })
-            .collect()
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        (0..INDEXES).map(index).collect()
+    }
+
+    async fn last_key(&self, _: &IndexName) -> source::Result<Option<RowKey>> {
+        Ok(None)
+    }
+
+    async fn keys(
+        &self,
+        _: &IndexName,
+        _: Option<&RowKey>,
+        _: &RowKey,
+        _: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        Ok(Vec::new())
     }
 
     async fn index_mappings(&self) -> source::Result<Vec<IndexMapping>> {

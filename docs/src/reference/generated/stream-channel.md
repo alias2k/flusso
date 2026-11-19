@@ -2,4 +2,4 @@
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `type` | `"channel"` | — | Required. Selects this adapter for `[stream]`. |
-| `capacity` | int | `1024` | Batches each lane queues before the ingest engine waits. A bounded buffer is what makes the slowest sink pace ingest. A sink engine also holds up to `writes` + 32 batches it has taken and not yet acknowledged, outside this bound. |
+| `capacity` | int | none | Deprecated, and ignored: still accepted, with a warning at start. What the lanes hold is bounded in bytes by `[concurrency] max_built_mib`, which a sink that stops acknowledging fills, pacing ingest; each lane keeps a fixed backstop of 1,048,576 items. |

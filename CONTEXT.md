@@ -53,12 +53,20 @@ The port in the middle: it carries envelopes from the ingest engine down to each
 _Avoid_: queue, bus, broker, channel (as the port name)
 
 **Lane**:
-One sink's ordered feed inside the stream. A stacked sink's lane is fed by the sink engine ahead of it instead of by the ingest engine.
+One `(index, sink)` pair's ordered feed inside the stream: the documents of one index for one sink. A sink engine reads all its sink's lanes. A stacked sink's lane is fed by the sink engine ahead of it instead of by the ingest engine.
 _Avoid_: channel, topic, subject, partition
 
 **Batch**:
-The unit a lane carries and a sink engine acknowledges: the envelopes one ingest commit built, in build order, with the position of the last change it covers. A batch with no envelopes still carries its position.
+The unit a lane carries and a sink engine acknowledges: the envelopes of the lane's index that one ingest commit built, in build order, with the position of the last change the commit covers (its key in the progress, the same on every lane). A commit that built nothing for an index publishes nothing to its lanes.
 _Avoid_: chunk, bundle, message group
+
+**Build gate**:
+What hands out the ingest engine's `builds` build slots: live batches first, except every fourth slot a live and a backfill batch both wait for. A batch is granted only when no running build holds one of its documents, and built batches are published in the order they were granted.
+_Avoid_: semaphore, permit pool, scheduler
+
+**Memory budget**:
+The heap built documents may hold until every lane has acknowledged them (`[concurrency] max_built_mib`). A build reserves its estimate when granted and settles to its measured size when it lands; the batch carries the charge until its last copy is dropped. Backfill holds at most half; a kind holding nothing is always granted one batch.
+_Avoid_: queue capacity, buffer size, memory limit (the process limit is the deployment's)
 
 **Snapshot complete**:
 The lane marker that follows the last batch of a snapshot, telling the sink engine it may record the index as seeded.
@@ -69,7 +77,7 @@ The stream's upward feed. It carries backfill and reindex requests from sink eng
 _Avoid_: control channel, command bus, callback
 
 **Request**:
-What travels up the request lane: a sink engine asking for a snapshot of one or more indexes into its own lane, for a first seed or a reindex. Acknowledged only once the snapshot is fully published.
+What travels up the request lane: a sink engine asking for a snapshot of one index into that index's lane, for a first seed or a reindex. Acknowledged only once the snapshot is fully published.
 _Avoid_: command, job, ticket
 
 **Sink**:
@@ -99,12 +107,20 @@ An updated row's new values, carried only beside a pre-image. Compared with it t
 _Avoid_: new row, after image, new tuple
 
 **Position**:
-An opaque, ordered, serializable offset in the source's change feed, assigned by the source and meaningful only to it. The source confirms a position once every lane has acknowledged it. Snapshot batches carry none.
+One change's place in the source's change feed: an ordered `seq`, plus stamps only the source reads (what it may confirm or fence while the change is the oldest outstanding, and once it has landed). It describes itself, so the source keeps no map of what it emitted. Snapshot batches carry none.
 _Avoid_: LSN, offset, cursor, ack, checkpoint
 
-**Watermark**:
-The lowest position, over every lane, that the lane has acknowledged with everything before it: a lane's part stops before its oldest unacknowledged positioned batch, since batches are acknowledged in any order. The stream owns it; the ingest engine forwards it to the source as confirmation.
-_Avoid_: low-water mark, min ack, commit point
+**Progress**:
+The engine's record, per lane, of what was routed to the lane and has not yet landed or become searchable, plus the newest routed position. One per deployment; it outlives every engine run. Confirmation and fences are read off it as a landed case.
+_Avoid_: watermark (the stream no longer keeps one), ledger, tracker
+
+**Landed** (`Before(o)` / `Through(p)` / `Idle`):
+How far some lanes have landed what was routed to them: everything before `o`, the oldest position still outstanding; or everything through `p`, the newest routed; or nothing routed yet. The source turns it into a source position from the positions' stamps, and only it knows whether a change was emitted after `p`.
+_Avoid_: watermark, min ack, commit point
+
+**Routed**:
+A batch is routed once the ingest engine has published it to every lane it goes to and registered it in the progress. A change emitted but not routed is in no lane, so only the source's own `next_seq` test keeps it from being confirmed.
+_Avoid_: sent, enqueued
 
 **Quiet stream**:
 The live stream having no change ready right now. A change arriving on a quiet stream has nothing to batch with.
@@ -115,7 +131,7 @@ A point in the source's own change order, as a client can read it from the sourc
 _Avoid_: token, LSN (outside the Postgres adapter), cursor, checkpoint, offset
 
 **Fence**:
-A wait until a sink, or every sink, has reached a caller-supplied source position at a chosen level, applied or searchable, related-table rebuilds included. It only observes: nothing is flushed or refreshed because a client waits. Covers live changes only, not a backfill. What a client uses to read its own writes.
+A wait until the lanes of the named indexes (or every index) on a sink (or every sink) have reached a caller-supplied source position at a chosen level, applied or searchable, related-table rebuilds included. It only observes: nothing is flushed or refreshed because a client waits. It vouches only for what reads of a lane's index see: while a sink seeds that index or rebuilds it beside the generation readers use, the fence holds, and past its timeout it answers that it can't vouch (backfilling or rebuilding) rather than pass. What a client uses to read its own writes.
 _Avoid_: barrier, sync point, flush wait
 
 **Applied**:
@@ -186,6 +202,14 @@ _Avoid_: dynamic field, sub-key, map entry
 **Generation**:
 One physical copy of an index in a destination. A reindex builds a fresh generation and swaps it in.
 _Avoid_: version, revision, copy
+
+**Stall age**:
+How long a lane's oldest outstanding position has stayed its oldest: how long the lane has landed nothing. Zero while it has nothing outstanding, or lands steadily; a busy lane is not stalled. Kept per process.
+_Avoid_: lag, backlog (that is how much waits, not how long nothing moved)
+
+**Pinned by**:
+The lane that decides how far the slot can be confirmed (the one `Progress`'s landed answer comes from), while it holds something back. A stalled lane pins the slot, and with it the WAL of every index.
+_Avoid_: blocking lane, slowest sink
 
 **Seeded**:
 A sink's own record that it holds a complete snapshot of an index for the current schema. Decided per sink, never for the deployment.

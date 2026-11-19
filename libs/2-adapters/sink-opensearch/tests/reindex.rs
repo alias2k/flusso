@@ -908,7 +908,7 @@ fn upsert(index: &IndexName, id: &str, doc: &GenericValue) -> Envelope {
         index.clone(),
         id,
         doc.clone(),
-        Some(Position(0)),
+        Some(Position::new(0)),
         chrono::Utc::now(),
     )
 }

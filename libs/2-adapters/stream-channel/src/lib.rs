@@ -10,17 +10,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
-use kernel::{Position, SinkName};
+use kernel::{IndexName, SinkName};
 use stream::{
-    AckHandle, Consumer, Delivery, Lane, LaneItem, Producer, QueueError, Request, RequestLane,
-    Result, Stream,
+    AckHandle, Consumer, Delivery, Lane, LaneItem, LaneKey, Producer, QueueError, Request,
+    RequestLane, Result, Stream,
 };
 use tokio::sync::mpsc;
 
-/// The in-process stream: one bounded channel per sink lane, one for requests,
-/// and the watermark over the lanes' acknowledgements.
+/// The in-process stream: one bounded channel per `(index, sink)` lane and
+/// one for requests.
 ///
-/// Built once by the daemon with the full sink set; every [`Stream::lane`] and
+/// Built once by the daemon with the full lane set; every [`Stream::lane`] and
 /// [`Stream::requests`] call hands out fresh ends over the same channels, so a
 /// restarted engine re-attaches and is redelivered whatever its predecessor
 /// left unacknowledged. Several deliveries may be outstanding at once (the
@@ -28,41 +28,108 @@ use tokio::sync::mpsc;
 /// published); each is acknowledged on its own.
 #[derive(Debug)]
 pub struct ChannelStream {
-    lanes: BTreeMap<SinkName, Arc<Channel<LaneItem>>>,
+    lanes: BTreeMap<LaneKey, Arc<Channel<LaneItem>>>,
     requests: Arc<Channel<Request>>,
 }
 
+/// How many items a lane built from configuration holds before publishing
+/// waits: a backstop that never binds before the ingest engine's memory
+/// budget, which counts at least 1 KiB per batch (the default 512 MiB holds at
+/// most 524,288 batches; only a budget past 1 GiB of 1 KiB batches reaches
+/// it). A bounded channel doesn't allocate its capacity.
+pub const LANE_BACKSTOP: usize = 1 << 20;
+
 impl ChannelStream {
-    /// A stream with one lane per sink in `sinks`, each holding `capacity`
-    /// items before publishing waits, plus a request lane of the same size.
-    pub fn new(capacity: usize, sinks: impl IntoIterator<Item = SinkName>) -> Self {
+    /// A stream with the lanes `lanes`, plus a request lane holding
+    /// `capacity` items. A sink's lanes share `capacity` between them: each
+    /// holds `max(1, capacity / its sink's lanes)` items before publishing
+    /// waits, so a sink holds about `capacity` items however many indexes it
+    /// receives.
+    pub fn new(capacity: usize, lanes: impl IntoIterator<Item = LaneKey>) -> Self {
         let capacity = capacity.max(1);
+        let lanes: Vec<LaneKey> = lanes.into_iter().collect();
+        let mut per_sink: BTreeMap<&SinkName, usize> = BTreeMap::new();
+        for key in &lanes {
+            *per_sink.entry(&key.sink).or_default() += 1;
+        }
+        let bound = |key: &LaneKey| {
+            let shared = per_sink.get(&key.sink).copied().unwrap_or(1).max(1);
+            (capacity / shared).max(1)
+        };
         Self {
-            lanes: sinks
-                .into_iter()
-                .map(|sink| (sink, Arc::new(Channel::new(capacity))))
+            lanes: lanes
+                .iter()
+                .map(|key| (key.clone(), Arc::new(Channel::new(bound(key)))))
                 .collect(),
             requests: Arc::new(Channel::new(capacity)),
         }
     }
 
-    /// Build from the adapter's own configuration.
-    pub fn from_config(config: &ChannelConfig, sinks: impl IntoIterator<Item = SinkName>) -> Self {
-        Self::new(config.capacity, sinks)
+    /// Build from the adapter's own configuration: every lane, and the
+    /// request lane, with the [`LANE_BACKSTOP`]. A `capacity` the config
+    /// still names is ignored, with a warning: the memory budget bounds what
+    /// lanes hold.
+    pub fn from_config(config: &ChannelConfig, lanes: impl IntoIterator<Item = LaneKey>) -> Self {
+        if let Some(capacity) = config.capacity {
+            tracing::warn!(
+                capacity,
+                "[stream] capacity (and --queue-capacity) is deprecated and ignored: \
+                 [concurrency] max_built_mib bounds what the lanes hold"
+            );
+        }
+        Self::bounded_per_lane(LANE_BACKSTOP, lanes)
     }
 
-    /// The sinks this stream has a lane for.
-    pub fn sinks(&self) -> impl Iterator<Item = &SinkName> {
+    /// A stream whose every lane, and the request lane, holds `bound` items,
+    /// however many lanes a sink has.
+    fn bounded_per_lane(bound: usize, lanes: impl IntoIterator<Item = LaneKey>) -> Self {
+        let bound = bound.max(1);
+        Self {
+            lanes: lanes
+                .into_iter()
+                .map(|key| (key, Arc::new(Channel::new(bound))))
+                .collect(),
+            requests: Arc::new(Channel::new(bound)),
+        }
+    }
+
+    /// A stream with one lane per pair of `indexes` and `sinks`.
+    pub fn over(
+        capacity: usize,
+        indexes: impl IntoIterator<Item = IndexName>,
+        sinks: impl IntoIterator<Item = SinkName> + Clone,
+    ) -> Self {
+        let lanes: Vec<LaneKey> = indexes
+            .into_iter()
+            .flat_map(|index| {
+                sinks
+                    .clone()
+                    .into_iter()
+                    .map(move |sink| LaneKey::new(index.clone(), sink))
+            })
+            .collect();
+        Self::new(capacity, lanes)
+    }
+
+    /// The lanes of this stream.
+    pub fn keys(&self) -> impl Iterator<Item = &LaneKey> {
         self.lanes.keys()
+    }
+
+    /// Every sink this stream has a lane into.
+    pub fn sinks(&self) -> Vec<SinkName> {
+        let sinks: std::collections::BTreeSet<&SinkName> =
+            self.lanes.keys().map(|key| &key.sink).collect();
+        sinks.into_iter().cloned().collect()
     }
 }
 
 impl Stream for ChannelStream {
-    fn lane(&self, sink: &SinkName) -> Result<Lane> {
+    fn lane(&self, key: &LaneKey) -> Result<Lane> {
         let channel = self
             .lanes
-            .get(sink)
-            .ok_or_else(|| QueueError::UnknownLane(sink.to_string()))?;
+            .get(key)
+            .ok_or_else(|| QueueError::UnknownLane(key.to_string()))?;
         Ok(Lane {
             producer: Box::new(ChannelProducer {
                 channel: Arc::clone(channel),
@@ -71,6 +138,14 @@ impl Stream for ChannelStream {
                 channel: Arc::clone(channel),
             }),
         })
+    }
+
+    fn lanes(&self, sink: &SinkName) -> Vec<LaneKey> {
+        self.lanes
+            .keys()
+            .filter(|key| &key.sink == sink)
+            .cloned()
+            .collect()
     }
 
     fn requests(&self) -> Result<RequestLane> {
@@ -84,34 +159,8 @@ impl Stream for ChannelStream {
         })
     }
 
-    fn watermark(&self) -> Option<Position> {
-        let mut lowest: Option<Position> = None;
-        for channel in self.lanes.values() {
-            let acked = channel.acked()?;
-            lowest = Some(lowest.map_or(acked, |low| low.min(acked)));
-        }
-        lowest
-    }
-
     fn is_idle(&self) -> bool {
         self.lanes.values().all(|channel| channel.is_idle())
-    }
-}
-
-/// What acknowledging an item confirms for its lane's watermark.
-trait Positioned {
-    fn position(&self) -> Option<Position>;
-}
-
-impl Positioned for LaneItem {
-    fn position(&self) -> Option<Position> {
-        LaneItem::position(self)
-    }
-}
-
-impl Positioned for Request {
-    fn position(&self) -> Option<Position> {
-        None
     }
 }
 
@@ -137,16 +186,13 @@ struct Channel<T> {
 ///
 /// So a released delivery can come back after later ones were acknowledged,
 /// and deliveries are acknowledged in any order: the sink engine writes
-/// several at once and keeps per-document order itself (ADR 0012). The
-/// lane's watermark is therefore not the highest acknowledgement but the last
-/// positioned item delivered before the oldest unacknowledged positioned one,
-/// which each entry records when it is first delivered.
+/// several at once and keeps per-document order itself (ADR 0012). How far a
+/// lane has landed is not the stream's to say: the engine's `Progress` keeps
+/// it.
 #[derive(Debug)]
 struct Ledger<T> {
     in_flight: Vec<InFlight<T>>,
     next_ticket: Ticket,
-    /// The position of the last positioned item first delivered on this lane.
-    delivered: Option<Position>,
     /// How many entries are marked `due`.
     due: usize,
 }
@@ -156,9 +202,6 @@ struct InFlight<T> {
     ticket: Ticket,
     item: T,
     due: bool,
-    /// The position of the last positioned item delivered before this one:
-    /// what the lane may confirm while this one is unacknowledged.
-    before: Option<Position>,
 }
 
 type Ticket = u64;
@@ -213,7 +256,7 @@ impl<T> Channel<T> {
     }
 }
 
-impl<T: Positioned + Clone + Send + 'static> Channel<T> {
+impl<T: Clone + Send + 'static> Channel<T> {
     fn new(capacity: usize) -> Self {
         let (tx, rx) = mpsc::channel(capacity);
         Self {
@@ -222,26 +265,9 @@ impl<T: Positioned + Clone + Send + 'static> Channel<T> {
             state: Mutex::new(Ledger {
                 in_flight: Vec::new(),
                 next_ticket: 0,
-                delivered: None,
                 due: 0,
             }),
             due: AtomicUsize::new(0),
-        }
-    }
-
-    /// The last positioned item delivered before the oldest unacknowledged
-    /// positioned one; with none unacknowledged, the last positioned item
-    /// delivered. Items still queued are newer than every delivered one, so
-    /// they never lower it.
-    fn acked(&self) -> Option<Position> {
-        let ledger = self.lock();
-        match ledger
-            .in_flight
-            .iter()
-            .find(|entry| entry.item.position().is_some())
-        {
-            Some(oldest) => oldest.before,
-            None => ledger.delivered,
         }
     }
 
@@ -257,10 +283,6 @@ impl<T: Positioned + Clone + Send + 'static> Channel<T> {
         let mut ledger = self.lock();
         let ticket = ledger.next_ticket;
         ledger.next_ticket += 1;
-        let before = ledger.delivered;
-        if let Some(position) = item.position() {
-            ledger.delivered = Some(position);
-        }
         // A release that landed while awaiting the channel made an earlier
         // entry due: serve it first and leave the new item due behind it, so
         // nothing is delivered twice or out of order.
@@ -268,7 +290,6 @@ impl<T: Positioned + Clone + Send + 'static> Channel<T> {
             ticket,
             item,
             due: true,
-            before,
         });
         ledger.due += 1;
         let taken = ledger.take_due();
@@ -304,7 +325,7 @@ impl<T> std::fmt::Debug for ChannelProducer<T> {
 }
 
 #[async_trait]
-impl<T: Positioned + Clone + Send + Sync + 'static> Producer<T> for ChannelProducer<T> {
+impl<T: Clone + Send + Sync + 'static> Producer<T> for ChannelProducer<T> {
     async fn publish(&self, item: T) -> Result<()> {
         self.channel
             .tx
@@ -326,7 +347,7 @@ impl<T> std::fmt::Debug for ChannelConsumer<T> {
 }
 
 #[async_trait]
-impl<T: Positioned + Clone + Send + Sync + 'static> Consumer<T> for ChannelConsumer<T> {
+impl<T: Clone + Send + Sync + 'static> Consumer<T> for ChannelConsumer<T> {
     async fn recv(&mut self) -> Result<Option<Delivery<T>>> {
         Ok(self.channel.recv().await.map(|(ticket, item)| {
             Delivery::new(
@@ -345,8 +366,7 @@ impl<T: Positioned + Clone + Send + Sync + 'static> Consumer<T> for ChannelConsu
     }
 }
 
-/// Acking removes the item from the ledger (the watermark is read from what
-/// remains: see `Channel::acked`). Nacking,
+/// Acking removes the item from the ledger. Nacking,
 /// or dropping the handle unacked (an engine that died holding it), marks the
 /// item for redelivery on the next `recv`.
 struct ChannelAck<T> {
@@ -374,7 +394,7 @@ impl<T> Drop for ChannelAck<T> {
 }
 
 #[async_trait]
-impl<T: Positioned + Clone + Send + Sync + 'static> AckHandle for ChannelAck<T> {
+impl<T: Clone + Send + Sync + 'static> AckHandle for ChannelAck<T> {
     async fn ack(mut self: Box<Self>) -> Result<()> {
         self.channel.ack(self.ticket);
         self.acked = true;

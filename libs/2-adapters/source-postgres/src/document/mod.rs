@@ -60,6 +60,7 @@
 //! Multi-hop reverse resolution issues one query per hop.
 
 mod fields;
+mod keys;
 mod matching;
 mod query;
 mod reads;
@@ -76,10 +77,8 @@ use kernel::{
     ColumnName, DatabaseSchema, Filter, IndexMapping, IndexName, IndexSchema, SoftDelete,
     TableName, Transform,
 };
-use source::document::{BuildFailure, Document, DocumentBuilder, DocumentId, IndexScope};
-use source::{
-    Catalog, ColumnInfo, Result, RowDiff, RowImage, RowKey, SnapshotTable, SourceError, SourceSpec,
-};
+use source::document::{BuildFailure, Document, DocumentBuilder, DocumentId};
+use source::{Catalog, ColumnInfo, Result, RowDiff, RowImage, RowKey, SourceError, SourceSpec};
 use sqlx::{PgPool, Row};
 
 use reads::ReadColumns;
@@ -359,6 +358,18 @@ pub struct PgDocumentBuilder {
     /// Root tables without a primary key already warned about for a key with
     /// a null part.
     keyless_warned: Arc<Mutex<HashSet<TableName>>>,
+    /// Indexes whose backfill was skipped (`keys`), so the warning is logged
+    /// once per index.
+    unwalked_warned: Arc<Mutex<HashSet<IndexName>>>,
+    /// Each walked root table's key operators (`keys.rs`), cached until a
+    /// page fails.
+    walk_operators: Arc<Mutex<HashMap<(String, String), query::WalkOperators>>>,
+    /// What each root table's walk order depends on (its key's type, the key
+    /// index's operator class and collation), as a resumable mark records it.
+    walk_orders: Arc<Mutex<HashMap<(String, String), keys::WalkOrder>>>,
+    /// Indexes whose walk sorts every page (operators the role may not
+    /// name), so the warning is logged once per index.
+    sorting_warned: Arc<Mutex<HashSet<IndexName>>>,
 }
 
 /// Each root `(schema, table)`'s catalog facts.
@@ -404,6 +415,10 @@ impl PgDocumentBuilder {
             privilege_probe_refused: Arc::new(AtomicBool::new(false)),
             unread_warned: Arc::new(RwLock::new(HashSet::new())),
             keyless_warned: Arc::new(Mutex::new(HashSet::new())),
+            unwalked_warned: Arc::new(Mutex::new(HashSet::new())),
+            walk_operators: Arc::default(),
+            walk_orders: Arc::default(),
+            sorting_warned: Arc::default(),
         }
     }
 
@@ -489,6 +504,20 @@ impl PgDocumentBuilder {
         Self::connect_pool(connection_url, spec, options).await
     }
 
+    /// This builder on a pool of its own of `max_connections`, sharing every
+    /// cache (column types, keys, plans): the reader resolves changes on one
+    /// connection while builds use the others (ADR 0012 stage 8a), and a
+    /// `Relation` message still reaches both.
+    #[tracing::instrument(name = "pg.connect", skip_all, err)]
+    pub async fn on_own_pool(&self, connection_url: &str, max_connections: u32) -> Result<Self> {
+        let options = sqlx::postgres::PgPoolOptions::new().max_connections(max_connections);
+        let pool = Self::open_pool(connection_url, options).await?;
+        Ok(Self {
+            pool,
+            ..self.clone()
+        })
+    }
+
     async fn connect_pool(
         connection_url: &str,
         spec: Arc<SourceSpec>,
@@ -499,7 +528,16 @@ impl PgDocumentBuilder {
         // builds is rendered by the session's `bytea_output`, which this sets
         // on every connection a direct link keeps. A transaction-mode pooler
         // may not.
-        let pool = options
+        let pool = Self::open_pool(connection_url, options).await?;
+        tracing::info!(indexes = spec.indexes().count(), "connected to Postgres");
+        Ok(Self::new(pool, spec))
+    }
+
+    async fn open_pool(
+        connection_url: &str,
+        options: sqlx::postgres::PgPoolOptions,
+    ) -> Result<PgPool> {
+        options
             .after_connect(|connection, _| {
                 Box::pin(async move {
                     sqlx::Executor::execute(&mut *connection, "SET bytea_output = 'hex'").await?;
@@ -509,9 +547,7 @@ impl PgDocumentBuilder {
             })
             .connect(connection_url)
             .await
-            .map_err(|e| SourceError::Connection(e.to_string()))?;
-        tracing::info!(indexes = spec.indexes().count(), "connected to Postgres");
-        Ok(Self::new(pool, spec))
+            .map_err(|e| SourceError::Connection(e.to_string()))
     }
 
     /// Build the document of the root row whose primary key reads as `id` (typed
@@ -1554,19 +1590,41 @@ impl DocumentBuilder for PgDocumentBuilder {
         Ok(out)
     }
 
-    fn backfill_scopes(&self) -> Vec<IndexScope> {
-        // A document is keyed by its root row, so the root table alone seeds the
-        // whole index — `build` assembles the joins and aggregates per root row.
-        self.spec
-            .indexes()
-            .map(|(name, schema)| IndexScope {
-                index: name.clone(),
-                root: SnapshotTable {
-                    db_schema: schema.db_schema.clone(),
-                    table: schema.table.clone(),
-                },
-            })
-            .collect()
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        self.spec.indexes().map(|(name, _)| name.clone()).collect()
+    }
+
+    #[tracing::instrument(name = "pg.last_key", level = "debug", skip_all, fields(%index))]
+    async fn last_key(&self, index: &IndexName) -> Result<Option<RowKey>> {
+        self.greatest_key(index).await
+    }
+
+    #[tracing::instrument(name = "pg.keys", level = "debug", skip_all, fields(%index, limit))]
+    async fn keys(
+        &self,
+        index: &IndexName,
+        after: Option<&RowKey>,
+        through: &RowKey,
+        limit: usize,
+    ) -> Result<Vec<RowKey>> {
+        self.key_page(index, after, through, limit).await
+    }
+
+    async fn walk_mark(&self, index: &IndexName, key: &RowKey) -> Result<Option<String>> {
+        self.mark_of(index, key).await
+    }
+
+    async fn resume_after(&self, index: &IndexName, mark: &str) -> Result<Option<RowKey>> {
+        self.resumed_key(index, mark).await
+    }
+
+    async fn compare_keys(
+        &self,
+        index: &IndexName,
+        a: &RowKey,
+        b: &RowKey,
+    ) -> Result<Option<std::cmp::Ordering>> {
+        self.walk_order(index, a, b).await
     }
 
     async fn index_mappings(&self) -> Result<Vec<IndexMapping>> {
