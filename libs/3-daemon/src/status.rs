@@ -120,6 +120,7 @@ pub enum LaneHealthState {
 /// A lane that is not open, as `/status` and the metrics read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneHealthView {
+    /// Parked, blocked or restaging (never open: an open lane has no view).
     pub state: LaneHealthState,
     /// When it stopped being written (UTC).
     pub since: chrono::DateTime<chrono::Utc>,

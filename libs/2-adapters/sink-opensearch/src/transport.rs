@@ -23,6 +23,8 @@ use sink::{RejectedDocument, Result, SinkError};
 use tracing::{debug, warn};
 
 use crate::OpensearchSink;
+use crate::bulk::{BulkAction, build_bulk_url, bulk_action_fragment, read_bulk_response};
+use crate::mapping::build_index_body;
 
 /// What one bulk request's items came back as, past the busy ones it resent.
 #[derive(Debug, Default)]
@@ -33,8 +35,6 @@ pub(crate) struct Chunk {
     /// Physical index and why, per item whose target is gone.
     pub(crate) missing: Vec<(String, String)>,
 }
-use crate::bulk::{BulkAction, build_bulk_url, bulk_action_fragment, read_bulk_response};
-use crate::mapping::build_index_body;
 
 /// A `reqwest` failure as a [`SinkError::Write`]: `context`, the error, and
 /// every cause in its source chain, joined with `": "`. A cause whose text its
