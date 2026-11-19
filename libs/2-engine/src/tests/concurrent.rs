@@ -656,7 +656,9 @@ fn seeds() -> Vec<u64> {
 /// confirmation at the last position, and each lane's last live position ends
 /// searchable with no new traffic. Every schedule also runs over a sink that
 /// holds one lock across its caught-up writes (as the OpenSearch sink holds
-/// its refresh) and leaves unforced writes `Deferred`.
+/// its refresh) and leaves unforced writes `Deferred`. The merging schedules
+/// run with the default merge wait, so items ready while a write is out wait
+/// for it (bounded) before going out merged.
 #[test]
 fn a_document_is_never_written_twice_at_once_and_its_versions_never_go_down() {
     let mut concurrent = false;

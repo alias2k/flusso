@@ -342,8 +342,8 @@ async fn a_lone_change_on_a_quiet_engine_is_written_at_once() {
 }
 
 /// `orders`' write never returns. Every `users` item, the first and every one
-/// after, goes out within the bound of becoming ready: a write out longer
-/// than the bound is not waited for.
+/// after, goes out within the bound of becoming ready, and once the stuck
+/// write is older than the bound, at once: it is not waited for.
 #[tokio::test(start_paused = true)]
 async fn a_stalled_lanes_write_holds_no_other_lanes_item_beyond_the_bound() {
     let mut rig = Rig::new(Recorder::default(), 4);
@@ -363,6 +363,12 @@ async fn a_stalled_lanes_write_holds_no_other_lanes_item_beyond_the_bound() {
             "{id} waited {:?}",
             started - published
         );
+        if k > 0 {
+            assert_eq!(
+                started, published,
+                "{id}: a write out longer than the bound is not waited for"
+            );
+        }
     }
 }
 
@@ -391,7 +397,8 @@ async fn a_busy_sibling_lane_holds_no_item_beyond_the_bound() {
     }
 }
 
-/// A backfill item is never held, even with a write out.
+/// Backfill is never held: with a backfill item waiting, nothing is, even
+/// with a write out and a live item ready beside it.
 #[tokio::test(start_paused = true)]
 async fn a_backfill_item_is_never_held() {
     let mut rig = Rig::new(Recorder::default(), 4);
@@ -399,6 +406,7 @@ async fn a_backfill_item_is_never_held() {
     rig.publish(&users(), "slow-u1", Some(1)).await;
     tokio::time::sleep(ms(5)).await;
     let published = rig.publish(&orders(), "b", None).await;
+    rig.publish(&users(), "u2", Some(2)).await;
     tokio::time::sleep(ms(1)).await;
     assert_eq!(rig.sink.started("orders/b"), Some(published));
 }
@@ -512,4 +520,29 @@ async fn a_stop_rejection_in_a_merged_write_loses_no_other_part() {
     assert!(rig.stream.is_idle());
     assert_eq!(rig.sink.times_written("orders/o1"), 2);
     assert_eq!(rig.sink.times_written("users/u2"), 1);
+}
+
+/// When the wait ends, another lane's item may go first (lanes take turns),
+/// alone, and its write is young: the item still waiting is not held again
+/// for it. Its wait counts from when it became ready, and ends there.
+#[tokio::test(start_paused = true)]
+async fn an_item_waits_no_longer_than_the_bound_when_another_write_starts_meanwhile() {
+    let mut rig = Rig::new(Recorder::default(), 4);
+    rig.start();
+    rig.publish(&users(), "stuck-u0", Some(1)).await;
+    tokio::time::sleep(ms(10)).await;
+    let published = rig.publish(&users(), "u1", Some(2)).await;
+    rig.publish(&orders(), "stuck-o1", Some(3)).await;
+    tokio::time::sleep(ms(200)).await;
+    let started = rig.sink.started("users/u1").expect("u1 is written");
+    assert!(
+        rig.sink.started("orders/stuck-o1") <= Some(started),
+        "orders went first: {:?}",
+        rig.sink.writes()
+    );
+    assert!(
+        started - published <= bound(),
+        "u1 waited {:?}",
+        started - published
+    );
 }

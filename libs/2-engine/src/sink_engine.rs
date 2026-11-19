@@ -150,6 +150,9 @@ pub struct SinkEngine {
     writes: usize,
     /// The most documents one write holds when ready items are merged.
     write_documents: usize,
+    /// The longest a ready live item waits for the writes out, to go out
+    /// merged with what else is ready.
+    pub(crate) merge_wait: std::time::Duration,
     /// A reindex taken off the control channel and not yet staged. It
     /// outlives a run, so a run failing with writes in flight doesn't lose a
     /// reindex the daemon already accepted; the next run stages it once its
@@ -195,6 +198,7 @@ impl SinkEngine {
             advanced: AtomicU64::new(0),
             writes: 1,
             write_documents: crate::BatchPolicy::default().max_changes,
+            merge_wait: crate::BatchPolicy::default().max_delay,
             blame: Mutex::new(Blame::Everyone),
             pending_reindex: Mutex::new(None),
             reindex_waiting: AtomicBool::new(false),
@@ -232,6 +236,20 @@ impl SinkEngine {
     /// lane per sink.
     pub fn with_write_documents(mut self, documents: usize) -> Self {
         self.write_documents = documents.max(1);
+        self
+    }
+
+    /// The longest a live item ready while a write is out waits for the writes
+    /// out to return, so it goes out in one write with what else is ready
+    /// (fewer, larger requests, as one lane per sink wrote one batch over
+    /// every index). Bounded from when the item became ready; a write out
+    /// longer than this is not waited for, so a stalled or slow lane holds no
+    /// other index's writes past it. Never for backfill, an ordered sink, a
+    /// sink with one lane, or without merging. The default is
+    /// [`BatchPolicy`](crate::BatchPolicy)'s `max_delay`, which the daemon
+    /// sets from `[batch] max_delay_ms`; zero turns the wait off.
+    pub fn with_merge_wait(mut self, wait: std::time::Duration) -> Self {
+        self.merge_wait = wait;
         self
     }
 

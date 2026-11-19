@@ -282,6 +282,7 @@ impl Daemon {
                 .with_options(parts.options)
                 .with_writes(writes(&config))
                 .with_write_documents(batch_policy(&config).max_changes)
+                .with_merge_wait(batch_policy(&config).max_delay)
                 .with_observer(Arc::clone(&observer))
                 .with_failure_policies(failure_policies.clone())
                 .skip_backfill(options.skip_backfill)

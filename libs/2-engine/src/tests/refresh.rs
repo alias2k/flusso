@@ -593,23 +593,28 @@ async fn an_item_landing_behind_one_waiting_for_its_refresh_is_no_progress() {
     );
 }
 
-/// `users`' refresh is out (behind the lock); `orders`' slow write is out
-/// too, and an item of each lane waits for it, then goes out merged while
-/// the refresh is still out. The merged write's `users` part lands during
-/// `users`' refresh: once it returns, `users` is checked again, and both
-/// lanes end searchable.
+/// `users`' refresh is out; `orders`' slow write is out too, and an item of
+/// each lane waits for it, then goes out merged while the refresh is still
+/// out. The merged write's `users` part lands during `users`' refresh: once
+/// it returns, `users` is checked again, and both lanes end searchable. No
+/// lock here (behind one, every caught-up write would wait for the refresh
+/// and the merge wait would end first), and every non-empty write is
+/// `Deferred`, so a refresh is what makes a position searchable.
 #[tokio::test(start_paused = true)]
 async fn a_merged_write_landing_during_a_lanes_refresh() {
+    let sink = Refresher {
+        deferred_even_caught_up: true,
+        ..Refresher::unlocked(200, 30)
+    };
     let mut rig = Rig::new(
-        Refresher::locked(200, 50),
+        sink,
         &[users(), orders()],
         4,
         crate::BatchPolicy::default().max_changes,
     );
     rig.start();
     rig.publish(&users(), "slow-a", Some(1)).await;
-    rig.publish(&users(), "b", Some(2)).await;
-    tokio::time::sleep(Duration::from_millis(55)).await;
+    tokio::time::sleep(Duration::from_millis(35)).await;
     rig.publish(&orders(), "slow-o", Some(3)).await;
     tokio::time::sleep(Duration::from_millis(10)).await;
     rig.publish(&users(), "u", Some(4)).await;

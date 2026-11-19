@@ -43,8 +43,21 @@
 //! [`write_limit`](sink::Sink::write_limit)), never splitting an item. So a
 //! burst over many indexes goes out in writes of about a batch, as with one
 //! lane per sink, and several small items of one lane go out together
-//! (#397). It takes what is ready and never waits for more: a lone item is
-//! written at once. An item behind a `SnapshotComplete` of its lane is not
+//! (#397). A lone item on a quiet engine is written at once.
+//!
+//! **The merge wait.** With several lanes, a live item ready while a write
+//! is out waits for the writes out to return, so it goes out in one write
+//! with what else is ready rather than alone beside them (a burst over three
+//! indexes is otherwise three times the requests, each refreshing). The
+//! wait is bounded hard by `merge_wait` (`[batch] max_delay_ms`, 50 ms by
+//! default), counted from when the item became ready and from when the
+//! youngest write out was sent, whichever ends first: a write out longer
+//! than the bound is not waited for, so a stalled or slow lane holds no
+//! other index's writes past it. Backfill is never held (with a backfill
+//! item waiting nothing is), nor is anything on an ordered sink, one lane, or
+//! without merging. The slot cap and a quiet lane's one item still apply.
+//!
+//! An item behind a `SnapshotComplete` of its lane is not
 //! admissible; a lane behind a failed run's barrier, and an ordered sink,
 //! write one item alone. Two items of one lane in a write share no document
 //! (each is admissible against every earlier item of its lane). The write
@@ -131,6 +144,8 @@ struct Queued {
     lane: usize,
     /// Its place in receive order within this run (lane order within a lane).
     seq: u64,
+    /// When it was taken off the lane: a merge wait is bounded from here.
+    ready_at: Instant,
 }
 
 /// One lane the run reads.
@@ -194,6 +209,9 @@ impl Documents {
 struct Flight {
     parts: Vec<Part>,
     work: Work,
+    /// When it was sent: a write out longer than the merge wait is not
+    /// waited for.
+    started: Instant,
     /// For a caught-up write, how many writes had returned at its grant, and
     /// the lanes it is caught up for.
     caught_up: Option<(u64, Vec<LaneKey>)>,
@@ -266,6 +284,8 @@ pub(super) struct Run<'a> {
     recording: Vec<(u64, usize)>,
     /// The empty caught-up writes in flight, by flight.
     refreshing: Vec<(u64, Refreshing)>,
+    /// While live items wait for the writes out to merge: when the wait ends.
+    hold_until: Option<Instant>,
     next_flight: u64,
     /// The lane-order number the next delivered item gets.
     next_seq: u64,
@@ -322,6 +342,7 @@ impl<'a> Run<'a> {
             seeding: Vec::new(),
             recording: Vec::new(),
             refreshing: Vec::new(),
+            hold_until: None,
             next_flight: 0,
             next_seq: 0,
             contested: 0,
@@ -377,6 +398,7 @@ impl<'a> Run<'a> {
                 .collect();
             let room = wanting.contains(&true);
             let next_due = self.next_due;
+            let hold_until = self.hold_until;
             // A stop changes nothing for the loop but the backfill waiting
             // (skipped unwritten), so it is watched only while some waits.
             let engine = self.engine;
@@ -455,6 +477,7 @@ impl<'a> Run<'a> {
                     self.engine.report_searchable();
                     self.refresh_due();
                 }
+                () = until(hold_until), if hold_until.is_some() => self.close_idle(),
                 () = stop.requested(), if watch_stop => self.close_idle(),
                 _ = idle_tick.tick() => self.close_idle(),
             }
@@ -710,6 +733,7 @@ impl<'a> Run<'a> {
             handle,
             lane,
             seq,
+            ready_at: Instant::now(),
         });
     }
 
@@ -732,6 +756,7 @@ impl<'a> Run<'a> {
                 handle,
                 lane,
                 seq,
+                ..
             }) = self.take_from_window(index)
             else {
                 continue;
@@ -765,6 +790,7 @@ impl<'a> Run<'a> {
                     handle,
                     lane,
                     seq,
+                    ..
                 }) = self.take_from_window(at)
                 {
                     if let Some(run) = self.lanes.get_mut(lane) {
@@ -777,6 +803,9 @@ impl<'a> Run<'a> {
                     }
                 }
                 continue;
+            }
+            if self.holds_for_merge() {
+                return Ok(());
             }
             let mut picked = self.pick();
             if picked.is_empty() {
@@ -793,6 +822,7 @@ impl<'a> Run<'a> {
                     handle,
                     lane,
                     seq,
+                    ..
                 }) = self.take_from_window(at)
                 {
                     envelopes.push(Arc::clone(&batch.envelopes));
@@ -834,6 +864,41 @@ impl<'a> Run<'a> {
         Ok(())
     }
 
+    /// Whether the live items waiting are held for the writes out, so they go
+    /// out merged with what else is ready once those return. Only while every
+    /// waiting item is live (backfill is never held), on a merging, unordered
+    /// sink with several lanes, and only for a write out shorter than the
+    /// merge wait: a stalled or slow write is not waited for. The hold ends
+    /// when the oldest waiting item has waited the merge wait, or when every
+    /// write out reaches that age, whichever comes first; a write returning
+    /// ends it sooner, when nothing younger is out.
+    fn holds_for_merge(&mut self) -> bool {
+        self.hold_until = self.merge_hold(Instant::now());
+        self.hold_until.is_some()
+    }
+
+    fn merge_hold(&self, now: Instant) -> Option<Instant> {
+        let bound = self.engine.merge_wait;
+        if bound.is_zero()
+            || self.lanes.len() < 2
+            || self.ordered()
+            || self.merge_limit() < 2
+            || self.backfill_waiting > 0
+            || self.live_waiting == 0
+        {
+            return None;
+        }
+        let youngest_write = self.flying.iter().map(|(_, flight)| flight.started).max()?;
+        let oldest_ready = self
+            .window
+            .iter()
+            .filter(|queued| matches!(queued.item, Queue::Batch { .. }))
+            .map(|queued| queued.ready_at)
+            .min()?;
+        let until = oldest_ready.min(youngest_write) + bound;
+        (now < until).then_some(until)
+    }
+
     /// The window index of a `SnapshotComplete` with nothing before it on its
     /// lane, waiting or in flight.
     fn runnable_complete(&self) -> Option<usize> {
@@ -853,9 +918,9 @@ impl<'a> Run<'a> {
     /// The window indexes of the next write, in window order, if one item is
     /// admissible: the item lanes' turns and live-first choose, then every
     /// other admissible item of the same kind that fits, lanes in turn, up to
-    /// the merge limit in documents. Merging takes what is ready and never
-    /// waits for more. An ordered sink, and a lane behind a failed run's
-    /// barrier, write one item alone.
+    /// the merge limit in documents. Merging takes what is ready; the merge
+    /// wait, if any, has already been decided. An ordered sink, and a lane
+    /// behind a failed run's barrier, write one item alone.
     fn pick(&mut self) -> Vec<usize> {
         // One lane, nothing in flight, one kind waiting: no contest, no turn
         // to take, so the front is the pick. Unless another item could join it
@@ -1072,6 +1137,7 @@ impl<'a> Run<'a> {
             Flight {
                 parts,
                 work,
+                started: Instant::now(),
                 caught_up: covers_below,
             },
         ));
