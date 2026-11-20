@@ -171,7 +171,7 @@ The share has a flag and a variable, like the table's other keys:
 
 1. **Nothing, usually.** Bursts of one index stop holding up the others.
 2. **Raise `index_budget_share` towards `1`** if one index does nearly all the work and should keep using the whole budget, as in 0.18. `1` is the old behaviour.
-3. **Leave the memory headroom as it is.** The budget can still be passed by one live and one backfill batch, as in 0.18 ([sizing](../reference/config-toml.md#concurrency)).
+3. **Check the memory headroom.** An index holding no live documents always gets one live batch, even with the budget full, so one index stuck at its share never stops the others. Plan for one live batch per index, plus one backfill batch, above `max_built_mib` ([sizing](../reference/config-toml.md#concurrency)); 0.18 needed one live batch in all.
 
 **What to know.**
 
