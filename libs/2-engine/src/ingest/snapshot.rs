@@ -662,7 +662,11 @@ mod tests {
                 }
             }
         };
-        let (users, orders) = tokio::join!(drive(walk("users")), drive(walk("orders")));
+        let (users, orders) = tokio::time::timeout(Duration::from_secs(60), async {
+            tokio::join!(drive(walk("users")), drive(walk("orders")))
+        })
+        .await
+        .unwrap();
         assert_eq!((users, orders), (3 * KEY_PAGE + 1, 3 * KEY_PAGE + 1));
         assert_eq!(documents.most.load(Ordering::SeqCst), 1);
     }
