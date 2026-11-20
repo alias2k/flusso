@@ -138,7 +138,7 @@ pub struct ConcurrencyConfig {
     pub builds: Option<NonZeroUsize>,
     /// MiB of built documents held before the ingest engine waits.
     pub max_built_mib: Option<NonZeroUsize>,
-    /// The share of `max_built_mib` one index may hold with two or more
+    /// The share of `max_built_mib` one index's live documents may hold with two or more
     /// indexes, with where it was set (the file, then `--index-budget-share`
     /// / `FLUSSO_INDEX_BUDGET_SHARE` laid over it by the binary).
     pub index_budget_share: Option<ShareValue>,
@@ -193,7 +193,7 @@ pub enum Origin {
 /// outside (0, 1], naming this origin.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShareValue {
-    /// The fraction of `max_built_mib` one index may hold.
+    /// The fraction of `max_built_mib` one index's live documents may hold.
     pub share: f64,
     /// Where it was set.
     pub origin: Origin,

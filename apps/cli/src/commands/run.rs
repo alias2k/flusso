@@ -171,11 +171,11 @@ pub(crate) struct RunArgs {
     #[arg(long, env = "FLUSSO_MAX_BUILT_MIB", value_parser = config::parse_max_built_mib)]
     max_built_mib: Option<std::num::NonZeroUsize>,
 
-    /// The share of `--max-built-mib` one index may hold while two or more
-    /// indexes run, so one index bursting leaves room for the others to
-    /// build. Overrides `[concurrency].index_budget_share` from config;
-    /// defaults to 0.5. Above 0, at most 1; with one index it holds the whole
-    /// budget. Never written into the lock. [env: FLUSSO_INDEX_BUDGET_SHARE]
+    /// The share of `--max-built-mib` one index's live documents may hold
+    /// while two or more indexes run, so one index bursting leaves room for
+    /// the others to build. Overrides `[concurrency].index_budget_share` from
+    /// config; defaults to 0.5. Above 0, at most 1; with one index it does
+    /// nothing. Never written into the lock. [env: FLUSSO_INDEX_BUDGET_SHARE]
     #[arg(long, value_parser = config::parse_index_budget_share)]
     index_budget_share: Option<f64>,
 

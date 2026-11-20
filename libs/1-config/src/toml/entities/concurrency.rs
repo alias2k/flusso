@@ -66,11 +66,12 @@ pub struct Concurrency {
     )]
     #[schemars(range(min = 16, max = 1_048_576))]
     pub max_built_mib: Option<NonZeroUsize>,
-    /// The share of `max_built_mib` one index may hold while two or more
-    /// indexes run (default 0.5): one index bursting fills at most this
-    /// much, and the others keep building beside it. Above 0, at most 1; with
-    /// one index it holds the whole budget whatever this says. `check`,
-    /// `build` and `run` refuse a value outside (0, 1].
+    /// The share of `max_built_mib` one index's live documents may hold
+    /// while two or more indexes run (default 0.5): one index bursting fills
+    /// at most this much, and the others keep building beside it. Its
+    /// backfill counts with every backfill against half the budget instead.
+    /// Above 0, at most 1; with one index it does nothing. `check`, `build`
+    /// and `run` refuse a value outside (0, 1].
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

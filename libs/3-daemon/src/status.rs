@@ -735,7 +735,9 @@ pub struct MemorySnapshot {
     /// Bytes of built documents not yet acknowledged by every sink,
     /// reservations of builds in flight included.
     pub built_bytes: usize,
-    /// Backfill's share of `built_bytes`; at most half the limit.
+    /// Backfill's share of `built_bytes`: at most half the limit, plus one
+    /// batch when backfill held nothing, plus what builds in flight settle
+    /// past their estimates.
     pub backfill_bytes: usize,
 }
 

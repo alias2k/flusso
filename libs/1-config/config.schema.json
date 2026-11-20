@@ -189,7 +189,7 @@
             "null"
           ],
           "format": "double",
-          "description": "The share of `max_built_mib` one index may hold while two or more\nindexes run (default 0.5): one index bursting fills at most this\nmuch, and the others keep building beside it. Above 0, at most 1; with\none index it holds the whole budget whatever this says. `check`,\n`build` and `run` refuse a value outside (0, 1].",
+          "description": "The share of `max_built_mib` one index's live documents may hold\nwhile two or more indexes run (default 0.5): one index bursting fills\nat most this much, and the others keep building beside it. Its\nbackfill counts with every backfill against half the budget instead.\nAbove 0, at most 1; with one index it does nothing. `check`, `build`\nand `run` refuse a value outside (0, 1].",
           "exclusiveMinimum": 0,
           "maximum": 1
         }

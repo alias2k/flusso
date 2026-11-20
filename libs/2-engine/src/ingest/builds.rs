@@ -141,6 +141,29 @@ impl PerDocument {
     }
 }
 
+/// When each kind was first held back by the budget since its last grant;
+/// `None` while it isn't waiting.
+#[derive(Debug, Default)]
+pub(super) struct Waits {
+    live: Option<Instant>,
+    backfill: Option<Instant>,
+}
+
+impl Waits {
+    fn of(&mut self, work: Work) -> &mut Option<Instant> {
+        match work {
+            Work::Live => &mut self.live,
+            Work::Backfill => &mut self.backfill,
+        }
+    }
+}
+
+fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Each index's settled charge for a batch's documents.
 pub(super) type Charges = BTreeMap<IndexName, Arc<Charge>>;
 
@@ -201,11 +224,9 @@ pub(super) struct Builds {
     /// The release generation of that refusal: a release past it may let
     /// the batch go.
     refused_generation: u64,
-    /// The kinds counted as waiting for the budget since their last grant.
-    waiting: (bool, bool),
-    /// When each kind (live, backfill) was first held back by the budget
-    /// since its last grant.
-    refused_at: (Option<Instant>, Option<Instant>),
+    /// When each kind was first held back by the budget since its last
+    /// grant: the engine's, so a wait outlives the run it started in.
+    waits: Arc<std::sync::Mutex<Waits>>,
     /// What woke the loop before this grant, for [`Observer::on_budget_wait`].
     wake: Wake,
     observer: Arc<dyn Observer>,
@@ -255,13 +276,20 @@ impl Builds {
             defer_below: None,
             refused: None,
             refused_generation: 0,
-            waiting: (false, false),
-            refused_at: (None, None),
+            waits: Arc::default(),
             wake: Wake::Change,
             observer: Arc::new(crate::observer::NoopObserver),
             spawned: Vec::new(),
             progress: None,
         }
+    }
+
+    /// Keep the budget waits in `waits`, which outlives this engine run: a
+    /// wait still open when the run ends (an error, an abort) goes on in the
+    /// next, so one hold is one refusal and one wait across a restart.
+    pub(super) fn with_waits(mut self, waits: Arc<std::sync::Mutex<Waits>>) -> Self {
+        self.waits = waits;
+        self
     }
 
     /// Let a live build take the indexes the budget has room for while each
@@ -340,18 +368,14 @@ impl Builds {
             self.refused_generation = generation;
         }
         self.refused.get_or_insert(work);
-        let refused_at = match work {
-            Work::Live => &mut self.refused_at.0,
-            Work::Backfill => &mut self.refused_at.1,
+        let started = {
+            let mut waits = lock(&self.waits);
+            let since = waits.of(work);
+            let started = since.is_none();
+            since.get_or_insert_with(Instant::now);
+            started
         };
-        refused_at.get_or_insert_with(Instant::now);
-        let waiting = match work {
-            Work::Live => &mut self.waiting.0,
-            Work::Backfill => &mut self.waiting.1,
-        };
-        if !std::mem::replace(waiting, true)
-            && let Some(budget) = &self.budget
-        {
+        if started && let Some(budget) = &self.budget {
             budget.note_refused(work);
         }
     }
@@ -544,15 +568,8 @@ impl Builds {
         // wait, from its first refusal to the grant that takes it.
         let still_waiting = matches!(&job, Job::Live { deferred, .. } if !deferred.is_empty());
         if !still_waiting {
-            match work {
-                Work::Live => self.waiting.0 = false,
-                Work::Backfill => self.waiting.1 = false,
-            }
-            let refused_at = match work {
-                Work::Live => self.refused_at.0.take(),
-                Work::Backfill => self.refused_at.1.take(),
-            };
-            if let Some(since) = refused_at {
+            let since = lock(&self.waits).of(work).take();
+            if let Some(since) = since {
                 self.observer
                     .on_budget_wait(work, self.wake, since.elapsed());
             }

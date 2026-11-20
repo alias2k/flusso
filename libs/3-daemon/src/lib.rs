@@ -127,11 +127,11 @@ fn origin(value: Option<config::BackoffValue>, key: &str) -> String {
     }
 }
 
-/// The share of `max_built_mib` one index may hold when
+/// The share of `max_built_mib` one index's live documents may hold when
 /// `[concurrency] index_budget_share` is unset.
 pub const DEFAULT_INDEX_BUDGET_SHARE: f64 = 0.5;
 
-/// The share of the memory budget one index may hold while two or more
+/// The share of the memory budget one index's live documents may hold while two or more
 /// indexes run, resolved and checked: `[concurrency] index_budget_share` as
 /// set (flag > env > file), else [`DEFAULT_INDEX_BUDGET_SHARE`]. A value
 /// outside (0, 1] (`nan` included) is refused, the message saying where it
@@ -151,7 +151,7 @@ pub fn index_budget_share(config: &Config) -> anyhow::Result<f64> {
     };
     anyhow::bail!(
         "[concurrency] index_budget_share = {} ({set}) is outside (0, 1]: it is the share of \
-         max_built_mib one index may hold while two or more indexes run. Set a number above 0 \
+         max_built_mib one index's live documents may hold while two or more indexes run. Set a number above 0 \
          and at most 1 (default 0.5) with flusso.toml's [concurrency] index_budget_share, \
          --index-budget-share or FLUSSO_INDEX_BUDGET_SHARE; a flag wins over its variable, a \
          variable over the file",

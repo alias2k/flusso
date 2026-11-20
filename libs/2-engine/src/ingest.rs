@@ -104,6 +104,8 @@ pub struct IngestEngine {
     batch: BatchPolicy,
     builds: usize,
     budget: Option<Arc<Budget>>,
+    /// The budget waits open across engine runs (see [`Builds::with_waits`]).
+    budget_waits: Arc<std::sync::Mutex<builds::Waits>>,
     failure_policies: FailurePolicies,
     stop: Stop,
     /// How many times this engine moved the source forward (see
@@ -144,6 +146,7 @@ impl IngestEngine {
             batch: BatchPolicy::default(),
             builds: 1,
             budget: None,
+            budget_waits: Arc::default(),
             failure_policies: FailurePolicies::default(),
             stop: Stop::new(),
             advances: AtomicU64::new(0),
@@ -289,7 +292,8 @@ impl IngestEngine {
         let mut builds = Builds::new(self.builds, self.budget.clone())
             .with_observer(Arc::clone(&self.observer))
             .with_progress(Arc::clone(&self.progress))
-            .with_deferral(defer_below);
+            .with_deferral(defer_below)
+            .with_waits(Arc::clone(&self.budget_waits));
         let ended = self
             .follow(&lanes, requests, &scopes, live, &mut builds)
             .await;
