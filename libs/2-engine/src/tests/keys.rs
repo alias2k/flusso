@@ -243,3 +243,46 @@ async fn each_index_keys_its_own_items_and_its_lanes_share_them() {
         );
     }
 }
+
+/// A live item that carries no key could be neither marked landed nor
+/// fenced, so a later item's mark would cover it: the sink engine refuses
+/// it and fails its run, leaving it unacknowledged.
+#[tokio::test]
+async fn a_live_item_without_a_key_fails_the_sink_engine() {
+    let primary = sink_name("primary");
+    let lane = LaneKey::new(users(), primary.clone());
+    let stream = Arc::new(ChannelStream::over(64, [users()], [primary.clone()]));
+    let progress = Arc::new(Progress::of([users()], [primary.clone()]));
+    stream
+        .lane(&lane)
+        .unwrap()
+        .producer
+        .publish(LaneItem::Batch(stream::Batch {
+            key: None,
+            position: Some(Position::new(3)),
+            changes: 1,
+            envelopes: Vec::new().into(),
+            hold: Default::default(),
+            walked: None,
+            ticket: None,
+        }))
+        .await
+        .unwrap();
+    let engine = SinkEngine::new(
+        primary,
+        Arc::new(RecordingSink::seeded(true)),
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        vec![mapping()],
+        Arc::clone(&progress),
+    );
+    let (_keep, mut control) = tokio::sync::mpsc::channel::<SinkControl>(1);
+    let outcome = tokio::time::timeout(Duration::from_secs(5), engine.run(&mut control))
+        .await
+        .expect("the run ends");
+    assert!(
+        matches!(outcome, Err(EngineError::UnkeyedLiveItem(ref named)) if *named == lane.to_string()),
+        "{outcome:?}"
+    );
+    assert!(!stream.is_idle(), "the item is left unacknowledged");
+    assert_eq!(progress.landed(), source::cdc::Landed::Idle);
+}

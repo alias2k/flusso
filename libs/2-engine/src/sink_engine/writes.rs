@@ -508,7 +508,11 @@ impl<'a> Run<'a> {
                                 run.closed = true;
                             }
                         }
-                        Ok(Some(delivery)) => self.queue(lane, delivery),
+                        Ok(Some(delivery)) => {
+                            if let Err(error) = self.queue(lane, delivery) {
+                                self.fail(error, &[lane]);
+                            }
+                        }
                     }
                 }
                 message = control.recv(), if control_open && !self.engine.reindex_pending() && self.failure.is_none() => {
@@ -888,7 +892,7 @@ impl<'a> Run<'a> {
                         Err(error) => return Err(error.into()),
                         Ok(None) => run.closed = true,
                         Ok(Some(delivery)) => {
-                            self.queue(lane, delivery);
+                            self.queue(lane, delivery)?;
                             took = true;
                         }
                     },
@@ -898,11 +902,22 @@ impl<'a> Run<'a> {
         Ok(took)
     }
 
-    fn queue(&mut self, lane: usize, delivery: Delivery<LaneItem>) {
+    /// Take a delivered item into the window. A live item (it carries a
+    /// position) must carry its key: without one it could be neither marked
+    /// in the progress nor fenced, and a later item's mark would cover it, so
+    /// it fails the run, left unacknowledged.
+    fn queue(&mut self, lane: usize, delivery: Delivery<LaneItem>) -> Result<()> {
         self.close_idle();
         let (item, handle) = delivery.into_parts();
         let item = match item {
             LaneItem::Batch(batch) => {
+                if batch.position.is_some() && batch.key.is_none() {
+                    let lane = self
+                        .lanes
+                        .get(lane)
+                        .map_or_else(String::new, |run| run.key.to_string());
+                    return Err(EngineError::UnkeyedLiveItem(lane));
+                }
                 if let Some(key) = batch.key
                     && let Some(position) = batch.position
                     && let Some(run) = self.lanes.get(lane)
@@ -944,6 +959,7 @@ impl<'a> Run<'a> {
             seq,
             ready_at: Instant::now(),
         });
+        Ok(())
     }
 
     /// Once a stop is requested, backfill items still waiting are

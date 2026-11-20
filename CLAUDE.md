@@ -642,7 +642,9 @@ is the one concrete piece.
   `indexes` (`/wait?index=…`, repeatable, `UnknownIndex` → 404); `/status` has `sinks.<s>.lanes.<index>`;
   `flusso.lane.outstanding{index,sink}`; `flusso-query` fences on the indexes a read reads, cached per
   `(level, index)` (`fence.rs`'s `After`). Guards: `engine` `tests::keys`
-  (`a_key_survives_an_ingest_restart`, `a_batch_takes_one_key_per_index_for_every_lane`),
+  (`a_key_survives_an_ingest_restart`, `a_batch_takes_one_key_per_index_for_every_lane`,
+  `each_index_keys_its_own_items_and_its_lanes_share_them`, `a_live_item_without_a_key_fails_the_sink_engine`:
+  a live item with no key is `EngineError::UnkeyedLiveItem`),
   `progress::tests`' `two_items_sharing_their_newest_position_land_one_at_a_time`, `fences::tests`'
   `two_items_sharing_a_position_are_applied_one_at_a_time`, `tests::lanes`
   (`a_batch_is_split_by_index_and_a_quiet_index_pins_nothing`,
@@ -751,10 +753,10 @@ is the one concrete piece.
   the last covered commit**, because Postgres skips a transaction whose commit record *starts* before
   the confirmed LSN (never confirm into an unprocessed commit's record). (2) A sink
   *reports* visibility (`WriteReport.visibility`: `Immediate` / `Within(d)` / `Deferred`); the
-  sink engine keeps the positions it received in position order (`sink_engine/fences.rs`, kept
-  across restarts of its run), reports each item landed and how far it is searchable to `Progress`
-  **before the ack**, and `Observer::on_position_applied` / `on_position_searchable` in position
-  order (the daemon's `FenceObserver` only wakes waiters on them), with a timer arm for searchable. A **caught-up** write (nothing else
+  sink engine keeps the live items it received per lane in item-key order, each with its position
+  (`sink_engine/fences.rs`, kept across restarts of its run), reports each item landed and how far it
+  is searchable to `Progress` by key **before the ack**, and `Observer::on_position_applied` /
+  `on_position_searchable` with the item's position, in key order (the daemon's `FenceObserver` only wakes waiters on them), with a timer arm for searchable. A **caught-up** write (nothing else
   queued or waiting) makes every write that returned before its grant searchable (the
   `Sink::write` contract; each returned write gets a sequence number), and before the ack that
   leaves its lane quiet a position not yet searchable gets an **empty caught-up write**, since
