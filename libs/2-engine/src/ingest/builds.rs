@@ -284,7 +284,12 @@ impl Builds {
             flights: Flights::new(),
             holding: Vec::new(),
             live_running: Vec::new(),
-            gate: Gate::new(limit),
+            gate: Gate::new(
+                limit,
+                budget
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(Budget::unlimited())),
+            ),
             granted: None,
             permits: Vec::new(),
             halted: false,

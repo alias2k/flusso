@@ -27,6 +27,10 @@ fn held(budget: &Arc<Budget>, name: &str, kib: usize) -> Vec<Charge> {
         .collect()
 }
 
+fn unlimited() -> Arc<Budget> {
+    Arc::new(Budget::unlimited())
+}
+
 /// Let every runnable task run.
 async fn settle() {
     for _ in 0..20 {
@@ -46,7 +50,7 @@ fn waiter(
     let gate = Arc::clone(gate);
     let granted = Arc::clone(granted);
     tokio::spawn(async move {
-        let (permit, ()) = gate.acquire(work, &Budget::unlimited(), |_| Ok(())).await;
+        let (permit, _) = gate.acquire(work, &[]).await;
         granted.lock().unwrap().push(name);
         tokio::time::sleep(hold).await;
         drop(permit);
@@ -55,7 +59,7 @@ fn waiter(
 
 #[test]
 fn choose_takes_live_first_but_every_fourth_contested_grant_is_backfill() {
-    let gate = Gate::new(1);
+    let gate = Gate::new(1, unlimited());
     let mut kinds = Vec::new();
     for _ in 0..8 {
         let (work, permit) = gate.choose(true, true).unwrap();
@@ -84,7 +88,7 @@ fn choose_takes_live_first_but_every_fourth_contested_grant_is_backfill() {
 
 #[test]
 fn no_permit_beyond_the_count_and_a_dropped_one_comes_back() {
-    let gate = Gate::new(2);
+    let gate = Gate::new(2, unlimited());
     let a = gate.choose(true, false).unwrap();
     let _b = gate.choose(true, false).unwrap();
     assert!(gate.choose(true, false).is_none());
@@ -96,7 +100,7 @@ fn no_permit_beyond_the_count_and_a_dropped_one_comes_back() {
 /// permit the one before gives back.
 #[tokio::test(start_paused = true)]
 async fn a_freed_permit_goes_to_the_oldest_live_waiter() {
-    let gate = Gate::new(1);
+    let gate = Gate::new(1, unlimited());
     let (_, held) = gate.choose(true, false).unwrap();
     let granted = Arc::new(Mutex::new(Vec::new()));
     let mut waiters = Vec::new();
@@ -124,7 +128,7 @@ async fn a_freed_permit_goes_to_the_oldest_live_waiter() {
 /// the oldest backfill waiter.
 #[tokio::test(start_paused = true)]
 async fn every_fourth_contested_grant_goes_to_the_oldest_backfill_waiter() {
-    let gate = Gate::new(1);
+    let gate = Gate::new(1, unlimited());
     let (_, held) = gate.choose(true, false).unwrap();
     let granted = Arc::new(Mutex::new(Vec::new()));
     let mut waiters = Vec::new();
@@ -167,18 +171,13 @@ async fn every_fourth_contested_grant_goes_to_the_oldest_backfill_waiter() {
 async fn a_waiter_refused_by_the_budget_keeps_its_place_and_the_permit_goes_on() {
     let budget = Arc::new(Budget::new(64 * KIB));
     let users = held(&budget, "users", 60);
-    let gate = Gate::new(1);
+    let gate = Gate::new(1, Arc::clone(&budget));
     let granted = Arc::new(Mutex::new(Vec::new()));
     let reserving = |name: &'static str, kib: usize| {
         let gate = Arc::clone(&gate);
-        let budget = Arc::clone(&budget);
         let granted = Arc::clone(&granted);
         tokio::spawn(async move {
-            let (permit, parts) = gate
-                .acquire(Work::Live, &budget, |behind| {
-                    budget.reserve_behind(Work::Live, &[(index(name), kib * KIB)], behind)
-                })
-                .await;
+            let (permit, parts) = gate.acquire(Work::Live, &[(index(name), kib * KIB)]).await;
             granted.lock().unwrap().push(name);
             tokio::time::sleep(Duration::from_millis(10)).await;
             drop(parts);
@@ -215,18 +214,13 @@ async fn a_younger_waiter_behind_a_limit_refusal_takes_no_room_by_the_limit() {
     let budget = Arc::new(Budget::new(64 * KIB));
     let users = held(&budget, "users", 40);
     let _orders = held(&budget, "orders", 8);
-    let gate = Gate::new(2);
+    let gate = Gate::new(2, Arc::clone(&budget));
     let granted = Arc::new(Mutex::new(Vec::new()));
     let reserving = |name: &'static str, kib: usize| {
         let gate = Arc::clone(&gate);
-        let budget = Arc::clone(&budget);
         let granted = Arc::clone(&granted);
         tokio::spawn(async move {
-            let (_permit, _parts) = gate
-                .acquire(Work::Live, &budget, |behind| {
-                    budget.reserve_behind(Work::Live, &[(index(name), kib * KIB)], behind)
-                })
-                .await;
+            let (_permit, _parts) = gate.acquire(Work::Live, &[(index(name), kib * KIB)]).await;
             granted.lock().unwrap().push(name);
         })
     };
@@ -255,18 +249,13 @@ async fn a_waiter_refused_by_its_share_holds_no_one_back() {
     let budget = Arc::new(Budget::new(64 * KIB).with_index_share(2, 0.5));
     let _users = held(&budget, "users", 30);
     let _orders = held(&budget, "orders", 8);
-    let gate = Gate::new(2);
+    let gate = Gate::new(2, Arc::clone(&budget));
     let granted = Arc::new(Mutex::new(Vec::new()));
     let reserving = |name: &'static str, kib: usize| {
         let gate = Arc::clone(&gate);
-        let budget = Arc::clone(&budget);
         let granted = Arc::clone(&granted);
         tokio::spawn(async move {
-            let (_permit, _parts) = gate
-                .acquire(Work::Live, &budget, |behind| {
-                    budget.reserve_behind(Work::Live, &[(index(name), kib * KIB)], behind)
-                })
-                .await;
+            let (_permit, _parts) = gate.acquire(Work::Live, &[(index(name), kib * KIB)]).await;
             granted.lock().unwrap().push(name);
         })
     };
@@ -290,7 +279,7 @@ async fn a_waiter_refused_by_its_share_holds_no_one_back() {
 /// granted.
 #[tokio::test(start_paused = true)]
 async fn a_waiter_dropped_before_its_grant_gives_its_place_to_the_next() {
-    let gate = Gate::new(1);
+    let gate = Gate::new(1, unlimited());
     let (_, held) = gate.choose(true, false).unwrap();
     let granted = Arc::new(Mutex::new(Vec::new()));
     let first = waiter(&gate, Work::Live, "first", &granted, Duration::ZERO);
@@ -311,7 +300,7 @@ async fn a_waiter_dropped_before_its_grant_gives_its_place_to_the_next() {
 /// waiter is in a line, even with one free.
 #[tokio::test(start_paused = true)]
 async fn the_one_task_gets_no_permit_ahead_of_an_eligible_waiter() {
-    let gate = Gate::new(1);
+    let gate = Gate::new(1, unlimited());
     let (_, held) = gate.choose(true, false).unwrap();
     let granted = Arc::new(Mutex::new(Vec::new()));
     let waiting = waiter(&gate, Work::Live, "waiter", &granted, Duration::ZERO);
@@ -334,7 +323,7 @@ async fn the_one_task_gets_no_permit_ahead_of_an_eligible_waiter() {
 /// gate has, and every waiter not dropped is granted.
 #[tokio::test(start_paused = true)]
 async fn many_waiters_never_hold_more_than_the_permits_and_every_one_is_granted() {
-    let gate = Gate::new(3);
+    let gate = Gate::new(3, unlimited());
     let out = Arc::new(AtomicUsize::new(0));
     let most = Arc::new(AtomicUsize::new(0));
     let mut tasks = Vec::new();
@@ -349,7 +338,7 @@ async fn many_waiters_never_hold_more_than_the_permits_and_every_one_is_granted(
         };
         let task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(n % 7)).await;
-            let (permit, ()) = gate.acquire(work, &Budget::unlimited(), |_| Ok(())).await;
+            let (permit, _) = gate.acquire(work, &[]).await;
             let now = out.fetch_add(1, Ordering::SeqCst) + 1;
             most.fetch_max(now, Ordering::SeqCst);
             tokio::time::sleep(Duration::from_millis(1 + (n * 13) % 5)).await;
@@ -376,17 +365,18 @@ async fn many_waiters_never_hold_more_than_the_permits_and_every_one_is_granted(
     assert_eq!(most.load(Ordering::SeqCst), 3, "the permits are all used");
 }
 
-/// A reservation the waiter's `reserve` makes is its, once: kept with the
+/// A reservation a waiter's grant makes is its, once: kept with the
 /// permit, given back with it.
 #[tokio::test(start_paused = true)]
 async fn the_reservation_a_waiter_makes_is_handed_back_with_its_permit() {
     let budget = Arc::new(Budget::new(64 * KIB));
-    let gate = Gate::new(1);
-    let (permit, parts): (Permit, Vec<Reservation>) = gate
-        .acquire(Work::Live, &budget, |behind| {
-            budget.reserve_behind(Work::Live, &[(index("users"), 8 * KIB)], behind)
-        })
-        .await;
+    let gate = Gate::new(1, Arc::clone(&budget));
+    let (permit, parts): (Permit, Vec<Reservation>) = tokio::time::timeout(
+        Duration::from_secs(5),
+        gate.acquire(Work::Live, &[(index("users"), 8 * KIB)]),
+    )
+    .await
+    .expect("users fits");
     assert_eq!(budget.held().total, 8 * KIB);
     drop(parts);
     drop(permit);
@@ -394,22 +384,17 @@ async fn the_reservation_a_waiter_makes_is_handed_back_with_its_permit() {
     assert!(gate.choose(true, false).is_some());
 }
 
-/// A waiter whose `reserve` reserves `kib` of live documents of `name` from
-/// `budget`, recording its name when granted.
+/// A waiter reserving `kib` of live documents of `name` from the gate's
+/// budget, recording its name when granted.
 fn budgeted(
     gate: &Arc<Gate>,
-    budget: &Arc<Budget>,
     name: &'static str,
     kib: usize,
     granted: &Arc<Mutex<Vec<&'static str>>>,
 ) -> tokio::task::JoinHandle<()> {
-    let (gate, budget, granted) = (Arc::clone(gate), Arc::clone(budget), Arc::clone(granted));
+    let (gate, granted) = (Arc::clone(gate), Arc::clone(granted));
     tokio::spawn(async move {
-        let (_permit, _parts) = gate
-            .acquire(Work::Live, &budget, |behind| {
-                budget.reserve_behind(Work::Live, &[(index(name), kib * KIB)], behind)
-            })
-            .await;
+        let (_permit, _parts) = gate.acquire(Work::Live, &[(index(name), kib * KIB)]).await;
         granted.lock().unwrap().push(name);
     })
 }
@@ -422,11 +407,11 @@ async fn a_waiter_refused_for_being_behind_is_eligible_again_when_the_one_ahead_
     let budget = Arc::new(Budget::new(64 * KIB));
     let _users = held(&budget, "users", 40);
     let _orders = held(&budget, "orders", 8);
-    let gate = Gate::new(2);
+    let gate = Gate::new(2, Arc::clone(&budget));
     let granted = Arc::new(Mutex::new(Vec::new()));
-    let large = budgeted(&gate, &budget, "users", 24, &granted);
+    let large = budgeted(&gate, "users", 24, &granted);
     settle().await;
-    let small = budgeted(&gate, &budget, "orders", 8, &granted);
+    let small = budgeted(&gate, "orders", 8, &granted);
     settle().await;
     assert!(
         granted.lock().unwrap().is_empty(),
@@ -444,7 +429,7 @@ async fn a_waiter_refused_for_being_behind_is_eligible_again_when_the_one_ahead_
 /// first contested grants after it are live, live, live, then backfill.
 #[tokio::test(start_paused = true)]
 async fn an_uncontested_grant_does_not_move_the_count() {
-    let gate = Gate::new(1);
+    let gate = Gate::new(1, unlimited());
     let (_, held) = gate.choose(true, false).unwrap();
     let granted = Arc::new(Mutex::new(Vec::new()));
     let mut waiters = vec![
@@ -487,25 +472,21 @@ async fn an_uncontested_grant_does_not_move_the_count() {
 /// G4 and G5: the backfill waiter whose turn it is is refused by the budget;
 /// the grants after it, with no eligible backfill waiter, are uncontested.
 /// The refusal doesn't move the count, so once a release makes it eligible
-/// it takes the next contested grant.
+/// it takes the next contested grant. The live waiters reserve nothing, so no
+/// grant changes the budget and the refusal stands until the release (G3).
 #[tokio::test(start_paused = true)]
 async fn a_refusal_does_not_move_the_count() {
     let budget = Arc::new(Budget::new(64 * KIB));
     let backfill_held = budget
         .reserve(Work::Backfill, &[(index("other"), 32 * KIB)])
         .unwrap();
-    let gate = Gate::new(1);
+    let gate = Gate::new(1, Arc::clone(&budget));
     let (_, held) = gate.choose(true, false).unwrap();
     let granted = Arc::new(Mutex::new(Vec::new()));
     let live = |name: &'static str| {
-        let (gate, budget, granted) =
-            (Arc::clone(&gate), Arc::clone(&budget), Arc::clone(&granted));
+        let (gate, granted) = (Arc::clone(&gate), Arc::clone(&granted));
         tokio::spawn(async move {
-            let (permit, parts) = gate
-                .acquire(Work::Live, &budget, |behind| {
-                    budget.reserve_behind(Work::Live, &[(index(name), KIB)], behind)
-                })
-                .await;
+            let (permit, parts) = gate.acquire(Work::Live, &[]).await;
             granted.lock().unwrap().push(name);
             tokio::time::sleep(Duration::from_millis(1)).await;
             drop((permit, parts));
@@ -516,14 +497,9 @@ async fn a_refusal_does_not_move_the_count() {
         .map(live)
         .collect();
     tasks.push({
-        let (gate, budget, granted) =
-            (Arc::clone(&gate), Arc::clone(&budget), Arc::clone(&granted));
+        let (gate, granted) = (Arc::clone(&gate), Arc::clone(&granted));
         tokio::spawn(async move {
-            let (_permit, _parts) = gate
-                .acquire(Work::Backfill, &budget, |behind| {
-                    budget.reserve_behind(Work::Backfill, &[(index("b"), 8 * KIB)], behind)
-                })
-                .await;
+            let (_permit, _parts) = gate.acquire(Work::Backfill, &[(index("b"), 8 * KIB)]).await;
             granted.lock().unwrap().push("b1");
         })
     });
@@ -563,10 +539,9 @@ async fn a_refusal_does_not_move_the_count() {
 /// drop.
 #[tokio::test(start_paused = true)]
 async fn a_selected_waiter_dropped_before_it_runs_wakes_the_next() {
-    let gate = Gate::new(1);
-    let unlimited = Budget::unlimited();
+    let gate = Gate::new(1, unlimited());
     let (_, held) = gate.choose(true, false).unwrap();
-    let mut first = Box::pin(gate.acquire(Work::Live, &unlimited, |_| Ok(())));
+    let mut first = Box::pin(gate.acquire(Work::Live, &[]));
     assert!(futures::poll!(first.as_mut()).is_pending());
     let granted = Arc::new(Mutex::new(Vec::new()));
     let second = waiter(&gate, Work::Live, "second", &granted, Duration::ZERO);
@@ -588,11 +563,10 @@ async fn a_selected_waiter_dropped_before_it_runs_wakes_the_next() {
 /// one ahead; the older one's grant wakes it, so it takes the other permit.
 #[tokio::test(start_paused = true)]
 async fn a_grant_wakes_the_waiter_behind_for_the_permit_left() {
-    let gate = Gate::new(2);
-    let unlimited = Budget::unlimited();
+    let gate = Gate::new(2, unlimited());
     let (_, one) = gate.choose(true, false).unwrap();
     let (_, two) = gate.choose(true, false).unwrap();
-    let mut first = Box::pin(gate.acquire(Work::Live, &unlimited, |_| Ok(())));
+    let mut first = Box::pin(gate.acquire(Work::Live, &[]));
     assert!(futures::poll!(first.as_mut()).is_pending());
     let granted = Arc::new(Mutex::new(Vec::new()));
     let second = waiter(
@@ -606,7 +580,7 @@ async fn a_grant_wakes_the_waiter_behind_for_the_permit_left() {
     drop((one, two));
     settle().await;
     assert!(granted.lock().unwrap().is_empty(), "second saw first ahead");
-    let std::task::Poll::Ready((_permit, ())) = futures::poll!(first.as_mut()) else {
+    let std::task::Poll::Ready((_permit, _)) = futures::poll!(first.as_mut()) else {
         panic!("first is granted");
     };
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -625,14 +599,13 @@ async fn a_grant_wakes_the_waiter_behind_for_the_permit_left() {
 async fn a_refusal_wakes_the_waiter_behind() {
     let budget = Arc::new(Budget::new(64 * KIB).with_index_share(2, 0.5));
     let _users = held(&budget, "users", 30);
-    let gate = Gate::new(1);
+    let gate = Gate::new(1, Arc::clone(&budget));
     let (_, held_permit) = gate.choose(true, false).unwrap();
-    let mut refused = Box::pin(gate.acquire(Work::Live, &budget, |behind| {
-        budget.reserve_behind(Work::Live, &[(index("users"), 8 * KIB)], behind)
-    }));
+    let users_batch = [(index("users"), 8 * KIB)];
+    let mut refused = Box::pin(gate.acquire(Work::Live, &users_batch));
     assert!(futures::poll!(refused.as_mut()).is_pending());
     let granted = Arc::new(Mutex::new(Vec::new()));
-    let behind = budgeted(&gate, &budget, "orders", 8, &granted);
+    let behind = budgeted(&gate, "orders", 8, &granted);
     settle().await;
     drop(held_permit);
     settle().await;
@@ -649,4 +622,132 @@ async fn a_refusal_wakes_the_waiter_behind() {
         .expect("the refusal woke orders")
         .unwrap();
     assert_eq!(*granted.lock().unwrap(), ["orders"]);
+}
+
+/// The budget of the stale-mark case: 64 KiB, 32 KiB per index; `users`
+/// holds an unsettled 20 KiB, `x` 38 and `orders` 2.
+fn stale_mark_budget() -> (Arc<Budget>, Vec<Reservation>, Vec<Charge>, Vec<Charge>) {
+    let budget = Arc::new(Budget::new(64 * KIB).with_index_share(3, 0.5));
+    let users = budget
+        .reserve(Work::Live, &[(index("users"), 20 * KIB)])
+        .unwrap();
+    let x = held(&budget, "x", 38);
+    let orders = held(&budget, "orders", 2);
+    (budget, users, x, orders)
+}
+
+/// G6 after a release: the release wakes `users` (refused by the limit) and
+/// `orders` (refused behind it), and `orders` runs first. It must not take
+/// `users`' refusal from before the release as standing: asked again,
+/// `users` is refused by its share, which holds no one back.
+#[tokio::test(start_paused = true)]
+async fn a_waiter_behind_reads_the_older_ones_standing_after_a_release_not_its_old_refusal() {
+    let (budget, users, x, _orders) = stale_mark_budget();
+    let gate = Gate::new(1, Arc::clone(&budget));
+    let users_batch = [(index("users"), 8 * KIB)];
+    let mut older = Box::pin(gate.acquire(Work::Live, &users_batch));
+    assert!(
+        futures::poll!(older.as_mut()).is_pending(),
+        "users is refused by the limit (68 of 64 KiB)"
+    );
+    let orders_batch = [(index("orders"), 2 * KIB)];
+    let mut younger = Box::pin(gate.acquire(Work::Live, &orders_batch));
+    assert!(
+        futures::poll!(younger.as_mut()).is_pending(),
+        "orders waits behind users"
+    );
+    let _users: Vec<Charge> = users
+        .into_iter()
+        .map(|part| part.settle(30 * KIB))
+        .collect();
+    drop(x);
+    assert!(
+        futures::poll!(younger.as_mut()).is_pending(),
+        "users is offered the permit first"
+    );
+    assert!(
+        futures::poll!(older.as_mut()).is_pending(),
+        "users is refused by its share (38 of 32 KiB)"
+    );
+    assert!(
+        futures::poll!(younger.as_mut()).is_ready(),
+        "orders fits (34 of 64 KiB): a share refusal holds no one back"
+    );
+}
+
+/// The same case with both waiters as tasks, woken in the order the runtime
+/// picks.
+#[tokio::test(start_paused = true)]
+async fn a_waiter_behind_is_granted_when_the_older_one_is_refused_by_its_share_after_a_release() {
+    let (budget, users, x, _orders) = stale_mark_budget();
+    let gate = Gate::new(1, Arc::clone(&budget));
+    let granted = Arc::new(Mutex::new(Vec::new()));
+    let older = budgeted(&gate, "users", 8, &granted);
+    settle().await;
+    let younger = {
+        let (gate, granted) = (Arc::clone(&gate), Arc::clone(&granted));
+        tokio::spawn(async move {
+            let (_permit, _parts) = gate
+                .acquire(Work::Live, &[(index("orders"), 2 * KIB)])
+                .await;
+            granted.lock().unwrap().push("orders");
+        })
+    };
+    settle().await;
+    assert!(
+        granted.lock().unwrap().is_empty(),
+        "orders waits behind users"
+    );
+    let _users: Vec<Charge> = users
+        .into_iter()
+        .map(|part| part.settle(30 * KIB))
+        .collect();
+    drop(x);
+    tokio::time::timeout(Duration::from_secs(3600), younger)
+        .await
+        .expect("orders fits (34 of 64 KiB) once users is refused by its share")
+        .unwrap();
+    assert_eq!(*granted.lock().unwrap(), ["orders"]);
+    older.abort();
+}
+
+/// G6 with no release: `users`' build settles larger than its estimate,
+/// which turns `users`' refusal by the limit into one by its share. The
+/// waiter behind it is asked again and fits.
+#[tokio::test(start_paused = true)]
+async fn a_settle_that_adds_bytes_lets_the_waiter_behind_be_asked_again() {
+    let budget = Arc::new(Budget::new(64 * KIB).with_index_share(3, 0.5));
+    let users = budget
+        .reserve(Work::Live, &[(index("users"), 24 * KIB)])
+        .unwrap();
+    let _x = held(&budget, "x", 31);
+    let _orders = held(&budget, "orders", 2);
+    let gate = Gate::new(1, Arc::clone(&budget));
+    let granted = Arc::new(Mutex::new(Vec::new()));
+    let older = budgeted(&gate, "users", 8, &granted);
+    settle().await;
+    let younger = {
+        let (gate, granted) = (Arc::clone(&gate), Arc::clone(&granted));
+        tokio::spawn(async move {
+            let (_permit, _parts) = gate
+                .acquire(Work::Live, &[(index("orders"), 2 * KIB)])
+                .await;
+            granted.lock().unwrap().push("orders");
+        })
+    };
+    settle().await;
+    assert!(
+        granted.lock().unwrap().is_empty(),
+        "users is refused by the limit (65 of 64 KiB); orders waits behind it"
+    );
+    let _users: Vec<Charge> = users
+        .into_iter()
+        .map(|part| part.settle(25 * KIB))
+        .collect();
+    tokio::time::timeout(Duration::from_secs(3600), younger)
+        .await
+        .expect("users is now refused by its share (33 of 32 KiB); orders fits (60 of 64 KiB)")
+        .unwrap();
+    assert_eq!(*granted.lock().unwrap(), ["orders"]);
+    older.abort();
 }

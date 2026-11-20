@@ -66,7 +66,9 @@
 //! reservation are one step and two reservers never pass the limit together.
 //! Every release bumps a generation and wakes every waiter
 //! ([`Budget::released_since`]), outside the lock: a waiter that read the
-//! generation with its refusal is woken by any release after it.
+//! generation with its refusal is woken by any release after it. While a
+//! waiter is in a build gate's line, an add does the same, so a refusal at
+//! the current generation is always what the budget would answer now.
 //!
 //! ```
 //! use std::sync::Arc;
@@ -163,8 +165,13 @@ struct State {
     /// Each index's bytes, live and backfill; an index holding nothing has
     /// no entry.
     by_index: BTreeMap<IndexName, Held>,
-    /// Bumped by every release.
+    /// Bumped by every release, and by every add while a waiter is
+    /// [`watch`](Budget::watch)ing.
     generation: u64,
+    /// Waiters in a gate's lines (stage 8a's G3): while there is one, what
+    /// is held never changes without the generation moving, so a refusal
+    /// made at the current generation is what the budget would answer now.
+    watched: usize,
 }
 
 impl State {
@@ -178,7 +185,8 @@ impl State {
             .map_or(0, |held| held.total - held.backfill)
     }
 
-    fn add(&mut self, work: Work, index: Option<&IndexName>, bytes: usize) {
+    /// Add `bytes`; whether the generation moved (only while watched).
+    fn add(&mut self, work: Work, index: Option<&IndexName>, bytes: usize) -> bool {
         self.total = self.total.saturating_add(bytes);
         if work == Work::Backfill {
             self.backfill = self.backfill.saturating_add(bytes);
@@ -190,6 +198,11 @@ impl State {
                 held.backfill = held.backfill.saturating_add(bytes);
             }
         }
+        let moved = self.watched > 0;
+        if moved {
+            self.generation = self.generation.wrapping_add(1);
+        }
+        moved
     }
 
     fn release(&mut self, work: Work, index: Option<&IndexName>, bytes: usize) {
@@ -343,7 +356,8 @@ impl Budget {
     }
 
     /// The release generation now: [`released_since`](Self::released_since)
-    /// returns once a release moves past it.
+    /// returns once a release (or, while a waiter is in a build gate's line,
+    /// an add) moves past it.
     pub fn generation(&self) -> u64 {
         self.state().generation
     }
@@ -483,10 +497,11 @@ impl Budget {
                 by_limit: admission.by_limit,
             });
         }
-        Ok(parts
+        let mut moved = false;
+        let reserved = parts
             .iter()
             .map(|(index, bytes)| {
-                state.add(work, Some(index), *bytes);
+                moved |= state.add(work, Some(index), *bytes);
                 Reservation {
                     budget: Arc::clone(self),
                     work,
@@ -494,7 +509,12 @@ impl Budget {
                     bytes: *bytes,
                 }
             })
-            .collect())
+            .collect();
+        drop(state);
+        if moved {
+            self.released.notify_waiters();
+        }
+        Ok(reserved)
     }
 
     /// Reserve `estimate` bytes for a build of `work` counted toward no
@@ -515,7 +535,11 @@ impl Budget {
         if !fits {
             return None;
         }
-        state.add(work, None, estimate);
+        let moved = state.add(work, None, estimate);
+        drop(state);
+        if moved {
+            self.released.notify_waiters();
+        }
         Some(Reservation {
             budget: Arc::clone(self),
             work,
@@ -524,8 +548,9 @@ impl Budget {
         })
     }
 
-    /// Returns once a release has moved the generation past `since` (at once
-    /// if one already has). The wait is registered before the generation is
+    /// Returns once a release (or, while a waiter is in a build gate's line,
+    /// an add) has moved the generation past `since` (at once if one already
+    /// has). The wait is registered before the generation is
     /// read, so a release between the two still wakes it.
     pub async fn released_since(&self, since: u64) {
         loop {
@@ -540,7 +565,23 @@ impl Budget {
     }
 
     fn add(&self, work: Work, index: Option<&IndexName>, bytes: usize) {
-        self.state().add(work, index, bytes);
+        let moved = self.state().add(work, index, bytes);
+        if moved {
+            self.released.notify_waiters();
+        }
+    }
+
+    /// A waiter joins a gate's line: until it [`unwatch`](Self::unwatch)es,
+    /// every add moves the generation and wakes the waiters too, not only a
+    /// release, so no refusal it or another waiter reads is out of date.
+    pub(crate) fn watch(&self) {
+        self.state().watched += 1;
+    }
+
+    /// A waiter leaves a gate's line (granted or dropped).
+    pub(crate) fn unwatch(&self) {
+        let mut state = self.state();
+        state.watched = state.watched.saturating_sub(1);
     }
 
     /// Give `bytes` back and wake every waiter, once, with the lock let go.

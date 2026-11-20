@@ -8,24 +8,37 @@
 //! - **G2.** One FIFO line per kind (live, backfill): a waiter
 //!   ([`Gate::acquire`]) joins the back of its kind's line and keeps its place
 //!   until it is granted or dropped.
-//! - **G3.** A waiter is *eligible* unless the budget refused it and no
-//!   release has come since.
+//! - **G3.** A waiter is *eligible* unless the budget refused it at the
+//!   budget's current generation; a refusal made while behind (G6) stands
+//!   only while the waiter still is behind. While a waiter is in a line, the
+//!   budget moves its generation on every change of what it holds
+//!   ([`Budget::watch`]: a release, a grant, a settle larger than its
+//!   estimate), so a refusal at the current generation is what the budget
+//!   would answer now. Standing is read from every waiter's refusal and the
+//!   generation at the moment of asking, under the lock: no mark another
+//!   waiter has to refresh, so none is out of date after a release, an add,
+//!   a grant or a drop.
 //! - **G4.** A free permit goes to the oldest eligible live waiter, except
 //!   every fourth time both lines have an eligible waiter (*contested*), when
 //!   it goes to the oldest eligible backfill waiter: a steady trickle can't
 //!   starve a backfill, and `builds = 1` still runs one. A grant only one
 //!   kind could take doesn't move the count.
-//! - **G5.** The budget is asked at grant, under the gate's lock: refused,
-//!   the waiter keeps its place, becomes ineligible, and the permit goes on.
-//! - **G6.** A waiter behind an older one of its kind that the budget refused
-//!   by the limit reserves *behind* it ([`Budget::reserve_behind`]): it takes
-//!   no room by the limit, so small batches can't starve a large one; a
-//!   refusal by an index's share holds no one back. A waiter refused while
-//!   behind is eligible again as soon as a waiter of its line leaves (the
-//!   one ahead may be gone), not only at a release.
-//! - **G7.** Every change wakes every waiter, after the lock is let go; a
-//!   waiter registers its wake-up before reading the state, so no wake-up is
-//!   lost.
+//! - **G5.** The gate's own budget is asked at grant, under the gate's lock
+//!   (gate, then budget): refused, the waiter keeps its place, becomes
+//!   ineligible, and the permit goes on. The gate makes every refusal itself,
+//!   so each carries its budget's generation.
+//! - **G6.** A waiter is *behind* while an older waiter of its kind is
+//!   ineligible with a refusal by the limit at the current generation; it
+//!   reserves behind it ([`Budget::reserve_behind`]): it takes no room by the
+//!   limit, so small batches can't starve a large one. A refusal by an
+//!   index's share, or one the budget has changed since, holds no one back.
+//!   A waiter refused while behind is eligible again as soon as nothing holds
+//!   it back (the one ahead left or was refused by its share, or the budget
+//!   changed).
+//! - **G7.** Every change wakes every waiter, after the gate's lock is let
+//!   go (a grant's add wakes the budget's waiters with it held: that only
+//!   schedules them); a waiter registers its wake-ups before reading the
+//!   state, so none is lost. A dropped permit wakes only while someone waits.
 //! - **G8.** A waiter dropped before its grant leaves its line and wakes the
 //!   others; a permit dropped gives itself back, once.
 //! - **G9.** The one task of today doesn't wait in a line: at each grant point
@@ -42,7 +55,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::Notify;
 
-use crate::budget::{Budget, Refusal};
+use kernel::IndexName;
+
+use crate::budget::{Budget, Refusal, Reservation};
 use crate::observer::Work;
 
 /// How many of every kind of contested grant go to backfill.
@@ -52,6 +67,8 @@ const BACKFILL_EVERY: u64 = 4;
 #[derive(Debug)]
 pub(crate) struct Gate {
     state: Mutex<State>,
+    /// What every waiter reserves from, asked at grant (G5).
+    budget: Arc<Budget>,
     /// Every change of the state (G7).
     changed: Notify,
 }
@@ -69,10 +86,10 @@ struct State {
 #[derive(Debug)]
 struct Waiting {
     id: u64,
-    /// Refused by the budget, and not yet made eligible again by a release.
+    /// Its last refusal: standing only at that generation (G3).
     refused: Option<Refusal>,
-    /// The refusal came while it was behind an older waiter the limit had
-    /// refused (G6): eligible again as soon as any waiter of its line leaves.
+    /// The refusal came while it was behind (G6): standing only while it
+    /// still is.
     behind: bool,
 }
 
@@ -91,7 +108,7 @@ impl Drop for Permit {
         let waiting = {
             let mut state = self.gate.state();
             state.free += 1;
-            !state.live.is_empty() || !state.backfill.is_empty()
+            state.is_waiting()
         };
         if waiting {
             self.gate.changed.notify_waiters();
@@ -114,17 +131,42 @@ impl State {
         }
     }
 
-    /// The oldest eligible waiter of `work`'s line.
-    fn front(&self, work: Work) -> Option<u64> {
+    /// Each waiter of `work`'s line, oldest first, with whether it is eligible
+    /// (G3) and whether it is behind (G6), read from every waiter's refusal
+    /// as it stands at the budget's generation `now`.
+    fn standing(&self, work: Work, now: u64) -> impl Iterator<Item = Standing> + '_ {
         self.line(work)
             .iter()
-            .find(|waiting| waiting.refused.is_none())
-            .map(|waiting| waiting.id)
+            .scan(false, move |held_back, waiting| {
+                let behind = *held_back;
+                let eligible = match waiting.refused {
+                    Some(refusal) if refusal.generation == now => {
+                        let eligible = waiting.behind && !behind;
+                        if !eligible && refusal.by_limit {
+                            *held_back = true;
+                        }
+                        eligible
+                    }
+                    _ => true,
+                };
+                Some(Standing {
+                    id: waiting.id,
+                    eligible,
+                    behind,
+                })
+            })
+    }
+
+    /// The oldest eligible waiter of `work`'s line.
+    fn front(&self, work: Work, now: u64) -> Option<u64> {
+        self.standing(work, now)
+            .find(|standing| standing.eligible)
+            .map(|standing| standing.id)
     }
 
     /// Whether both lines have an eligible waiter.
-    fn is_contested(&self) -> bool {
-        self.front(Work::Live).is_some() && self.front(Work::Backfill).is_some()
+    fn is_contested(&self, now: u64) -> bool {
+        self.front(Work::Live, now).is_some() && self.front(Work::Backfill, now).is_some()
     }
 
     /// The kind G4 gives the next permit to, among `live` and `backfill`
@@ -141,22 +183,20 @@ impl State {
     }
 
     /// The waiter G4 offers the next permit to.
-    fn selected(&self) -> Option<(Work, u64)> {
-        let live = self.front(Work::Live);
-        let backfill = self.front(Work::Backfill);
+    fn selected(&self, now: u64) -> Option<(Work, u64)> {
+        let live = self.front(Work::Live, now);
+        let backfill = self.front(Work::Backfill, now);
         match self.turn(live.is_some(), backfill.is_some())? {
             Work::Live => live.map(|id| (Work::Live, id)),
             Work::Backfill => backfill.map(|id| (Work::Backfill, id)),
         }
     }
 
-    /// Whether an older waiter of `work` than `id` was refused by the limit
-    /// (G6).
-    fn behind_a_limit_refusal(&self, work: Work, id: u64) -> bool {
-        self.line(work)
-            .iter()
-            .take_while(|waiting| waiting.id != id)
-            .any(|waiting| waiting.refused.is_some_and(|refusal| refusal.by_limit))
+    /// Whether waiter `id` of `work` is behind (G6).
+    fn is_behind(&self, work: Work, id: u64, now: u64) -> bool {
+        self.standing(work, now)
+            .find(|standing| standing.id == id)
+            .is_some_and(|standing| standing.behind)
     }
 
     fn waiting_mut(&mut self, work: Work, id: u64) -> Option<&mut Waiting> {
@@ -165,17 +205,16 @@ impl State {
             .find(|waiting| waiting.id == id)
     }
 
-    /// `id` leaves `work`'s line (granted or dropped): the waiters refused
-    /// only for being behind are eligible again, the one ahead of them may be
-    /// gone (G6). The caller wakes them.
-    fn leave(&mut self, work: Work, id: u64) {
-        let line = self.line_mut(work);
-        line.retain(|waiting| waiting.id != id);
-        for waiting in line.iter_mut().filter(|waiting| waiting.behind) {
-            waiting.refused = None;
-            waiting.behind = false;
-        }
+    fn is_waiting(&self) -> bool {
+        !self.live.is_empty() || !self.backfill.is_empty()
     }
+}
+
+/// A waiter's standing at one moment (G3, G6).
+struct Standing {
+    id: u64,
+    eligible: bool,
+    behind: bool,
 }
 
 /// A waiter's place in its line: dropped before its grant, it leaves the
@@ -190,15 +229,22 @@ struct Place<'a> {
 impl Drop for Place<'_> {
     fn drop(&mut self) {
         if !self.granted {
-            self.gate.state().leave(self.work, self.id);
+            self.gate
+                .state()
+                .line_mut(self.work)
+                .retain(|waiting| waiting.id != self.id);
+        }
+        self.gate.budget.unwatch();
+        if !self.granted {
             self.gate.changed.notify_waiters();
         }
     }
 }
 
 impl Gate {
-    /// A gate of `permits` (at least one).
-    pub(crate) fn new(permits: usize) -> Arc<Self> {
+    /// A gate of `permits` (at least one) whose waiters reserve from
+    /// `budget`.
+    pub(crate) fn new(permits: usize, budget: Arc<Budget>) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(State {
                 free: permits.max(1),
@@ -207,6 +253,7 @@ impl Gate {
                 backfill: VecDeque::new(),
                 next_id: 0,
             }),
+            budget,
             changed: Notify::new(),
         })
     }
@@ -220,7 +267,9 @@ impl Gate {
     /// first).
     pub(crate) fn choose(self: &Arc<Self>, live: bool, backfill: bool) -> Option<(Work, Permit)> {
         let mut state = self.state();
-        if state.free == 0 || state.selected().is_some() {
+        if state.free == 0
+            || (state.is_waiting() && state.selected(self.budget.generation()).is_some())
+        {
             return None;
         }
         let work = state.turn(live, backfill)?;
@@ -237,14 +286,11 @@ impl Gate {
         ))
     }
 
-    /// Wait in `work`'s line for a permit (G2–G8). When the permit is offered,
-    /// `reserve` is called under the gate's lock with whether the waiter is
-    /// behind an older one the limit refused (G6), and reserves its batch from
-    /// `budget`; refused, the waiter keeps its place until `budget` releases
-    /// past the refusal (G3, G5). A refusal always names `budget`'s
-    /// generation, so a waiter refused is always made eligible again by a
-    /// release (there is no refusal without a budget to release it). Dropping
-    /// the future leaves the line (G8).
+    /// Wait in `work`'s line for a permit and a reservation of `parts` from
+    /// the gate's budget (G2–G8), asked when the permit is offered, behind an
+    /// older waiter the limit refused if there is one (G6). Refused, the
+    /// waiter keeps its place until a release or the waiters ahead let it be
+    /// asked again (G3, G5). Dropping the future leaves the line (G8).
     #[cfg_attr(
         not(test),
         expect(
@@ -252,16 +298,16 @@ impl Gate {
             reason = "the index tasks of ADR 0012 stage 8a's 6a/6b wait here"
         )
     )]
-    pub(crate) async fn acquire<R>(
+    pub(crate) async fn acquire(
         self: &Arc<Self>,
         work: Work,
-        budget: &Budget,
-        mut reserve: impl FnMut(bool) -> Result<R, Refusal>,
-    ) -> (Permit, R) {
+        parts: &[(IndexName, usize)],
+    ) -> (Permit, Vec<Reservation>) {
         let mut place = {
             let mut state = self.state();
             let id = state.next_id;
             state.next_id += 1;
+            self.budget.watch();
             state.line_mut(work).push_back(Waiting {
                 id,
                 refused: None,
@@ -279,21 +325,20 @@ impl Gate {
             let changed = self.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            let refused = {
+            let standing_refusal = {
                 let mut state = self.state();
-                let refused = state
-                    .waiting_mut(work, place.id)
-                    .and_then(|waiting| waiting.refused);
-                if refused.is_none() && state.free > 0 && state.selected() == Some((work, place.id))
-                {
-                    let behind = state.behind_a_limit_refusal(work, place.id);
-                    match reserve(behind) {
+                let now = self.budget.generation();
+                if state.free > 0 && state.selected(now) == Some((work, place.id)) {
+                    let behind = state.is_behind(work, place.id, now);
+                    match self.budget.reserve_behind(work, parts, behind) {
                         Ok(reserved) => {
-                            if state.is_contested() {
+                            if state.is_contested(now) {
                                 state.contested += 1;
                             }
                             state.free -= 1;
-                            state.leave(work, place.id);
+                            state
+                                .line_mut(work)
+                                .retain(|waiting| waiting.id != place.id);
                             place.granted = true;
                             drop(state);
                             self.changed.notify_waiters();
@@ -311,22 +356,22 @@ impl Gate {
                             }
                             drop(state);
                             self.changed.notify_waiters();
-                            Some(refusal)
+                            Some(refusal.generation)
                         }
                     }
                 } else {
-                    refused
+                    state
+                        .waiting_mut(work, place.id)
+                        .and_then(|waiting| waiting.refused)
+                        .map(|refusal| refusal.generation)
+                        .filter(|&generation| generation == now)
                 }
             };
-            match refused {
-                Some(refusal) => {
+            match standing_refusal {
+                Some(generation) => {
                     tokio::select! {
                         () = &mut changed => {}
-                        () = budget.released_since(refusal.generation) => {
-                            if let Some(waiting) = self.state().waiting_mut(work, place.id) {
-                                waiting.refused = None;
-                                waiting.behind = false;
-                            }
+                        () = self.budget.released_since(generation) => {
                             self.changed.notify_waiters();
                         }
                     }
