@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795122000208,
+  "lastUpdate": 1795135051044,
   "repoUrl": "https://github.com/alias2k/flusso",
   "entries": {
     "flusso (bigger is better)": [
@@ -5614,6 +5614,54 @@ window.BENCHMARK_DATA = {
             "value": 751.4883915905918,
             "unit": "changes/s",
             "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 56.66, \"disk_write_ms\": 350.816, \"memory_copy_ms\": 203.611}, \"cores\": 4, \"cpu\": \"INTEL(R) XEON(R) PLATINUM 8573C\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "89390131+JakubWasilczyk-Alias2k@users.noreply.github.com",
+            "name": "Jakub Wasilczyk",
+            "username": "JakubWasilczyk-Alias2k"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a187cf91e6d819ca90dcab927166fb9c937d4010",
+          "message": "Merge pull request #435 from alias2k/fix/generation-deleted-mid-backfill-428\n\nfix(engine): a backfill whose target was created anew no longer seeds it",
+          "timestamp": "2026-11-20T01:18:38+01:00",
+          "tree_id": "4e3a16aaaf1971ba356a0a3054c0a707296abe72",
+          "url": "https://github.com/alias2k/flusso/commit/a187cf91e6d819ca90dcab927166fb9c937d4010"
+        },
+        "date": 1795135050776,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "complex/ci/backfill_docs_per_s",
+            "value": 1150.494949456315,
+            "unit": "docs/s",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.49, \"disk_write_ms\": 77.136, \"memory_copy_ms\": 199.487}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "complex/ci/drain_changes_per_s",
+            "value": 1281.1702754028158,
+            "unit": "changes/s",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.49, \"disk_write_ms\": 77.136, \"memory_copy_ms\": 199.487}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}, \"scale\": {\"burst\": 4000, \"items_per_order\": 4, \"name\": \"ci\", \"orders\": 0, \"orders_per_user\": 5, \"probe_rate_per_s\": 20, \"probes\": 150, \"products\": 0, \"reviews_per_product\": 0, \"rss_cap_mib\": 2048, \"tags\": 8, \"tags_per_user\": 4, \"users\": 2000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/backfill_docs_per_s",
+            "value": 7512.228058301493,
+            "unit": "docs/s",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.49, \"disk_write_ms\": 77.136, \"memory_copy_ms\": 199.487}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
+          },
+          {
+            "name": "reference/ci/drain_changes_per_s",
+            "value": 1203.8362165619974,
+            "unit": "changes/s",
+            "extra": "{\"images\": {\"opensearch\": \"opensearchproject/opensearch:2\", \"postgres\": \"postgres:16-alpine\"}, \"runner\": {\"calibration\": {\"cpu_sha256_ms\": 43.49, \"disk_write_ms\": 77.136, \"memory_copy_ms\": 199.487}, \"cores\": 4, \"cpu\": \"Intel(R) Xeon(R) 6975P-C\"}, \"scale\": {\"burst\": 10000, \"items_per_order\": 3, \"name\": \"ci\", \"orders\": 25000, \"orders_per_user\": 0, \"probe_rate_per_s\": 20, \"probes\": 200, \"products\": 1000, \"reviews_per_product\": 2, \"rss_cap_mib\": 2048, \"tags\": 0, \"tags_per_user\": 0, \"users\": 5000, \"wall_cap_secs\": 900, \"writers\": 8}}"
           }
         ]
       }
