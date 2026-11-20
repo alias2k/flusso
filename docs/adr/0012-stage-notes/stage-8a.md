@@ -351,7 +351,7 @@ lines; the manual is written by the documentation agent before its PR is ready.
 | 5 | **Gate with lines** (budget asked at grant), the key-page permit. After 4 (both touch `builds.rs`). One task. | gate tests of §4 | `snapshot/rows` at `builds = 1` and 4 |
 | 6a | **Reader task + one builder task** over every pending set, the **lead bound** (`max_waiting_per_index`, `max_waiting`), the stop barrier, the stream handed back. No independence yet; `main`'s pacing. | `the_reader_waits_at_the_lead_and_resumes`, `a_stop_mid_run_builds_what_the_reader_marked_last`, `a_stop_with_many_pending_ids_finishes_within_the_deadline`, `an_id_of_an_index_without_lanes_pins_nothing` | the hop and the locks: the full in-process suite, `shutdown` e2e, the end measurements |
 | 6b | **Per-index tasks, dispatcher, per-index walks and coalescing**, the held-index exemption and `max_pending_documents`. | the independence tests; `indexes_walk_at_once`; `a_task_blocked_on_a_full_lane_holds_no_permit`; the seeded schedule over three indexes | everything; the end measurements |
-| 7 | **Per-index ingest status and metrics**, the backlog, `GET /status/indexes/<name>`, `FlussoIndexBacklog`, the Grafana panel. | status and metric tests | — |
+| 7 | **Per-index ingest status and metrics**, the backlog, `GET /indexes/<name>/status` (public), `POST /indexes/<name>/reindex` (private, replacing `POST /reindex`), `FlussoIndexBacklog`, the Grafana panel. | status and metric tests | — |
 | 8 | **Per-index restart** (8b's other half). | `a_stop_failure_on_one_index_lets_the_others_land`, `a_restarted_index_task_gives_back_its_builds_and_serves_its_request_again`, daemon backoff tests per index | a poison index looping: backoff tests |
 
 **Order and review.** 1 and 4 touch disjoint files and can be reviewed in either order; 2 and 3
@@ -401,11 +401,16 @@ no sense is refused at start, naming where it came from, as `[backoff]` is (`dae
   index it applies to nothing.
 - The designer's config form renders from the `[concurrency]` schema: `just schema-gen` in each slice.
 
-**One index's state over HTTP** (slice 7): `GET /status/indexes/<name>` on the public surface,
-unauthenticated like `/status`, answering the same JSON as `/status`'s `ingest.indexes.<name>`; an
-unknown or disabled index is `404` with the known indexes in the body. `/indexes/<name>` was the
-alternative and is refused: `/indexes` is the private surface's, behind Basic auth, and means the
-sinks' seeding states.
+**Per-index HTTP paths** (slice 7, the owner's call; nothing before it):
+
+| Route | Surface | What |
+| --- | --- | --- |
+| `GET /indexes/<name>/status` | public, unauthenticated like `/status` | the same JSON as `/status`'s `ingest.indexes.<name>`; an unknown or disabled index is `404` naming the known indexes |
+| `POST /indexes/<name>/reindex?sink=…` | private, Basic auth | replaces `POST /reindex?index=…&sink=…`, which is removed (breaking); `flusso reindex` follows |
+| `GET /indexes` | private, Basic auth | unchanged: every sink's seeding states |
+
+So `/indexes/…` is served by both listeners: `…/status` only on the public one, `GET /indexes` and
+`…/reindex` only on the private one. Each listener answers `404` for the other's routes, as now.
 
 **`FlussoIndexBacklog`** needs the backlog's age (`flusso.index.backlog_age`), which exists from
 slice 7, so the alert lands there; slice 2 only stops blaming lanes for it.
