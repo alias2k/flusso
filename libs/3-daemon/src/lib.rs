@@ -289,6 +289,7 @@ impl Daemon {
                 Instant::now(),
             )
             .with_fence(fence.clone())
+            .with_progress(Arc::clone(&progress))
             .with_source(Arc::clone(&capture))
             .with_budget(Arc::clone(&budget))
             .with_stalls(Arc::clone(&stalls)),
@@ -406,6 +407,12 @@ impl RunningDaemon {
     /// report (see [`Budget`]). Cheap to clone.
     pub fn budget(&self) -> Arc<Budget> {
         Arc::clone(&self.budget)
+    }
+
+    /// How far each lane has landed what was routed to it, and how many
+    /// changes each sink has committed (see [`Progress`]). Cheap to clone.
+    pub fn progress(&self) -> Arc<Progress> {
+        Arc::clone(&self.progress)
     }
 
     /// The fence: what a transport waits on so a client can read its own

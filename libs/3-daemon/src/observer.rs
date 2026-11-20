@@ -50,17 +50,9 @@ impl Observer for StatusObserver {
         self.status.mark_sink_started(sink);
     }
 
-    fn on_changes_settled(&self, sink: &SinkName, changes: usize) {
-        self.status.settle_changes(sink, changes as u64);
-    }
-
     fn on_batch_committed(&self, sink: &SinkName, stats: CommitStats) {
-        self.status.record_commit(
-            sink,
-            stats.changes as u64,
-            stats.envelopes as u64,
-            stats.flush.as_micros() as u64,
-        );
+        self.status
+            .record_commit(sink, stats.envelopes as u64, stats.flush.as_micros() as u64);
     }
 
     fn on_document_quarantined(&self, sink: &SinkName, _index: &str, _id: &str, _reason: &str) {

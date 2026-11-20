@@ -322,7 +322,6 @@ impl Rig {
             .publish(LaneItem::Batch(Batch {
                 key: position.map(stream::ItemKey::new),
                 position: position.map(Position::new),
-                changes: 1,
                 envelopes: vec![Envelope::upsert(
                     index.clone(),
                     id.to_owned(),

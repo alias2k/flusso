@@ -6,7 +6,7 @@
 //! consistent-enough snapshot. Per-sink state is what makes a stalled or
 //! failing sink visible without stopping the others.
 
-use engine::Budget;
+use engine::{Budget, Progress};
 
 use crate::stall::{LaneStall, Stalls};
 use std::collections::BTreeMap;
@@ -88,6 +88,8 @@ pub struct Status {
     script_failures: Mutex<BTreeMap<IndexName, ScriptFailures>>,
     sinks: BTreeMap<SinkName, SinkStatus>,
     indexes: Vec<IndexName>,
+    /// Where each sink's committed count comes from; `None` reports none.
+    progress: Option<Arc<Progress>>,
     /// Where the fence positions come from; `None` reports none.
     fence: Option<Fence>,
     /// Where the visibility wait comes from; `None` reports none.
@@ -216,7 +218,6 @@ fn wall_clock(
 pub struct SinkStatus {
     phase: Mutex<SinkPhase>,
     indexes: Mutex<BTreeMap<IndexName, IndexState>>,
-    changes_committed: AtomicU64,
     envelopes_applied: AtomicU64,
     batches: AtomicU64,
     documents_quarantined: AtomicU64,
@@ -235,7 +236,6 @@ impl SinkStatus {
                     .map(|index| (index.clone(), IndexState::Pending))
                     .collect(),
             ),
-            changes_committed: AtomicU64::new(0),
             envelopes_applied: AtomicU64::new(0),
             batches: AtomicU64::new(0),
             documents_quarantined: AtomicU64::new(0),
@@ -244,8 +244,7 @@ impl SinkStatus {
         }
     }
 
-    fn snapshot(&self, captured: u64, positions: SinkPositions) -> SinkSnapshot {
-        let committed = self.changes_committed.load(Ordering::Relaxed);
+    fn snapshot(&self, captured: u64, committed: u64, positions: SinkPositions) -> SinkSnapshot {
         let checkpoints = lock(&self.checkpoints).clone();
         SinkSnapshot {
             applied_position: positions.applied,
@@ -311,6 +310,7 @@ impl Status {
                 .map(|sink| (sink, SinkStatus::new(&indexes)))
                 .collect(),
             indexes,
+            progress: None,
             fence: None,
             source: None,
             budget: None,
@@ -516,27 +516,8 @@ impl Status {
         self.documents_built.fetch_add(documents, Ordering::Relaxed);
     }
 
-    /// `changes` built into no document `sink` receives: settled for it
-    /// without a write.
-    pub(crate) fn settle_changes(&self, sink: &SinkName, changes: u64) {
+    pub(crate) fn record_commit(&self, sink: &SinkName, envelopes: u64, flush_micros: u64) {
         if let Some(status) = self.sink(sink) {
-            status
-                .changes_committed
-                .fetch_add(changes, Ordering::Relaxed);
-        }
-    }
-
-    pub(crate) fn record_commit(
-        &self,
-        sink: &SinkName,
-        changes: u64,
-        envelopes: u64,
-        flush_micros: u64,
-    ) {
-        if let Some(status) = self.sink(sink) {
-            status
-                .changes_committed
-                .fetch_add(changes, Ordering::Relaxed);
             status
                 .envelopes_applied
                 .fetch_add(envelopes, Ordering::Relaxed);
@@ -582,24 +563,40 @@ impl Status {
         *lock(&self.last_error) = Some(error.to_owned());
     }
 
+    /// Read each sink's committed count from `progress`: a change counts
+    /// for a sink once every lane of the sink has landed it, or had nothing
+    /// for it ([`Progress::committed`]).
+    pub fn with_progress(mut self, progress: Arc<Progress>) -> Self {
+        self.progress = Some(progress);
+        self
+    }
+
+    /// The live changes `sink` has committed; `0` without a progress.
+    /// Computed when read: nothing waits on it.
+    pub fn committed(&self, sink: &SinkName) -> u64 {
+        self.progress
+            .as_ref()
+            .map_or(0, |progress| progress.committed(sink))
+    }
+
     /// Changes captured but not yet committed by the slowest sink.
     pub fn in_flight(&self) -> u64 {
+        // Committed first: a change read in between only adds to captured,
+        // so committed never reads past it.
+        let slowest = self.sinks.keys().map(|sink| self.committed(sink)).min();
         let captured = self.changes_captured.load(Ordering::Relaxed);
-        let slowest = self
-            .sinks
-            .values()
-            .map(|s| s.changes_committed.load(Ordering::Relaxed))
-            .min()
-            .unwrap_or(captured);
-        captured.saturating_sub(slowest)
+        captured.saturating_sub(slowest.unwrap_or(captured))
     }
 
     /// Changes captured but not yet committed by `sink`.
     pub fn in_flight_for(&self, sink: &SinkName) -> u64 {
-        let captured = self.changes_captured.load(Ordering::Relaxed);
-        self.sink(sink).map_or(0, |s| {
-            captured.saturating_sub(s.changes_committed.load(Ordering::Relaxed))
-        })
+        if self.sink(sink).is_none() {
+            return 0;
+        }
+        let committed = self.committed(sink);
+        self.changes_captured
+            .load(Ordering::Relaxed)
+            .saturating_sub(committed)
     }
 
     /// The sinks this status tracks.
@@ -620,6 +617,12 @@ impl Status {
 
     /// A point-in-time copy for serialization.
     pub fn snapshot(&self) -> StatusSnapshot {
+        // Committed before captured, as in `in_flight`.
+        let committed: BTreeMap<&SinkName, u64> = self
+            .sinks
+            .keys()
+            .map(|sink| (sink, self.committed(sink)))
+            .collect();
         let captured = self.changes_captured.load(Ordering::Relaxed);
         let mut positions: FencePositions = self
             .fence
@@ -631,7 +634,8 @@ impl Status {
             .iter()
             .map(|(name, status)| {
                 let positions = positions.sinks.remove(name).unwrap_or_default();
-                let mut snapshot = status.snapshot(captured, positions);
+                let committed = committed.get(name).copied().unwrap_or(0);
+                let mut snapshot = status.snapshot(captured, committed, positions);
                 for (lane, view) in lock(&self.lane_health)
                     .iter()
                     .filter(|(lane, _)| &lane.sink == name)
@@ -680,7 +684,8 @@ impl Status {
             uptime_seconds: self.started_at.elapsed().as_secs(),
             indexes,
             changes_captured: captured,
-            changes_in_flight: self.in_flight(),
+            changes_in_flight: captured
+                .saturating_sub(committed.values().copied().min().unwrap_or(captured)),
             documents_built: self.documents_built.load(Ordering::Relaxed),
             slot_lag_bytes: self
                 .slot_lag_known
@@ -818,7 +823,9 @@ pub struct SinkSnapshot {
     /// Where this sink engine is.
     pub phase: SinkPhase,
     pub indexes: BTreeMap<String, IndexState>,
-    /// Changes whose batch this sink flushed and acknowledged.
+    /// Live changes this sink has landed: each read counts once every lane
+    /// of the sink has landed it, or had nothing for it, with every change
+    /// read before it.
     pub changes_committed: u64,
     /// Captured minus committed by the slowest sink (per sink: by that sink).
     pub changes_in_flight: u64,

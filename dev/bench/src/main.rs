@@ -402,6 +402,6 @@ async fn run(
         report.smaller("flush_p99_ms", "ms", p * 1_000.0);
     }
     report.bigger("backfill_docs_per_s", "docs/s", backfill_docs_per_s);
-    report.bigger("drain_changes_per_s", "changes/s", drain_changes_per_s);
+    report.drain("drain_changes_per_s", "changes/s", drain_changes_per_s);
     Ok(report)
 }

@@ -412,7 +412,6 @@ async fn lanes_take_turns_so_a_backlog_on_one_index_does_not_starve_another() {
         LaneItem::Batch(Batch {
             key: Some(stream::ItemKey::new(position)),
             position: Some(Position::new(position)),
-            changes: 1,
             envelopes: vec![Envelope::upsert(
                 index,
                 position.to_string(),
@@ -494,7 +493,6 @@ async fn a_snapshot_complete_waits_only_for_its_own_lane() {
         LaneItem::Batch(Batch {
             key: None,
             position: None,
-            changes: 0,
             envelopes: vec![Envelope::upsert(
                 index,
                 id,
@@ -588,7 +586,6 @@ async fn a_late_live_item_on_a_quiet_lane(backlog_live: bool) -> usize {
         LaneItem::Batch(Batch {
             key: position.map(stream::ItemKey::new),
             position: position.map(Position::new),
-            changes: usize::from(position.is_some()),
             envelopes: vec![Envelope::upsert(
                 index,
                 id.to_string(),
@@ -735,7 +732,6 @@ async fn a_stalled_index_with_a_backlog_leaves_its_sibling_a_slot() {
         LaneItem::Batch(Batch {
             key: Some(stream::ItemKey::new(position)),
             position: Some(Position::new(position)),
-            changes: 1,
             envelopes: vec![Envelope::upsert(
                 index,
                 position.to_string(),
@@ -862,7 +858,6 @@ async fn an_ordered_sink_writes_live_items_across_lanes_in_position_order() {
         LaneItem::Batch(Batch {
             key: Some(stream::ItemKey::new(position)),
             position: Some(Position::new(position)),
-            changes: 1,
             envelopes: vec![Envelope::upsert(
                 index,
                 position.to_string(),
@@ -962,7 +957,6 @@ async fn a_quiet_lane_makes_its_last_writes_searchable_beside_a_stalled_lane() {
         LaneItem::Batch(Batch {
             key: Some(stream::ItemKey::new(position)),
             position: Some(Position::new(position)),
-            changes: 1,
             envelopes: vec![Envelope::upsert(
                 index,
                 position.to_string(),
@@ -1078,7 +1072,6 @@ async fn a_caught_up_write_names_only_its_own_quiet_lanes() {
         LaneItem::Batch(Batch {
             key: Some(stream::ItemKey::new(position)),
             position: Some(Position::new(position)),
-            changes: 1,
             envelopes: vec![Envelope::upsert(
                 index,
                 position.to_string(),
@@ -1241,7 +1234,6 @@ async fn a_lane_whose_live_item_is_blocked_answers_no_further_than_before() {
         .publish(LaneItem::Batch(Batch {
             key: None,
             position: None,
-            changes: 0,
             envelopes: Vec::new().into(),
             hold: Default::default(),
             walked: None,
@@ -1350,7 +1342,6 @@ async fn a_quiet_lanes_caught_up_write_waits_beside_another_lanes_refresh() {
             .publish(LaneItem::Batch(Batch {
                 key: Some(stream::ItemKey::new(position)),
                 position: Some(Position::new(position)),
-                changes: 1,
                 envelopes: vec![Envelope::upsert(
                     index,
                     position.to_string(),

@@ -227,7 +227,6 @@ impl Rig {
             .publish(LaneItem::Batch(Batch {
                 key: None,
                 position: None,
-                changes: 0,
                 envelopes: vec![Envelope::upsert(
                     users(),
                     key,

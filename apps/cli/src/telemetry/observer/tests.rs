@@ -105,15 +105,15 @@ fn a_commit_records_the_flush_documents_and_size_by_sink_and_work() {
     let (observer, registry, _provider) = recorder();
     observer.on_batch_committed(
         &sink("primary"),
-        CommitStats::new(128, 0, Duration::from_millis(60), Work::Backfill).sent(Some(50_000)),
+        CommitStats::new(128, Duration::from_millis(60), Work::Backfill).sent(Some(50_000)),
     );
     observer.on_batch_committed(
         &sink("audit"),
-        CommitStats::new(1, 1, Duration::from_millis(1), Work::Live),
+        CommitStats::new(1, Duration::from_millis(1), Work::Live),
     );
     observer.on_batch_committed(
         &sink("audit"),
-        CommitStats::new(0, 1, Duration::from_millis(1), Work::Live).sent(Some(0)),
+        CommitStats::new(0, Duration::from_millis(1), Work::Live).sent(Some(0)),
     );
 
     let text = scrape(&registry);

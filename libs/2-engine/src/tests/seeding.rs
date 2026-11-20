@@ -299,7 +299,6 @@ fn batch(lane: &str, id: &str, position: Option<Position>) -> LaneItem {
     LaneItem::Batch(Batch {
         key: position.map(|position| stream::ItemKey::new(position.seq)),
         position,
-        changes: usize::from(position.is_some()),
         envelopes: vec![Envelope::upsert(
             index(lane),
             id,

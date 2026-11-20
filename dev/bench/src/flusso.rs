@@ -12,6 +12,14 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use tokio::process::{Child, Command};
 
+/// What [`Flusso::wait_drained`] waits for, stamped on each drain point's
+/// `extra.images.drain`: every sink's `changes_in_flight` at 0, which since
+/// ADR 0012 stage 8a means every lane of every sink landed every change.
+/// Points measured before (a sink's first lane of a batch counted it) have
+/// none, so the step between them restarts the series' window instead of
+/// mixing two levels.
+pub(crate) const DRAINED: &str = "every-lane-landed";
+
 /// Peak resident set and CPU time so far, from `ps`.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub(crate) struct Resources {
@@ -190,8 +198,8 @@ impl Flusso {
     }
 
     /// Wait until at least `expected` more changes than `baseline` have been
-    /// captured and every sink has nothing in flight. Returns the instant that
-    /// first held.
+    /// captured and every sink has nothing in flight ([`DRAINED`]). Returns
+    /// the instant that first held.
     pub(crate) async fn wait_drained(
         &mut self,
         baseline: u64,

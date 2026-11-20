@@ -69,6 +69,40 @@
 //! early only makes its lane's answer older. A mark may run ahead of the
 //! registrations (a lane lands an item before it is registered): it is kept,
 //! and covers the item once it is.
+//!
+//! **How many changes a sink has committed.** The ingest engine counts each
+//! change it reads ([`Progress::change_read`]) and closes a [`Step`] as it
+//! grants a live build ([`Progress::close_step`]): the step holds every
+//! change read since the previous one, and its build's items carry it on
+//! every lane, published or skipped. A lane has committed a step once it has
+//! landed every item of that step and before it, or had nothing for them; a
+//! sink once every one of its lanes has ([`Progress::committed`]). A read is
+//! counted once per sink, when the sink lands the step it was read in: a
+//! change a replaying source reads again is a second read, counted when its
+//! own step lands, and a redelivered item that had landed moves nothing. A
+//! step whose engine run ended before routing it (its reads replay in the
+//! next run) is committed with the next step routed after it.
+//!
+//! ```
+//! use engine::Progress;
+//! use kernel::{IndexName, Position, SinkName};
+//! use stream::LaneKey;
+//!
+//! let primary = SinkName::try_new("primary").unwrap();
+//! let users = LaneKey::new(IndexName::try_new("users").unwrap(), primary.clone());
+//! let orders = LaneKey::new(IndexName::try_new("orders").unwrap(), primary.clone());
+//! let progress = Progress::new([users.clone(), orders.clone()]);
+//!
+//! progress.change_read();
+//! let step = progress.close_step();
+//! let key = progress.next_key(&users.index).unwrap();
+//! progress.published_step(&users, key, Position::new(1), Position::new(1), step);
+//! progress.skipped_step(&orders, Position::new(1), step);
+//! assert_eq!(progress.committed(&primary), 0, "the users item hasn't landed");
+//!
+//! progress.applied(&users, key);
+//! assert_eq!(progress.committed(&primary), 1);
+//! ```
 
 mod pending;
 
@@ -97,6 +131,17 @@ pub enum Pin {
     Backlog(IndexName),
 }
 
+/// The live changes read between two live grants: what a sink's committed
+/// count moves by ([`Progress::committed`]). Numbered in grant order for the
+/// life of the progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Step {
+    number: u64,
+    /// How many changes had been read when it closed: what a sink that has
+    /// committed it has committed.
+    read: u64,
+}
+
 /// Which of a lane's two levels to read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
@@ -117,6 +162,8 @@ pub struct Progress {
     pending: BTreeMap<IndexName, Mutex<Pending>>,
     /// How many ids wait, over every index.
     waiting: AtomicUsize,
+    /// How many live changes have been read, over every engine run.
+    read: AtomicU64,
     /// Called after every registration: a fence waiter may pass now.
     listener: OnceLock<Listener>,
 }
@@ -142,16 +189,34 @@ impl std::fmt::Debug for Progress {
 #[derive(Debug, Default)]
 struct Registry {
     lanes: BTreeMap<LaneKey, Registered>,
+    steps: Steps,
 }
 
-/// One lane's routed items not yet covered, as `(key, oldest)` in routing
-/// order, and the newest position routed to it.
+/// Where the steps' numbering is.
+#[derive(Debug, Default)]
+struct Steps {
+    /// The number of the next step.
+    next: u64,
+    /// How many changes had been read when the last step closed.
+    read: u64,
+}
+
+/// One lane's routed items not yet covered, as `(key, oldest, step)` in
+/// routing order, the newest position routed to it and the steps routed to
+/// it from the newest it has committed.
 #[derive(Debug, Default)]
 struct Registered {
-    unlanded: VecDeque<(ItemKey, Position)>,
+    unlanded: VecDeque<(ItemKey, Position, Option<Step>)>,
     unsearchable: VecDeque<(ItemKey, Position)>,
     /// Every change through it that the lane needs is registered on it.
     newest: Option<Position>,
+    /// The steps routed to the lane that can still answer what it has
+    /// committed, in order: the front is the newest it has committed, once
+    /// it has one; after it, each step holding an unlanded item and the
+    /// newest step after each of those, a later skip replacing an earlier
+    /// one. A step no lane was routed (its engine run ended first) is in
+    /// none. See [`Registered::record`] for the bound.
+    steps: VecDeque<Step>,
 }
 
 /// How far one lane's sink engine has written, in lane order: the key's
@@ -183,11 +248,13 @@ impl Progress {
                     .keys()
                     .map(|lane| (lane.clone(), Registered::default()))
                     .collect(),
+                steps: Steps::default(),
             }),
             marks,
             keys,
             pending,
             waiting: AtomicUsize::new(0),
+            read: AtomicU64::new(0),
             listener: OnceLock::new(),
         }
     }
@@ -242,34 +309,46 @@ impl Progress {
 
     /// `lane` took the item keyed `key` of a batch covering `oldest..=last`.
     /// Call it once the lane's own send succeeded, in key order per lane.
+    /// It counts toward no [`Step`]: a live build's item is registered with
+    /// its step ([`published_build`](Self::published_build)).
     pub fn published(&self, lane: &LaneKey, key: ItemKey, oldest: Position, last: Position) {
-        {
-            let mut registry = lock(&self.registry);
-            if let Some(registered) = registry.lanes.get_mut(lane) {
-                registered.unlanded.push_back((key, oldest));
-                registered.unsearchable.push_back((key, oldest));
-                registered.newest = Some(registered.newest.map_or(last, |n| n.max(last)));
-            }
-        }
+        self.register(lane, Some((key, oldest)), last, None);
+        self.registered();
+    }
+
+    /// [`published`](Self::published), for an item of the live build of
+    /// `step`.
+    pub fn published_step(
+        &self,
+        lane: &LaneKey,
+        key: ItemKey,
+        oldest: Position,
+        last: Position,
+        step: Step,
+    ) {
+        self.register(lane, Some((key, oldest)), last, Some(step));
         self.registered();
     }
 
     /// A batch through `last` had nothing for `lane`: the lane has every
     /// change through `last` it needs, once its earlier items are registered.
     pub fn skipped(&self, lane: &LaneKey, last: Position) {
-        {
-            let mut registry = lock(&self.registry);
-            if let Some(registered) = registry.lanes.get_mut(lane) {
-                registered.newest = Some(registered.newest.map_or(last, |n| n.max(last)));
-            }
-        }
+        self.register(lane, None, last, None);
+        self.registered();
+    }
+
+    /// [`skipped`](Self::skipped), for the live build of `step`: the lane has
+    /// every change of the step it needs, once its earlier items are.
+    pub fn skipped_step(&self, lane: &LaneKey, last: Position, step: Step) {
+        self.register(lane, None, last, Some(step));
         self.registered();
     }
 
     /// `lane` took the item keyed `key` of the pending build `token`, which
-    /// covers `oldest..=last`: [`published`](Self::published), and the build
-    /// no longer holds that lane back, both before the one notification, so a
-    /// fence waiter woken by it sees the lane's new answer.
+    /// covers `oldest..=last` and is the live build of `step`:
+    /// [`published_step`](Self::published_step), and the build no longer
+    /// holds that lane back, both before the one notification, so a fence
+    /// waiter woken by it sees the lane's new answer.
     pub fn published_build(
         &self,
         lane: &LaneKey,
@@ -277,32 +356,47 @@ impl Progress {
         oldest: Position,
         last: Position,
         token: Token,
+        step: Step,
     ) {
-        {
-            let mut registry = lock(&self.registry);
-            if let Some(registered) = registry.lanes.get_mut(lane) {
-                registered.unlanded.push_back((key, oldest));
-                registered.unsearchable.push_back((key, oldest));
-                registered.newest = Some(registered.newest.map_or(last, |n| n.max(last)));
-            }
-        }
+        self.register(lane, Some((key, oldest)), last, Some(step));
         self.settle_build(lane, token);
         self.registered();
     }
 
-    /// The pending build `token`'s batch, through `last`, had nothing for
-    /// `lane` (every document it made for the index failed under `skip`):
-    /// [`skipped`](Self::skipped), and the build no longer holds that lane
+    /// The live build of `step`, through `last`, had nothing for `lane`
+    /// (it touched no document of the index, or every one it made failed
+    /// under `skip`): [`skipped_step`](Self::skipped_step), and the index's
+    /// pending build `token`, if it took one, no longer holds that lane
     /// back, before the one notification.
-    pub fn skipped_build(&self, lane: &LaneKey, last: Position, token: Token) {
-        {
-            let mut registry = lock(&self.registry);
-            if let Some(registered) = registry.lanes.get_mut(lane) {
-                registered.newest = Some(registered.newest.map_or(last, |n| n.max(last)));
-            }
+    pub fn skipped_build(&self, lane: &LaneKey, last: Position, token: Option<Token>, step: Step) {
+        self.register(lane, None, last, Some(step));
+        if let Some(token) = token {
+            self.settle_build(lane, token);
         }
-        self.settle_build(lane, token);
         self.registered();
+    }
+
+    fn register(
+        &self,
+        lane: &LaneKey,
+        item: Option<(ItemKey, Position)>,
+        last: Position,
+        step: Option<Step>,
+    ) {
+        let mut registry = lock(&self.registry);
+        if let (Some(registered), Some(marks)) =
+            (registry.lanes.get_mut(lane), self.marks.get(lane))
+        {
+            if let Some(step) = step {
+                registered.committed(marks);
+                registered.record(step, item.is_some());
+            }
+            if let Some((key, oldest)) = item {
+                registered.unlanded.push_back((key, oldest, step));
+                registered.unsearchable.push_back((key, oldest));
+            }
+            registered.newest = Some(registered.newest.map_or(last, |n| n.max(last)));
+        }
     }
 
     fn settle_build(&self, lane: &LaneKey, token: Token) {
@@ -530,11 +624,84 @@ impl Progress {
     /// publishing it, and confirmation never passed it, so the next run's
     /// replayed stream marks it again. Call it as a run starts, before
     /// anything is read. Idempotent.
+    ///
+    /// The changes the ended run read since its last live grant close a
+    /// [`Step`] no lane is routed: they are committed with the next step
+    /// routed, as their replays are.
     pub fn forget_all(&self) {
+        {
+            let mut registry = lock(&self.registry);
+            if self.read.load(Ordering::Relaxed) > registry.steps.read {
+                self.close(&mut registry);
+            }
+        }
         for pending in self.pending.values() {
             let forgotten = lock(pending).forget();
             self.waiting.fetch_sub(forgotten, Ordering::Relaxed);
         }
+    }
+
+    /// One more live change was read.
+    pub fn change_read(&self) {
+        self.read.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How many live changes have been read, over every engine run.
+    pub fn changes_read(&self) -> u64 {
+        self.read.load(Ordering::Relaxed)
+    }
+
+    /// Close the step of every change read since the last one: call it as
+    /// the live build that takes them is granted, and register that build's
+    /// items with it.
+    pub fn close_step(&self) -> Step {
+        let mut registry = lock(&self.registry);
+        self.close(&mut registry)
+    }
+
+    fn close(&self, registry: &mut Registry) -> Step {
+        let read = self.read.load(Ordering::Relaxed);
+        let step = Step {
+            number: registry.steps.next,
+            read,
+        };
+        registry.steps.next += 1;
+        registry.steps.read = read;
+        step
+    }
+
+    /// How many live changes `sink` has committed: those read through the
+    /// newest step every one of its lanes has landed, or had nothing for. A
+    /// sink with no lane has every closed step.
+    pub fn committed(&self, sink: &SinkName) -> u64 {
+        let mut registry = lock(&self.registry);
+        let mut least: Option<Option<Step>> = None;
+        for (lane, marks) in &self.marks {
+            if lane.sink != *sink {
+                continue;
+            }
+            if let Some(registered) = registry.lanes.get_mut(lane) {
+                let at = registered.committed(marks);
+                least = Some(least.map_or(at, |least| least.min(at)));
+            }
+        }
+        match least {
+            None => registry.steps.read,
+            Some(at) => at.map_or(0, |step| step.read),
+        }
+    }
+
+    /// How many steps `lane` keeps to answer [`committed`](Self::committed),
+    /// beside how many items it has unlanded, both read under one lock: the
+    /// first is at most the second plus two, however many grants pass the
+    /// lane. `None` for an unknown lane.
+    pub fn steps_kept(&self, lane: &LaneKey) -> Option<(usize, usize)> {
+        let marks = self.marks.get(lane)?;
+        let mut registry = lock(&self.registry);
+        registry.lanes.get_mut(lane).map(|registered| {
+            registered.committed(marks);
+            (registered.steps.len(), registered.unlanded.len())
+        })
     }
 
     /// Every index that can have pending documents: one with a lane here.
@@ -584,7 +751,7 @@ impl Registered {
         while self
             .unlanded
             .front()
-            .is_some_and(|(key, _)| key.number() < applied)
+            .is_some_and(|(key, _, _)| key.number() < applied)
         {
             self.unlanded.pop_front();
         }
@@ -596,13 +763,55 @@ impl Registered {
         {
             self.unsearchable.pop_front();
         }
-        let unlanded = self.unlanded.front().map(|(_, oldest)| *oldest);
+        let unlanded = self.unlanded.front().map(|(_, oldest, _)| *oldest);
         match level {
             Level::Applied => unlanded,
             Level::Searchable => {
                 let unsearchable = self.unsearchable.front().map(|(_, oldest)| *oldest);
                 unlanded.into_iter().chain(unsearchable).min()
             }
+        }
+    }
+}
+
+impl Registered {
+    /// The newest step routed to the lane that it has landed every item
+    /// of, through it, or had nothing for; `None` before the first. A step
+    /// routed to no lane is behind the next one routed: it is committed with
+    /// it, never before.
+    fn committed(&mut self, marks: &Marks) -> Option<Step> {
+        self.outstanding(marks, Level::Applied);
+        let unlanded = self.unlanded.iter().find_map(|(_, _, step)| *step);
+        let behind = |step: &Step| unlanded.is_none_or(|unlanded| *step < unlanded);
+        while self.steps.get(1).is_some_and(behind) {
+            self.steps.pop_front();
+        }
+        self.steps.front().copied().filter(behind)
+    }
+
+    /// Record that `step` was routed to the lane, with an item or skipped.
+    /// Call it after [`committed`](Self::committed) pruned the front and
+    /// before the step's own item is registered.
+    ///
+    /// A skipped step replaces the newest entry: steps reach a lane in
+    /// order, so whenever that entry could answer as committed the skip
+    /// answers too, and it is the newer. **The bound:** items land in key
+    /// order, so every item after the first unlanded one is unlanded too;
+    /// past the front, an entry was pushed by one of the `k` unlanded items.
+    /// So a lane keeps at most `k + 1` entries after a registration, `k + 2`
+    /// with the step being recorded, however many grants pass it.
+    fn record(&mut self, step: Step, item: bool) {
+        let Some(&newest) = self.steps.back() else {
+            self.steps.push_back(step);
+            return;
+        };
+        if newest >= step {
+            return;
+        }
+        if !item && let Some(back) = self.steps.back_mut() {
+            *back = step;
+        } else {
+            self.steps.push_back(step);
         }
     }
 }

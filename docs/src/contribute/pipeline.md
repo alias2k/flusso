@@ -149,6 +149,8 @@ An item refused as **busy** (429 or 503) is neither rejected nor blocked. The si
 
 Both engines report lifecycle and progress to an `Observer` (`observer.rs`): sync, cheap, no-op by default, set with `with_observer`. Every sink-side event carries the `SinkName`; engine errors carry an `EngineId` (`Ingest` or `Sink(name)`). The daemon fans events to its per-sink `Status`; the binary attaches an OpenTelemetry observer. Guard: `reports_lifecycle_and_progress_to_the_observer`.
 
+A sink's `changes_committed` is not an event: `Status` reads it from `Progress` when asked (`Progress::committed`). The ingest engine counts every live change it reads and closes a step at each live grant; every lane is registered with the step, with an item or without one. A sink has committed the reads through the oldest step all its lanes have landed or skipped, so a change counts only once every lane of the sink has it, and in read order: a stalled lane holds its sink's count for every index, as it holds confirmation. Each read counts once per sink: a redelivered item that had landed moves nothing, and a change a source replays after an ingest restart is a second read, counted when its own step lands. Guards: the daemon's `tests::committed`, `progress::tests::committed`.
+
 ## Where this shows up
 
 - [How flusso works](../start/how-it-works.md) for the user-facing telling.

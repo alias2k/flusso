@@ -962,8 +962,9 @@ async fn a_fence_on_a_healthy_sink_passes_while_its_index_build_waits_on_a_full_
     tokio::time::sleep(Duration::from_millis(10)).await;
     assert!(!waiting.is_finished(), "the item isn't registered yet");
 
+    let step = rig.progress.close_step();
     rig.progress
-        .published_build(&lane("a"), key, taken.oldest, change, taken.token);
+        .published_build(&lane("a"), key, taken.oldest, change, taken.token, step);
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(1), waiting)
             .await

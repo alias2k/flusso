@@ -545,7 +545,14 @@ fn a_marked_id_pins_confirmation_until_its_build_lands() {
     assert_eq!(progress.landed(), Landed::Before(p(3)), "building");
 
     let key = progress.next_key(&a.index).unwrap();
-    progress.published_build(&a, key, taken.oldest, p(3), taken.token);
+    progress.published_build(
+        &a,
+        key,
+        taken.oldest,
+        p(3),
+        taken.token,
+        progress.close_step(),
+    );
     progress.release(&a.index, taken.token);
     assert_eq!(progress.landed(), Landed::Before(p(3)), "on the lane");
     progress.applied(&a, key);
@@ -563,7 +570,14 @@ fn a_build_holds_a_lane_only_until_its_item_is_registered_there() {
         .take(&healthy.index, usize::MAX, &nothing_held)
         .unwrap();
     let key = progress.next_key(&healthy.index).unwrap();
-    progress.published_build(&healthy, key, taken.oldest, p(1), taken.token);
+    progress.published_build(
+        &healthy,
+        key,
+        taken.oldest,
+        p(1),
+        taken.token,
+        progress.close_step(),
+    );
     progress.applied(&healthy, key);
 
     assert_eq!(
@@ -638,7 +652,14 @@ fn a_run_forgets_what_an_earlier_run_left_behind() {
 /// Register `taken`'s item on `lane` under `key`: the call the ingest
 /// engine makes once that lane's send returned.
 fn register(progress: &Progress, lane: &LaneKey, key: ItemKey, taken: &Taken, last: Position) {
-    progress.published_build(lane, key, taken.oldest, last, taken.token);
+    progress.published_build(
+        lane,
+        key,
+        taken.oldest,
+        last,
+        taken.token,
+        progress.close_step(),
+    );
 }
 
 /// Each answer a registration moves is followed by a notification, so a
@@ -714,4 +735,382 @@ fn a_lane_wins_a_tie_with_another_indexs_backlog() {
     progress.published(&users, ItemKey::new(0), p(5), p(5));
     progress.mark([(id("orders", 1), p(5))]);
     assert_eq!(progress.pinned_by(), Some(Pin::Lane(users)));
+}
+
+mod committed {
+    use super::*;
+
+    fn lane(index: &str, sink: &str) -> LaneKey {
+        LaneKey::new(
+            kernel::IndexName::try_new(index).unwrap(),
+            kernel::SinkName::try_new(sink).unwrap(),
+        )
+    }
+
+    fn name(sink: &str) -> SinkName {
+        SinkName::try_new(sink).unwrap()
+    }
+
+    /// Read `changes` and close their step.
+    fn read(progress: &Progress, changes: u64) -> Step {
+        for _ in 0..changes {
+            progress.change_read();
+        }
+        progress.close_step()
+    }
+
+    /// An item of `step` on `lane`, registered; its key.
+    fn route(progress: &Progress, lane: &LaneKey, step: Step) -> ItemKey {
+        let key = progress.next_key(&lane.index).unwrap();
+        progress.published_step(lane, key, p(1), p(1), step);
+        key
+    }
+
+    #[test]
+    fn nothing_read_is_nothing_committed() {
+        let progress = Progress::new([lane("users", "a")]);
+        assert_eq!(progress.committed(&name("a")), 0);
+        assert_eq!(progress.changes_read(), 0);
+    }
+
+    /// A change counts once every lane of the sink has landed its item; a
+    /// sibling sink's lanes don't hold it.
+    #[test]
+    fn a_change_counts_once_every_lane_of_its_sink_landed_it() {
+        let (users_a, orders_a, users_b) =
+            (lane("users", "a"), lane("orders", "a"), lane("users", "b"));
+        let progress = Progress::new([users_a.clone(), orders_a.clone(), users_b.clone()]);
+        let step = read(&progress, 2);
+        let users = route(&progress, &users_a, step);
+        progress.published_step(&users_b, users, p(1), p(2), step);
+        let orders = route(&progress, &orders_a, step);
+
+        progress.applied(&orders_a, orders);
+        progress.applied(&users_b, users);
+        assert_eq!(
+            progress.committed(&name("a")),
+            0,
+            "users hasn't landed on a"
+        );
+        assert_eq!(progress.committed(&name("b")), 2);
+
+        progress.applied(&users_a, users);
+        assert_eq!(progress.committed(&name("a")), 2);
+    }
+
+    /// A step a lane had nothing for counts once the lane's earlier items
+    /// landed, and a lane still behind an item holds its sink's count for
+    /// every later step, on every index.
+    #[test]
+    fn a_skipped_step_counts_after_the_lanes_earlier_items() {
+        let (users, orders) = (lane("users", "a"), lane("orders", "a"));
+        let progress = Progress::new([users.clone(), orders.clone()]);
+        let first = read(&progress, 1);
+        let held = route(&progress, &users, first);
+        progress.skipped_step(&orders, p(1), first);
+        let second = read(&progress, 1);
+        progress.skipped_step(&users, p(2), second);
+        let landed = route(&progress, &orders, second);
+        progress.applied(&orders, landed);
+        assert_eq!(progress.committed(&name("a")), 0);
+
+        progress.applied(&users, held);
+        assert_eq!(progress.committed(&name("a")), 2);
+    }
+
+    /// A redelivered item that had landed raises no mark further: it counts
+    /// once.
+    #[test]
+    fn a_redelivered_item_counts_once() {
+        let a = lane("users", "a");
+        let progress = Progress::new([a.clone()]);
+        let key = route(&progress, &a, read(&progress, 1));
+        progress.applied(&a, key);
+        progress.applied(&a, key);
+        assert_eq!(progress.committed(&name("a")), 1);
+    }
+
+    /// A source that replays under the positions it had: the first run's
+    /// read and its replay are two reads. A sink that landed the first read
+    /// counts it then and the replay when that lands; a sink that hadn't
+    /// counts the first read once its own item lands, never before.
+    #[test]
+    fn a_replayed_change_counts_once_per_read_on_each_sink() {
+        let (on_a, on_b) = (lane("users", "a"), lane("users", "b"));
+        let progress = Progress::new([on_a.clone(), on_b.clone()]);
+        let first = read(&progress, 1);
+        let old = route(&progress, &on_a, first);
+        progress.published_step(&on_b, old, p(1), p(1), first);
+        progress.applied(&on_a, old);
+        assert_eq!(progress.committed(&name("a")), 1);
+        assert_eq!(progress.committed(&name("b")), 0);
+
+        // The engine run ends; the next one replays the change.
+        progress.forget_all();
+        let replay = read(&progress, 1);
+        let new = route(&progress, &on_a, replay);
+        progress.published_step(&on_b, new, p(1), p(1), replay);
+        assert_eq!(
+            progress.committed(&name("a")),
+            1,
+            "the replay hasn't landed"
+        );
+        assert_eq!(progress.committed(&name("b")), 0);
+
+        progress.applied(&on_b, old);
+        assert_eq!(progress.committed(&name("b")), 1, "b's first read landed");
+        progress.applied(&on_a, new);
+        progress.applied(&on_b, new);
+        assert_eq!(progress.committed(&name("a")), 2);
+        assert_eq!(progress.committed(&name("b")), 2);
+        assert_eq!(progress.changes_read(), 2);
+    }
+
+    /// Reads an engine run never granted close a step at the next run's
+    /// start that no lane is routed: they count with the next step routed,
+    /// once it lands.
+    #[test]
+    fn reads_of_an_ended_run_count_with_the_next_step_routed() {
+        let a = lane("users", "a");
+        let progress = Progress::new([a.clone()]);
+        progress.change_read();
+        progress.change_read();
+        progress.forget_all();
+        progress.forget_all();
+        let replay = read(&progress, 2);
+        let key = route(&progress, &a, replay);
+        assert_eq!(progress.committed(&name("a")), 0);
+
+        progress.applied(&a, key);
+        assert_eq!(progress.committed(&name("a")), 4);
+    }
+
+    /// A sink with no lane has every closed step.
+    #[test]
+    fn a_sink_with_no_lane_has_every_closed_step() {
+        let progress = Progress::new([lane("users", "a")]);
+        read(&progress, 3);
+        progress.change_read();
+        assert_eq!(progress.committed(&name("elsewhere")), 3);
+    }
+
+    /// Steps a lane has passed are dropped as new ones are routed, so its
+    /// record stays as long as it is behind, not as the run is long.
+    #[test]
+    fn steps_every_lane_passed_are_dropped() {
+        let a = lane("users", "a");
+        let progress = Progress::new([a.clone()]);
+        for _ in 0..100 {
+            let key = route(&progress, &a, read(&progress, 1));
+            progress.applied(&a, key);
+        }
+        read(&progress, 1);
+        assert!(progress.steps_kept(&a).unwrap().0 <= 2);
+        assert_eq!(progress.committed(&name("a")), 100);
+    }
+}
+
+mod parked {
+    use super::*;
+
+    fn lane(index: &str) -> LaneKey {
+        LaneKey::new(
+            kernel::IndexName::try_new(index).unwrap(),
+            kernel::SinkName::try_new("a").unwrap(),
+        )
+    }
+
+    /// What the bound says a lane may keep: its unlanded items, plus two.
+    fn within_bound(progress: &Progress, lane: &LaneKey) -> bool {
+        let (kept, unlanded) = progress.steps_kept(lane).unwrap();
+        kept <= unlanded + 2
+    }
+
+    /// `users` holds `parked` unlanded items (the first on the first step
+    /// when `from_the_start`), then `grants` live grants pass it with
+    /// documents for `orders` only, each landing at once. Every lane keeps
+    /// a record bounded by its unlanded items, and once `users` lands the
+    /// sink has every read.
+    fn grants_past_a_parked_lane(parked: usize, from_the_start: bool, grants: u64) {
+        let (users, orders) = (lane("users"), lane("orders"));
+        let progress = Progress::new([users.clone(), orders.clone()]);
+        let sink = SinkName::try_new("a").unwrap();
+        let mut read = 0;
+        let mut grant = |progress: &Progress, users_item: bool| {
+            progress.change_read();
+            read += 1;
+            let step = progress.close_step();
+            if users_item {
+                let key = progress.next_key(&users.index).unwrap();
+                progress.published_step(&users, key, p(read), p(read), step);
+                progress.skipped_step(&orders, p(read), step);
+            } else {
+                let key = progress.next_key(&orders.index).unwrap();
+                progress.published_step(&orders, key, p(read), p(read), step);
+                progress.skipped_step(&users, p(read), step);
+                progress.applied(&orders, key);
+            }
+        };
+        if !from_the_start {
+            grant(&progress, false);
+        }
+        for _ in 0..parked {
+            grant(&progress, true);
+            grant(&progress, false);
+        }
+        for _ in 0..grants {
+            grant(&progress, false);
+            assert!(
+                within_bound(&progress, &users),
+                "users keeps {:?}",
+                progress.steps_kept(&users)
+            );
+            assert!(
+                within_bound(&progress, &orders),
+                "orders keeps {:?}",
+                progress.steps_kept(&orders)
+            );
+        }
+        assert_eq!(progress.outstanding(&users), parked);
+        assert_eq!(progress.committed(&sink), u64::from(!from_the_start));
+
+        let last = progress.next_key(&users.index).unwrap();
+        progress.applied(&users, last);
+        assert_eq!(progress.committed(&sink), progress.changes_read());
+        assert!(within_bound(&progress, &users));
+    }
+
+    #[test]
+    fn a_lane_parked_on_its_first_item_keeps_a_bounded_record() {
+        grants_past_a_parked_lane(1, true, 10_000);
+    }
+
+    #[test]
+    fn a_lane_parked_after_landing_keeps_a_bounded_record() {
+        grants_past_a_parked_lane(1, false, 10_000);
+    }
+
+    #[test]
+    fn a_lane_with_several_unlanded_items_keeps_twice_as_many() {
+        grants_past_a_parked_lane(5, false, 10_000);
+    }
+}
+
+/// The compacted record answers as a naive one that keeps every step: random
+/// grants over two indexes on two sinks, each lane getting an item or a skip,
+/// items landing in key order at random, an engine run ending now and then
+/// with reads never granted. After every operation each sink's count equals
+/// the model's, and each lane keeps within its bound.
+#[test]
+fn compaction_changes_no_count() {
+    let sinks = ["a", "b"];
+    let indexes = ["users", "orders"];
+    let lanes: Vec<LaneKey> = indexes
+        .iter()
+        .flat_map(|index| {
+            sinks.iter().map(move |sink| {
+                LaneKey::new(
+                    kernel::IndexName::try_new(*index).unwrap(),
+                    SinkName::try_new(*sink).unwrap(),
+                )
+            })
+        })
+        .collect();
+    for seed in 0..40_u64 {
+        let mut state = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let mut next = |below: u64| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) % below
+        };
+        let progress = Progress::new(lanes.clone());
+        // Per lane: every step routed (read total, item key) and how many
+        // items have landed.
+        let mut routed: Vec<Vec<(u64, Option<u64>)>> = vec![Vec::new(); lanes.len()];
+        let mut keys: Vec<Vec<ItemKey>> = vec![Vec::new(); lanes.len()];
+        let mut landed: Vec<usize> = vec![0; lanes.len()];
+        for _ in 0..400 {
+            match next(10) {
+                0 => {
+                    progress.change_read();
+                    progress.forget_all();
+                }
+                1..=5 => {
+                    for _ in 0..next(3) {
+                        progress.change_read();
+                    }
+                    let step = progress.close_step();
+                    let read = progress.changes_read();
+                    for index in &indexes {
+                        let item = next(3) == 0;
+                        let key = item.then(|| {
+                            progress
+                                .next_key(&kernel::IndexName::try_new(*index).unwrap())
+                                .unwrap()
+                        });
+                        for (at, lane) in lanes.iter().enumerate() {
+                            if lane.index.as_ref() != *index {
+                                continue;
+                            }
+                            match key {
+                                Some(key) => {
+                                    progress.published_step(lane, key, p(read), p(read), step);
+                                    keys[at].push(key);
+                                    routed[at].push((read, Some(key.number())));
+                                }
+                                None => {
+                                    progress.skipped_step(lane, p(read), step);
+                                    routed[at].push((read, None));
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    let at = next(lanes.len() as u64) as usize;
+                    let lane = &lanes[at];
+                    let left = keys[at].len() - landed[at];
+                    if left > 0 {
+                        landed[at] += 1 + next(left as u64) as usize;
+                        progress.applied(lane, keys[at][landed[at] - 1]);
+                    }
+                }
+            }
+            for sink in sinks {
+                let model = lanes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, lane)| lane.sink.as_ref() == sink)
+                    .map(|(at, _)| {
+                        let first_unlanded = keys[at].get(landed[at]).map(|key| key.number());
+                        routed[at]
+                            .iter()
+                            .take_while(|(_, key)| {
+                                first_unlanded
+                                    .is_none_or(|unlanded| key.is_none_or(|key| key < unlanded))
+                            })
+                            .last()
+                            .map_or(0, |(read, _)| *read)
+                    })
+                    .min()
+                    .unwrap();
+                assert_eq!(
+                    progress.committed(&SinkName::try_new(sink).unwrap()),
+                    model,
+                    "seed {seed}"
+                );
+            }
+            for lane in &lanes {
+                let (kept, unlanded) = progress.steps_kept(lane).unwrap();
+                assert!(
+                    kept <= unlanded + 2,
+                    "seed {seed}: {lane} keeps {:?}",
+                    progress.steps_kept(lane)
+                );
+            }
+        }
+    }
 }

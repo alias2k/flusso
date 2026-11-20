@@ -276,12 +276,108 @@ plus the resolver. Raising it to several pages is a later, measured change (pool
 
 ### 3.6 Changes committed
 
-`Batch.changes` counted a change on the first item of each sink; per index it has no meaning.
-`Progress` keeps routed seqs as ranges (one range while seqs are dense, as Postgres's are). A sink's
-`changes_committed` is the routed changes below its lanes' landed bound, computed when read. Same name
-and meaning (`changes_in_flight` = captured − committed); monotonic across ingest restarts (a replayed
-change is captured and routed again under a new seq); `flusso.changes.committed` becomes an
-observable counter.
+**Status: built in slice 3** (owner's decision, 2026-11-20: option 1 below, the `Progress`
+definition now). A change is committed for a sink once **every lane of that sink has landed it, or
+had nothing for it**, with every change read before it. The owner accepted that a stalled index makes
+its sink's `changes_in_flight` grow for all of that sink's indexes: the count follows the oldest
+unlanded change, as confirmation does.
+
+**What `main` did** (since stage 7's one lane per `(index, sink)`):
+
+- A live batch's change count rode on the **first** item of each sink, in lane order (the
+  lowest index name that got a document: `commit.rs`'s `changes: if first { changes } else { 0 }`),
+  and was credited when **that item landed** (`on_batch_committed`, summed over a merged write's parts).
+- A sink that got no item from the batch was credited **at publish** (`on_changes_settled`), before it
+  had landed anything of it or anything earlier.
+- Read by `/status` (`sinks.<s>.changes_committed`, `changes_in_flight` = captured − committed, and the
+  top-level slowest), `flusso.changes.committed` / `flusso.changes.in_flight`, the stop's deadline
+  message (`shutdown.rs`: sinks with changes in flight), and `dev/bench`'s `wait_drained` (a burst is
+  drained when every sink's `changes_in_flight` is 0).
+
+**Why it has to come from `Progress`:** once several tasks publish (6b), a live run's changes touch
+several indexes whose batches are built and published separately, so no single item can carry the
+count.
+
+**Which moments moved** (each later than on `main`, never earlier; the totals end equal to the
+changes read once everything lands):
+
+| Case | `main` credited | Now | Test (`daemon` `tests::committed`) |
+| --- | --- | --- | --- |
+| a batch with items on two or more lanes of a sink | when the first lane's item lands | when every lane's item lands | `a_change_counts_once_every_lane_of_the_sink_landed_it` |
+| a batch with no item for a sink | at publish | when that sink's lanes have landed every earlier item | `a_change_with_nothing_for_a_sink_counts_after_its_earlier_changes` |
+| an earlier item still out on another lane of the sink (a slow or stalled index) | later batches still credited as their first item lands | nothing past it until it lands | `a_stalled_lane_holds_its_sinks_count_for_other_indexes` |
+| a sink engine restart redelivers an item that had landed | credited again (counts could pass captured; `changes_in_flight` saturated at 0) | once | `a_redelivered_item_that_had_landed_counts_once` |
+| an ingest engine run ends with changes read and never published; the source replays them | never credited: `changes_in_flight` stayed above 0 for the life of the process | both reads count, once the replay lands | `every_change_read_counts_once_per_sink_across_a_replay`, `failed_ingest_engine_restarts_and_resumes_the_stream` (expectation 2 → 3, in flight 0) |
+
+**The design as built** (`libs/2-engine/src/progress.rs`, module doc "How many changes a sink has
+committed"):
+
+- `Progress` counts every live change read (`change_read`, beside `on_change_captured` in
+  `buffer_live`) and closes a **`Step`** at each live grant (`close_step`, in `start_live`): the step
+  holds every change read since the previous one and records the read total. Every lane of the grant's
+  build is registered with the step, with an item (`published_build`) or without
+  (`skipped_build`, which also takes the index with no pending build), an empty build included.
+- A step carries its read total. A lane keeps the steps routed to it that can still answer: it has
+  committed the newest one whose items it has all landed, and a sink's count is the read total at the
+  oldest step its lanes have committed. There is no list shared by the lanes.
+- **The bound** (review round 1: a parked lane let steps pile up, about 24 bytes per grant, and one
+  parked lane stopped the pruning for every sink). A lane drops the steps before the one it has
+  committed whenever a step is registered on it, and a skipped step replaces the lane's newest entry
+  (steps reach a lane in order, so whenever that entry could answer the skip answers too). Items land
+  in key order, so past the front every entry was pushed by one of the lane's `k` unlanded items: **a lane keeps at most `k + 2` steps, however
+  many grants pass it**, and `k` is bounded by the lane's capacity. A lane parked on its first item
+  keeps at most 2. `Progress::steps_kept` reports it, with the lane's unlanded items, under one lock (the delta re-check showed the "no unlanded item at or after it" condition on the replacement was never needed: a skip always replaces the newest entry, which tightened the bound from `2k + 2`). Guards: `progress::tests::parked` (10,000 grants
+  past a lane parked on its first item, after landing, and with five unlanded items: the bound holds
+  after every grant and the count is the total read once the lane lands), the daemon's
+  `a_{refused,blocked,restaging}_lane_holds_its_sinks_count_and_a_sibling_counts_on` (200 grants
+  past the lane on a real daemon, the bound on every lane, every read counted once it is written
+  again), and `compaction_changes_no_count` (seeded random grants, skips, landings and ended runs over
+  two indexes on two sinks: every count equals a model that keeps every step). All seven fail with
+  the record appending every step.
+- **The cost of a read.** `Progress::committed(sink)` takes the registry lock (the one the ingest
+  engine takes per lane registration and confirmation and fences read under) and walks every lane of
+  the deployment, keeping the sink's: per lane it drops landed items (amortized, as `landed()` does),
+  finds its first unlanded item's step and pops the steps before it, constant work in the usual case.
+  `/status` reads it once per sink (`indexes × sinks` lane visits per sink); `/metrics` twice per
+  sink (`flusso.changes.committed`, and `flusso.changes.in_flight` through `in_flight_for`). The lock
+  is held for that walk alone.
+- **Per read, not per position.** A source that replays under the positions it had (the position
+  contract, #439) reads a change twice; each read is counted once per sink, when the sink lands that
+  read's own step. A sink that had landed the first read counted it then and counts the replay when
+  that lands; one that hadn't counts the first read when its own (redelivered) item lands, never
+  before. `progress::tests::committed::a_replayed_change_counts_once_per_read_on_each_sink`.
+- **Reads an engine run never granted** close a step at the next run's start (`forget_all`) that no
+  lane is routed: they count with the next step routed, once it lands
+  (`reads_of_an_ended_run_count_with_the_next_step_routed`).
+- **Notification:** nothing listens to the count. `/status`, the metric callbacks, the stop's deadline
+  message and `wait_drained` all read it when they need it, so there is no wake-up to send.
+- 6a moves `close_step` into the reader with its live runs: a step is a run's changes.
+
+**Each case, answered:**
+
+- **Parked (refused), blocked, restaging lane:** holds its sink's count (nothing past its oldest
+  unlanded item), a sibling sink counts on. `a_{refused,blocked,restaging}_lane_holds_its_sinks_count_and_a_sibling_counts_on`.
+- **`on_error = "skip"`** (every document of a change failed): the lane is registered as skipped; the
+  change counts once the sink landed what came before. `a_change_whose_documents_were_all_skipped_still_counts`.
+- **`backfill = false` sink:** counts live changes like any sink (it skips snapshots, which carry no
+  step). `drives_changes_through_injected_backends` (committed 2 on both sinks).
+- **Empty batch** (touched no document any lane gets): a step skipped on every lane; counts after the
+  sink's earlier items. `a_change_that_builds_nothing_settles_after_the_batch_before_it` (engine).
+- **Graceful stop:** every sink that landed everything ends at `changes_in_flight` 0
+  (`a_graceful_stop_ends_with_nothing_in_flight_on_any_sink`); the deadline message reads the same
+  field, so it names a sink exactly while some lane of it is behind.
+
+**What moved for users and benchmarks:** `changes_committed` rises later and in read order,
+`changes_in_flight` stays above 0 until a sink has every document, and no longer sticks above 0 after
+an ingest engine restart; `flusso.changes.committed` is an observable counter read from the status
+(same name and label; the Prometheus name stays `flusso_changes_committed_total`). `dev/bench`'s
+`wait_drained` keeps reading `changes_in_flight`, so `drain_changes_per_s` steps once at this merge:
+its points carry `extra.images.drain = "every-lane-landed"` and `bench-regression.py` restarts the
+window as for an image change (the rule unchanged). The latency probes poll OpenSearch and don't read
+the counter.
+
+**Options the owner chose from:** (1) build the `Progress` definition now: taken; (2) keep `main`'s
+moments in `Progress` until 6b; (3) leave the counter until 6b.
 
 ### 3.7 Run lifecycle
 
@@ -335,7 +431,7 @@ realistic build rate. ADR question 7's "leave them for replay" is reversed (reco
 | Item-level vs flush-wide; lane parking | sink side unchanged | `tests::parking`, `tests::merge`, daemon `a_stop_rejection_halts_its_lane_writing_several_items_at_once` | `a_parked_lane_fills_only_its_index_half_and_other_backfills_go_one_batch_at_a_time` |
 | Memory budget | many reservers; rules 1–4 per §3.5 | `random_schedules_under_a_tiny_budget_stay_within_it_and_finish`, `live_keeps_room_beside_a_backfill_holding_its_half`, `a_batch_bigger_than_the_budget_still_builds` | `concurrent_reservations_never_pass_the_limit`, `a_release_wakes_every_waiting_task`, `an_index_holding_nothing_gets_one_batch` |
 | Gate fairness | lines per kind; budget asked at grant | `gate::tests` | `a_task_blocked_on_a_full_lane_holds_no_permit` (two indexes, one lane full, `builds = 1`), `a_waiter_refused_by_the_budget_keeps_its_place` |
-| `changes_committed` | computed from `Progress` | daemon status tests | `changes_committed_counts_what_every_lane_of_the_sink_landed`, `changes_committed_never_goes_back_across_an_ingest_restart` |
+| `changes_committed` | computed from `Progress` (§3.6) | daemon status tests | daemon `tests::committed`, `progress::tests::committed` |
 | Resume checkpoints (8b), reindex per sink | the walk and its marks move as they are | `tests::resume`, `a_killed_backfill_resumes_…` e2e, `reindex_control_stages_and_requests_a_snapshot_without_restarting`, `reindex_operation_targets_one_sink` | — |
 | Independence (ADR §1) | new (6b) | — | `a_slow_build_of_one_index_delays_no_other_index`, `a_backfill_of_one_index_delays_no_live_change_of_another` |
 
@@ -348,7 +444,7 @@ lines; the manual is written by the documentation agent before its PR is ready.
 | --- | --- | --- | --- |
 | 1 | **Item keys.** `Batch.key`, a key counter per index in `Progress`; `Progress` and the sink's `Fences` keyed by it. One task. | `progress::tests` on keys; `a_key_survives_an_ingest_restart` | nothing in behaviour; `live_drain_held` |
 | 2 | **Pending sets in `Progress`, one task**, and the stall/pin attribution. The one task marks a run, then takes **across every index's set into one build**, as `main`'s batch spans indexes, published per lane. `newest`/`skipped` go. | pending unit tests (dedup, mark in flight, give back, the minimum, `(seq, counter)` order); the model test; `a_healthy_lane_is_not_stalled_by_its_index_backlog` | confirmation or fences early: model test, `fence` e2e, `wal_release`; lock cost: `live_drain_held` |
-| 3 | **Changes committed from `Progress`.** | the `changes_committed` tests | `/status` and metric values |
+| 3 | **Changes committed from `Progress`** (§3.6, owner's option 1): every lane of a sink landed it, or had nothing for it. Moves when a change counts. One task. | daemon `tests::committed` (red on `main`), `progress::tests::committed` | `/status` and metric values; `drain_changes_per_s` steps once (window restarted) |
 | 4 | **Budget for many reservers, per index.** Rule 2 (`index_budget_share`) and rule 4 per index. Changes what a multi-index deployment holds: one index of three bursting holds at most half. | budget tests of §4 | a burst on one index of three (§7); the tiny-budget schedule |
 | 5 | **Gate with lines** (budget asked at grant), the key-page permit. After 4 (both touch `builds.rs`). One task. | gate tests of §4 | `snapshot/rows` at `builds = 1` and 4 |
 | 6a | **Reader task + one builder task** over every pending set, the **lead bound** (`max_waiting_per_index`, `max_waiting`), the stop barrier, the stream handed back. No independence yet; `main`'s pacing. | `the_reader_waits_at_the_lead_and_resumes`, `a_stop_mid_run_builds_what_the_reader_marked_last`, `a_stop_with_many_pending_ids_finishes_within_the_deadline`, `an_id_of_an_index_without_lanes_pins_nothing` | the hop and the locks: the full in-process suite, `shutdown` e2e, the end measurements |

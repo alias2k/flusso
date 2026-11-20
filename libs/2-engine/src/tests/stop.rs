@@ -732,7 +732,6 @@ async fn a_deferred_sink_still_refreshes_when_skipped_snapshot_batches_follow_th
         stream::LaneItem::Batch(stream::Batch {
             key: Some(stream::ItemKey::new(position)),
             position: Some(Position::new(position)),
-            changes: 1,
             envelopes: Vec::new().into(),
             hold: Default::default(),
             walked: None,
@@ -742,7 +741,6 @@ async fn a_deferred_sink_still_refreshes_when_skipped_snapshot_batches_follow_th
     let snapshot = stream::LaneItem::Batch(stream::Batch {
         key: None,
         position: None,
-        changes: 0,
         envelopes: Vec::new().into(),
         hold: Default::default(),
         walked: None,

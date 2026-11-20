@@ -186,7 +186,6 @@ fn item(index_name: &str, ids: std::ops::Range<i64>, position: Option<u64>) -> L
     LaneItem::Batch(Batch {
         key: position.map(stream::ItemKey::new),
         position: position.map(Position::new),
-        changes: 1,
         envelopes: ids
             .map(|id| {
                 Envelope::upsert(

@@ -48,6 +48,7 @@ impl IngestEngine {
         event: ChangeEvent,
     ) -> Result<()> {
         self.observer.on_change_captured();
+        self.progress.change_read();
         let affected = self
             .resolver
             .resolve(event.table(), event.key(), event.before(), event.after())

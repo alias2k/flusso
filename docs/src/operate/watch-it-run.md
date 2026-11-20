@@ -14,7 +14,7 @@ flusso is running and you want to know whether it's keeping up, what it's done, 
    curl -s localhost:9464/status | jq
    ```
 
-   `phase` should be `live` and every entry in `indexes` should be `seeded`. `changes_in_flight` is the backlog between capture and the sink; `slot_lag_bytes` is how far the confirmed position trails Postgres. The field list is in [HTTP endpoints](../reference/http.md#get-status).
+   `phase` should be `live` and every entry in `indexes` should be `seeded`. `changes_in_flight` is the backlog between capture and the sink's slowest index; `slot_lag_bytes` is how far the confirmed position trails Postgres. The field list is in [HTTP endpoints](../reference/http.md#get-status).
 
 2. **Wire the probes.** `/healthz` is liveness; `/readyz` returns `200` from the start of backfill onward and `503` once the pipeline stops. Point Kubernetes probes at both; the Helm chart already does.
 

@@ -60,15 +60,14 @@ pub struct BuildStats {
 }
 
 /// What one sink engine committed: the batch's envelopes applied and flushed,
-/// how many source changes that batch covered, and the flush duration.
+/// and the flush duration. How many changes a sink has committed is
+/// [`Progress::committed`](crate::Progress::committed), not a sum of these.
 /// Built with [`CommitStats::new`]; more fields may come.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct CommitStats {
     /// Envelopes applied to the sink in this batch.
     pub envelopes: usize,
-    /// Source changes the batch covered; `0` for a snapshot batch.
-    pub changes: usize,
     /// How long the flush took.
     pub flush: Duration,
     /// Live changes or a backfill.
@@ -78,12 +77,11 @@ pub struct CommitStats {
 }
 
 impl CommitStats {
-    /// A commit of `envelopes` covering `changes` source changes, flushed in
-    /// `flush`, for `work`, with no byte count.
-    pub fn new(envelopes: usize, changes: usize, flush: Duration, work: Work) -> Self {
+    /// A commit of `envelopes`, flushed in `flush`, for `work`, with no
+    /// byte count.
+    pub fn new(envelopes: usize, flush: Duration, work: Work) -> Self {
         Self {
             envelopes,
-            changes,
             flush,
             work,
             bytes: None,
@@ -409,12 +407,6 @@ pub trait Observer: std::fmt::Debug + Send + Sync {
     }
 
     /// A sink engine applied, flushed, and acknowledged one batch.
-    /// A batch built `changes` source changes into no document `sink`
-    /// receives: they are settled for `sink` without a write.
-    fn on_changes_settled(&self, sink: &SinkName, changes: usize) {
-        let _ = (sink, changes);
-    }
-
     fn on_batch_committed(&self, sink: &SinkName, stats: CommitStats) {
         let _ = (sink, stats);
     }
@@ -594,12 +586,6 @@ impl Observer for FanOut {
     fn on_sink_started(&self, sink: &SinkName) {
         for observer in &self.observers {
             observer.on_sink_started(sink);
-        }
-    }
-
-    fn on_changes_settled(&self, sink: &SinkName, changes: usize) {
-        for observer in &self.observers {
-            observer.on_changes_settled(sink, changes);
         }
     }
 

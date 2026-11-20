@@ -210,8 +210,7 @@ impl DocumentBuilder for TwoIndexes {
     }
 }
 
-/// What a test reads off the observer: batches built and changes settled,
-/// in order.
+/// What a test reads off the observer: batches built, in order.
 #[derive(Debug, Default)]
 struct Events(Mutex<Vec<String>>);
 
@@ -222,18 +221,11 @@ impl Observer for Events {
             .unwrap()
             .push(format!("built {}", stats.documents));
     }
-
-    fn on_changes_settled(&self, sink: &SinkName, changes: usize) {
-        self.0
-            .lock()
-            .unwrap()
-            .push(format!("settled {changes} on {sink}"));
-    }
 }
 
-/// A change that builds no document is settled in slot order, as an empty
-/// batch was: after the batch granted before it is published, never ahead
-/// of it.
+/// A change that builds no document is published in slot order, as an
+/// empty batch was: after the batch granted before it, never ahead of it.
+/// It counts as committed once the sink has landed that batch, not before.
 #[tokio::test(start_paused = true)]
 async fn a_change_that_builds_nothing_settles_after_the_batch_before_it() {
     let primary = sink_name("primary");
@@ -247,7 +239,7 @@ async fn a_change_that_builds_nothing_settles_after_the_batch_before_it() {
         Arc::new(MockSource::new(vec![upsert(1), upsert(9)])),
         Arc::clone(&documents) as Arc<dyn DocumentBuilder>,
         Arc::clone(&stream) as Arc<dyn Stream>,
-        vec![primary],
+        vec![primary.clone()],
         Arc::clone(&progress),
     )
     .with_batch(BatchPolicy {
@@ -261,9 +253,18 @@ async fn a_change_that_builds_nothing_settles_after_the_batch_before_it() {
     run.await.unwrap().unwrap();
     assert_eq!(
         *events.0.lock().unwrap(),
-        ["built 2", "settled 1 on primary", "built 0"],
-        "the empty batch settles after the one granted before it, as an empty batch"
+        ["built 2", "built 0"],
+        "the empty batch is published after the one granted before it"
     );
+    assert_eq!(
+        progress.committed(&primary),
+        0,
+        "the first batch hasn't landed, so neither change counts"
+    );
+    for index in [orders(), users()] {
+        progress.applied(&LaneKey::new(index, primary.clone()), ItemKey::new(0));
+    }
+    assert_eq!(progress.committed(&primary), 2);
 }
 
 /// Every document a build made for `users` fails under `skip`, so the
@@ -285,7 +286,6 @@ async fn a_skipped_lane_is_not_held_by_a_full_lane_of_another_index() {
         .publish(LaneItem::Batch(stream::Batch {
             key: None,
             position: None,
-            changes: 0,
             envelopes: Vec::new().into(),
             hold: Default::default(),
             walked: None,
