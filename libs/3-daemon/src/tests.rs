@@ -1272,6 +1272,7 @@ fn batch_policy_lays_the_config_over_the_engine_defaults() {
 }
 
 mod backoff;
+mod budget;
 mod committed;
 mod lanes;
 mod staging;

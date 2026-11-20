@@ -282,9 +282,16 @@ impl Pending {
     }
 
     /// How many ids wait.
-    #[cfg(test)]
     pub(crate) fn waiting(&self) -> usize {
         self.waiting.len()
+    }
+
+    /// The position of the oldest waiting id; `None` while none waits.
+    pub(crate) fn oldest_waiting(&self) -> Option<Position> {
+        self.order
+            .first_key_value()
+            .and_then(|(_, key)| self.waiting.get(key))
+            .map(|(position, _)| *position)
     }
 }
 

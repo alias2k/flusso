@@ -710,6 +710,7 @@ mod tests {
             writes = 8
             builds = 6
             max_built_mib = 256
+            index_budget_share = 0.25
 
             [backoff]
             initial_ms = 200
@@ -724,6 +725,7 @@ mod tests {
             reparsed.concurrency.max_built_mib,
             std::num::NonZeroUsize::new(256)
         );
+        assert_eq!(reparsed.concurrency.index_budget_share, Some(0.25));
         assert!(regenerated.contains("[concurrency]"), "{regenerated}");
         assert_eq!(
             reparsed.backoff.initial_ms,

@@ -66,6 +66,10 @@ fn users() -> IndexName {
     IndexName::try_new("users").unwrap()
 }
 
+/// The indexes a [`Builder`] over several spreads its ids across, in order:
+/// id `i` is a document of `INDEXES[i % n]`.
+const INDEXES: [&str; 3] = ["users", "orders", "items"];
+
 fn sink_name() -> SinkName {
     SinkName::try_new("primary").unwrap()
 }
@@ -286,6 +290,8 @@ struct Behaviour {
     delay: Option<Duration>,
     /// Every key page takes this long to read.
     keys_delay: Option<Duration>,
+    /// Every upsert carries this many bytes of padding.
+    padding: usize,
 }
 
 /// Builds documents from the [`Database`], reading each version when the
@@ -302,8 +308,9 @@ struct Builder {
     most: AtomicUsize,
     /// Builds dropped before they finished.
     cancelled: Arc<AtomicUsize>,
-    /// Over two indexes: odd ids are `orders`' documents, even ids `users'`.
-    two: bool,
+    /// How many indexes its documents fall in: id `i` is a document of
+    /// index `i % indexes` of [`INDEXES`].
+    indexes: usize,
 }
 
 /// Counts a build dropped before it finished.
@@ -328,31 +335,34 @@ impl Builder {
             now: AtomicUsize::new(0),
             most: AtomicUsize::new(0),
             cancelled: Arc::default(),
-            two: false,
+            indexes: 1,
         })
     }
 
     /// The builder over two indexes, `users` (even ids) and `orders` (odd).
     fn two(db: &Arc<Database>, behaviour: Behaviour) -> Arc<Self> {
+        Self::over(db, behaviour, 2)
+    }
+
+    /// The builder over the first `indexes` of [`INDEXES`]: id `i` is a
+    /// document of index `i % indexes`.
+    fn over(db: &Arc<Database>, behaviour: Behaviour, indexes: usize) -> Arc<Self> {
         let mut builder = Arc::into_inner(Self::new(db, behaviour)).unwrap();
-        builder.two = true;
+        builder.indexes = indexes.clamp(1, INDEXES.len());
         Arc::new(builder)
     }
 
     fn index_of(&self, id: i64) -> IndexName {
-        if self.two && id % 2 == 1 {
-            orders()
-        } else {
-            users()
-        }
+        let at = id.rem_euclid(self.indexes as i64) as usize;
+        IndexName::try_new(INDEXES.get(at).copied().unwrap_or("users")).unwrap()
     }
 
     fn indexes(&self) -> Vec<IndexName> {
-        if self.two {
-            vec![orders(), users()]
-        } else {
-            vec![users()]
-        }
+        INDEXES
+            .iter()
+            .take(self.indexes)
+            .map(|name| IndexName::try_new(*name).unwrap())
+            .collect()
     }
 
     fn release(&self, id: i64) {
@@ -434,13 +444,20 @@ impl Builder {
                 continue;
             }
             documents.push(match version {
-                Some(version) => Document::Upsert {
-                    id: document_id,
-                    body: GenericValue::Map(BTreeMap::from([(
-                        "v".to_owned(),
-                        GenericValue::BigInt(version as i64),
-                    )])),
-                },
+                Some(version) => {
+                    let mut body =
+                        BTreeMap::from([("v".to_owned(), GenericValue::BigInt(version as i64))]);
+                    if self.behaviour.padding > 0 {
+                        body.insert(
+                            "pad".to_owned(),
+                            GenericValue::String("x".repeat(self.behaviour.padding)),
+                        );
+                    }
+                    Document::Upsert {
+                        id: document_id,
+                        body: GenericValue::Map(body),
+                    }
+                }
                 None => Document::Delete { id: document_id },
             });
         }
@@ -547,6 +564,10 @@ struct Recorder {
     /// A budget and the most it may hold, checked at every write.
     watch: Mutex<Option<(Arc<Budget>, usize)>>,
     overdrawn: Mutex<Vec<usize>>,
+    /// The most one index may hold, checked at every write for each of
+    /// [`INDEXES`].
+    watch_index: Mutex<Option<usize>>,
+    overdrawn_index: Mutex<Vec<(String, usize)>>,
     /// The next write fails, once.
     fail_next: AtomicBool,
     /// How long each write takes, when set.
@@ -621,6 +642,17 @@ impl Sink for Recorder {
             let held = budget.held().total;
             if held > *most {
                 self.overdrawn.lock().unwrap().push(held);
+            }
+            if let Some(most) = *self.watch_index.lock().unwrap() {
+                for name in INDEXES {
+                    let held = budget.held_by(&IndexName::try_new(name).unwrap());
+                    if held > most {
+                        self.overdrawn_index
+                            .lock()
+                            .unwrap()
+                            .push((name.to_owned(), held));
+                    }
+                }
             }
         }
         let mut documents = Vec::with_capacity(envelopes.len());
@@ -738,11 +770,14 @@ struct Deployment {
     ingest: IngestEngine,
     sink: Option<SinkEngine>,
     budget: Option<Arc<Budget>>,
+    /// How many indexes it runs: a budget is shared over them.
+    indexes: usize,
 }
 
 impl Deployment {
     fn new(feed: Feed, builder: Arc<Builder>, recorder: Arc<Recorder>) -> Self {
         let indexes = builder.indexes();
+        let count = indexes.len();
         let stream = Arc::new(ChannelStream::over(64, indexes.clone(), [sink_name()]));
         let feed = Arc::new(feed);
         let published: Published = Arc::default();
@@ -775,6 +810,7 @@ impl Deployment {
             ingest,
             sink: Some(sink),
             budget: None,
+            indexes: count,
         }
         .counting()
     }
@@ -788,10 +824,11 @@ impl Deployment {
         self
     }
 
-    /// Hold built documents within `bytes`, and check at every write that the
-    /// budget holds at most `most`.
+    /// Hold built documents within `bytes`, shared over its indexes as the
+    /// daemon shares it (half each, with two or more), and check at every
+    /// write that the budget holds at most `most`.
     fn with_budget(mut self, bytes: usize, most: usize) -> Self {
-        let budget = Arc::new(Budget::new(bytes));
+        let budget = Arc::new(Budget::new(bytes).with_index_share(self.indexes, 0.5));
         self.ingest = self.ingest.with_budget(Arc::clone(&budget));
         *self.recorder.watch.lock().unwrap() = Some((Arc::clone(&budget), most));
         self.budget = Some(budget);
@@ -816,6 +853,11 @@ impl Deployment {
         assert!(
             overdrawn.is_empty(),
             "the budget held more than allowed at some write: {overdrawn:?}"
+        );
+        let overdrawn = self.recorder.overdrawn_index.lock().unwrap().clone();
+        assert!(
+            overdrawn.is_empty(),
+            "an index held more than allowed at some write: {overdrawn:?}"
         );
     }
 
@@ -2127,4 +2169,243 @@ async fn every_budget_wait_ends_on_a_release_not_the_tick() {
             "{kind} waited {longest:?}, near the tick: {by_wake:?}"
         );
     }
+}
+
+/// With three indexes, one bursting holds at most its share of the budget
+/// while the sink is stalled; the other two keep building beside it.
+#[tokio::test(start_paused = true)]
+async fn one_bursting_index_of_three_holds_its_share_and_the_others_build() {
+    // `users` (ids divisible by 3) rewrites three documents again and again,
+    // then `orders` (1, 4) and `items` (2, 5) change.
+    let mut log: Vec<Change> = (0..30).map(|n| Change::upsert(3 * (n % 3))).collect();
+    log.extend([1, 2, 4, 5].map(Change::upsert));
+    let db = Database::new(0, log);
+    // Documents of about 8 KiB: the 96 KiB budget is a dozen of them, so
+    // `users` would fill it alone.
+    let builder = Builder::over(
+        &db,
+        Behaviour {
+            padding: 8 * KIB,
+            ..Behaviour::default()
+        },
+        3,
+    );
+    let recorder = Recorder::seeded(true);
+    recorder.stall();
+    let mut deployment =
+        Deployment::new(Feed::new(&db), Arc::clone(&builder), Arc::clone(&recorder))
+            .ingest(|ingest| ingest.with_batch(batch(4)).with_builds(4))
+            .with_budget(96 * KIB, usize::MAX);
+    let budget = deployment.budget.clone().unwrap();
+    assert_eq!(budget.index_share(), Some(48 * KIB));
+    let resumer = {
+        let builder = Arc::clone(&builder);
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let built: HashSet<i64> = builder.grants().into_iter().flatten().collect();
+            let users_held = budget.held_by(&users());
+            recorder.resume();
+            (built, users_held)
+        })
+    };
+    deployment.run_to_end(0).await;
+    let (built, users_held) = resumer.await.unwrap();
+    for id in [1, 2, 4, 5] {
+        assert!(
+            built.contains(&id),
+            "{id} was built while users held the stalled sink: {built:?}"
+        );
+    }
+    assert!(
+        users_held <= 48 * KIB + 3 * 16 * KIB,
+        "users holds its share and at most its one batch past it: {users_held}"
+    );
+    assert_eq!(deployment.recorder.state(), db.expected());
+}
+
+/// An index the budget leaves waiting gets nothing from the build that
+/// takes the others, not even its step: a sink whose lanes all landed counts
+/// none of its changes committed until its documents land.
+#[tokio::test(start_paused = true)]
+async fn a_deferred_index_is_never_counted_committed_before_its_documents_land() {
+    let audit = SinkName::try_new("audit").unwrap();
+    let sinks = [sink_name(), audit.clone()];
+    let indexes = [users(), orders()];
+    let stream = Arc::new(ChannelStream::over(64, indexes.clone(), sinks.clone()));
+    // `users` 0, then `users` 2, then `orders` 1, each its own live run.
+    let db = Database::new(0, [0, 2, 1].map(Change::upsert).to_vec());
+    let feed = Arc::new(Feed::new(&db).with_delay(Duration::from_millis(100)));
+    let budget = Arc::new(Budget::new(16 * KIB).with_index_share(2, 0.5));
+    let progress = Arc::new(crate::Progress::of(indexes.clone(), sinks.clone()));
+    let builder = Builder::two(&db, Behaviour::default());
+    let ingest = IngestEngine::new(
+        Arc::clone(&feed) as Arc<dyn ChangeCapture>,
+        Arc::clone(&builder) as Arc<dyn DocumentBuilder>,
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        sinks.to_vec(),
+        Arc::clone(&progress),
+    )
+    .with_batch(batch(4))
+    .with_builds(4)
+    .with_budget(Arc::clone(&budget));
+    let healthy = Recorder::seeded(true);
+    let stalled = Recorder::seeded(true);
+    stalled.stall();
+    let mut tasks = Vec::new();
+    for (name, recorder) in [(sink_name(), &healthy), (audit, &stalled)] {
+        let mappings = indexes
+            .iter()
+            .map(|index| IndexMapping {
+                index: index.clone(),
+                ..mapping()
+            })
+            .collect();
+        let engine = SinkEngine::new(
+            name,
+            Arc::clone(recorder) as Arc<dyn Sink>,
+            Arc::clone(&stream) as Arc<dyn Stream>,
+            mappings,
+            Arc::clone(&progress),
+        );
+        engine.stage(Continuity::Resumed).await.unwrap();
+        tasks.push(tokio::spawn(async move {
+            let (_control, mut rx) = tokio::sync::mpsc::channel::<SinkControl>(1);
+            engine.run(&mut rx).await
+        }));
+    }
+    let run = tokio::spawn(async move { ingest.run().await });
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(progress.changes_read(), 3);
+    assert_eq!(
+        progress.waiting_by_index(),
+        vec![(users(), 1)],
+        "users 2 waits: the stalled sink holds users' share"
+    );
+    let written: HashSet<i64> = healthy.written_ids().into_iter().flatten().collect();
+    assert_eq!(
+        written,
+        HashSet::from([0, 1]),
+        "orders 1 was built beside it"
+    );
+    assert_eq!(
+        progress.committed(&sink_name()),
+        1,
+        "the healthy sink landed every item routed to it, and still counts only users 0: \
+         users 2 is not built"
+    );
+
+    stalled.resume();
+    run.await.unwrap().unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !stream.is_idle() {
+        assert!(tokio::time::Instant::now() < deadline, "the lanes drain");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert_eq!(progress.committed(&sink_name()), 3);
+    assert_eq!(progress.committed(&SinkName::try_new("audit").unwrap()), 3);
+    crate::tests::assert_released(&budget).await;
+    for task in tasks {
+        task.abort();
+    }
+}
+
+/// An index may wait while others build only up to two runs of documents:
+/// past that the live batch waits whole, and a full run stops the reading,
+/// as with one index, so the pending set stays bounded.
+#[tokio::test(start_paused = true)]
+async fn an_index_past_its_waiting_bound_holds_the_live_batch_whole() {
+    // `users` 0, 2, 4, 6 (distinct documents), then `orders` 1.
+    let db = Database::new(0, [0, 2, 4, 6, 1].map(Change::upsert).to_vec());
+    let builder = Builder::two(&db, Behaviour::default());
+    let recorder = Recorder::seeded(true);
+    recorder.stall();
+    let mut deployment = Deployment::new(
+        Feed::new(&db).with_delay(Duration::from_millis(20)),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+    )
+    .ingest(|ingest| ingest.with_batch(batch(1)).with_builds(4))
+    .with_budget(16 * KIB, usize::MAX);
+    let progress = deployment.ingest.progress();
+    let resumer = {
+        let builder = Arc::clone(&builder);
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let built: HashSet<i64> = builder.grants().into_iter().flatten().collect();
+            let read = progress.changes_read();
+            recorder.resume();
+            (built, read)
+        })
+    };
+    deployment.run_to_end(0).await;
+    let (built, read) = resumer.await.unwrap();
+    assert!(
+        !built.contains(&1),
+        "users has two documents waiting (one run's worth twice over), so the reading \
+         stopped before orders 1: {built:?}"
+    );
+    assert!(read < 5, "{read} changes read");
+    assert_eq!(deployment.recorder.state(), db.expected());
+}
+
+/// The tiny-budget schedule over three indexes, four changes in five on
+/// `users`: a backfill of all three, live changes, failures and restarts.
+/// Each index holds at most its share plus a batch per build and one more,
+/// the whole at most the limit plus a batch per build and per index, nothing
+/// deadlocks, and every byte comes back.
+#[test]
+fn random_schedules_over_three_indexes_with_one_bursting_stay_within_their_shares() {
+    for seed in seeds(120) {
+        for builds in [1, 4] {
+            crate::tests::paused_runtime().block_on(bursting_schedule(seed, builds));
+        }
+    }
+}
+
+async fn bursting_schedule(seed: u64, builds: usize) {
+    let mut random = Rng::new(seed ^ 0x00b0_0057);
+    let rows = 3 + random.below(40) as i64;
+    let log: Vec<Change> = (0..1 + random.below(80))
+        .map(|_| {
+            let id = random.below(rows as u64) as i64;
+            let id = if random.below(5) == 0 {
+                id
+            } else {
+                id - id.rem_euclid(3)
+            };
+            Change {
+                id,
+                delete: random.below(6) == 0,
+            }
+        })
+        .collect();
+    let max_changes = 1 + random.below(8) as usize;
+    let db = Database::new(rows, log);
+    let builder = Builder::over(
+        &db,
+        Behaviour {
+            random: Some(Mutex::new(Rng::new(seed.wrapping_mul(31)))),
+            failures_left: AtomicUsize::new(random.below(3) as usize),
+            ..Behaviour::default()
+        },
+        3,
+    );
+    let limit = 8 * KIB;
+    let batch_bytes = max_changes * 16 * KIB;
+    let mut deployment = Deployment::new(
+        Feed::new(&db).with_gaps(seed.wrapping_mul(17)),
+        builder,
+        Recorder::seeded(false),
+    )
+    .ingest(|ingest| ingest.with_batch(batch(max_changes)).with_builds(builds))
+    .with_budget(limit, limit + (builds + 3) * batch_bytes);
+    *deployment.recorder.watch_index.lock().unwrap() = Some(limit / 2 + (builds + 1) * batch_bytes);
+    deployment.run_to_end(8).await;
+    assert_eq!(
+        deployment.recorder.state(),
+        db.expected(),
+        "seed {seed}, builds {builds}"
+    );
 }

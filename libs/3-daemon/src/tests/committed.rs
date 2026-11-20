@@ -36,7 +36,7 @@ fn audit() -> SinkName {
 /// A change to row `id` of `table`: `users` touches the `users` document,
 /// `orders` the `orders` one, `both` both, `none` neither, `bad` a `users`
 /// document that fails to build.
-fn change(table: &str, id: i64) -> ChangeEvent {
+pub(super) fn change(table: &str, id: i64) -> ChangeEvent {
     ChangeEvent::Upsert {
         table: TableName::try_new(table).unwrap(),
         key: RowKey(vec![(
@@ -50,7 +50,7 @@ fn change(table: &str, id: i64) -> ChangeEvent {
 
 /// The two indexes, `users` and `orders`, one change per batch, quick
 /// restarts.
-fn two_indexes() -> config::Config {
+pub(super) fn two_indexes() -> config::Config {
     let mut config = fast_restarts();
     let users_entry = config.indexes.get(&users()).unwrap().clone();
     let mut orders_entry = users_entry;
@@ -272,11 +272,11 @@ impl ChangeCapture for Replaying {
 }
 
 /// Scripted changes from position 0, then open until `end` fires.
-fn scripted(changes: Vec<ChangeEvent>) -> (super::ScriptedSource, oneshot::Sender<()>) {
+pub(super) fn scripted(changes: Vec<ChangeEvent>) -> (super::ScriptedSource, oneshot::Sender<()>) {
     super::ScriptedSource::new(changes).held_open()
 }
 
-fn backends_over(
+pub(super) fn backends_over(
     capture: Arc<dyn ChangeCapture>,
     sinks: Vec<(SinkName, Arc<dyn Sink>)>,
 ) -> Arc<MockBackends> {

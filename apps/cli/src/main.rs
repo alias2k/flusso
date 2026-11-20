@@ -73,7 +73,7 @@ enum Command {
     /// Build a config and its schemas into a single portable artifact.
     Build(BuildArgs),
     /// Stream Postgres changes into the configured sink(s).
-    Run(RunArgs),
+    Run(Box<RunArgs>),
     /// Validate the config and schemas without running the pipeline.
     Check(CheckArgs),
     /// Open the visual schema designer (a local web UI).
@@ -106,7 +106,7 @@ fn main() -> anyhow::Result<()> {
 async fn dispatch(command: Command) -> anyhow::Result<()> {
     match command {
         Command::Build(args) => commands::build::execute(args),
-        Command::Run(args) => commands::run::execute(args).await,
+        Command::Run(args) => commands::run::execute(*args).await,
         Command::Check(args) => commands::check::execute(args).await,
         #[cfg(feature = "design")]
         Command::Design(args) => commands::design::execute(args).await,

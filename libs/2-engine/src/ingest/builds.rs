@@ -72,6 +72,9 @@ pub(super) enum Job {
         position: Position,
         changes: usize,
         step: Step,
+        /// The indexes with documents waiting that the budget left out:
+        /// their lanes get nothing from this build, not even its step.
+        deferred: Vec<IndexName>,
     },
     /// A snapshot batch, to each lane the slice it asked for, each index's
     /// slice carrying how far its walk got (the batch's greatest key of it).
@@ -90,20 +93,21 @@ pub(super) struct Built {
 }
 
 /// What [`Builds::start`] hands a build: the ids, given back when it ends,
-/// and the heap its documents hold when the budget counts them.
+/// and the heap its documents hold per index when the budget counts them.
 pub(super) struct Output {
     ids: Vec<DocumentId>,
     built: Built,
-    bytes: usize,
+    bytes: BTreeMap<IndexName, usize>,
 }
 
 struct Slot {
     job: Job,
     built: Option<Built>,
-    /// The budget's bytes for this build: reserved at grant, settled when it
-    /// lands.
-    reservation: Option<Reservation>,
-    charge: Option<Arc<Charge>>,
+    /// The budget's bytes for this build, one part per index: reserved at
+    /// grant, settled when it lands.
+    reservations: Vec<Reservation>,
+    /// Each index's settled part, carried by that index's lane items.
+    charges: BTreeMap<IndexName, Arc<Charge>>,
 }
 
 impl Slot {
@@ -112,33 +116,52 @@ impl Slot {
     }
 }
 
-/// Bytes per document of each kind, a running average of what landed.
-struct PerDocument {
-    live: usize,
-    backfill: usize,
-}
+/// Bytes per document of each index and kind, a running average of what
+/// landed; [`FIRST_ESTIMATE`] before any did.
+#[derive(Default)]
+struct PerDocument(BTreeMap<(IndexName, Work), usize>);
 
 impl PerDocument {
-    fn of(&self, work: Work) -> usize {
-        match work {
-            Work::Live => self.live,
-            Work::Backfill => self.backfill,
-        }
+    fn of(&self, index: &IndexName, work: Work) -> usize {
+        self.0
+            .get(&(index.clone(), work))
+            .copied()
+            .unwrap_or(FIRST_ESTIMATE)
     }
 
-    fn of_mut(&mut self, work: Work) -> &mut usize {
-        match work {
-            Work::Live => &mut self.live,
-            Work::Backfill => &mut self.backfill,
+    fn landed(&mut self, index: &IndexName, work: Work, bytes: usize, documents: usize) {
+        if documents == 0 {
+            return;
         }
+        let average = self
+            .0
+            .entry((index.clone(), work))
+            .or_insert(FIRST_ESTIMATE);
+        *average = (*average * 7 + bytes / documents) / 8;
     }
+}
+
+/// Each index's settled charge for a batch's documents.
+pub(super) type Charges = BTreeMap<IndexName, Arc<Charge>>;
+
+/// The live batch offered to [`Builds::choose`].
+pub(super) struct LiveCandidate<L> {
+    /// Handed back in [`Grant::Live`].
+    pub(super) live: L,
+    /// The documents waiting, per index, oldest waiting first.
+    pub(super) documents: Vec<(IndexName, usize)>,
+    /// The live run is full: a build may start beside a running live one.
+    pub(super) full: bool,
+    /// Changes were read since the last grant: a build that takes nothing
+    /// still settles them.
+    pub(super) changes: bool,
 }
 
 /// Which kind of batch a free slot goes to; a live grant carries back what
-/// the live candidate was offered with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// the live candidate was offered with and the indexes it may take.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Grant<L> {
-    Live(L),
+    Live(L, Vec<IndexName>),
     Backfill,
 }
 
@@ -163,11 +186,21 @@ pub(super) struct Builds {
     halted: bool,
     spare: Vec<Vec<DocumentId>>,
     budget: Option<Arc<Budget>>,
-    /// Bytes per document, live and backfill: a running average of what
-    /// landed, which a grant reserves per id.
+    /// Bytes per document, per index, live and backfill: a running average
+    /// of what landed, which a grant reserves per id.
     per_document: PerDocument,
-    /// The last choice found a batch the budget alone refused.
+    /// What the last choice reserved for the build it granted.
+    reserved: Vec<Reservation>,
+    /// The most documents an index may leave waiting while a live build
+    /// takes the others (ADR 0012 stage 8a slice 4); `None` lets none wait:
+    /// a live batch then goes whole or not at all, as with one index.
+    defer_below: Option<usize>,
+    /// The last choice found a batch the budget alone refused (for live,
+    /// some index it left waiting).
     refused: Option<Work>,
+    /// The release generation of that refusal: a release past it may let
+    /// the batch go.
+    refused_generation: u64,
     /// The kinds counted as waiting for the budget since their last grant.
     waiting: (bool, bool),
     /// When each kind (live, backfill) was first held back by the budget
@@ -217,11 +250,11 @@ impl Builds {
             halted: false,
             spare: Vec::new(),
             budget,
-            per_document: PerDocument {
-                live: FIRST_ESTIMATE,
-                backfill: FIRST_ESTIMATE,
-            },
+            per_document: PerDocument::default(),
+            reserved: Vec::new(),
+            defer_below: None,
             refused: None,
+            refused_generation: 0,
             waiting: (false, false),
             refused_at: (None, None),
             wake: Wake::Change,
@@ -229,6 +262,14 @@ impl Builds {
             spawned: Vec::new(),
             progress: None,
         }
+    }
+
+    /// Let a live build take the indexes the budget has room for while each
+    /// index left out has fewer than `below` documents waiting; past that,
+    /// or without this, the batch waits whole.
+    pub(super) fn with_deferral(mut self, below: Option<usize>) -> Self {
+        self.defer_below = below;
+        self
     }
 
     /// Tell `progress` when a live build lands.
@@ -254,22 +295,49 @@ impl Builds {
         self.refused
     }
 
-    fn estimate(&self, work: Work, ids: usize) -> usize {
-        self.per_document.of(work).saturating_mul(ids)
+    /// The release generation the last refusal was decided at: what
+    /// [`Budget::released_since`] waits past.
+    pub(super) fn refused_since(&self) -> u64 {
+        self.refused_generation
     }
 
-    /// Whether the budget has room for a batch of `ids` documents of `work`;
-    /// when it hasn't, remember it and ask for a wake-up on the next release.
-    fn affordable(&mut self, work: Work, ids: usize) -> bool {
+    /// Each index's estimate for `documents` documents of `work`.
+    fn parts(&self, work: Work, documents: &[(IndexName, usize)]) -> Vec<(IndexName, usize)> {
+        documents
+            .iter()
+            .map(|(index, count)| {
+                (
+                    index.clone(),
+                    self.per_document.of(index, work).saturating_mul(*count),
+                )
+            })
+            .collect()
+    }
+
+    /// Which of `documents` (per index, oldest waiting first) the budget has
+    /// room for in a batch of `work` (all or none for backfill); `None`
+    /// when it grants nothing. A refusal, even of part of a live batch, is
+    /// remembered with its generation, so the next release wakes the engine.
+    fn affordable(
+        &mut self,
+        work: Work,
+        documents: &[(IndexName, usize)],
+    ) -> Option<Vec<IndexName>> {
         let Some(budget) = &self.budget else {
-            return true;
+            return Some(documents.iter().map(|(index, _)| index.clone()).collect());
         };
-        // The wish comes first: a release landing between it and the check
-        // still wakes the engine (kept as a permit, costing at most one
-        // spurious wake), where a check first could lose it for good.
-        budget.want_release();
-        if budget.fits(work, self.estimate(work, ids)) {
-            return true;
+        let admission = budget.admit(work, &self.parts(work, documents));
+        if admission.refused {
+            self.refuse(work, admission.generation);
+        }
+        admission.grants().then_some(admission.admitted)
+    }
+
+    fn refuse(&mut self, work: Work, generation: u64) {
+        // The earliest refusal of a choice decides the wait: any release
+        // after it may let a batch go.
+        if self.refused.is_none() {
+            self.refused_generation = generation;
         }
         self.refused.get_or_insert(work);
         let refused_at = match work {
@@ -281,10 +349,30 @@ impl Builds {
             Work::Live => &mut self.waiting.0,
             Work::Backfill => &mut self.waiting.1,
         };
-        if !std::mem::replace(waiting, true) {
+        if !std::mem::replace(waiting, true)
+            && let Some(budget) = &self.budget
+        {
             budget.note_refused(work);
         }
-        false
+    }
+
+    /// Reserve what the gate just granted: `documents` of `work`, per index.
+    /// Decided again under the budget's lock, so a reserver elsewhere taking
+    /// the room meanwhile only makes this a refusal. `false` when refused.
+    fn reserve(&mut self, work: Work, documents: &[(IndexName, usize)]) -> bool {
+        let Some(budget) = self.budget.clone() else {
+            return true;
+        };
+        match budget.reserve(work, &self.parts(work, documents)) {
+            Ok(reservations) => {
+                self.reserved = reservations;
+                true
+            }
+            Err(generation) => {
+                self.refuse(work, generation);
+                false
+            }
+        }
     }
 
     /// Builds running on their own tasks.
@@ -327,50 +415,96 @@ impl Builds {
     }
 
     /// Which waiting batch the next free slot goes to, if any. `live` is the
-    /// live candidate (handed back in [`Grant::Live`]), how many documents it
-    /// would take and whether its run is full; the caller offers it only when
-    /// no running build holds one of them. `backfill` is the snapshot batch's
-    /// ids.
+    /// live candidate (handed back in [`Grant::Live`]), its waiting documents
+    /// per index (oldest waiting first) and whether its run is full; the
+    /// caller offers it only when no running build holds one of them. A live
+    /// grant names the indexes the budget has room for; the rest keep
+    /// waiting. `backfill` is the snapshot batch's ids.
     pub(super) fn choose<L>(
         &mut self,
-        live: Option<(L, usize, bool)>,
+        live: Option<LiveCandidate<L>>,
         backfill: Option<&[DocumentId]>,
     ) -> Option<Grant<L>> {
         self.refused = None;
         if !self.has_room() {
             return None;
         }
-        let live = live.filter(|(_, documents, full)| {
-            (self.live_running.is_empty() || *full) && self.affordable(Work::Live, *documents)
+        let live = live
+            .filter(|candidate| self.live_running.is_empty() || candidate.full)
+            .and_then(|candidate| {
+                let taken = self.live_part(&candidate.documents, candidate.changes)?;
+                Some((candidate.live, taken))
+            });
+        let backfill = backfill.and_then(|ids| {
+            let documents = per_index(ids);
+            (!self.holds_any(ids) && self.affordable(Work::Backfill, &documents).is_some())
+                .then_some(documents)
         });
-        let backfill = backfill
-            .is_some_and(|ids| !self.holds_any(ids) && self.affordable(Work::Backfill, ids.len()));
-        let (work, permit) = self.gate.choose(live.is_some(), backfill)?;
-        self.granted = Some(permit);
-        match (work, live) {
-            (Work::Live, Some((live, _, _))) => Some(Grant::Live(live)),
-            (Work::Backfill, _) => Some(Grant::Backfill),
-            (Work::Live, None) => {
-                self.granted = None;
-                None
-            }
+        let (work, permit) = self.gate.choose(live.is_some(), backfill.is_some())?;
+        let granted = match (work, live, backfill) {
+            (Work::Live, Some((live, taken)), _) => self
+                .reserve(Work::Live, &taken)
+                .then(|| Grant::Live(live, taken.into_iter().map(|(index, _)| index).collect())),
+            (Work::Backfill, _, Some(documents)) => self
+                .reserve(Work::Backfill, &documents)
+                .then_some(Grant::Backfill),
+            _ => None,
+        };
+        if granted.is_some() {
+            self.granted = Some(permit);
         }
+        granted
     }
 
-    /// Whether the live batch could be granted ignoring the rule that a
-    /// second live build waits for a full batch: for the last batch of a run.
-    pub(super) fn can_take_last(&mut self, documents: usize) -> bool {
+    /// Which of the live batch's `documents` (per index, oldest waiting
+    /// first) could be granted ignoring the rule that a second live build
+    /// waits for a full batch: for the last batch of a run. `None` when none.
+    pub(super) fn can_take_last(
+        &mut self,
+        documents: &[(IndexName, usize)],
+    ) -> Option<Vec<IndexName>> {
         self.refused = None;
-        if !(self.has_room() && self.affordable(Work::Live, documents)) {
-            return false;
+        if !self.has_room() {
+            return None;
         }
-        match self.gate.choose(true, false) {
-            Some((_, permit)) => {
-                self.granted = Some(permit);
-                true
-            }
-            None => false,
+        let taken = self.live_part(documents, false)?;
+        let (_, permit) = self.gate.choose(true, false)?;
+        if !self.reserve(Work::Live, &taken) {
+            return None;
         }
+        self.granted = Some(permit);
+        Some(taken.into_iter().map(|(index, _)| index).collect())
+    }
+
+    /// The part of a live batch's `documents` (per index, oldest waiting
+    /// first) a build may take now: the indexes the budget has room for,
+    /// when every index left out may wait (see
+    /// [`with_deferral`](Self::with_deferral)) and the build takes
+    /// something, or settles `changes` read since the last grant. `None`
+    /// when the batch waits.
+    fn live_part(
+        &mut self,
+        documents: &[(IndexName, usize)],
+        changes: bool,
+    ) -> Option<Vec<(IndexName, usize)>> {
+        let admitted = self.affordable(Work::Live, documents);
+        let admitted = match (admitted, self.defer_below) {
+            (Some(admitted), _) => admitted,
+            (None, Some(_)) if changes => Vec::new(),
+            (None, _) => return None,
+        };
+        let (taken, left): (Vec<_>, Vec<_>) = documents
+            .iter()
+            .cloned()
+            .partition(|(index, _)| admitted.contains(index));
+        let may_wait = left.is_empty()
+            || self
+                .defer_below
+                .is_some_and(|below| left.iter().all(|(_, waiting)| *waiting < below));
+        if !may_wait || (taken.is_empty() && !left.is_empty() && !changes) {
+            return None;
+        }
+        Some(taken)
     }
 
     /// An empty id list to fill, reusing one a finished build gave back.
@@ -385,8 +519,8 @@ impl Builds {
         self.slots.push_back(Slot {
             job: Job::Complete(Box::new(snapshot)),
             built: None,
-            reservation: None,
-            charge: None,
+            reservations: Vec::new(),
+            charges: BTreeMap::new(),
         });
     }
 
@@ -417,16 +551,13 @@ impl Builds {
             self.observer
                 .on_budget_wait(work, self.wake, since.elapsed());
         }
-        let reservation = self
-            .budget
-            .as_ref()
-            .and_then(|budget| budget.try_reserve(work, self.estimate(work, ids.len())));
+        let reservations = std::mem::take(&mut self.reserved);
         let measure = self.budget.is_some();
         self.slots.push_back(Slot {
             job,
             built: None,
-            reservation,
-            charge: None,
+            reservations,
+            charges: BTreeMap::new(),
         });
         // With one build at a time nothing is ever compared, so nothing is
         // hashed.
@@ -437,10 +568,13 @@ impl Builds {
             let documents = documents.build_many(&ids).await.map_err(EngineError::from);
             let took = started.elapsed();
             // Measured here, on the build's own task when it was spawned.
-            let bytes = match &documents {
-                Ok(documents) if measure => documents.iter().map(document_bytes).sum(),
-                _ => 0,
-            };
+            let mut bytes: BTreeMap<IndexName, usize> = BTreeMap::new();
+            if let (Ok(documents), true) = (&documents, measure) {
+                for document in documents {
+                    *bytes.entry(document.id().index.clone()).or_insert(0) +=
+                        document_bytes(document);
+                }
+            }
             Output {
                 ids,
                 built: Built { documents, took },
@@ -511,13 +645,20 @@ impl Builds {
                 built,
                 bytes,
             }) => {
-                if let Some(reservation) = slot.reservation.take() {
-                    let work = reservation.work();
-                    if !ids.is_empty() {
-                        let average = self.per_document.of_mut(work);
-                        *average = (*average * 7 + bytes / ids.len()) / 8;
-                    }
-                    slot.charge = Some(Arc::new(reservation.settle(bytes)));
+                let documents = per_index(&ids);
+                for reservation in std::mem::take(&mut slot.reservations) {
+                    let Some(index) = reservation.index().cloned() else {
+                        continue;
+                    };
+                    let landed = bytes.get(&index).copied().unwrap_or(0);
+                    let count = documents
+                        .iter()
+                        .find(|(of, _)| *of == index)
+                        .map_or(0, |(_, count)| *count);
+                    self.per_document
+                        .landed(&index, reservation.work(), landed, count);
+                    slot.charges
+                        .insert(index, Arc::new(reservation.settle(landed)));
                 }
                 ids.clear();
                 self.spare.push(ids);
@@ -537,14 +678,14 @@ impl Builds {
     }
 
     /// The front slot, once it is ready to publish, with the budget's charge
-    /// for its documents.
-    pub(super) fn pop_ready(&mut self) -> Option<(Job, Option<Built>, Option<Arc<Charge>>)> {
+    /// for each index's documents.
+    pub(super) fn pop_ready(&mut self) -> Option<(Job, Option<Built>, Charges)> {
         if !self.slots.front().is_some_and(Slot::is_ready) {
             return None;
         }
         let slot = self.slots.pop_front()?;
         self.front += 1;
-        Some((slot.job, slot.built, slot.charge))
+        Some((slot.job, slot.built, slot.charges))
     }
 
     /// Wait for every running build and drop what it built: the run is
@@ -556,6 +697,18 @@ impl Builds {
         self.holding.clear();
         self.slots.clear();
     }
+}
+
+/// How many of `ids` each index has, in order of first appearance.
+fn per_index(ids: &[DocumentId]) -> Vec<(IndexName, usize)> {
+    let mut counts: Vec<(IndexName, usize)> = Vec::new();
+    for id in ids {
+        match counts.iter_mut().find(|(index, _)| *index == id.index) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((id.index.clone(), 1)),
+        }
+    }
+    counts
 }
 
 /// The hash a document is compared by: its index, then its key.
@@ -604,21 +757,32 @@ mod tests {
     /// isn't left to the confirm tick's backstop.
     #[tokio::test(start_paused = true)]
     async fn a_release_right_after_the_check_wakes_the_refused_engine() {
+        let users = IndexName::try_new("users").unwrap();
         let budget = Arc::new(Budget::new(64 * 1024));
-        let charge = budget
-            .try_reserve(Work::Live, 60 * 1024)
+        let charge: Vec<Charge> = budget
+            .reserve(Work::Live, &[(users.clone(), 60 * 1024)])
             .unwrap()
-            .settle(60 * 1024);
+            .into_iter()
+            .map(|part| part.settle(60 * 1024))
+            .collect();
         let mut builds = Builds::new(4, Some(Arc::clone(&budget)));
         budget.after_check(move || drop(charge));
 
+        let one = [(users.clone(), 1)];
         assert!(
-            !builds.affordable(Work::Live, 1),
+            builds.affordable(Work::Live, &one).is_none(),
             "60 KiB held: a 16 KiB batch doesn't fit in 64"
         );
-        tokio::time::timeout(CONFIRM_TICK - Duration::from_millis(1), budget.released())
-            .await
-            .expect("the release after the check wakes the engine before the confirm tick");
-        assert!(builds.affordable(Work::Live, 1), "and the batch is granted");
+        tokio::time::timeout(
+            CONFIRM_TICK - Duration::from_millis(1),
+            budget.released_since(builds.refused_since()),
+        )
+        .await
+        .expect("the release after the check wakes the engine before the confirm tick");
+        assert_eq!(
+            builds.affordable(Work::Live, &one),
+            Some(vec![users]),
+            "and the batch is granted"
+        );
     }
 }

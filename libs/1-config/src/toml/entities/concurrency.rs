@@ -28,7 +28,7 @@ pub const MAX_BUILT_MIB: usize = 1 << 20;
 /// it is never written into `flusso.lock`, so `run --locked` takes it from
 /// `--writes` / `FLUSSO_WRITES` and `--builds` / `FLUSSO_BUILDS` or the
 /// defaults. Every key is optional.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Concurrency {
     /// Bulk writes each sink runs at once (default 4). Two writes never hold
@@ -66,6 +66,43 @@ pub struct Concurrency {
     )]
     #[schemars(range(min = 16, max = 1_048_576))]
     pub max_built_mib: Option<NonZeroUsize>,
+    /// The share of `max_built_mib` one index may hold while two or more
+    /// indexes run (default 0.5): one index bursting fills at most this
+    /// much, and the others keep building beside it. Above 0, at most 1; with
+    /// one index it holds the whole budget whatever this says. `check`,
+    /// `build` and `run` refuse a value outside (0, 1].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "any_number"
+    )]
+    #[schemars(extend("exclusiveMinimum" = 0, "maximum" = 1))]
+    pub index_budget_share: Option<f64>,
+}
+
+/// A number as written, whole or not: the range is the daemon's to judge,
+/// with where the value came from.
+fn any_number<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<f64>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Number {
+        Whole(i64),
+        Fraction(f64),
+    }
+    Ok(
+        Option::<Number>::deserialize(deserializer)?.map(|number| match number {
+            Number::Whole(whole) => whole as f64,
+            Number::Fraction(fraction) => fraction,
+        }),
+    )
+}
+
+/// `index_budget_share` from a flag or an env var: a number. Its range is
+/// judged with the file's value, naming where it came from.
+pub fn parse_index_budget_share(text: &str) -> Result<f64, String> {
+    text.trim()
+        .parse()
+        .map_err(|_| format!("`{text}` is not a number; give a share above 0, at most 1"))
 }
 
 /// `max_built_mib`, refused outside [`MIN_BUILT_MIB`]..=[`MAX_BUILT_MIB`].
@@ -155,6 +192,9 @@ pub fn parse_writes(text: &str) -> Result<NonZeroUsize, String> {
 impl Concurrency {
     /// True when no key is set, so serialization can omit the table.
     pub fn is_empty(&self) -> bool {
-        self.writes.is_none() && self.builds.is_none() && self.max_built_mib.is_none()
+        self.writes.is_none()
+            && self.builds.is_none()
+            && self.max_built_mib.is_none()
+            && self.index_budget_share.is_none()
     }
 }

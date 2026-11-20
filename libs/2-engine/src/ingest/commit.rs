@@ -24,7 +24,7 @@ use source::document::{BuildFailure, Document, DocumentId};
 use stream::{Batch, Hold, ItemKey, LaneItem, LaneKey, Producer};
 use tokio::time::Instant;
 
-use super::builds::{Builds, Built, Grant, Job};
+use super::builds::{Builds, Built, Grant, Job, LiveCandidate};
 use super::confirm::CONFIRM_TICK;
 use super::live::LiveRun;
 use super::snapshot::Snapshot;
@@ -62,13 +62,20 @@ impl IngestEngine {
             let live = pending
                 .position
                 .filter(|_| !self.waiting_held(builds))
-                .map(|position| (position, self.progress.waiting(), pending.is_full()));
+                .map(|position| LiveCandidate {
+                    live: position,
+                    documents: self.progress.waiting_by_index(),
+                    full: pending.is_full(),
+                    changes: pending.count > 0,
+                });
             let backfill = snapshot
                 .as_ref()
                 .filter(|active| active.batch.count > 0 && (active.batch.is_full() || active.done))
                 .map(|active| active.batch.ids.as_slice());
             match builds.choose(live, backfill) {
-                Some(Grant::Live(position)) => self.start_live(pending, builds, position).await,
+                Some(Grant::Live(position, admitted)) => {
+                    self.start_live(pending, builds, position, &admitted).await;
+                }
                 Some(Grant::Backfill) => {
                     if let Some(active) = snapshot.as_mut() {
                         self.start_backfill(active, builds).await;
@@ -112,13 +119,12 @@ impl IngestEngine {
         loop {
             self.publish_ready(builds, lanes).await?;
             self.mark_run(pending);
-            let waiting = self.progress.waiting();
             let live = pending.position;
             if let Some(position) = live
                 && !self.waiting_held(builds)
-                && builds.can_take_last(waiting)
+                && let Some(admitted) = builds.can_take_last(&self.progress.waiting_by_index())
             {
-                self.start_live(pending, builds, position).await;
+                self.start_live(pending, builds, position, &admitted).await;
                 continue;
             }
             if builds.running() == 0 {
@@ -128,7 +134,9 @@ impl IngestEngine {
                     (true, Some(_), Some(budget)) => {
                         // The release wakes this; the timeout is a backstop
                         // should one ever go unheard.
-                        let _ = tokio::time::timeout(CONFIRM_TICK, budget.released()).await;
+                        let since = builds.refused_since();
+                        let _ =
+                            tokio::time::timeout(CONFIRM_TICK, budget.released_since(since)).await;
                         continue;
                     }
                     _ => return Ok(()),
@@ -142,9 +150,11 @@ impl IngestEngine {
     }
 
     /// Mark the live run's documents pending on their indexes, deduplicated
-    /// there. A document waits only between its live run's marking and that
-    /// live run's grant, which takes every one: what an earlier engine run
-    /// left behind is forgotten as an engine run starts.
+    /// there. A document waits between its live run's marking and the grant
+    /// that takes its index: the live run's own, or a later one when the
+    /// budget left the index waiting (the run's position is kept until
+    /// then). What an earlier engine run left behind is forgotten as an
+    /// engine run starts.
     fn mark_run(&self, pending: &mut LiveRun) {
         if !pending.marks.is_empty() {
             self.progress.mark(pending.marks.drain(..));
@@ -163,36 +173,62 @@ impl IngestEngine {
         self.progress.any_waiting_held(held)
     }
 
-    /// Take every index's waiting documents into one build, as one batch
-    /// over every index (the grant checked none is in a running build). A
-    /// run whose changes touched no document any lane receives is an empty
-    /// build, as on `main`: its slot settles those changes in grant order.
-    /// The batch carries `position`, its live run's newest change, as on
-    /// `main`: every document it takes was marked by that live run.
-    async fn start_live(&self, pending: &mut LiveRun, builds: &mut Builds, position: Position) {
-        let (ids, taken) = self.take_all(builds);
+    /// Take the waiting documents of every index in `admitted` (the ones the
+    /// budget has room for) into one build, as one batch over those indexes
+    /// (the grant checked none is in a running build). A run whose changes
+    /// touched no document any lane receives is an empty build, as on
+    /// `main`: its slot settles those changes in grant order. The batch
+    /// carries `position`, its live run's newest change: every document it
+    /// takes was marked at or before it. An index left waiting is
+    /// **deferred**: its lanes are not registered with this build's step, so
+    /// no change of it counts as committed before its documents land, and
+    /// the live run keeps its position so a later grant takes them.
+    async fn start_live(
+        &self,
+        pending: &mut LiveRun,
+        builds: &mut Builds,
+        position: Position,
+        admitted: &[IndexName],
+    ) {
+        let (ids, taken) = self.take_all(builds, admitted);
         let changes = pending.count;
+        let deferred: Vec<IndexName> = self
+            .progress
+            .waiting_by_index()
+            .into_iter()
+            .map(|(index, _)| index)
+            .collect();
         pending.clear();
+        if !deferred.is_empty() {
+            pending.position = Some(position);
+        }
         let step = self.progress.close_step();
         let job = Job::Live {
             taken,
             position,
             changes,
             step,
+            deferred,
         };
         builds
             .start(&self.documents, ids, job, &|built| self.halts(built))
             .await;
     }
 
-    /// Every index's waiting documents: the ids, and each index's build.
+    /// The waiting documents of each index in `admitted`: the ids, and each
+    /// index's build.
     fn take_all(
         &self,
         builds: &mut Builds,
+        admitted: &[IndexName],
     ) -> (Vec<DocumentId>, Vec<(IndexName, Token, Position)>) {
         let mut ids = builds.spare(self.batch.max_changes);
         let mut taken = Vec::new();
-        for index in self.progress.indexes() {
+        for index in self
+            .progress
+            .indexes()
+            .filter(|index| admitted.contains(index))
+        {
             if let Some(take) = self
                 .progress
                 .take(index, usize::MAX, &|key| builds.holds(index, key))
@@ -277,12 +313,15 @@ impl IngestEngine {
     /// with nothing after it published.
     async fn publish_ready(&self, builds: &mut Builds, lanes: &Lanes) -> Result<bool> {
         let mut published = false;
-        while let Some((job, built, charge)) = builds.pop_ready() {
+        while let Some((job, built, charges)) = builds.pop_ready() {
             published = true;
-            // Every lane's item of the batch shares the one charge: its bytes
-            // come back when the last copy is dropped (every lane acknowledged
-            // it, and no ledger can redeliver it).
-            let hold = charge.map_or_else(Hold::default, |charge| Hold::new(charge));
+            // Every lane's item of an index shares the index's one charge:
+            // its bytes come back when the last copy is dropped (every lane
+            // of the index acknowledged it, and no ledger can redeliver it).
+            let holds: BTreeMap<IndexName, Hold> = charges
+                .into_iter()
+                .map(|(index, charge)| (index, Hold::new(charge)))
+                .collect();
             match (job, built) {
                 (Job::Complete(mut finished), _) => {
                     let started = Instant::now();
@@ -297,6 +336,7 @@ impl IngestEngine {
                         position,
                         changes,
                         step,
+                        deferred,
                     },
                     Some(built),
                 ) => {
@@ -305,11 +345,11 @@ impl IngestEngine {
                         changes,
                         step,
                     };
-                    self.publish_live(built, &taken, granted, &hold, lanes)
+                    self.publish_live(built, &taken, &deferred, granted, &holds, lanes)
                         .await?;
                 }
                 (Job::Backfill { requested, marks }, Some(built)) => {
-                    self.publish_backfill(built, &requested, &marks, &hold, lanes)
+                    self.publish_backfill(built, &requested, &marks, &holds, lanes)
                         .await?;
                 }
                 (_, None) => {}
@@ -327,8 +367,9 @@ impl IngestEngine {
         &self,
         built: Built,
         taken: &[(IndexName, Token, Position)],
+        deferred: &[IndexName],
         granted: Granted,
-        hold: &Hold,
+        holds: &BTreeMap<IndexName, Hold>,
         lanes: &Lanes,
     ) -> Result<()> {
         let Granted {
@@ -354,13 +395,16 @@ impl IngestEngine {
         // envelopes of that index, in build order, under the index's next key
         // (the same on each of its lanes; lanes are ordered by index, so an
         // index's lanes are adjacent). Every lane, with an item or not, is
-        // registered with the batch's step: what a sink's committed count
-        // follows.
+        // registered with the batch's step (what a sink's committed count
+        // follows), except a deferred index's: its documents still wait.
         let mut by_lane: Vec<Item<'_>> = Vec::new();
         let mut skipped: Vec<&LaneKey> = Vec::new();
         let mut keyed: Option<(&IndexName, ItemKey)> = None;
         let groups = group_by_index(envelopes);
         for (lane, producer) in lanes {
+            if deferred.contains(&lane.index) {
+                continue;
+            }
             match groups.get(&lane.index) {
                 Some(envelopes) => {
                     let item_key = match keyed {
@@ -390,7 +434,7 @@ impl IngestEngine {
                             key: Some(item_key),
                             position: Some(position),
                             envelopes: Arc::clone(envelopes),
-                            hold: hold.clone(),
+                            hold: holds.get(&lane.index).cloned().unwrap_or_default(),
                             walked: None,
                             ticket: None,
                         }),
@@ -429,7 +473,7 @@ impl IngestEngine {
         built: Built,
         requested: &BTreeMap<SinkName, BTreeMap<IndexName, stream::Ticket>>,
         marks: &BTreeMap<IndexName, stream::WalkMark>,
-        hold: &Hold,
+        holds: &BTreeMap<IndexName, Hold>,
         lanes: &Lanes,
     ) -> Result<()> {
         let (envelopes, by_index) = self.envelopes(built.documents?, None)?;
@@ -457,7 +501,7 @@ impl IngestEngine {
                         key: None,
                         position: None,
                         envelopes: Arc::clone(envelopes),
-                        hold: hold.clone(),
+                        hold: holds.get(index).cloned().unwrap_or_default(),
                         walked: marks.get(index).cloned(),
                         ticket: Some(*ticket),
                     }),

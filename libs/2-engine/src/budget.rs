@@ -1,53 +1,83 @@
 //! The memory budget: how many bytes of built documents the pipeline holds
-//! before it builds more (ADR 0012 stage 5).
+//! before it builds more (ADR 0012 stage 5, shared per index since stage 8a).
 //!
 //! **What is counted.** The heap a built batch's documents own, measured by a
 //! walk over each document ([`document_bytes`]) on the build's own task, plus a
-//! floor of [`FLOOR`] per batch so an empty batch still counts. A batch is
-//! counted once, however many lanes carry it.
+//! floor of [`FLOOR`] per index of a batch so an empty part still counts. A
+//! batch is counted once, however many lanes carry it, and per index: each
+//! index's documents are charged to that index.
 //!
-//! **When.** The ingest engine *reserves* an estimate when it grants a build
-//! ([`Budget::try_reserve`]), and *settles* it to the walked size when the
-//! build lands ([`Reservation::settle`]). The settled [`Charge`] rides inside
-//! the published batch; when its last copy is dropped (every lane has
-//! acknowledged it and the channel's ledger let it go), its `Drop` gives the
-//! bytes back. A reservation dropped unsettled (a failed build, a stop) gives
-//! its estimate back the same way.
+//! **When.** The ingest engine *reserves* an estimate per index when it grants
+//! a build ([`Budget::reserve`]), and *settles* each to the walked size when
+//! the build lands ([`Reservation::settle`]). The settled [`Charge`] rides
+//! inside that index's lane items; when its last copy is dropped (every lane
+//! of the index acknowledged it and the channel's ledger let it go), its
+//! `Drop` gives the bytes back. A reservation dropped unsettled (a failed
+//! build, a stop, a dropped future) gives its estimate back the same way.
 //!
-//! **The rules.**
+//! **The rules.** A build is granted when every rule allows it, or rule 4 or 5
+//! does.
 //!
-//! - Everything held stays within the limit.
-//! - Backfill holds at most half of it, so live builds always have room.
-//! - A kind (live or backfill) holding nothing is always granted one batch,
-//!   so a batch larger than the budget still builds, alone.
+//! | Rule | Bound |
+//! | --- | --- |
+//! | 1 | everything held ≤ the limit |
+//! | 2 | one index ≤ its share of the limit, with two or more indexes ([`Budget::with_index_share`]) |
+//! | 3 | backfill over every index ≤ half the limit, so live always has room |
+//! | 4 | an index holding nothing gets one batch, whatever 1–3 say |
+//! | 5 | a kind (live or backfill) holding nothing gets one batch: live then takes every index waiting |
 //!
-//! A settled batch may come out larger than its estimate, so held bytes stay
-//! within the limit plus one batch per build in flight.
+//! With one index, rules 4 and 5 are the same and rule 2 applies to nothing:
+//! the budget answers exactly as before it was shared. A live build takes the
+//! indexes that fit and leaves the rest waiting ([`Budget::admit`]); a
+//! backfill batch fits whole or not at all. Indexes are offered oldest waiting
+//! first, and the first one refused by the limit (rule 1) stops every younger
+//! one from taking room by the limit, so a stream of small batches never
+//! starves a large one; an index refused by its own share doesn't hold the
+//! others back. A settled batch may come out larger than its estimate, so held
+//! bytes stay within the limit plus one batch per build in flight and one per
+//! index (rule 4).
+//!
+//! **Many reservers.** Every count lives under one lock, so a check and its
+//! reservation are one step and two reservers never pass the limit together.
+//! Every release bumps a generation and wakes every waiter
+//! ([`Budget::released_since`]), outside the lock: a waiter that read the
+//! generation with its refusal is woken by any release after it.
 //!
 //! ```
 //! use std::sync::Arc;
 //! use engine::{Budget, Work};
+//! use kernel::IndexName;
 //!
-//! let budget = Arc::new(Budget::new(64 * 1024));
-//! let reservation = budget.try_reserve(Work::Live, 48 * 1024).unwrap();
-//! assert!(budget.try_reserve(Work::Live, 48 * 1024).is_none());
-//! let charge = reservation.settle(40 * 1024);
-//! assert_eq!(budget.held().total, 40 * 1024);
-//! drop(charge);
+//! let users = IndexName::try_new("users").unwrap();
+//! let orders = IndexName::try_new("orders").unwrap();
+//! let budget = Arc::new(Budget::new(64 * 1024).with_index_share(2, 0.5));
+//! let held = budget
+//!     .reserve(Work::Live, &[(users.clone(), 30 * 1024)])
+//!     .unwrap();
+//! // `users` holds its share; `orders` still fits.
+//! let admitted = budget
+//!     .admit(Work::Live, &[(users.clone(), 8 * 1024), (orders.clone(), 8 * 1024)])
+//!     .admitted;
+//! assert_eq!(admitted, vec![orders]);
+//! let charges: Vec<_> = held.into_iter().map(|part| part.settle(20 * 1024)).collect();
+//! assert_eq!(budget.held_by(&users), 20 * 1024);
+//! drop(charges);
 //! assert_eq!(budget.held().total, 0);
 //! ```
 
+use std::collections::BTreeMap;
 use std::mem::size_of;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use kernel::{Envelope, GenericValue};
+use kernel::{Envelope, GenericValue, IndexName};
 use source::document::Document;
 use tokio::sync::Notify;
 
 use crate::observer::Work;
 
-/// The least a batch counts, so empty batches still bound the item count.
+/// The least a batch counts per index, so empty batches still bound the item
+/// count.
 pub const FLOOR: usize = 1024;
 
 /// A B-tree leaf: eleven key-value slots and a small header.
@@ -65,15 +95,80 @@ pub struct Held {
     pub backfill: usize,
 }
 
+/// What [`Budget::admit`] decided for a build's indexes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Admission {
+    /// The indexes that fit, in the order offered: every one or none for a
+    /// backfill batch. Empty when nothing was offered.
+    pub admitted: Vec<IndexName>,
+    /// Whether something offered was refused: the build waits for a release
+    /// for it (all of it for a backfill batch, what was left out for live).
+    pub refused: bool,
+    /// The release generation the decision was made at: a waiter passes it
+    /// to [`Budget::released_since`].
+    pub generation: u64,
+}
+
+impl Admission {
+    /// Whether the build may go ahead: something fit, or nothing was offered
+    /// and nothing refused.
+    pub fn grants(&self) -> bool {
+        !self.admitted.is_empty() || !self.refused
+    }
+}
+
+/// The counts, under one lock.
+#[derive(Debug, Default)]
+struct State {
+    total: usize,
+    backfill: usize,
+    by_index: BTreeMap<IndexName, usize>,
+    /// Bumped by every release.
+    generation: u64,
+}
+
+impl State {
+    fn held_by(&self, index: &IndexName) -> usize {
+        self.by_index.get(index).copied().unwrap_or(0)
+    }
+
+    fn add(&mut self, work: Work, index: Option<&IndexName>, bytes: usize) {
+        self.total = self.total.saturating_add(bytes);
+        if work == Work::Backfill {
+            self.backfill = self.backfill.saturating_add(bytes);
+        }
+        if let Some(index) = index {
+            let held = self.by_index.entry(index.clone()).or_insert(0);
+            *held = held.saturating_add(bytes);
+        }
+    }
+
+    fn release(&mut self, work: Work, index: Option<&IndexName>, bytes: usize) {
+        self.total = self.total.saturating_sub(bytes);
+        if work == Work::Backfill {
+            self.backfill = self.backfill.saturating_sub(bytes);
+        }
+        if let Some(index) = index
+            && let Some(held) = self.by_index.get_mut(index)
+        {
+            *held = held.saturating_sub(bytes);
+            if *held == 0 {
+                self.by_index.remove(index);
+            }
+        }
+        self.generation = self.generation.wrapping_add(1);
+    }
+}
+
 /// The pipeline's budget for built documents not yet acknowledged by every
-/// lane. Shared by the ingest engine (which reserves) and whatever drops the
-/// last copy of a batch (which releases).
+/// lane. Shared by whatever reserves (the ingest engine) and whatever drops
+/// the last copy of a batch (which releases).
 #[derive(Debug)]
 pub struct Budget {
     limit: usize,
-    total: AtomicUsize,
-    backfill: AtomicUsize,
-    waiting: AtomicBool,
+    /// Rule 2's bound in bytes; `None` with fewer than two indexes.
+    index_share: Option<usize>,
+    state: Mutex<State>,
     released: Notify,
     refused_live: AtomicU64,
     refused_backfill: AtomicU64,
@@ -81,8 +176,8 @@ pub struct Budget {
     after_check: AfterCheck,
 }
 
-/// A test's hook run once right after [`Budget::fits`] decided: where a
-/// release racing the engine's check lands.
+/// A test's hook run once right after [`Budget::admit`] decided, with the
+/// lock let go: where a release racing the engine's check lands.
 #[cfg(test)]
 #[derive(Default)]
 struct AfterCheck(std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>);
@@ -95,13 +190,12 @@ impl std::fmt::Debug for AfterCheck {
 }
 
 impl Budget {
-    /// A budget of `limit` bytes.
+    /// A budget of `limit` bytes, not shared per index.
     pub fn new(limit: usize) -> Self {
         Self {
             limit,
-            total: AtomicUsize::new(0),
-            backfill: AtomicUsize::new(0),
-            waiting: AtomicBool::new(false),
+            index_share: None,
+            state: Mutex::new(State::default()),
             released: Notify::new(),
             refused_live: AtomicU64::new(0),
             refused_backfill: AtomicU64::new(0),
@@ -110,14 +204,36 @@ impl Budget {
         }
     }
 
-    /// Run `hook` once, right after the next [`fits`](Self::fits) decides.
+    /// Share the limit over `indexes` indexes: with two or more, one index
+    /// holds at most `share` of it (rule 2); with one, it holds all of it.
+    /// `share` is taken as it is: the caller checked it is in (0, 1].
+    #[must_use]
+    pub fn with_index_share(mut self, indexes: usize, share: f64) -> Self {
+        self.index_share = (indexes >= 2).then(|| {
+            let bytes = (self.limit as f64 * share).floor();
+            if bytes >= self.limit as f64 {
+                self.limit
+            } else {
+                bytes as usize
+            }
+        });
+        self
+    }
+
+    /// Rule 2's bound in bytes: what one index may hold; `None` when the
+    /// budget isn't shared (one index).
+    pub fn index_share(&self) -> Option<usize> {
+        self.index_share
+    }
+
+    /// Run `hook` once, right after the next [`admit`](Self::admit) decides.
     #[cfg(test)]
     pub(crate) fn after_check(&self, hook: impl FnOnce() + Send + 'static) {
         *self
             .after_check
             .0
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(hook));
+            .unwrap_or_else(PoisonError::into_inner) = Some(Box::new(hook));
     }
 
     /// Count a batch of `work` the budget held back: once per wait, not per
@@ -148,94 +264,200 @@ impl Budget {
         self.limit
     }
 
-    /// What is held now, reservations included. The two counters are read
-    /// one after the other, so a backfill release landing between them can
-    /// read as live room for an instant: at most one live batch granted a
-    /// little early, never a byte lost or counted twice.
+    fn state(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// What is held now, reservations included, read at one instant.
     pub fn held(&self) -> Held {
-        let backfill = self.backfill.load(Ordering::SeqCst);
-        let total = self.total.load(Ordering::SeqCst);
+        let state = self.state();
         Held {
-            total: total.max(backfill),
-            backfill,
+            total: state.total,
+            backfill: state.backfill,
         }
     }
 
-    /// Reserve `estimate` bytes for a build of `work`, if the rules allow:
-    /// within the limit, backfill within half of it, and always one batch
-    /// for a kind holding nothing. Only the ingest engine reserves, so the
-    /// check and the add need no lock: anything else only releases.
-    pub fn try_reserve(self: &Arc<Self>, work: Work, estimate: usize) -> Option<Reservation> {
-        if !self.fits(work, estimate) {
-            return None;
-        }
-        self.add(work, estimate);
-        Some(Reservation {
-            budget: Arc::clone(self),
-            work,
-            bytes: estimate,
-        })
+    /// What `index` holds now, live and backfill, reservations included.
+    pub fn held_by(&self, index: &IndexName) -> usize {
+        self.state().held_by(index)
     }
 
-    /// Whether [`try_reserve`](Self::try_reserve) would grant `estimate`
-    /// bytes to `work` now.
-    pub fn fits(&self, work: Work, estimate: usize) -> bool {
-        let Held { total, backfill } = self.held();
-        let fits = match work {
-            Work::Live => total - backfill == 0 || total.saturating_add(estimate) <= self.limit,
-            Work::Backfill => {
-                backfill == 0
-                    || (backfill.saturating_add(estimate) <= self.limit / 2
-                        && total.saturating_add(estimate) <= self.limit)
-            }
+    /// The release generation now: [`released_since`](Self::released_since)
+    /// returns once a release moves past it.
+    pub fn generation(&self) -> u64 {
+        self.state().generation
+    }
+
+    /// Which of `parts` (each index with its estimate, oldest waiting first)
+    /// a build of `work` may take now, by the module's rules, and the
+    /// generation the decision was made at. Reserves nothing.
+    pub fn admit(&self, work: Work, parts: &[(IndexName, usize)]) -> Admission {
+        let admission = {
+            let state = self.state();
+            self.decide(&state, work, parts)
         };
         #[cfg(test)]
         if let Some(hook) = self
             .after_check
             .0
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(PoisonError::into_inner)
             .take()
         {
             hook();
         }
-        fits
+        admission
     }
 
-    /// Say the engine waits for a release: the next release wakes
-    /// [`released`](Self::released).
-    pub fn want_release(&self) {
-        self.waiting.store(true, Ordering::SeqCst);
-    }
-
-    /// Resolves after a release that followed [`want_release`](Self::want_release).
-    pub async fn released(&self) {
-        self.released.notified().await;
-    }
-
-    fn add(&self, work: Work, bytes: usize) {
-        if work == Work::Backfill {
-            self.backfill.fetch_add(bytes, Ordering::SeqCst);
+    fn decide(&self, state: &State, work: Work, parts: &[(IndexName, usize)]) -> Admission {
+        let generation = state.generation;
+        let all = || parts.iter().map(|(index, _)| index.clone()).collect();
+        if parts.is_empty() {
+            return Admission {
+                admitted: Vec::new(),
+                refused: false,
+                generation,
+            };
         }
-        self.total.fetch_add(bytes, Ordering::SeqCst);
+        let within_share = |index: &IndexName, estimate: usize| -> bool {
+            self.index_share
+                .is_none_or(|share| state.held_by(index).saturating_add(estimate) <= share)
+        };
+        match work {
+            Work::Live => {
+                // Rule 5: live holding nothing takes every index waiting.
+                if state.total - state.backfill.min(state.total) == 0 {
+                    return Admission {
+                        admitted: all(),
+                        refused: false,
+                        generation,
+                    };
+                }
+                let mut running = state.total;
+                let mut blocked = false;
+                let mut admitted = Vec::with_capacity(parts.len());
+                for (index, estimate) in parts {
+                    let fits = if state.held_by(index) == 0 {
+                        true
+                    } else if !within_share(index, *estimate) {
+                        false
+                    } else if !blocked && running.saturating_add(*estimate) <= self.limit {
+                        true
+                    } else {
+                        blocked = true;
+                        false
+                    };
+                    if fits {
+                        running = running.saturating_add(*estimate);
+                        admitted.push(index.clone());
+                    }
+                }
+                let refused = admitted.len() < parts.len();
+                Admission {
+                    admitted,
+                    refused,
+                    generation,
+                }
+            }
+            Work::Backfill => {
+                let estimate: usize = parts.iter().map(|(_, bytes)| *bytes).sum();
+                let fits = state.backfill == 0
+                    || parts.iter().all(|(index, _)| state.held_by(index) == 0)
+                    || (state.backfill.saturating_add(estimate) <= self.limit / 2
+                        && state.total.saturating_add(estimate) <= self.limit
+                        && parts
+                            .iter()
+                            .all(|(index, bytes)| within_share(index, *bytes)));
+                Admission {
+                    admitted: if fits { all() } else { Vec::new() },
+                    refused: !fits,
+                    generation,
+                }
+            }
+        }
     }
 
-    /// Every access to `total`, `backfill` and `waiting` is `SeqCst`: the
-    /// engine stores its wish then loads the totals, a release subtracts then
-    /// swaps the wish, and only a single total order guarantees one of the
-    /// two sees the other (with acquire/release both could miss, and the
-    /// wake be lost).
-    fn release(&self, work: Work, bytes: usize) {
+    /// Reserve each of `parts` for a build of `work`, if all of them fit now
+    /// ([`admit`](Self::admit) admitting every one), in one step: two
+    /// reservers never pass the limit together. `Err` carries the generation
+    /// of the refusal.
+    pub fn reserve(
+        self: &Arc<Self>,
+        work: Work,
+        parts: &[(IndexName, usize)],
+    ) -> Result<Vec<Reservation>, u64> {
+        let mut state = self.state();
+        let admission = self.decide(&state, work, parts);
+        if admission.refused {
+            return Err(admission.generation);
+        }
+        Ok(parts
+            .iter()
+            .map(|(index, bytes)| {
+                state.add(work, Some(index), *bytes);
+                Reservation {
+                    budget: Arc::clone(self),
+                    work,
+                    index: Some(index.clone()),
+                    bytes: *bytes,
+                }
+            })
+            .collect())
+    }
+
+    /// Reserve `estimate` bytes for a build of `work` counted toward no
+    /// index, if the kind's rules allow: within the limit, backfill within
+    /// half of it, and always one batch for a kind holding nothing.
+    pub fn try_reserve(self: &Arc<Self>, work: Work, estimate: usize) -> Option<Reservation> {
+        let mut state = self.state();
+        let fits = match work {
+            Work::Live => {
+                state.total == state.backfill || state.total.saturating_add(estimate) <= self.limit
+            }
+            Work::Backfill => {
+                state.backfill == 0
+                    || (state.backfill.saturating_add(estimate) <= self.limit / 2
+                        && state.total.saturating_add(estimate) <= self.limit)
+            }
+        };
+        if !fits {
+            return None;
+        }
+        state.add(work, None, estimate);
+        Some(Reservation {
+            budget: Arc::clone(self),
+            work,
+            index: None,
+            bytes: estimate,
+        })
+    }
+
+    /// Returns once a release has moved the generation past `since` (at once
+    /// if one already has). The wait is registered before the generation is
+    /// read, so a release between the two still wakes it.
+    pub async fn released_since(&self, since: u64) {
+        loop {
+            let notified = self.released.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.generation() != since {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    fn add(&self, work: Work, index: Option<&IndexName>, bytes: usize) {
+        self.state().add(work, index, bytes);
+    }
+
+    /// Give `bytes` back and wake every waiter, once, with the lock let go.
+    fn release(&self, work: Work, index: Option<&IndexName>, bytes: usize) {
         if bytes == 0 {
             return;
         }
-        self.total.fetch_sub(bytes, Ordering::SeqCst);
-        if work == Work::Backfill {
-            self.backfill.fetch_sub(bytes, Ordering::SeqCst);
-        }
-        if self.waiting.swap(false, Ordering::SeqCst) {
-            self.released.notify_one();
-        }
+        self.state().release(work, index, bytes);
+        self.released.notify_waiters();
     }
 }
 
@@ -251,16 +473,21 @@ impl Drop for Budget {
                 Held::default(),
                 "the memory budget was dropped with bytes still counted"
             );
+            debug_assert!(
+                self.state().by_index.is_empty(),
+                "the memory budget was dropped with an index still counted"
+            );
         }
     }
 }
 
-/// Bytes reserved for a build in flight. Dropped unsettled, it gives them
-/// back.
+/// Bytes reserved for one index's part of a build in flight. Dropped
+/// unsettled, it gives them back.
 #[derive(Debug)]
 pub struct Reservation {
     budget: Arc<Budget>,
     work: Work,
+    index: Option<IndexName>,
     bytes: usize,
 }
 
@@ -270,19 +497,27 @@ impl Reservation {
         self.work
     }
 
-    /// The build landed with `bytes` of documents: hold that much (at least
+    /// The index it counts toward; `None` for none.
+    pub fn index(&self) -> Option<&IndexName> {
+        self.index.as_ref()
+    }
+
+    /// The part landed with `bytes` of documents: hold that much (at least
     /// [`FLOOR`]) instead of the estimate, until the returned charge drops.
     pub fn settle(mut self, bytes: usize) -> Charge {
         let bytes = bytes.max(FLOOR);
         let reserved = std::mem::take(&mut self.bytes);
+        let index = self.index.take();
         if bytes > reserved {
-            self.budget.add(self.work, bytes - reserved);
+            self.budget.add(self.work, index.as_ref(), bytes - reserved);
         } else {
-            self.budget.release(self.work, reserved - bytes);
+            self.budget
+                .release(self.work, index.as_ref(), reserved - bytes);
         }
         Charge {
             budget: Arc::clone(&self.budget),
             work: self.work,
+            index,
             bytes,
         }
     }
@@ -290,15 +525,17 @@ impl Reservation {
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        self.budget.release(self.work, self.bytes);
+        self.budget
+            .release(self.work, self.index.as_ref(), self.bytes);
     }
 }
 
-/// Bytes a published batch holds until its last copy is dropped.
+/// Bytes a published batch's part holds until its last copy is dropped.
 #[derive(Debug)]
 pub struct Charge {
     budget: Arc<Budget>,
     work: Work,
+    index: Option<IndexName>,
     bytes: usize,
 }
 
@@ -311,7 +548,8 @@ impl Charge {
 
 impl Drop for Charge {
     fn drop(&mut self) {
-        self.budget.release(self.work, self.bytes);
+        self.budget
+            .release(self.work, self.index.as_ref(), self.bytes);
     }
 }
 
@@ -474,19 +712,29 @@ mod tests {
         assert!(budget.try_reserve(Work::Live, KIB).is_some());
     }
 
+    fn index(name: &str) -> IndexName {
+        IndexName::try_new(name).unwrap()
+    }
+
+    /// `bytes` of live documents of `name`, settled.
+    fn held(budget: &Arc<Budget>, name: &str, bytes: usize) -> Vec<Charge> {
+        budget
+            .reserve(Work::Live, &[(index(name), bytes)])
+            .unwrap()
+            .into_iter()
+            .map(|part| part.settle(bytes))
+            .collect()
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_release_wakes_an_engine_that_waits_for_one() {
         let budget = budget(64);
-        let charge = budget
-            .try_reserve(Work::Live, 60 * KIB)
-            .unwrap()
-            .settle(60 * KIB);
-        let _other = budget.try_reserve(Work::Backfill, 2 * KIB).unwrap();
-        assert!(budget.try_reserve(Work::Live, 8 * KIB).is_none());
-        budget.want_release();
+        let charge = held(&budget, "users", 60 * KIB);
+        let refusal = budget.admit(Work::Live, &[(index("users"), 8 * KIB)]);
+        assert!(!refusal.grants());
         let waiter = {
             let budget = Arc::clone(&budget);
-            tokio::spawn(async move { budget.released().await })
+            tokio::spawn(async move { budget.released_since(refusal.generation).await })
         };
         tokio::task::yield_now().await;
         drop(charge);
@@ -496,26 +744,260 @@ mod tests {
             .unwrap();
     }
 
-    /// The wish comes before the check: a release on
-    /// another thread between the two then still wakes the engine (the
-    /// notification is kept as a permit), where the other order lost it and
-    /// left ingest waiting for ever.
+    /// The generation is read with the refusal, under the lock: a release
+    /// on another thread between the refusal and the wait still wakes the
+    /// waiter, where a flag set after the check could lose it.
     #[tokio::test(start_paused = true)]
-    async fn a_release_between_the_wish_and_the_check_is_not_lost() {
+    async fn a_release_between_the_refusal_and_the_wait_is_not_lost() {
+        let budget = budget(64);
+        let charge = held(&budget, "users", 60 * KIB);
+        budget.after_check(move || drop(charge));
+        let refusal = budget.admit(Work::Live, &[(index("users"), 8 * KIB)]);
+        assert!(!refusal.grants(), "decided before the release");
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            budget.released_since(refusal.generation),
+        )
+        .await
+        .expect("the waiter is woken by the release that raced its refusal");
+        assert!(
+            budget
+                .admit(Work::Live, &[(index("users"), 8 * KIB)])
+                .grants(),
+            "room is back"
+        );
+    }
+
+    /// Every waiter is woken by one release, and each wakes once: three
+    /// waiters, one release.
+    #[tokio::test(start_paused = true)]
+    async fn a_release_wakes_every_waiting_task() {
         let budget = budget(64);
         let charge = budget
-            .try_reserve(Work::Live, 60 * KIB)
+            .try_reserve(Work::Live, 64 * KIB)
             .unwrap()
-            .settle(60 * KIB);
-        let _backfill = budget.try_reserve(Work::Backfill, 2 * KIB).unwrap();
-        budget.want_release();
-        assert!(!budget.fits(Work::Live, 8 * KIB));
-        // A sink engine acknowledges the last batch on another thread, here.
+            .settle(64 * KIB);
+        let since = budget.generation();
+        let waiters: Vec<_> = (0..3)
+            .map(|_| {
+                let budget = Arc::clone(&budget);
+                tokio::spawn(async move { budget.released_since(since).await })
+            })
+            .collect();
+        tokio::task::yield_now().await;
         drop(charge);
-        tokio::time::timeout(Duration::from_secs(60), budget.released())
-            .await
-            .expect("the engine waiting for a release is woken");
-        assert!(budget.fits(Work::Live, 8 * KIB), "room is back");
+        for waiter in waiters {
+            tokio::time::timeout(Duration::from_secs(1), waiter)
+                .await
+                .expect("every waiter is woken")
+                .unwrap();
+        }
+    }
+
+    /// With two or more indexes, one index holds at most its share; the
+    /// others still fit beside it.
+    #[test]
+    fn an_index_at_its_share_is_left_out_and_the_others_fit() {
+        let budget = Arc::new(Budget::new(64 * KIB).with_index_share(3, 0.5));
+        assert_eq!(budget.index_share(), Some(32 * KIB));
+        let _users = budget
+            .reserve(Work::Live, &[(index("users"), 30 * KIB)])
+            .unwrap();
+        let admission = budget.admit(
+            Work::Live,
+            &[(index("users"), 4 * KIB), (index("orders"), 4 * KIB)],
+        );
+        assert_eq!(admission.admitted, vec![index("orders")]);
+        assert!(admission.refused, "users is left waiting");
+        assert!(
+            budget
+                .reserve(Work::Live, &[(index("users"), 4 * KIB)])
+                .is_err(),
+            "past its share"
+        );
+        assert!(
+            budget
+                .reserve(Work::Live, &[(index("users"), 2 * KIB)])
+                .is_ok()
+        );
+    }
+
+    /// With one index there is no share: it may hold the whole limit, as
+    /// before the budget was shared.
+    #[test]
+    fn one_index_holds_the_whole_budget() {
+        let budget = Arc::new(Budget::new(64 * KIB).with_index_share(1, 0.5));
+        assert_eq!(budget.index_share(), None);
+        let _first = budget
+            .reserve(Work::Live, &[(index("users"), 40 * KIB)])
+            .unwrap();
+        let _second = budget
+            .reserve(Work::Live, &[(index("users"), 20 * KIB)])
+            .unwrap();
+        assert!(
+            budget
+                .reserve(Work::Live, &[(index("users"), 8 * KIB)])
+                .is_err()
+        );
+    }
+
+    /// An index holding nothing gets one batch, past the limit and past
+    /// backfill's half (rule 4): the others holding the whole budget never
+    /// shut it out.
+    #[test]
+    fn an_index_holding_nothing_gets_one_batch() {
+        let budget = Arc::new(Budget::new(64 * KIB).with_index_share(3, 0.5));
+        let _users = budget
+            .reserve(Work::Live, &[(index("users"), 32 * KIB)])
+            .unwrap();
+        let _orders = budget
+            .reserve(Work::Backfill, &[(index("orders"), 32 * KIB)])
+            .unwrap();
+        assert_eq!(
+            budget
+                .admit(Work::Live, &[(index("items"), 100 * KIB)])
+                .admitted,
+            vec![index("items")]
+        );
+        let _items = budget
+            .reserve(Work::Backfill, &[(index("items"), 100 * KIB)])
+            .unwrap();
+        assert!(
+            budget
+                .reserve(Work::Backfill, &[(index("items"), KIB)])
+                .is_err(),
+            "once it holds something, the rules apply"
+        );
+    }
+
+    /// Live holding nothing takes every index waiting, at its share or not:
+    /// live always has room once it holds no live bytes.
+    #[test]
+    fn live_holding_nothing_takes_every_index() {
+        let budget = Arc::new(Budget::new(64 * KIB).with_index_share(2, 0.5));
+        let _backfill = budget
+            .reserve(Work::Backfill, &[(index("users"), 32 * KIB)])
+            .unwrap();
+        let admission = budget.admit(Work::Live, &[(index("users"), 16 * KIB)]);
+        assert_eq!(admission.admitted, vec![index("users")]);
+    }
+
+    /// The oldest index refused by the limit keeps every younger one from
+    /// taking room by the limit, so small batches can't starve a large one;
+    /// an index refused by its own share doesn't.
+    #[test]
+    fn the_oldest_index_refused_by_the_limit_holds_younger_ones_back() {
+        let budget = Arc::new(Budget::new(64 * KIB).with_index_share(3, 0.5));
+        let _held = budget
+            .reserve(
+                Work::Live,
+                &[
+                    (index("users"), 30 * KIB),
+                    (index("orders"), 16 * KIB),
+                    (index("items"), 8 * KIB),
+                ],
+            )
+            .unwrap();
+        let admission = budget.admit(
+            Work::Live,
+            &[
+                (index("users"), 8 * KIB),
+                (index("orders"), 12 * KIB),
+                (index("items"), 4 * KIB),
+            ],
+        );
+        assert!(
+            admission.admitted.is_empty(),
+            "users is past its share and lets the others try; orders is refused by the limit \
+             and holds items back: {:?}",
+            admission.admitted
+        );
+        let admission = budget.admit(
+            Work::Live,
+            &[(index("users"), 8 * KIB), (index("items"), 4 * KIB)],
+        );
+        assert_eq!(admission.admitted, vec![index("items")]);
+    }
+
+    /// A backfill batch spanning two indexes fits whole or not at all.
+    #[test]
+    fn a_backfill_batch_fits_whole_or_not_at_all() {
+        let budget = Arc::new(Budget::new(64 * KIB).with_index_share(2, 0.5));
+        let _live = budget
+            .reserve(Work::Live, &[(index("users"), 4 * KIB)])
+            .unwrap();
+        let _backfill = budget
+            .reserve(Work::Backfill, &[(index("orders"), 30 * KIB)])
+            .unwrap();
+        let admission = budget.admit(
+            Work::Backfill,
+            &[(index("users"), KIB), (index("orders"), 4 * KIB)],
+        );
+        assert!(admission.admitted.is_empty() && admission.refused);
+    }
+
+    /// Reservers on many threads never pass the limit together: every
+    /// reservation is checked and counted in one step.
+    #[test]
+    fn concurrent_reservations_never_pass_the_limit() {
+        let budget = Arc::new(Budget::new(64 * KIB).with_index_share(4, 1.0));
+        let names: Vec<IndexName> = ["a", "b", "c", "d"].into_iter().map(index).collect();
+        // Every index holds something, so only the limit decides.
+        let _seeds: Vec<Reservation> = names
+            .iter()
+            .flat_map(|name| budget.reserve(Work::Live, &[(name.clone(), KIB)]).unwrap())
+            .collect();
+        let most = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for name in &names {
+                let (budget, most) = (&budget, &most);
+                scope.spawn(move || {
+                    for _ in 0..2_000 {
+                        if let Ok(parts) = budget.reserve(Work::Live, &[(name.clone(), 3 * KIB)]) {
+                            most.fetch_max(budget.held().total, Ordering::SeqCst);
+                            drop(parts);
+                        }
+                    }
+                });
+            }
+        });
+        assert!(most.into_inner() <= 64 * KIB);
+        drop(_seeds);
+        assert_eq!(budget.held(), Held::default());
+    }
+
+    /// Every path gives each index's bytes back exactly once: a settle
+    /// smaller or larger, a reservation dropped unsettled, charges dropped on
+    /// other threads.
+    #[test]
+    fn every_index_gets_every_byte_back_once() {
+        let budget = Arc::new(Budget::new(usize::MAX / 4).with_index_share(2, 0.5));
+        let parts = budget
+            .reserve(
+                Work::Live,
+                &[(index("users"), 8 * KIB), (index("orders"), 8 * KIB)],
+            )
+            .unwrap();
+        let mut parts = parts.into_iter();
+        let users = parts.next().unwrap().settle(3 * KIB);
+        let orders = parts.next().unwrap();
+        assert_eq!(budget.held_by(&index("users")), 3 * KIB);
+        assert_eq!(budget.held_by(&index("orders")), 8 * KIB);
+        drop(orders);
+        assert_eq!(budget.held_by(&index("orders")), 0);
+        let backfill = budget
+            .reserve(Work::Backfill, &[(index("orders"), KIB)])
+            .unwrap()
+            .into_iter()
+            .map(|part| part.settle(20 * KIB))
+            .collect::<Vec<_>>();
+        assert_eq!(budget.held_by(&index("orders")), 20 * KIB);
+        std::thread::scope(|scope| {
+            scope.spawn(move || drop(users));
+            scope.spawn(move || drop(backfill));
+        });
+        assert_eq!(budget.held(), Held::default());
+        assert_eq!(budget.held_by(&index("users")), 0);
     }
 
     #[test]

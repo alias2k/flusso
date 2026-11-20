@@ -130,7 +130,7 @@ impl BatchConfig {
 
 /// The `[concurrency]` knobs from `flusso.toml`. An unset key keeps the
 /// daemon's default.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ConcurrencyConfig {
     /// Lane items each sink writes at once.
     pub writes: Option<NonZeroUsize>,
@@ -138,6 +138,10 @@ pub struct ConcurrencyConfig {
     pub builds: Option<NonZeroUsize>,
     /// MiB of built documents held before the ingest engine waits.
     pub max_built_mib: Option<NonZeroUsize>,
+    /// The share of `max_built_mib` one index may hold with two or more
+    /// indexes, with where it was set (the file, then `--index-budget-share`
+    /// / `FLUSSO_INDEX_BUDGET_SHARE` laid over it by the binary).
+    pub index_budget_share: Option<ShareValue>,
 }
 
 /// The `[backoff]` knobs, in milliseconds, each with where it was set: the
@@ -158,7 +162,7 @@ pub struct BackoffValue {
     /// Milliseconds.
     pub ms: NonZeroU64,
     /// Where it was set.
-    pub origin: BackoffOrigin,
+    pub origin: Origin,
 }
 
 impl BackoffValue {
@@ -166,20 +170,33 @@ impl BackoffValue {
     pub fn from_file(ms: NonZeroU64) -> Self {
         Self {
             ms,
-            origin: BackoffOrigin::File,
+            origin: Origin::File,
         }
     }
 }
 
-/// Where a `[backoff]` value was set.
+/// Where a setting of the machine that runs flusso (`[backoff]`,
+/// `[concurrency] index_budget_share`) was set, so a refusal can say how to
+/// change it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BackoffOrigin {
-    /// `flusso.toml`'s `[backoff]` table.
+pub enum Origin {
+    /// `flusso.toml`.
     File,
-    /// The command line (`--backoff-initial-ms` / `--backoff-max-ms`).
+    /// The command line.
     Flag,
-    /// The environment (`FLUSSO_BACKOFF_INITIAL_MS` / `FLUSSO_BACKOFF_MAX_MS`).
+    /// The environment.
     Env,
+}
+
+/// `[concurrency] index_budget_share` and where it was set. Taken as it is
+/// written: the daemon's judge (`daemon::index_budget_share`) refuses a value
+/// outside (0, 1], naming this origin.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShareValue {
+    /// The fraction of `max_built_mib` one index may hold.
+    pub share: f64,
+    /// Where it was set.
+    pub origin: Origin,
 }
 
 /// One index in a [`Config`], paired with whether it is built on this run.

@@ -459,18 +459,24 @@ function valueProblem(t: Translate, problem: ValueProblem): string {
 
 /// A number box. An integer a JS number can't hold exactly (past 2^53) is
 /// refused rather than rounded: the box turns red and the model keeps its value.
+/// `above` refuses that value and anything below it (an exclusive minimum);
+/// `step` is the input's step (`"any"` for fractions).
 export function Num({
   value,
   onChange,
   placeholder,
   min,
   max,
+  above,
+  step,
 }: {
   value: number | undefined;
   onChange: (v: number | undefined) => void;
   placeholder?: string;
   min?: number;
   max?: number;
+  above?: number;
+  step?: string;
 }) {
   const [refused, setRefused] = useState<string | null>(null);
   return (
@@ -478,14 +484,20 @@ export function Num({
       type="number"
       value={refused ?? value ?? ""}
       placeholder={placeholder}
-      min={min}
+      min={min ?? above}
       max={max}
+      step={step}
       className={cn(refused !== null && "invalid")}
       aria-invalid={refused !== null ? true : undefined}
       onChange={(e) => {
         const n = e.target.value === "" ? undefined : Number(e.target.value);
         const rounded = n !== undefined && Number.isInteger(n) && !Number.isSafeInteger(n);
-        const outside = n !== undefined && ((min !== undefined && n < min) || (max !== undefined && n > max));
+        const outside =
+          n !== undefined &&
+          (Number.isNaN(n) ||
+            (min !== undefined && n < min) ||
+            (above !== undefined && n <= above) ||
+            (max !== undefined && n > max));
         const kept = rounded || outside;
         setRefused(kept ? e.target.value : null);
         if (!kept) onChange(n);

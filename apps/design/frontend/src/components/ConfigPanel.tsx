@@ -232,6 +232,18 @@ export function ConfigPanel({
           </Field>
         </div>
         <div className="w-28">
+          <Field label="concurrency.index_budget_share">
+            <Num
+              value={config.concurrency?.index_budget_share}
+              onChange={(v) => onChange({ ...config, concurrency: { ...config.concurrency, index_budget_share: v } })}
+              placeholder="0.5"
+              above={0}
+              max={1}
+              step="any"
+            />
+          </Field>
+        </div>
+        <div className="w-28">
           <Field label="backoff.initial_ms">
             <Num
               value={config.backoff?.initial_ms}

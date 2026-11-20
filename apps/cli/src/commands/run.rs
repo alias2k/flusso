@@ -171,6 +171,14 @@ pub(crate) struct RunArgs {
     #[arg(long, env = "FLUSSO_MAX_BUILT_MIB", value_parser = config::parse_max_built_mib)]
     max_built_mib: Option<std::num::NonZeroUsize>,
 
+    /// The share of `--max-built-mib` one index may hold while two or more
+    /// indexes run, so one index bursting leaves room for the others to
+    /// build. Overrides `[concurrency].index_budget_share` from config;
+    /// defaults to 0.5. Above 0, at most 1; with one index it holds the whole
+    /// budget. Never written into the lock. [env: FLUSSO_INDEX_BUDGET_SHARE]
+    #[arg(long, value_parser = config::parse_index_budget_share)]
+    index_budget_share: Option<f64>,
+
     /// The first wait before trying again, in milliseconds: a failed engine's
     /// restart, a parked lane's probe, a re-staged lane's next staging. Each
     /// wait doubles up to `--backoff-max-ms`. Overrides `[backoff].initial_ms`
@@ -245,6 +253,9 @@ pub(crate) async fn execute(args: RunArgs) -> anyhow::Result<()> {
         args.backoff_max_ms,
         |name| std::env::var(name).ok(),
     )?;
+    lay_index_budget_share(&mut config, args.index_budget_share, |name| {
+        std::env::var(name).ok()
+    })?;
 
     // Adapter knobs given as flags/env are laid over the file's entries, then
     // every entry is validated against its adapter before anything connects.
@@ -584,7 +595,7 @@ fn lay_backoff(
         if let Some(ms) = flag {
             return Ok(Some(config::BackoffValue {
                 ms,
-                origin: config::BackoffOrigin::Flag,
+                origin: config::Origin::Flag,
             }));
         }
         match env(name).filter(|text| !text.is_empty()) {
@@ -593,7 +604,7 @@ fn lay_backoff(
                     .map_err(|why| anyhow::anyhow!("{name}: {why}"))?;
                 Ok(Some(config::BackoffValue {
                     ms,
-                    origin: config::BackoffOrigin::Env,
+                    origin: config::Origin::Env,
                 }))
             }
             None => Ok(file),
@@ -606,6 +617,36 @@ fn lay_backoff(
     )?;
     config.backoff.max_ms = layer(max_ms, "FLUSSO_BACKOFF_MAX_MS", config.backoff.max_ms)?;
     daemon::backoff(config)?;
+    Ok(())
+}
+
+/// Lay `--index-budget-share` over `FLUSSO_INDEX_BUDGET_SHARE` over
+/// `[concurrency] index_budget_share`, keeping where it was set, then check
+/// it with the daemon's judge, so a bad share fails before anything
+/// connects. The variable is read here, not by clap, so the refusal can tell
+/// a flag from its variable.
+fn lay_index_budget_share(
+    config: &mut config::Config,
+    flag: Option<f64>,
+    env: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<()> {
+    const VARIABLE: &str = "FLUSSO_INDEX_BUDGET_SHARE";
+    let laid = match flag {
+        Some(share) => Some(config::ShareValue {
+            share,
+            origin: config::Origin::Flag,
+        }),
+        None => match env(VARIABLE).filter(|text| !text.is_empty()) {
+            Some(text) => Some(config::ShareValue {
+                share: config::parse_index_budget_share(&text)
+                    .map_err(|why| anyhow::anyhow!("{VARIABLE}: {why}"))?,
+                origin: config::Origin::Env,
+            }),
+            None => config.concurrency.index_budget_share,
+        },
+    };
+    config.concurrency.index_budget_share = laid;
+    daemon::index_budget_share(config)?;
     Ok(())
 }
 
