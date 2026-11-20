@@ -140,3 +140,106 @@ async fn a_batch_takes_one_key_per_index_for_every_lane() {
         expected
     );
 }
+
+fn orders() -> IndexName {
+    IndexName::try_new("orders").unwrap()
+}
+
+/// Resolves change `1` to its `orders` document alone and every other change
+/// to both its `users` and its `orders` document.
+#[derive(Debug)]
+struct UsersAndOrders;
+
+#[async_trait]
+impl DocumentBuilder for UsersAndOrders {
+    async fn resolve(
+        &self,
+        _table: &TableName,
+        key: &RowKey,
+        _before: Option<&RowImage>,
+        _after: Option<&RowImage>,
+    ) -> source::Result<Vec<DocumentId>> {
+        let indexes = if *key == super::key(1) {
+            vec![orders()]
+        } else {
+            vec![users(), orders()]
+        };
+        Ok(indexes
+            .into_iter()
+            .map(|index| DocumentId {
+                index,
+                key: key.clone(),
+            })
+            .collect())
+    }
+
+    async fn build(&self, id: &DocumentId) -> source::Result<Document> {
+        Ok(Document::Upsert {
+            id: id.clone(),
+            body: kernel::GenericValue::Map(BTreeMap::new()),
+        })
+    }
+
+    fn backfill_indexes(&self) -> Vec<IndexName> {
+        Vec::new()
+    }
+
+    async fn last_key(&self, _: &IndexName) -> source::Result<Option<RowKey>> {
+        Ok(None)
+    }
+
+    async fn keys(
+        &self,
+        _: &IndexName,
+        _: Option<&RowKey>,
+        _: &RowKey,
+        _: usize,
+    ) -> source::Result<Vec<RowKey>> {
+        Ok(Vec::new())
+    }
+}
+
+/// Two indexes into two sinks: each index numbers its own items, and both of
+/// its lanes get the same key for one batch. `orders` gets an item from the
+/// first batch, `users` doesn't, so their keys part from the start.
+#[tokio::test]
+async fn each_index_keys_its_own_items_and_its_lanes_share_them() {
+    let (primary, audit) = (sink_name("primary"), sink_name("audit"));
+    let sinks = vec![primary.clone(), audit.clone()];
+    let indexes = [users(), orders()];
+    let stream = Arc::new(ChannelStream::over(64, indexes.clone(), sinks.clone()));
+    let progress = Arc::new(Progress::of(indexes, sinks.clone()));
+    IngestEngine::new(
+        Arc::new(MockSource::new(vec![upsert(1), upsert(2), upsert(3)])),
+        Arc::new(UsersAndOrders),
+        Arc::clone(&stream) as Arc<dyn Stream>,
+        sinks,
+        Arc::clone(&progress),
+    )
+    .with_batch(BatchPolicy {
+        max_changes: 1,
+        max_delay: Duration::from_millis(10),
+    })
+    .run()
+    .await
+    .unwrap();
+
+    let orders_items = [
+        (ItemKey::new(0), 0),
+        (ItemKey::new(1), 1),
+        (ItemKey::new(2), 2),
+    ];
+    let users_items = [(ItemKey::new(0), 1), (ItemKey::new(1), 2)];
+    for sink in [primary, audit] {
+        assert_eq!(
+            items(&stream, &LaneKey::new(orders(), sink.clone()), 3).await,
+            orders_items,
+            "orders into {sink}"
+        );
+        assert_eq!(
+            items(&stream, &LaneKey::new(users(), sink.clone()), 2).await,
+            users_items,
+            "users into {sink}"
+        );
+    }
+}
