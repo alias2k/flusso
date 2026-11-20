@@ -17,7 +17,7 @@ A lane that keeps writing is not stalled, however long its backlog. For a whole 
 ## What it costs while it lasts
 
 - **WAL on the Postgres server.** The replication slot is confirmed only as far as the slowest lane has written, so one stuck lane keeps the WAL of **every** index. Past `max_slot_wal_keep_size`, Postgres invalidates the slot and every index on every sink is rebuilt from a backfill ([Recover from a dropped slot](dropped-slot.md)).
-- **Memory, eventually.** The other indexes keep being written, but documents queued behind the stuck lane hold part of the [memory budget](../reference/config-toml.md#concurrency). With two or more indexes, the stuck index fills only its share (`index_budget_share`, half by default) and the others keep building. Long enough, its changes pile up past what may wait, reading stops, and the other indexes stall too.
+- **Memory, eventually.** The other indexes keep being written, but documents queued behind the stuck lane hold part of the [memory budget](../reference/config-toml.md#concurrency). With two or more indexes, the stuck index's live documents fill only its share (`index_budget_share`, half by default) and the others keep building. Long enough, its changes pile up past what may wait, reading stops, and the other indexes stall too.
 - **Fences on that index.** A [`/wait`](../reference/http.md#get-waitpositionposition) covering the stuck lane times out (`408`); a wait that names only other indexes (`index=…`) still answers.
 
 Dropping and rebuilding just the stuck index is not available yet ([#394](https://github.com/alias2k/flusso/issues/394)).

@@ -10,7 +10,7 @@
 - **A generation deleted mid-backfill is backfilled again in full**, never seeded with rows missing; a cut-down OpenSearch role needs to read index settings (#428): [A generation deleted mid-backfill](#a-generation-deleted-mid-backfill).
 - **`pinned_by` can name an index alone**, with `sink` null in `/status` and no `sink` label on `flusso_slot_pinned_by`: [An index's backlog can pin the slot](#an-indexs-backlog-can-pin-the-slot).
 - **A sink's committed count waits for every index**: `changes_committed` and `flusso_changes_committed_total` count a change once every lane of the sink has written it, so one slow index holds `changes_in_flight` for the whole sink: [Committed means written on every index](#committed-means-written-on-every-index).
-- **One index holds at most half of the memory budget** by default, with two or more indexes, so the others keep building beside one in a burst; `[concurrency] index_budget_share` sets the share: [Each index has a share of the memory budget](#each-index-has-a-share-of-the-memory-budget).
+- **One index's live documents hold at most half of the memory budget** by default, with two or more indexes, so the others keep building beside one in a burst; `[concurrency] index_budget_share` sets the share: [Each index has a share of the memory budget](#each-index-has-a-share-of-the-memory-budget).
 
 **Code that embeds the crates**
 
@@ -150,11 +150,11 @@ It applies to `/status` (`changes_in_flight`, and `sinks.<sink>.changes_committe
 
 ## Each index has a share of the memory budget
 
-**What changed.** In 0.18 one index could fill the whole [memory budget](../reference/config-toml.md#concurrency) (`max_built_mib`): when its sink fell behind in a burst, every other index waited behind it. In 0.19, with two or more indexes, one index holds at most a share of the budget, and the other indexes keep building in the rest.
+**What changed.** In 0.18 one index could fill the whole [memory budget](../reference/config-toml.md#concurrency) (`max_built_mib`): when its sink fell behind in a burst, every other index waited behind it. In 0.19, with two or more indexes, one index's live documents hold at most a share of the budget, and the other indexes keep building in the rest. A backfill or reindex doesn't count against its index's share: backfills together stay within half the budget, as in 0.18, so an index being reindexed keeps building its live changes.
 
 | | 0.18 | 0.19 |
 | --- | --- | --- |
-| One index in a burst, its sink behind | fills the whole budget; the others wait | stops at its share; the others keep building |
+| One index in a burst, its sink behind | fills the whole budget; the others wait | its live documents stop at its share; the others keep building |
 | The share | none | `[concurrency] index_budget_share`, default `0.5` (256 MiB of the default 512) |
 | A burst over many distinct documents of one index | reading pauses for every index | the same, once that index has more than `2 × [batch] max_changes` documents waiting to be built |
 | One index | the whole budget | unchanged |
@@ -171,7 +171,7 @@ The share has a flag and a variable, like the table's other keys:
 
 1. **Nothing, usually.** Bursts of one index stop holding up the others.
 2. **Raise `index_budget_share` towards `1`** if one index does nearly all the work and should keep using the whole budget, as in 0.18. `1` is the old behaviour.
-3. **Check the memory headroom.** An index holding nothing always gets one batch, even with the budget full, so plan for one batch per index above `max_built_mib` ([sizing](../reference/config-toml.md#concurrency)).
+3. **Leave the memory headroom as it is.** The budget can still be passed by one live and one backfill batch, as in 0.18 ([sizing](../reference/config-toml.md#concurrency)).
 
 **What to know.**
 
@@ -194,7 +194,7 @@ The share has a flag and a variable, like the table's other keys:
 - **Removed: `Observer::on_changes_settled`.** A sink's committed count is no longer an event: read `Progress::committed(sink)`, or `daemon::Status::committed(sink)`. `CommitStats.changes` and `stream::Batch.changes`, which only fed it, are removed: `CommitStats::new` takes `(envelopes, flush, work)`, and a `Batch` literal drops the field (a serialized item that still carries it reads fine).
 - **`Progress` counts committed changes by step.** New `engine::Step`, and `Progress::change_read`, `changes_read`, `close_step`, `committed`, `published_step` and `skipped_step`. `Progress::published_build` takes the build's `Step`; `skipped_build` takes an `Option<Token>` and a `Step`. `Progress::steps_kept(lane)` reports how many steps a lane keeps beside its unwritten items (the first is at most the second plus two), and `RunningDaemon::progress()` hands out the deployment's `Progress`.
 - **`daemon::Status::with_progress`** is new: a `Status` built without it reports `0` committed for every sink, so all its captured changes read as in flight.
-- **`engine::Budget` serves many reservers and is shared per index.** Removed: `fits`, `want_release` and `released`. New: `admit(work, parts)` answers an `engine::Admission` (`admitted`, `refused`, `generation`, `grants()`); `reserve(work, parts)` admits and reserves in one step, one `Reservation` per index, or `Err` with the refusal's generation; `released_since(generation)` waits for a release after it. `with_index_share(indexes, share)` caps one index at `share` of the limit when `indexes` is 2 or more; `held_by`, `index_share`, `generation` and `Reservation::index` read the state. `try_reserve` stays, counted toward no index.
+- **`engine::Budget` serves many reservers and is shared per index.** Removed: `fits`, `want_release` and `released`. New: `admit(work, parts)` answers an `engine::Admission` (`admitted`, `refused`, `generation`, `grants()`); `reserve(work, parts)` admits and reserves in one step, one `Reservation` per index, or `Err` with the refusal's generation; `released_since(generation)` waits for a release after it. `with_index_share(indexes, share)` caps one index's live bytes at `share` of the limit when `indexes` is 2 or more; `held_by`, `index_share`, `generation` and `Reservation::index` read the state. `try_reserve` stays, counted toward no index.
 - **`[concurrency] index_budget_share`** is `ConcurrencyConfig.index_budget_share: Option<config::ShareValue>` (`share`, `origin`), and `ConcurrencyConfig` no longer derives `Eq`. `daemon::index_budget_share(&Config)` resolves and checks it (`daemon::DEFAULT_INDEX_BUDGET_SHARE` is `0.5`), and `Daemon::start` fails on a share outside (0, 1]. `config::parse_index_budget_share` parses a flag's or a variable's value. New `Progress::waiting_by_index`.
 - **New: `stream::Ticket`.** `Request::Backfill` gains `ticket`, `LaneItem::SnapshotComplete` gains `ticket`, and `Batch` gains `ticket: Option<Ticket>` (`None` on a live batch). Serialized items without them still read (`serde` defaults). Struct literals must set them.
 
