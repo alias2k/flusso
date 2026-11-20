@@ -2831,7 +2831,8 @@ async fn a_wait_open_when_an_engine_run_ends_is_reported_up_to_that_moment() {
 /// its lane parks (every document refused under `on_error = "stop"`) for ten
 /// simulated minutes, so its backfill climbs to half the budget and its live
 /// documents to its share, and neither comes back. Healthy `users` (even
-/// ids) changes every 100 ms the whole time: each change is read and lands,
+/// ids) changes in bursts of sixteen a second the whole time: each change is
+/// read and lands,
 /// and the whole never passes the stated bound (the limit, plus one live
 /// batch per index, plus one backfill batch). Then `orders` is let through
 /// and everything converges.
@@ -2932,5 +2933,107 @@ async fn a_parked_index_at_its_share_leaves_a_healthy_index_writing_for_ten_minu
     let state = deployment.recorder.state();
     for (id, version) in db.expected().iter().filter(|(id, _)| *id % 2 == 1) {
         assert_eq!(state.get(id), Some(version), "orders {id} once let through");
+    }
+}
+
+/// What this slice does when the stuck index keeps changing many distinct
+/// documents: `orders` parked at its share, as in the test above, but
+/// changing all ten minutes over fifty documents, one a second. Each change
+/// of a new document joins its waiting set (a parked lane never gives its
+/// live bytes back, so `orders` is never granted again); once it has
+/// `2 × max_changes` documents waiting (32 here) the live batch waits whole
+/// and the reading stops for every index, `users` included, as before 0.19
+/// once the budget was full. Pinned here; ADR 0012 stage 8a's 6b exempts an
+/// index held by the budget from that bound, and this scenario with the
+/// reading going on is its acceptance test.
+#[tokio::test(start_paused = true)]
+async fn a_parked_index_changing_many_documents_stops_the_reading_at_its_waiting_cap() {
+    let log: Vec<Change> = (0..9600)
+        .map(|n| {
+            if n % 16 == 0 {
+                Change::upsert(1001 + 2 * ((n / 16) % 50))
+            } else {
+                Change::upsert(2 * (n % 20))
+            }
+        })
+        .collect();
+    let db = Database::new(400, log);
+    let builder = Builder::over(
+        &db,
+        Behaviour {
+            padding: 8 * KIB,
+            ..Behaviour::default()
+        },
+        2,
+    );
+    let recorder = Recorder::seeded(false);
+    recorder
+        .seeded_indexes
+        .lock()
+        .unwrap()
+        .insert("users".to_owned());
+    recorder
+        .refused_indexes
+        .lock()
+        .unwrap()
+        .insert("orders".to_owned());
+    let mut deployment = Deployment::with_lanes(
+        Feed::new(&db).with_bursts(16, Duration::from_secs(1)),
+        Arc::clone(&builder),
+        Arc::clone(&recorder),
+        1 << 20,
+    )
+    .ingest(|ingest| ingest.with_batch(batch(16)).with_builds(4))
+    .with_budget(512 * KIB, usize::MAX);
+    let progress = deployment.ingest.progress();
+    let watcher = {
+        let recorder = Arc::clone(&recorder);
+        tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for _ in 0..60 {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                seen.push((progress.changes_read(), progress.waiting_by_index()));
+            }
+            recorder.refused_indexes.lock().unwrap().clear();
+            seen
+        })
+    };
+    deployment.run_to_end(0).await;
+    let seen = watcher.await.unwrap();
+    let orders_waiting = |waiting: &Vec<(IndexName, usize)>| {
+        waiting
+            .iter()
+            .find(|(index, _)| *index == orders())
+            .map_or(0, |(_, count)| *count)
+    };
+    // Measured on paused time: 16 changes a second, `orders` held at its
+    // share from about the 30th second, one more `orders` document waiting
+    // each second after; the 32nd at second 61.
+    let (read, waiting) = &seen[5];
+    assert_eq!(
+        (*read, orders_waiting(waiting)),
+        (960, 31),
+        "at 60 s the reading goes on: orders has 31 documents waiting"
+    );
+    for (at, (read, waiting)) in seen.iter().enumerate().skip(6) {
+        assert_eq!(
+            (*read, orders_waiting(waiting)),
+            (976, 32),
+            "from 61 s, with 2 × max_changes orders documents waiting, the reading stopped for \
+             every index ({} s)",
+            10 * (at + 1)
+        );
+    }
+    let state = deployment.recorder.state();
+    for (id, version) in db
+        .expected()
+        .iter()
+        .filter(|(id, _)| **id < 40 || *id % 2 == 1)
+    {
+        assert_eq!(
+            state.get(id),
+            Some(version),
+            "{id} once orders is let through"
+        );
     }
 }

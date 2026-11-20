@@ -30,10 +30,14 @@
 //! was shared; rule 3 is the share. It counts an index's live bytes only: its
 //! backfill is capped with every other index's by rule 2, so an index whose
 //! backfill or reindex runs keeps, for its live changes, the room live had
-//! before the share, up to its share. Rule 5 is what keeps the promise while
-//! one index is stuck (a parked lane holding its share and its backfill for
-//! hours): every other index still gets a batch whenever it holds no live
-//! bytes, past the limit if need be. With one index rule 3 applies to
+//! before the share, up to its share. Rule 5 is what keeps the others building
+//! while one index is stuck (a parked lane holding its share and its backfill
+//! for hours): every other index still gets a batch whenever it holds no live
+//! bytes, past the limit if need be. That lasts until the stuck index has
+//! `2 × max_changes` documents waiting (the ingest engine's deferral cap):
+//! then the live batch waits whole and the reading stops for every index, as
+//! before the share. ADR 0012 stage 8a's 6b lifts that cap for an index the
+//! budget holds. With one index rule 3 applies to
 //! nothing and rule 5 is "live holding nothing": the budget answers as before
 //! it was shared. A live build takes the indexes that fit and leaves the rest
 //! waiting ([`Budget::admit`]); a backfill batch fits whole or not at all.
@@ -202,7 +206,7 @@ impl State {
 #[derive(Debug)]
 pub struct Budget {
     limit: usize,
-    /// Rule 2's bound in bytes; `None` with fewer than two indexes.
+    /// Rule 3's bound in bytes; `None` with fewer than two indexes.
     index_share: Option<usize>,
     state: Mutex<State>,
     released: Notify,
@@ -1106,6 +1110,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// An older index holding live bytes refused by the limit holds back
+    /// younger indexes holding live bytes, never one holding none: rule 5
+    /// is never blocked.
+    #[test]
+    fn an_index_refused_by_the_limit_never_holds_back_a_rule_5_batch() {
+        let budget = Arc::new(Budget::new(64 * KIB).with_index_share(3, 0.5));
+        let _s1 = held(&budget, "s1", 32 * KIB);
+        let _s2 = held(&budget, "s2", 16 * KIB);
+        let _backfill = budget
+            .reserve(Work::Backfill, &[(index("b"), 16 * KIB)])
+            .unwrap();
+        let admission = budget.admit(Work::Live, &[(index("s2"), 8 * KIB), (index("y"), 4 * KIB)]);
+        assert_eq!(admission.admitted, vec![index("y")]);
+        assert!(admission.refused, "s2 waits for the limit");
     }
 
     /// A backfill batch spanning two indexes fits whole or not at all.
