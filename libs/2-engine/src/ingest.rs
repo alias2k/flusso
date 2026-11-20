@@ -106,6 +106,8 @@ pub struct IngestEngine {
     budget: Option<Arc<Budget>>,
     /// The budget waits open across engine runs (see [`Builds::with_waits`]).
     budget_waits: Arc<std::sync::Mutex<builds::Waits>>,
+    /// The one key-read permit every walk shares (ADR 0012 stage 8a, K1).
+    key_reads: Arc<tokio::sync::Semaphore>,
     failure_policies: FailurePolicies,
     stop: Stop,
     /// How many times this engine moved the source forward (see
@@ -147,6 +149,7 @@ impl IngestEngine {
             builds: 1,
             budget: None,
             budget_waits: Arc::default(),
+            key_reads: Arc::new(tokio::sync::Semaphore::new(1)),
             failure_policies: FailurePolicies::default(),
             stop: Stop::new(),
             advances: AtomicU64::new(0),

@@ -129,9 +129,22 @@ pub struct Admission {
     /// Whether something offered was refused: the build waits for a release
     /// for it (all of it for a backfill batch, what was left out for live).
     pub refused: bool,
+    /// Whether a refusal was by the limit (rules 1 and 2), not by an index's
+    /// share: what holds younger waiters back from room by the limit.
+    pub by_limit: bool,
     /// The release generation the decision was made at: a waiter passes it
     /// to [`Budget::released_since`].
     pub generation: u64,
+}
+
+/// Why [`Budget::reserve_behind`] refused, and when.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Refusal {
+    /// The release generation of the refusal: a release past it may let
+    /// the batch go ([`Budget::released_since`]).
+    pub generation: u64,
+    /// Refused by the limit (rules 1 and 2), not by an index's share.
+    pub by_limit: bool,
 }
 
 impl Admission {
@@ -341,7 +354,7 @@ impl Budget {
     pub fn admit(&self, work: Work, parts: &[(IndexName, usize)]) -> Admission {
         let admission = {
             let state = self.state();
-            self.decide(&state, work, parts)
+            self.decide(&state, work, parts, false)
         };
         #[cfg(test)]
         if let Some(hook) = self
@@ -356,20 +369,30 @@ impl Budget {
         admission
     }
 
-    fn decide(&self, state: &State, work: Work, parts: &[(IndexName, usize)]) -> Admission {
+    /// `behind`: the caller waits behind an older one the limit refused, so
+    /// it takes no room by the limit (rules 1 and 2), only rule 5 or 4.
+    fn decide(
+        &self,
+        state: &State,
+        work: Work,
+        parts: &[(IndexName, usize)],
+        behind: bool,
+    ) -> Admission {
         let generation = state.generation;
         let all = || parts.iter().map(|(index, _)| index.clone()).collect();
         if parts.is_empty() {
             return Admission {
                 admitted: Vec::new(),
                 refused: false,
+                by_limit: false,
                 generation,
             };
         }
         match work {
             Work::Live => {
                 let mut running = state.total;
-                let mut blocked = false;
+                let mut blocked = behind;
+                let mut by_limit = false;
                 let mut admitted = Vec::with_capacity(parts.len());
                 for (index, estimate) in parts {
                     let live = state.live_by(index);
@@ -395,6 +418,7 @@ impl Budget {
                         // The oldest refused by the limit keeps younger
                         // indexes that hold live bytes from taking room by it.
                         blocked = true;
+                        by_limit = true;
                         false
                     };
                     if fits {
@@ -406,6 +430,7 @@ impl Budget {
                 Admission {
                     admitted,
                     refused,
+                    by_limit,
                     generation,
                 }
             }
@@ -414,11 +439,13 @@ impl Budget {
                 // Rule 4, then rules 2 and 1: backfill as on `main`, whichever
                 // indexes it walks.
                 let fits = state.backfill == 0
-                    || (state.backfill.saturating_add(estimate) <= self.limit / 2
+                    || (!behind
+                        && state.backfill.saturating_add(estimate) <= self.limit / 2
                         && state.total.saturating_add(estimate) <= self.limit);
                 Admission {
                     admitted: if fits { all() } else { Vec::new() },
                     refused: !fits,
+                    by_limit: !fits,
                     generation,
                 }
             }
@@ -434,10 +461,27 @@ impl Budget {
         work: Work,
         parts: &[(IndexName, usize)],
     ) -> Result<Vec<Reservation>, u64> {
+        self.reserve_behind(work, parts, false)
+            .map_err(|refusal| refusal.generation)
+    }
+
+    /// [`reserve`](Self::reserve) for a waiter behind an older one: with
+    /// `behind`, it takes no room by the limit (rules 1 and 2), so only rule
+    /// 5 (live) or 4 (backfill) can grant it, and small batches can't starve
+    /// the larger one ahead. The refusal says whether the limit refused it.
+    pub fn reserve_behind(
+        self: &Arc<Self>,
+        work: Work,
+        parts: &[(IndexName, usize)],
+        behind: bool,
+    ) -> Result<Vec<Reservation>, Refusal> {
         let mut state = self.state();
-        let admission = self.decide(&state, work, parts);
+        let admission = self.decide(&state, work, parts, behind);
         if admission.refused {
-            return Err(admission.generation);
+            return Err(Refusal {
+                generation: admission.generation,
+                by_limit: admission.by_limit,
+            });
         }
         Ok(parts
             .iter()
