@@ -31,13 +31,8 @@ fn primary() -> SinkName {
     SinkName::try_new("primary").unwrap()
 }
 
-fn commit(changes: usize, envelopes: usize) -> CommitStats {
-    CommitStats::new(
-        envelopes,
-        changes,
-        Duration::from_millis(5),
-        crate::Work::Live,
-    )
+fn commit(envelopes: usize) -> CommitStats {
+    CommitStats::new(envelopes, Duration::from_millis(5), crate::Work::Live)
 }
 
 /// A status over `users` on `sinks` that reads each sink's committed count
@@ -112,7 +107,7 @@ fn observer_drives_status_through_its_lifecycle() {
         3,
         "built but not yet committed by the sink"
     );
-    observer.on_batch_committed(&primary(), commit(3, 2));
+    observer.on_batch_committed(&primary(), commit(2));
     progress.applied(&lane, key);
     observer.on_slot_lag(4096);
 
@@ -304,7 +299,7 @@ fn status_tracks_each_sink_separately() {
     let on_audit = ::stream::LaneKey::new(users(), audit.clone());
     let lanes = [::stream::LaneKey::new(users(), primary()), on_audit.clone()];
     let key = read_and_route(&observer, &progress, &lanes, 2);
-    observer.on_batch_committed(&audit, commit(2, 2));
+    observer.on_batch_committed(&audit, commit(2));
     progress.applied(&on_audit, key);
     assert_eq!(
         status.in_flight(),

@@ -6,8 +6,8 @@
 //! use kernel::Position;
 //! use stream::{Batch, ItemKey, LaneItem, Ticket};
 //!
-//! let live = LaneItem::Batch(Batch { key: Some(ItemKey::new(0)), position: Some(Position::new(7)), changes: 3, envelopes: Vec::new().into(), hold: Default::default(), walked: None, ticket: None });
-//! let snapshot = LaneItem::Batch(Batch { key: None, position: None, changes: 0, envelopes: Vec::new().into(), hold: Default::default(), walked: None, ticket: Some(Ticket::new(1)) });
+//! let live = LaneItem::Batch(Batch { key: Some(ItemKey::new(0)), position: Some(Position::new(7)), envelopes: Vec::new().into(), hold: Default::default(), walked: None, ticket: None });
+//! let snapshot = LaneItem::Batch(Batch { key: None, position: None, envelopes: Vec::new().into(), hold: Default::default(), walked: None, ticket: Some(Ticket::new(1)) });
 //! assert_eq!(live.position(), Some(Position::new(7)));
 //! assert_eq!(live.key(), Some(ItemKey::new(0)));
 //! assert_eq!(snapshot.position(), None, "snapshot rows carry no position");
@@ -79,10 +79,6 @@ pub struct Batch {
     /// The position of the last change in the batch; `None` for snapshot rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<Position>,
-    /// How many source changes the batch was built from, for progress
-    /// accounting; `0` for a snapshot batch.
-    #[serde(default)]
-    pub changes: usize,
     /// The documents, in build order.
     pub envelopes: Arc<[Envelope]>,
     /// What keeps the batch's documents counted against the producer's

@@ -260,7 +260,6 @@ async fn a_live_item_without_a_key_fails_the_sink_engine() {
         .publish(LaneItem::Batch(stream::Batch {
             key: None,
             position: Some(Position::new(3)),
-            changes: 1,
             envelopes: Vec::new().into(),
             hold: Default::default(),
             walked: None,

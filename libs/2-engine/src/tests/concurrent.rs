@@ -550,7 +550,6 @@ impl Rig {
                 .publish(LaneItem::Batch(Batch {
                     key: Some(stream::ItemKey::new(position.seq)),
                     position: Some(position),
-                    changes: 1,
                     envelopes,
                     hold: Default::default(),
                     walked: None,
@@ -582,7 +581,6 @@ impl Rig {
                 .publish(LaneItem::Batch(Batch {
                     key: None,
                     position: None,
-                    changes: 0,
                     envelopes,
                     hold: Default::default(),
                     walked: None,
@@ -1228,7 +1226,6 @@ async fn a_failed_acknowledgement_still_waits_for_the_writes_in_flight() {
         lane.publish(LaneItem::Batch(Batch {
             key: Some(stream::ItemKey::new(position)),
             position: Some(Position::new(position)),
-            changes: 1,
             envelopes,
             hold: Default::default(),
             walked: None,

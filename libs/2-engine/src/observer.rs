@@ -60,17 +60,14 @@ pub struct BuildStats {
 }
 
 /// What one sink engine committed: the batch's envelopes applied and flushed,
-/// how many source changes that batch covered, and the flush duration.
+/// and the flush duration. How many changes a sink has committed is
+/// [`Progress::committed`](crate::Progress::committed), not a sum of these.
 /// Built with [`CommitStats::new`]; more fields may come.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct CommitStats {
     /// Envelopes applied to the sink in this batch.
     pub envelopes: usize,
-    /// Source changes the live batch covered, on the sink's first item of
-    /// it; `0` on its other items and for a snapshot batch. Not when they
-    /// count as committed: that is [`Progress::committed`](crate::Progress::committed).
-    pub changes: usize,
     /// How long the flush took.
     pub flush: Duration,
     /// Live changes or a backfill.
@@ -80,12 +77,11 @@ pub struct CommitStats {
 }
 
 impl CommitStats {
-    /// A commit of `envelopes` covering `changes` source changes, flushed in
-    /// `flush`, for `work`, with no byte count.
-    pub fn new(envelopes: usize, changes: usize, flush: Duration, work: Work) -> Self {
+    /// A commit of `envelopes`, flushed in `flush`, for `work`, with no
+    /// byte count.
+    pub fn new(envelopes: usize, flush: Duration, work: Work) -> Self {
         Self {
             envelopes,
-            changes,
             flush,
             work,
             bytes: None,

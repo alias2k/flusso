@@ -961,7 +961,6 @@ mod tests {
                 let item = stream::LaneItem::Batch(stream::Batch {
                     key: Some(stream::ItemKey::new(position)),
                     position: Some(kernel::Position::new(position)),
-                    changes: 1,
                     envelopes: Vec::new().into(),
                     hold: Default::default(),
                     walked: None,

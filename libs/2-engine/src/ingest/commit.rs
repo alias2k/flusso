@@ -353,12 +353,11 @@ impl IngestEngine {
         // One item per lane of an index the batch built something for: the
         // envelopes of that index, in build order, under the index's next key
         // (the same on each of its lanes; lanes are ordered by index, so an
-        // index's lanes are adjacent). A sink's first item carries the batch's
-        // changes. Every lane, with an item or not, is registered with the
-        // batch's step: what a sink's committed count follows.
+        // index's lanes are adjacent). Every lane, with an item or not, is
+        // registered with the batch's step: what a sink's committed count
+        // follows.
         let mut by_lane: Vec<Item<'_>> = Vec::new();
         let mut skipped: Vec<&LaneKey> = Vec::new();
-        let mut counted: Vec<&SinkName> = Vec::new();
         let mut keyed: Option<(&IndexName, ItemKey)> = None;
         let groups = group_by_index(envelopes);
         for (lane, producer) in lanes {
@@ -375,10 +374,6 @@ impl IngestEngine {
                             item_key
                         }
                     };
-                    let first = !counted.contains(&&lane.sink);
-                    if first {
-                        counted.push(&lane.sink);
-                    }
                     // Every document of the batch came from one of its
                     // takes, so its index has a pending build to register
                     // under; an item without one would land unregistered.
@@ -394,7 +389,6 @@ impl IngestEngine {
                         LaneItem::Batch(Batch {
                             key: Some(item_key),
                             position: Some(position),
-                            changes: if first { changes } else { 0 },
                             envelopes: Arc::clone(envelopes),
                             hold: hold.clone(),
                             walked: None,
@@ -462,7 +456,6 @@ impl IngestEngine {
                     LaneItem::Batch(Batch {
                         key: None,
                         position: None,
-                        changes: 0,
                         envelopes: Arc::clone(envelopes),
                         hold: hold.clone(),
                         walked: marks.get(index).cloned(),

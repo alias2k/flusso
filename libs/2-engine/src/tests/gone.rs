@@ -740,7 +740,6 @@ impl Lane {
             .publish(LaneItem::Batch(Batch {
                 key: None,
                 position: None,
-                changes: 0,
                 envelopes: envelopes.into(),
                 hold: Default::default(),
                 walked: Some(stream::WalkMark::new(format!("{last:04}"))),
@@ -1139,7 +1138,6 @@ impl Pair {
             .publish(LaneItem::Batch(Batch {
                 key: None,
                 position: None,
-                changes: 0,
                 envelopes: vec![Envelope::upsert(
                     index.clone(),
                     id,

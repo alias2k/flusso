@@ -1441,7 +1441,6 @@ impl PositionRig {
             .publish(stream::LaneItem::Batch(stream::Batch {
                 key: position.map(stream::ItemKey::new),
                 position: position.map(Position::new),
-                changes: 1,
                 envelopes: Vec::new().into(),
                 hold: Default::default(),
                 walked: None,

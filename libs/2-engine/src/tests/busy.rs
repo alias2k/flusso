@@ -216,7 +216,6 @@ fn item(position: u64, ids: &[&str]) -> stream::LaneItem {
     stream::LaneItem::Batch(stream::Batch {
         key: Some(stream::ItemKey::new(position)),
         position: Some(Position::new(position)),
-        changes: 1,
         envelopes: envelopes.into(),
         hold: Default::default(),
         walked: None,

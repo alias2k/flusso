@@ -246,7 +246,6 @@ struct Part {
     lane: usize,
     key: Option<ItemKey>,
     position: Option<Position>,
-    changes: usize,
     documents: Documents,
     seq: u64,
     /// The item itself, put back in the window if its lane parks.
@@ -1056,7 +1055,6 @@ impl<'a> Run<'a> {
                         lane,
                         key: batch.key,
                         position: batch.position,
-                        changes: batch.changes,
                         documents,
                         seq,
                         batch,
@@ -1619,10 +1617,9 @@ impl<'a> Run<'a> {
                 .iter()
                 .map(|part| part.documents.envelopes.len())
                 .sum();
-            let changes = landed_parts.iter().map(|part| part.changes).sum();
             self.engine.observer.on_batch_committed(
                 &self.engine.name,
-                CommitStats::new(envelopes, changes, landed.took, flight.work).sent(report.bytes),
+                CommitStats::new(envelopes, landed.took, flight.work).sent(report.bytes),
             );
         }
         let written: Vec<(LaneKey, ItemKey)> = landed_parts
