@@ -248,165 +248,71 @@ halts the task's grants, publishes nothing after the failed slot, and fails the 
 permit shared by every walk (one page read at a time, as `main`); the builder pool stays `builds + 1`
 plus the resolver. Raising it to several pages is a later, measured change (pool grows by as much).
 
-**Budget**, from one reserver to many:
+**Budget**, from one reserver to many. **Built in slice 4** (as built, below the plan it replaced):
 
-| Today | 8a |
+| Before | Slice 4 |
 | --- | --- |
-| check then add, "only the ingest engine reserves" | one compare-and-swap loop (or a lock): N tasks never pass the limit together |
-| `want_release` + `notify_one`: one waiter | `Notified::enable()` before the check, `notify_waiters()` on a release |
+| check then add, "only the ingest engine reserves" | every count under one lock: `Budget::admit` decides, `Budget::reserve` checks again and adds in one step, so N reservers never pass the limit together |
+| `want_release` + `notify_one`: one waiter | every release bumps a generation and calls `notify_waiters` after letting the lock go; a waiter passes its refusal's generation to `Budget::released_since`, which enables its `Notified` before reading the generation |
 | an estimate per kind | an estimate per index and kind |
-| rule 4 per kind | per index |
+| one charge per batch, on every lane | one charge per index of a batch, on that index's lanes only |
+| rule 4 per kind | per index, and per kind kept (rule 5) |
 
-**How the rules combine** (a build is granted when every rule allows it, or when rule 4 does):
+**What slices 2 and 3 changed about this slice.** The plan assumed a task per index, each reserving for
+its own batch. Until 6b one task builds one live batch across every index (slice 2's take), so:
+
+- **The budget is reserved per index inside one build.** A build reserves one part per index, settles each
+  part to that index's documents when it lands, and each index's charge rides only that index's lane items.
+  Per-index accounting is exact with one build covering several indexes; nothing waited for 6b.
+- **A live build takes the indexes that fit and defers the rest.** All-or-none per batch would let one
+  index at its share hold every other index's changes back, which is what the share exists to stop. A
+  deferred index's documents stay waiting, the live run keeps its position for a later grant, and the
+  deferred index's lanes get **nothing** from that build, not even its step (slice 3): a step registered on
+  a lane whose documents still wait would count those changes committed before they are built.
+- **The deferral needs a bound, and one task needs it now.** With one reader, a live run is closed only by a
+  grant; a run whose only documents are deferred would otherwise keep the reading stopped and the other
+  indexes with it. So a grant that takes nothing still closes a run that read changes (an empty build), and
+  reading goes on, which lets the deferred index's waiting set grow. It is bounded: an index may stay
+  deferred while it has fewer than `2 × max_changes` documents waiting (6a's default for
+  `max_waiting_per_index`, which the owner approved for 6a, brought forward as a constant); past that the
+  live batch waits whole and a full run stops the reading, as on `main`. With one index nothing is
+  deferred (`Builds::with_deferral(None)`): one index behaves exactly as before. 6a replaces the constant
+  with the `max_waiting_per_index` setting. **Owner to confirm** the constant until then.
+
+**How the rules combine** (a build is granted when every rule allows it, or when rule 4 or 5 does):
 
 | Rule | Bound |
 | --- | --- |
 | 1 | everything held ≤ `max_built_mib` |
-| 2 | one index ≤ half (with two or more indexes, decision (b)5) |
+| 2 | one index ≤ `index_budget_share` of it (default half), with two or more indexes with lanes (decision (b)5) |
 | 3 | backfill over every index ≤ half |
 | 4 | an index holding nothing gets one batch, whatever 1–3 say |
+| 5 | a kind holding nothing gets one batch: live then takes every index waiting, at its share or not ("live always fits once it holds no live bytes") |
 
-- **A's backfill parked:** A holds up to half, which is all of backfill's half (rules 2, 3). B's
-  backfill then runs one batch at a time, by rule 4 alone (ADR §5's table accepts it: "slower, no
-  deadlock"). B's live builds keep the other half.
-- **N indexes** each past the limit by one batch at most (rule 4): the bound is `max_built_mib` plus
-  one batch per index (ADR §5).
-- **A parked lane** keeps its charges (stage 9 §3): its index reaches its half and stops building on
-  every sink; under 6b's lead exemption the others go on. Stage 9 §6's `Charge::forget` comes after 8a.
-
-### 3.6 Changes committed
-
-**Status: built in slice 3** (owner's decision, 2026-11-20: option 1 below, the `Progress`
-definition now). A change is committed for a sink once **every lane of that sink has landed it, or
-had nothing for it**, with every change read before it. The owner accepted that a stalled index makes
-its sink's `changes_in_flight` grow for all of that sink's indexes: the count follows the oldest
-unlanded change, as confirmation does.
-
-**What `main` did** (since stage 7's one lane per `(index, sink)`):
-
-- A live batch's change count rode on the **first** item of each sink, in lane order (the
-  lowest index name that got a document: `commit.rs`'s `changes: if first { changes } else { 0 }`),
-  and was credited when **that item landed** (`on_batch_committed`, summed over a merged write's parts).
-- A sink that got no item from the batch was credited **at publish** (`on_changes_settled`), before it
-  had landed anything of it or anything earlier.
-- Read by `/status` (`sinks.<s>.changes_committed`, `changes_in_flight` = captured − committed, and the
-  top-level slowest), `flusso.changes.committed` / `flusso.changes.in_flight`, the stop's deadline
-  message (`shutdown.rs`: sinks with changes in flight), and `dev/bench`'s `wait_drained` (a burst is
-  drained when every sink's `changes_in_flight` is 0).
-
-**Why it has to come from `Progress`:** once several tasks publish (6b), a live run's changes touch
-several indexes whose batches are built and published separately, so no single item can carry the
-count.
-
-**Which moments moved** (each later than on `main`, never earlier; the totals end equal to the
-changes read once everything lands):
-
-| Case | `main` credited | Now | Test (`daemon` `tests::committed`) |
-| --- | --- | --- | --- |
-| a batch with items on two or more lanes of a sink | when the first lane's item lands | when every lane's item lands | `a_change_counts_once_every_lane_of_the_sink_landed_it` |
-| a batch with no item for a sink | at publish | when that sink's lanes have landed every earlier item | `a_change_with_nothing_for_a_sink_counts_after_its_earlier_changes` |
-| an earlier item still out on another lane of the sink (a slow or stalled index) | later batches still credited as their first item lands | nothing past it until it lands | `a_stalled_lane_holds_its_sinks_count_for_other_indexes` |
-| a sink engine restart redelivers an item that had landed | credited again (counts could pass captured; `changes_in_flight` saturated at 0) | once | `a_redelivered_item_that_had_landed_counts_once` |
-| an ingest engine run ends with changes read and never published; the source replays them | never credited: `changes_in_flight` stayed above 0 for the life of the process | both reads count, once the replay lands | `every_change_read_counts_once_per_sink_across_a_replay`, `failed_ingest_engine_restarts_and_resumes_the_stream` (expectation 2 → 3, in flight 0) |
-
-**The design as built** (`libs/2-engine/src/progress.rs`, module doc "How many changes a sink has
-committed"):
-
-- `Progress` counts every live change read (`change_read`, beside `on_change_captured` in
-  `buffer_live`) and closes a **`Step`** at each live grant (`close_step`, in `start_live`): the step
-  holds every change read since the previous one and records the read total. Every lane of the grant's
-  build is registered with the step, with an item (`published_build`) or without
-  (`skipped_build`, which also takes the index with no pending build), an empty build included.
-- A step carries its read total. A lane keeps the steps routed to it that can still answer: it has
-  committed the newest one whose items it has all landed, and a sink's count is the read total at the
-  oldest step its lanes have committed. There is no list shared by the lanes.
-- **The bound** (review round 1: a parked lane let steps pile up, about 24 bytes per grant, and one
-  parked lane stopped the pruning for every sink). A lane drops the steps before the one it has
-  committed whenever a step is registered on it, and a skipped step replaces the lane's newest entry
-  (steps reach a lane in order, so whenever that entry could answer the skip answers too). Items land
-  in key order, so past the front every entry was pushed by one of the lane's `k` unlanded items: **a lane keeps at most `k + 2` steps, however
-  many grants pass it**, and `k` is bounded by the lane's capacity. A lane parked on its first item
-  keeps at most 2. `Progress::steps_kept` reports it, with the lane's unlanded items, under one lock (the delta re-check showed the "no unlanded item at or after it" condition on the replacement was never needed: a skip always replaces the newest entry, which tightened the bound from `2k + 2`). Guards: `progress::tests::parked` (10,000 grants
-  past a lane parked on its first item, after landing, and with five unlanded items: the bound holds
-  after every grant and the count is the total read once the lane lands), the daemon's
-  `a_{refused,blocked,restaging}_lane_holds_its_sinks_count_and_a_sibling_counts_on` (200 grants
-  past the lane on a real daemon, the bound on every lane, every read counted once it is written
-  again), and `compaction_changes_no_count` (seeded random grants, skips, landings and ended runs over
-  two indexes on two sinks: every count equals a model that keeps every step). All seven fail with
-  the record appending every step.
-- **The cost of a read.** `Progress::committed(sink)` takes the registry lock (the one the ingest
-  engine takes per lane registration and confirmation and fences read under) and walks every lane of
-  the deployment, keeping the sink's: per lane it drops landed items (amortized, as `landed()` does),
-  finds its first unlanded item's step and pops the steps before it, constant work in the usual case.
-  `/status` reads it once per sink (`indexes × sinks` lane visits per sink); `/metrics` twice per
-  sink (`flusso.changes.committed`, and `flusso.changes.in_flight` through `in_flight_for`). The lock
-  is held for that walk alone.
-- **Per read, not per position.** A source that replays under the positions it had (the position
-  contract, #439) reads a change twice; each read is counted once per sink, when the sink lands that
-  read's own step. A sink that had landed the first read counted it then and counts the replay when
-  that lands; one that hadn't counts the first read when its own (redelivered) item lands, never
-  before. `progress::tests::committed::a_replayed_change_counts_once_per_read_on_each_sink`.
-- **Reads an engine run never granted** close a step at the next run's start (`forget_all`) that no
-  lane is routed: they count with the next step routed, once it lands
-  (`reads_of_an_ended_run_count_with_the_next_step_routed`).
-- **Notification:** nothing listens to the count. `/status`, the metric callbacks, the stop's deadline
-  message and `wait_drained` all read it when they need it, so there is no wake-up to send.
-- 6a moves `close_step` into the reader with its live runs: a step is a run's changes.
-
-**Each case, answered:**
-
-- **Parked (refused), blocked, restaging lane:** holds its sink's count (nothing past its oldest
-  unlanded item), a sibling sink counts on. `a_{refused,blocked,restaging}_lane_holds_its_sinks_count_and_a_sibling_counts_on`.
-- **`on_error = "skip"`** (every document of a change failed): the lane is registered as skipped; the
-  change counts once the sink landed what came before. `a_change_whose_documents_were_all_skipped_still_counts`.
-- **`backfill = false` sink:** counts live changes like any sink (it skips snapshots, which carry no
-  step). `drives_changes_through_injected_backends` (committed 2 on both sinks).
-- **Empty batch** (touched no document any lane gets): a step skipped on every lane; counts after the
-  sink's earlier items. `a_change_that_builds_nothing_settles_after_the_batch_before_it` (engine).
-- **Graceful stop:** every sink that landed everything ends at `changes_in_flight` 0
-  (`a_graceful_stop_ends_with_nothing_in_flight_on_any_sink`); the deadline message reads the same
-  field, so it names a sink exactly while some lane of it is behind.
-
-**What moved for users and benchmarks:** `changes_committed` rises later and in read order,
-`changes_in_flight` stays above 0 until a sink has every document, and no longer sticks above 0 after
-an ingest engine restart; `flusso.changes.committed` is an observable counter read from the status
-(same name and label; the Prometheus name stays `flusso_changes_committed_total`). `dev/bench`'s
-`wait_drained` keeps reading `changes_in_flight`, so `drain_changes_per_s` steps once at this merge:
-its points carry `extra.images.drain = "every-lane-landed"` and `bench-regression.py` restarts the
-window as for an image change (the rule unchanged). The latency probes poll OpenSearch and don't read
-the counter.
-
-**Options the owner chose from:** (1) build the `Progress` definition now: taken; (2) keep `main`'s
-moments in `Progress` until 6b; (3) leave the counter until 6b.
-
-### 3.7 Run lifecycle
-
-**The stop barrier.** An index task may return from a stop or a live end only once the reader has
-**ended** (its signal) and the task's pending set is empty. Otherwise a task could see its set empty
-and return while the reader, finishing its last run, still marks an id there that nobody then builds:
-`drain_lanes` only checks the lanes (`stop.rs`), the close confirms short of it, the process exits 0
-and the restart rewrites landed documents.
-
-| Event | Reader | Index tasks | Engine |
-| --- | --- | --- | --- |
-| start | — | `give_back` every in-flight token (idempotent) | `prepare`, open live, spawn reader, dispatcher and tasks in a `JoinSet` (aborted with the engine) |
-| live stream ends | marks its last run, signals, returns the stream | after the signal: build every pending id, serve queued requests, then return | `Ok` once every task returned with the request lane empty (`main`'s rule) |
-| stop (#371) | reads nothing more, marks its last run, signals, returns the stream; dispatcher takes no request | abandon the walk (deliveries dropped, redelivered next start); after the signal: finish running builds, build and publish every pending id (at most the lead, §3.1), return | join every task, `drain_lanes`, `close_live` on the returned stream, poll it to its end (unchanged) |
-| index task fails (slices 6a–7) | — | the others are aborted | `Err`; the daemon restarts the engine with `[backoff]`, as `main` |
-| index task fails (slice 8) | goes on | that task alone: give back, its own `Backoff`, restart; its dropped requests come back through the lane | — |
-| task panics | — | a `JoinSet` error = a failed task | as above |
-
-**What a stop costs**, against `main`: `main` builds one batch and finishes `2 × builds` slots. 8a
-builds at most the lead (2,048 ids at defaults over every index, 512 per index) plus one run, and
-finishes the slots in flight: a few batches more, well inside `--shutdown-timeout-secs` (30 s) at any
-realistic build rate. ADR question 7's "leave them for replay" is reversed (recorded in the ADR).
-
-### 3.8 Observability
-
-- `on_stage`: the reader reports `Resolve` and `Idle` with no index; an index task `Build`, `Publish`,
-  `LaneWait`, `Page`, `Snapshot`, `Idle` with its index.
-- Per index: ids waiting (the backlog) and its oldest's age, ids building, builds running, held bytes.
-  Deployment: reader waits, by bound. Names: decision (b)4.
+- **Order and starvation.** A live batch's indexes are offered oldest waiting first (by their oldest waiting
+  position). An index refused by its own share doesn't hold others back. The first index refused by the
+  limit (rule 1) stops every younger one from taking room by the limit; they still get rule 4. So a stream
+  of small batches can't starve a large one: room accumulates until the oldest fits, or it drains to
+  nothing and rule 4 grants it.
+- **No deadlock between an index at its share and the limit.** An index at its share holds bytes, which
+  come back when its lanes acknowledge; meanwhile rule 4 and 5 keep every index holding nothing, and live
+  holding nothing, able to build. A parked lane keeps its index at its share for as long as it is parked;
+  the other indexes build on (rules 2 and 4).
+- **A backfill batch spanning two indexes** (a page ends one index's walk and starts the next) fits whole or
+  not at all.
+- **The bound** is `max_built_mib` plus each in-flight build's actual batch and one batch per index (rule 4);
+  one index holds its share plus at most a batch per build and one more (rule 5).
+- **Which indexes share.** The indexes with lanes (`mappings`): an index with no lane never builds and holds
+  nothing. Lanes per index don't matter: a batch's part is counted once, however many lanes carry it. A
+  backfill or reindex of one index draws on that index's share and backfill's half; the share is a fixed
+  fraction of the limit, not divided by how many indexes have work.
+- **Every byte back once.** A part's reservation gives its estimate back when dropped unsettled (a failed or
+  aborted build, a stop, an engine run ending, a dropped future: the `Builds` slots are dropped with it);
+  a settled charge when the last copy of its index's items drops. `Budget`'s `Drop` asserts nothing is
+  counted, per index too, in every debug test.
+- **Operable without per-index metrics.** `flusso.memory.*` and `/status`'s `memory` keep their meaning
+  (totals per kind). An index held at its share shows as its backlog pinning confirmation
+  (`pinned_by: {"index": …}`, slice 2) and as live budget waits; bytes per index wait for slice 7.
 
 ## 4. Guarantees
 
@@ -429,7 +335,7 @@ realistic build rate. ADR question 7's "leave them for replay" is reversed (reco
 | A lone change commits at once (#135) | `main`'s run cut; a waiting id is taken once a slot is free | `a_lone_change_on_a_quiet_stream_commits_without_waiting`, `max_delay_caps_a_batch_while_changes_keep_arriving` | — (rerun on the reader) |
 | Script failures on the ingest side (#198) | in the index task | `skip_policy_leaves_a_failed_document_out_and_keeps_going`, `stop_policy_fails_the_ingest_engine_on_a_failed_document` | slice 8: `a_stop_failure_on_one_index_lets_the_others_land` |
 | Item-level vs flush-wide; lane parking | sink side unchanged | `tests::parking`, `tests::merge`, daemon `a_stop_rejection_halts_its_lane_writing_several_items_at_once` | `a_parked_lane_fills_only_its_index_half_and_other_backfills_go_one_batch_at_a_time` |
-| Memory budget | many reservers; rules 1–4 per §3.5 | `random_schedules_under_a_tiny_budget_stay_within_it_and_finish`, `live_keeps_room_beside_a_backfill_holding_its_half`, `a_batch_bigger_than_the_budget_still_builds` | `concurrent_reservations_never_pass_the_limit`, `a_release_wakes_every_waiting_task`, `an_index_holding_nothing_gets_one_batch` |
+| Memory budget | many reservers; rules 1–5 per §3.5 (slice 4) | `random_schedules_under_a_tiny_budget_stay_within_it_and_finish`, `live_keeps_room_beside_a_backfill_holding_its_half`, `a_batch_bigger_than_the_budget_still_builds` | `budget::tests` (`concurrent_reservations_never_pass_the_limit`, `a_release_wakes_every_waiting_task`, `a_release_between_the_refusal_and_the_wait_is_not_lost`, `an_index_holding_nothing_gets_one_batch`, `the_oldest_index_refused_by_the_limit_holds_younger_ones_back`, `every_index_gets_every_byte_back_once`), `one_bursting_index_of_three_holds_its_share_and_the_others_build`, `a_deferred_index_is_never_counted_committed_before_its_documents_land`, `an_index_past_its_waiting_bound_holds_the_live_batch_whole`, `random_schedules_over_three_indexes_with_one_bursting_stay_within_their_shares` |
 | Gate fairness | lines per kind; budget asked at grant | `gate::tests` | `a_task_blocked_on_a_full_lane_holds_no_permit` (two indexes, one lane full, `builds = 1`), `a_waiter_refused_by_the_budget_keeps_its_place` |
 | `changes_committed` | computed from `Progress` (§3.6) | daemon status tests | daemon `tests::committed`, `progress::tests::committed` |
 | Resume checkpoints (8b), reindex per sink | the walk and its marks move as they are | `tests::resume`, `a_killed_backfill_resumes_…` e2e, `reindex_control_stages_and_requests_a_snapshot_without_restarting`, `reindex_operation_targets_one_sink` | — |
@@ -445,7 +351,7 @@ lines; the manual is written by the documentation agent before its PR is ready.
 | 1 | **Item keys.** `Batch.key`, a key counter per index in `Progress`; `Progress` and the sink's `Fences` keyed by it. One task. | `progress::tests` on keys; `a_key_survives_an_ingest_restart` | nothing in behaviour; `live_drain_held` |
 | 2 | **Pending sets in `Progress`, one task**, and the stall/pin attribution. The one task marks a run, then takes **across every index's set into one build**, as `main`'s batch spans indexes, published per lane. `newest`/`skipped` go. | pending unit tests (dedup, mark in flight, give back, the minimum, `(seq, counter)` order); the model test; `a_healthy_lane_is_not_stalled_by_its_index_backlog` | confirmation or fences early: model test, `fence` e2e, `wal_release`; lock cost: `live_drain_held` |
 | 3 | **Changes committed from `Progress`** (§3.6, owner's option 1): every lane of a sink landed it, or had nothing for it. Moves when a change counts. One task. | daemon `tests::committed` (red on `main`), `progress::tests::committed` | `/status` and metric values; `drain_changes_per_s` steps once (window restarted) |
-| 4 | **Budget for many reservers, per index.** Rule 2 (`index_budget_share`) and rule 4 per index. Changes what a multi-index deployment holds: one index of three bursting holds at most half. | budget tests of §4 | a burst on one index of three (§7); the tiny-budget schedule |
+| 4 | **Budget for many reservers, per index** (§3.5, as built). Rule 2 (`index_budget_share`), rule 4 per index; a live build takes the indexes that fit and defers the rest, bounded at `2 × max_changes` waiting. Changes what a multi-index deployment holds: one index of three bursting holds at most its share, the others keep building. One task. | budget tests of §4 | a burst on one index of three (§7); the tiny-budget schedule, and its three-index variant |
 | 5 | **Gate with lines** (budget asked at grant), the key-page permit. After 4 (both touch `builds.rs`). One task. | gate tests of §4 | `snapshot/rows` at `builds = 1` and 4 |
 | 6a | **Reader task + one builder task** over every pending set, the **lead bound** (`max_waiting_per_index`, `max_waiting`), the stop barrier, the stream handed back. No independence yet; `main`'s pacing. | `the_reader_waits_at_the_lead_and_resumes`, `a_stop_mid_run_builds_what_the_reader_marked_last`, `a_stop_with_many_pending_ids_finishes_within_the_deadline`, `an_id_of_an_index_without_lanes_pins_nothing` | the hop and the locks: the full in-process suite, `shutdown` e2e, the end measurements |
 | 6b | **Per-index tasks, dispatcher, per-index walks and coalescing**, the held-index exemption and `max_pending_documents`. | the independence tests; `indexes_walk_at_once`; `a_task_blocked_on_a_full_lane_holds_no_permit`; the seeded schedule over three indexes | everything; the end measurements |
@@ -545,7 +451,7 @@ no sense is refused at start, naming where it came from, as `[backoff]` is (`dae
 | `max_waiting_per_index` (`--max-waiting-per-index` / `FLUSSO_MAX_WAITING_PER_INDEX`) | `2 × [batch] max_changes` | 0 | 6a |
 | `max_waiting` (`--max-waiting` / `FLUSSO_MAX_WAITING`) | `2 × builds × max_changes` | 0, or below `max_waiting_per_index` (as set or derived) | 6a |
 | `max_pending_documents` (`--max-pending-documents` / `FLUSSO_MAX_PENDING_DOCUMENTS`) | 1,000,000 | 0, or below `max_waiting` | 6b |
-| `index_budget_share` (`--index-budget-share` / `FLUSSO_INDEX_BUDGET_SHARE`) | 0.5 | outside (0, 1], or not a number | 4 |
+| `index_budget_share` (`--index-budget-share` / `FLUSSO_INDEX_BUDGET_SHARE`) | 0.5 | outside (0, 1] (`nan` too), or not a number; a whole `1` is taken | 4 (built) |
 
 - The two `max_waiting` keys are the reader's lead (§3.1); they also cap what a stop builds.
 - `index_budget_share` is rule 2's fraction of `max_built_mib`. Decision 5 stands: with one enabled
