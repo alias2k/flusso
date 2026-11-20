@@ -9,10 +9,11 @@
 - **The retry wait is configurable**: `[backoff]` sets the first and the longest wait of every restart and probe: [Retry timing is configurable](#retry-timing-is-configurable).
 - **A generation deleted mid-backfill is backfilled again in full**, never seeded with rows missing; a cut-down OpenSearch role needs to read index settings (#428): [A generation deleted mid-backfill](#a-generation-deleted-mid-backfill).
 - **`pinned_by` can name an index alone**, with `sink` null in `/status` and no `sink` label on `flusso_slot_pinned_by`: [An index's backlog can pin the slot](#an-indexs-backlog-can-pin-the-slot).
+- **A sink's committed count waits for every index**: `changes_committed` and `flusso_changes_committed_total` count a change once every lane of the sink has written it, so one slow index holds `changes_in_flight` for the whole sink: [Committed means written on every index](#committed-means-written-on-every-index).
 
 **Code that embeds the crates**
 
-- **New lane-health API, `EngineError::DocumentsRejected` removed, order per index for an ordered sink, `DaemonOptions::max_restart_backoff` replaced by `[backoff]`, `Sink::ensure_index` returns `Ensured`, backfill items carry a `Ticket`, `pinned_by` answers an `engine::Pin`**: [For code embedding the crates](#for-code-embedding-the-crates).
+- **New lane-health API, `EngineError::DocumentsRejected` removed, order per index for an ordered sink, `DaemonOptions::max_restart_backoff` replaced by `[backoff]`, `Sink::ensure_index` returns `Ensured`, backfill items carry a `Ticket`, `pinned_by` answers an `engine::Pin`, `Observer::on_changes_settled` removed**: [For code embedding the crates](#for-code-embedding-the-crates).
 
 ## One index's failure parks its own lane
 
@@ -125,6 +126,27 @@ The backlog form shows up for a moment during live builds. One that stays means 
    max by (index) (flusso_slot_pinned_by{sink=""} * on () group_left max(flusso_replication_slot_lag_bytes))
    ```
 
+## Committed means written on every index
+
+**What changed.** A sink's committed count follows its slowest index. A change counts for a sink once **every lane** of it (one per index) has written it, or had nothing to write for it, and every change read before it counts too. In 0.18 a change could count while some of its documents were still unwritten on that sink.
+
+| | 0.18 | 0.19 |
+| --- | --- | --- |
+| A change counts as committed | when the sink wrote its first item of the batch; other indexes of the sink could still be behind | once every lane of the sink has written it, in read order |
+| `changes_in_flight` at `0` | could hide an index still behind | everything read is written on that sink |
+| One stalled or [parked](#one-indexs-failure-parks-its-own-lane) index | the count could keep rising | the sink's count stops there, for all its indexes |
+| A redelivered batch that had already landed | counted twice | counted once; the count never passes `changes_captured` |
+| After an ingest engine restart | the failed run's change was never counted: `changes_in_flight` stayed above `0` for good | back to `0` once everything lands |
+
+It applies to `/status` (`changes_in_flight`, and `sinks.<sink>.changes_committed` and `changes_in_flight`) and to `flusso_changes_committed_total` and `flusso_changes_in_flight`. Names and labels are unchanged; [HTTP endpoints](../reference/http.md#get-status) and [Metrics](../reference/metrics.md) have the definitions. The stop's deadline message names a sink while any of its lanes is behind.
+
+**Who is affected.**
+
+- An alert or dashboard on `changes_in_flight` or `rate(flusso_changes_committed_total)`: on a sink with one slow index it may fire earlier, or for longer, than in 0.18.
+- Anything that waits for `changes_in_flight` to reach `0` (a deploy script, a test): it now waits until everything read is written on every index.
+
+**What to do.** Nothing in configuration. Review the thresholds of alerts on these series. When a sink's count stays behind, its lanes say which index holds it: `outstanding`, `stall_seconds` and `health` under `sinks.<sink>.lanes.<index>` ([A lane is stalled](stalled-lane.md)).
+
 ## For code embedding the crates
 
 - **Removed:** `EngineError::DocumentsRejected` (a refusal no longer ends the run).
@@ -138,6 +160,9 @@ The backlog form shows up for a moment during live builds. One that stays means 
 - **`Sink::ensure_index`** returns `sink::Ensured { target: Option<TargetId>, created }` instead of `()` (build one with `Ensured::existing(target)` or `Ensured::created(target)`; it is `#[non_exhaustive]`). New `sink::TargetId` names a target; a sink that can tell its targets apart gives one created anew a new id. The default implementation names none.
 - **New: `SinkError::TargetChanged`.** `mark_seeded` answers it for a target that isn't the one `ensure_index` named; the engine then stages the index again and backfills it in full.
 - **`pinned_by` answers an `engine::Pin`** (re-exported as `daemon::Pin`): `Pin::Lane(LaneKey)` or `Pin::Backlog(IndexName)`. `Progress::pinned_by`, `Stalls::pinned_by` and the second half of `Status::stalls()` return `Option<Pin>` instead of `Option<LaneKey>`. `daemon::status::LaneId` is now `PinnedBy` (re-exported as `daemon::PinnedBy`), with `sink: Option<String>`. New `Progress::own_oldest(lane)`: the oldest change the lane holds itself, what its stall age is measured by.
+- **Removed: `Observer::on_changes_settled`.** A sink's committed count is no longer an event: read `Progress::committed(sink)`, or `daemon::Status::committed(sink)`. `CommitStats.changes` no longer adds to it.
+- **`Progress` counts committed changes by step.** New `engine::Step`, and `Progress::change_read`, `changes_read`, `close_step`, `committed`, `published_step` and `skipped_step`. `Progress::published_build` takes the build's `Step`; `skipped_build` takes an `Option<Token>` and a `Step`.
+- **`daemon::Status::with_progress`** is new: a `Status` built without it reports `0` committed for every sink, so all its captured changes read as in flight.
 - **New: `stream::Ticket`.** `Request::Backfill` gains `ticket`, `LaneItem::SnapshotComplete` gains `ticket`, and `Batch` gains `ticket: Option<Ticket>` (`None` on a live batch). Serialized items without them still read (`serde` defaults). Struct literals must set them.
 
 ## Related

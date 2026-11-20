@@ -105,7 +105,7 @@ The drain, in order:
 5. **Answer the fences.** An open [`/wait`](http.md#get-waitpositionposition) on `searchable` is held while a sink's refresh interval would still answer it within the deadline; then every wait still open is answered `503` "stopping".
 6. **Close**: the HTTP surfaces, then the telemetry flush, each given at most 5 s of what is left.
 
-`--shutdown-timeout-secs` (30 s) covers all of it. At the deadline flusso logs `shutdown deadline of <n>s passed while <step> (<sink>: <n> changes in flight, …)` and exits `1`. That is safe: a change no sink acknowledged was never confirmed to the slot, so the next start reads it again (at-least-once), and rebuilding a document gives the same document.
+`--shutdown-timeout-secs` (30 s) covers all of it. At the deadline flusso logs `shutdown deadline of <n>s passed while <step> (<sink>: <n> changes in flight, …)` and exits `1`. It names every sink with a lane still behind, its [`changes_in_flight`](http.md#get-status), and each of its lanes flusso doesn't write. That is safe: a change no sink acknowledged was never confirmed to the slot, so the next start reads it again (at-least-once), and rebuilding a document gives the same document.
 
 | Exit | Means |
 | --- | --- |

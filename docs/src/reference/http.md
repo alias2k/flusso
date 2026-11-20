@@ -30,7 +30,7 @@ The live status document as JSON: the deployment, then one block per sink.
 | `uptime_seconds` | int | Since the daemon started. A reindex does not restart anything. |
 | `indexes` | map of name to `pending` \| `backfilling` \| `seeded` | Per-index state across sinks: the least advanced sink's state. |
 | `changes_captured` | int | Changes the ingest engine pulled from the source. |
-| `changes_in_flight` | int | Captured minus committed by the slowest sink. |
+| `changes_in_flight` | int | Captured minus the slowest sink's `changes_committed`. `0` means every sink has written everything read. |
 | `documents_built` | int | Documents assembled by the ingest engine (once, however many sinks). |
 | `slot_lag_bytes` | int or null | Null until the first lag sample. |
 | `pinned_by` | object or null | What holds the replication slot back the most: whatever holds the oldest change not yet written. Two forms. **A lane**, `{ "index", "sink" }`: that index's oldest change on that sink. **An index's backlog**, `{ "index", "sink": null }`: documents of that index waiting to be built or being built, not yet handed to any sink. The backlog form shows up for a moment during live builds; one that stays means builds aren't keeping up ([A lane is stalled](../operate/stalled-lane.md#when-an-indexs-backlog-holds-the-slot)). On a tie the lane is named. Null while nothing is outstanding. |
@@ -46,8 +46,8 @@ The live status document as JSON: the deployment, then one block per sink.
 | `script_failures.<index>.last` | object | The most recent: `id`, `field` (path, e.g. `variants[2].gross`), `message`, `line` and `column` in the script (null without a position), `at` (RFC 3339). |
 | `sinks.<name>.phase` | `starting` \| `backfilling` \| `live` \| `failed` \| `stopped` | `failed` while the daemon waits to restart that sink engine; the others keep running. |
 | `sinks.<name>.indexes` | map of name to state | That sink's own view of each index. |
-| `sinks.<name>.changes_committed` | int | Changes whose batch this sink wrote and acked. |
-| `sinks.<name>.changes_in_flight` | int | Captured minus this sink's committed. |
+| `sinks.<name>.changes_committed` | int | Live changes this sink has written, counted in read order. A change counts once **every lane** of the sink (one per index) has written it, or had nothing to write for it, and every change read before it counts. A redelivered batch that had already landed counts once, so it never passes `changes_captured`. |
+| `sinks.<name>.changes_in_flight` | int | Captured minus this sink's committed. Above `0` while any lane of the sink is behind: one stalled or [parked](#lane-health) index holds the count for all the sink's indexes. `0` means everything read is written on this sink. |
 | `sinks.<name>.envelopes_applied` | int | Documents written to this sink. |
 | `sinks.<name>.batches` | int | |
 | `sinks.<name>.documents_quarantined` | int | Non-zero means data is being dropped under `on_error = "skip"`. |
