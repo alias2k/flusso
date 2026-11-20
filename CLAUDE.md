@@ -1187,11 +1187,13 @@ is the one concrete piece.
   from that build, not even its step, so nothing of them counts committed early. An index may stay
   deferred only while it has fewer than `2 × max_changes` documents waiting (`Builds::with_deferral`,
   only with a shared budget); past that the batch waits whole and a full run stops the reading, as with one
-  index. Rules (`budget.rs`'s module doc): 1 total ≤ limit, 2 an index ≤ its share, 3 backfill ≤ half,
-  4 an index holding nothing gets one batch (for live, one holding no live bytes: live keeps room beside
-  the index's own backfill, a reindex included), 5 a kind holding nothing gets one (live then takes every
-  index); a live wait (`flusso.memory.refused`/`wait`) lasts until no index is deferred, so one held index
-  is one refusal and one wait; indexes are offered oldest waiting first and the first refused by the limit stops younger ones
+  index. Rules (`budget.rs`'s module doc): 1 total ≤ limit, 2 backfill ≤ half, 3 an index's **live** bytes
+  ≤ its share (or none yet: a larger batch builds alone, within rule 1; its backfill bytes don't count, so
+  an index's backfill or reindex leaves its live stream `main`'s room), 4 a kind holding nothing gets one
+  batch (live then takes every index); nothing per index passes the limit, so the total bound is `main`'s
+  (limit + one batch per kind + settle slack). A live wait (`flusso.memory.refused`/`wait`) lasts until no
+  index is deferred and its clock (`builds::Waits`) belongs to the engine, so one held index is one refusal
+  and one wait, across an engine restart too; indexes are offered oldest waiting first and the first refused by the limit stops younger ones
   from taking room by it (no starvation by small batches). Each index's settled `Charge` rides only that
   index's lane items. A candidate the budget can't fit is not admissible, so the gate's every-fourth
   counter doesn't move, and the loop waits on `Budget::released_since` (`ingest.rs`'s release arm;
@@ -1221,9 +1223,12 @@ is the one concrete piece.
   `a_deferred_index_is_never_counted_committed_before_its_documents_land`,
   `an_index_past_its_waiting_bound_holds_the_live_batch_whole`,
   `random_schedules_over_three_indexes_with_one_bursting_stay_within_their_shares` (sink stalled for a
-  second; each index ≤ its share plus two batches at every write, which fails with the share off),
+  second; each index's live bytes ≤ its share plus one batch at every write, which fails with the share off),
   `an_index_held_at_its_share_is_one_wait_however_many_builds_pass_it`,
-  `an_index_backfilling_behind_a_slow_sink_still_builds_its_live_changes`, the daemon's `tests::budget`, the CLI's
+  `an_index_backfilling_behind_a_slow_sink_keeps_both_live_streams_building` (shared vs `main`'s rules on
+  paused time), `a_hold_across_an_engine_restart_is_one_wait`, `budget::tests`'
+  `four_indexes_pass_the_limit_by_at_most_one_batch_per_kind` and
+  `an_index_backfilling_keeps_the_live_room_main_gave_it`, the daemon's `tests::budget`, the CLI's
   `index_budget_share` binary; every `ingest::tests` deployment with a budget asserts it returns to zero
   (`Deployment::assert_released`), and `Budget`'s `Drop` asserts no index is still counted.
 - **A lone change on a quiet stream is committed at once (issue #135).** `BatchPolicy`
