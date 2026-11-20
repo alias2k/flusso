@@ -65,6 +65,7 @@ Precedence is flag (`--batch-max-changes` / `--batch-max-delay-ms`), then `FLUSS
 | `writes` | integer 1–64 | `4` | Bulk writes each sink runs at once. `1` writes one batch at a time. A sink that emits an ordered stream (stdout) always writes one at a time. |
 | `builds` | integer 1–32 | `4` | Batches of documents the ingest engine builds at once. `1` builds one batch at a time. The source's document builder keeps `builds` + 2 Postgres connections. |
 | `max_built_mib` | integer 16–1,048,576 | `512` | MiB of built documents held until every sink acknowledges them. Past it the ingest engine builds nothing more until a sink acknowledges some. |
+| `index_budget_share` | number above 0, at most 1 | `0.5` | The share of `max_built_mib` one index may hold while two or more indexes run. With one index it does nothing. |
 
 Several writes run at once, but never two holding the same document, so each document's later version still lands after its earlier one. Live changes go before backfill pages, except every fourth write slot both could take, so a backfill can't stall live indexing and live traffic can't starve a backfill.
 
@@ -72,18 +73,34 @@ End to end on the `reference` benchmark, 2 and 4 writes backfilled about 1.4× f
 
 Several builds run at once, but never two holding the same document, and each sink gets the built batches in the order they were started, so a document's later version still lands after its earlier one. Live batches go before backfill batches, except every fourth build slot both could take. A second live build starts only while the batch waiting behind the first is full, so a trickle of changes still batches itself. A backfill gains while building is what holds it back. On the `reference` benchmark, 2 and 4 builds backfilled about 15% faster than one; past that the sink's writes bound it. Peak memory rose there, from about 120 to 300–400 MiB, because built batches wait in the sink's lane. Each build holds a Postgres connection; behind PgBouncer count `builds` + 2 server connections in transaction mode. Up to `2 × builds` built batches wait behind a slow one before nothing more starts.
 
-**The memory budget.** A built batch is counted from its build until the last sink acknowledges it, in heap bytes (a document holds about 8–10× its JSON), at least 1 KiB a batch. A backfill holds at most half of `max_built_mib` (past the one batch a backfill holding nothing is always granted), so live changes always have room beside it. A batch larger than the whole budget still builds, alone, once nothing of its kind (live or backfill) is held. A sink that stops acknowledging fills the budget, and then ingest waits: the slowest sink paces ingest, as a full queue did before 0.18. The budget can be passed by the batches being built at the moment it fills, each by what it really built: up to `2 × builds` batches. It doesn't count a sink's request bodies (`writes` × one rendered `_bulk` per sink) or the source's read-ahead (`[batch] max_changes` × 16 changes with their row images). Plan the process's memory as `max_built_mib` + `2 × builds` batches + those two + about 100 MiB, plus 10–20% for the allocator. On Linux, `run` warns at start when `max_built_mib` alone reaches the cgroup's memory limit, or the host's memory without one. `/status` reports what is held (`memory`) and `flusso.memory.built` plots it ([Metrics](metrics.md)).
+**The memory budget.** A built batch is counted from its build until the last sink acknowledges it, in heap bytes (a document holds about 8–10× its JSON), at least 1 KiB a batch. A backfill holds at most half of `max_built_mib` (past the one batch a backfill holding nothing is always granted), so live changes always have room beside it. A batch larger than the whole budget still builds, alone, once nothing of its kind (live or backfill) is held. A sink that stops acknowledging fills the budget, and then ingest waits: the slowest sink paces ingest, as a full queue did before 0.18. The budget can be passed by the batches being built at the moment it fills, each by what it really built: up to `2 × builds` batches, plus one batch per index, since an index holding nothing always gets one. It doesn't count a sink's request bodies (`writes` × one rendered `_bulk` per sink) or the source's read-ahead (`[batch] max_changes` × 16 changes with their row images). Plan the process's memory as `max_built_mib` + `2 × builds` batches + one batch per index + those two + about 100 MiB, plus 10–20% for the allocator. On Linux, `run` warns at start when `max_built_mib` alone reaches the cgroup's memory limit, or the host's memory without one. `/status` reports what is held (`memory`) and `flusso.memory.built` plots it ([Metrics](metrics.md)).
+
+**One index's share.** With two or more indexes, one index holds at most `index_budget_share` of the budget: 256 MiB of the default 512. An index whose sink falls behind in a burst stops at its share, and the other indexes keep building in the rest. An index holding nothing always gets one batch, even with the budget full, so no index is shut out.
+
+- **While it waits at its share**, that index's documents wait to be built, and the stream keeps being read for the others.
+- **Up to a point.** Once the waiting index has more than `2 × [batch] max_changes` distinct documents to build (512 by default), reading stops for every index until that index's sink acknowledges some, as when the whole budget is full. A burst that rewrites the same few documents never gets there; one over thousands of distinct rows of one index still pauses the others.
+- **With one index** it holds the whole budget, whatever the share says.
 
 **When to change it.** The default, 512 MiB, keeps the tail of visible latency short while a backfill runs beside live changes.
 
 - **Lower it on a memory-constrained host.** On `reference`, 64 MiB measured 82–87 MiB peak RSS, against about 210 MiB at 512. p50 latency, burst and backfill throughput were unchanged, but the p99 of visible latency rose to about 1 s from about 200 ms (0.17: 2.2–2.5 s). Below 64 MiB the backfill slows.
 - **Raise it when documents are large** (a few hundred KiB of JSON or more each): a batch of them can take much of the budget, so fewer batches are in flight and builds and writes stop overlapping.
-- **Raise it when many indexes are live at once**: they share the budget.
+- **Raise it when many indexes are live at once**: they share the budget, each up to its share.
 - **Raise it for a slow but healthy sink** (a busy or distant cluster): more built batches can wait for it, so a burst is absorbed rather than paced.
+- **Lower `index_budget_share` when several indexes burst at once.** At `0.5`, two bursting indexes can fill the budget between them; `1 / number of indexes` keeps a slice for each.
+- **Raise `index_budget_share` towards `1` when one index does nearly all the work** and the others are quiet. At `1` one index can fill the whole budget, as in 0.18.
 
 Watch `flusso.memory.refused`: if it grows steadily while the sinks are healthy, the budget sets the pace and raising it helps. If it grows only while a sink is down, the budget is doing its job.
 
-The table is a property of the machine that runs flusso, so it is **never written into `flusso.lock`**: `run` with a `flusso.toml` reads it, `run --locked` takes the flag or the env var, else the default. Precedence is flag (`--writes`, `--builds`, `--max-built-mib`), then `FLUSSO_WRITES` / `FLUSSO_BUILDS` / `FLUSSO_MAX_BUILT_MIB`, then this table, then the default. See [CLI](cli.md#run).
+The table is a property of the machine that runs flusso, so it is **never written into `flusso.lock`**: `run` with a `flusso.toml` reads it, `run --locked` takes the flag or the env var, else the default. Precedence is flag (`--writes`, `--builds`, `--max-built-mib`, `--index-budget-share`), then `FLUSSO_WRITES` / `FLUSSO_BUILDS` / `FLUSSO_MAX_BUILT_MIB` / `FLUSSO_INDEX_BUDGET_SHARE`, then this table, then the default. See [CLI](cli.md#run).
+
+**A share outside (0, 1] is refused**, `nan` included, by `check`, `build` and `run`, before anything connects. The message names where the value came from and every way to set it:
+
+```text
+[concurrency] index_budget_share = 0 (set in flusso.toml's [concurrency] index_budget_share) is outside (0, 1]: it is the share of max_built_mib one index may hold while two or more indexes run. Set a number above 0 and at most 1 (default 0.5) with flusso.toml's [concurrency] index_budget_share, --index-budget-share or FLUSSO_INDEX_BUDGET_SHARE; a flag wins over its variable, a variable over the file
+```
+
+A flag or a variable that isn't a number is refused as `` `half` is not a number; give a share above 0, at most 1 ``.
 
 ## backoff
 

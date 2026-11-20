@@ -10,10 +10,11 @@
 - **A generation deleted mid-backfill is backfilled again in full**, never seeded with rows missing; a cut-down OpenSearch role needs to read index settings (#428): [A generation deleted mid-backfill](#a-generation-deleted-mid-backfill).
 - **`pinned_by` can name an index alone**, with `sink` null in `/status` and no `sink` label on `flusso_slot_pinned_by`: [An index's backlog can pin the slot](#an-indexs-backlog-can-pin-the-slot).
 - **A sink's committed count waits for every index**: `changes_committed` and `flusso_changes_committed_total` count a change once every lane of the sink has written it, so one slow index holds `changes_in_flight` for the whole sink: [Committed means written on every index](#committed-means-written-on-every-index).
+- **One index holds at most half of the memory budget** by default, with two or more indexes, so the others keep building beside one in a burst; `[concurrency] index_budget_share` sets the share: [Each index has a share of the memory budget](#each-index-has-a-share-of-the-memory-budget).
 
 **Code that embeds the crates**
 
-- **New lane-health API, `EngineError::DocumentsRejected` removed, order per index for an ordered sink, `DaemonOptions::max_restart_backoff` replaced by `[backoff]`, `Sink::ensure_index` returns `Ensured`, backfill items carry a `Ticket`, `pinned_by` answers an `engine::Pin`, `Observer::on_changes_settled` removed**: [For code embedding the crates](#for-code-embedding-the-crates).
+- **New lane-health API, `EngineError::DocumentsRejected` removed, order per index for an ordered sink, `DaemonOptions::max_restart_backoff` replaced by `[backoff]`, `Sink::ensure_index` returns `Ensured`, backfill items carry a `Ticket`, `pinned_by` answers an `engine::Pin`, `Observer::on_changes_settled` removed, `engine::Budget` shared per index**: [For code embedding the crates](#for-code-embedding-the-crates).
 
 ## One index's failure parks its own lane
 
@@ -39,7 +40,7 @@ A refused or blocked lane is **parked**: it writes its oldest batch again alone 
 
 **What to know.**
 
-- **Memory.** A parked lane keeps its built documents until they land, and the documents queued behind it hold part of the [memory budget](../reference/config-toml.md#concurrency). Parked long enough, it fills the budget and the other indexes slow down too, as a stalled sink did in 0.18.
+- **Memory.** A parked lane keeps its built documents until they land, and the documents queued behind it hold part of the [memory budget](../reference/config-toml.md#concurrency). With two or more indexes it fills only that index's [share](#each-index-has-a-share-of-the-memory-budget), and the other indexes keep building. Parked long enough, its changes pile up past what may wait, reading stops, and the other indexes stall too, as with a stalled sink in 0.18.
 - **A stop with a parked lane exits `1`.** The stop probes every parked lane once more at once, so a block lifted meanwhile still drains. A lane that still can't land holds the drain until `--shutdown-timeout-secs`, and the exit message names it: `primary: 3 changes in flight, lane users blocked since … (blocked: index [users_…] blocked by: [FORBIDDEN/8/index write (api)];)`. The next start writes the parked batches again first.
 - **Not yet.** A refused lane writes the same batch on each probe; rebuilding it from the current row first is a later release, as are a reindex of one index without pausing the sink's other writes, and dropping a stalled index automatically ([#394](https://github.com/alias2k/flusso/issues/394)).
 
@@ -147,6 +148,36 @@ It applies to `/status` (`changes_in_flight`, and `sinks.<sink>.changes_committe
 
 **What to do.** Nothing in configuration. Review the thresholds of alerts on these series. When a sink's count stays behind, its lanes say which index holds it: `outstanding`, `stall_seconds` and `health` under `sinks.<sink>.lanes.<index>` ([A lane is stalled](stalled-lane.md)).
 
+## Each index has a share of the memory budget
+
+**What changed.** In 0.18 one index could fill the whole [memory budget](../reference/config-toml.md#concurrency) (`max_built_mib`): when its sink fell behind in a burst, every other index waited behind it. In 0.19, with two or more indexes, one index holds at most a share of the budget, and the other indexes keep building in the rest.
+
+| | 0.18 | 0.19 |
+| --- | --- | --- |
+| One index in a burst, its sink behind | fills the whole budget; the others wait | stops at its share; the others keep building |
+| The share | none | `[concurrency] index_budget_share`, default `0.5` (256 MiB of the default 512) |
+| A burst over many distinct documents of one index | reading pauses for every index | the same, once that index has more than `2 × [batch] max_changes` documents waiting to be built |
+| One index | the whole budget | unchanged |
+
+The share has a flag and a variable, like the table's other keys:
+
+| `flusso.toml` | Flag | Variable | Default |
+| --- | --- | --- | --- |
+| `[concurrency] index_budget_share` | `--index-budget-share` | `FLUSSO_INDEX_BUDGET_SHARE` | `0.5` |
+
+**Who is affected.** Deployments running two or more indexes. A single index sees no change.
+
+**What to do.**
+
+1. **Nothing, usually.** Bursts of one index stop holding up the others.
+2. **Raise `index_budget_share` towards `1`** if one index does nearly all the work and should keep using the whole budget, as in 0.18. `1` is the old behaviour.
+3. **Check the memory headroom.** An index holding nothing always gets one batch, even with the budget full, so plan for one batch per index above `max_built_mib` ([sizing](../reference/config-toml.md#concurrency)).
+
+**What to know.**
+
+- **Refused at start.** `check`, `build` and `run` refuse a share outside (0, 1], `nan` included, naming where the value came from. Like the rest of `[concurrency]`, it is never written into `flusso.lock`.
+- **Metrics are unchanged.** `flusso.memory.*` and `/status` `memory` still report the whole budget; nothing per index yet. An index held at its share shows as its backlog in [`pinned_by`](#an-indexs-backlog-can-pin-the-slot) and as live waits in `flusso.memory.wait`.
+
 ## For code embedding the crates
 
 - **Removed:** `EngineError::DocumentsRejected` (a refusal no longer ends the run).
@@ -155,7 +186,7 @@ It applies to `/status` (`changes_in_flight`, and `sinks.<sink>.changes_committe
 - **Order is per index** for an ordered sink (`Sink::ordered`). Across indexes, live items go in position order while every lane is written; a parked lane is overtaken by the other indexes' later items. The stdout sink never reports a refusal or a block, so its lines keep position order as in 0.18.
 - **`Observer`** gains `on_lane_health` and `on_lane_probe`; `engine::LaneHealth`, `ParkReason` and `ProbeOutcome` are new and re-exported by `daemon`.
 - **`daemon::LaneSnapshot`** (a lane of `/status`) gains the public fields `health`, `parked_since`, `next_probe` and `reason`: code building one with a struct literal must set them. `Status::unhealthy_lanes`, `LaneHealthView` and `LaneHealthState` (`Open`, `Refused`, `Blocked`, `Restaging`; `name()` gives the word `/status` writes) are new.
-- **Removed: `DaemonOptions::max_restart_backoff`.** The schedule comes from the config: `Config.backoff` (`config::BackoffConfig`, each key a `BackoffValue` with its `BackoffOrigin`), resolved by `daemon::backoff(&Config)`. `Daemon::start` fails when `max_ms` is below `initial_ms`. A struct literal of `DaemonOptions` drops the field.
+- **Removed: `DaemonOptions::max_restart_backoff`.** The schedule comes from the config: `Config.backoff` (`config::BackoffConfig`, each key a `BackoffValue` with its `config::Origin`), resolved by `daemon::backoff(&Config)`. `Daemon::start` fails when `max_ms` is below `initial_ms`. A struct literal of `DaemonOptions` drops the field.
 - **New: `engine::Backoff`** (re-exported as `daemon::Backoff`): `Backoff::new(initial, max)` returns `Err(engine::BackoffError)` for a zero first wait or a cap below it; `initial()`, `max()`, `after(wait)` (doubled, capped); `Default` is 1 s / 60 s. `SinkEngine::with_backoff(Backoff)` sets a sink engine's probe and staging schedule. `config::parse_backoff_ms` parses a flag's or a variable's value.
 - **`Sink::ensure_index`** returns `sink::Ensured { target: Option<TargetId>, created }` instead of `()` (build one with `Ensured::existing(target)` or `Ensured::created(target)`; it is `#[non_exhaustive]`). New `sink::TargetId` names a target; a sink that can tell its targets apart gives one created anew a new id. The default implementation names none.
 - **New: `SinkError::TargetChanged`.** `mark_seeded` answers it for a target that isn't the one `ensure_index` named; the engine then stages the index again and backfills it in full.
@@ -163,6 +194,8 @@ It applies to `/status` (`changes_in_flight`, and `sinks.<sink>.changes_committe
 - **Removed: `Observer::on_changes_settled`.** A sink's committed count is no longer an event: read `Progress::committed(sink)`, or `daemon::Status::committed(sink)`. `CommitStats.changes` and `stream::Batch.changes`, which only fed it, are removed: `CommitStats::new` takes `(envelopes, flush, work)`, and a `Batch` literal drops the field (a serialized item that still carries it reads fine).
 - **`Progress` counts committed changes by step.** New `engine::Step`, and `Progress::change_read`, `changes_read`, `close_step`, `committed`, `published_step` and `skipped_step`. `Progress::published_build` takes the build's `Step`; `skipped_build` takes an `Option<Token>` and a `Step`. `Progress::steps_kept(lane)` reports how many steps a lane keeps beside its unwritten items (the first is at most the second plus two), and `RunningDaemon::progress()` hands out the deployment's `Progress`.
 - **`daemon::Status::with_progress`** is new: a `Status` built without it reports `0` committed for every sink, so all its captured changes read as in flight.
+- **`engine::Budget` serves many reservers and is shared per index.** Removed: `fits`, `want_release` and `released`. New: `admit(work, parts)` answers an `engine::Admission` (`admitted`, `refused`, `generation`, `grants()`); `reserve(work, parts)` admits and reserves in one step, one `Reservation` per index, or `Err` with the refusal's generation; `released_since(generation)` waits for a release after it. `with_index_share(indexes, share)` caps one index at `share` of the limit when `indexes` is 2 or more; `held_by`, `index_share`, `generation` and `Reservation::index` read the state. `try_reserve` stays, counted toward no index.
+- **`[concurrency] index_budget_share`** is `ConcurrencyConfig.index_budget_share: Option<config::ShareValue>` (`share`, `origin`), and `ConcurrencyConfig` no longer derives `Eq`. `daemon::index_budget_share(&Config)` resolves and checks it (`daemon::DEFAULT_INDEX_BUDGET_SHARE` is `0.5`), and `Daemon::start` fails on a share outside (0, 1]. `config::parse_index_budget_share` parses a flag's or a variable's value. New `Progress::waiting_by_index`.
 - **New: `stream::Ticket`.** `Request::Backfill` gains `ticket`, `LaneItem::SnapshotComplete` gains `ticket`, and `Batch` gains `ticket: Option<Ticket>` (`None` on a live batch). Serialized items without them still read (`serde` defaults). Struct literals must set them.
 
 ## Related
