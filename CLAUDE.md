@@ -974,7 +974,16 @@ is the one concrete piece.
   only when no running build holds one of its documents (sorted 64-bit id hashes; nothing hashed at
   `builds = 1`), so a later build of a document starts after the earlier one returned, reads newer
   state, and lands later. Live goes first except every fourth contested grant (the counter moves
-  only on contested grants); a second live build waits for a full batch. A build is polled once
+  only on contested grants); a second live build waits for a full batch. The gate (`ingest/gate.rs`,
+  ADR 0012 stage 8a slice 5, rules G1–G9 in the stage note and the module doc) also has a FIFO line per
+  kind for the index tasks of 6a/6b (`Gate::acquire`, unused in production until then): the budget asked
+  at grant under the gate's lock, a refused waiter keeping its place while the permit goes on, a waiter
+  behind an older limit refusal reserving with `Budget::reserve_behind` (no room by the limit), wake-ups
+  after the lock is let go, cancel-safe; today's one task asks `Gate::choose` and gets a permit only while
+  no eligible waiter is in a line, so grants are as before. Key reads (a page or an index's bound) take
+  one shared `tokio::sync::Semaphore` permit held inside the walk's stored fetch (K1). Guards:
+  `gate::tests` (one per rule, each failing under its mutation), `snapshot::tests`'
+  `walks_read_one_key_page_at_a_time`. A build is polled once
   where it is granted and spawned only if that doesn't finish it (mocks never spawn); spawned ones
   are awaited through `Flights`. A failed build (or a `Document::Failed` under `stop`) stops
   grants; slots before it are published, nothing from it on, and the run awaits every running build
