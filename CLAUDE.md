@@ -978,14 +978,17 @@ is the one concrete piece.
   ADR 0012 stage 8a slice 5, rules G1–G9 in the stage note and the module doc) also has a FIFO line per
   kind for the index tasks of 6a/6b (`Gate::acquire`, unused in production until then): the budget asked
   at grant under the gate's lock, a refused waiter keeping its place while the permit goes on, a waiter
-  behind an older limit refusal reserving with `Budget::reserve_behind` (no room by the limit) and eligible
-  again once any waiter of its line leaves, wake-ups after the lock is let go (a returned permit wakes only
-  when someone waits, decided under the lock), cancel-safe, the budget required (a refusal always has a
-  release to end it); today's one task asks `Gate::choose` and gets a permit only while
+  behind an older limit refusal reserving with `Budget::reserve_behind` (no room by the limit), wake-ups
+  after the lock is let go (a returned permit wakes only when someone waits, decided under the lock),
+  cancel-safe. **A waiter's standing is computed, never a mark another waiter refreshes**: eligibility
+  and "behind" are read at each ask from every refusal and the budget's current generation, and while
+  any waiter is in a line the budget moves its generation on every add too (`Budget::watch`), so a
+  refusal at the current generation is what the budget would answer now. The gate owns its
+  budget and asks it itself (`Gate::new(permits, budget)`, `acquire(work, parts)`); today's one task asks `Gate::choose` and gets a permit only while
   no eligible waiter is in a line, so grants are as before. Key reads (a page or an index's bound) take
   one shared `tokio::sync::Semaphore` permit held inside the walk's stored fetch (K1). Guards:
-  `gate::tests` (sixteen mutations of the rules, each failing at least one test: the table is in PR
-  #443), `snapshot::tests`'
+  `gate::tests` (each mutation of the rules in the stage note's table, under the gate's bounds in
+  `docs/adr/0012-stage-notes/stage-8a.md`, fails at least one test, but one shown equivalent), `snapshot::tests`'
   `walks_read_one_key_page_at_a_time`. A build is polled once
   where it is granted and spawned only if that doesn't finish it (mocks never spawn); spawned ones
   are awaited through `Flights`. A failed build (or a `Document::Failed` under `stop`) stops
