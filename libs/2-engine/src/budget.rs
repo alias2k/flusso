@@ -489,7 +489,32 @@ impl Budget {
         parts: &[(IndexName, usize)],
         behind: bool,
     ) -> Result<Vec<Reservation>, Refusal> {
-        let mut state = self.state();
+        let state = self.state();
+        self.reserve_locked(state, work, parts, behind)
+    }
+
+    /// [`reserve_behind`](Self::reserve_behind), only while the generation
+    /// is still `generation`: `None` when it moved since, so a caller that
+    /// chose at `generation` reserves nothing on a choice that change made
+    /// out of date.
+    pub(crate) fn reserve_at(
+        self: &Arc<Self>,
+        work: Work,
+        parts: &[(IndexName, usize)],
+        behind: bool,
+        generation: u64,
+    ) -> Option<Result<Vec<Reservation>, Refusal>> {
+        let state = self.state();
+        (state.generation == generation).then(|| self.reserve_locked(state, work, parts, behind))
+    }
+
+    fn reserve_locked(
+        self: &Arc<Self>,
+        mut state: MutexGuard<'_, State>,
+        work: Work,
+        parts: &[(IndexName, usize)],
+        behind: bool,
+    ) -> Result<Vec<Reservation>, Refusal> {
         let admission = self.decide(&state, work, parts, behind);
         if admission.refused {
             return Err(Refusal {

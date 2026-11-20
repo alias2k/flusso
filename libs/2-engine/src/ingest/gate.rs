@@ -26,7 +26,9 @@
 //! - **G5.** The gate's own budget is asked at grant, under the gate's lock
 //!   (gate, then budget): refused, the waiter keeps its place, becomes
 //!   ineligible, and the permit goes on. The gate makes every refusal itself,
-//!   so each carries its budget's generation.
+//!   so each carries its budget's generation, and reserves only at the
+//!   generation it chose the waiter at ([`Budget::reserve_at`]): a release or
+//!   an add in between makes it choose again.
 //! - **G6.** A waiter is *behind* while an older waiter of its kind is
 //!   ineligible with a refusal by the limit at the current generation; it
 //!   reserves behind it ([`Budget::reserve_behind`]): it takes no room by the
@@ -35,10 +37,14 @@
 //!   A waiter refused while behind is eligible again as soon as nothing holds
 //!   it back (the one ahead left or was refused by its share, or the budget
 //!   changed).
-//! - **G7.** Every change wakes every waiter, after the gate's lock is let
-//!   go (a grant's add wakes the budget's waiters with it held: that only
-//!   schedules them); a waiter registers its wake-ups before reading the
-//!   state, so none is lost. A dropped permit wakes only while someone waits.
+//! - **G7.** Every change of the gate's state wakes every waiter, after the
+//!   gate's lock is let go (a grant's add wakes the budget's waiters with it
+//!   held: that only schedules them). A change of the budget wakes only the
+//!   waiters holding a refusal, the only ones whose standing it changes: it
+//!   makes refused waiters eligible, which can take an offer away from a
+//!   waiter without a refusal but never give it one. A waiter registers its
+//!   wake-ups before reading the state, so none is lost. A dropped permit
+//!   wakes only while someone waits.
 //! - **G8.** A waiter dropped before its grant leaves its line and wakes the
 //!   others; a permit dropped gives itself back, once.
 //! - **G9.** The one task of today doesn't wait in a line: at each grant point
@@ -71,6 +77,21 @@ pub(crate) struct Gate {
     budget: Arc<Budget>,
     /// Every change of the state (G7).
     changed: Notify,
+    #[cfg(test)]
+    before_reserve: BeforeReserve,
+}
+
+/// A test's hook run once between choosing a waiter and its reservation,
+/// with the gate's lock held: where a release racing a grant lands.
+#[cfg(test)]
+#[derive(Default)]
+struct BeforeReserve(Mutex<Option<Box<dyn FnOnce() + Send>>>);
+
+#[cfg(test)]
+impl std::fmt::Debug for BeforeReserve {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BeforeReserve")
+    }
 }
 
 #[derive(Debug)]
@@ -255,11 +276,23 @@ impl Gate {
             }),
             budget,
             changed: Notify::new(),
+            #[cfg(test)]
+            before_reserve: BeforeReserve::default(),
         })
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Run `hook` once, between choosing the next waiter and its reservation.
+    #[cfg(test)]
+    pub(crate) fn before_reserve(&self, hook: impl FnOnce() + Send + 'static) {
+        *self
+            .before_reserve
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Box::new(hook));
     }
 
     /// A permit for one of the kinds the caller has ready, by G4, or `None`
@@ -330,8 +363,19 @@ impl Gate {
                 let now = self.budget.generation();
                 if state.free > 0 && state.selected(now) == Some((work, place.id)) {
                     let behind = state.is_behind(work, place.id, now);
-                    match self.budget.reserve_behind(work, parts, behind) {
-                        Ok(reserved) => {
+                    #[cfg(test)]
+                    if let Some(hook) = self
+                        .before_reserve
+                        .0
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .take()
+                    {
+                        hook();
+                    }
+                    match self.budget.reserve_at(work, parts, behind, now) {
+                        None => continue,
+                        Some(Ok(reserved)) => {
                             if state.is_contested(now) {
                                 state.contested += 1;
                             }
@@ -349,7 +393,7 @@ impl Gate {
                                 reserved,
                             );
                         }
-                        Err(refusal) => {
+                        Some(Err(refusal)) => {
                             if let Some(waiting) = state.waiting_mut(work, place.id) {
                                 waiting.refused = Some(refusal);
                                 waiting.behind = behind;
@@ -371,9 +415,7 @@ impl Gate {
                 Some(generation) => {
                     tokio::select! {
                         () = &mut changed => {}
-                        () = self.budget.released_since(generation) => {
-                            self.changed.notify_waiters();
-                        }
+                        () = self.budget.released_since(generation) => {}
                     }
                 }
                 None => changed.await,

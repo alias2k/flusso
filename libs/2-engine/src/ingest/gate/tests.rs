@@ -751,3 +751,79 @@ async fn a_settle_that_adds_bytes_lets_the_waiter_behind_be_asked_again() {
     assert_eq!(*granted.lock().unwrap(), ["orders"]);
     older.abort();
 }
+
+/// G5 with a release racing the grant: `orders` is chosen while `users` is
+/// refused by its share, then `users`' 20 KiB are released before `orders`
+/// reserves. `orders` gives the offer back, and `users`, now fitting, is
+/// granted first.
+#[tokio::test(start_paused = true)]
+async fn a_release_between_choosing_a_waiter_and_its_reservation_offers_the_permit_again() {
+    let budget = Arc::new(Budget::new(64 * KIB).with_index_share(3, 0.5));
+    let released = held(&budget, "users", 20);
+    let _users = held(&budget, "users", 10);
+    let _x = held(&budget, "x", 30);
+    let _orders = held(&budget, "orders", 2);
+    let gate = Gate::new(1, Arc::clone(&budget));
+    let users_batch = [(index("users"), 8 * KIB)];
+    let mut older = Box::pin(gate.acquire(Work::Live, &users_batch));
+    assert!(
+        futures::poll!(older.as_mut()).is_pending(),
+        "users is refused by its share (38 of 32 KiB)"
+    );
+    gate.before_reserve(move || drop(released));
+    let orders_batch = [(index("orders"), 20 * KIB)];
+    let mut younger = Box::pin(gate.acquire(Work::Live, &orders_batch));
+    assert!(
+        futures::poll!(younger.as_mut()).is_pending(),
+        "the release came after orders was chosen: the offer goes back to users"
+    );
+    let std::task::Poll::Ready(_users_granted) = futures::poll!(older.as_mut()) else {
+        panic!("users fits now (50 of 64 KiB)");
+    };
+    assert!(
+        futures::poll!(younger.as_mut()).is_pending(),
+        "orders no longer fits (70 of 64 KiB)"
+    );
+}
+
+/// With no waiter in a line (today's production), an add moves nothing: no
+/// reservation, settle or untracked reservation moves the generation or
+/// wakes anyone. The same after one waiter was granted and another dropped.
+#[tokio::test(start_paused = true)]
+async fn with_no_waiter_an_add_moves_no_generation() {
+    fn adds_move_nothing(budget: &Arc<Budget>) {
+        let before = budget.generation();
+        let reserved = budget
+            .reserve(Work::Live, &[(index("users"), 4 * KIB)])
+            .unwrap();
+        assert_eq!(budget.generation(), before, "a reservation");
+        let settled: Vec<Charge> = reserved
+            .into_iter()
+            .map(|part| part.settle(8 * KIB))
+            .collect();
+        assert_eq!(
+            budget.generation(),
+            before,
+            "a settle larger than its estimate"
+        );
+        let untracked = budget.try_reserve(Work::Live, 4 * KIB).unwrap();
+        assert_eq!(budget.generation(), before, "an untracked reservation");
+        drop((settled, untracked));
+    }
+    let budget = Arc::new(Budget::new(64 * KIB));
+    adds_move_nothing(&budget);
+    let gate = Gate::new(1, Arc::clone(&budget));
+    let (permit, parts) = tokio::time::timeout(
+        Duration::from_secs(5),
+        gate.acquire(Work::Live, &[(index("orders"), KIB)]),
+    )
+    .await
+    .expect("orders fits");
+    drop((permit, parts));
+    let (_, held_permit) = gate.choose(true, false).unwrap();
+    let mut dropped = Box::pin(gate.acquire(Work::Live, &[]));
+    assert!(futures::poll!(dropped.as_mut()).is_pending());
+    drop(dropped);
+    drop(held_permit);
+    adds_move_nothing(&budget);
+}
