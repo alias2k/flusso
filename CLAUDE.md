@@ -1188,13 +1188,17 @@ is the one concrete piece.
   deferred only while it has fewer than `2 × max_changes` documents waiting (`Builds::with_deferral`,
   only with a shared budget); past that the batch waits whole and a full run stops the reading, as with one
   index. Rules (`budget.rs`'s module doc): 1 total ≤ limit, 2 backfill ≤ half, 3 an index's **live** bytes
-  ≤ its share (or none yet: a larger batch builds alone, within rule 1; its backfill bytes don't count, so
-  an index's backfill or reindex leaves its live stream `main`'s room), 4 a kind holding nothing gets one
-  batch (live then takes every index); nothing per index passes the limit, so the total bound is `main`'s
-  (limit + one batch per kind + settle slack). A live wait (`flusso.memory.refused`/`wait`) lasts until no
-  index is deferred and its clock (`builds::Waits`) belongs to the engine, so one held index is one refusal
-  and one wait, across an engine restart too; indexes are offered oldest waiting first and the first refused by the limit stops younger ones
-  from taking room by it (no starvation by small batches). Each index's settled `Charge` rides only that
+  ≤ its share (its backfill bytes don't count, so an index's backfill or reindex leaves its live stream
+  `main`'s room), 4 backfill holding nothing gets one batch, 5 an index holding no live bytes gets one live
+  batch whatever 1 and 3 say (so one stuck index, a parked lane at its share for hours, never stops the
+  others; live holding nothing takes every index). Total ≤ limit + one live batch per index + one backfill
+  batch + settle slack; one index's live batch is take-all, up to about `3 × max_changes` changes'
+  documents with two or more indexes (a per-index cap would register a step while documents of it still
+  wait). Indexes are offered oldest waiting first and the first refused by the limit stops younger ones
+  **holding live bytes** from taking room by it (no starvation by small batches; rule 5 is never held back).
+  A live wait (`flusso.memory.refused`/`wait`) lasts until no index is deferred; whether a hold was counted
+  belongs to the engine (`builds::Waits`), its clock to the engine run: a run that ends reports its open wait
+  up to then, and the next run's refusal of the same hold starts a new clock without counting again. Each index's settled `Charge` rides only that
   index's lane items. A candidate the budget can't fit is not admissible, so the gate's every-fourth
   counter doesn't move, and the loop waits on `Budget::released_since` (`ingest.rs`'s release arm;
   `settle` waits too). The build future
@@ -1225,10 +1229,10 @@ is the one concrete piece.
   `random_schedules_over_three_indexes_with_one_bursting_stay_within_their_shares` (sink stalled for a
   second; each index's live bytes ≤ its share plus one batch at every write, which fails with the share off),
   `an_index_held_at_its_share_is_one_wait_however_many_builds_pass_it`,
-  `an_index_backfilling_behind_a_slow_sink_keeps_both_live_streams_building` (shared vs `main`'s rules on
-  paused time), `a_hold_across_an_engine_restart_is_one_wait`, `budget::tests`'
-  `four_indexes_pass_the_limit_by_at_most_one_batch_per_kind` and
-  `an_index_backfilling_keeps_the_live_room_main_gave_it`, the daemon's `tests::budget`, the CLI's
+  `an_index_backfilling_behind_a_slow_sink_keeps_both_live_streams_building` (shared vs the share off on
+  paused time), `a_parked_index_at_its_share_leaves_a_healthy_index_writing_for_ten_minutes` (lanes as large as
+  a deployment's), `a_hold_across_an_engine_restart_is_one_wait`,
+  `a_wait_open_when_an_engine_run_ends_is_reported_up_to_that_moment`, `budget::tests`' rule and bound tests, the daemon's `tests::budget`, the CLI's
   `index_budget_share` binary; every `ingest::tests` deployment with a budget asserts it returns to zero
   (`Deployment::assert_released`), and `Budget`'s `Drop` asserts no index is still counted.
 - **A lone change on a quiet stream is committed at once (issue #135).** `BatchPolicy`

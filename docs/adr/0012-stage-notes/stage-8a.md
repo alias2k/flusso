@@ -256,7 +256,7 @@ plus the resolver. Raising it to several pages is a later, measured change (pool
 | `want_release` + `notify_one`: one waiter | every release bumps a generation and calls `notify_waiters` after letting the lock go; a waiter passes its refusal's generation to `Budget::released_since`, which enables its `Notified` before reading the generation |
 | an estimate per kind | an estimate per index and kind |
 | one charge per batch, on every lane | one charge per index of a batch, on that index's lanes only |
-| rule 4 per kind | per kind, unchanged; the share (rule 3) bounds an index's live bytes |
+| rule 4 per kind | per kind for backfill; per index for live (rule 5); the share (rule 3) bounds an index's live bytes |
 
 **What slices 2 and 3 changed about this slice.** The plan assumed a task per index, each reserving for
 its own batch. Until 6b one task builds one live batch across every index (slice 2's take), so:
@@ -279,67 +279,95 @@ its own batch. Until 6b one task builds one live batch across every index (slice
   deferred (`Builds::with_deferral(None)`): one index behaves exactly as before. 6a replaces the constant
   with the `max_waiting_per_index` setting. **Owner to confirm** the constant until then.
 
-**The rules, as built after review round 2** (a build is granted when rules 1–3 allow it, or rule 4
-does). The requirement they were derived from: with two or more indexes, an index whose backfill or
-reindex runs keeps building its steady live stream beside it no worse than `main` (where live had
-everything the backfill's half left: `total + estimate ≤ limit`, backfill ≤ half); one index bursting
-**live** holds at most its share, so the others keep building; and the total stays within a bound the
-manual states truthfully.
+**The rules, as built after review round 3** (a build is granted when rules 1–3 allow it, or rule 4 or 5
+does). The requirement: with two or more indexes, an index whose backfill or reindex runs keeps building its
+steady live stream beside it no worse than `main` (where live had everything the backfill's half left:
+`total + estimate ≤ limit`, backfill ≤ half); one index bursting **live** holds at most its share; one index
+**stuck** (a parked lane holding its share and its backfill for hours) never stops the others; and the total
+stays within a bound the manual states truthfully. The owner's standing rule settles the trade: memory in
+the hundreds of MiB is cheap, latency is never traded for it, so the promise wins over a tighter bound.
 
 | Rule | Bound |
 | --- | --- |
 | 1 | everything held, live and backfill, ≤ `max_built_mib` |
 | 2 | backfill, over every index, ≤ half |
-| 3 | with two or more indexes with lanes (decision (b)5), one index's **live** bytes ≤ `index_budget_share` of the limit; an index holding no live bytes is granted a batch larger than the share, alone, within rule 1 |
-| 4 | a kind (live or backfill) holding nothing gets one batch, whatever 1–3 say: live then takes every index waiting |
+| 3 | with two or more indexes with lanes (decision (b)5), one index's **live** bytes ≤ `index_budget_share` of the limit |
+| 4 | backfill holding nothing gets one batch, whatever 1 and 2 say |
+| 5 | an index holding no live bytes gets one live batch, whatever 1 and 3 say (so live holding nothing takes every index waiting: `main`'s rule for live) |
 
-Rules 1, 2 and 4 are `main`'s budget; rule 3 is the share. **An index's backfill bytes don't count against
-its share**: backfill is capped as a whole by rule 2, so the live room an index has beside its own backfill
-is `main`'s (within the limit), up to its share. **Nothing per index passes the limit**; only rule 4, per
-kind, does, as on `main`.
+Rules 1, 2, 4 and 5-with-one-index are `main`'s budget; rule 3 is the share. **An index's backfill bytes
+don't count against its share**: backfill is capped as a whole by rule 2, as on `main`. **Rule 5 is what
+keeps the promise while one index is stuck**: a healthy index acknowledges its live batches, so it holds no
+live bytes again and again, and each time gets a batch whatever the stuck index holds. **`blocked`**
+(oldest waiting first: the first index refused by the limit stops younger ones from taking room by it, so a
+large batch isn't starved by small ones) applies only to indexes that hold live bytes; rule 5 is never held
+back by it. A younger index thus gets at most its one rule-5 batch past an older one waiting for room, then
+waits behind it like the rest: no starvation, and one stuck index can't turn into a stop for all.
+
+**One index's batch** is everything a live grant takes of it: take-all. A cap at `max_changes` documents
+per index per grant was considered and dropped: a partly taken index's lanes would be registered with the
+build's step while some of its documents still wait, so its changes would count committed before they are
+built (slice 3's invariant); keeping it correct needs a registration with no step for a partial take, more
+machinery than the bound is worth. So the batch is stated in documents: an index left waiting keeps fewer
+than `2 × max_changes` documents, and the grant that takes them also takes what the run being granted
+marked, so with two or more indexes one index's batch holds the documents of up to about three live runs,
+`3 × [batch] max_changes` changes' worth (with one index nothing waits: one run's, as on `main`).
 
 **Bounds, derived:**
 
-- **Total:** the limit, plus one batch per kind (rule 4), plus what each build in flight settles past its
-  estimate: `main`'s bound. Guards: `four_indexes_pass_the_limit_by_at_most_one_batch_per_kind` (the
-  reviewer's sequence: 288 KiB = limit + 5 batches under round 1's rules), and
-  `random_reservations_stay_within_the_stated_bounds` (seeded reservations and releases over four indexes;
-  a guard for the bounds, it passes on round 1's rules too).
+- **Total:** the limit, plus one live batch per index (rule 5), plus one backfill batch (rule 4), plus what
+  each build in flight settles past its estimate. Guards: `four_indexes_pass_the_limit_by_at_most_a_live_batch_each_and_a_backfill_batch`
+  (the reviewer's sequence: 224 KiB), `random_reservations_stay_within_the_stated_bounds` (seeded
+  reservations and releases over four indexes; a guard, it doesn't tell rule sets apart), and the parked-lane
+  engine test below, which checks the bound at every write for ten simulated minutes.
 - **Backfill:** half, plus one batch when backfill held nothing, plus the same settle slack.
 - **One index's live bytes:** its share, or one batch when that batch alone is larger, plus the same.
   Guard: the three-index schedule, which watches each index's live bytes at every write against share + one
-  batch and fails with the share off (325 KiB against 304).
+  batch and fails with the share off.
 - **One index's bytes in all:** its live bytes plus whatever backfill it holds within backfill's half.
 
 **History of the rules** (kept short; the PR has the detail). Round 0 counted an index's backfill bytes
-against its share and let an index holding nothing pass the limit (rule 4 per index). Round 1 made rule 4
-for live look at live bytes. Review round 2 showed both were wrong for a steady stream: a backfilling index got
-one live batch at a time once its live bytes plus its backfill reached its share, and its deferred documents
-reaching `2 × max_changes` then stopped the reading for every index (a reindex on a live deployment); and
-the per-index bypass of the limit stacked once per kind per index (limit + 5 batches with four indexes, where
-the docs said one per index). Rule 3 now counts live bytes only and passes no limit.
+against its share and let an index holding nothing pass the limit. Round 1 made rule 4 for live look at live
+bytes. Round 2 found a backfilling index's steady stream stopped behind its own backfill, and the per-index
+bypass stacking once per kind per index; it counted live bytes only and passed no limit per index. Round 3
+found that this let a stuck index stop every healthy one (case A: `a` reindexed and parked, backfill at
+half, live at its share, `b` refused by the limit, then reading stopped; case B: three indexes, `a` parked at
+its share, `x` oldest with a batch larger than the room left refused and `blocked` holding small `b` back
+too): rule 5 now gives every index holding no live bytes its batch, past the limit, and `blocked` never
+holds it back.
 
+- **One stuck index never stops the others.** Budget guards: `a_parked_index_at_its_share_beside_its_backfill_leaves_a_healthy_index_its_batch`
+  (A), `a_large_batch_and_a_small_one_both_build_beside_a_parked_index` (B),
+  `an_index_holding_no_live_bytes_gets_one_live_batch_past_the_limit` (the case round 2 left untested), all
+  red on round 2's rules. Engine guard: `a_parked_index_at_its_share_leaves_a_healthy_index_writing_for_ten_minutes`:
+  `orders` reindexed with its lane parked (every document refused under `on_error = "stop"`) for ten
+  simulated minutes, its backfill and live documents held; `users` writes bursts of sixteen distinct documents
+  a second the whole time. Every `users` change is read and lands, the whole stays within the bound at every
+  write, then `orders` is let through and converges. Without rule 5 `users` stops landing after about 25 s.
+  It runs with lanes as large as a deployment's: with the harness's 64-item lanes the parked lane fills
+  first and the publish blocks, which a deployment's lanes (1,048,576 items) never reach before the budget.
 - **Per index, live keeps `main`'s room beside its own backfill.** Engine guard:
-  `an_index_backfilling_behind_a_slow_sink_keeps_both_live_streams_building`, the reviewer's scenario
+  `an_index_backfilling_behind_a_slow_sink_keeps_both_live_streams_building`: the reviewer's scenario
   (4000 rows, `orders` backfilling 2000 of about 8 KiB behind a sink writing one item per 200 ms, `users` and
-  200 distinct `orders` documents changing every 2 ms, budget 1 MiB, batch 16, builds 4), run on paused
-  time twice, on the shared budget and on an unshared one (`main`'s rules). The sink sets the pace, so the
-  reading pauses on any rules; the test asserts "no worse than `main`": `orders`' live documents built and
-  the reading finished no later than there (+10 %), and every `orders` live document built before its
-  backfill completes. Measured: shared 57.5 s read, live built by 59.2 s, backfill done at 82.8 s; unshared
-  315.2 s, 66.8 s, 137.2 s; with the share counting backfill bytes, live built by 85.4 s (fails).
-  Budget guard: `an_index_backfilling_keeps_the_live_room_main_gave_it` (fails on round 1's rules: the second
-  live batch was refused at 80 of 128 KiB).
-- **The budget metrics keep their meaning** (review round 1, completed in round 2).
-  `flusso.memory.refused{work}` counts once per wait and `flusso.memory.wait{work}` reports one per wait, as
-  on `main`: a live wait starts at the first refusal of live documents and ends at the grant that leaves no
-  index deferred; a partial grant that defers an index neither ends the wait nor starts another. The wait
-  clock (`builds::Waits`) belongs to the engine, not to an engine run's `Builds`: a wait still open when a run
-  ends on an error or an abort goes on in the next run, so one hold is one refusal and one wait across a
-  restart. A run that ends cleanly has built every waiting document first (`settle`), which ends the wait
-  through a grant. Guards: `an_index_held_at_its_share_is_one_wait_however_many_builds_pass_it` (11 before
-  round 1, 1 after), `a_hold_across_an_engine_restart_is_one_wait` (no wait reported before round 2).
-  Overlapping holds of two indexes are one wait. With one index nothing is deferred: the numbers are `main`'s.
+  200 distinct `orders` documents changing every 2 ms, budget 1 MiB, batch 16, builds 4), run twice on paused
+  time: on the shared budget and on this branch's budget with the share off (`main`'s budget rules, not
+  `main`'s code). It asserts `orders`' last live document is built no later than with the share off, and
+  before its backfill completes; with the share counting backfill bytes it fails. The test sink costs a fixed
+  time per item whatever its size, so the arms' other timings are not a performance comparison and nothing
+  else is asserted. Budget guard: `an_index_backfilling_keeps_the_live_room_main_gave_it`.
+- **The budget metrics keep their meaning** (review rounds 1–3). `flusso.memory.refused{work}` counts once
+  per hold and `flusso.memory.wait{work}` reports one wait per hold and engine run, as on `main`: a live
+  wait starts at the first refusal of live documents and ends at the grant that leaves no index deferred; a
+  partial grant that defers an index neither ends the wait nor starts another. Whether a hold was counted
+  belongs to the engine (`builds::Waits`), its clock to the engine run: when a run ends (an error, an abort,
+  any drop of its `Builds`) an open wait is reported up to then, with wake `settle`, and only the "counted"
+  flag is kept, so an outage before the next run doesn't stretch the wait, a refusal of the same hold in the
+  next run starts a new clock without counting again, and with no refusal nothing more is reported. Guards:
+  `an_index_held_at_its_share_is_one_wait_however_many_builds_pass_it` (11 before round 1, 1 after),
+  `a_hold_across_an_engine_restart_is_one_wait`, `a_wait_open_when_an_engine_run_ends_is_reported_up_to_that_moment`
+  (an hour's outage: was reported as a wait of 3602 s), and `builds::tests`'
+  `a_hold_refused_again_in_the_next_run_is_counted_once_and_timed_per_run`. Overlapping holds of two
+  indexes are one wait. With one index nothing is deferred: the numbers are `main`'s.
 - **An index with no lane** never has documents waiting (`Progress::mark` drops its ids), so it is never
   offered, deferred or counted in a wait; it holds nothing.
 - **One index is `main`'s but for one case**: a live run that touched no document is now always granted (an
@@ -347,12 +375,13 @@ the docs said one per index). Rule 3 now counts live bytes only and passes no li
   settle had left the total past the limit. An empty build holds nothing, so it changes no bound.
 - **Order and starvation.** A live batch's indexes are offered oldest waiting first (by their oldest waiting
   position). An index refused by its own share doesn't hold others back. The first index refused by the
-  limit stops every younger one from taking room by the limit. So a stream of small batches can't starve a
-  large one: room accumulates until the oldest fits, or live drains to nothing and rule 4 grants it.
+  limit stops every younger one that holds live bytes from taking room by the limit. So a stream of small
+  batches can't starve a large one: room accumulates until the oldest fits, or it drains to no live bytes and
+  rule 5 grants it.
 - **No deadlock between an index at its share and the limit.** An index at its share holds live bytes, which
-  come back when its lanes acknowledge; meanwhile every index holding no live bytes can build within the
-  limit, and live holding nothing takes every index (rule 4). A parked lane keeps its index at its share for
-  as long as it is parked; the other indexes build on.
+  come back when its lanes acknowledge; meanwhile every index holding no live bytes gets its batch, past
+  the limit if need be (rule 5). A parked lane keeps its index at its share for as long as it is parked;
+  the other indexes build on.
 - **A backfill batch spanning two indexes** (a page ends one index's walk and starts the next) fits whole or
   not at all, by rules 1, 2 and 4 alone.
 - **Which indexes share.** The indexes with lanes (`mappings`). Lanes per index don't matter: a batch's part
@@ -387,7 +416,7 @@ the docs said one per index). Rule 3 now counts live bytes only and passes no li
 | A lone change commits at once (#135) | `main`'s run cut; a waiting id is taken once a slot is free | `a_lone_change_on_a_quiet_stream_commits_without_waiting`, `max_delay_caps_a_batch_while_changes_keep_arriving` | — (rerun on the reader) |
 | Script failures on the ingest side (#198) | in the index task | `skip_policy_leaves_a_failed_document_out_and_keeps_going`, `stop_policy_fails_the_ingest_engine_on_a_failed_document` | slice 8: `a_stop_failure_on_one_index_lets_the_others_land` |
 | Item-level vs flush-wide; lane parking | sink side unchanged | `tests::parking`, `tests::merge`, daemon `a_stop_rejection_halts_its_lane_writing_several_items_at_once` | `a_parked_lane_fills_only_its_index_half_and_other_backfills_go_one_batch_at_a_time` |
-| Memory budget | many reservers; rules 1–4 per §3.5 (slice 4) | `random_schedules_under_a_tiny_budget_stay_within_it_and_finish`, `live_keeps_room_beside_a_backfill_holding_its_half`, `a_batch_bigger_than_the_budget_still_builds` | `budget::tests` (`concurrent_reservations_never_pass_the_limit`, `a_release_wakes_every_waiting_task`, `a_release_between_the_refusal_and_the_wait_is_not_lost`, `a_live_batch_larger_than_the_share_builds_alone_within_the_limit`, `the_oldest_index_refused_by_the_limit_holds_younger_ones_back`, `every_index_gets_every_byte_back_once`), `one_bursting_index_of_three_holds_its_share_and_the_others_build`, `a_deferred_index_is_never_counted_committed_before_its_documents_land`, `an_index_past_its_waiting_bound_holds_the_live_batch_whole`, `random_schedules_over_three_indexes_with_one_bursting_stay_within_their_shares` (binds: fails with the share off), `an_index_held_at_its_share_is_one_wait_however_many_builds_pass_it`, `an_index_backfilling_behind_a_slow_sink_keeps_both_live_streams_building`, `an_index_backfilling_keeps_the_live_room_main_gave_it`, `four_indexes_pass_the_limit_by_at_most_one_batch_per_kind`, `a_hold_across_an_engine_restart_is_one_wait` |
+| Memory budget | many reservers; rules 1–5 per §3.5 (slice 4) | `random_schedules_under_a_tiny_budget_stay_within_it_and_finish`, `live_keeps_room_beside_a_backfill_holding_its_half`, `a_batch_bigger_than_the_budget_still_builds` | `budget::tests` (`concurrent_reservations_never_pass_the_limit`, `a_release_wakes_every_waiting_task`, `a_release_between_the_refusal_and_the_wait_is_not_lost`, `an_index_holding_no_live_bytes_gets_one_live_batch_past_the_limit`, `the_oldest_index_refused_by_the_limit_holds_younger_ones_back`, `every_index_gets_every_byte_back_once`), `one_bursting_index_of_three_holds_its_share_and_the_others_build`, `a_deferred_index_is_never_counted_committed_before_its_documents_land`, `an_index_past_its_waiting_bound_holds_the_live_batch_whole`, `random_schedules_over_three_indexes_with_one_bursting_stay_within_their_shares` (binds: fails with the share off), `an_index_held_at_its_share_is_one_wait_however_many_builds_pass_it`, `an_index_backfilling_behind_a_slow_sink_keeps_both_live_streams_building`, `an_index_backfilling_keeps_the_live_room_main_gave_it`, `four_indexes_pass_the_limit_by_at_most_a_live_batch_each_and_a_backfill_batch`, `a_hold_across_an_engine_restart_is_one_wait`, `a_wait_open_when_an_engine_run_ends_is_reported_up_to_that_moment`, `a_parked_index_at_its_share_leaves_a_healthy_index_writing_for_ten_minutes`, `a_parked_index_at_its_share_beside_its_backfill_leaves_a_healthy_index_its_batch`, `a_large_batch_and_a_small_one_both_build_beside_a_parked_index` |
 | Gate fairness | lines per kind; budget asked at grant | `gate::tests` | `a_task_blocked_on_a_full_lane_holds_no_permit` (two indexes, one lane full, `builds = 1`), `a_waiter_refused_by_the_budget_keeps_its_place` |
 | `changes_committed` | computed from `Progress` (§3.6) | daemon status tests | daemon `tests::committed`, `progress::tests::committed` |
 | Resume checkpoints (8b), reindex per sink | the walk and its marks move as they are | `tests::resume`, `a_killed_backfill_resumes_…` e2e, `reindex_control_stages_and_requests_a_snapshot_without_restarting`, `reindex_operation_targets_one_sink` | — |
