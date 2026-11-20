@@ -52,7 +52,7 @@ ChangeCapture ─▶ reader ──┼─ pending(orders) ▶ index task(orders) 
 - Publishes each built batch to every live lane of the index.
 - **Backfill:**
   - Reads root keys in keyset pages and builds them like pending ids, publishing to the lanes that asked.
-  - A page drops ids that are pending or in flight live (their live build goes to every lane).
+  - ~~A page drops ids that are pending or in flight live (their live build goes to every lane).~~ **Deferred by stage 8a's design** (`0012-stage-notes/stage-8a.md`): it is an optimisation, not needed for correctness. A page and a live build of the same id never build at once (admission, and a live take skips ids a page is building) and publish in the order they were granted, and per document a later build reads newer state. So keeping the id in the page costs one build more, never a stale write. To measure before adding.
   - It resumes from the last key it published after a restart.
   - The request is acknowledged after `SnapshotComplete`, as today.
 - Builds a fresh copy of given ids for one lane, on request (section 6), through the backfill path.
@@ -313,7 +313,7 @@ A long stall has two costs:
 | `index_not_found` | re-stages that `(index, sink)` at a lane barrier: `ensure_index`, a backfill request, then redelivery. This replaces today's sink-wide restart (#123) |
 | a transport failure | fails every lane: the sink is down |
 
-**Stop (#371):** the reader stops reading; index tasks publish their builds in flight and leave pending ids unconfirmed for replay; backfills are abandoned unacknowledged; sinks finish live items and skip backfill items; `Progress` confirms as acknowledgements arrive, then the stream closes.
+**Stop (#371):** the reader stops reading, marks its last run and ends; index tasks then publish their builds in flight and build what is pending (bounded by the reader's lead; question 7, reopened); backfills are abandoned unacknowledged; sinks finish live items and skip backfill items; `Progress` confirms as acknowledgements arrive, then the stream closes.
 
 **Staging (#120)**, unchanged in order: `continuity()`, then every sink staged, then `prepare()`, then the reader and index tasks start.
 
@@ -463,6 +463,7 @@ The reviewers' recommendation is the proposed default.
 5. **At most two live builds per index, a second only for a backlog.** *Yes.* Cost: a hot index uses at most two of the `builds` permits for live changes.
 6. **A parked lane asks for a fresh build of its ids.** *Yes.* Cost: one more request kind on the index task.
 7. **A stop leaves unbuilt ids for replay.** *Yes.* Cost: the next start rebuilds them.
+   **Reopened by stage 8a's design, reversal proposed:** leaving them breaks `shutdown`'s `…a_restart_rewrites_none_of_it` (the replay rebuilds documents that already landed) and the stop's promise to land what was read. Proposed: a stop builds what is pending, which the reader's lead bound keeps near `main`'s one batch plus `2 × builds` slots. Awaiting the owner (`stage-8a.md`, decision (b)1).
 8. **Helm memory defaults.** Today `resources: {}`. *Ship `requests.memory: 512Mi`, and leave the limit commented out with the formula beside it* (`max_built_mib` + one batch per index + pending + ~100 MiB). Cost: no OOM-kill protection by default; a `1536Mi` limit could OOM-kill a deployment with many indexes or large documents that runs today.
 
 ## Settings
