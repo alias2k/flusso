@@ -132,7 +132,7 @@ Find which side is slow:
 | --- | --- | --- |
 | The `build` stage busy ([Where the time goes](../reference/metrics.md#where-the-time-goes)), slow document queries in Postgres | Building that index's documents is slow | Read the slow queries (`pg_stat_statements`) and index the columns the schema joins on, or raise [`[concurrency] builds`](../reference/config-toml.md#concurrency) if Postgres has room |
 | `flusso_memory_built_bytes` flat at the limit, `flusso_memory_refused_total` climbing | The [memory budget](../reference/config-toml.md#concurrency) is full, so nothing more is built | Find the sink that isn't acknowledging (a parked lane, a lane whose `outstanding` stays high) and fix it as above; with every sink healthy, raise `max_built_mib` |
-| `flusso_memory_built_bytes` below the limit, `flusso_memory_refused_total{work="live"}` climbing | The index holds its [share of the budget](../reference/config-toml.md#concurrency) (`index_budget_share`), so its documents wait while the other indexes build | Find that index's lane that isn't acknowledging and fix it as above; with every sink healthy, raise `max_built_mib` or `index_budget_share` |
+| `flusso_memory_built_bytes` below the limit while `pinned_by` keeps naming the index alone; `flusso_memory_refused_total{work="live"}` rose by one when it began, and the wait shows in `flusso_memory_wait_seconds{work="live"}` once it ends | The index holds its [share of the budget](../reference/config-toml.md#concurrency) (`index_budget_share`), so its documents wait while the other indexes build | Find that index's lane that isn't acknowledging and fix it as above; with every sink healthy, raise `max_built_mib` or `index_budget_share` |
 
 ## Options and variations
 
