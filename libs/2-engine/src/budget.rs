@@ -23,7 +23,7 @@
 //! | 1 | everything held ≤ the limit |
 //! | 2 | one index ≤ its share of the limit, with two or more indexes ([`Budget::with_index_share`]) |
 //! | 3 | backfill over every index ≤ half the limit, so live always has room |
-//! | 4 | an index holding nothing gets one batch, whatever 1–3 say |
+//! | 4 | an index holding nothing gets one batch, whatever 1–3 say; for live, an index holding no live bytes does, so live keeps room beside the index's own backfill |
 //! | 5 | a kind (live or backfill) holding nothing gets one batch: live then takes every index waiting |
 //!
 //! With one index, rules 4 and 5 are the same and rule 2 applies to nothing:
@@ -122,14 +122,22 @@ impl Admission {
 struct State {
     total: usize,
     backfill: usize,
-    by_index: BTreeMap<IndexName, usize>,
+    /// Each index's bytes, live and backfill; an index holding nothing has
+    /// no entry.
+    by_index: BTreeMap<IndexName, Held>,
     /// Bumped by every release.
     generation: u64,
 }
 
 impl State {
     fn held_by(&self, index: &IndexName) -> usize {
-        self.by_index.get(index).copied().unwrap_or(0)
+        self.by_index.get(index).map_or(0, |held| held.total)
+    }
+
+    fn live_by(&self, index: &IndexName) -> usize {
+        self.by_index
+            .get(index)
+            .map_or(0, |held| held.total - held.backfill)
     }
 
     fn add(&mut self, work: Work, index: Option<&IndexName>, bytes: usize) {
@@ -138,8 +146,11 @@ impl State {
             self.backfill = self.backfill.saturating_add(bytes);
         }
         if let Some(index) = index {
-            let held = self.by_index.entry(index.clone()).or_insert(0);
-            *held = held.saturating_add(bytes);
+            let held = self.by_index.entry(index.clone()).or_default();
+            held.total = held.total.saturating_add(bytes);
+            if work == Work::Backfill {
+                held.backfill = held.backfill.saturating_add(bytes);
+            }
         }
     }
 
@@ -151,8 +162,12 @@ impl State {
         if let Some(index) = index
             && let Some(held) = self.by_index.get_mut(index)
         {
-            *held = held.saturating_sub(bytes);
-            if *held == 0 {
+            held.total = held.total.saturating_sub(bytes);
+            if work == Work::Backfill {
+                held.backfill = held.backfill.saturating_sub(bytes);
+            }
+            held.backfill = held.backfill.min(held.total);
+            if held.total == 0 {
                 self.by_index.remove(index);
             }
         }
@@ -337,7 +352,9 @@ impl Budget {
                 let mut blocked = false;
                 let mut admitted = Vec::with_capacity(parts.len());
                 for (index, estimate) in parts {
-                    let fits = if state.held_by(index) == 0 {
+                    // Rule 4 for live: an index holding no live bytes gets
+                    // one live batch, beside its own backfill too.
+                    let fits = if state.live_by(index) == 0 {
                         true
                     } else if !within_share(index, *estimate) {
                         false
@@ -917,6 +934,30 @@ mod tests {
             &[(index("users"), 8 * KIB), (index("items"), 4 * KIB)],
         );
         assert_eq!(admission.admitted, vec![index("items")]);
+    }
+
+    /// An index whose backfill holds its share still gets one live batch
+    /// while live holds another index's bytes: per index, live keeps room
+    /// beside that index's backfill (a reindex of one index on a live
+    /// deployment).
+    #[test]
+    fn an_index_holding_only_backfill_bytes_gets_one_live_batch() {
+        let budget = Arc::new(Budget::new(128 * KIB).with_index_share(2, 0.5));
+        let _backfill = budget
+            .reserve(Work::Backfill, &[(index("orders"), 64 * KIB)])
+            .unwrap();
+        let _users = held(&budget, "users", 16 * KIB);
+        let admission = budget.admit(Work::Live, &[(index("orders"), 16 * KIB)]);
+        assert_eq!(admission.admitted, vec![index("orders")]);
+        let _live = budget
+            .reserve(Work::Live, &[(index("orders"), 16 * KIB)])
+            .unwrap();
+        assert!(
+            budget
+                .reserve(Work::Live, &[(index("orders"), 16 * KIB)])
+                .is_err(),
+            "once it holds live bytes, its share applies again"
+        );
     }
 
     /// A backfill batch spanning two indexes fits whole or not at all.

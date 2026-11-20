@@ -539,17 +539,23 @@ impl Builds {
         }
         let live = matches!(job, Job::Live { .. });
         let work = if live { Work::Live } else { Work::Backfill };
-        match work {
-            Work::Live => self.waiting.0 = false,
-            Work::Backfill => self.waiting.1 = false,
-        }
-        let refused_at = match work {
-            Work::Live => self.refused_at.0.take(),
-            Work::Backfill => self.refused_at.1.take(),
-        };
-        if let Some(since) = refused_at {
-            self.observer
-                .on_budget_wait(work, self.wake, since.elapsed());
+        // A live grant that leaves an index waiting for the budget doesn't
+        // end the live wait: one index held back while others build is one
+        // wait, from its first refusal to the grant that takes it.
+        let still_waiting = matches!(&job, Job::Live { deferred, .. } if !deferred.is_empty());
+        if !still_waiting {
+            match work {
+                Work::Live => self.waiting.0 = false,
+                Work::Backfill => self.waiting.1 = false,
+            }
+            let refused_at = match work {
+                Work::Live => self.refused_at.0.take(),
+                Work::Backfill => self.refused_at.1.take(),
+            };
+            if let Some(since) = refused_at {
+                self.observer
+                    .on_budget_wait(work, self.wake, since.elapsed());
+            }
         }
         let reservations = std::mem::take(&mut self.reserved);
         let measure = self.budget.is_some();
