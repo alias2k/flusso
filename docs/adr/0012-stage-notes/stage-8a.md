@@ -247,9 +247,9 @@ code; the bounds below follow from them.
 | G2 | one FIFO line per kind (live, backfill); a waiter joins the back of its kind's line and keeps its place until it is granted or dropped |
 | G3 | a waiter is **eligible** unless the budget refused it **at the budget's current generation**; a refusal made while behind (G6) stands only while the waiter still is behind. While any waiter is in a line the budget moves its generation on every change of what it holds, not only a release (`Budget::watch`: a release, a grant, a settle larger than its estimate), so a refusal at the current generation is exactly what the budget would answer now. Standing is computed from every waiter's refusal and the generation at the moment of asking, under the lock, never from a mark another waiter has to refresh (review round 2) |
 | G4 | a free permit is offered to the oldest eligible live waiter, except on every fourth **contested** grant (both lines have an eligible waiter), when it goes to the oldest eligible backfill waiter; a grant only one kind could take doesn't move the count (`main`'s rule, per waiter) |
-| G5 | **the budget is asked at grant**, under the gate's lock (gate lock, then the budget's; the budget never takes the gate's): the offered waiter reserves its batch from the gate's own budget (`Gate::new` takes it; `acquire` takes the batch's parts and asks `Budget::reserve_behind` itself, so every refusal carries that budget's generation); refused, it keeps its place, becomes ineligible (G3) and the offer moves on by G4 |
+| G5 | **the budget is asked at grant**, under the gate's lock (gate lock, then the budget's; the budget never takes the gate's): the offered waiter reserves its batch from the gate's own budget (`Gate::new` takes it; `acquire` takes the batch's parts and asks the budget itself, so every refusal carries that budget's generation). It reserves only at the generation it chose the waiter at (`Budget::reserve_at`): when a release or an add came between the choice and the reservation, nothing is reserved or recorded and the waiter is chosen again at the new generation (review round 3). That needs a real change each time, so it can't spin; refused, it keeps its place, becomes ineligible (G3) and the offer moves on by G4 |
 | G6 | a waiter is **behind** while an older waiter of its kind is ineligible with a refusal **by the limit** at the current generation; it reserves *behind*: it takes no room by the limit (for live only rule 5, for backfill only rule 4 can grant it), so small batches can't starve a large one (the budget's oldest-first, across waiters). A refusal by an index's **share**, or one the budget has changed since, holds no one back: one stuck index never blocks another's line. A waiter refused **while behind** is eligible again as soon as nothing holds it back: the one ahead left (granted or dropped), was refused by its share, or the budget changed (review rounds 1 and 2) |
-| G7 | every change (a permit freed, a waiter leaving, a refusal, a grant, a change of the budget making a waiter eligible again) wakes every waiter, after the gate's lock is let go (a grant's own add wakes the budget's waiters with it held, which only schedules them); a waiter registers its wake-up before it reads the state, so no wake-up is lost. A permit given back wakes only when someone is in a line, decided under the lock (a waiter joins under it before reading the state, so it either sees the permit free or is woken): with no waiter, as today, a landed build costs no wake-up |
+| G7 | every change of the gate's state (a permit freed, a waiter leaving, a refusal, a grant) wakes every waiter, after the gate's lock is let go (a grant's own add wakes the budget's waiters with it held, which only schedules them). A change of the budget wakes only the waiters holding a refusal, through `Budget::released_since`, and the gate adds no wake-up of its own (review round 3): those are the only waiters whose standing it changes. It makes refused waiters eligible, which can only take an offer away from a waiter without a refusal (an older waiter becomes the oldest eligible of its kind, or a contested turn goes to the other kind), never give one to it. a waiter registers its wake-up before it reads the state, so no wake-up is lost. A permit given back wakes only when someone is in a line, decided under the lock (a waiter joins under it before reading the state, so it either sees the permit free or is woken): with no waiter, as today, a landed build costs no wake-up |
 | G8 | cancel-safe: a waiter dropped before its grant leaves its line and wakes the others; a permit dropped gives itself back, once. A waiter watches the budget from joining its line until it leaves it, granted or dropped, so a dropped waiter leaves no watch behind |
 | G9 | **the one task of this slice** doesn't wait in a line: at each grant point it asks with its live and backfill candidates (`Builds::choose`, the budget asked just before as today) and gets a permit by G4 only while no eligible waiter is in a line, which with one task is always. So the order of grants, the every-fourth rule, a second live build only while the waiting batch is full, and `builds` as the cap are `main`'s |
 
@@ -268,9 +268,11 @@ grows by as much).
   grant. A waiter further back waits for the ones ahead of it, FIFO (G2).
 - **Passed over, refused.** While the budget refuses it, a waiter is passed over by any eligible one (G3,
   G5): one waiter the budget can't fit never holds a permit idle. Once the budget changes it is eligible
-  again (G3) and offered before the younger waiters of its kind, and those take no room by the limit while it is refused by
-  the limit (G6), so it waits only as long as the budget itself can't fit it: by the budget's rules, at most
-  until its index holds no live bytes (rule 5) or backfill holds nothing (rule 4).
+  again (G3) and offered before every younger waiter of its kind: one chosen before the change reserves
+  only at the generation it was chosen at, so it gives the offer back (G5). While it is refused by the
+  limit, the younger waiters of its kind take no room by the limit (G6); a waiter of the other kind may,
+  on a grant G4 gives that kind. By the budget's rules it waits at most until its index holds no live
+  bytes (rule 5) or backfill holds nothing (rule 4).
 - **The stuck case.** A stuck index's waiter refused by its share holds no other waiter back (G6); one refused
   by the limit holds others only from room by the limit, never from rule 5 (a healthy index holding no live
   bytes still gets its batch). A full lane or a sink down holds no permit: a permit is held by a running
@@ -298,11 +300,15 @@ grows by as much).
   `a_selected_waiter_dropped_before_it_runs_wakes_the_next`.
 - **Cost of watching.** While a waiter is in a line, every add (a grant, a settle larger than its estimate)
   moves the generation and wakes the budget's waiters, who ask again. With no waiter, as today, an add
-  costs one comparison under the budget's lock and no wake-up.
+  costs one comparison under the budget's lock and no wake-up (`with_no_waiter_an_add_moves_no_generation`,
+  also after a waiter was granted and another dropped). One case to measure in 6b: a refused backfill
+  waiter whose turn has come (the count at three) is asked again after every live grant, since each
+  grant's add makes its refusal out of date; it is refused again without moving the count, and the next
+  grant is live. So while it waits, every live grant costs one more budget decision.
 - **Metrics** don't move: the gate records nothing of its own in this slice; budget waits stay
   `Builds`' (slice 4), and with one task (G9) every grant is decided where it was.
 
-**Mutations of the gate's rules** (re-run in review round 2, on the code as merged). Each mutation
+**Mutations of the gate's rules** (re-run in review round 3, on the code as merged). Each mutation
 compiles (`std::hint::black_box` keeps a constant from being folded away) and is run against
 `gate::tests` and `snapshot::tests`' `walks_read_one_key_page_at_a_time`, with a per-test limit of 10 s
 (nextest `terminate-after`), since a waiter that spins without yielding stops a paused-time runtime and
@@ -310,17 +316,20 @@ its tokio timeout with it. "Hang" marks a test the limit ended.
 
 | Mutation | Tests that fail |
 | --- | --- |
-| G1: no check of free permits | 11 gate tests |
-| G2: a waiter joins the front of its line | 14 gate tests |
-| G3: a refusal stands after the budget changed | `a_waiter_behind_reads_the_older_ones_standing_after_a_release_not_its_old_refusal`, `a_waiter_behind_is_granted_when_the_older_one_is_refused_by_its_share_after_a_release`, `a_settle_that_adds_bytes_lets_the_waiter_behind_be_asked_again`, `a_younger_waiter_behind_a_limit_refusal_takes_no_room_by_the_limit`, `a_waiter_refused_by_the_budget_keeps_its_place_and_the_permit_goes_on`, `a_refusal_does_not_move_the_count` |
+| G1: no check of free permits | 12 gate tests |
+| G2: a waiter joins the front of its line | 15 gate tests |
+| G3: a refusal stands after the budget changed | `a_waiter_behind_reads_the_older_ones_standing_after_a_release_not_its_old_refusal`, `a_waiter_behind_is_granted_when_the_older_one_is_refused_by_its_share_after_a_release`, `a_settle_that_adds_bytes_lets_the_waiter_behind_be_asked_again`, `a_younger_waiter_behind_a_limit_refusal_takes_no_room_by_the_limit`, `a_waiter_refused_by_the_budget_keeps_its_place_and_the_permit_goes_on`, `a_refusal_does_not_move_the_count`, `a_release_between_choosing_a_waiter_and_its_reservation_offers_the_permit_again` |
 | G3: an add doesn't move the budget's generation while watched | `a_settle_that_adds_bytes_lets_the_waiter_behind_be_asked_again` |
 | G3: an add wakes no waiter | `a_settle_that_adds_bytes_lets_the_waiter_behind_be_asked_again` |
+| G3: every add moves the generation, waiter or not | `with_no_waiter_an_add_moves_no_generation` |
+| G3: a waiter never unwatches | `with_no_waiter_an_add_moves_no_generation` |
 | G3/G6: a limit refusal the budget changed since still holds younger waiters back | none: **equivalent**. A younger waiter is asked only when every older waiter of its kind is ineligible, that is, holds a refusal at the current generation, so no stale refusal is ever read for "behind" (G4 picks the oldest eligible) |
 | G4: contested grants always go live | `choose_takes_live_first_but_every_fourth_contested_grant_is_backfill`, `every_fourth_contested_grant_goes_to_the_oldest_backfill_waiter`, `an_uncontested_grant_does_not_move_the_count`, `a_refusal_does_not_move_the_count` |
 | G4: the count moves on every grant | `an_uncontested_grant_does_not_move_the_count`, `a_refusal_does_not_move_the_count` |
 | G4: a refusal moves the count | `a_refusal_does_not_move_the_count` |
-| G5: a refusal never makes a waiter ineligible | 9 gate tests, each a hang (the refused waiter is asked again without yielding) |
-| G5: no wake-up after a refusal | `a_refusal_wakes_the_waiter_behind`, `a_refusal_does_not_move_the_count`, `a_waiter_behind_reads_the_older_ones_standing_after_a_release_not_its_old_refusal` |
+| G5: a refusal never makes a waiter ineligible | 10 gate tests, each a hang (the refused waiter is asked again without yielding) |
+| G5: no wake-up after a refusal | `a_refusal_wakes_the_waiter_behind`, `a_refusal_does_not_move_the_count`, `a_settle_that_adds_bytes_lets_the_waiter_behind_be_asked_again`, and two of the round-2 stale-refusal tests |
+| G5: a reservation ignores a generation that moved since the choice | `a_release_between_choosing_a_waiter_and_its_reservation_offers_the_permit_again` |
 | G6: never behind | `a_younger_waiter_behind_a_limit_refusal_takes_no_room_by_the_limit`, `a_waiter_refused_for_being_behind_is_eligible_again_when_the_one_ahead_leaves`, and the three round-2 stale-refusal tests |
 | G6: a share refusal holds younger waiters back | `a_waiter_refused_by_its_share_holds_no_one_back` and the three round-2 stale-refusal tests |
 | G6: a refusal made while behind stands with nothing ahead | `a_waiter_refused_for_being_behind_is_eligible_again_when_the_one_ahead_leaves` |
@@ -330,6 +339,10 @@ its tokio timeout with it. "Hang" marks a test the limit ended.
 | G8: a dropped waiter wakes no one | `a_selected_waiter_dropped_before_it_runs_wakes_the_next`, `a_waiter_refused_for_being_behind_is_eligible_again_when_the_one_ahead_leaves` |
 | G9: the one task ignores the lines | `the_one_task_gets_no_permit_ahead_of_an_eligible_waiter` |
 | K1: no permit taken for a key read | `walks_read_one_key_page_at_a_time` |
+
+Removed in round 3: the wake-up of every waiter that a refused waiter sent when it saw the budget change.
+No test needed it, and G7 says why none can: a change of the budget wakes every waiter whose standing it
+changes.
 
 **What waits for 6a/6b.** The lines (G2–G8) have no waiter in production until index tasks exist; this
 slice proves them with many waiters in `gate::tests` and keeps the one task on G9. "At most one waiter per

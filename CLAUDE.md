@@ -984,7 +984,10 @@ is the one concrete piece.
   and "behind" are read at each ask from every refusal and the budget's current generation, and while
   any waiter is in a line the budget moves its generation on every add too (`Budget::watch`), so a
   refusal at the current generation is what the budget would answer now. The gate owns its
-  budget and asks it itself (`Gate::new(permits, budget)`, `acquire(work, parts)`); today's one task asks `Gate::choose` and gets a permit only while
+  budget and asks it itself (`Gate::new(permits, budget)`, `acquire(work, parts)`), only at the
+  generation it chose the waiter at (`Budget::reserve_at`: moved since, it chooses again). The gate
+  tests run on paused time, where a loop that never yields stops tokio's timeouts too, so
+  `.config/nextest.toml` ends each after 30 s in both profiles; today's one task asks `Gate::choose` and gets a permit only while
   no eligible waiter is in a line, so grants are as before. Key reads (a page or an index's bound) take
   one shared `tokio::sync::Semaphore` permit held inside the walk's stored fetch (K1). Guards:
   `gate::tests` (each mutation of the rules in the stage note's table, under the gate's bounds in
