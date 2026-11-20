@@ -365,23 +365,40 @@ other. 1–5 change nothing a user sees except slice 4's per-index half and slic
 - **`newest` and `skipped` stay** until 6a. With one task they are still how a lane learns of a
   batch it has nothing in, and the model test keeps its meaning; 6a replaces them with the reader's
   `routed`.
-- **Marked at the grant, taken all or none.** The one task marks its run when a live build is
-  granted and takes every index's waiting ids into one build. While a waiting id is still building
-  (`Pending` until published, or a running backfill build of it), nothing is taken and the run stays
-  closed, as `main`'s batch waited for admission. `take`'s skip of building ids is for 6a.
-- **A batch's position is the run's newest change**, never a given-back id's: positions never go
-  back along a lane. A build a failed run never published waits again (`give_back_all` at the next
-  run's start) and is taken with the first replayed change, not at once.
-- **A run whose changes build nothing** tells every lane it was skipped and every sink its changes
-  settled, as an empty batch did (#204).
-- **`pinned_by`** is `engine::Pin`: a lane, or `Backlog(index)` while that index's pending documents
-  are older than every lane's own items (a tie names the lane). `/status` gives `{index, sink: null}`,
-  `flusso.slot.pinned_by` an `{index}` series. Stall age counts a lane's own items only
-  (`Progress::own_oldest`). `FlussoIndexBacklog` waits for slice 7's backlog age.
+- **Marked as read, granted all or none, admission as on `main`.** The one task marks its run
+  (`mark_run`) and offers it to the gate only while no waiting id is in a running build, checked
+  before a permit is taken, so no grant is ever given back. A build's ids leave admission when it
+  **lands** (`build_landed`), as `main`'s `Builds::holding` did: a later build of one of them gets a
+  later slot and publishes after (guard: `a_document_whose_build_landed_is_built_again_while_an_earlier_slot_waits`,
+  which passes on `main`'s engine). The live estimate counts distinct documents. `take`'s skip of
+  building ids is for 6a.
+- **Three steps of a build** decide who answers for it: taken or landed, it is the index's
+  **backlog** (`Pin::Backlog`, no lane's stall); once its batch is **sending** (`build_sending`), a
+  lane that hasn't registered it owns it (`Pin::Lane`, its stall age); a lane's registration or skip
+  settles it for that lane (`published_build` / `skipped_build`, the registry and the build changed
+  before one notification, so a fence waiter never misses the move). On a tie, within a lane or across
+  lanes, the lane is named.
+- **What a failed run leaves behind is forgotten**, not given back (`forget_all` as a run starts).
+  Confirmation stayed before it, so the replay marks it again, in batches of `max_changes`, as `main`
+  rebuilt it. Giving it back built it all in one batch past `max_changes`, which the tiny-budget
+  schedule caught (the budget's bound assumes one batch per build). Slice 8's per-index restart, which
+  doesn't reopen the stream, needs give-back and brings it with its own bound.
+- **A batch's position is the run's newest change, never below `Progress::newest_routed`**, so
+  positions never go back along a lane, across runs too.
+- **A run whose changes build nothing is an empty build**, as on `main`: its slot tells every lane
+  it was skipped and every sink its changes settled, in grant order (#204).
+- **`pinned_by`** is `engine::Pin`. `/status` gives `{index, sink: null}` for a backlog,
+  `flusso.slot.pinned_by` an `{index}` series, and the dev dashboard's WAL panel shows it with the
+  slot's whole lag. It is non-null during every live build (the build is the backlog's). Stall age
+  counts what a lane holds itself (`Progress::own_oldest`). `FlussoIndexBacklog` waits for slice 7.
+- **`Fence::settled` needs no change:** a build left behind (an ingest engine that failed while
+  stopping) holds both fence levels at its change, so the wait `settled` skips could never be
+  answered (`a_build_left_behind_holds_both_levels_so_settled_cuts_off_no_answerable_wait`).
 - **Existing tests changed:** `tests::lanes`' `a_lane_whose_live_item_is_blocked_answers_no_further_than_before`
   now expects `Before(0)` (the pending build holds the blocked lane) where it expected the lane's old
-  `Idle`; `pinned_by` comparisons in `tests::parking`, `tests/lane_parking.rs` and `stall::tests`
-  wrap the lane in `Pin::Lane`.
+  `Idle`; slice 1's `a_key_survives_an_ingest_restart` expects the replayed positions held at what was
+  routed (`1, 1`) where it expected them to repeat below it (`0, 1`); `pinned_by` comparisons in
+  `tests::parking`, `tests/lane_parking.rs` and `stall::tests` wrap the lane in `Pin::Lane`.
 
 ## 6. Decisions
 

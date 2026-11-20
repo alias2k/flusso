@@ -55,7 +55,7 @@ use super::snapshot::Snapshot;
 use crate::budget::{Budget, Charge, Reservation, document_bytes};
 use crate::error::{EngineError, Result};
 use crate::observer::{Observer, Wake, Work};
-use crate::progress::Token;
+use crate::progress::{Progress, Token};
 use crate::sink_engine::flights::Flights;
 
 /// The bytes per document a build is first estimated at, before any build
@@ -176,6 +176,9 @@ pub(super) struct Builds {
     /// The spawned builds, aborted when the run's future is dropped (a
     /// supervisor's abort, a shutdown deadline) so none outlives it.
     spawned: Vec<(u64, AbortHandle)>,
+    /// Told when a live build lands, so its documents leave admission there
+    /// too (the pending take reads it).
+    progress: Option<Arc<Progress>>,
 }
 
 impl Drop for Builds {
@@ -221,7 +224,14 @@ impl Builds {
             wake: Wake::Change,
             observer: Arc::new(crate::observer::NoopObserver),
             spawned: Vec::new(),
+            progress: None,
         }
+    }
+
+    /// Tell `progress` when a live build lands.
+    pub(super) fn with_progress(mut self, progress: Arc<Progress>) -> Self {
+        self.progress = Some(progress);
+        self
     }
 
     /// Report each wait for the budget to `observer`.
@@ -355,12 +365,6 @@ impl Builds {
         }
     }
 
-    /// Give back the permit the last choice took: the live take found
-    /// nothing it could build.
-    pub(super) fn drop_grant(&mut self) {
-        self.granted = None;
-    }
-
     /// An empty id list to fill, reusing one a finished build gave back.
     pub(super) fn spare(&mut self, capacity: usize) -> Vec<DocumentId> {
         self.spare
@@ -488,6 +492,11 @@ impl Builds {
         else {
             return;
         };
+        if let (Job::Live { taken, .. }, Some(progress)) = (&slot.job, &self.progress) {
+            for (index, token, _) in taken {
+                progress.build_landed(index, *token);
+            }
+        }
         let built = match output {
             Some(Output {
                 mut ids,

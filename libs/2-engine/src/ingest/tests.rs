@@ -1283,11 +1283,12 @@ async fn a_document_whose_build_landed_is_built_again_while_an_earlier_slot_wait
     assert_eq!(deployment.recorder.state(), db.expected());
 }
 
-/// A build that fails is given back and the engine restarts: the stream
-/// resumes after what every lane landed, which stays before the failed
-/// change, so its replay rebuilds the document and every sink ends with it.
+/// A build that fails is left behind and the engine restarts: the new run
+/// forgets it, and the stream resumes after what every lane landed, which
+/// stayed before the failed change, so its replay rebuilds the document and
+/// every sink ends with it.
 #[tokio::test(start_paused = true)]
-async fn a_failed_build_is_given_back_and_rebuilt_from_the_replay() {
+async fn a_failed_build_is_forgotten_and_rebuilt_from_the_replay() {
     let db = Database::new(0, [1, 2, 3].into_iter().map(Change::upsert).collect());
     let builder = Builder::new(
         &db,

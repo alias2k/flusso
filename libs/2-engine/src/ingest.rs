@@ -277,8 +277,9 @@ impl IngestEngine {
         tracing::info!("following live changes");
         self.observer.on_live_started();
 
-        let mut builds =
-            Builds::new(self.builds, self.budget.clone()).with_observer(Arc::clone(&self.observer));
+        let mut builds = Builds::new(self.builds, self.budget.clone())
+            .with_observer(Arc::clone(&self.observer))
+            .with_progress(Arc::clone(&self.progress));
         let ended = self
             .follow(&lanes, requests, &scopes, live, &mut builds)
             .await;
@@ -305,10 +306,10 @@ impl IngestEngine {
         // Where the last arm's work ended: every arm times its wait from here,
         // so the loop reads no clock of its own.
         let mut mark = Instant::now();
-        // What an earlier run took and never published waits again, and is
-        // built with the first change this run reads: confirmation stayed
-        // before it, so that change is a replay of what it waits for.
-        self.progress.give_back_all();
+        // What an earlier run marked and never published is forgotten:
+        // confirmation stayed before all of it, so this run's stream replays
+        // it and it is marked again, batched as it is read.
+        self.progress.forget_all();
 
         loop {
             // A live stream that ends while a snapshot runs or requests wait

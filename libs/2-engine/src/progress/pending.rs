@@ -1,10 +1,18 @@
 //! One index's pending documents: the ids marked for a build and not yet
 //! published, each with the oldest change that touched it (ADR 0012 stage 8a).
 //!
-//! **Waiting** ids are marked and not taken; **building** ids were taken under
-//! a [`Token`] and are released once that build is published on every lane.
-//! What holds confirmation back is the oldest of both: the first waiting id in
-//! position order, or the oldest change of a build.
+//! **Waiting** ids are marked and not taken; a **build** takes them under a
+//! [`Token`] and is released once published on every lane. What holds
+//! confirmation back is the oldest of both: the first waiting id in position
+//! order, or the oldest change of a build.
+//!
+//! A build goes through three steps, each changing who answers for it:
+//!
+//! | Step | Admission (a take skips its ids) | Holds a lane back as |
+//! | --- | --- | --- |
+//! | taken, running | yes | the index's **backlog** |
+//! | landed | no, as on `main`: a later build of an id gets a later slot, so it publishes after | backlog |
+//! | sending | no | the **lane's own**, until its item is registered there |
 //!
 //! - A mark keeps an id's **oldest** position: one build covers every change
 //!   before it, since a build reads the database as it is when it runs.
@@ -12,11 +20,14 @@
 //!   that build may have read before the change.
 //! - A take **skips** ids building and ids the caller says are held (a running
 //!   backfill build of them), so a taken id is never built twice at once.
-//! - A build **given back** (it failed, or its run ended unpublished) returns
-//!   each id at the older of its taken position and any newer mark.
+//! - What a run leaves behind (it failed before publishing) is **forgotten**
+//!   when the next run starts: confirmation stayed before all of it, so the
+//!   replayed stream marks it again, in batches of `max_changes`, as `main`
+//!   rebuilt it.
 //! - A build holds a lane back only until its item is **registered** on that
-//!   lane (the item then holds it, from the same oldest change), so a full
-//!   lane holds back only itself.
+//!   lane, or the lane is told the batch had nothing for it (the item then
+//!   holds it, from the same oldest change), so a full lane holds back only
+//!   itself; once sending, a lane that hasn't taken the item answers for it.
 //!
 //! ```text
 //! mark a@1 b@2 a@3   waiting a@1 b@2            minimum 1
@@ -69,8 +80,13 @@ struct Build {
     token: Token,
     oldest: Position,
     ids: Vec<(Arc<RowKey>, Position)>,
-    /// The sinks whose lane of the index has the build's item registered.
+    /// The sinks whose lane of the index has the build's item registered,
+    /// or was told the batch had nothing for it.
     registered: Vec<SinkName>,
+    /// The build returned: its ids are no longer admission's.
+    landed: bool,
+    /// Its batch is being published to the index's lanes.
+    sending: bool,
 }
 
 impl Pending {
@@ -146,6 +162,8 @@ impl Pending {
             oldest,
             ids: taken,
             registered: Vec::new(),
+            landed: false,
+            sending: false,
         });
         Some(Taken {
             token,
@@ -155,48 +173,54 @@ impl Pending {
         })
     }
 
-    /// The build under `token` is published on every lane: its ids are no
-    /// longer building. Returns how many ids it held.
+    /// The build under `token` returned: its ids leave admission, so a later
+    /// change to one of them can be built in a later slot (which publishes
+    /// after this one).
+    pub(crate) fn land(&mut self, token: Token) {
+        let Some(build) = self.builds.iter_mut().find(|build| build.token == token) else {
+            return;
+        };
+        if std::mem::replace(&mut build.landed, true) {
+            return;
+        }
+        for (key, _) in &build.ids {
+            self.building.remove(key);
+        }
+    }
+
+    /// The build under `token` is being published: a lane that hasn't
+    /// registered its item now answers for it.
+    pub(crate) fn sending(&mut self, token: Token) {
+        if let Some(build) = self.builds.iter_mut().find(|build| build.token == token) {
+            build.sending = true;
+        }
+    }
+
+    /// The build under `token` is published on every lane: it holds nothing
+    /// back. Returns how many ids it held.
     pub(crate) fn release(&mut self, token: Token) -> usize {
         let Some(build) = self.remove_build(token) else {
             return 0;
         };
-        for (key, _) in &build.ids {
-            self.building.remove(key);
+        if !build.landed {
+            for (key, _) in &build.ids {
+                self.building.remove(key);
+            }
         }
         build.ids.len()
     }
 
-    /// The build under `token` won't be published: each id waits again, at
-    /// the older of its taken position and any newer mark. Returns how many
-    /// ids started waiting again.
-    pub(crate) fn give_back(&mut self, token: Token) -> usize {
-        let Some(build) = self.remove_build(token) else {
-            return 0;
-        };
-        let mut waiting = 0;
-        for (key, position) in build.ids {
-            self.building.remove(&key);
-            match self.waiting.get(&key) {
-                Some(&(held, counter)) => {
-                    if position.seq < held.seq
-                        && let Some(arc) = self.order.remove(&(held.seq, counter))
-                    {
-                        self.insert(arc, position);
-                    }
-                }
-                None => {
-                    self.insert(key, position);
-                    waiting += 1;
-                }
-            }
-        }
+    /// Forget everything: the run that marked and took it ended before
+    /// publishing it. Confirmation never passed any of it, so the next run's
+    /// stream replays every change and marks the documents again. Returns how
+    /// many ids were waiting.
+    pub(crate) fn forget(&mut self) -> usize {
+        let waiting = self.waiting.len();
+        self.waiting.clear();
+        self.order.clear();
+        self.building.clear();
+        self.builds.clear();
         waiting
-    }
-
-    /// Every build's token, oldest first.
-    pub(crate) fn tokens(&self) -> Vec<Token> {
-        self.builds.iter().map(|build| build.token).collect()
     }
 
     fn remove_build(&mut self, token: Token) -> Option<Build> {
@@ -213,9 +237,10 @@ impl Pending {
         }
     }
 
-    /// The oldest change any of its ids holds back on `sink`'s lane: the
-    /// first waiting id, or the oldest of a build not yet registered there.
-    pub(crate) fn minimum_for(&self, sink: &SinkName) -> Option<Position> {
+    /// The oldest change the index's backlog holds back on `sink`'s lane:
+    /// the first waiting id, or the oldest of a build not yet being published
+    /// nor registered there.
+    pub(crate) fn backlog_for(&self, sink: &SinkName) -> Option<Position> {
         let waiting = self
             .order
             .first_key_value()
@@ -223,9 +248,19 @@ impl Pending {
             .map(|(position, _)| *position);
         self.builds
             .iter()
-            .filter(|build| !build.registered.contains(sink))
+            .filter(|build| !build.sending && !build.registered.contains(sink))
             .map(|build| build.oldest)
             .chain(waiting)
+            .min()
+    }
+
+    /// The oldest change of a build being published that `sink`'s lane
+    /// hasn't registered: the lane's to answer for.
+    pub(crate) fn sent_to(&self, sink: &SinkName) -> Option<Position> {
+        self.builds
+            .iter()
+            .filter(|build| build.sending && !build.registered.contains(sink))
+            .map(|build| build.oldest)
             .min()
     }
 
@@ -348,25 +383,42 @@ mod tests {
     }
 
     #[test]
-    fn a_build_given_back_waits_again_at_its_older_position() {
+    fn forgetting_leaves_nothing_waiting_or_building() {
         let mut pending = Pending::default();
         pending.mark(key(1), p(1));
-        pending.mark(key(2), p(2));
         let taken = pending.take(&index(), usize::MAX, &none).unwrap();
-        pending.mark(key(1), p(5));
-        assert_eq!(
-            pending.give_back(taken.token),
-            1,
-            "2 waits again; 1 already did"
-        );
+        pending.mark(key(2), p(2));
+        assert_eq!(pending.forget(), 1);
+        assert_eq!(pending.minimum(), None);
+        assert_eq!(pending.release(taken.token), 0, "the build is gone");
+        pending.mark(key(1), p(3));
+        let again = pending.take(&index(), usize::MAX, &none).unwrap();
+        assert_eq!(again.oldest, p(3), "marked afresh by the replay");
+        assert_ne!(again.token, taken.token);
+    }
+
+    /// A landed build leaves admission: a later change to one of its ids is
+    /// taken into a later build while it waits to be published.
+    #[test]
+    fn a_landed_build_lets_its_documents_be_taken_again() {
+        let mut pending = Pending::default();
+        pending.mark(key(1), p(1));
+        let first = pending.take(&index(), usize::MAX, &none).unwrap();
+        pending.mark(key(1), p(2));
+        assert!(pending.take(&index(), usize::MAX, &none).is_none());
+        pending.land(first.token);
+        let second = pending.take(&index(), usize::MAX, &none).unwrap();
+        assert_eq!(second.oldest, p(2));
+        pending.release(first.token);
         assert_eq!(
             pending.minimum(),
-            Some(p(1)),
-            "1 is back at its older position"
+            Some(p(2)),
+            "the second build still holds it"
         );
-        let again = pending.take(&index(), usize::MAX, &none).unwrap();
-        assert_eq!(ids(&again), [key(1), key(2)]);
-        assert_eq!(again.oldest, p(1));
+        assert!(
+            pending.take(&index(), usize::MAX, &none).is_none(),
+            "releasing the first leaves the second's document building"
+        );
     }
 
     #[test]
@@ -377,7 +429,6 @@ mod tests {
         let taken = pending.take(&index(), usize::MAX, &none).unwrap();
         pending.mark(key(2), p(6));
         assert_eq!(pending.minimum(), Some(p(4)));
-        assert_eq!(pending.tokens(), [taken.token]);
         pending.release(taken.token);
         assert_eq!(pending.minimum(), Some(p(6)));
         let last = pending.take(&index(), usize::MAX, &none).unwrap();

@@ -545,8 +545,7 @@ fn a_marked_id_pins_confirmation_until_its_build_lands() {
     assert_eq!(progress.landed(), Landed::Before(p(3)), "building");
 
     let key = progress.next_key(&a.index).unwrap();
-    progress.published(&a, key, taken.oldest, p(3));
-    progress.build_registered(&a, taken.token);
+    progress.published_build(&a, key, taken.oldest, p(3), taken.token);
     progress.release(&a.index, taken.token);
     assert_eq!(progress.landed(), Landed::Before(p(3)), "on the lane");
     progress.applied(&a, key);
@@ -564,8 +563,7 @@ fn a_build_holds_a_lane_only_until_its_item_is_registered_there() {
         .take(&healthy.index, usize::MAX, &nothing_held)
         .unwrap();
     let key = progress.next_key(&healthy.index).unwrap();
-    progress.published(&healthy, key, taken.oldest, p(1));
-    progress.build_registered(&healthy, taken.token);
+    progress.published_build(&healthy, key, taken.oldest, p(1), taken.token);
     progress.applied(&healthy, key);
 
     assert_eq!(
@@ -621,27 +619,26 @@ fn an_id_of_an_index_without_lanes_pins_nothing() {
     assert_eq!(progress.landed(), Landed::Idle);
 }
 
-/// A build a run never published waits again when the next run starts.
+/// What a run left behind unpublished is forgotten when the next run
+/// starts, every time it is asked: the replay marks it again.
 #[test]
-fn a_build_left_unpublished_waits_again() {
+fn a_run_forgets_what_an_earlier_run_left_behind() {
     let a = sink("a");
     let progress = Progress::new([a.clone()]);
     progress.mark([(id("users", 1), p(1)), (id("users", 2), p(2))]);
     progress.take(&a.index, usize::MAX, &nothing_held).unwrap();
-    progress.give_back_all();
-    progress.give_back_all();
-    assert_eq!(progress.waiting(), 2, "once, however often it runs");
+    progress.mark([(id("users", 3), p(3))]);
     assert_eq!(progress.landed(), Landed::Before(p(1)));
-    let again = progress.take(&a.index, usize::MAX, &nothing_held).unwrap();
-    assert_eq!(again.ids.len(), 2);
-    assert_eq!(again.oldest, p(1));
+    progress.forget_all();
+    progress.forget_all();
+    assert_eq!(progress.waiting(), 0);
+    assert_eq!(progress.landed(), Landed::Idle);
 }
 
 /// Register `taken`'s item on `lane` under `key`: the call the ingest
 /// engine makes once that lane's send returned.
 fn register(progress: &Progress, lane: &LaneKey, key: ItemKey, taken: &Taken, last: Position) {
-    progress.published(lane, key, taken.oldest, last);
-    progress.build_registered(lane, taken.token);
+    progress.published_build(lane, key, taken.oldest, last, taken.token);
 }
 
 /// Each answer a registration moves is followed by a notification, so a
@@ -689,6 +686,13 @@ fn a_build_sent_to_some_lanes_and_blocked_on_one_pins_that_lane() {
     let progress = Progress::new([a.clone(), b.clone()]);
     progress.mark([(id("users", 1), p(3))]);
     let taken = progress.take(&a.index, usize::MAX, &nothing_held).unwrap();
+    assert_eq!(
+        progress.pinned_by(),
+        Some(Pin::Backlog(a.index.clone())),
+        "building: the backlog's"
+    );
+    progress.build_landed(&a.index, taken.token);
+    progress.build_sending(&a.index, taken.token);
     let key = progress.next_key(&a.index).unwrap();
     register(&progress, &a, key, &taken, p(3));
     progress.applied(&a, key);

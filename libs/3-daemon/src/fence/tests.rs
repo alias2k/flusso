@@ -924,3 +924,56 @@ async fn a_build_left_behind_holds_both_levels_so_settled_cuts_off_no_answerable
     );
     assert_eq!(waiting.await.unwrap(), timed_out("9"));
 }
+
+/// The race behind one registration call: the sink lands the batch's item
+/// before the ingest task registers it, and a sibling sink's lane is full,
+/// so its item never registers. The registration that moves the healthy
+/// lane's answer wakes its waiter, which passes without the full lane.
+#[tokio::test(start_paused = true)]
+async fn a_fence_on_a_healthy_sink_passes_while_its_index_build_waits_on_a_full_sibling() {
+    let rig = fence(&["a", "b"]);
+    let change = rig.source.emit(20);
+    rig.progress.mark([(
+        source::document::DocumentId {
+            index: index("users"),
+            key: source::RowKey(Vec::new()),
+        },
+        change,
+    )]);
+    let taken = rig
+        .progress
+        .take(&index("users"), usize::MAX, &|_: &source::RowKey| false)
+        .unwrap();
+    rig.progress.build_landed(&index("users"), taken.token);
+    rig.progress.build_sending(&index("users"), taken.token);
+
+    let waiting = tokio::spawn({
+        let fence = rig.fence.clone();
+        async move {
+            fence
+                .wait(&request("20", FenceLevel::Applied, Some("a")))
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let key = rig.progress.next_key(&index("users")).unwrap();
+    rig.progress.applied(&lane("a"), key);
+    rig.observer.on_position_applied(&lane("a"), change);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert!(!waiting.is_finished(), "the item isn't registered yet");
+
+    rig.progress
+        .published_build(&lane("a"), key, taken.oldest, change, taken.token);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .expect("woken by the registration")
+            .unwrap(),
+        reached("20")
+    );
+    assert_eq!(
+        rig.progress.lane(&lane("b"), Level::Applied),
+        Some(Landed::Before(change)),
+        "the full sibling still holds itself back"
+    );
+}

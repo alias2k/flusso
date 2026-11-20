@@ -261,8 +261,8 @@ async fn a_change_that_builds_nothing_settles_after_the_batch_before_it() {
     run.await.unwrap().unwrap();
     assert_eq!(
         *events.0.lock().unwrap(),
-        ["built 2", "settled 1 on primary"],
-        "the empty batch settles after the one granted before it"
+        ["built 2", "settled 1 on primary", "built 0"],
+        "the empty batch settles after the one granted before it, as an empty batch"
     );
 }
 
@@ -317,9 +317,9 @@ async fn a_skipped_lane_is_not_held_by_a_full_lane_of_another_index() {
     run.abort();
 }
 
-/// A build a failed run left behind is published by the next run before it
-/// reads any change (the stream ends at once): its item never carries a
-/// position below what its lanes were already routed.
+/// A batch never carries a position below what its lanes were already
+/// routed, so positions never go back along a lane, even when a stream
+/// replays changes under positions it numbered before.
 #[tokio::test]
 async fn a_batch_never_carries_a_position_below_what_its_lanes_were_routed() {
     let primary = sink_name("primary");
@@ -329,18 +329,8 @@ async fn a_batch_never_carries_a_position_below_what_its_lanes_were_routed() {
     let earlier = progress.next_key(&users()).unwrap();
     progress.published(&lane, earlier, Position::new(10), Position::new(10));
     progress.applied(&lane, earlier);
-    progress.mark([(
-        DocumentId {
-            index: users(),
-            key: super::key(1),
-        },
-        Position::new(2),
-    )]);
-    progress
-        .take(&users(), usize::MAX, &|_: &RowKey| false)
-        .unwrap();
     IngestEngine::new(
-        Arc::new(MockSource::new(Vec::new())),
+        Arc::new(MockSource::new(vec![upsert(1)])),
         Arc::new(MockDocuments::default()),
         Arc::clone(&stream) as Arc<dyn Stream>,
         vec![primary],

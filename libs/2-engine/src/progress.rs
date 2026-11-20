@@ -89,10 +89,11 @@ pub use pending::{Taken, Token};
 /// ([`Progress::pinned_by`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pin {
-    /// A lane's own oldest item, written and not landed.
+    /// A lane: its own oldest item not landed, or a batch being published
+    /// that it hasn't taken yet (a full lane).
     Lane(LaneKey),
-    /// An index's documents marked and not yet published on its lanes:
-    /// none of its lanes holds them yet.
+    /// An index's backlog: documents marked and waiting, or building, that
+    /// no lane has been sent yet.
     Backlog(IndexName),
 }
 
@@ -265,6 +266,51 @@ impl Progress {
         self.registered();
     }
 
+    /// `lane` took the item keyed `key` of the pending build `token`, which
+    /// covers `oldest..=last`: [`published`](Self::published), and the build
+    /// no longer holds that lane back, both before the one notification, so a
+    /// fence waiter woken by it sees the lane's new answer.
+    pub fn published_build(
+        &self,
+        lane: &LaneKey,
+        key: ItemKey,
+        oldest: Position,
+        last: Position,
+        token: Token,
+    ) {
+        {
+            let mut registry = lock(&self.registry);
+            if let Some(registered) = registry.lanes.get_mut(lane) {
+                registered.unlanded.push_back((key, oldest));
+                registered.unsearchable.push_back((key, oldest));
+                registered.newest = Some(registered.newest.map_or(last, |n| n.max(last)));
+            }
+        }
+        self.settle_build(lane, token);
+        self.registered();
+    }
+
+    /// The pending build `token`'s batch, through `last`, had nothing for
+    /// `lane` (every document it made for the index failed under `skip`):
+    /// [`skipped`](Self::skipped), and the build no longer holds that lane
+    /// back, before the one notification.
+    pub fn skipped_build(&self, lane: &LaneKey, last: Position, token: Token) {
+        {
+            let mut registry = lock(&self.registry);
+            if let Some(registered) = registry.lanes.get_mut(lane) {
+                registered.newest = Some(registered.newest.map_or(last, |n| n.max(last)));
+            }
+        }
+        self.settle_build(lane, token);
+        self.registered();
+    }
+
+    fn settle_build(&self, lane: &LaneKey, token: Token) {
+        if let Some(pending) = self.pending.get(&lane.index) {
+            lock(pending).registered(token, &lane.sink);
+        }
+    }
+
     fn registered(&self) {
         if let Some(listener) = self.listener.get() {
             listener();
@@ -295,9 +341,10 @@ impl Progress {
     }
 
     /// What decides [`landed`](Self::landed) while it holds something back
-    /// (`Before`): a lane's own oldest item, or its index's pending
-    /// documents, which no lane holds yet. On a tie the lane is named. `None`
-    /// when everything routed has landed.
+    /// (`Before`): a lane (what it holds itself, see
+    /// [`own_oldest`](Self::own_oldest)), or an index's backlog, which no
+    /// lane has been sent yet. On a tie, within a lane or across lanes, the
+    /// lane is named. `None` when everything routed has landed.
     pub fn pinned_by(&self) -> Option<Pin> {
         match self.least_of(self.marks.keys(), Level::Applied) {
             Some((lane, Landed::Before(_), true)) => Some(Pin::Backlog(lane.index.clone())),
@@ -331,13 +378,13 @@ impl Progress {
     /// first of `lanes`) and whether its index's pending documents, not its
     /// own items, decide it.
     ///
-    /// A lane answers `Before` the oldest of its own unlanded items and its
-    /// index's pending documents not yet registered on it. The writers order
-    /// their steps so the reader can't miss a change: an item is registered
-    /// on a lane before its build stops counting there, and documents are
-    /// pending before anything routes past them. So the registry is locked first and each
-    /// index's pending set under it; no writer holds a pending lock while it
-    /// takes the registry's.
+    /// A lane answers `Before` the oldest of its own unlanded items, a batch
+    /// being published it hasn't taken yet (both its own), and its index's
+    /// backlog (the backlog's). The writers order their steps so the reader
+    /// can't miss a change: an item is registered on a lane before its build
+    /// stops counting there, and documents are pending before anything routes
+    /// past them. So the registry is locked first and each index's pending set
+    /// under it; no writer holds a pending lock while it takes the registry's.
     fn least_of<'a>(
         &self,
         lanes: impl IntoIterator<Item = &'a LaneKey>,
@@ -348,11 +395,18 @@ impl Progress {
         for lane in lanes {
             let marks = self.marks.get(lane)?;
             let registered = registry.lanes.get_mut(lane)?;
-            let own = registered.outstanding(marks, level);
-            let backlog = self
+            let (sent, backlog) = self
                 .pending
                 .get(&lane.index)
-                .and_then(|pending| lock(pending).minimum_for(&lane.sink));
+                .map_or((None, None), |pending| {
+                    let pending = lock(pending);
+                    (pending.sent_to(&lane.sink), pending.backlog_for(&lane.sink))
+                });
+            let own = registered
+                .outstanding(marks, level)
+                .into_iter()
+                .chain(sent)
+                .min();
             let (answer, from_backlog) = match (own, backlog) {
                 (Some(own), Some(backlog)) if backlog < own => (Landed::Before(backlog), true),
                 (Some(own), _) => (Landed::Before(own), false),
@@ -362,24 +416,33 @@ impl Progress {
                     false,
                 ),
             };
+            // On a tie the lane is named: its own item holds the slot as much
+            // as the backlog does, and it is the one to look at.
             least = Some(match least {
-                Some(least) if bound(least.1) <= bound(answer) => least,
+                Some(least) if (bound(least.1), least.2) <= (bound(answer), from_backlog) => least,
                 _ => (lane, answer, from_backlog),
             });
         }
         least
     }
 
-    /// The oldest of `lane`'s own items not yet landed: what its stall is
-    /// measured by. Its index's pending documents don't count: they are on
-    /// no lane yet. `None` for nothing outstanding or an unknown lane.
+    /// The oldest of what `lane` itself holds back: its items not yet landed
+    /// and a batch being published that it hasn't taken yet. What its stall
+    /// is measured by. Its index's backlog (documents waiting or building)
+    /// doesn't count: it is on no lane yet. `None` for nothing outstanding or
+    /// an unknown lane.
     pub fn own_oldest(&self, lane: &LaneKey) -> Option<Position> {
         let marks = self.marks.get(lane)?;
         let mut registry = lock(&self.registry);
-        registry
+        let own = registry
             .lanes
             .get_mut(lane)?
-            .outstanding(marks, Level::Applied)
+            .outstanding(marks, Level::Applied);
+        let sent = self
+            .pending
+            .get(&lane.index)
+            .and_then(|pending| lock(pending).sent_to(&lane.sink));
+        own.into_iter().chain(sent).min()
     }
 
     /// Mark each id pending on its index, touched by the change at its
@@ -427,12 +490,30 @@ impl Progress {
         Some(taken)
     }
 
-    /// The build under `token` has its item registered on `lane` (call it
-    /// right after that registration): it holds that lane back no more.
-    pub fn build_registered(&self, lane: &LaneKey, token: Token) {
-        if let Some(pending) = self.pending.get(&lane.index) {
-            lock(pending).registered(token, &lane.sink);
+    /// `index`'s build `token` returned: its documents leave admission, so
+    /// a later change to one of them can be taken into a later build.
+    pub fn build_landed(&self, index: &IndexName, token: Token) {
+        if let Some(pending) = self.pending.get(index) {
+            lock(pending).land(token);
         }
+    }
+
+    /// `index`'s build `token` is being published: from now on a lane that
+    /// hasn't registered its item answers for it (stall age, `pinned_by`).
+    pub fn build_sending(&self, index: &IndexName, token: Token) {
+        if let Some(pending) = self.pending.get(index) {
+            lock(pending).sending(token);
+        }
+    }
+
+    /// The newest position routed to any lane: what no later batch's
+    /// position goes below, across runs.
+    pub fn newest_routed(&self) -> Option<Position> {
+        lock(&self.registry)
+            .lanes
+            .values()
+            .filter_map(|registered| registered.newest)
+            .max()
     }
 
     /// Whether some waiting document is building, or `held` says a running
@@ -455,15 +536,14 @@ impl Progress {
         self.registered();
     }
 
-    /// Every build not released waits again: its run ended before
-    /// publishing it. Idempotent.
-    pub fn give_back_all(&self) {
+    /// Forget every pending document: the run that marked it ended before
+    /// publishing it, and confirmation never passed it, so the next run's
+    /// replayed stream marks it again. Call it as a run starts, before
+    /// anything is read. Idempotent.
+    pub fn forget_all(&self) {
         for pending in self.pending.values() {
-            let mut pending = lock(pending);
-            for token in pending.tokens() {
-                let waiting = pending.give_back(token);
-                self.waiting.fetch_add(waiting, Ordering::Relaxed);
-            }
+            let forgotten = lock(pending).forget();
+            self.waiting.fetch_sub(forgotten, Ordering::Relaxed);
         }
     }
 
