@@ -323,11 +323,10 @@ committed"):
 - **The bound** (review round 1: a parked lane let steps pile up, about 24 bytes per grant, and one
   parked lane stopped the pruning for every sink). A lane drops the steps before the one it has
   committed whenever a step is registered on it, and a skipped step replaces the lane's newest entry
-  when no unlanded item is at or after it (that entry could only answer as the newest step, which the
-  skip now is). Items land in key order, so past the front every entry is a step holding one of the
-  lane's `k` unlanded items or the one skip after it: **a lane keeps at most `2k + 2` steps, however
+  (steps reach a lane in order, so whenever that entry could answer the skip answers too). Items land
+  in key order, so past the front every entry was pushed by one of the lane's `k` unlanded items: **a lane keeps at most `k + 2` steps, however
   many grants pass it**, and `k` is bounded by the lane's capacity. A lane parked on its first item
-  keeps at most 2. `Progress::steps_kept` reports it. Guards: `progress::tests::parked` (10,000 grants
+  keeps at most 2. `Progress::steps_kept` reports it, with the lane's unlanded items, under one lock (the delta re-check showed the "no unlanded item at or after it" condition on the replacement was never needed: a skip always replaces the newest entry, which tightened the bound from `2k + 2`). Guards: `progress::tests::parked` (10,000 grants
   past a lane parked on its first item, after landing, and with five unlanded items: the bound holds
   after every grant and the count is the total read once the lane lands), the daemon's
   `a_{refused,blocked,restaging}_lane_holds_its_sinks_count_and_a_sibling_counts_on` (200 grants

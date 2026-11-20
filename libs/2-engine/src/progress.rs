@@ -691,14 +691,17 @@ impl Progress {
         }
     }
 
-    /// How many steps `lane` keeps to answer [`committed`](Self::committed):
-    /// at most twice its unlanded items ([`outstanding`](Self::outstanding))
-    /// plus two, however many grants pass it. `None` for an unknown lane.
-    pub fn steps_kept(&self, lane: &LaneKey) -> Option<usize> {
-        lock(&self.registry)
-            .lanes
-            .get(lane)
-            .map(|registered| registered.steps.len())
+    /// How many steps `lane` keeps to answer [`committed`](Self::committed),
+    /// beside how many items it has unlanded, both read under one lock: the
+    /// first is at most the second plus two, however many grants pass the
+    /// lane. `None` for an unknown lane.
+    pub fn steps_kept(&self, lane: &LaneKey) -> Option<(usize, usize)> {
+        let marks = self.marks.get(lane)?;
+        let mut registry = lock(&self.registry);
+        registry.lanes.get_mut(lane).map(|registered| {
+            registered.committed(marks);
+            (registered.steps.len(), registered.unlanded.len())
+        })
     }
 
     /// Every index that can have pending documents: one with a lane here.
@@ -790,14 +793,13 @@ impl Registered {
     /// Call it after [`committed`](Self::committed) pruned the front and
     /// before the step's own item is registered.
     ///
-    /// A skipped step replaces the newest entry when no unlanded item is at
-    /// or after that entry: the entry could only answer as the newest step,
-    /// which the skip now is. **The bound:** items land in key order, so
-    /// every item after the first unlanded one is unlanded too; past the
-    /// front, each entry is a step holding one of the `k` unlanded items or
-    /// the one skip entry after it. So a lane keeps at most `2k + 1` entries
-    /// after a registration, `2k + 2` with the step being recorded, however
-    /// many grants pass it.
+    /// A skipped step replaces the newest entry: steps reach a lane in
+    /// order, so whenever that entry could answer as committed the skip
+    /// answers too, and it is the newer. **The bound:** items land in key
+    /// order, so every item after the first unlanded one is unlanded too;
+    /// past the front, an entry was pushed by one of the `k` unlanded items.
+    /// So a lane keeps at most `k + 1` entries after a registration, `k + 2`
+    /// with the step being recorded, however many grants pass it.
     fn record(&mut self, step: Step, item: bool) {
         let Some(&newest) = self.steps.back() else {
             self.steps.push_back(step);
@@ -806,9 +808,7 @@ impl Registered {
         if newest >= step {
             return;
         }
-        let newest_unlanded = self.unlanded.iter().rev().find_map(|(_, _, step)| *step);
-        let replaceable = !item && newest_unlanded.is_none_or(|unlanded| unlanded < newest);
-        if replaceable && let Some(back) = self.steps.back_mut() {
+        if !item && let Some(back) = self.steps.back_mut() {
             *back = step;
         } else {
             self.steps.push_back(step);

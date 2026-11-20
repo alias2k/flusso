@@ -905,7 +905,7 @@ mod committed {
             progress.applied(&a, key);
         }
         read(&progress, 1);
-        assert!(progress.steps_kept(&a).unwrap() <= 2);
+        assert!(progress.steps_kept(&a).unwrap().0 <= 2);
         assert_eq!(progress.committed(&name("a")), 100);
     }
 }
@@ -920,10 +920,10 @@ mod parked {
         )
     }
 
-    /// What the bound says a lane may keep: twice its unlanded items, plus
-    /// two.
+    /// What the bound says a lane may keep: its unlanded items, plus two.
     fn within_bound(progress: &Progress, lane: &LaneKey) -> bool {
-        progress.steps_kept(lane).unwrap() <= 2 * progress.outstanding(lane) + 2
+        let (kept, unlanded) = progress.steps_kept(lane).unwrap();
+        kept <= unlanded + 2
     }
 
     /// `users` holds `parked` unlanded items (the first on the first step
@@ -1104,8 +1104,9 @@ fn compaction_changes_no_count() {
                 );
             }
             for lane in &lanes {
+                let (kept, unlanded) = progress.steps_kept(lane).unwrap();
                 assert!(
-                    progress.steps_kept(lane).unwrap() <= 2 * progress.outstanding(lane) + 2,
+                    kept <= unlanded + 2,
                     "seed {seed}: {lane} keeps {:?}",
                     progress.steps_kept(lane)
                 );

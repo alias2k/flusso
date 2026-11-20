@@ -637,8 +637,8 @@ is the one concrete piece.
   or skipped; counted per read, so a replayed change counts once per read and a redelivered item once;
   reads of a run that ended before its grant close a step at the next run's `forget_all` and count with
   the next routed one. Computed when read (`Status::with_progress`, the observable `flusso.changes.committed`);
-  nothing listens. A step carries its read total; a lane keeps at most `2k + 2` steps (`k` its unlanded
-  items: a skip replaces the lane's newest entry when no unlanded item is at or after it), so a parked lane
+  nothing listens. A step carries its read total; a lane keeps at most `k + 2` steps (`k` its unlanded
+  items: a skip replaces the lane's newest entry), so a parked lane
   holds no growing record (`Progress::steps_kept`). Guards: `daemon` `tests::committed`,
   `progress::tests::{committed,parked,compaction_changes_no_count}`. Snapshots and `SnapshotComplete { index }` go to
   `(index, s)` of each requesting sink; requests are one per index and coalesce by sink set. The sink

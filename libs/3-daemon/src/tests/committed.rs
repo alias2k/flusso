@@ -661,9 +661,9 @@ async fn a_lane_not_written_holds_its_sinks_count(
         LaneKey::new(users(), audit()),
         LaneKey::new(orders(), audit()),
     ] {
-        let kept = progress.steps_kept(&lane).unwrap();
+        let (kept, unlanded) = progress.steps_kept(&lane).unwrap();
         assert!(
-            kept <= 2 * progress.outstanding(&lane) + 2,
+            kept <= unlanded + 2,
             "{lane} keeps {kept} steps after {total} grants"
         );
     }
