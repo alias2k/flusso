@@ -704,8 +704,12 @@ is the one concrete piece.
   own: stall age, `Pin::Lane`), and its index's **backlog** (waiting ids, builds not sending and not
   registered on it: `Pin::Backlog`), so a full sibling lane still holds back only itself. What a run
   left behind unpublished is forgotten when the next run starts (`forget_all`): confirmation stayed
-  before it, so the replay marks it again. A batch's position is the newest change the run read, never
-  below `Progress::newest_routed`, so positions never go back along a lane.
+  before it, so the replay marks it again. A batch carries its own run's newest change, as on `main`
+  (every document it takes was marked by that run): positions grow along a lane within one run (grant
+  order), and across runs only as the source numbers them. The `ChangeCapture` port promises
+  monotonic positions within one run; the Postgres capture keeps numbering across reopened streams. A
+  batch never borrows another change's position, so a lane that lands it answers through its own
+  run's changes only (guard: `a_replayed_batch_claims_no_change_another_lane_landed`).
   Each lane answers `Before(oldest of its unlanded items and its index's pending documents)` /
   `Through(the newest position routed to it)` / `Idle`
   (`source::cdc::Landed`), and several lanes (`landed()`, `over`) answer as the lane that covers least,
@@ -743,9 +747,9 @@ is the one concrete piece.
   `tests::pending` (`a_document_being_built_holds_confirmation_in_the_progress`,
   `a_skipped_lane_is_not_held_by_a_full_lane_of_another_index`,
   `a_change_that_builds_nothing_settles_after_the_batch_before_it`,
-  `a_batch_never_carries_a_position_below_what_its_lanes_were_routed`), `ingest::tests`'
+  `a_replayed_batch_claims_no_change_another_lane_landed`), `ingest::tests`'
   `a_document_whose_build_landed_is_built_again_while_an_earlier_slot_waits` (passes on `main`'s
-  engine too) and `a_failed_build_is_forgotten_and_rebuilt_from_the_replay`, the daemon's
+  engine too) and `what_a_failed_run_left_behind_is_rebuilt_from_the_replay_in_batches`, the daemon's
   `a_fence_on_a_healthy_sink_passes_while_its_index_build_waits_on_a_full_sibling` and
   `a_build_left_behind_holds_both_levels_so_settled_cuts_off_no_answerable_wait`;
   `a_stalled_lane_pins_confirmation_and_its_own_fence_only`,

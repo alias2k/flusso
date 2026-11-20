@@ -381,10 +381,18 @@ other. 1–5 change nothing a user sees except slice 4's per-index half and slic
 - **What a failed run leaves behind is forgotten**, not given back (`forget_all` as a run starts).
   Confirmation stayed before it, so the replay marks it again, in batches of `max_changes`, as `main`
   rebuilt it. Giving it back built it all in one batch past `max_changes`, which the tiny-budget
-  schedule caught (the budget's bound assumes one batch per build). Slice 8's per-index restart, which
-  doesn't reopen the stream, needs give-back and brings it with its own bound.
-- **A batch's position is the run's newest change, never below `Progress::newest_routed`**, so
-  positions never go back along a lane, across runs too.
+  schedule caught (the budget's bound assumes one batch per build). Guard:
+  `what_a_failed_run_left_behind_is_rebuilt_from_the_replay_in_batches` (three batches left behind
+  are rebuilt two at a time; under give-back it sees one batch of six). Slice 8's per-index restart,
+  which doesn't reopen the stream, needs give-back and brings it with its own bound.
+- **A batch carries its own run's newest change**, as on `main`: every document it takes was marked
+  by that run (a document waits only between its run's marking and grant, and what a failed run left
+  is forgotten), so no fallback is needed. Positions grow along a lane within one run; across runs only
+  as the source numbers them: the `ChangeCapture` port promises monotonic positions within one run,
+  and the Postgres capture keeps numbering across reopened streams. A floor at the newest position
+  routed to any lane (review round 1) was removed in round 2: with a source that repeats positions
+  across runs, a replayed change's batch borrowed another lane's newer change, and a lane that never
+  got that change answered through it (`a_replayed_batch_claims_no_change_another_lane_landed`).
 - **A run whose changes build nothing is an empty build**, as on `main`: its slot tells every lane
   it was skipped and every sink its changes settled, in grant order (#204).
 - **`pinned_by`** is `engine::Pin`. `/status` gives `{index, sink: null}` for a backlog,
@@ -396,8 +404,7 @@ other. 1–5 change nothing a user sees except slice 4's per-index half and slic
   answered (`a_build_left_behind_holds_both_levels_so_settled_cuts_off_no_answerable_wait`).
 - **Existing tests changed:** `tests::lanes`' `a_lane_whose_live_item_is_blocked_answers_no_further_than_before`
   now expects `Before(0)` (the pending build holds the blocked lane) where it expected the lane's old
-  `Idle`; slice 1's `a_key_survives_an_ingest_restart` expects the replayed positions held at what was
-  routed (`1, 1`) where it expected them to repeat below it (`0, 1`); `pinned_by` comparisons in
+  `Idle`; `pinned_by` comparisons in
   `tests::parking`, `tests/lane_parking.rs` and `stall::tests` wrap the lane in `Pin::Lane`.
 
 ## 6. Decisions

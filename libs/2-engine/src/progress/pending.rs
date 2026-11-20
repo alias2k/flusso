@@ -58,8 +58,6 @@ pub struct Taken {
     pub ids: Vec<DocumentId>,
     /// The oldest change among them.
     pub oldest: Position,
-    /// The newest change any of them waited at.
-    pub newest: Position,
 }
 
 /// One index's waiting and building ids.
@@ -137,7 +135,6 @@ impl Pending {
         let mut ids = Vec::with_capacity(chosen.len());
         let mut taken = Vec::with_capacity(chosen.len());
         let mut oldest: Option<Position> = None;
-        let mut newest: Option<Position> = None;
         for at in chosen {
             let Some(key) = self.order.remove(&at) else {
                 continue;
@@ -146,7 +143,6 @@ impl Pending {
                 continue;
             };
             oldest = Some(oldest.map_or(position, |o| o.min(position)));
-            newest = Some(newest.map_or(position, |n| n.max(position)));
             ids.push(DocumentId {
                 index: index.clone(),
                 key: (*key).clone(),
@@ -154,7 +150,7 @@ impl Pending {
             self.building.insert(Arc::clone(&key));
             taken.push((key, position));
         }
-        let (oldest, newest) = oldest.zip(newest)?;
+        let oldest = oldest?;
         let token = Token(self.next_token);
         self.next_token += 1;
         self.builds.push(Build {
@@ -165,12 +161,7 @@ impl Pending {
             landed: false,
             sending: false,
         });
-        Some(Taken {
-            token,
-            ids,
-            oldest,
-            newest,
-        })
+        Some(Taken { token, ids, oldest })
     }
 
     /// The build under `token` returned: its ids leave admission, so a later

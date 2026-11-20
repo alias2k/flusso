@@ -74,8 +74,7 @@ async fn items(stream: &ChannelStream, lane: &LaneKey, count: usize) -> Vec<(Ite
 
 /// A second run replays changes under positions the first run's items still
 /// hold, unacknowledged on the lane: its items get the next keys, so landing
-/// the first run's items covers none of the second's. Their positions never
-/// go below what the lane was routed.
+/// the first run's items covers none of the second's.
 #[tokio::test]
 async fn a_key_survives_an_ingest_restart() {
     let primary = sink_name("primary");
@@ -93,10 +92,10 @@ async fn a_key_survives_an_ingest_restart() {
         [
             (ItemKey::new(0), 0),
             (ItemKey::new(1), 1),
-            (ItemKey::new(2), 1),
+            (ItemKey::new(2), 0),
             (ItemKey::new(3), 1)
         ],
-        "the replayed positions are held at what was routed; keys go on"
+        "positions repeat across the runs; keys go on"
     );
 
     progress.applied(&lane, ItemKey::new(1));

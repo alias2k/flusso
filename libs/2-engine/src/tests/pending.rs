@@ -317,40 +317,6 @@ async fn a_skipped_lane_is_not_held_by_a_full_lane_of_another_index() {
     run.abort();
 }
 
-/// A batch never carries a position below what its lanes were already
-/// routed, so positions never go back along a lane, even when a stream
-/// replays changes under positions it numbered before.
-#[tokio::test]
-async fn a_batch_never_carries_a_position_below_what_its_lanes_were_routed() {
-    let primary = sink_name("primary");
-    let lane = LaneKey::new(users(), primary.clone());
-    let stream = Arc::new(ChannelStream::over(64, [users()], [primary.clone()]));
-    let progress = Arc::new(Progress::of([users()], [primary.clone()]));
-    let earlier = progress.next_key(&users()).unwrap();
-    progress.published(&lane, earlier, Position::new(10), Position::new(10));
-    progress.applied(&lane, earlier);
-    IngestEngine::new(
-        Arc::new(MockSource::new(vec![upsert(1)])),
-        Arc::new(MockDocuments::default()),
-        Arc::clone(&stream) as Arc<dyn Stream>,
-        vec![primary],
-        Arc::clone(&progress),
-    )
-    .run()
-    .await
-    .unwrap();
-    let mut consumer = stream.lane(&lane).unwrap().consumer;
-    let delivery = consumer.recv().await.unwrap().unwrap();
-    let LaneItem::Batch(batch) = delivery.item() else {
-        panic!("a live batch");
-    };
-    assert!(
-        batch.position >= Some(Position::new(10)),
-        "positions never go back along a lane: {:?}",
-        batch.position
-    );
-}
-
 /// A run published the batch through change 10 to `primary` only (the send
 /// to `audit` failed and the run ended), and `primary` landed it. The next
 /// run's stream replays change 0. Its batch carries change 0's own position:

@@ -111,7 +111,7 @@ impl IngestEngine {
             self.publish_ready(builds, lanes).await?;
             self.mark_run(pending);
             let waiting = self.progress.waiting();
-            let live = pending.count > 0 || waiting > 0;
+            let live = pending.count > 0;
             if live && !self.waiting_held(builds) && builds.can_take_last(waiting) {
                 self.start_live(pending, builds).await;
                 continue;
@@ -137,12 +137,17 @@ impl IngestEngine {
     }
 
     /// Mark the run's documents pending on their indexes, deduplicated
-    /// there, and remember the run's newest change.
+    /// there. A document waits only between its run's marking and that run's
+    /// grant, which takes every one: what an earlier run left behind is
+    /// forgotten as a run starts.
     fn mark_run(&self, pending: &mut LiveRun) {
         if !pending.marks.is_empty() {
             self.progress.mark(pending.marks.drain(..));
         }
-        pending.last = pending.last.max(pending.position);
+        debug_assert!(
+            pending.count > 0 || self.progress.waiting() == 0,
+            "documents wait with no run to grant them"
+        );
     }
 
     /// Whether a running build holds one of the waiting documents: a take
@@ -157,9 +162,11 @@ impl IngestEngine {
     /// over every index (the grant checked none is in a running build). A
     /// run whose changes touched no document any lane receives is an empty
     /// build, as on `main`: its slot settles those changes in grant order.
+    /// The batch carries the run's newest change, as on `main`: every
+    /// document it takes was marked by this run.
     async fn start_live(&self, pending: &mut LiveRun, builds: &mut Builds) {
-        let (ids, taken, position) = self.take_all(pending.last, builds);
-        pending.last = position;
+        let (ids, taken) = self.take_all(builds);
+        let position = pending.position;
         let changes = pending.count;
         pending.clear();
         let job = Job::Live {
@@ -172,36 +179,23 @@ impl IngestEngine {
             .await;
     }
 
-    /// Every index's waiting documents: the ids, each index's build, and the
-    /// position the batch answers for. That is `last`, the newest change
-    /// this run read, or, before it read any, the newest its documents waited
-    /// at, and never below what any lane was already routed, across runs, so
-    /// positions never go back along a lane.
-    #[allow(clippy::type_complexity)]
+    /// Every index's waiting documents: the ids, and each index's build.
     fn take_all(
         &self,
-        last: Option<Position>,
         builds: &mut Builds,
-    ) -> (
-        Vec<DocumentId>,
-        Vec<(IndexName, Token, Position)>,
-        Option<Position>,
-    ) {
+    ) -> (Vec<DocumentId>, Vec<(IndexName, Token, Position)>) {
         let mut ids = builds.spare(self.batch.max_changes);
         let mut taken = Vec::new();
-        let mut newest = None;
         for index in self.progress.indexes() {
             if let Some(take) = self
                 .progress
                 .take(index, usize::MAX, &|key| builds.holds(index, key))
             {
                 ids.extend(take.ids);
-                newest = newest.max(Some(take.newest));
                 taken.push((index.clone(), take.token, take.oldest));
             }
         }
-        let position = last.or(newest).max(self.progress.newest_routed());
-        (ids, taken, position)
+        (ids, taken)
     }
 
     async fn start_backfill(&self, snapshot: &mut Snapshot, builds: &mut Builds) {

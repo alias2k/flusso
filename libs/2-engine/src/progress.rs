@@ -506,16 +506,6 @@ impl Progress {
         }
     }
 
-    /// The newest position routed to any lane: what no later batch's
-    /// position goes below, across runs.
-    pub fn newest_routed(&self) -> Option<Position> {
-        lock(&self.registry)
-            .lanes
-            .values()
-            .filter_map(|registered| registered.newest)
-            .max()
-    }
-
     /// Whether some waiting document is building, or `held` says a running
     /// build holds it (`None`: none is held), so a take now would leave it
     /// behind.

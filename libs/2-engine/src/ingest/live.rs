@@ -105,9 +105,6 @@ pub(super) struct LiveRun {
     pub(super) marks: Vec<(DocumentId, Position)>,
     pub(super) count: usize,
     pub(super) position: Option<Position>,
-    /// The newest position this run of the engine marked: what a live item
-    /// carries, so positions never go back along a lane.
-    pub(super) last: Option<Position>,
     pub(super) deadline: Option<Instant>,
     capacity: usize,
 }
@@ -118,7 +115,6 @@ impl LiveRun {
             marks: Vec::with_capacity(capacity),
             count: 0,
             position: None,
-            last: None,
             deadline: None,
             capacity,
         }
