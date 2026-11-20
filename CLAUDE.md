@@ -1171,18 +1171,46 @@ is the one concrete piece.
 - **Built documents are held within a byte budget (ADR 0012 stage 5).** `[concurrency] max_built_mib`
   (`--max-built-mib` / `FLUSSO_MAX_BUILT_MIB`, 16..=1,048,576, default 512 via
   `daemon::DEFAULT_MAX_BUILT_MIB`, the owner's call after 64 was tried: `stage-5.md` "The default"; never in the lock) is an `engine::Budget` the daemon hands the ingest
-  engine (`IngestEngine::with_budget`; without one nothing is counted) and `/status` (`memory`). A grant
-  reserves an estimate (ids × a running average bytes per document, per kind) in `Builds::choose`: a
-  candidate the budget can't fit is not admissible, so the gate's every-fourth counter doesn't move, and
-  the loop waits on `Budget::released` (`ingest.rs`'s release arm; `settle` waits too). The build future
+  engine (`IngestEngine::with_budget`; without one nothing is counted) and `/status` (`memory`). **Shared
+  per index since ADR 0012 stage 8a slice 4**: with two or more indexes with lanes, one index holds at most
+  `[concurrency] index_budget_share` of it (`--index-budget-share` / `FLUSSO_INDEX_BUDGET_SHARE`, default
+  0.5 via `daemon::DEFAULT_INDEX_BUDGET_SHARE`; refused outside (0, 1], `nan` included, by the one judge
+  `daemon::index_budget_share` that `check`, `build`, `run` (`lay_index_budget_share`, flag > env > file)
+  and `Daemon::start` share, naming where the value came from; never in the lock); with one index nothing
+  changes. Every count lives under one lock (`Budget::admit` decides, `Budget::reserve` checks and adds in
+  one step), so many reservers never pass the limit together; every release bumps a generation and
+  `notify_waiters` outside the lock, and a waiter passes the generation of its refusal to
+  `Budget::released_since` (no lost wake-up). A grant estimates per index (ids × a running average per
+  index and kind) in `Builds::choose`, admits, lets the gate pick, then reserves: a backfill batch fits
+  whole or not at all; a live batch takes the indexes that fit (`Grant::Live(_, admitted)`) and **defers**
+  the rest: their documents stay waiting, the live run keeps its position, and their lanes get nothing
+  from that build, not even its step, so nothing of them counts committed early. An index may stay
+  deferred only while it has fewer than `2 × max_changes` documents waiting (`Builds::with_deferral`,
+  only with a shared budget); past that the batch waits whole and a full run stops the reading, as with one
+  index. Rules (`budget.rs`'s module doc): 1 total ≤ limit, 2 backfill ≤ half, 3 an index's **live** bytes
+  ≤ its share (its backfill bytes don't count, so an index's backfill or reindex leaves its live stream
+  `main`'s room), 4 backfill holding nothing gets one batch, 5 an index holding no live bytes gets one live
+  batch whatever 1 and 3 say (so one stuck index, a parked lane at its share for hours, leaves the others
+  building until it has `2 × max_changes` documents waiting, then reading stops for all as before; 6b
+  lifts that; live holding nothing takes every index). Total ≤ limit + one live batch per index + one backfill
+  batch + settle slack; one index's live batch is take-all, up to about `3 × max_changes` changes'
+  documents with two or more indexes (a per-index cap would register a step while documents of it still
+  wait). Indexes are offered oldest waiting first and the first refused by the limit stops younger ones
+  **holding live bytes** from taking room by it (no starvation by small batches; rule 5 is never held back).
+  A live wait (`flusso.memory.refused`/`wait`) lasts until no index is deferred; whether a hold was counted
+  belongs to the engine (`builds::Waits`), its clock to the engine run: a run that ends reports its open wait
+  up to then, and the next run's refusal of the same hold starts a new clock without counting again. Each index's settled `Charge` rides only that
+  index's lane items. A candidate the budget can't fit is not admissible, so the gate's every-fourth
+  counter doesn't move, and the loop waits on `Budget::released_since` (`ingest.rs`'s release arm;
+  `settle` waits too). The build future
   walks its documents (`budget::document_bytes`, B-tree nodes not entries; `tests/heap_walk.rs` holds it
   to a counting allocator within 0.8–1.2) and the reservation settles to that, at least `FLOOR` (1 KiB).
   The `Arc<Charge>` rides every lane's piece as `stream::Batch.hold` (an opaque `Hold`, serde-skipped,
   equal to any other), so the bytes return when the last copy drops: every lane acknowledged and no
   ledger can redeliver. Rules: total within the limit, backfill within half, and a kind holding nothing
   is always granted one batch (so a batch larger than the budget builds alone); held stays within the
-  limit plus each in-flight build's **actual** batch (a grant is checked against its estimate, then
-  settles to what it built; the estimate stays one average per kind, per index waits for 8a). `[stream] capacity` / `--queue-capacity` are deprecated
+  limit plus each in-flight build's **actual** batch and one batch per index (rule 4; a grant is checked
+  against its estimate, then settles to what it built). `[stream] capacity` / `--queue-capacity` are deprecated
   (load, warn, ignored); `ChannelStream::from_config` gives lanes `LANE_BACKSTOP` (1,048,576) items,
   which the floor keeps from binding (`ChannelStream::new` keeps an explicit capacity for tests).
   Metrics `flusso.memory.built{work}`, `flusso.memory.refused{work}` (once per wait) and
@@ -1195,8 +1223,19 @@ is the one concrete piece.
   (held ≤ limit + each build's actual batch at every write, every byte back at the end),
   `a_stalled_sink_paces_builds_and_they_resume_when_it_does`,
   `live_keeps_room_beside_a_backfill_holding_its_half`, `a_batch_bigger_than_the_budget_still_builds`,
-  `a_batch_redelivered_after_a_failed_write_gives_its_bytes_back_once_written`; every `ingest::tests`
-  deployment with a budget asserts it returns to zero (`Deployment::assert_released`).
+  `a_batch_redelivered_after_a_failed_write_gives_its_bytes_back_once_written`,
+  `one_bursting_index_of_three_holds_its_share_and_the_others_build`,
+  `a_deferred_index_is_never_counted_committed_before_its_documents_land`,
+  `an_index_past_its_waiting_bound_holds_the_live_batch_whole`,
+  `random_schedules_over_three_indexes_with_one_bursting_stay_within_their_shares` (sink stalled for a
+  second; each index's live bytes ≤ its share plus one batch at every write, which fails with the share off),
+  `an_index_held_at_its_share_is_one_wait_however_many_builds_pass_it`,
+  `an_index_backfilling_behind_a_slow_sink_keeps_both_live_streams_building` (shared vs the share off on
+  paused time), `a_parked_index_at_its_share_leaves_a_healthy_index_writing_for_ten_minutes` (lanes as large as
+  a deployment's), `a_hold_across_an_engine_restart_is_one_wait`,
+  `a_wait_open_when_an_engine_run_ends_is_reported_up_to_that_moment`, `budget::tests`' rule and bound tests, the daemon's `tests::budget`, the CLI's
+  `index_budget_share` binary; every `ingest::tests` deployment with a budget asserts it returns to zero
+  (`Deployment::assert_released`), and `Budget`'s `Drop` asserts no index is still counted.
 - **A lone change on a quiet stream is committed at once (issue #135).** `BatchPolicy`
   (default 256 changes / 50 ms; `flusso.toml`'s `[batch]` table `max_changes`/`max_delay_ms`,
   laid over the defaults by the daemon; `--batch-max-changes`/`--batch-max-delay-ms` +

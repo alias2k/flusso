@@ -104,6 +104,8 @@ pub struct IngestEngine {
     batch: BatchPolicy,
     builds: usize,
     budget: Option<Arc<Budget>>,
+    /// The budget waits open across engine runs (see [`Builds::with_waits`]).
+    budget_waits: Arc<std::sync::Mutex<builds::Waits>>,
     failure_policies: FailurePolicies,
     stop: Stop,
     /// How many times this engine moved the source forward (see
@@ -144,6 +146,7 @@ impl IngestEngine {
             batch: BatchPolicy::default(),
             builds: 1,
             budget: None,
+            budget_waits: Arc::default(),
             failure_policies: FailurePolicies::default(),
             stop: Stop::new(),
             advances: AtomicU64::new(0),
@@ -277,9 +280,20 @@ impl IngestEngine {
         tracing::info!("following live changes");
         self.observer.on_live_started();
 
+        // An index the shared budget leaves out may wait while the others
+        // build, up to two runs of documents (ADR 0012 stage 8a slice 4); past
+        // that the live batch waits whole, and a full one stops the reading,
+        // as with one index.
+        let defer_below = self
+            .budget
+            .as_ref()
+            .and_then(|budget| budget.index_share())
+            .map(|_| self.batch.max_changes.saturating_mul(2));
         let mut builds = Builds::new(self.builds, self.budget.clone())
             .with_observer(Arc::clone(&self.observer))
-            .with_progress(Arc::clone(&self.progress));
+            .with_progress(Arc::clone(&self.progress))
+            .with_deferral(defer_below)
+            .with_waits(Arc::clone(&self.budget_waits));
         let ended = self
             .follow(&lanes, requests, &scopes, live, &mut builds)
             .await;
@@ -371,7 +385,9 @@ impl IngestEngine {
                         mark = Instant::now();
                     }
                 },
-                () = released(self.budget.as_deref()), if builds.refused().is_some() => {
+                () = released(self.budget.as_deref(), builds.refused_since()),
+                    if builds.refused().is_some() =>
+                {
                     builds.woke(Wake::Released);
                     self.grant(&mut pending, &mut snapshot, builds, lanes).await?;
                     self.confirm(&mut last_confirmed, false);
@@ -512,10 +528,11 @@ impl IngestEngine {
     }
 }
 
-/// The next release of `budget`'s bytes; never, without a budget.
-async fn released(budget: Option<&Budget>) {
+/// A release of `budget`'s bytes past generation `since`; never, without a
+/// budget.
+async fn released(budget: Option<&Budget>, since: u64) {
     match budget {
-        Some(budget) => budget.released().await,
+        Some(budget) => budget.released_since(since).await,
         None => std::future::pending().await,
     }
 }

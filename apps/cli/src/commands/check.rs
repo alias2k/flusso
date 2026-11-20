@@ -78,6 +78,8 @@ pub(crate) async fn execute(args: CheckArgs) -> anyhow::Result<()> {
     // misspelled sink option is a config error, and `check` exists to catch it.
     adapters::validate(&config).with_context(|| format!("validating {}", args.config.display()))?;
     daemon::backoff(&config).with_context(|| format!("validating {}", args.config.display()))?;
+    daemon::index_budget_share(&config)
+        .with_context(|| format!("validating {}", args.config.display()))?;
     crate::backends::compile_scripts(&config)
         .with_context(|| format!("compiling the scripts of {}", args.config.display()))?;
     let config = Arc::new(config);

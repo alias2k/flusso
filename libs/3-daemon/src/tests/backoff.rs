@@ -759,8 +759,8 @@ fn a_backoff_refusal_says_where_each_value_came_from() {
         crate::backoff(&config).unwrap_err().to_string()
     };
     let said = refusal(
-        value(800, config::BackoffOrigin::Flag),
-        value(200, config::BackoffOrigin::Env),
+        value(800, config::Origin::Flag),
+        value(200, config::Origin::Env),
     );
     assert!(
         said.contains("max_ms = 200 (set by FLUSSO_BACKOFF_MAX_MS) is below initial_ms = 800 (set by --backoff-initial-ms)"),
@@ -775,14 +775,14 @@ fn a_backoff_refusal_says_where_each_value_came_from() {
         "{said}"
     );
     let said = refusal(
-        value(800, config::BackoffOrigin::Env),
-        value(200, config::BackoffOrigin::Flag),
+        value(800, config::Origin::Env),
+        value(200, config::Origin::Flag),
     );
     assert!(
         said.contains("max_ms = 200 (set by --backoff-max-ms) is below initial_ms = 800 (set by FLUSSO_BACKOFF_INITIAL_MS)"),
         "{said}"
     );
-    let said = refusal(None, value(200, config::BackoffOrigin::File));
+    let said = refusal(None, value(200, config::Origin::File));
     assert!(
         said.contains("max_ms = 200 (set in flusso.toml's [backoff] max_ms) is below initial_ms = 1000 (the default)"),
         "{said}"

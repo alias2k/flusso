@@ -709,6 +709,28 @@ impl Progress {
         self.pending.keys()
     }
 
+    /// Each index with ids waiting to be taken, how many, oldest waiting
+    /// first (by the position of its oldest waiting id; ties by name).
+    pub fn waiting_by_index(&self) -> Vec<(IndexName, usize)> {
+        let mut waiting: Vec<(Position, IndexName, usize)> = self
+            .pending
+            .iter()
+            .filter_map(|(index, pending)| {
+                let pending = lock(pending);
+                let count = pending.waiting();
+                pending
+                    .oldest_waiting()
+                    .filter(|_| count > 0)
+                    .map(|oldest| (oldest, index.clone(), count))
+            })
+            .collect();
+        waiting.sort();
+        waiting
+            .into_iter()
+            .map(|(_, index, count)| (index, count))
+            .collect()
+    }
+
     /// How many ids wait to be taken, over every index.
     pub fn waiting(&self) -> usize {
         self.waiting.load(Ordering::Relaxed)

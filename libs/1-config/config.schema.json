@@ -182,6 +182,16 @@
           "minimum": 16,
           "description": "MiB of built documents held before the ingest engine waits (default\n512): what it built and every sink has not yet acknowledged. A\nbackfill holds at most half of it, so live changes always have room,\nand a batch larger than the whole budget still builds, alone. Counts\nheap, not JSON: a document holds 8–10× its JSON size. At least 16, at\nmost 1,048,576.",
           "maximum": 1048576
+        },
+        "index_budget_share": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "The share of `max_built_mib` one index's live documents may hold\nwhile two or more indexes run (default 0.5): one index bursting fills\nat most this much, and the others keep building beside it. Its\nbackfill counts with every backfill against half the budget instead.\nAbove 0, at most 1; with one index it does nothing. `check`, `build`\nand `run` refuse a value outside (0, 1].",
+          "exclusiveMinimum": 0,
+          "maximum": 1
         }
       },
       "description": "How much the pipeline does at once, from a `flusso.toml` `[concurrency]`\ntable. A property of the machine that runs flusso, not of the deployment:\nit is never written into `flusso.lock`, so `run --locked` takes it from\n`--writes` / `FLUSSO_WRITES` and `--builds` / `FLUSSO_BUILDS` or the\ndefaults. Every key is optional."

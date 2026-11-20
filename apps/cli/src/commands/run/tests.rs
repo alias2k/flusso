@@ -1,4 +1,4 @@
-use super::{ConfigPlan, lay_backoff, plan_config};
+use super::{ConfigPlan, lay_backoff, lay_index_budget_share, plan_config};
 use std::path::{Path, PathBuf};
 
 const DEFAULT: &str = "flusso.toml";
@@ -85,13 +85,13 @@ fn laid(
     Ok(config)
 }
 
-fn origin(value: Option<config::BackoffValue>) -> Option<(u64, config::BackoffOrigin)> {
+fn origin(value: Option<config::BackoffValue>) -> Option<(u64, config::Origin)> {
     value.map(|value| (value.ms.get(), value.origin))
 }
 
 #[test]
 fn each_backoff_key_takes_the_flag_over_the_variable_over_the_file() {
-    use config::BackoffOrigin::{Env, File, Flag};
+    use config::Origin::{Env, File, Flag};
     let file = "initial_ms = 200\nmax_ms = 800";
     let both_vars = [
         ("FLUSSO_BACKOFF_INITIAL_MS", "300"),
@@ -176,4 +176,101 @@ fn engine_backoff(initial_ms: u64, max_ms: u64) -> daemon::Backoff {
         std::time::Duration::from_millis(max_ms),
     )
     .unwrap()
+}
+
+fn with_concurrency(table: &str) -> config::Config {
+    let toml = format!("[source]\ntype = \"postgres\"\n\n[concurrency]\n{table}\n");
+    config::Config::from(
+        <config::toml::ConfigToml as config::ParseFrom<_>>::try_parse(toml).unwrap(),
+    )
+}
+
+fn share_laid(
+    table: &str,
+    flag: Option<f64>,
+    env: &[(&str, &str)],
+) -> anyhow::Result<config::Config> {
+    let mut config = with_concurrency(table);
+    lay_index_budget_share(&mut config, flag, vars(env))?;
+    Ok(config)
+}
+
+fn share(config: &config::Config) -> Option<(f64, config::Origin)> {
+    config
+        .concurrency
+        .index_budget_share
+        .map(|value| (value.share, value.origin))
+}
+
+#[test]
+fn the_index_budget_share_takes_the_flag_over_the_variable_over_the_file() {
+    use config::Origin::{Env, File, Flag};
+    let file = "index_budget_share = 0.25";
+    let var = [("FLUSSO_INDEX_BUDGET_SHARE", "0.4")];
+    assert_eq!(
+        share(&share_laid(file, None, &[]).unwrap()),
+        Some((0.25, File))
+    );
+    assert_eq!(
+        share(&share_laid(file, None, &var).unwrap()),
+        Some((0.4, Env))
+    );
+    assert_eq!(
+        share(&share_laid(file, Some(0.75), &var).unwrap()),
+        Some((0.75, Flag))
+    );
+    let config = share_laid("", None, &[]).unwrap();
+    assert_eq!(share(&config), None);
+    assert_eq!(daemon::index_budget_share(&config).unwrap(), 0.5);
+    assert_eq!(
+        share(&share_laid("index_budget_share = 1", None, &[]).unwrap()),
+        Some((1.0, File)),
+        "a whole 1 is the whole budget"
+    );
+    assert_eq!(
+        share(&share_laid("", None, &[("FLUSSO_INDEX_BUDGET_SHARE", "")]).unwrap()),
+        None,
+        "an empty variable is unset"
+    );
+}
+
+#[test]
+fn an_index_budget_share_outside_zero_to_one_is_refused_naming_where_it_came_from() {
+    for (table, flag, env, said) in [
+        (
+            "index_budget_share = 0",
+            None,
+            &[][..],
+            "index_budget_share = 0 (set in flusso.toml's [concurrency] index_budget_share)",
+        ),
+        (
+            "",
+            Some(1.5),
+            &[][..],
+            "index_budget_share = 1.5 (set by --index-budget-share)",
+        ),
+        (
+            "",
+            None,
+            &[("FLUSSO_INDEX_BUDGET_SHARE", "-0.5")][..],
+            "index_budget_share = -0.5 (set by FLUSSO_INDEX_BUDGET_SHARE)",
+        ),
+        (
+            "index_budget_share = nan",
+            None,
+            &[][..],
+            "index_budget_share = NaN (set in flusso.toml's [concurrency] index_budget_share)",
+        ),
+    ] {
+        let error = share_laid(table, flag, env).unwrap_err().to_string();
+        assert!(error.contains(said), "{error}");
+        assert!(error.contains("is outside (0, 1]"), "{error}");
+    }
+    let error = share_laid("", None, &[("FLUSSO_INDEX_BUDGET_SHARE", "half")])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("FLUSSO_INDEX_BUDGET_SHARE: `half` is not a number"),
+        "{error}"
+    );
 }

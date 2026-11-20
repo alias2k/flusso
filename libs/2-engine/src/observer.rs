@@ -176,7 +176,7 @@ impl Stage {
 }
 
 /// Which work a timing belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Work {
     /// Live changes from the stream.
     Live,

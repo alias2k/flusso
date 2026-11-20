@@ -121,10 +121,42 @@ pub fn backoff(config: &Config) -> anyhow::Result<Backoff> {
 fn origin(value: Option<config::BackoffValue>, key: &str) -> String {
     match value.map(|value| value.origin) {
         None => "the default".to_owned(),
-        Some(config::BackoffOrigin::File) => format!("set in flusso.toml's [backoff] {key}"),
-        Some(config::BackoffOrigin::Flag) => format!("set by {}", flag(key)),
-        Some(config::BackoffOrigin::Env) => format!("set by {}", variable(key)),
+        Some(config::Origin::File) => format!("set in flusso.toml's [backoff] {key}"),
+        Some(config::Origin::Flag) => format!("set by {}", flag(key)),
+        Some(config::Origin::Env) => format!("set by {}", variable(key)),
     }
+}
+
+/// The share of `max_built_mib` one index's live documents may hold when
+/// `[concurrency] index_budget_share` is unset.
+pub const DEFAULT_INDEX_BUDGET_SHARE: f64 = 0.5;
+
+/// The share of the memory budget one index's live documents may hold while two or more
+/// indexes run, resolved and checked: `[concurrency] index_budget_share` as
+/// set (flag > env > file), else [`DEFAULT_INDEX_BUDGET_SHARE`]. A value
+/// outside (0, 1] (`nan` included) is refused, the message saying where it
+/// came from and how to change it. The one judge `run`, `check`, `build` and
+/// [`Daemon::start`] share.
+pub fn index_budget_share(config: &Config) -> anyhow::Result<f64> {
+    let Some(value) = config.concurrency.index_budget_share else {
+        return Ok(DEFAULT_INDEX_BUDGET_SHARE);
+    };
+    if value.share > 0.0 && value.share <= 1.0 {
+        return Ok(value.share);
+    }
+    let set = match value.origin {
+        config::Origin::File => "set in flusso.toml's [concurrency] index_budget_share",
+        config::Origin::Flag => "set by --index-budget-share",
+        config::Origin::Env => "set by FLUSSO_INDEX_BUDGET_SHARE",
+    };
+    anyhow::bail!(
+        "[concurrency] index_budget_share = {} ({set}) is outside (0, 1]: it is the share of \
+         max_built_mib one index's live documents may hold while two or more indexes run. Set a number above 0 \
+         and at most 1 (default 0.5) with flusso.toml's [concurrency] index_budget_share, \
+         --index-budget-share or FLUSSO_INDEX_BUDGET_SHARE; a flag wins over its variable, a \
+         variable over the file",
+        value.share
+    )
 }
 
 /// Every way to set a `[backoff]` key.
@@ -241,6 +273,7 @@ impl Daemon {
 
         backends.validate(&config)?;
         let backoff = backoff(&config)?;
+        let index_share = index_budget_share(&config)?;
         tracing::info!(
             source = %config.source.kind,
             stream = %config.stream.kind,
@@ -280,7 +313,11 @@ impl Daemon {
             Arc::clone(&progress),
             lanes.iter().cloned(),
         );
-        let budget = Arc::new(Budget::new(max_built_bytes(&config)));
+        // Shared per index only with two or more: `mappings` are the
+        // indexes that have lanes, the ones a build can hold bytes for.
+        let budget = Arc::new(
+            Budget::new(max_built_bytes(&config)).with_index_share(mappings.len(), index_share),
+        );
         let stalls = Arc::new(Stalls::new(lanes.iter().cloned()));
         let status = Arc::new(
             Status::new(

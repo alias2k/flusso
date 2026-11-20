@@ -17,7 +17,7 @@ use crate::toml::ConfigToml;
 
 use super::{
     BackoffConfig, BackoffValue, BatchConfig, ConcurrencyConfig, Config, DEFAULT_STREAM_KIND,
-    ServerConfig,
+    Origin, ServerConfig, ShareValue,
 };
 
 /// Infallible (nothing is resolved or interpreted here), so this is a `From`;
@@ -40,6 +40,10 @@ impl From<ConfigToml> for Config {
                 writes: toml.concurrency.writes,
                 builds: toml.concurrency.builds,
                 max_built_mib: toml.concurrency.max_built_mib,
+                index_budget_share: toml.concurrency.index_budget_share.map(|share| ShareValue {
+                    share,
+                    origin: Origin::File,
+                }),
             },
             backoff: BackoffConfig {
                 initial_ms: toml.backoff.initial_ms.map(BackoffValue::from_file),

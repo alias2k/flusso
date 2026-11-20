@@ -13,7 +13,9 @@ mod stop;
 #[cfg(test)]
 mod tests;
 
-pub use budget::{Budget, Charge, FLOOR, Held, Reservation, document_bytes, value_bytes};
+pub use budget::{
+    Admission, Budget, Charge, FLOOR, Held, Reservation, document_bytes, value_bytes,
+};
 pub use error::*;
 pub use ingest::{IngestEngine, KEY_PAGE, document_id};
 pub use observer::*;
