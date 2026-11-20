@@ -246,7 +246,8 @@ async fn a_write_blocked_index_parks_alone_and_catches_up_once_lifted() {
     );
     let pinning = live.progress.pinned_by();
     assert!(
-        pinning == Some(lane("held_stop")) || pinning == Some(lane("held_skip")),
+        pinning == Some(engine::Pin::Lane(lane("held_stop")))
+            || pinning == Some(engine::Pin::Lane(lane("held_skip"))),
         "a blocked lane pins the slot: {pinning:?}"
     );
 

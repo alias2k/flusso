@@ -24,7 +24,7 @@ impl IngestEngine {
     pub(super) async fn drain_ready(
         &self,
         live: &mut LiveStream,
-        pending: &mut PendingBatch,
+        pending: &mut LiveRun,
     ) -> Result<bool> {
         while pending.is_open() && !self.stop.is_requested() {
             match live.next().now_or_never() {
@@ -39,11 +39,11 @@ impl IngestEngine {
         Ok(false)
     }
 
-    /// Resolve one live change into the batch: the documents it touches,
-    /// deduplicated, and its position.
+    /// Resolve one live change into the run: the documents it touches, each
+    /// with its position, and the run's position.
     pub(super) async fn buffer_live(
         &self,
-        pending: &mut PendingBatch,
+        pending: &mut LiveRun,
         position: Position,
         event: ChangeEvent,
     ) -> Result<()> {
@@ -53,8 +53,10 @@ impl IngestEngine {
             .resolve(event.table(), event.key(), event.before(), event.after())
             .await?;
         tracing::trace!(documents = affected.len(), "change resolved to documents");
-        pending.add(affected);
-        pending.oldest.get_or_insert(position);
+        pending
+            .marks
+            .extend(affected.into_iter().map(|id| (id, position)));
+        pending.count += 1;
         pending.position = Some(position);
         if pending.deadline.is_none() {
             pending.deadline = Some(Instant::now() + self.batch.max_delay);
@@ -92,19 +94,63 @@ pub(super) async fn next_live(live: &mut LiveStream, stop: &Stop) -> Next {
     .await
 }
 
-/// A batch in the making: the deduplicated document ids of the buffered changes
-/// (or snapshot rows), how many were buffered, and — for a live
-/// batch — the last position and the flush deadline.
+/// The live changes read since the last grant: the documents they touch,
+/// each with the change's position (marked pending on their indexes when the
+/// next live build is granted, which deduplicates them), how many changes,
+/// the run's last position and its deadline. A run cut at `max_changes`
+/// changes or its deadline stops the reading until a build takes it, as one
+/// batch did.
+#[derive(Debug)]
+pub(super) struct LiveRun {
+    pub(super) marks: Vec<(DocumentId, Position)>,
+    pub(super) count: usize,
+    pub(super) position: Option<Position>,
+    /// The newest position this run of the engine marked: what a live item
+    /// carries, so positions never go back along a lane.
+    pub(super) last: Option<Position>,
+    pub(super) deadline: Option<Instant>,
+    capacity: usize,
+}
+
+impl LiveRun {
+    pub(super) fn new(capacity: usize) -> Self {
+        Self {
+            marks: Vec::with_capacity(capacity),
+            count: 0,
+            position: None,
+            last: None,
+            deadline: None,
+            capacity,
+        }
+    }
+
+    pub(super) fn is_full(&self) -> bool {
+        self.count >= self.capacity
+    }
+
+    /// Still accepting changes: neither full nor past its deadline.
+    pub(super) fn is_open(&self) -> bool {
+        !self.is_full()
+            && self
+                .deadline
+                .is_none_or(|deadline| Instant::now() < deadline)
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.marks.clear();
+        self.count = 0;
+        self.position = None;
+        self.deadline = None;
+    }
+}
+
+/// A snapshot batch in the making: the deduplicated document ids of the
+/// rows read and how many.
 #[derive(Debug)]
 pub(super) struct PendingBatch {
     pub(super) ids: Vec<DocumentId>,
     pub(super) seen: HashSet<DocumentId>,
     pub(super) count: usize,
-    pub(super) position: Option<Position>,
-    /// The batch's first position: what holds confirmation back while the
-    /// batch is outstanding on a lane.
-    pub(super) oldest: Option<Position>,
-    pub(super) deadline: Option<Instant>,
     pub(super) capacity: usize,
 }
 
@@ -114,9 +160,6 @@ impl PendingBatch {
             ids: Vec::with_capacity(capacity),
             seen: HashSet::with_capacity(capacity),
             count: 0,
-            position: None,
-            oldest: None,
-            deadline: None,
             capacity,
         }
     }
@@ -135,20 +178,9 @@ impl PendingBatch {
         self.count >= self.capacity
     }
 
-    /// Still accepting changes: neither full nor past its deadline.
-    pub(super) fn is_open(&self) -> bool {
-        !self.is_full()
-            && self
-                .deadline
-                .is_none_or(|deadline| Instant::now() < deadline)
-    }
-
     pub(super) fn clear(&mut self) {
         self.ids.clear();
         self.seen.clear();
         self.count = 0;
-        self.position = None;
-        self.oldest = None;
-        self.deadline = None;
     }
 }

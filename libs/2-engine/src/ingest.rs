@@ -74,7 +74,7 @@ use crate::stop::{Stop, drain_lanes};
 
 use builds::Builds;
 use confirm::{CONFIRM_TICK, Furthest};
-use live::{Next, PendingBatch, next_live};
+use live::{LiveRun, Next, next_live};
 pub use snapshot::KEY_PAGE;
 use snapshot::{ClosedConsumer, Snapshot, Step, next_snapshot_step};
 
@@ -297,7 +297,7 @@ impl IngestEngine {
         mut live: LiveStream,
         builds: &mut Builds,
     ) -> Result<Ended> {
-        let mut pending = PendingBatch::new(self.batch.max_changes);
+        let mut pending = LiveRun::new(self.batch.max_changes);
         let mut snapshot: Option<Snapshot> = None;
         let mut last_confirmed: Option<Landed> = None;
         let mut confirm_tick = tokio::time::interval(CONFIRM_TICK);
@@ -305,6 +305,10 @@ impl IngestEngine {
         // Where the last arm's work ended: every arm times its wait from here,
         // so the loop reads no clock of its own.
         let mut mark = Instant::now();
+        // What an earlier run took and never published waits again, and is
+        // built with the first change this run reads: confirmation stayed
+        // before it, so that change is a replay of what it waits for.
+        self.progress.give_back_all();
 
         loop {
             // A live stream that ends while a snapshot runs or requests wait
@@ -455,7 +459,7 @@ impl IngestEngine {
     /// live stream so the final position reaches the source.
     async fn wind_down(
         &self,
-        pending: &mut PendingBatch,
+        pending: &mut LiveRun,
         builds: &mut Builds,
         lanes: &Lanes,
         mut live: LiveStream,

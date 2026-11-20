@@ -689,7 +689,19 @@ is the one concrete piece.
   before it in lane order (`Fences`' in-order answers, by item key; the observer still hears the item's
   position); lane order is registration order and key order, so a mark
   covers every registered item up to it, and one that runs ahead covers an item registered later.
-  Each lane answers `Before(oldest unlanded)` / `Through(the newest position routed to it)` / `Idle`
+  **Pending documents (ADR 0012 stage 8a slice 2):** `Progress` keeps per index the documents marked
+  for a build and not yet published (`progress/pending.rs`: waiting ids at their oldest change, and
+  each build taken under a `Token` with its oldest). The one ingest task marks its live run when a
+  build is granted (`Progress::mark`, dropping ids of an index with no lane), takes every index's
+  waiting ids into one build (`take`, all or none: while a waiting id is still building, nothing is
+  taken and the run stays closed, as one batch on `main` did), and after publishing calls
+  `build_registered(lane, token)` beside each lane's registration and `release(index, token)` after
+  every lane's; a build a run never published waits again at the next run's start (`give_back_all`)
+  and is built with the first replayed change. A lane's answer counts its index's waiting ids and the
+  builds not yet registered **on it**, so a full sibling lane still holds back only itself. A batch's
+  position is the newest change the run read, so positions never go back along a lane.
+  Each lane answers `Before(oldest of its unlanded items and its index's pending documents)` /
+  `Through(the newest position routed to it)` / `Idle`
   (`source::cdc::Landed`), and several lanes (`landed()`, `over`) answer as the lane that covers least,
   so a lane that hasn't taken a batch yet holds the others back and a fence on a healthy lane isn't
   held back by a full sibling. Both engines take the one `Arc<Progress>` in their constructors
@@ -718,7 +730,12 @@ is the one concrete piece.
   monotonic for the life of the source across reopened streams (`Positions::new(start_lsn,
   first_seq)` continues `next_seq`), so the `next_seq` test stays exact across an ingest restart.
   Guards: `progress::tests` (`every_interleaving_answers_as_the_model_does`, 300 seeded interleavings
-  against a model; `a_stalled_lane_pins_confirmation_and_its_own_fence_only`,
+  against a model; `a_marked_id_pins_confirmation_until_its_build_lands`,
+  `a_build_holds_a_lane_only_until_its_item_is_registered_there`,
+  `an_id_of_an_index_without_lanes_pins_nothing`, `a_build_left_unpublished_waits_again`,
+  `progress::pending::tests`, `engine` `tests::pending`'s
+  `a_document_being_built_holds_confirmation_in_the_progress`;
+  `a_stalled_lane_pins_confirmation_and_its_own_fence_only`,
   `a_skipped_lane_pins_nothing`, `a_landing_reported_before_its_registration_still_counts`,
   `a_mark_never_moves_back`, `a_healthy_lane_reaches_what_it_landed_while_a_sibling_lane_is_full`,
   `several_lanes_answer_their_least_and_an_unknown_lane_none` (successor of the channel's
@@ -1566,13 +1583,19 @@ as independent tasks → restart a failed one with backoff while the others keep
 ingest engine ending cleanly ends the deployment after the lanes drain), exposes the reindex
 *operation* through `DaemonControl`, and polls source capture lag out-of-band (`lag.rs` over
 `ChangeCapture::lag`). It also samples every `(index, sink)` lane once a second (`stall.rs`, ADR
-0012 stage 8c): a lane's **stall age** is how long its oldest outstanding position (`Progress::lane`,
-`Applied`) has stayed its oldest, reset when it changes or clears (nothing per item; a backfill-only
+0012 stage 8c): a lane's **stall age** is how long its own oldest unlanded item
+(`Progress::own_oldest`: an index's pending documents, on no lane yet, stall no lane; stage 8a slice
+2) has stayed its oldest, reset when it changes or clears (nothing per item; a backfill-only
 lane has none, backfill items carry no position); its **WAL behind** is the slot lag less how far its
-`ChangeCapture::reached` is ahead of `Progress::landed`'s; the least outstanding lane is
-`pinned_by`. `/status` lanes carry `stall_seconds`/`wal_behind_bytes` (absent without tracking) and
-the document `pinned_by`; the CLI exports `flusso.lane.stall_age`, `flusso.lane.wal_behind`,
-`flusso.slot.pinned_by`; `warn!` past `STALL_WARN` (10 min) and every 10 min after, `info!` on
+`ChangeCapture::reached` is ahead of `Progress::landed`'s; what `landed` is decided by is
+`pinned_by` (`engine::Pin`: a lane, or `Backlog(index)` while that index's pending documents are
+older than every lane's own items; a tie names the lane). `/status` lanes carry
+`stall_seconds`/`wal_behind_bytes` (absent without tracking) and the document `pinned_by` (`{index,
+sink}`, `sink` null for a backlog); the CLI exports `flusso.lane.stall_age`, `flusso.lane.wal_behind`,
+`flusso.slot.pinned_by` (`{index}` alone for a backlog); guards: `stall::tests`'
+`a_healthy_lane_is_not_stalled_by_its_index_backlog`, `progress::tests`'
+`a_backlog_pinning_confirmation_is_named_by_its_index`, the CLI's
+`an_index_backlog_pinning_the_slot_is_exported_by_its_index`; `warn!` past `STALL_WARN` (10 min) and every 10 min after, `info!` on
 recovery. `FlussoLaneStalled` (`dev/prometheus/rules/flusso.rules.yml`, tested by
 `dev/prometheus/tests/flusso.rules.test.yml` with `promtool test rules`, outside `rules/` which the
 dev server loads whole; the Helm chart's `prometheusRule`, kept equal by

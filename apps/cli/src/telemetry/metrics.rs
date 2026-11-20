@@ -235,7 +235,8 @@ pub(crate) fn register_lane_outstanding_gauge(status: Arc<Status>) -> Observable
 /// `(index, sink)` lane: `flusso.lane.stall_age` (seconds the lane's oldest
 /// outstanding item has stayed its oldest), `flusso.lane.wal_behind` (bytes
 /// of WAL the slot holds because of it, while it has something outstanding)
-/// and `flusso.slot.pinned_by` (1 on the lane holding the slot back most).
+/// and `flusso.slot.pinned_by` (1 on the lane holding the slot back most, or
+/// on the index alone, with no `sink`, while its pending documents do).
 pub(crate) fn register_stall_gauges(status: Arc<Status>) -> StallGauges {
     stall_gauges(&global::meter("flusso"), status)
 }
@@ -287,13 +288,16 @@ fn stall_gauges(meter: &opentelemetry::metrics::Meter, status: Arc<Status>) -> S
     let pinned_by = meter
         .u64_observable_gauge("flusso.slot.pinned_by")
         .with_description(
-            "1 on the (index, sink) lane holding the replication slot back the most; absent \
-             while no lane has anything outstanding",
+            "1 on the (index, sink) lane holding the replication slot back the most, or on the \
+             index alone while its documents pending and on no lane yet do; absent while \
+             nothing is outstanding",
         )
-        .with_callback(move |observer| {
-            if let Some(key) = status.stalls().1 {
-                observer.observe(1, &lane(&key));
+        .with_callback(move |observer| match status.stalls().1 {
+            Some(daemon::Pin::Lane(key)) => observer.observe(1, &lane(&key)),
+            Some(daemon::Pin::Backlog(index)) => {
+                observer.observe(1, &[KeyValue::new("index", index.as_ref().to_owned())])
             }
+            None => {}
         })
         .build();
     (stall_age, wal_behind, pinned_by)
@@ -561,6 +565,63 @@ mod tests {
         ] {
             assert!(text.contains(line), "no `{line}` in:\n{text}");
         }
+    }
+
+    /// An index whose pending documents pin the slot is exported by its
+    /// index alone, with no `sink`, and its lane keeps no stall series.
+    #[test]
+    fn an_index_backlog_pinning_the_slot_is_exported_by_its_index() {
+        let users = LaneKey::new(
+            IndexName::try_new("users").unwrap(),
+            SinkName::try_new("primary").unwrap(),
+        );
+        let progress = Progress::new([users.clone()]);
+        let stalls = Arc::new(Stalls::new([users.clone()]));
+        progress.mark([(
+            source::document::DocumentId {
+                index: users.index.clone(),
+                key: source::RowKey(Vec::new()),
+            },
+            Position::new(3),
+        )]);
+        let start = tokio::time::Instant::now();
+        stalls.sample(start, &progress, &NoPositions, Some(2_048));
+        stalls.sample(
+            start + Duration::from_secs(30),
+            &progress,
+            &NoPositions,
+            Some(2_048),
+        );
+        let status = Arc::new(
+            Status::new(
+                [users.index.clone()],
+                [users.sink.clone()],
+                std::time::Instant::now(),
+            )
+            .with_stalls(stalls),
+        );
+
+        let registry = Registry::new();
+        let exporter = opentelemetry_prometheus::exporter()
+            .with_registry(registry.clone())
+            .scope_info_enabled(false)
+            .build()
+            .unwrap();
+        let provider = provider_builder().with_reader(exporter).build();
+        let _gauges = stall_gauges(&provider.meter("flusso"), status);
+        let text = TextEncoder::new()
+            .encode_to_string(&registry.gather())
+            .unwrap();
+        for line in [
+            r#"flusso_lane_stall_age_seconds{index="users",sink="primary"} 0"#,
+            r#"flusso_slot_pinned_by{index="users"} 1"#,
+        ] {
+            assert!(text.contains(line), "no `{line}` in:\n{text}");
+        }
+        assert!(
+            !text.contains("flusso_lane_wal_behind_bytes"),
+            "the lane holds nothing itself:\n{text}"
+        );
     }
 
     #[test]

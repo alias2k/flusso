@@ -123,7 +123,9 @@ struct Pending {
 ```
 
 **The minimum** (what holds confirmation back) is the least of `order`'s first key and each build's
-oldest: no multiset to keep in step.
+oldest: no multiset to keep in step. Per lane, a build counts only until its item is registered on
+that lane (each build keeps the sinks that registered it), so a full sibling lane still holds back
+only itself (stage 6's guard; found while building slice 2).
 
 | Operation | Who | Under the index lock |
 | --- | --- | --- |
@@ -137,7 +139,7 @@ oldest: no multiset to keep in step.
 
 | Lane state | Answer |
 | --- | --- |
-| an unlanded item, or its index's pending minimum | `Before(min(oldest unlanded, pending minimum))` |
+| an unlanded item, or its index's pending minimum for this lane | `Before(min(oldest unlanded, pending minimum))` |
 | neither, something routed | `Through(routed)` |
 | nothing routed | `Idle` |
 
@@ -356,7 +358,30 @@ lines; the manual is written by the documentation agent before its PR is ready.
 
 **Order and review.** 1 and 4 touch disjoint files and can be reviewed in either order; 2 and 3
 follow 1; 5 follows 4. 6a needs 1–5; 6b follows 6a. 7 and 8 follow 6b and are independent of each
-other. 1–5 change nothing a user sees except slice 4's per-index half.
+other. 1–5 change nothing a user sees except slice 4's per-index half and slice 2's `pinned_by`.
+
+**Slice 2 as built** (where it differs from the plan above):
+
+- **`newest` and `skipped` stay** until 6a. With one task they are still how a lane learns of a
+  batch it has nothing in, and the model test keeps its meaning; 6a replaces them with the reader's
+  `routed`.
+- **Marked at the grant, taken all or none.** The one task marks its run when a live build is
+  granted and takes every index's waiting ids into one build. While a waiting id is still building
+  (`Pending` until published, or a running backfill build of it), nothing is taken and the run stays
+  closed, as `main`'s batch waited for admission. `take`'s skip of building ids is for 6a.
+- **A batch's position is the run's newest change**, never a given-back id's: positions never go
+  back along a lane. A build a failed run never published waits again (`give_back_all` at the next
+  run's start) and is taken with the first replayed change, not at once.
+- **A run whose changes build nothing** tells every lane it was skipped and every sink its changes
+  settled, as an empty batch did (#204).
+- **`pinned_by`** is `engine::Pin`: a lane, or `Backlog(index)` while that index's pending documents
+  are older than every lane's own items (a tie names the lane). `/status` gives `{index, sink: null}`,
+  `flusso.slot.pinned_by` an `{index}` series. Stall age counts a lane's own items only
+  (`Progress::own_oldest`). `FlussoIndexBacklog` waits for slice 7's backlog age.
+- **Existing tests changed:** `tests::lanes`' `a_lane_whose_live_item_is_blocked_answers_no_further_than_before`
+  now expects `Before(0)` (the pending build holds the blocked lane) where it expected the lane's old
+  `Idle`; `pinned_by` comparisons in `tests::parking`, `tests/lane_parking.rs` and `stall::tests`
+  wrap the lane in `Pin::Lane`.
 
 ## 6. Decisions
 

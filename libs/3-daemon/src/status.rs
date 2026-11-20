@@ -356,7 +356,7 @@ impl Status {
 
     /// Every lane's stall as of the last sample, and the lane pinning the
     /// slot: what the binary's gauges read.
-    pub fn stalls(&self) -> (Vec<(stream::LaneKey, LaneStall)>, Option<stream::LaneKey>) {
+    pub fn stalls(&self) -> (Vec<(stream::LaneKey, LaneStall)>, Option<engine::Pin>) {
         self.stalls
             .as_ref()
             .map(|stalls| (stalls.lanes(), stalls.pinned_by()))
@@ -699,9 +699,15 @@ impl Status {
                 .stalls
                 .as_ref()
                 .and_then(|stalls| stalls.pinned_by())
-                .map(|lane| LaneId {
-                    index: lane.index.as_ref().to_owned(),
-                    sink: lane.sink.as_ref().to_owned(),
+                .map(|pin| match pin {
+                    engine::Pin::Lane(lane) => PinnedBy {
+                        index: lane.index.as_ref().to_owned(),
+                        sink: Some(lane.sink.as_ref().to_owned()),
+                    },
+                    engine::Pin::Backlog(index) => PinnedBy {
+                        index: index.as_ref().to_owned(),
+                        sink: None,
+                    },
                 }),
             memory: self.budget.as_ref().map(|budget| {
                 let held = budget.held();
@@ -767,9 +773,11 @@ pub struct StatusSnapshot {
     /// with a failure appear.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub script_failures: BTreeMap<String, ScriptFailures>,
-    /// The lane that holds the replication slot back the most: the one with
-    /// the oldest outstanding change. `None` while no lane has one.
-    pub pinned_by: Option<LaneId>,
+    /// What holds the replication slot back the most: the lane with the
+    /// oldest outstanding change, or an index whose documents with an older
+    /// change are pending and on no lane yet. `None` while nothing is
+    /// outstanding.
+    pub pinned_by: Option<PinnedBy>,
     /// The memory budget for built documents; `None` when the deployment
     /// counts none.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -876,11 +884,12 @@ fn rfc3339(at: chrono::DateTime<chrono::Utc>) -> String {
     at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-/// A lane in `/status`'s `pinned_by`.
+/// `/status`'s `pinned_by`: a lane, or an index alone (`sink` null) while
+/// its pending documents, on no lane yet, are what holds the slot back.
 #[derive(Debug, Clone, Serialize)]
-pub struct LaneId {
+pub struct PinnedBy {
     pub index: String,
-    pub sink: String,
+    pub sink: Option<String>,
 }
 
 fn is_zero(count: &u64) -> bool {

@@ -5,11 +5,13 @@
 //! **A lane is stalled when it acknowledges nothing**, not when its backlog
 //! is high: a busy lane lands its oldest item, and the next becomes the
 //! oldest. So the age is measured from the moment the lane's oldest
-//! outstanding position was first seen, and resets whenever it changes or the
-//! lane clears. A lane with nothing outstanding has age 0.
+//! outstanding item was first seen, and resets whenever it changes or the
+//! lane clears. A lane with nothing outstanding has age 0. Only the lane's
+//! own items count ([`Progress::own_oldest`]): documents its index has
+//! pending and not yet published are on no lane, so they stall none.
 //!
 //! **Sampled, not timestamped.** [`watch`] samples every lane once a second
-//! through [`Progress::lane`]: one lock per lane per second, nothing on the
+//! through [`Progress::own_oldest`]: one lock per lane per second, nothing on the
 //! path a change takes. The age is accurate to the sampling period.
 //!
 //! **Backfill items carry no position**, so they are not in [`Progress`]: a
@@ -20,9 +22,11 @@
 //! ([`Progress::landed`]), and the source reports how far behind the
 //! server's WAL that is (the slot lag). A lane holds WAL from its own
 //! position ([`ChangeCapture::reached`]), so its share is the lag less how
-//! far it is ahead of the least. The lane `landed` is decided by
+//! far it is ahead of the least. What `landed` is decided by
 //! ([`Progress::pinned_by`]) **pins the slot**: one computation, so a tie at
-//! one source position names the lane holding the slot back.
+//! one source position names what holds the slot back. That is a lane, or an
+//! index's pending documents ([`Pin::Backlog`]) when they are older than every
+//! lane's own items.
 //!
 //! ```
 //! use std::time::Duration;
@@ -55,7 +59,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use engine::{Level, Progress};
+use engine::{Pin, Progress};
 use source::cdc::{ChangeCapture, Landed};
 use stream::LaneKey;
 use tokio::time::{Instant, MissedTickBehavior, interval};
@@ -106,7 +110,7 @@ pub struct Stalls {
 #[derive(Debug, Default)]
 struct State {
     lanes: BTreeMap<LaneKey, Tracked>,
-    pinned_by: Option<LaneKey>,
+    pinned_by: Option<Pin>,
 }
 
 #[derive(Debug)]
@@ -156,11 +160,8 @@ impl Stalls {
         let mut events = Vec::new();
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         for (lane, tracked) in &mut state.lanes {
-            let landed = progress.lane(lane, Level::Applied).unwrap_or(Landed::Idle);
-            let oldest = match landed {
-                Landed::Before(position) => Some(position.seq),
-                Landed::Through(_) | Landed::Idle => None,
-            };
+            let own = progress.own_oldest(lane);
+            let oldest = own.map(|position| position.seq);
             if oldest != tracked.oldest {
                 if tracked.warned.take().is_some() {
                     events.push(StallEvent::Recovered {
@@ -175,7 +176,7 @@ impl Stalls {
                 tracked.stall = LaneStall::default();
                 continue;
             }
-            let at = source.reached(landed).map(|at| at.0);
+            let at = own.and_then(|own| source.reached(Landed::Before(own)).map(|at| at.0));
             let wal_behind = slot_lag.map(|lag| match (at, least) {
                 (Some(at), Some(least)) => lag.saturating_sub(at.saturating_sub(least)),
                 _ => lag,
@@ -197,9 +198,9 @@ impl Stalls {
                 });
             }
         }
-        // The lane `landed` itself is decided by: one computation, so a tie
-        // (two lanes at one source position) names the lane that holds the
-        // slot back, never its neighbour.
+        // What `landed` itself is decided by: one computation, so a tie (two
+        // lanes at one source position) names what holds the slot back, never
+        // its neighbour.
         state.pinned_by = progress.pinned_by();
         events
     }
@@ -224,9 +225,9 @@ impl Stalls {
             .collect()
     }
 
-    /// The lane that holds the slot back the most, if any lane has something
-    /// outstanding.
-    pub fn pinned_by(&self) -> Option<LaneKey> {
+    /// What holds the slot back the most, a lane or an index's pending
+    /// documents, while anything is outstanding.
+    pub fn pinned_by(&self) -> Option<Pin> {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.pinned_by.clone()
     }
@@ -332,6 +333,34 @@ mod tests {
         assert_eq!(stalls.pinned_by(), None);
     }
 
+    /// Documents an index has pending, on no lane yet, stall none of its
+    /// lanes: a healthy lane keeps age 0 while its index's backlog is what
+    /// pins the slot, named by the index.
+    #[test]
+    fn a_healthy_lane_is_not_stalled_by_its_index_backlog() {
+        let users = lane("users");
+        let progress = Progress::new([users.clone()]);
+        let stalls = Stalls::new([users.clone()]);
+        let start = Instant::now();
+        progress.mark([(
+            source::document::DocumentId {
+                index: users.index.clone(),
+                key: source::RowKey(Vec::new()),
+            },
+            Position::new(1),
+        )]);
+        stalls.sample(start, &progress, &Lsns, Some(10));
+        stalls.sample(at(start, 900), &progress, &Lsns, Some(10));
+        assert_eq!(stalls.lane(&users), LaneStall::default());
+        assert_eq!(stalls.pinned_by(), Some(Pin::Backlog(users.index.clone())));
+        assert!(
+            stalls
+                .sample(at(start, 1300), &progress, &Lsns, Some(10))
+                .is_empty(),
+            "no lane is warned about"
+        );
+    }
+
     #[test]
     fn a_lane_whose_oldest_item_stays_ages_and_resets_when_it_lands() {
         let users = lane("users");
@@ -407,7 +436,7 @@ mod tests {
             Position::new(7),
         );
         stalls.sample(Instant::now(), &progress, &Lsns, Some(1_000));
-        assert_eq!(stalls.pinned_by(), Some(orders.clone()));
+        assert_eq!(stalls.pinned_by(), Some(Pin::Lane(orders.clone())));
         assert_eq!(stalls.lane(&orders).wal_behind, Some(1_000));
         assert_eq!(
             stalls.lane(&users).wal_behind,
@@ -465,7 +494,7 @@ mod tests {
         );
         stalls.sample(Instant::now(), &progress, &OneCommit, Some(1_000));
         assert_eq!(progress.landed(), Landed::Before(Position::new(5)));
-        assert_eq!(stalls.pinned_by(), Some(zzz));
+        assert_eq!(stalls.pinned_by(), Some(Pin::Lane(zzz)));
         assert_eq!(progress.pinned_by(), stalls.pinned_by());
     }
 
