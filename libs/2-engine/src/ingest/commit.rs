@@ -59,14 +59,16 @@ impl IngestEngine {
             // only once none of them is in a running build: `main`'s
             // admission, checked before a permit is taken. Its estimate
             // counts distinct documents.
-            let live = (pending.count > 0 && !self.waiting_held(builds))
-                .then(|| (self.progress.waiting(), pending.is_full()));
+            let live = pending
+                .position
+                .filter(|_| !self.waiting_held(builds))
+                .map(|position| (position, self.progress.waiting(), pending.is_full()));
             let backfill = snapshot
                 .as_ref()
                 .filter(|active| active.batch.count > 0 && (active.batch.is_full() || active.done))
                 .map(|active| active.batch.ids.as_slice());
             match builds.choose(live, backfill) {
-                Some(Grant::Live) => self.start_live(pending, builds).await,
+                Some(Grant::Live(position)) => self.start_live(pending, builds, position).await,
                 Some(Grant::Backfill) => {
                     if let Some(active) = snapshot.as_mut() {
                         self.start_backfill(active, builds).await;
@@ -111,15 +113,18 @@ impl IngestEngine {
             self.publish_ready(builds, lanes).await?;
             self.mark_run(pending);
             let waiting = self.progress.waiting();
-            let live = pending.count > 0;
-            if live && !self.waiting_held(builds) && builds.can_take_last(waiting) {
-                self.start_live(pending, builds).await;
+            let live = pending.position;
+            if let Some(position) = live
+                && !self.waiting_held(builds)
+                && builds.can_take_last(waiting)
+            {
+                self.start_live(pending, builds, position).await;
                 continue;
             }
             if builds.running() == 0 {
                 // Nothing builds: what holds the last batch back is the
                 // budget, which the sinks' acknowledgements free.
-                match (live, builds.refused(), self.budget.as_deref()) {
+                match (live.is_some(), builds.refused(), self.budget.as_deref()) {
                     (true, Some(_), Some(budget)) => {
                         // The release wakes this; the timeout is a backstop
                         // should one ever go unheard.
@@ -136,17 +141,17 @@ impl IngestEngine {
         }
     }
 
-    /// Mark the run's documents pending on their indexes, deduplicated
-    /// there. A document waits only between its run's marking and that run's
-    /// grant, which takes every one: what an earlier run left behind is
-    /// forgotten as a run starts.
+    /// Mark the live run's documents pending on their indexes, deduplicated
+    /// there. A document waits only between its live run's marking and that
+    /// live run's grant, which takes every one: what an earlier engine run
+    /// left behind is forgotten as an engine run starts.
     fn mark_run(&self, pending: &mut LiveRun) {
         if !pending.marks.is_empty() {
             self.progress.mark(pending.marks.drain(..));
         }
         debug_assert!(
-            pending.count > 0 || self.progress.waiting() == 0,
-            "documents wait with no run to grant them"
+            pending.position.is_some() || self.progress.waiting() == 0,
+            "documents wait with no live run to grant them"
         );
     }
 
@@ -162,11 +167,10 @@ impl IngestEngine {
     /// over every index (the grant checked none is in a running build). A
     /// run whose changes touched no document any lane receives is an empty
     /// build, as on `main`: its slot settles those changes in grant order.
-    /// The batch carries the run's newest change, as on `main`: every
-    /// document it takes was marked by this run.
-    async fn start_live(&self, pending: &mut LiveRun, builds: &mut Builds) {
+    /// The batch carries `position`, its live run's newest change, as on
+    /// `main`: every document it takes was marked by that live run.
+    async fn start_live(&self, pending: &mut LiveRun, builds: &mut Builds, position: Position) {
         let (ids, taken) = self.take_all(builds);
-        let position = pending.position;
         let changes = pending.count;
         pending.clear();
         let job = Job::Live {
@@ -315,12 +319,12 @@ impl IngestEngine {
         &self,
         built: Built,
         taken: &[(IndexName, Token, Position)],
-        position: Option<Position>,
+        position: Position,
         changes: usize,
         hold: &Hold,
         lanes: &Lanes,
     ) -> Result<()> {
-        let (envelopes, by_index) = self.envelopes(built.documents?, position)?;
+        let (envelopes, by_index) = self.envelopes(built.documents?, Some(position))?;
         self.observer
             .on_stage(StageTiming::new(Stage::Build, built.took).work(Work::Live));
         // From here a lane that hasn't taken its index's item answers for it.
@@ -362,18 +366,21 @@ impl IngestEngine {
                     if first {
                         counted.push(&lane.sink);
                     }
-                    let routed = taken
-                        .iter()
-                        .find(|(index, _, _)| *index == lane.index)
-                        .zip(position)
-                        .map(|((_, token, oldest), last)| (*oldest, last, *token));
+                    // Every document of the batch came from one of its
+                    // takes, so its index has a pending build to register
+                    // under; an item without one would land unregistered.
+                    let Some((_, token, oldest)) =
+                        taken.iter().find(|(index, _, _)| *index == lane.index)
+                    else {
+                        return Err(EngineError::UnregisteredLiveItem(lane.to_string()));
+                    };
                     by_lane.push((
                         lane,
                         producer,
-                        routed,
+                        Some((*oldest, position, *token)),
                         LaneItem::Batch(Batch {
                             key: Some(item_key),
-                            position,
+                            position: Some(position),
                             changes: if first { changes } else { 0 },
                             envelopes: Arc::clone(envelopes),
                             hold: hold.clone(),
@@ -390,12 +397,10 @@ impl IngestEngine {
         // of the index has it, the index's pending build holds all of them
         // back. A lane that lands the item first leaves its mark for the
         // registration to find.
-        if let Some(last) = position {
-            for key in &skipped {
-                match taken.iter().find(|(index, _, _)| *index == key.index) {
-                    Some((_, token, _)) => self.progress.skipped_build(key, last, *token),
-                    None => self.progress.skipped(key, last),
-                }
+        for key in &skipped {
+            match taken.iter().find(|(index, _, _)| *index == key.index) {
+                Some((_, token, _)) => self.progress.skipped_build(key, position, *token),
+                None => self.progress.skipped(key, position),
             }
         }
         for key in skipped {

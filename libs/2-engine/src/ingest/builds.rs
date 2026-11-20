@@ -64,11 +64,12 @@ const FIRST_ESTIMATE: usize = 16 * 1024;
 
 /// What a granted slot publishes.
 pub(super) enum Job {
-    /// A live batch, to every lane, with the position of its last change
-    /// and, per index, the pending build it took (released once published).
+    /// A live batch, to every lane, with the position of its live run's last
+    /// change and, per index, the pending build it took (released once
+    /// published).
     Live {
         taken: Vec<(IndexName, Token, Position)>,
-        position: Option<Position>,
+        position: Position,
         changes: usize,
     },
     /// A snapshot batch, to each lane the slice it asked for, each index's
@@ -132,10 +133,11 @@ impl PerDocument {
     }
 }
 
-/// Which kind of batch a free slot goes to.
+/// Which kind of batch a free slot goes to; a live grant carries back what
+/// the live candidate was offered with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Grant {
-    Live,
+pub(super) enum Grant<L> {
+    Live(L),
     Backfill,
 }
 
@@ -323,30 +325,35 @@ impl Builds {
             .any(|(_, held)| held.binary_search(&hash).is_ok())
     }
 
-    /// Which waiting batch the next free slot goes to, if any. `live` is how
-    /// many documents the live batch would take and whether its run is full
-    /// (the take skips what running builds hold, so it is always admissible);
-    /// `backfill` the snapshot batch's ids.
-    pub(super) fn choose(
+    /// Which waiting batch the next free slot goes to, if any. `live` is the
+    /// live candidate (handed back in [`Grant::Live`]), how many documents it
+    /// would take and whether its run is full; the caller offers it only when
+    /// no running build holds one of them. `backfill` is the snapshot batch's
+    /// ids.
+    pub(super) fn choose<L>(
         &mut self,
-        live: Option<(usize, bool)>,
+        live: Option<(L, usize, bool)>,
         backfill: Option<&[DocumentId]>,
-    ) -> Option<Grant> {
+    ) -> Option<Grant<L>> {
         self.refused = None;
         if !self.has_room() {
             return None;
         }
-        let live = live.is_some_and(|(documents, full)| {
-            (self.live_running.is_empty() || full) && self.affordable(Work::Live, documents)
+        let live = live.filter(|(_, documents, full)| {
+            (self.live_running.is_empty() || *full) && self.affordable(Work::Live, *documents)
         });
         let backfill = backfill
             .is_some_and(|ids| !self.holds_any(ids) && self.affordable(Work::Backfill, ids.len()));
-        let (work, permit) = self.gate.choose(live, backfill)?;
+        let (work, permit) = self.gate.choose(live.is_some(), backfill)?;
         self.granted = Some(permit);
-        Some(match work {
-            Work::Live => Grant::Live,
-            Work::Backfill => Grant::Backfill,
-        })
+        match (work, live) {
+            (Work::Live, Some((live, _, _))) => Some(Grant::Live(live)),
+            (Work::Backfill, _) => Some(Grant::Backfill),
+            (Work::Live, None) => {
+                self.granted = None;
+                None
+            }
+        }
     }
 
     /// Whether the live batch could be granted ignoring the rule that a
