@@ -276,12 +276,59 @@ plus the resolver. Raising it to several pages is a later, measured change (pool
 
 ### 3.6 Changes committed
 
-`Batch.changes` counted a change on the first item of each sink; per index it has no meaning.
-`Progress` keeps routed seqs as ranges (one range while seqs are dense, as Postgres's are). A sink's
-`changes_committed` is the routed changes below its lanes' landed bound, computed when read. Same name
-and meaning (`changes_in_flight` = captured − committed); monotonic across ingest restarts (a replayed
-change is captured and routed again under a new seq); `flusso.changes.committed` becomes an
-observable counter.
+**Status: stopped before building, for the owner's decision** (slice 3, 2026-11-21). The plan below
+moves when a change counts as committed; the brief was to keep every moment.
+
+**What `main` does** (since stage 7's one lane per `(index, sink)`):
+
+- A live batch's change count rides on the **first** item of each sink, in lane order (the
+  lowest index name that got a document: `commit.rs`'s `changes: if first { changes } else { 0 }`),
+  and is credited when **that item lands** (`on_batch_committed`, summed over a merged write's parts).
+- A sink that got no item from the batch is credited **at publish** (`on_changes_settled`), before it
+  has landed anything of it or anything earlier.
+- Read by `/status` (`sinks.<s>.changes_committed`, `changes_in_flight` = captured − committed, and the
+  top-level slowest), `flusso.changes.committed` / `flusso.changes.in_flight`, the stop's deadline
+  message (`shutdown.rs`: sinks with changes in flight), and `dev/bench`'s `wait_drained` (a burst is
+  drained when every sink's `changes_in_flight` is 0).
+
+**What "from `Progress`" means**, and why it has to: once several tasks publish (6b), a live run's
+changes touch several indexes whose batches are built and published separately, so no single item
+can carry the count. The only definition that holds there is: a change is committed for a sink when
+**every lane of that sink has landed it** (or had nothing for it). That is what `Progress` already
+answers per lane.
+
+**Which moments move** (each later than on `main`, never earlier; the totals end equal once
+everything lands):
+
+| Case | `main` credits | From `Progress` |
+| --- | --- | --- |
+| a batch with items on two or more lanes of a sink | when the first lane's item lands | when every lane's item lands |
+| a batch with no item for a sink | at publish | when that sink's lanes have landed every earlier item |
+| an earlier item still out on another lane of the sink (a slow or stalled index) | later batches still credited as their first item lands | nothing past it until it lands |
+| a sink engine restart redelivers an item that had landed | credited again (counts can pass captured; `changes_in_flight` saturates at 0) | once |
+
+So `main` has claimed a change committed while part of its documents were still unwritten on the
+sink, since stage 7. Before stage 7 (one lane per sink) the batch's one item carried the count and an
+empty batch was acknowledged in lane order: the `Progress` definition is that older meaning back.
+
+**What a user and a benchmark would see:** `changes_committed` rising later and in order,
+`changes_in_flight` staying above 0 until a sink has every document; the stop's deadline message
+naming such a sink; and `dev/bench`'s `wait_drained` declaring a burst drained later, which moves
+the scenarios' burst drain and latency figures (a step in their history, against `main` as measured
+with its own counter).
+
+**Options:**
+
+1. **Build the `Progress` definition now** (as planned): `Progress` keeps the routed changes (ranges
+   of seqs; with sources that repeat positions across engine runs, a count per routed instance), a
+   sink's committed is what all its lanes landed, computed when read; the metric becomes an
+   observable counter. Moments move as in the table. **Recommended**, with `wait_drained` reading the
+   same definition on both sides of a comparison, and the step announced in the bench history.
+2. **Keep `main`'s moments now, in `Progress`:** the carried count is registered with the item and
+   credited when it lands (and the settled count at publish). Exact for slices 3–6a (one task builds
+   across indexes, so a batch still has a first item per sink); 6b then has to move the moments
+   anyway, with the same table.
+3. **Leave the counter as it is until 6b.**
 
 ### 3.7 Run lifecycle
 
@@ -348,7 +395,7 @@ lines; the manual is written by the documentation agent before its PR is ready.
 | --- | --- | --- | --- |
 | 1 | **Item keys.** `Batch.key`, a key counter per index in `Progress`; `Progress` and the sink's `Fences` keyed by it. One task. | `progress::tests` on keys; `a_key_survives_an_ingest_restart` | nothing in behaviour; `live_drain_held` |
 | 2 | **Pending sets in `Progress`, one task**, and the stall/pin attribution. The one task marks a run, then takes **across every index's set into one build**, as `main`'s batch spans indexes, published per lane. `newest`/`skipped` go. | pending unit tests (dedup, mark in flight, give back, the minimum, `(seq, counter)` order); the model test; `a_healthy_lane_is_not_stalled_by_its_index_backlog` | confirmation or fences early: model test, `fence` e2e, `wal_release`; lock cost: `live_drain_held` |
-| 3 | **Changes committed from `Progress`.** | the `changes_committed` tests | `/status` and metric values |
+| 3 | **Changes committed from `Progress`.** Stopped for a decision: it moves when a change counts (§3.6). | the `changes_committed` tests | `/status` and metric values |
 | 4 | **Budget for many reservers, per index.** Rule 2 (`index_budget_share`) and rule 4 per index. Changes what a multi-index deployment holds: one index of three bursting holds at most half. | budget tests of §4 | a burst on one index of three (§7); the tiny-budget schedule |
 | 5 | **Gate with lines** (budget asked at grant), the key-page permit. After 4 (both touch `builds.rs`). One task. | gate tests of §4 | `snapshot/rows` at `builds = 1` and 4 |
 | 6a | **Reader task + one builder task** over every pending set, the **lead bound** (`max_waiting_per_index`, `max_waiting`), the stop barrier, the stream handed back. No independence yet; `main`'s pacing. | `the_reader_waits_at_the_lead_and_resumes`, `a_stop_mid_run_builds_what_the_reader_marked_last`, `a_stop_with_many_pending_ids_finishes_within_the_deadline`, `an_id_of_an_index_without_lanes_pins_nothing` | the hop and the locks: the full in-process suite, `shutdown` e2e, the end measurements |
