@@ -56,12 +56,13 @@
 //! target   A  A        B  B   (not seeded)  B  B  B  B  seeded
 //! ```
 //!
-//! The loop also reports the sink's two **fence levels** to the progress and
-//! the observer, in position order whatever order the writes finish in
-//! (`fences`). *Applied* is the last position before the oldest one still
-//! being written, reported before the item's acknowledgement. *Searchable*
-//! trails it by what each write reported ([`Visibility`](sink::Visibility)), so a searchable
-//! position always means "this and everything before it". The engine only
+//! The loop also reports the sink's two **fence levels**, per lane, in item
+//! key order whatever order the writes finish in (`fences`): to the progress
+//! by the item's [`ItemKey`](stream::ItemKey), to the observer by its position.
+//! *Applied* is the last item before the oldest one still being written,
+//! reported before the item's acknowledgement. *Searchable* trails it by what
+//! each write reported ([`Visibility`](sink::Visibility)), so a searchable item
+//! always means "this and everything before it on its lane". The engine only
 //! observes; nothing here asks the sink to refresh because a reader waits.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -179,10 +180,10 @@ pub struct SinkEngine {
     outstanding: Mutex<BTreeMap<IndexName, Asked>>,
     /// The last ticket a request of this engine carried.
     tickets: AtomicU64,
-    /// The fence levels over the positions received, in position order.
+    /// The fence levels over the live items received, per lane in key order.
     /// Survives a restart of this engine's run, so a redelivered item keeps
-    /// its place and a position written before a failure is still reported
-    /// once its time comes.
+    /// its place and an item written before a failure is still reported once
+    /// its time comes.
     fences: Mutex<Fences>,
     /// Where landings and searchable positions are reported, for
     /// confirmation and fences.

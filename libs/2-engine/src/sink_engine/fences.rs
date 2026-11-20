@@ -13,7 +13,7 @@
 //! sequence number so that "before" is exact.
 //!
 //! ```text
-//! positions   1 (writing)   2 (done, due 10:00:05)   3 (done, due now)
+//! keys        1 (writing)   2 (done, due 10:00:05)   3 (done, due now)
 //! applied     none: 1 is still being written
 //! 1 returns   applied 3; searchable 1 at once, then 2 and 3 at 10:00:05
 //! ```
@@ -32,7 +32,8 @@ use sink::Visibility;
 use stream::{ItemKey, LaneKey};
 use tokio::time::Instant;
 
-/// The fence levels of one sink, per lane, over the positions it has received.
+/// The fence levels of one sink, per lane, over the live items it has
+/// received, in key order.
 #[derive(Debug, Default)]
 pub(super) struct Fences {
     lanes: BTreeMap<LaneKey, LaneFences>,
@@ -42,10 +43,10 @@ pub(super) struct Fences {
     /// covered by a caught-up write of the lane that returned: an idle
     /// refresh of the lane would add nothing.
     covered_below: BTreeMap<LaneKey, u64>,
-    /// The latest time any written position was due at. It never moves back,
+    /// The latest time any written item was due at. It never moves back,
     /// so once it has passed no entry waits on a time.
     latest_due: Option<Instant>,
-    /// Written positions waiting on a caught-up write (never fewer than there
+    /// Written items waiting on a caught-up write (never fewer than there
     /// are). With none, and `latest_due` passed, no entry waits at all and the
     /// scans below are skipped: what one write at a time cost per item.
     deferred: usize,

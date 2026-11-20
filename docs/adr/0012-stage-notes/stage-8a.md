@@ -118,8 +118,8 @@ struct Pending {
     in_flight: HashMap<Arc<RowKey>, Token>,          // live builds not yet published
     page_held: HashSet<Arc<RowKey>>,                 // ids in a running backfill page build
     builds: Vec<(Token, Position, Vec<(Arc<RowKey>, Position)>)>, // at most 2 × builds; oldest, take positions
-    next_key: u64,                                   // the item key counter (§3.3)
 }
+// The item key counter is not here: it is `Progress::next_key`, one atomic per index (§3.3, slice 1).
 ```
 
 **The minimum** (what holds confirmation back) is the least of `order`'s first key and each build's
@@ -161,9 +161,10 @@ on the tick: the three moments an answer can move without a sink mark.
 Live items can't be keyed by "the batch's last position": takes skip in-flight ids, so an id skipped
 once is taken later with an older position.
 
-- `Batch.key: Option<u64>`: the item's number on its index's lanes, from `Pending::next_key`, taken at
-  publish (grant order). In `Progress`, so a restarted task never reuses a key still unacknowledged.
-  `None` for snapshot items.
+- `Batch.key: Option<stream::ItemKey>`: the item's number on its index's lanes, from
+  `Progress::next_key` (one atomic per index), taken at publish (grant order). In `Progress`, so a
+  restarted task never reuses a key still unacknowledged. `None` for snapshot items; a live item
+  without one fails the sink engine's run (`EngineError::UnkeyedLiveItem`). Built in slice 1.
 - `Progress` registers `(key, oldest)` per lane; `applied(lane, key)` / `searchable(lane, key)`; the
   sink's `Fences` order by key. `Observer::on_position_applied` reports `Batch.position` (its one
   consumer, the fence observer, only wakes waiters).
